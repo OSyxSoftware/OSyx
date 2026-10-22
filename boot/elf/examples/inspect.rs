@@ -1,13 +1,15 @@
 //! Validates a kernel ELF with exactly the rules the boot loader applies.
 //! Exit status 0 = accepted, 1 = rejected, 2 = usage / I/O error.
 //!
-//! cargo run -p osyx-elf --example inspect -- <kernel.elf>
+//! cargo run -p osyx-elf --example inspect -- [--user] <file.elf>
 
-use osyx_elf::{KernelImage, PF_R, PF_W, PF_X};
+use osyx_elf::{ElfImage, PF_R, PF_W, PF_X};
 
 fn main() {
-    let Some(path) = std::env::args().nth(1) else {
-        eprintln!("usage: inspect <kernel.elf>");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let user = args.iter().any(|a| a == "--user");
+    let Some(path) = args.iter().find(|a| !a.starts_with("--")).cloned() else {
+        eprintln!("usage: inspect [--user] <file.elf>");
         std::process::exit(2);
     };
     let data = match std::fs::read(&path) {
@@ -17,7 +19,8 @@ fn main() {
             std::process::exit(2);
         }
     };
-    match KernelImage::parse(&data) {
+    let parsed = if user { ElfImage::parse_user(&data) } else { ElfImage::parse(&data) };
+    match parsed {
         Ok(k) => {
             println!("{path}: OK, entry {:#x}, {} bytes mapped", k.entry(), k.virt_span());
             for s in k.segments() {

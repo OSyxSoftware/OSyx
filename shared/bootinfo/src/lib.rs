@@ -24,12 +24,14 @@
 /// "OSYXBOOT" in ASCII, little endian.
 pub const BOOTINFO_MAGIC: u64 = 0x544F_4F42_5859_534F;
 /// Bumped on any layout change of the structures in this crate.
-pub const BOOTINFO_VERSION: u32 = 1;
+pub const BOOTINFO_VERSION: u32 = 2;
 
 /// Boot flag: the framebuffer described in [`BootInfo::framebuffer`] is valid.
 pub const FLAG_FRAMEBUFFER: u32 = 1 << 0;
 /// Boot flag: `acpi_rsdp` holds a valid physical address.
 pub const FLAG_ACPI: u32 = 1 << 1;
+/// Boot flag: `init_module` describes a loaded user program image.
+pub const FLAG_INIT_MODULE: u32 = 1 << 2;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +147,10 @@ pub struct BootInfo {
     pub hhdm_offset: u64,
     /// Exclusive upper bound of the physical range covered by the HHDM.
     pub hhdm_size: u64,
+    /// HHDM address of the initial user program (`\EFI\OSYX\INIT.ELF`), or 0.
+    /// Lives in bootloader-reclaimable memory: copy it before reclaiming.
+    pub init_module: u64,
+    pub init_module_size: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +234,8 @@ mod tests {
             cmdline_len: 0,
             hhdm_offset: 0,
             hhdm_size: 0,
+            init_module: 0,
+            init_module_size: 0,
         }
     }
 
@@ -237,7 +245,7 @@ mod tests {
         assert_eq!(size_of::<FramebufferInfo>(), 32);
         assert_eq!(size_of::<MemoryMapInfo>(), 24);
         assert_eq!(size_of::<KernelImageInfo>(), 32);
-        assert_eq!(size_of::<BootInfo>(), 152);
+        assert_eq!(size_of::<BootInfo>(), 168);
         assert_eq!(align_of::<BootInfo>(), 8);
     }
 

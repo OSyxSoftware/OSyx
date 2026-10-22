@@ -1,13 +1,19 @@
-//! Page table manipulation for the kernel address space.
+//! Page table manipulation.
 //!
-//! The kernel keeps running on the PML4 built by the boot loader. Page table
-//! pages are accessed through the HHDM. All modifications are serialised by
-//! `PAGING` (lock order: HEAP -> PAGING -> FRAMES).
+//! Every function takes the physical address of a PML4 ("root"). The kernel
+//! root is the PML4 built by the boot loader; each process gets its own root
+//! whose upper half (slots 256..512) is copied from the kernel root. Because
+//! [`init`] pre-allocates a PDPT for every upper-half slot, later kernel
+//! mappings (heap growth, MMIO) appear in every address space automatically.
+//!
+//! Page table pages are accessed through the HHDM. All modifications are
+//! serialised by `PAGING` (lock order: HEAP -> PAGING -> FRAMES).
 
-use super::{alloc_frame, hhdm_offset, hhdm_size, phys_to_virt, PAGE_SIZE};
+use super::{alloc_frame, free_frame, hhdm_offset, hhdm_size, phys_to_virt, PAGE_SIZE};
 use crate::arch::cpu;
 use crate::sync::IrqSpinLock;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use osyx_abi::USER_END;
 
 pub const PRESENT: u64 = 1 << 0;
 pub const WRITABLE: u64 = 1 << 1;
@@ -19,8 +25,11 @@ const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// The top 2 GiB hold the kernel image; generic mappings may not touch it.
 const KERNEL_IMAGE_SPACE: u64 = 0xFFFF_FFFF_8000_0000;
+/// The first 64 KiB of user space stay unmapped to catch null dereferences.
+pub const USER_START: u64 = 0x1_0000;
 
 static NX: AtomicBool = AtomicBool::new(false);
+static KERNEL_ROOT: AtomicU64 = AtomicU64::new(0);
 static PAGING: IrqSpinLock<()> = IrqSpinLock::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +53,10 @@ pub struct Flags {
 
 impl Flags {
     pub const KERNEL_RW: Flags = Flags { writable: true, executable: false, user: false, uncached: false };
+
+    pub const fn user(writable: bool, executable: bool) -> Flags {
+        Flags { writable, executable, user: true, uncached: false }
+    }
 
     fn bits(self) -> u64 {
         let mut b = PRESENT;
@@ -82,15 +95,35 @@ fn table(pa: u64) -> *mut u64 {
     phys_to_virt(pa) as *mut u64
 }
 
-fn pml4() -> u64 {
+/// Root of the kernel address space.
+pub fn kernel_root() -> u64 {
+    KERNEL_ROOT.load(Ordering::Relaxed)
+}
+
+/// Root of the currently active address space.
+pub fn current_root() -> u64 {
     cpu::read_cr3() & ADDR_MASK
 }
 
-/// Records whether EFER.NXE is active (set by the boot loader when supported).
+/// Records NX state and the kernel root, and pre-allocates all upper-half
+/// PDPTs so the kernel half can be shared by reference between roots.
 pub fn init() {
     // SAFETY: IA32_EFER exists on every x86-64 CPU.
     let efer = unsafe { cpu::rdmsr(0xC000_0080) };
     NX.store(efer & (1 << 11) != 0, Ordering::Relaxed);
+    let root = current_root();
+    KERNEL_ROOT.store(root, Ordering::Relaxed);
+    let _g = PAGING.lock();
+    for i in 256..512 {
+        // SAFETY: entries of the active PML4, accessed via the HHDM.
+        unsafe {
+            let e = table(root).add(i);
+            if *e & PRESENT == 0 {
+                let pdpt = alloc_frame().expect("out of memory pre-allocating kernel PDPTs");
+                *e = pdpt | PRESENT | WRITABLE;
+            }
+        }
+    }
 }
 
 pub fn nx_enabled() -> bool {
@@ -101,10 +134,10 @@ pub fn nx_enabled() -> bool {
 /// After this, no lower-half address is mapped in the kernel address space.
 pub fn remove_identity_map() -> usize {
     let _g = PAGING.lock();
-    let root = table(pml4());
+    let root = table(kernel_root());
     let mut removed = 0;
     for i in 0..256 {
-        // SAFETY: entries of the active PML4, accessed via the HHDM.
+        // SAFETY: entries of the kernel PML4, accessed via the HHDM.
         unsafe {
             if *root.add(i) & PRESENT != 0 {
                 *root.add(i) = 0;
@@ -117,31 +150,58 @@ pub fn remove_identity_map() -> usize {
     removed
 }
 
-fn check_virt(va: u64) -> Result<(), MapError> {
+fn check_virt(va: u64, user: bool) -> Result<(), MapError> {
     if !va.is_multiple_of(PAGE_SIZE) {
         return Err(MapError::Unaligned);
     }
     if !is_canonical(va) {
         return Err(MapError::NonCanonical);
     }
+    if user {
+        if !(USER_START..USER_END).contains(&va) {
+            return Err(MapError::ReservedRange);
+        }
+        return Ok(());
+    }
     let hhdm = hhdm_offset();
-    if (va >= hhdm && va < hhdm + hhdm_size()) || va >= KERNEL_IMAGE_SPACE {
+    if va < USER_END || (va >= hhdm && va < hhdm + hhdm_size()) || va >= KERNEL_IMAGE_SPACE {
         return Err(MapError::ReservedRange);
     }
     Ok(())
 }
 
-/// Maps the 4 KiB page at `va` to the frame at `pa`.
+/// Maps the 4 KiB page at `va` to `pa` in the kernel address space.
 pub fn map(va: u64, pa: u64, flags: Flags) -> Result<(), MapError> {
-    check_virt(va)?;
+    if flags.user {
+        return Err(MapError::ReservedRange);
+    }
+    map_in(kernel_root(), va, pa, flags)
+}
+
+/// Unmaps a kernel page and returns its frame.
+pub fn unmap(va: u64) -> Result<u64, MapError> {
+    unmap_in(kernel_root(), va, false)
+}
+
+/// Translates through the currently active address space.
+pub fn translate(va: u64) -> Option<Translation> {
+    translate_in(current_root(), va)
+}
+
+/// Maps the 4 KiB page at `va` to the frame at `pa` in `root`. User mappings
+/// must lie in the lower half, kernel mappings in the upper half outside the
+/// HHDM and the kernel image.
+pub fn map_in(root: u64, va: u64, pa: u64, flags: Flags) -> Result<(), MapError> {
+    check_virt(va, flags.user)?;
     if !pa.is_multiple_of(PAGE_SIZE) {
         return Err(MapError::Unaligned);
     }
     let _g = PAGING.lock();
-    let mut t = pml4();
+    let mut t = root;
     for shift in [39u64, 30, 21] {
+        // SAFETY: `t` is a page table page reachable through the HHDM.
         let e = unsafe { table(t).add(((va >> shift) & 511) as usize) };
-        // SAFETY: `e` points into a page table page reachable through the HHDM.
+        // SAFETY: as above.
         let val = unsafe { *e };
         if val & PRESENT == 0 {
             let new = alloc_frame().ok_or(MapError::OutOfMemory)?;
@@ -155,14 +215,10 @@ pub fn map(va: u64, pa: u64, flags: Flags) -> Result<(), MapError> {
         } else if val & HUGE != 0 {
             return Err(MapError::HugePage);
         } else {
-            if flags.user && val & USER == 0 {
-                // SAFETY: as above; widening an intermediate entry is harmless
-                // because leaf entries still control access.
-                unsafe { *e = val | USER };
-            }
             t = val & ADDR_MASK;
         }
     }
+    // SAFETY: as above.
     let e = unsafe { table(t).add(((va >> 12) & 511) as usize) };
     // SAFETY: as above.
     unsafe {
@@ -171,16 +227,18 @@ pub fn map(va: u64, pa: u64, flags: Flags) -> Result<(), MapError> {
         }
         *e = (pa & ADDR_MASK) | flags.bits();
     }
-    cpu::invlpg(va);
+    if root == current_root() || va >= USER_END {
+        cpu::invlpg(va);
+    }
     Ok(())
 }
 
-/// Unmaps the 4 KiB page at `va` and returns the frame it pointed to (the
-/// caller owns that frame afterwards).
-pub fn unmap(va: u64) -> Result<u64, MapError> {
-    check_virt(va)?;
+/// Unmaps the 4 KiB page at `va` in `root` and returns the frame it pointed to
+/// (the caller owns that frame afterwards).
+pub fn unmap_in(root: u64, va: u64, user: bool) -> Result<u64, MapError> {
+    check_virt(va, user)?;
     let _g = PAGING.lock();
-    let mut t = pml4();
+    let mut t = root;
     for shift in [39u64, 30, 21] {
         // SAFETY: page table pages reachable through the HHDM.
         let val = unsafe { *table(t).add(((va >> shift) & 511) as usize) };
@@ -192,6 +250,7 @@ pub fn unmap(va: u64) -> Result<u64, MapError> {
         }
         t = val & ADDR_MASK;
     }
+    // SAFETY: as above.
     let e = unsafe { table(t).add(((va >> 12) & 511) as usize) };
     // SAFETY: as above.
     let val = unsafe { *e };
@@ -200,17 +259,19 @@ pub fn unmap(va: u64) -> Result<u64, MapError> {
     }
     // SAFETY: as above.
     unsafe { *e = 0 };
-    cpu::invlpg(va);
+    if root == current_root() || va >= USER_END {
+        cpu::invlpg(va);
+    }
     Ok(val & ADDR_MASK)
 }
 
-/// Walks the active page tables (handling 2 MiB / 1 GiB pages).
-pub fn translate(va: u64) -> Option<Translation> {
+/// Walks the page tables of `root` (handling 2 MiB / 1 GiB pages).
+pub fn translate_in(root: u64, va: u64) -> Option<Translation> {
     if !is_canonical(va) {
         return None;
     }
     let _g = PAGING.lock();
-    let mut t = pml4();
+    let mut t = root;
     let (mut writable, mut user, mut nx) = (true, true, false);
     for (level, shift) in [39u64, 30, 21, 12].into_iter().enumerate() {
         // SAFETY: page table pages reachable through the HHDM.
@@ -236,4 +297,60 @@ pub fn translate(va: u64) -> Option<Translation> {
         t = val & ADDR_MASK;
     }
     None
+}
+
+/// Creates a new address space: empty user half, shared kernel half.
+pub fn new_address_space() -> Result<u64, MapError> {
+    let root = alloc_frame().ok_or(MapError::OutOfMemory)?;
+    let _g = PAGING.lock();
+    let kernel = table(kernel_root());
+    // SAFETY: both roots are page table pages reachable through the HHDM; the
+    // new one was zeroed by alloc_frame.
+    unsafe {
+        for i in 256..512 {
+            *table(root).add(i) = *kernel.add(i);
+        }
+    }
+    Ok(root)
+}
+
+/// Frees every frame of the user half of `root` (leaf pages and page tables)
+/// and the root itself. Returns the number of frames released.
+///
+/// # Safety
+/// `root` must not be active on any CPU and must not be used afterwards; all
+/// user-half leaf frames must be owned exclusively by this address space.
+pub unsafe fn destroy_address_space(root: u64) -> u64 {
+    assert_ne!(root, kernel_root(), "attempt to destroy the kernel address space");
+    assert_ne!(root, current_root(), "attempt to destroy the active address space");
+    let _g = PAGING.lock();
+    let mut freed = 0;
+    unsafe fn release(t: u64, level: u32, freed: &mut u64) {
+        for i in 0..512 {
+            let val = *table(t).add(i);
+            if val & PRESENT == 0 {
+                continue;
+            }
+            let next = val & ADDR_MASK;
+            if level > 1 && val & HUGE == 0 {
+                release(next, level - 1, freed);
+            }
+            if free_frame(next).is_ok() {
+                *freed += 1;
+            }
+        }
+    }
+    for i in 0..256 {
+        let val = *table(root).add(i);
+        if val & PRESENT != 0 {
+            release(val & ADDR_MASK, 3, &mut freed);
+            if free_frame(val & ADDR_MASK).is_ok() {
+                freed += 1;
+            }
+        }
+    }
+    if free_frame(root).is_ok() {
+        freed += 1;
+    }
+    freed
 }

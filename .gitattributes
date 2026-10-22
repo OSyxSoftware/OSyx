@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Generated binary boot assets
+*.osxi binary
+*.osxf binary
+*.bmp binary
+*.ico binary
+*.png binary

@@ -2,9 +2,10 @@
 //!
 //! Each probe routine has an entry `(faulting_instruction, recovery_address)`
 //! in the `.osyx_fixup` section. When a #PF or #GP hits such an instruction,
-//! the dispatcher resumes at the recovery address instead of panicking. This
-//! is the mechanism future `copy_from_user` / `copy_to_user` will use to
-//! validate user pointers without trusting them.
+//! the dispatcher resumes at the recovery address instead of panicking.
+//! [`copy_from_user`] / [`copy_to_user`] are built on this: user pointers are
+//! range checked, and an unmapped or read-only user page turns into
+//! `Errno::Fault` instead of a kernel crash.
 
 use core::arch::global_asm;
 
@@ -28,10 +29,20 @@ osyx_probe_write_u8:
 4:  mov eax, 1
     ret
 
+    .global osyx_copy_bytes
+osyx_copy_bytes:
+    mov rcx, rdx
+5:  rep movsb
+    xor eax, eax
+    ret
+6:  mov eax, 1
+    ret
+
     .pushsection .osyx_fixup, "a"
     .balign 8
     .quad 1b, 2b
     .quad 3b, 4b
+    .quad 5b, 6b
     .popsection
     "#
 );
@@ -45,6 +56,7 @@ struct Fixup {
 extern "C" {
     fn osyx_probe_read_u8(addr: u64, out: *mut u8) -> u32;
     fn osyx_probe_write_u8(addr: u64, value: u8) -> u32;
+    fn osyx_copy_bytes(dst: *mut u8, src: *const u8, len: usize) -> u32;
     static __fixup_start: Fixup;
     static __fixup_end: Fixup;
 }
@@ -86,5 +98,40 @@ pub unsafe fn probe_write_u8(addr: u64, value: u8) -> Result<(), Fault> {
         Ok(())
     } else {
         Err(Fault)
+    }
+}
+
+/// True if `[addr, addr + len)` lies entirely inside mappable user space.
+pub fn user_range_ok(addr: u64, len: u64) -> bool {
+    if len == 0 {
+        return true;
+    }
+    addr >= crate::mem::paging::USER_START && addr.checked_add(len).is_some_and(|end| end <= osyx_abi::USER_END)
+}
+
+/// Copies `dst.len()` bytes from user address `src`.
+pub fn copy_from_user(dst: &mut [u8], src: u64) -> Result<(), osyx_abi::Errno> {
+    if !user_range_ok(src, dst.len() as u64) {
+        return Err(osyx_abi::Errno::Fault);
+    }
+    // SAFETY: `dst` is a valid kernel buffer; faults on the user side are
+    // recovered through the fixup table.
+    match unsafe { osyx_copy_bytes(dst.as_mut_ptr(), src as *const u8, dst.len()) } {
+        0 => Ok(()),
+        _ => Err(osyx_abi::Errno::Fault),
+    }
+}
+
+/// Copies `src` to user address `dst`. Fails on unmapped or read-only pages
+/// (CR0.WP makes read-only user pages read-only for the kernel too).
+pub fn copy_to_user(dst: u64, src: &[u8]) -> Result<(), osyx_abi::Errno> {
+    if !user_range_ok(dst, src.len() as u64) {
+        return Err(osyx_abi::Errno::Fault);
+    }
+    // SAFETY: `src` is a valid kernel buffer; faults on the user side are
+    // recovered through the fixup table.
+    match unsafe { osyx_copy_bytes(dst as *mut u8, src.as_ptr(), src.len()) } {
+        0 => Ok(()),
+        _ => Err(osyx_abi::Errno::Fault),
     }
 }

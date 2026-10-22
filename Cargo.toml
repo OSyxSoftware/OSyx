@@ -1,20 +1,27 @@
 [workspace]
 resolver = "2"
 members = [
+    "shared/abi",
     "shared/bootinfo",
     "boot/gfx",
     "boot/elf",
     "boot/uefi-loader",
     "kernel",
     "kernel/mm",
+    "runtime/os-sys",
+    "runtime/os-std",
+    "userspace/hello",
 ]
-# Host-testable crates only. The loader and kernel are freestanding and are
+# Host-testable crates only. The loader, kernel and user programs are freestanding and are
 # built with an explicit --target by scripts/build.ps1.
 default-members = [
+    "shared/abi",
     "shared/bootinfo",
     "boot/gfx",
     "boot/elf",
     "kernel/mm",
+    "runtime/os-sys",
+    "runtime/os-std",
 ]
 
 [workspace.package]

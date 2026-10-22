@@ -6,6 +6,7 @@
 //!  3. frame allocator, NX state, removal of the boot identity map
 //!  4. kernel heap, then reclaim of bootloader memory
 //!  5. PIC/PIT timer, interrupts on, framebuffer status screen, self-tests
+//!  6. the init program (`\EFI\OSYX\INIT.ELF`, if present) in ring 3
 
 #![no_std]
 #![no_main]
@@ -17,11 +18,14 @@ mod display;
 mod fixup;
 mod interrupts;
 mod mem;
+mod process;
 mod qemu;
 mod selftest;
 mod serial;
 mod sync;
+mod syscall;
 
+use alloc::vec::Vec;
 use arch::cpu;
 use core::fmt::Write as _;
 use osyx_bootinfo::{BootInfo, MemoryDescriptor, MemoryKind};
@@ -97,6 +101,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     unsafe {
         arch::gdt::init();
         arch::idt::init();
+        syscall::init();
     }
     let cpuinfo = cpu::CpuInfo::detect();
     kprintln!("cpu: {}", cpuinfo);
@@ -111,6 +116,8 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     kprintln!("paging: NX {}, removed {} identity-map PML4 entries", mem::paging::nx_enabled(), removed);
     let heap = mem::heap::init();
     kprintln!("heap: {} KiB mapped at {:#x}", heap >> 10, mem::heap::HEAP_START);
+    // The init image lives in bootloader memory: copy it before reclaiming.
+    let init_image = copy_init_module(&raw);
     let reclaimed = mem::reclaim_bootloader_memory(boot.memory_map());
     let (free, total) = mem::frame_stats();
     kprintln!("reclaimed {} KiB of boot loader memory; {} / {} MiB free", reclaimed * 4, free >> 8, total >> 8);
@@ -129,14 +136,24 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
 
     let summary = selftest::run(boot);
     let mut line1 = Line::new();
-    let _ = write!(line1, "Self-tests: {} passed, {} failed", summary.passed, summary.failed);
     let (free, _) = mem::frame_stats();
-    let hs = mem::heap::stats();
+    let _ =
+        write!(line1, "Self-tests: {} passed, {} failed  |  {} MiB free", summary.passed, summary.failed, free >> 8);
+    let mut ok = summary.failed == 0;
+    display::status("Starting init", osyx_gfx::splash::TEXT, &[line1.as_str()]);
+
     let mut line2 = Line::new();
-    let _ = write!(line2, "{} MiB free  |  heap {} KiB used of {} KiB", free >> 8, hs.used >> 10, hs.capacity >> 10);
-    let ok = summary.failed == 0;
+    match init_image {
+        Some(image) => {
+            let user_ok = run_init(boot, &image, &mut line2);
+            ok &= user_ok;
+        }
+        None => {
+            let _ = write!(line2, "No init program (\\EFI\\OSYX\\INIT.ELF)");
+        }
+    }
     let color = if ok { osyx_gfx::splash::OK } else { osyx_gfx::splash::ERROR };
-    let title = if ok { "OSyx kernel is running" } else { "Kernel self-tests failed" };
+    let title = if ok { "OSyx kernel is running" } else { "OSyx: a check failed" };
     display::status(title, color, &[line1.as_str(), line2.as_str()]);
 
     if let Some(kind) = boot.option_value("test.fault") {
@@ -147,10 +164,60 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
         qemu::exit(if ok { qemu::ExitCode::Success } else { qemu::ExitCode::TestFailure });
     }
     kprintln!("entering idle loop");
-    idle(line1, line2)
+    idle(line1, line2, ok)
 }
 
-fn idle(line1: Line, line2: Line) -> ! {
+/// Runs the init program with `init.args=a,b,c` and checks its exit status
+/// against `init.expect=N` (default 0). Returns whether it matched.
+fn run_init(boot: &BootData, image: &[u8], summary: &mut Line) -> bool {
+    let mut args: Vec<&str> = alloc::vec!["init"];
+    if let Some(extra) = boot.option_value("init.args") {
+        args.extend(extra.split(',').filter(|a| !a.is_empty()));
+    }
+    let expect = boot.option_value("init.expect").and_then(parse_int).unwrap_or(0);
+    match process::run("init", image, &args) {
+        Ok(status) => {
+            let ok = status == expect;
+            kprintln!(
+                "init: exit status {:#x}, expected {:#x}: {}",
+                status,
+                expect,
+                if ok { "ok" } else { "MISMATCH" }
+            );
+            let tail = process::output_tail();
+            let last = tail.last().map(|s| s.as_str()).unwrap_or("");
+            let _ = write!(summary, "init exited with {}: \"{}\"", status, last);
+            ok
+        }
+        Err(e) => {
+            kprintln!("init: failed to start: {}", e);
+            let _ = write!(summary, "init failed to start: {}", e);
+            false
+        }
+    }
+}
+
+fn parse_int(s: &str) -> Option<i32> {
+    match s.strip_prefix("0x") {
+        Some(hex) => u32::from_str_radix(hex, 16).ok().map(|v| v as i32),
+        None => s.parse().ok(),
+    }
+}
+
+fn copy_init_module(raw: &BootInfo) -> Option<Vec<u8>> {
+    if raw.flags & osyx_bootinfo::FLAG_INIT_MODULE == 0 || raw.init_module == 0 {
+        return None;
+    }
+    let size = raw.init_module_size as usize;
+    let mut v = alloc::vec![0u8; size];
+    // SAFETY: the loader placed `size` bytes at this HHDM address in
+    // bootloader-reclaimable memory, which has not been reclaimed yet.
+    unsafe { core::ptr::copy_nonoverlapping(raw.init_module as *const u8, v.as_mut_ptr(), size) };
+    kprintln!("init module: {} bytes", size);
+    Some(v)
+}
+
+fn idle(line1: Line, line2: Line, ok: bool) -> ! {
     let mut last = 0;
     loop {
         cpu::enable_and_halt();
@@ -161,8 +228,12 @@ fn idle(line1: Line, line2: Line) -> ! {
         if t / 100 != last / 100 {
             let mut up = Line::new();
             let _ = write!(up, "Uptime {} s", t / 100);
-            let title = "OSyx kernel is running";
-            display::status(title, osyx_gfx::splash::OK, &[line1.as_str(), line2.as_str(), up.as_str()]);
+            let (title, color) = if ok {
+                ("OSyx kernel is running", osyx_gfx::splash::OK)
+            } else {
+                ("OSyx: a check failed", osyx_gfx::splash::ERROR)
+            };
+            display::status(title, color, &[line1.as_str(), line2.as_str(), up.as_str()]);
         }
         last = t;
     }

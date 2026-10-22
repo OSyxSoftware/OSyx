@@ -60,6 +60,18 @@ static mut GDT: [u64; 7] = [
     0,                     // TSS high
 ];
 
+/// Sets the stack the CPU switches to when an interrupt or exception arrives
+/// while running in ring 3 (TSS.RSP0).
+///
+/// # Safety
+/// `top` must be the 16-byte aligned top of a mapped kernel stack that stays
+/// valid while user code runs.
+pub unsafe fn set_kernel_stack(top: u64) {
+    let tss = &raw mut TSS;
+    // The TSS is packed: write the field without creating a reference.
+    core::ptr::addr_of_mut!((*tss).rsp).write_unaligned([top, 0, 0]);
+}
+
 #[repr(C, packed)]
 struct Pointer {
     limit: u16,

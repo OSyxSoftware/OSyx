@@ -1,6 +1,8 @@
 # Full OSyx test suite:
 #   1. host unit tests (cargo test) and clippy
-#   2. QEMU boot test: loader -> kernel -> in-kernel self-tests -> exit 33
+#   2. QEMU boot test: loader -> kernel -> in-kernel self-tests -> ring-3 init
+#      (OSyx Std program with its own checks) -> exit 33; plus variants for
+#      user faults, user panics, exit codes and a boot without init
 #   3. controlled CPU exception tests (#PF, #GP, #UD, #DE) -> diagnostics + exit 37
 #   4. invalid kernel image -> boot loader error screen
 #   5. screenshots of the kernel screen and the loader error screen via QMP
@@ -55,13 +57,14 @@ try {
     if (-not $SkipHost) {
         Write-Host '==> host unit tests'
         $out = ''
-        try { $out = (Invoke-Checked 'cargo test' { cargo test --workspace --exclude osyx-kernel --exclude osyx-uefi-loader }) -join "`n"; $ok = $true } catch { $ok = $false; $out += $_ }
+        try { $out = (Invoke-Checked 'cargo test' { cargo test --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-hello }) -join "`n"; $ok = $true } catch { $ok = $false; $out += $_ }
         $passed = ([regex]::Matches($out, 'test result: ok\. (\d+) passed') | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Sum).Sum
         Record 'host unit tests' $ok "$passed tests passed"
         Write-Host '==> clippy (host crates + freestanding targets)'
         $ok = $true
         try {
-            Invoke-Checked 'clippy host' { cargo clippy --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --all-targets -- -D warnings } | Out-Null
+            Invoke-Checked 'clippy host' { cargo clippy --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-hello --all-targets -- -D warnings } | Out-Null
+            Invoke-Checked 'clippy user' { cargo clippy -p osyx-hello -p os-std -p os-sys --target x86_64-unknown-none --target-dir target/user -- -D warnings } | Out-Null
             Invoke-Checked 'clippy loader' { cargo clippy -p osyx-uefi-loader --target x86_64-unknown-uefi -- -D warnings } | Out-Null
             Invoke-Checked 'clippy kernel' { cargo clippy -p osyx-kernel --target x86_64-unknown-none -- -D warnings } | Out-Null
         } catch { $ok = $false; Write-Host $_ }
@@ -76,6 +79,32 @@ try {
         $ok = $r.Exit -eq 33 -and $selftest.Success -and $selftest.Groups[2].Value -eq '0' `
             -and $r.Log -match 'boot services exited' -and $r.Log -match 'OSyx kernel \S+ \(x86_64\) starting'
         Record 'QEMU boot + kernel self-tests' $ok "exit=$($r.Exit) $($selftest.Value)"
+        $user = [regex]::Match($r.Log, 'user checks: (\d+) passed, (\d+) failed')
+        $ok = $r.Exit -eq 33 -and $r.Log -match '\[init:1\] Hello from OSyx userspace!' -and $user.Success `
+            -and $user.Groups[2].Value -eq '0' -and $r.Log -match 'init: exit status 0x0, expected 0x0: ok' `
+            -and $r.Log -match 'process teardown: no frame leak'
+        Record 'ring-3 init (OSyx Std) checks' $ok $user.Value
+
+        $userCases = @(
+            @{ Name = 'user page fault kills process'; Args = 'fault'; Expect = '0x4000000e'
+               Pattern = 'process 1 terminated: Page fault \(#PF\) at rip 0x[0-9a-f]+, error code 0x4' }
+            @{ Name = 'user panic exits with 101'; Args = 'panic'; Expect = '101'
+               Pattern = '\[init:1\] program panicked: panicked at' }
+            @{ Name = 'user exit code propagates'; Args = 'exit,42'; Expect = '42'
+               Pattern = 'process 1 \(init\) exited with status 42' }
+        )
+        foreach ($u in $userCases) {
+            & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "test.exit boot.fast init.args=$($u.Args) init.expect=$($u.Expect)" | Out-Null
+            $r = Invoke-Boot "user-$($u.Args -replace ',', '-')" $TimeoutSec
+            $ok = $r.Exit -eq 33 -and $r.Log -match $u.Pattern -and $r.Log -match ': ok' `
+                -and $r.Log -match 'process teardown: no frame leak' -and $r.Log -notmatch 'KERNEL PANIC'
+            Record $u.Name $ok "exit=$($r.Exit)"
+        }
+
+        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast' -NoInit | Out-Null
+        $r = Invoke-Boot 'boot-no-init' $TimeoutSec
+        $ok = $r.Exit -eq 33 -and $r.Log -match 'no \\EFI\\OSYX\\INIT.ELF' -and $r.Log -notmatch 'process 1'
+        Record 'boot without init program' $ok "exit=$($r.Exit)"
 
         # --- 3. controlled exceptions --------------------------------------
         $faults = @{
@@ -110,7 +139,7 @@ try {
         $shot = Join-Path $testDir 'kernel-running.png'
         if (Test-Path $shot) { Remove-Item $shot }
         $r = Invoke-Boot 'kernel-screen' $TimeoutSec 'entering idle loop' $shot
-        $ok = (Test-Path $shot) -and $r.Log -match 'self-tests: \d+ passed, 0 failed'
+        $ok = (Test-Path $shot) -and $r.Log -match 'self-tests: \d+ passed, 0 failed' -and $r.Log -match 'user checks: \d+ passed, 0 failed'
         Record 'kernel screen screenshot' $ok $shot
         # Leave a usable default ESP behind.
         & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline '' | Out-Null

@@ -24,7 +24,9 @@ pub fn uptime_ms() -> u64 {
 
 #[no_mangle]
 extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
+    let from_user = f.cs & 3 == 3;
     match f.vector {
+        0..=31 if from_user => kill_process(f),
         3 => {
             BREAKPOINTS.fetch_add(1, Ordering::Relaxed);
             kprintln!("breakpoint at {:#x}", f.rip);
@@ -52,6 +54,24 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
         }
         v => kprintln!("unexpected interrupt vector {v}"),
     }
+}
+
+/// A CPU exception raised by user code terminates the process, not the kernel.
+fn kill_process(f: &TrapFrame) -> ! {
+    let name = EXCEPTION_NAMES[f.vector as usize];
+    kprintln!(
+        "process {} terminated: {} at rip {:#x}, error code {:#x}",
+        crate::process::current_pid(),
+        name,
+        f.rip,
+        f.error_code
+    );
+    if f.vector == 14 {
+        kprintln!("  faulting address {:#018x}", cpu::read_cr2());
+    }
+    // SAFETY: the exception arrived from ring 3, so we run on the process's
+    // kernel stack (TSS.RSP0).
+    unsafe { crate::process::exit_current(osyx_abi::EXCEPTION_EXIT_BASE | f.vector as i32) }
 }
 
 fn fatal(f: &TrapFrame) -> ! {

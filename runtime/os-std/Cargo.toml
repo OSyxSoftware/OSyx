@@ -1,0 +1,11 @@
+[package]
+name = "os-std"
+description = "OSyx Std: the standard library for native OSyx user programs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+os-sys = { path = "../os-sys" }
+osyx-abi = { path = "../../shared/abi" }
+osyx-mm = { path = "../../kernel/mm" }

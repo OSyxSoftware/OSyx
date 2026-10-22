@@ -1,0 +1,184 @@
+//! SYSCALL/SYSRET entry and the system call dispatcher (ABI: `osyx_abi`).
+//!
+//! Entry: the CPU loads CS/SS from STAR, saves the user RIP in RCX and RFLAGS
+//! in R11, and masks RFLAGS with FMASK (interrupts off). The stub switches to
+//! the process's kernel stack, saves a [`SyscallFrame`], re-enables
+//! interrupts and calls [`osyx_syscall_dispatch`]. Single CPU for now: the
+//! stack pointers live in globals; SMP will move them to per-CPU data
+//! reached through `swapgs`.
+
+use crate::arch::cpu;
+use crate::arch::gdt::{KERNEL_CS, USER_DS};
+use crate::fixup::{copy_from_user, copy_to_user};
+use crate::{interrupts, mem, process};
+use core::arch::global_asm;
+use osyx_abi::{nr, Errno, SystemInfo};
+
+#[no_mangle]
+static mut OSYX_SYSCALL_KERNEL_RSP: u64 = 0;
+#[no_mangle]
+static mut OSYX_SYSCALL_USER_RSP: u64 = 0;
+
+global_asm!(
+    r#"
+    .section .text
+    .global osyx_syscall_entry
+osyx_syscall_entry:
+    mov [rip + OSYX_SYSCALL_USER_RSP], rsp
+    mov rsp, [rip + OSYX_SYSCALL_KERNEL_RSP]
+    push qword ptr [rip + OSYX_SYSCALL_USER_RSP]
+    push r11
+    push rcx
+    push rbp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push r9
+    push r8
+    push r10
+    push rdx
+    push rsi
+    push rdi
+    push rax
+    mov rdi, rsp
+    sti
+    call osyx_syscall_dispatch
+    cli
+    add rsp, 8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop r10
+    pop r8
+    pop r9
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    pop rcx
+    pop r11
+    pop rsp
+    sysretq
+    "#
+);
+
+extern "C" {
+    fn osyx_syscall_entry();
+}
+
+/// Registers saved by the entry stub (lowest address first).
+#[repr(C)]
+pub struct SyscallFrame {
+    pub rax: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub r10: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub rip: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+}
+
+const IA32_EFER: u32 = 0xC000_0080;
+const IA32_STAR: u32 = 0xC000_0081;
+const IA32_LSTAR: u32 = 0xC000_0082;
+const IA32_FMASK: u32 = 0xC000_0084;
+
+/// Enables SYSCALL and installs the entry point.
+///
+/// # Safety
+/// Must run once after the GDT is loaded (STAR refers to its selectors).
+pub unsafe fn init() {
+    cpu::wrmsr(IA32_EFER, cpu::rdmsr(IA32_EFER) | 1); // SCE
+                                                      // SYSCALL: CS = STAR[47:32], SS = +8.  SYSRET: CS = STAR[63:48] + 16, SS = +8.
+    let sysret_base = (USER_DS & !3) as u64 - 8;
+    cpu::wrmsr(IA32_STAR, (sysret_base << 48) | ((KERNEL_CS as u64) << 32));
+    cpu::wrmsr(IA32_LSTAR, osyx_syscall_entry as *const () as u64);
+    // Clear IF, TF, DF, NT and AC on entry.
+    cpu::wrmsr(IA32_FMASK, (1 << 9) | (1 << 8) | (1 << 10) | (1 << 14) | (1 << 18));
+}
+
+/// # Safety
+/// `top` must be the top of the current process's kernel stack.
+pub unsafe fn set_kernel_stack(top: u64) {
+    OSYX_SYSCALL_KERNEL_RSP = top;
+}
+
+#[no_mangle]
+extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
+    let r = match f.rax {
+        nr::EXIT => {
+            // SAFETY: we are on the process's kernel stack inside a system call.
+            unsafe { process::exit_current(f.rdi as i32) }
+        }
+        nr::WRITE => sys_write(f.rdi, f.rsi, f.rdx),
+        nr::MAP => process::map_anonymous(f.rdi, f.rsi),
+        nr::UNMAP => process::unmap_region(f.rdi, f.rsi).map(|_| 0),
+        nr::SYSINFO => sys_sysinfo(f.rdi),
+        nr::CLOCK => sys_clock(f.rdi),
+        _ => Err(Errno::NotSupported),
+    };
+    osyx_abi::encode(r)
+}
+
+fn sys_write(fd: u64, buf: u64, len: u64) -> Result<u64, Errno> {
+    if fd != osyx_abi::STDOUT && fd != osyx_abi::STDERR {
+        return Err(Errno::BadHandle);
+    }
+    if len > osyx_abi::MAX_WRITE as u64 {
+        return Err(Errno::InvalidArgument);
+    }
+    if !crate::fixup::user_range_ok(buf, len) {
+        return Err(Errno::Fault);
+    }
+    let mut chunk = [0u8; 512];
+    let mut done = 0;
+    while done < len {
+        let n = (len - done).min(chunk.len() as u64) as usize;
+        copy_from_user(&mut chunk[..n], buf + done)?;
+        process::write_output(&chunk[..n]);
+        done += n as u64;
+    }
+    Ok(len)
+}
+
+fn sys_sysinfo(out: u64) -> Result<u64, Errno> {
+    let (free, total) = mem::frame_stats();
+    let mut info = SystemInfo {
+        abi_version: osyx_abi::ABI_VERSION,
+        page_size: mem::PAGE_SIZE as u32,
+        total_memory: total * mem::PAGE_SIZE,
+        free_memory: free * mem::PAGE_SIZE,
+        uptime_ns: interrupts::uptime_ms() * 1_000_000,
+        pid: process::current_pid(),
+        kernel_version: [0; 16],
+    };
+    let v = crate::VERSION.as_bytes();
+    info.kernel_version[..v.len().min(16)].copy_from_slice(&v[..v.len().min(16)]);
+    // SAFETY: SystemInfo is repr(C) plain data without padding-dependent
+    // invariants; viewing it as bytes is sound.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(&info as *const SystemInfo as *const u8, core::mem::size_of::<SystemInfo>())
+    };
+    copy_to_user(out, bytes)?;
+    Ok(0)
+}
+
+fn sys_clock(id: u64) -> Result<u64, Errno> {
+    match id {
+        osyx_abi::CLOCK_MONOTONIC => Ok(interrupts::uptime_ms() * 1_000_000),
+        _ => Err(Errno::InvalidArgument),
+    }
+}

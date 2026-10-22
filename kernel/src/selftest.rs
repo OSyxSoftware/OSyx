@@ -3,7 +3,7 @@
 //! cannot reach. Results go to the serial log as `[test] <name> ... ok|FAILED`.
 
 use crate::arch::cpu;
-use crate::fixup::{probe_read_u8, probe_write_u8};
+use crate::fixup::{copy_from_user, copy_to_user, probe_read_u8, probe_write_u8};
 use crate::mem::paging::{self, Flags, MapError};
 use crate::mem::{self, heap, phys_to_virt, PAGE_SIZE};
 use crate::{interrupts, kprintln, BootData};
@@ -36,7 +36,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 9] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 11] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -46,6 +46,8 @@ pub fn run(boot: &BootData) -> Summary {
         ("kernel heap", &heap_test),
         ("breakpoint exception", &breakpoint),
         ("timer interrupts", &timer),
+        ("user copy validation", &user_copy),
+        ("address space lifecycle", &address_space),
     ];
     let mut s = Summary { passed: 0, failed: 0 };
     for (name, t) in tests.iter() {
@@ -221,4 +223,46 @@ fn timer() -> TestResult {
         cpu::enable_and_halt();
     }
     Err(format!("timer stuck at {} ticks", interrupts::ticks()))
+}
+
+fn user_copy() -> TestResult {
+    use osyx_abi::Errno;
+    let mut buf = [0u8; 16];
+    // Kernel addresses are rejected by the range check, before any access.
+    ensure!(copy_from_user(&mut buf, RODATA_PROBE.as_ptr() as u64) == Err(Errno::Fault), "kernel address accepted");
+    ensure!(copy_from_user(&mut buf, 0) == Err(Errno::Fault), "null pointer accepted");
+    ensure!(copy_from_user(&mut buf, osyx_abi::USER_END - 8) == Err(Errno::Fault), "range crossing USER_END accepted");
+    ensure!(copy_from_user(&mut buf, u64::MAX - 4) == Err(Errno::Fault), "overflowing range accepted");
+    // In range but unmapped: rejected through the fault fixup.
+    ensure!(copy_from_user(&mut buf, 0x40_0000) == Err(Errno::Fault), "unmapped user page readable");
+    ensure!(copy_to_user(0x40_0000, &buf) == Err(Errno::Fault), "unmapped user page writable");
+    ensure!(copy_from_user(&mut [], 0) == Ok(()), "empty copy must succeed");
+    Ok(())
+}
+
+fn address_space() -> TestResult {
+    let (free_before, _) = mem::frame_stats();
+    let root = paging::new_address_space().map_err(|e| format!("create: {e:?}"))?;
+    let frame = mem::alloc_frame().ok_or("out of frames")?;
+    let va = 0x40_0000;
+    paging::map_in(root, va, frame, Flags::user(true, false)).map_err(|e| format!("map_in: {e:?}"))?;
+    let t = paging::translate_in(root, va).ok_or("translate_in failed")?;
+    ensure!(t.phys == frame && t.user && t.writable, "bad user translation {t:?}");
+    ensure!(paging::translate(va).is_none(), "user mapping leaked into the kernel address space");
+    let k = paging::translate_in(root, RODATA_PROBE.as_ptr() as u64).ok_or("kernel half not shared")?;
+    ensure!(!k.user, "kernel page accessible from user mode");
+    ensure!(
+        paging::map_in(root, mem::hhdm_offset(), frame, Flags::user(true, false)) == Err(MapError::ReservedRange),
+        "user mapping in kernel half accepted"
+    );
+    ensure!(
+        paging::map_in(root, 0x1000, frame, Flags::user(true, false)) == Err(MapError::ReservedRange),
+        "user mapping in the null guard accepted"
+    );
+    // SAFETY: the address space was never activated and owns `frame`.
+    let freed = unsafe { paging::destroy_address_space(root) };
+    ensure!(freed == 5, "expected 5 frames released (root, PDPT, PD, PT, page), got {freed}");
+    let (free_after, _) = mem::frame_stats();
+    ensure!(free_after == free_before, "leak: {free_before} free before, {free_after} after");
+    Ok(())
 }

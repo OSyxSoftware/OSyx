@@ -5,7 +5,8 @@
 //!   protected by [`IrqSpinLock`], which disables interrupts while held. A
 //!   plain [`SpinLock`] taken in thread context could otherwise be re-taken by
 //!   an interrupt handler on the same CPU and deadlock.
-//! * Lock order (outer to inner): HEAP -> PAGING -> FRAMES -> SERIAL.
+//! * Lock order (outer to inner):
+//!   CURRENT (process) -> OUTPUT_TAIL -> HEAP -> PAGING -> FRAMES -> SERIAL.
 //!   Never acquire an outer lock while holding an inner one.
 //! * The panic path may forcibly unlock SERIAL / DISPLAY (see `force_unlock`),
 //!   because the panicking context might be the holder.

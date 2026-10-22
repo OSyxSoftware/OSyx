@@ -1,12 +1,14 @@
-//! Validation of the OSyx kernel ELF64 image.
+//! Validation of OSyx ELF64 executables (the kernel and user programs).
 //!
 //! The parser never indexes the input without a bounds check and uses checked
 //! arithmetic for every offset/size computation, so arbitrary (malicious or
 //! truncated) input yields an [`ElfError`] instead of a panic.
 //!
-//! Policy enforced for kernel images (beyond plain ELF validity):
-//! * x86-64, little endian, `ET_EXEC`.
-//! * Every `PT_LOAD` segment lies in the top 2 GiB (`kernel` code model).
+//! Policy enforced (beyond plain ELF validity):
+//! * x86-64, little endian, `ET_EXEC`, no dynamic linking.
+//! * Every `PT_LOAD` segment lies inside the [`AddressRange`] the caller
+//!   allows: the top 2 GiB for the kernel (`kernel` code model) or the user
+//!   half for programs.
 //! * Segments are 4 KiB aligned, do not overlap, do not share pages, and are
 //!   never both writable and executable (W^X).
 //! * The entry point lies inside an executable segment.
@@ -16,6 +18,18 @@
 pub const PAGE_SIZE: u64 = 4096;
 pub const KERNEL_SPACE_START: u64 = 0xFFFF_FFFF_8000_0000;
 pub const MAX_SEGMENTS: usize = 16;
+
+/// Half-open virtual address range `[start, end)` segments must lie in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AddressRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// The kernel image: top 2 GiB (minus the last page, kept as overflow guard).
+pub const KERNEL_RANGE: AddressRange = AddressRange { start: KERNEL_SPACE_START, end: u64::MAX - PAGE_SIZE + 1 };
+/// User programs: above the null-guard 64 KiB, below the top of the user half.
+pub const USER_RANGE: AddressRange = AddressRange { start: 0x1_0000, end: 0x0000_7FFF_FFFF_0000 };
 
 const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
@@ -41,7 +55,7 @@ pub enum ElfError {
     SegmentFileRangeInvalid { index: usize },
     SegmentSizeInvalid { index: usize },
     SegmentNotPageAligned { index: usize },
-    SegmentOutsideKernelSpace { index: usize },
+    SegmentOutOfRange { index: usize },
     SegmentOverlap { index: usize },
     WritableAndExecutable { index: usize },
     EntryNotExecutable(u64),
@@ -65,7 +79,7 @@ impl ElfError {
             ElfError::SegmentFileRangeInvalid { .. } => "segment data lies outside the file",
             ElfError::SegmentSizeInvalid { .. } => "segment file size exceeds memory size",
             ElfError::SegmentNotPageAligned { .. } => "segment is not page aligned",
-            ElfError::SegmentOutsideKernelSpace { .. } => "segment outside the kernel address range",
+            ElfError::SegmentOutOfRange { .. } => "segment outside the allowed address range",
             ElfError::SegmentOverlap { .. } => "segments overlap or share a page",
             ElfError::WritableAndExecutable { .. } => "segment is writable and executable",
             ElfError::EntryNotExecutable(_) => "entry point is not in an executable segment",
@@ -99,7 +113,7 @@ impl Segment {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct KernelImage<'a> {
+pub struct ElfImage<'a> {
     data: &'a [u8],
     entry: u64,
     segments: [Segment; MAX_SEGMENTS],
@@ -123,8 +137,21 @@ fn u64_at(d: &[u8], off: usize) -> Result<u64, ElfError> {
     Ok(u64::from_le_bytes(a))
 }
 
-impl<'a> KernelImage<'a> {
+/// The boot loader's name for an image validated with [`KERNEL_RANGE`].
+pub type KernelImage<'a> = ElfImage<'a>;
+
+impl<'a> ElfImage<'a> {
+    /// Validates a kernel image (segments in [`KERNEL_RANGE`]).
     pub fn parse(data: &'a [u8]) -> Result<Self, ElfError> {
+        Self::parse_with(data, KERNEL_RANGE)
+    }
+
+    /// Validates a user program (segments in [`USER_RANGE`]).
+    pub fn parse_user(data: &'a [u8]) -> Result<Self, ElfError> {
+        Self::parse_with(data, USER_RANGE)
+    }
+
+    pub fn parse_with(data: &'a [u8], range: AddressRange) -> Result<Self, ElfError> {
         if data.len() < 64 {
             return Err(ElfError::TooSmall);
         }
@@ -185,7 +212,7 @@ impl<'a> KernelImage<'a> {
             if count == MAX_SEGMENTS {
                 return Err(ElfError::TooManySegments);
             }
-            Self::check_segment(data, &seg, count)?;
+            Self::check_segment(data, &seg, count, range)?;
             segments[count] = seg;
             count += 1;
         }
@@ -213,10 +240,10 @@ impl<'a> KernelImage<'a> {
         if !entry_ok {
             return Err(ElfError::EntryNotExecutable(entry));
         }
-        Ok(KernelImage { data, entry, segments, count })
+        Ok(ElfImage { data, entry, segments, count })
     }
 
-    fn check_segment(data: &[u8], s: &Segment, index: usize) -> Result<(), ElfError> {
+    fn check_segment(data: &[u8], s: &Segment, index: usize, range: AddressRange) -> Result<(), ElfError> {
         let file_end = s.file_offset.checked_add(s.file_size);
         if file_end.is_none_or(|e| e > data.len() as u64) {
             return Err(ElfError::SegmentFileRangeInvalid { index });
@@ -227,9 +254,9 @@ impl<'a> KernelImage<'a> {
         if !s.vaddr.is_multiple_of(PAGE_SIZE) {
             return Err(ElfError::SegmentNotPageAligned { index });
         }
-        let end = s.vaddr.checked_add(s.mem_size).and_then(|e| e.checked_add(PAGE_SIZE));
-        if s.vaddr < KERNEL_SPACE_START || end.is_none() {
-            return Err(ElfError::SegmentOutsideKernelSpace { index });
+        let end = s.vaddr.checked_add(s.mem_size).and_then(|e| e.checked_add(PAGE_SIZE - 1));
+        if s.vaddr < range.start || end.is_none_or(|e| e > range.end) {
+            return Err(ElfError::SegmentOutOfRange { index });
         }
         if s.writable() && s.executable() {
             return Err(ElfError::WritableAndExecutable { index });
@@ -386,8 +413,8 @@ mod tests {
             (load(PF_R, u64::MAX, BASE, 2, 2), ElfError::SegmentFileRangeInvalid { index: 0 }),
             (load(PF_R, 0, BASE, 0x20, 0x10), ElfError::SegmentSizeInvalid { index: 0 }),
             (load(PF_R, 0, BASE + 4, 0x10, 0x10), ElfError::SegmentNotPageAligned { index: 0 }),
-            (load(PF_R, 0, 0x40_0000, 0x10, 0x10), ElfError::SegmentOutsideKernelSpace { index: 0 }),
-            (load(PF_R, 0, BASE, 0, u64::MAX - BASE), ElfError::SegmentOutsideKernelSpace { index: 0 }),
+            (load(PF_R, 0, 0x40_0000, 0x10, 0x10), ElfError::SegmentOutOfRange { index: 0 }),
+            (load(PF_R, 0, BASE, 0, u64::MAX - BASE), ElfError::SegmentOutOfRange { index: 0 }),
             (load(PF_R | PF_W | PF_X, 0, BASE, 0x10, 0x10), ElfError::WritableAndExecutable { index: 0 }),
         ];
         for (ph, err) in cases {
@@ -418,6 +445,26 @@ mod tests {
         assert_eq!(KernelImage::parse(&d).err(), Some(ElfError::DynamicNotSupported));
         let d = build(BASE, &[], 0x4000);
         assert_eq!(KernelImage::parse(&d).err(), Some(ElfError::NoLoadableSegments));
+    }
+
+    #[test]
+    fn user_policy_accepts_low_half_only() {
+        let user = build(
+            0x40_1000,
+            &[load(PF_R | PF_X, 0x1000, 0x40_1000, 0x10, 0x10), load(PF_R | PF_W, 0x2000, 0x40_2000, 0x10, 0x2000)],
+            0x3000,
+        );
+        let img = ElfImage::parse_user(&user).unwrap();
+        assert_eq!(img.virt_base(), 0x40_1000);
+        assert_eq!(ElfImage::parse(&user).err(), Some(ElfError::SegmentOutOfRange { index: 0 }));
+        // The kernel is not a valid user program.
+        assert_eq!(ElfImage::parse_user(&good()).err(), Some(ElfError::SegmentOutOfRange { index: 0 }));
+        // Null page and anything reaching into the top of the user half are refused.
+        let null = build(0, &[load(PF_R | PF_X, 0, 0, 0x10, 0x10)], 0x1000);
+        assert_eq!(ElfImage::parse_user(&null).err(), Some(ElfError::SegmentOutOfRange { index: 0 }));
+        let top =
+            build(USER_RANGE.end - 0x1000, &[load(PF_R | PF_X, 0, USER_RANGE.end - 0x1000, 0x10, 0x2000)], 0x1000);
+        assert_eq!(ElfImage::parse_user(&top).err(), Some(ElfError::SegmentOutOfRange { index: 0 }));
     }
 
     #[test]

@@ -1,0 +1,9 @@
+[package]
+name = "os-sys"
+description = "Raw OSyx system call wrappers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+osyx-abi = { path = "../../shared/abi" }

@@ -1,0 +1,15 @@
+[package]
+name = "osyx-hello"
+description = "First OSyx user program: exercises OSyx Std and the system call ABI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hello"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+os-std = { path = "../../runtime/os-std" }

@@ -3,6 +3,26 @@
 version = 4
 
 [[package]]
+name = "os-std"
+version = "0.1.0"
+dependencies = [
+ "os-sys",
+ "osyx-abi",
+ "osyx-mm",
+]
+
+[[package]]
+name = "os-sys"
+version = "0.1.0"
+dependencies = [
+ "osyx-abi",
+]
+
+[[package]]
+name = "osyx-abi"
+version = "0.1.0"
+
+[[package]]
 name = "osyx-bootinfo"
 version = "0.1.0"
 
@@ -15,10 +35,19 @@ name = "osyx-gfx"
 version = "0.1.0"
 
 [[package]]
+name = "osyx-hello"
+version = "0.1.0"
+dependencies = [
+ "os-std",
+]
+
+[[package]]
 name = "osyx-kernel"
 version = "0.1.0"
 dependencies = [
+ "osyx-abi",
  "osyx-bootinfo",
+ "osyx-elf",
  "osyx-gfx",
  "osyx-mm",
 ]

@@ -25,7 +25,7 @@ use core::ptr::null_mut;
 use efi::{memtype, BootServices, File, Handle, Status, SystemTable};
 use osyx_bootinfo::{
     BootInfo, KernelImageInfo, MemoryDescriptor, MemoryKind, MemoryMapInfo, BOOTINFO_MAGIC, BOOTINFO_VERSION,
-    FLAG_ACPI, FLAG_FRAMEBUFFER,
+    FLAG_ACPI, FLAG_FRAMEBUFFER, FLAG_INIT_MODULE,
 };
 use osyx_elf::{KernelImage, PAGE_SIZE};
 use paging::{TableBuilder, HHDM_OFFSET};
@@ -34,6 +34,8 @@ use serial::StrBuf;
 
 const KERNEL_PATH: &str = "\\EFI\\OSYX\\KERNEL.ELF";
 const CMDLINE_PATH: &str = "\\EFI\\OSYX\\CMDLINE.TXT";
+const INIT_PATH: &str = "\\EFI\\OSYX\\INIT.ELF";
+const INIT_MAX: u64 = 64 << 20;
 const CMDLINE_MAX: usize = 4096;
 const STACK_PAGES: u64 = 32; // 128 KiB boot stack for the kernel
 const STAGES: u32 = 6;
@@ -177,6 +179,7 @@ fn boot(
         );
     }
     log!("kernel loaded at phys {:#x}, entry {:#x}", kphys, kernel.entry());
+    let init = load_init_module(bs, root)?;
     stage(screen, 4, "Preparing memory");
 
     // ---- Stage 5: page tables, stack, BootInfo, memory map ---------------
@@ -216,6 +219,9 @@ fn boot(
     if rsdp != 0 {
         flags |= FLAG_ACPI;
     }
+    if init.is_some() {
+        flags |= FLAG_INIT_MODULE;
+    }
     let info = BootInfo {
         magic: BOOTINFO_MAGIC,
         version: BOOTINFO_VERSION,
@@ -246,6 +252,8 @@ fn boot(
         cmdline_len: cmd.len() as u64,
         hhdm_offset: HHDM_OFFSET,
         hhdm_size,
+        init_module: init.map_or(0, |(phys, _)| HHDM_OFFSET + phys),
+        init_module_size: init.map_or(0, |(_, size)| size),
     };
     let info_ptr = region as *mut BootInfo;
     // SAFETY: region is 8-byte (page) aligned and large enough.
@@ -345,6 +353,30 @@ fn read_cmdline(bs: &BootServices, root: *mut File) -> Cmdline {
     unsafe { ((*f).close)(f) };
     let _ = bs;
     c
+}
+
+/// Loads the optional initial user program into bootloader-reclaimable pages.
+/// Its contents are validated by the kernel, not here. Returns (phys, size).
+fn load_init_module(bs: &BootServices, root: *mut File) -> Result<Option<(u64, u64)>, BootError> {
+    let Ok(f) = open_file(root, INIT_PATH) else {
+        log!("no {INIT_PATH}; kernel starts without a user program");
+        return Ok(None);
+    };
+    let size = match file_size(f) {
+        Ok(n) if n > 0 && n <= INIT_MAX => n,
+        Ok(n) => fail!(Status::LOAD_ERROR, "Init program is invalid", "{} has implausible size {} bytes", INIT_PATH, n),
+        Err(st) => fail!(st, "Init program not readable", "cannot query size of {} ({})", INIT_PATH, st.name()),
+    };
+    let phys = alloc_pages(bs, memtype::OSYX_BOOTINFO, size.div_ceil(PAGE_SIZE))?;
+    // SAFETY: fresh allocation of at least `size` bytes, identity mapped.
+    let buf = unsafe { core::slice::from_raw_parts_mut(phys as *mut u8, size as usize) };
+    if let Err(st) = read_exact(f, buf) {
+        fail!(st, "Init program not readable", "read of {} failed ({})", INIT_PATH, st.name());
+    }
+    // SAFETY: handle opened above.
+    unsafe { ((*f).close)(f) };
+    log!("init module: {} bytes at phys {:#x}", size, phys);
+    Ok(Some((phys, size)))
 }
 
 fn open_boot_volume(bs: &BootServices, image: Handle) -> Result<*mut File, BootError> {

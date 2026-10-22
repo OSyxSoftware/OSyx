@@ -12,6 +12,8 @@ test = false
 bench = false
 
 [dependencies]
+osyx-abi = { path = "../shared/abi" }
 osyx-bootinfo = { path = "../shared/bootinfo" }
+osyx-elf = { path = "../boot/elf" }
 osyx-gfx = { path = "../boot/gfx" }
 osyx-mm = { path = "mm" }

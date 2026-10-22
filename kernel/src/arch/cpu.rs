@@ -34,6 +34,12 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
     (hi as u64) << 32 | lo as u64
 }
 
+/// # Safety
+/// Writing MSRs reconfigures the CPU; the caller must know the semantics.
+pub unsafe fn wrmsr(msr: u32, v: u64) {
+    asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32, options(nomem, nostack, preserves_flags));
+}
+
 pub fn read_cr2() -> u64 {
     let v;
     // SAFETY: reading CR2 has no side effects in ring 0.
