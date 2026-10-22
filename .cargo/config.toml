@@ -1,0 +1,4 @@
+# The kernel is linked as a static ET_EXEC at a fixed higher-half address.
+# x86_64-unknown-none defaults to PIE, which the OSyx boot loader rejects.
+[target.x86_64-unknown-none]
+rustflags = ["-C", "relocation-model=static"]

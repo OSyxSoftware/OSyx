@@ -1,0 +1,17 @@
+[package]
+name = "osyx-uefi-loader"
+description = "OSyx graphical UEFI boot manager (BOOTX64.EFI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "osyx-uefi-loader"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+osyx-bootinfo = { path = "../../shared/bootinfo" }
+osyx-gfx = { path = "../gfx" }
+osyx-elf = { path = "../elf" }

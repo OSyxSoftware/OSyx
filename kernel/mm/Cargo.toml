@@ -1,0 +1,9 @@
+[package]
+name = "osyx-mm"
+description = "Hardware-independent memory management algorithms of the OSyx kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+osyx-bootinfo = { path = "../../shared/bootinfo" }

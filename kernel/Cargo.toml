@@ -1,0 +1,17 @@
+[package]
+name = "osyx-kernel"
+description = "The OSyx kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "osyx-kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+osyx-bootinfo = { path = "../shared/bootinfo" }
+osyx-gfx = { path = "../boot/gfx" }
+osyx-mm = { path = "mm" }

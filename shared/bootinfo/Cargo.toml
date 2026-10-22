@@ -1,0 +1,8 @@
+[package]
+name = "osyx-bootinfo"
+description = "Versioned BootInfo ABI shared by the OSyx bootloader and kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -1,0 +1,8 @@
+[package]
+name = "osyx-gfx"
+description = "Allocation-free integer 2D rendering for the OSyx boot screen and kernel console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "shared/bootinfo",
+    "boot/gfx",
+    "boot/elf",
+    "boot/uefi-loader",
+    "kernel",
+    "kernel/mm",
+]
+# Host-testable crates only. The loader and kernel are freestanding and are
+# built with an explicit --target by scripts/build.ps1.
+default-members = [
+    "shared/bootinfo",
+    "boot/gfx",
+    "boot/elf",
+    "kernel/mm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["OSyx developers"]
+
+[profile.release]
+opt-level = 2
+debug = 1
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
