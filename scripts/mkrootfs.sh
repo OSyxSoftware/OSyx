@@ -23,6 +23,13 @@ for d in bin usr/bin system/bin; do
     fi
 done
 # Desktop wallpapers (OSXI images converted by build.ps1).
+if [ -d "$BIN/opt/zen" ]; then
+    mkdir -p "$R/opt/zen"
+    cp -a "$BIN/opt/zen/." "$R/opt/zen/"
+    find "$R/opt/zen" -type d -exec chmod 0755 {} +
+    find "$R/opt/zen" -type f -exec chmod 0644 {} +
+    chmod 0755 "$R/opt/zen/zen.exe"
+fi
 if [ -d "$BIN/opt/apps" ]; then
     mkdir -p "$R/opt/apps"
     find "$BIN/opt/apps" -maxdepth 1 -type f -exec install -m 0755 -t "$R/opt/apps/" {} +

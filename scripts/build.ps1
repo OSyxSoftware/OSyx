@@ -8,9 +8,13 @@ param(
     [switch]$NoInit,
     # Keep the root partition of the current build/osyx.img (e.g. to boot
     # again after a simulated power cut) instead of building a fresh one.
-    [switch]$KeepRoot
+    [switch]$KeepRoot,
+    [ValidateRange(128, 16384)][int]$RootMiB = 128,
+    # Experimental vendor payload; does not install a menu entry or default.
+    [string]$ZenDirectory = ''
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
+$Script:RootSizeMiB = $RootMiB
 Push-Location $Root
 try {
     $profileArgs = @(if (-not $DebugBuild) { '--release' })
@@ -94,6 +98,14 @@ try {
         New-Item -ItemType Directory -Force $wallDir | Out-Null
         Copy-Item $wallOut (Join-Path $wallDir 'default.osxi')
         # Windows PE32+ test programs (built with clang when available).
+        if ($ZenDirectory) {
+            $zenSource = (Resolve-Path -LiteralPath $ZenDirectory).Path
+            if (-not (Test-Path -LiteralPath (Join-Path $zenSource 'zen.exe'))) { throw 'ZenDirectory has no zen.exe' }
+            if ($RootMiB -lt 1024) { throw 'The complete Zen package requires -RootMiB 1024 or larger' }
+            $zenStage = Join-Path $stage 'opt/zen'
+            New-Item -ItemType Directory -Force $zenStage | Out-Null
+            Get-ChildItem -LiteralPath $zenSource -Force | Copy-Item -Destination $zenStage -Recurse
+        }
         & (Join-Path $PSScriptRoot 'build-winapps.ps1') | Out-Null
         $winApps = Join-Path $BuildDir 'winapps'
         if (Test-Path (Join-Path $winApps 'textedit.exe')) {

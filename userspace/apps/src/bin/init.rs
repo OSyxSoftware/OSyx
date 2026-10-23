@@ -63,6 +63,7 @@ fn main() -> i32 {
             process::exit(code);
         }
         Some("desktop") => return desktop_session(),
+        Some("zen-probe") => return zen_probe(),
         Some("net") => {
             let port = |i: usize, d: u16| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
             let mut t = Tests::default();
@@ -236,6 +237,21 @@ fn main() -> i32 {
 /// system, which starts the desktop shell) and restarts it if it fails. If
 /// it cannot be brought up, init exits and the kernel's status screen
 /// stays as the diagnostic fallback.
+fn zen_probe() -> i32 {
+    println!("zen-probe: official /opt/zen/zen.exe via /bin/winrun; no substitute browser");
+    let prism = Command::new("/system/bin/prism").spawn();
+    if prism.is_err() { println!("ZEN_PROBE_RESULT infrastructure=prism_start_failed"); return 1; }
+    thread::sleep(Duration::from_secs(2));
+    let result = Command::new("/bin/winrun").args(&[
+        "-v", "/opt/zen/zen.exe", "--no-remote", "--profile", "C:\\home\\user\\zen-profile", "about:blank",
+    ]).status();
+    println!("ZEN_PROBE_RESULT exit={:?}", result.as_ref().ok().and_then(|s| s.code()));
+    if let Ok(p) = prism { let _ = os_std::system::kill(p.id()); let _ = p.wait(); }
+    // Boot completion is separate from browser success; the host reads
+    // the actual winrun exit above and never treats this as a browser pass.
+    0
+}
+
 fn desktop_session() -> i32 {
     const PRISM: &str = "/system/bin/prism";
     for attempt in 1..=3 {
