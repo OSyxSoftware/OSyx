@@ -27,11 +27,17 @@ try {
     $savedFlags = $env:RUSTFLAGS
     $env:RUSTFLAGS = '-C relocation-model=static -C code-model=small'
     try {
-        Invoke-Checked 'user build' { cargo build -p osyx-apps --target x86_64-unknown-none --target-dir target/user @profileArgs }
+        Invoke-Checked 'user build' { cargo build -p osyx-apps -p osyx-desktop --target x86_64-unknown-none --target-dir target/user @profileArgs }
     } finally { $env:RUSTFLAGS = $savedFlags }
-    # Program -> directory on the root file system.
-    $installDirs = [ordered]@{ init = 'bin'; worker = 'bin'; probe = 'usr/bin' }
+    # Program -> directory on the root file system. The graphical session
+    # (PRISM, the desktop shell and its applications) lives in /system/bin.
+    $installDirs = [ordered]@{
+        init = 'bin'; worker = 'bin'; probe = 'usr/bin'; axis = 'bin'
+        prism = 'system/bin'; desktop = 'system/bin'; terminal = 'system/bin'; files = 'system/bin'; sysinfo = 'system/bin'
+    }
     $userBins = @($installDirs.Keys)
+    # Only these are also boot modules (the fallback root's /bin).
+    $moduleBins = @('init', 'worker', 'probe')
     foreach ($bin in $userBins) {
         $path = Join-Path $Root "target\user\x86_64-unknown-none\$profileDir\$bin"
         Invoke-Checked "$bin validation" { cargo run -q -p osyx-elf --example inspect -- --user $path }
@@ -53,7 +59,7 @@ try {
     if (Test-Path $legacyInit) { Remove-Item $legacyInit }
     if (-not $NoInit) {
         New-Item -ItemType Directory -Force $binDir | Out-Null
-        foreach ($bin in $userBins) {
+        foreach ($bin in $moduleBins) {
             Copy-Item (Join-Path $Root "target\user\x86_64-unknown-none\$profileDir\$bin") (Join-Path $binDir $bin) -Force
         }
     }
@@ -74,7 +80,16 @@ try {
         # Programs for /bin and /usr/bin of the root (none with -NoInit).
         $stage = Join-Path $BuildDir 'rootfs-programs'
         if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-        foreach ($d in 'bin', 'usr\bin') { New-Item -ItemType Directory -Force (Join-Path $stage $d) | Out-Null }
+        foreach ($d in 'bin', 'usr\bin', 'system\bin') { New-Item -ItemType Directory -Force (Join-Path $stage $d) | Out-Null }
+        # The default desktop wallpaper, converted from PNG to OSXI (cached).
+        $wallSrc = Join-Path $Root 'graphics\assets\wallpaper\osyx-default.png'
+        $wallOut = Join-Path $BuildDir 'wallpaper-default.osxi'
+        if (-not (Test-Path $wallOut) -or (Get-Item $wallSrc).LastWriteTime -gt (Get-Item $wallOut).LastWriteTime) {
+            Invoke-Checked 'wallpaper' { python (Join-Path $PSScriptRoot 'png2osxi.py') $wallSrc $wallOut }
+        }
+        $wallDir = Join-Path $stage 'system\share\wallpapers'
+        New-Item -ItemType Directory -Force $wallDir | Out-Null
+        Copy-Item $wallOut (Join-Path $wallDir 'default.osxi')
         if (-not $NoInit) {
             foreach ($bin in $userBins) {
                 Copy-Item (Join-Path $Root "target\user\x86_64-unknown-none\$profileDir\$bin") (Join-Path $stage "$($installDirs[$bin])\$bin")

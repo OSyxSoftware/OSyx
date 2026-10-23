@@ -4,7 +4,7 @@
 use crate::error::{Error, Result};
 use alloc::string::String;
 use alloc::vec::Vec;
-pub use os_sys::ipc::{field_str, DisplayInfo, MountInfo, ProcInfo, POWER_OFF, POWER_REBOOT, PROC_RUNNING, PROC_ZOMBIE};
+pub use os_sys::ipc::{field_str, pixel, DisplayInfo, MountInfo, ProcInfo, POWER_OFF, POWER_REBOOT, PROC_RUNNING, PROC_ZOMBIE};
 
 /// Every process (running and not yet collected).
 pub fn processes() -> Result<Vec<ProcInfo>> {

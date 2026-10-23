@@ -1,0 +1,12 @@
+[package]
+name = "prism-client"
+description = "PRISM client library: connection, windows with shared-memory buffers, events for the OSyx UI toolkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+os-std = { path = "../../runtime/os-std" }
+osyx-gfx = { path = "../../boot/gfx" }
+osyx-ui = { path = "../ui" }
+prism-proto = { path = "../prism-proto" }

@@ -1,0 +1,51 @@
+[package]
+name = "osyx-desktop"
+description = "The OSyx graphical session: PRISM compositor, desktop shell, AXIS shell and terminal, file manager, system information"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "prism"
+path = "src/bin/prism.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "desktop"
+path = "src/bin/desktop.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "terminal"
+path = "src/bin/terminal.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "files"
+path = "src/bin/files.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "sysinfo"
+path = "src/bin/sysinfo.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "axis"
+path = "src/bin/axis.rs"
+test = false
+bench = false
+
+[dependencies]
+os-std = { path = "../../runtime/os-std" }
+osyx-gfx = { path = "../../boot/gfx" }
+osyx-input = { path = "../../shared/input" }
+osyx-ui = { path = "../../graphics/ui" }
+prism-client = { path = "../../graphics/prism-client" }
+prism-core = { path = "../../graphics/prism-core" }
+prism-proto = { path = "../../graphics/prism-proto" }

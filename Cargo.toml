@@ -14,6 +14,8 @@ members = [
     "drivers/usb",
     "graphics/prism-proto",
     "graphics/prism-core",
+    "graphics/ui",
+    "graphics/prism-client",
     "runtime/os-sys",
     "runtime/os-std",
     "storage/ext4",
@@ -22,6 +24,7 @@ members = [
     "storage/tmpfs",
     "storage/vfs",
     "userspace/apps",
+    "userspace/desktop",
 ]
 # Host-testable crates only. The loader, kernel and user programs are freestanding and are
 # built with an explicit --target by scripts/build.ps1.
@@ -37,6 +40,7 @@ default-members = [
     "drivers/usb",
     "graphics/prism-proto",
     "graphics/prism-core",
+    "graphics/ui",
     "runtime/os-sys",
     "runtime/os-std",
     "storage/ext4",

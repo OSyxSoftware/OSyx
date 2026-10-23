@@ -54,6 +54,7 @@ fn main() -> i32 {
             let code = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             process::exit(code);
         }
+        Some("desktop") => return desktop_session(),
         Some("crash-prep") => {
             // Leave a removed-but-open file on the ext4 root, then exit
             // (the kernel's test.power-cut stops the machine right after).
@@ -141,6 +142,28 @@ fn main() -> i32 {
 
     println!("user checks: {} passed, {} failed", t.passed, t.failed);
     t.failed as i32
+}
+
+/// `init desktop`: runs the graphical session (PRISM from the root file
+/// system, which starts the desktop shell) and restarts it if it fails. If
+/// it cannot be brought up, init exits and the kernel's status screen
+/// stays as the diagnostic fallback.
+fn desktop_session() -> i32 {
+    const PRISM: &str = "/system/bin/prism";
+    for attempt in 1..=3 {
+        println!("starting the graphical session: {PRISM} (attempt {attempt})");
+        match Command::new(PRISM).status() {
+            Ok(s) if s.success() => return 0,
+            Ok(s) => eprintln!("{PRISM} ended with status {:#x}", s.raw()),
+            Err(e) => {
+                eprintln!("cannot start {PRISM}: {e}");
+                return 1;
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    eprintln!("the graphical session keeps failing; the kernel console stays");
+    1
 }
 
 fn worker(args: &[&str]) -> Command {

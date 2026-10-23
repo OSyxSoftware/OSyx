@@ -11,6 +11,8 @@
 #   3. controlled CPU exception tests (#PF, #GP, #UD, #DE) -> diagnostics + exit 37
 #   4. invalid kernel image -> boot loader error screen
 #   5. screenshots of the kernel screen and the loader error screen via QMP
+#   6. the graphical session: PRISM, desktop shell, AXIS Terminal, Files and
+#      System Information driven by injected USB keyboard and mouse events
 # Serial logs and screenshots are kept in build/test/.
 param(
     [switch]$SkipHost,
@@ -68,14 +70,14 @@ try {
     if (-not $SkipHost) {
         Write-Host '==> host unit tests'
         $out = ''
-        try { $out = (Invoke-Checked 'cargo test' { cargo test --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps }) -join "`n"; $ok = $true } catch { $ok = $false; $out += $_ }
+        try { $out = (Invoke-Checked 'cargo test' { cargo test --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --exclude osyx-desktop --exclude prism-client }) -join "`n"; $ok = $true } catch { $ok = $false; $out += $_ }
         $passed = ([regex]::Matches($out, 'test result: ok\. (\d+) passed') | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Sum).Sum
         Record 'host unit tests' $ok "$passed tests passed"
         Write-Host '==> clippy (host crates + freestanding targets)'
         $ok = $true
         try {
-            Invoke-Checked 'clippy host' { cargo clippy --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --all-targets -- -D warnings } | Out-Null
-            Invoke-Checked 'clippy user' { cargo clippy -p osyx-apps -p os-std -p os-sys --target x86_64-unknown-none --target-dir target/user -- -D warnings } | Out-Null
+            Invoke-Checked 'clippy host' { cargo clippy --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --exclude osyx-desktop --exclude prism-client --all-targets -- -D warnings } | Out-Null
+            Invoke-Checked 'clippy user' { cargo clippy -p osyx-apps -p osyx-desktop -p prism-client -p os-std -p os-sys --target x86_64-unknown-none --target-dir target/user -- -D warnings } | Out-Null
             Invoke-Checked 'clippy loader' { cargo clippy -p osyx-uefi-loader --target x86_64-unknown-uefi -- -D warnings } | Out-Null
             Invoke-Checked 'clippy kernel' { cargo clippy -p osyx-kernel --target x86_64-unknown-none -- -D warnings } | Out-Null
         } catch { $ok = $false; Write-Host $_ }
@@ -284,6 +286,16 @@ try {
         $r = Invoke-Boot 'kernel-screen' $TimeoutSec 'entering idle loop' $shot
         $ok = (Test-Path $shot) -and $r.Log -match 'self-tests: \d+ passed, 0 failed' -and $r.Log -match 'user checks: \d+ passed, 0 failed'
         Record 'kernel screen screenshot' $ok $shot
+
+        # --- 6. graphical session ---------------------------------------------
+        # PRISM, the desktop shell and the applications driven through the
+        # USB keyboard and mouse (scripts/desktop-test.ps1).
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'desktop-test.ps1') -TimeoutSec $TimeoutSec 2>&1 | ForEach-Object { "$_" }
+        foreach ($line in $out) {
+            if ($line -match '^\[(PASS|FAIL)\] (.*)$') { $results.Add([pscustomobject]@{ Test = "desktop: $($Matches[2])"; Result = $Matches[1]; Detail = '' }); Write-Host $line }
+        }
+        $sum = $out | Select-String -Pattern 'desktop tests: (\d+) passed, (\d+) failed' | Select-Object -Last 1
+        Record 'graphical session (PRISM + desktop) run' ($null -ne $sum -and $sum.Matches[0].Groups[2].Value -eq '0') $(if ($sum) { $sum.Line } else { 'no summary' })
         # Leave a usable default ESP behind.
         & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline '' | Out-Null
     }

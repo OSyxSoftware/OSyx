@@ -38,6 +38,19 @@ name = "osyx-crypto"
 version = "0.1.0"
 
 [[package]]
+name = "osyx-desktop"
+version = "0.1.0"
+dependencies = [
+ "os-std",
+ "osyx-gfx",
+ "osyx-input",
+ "osyx-ui",
+ "prism-client",
+ "prism-core",
+ "prism-proto",
+]
+
+[[package]]
 name = "osyx-elf"
 version = "0.1.0"
 
@@ -109,6 +122,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "osyx-ui"
+version = "0.1.0"
+dependencies = [
+ "osyx-gfx",
+ "osyx-input",
+]
+
+[[package]]
 name = "osyx-usb"
 version = "0.1.0"
 
@@ -117,6 +138,16 @@ name = "osyx-vfs"
 version = "0.1.0"
 dependencies = [
  "osyx-abi",
+]
+
+[[package]]
+name = "prism-client"
+version = "0.1.0"
+dependencies = [
+ "os-std",
+ "osyx-gfx",
+ "osyx-ui",
+ "prism-proto",
 ]
 
 [[package]]

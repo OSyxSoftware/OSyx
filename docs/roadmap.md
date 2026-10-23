@@ -16,6 +16,9 @@ Status of the milestones from the project brief.
 | 7d | Storage: PCI, virtio-blk, block layer, FAT32, VFS, file handles, OSyx Std `fs` | Done (polled I/O, single CPU) |
 | 7e | File system architecture: ext4 root (journalled), FAT32 `/boot`, tmpfs, devfs, GPT, permissions, cwd, symlinks, mount/umount | Done (see storage.md for limits) |
 | 7f | Native executable loader: ELF64 from the VFS (`/bin`, `/usr/bin`), `execve`, argv/envp/auxv, OSyx Std environment | Done (static `ET_EXEC` only; see kernel.md) |
+| 7g | Kernel objects and IPC: pipes, channels, shared memory, wait_handles (ABI v7) | Done |
+| 7h | Native xHCI driver, USB enumeration, HID keyboard/mouse, input core | Done (root ports, boot keyboards; see graphics.md) |
+| 7i | PRISM compositor, protocol v1, UI toolkit, desktop shell, AXIS Terminal, Files, System Information | Done (software composition; see graphics.md) |
 | 8 | Native Windows PE execution | Not started |
 
 ## Next steps (in order)
@@ -35,4 +38,6 @@ Status of the milestones from the project brief.
    per-CPU data with `swapgs`.
 6. **More OSyx Std**: `RwLock`, `Once`/`OnceLock`, `mpsc`; then the
    genuine `std` port ([rust-std.md](rust-std.md)).
-7. **Input**: PS/2 or virtio keyboard, a text console and a shell.
+7. **Desktop follow-ups**: per-pixel alpha in the toolkit, damage-based
+   client redraws, USB hubs and report-protocol keyboards, AXIS pipelines
+   and blocks (see [graphics.md](graphics.md)).

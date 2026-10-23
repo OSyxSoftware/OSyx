@@ -1,0 +1,10 @@
+[package]
+name = "osyx-ui"
+description = "OSyx UI toolkit: theme, fonts, painter and widgets drawn into PRISM surfaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+osyx-gfx = { path = "../../boot/gfx" }
+osyx-input = { path = "../../shared/input" }
