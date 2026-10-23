@@ -72,6 +72,7 @@ mod accounts;
 mod capi;
 mod minordlls;
 mod propsys;
+mod pipes;
 mod ws2_32;
 
 use alloc::string::String;

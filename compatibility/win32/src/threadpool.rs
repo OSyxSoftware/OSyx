@@ -7,7 +7,8 @@
 //! the nearest timer is due. Waits block in a helper thread on the object
 //! and a private cancel event, then queue their callback. Custom callback
 //! environments and pools, and associating files with completion ports
-//! (OSyx has no overlapped I/O), fail with ERROR_NOT_SUPPORTED.
+//! (files complete synchronously; pipes are the handles with overlapped
+//! I/O and can be associated), fail with ERROR_NOT_SUPPORTED.
 #![allow(non_snake_case)]
 use crate::{
     error::*,
@@ -497,23 +498,51 @@ extern "win64" fn UnregisterWait(wait: u64) -> i32 {
 // ---- I/O completion ports ---------------------------------------------------------
 
 pub struct PortObj {
-    queue: Mutex<VecDeque<(u32, u64, u64)>>,
+    /// (bytes, key, OVERLAPPED, Win32 error of the operation; 0 when it
+    /// succeeded or the packet was posted).
+    queue: Mutex<VecDeque<(u32, u64, u64, u32)>>,
     word: AtomicU32,
 }
 
-extern "win64" fn CreateIoCompletionPort(file: u64, existing: u64, _key: u64, _threads: u32) -> u64 {
-    if file != INVALID_HANDLE_VALUE {
-        return fail(ERROR_NOT_SUPPORTED, 0); // no overlapped file I/O
+/// Pipes are the handles with overlapped I/O (pipes.rs): associating one
+/// queues its completions to the port. Files complete synchronously and
+/// cannot be associated.
+extern "win64" fn CreateIoCompletionPort(file: u64, existing: u64, key: u64, _threads: u32) -> u64 {
+    if file == INVALID_HANDLE_VALUE {
+        if existing != 0 {
+            return fail(ERROR_INVALID_PARAMETER, 0);
+        }
+        return new_port();
     }
-    if existing != 0 {
+    let Some(Object::Pipe(p)) = objects::get(file) else {
+        return fail(if objects::get(file).is_some() { ERROR_NOT_SUPPORTED } else { ERROR_INVALID_HANDLE }, 0);
+    };
+    let port = if existing == 0 {
+        new_port()
+    } else if matches!(objects::get(existing), Some(Object::Port(_))) {
+        existing
+    } else {
         return fail(ERROR_INVALID_PARAMETER, 0);
-    }
+    };
+    crate::pipes::associate(&p, port, key);
+    port
+}
+
+fn new_port() -> u64 {
     objects::insert(Object::Port(Arc::new(PortObj { queue: Mutex::new(VecDeque::new()), word: AtomicU32::new(0) })))
+}
+
+/// Queues the completion of I/O on an associated handle, with its error.
+pub fn post(port: u64, bytes: u32, key: u64, overlapped: u64, error: u32) {
+    let Some(Object::Port(p)) = objects::get(port) else { return };
+    p.queue.lock().unwrap().push_back((bytes, key, overlapped, error));
+    p.word.fetch_add(1, Ordering::SeqCst);
+    os_sys::futex_wake(p.word.as_ptr(), 1);
 }
 
 extern "win64" fn PostQueuedCompletionStatus(port: u64, bytes: u32, key: u64, overlapped: u64) -> i32 {
     let Some(Object::Port(p)) = objects::get(port) else { return fail(ERROR_INVALID_HANDLE, 0) };
-    p.queue.lock().unwrap().push_back((bytes, key, overlapped));
+    p.queue.lock().unwrap().push_back((bytes, key, overlapped, 0));
     p.word.fetch_add(1, Ordering::SeqCst);
     os_sys::futex_wake(p.word.as_ptr(), 1);
     1
@@ -527,14 +556,15 @@ extern "win64" fn GetQueuedCompletionStatus(port: u64, bytes: *mut u32, key: *mu
     let end = (ms != u32::MAX).then(|| Instant::now() + Duration::from_millis(ms as u64));
     loop {
         let seq = p.word.load(Ordering::SeqCst);
-        if let Some((b, k, o)) = p.queue.lock().unwrap().pop_front() {
+        if let Some((b, k, o, e)) = p.queue.lock().unwrap().pop_front() {
             // SAFETY: the caller's out pointers.
             unsafe {
                 *bytes = b;
                 *key = k;
                 *overlapped = o;
             }
-            return 1;
+            // A failed operation dequeues with FALSE and its error.
+            return if e == 0 { 1 } else { fail(e, 0) };
         }
         let timeout = match end {
             None => 0,
@@ -550,6 +580,43 @@ extern "win64" fn GetQueuedCompletionStatus(port: u64, bytes: *mut u32, key: *mu
         };
         let _ = os_sys::futex_wait(p.word.as_ptr(), seq, timeout);
     }
+}
+
+/// OVERLAPPED_ENTRY { lpCompletionKey, lpOverlapped, Internal,
+/// dwNumberOfBytesTransferred }: waits for the first packet, then takes
+/// what else is queued, up to `count`.
+extern "win64" fn GetQueuedCompletionStatusEx(port: u64, entries: *mut u8, count: u32, removed: *mut u32, ms: u32, _alertable: i32) -> i32 {
+    let Some(Object::Port(p)) = objects::get(port) else { return fail(ERROR_INVALID_HANDLE, 0) };
+    if entries.is_null() || count == 0 || removed.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let (mut b, mut k, mut o) = (0u32, 0u64, 0u64);
+    if GetQueuedCompletionStatus(port, &mut b, &mut k, &mut o, ms) == 0 && o == 0 {
+        return 0; // timed out (or the port went away)
+    }
+    let mut taken = alloc::vec![(b, k, o, 0u32)];
+    {
+        let mut q = p.queue.lock().unwrap();
+        while taken.len() < count as usize {
+            match q.pop_front() {
+                Some(x) => taken.push(x),
+                None => break,
+            }
+        }
+    }
+    for (i, (b, k, o, _)) in taken.iter().enumerate() {
+        let e = entries as u64 + i as u64 * 32;
+        // SAFETY: the caller's array of `count` entries.
+        unsafe {
+            core::ptr::write_unaligned(e as *mut u64, *k);
+            core::ptr::write_unaligned((e + 8) as *mut u64, *o);
+            core::ptr::write_unaligned((e + 16) as *mut u64, 0); // Internal: reserved
+            core::ptr::write_unaligned((e + 24) as *mut u32, *b);
+        }
+    }
+    // SAFETY: the caller's out count.
+    unsafe { *removed = taken.len() as u32 };
+    1
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
@@ -574,5 +641,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CreateIoCompletionPort,
         PostQueuedCompletionStatus,
         GetQueuedCompletionStatus,
+        GetQueuedCompletionStatusEx,
     ]
 }

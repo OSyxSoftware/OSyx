@@ -354,6 +354,12 @@ pub fn attributes(st: &osyx_abi::FileStat) -> u32 {
 /// CreateFile core shared with NtCreateFile. Returns the handle and
 /// whether an existing file was opened (for ERROR_ALREADY_EXISTS).
 pub fn create_file(name: &str, access: u32, share: u32, disposition: u32, flags: u32) -> Result<(u64, bool), u32> {
+    if let Some(pipe) = crate::pipes::pipe_name(name) {
+        if disposition != OPEN_EXISTING {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        return crate::pipes::open_client(pipe, flags).map(|h| (h, true));
+    }
     match path::special(name) {
         Some(path::Special::Null) => return Ok((objects::insert(Object::Null), true)),
         Some(path::Special::ConsoleOut) => return Ok((objects::insert(Object::Console(Console::Out)), true)),
@@ -549,6 +555,9 @@ fn complete_overlapped(ov: *const u8, n: u32) {
 }
 
 extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u32, ov: *const u8) -> Bool {
+    if let Some(Object::Pipe(p)) = objects::get(h) {
+        return crate::pipes::read_file(p, buf, n, read, ov as u64);
+    }
     match read_handle(h, buf, n, overlapped_offset(ov)) {
         Ok(k) => {
             if !read.is_null() {
@@ -563,6 +572,9 @@ extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u32, ov: *co
 }
 
 extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: *mut u32, ov: *const u8) -> Bool {
+    if let Some(Object::Pipe(p)) = objects::get(h) {
+        return crate::pipes::write_file(p, buf, n, written, ov as u64);
+    }
     match write_handle(h, buf, n, overlapped_offset(ov)) {
         Ok(k) => {
             if !written.is_null() {
@@ -578,25 +590,37 @@ extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: *mut u32, o
 
 const STATUS_PENDING: u64 = 0x103;
 
-extern "win64" fn GetOverlappedResult(h: u64, ov: *const u8, n: *mut u32, _wait: Bool) -> Bool {
+/// Pending operations are those of overlapped pipe handles (pipes.rs);
+/// waiting uses the OVERLAPPED's event, or polls without one.
+extern "win64" fn GetOverlappedResult(h: u64, ov: *const u8, n: *mut u32, wait: Bool) -> Bool {
     if objects::get(h).is_none() {
         return fail(ERROR_INVALID_HANDLE, FALSE);
     }
     if ov.is_null() {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
-    // SAFETY: the caller's OVERLAPPED structure.
-    let (status, bytes): (u64, u64) = unsafe { (teb::get(ov as u64, 0), teb::get(ov as u64, 8)) };
-    if status == STATUS_PENDING {
-        // Never left pending by OSyx: an operation that was not started here.
-        return fail(ERROR_IO_INCOMPLETE, FALSE);
+    let read = |off: usize| -> u64 {
+        // SAFETY: the caller's OVERLAPPED; a helper thread may complete it.
+        unsafe { core::ptr::read_volatile((ov as u64 + off as u64) as *const u64) }
+    };
+    while read(0) == STATUS_PENDING {
+        if wait == 0 {
+            return fail(ERROR_IO_INCOMPLETE, FALSE);
+        }
+        match read(24) & !1 {
+            0 => os_std::thread::sleep(core::time::Duration::from_millis(1)),
+            event => {
+                let _ = objects::wait(&[event], false, 10);
+            }
+        }
     }
+    let (status, bytes) = (read(0), read(8));
     if !n.is_null() {
         // SAFETY: the caller's out pointer.
         unsafe { *n = bytes as u32 };
     }
     if status != 0 {
-        return fail(ERROR_GEN_FAILURE, FALSE);
+        return fail(crate::pipes::error_of(status), FALSE);
     }
     TRUE
 }
@@ -604,10 +628,11 @@ extern "win64" fn GetOverlappedResult(h: u64, ov: *const u8, n: *mut u32, _wait:
 /// Nothing is ever pending (see complete_overlapped): for CancelIoEx,
 /// as on Windows, that is ERROR_NOT_FOUND.
 extern "win64" fn CancelIoEx(h: u64, _ov: *const u8) -> Bool {
-    if objects::get(h).is_none() {
-        return fail(ERROR_INVALID_HANDLE, FALSE);
+    match objects::get(h) {
+        None => fail(ERROR_INVALID_HANDLE, FALSE),
+        Some(Object::Pipe(p)) if crate::pipes::cancel(&p) => TRUE,
+        Some(_) => fail(ERROR_NOT_FOUND, FALSE),
     }
-    fail(ERROR_NOT_FOUND, FALSE)
 }
 
 /// A thread blocked in a synchronous kernel call cannot be interrupted
@@ -632,10 +657,14 @@ extern "win64" fn DeviceIoControl(h: u64, _code: u32, _i: u64, _il: u32, _o: u64
 /// Nothing is ever pending (see complete_overlapped): there is nothing to
 /// cancel for a valid handle.
 extern "win64" fn CancelIo(h: u64) -> Bool {
-    if objects::get(h).is_none() {
-        return fail(ERROR_INVALID_HANDLE, FALSE);
+    match objects::get(h) {
+        None => fail(ERROR_INVALID_HANDLE, FALSE),
+        Some(Object::Pipe(p)) => {
+            crate::pipes::cancel(&p);
+            TRUE
+        }
+        Some(_) => TRUE,
     }
-    TRUE
 }
 
 /// An anonymous pipe over a kernel pipe; `size` is a hint Windows may
@@ -762,6 +791,7 @@ const FILE_TYPE_PIPE: u32 = 3;
 extern "win64" fn GetFileType(h: u64) -> u32 {
     match objects::get(h) {
         Some(Object::File(f)) if f.key.0 == objects::PIPE_DEV => FILE_TYPE_PIPE,
+        Some(Object::Pipe(_)) => FILE_TYPE_PIPE,
         Some(Object::File(_)) => FILE_TYPE_DISK,
         Some(Object::Console(_)) | Some(Object::Null) => FILE_TYPE_CHAR,
         _ => fail(ERROR_INVALID_HANDLE, 0),
@@ -1669,6 +1699,10 @@ extern "win64" fn CreateEventExW(attributes: u64, name: *const u16, flags: u32, 
 /// change notifications).
 pub(crate) fn set_event(h: u64) {
     event_op(h, true);
+}
+
+pub(crate) fn reset_event(h: u64) {
+    event_op(h, false);
 }
 
 fn event_op(h: u64, set: bool) -> Bool {
@@ -2733,6 +2767,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::zone::exports());
     exports.extend(crate::nls::exports());
     exports.extend(crate::procinfo::exports());
+    exports.extend(crate::pipes::exports());
     exports.push(("PathCchCanonicalize", crate::shlwapi::path_cch_canonicalize()));
     exports.extend(crate::threadpool::exports());
     exports.extend(crate::process::exports());

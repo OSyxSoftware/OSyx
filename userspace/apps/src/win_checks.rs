@@ -70,6 +70,7 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("time zones, en-US formatting, named objects and machine information", || run("k32xul.exe", &[]) == Some(0));
     t.check("registry enumeration and notification, CryptoAPI hashes, credentials, ETW and accounts", || run("advapi.exe", &[]) == Some(0));
     t.check("rpcrt4, cfgmgr32, propsys, bcryptprimitives, shcore and ntdll additions", || run("newdlls.exe", &[]) == Some(0));
+    t.check("named pipes across processes with overlapped I/O and completion ports", || run("pipes.exe", &[]) == Some(0));
     t.check("a missing program is reported", || {
         Command::new("/bin/winrun").arg("/opt/wintests/none.exe").status().ok().and_then(|s| s.code()) == Some(2)
     });

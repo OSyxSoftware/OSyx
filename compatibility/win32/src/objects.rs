@@ -243,6 +243,7 @@ pub enum Object {
     Job(Arc<crate::process::JobObj>),
     WindowStation(Arc<crate::winsta::Station>),
     Desktop(Arc<crate::winsta::DesktopObj>),
+    Pipe(Arc<crate::pipes::PipeObj>),
 }
 
 struct Table {
@@ -338,7 +339,7 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
             }
             free
         }
-        Object::Console(_) | Object::File(_) | Object::Null => true,
+        Object::Console(_) | Object::File(_) | Object::Null | Object::Pipe(_) => true,
         Object::Process(p) => p.done.load(Ordering::SeqCst),
         Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) | Object::WindowStation(_) | Object::Desktop(_) => {
             return Err(ERROR_INVALID_HANDLE)
