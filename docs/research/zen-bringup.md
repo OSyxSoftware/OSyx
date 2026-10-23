@@ -255,6 +255,44 @@ wrappers and unwinding (RtlLookupFunctionEntry, RtlVirtualUnwind,
 RtlCaptureStackBackTrace), the registry, thread pools, job objects,
 process creation, FLS, SList and locale APIs, and shlwapi paths.
 
+## Attempt 9: mozglue fully linked
+
+New in `84d781e`, all exercised by `runtime.exe` (55/55 on Windows, 56/56 on
+OSyx; Win32 QEMU suite 406/406):
+
+- `rtl.rs`: Rtl heap calls on the process heap, counted strings, interlocked
+  SLists on the x64 header layout (CMPXCHG16B), Encode/DecodePointer with a
+  per-process secret from /dev/random, NT names of SRW/run-once/condition
+  variables.
+- `unwind.rs`: x64 table-based unwinding over the images' `.pdata` and
+  RtlAddFunctionTable tables, RtlVirtualUnwind including epilogue
+  detection, chained unwind info and machine frames, RtlCaptureContext,
+  RtlCaptureStackBackTrace, GetThreadContext for the calling thread only
+  (OSyx cannot stop another thread to read its registers).
+- `registry.rs`: persistent HKLM (`/etc/osyx/registry/machine.reg`) and
+  HKCU (`$HOME/.osyx-registry/user.reg`) hives, atomic rewrite, per-handle
+  access rights, volatile keys, RegGetValueW type filtering and expansion.
+- `sysext.rs`: GetSystemTime/SystemTimeToFileTime, unbiased interrupt
+  time, GetProcessTimes (scheduler samples; OSyx has no kernel/user split,
+  so all CPU time is reported as user time), VerSetConditionMask and
+  VerifyVersionInfoW against the reported 10.0.19041, IsBadReadPtr probing
+  through a kernel copy that returns EFAULT, SearchPathW, FormatMessageA/W
+  (system text in English for the errors OSyx reports; message tables of
+  PE modules are not read). WER registration returns E_NOTIMPL.
+
+Actual result (QEMU exit 33, winrun 126, no kernel panic):
+
+```
+API set api-ms-win-crt-runtime-l1-1-0.dll (needed by vcruntime140.dll) has no host
+```
+
+mozglue.dll has no unresolved static imports left. The startup closure has
+336 unresolved occurrences: 239 UCRT (`api-ms-win-crt-*`, a separate
+work item) and 97 others (zen.exe 55, msvcp140.dll 31, vcruntime140.dll 6,
+vcruntime140_1.dll 5): FLS, RtlUnwind/RtlUnwindEx and frame-based exception
+dispatch for C++ exceptions, thread pools, locale and file information
+APIs, job objects and process creation.
+
 No fallback browser, mock UI or success-returning API placeholders were
 introduced. This is an incomplete Windows compatibility port, not a
 working Zen Browser release. Completing it requires implementing and
