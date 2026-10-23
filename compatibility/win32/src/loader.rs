@@ -162,6 +162,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("version.dll", crate::version::exports(), Vec::new()),
         builtin("psapi.dll", crate::psapi::exports(), Vec::new()),
         builtin("advapi32.dll", [crate::security::exports(), crate::registry::exports()].concat(), Vec::new()),
+        builtin("shlwapi.dll", crate::shlwapi::exports(), Vec::new()),
+        builtin("combase.dll", crate::shlwapi::combase_exports(), Vec::new()),
     ]
 }
 
@@ -209,7 +211,8 @@ fn schema() -> Vec<u8> {
     b.add("api-ms-win-core-rtlsupport-l1-2-0", "ntdll.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-rtlsupport-l1-1-0", "ntdll.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-registry-l1-1-0", "advapi32.dll", &[]).expect("valid contract name");
-    b.add("api-ms-win-core-winrt-l1-1-0", "", &[]).expect("valid contract name"); // no host
+    b.add("api-ms-win-core-winrt-l1-1-0", "combase.dll", &[]).expect("valid contract name");
+    b.add("api-ms-win-core-winrt-string-l1-1-0", "combase.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-ntuser-window-l1-1-4", "user32.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-gdi-dc-l1-2-0", "gdi32.dll", &[]).expect("valid contract name");
     b.build()
@@ -682,6 +685,40 @@ pub fn free_library(h: u64) -> Result<(), u32> {
         }
     }
     Ok(())
+}
+
+/// DLL file search after the application directory: an optional
+/// SetDllDirectory directory (OSyx path), then the current directory when
+/// `include_cwd`. Built-in DLLs (the "system" directory) always resolve.
+pub fn set_dll_search(dll_dir: Option<String>, include_cwd: bool) {
+    let mut g = LOADER.lock().unwrap();
+    let Some(l) = g.as_mut() else { return };
+    let app = l.linker.host.search[0].clone();
+    let mut search = alloc::vec![app];
+    search.extend(dll_dir);
+    if include_cwd {
+        if let Ok(cwd) = os_std::env::current_dir() {
+            search.push(String::from(cwd.as_str()));
+        }
+    }
+    l.linker.host.search = search;
+}
+
+/// Whether the image section containing `addr` is executable (from the
+/// mapped section headers).
+pub fn is_executable(addr: u64) -> bool {
+    let Some((base, _)) = image_containing(addr) else { return false };
+    let rd32 = |a: u64| unsafe { core::ptr::read_unaligned(a as *const u32) };
+    let rd16 = |a: u64| unsafe { core::ptr::read_unaligned(a as *const u16) };
+    // SAFETY (closures): the headers of a mapped image.
+    let nt = base + rd32(base + 0x3c) as u64;
+    let count = rd16(nt + 6) as u64;
+    let sections = nt + 24 + rd16(nt + 20) as u64;
+    let rva = addr - base;
+    (0..count).map(|i| sections + i * 40).any(|s| {
+        let (va, size, flags) = (rd32(s + 12) as u64, rd32(s + 8).max(rd32(s + 16)) as u64, rd32(s + 36));
+        rva >= va && rva < va + size && flags & 0x2000_0000 != 0
+    })
 }
 
 /// (base, size) of the mapped PE image containing `addr`.

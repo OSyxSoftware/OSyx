@@ -185,7 +185,7 @@ fn write_find(out: u64, name: &str, st: &FileStat) -> i32 {
     }
     1
 }
-extern "win64" fn FindFirstFileW(pattern: *const u16, out: u64) -> u64 {
+pub(crate) extern "win64" fn FindFirstFileW(pattern: *const u16, out: u64) -> u64 {
     if out == 0 {
         return fail(ERROR_INVALID_PARAMETER, u64::MAX);
     }

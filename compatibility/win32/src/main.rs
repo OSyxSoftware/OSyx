@@ -22,16 +22,19 @@ macro_rules! export_table {
 
 mod error;
 mod exceptions;
+mod files;
 mod fls;
 mod iphlpapi;
 mod kernel32;
 mod loader;
+mod locale;
 mod mapping;
 mod mem;
 mod ntdll;
 mod objects;
 mod path;
 mod setupapi;
+mod shlwapi;
 mod security;
 mod seh;
 mod teb;
@@ -39,11 +42,13 @@ mod user32;
 mod volumes;
 mod version;
 mod synch;
+mod process;
 mod psapi;
 mod registry;
 mod rtl;
 mod sysext;
 mod unwind;
+mod threadpool;
 mod timers;
 mod ws2_32;
 
@@ -98,7 +103,15 @@ fn main() -> i32 {
         cmd.push(' ');
         cmd.push_str(&quote(a));
     }
+    // CreateProcessW's working directory for a Windows child.
     let mut env: Vec<(String, String)> = os_std::env::vars().collect();
+    if let Some(i) = env.iter().position(|(k, _)| k == "OSYX_WINRUN_CWD") {
+        let (_, dir) = env.remove(i);
+        if let Err(e) = os_sys::chdir(&dir) {
+            eprintln!("winrun: cannot enter {dir}: {e:?}");
+            return 126;
+        }
+    }
     for (k, v) in [
         ("OS", "Windows_NT"),
         ("OSYX", "1"),

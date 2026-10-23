@@ -234,6 +234,9 @@ pub enum Object {
     Semaphore(Arc<SemaphoreObj>),
     Section(Arc<SectionObj>),
     Token(Arc<crate::security::Token>),
+    Port(Arc<crate::threadpool::PortObj>),
+    Process(Arc<crate::process::ProcessObj>),
+    Job(Arc<crate::process::JobObj>),
 }
 
 struct Table {
@@ -252,6 +255,11 @@ pub fn insert(o: Object) -> u64 {
     t.next += 4;
     t.map.insert(h, o);
     h
+}
+
+/// Open handles of this process.
+pub fn count() -> usize {
+    TABLE.lock().unwrap().map.len()
 }
 
 pub fn get(h: u64) -> Option<Object> {
@@ -320,7 +328,8 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
             free
         }
         Object::Console(_) | Object::File(_) | Object::Null => true,
-        Object::Section(_) | Object::Token(_) => return Err(ERROR_INVALID_HANDLE),
+        Object::Process(p) => p.done.load(Ordering::SeqCst),
+        Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) => return Err(ERROR_INVALID_HANDLE),
     })
 }
 

@@ -122,12 +122,12 @@ pub fn process_heap() -> u64 {
     h
 }
 
-fn cwd_win() -> String {
+pub(crate) fn cwd_win() -> String {
     os_std::env::current_dir().map(|p| path::to_windows(p.as_str())).unwrap_or_else(|_| String::from("C:\\"))
 }
 
 /// Windows path → canonical OSyx path and whether it exists.
-fn locate(win: &str) -> Result<(String, bool), u32> {
+pub(crate) fn locate(win: &str) -> Result<(String, bool), u32> {
     let p = path::to_osyx(win, &cwd_win())?;
     path::resolve(&p)
 }
@@ -317,6 +317,12 @@ pub fn create_file(name: &str, access: u32, share: u32, disposition: u32, flags:
     if is_dir && flags & FILE_FLAG_BACKUP_SEMANTICS == 0 {
         return Err(ERROR_ACCESS_DENIED);
     }
+    // FILE_ATTRIBUTE_READONLY (no owner write bit) refuses writing even
+    // to root, which the kernel's permission check would let through.
+    let truncating = disposition == CREATE_ALWAYS || disposition == TRUNCATE_EXISTING;
+    if st.is_some_and(|s| !is_dir && s.mode & 0o200 == 0) && (rights.1 || truncating) {
+        return Err(ERROR_ACCESS_DENIED);
+    }
     // Sharing is checked before anything changes on disk.
     let pre = match st {
         Some(s) => Some(objects::share_open((s.dev, s.ino), rights, share)?),
@@ -367,7 +373,7 @@ pub fn create_file(name: &str, access: u32, share: u32, disposition: u32, flags:
     Ok((objects::insert(Object::File(Arc::new(f))), exists))
 }
 
-fn create_file_common(name: Option<String>, access: u32, share: u32, disposition: u32, flags: u32) -> u64 {
+pub(crate) fn create_file_common(name: Option<String>, access: u32, share: u32, disposition: u32, flags: u32) -> u64 {
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE) };
     match create_file(&name, access, share, disposition, flags) {
         Ok((h, existed)) => {
@@ -489,7 +495,7 @@ extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: *mut u32, o
     }
 }
 
-fn file_stat(h: u64) -> Result<osyx_abi::FileStat, u32> {
+pub(crate) fn file_stat(h: u64) -> Result<osyx_abi::FileStat, u32> {
     let f = objects::file(h)?;
     os_sys::fstat(f.fd).map_err(errno_to_win32)
 }
@@ -720,7 +726,7 @@ extern "win64" fn DeleteFileW(name: *const u16) -> Bool {
 
 const MOVEFILE_REPLACE_EXISTING: u32 = 1;
 
-fn move_file(from: Option<String>, to: Option<String>, flags: u32) -> Bool {
+pub(crate) fn move_file(from: Option<String>, to: Option<String>, flags: u32) -> Bool {
     let (Some(from), Some(to)) = (from, to) else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
     let src = match locate(&from) {
         Ok((p, true)) => p,
@@ -917,7 +923,10 @@ extern "win64" fn TerminateProcess(h: u64, code: u32) -> Bool {
     if h == objects::CURRENT_PROCESS {
         os_std::process::exit(code as i32);
     }
-    fail(ERROR_ACCESS_DENIED, FALSE)
+    match objects::get(h) {
+        Some(Object::Process(p)) => crate::process::terminate(&p, code).map_or_else(|e| fail(e, FALSE), |()| TRUE),
+        _ => fail(ERROR_INVALID_HANDLE, FALSE),
+    }
 }
 
 extern "win64" fn GetExitCodeProcess(h: u64, code: *mut u32) -> Bool {
@@ -926,7 +935,14 @@ extern "win64" fn GetExitCodeProcess(h: u64, code: *mut u32) -> Bool {
         unsafe { *code = 259 }; // STILL_ACTIVE
         return TRUE;
     }
-    fail(ERROR_INVALID_HANDLE, FALSE)
+    match objects::get(h) {
+        Some(Object::Process(p)) if !code.is_null() => {
+            // SAFETY: the caller's out pointer.
+            unsafe { *code = crate::process::exit_code(&p) };
+            TRUE
+        }
+        _ => fail(ERROR_INVALID_HANDLE, FALSE),
+    }
 }
 
 const CREATE_SUSPENDED: u32 = 4;
@@ -988,7 +1004,7 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
     Ok(obj)
 }
 
-extern "win64" fn CreateThread(attributes: u64, stack: usize, start: u64, param: u64, flags: u32, tid: *mut u32) -> u64 {
+pub(crate) extern "win64" fn CreateThread(attributes: u64, stack: usize, start: u64, param: u64, flags: u32, tid: *mut u32) -> u64 {
     if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     if start == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -1099,6 +1115,11 @@ extern "win64" fn GetStartupInfoW(si: *mut u8) {
 
 pub(crate) fn env_get(name: &str) -> Option<String> {
     with_process(|p| p.env.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone()))
+}
+
+/// The Win32 environment, including SetEnvironmentVariable changes.
+pub(crate) fn env_vars() -> Vec<(String, String)> {
+    with_process(|p| p.env.clone())
 }
 
 fn env_set(name: &str, value: Option<String>) {
@@ -1391,7 +1412,7 @@ extern "win64" fn ReleaseMutex(h: u64) -> Bool {
     TRUE
 }
 
-extern "win64" fn CreateSemaphoreA(attributes: u64, initial: i32, max: i32, _name: *const u8) -> u64 {
+pub(crate) extern "win64" fn CreateSemaphoreA(attributes: u64, initial: i32, max: i32, _name: *const u8) -> u64 {
     if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     if max <= 0 || initial < 0 || initial > max {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -2130,6 +2151,10 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::unwind::kernel32_exports());
     exports.extend(crate::sysext::exports());
     exports.extend(crate::fls::exports());
+    exports.extend(crate::files::exports());
+    exports.extend(crate::locale::exports());
+    exports.extend(crate::threadpool::exports());
+    exports.extend(crate::process::exports());
     exports.extend(crate::seh::ntdll_exports());
     exports.push(("OpenProcessToken",crate::security::OpenProcessToken as *const () as u64));
     exports

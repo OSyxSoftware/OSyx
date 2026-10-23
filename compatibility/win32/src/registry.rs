@@ -404,7 +404,7 @@ const RRF_NOEXPAND: u32 = 0x1000_0000;
 const RRF_ZEROONFAILURE: u32 = 0x2000_0000;
 
 /// Expands %NAME% references from the program's environment (unknown ones stay).
-fn expand_env(s: &str) -> String {
+pub(crate) fn expand_env(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(i) = rest.find('%') {

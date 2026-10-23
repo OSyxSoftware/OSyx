@@ -299,6 +299,52 @@ working Zen Browser release. Completing it requires implementing and
 testing the runtime/process/security/graphics surfaces above, then real
 browser interaction and verified HTTPS tests.
 
+## After attempt 9: C++ exceptions and the newer Win32 surface
+
+`f4c2f51` added FLS with thread-exit callbacks, frame-based SEH dispatch
+through language handlers, RtlUnwind/RtlUnwindEx and unwind consolidation
+(`seh.exe`). The next commit covers every non-UCRT static import of
+zen.exe and msvcp140.dll listed by attempt 9 (86 occurrences):
+
+- `files.rs`: CreateFile2, CopyFile2/CopyFileW, FindFirstFileExW,
+  Get/SetFileAttributes(Ex)W, Get/SetFileInformationByHandle(Ex)
+  (basic, standard, name, id, end of file, disposition, rename).
+  Only the read-only attribute is stored (as the owner write bit);
+  setting times, hidden/system attributes and hard links fail with
+  ERROR_NOT_SUPPORTED.
+- `locale.rs`: one locale, en-US, with UTF-8 code pages. Comparison and
+  sort keys order by case-folded scalars, then lower before upper case;
+  flags needing Windows' sorting tables fail with ERROR_NOT_SUPPORTED.
+- `threadpool.rs`: the default pool (work, timers, waits, registered
+  waits, FreeLibraryWhenCallbackReturns) on on-demand Windows worker
+  threads, and completion ports as queues (no overlapped file I/O).
+- `process.rs`: CreateProcessW (PE children under a child winrun, native
+  programs directly), waitable process handles with exit codes, job
+  objects (kill-on-close, accounting, process lists), attribute lists,
+  and the "remote" memory calls on the calling process only: OSyx gives a
+  process no access to another's memory, so other targets fail with
+  ERROR_ACCESS_DENIED.
+- `shlwapi.rs`: shlwapi.dll path helpers and combase.dll WinRT strings;
+  api-ms-win-core-winrt(-string)-l1-1-0 now map to combase. No runtime
+  classes are registered, so activation reports REGDB_E_CLASSNOTREG.
+- `sysext.rs`: processor topology (one CPU), mitigation policies, handle
+  counts, system/Windows directories, ExpandEnvironmentStringsW,
+  SetDllDirectoryW/SetDefaultDllDirectories (they change the loader's
+  search list), CreateSemaphoreExW, NtQueryObject.
+
+The `platform.exe` fixture exercises them: 96/96 on Windows and 96/96 on
+OSyx; the Win32 QEMU suite passed 522/522. Its first OSyx runs found
+three bugs, now fixed: the read-only attribute did not stop root from
+opening a file for writing, LCMapStringEx left out the terminator of a
+NUL-terminated source, and CreateProcessW passed console streams to the
+kernel as handles 0-2 (they are kernel handles only when winrun's own
+stdio is redirected) and gave the child the native instead of the Win32
+environment.
+
+The UCRT is developed separately (branch `zen-ucrt`); until it lands, Zen
+still stops at `api-ms-win-crt-runtime-l1-1-0.dll (needed by
+vcruntime140.dll) has no host`, so no new Zen attempt was run.
+
 ## Validation
 
 Host parser/loader tests (including resource bounds, malformed delay

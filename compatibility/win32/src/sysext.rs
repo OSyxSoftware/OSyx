@@ -254,28 +254,33 @@ fn readable(addr: u64) -> bool {
 }
 
 extern "win64" fn IsBadReadPtr(p: u64, len: usize) -> i32 {
+    i32::from(is_bad_read(p, len))
+}
+
+/// Whether any byte of [p, p+len) cannot be read.
+pub fn is_bad_read(p: u64, len: usize) -> bool {
     if len == 0 {
-        return 0;
+        return false;
     }
     if p == 0 {
-        return 1;
+        return true;
     }
-    let Some(last) = p.checked_add(len as u64 - 1) else { return 1 };
+    let Some(last) = p.checked_add(len as u64 - 1) else { return true };
     // PAGE_NOACCESS memory is mapped readable on OSyx (mem.rs): consult
     // the recorded protection first.
     let mut page = p & !(mem::PAGE as u64 - 1);
     while page <= last {
         if let Some(info) = mem::virtual_query(page) {
             if info.state != mem::MEM_COMMIT || info.protect & (mem::PAGE_NOACCESS | mem::PAGE_GUARD) != 0 {
-                return 1;
+                return true;
             }
         }
         if !readable(page.max(p)) {
-            return 1;
+            return true;
         }
         page += mem::PAGE as u64;
     }
-    i32::from(!readable(last))
+    !readable(last)
 }
 
 /// Windows Error Reporting is not part of OSyx: there is no out-of-process
@@ -589,9 +594,407 @@ extern "win64" fn FormatMessageW(flags: u32, source: u64, id: u32, lang: u32, bu
     format_message(flags, source, id, lang, buf, size, args, true)
 }
 
+// ---- processors ---------------------------------------------------------------------
+//
+// OSyx schedules on one CPU (SystemInfo.ticks are "single CPU"); GetSystemInfo
+// reports one processor with affinity mask 1.
+
+extern "win64" fn GetCurrentProcessorNumber() -> u32 {
+    0
+}
+
+/// With one CPU, a fence orders this thread's stores before any other
+/// thread runs; there are no other processors' write buffers.
+extern "win64" fn FlushProcessWriteBuffers() {
+    core::sync::atomic::fence(Ordering::SeqCst);
+}
+
+/// CPUID leaf 4 (deterministic cache parameters): (level, type, ways,
+/// line size, size, fully associative) per cache.
+fn caches() -> Vec<(u8, u32, u32, u16, u32, bool)> {
+    let mut out = Vec::new();
+    let max = core::arch::x86_64::__cpuid(0).eax;
+    if max < 4 {
+        return out;
+    }
+    for i in 0..16 {
+        let r = core::arch::x86_64::__cpuid_count(4, i);
+        let kind = r.eax & 0x1f;
+        if kind == 0 {
+            break;
+        }
+        let level = ((r.eax >> 5) & 7) as u8;
+        let ways = (r.ebx >> 22) + 1;
+        let partitions = ((r.ebx >> 12) & 0x3ff) + 1;
+        let line = (r.ebx & 0xfff) + 1;
+        let sets = r.ecx + 1;
+        // Windows PROCESSOR_CACHE_TYPE: Unified 0, Instruction 1, Data 2.
+        let t = match kind {
+            1 => 2,
+            2 => 1,
+            _ => 0,
+        };
+        out.push((level, t, ways, line as u16, ways * partitions * line * sets, r.eax & 0x200 != 0));
+    }
+    out
+}
+
+/// SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX records for one processor:
+/// core (0), NUMA node (1), caches (2), package (3), group (4).
+extern "win64" fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, len: *mut u32) -> i32 {
+    if len.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let all = relation == 0xffff;
+    if !all && relation > 4 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut record = |kind: u32, body: &[u8]| {
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&(body.len() as u32 + 8).to_le_bytes());
+        out.extend_from_slice(body);
+    };
+    // GROUP_AFFINITY: mask 1 in group 0.
+    let mut affinity = [0u8; 16];
+    affinity[0] = 1;
+    let processor = |b: &mut Vec<u8>| {
+        b.extend_from_slice(&[0u8; 22]); // Flags, EfficiencyClass, Reserved
+        b.extend_from_slice(&1u16.to_le_bytes()); // GroupCount
+        b.extend_from_slice(&affinity);
+    };
+    if all || relation == 0 {
+        let mut b = Vec::new();
+        processor(&mut b);
+        record(0, &b);
+    }
+    if all || relation == 1 {
+        // NodeNumber 0, 18 reserved bytes, GroupCount 1, GroupMask.
+        let mut b = alloc::vec![0u8; 22];
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&affinity);
+        record(1, &b);
+    }
+    if all || relation == 2 {
+        for (level, kind, ways, line, size, full) in caches() {
+            let mut b = Vec::new();
+            b.push(level);
+            b.push(if full { 0xff } else { ways.min(0xfe) as u8 });
+            b.extend_from_slice(&line.to_le_bytes());
+            b.extend_from_slice(&size.to_le_bytes());
+            b.extend_from_slice(&kind.to_le_bytes());
+            b.extend_from_slice(&[0u8; 18]);
+            b.extend_from_slice(&1u16.to_le_bytes());
+            b.extend_from_slice(&affinity);
+            record(2, &b);
+        }
+    }
+    if all || relation == 3 {
+        let mut b = Vec::new();
+        processor(&mut b);
+        record(3, &b);
+    }
+    if all || relation == 4 {
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u16.to_le_bytes()); // MaximumGroupCount
+        b.extend_from_slice(&1u16.to_le_bytes()); // ActiveGroupCount
+        b.extend_from_slice(&[0u8; 20]);
+        b.push(1); // MaximumProcessorCount
+        b.push(1); // ActiveProcessorCount
+        b.extend_from_slice(&[0u8; 38]);
+        b.extend_from_slice(&1u64.to_le_bytes()); // ActiveProcessorMask
+        record(4, &b);
+    }
+    // SAFETY: the caller's in/out length and buffer of that length.
+    unsafe {
+        let have = *len as usize;
+        *len = out.len() as u32;
+        if buf.is_null() || have < out.len() {
+            return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        core::ptr::copy_nonoverlapping(out.as_ptr(), buf, out.len());
+    }
+    1
+}
+
+extern "win64" fn SetThreadAffinityMask(thread: u64, mask: u64) -> u64 {
+    if !(thread == objects::CURRENT_THREAD || matches!(objects::get(thread), Some(objects::Object::Thread(_)))) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if mask & 1 == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0); // the only processor is #0
+    }
+    1 // previous mask
+}
+
+// ---- process information ------------------------------------------------------------
+
+extern "win64" fn IsWow64Process(process: u64, out: *mut i32) -> i32 {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if process != objects::CURRENT_PROCESS && !matches!(objects::get(process), Some(objects::Object::Process(_))) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    // SAFETY: the caller's out pointer. Every OSyx Windows process is x64.
+    unsafe { *out = 0 };
+    1
+}
+
+extern "win64" fn GetProcessHandleCount(process: u64, out: *mut u32) -> i32 {
+    if process != objects::CURRENT_PROCESS || out.is_null() {
+        return fail(if out.is_null() { ERROR_INVALID_PARAMETER } else { ERROR_ACCESS_DENIED }, 0);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = objects::count() as u32 };
+    1
+}
+
+/// Every heap handle shares one allocator; the process heap stands for it.
+extern "win64" fn GetProcessHeaps(n: u32, out: *mut u64) -> u32 {
+    if n >= 1 && !out.is_null() {
+        // SAFETY: the caller's array of `n` handles.
+        unsafe { *out = kernel32::process_heap() };
+    }
+    1
+}
+
+/// HeapCompatibilityInformation (LFH) and terminate-on-corruption would
+/// promise allocator behaviour the shared allocator does not have.
+extern "win64" fn HeapSetInformation(_heap: u64, _class: u32, _info: u64, _len: usize) -> i32 {
+    fail(ERROR_NOT_SUPPORTED, 0)
+}
+
+const HANDLE_FLAG_INHERIT: u32 = 1;
+const HANDLE_FLAG_PROTECT_FROM_CLOSE: u32 = 2;
+
+/// Clearing flags is always true here (handles are never inherited or
+/// protected); setting them is not supported.
+extern "win64" fn SetHandleInformation(h: u64, mask: u32, flags: u32) -> i32 {
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if mask & !(HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE) != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if flags & mask != 0 {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    1
+}
+
+/// ThreadMemoryPriority, absolute CPU priority, dynamic code policy and
+/// power throttling have no counterpart in the OSyx scheduler.
+extern "win64" fn SetThreadInformation(_thread: u64, _class: u32, _info: u64, _len: u32) -> i32 {
+    fail(ERROR_NOT_SUPPORTED, 0)
+}
+
+// PROCESS_MITIGATION_POLICY classes reported as they are on OSyx: data
+// execution prevention is always on (NX and W^X); the others are not
+// enforced and read as all-zero flags.
+const PROCESS_DEP_POLICY: u32 = 0;
+
+extern "win64" fn GetProcessMitigationPolicy(process: u64, policy: u32, buf: *mut u8, len: usize) -> i32 {
+    if process != objects::CURRENT_PROCESS {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    let need = if policy == PROCESS_DEP_POLICY { 8 } else { 4 };
+    if buf.is_null() || len < need || policy > 16 || policy == 5 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's buffer of `len` bytes.
+    unsafe {
+        core::ptr::write_bytes(buf, 0, need);
+        if policy == PROCESS_DEP_POLICY {
+            teb::put(buf as u64, 0, 0x1u32); // Enable
+            teb::put(buf as u64, 4, 1u8); // Permanent
+        }
+    }
+    1
+}
+
+/// Enabling DEP is already true; other policies cannot be enforced.
+extern "win64" fn SetProcessMitigationPolicy(policy: u32, buf: *const u8, len: usize) -> i32 {
+    if buf.is_null() || len < 4 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's policy structure.
+    let flags = unsafe { teb::get::<u32>(buf as u64, 0) };
+    if policy == PROCESS_DEP_POLICY && flags & !0x3 == 0 && flags & 1 != 0 {
+        return 1;
+    }
+    fail(ERROR_NOT_SUPPORTED, 0)
+}
+
+const APPMODEL_ERROR_NO_PACKAGE: u32 = 15700;
+
+extern "win64" fn GetCurrentPackageFullName(len: *mut u32, _buf: *mut u16) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    APPMODEL_ERROR_NO_PACKAGE
+}
+
+/// PRODUCT_UNDEFINED: OSyx is not a Windows edition.
+extern "win64" fn GetProductInfo(_major: u32, _minor: u32, _sp_major: u32, _sp_minor: u32, out: *mut u32) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = 0 };
+    1
+}
+
+extern "win64" fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32 {
+    kernel32::out_w("C:\\Windows\\System32", buf, size)
+}
+
+extern "win64" fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
+    kernel32::out_w("C:\\Windows", buf, size)
+}
+
+extern "win64" fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32 {
+    // SAFETY: a NUL-terminated string.
+    let Some(s) = (unsafe { path::wide_to_string(src) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let expanded = crate::registry::expand_env(&s);
+    // Returns the size including the terminator, whether or not it fits.
+    let r = kernel32::out_w(&expanded, dst, size);
+    if r >= size { r } else { r + 1 }
+}
+
+extern "win64" fn DebugBreak() {
+    // SAFETY: raises EXCEPTION_BREAKPOINT through the normal dispatch.
+    unsafe { core::arch::asm!("int3") };
+}
+
+const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+
+/// Every winrun process already has the OSyx console as its standard
+/// handles, which Windows reports as "already attached".
+extern "win64" fn AttachConsole(pid: u32) -> i32 {
+    let _ = ATTACH_PARENT_PROCESS;
+    let _ = pid;
+    fail(ERROR_ACCESS_DENIED, 0)
+}
+
+// ---- DLL search -------------------------------------------------------------------
+
+const LOAD_LIBRARY_SEARCH_DEFAULT_FLAGS: u32 = 0x1e00;
+static SAFE_SEARCH: AtomicU64 = AtomicU64::new(0);
+static DLL_DIR: Mutex<Option<String>> = Mutex::new(None);
+
+fn apply_search() {
+    let dir = DLL_DIR.lock().unwrap().clone();
+    // The current directory is searched only in the original default order.
+    let cwd = SAFE_SEARCH.load(Ordering::Relaxed) == 0 && dir.is_none();
+    crate::loader::set_dll_search(dir, cwd);
+}
+
+extern "win64" fn SetDefaultDllDirectories(flags: u32) -> i32 {
+    if flags == 0 || flags & !LOAD_LIBRARY_SEARCH_DEFAULT_FLAGS != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    SAFE_SEARCH.store(flags as u64, Ordering::Relaxed);
+    apply_search();
+    1
+}
+
+extern "win64" fn SetDllDirectoryW(dir: *const u16) -> i32 {
+    // SAFETY: NULL or a NUL-terminated string.
+    let d = unsafe { path::wide_to_string(dir) };
+    let null = d.is_none();
+    let new = match d {
+        None => None,
+        Some(s) if s.is_empty() => {
+            // "" removes the current directory without adding one.
+            SAFE_SEARCH.fetch_or(1 << 32, Ordering::Relaxed);
+            None
+        }
+        Some(s) => match path::to_osyx(&s, &kernel32::cwd_win()).and_then(|p| path::resolve(&p)) {
+            Ok((p, true)) => Some(p),
+            _ => return fail(ERROR_PATH_NOT_FOUND, 0),
+        },
+    };
+    if null {
+        SAFE_SEARCH.fetch_and(!(1 << 32), Ordering::Relaxed);
+    }
+    *DLL_DIR.lock().unwrap() = new;
+    apply_search();
+    1
+}
+
+extern "win64" fn CreateSemaphoreExW(sa: u64, initial: i32, max: i32, name: *const u16, flags: u32, _access: u32) -> u64 {
+    if flags != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if !name.is_null() {
+        return fail(ERROR_NOT_SUPPORTED, 0); // semaphores are unnamed here
+    }
+    kernel32::CreateSemaphoreA(sa, initial, max, core::ptr::null())
+}
+
+/// ObjectBasicInformation (0) and ObjectTypeInformation (2) for handles
+/// of this process; names (1) are not tracked.
+extern "win64" fn NtQueryObject(h: u64, class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> NtStatus {
+    let Some(o) = objects::get(h) else { return STATUS_INVALID_HANDLE };
+    match class {
+        0 => {
+            if len < 56 || buf.is_null() {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            // SAFETY: the caller's 56-byte OBJECT_BASIC_INFORMATION.
+            unsafe {
+                core::ptr::write_bytes(buf, 0, 56);
+                teb::put(buf as u64, 8, 1u32); // HandleCount (this handle)
+                teb::put(buf as u64, 12, 1u32); // PointerCount
+                if !ret.is_null() {
+                    *ret = 56;
+                }
+            }
+            STATUS_SUCCESS
+        }
+        2 => {
+            let name = match o {
+                objects::Object::File(_) | objects::Object::Console(_) | objects::Object::Null => "File",
+                objects::Object::Thread(_) => "Thread",
+                objects::Object::Event(_) => "Event",
+                objects::Object::Timer(_) => "Timer",
+                objects::Object::Mutex(_) => "Mutant",
+                objects::Object::Semaphore(_) => "Semaphore",
+                objects::Object::Section(_) => "Section",
+                objects::Object::Token(_) => "Token",
+                objects::Object::Port(_) => "IoCompletion",
+                objects::Object::Process(_) => "Process",
+                objects::Object::Job(_) => "Job",
+            };
+            // OBJECT_TYPE_INFORMATION: UNICODE_STRING TypeName, then
+            // counters (zero here); the name follows the 104-byte header.
+            let units: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+            let need = 104 + units.len() as u32 * 2;
+            if !ret.is_null() {
+                // SAFETY: the caller's out pointer.
+                unsafe { *ret = need };
+            }
+            if len < need || buf.is_null() {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            // SAFETY: the caller's buffer of `need` bytes.
+            unsafe {
+                core::ptr::write_bytes(buf, 0, 104);
+                teb::put(buf as u64, 0, ((units.len() - 1) * 2) as u16);
+                teb::put(buf as u64, 2, (units.len() * 2) as u16);
+                teb::put(buf as u64, 8, buf as u64 + 104);
+                core::ptr::copy_nonoverlapping(units.as_ptr(), buf.add(104) as *mut u16, units.len());
+            }
+            STATUS_SUCCESS
+        }
+        _ => STATUS_NOT_SUPPORTED,
+    }
+}
+
 /// ntdll is VerSetConditionMask's real home; kernel32's forwards to it.
 pub fn ntdll_exports() -> Vec<(&'static str, u64)> {
-    export_table![VerSetConditionMask]
+    export_table![VerSetConditionMask, NtQueryObject]
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
@@ -609,5 +1012,27 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         SearchPathW,
         FormatMessageA,
         FormatMessageW,
+        GetCurrentProcessorNumber,
+        FlushProcessWriteBuffers,
+        GetLogicalProcessorInformationEx,
+        SetThreadAffinityMask,
+        IsWow64Process,
+        GetProcessHandleCount,
+        GetProcessHeaps,
+        HeapSetInformation,
+        SetHandleInformation,
+        SetThreadInformation,
+        GetProcessMitigationPolicy,
+        SetProcessMitigationPolicy,
+        GetCurrentPackageFullName,
+        GetProductInfo,
+        GetSystemDirectoryW,
+        GetWindowsDirectoryW,
+        ExpandEnvironmentStringsW,
+        DebugBreak,
+        AttachConsole,
+        SetDefaultDllDirectories,
+        SetDllDirectoryW,
+        CreateSemaphoreExW,
     ]
 }
