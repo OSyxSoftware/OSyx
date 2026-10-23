@@ -32,6 +32,10 @@ mod setupapi;
 mod teb;
 mod user32;
 mod volumes;
+mod version;
+mod synch;
+mod psapi;
+mod timers;
 mod ws2_32;
 
 use alloc::string::String;
@@ -53,6 +57,10 @@ fn quote(a: &str) -> String {
 
 fn main() -> i32 {
     let mut args: Vec<String> = os_std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--exports") {
+        loader::print_capabilities();
+        return 0;
+    }
     let verbose = args.first().is_some_and(|a| a == "-v");
     if verbose {
         args.remove(0);

@@ -159,6 +159,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("ws2_32.dll", crate::ws2_32::exports(), crate::ws2_32::ordinals()),
         builtin("setupapi.dll", crate::setupapi::exports(), Vec::new()),
         builtin("iphlpapi.dll", crate::iphlpapi::exports(), Vec::new()),
+        builtin("version.dll", crate::version::exports(), Vec::new()),
+        builtin("psapi.dll", crate::psapi::exports(), Vec::new()),
     ]
 }
 
@@ -167,7 +169,10 @@ fn builtins() -> Vec<Arc<Builtin>> {
 /// imports through those fail with "no host".)
 fn schema() -> Vec<u8> {
     let mut b = SchemaBuilder::new();
+    b.add("api-ms-win-core-version-l1-1-1", "version.dll", &[]).expect("version contract");
     let k32 = [
+        "api-ms-win-core-psapi-l1-1-0",
+        "api-ms-win-core-synch-l1-1-0",
         "api-ms-win-core-processthreads-l1-1-3",
         "api-ms-win-core-synch-l1-2-1",
         "api-ms-win-core-file-l1-2-4",
@@ -196,6 +201,23 @@ fn schema() -> Vec<u8> {
     b.add("ext-ms-win-ntuser-window-l1-1-4", "user32.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-gdi-dc-l1-2-0", "gdi32.dll", &[]).expect("valid contract name");
     b.build()
+}
+
+/// Reports the actual compiled export tables and API-set schema, for
+/// dependency auditing. This does not claim full semantics for an API.
+pub fn print_capabilities() {
+    for module in builtins() {
+        for name in module.by_name.keys() { os_std::println!("WIN_EXPORT {} {}", module.name, name); }
+        for ordinal in module.by_ordinal.keys() { os_std::println!("WIN_ORDINAL {} #{}", module.name, ordinal); }
+    }
+    let ns = schema();
+    if let Ok(s) = Schema::parse(&ns) {
+        for i in 0..s.len() {
+            if let Ok(name) = s.name(i) {
+                if let Ok(Some(host)) = s.resolve(&name, None) { os_std::println!("WIN_APISET {} {}", name, host); }
+            }
+        }
+    }
 }
 
 // ---- the host -------------------------------------------------------------------

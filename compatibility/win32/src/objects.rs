@@ -159,6 +159,39 @@ pub struct EventObj {
     pub name: Option<String>,
 }
 
+pub struct TimerState {
+    pub due: Option<Instant>,
+    pub period: Duration,
+    pub signaled: bool,
+}
+pub struct TimerObj {
+    pub manual: bool,
+    pub name: Option<String>,
+    pub state: Mutex<TimerState>,
+}
+impl TimerObj {
+    pub(crate) fn ready(&self, consume: bool) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        if let Some(due) = state.due.filter(|&due| now >= due) {
+            state.signaled = true;
+            state.due = if state.period.is_zero() {
+                None
+            } else {
+                let steps = (now - due).as_nanos() / state.period.as_nanos() + 1;
+                u64::try_from(state.period.as_nanos() * steps)
+                    .ok()
+                    .and_then(|ns| due.checked_add(Duration::from_nanos(ns)))
+            };
+        }
+        let result = state.signaled;
+        if result && consume && !self.manual {
+            state.signaled = false;
+        }
+        result
+    }
+}
+
 pub struct MutexObj {
     /// Owning thread id (0: free) and recursion count, under one lock.
     pub state: Mutex<(u32, u32)>,
@@ -190,6 +223,7 @@ pub enum Object {
     Null,
     Thread(Arc<ThreadObj>),
     Event(Arc<EventObj>),
+    Timer(Arc<TimerObj>),
     Mutex(Arc<MutexObj>),
     Semaphore(Arc<SemaphoreObj>),
     Section(Arc<SectionObj>),
@@ -253,6 +287,7 @@ pub const INFINITE: u32 = 0xFFFF_FFFF;
 fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
     Ok(match o {
         Object::Thread(t) => t.done.load(Ordering::SeqCst),
+        Object::Timer(t) => t.ready(consume),
         Object::Event(e) => {
             if e.manual || !consume {
                 e.signaled.load(Ordering::SeqCst)
@@ -330,13 +365,24 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
             }
         }
         // futex_wait: 0 means no timeout.
-        let wait_ns = match deadline {
+        let timer_due = objs
+            .iter()
+            .filter_map(|o| match o {
+                Some(Object::Timer(t)) => t.state.lock().unwrap().due,
+                _ => None,
+            })
+            .min();
+        let next = match (deadline, timer_due) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Ok(WAIT_TIMEOUT);
+        }
+        let wait_ns = match next {
             None => 0,
             Some(d) => {
                 let now = Instant::now();
-                if now >= d {
-                    return Ok(WAIT_TIMEOUT);
-                }
                 (d - now).as_nanos().max(1) as u64
             }
         };
@@ -352,6 +398,7 @@ pub fn find_named(name: &str) -> Option<Object> {
         .values()
         .find(|o| match o {
             Object::Event(e) => e.name.as_deref().is_some_and(|n| n == name),
+            Object::Timer(t) => t.name.as_deref().is_some_and(|n| n == name),
             Object::Mutex(m) => m.name.as_deref().is_some_and(|n| n == name),
             _ => false,
         })

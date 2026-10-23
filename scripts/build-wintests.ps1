@@ -25,12 +25,20 @@ function Stale([string]$Target, [string[]]$Inputs) {
 }
 
 # Import library for the API set contract windll.dll imports through.
+$versionObj = Join-Path $out 'version-resource.o'
+if (Stale $versionObj @("$src\version.rc")) {
+    $windres = Find-Tool 'windres' @('C:\msys64\ucrt64\bin\windres.exe')
+    if (-not $windres) { throw 'windres required for version API regression fixture' }
+    Invoke-Checked 'version resource' { & $windres "$src\version.rc" -O coff -o $versionObj }
+}
 $apisetLib = Join-Path $out 'libapiset-processthreads.a'
 if (Stale $apisetLib @("$src\apiset-processthreads.def")) {
     Invoke-Checked 'apiset import library' { & $dlltool -d "$src\apiset-processthreads.def" -l $apisetLib -m i386:x86-64 }
 }
 $programs = [ordered]@{
     'minimal.exe' = @{ Src = @('minimal.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
+    'version.exe' = @{ Src = @('version.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', $versionObj, '-lversion', '-lkernel32') }
+    'synch.exe' = @{ Src = @('synch.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32', '-lsynchronization') }
     'hello.exe'   = @{ Src = @('hello.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'fileio.exe'  = @{ Src = @('fileio.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'threads.exe' = @{ Src = @('threads.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
@@ -42,6 +50,7 @@ $programs = [ordered]@{
 foreach ($name in $programs.Keys) {
     $p = $programs[$name]
     $inputs = @($p.Src | ForEach-Object { Join-Path $src $_ }) + @("$src\common.h")
+    if ($name -eq 'version.exe') { $inputs += $versionObj }
     $target = Join-Path $out $name
     if (Stale $target $inputs) {
         Invoke-Checked $name { & $clang @common @($p.Src | ForEach-Object { Join-Path $src $_ }) @($p.Args) -o $target }

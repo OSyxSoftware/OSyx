@@ -1247,8 +1247,8 @@ extern "win64" fn LeaveCriticalSection(cs: u64) {
     }
 }
 
-// SRWLOCK: one pointer-sized word; here an exclusive futex lock (shared
-// acquisitions are exclusive too: correct, if less concurrent).
+// SRWLOCK: high bit = exclusive owner, remaining bits = shared readers.
+const SRW_WRITER: u32 = 1 << 31;
 fn srw_word(l: u64) -> &'static AtomicU32 {
     // SAFETY: the caller's SRWLOCK (8 bytes, aligned).
     unsafe { &*(l as usize as *const AtomicU32) }
@@ -1258,24 +1258,43 @@ extern "win64" fn InitializeSRWLock(l: u64) {
     srw_word(l).store(0, Ordering::Relaxed);
 }
 
-extern "win64" fn AcquireSRWLockExclusive(l: u64) {
+pub(crate) extern "win64" fn AcquireSRWLockExclusive(l: u64) {
     let w = srw_word(l);
-    if w.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        while w.swap(2, Ordering::Acquire) != 0 {
-            let _ = os_sys::futex_wait(w.as_ptr(), 2, 0);
-        }
+    loop {
+        if w.compare_exchange(0, SRW_WRITER, Ordering::Acquire, Ordering::Relaxed).is_ok() { return; }
+        let old = w.load(Ordering::Relaxed);
+        if old != 0 { let _ = os_sys::futex_wait(w.as_ptr(), old, 0); }
     }
 }
 
-extern "win64" fn ReleaseSRWLockExclusive(l: u64) {
+pub(crate) extern "win64" fn ReleaseSRWLockExclusive(l: u64) {
     let w = srw_word(l);
-    if w.swap(0, Ordering::Release) == 2 {
-        os_sys::futex_wake(w.as_ptr(), 1);
-    }
+    w.store(0, Ordering::Release);
+    os_sys::futex_wake(w.as_ptr(), u32::MAX);
 }
 
 extern "win64" fn TryAcquireSRWLockExclusive(l: u64) -> u8 {
-    srw_word(l).compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() as u8
+    srw_word(l).compare_exchange(0, SRW_WRITER, Ordering::Acquire, Ordering::Relaxed).is_ok() as u8
+}
+
+extern "win64" fn TryAcquireSRWLockShared(l: u64) -> u8 {
+    let w = srw_word(l);
+    loop {
+        let old = w.load(Ordering::Relaxed);
+        if old >= SRW_WRITER - 1 { return 0; }
+        if w.compare_exchange_weak(old, old + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() { return 1; }
+    }
+}
+pub(crate) extern "win64" fn AcquireSRWLockShared(l: u64) {
+    let w = srw_word(l);
+    while TryAcquireSRWLockShared(l) == 0 {
+        let old = w.load(Ordering::Relaxed);
+        if old & SRW_WRITER != 0 { let _ = os_sys::futex_wait(w.as_ptr(), old, 0); }
+    }
+}
+pub(crate) extern "win64" fn ReleaseSRWLockShared(l: u64) {
+    let w = srw_word(l);
+    if w.fetch_sub(1, Ordering::Release) == 1 { os_sys::futex_wake(w.as_ptr(), u32::MAX); }
 }
 
 fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
@@ -2023,6 +2042,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         AcquireSRWLockExclusive,
         ReleaseSRWLockExclusive,
         TryAcquireSRWLockExclusive,
+        AcquireSRWLockShared, ReleaseSRWLockShared, TryAcquireSRWLockShared,
         CreateEventA,
         CreateEventW,
         CreateEventExW,
@@ -2088,5 +2108,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetVersionExW,
     ];
     exports.extend(crate::volumes::exports());
+    exports.extend(crate::synch::exports());
+    exports.extend(crate::psapi::kernel_exports());
+    exports.extend(crate::timers::exports());
     exports
 }
