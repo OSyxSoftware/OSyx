@@ -22,9 +22,12 @@ const SOCK_STREAM: i32 = 1;
 const SOCK_DGRAM: i32 = 2;
 const SOL_SOCKET: i32 = 0xFFFF;
 const SO_REUSEADDR: i32 = 0x4;
+const SO_KEEPALIVE: i32 = 0x8;
 const SO_BROADCAST: i32 = 0x20;
 const SO_SNDTIMEO: i32 = 0x1005;
 const SO_RCVTIMEO: i32 = 0x1006;
+const SO_ERROR: i32 = 0x1007;
+const SO_TYPE: i32 = 0x1008;
 const IPPROTO_TCP: i32 = 6;
 const TCP_NODELAY: i32 = 1;
 const FIONBIO: u32 = 0x8004_667E;
@@ -55,6 +58,7 @@ const WSANOTINITIALISED: u32 = 10093;
 const WSAHOST_NOT_FOUND: u32 = 11001;
 const WSATRY_AGAIN: u32 = 11002;
 const WSAVERNOTSUPPORTED: u32 = 10092;
+const WSANO_DATA: u32 = 11004;
 
 fn wsa(e: Errno) -> u32 {
     match e {
@@ -139,16 +143,18 @@ fn write_addr(a: &SockAddr, p: *mut u8, len: *mut i32) {
     }
 }
 
+/// Winsock 1.0 to 2.2 are accepted (wsock32 users ask for 1.1); a newer
+/// request negotiates 2.2, as on Windows.
 extern "win64" fn WSAStartup(version: u16, data: *mut u8) -> i32 {
     let (major, minor) = (version & 0xFF, version >> 8);
-    if major < 2 {
+    if major == 0 {
         return WSAVERNOTSUPPORTED as i32;
     }
     if !data.is_null() {
         // SAFETY: the caller's WSADATA (408 bytes on x64).
         unsafe {
             core::ptr::write_bytes(data, 0, 408);
-            teb::put(data as u64, 0, if major == 2 && minor <= 2 { version } else { 0x0202u16 });
+            teb::put(data as u64, 0, if major == 1 || (major == 2 && minor <= 2) { version } else { 0x0202u16 });
             teb::put(data as u64, 2, 0x0202u16);
             let desc = b"OSyx Winsock 2.2 (native TCP/IP stack)";
             core::ptr::copy_nonoverlapping(desc.as_ptr(), data.add(16), desc.len());
@@ -358,6 +364,36 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
     })())
 }
 
+/// The options OSyx can report: the socket type, the pending error (OSyx
+/// reports errors on the failing call, so none is ever pending) and the
+/// fixed behaviours setsockopt accepts.
+extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *mut i32) -> i32 {
+    result((|| {
+        let (_, stream) = fd(s)?;
+        let v: u32 = match (level, name) {
+            (SOL_SOCKET, SO_TYPE) => {
+                if stream {
+                    SOCK_STREAM as u32
+                } else {
+                    SOCK_DGRAM as u32
+                }
+            }
+            (SOL_SOCKET, SO_ERROR | SO_REUSEADDR | SO_KEEPALIVE) => 0,
+            (IPPROTO_TCP, TCP_NODELAY) if stream => 1,
+            _ => return Err(WSAENOPROTOOPT),
+        };
+        // SAFETY: the caller's value buffer of `*len` bytes.
+        unsafe {
+            if val.is_null() || len.is_null() || *len < 4 {
+                return Err(WSAEFAULT);
+            }
+            core::ptr::write_unaligned(val as *mut u32, v);
+            *len = 4;
+        }
+        Ok(())
+    })())
+}
+
 extern "win64" fn ioctlsocket(s: u64, cmd: u32, arg: *mut u32) -> i32 {
     result((|| {
         let (fd, _) = fd(s)?;
@@ -461,6 +497,11 @@ extern "win64" fn gethostbyname(name: *const u8) -> u64 {
         Ok(_) => return err(WSAHOST_NOT_FOUND, 0),
         Err(e) => return err(e, 0),
     };
+    hostent(&n, &addrs)
+}
+
+/// Fills this thread's hostent buffer.
+fn hostent(n: &str, addrs: &[[u8; 4]]) -> u64 {
     let buf = thread_buffer(0, 512);
     let name_bytes: Vec<u8> = n.bytes().take(255).chain(core::iter::once(0)).collect();
     // SAFETY: a 512-byte buffer: hostent (32) + 9 pointers (72) + 8
@@ -486,10 +527,76 @@ extern "win64" fn gethostbyname(name: *const u8) -> u64 {
     buf
 }
 
+fn host_name() -> String {
+    os_std::fs::read_to_string("/etc/hostname").map(|s| String::from(s.trim())).unwrap_or_else(|_| String::from("osyx"))
+}
+
+/// Loopback addresses name this machine, as on Windows. OSyx's resolver
+/// has no reverse (PTR) lookup, so any other address is not found.
+extern "win64" fn gethostbyaddr(addr: *const u8, len: i32, kind: i32) -> u64 {
+    if !started() {
+        return err(WSANOTINITIALISED, 0);
+    }
+    if kind != AF_INET as i32 {
+        return err(WSAEAFNOSUPPORT, 0);
+    }
+    if addr.is_null() || len < 4 {
+        return err(WSAEFAULT, 0);
+    }
+    let mut a = [0u8; 4];
+    // SAFETY: the caller's 4-byte address.
+    unsafe { core::ptr::copy_nonoverlapping(addr, a.as_mut_ptr(), 4) };
+    if a[0] != 127 {
+        return err(WSAHOST_NOT_FOUND, 0);
+    }
+    hostent(&host_name(), &[a])
+}
+
+/// The protocols of Windows' default etc\protocol that OSyx implements.
+const PROTOCOLS: [(&str, i16); 4] = [("ip", 0), ("icmp", 1), ("tcp", 6), ("udp", 17)];
+
+/// protoent (x64): p_name, p_aliases, p_proto (i16), in a per-thread buffer.
+fn protoent(name: &str, proto: i16) -> u64 {
+    let buf = thread_buffer(2, 64);
+    // SAFETY: a 64-byte buffer: protoent (24) + aliases terminator (8) +
+    // the NUL-terminated name (<= 32).
+    unsafe {
+        let aliases = buf + 24;
+        let name_p = aliases + 8;
+        teb::put(aliases, 0, 0u64);
+        core::ptr::write_bytes(name_p as *mut u8, 0, 32);
+        core::ptr::copy_nonoverlapping(name.as_ptr(), name_p as *mut u8, name.len());
+        teb::put(buf, 0, name_p);
+        teb::put(buf, 8, aliases);
+        teb::put(buf, 16, proto);
+    }
+    buf
+}
+
+extern "win64" fn getprotobyname(name: *const u8) -> u64 {
+    if !started() {
+        return err(WSANOTINITIALISED, 0);
+    }
+    // SAFETY: a NUL-terminated name.
+    let Some(n) = (unsafe { crate::path::ansi_to_string(name) }) else { return err(WSAEFAULT, 0) };
+    match PROTOCOLS.iter().find(|(p, _)| p.eq_ignore_ascii_case(&n)) {
+        Some(&(p, v)) => protoent(p, v),
+        None => err(WSANO_DATA, 0),
+    }
+}
+
+extern "win64" fn getprotobynumber(number: i32) -> u64 {
+    if !started() {
+        return err(WSANOTINITIALISED, 0);
+    }
+    match PROTOCOLS.iter().find(|(_, v)| *v as i32 == number) {
+        Some(&(p, v)) => protoent(p, v),
+        None => err(WSANO_DATA, 0),
+    }
+}
+
 extern "win64" fn gethostname(buf: *mut u8, len: i32) -> i32 {
-    let name = os_std::fs::read_to_string("/etc/hostname")
-        .map(|s| String::from(s.trim()))
-        .unwrap_or_else(|_| String::from("osyx"));
+    let name = host_name();
     if buf.is_null() || (len as usize) < name.len() + 1 {
         return err(WSAEFAULT, SOCKET_ERROR);
     }
@@ -563,6 +670,18 @@ extern "win64" fn freeaddrinfo(mut p: u64) {
         let next: u64 = unsafe { teb::get(p, 40) };
         crate::kernel32::heap_free(p);
         p = next;
+    }
+}
+
+/// FD_ISSET: whether fd_set `set` holds `s`.
+extern "win64" fn __WSAFDIsSet(s: u64, set: *const u8) -> i32 {
+    if set.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's fd_set { u32 count; SOCKET array[64] }.
+    unsafe {
+        let n: u32 = teb::get(set as u64, 0);
+        (0..n.min(64) as usize).any(|i| teb::get::<u64>(set as u64, 8 + i * 8) == s) as i32
     }
 }
 
@@ -648,6 +767,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         recvfrom,
         shutdown,
         setsockopt,
+        getsockopt,
         ioctlsocket,
         getsockname,
         getpeername,
@@ -658,14 +778,19 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         inet_addr,
         inet_ntoa,
         gethostbyname,
+        gethostbyaddr,
+        getprotobyname,
+        getprotobynumber,
         gethostname,
         getaddrinfo,
         freeaddrinfo,
         select,
+        __WSAFDIsSet,
     ]
 }
 
-/// The classic ws2_32 export ordinals (programs may import by ordinal).
+/// The classic Winsock export ordinals, shared by ws2_32 and wsock32
+/// (programs may import by ordinal).
 pub fn ordinals() -> Vec<(u16, u64)> {
     let f = |p: usize| p as u64;
     alloc::vec![
@@ -675,6 +800,7 @@ pub fn ordinals() -> Vec<(u16, u64)> {
         (4, f(connect as *const () as usize)),
         (5, f(getpeername as *const () as usize)),
         (6, f(getsockname as *const () as usize)),
+        (7, f(getsockopt as *const () as usize)),
         (8, f(htonl as *const () as usize)),
         (9, f(htons as *const () as usize)),
         (10, f(ioctlsocket as *const () as usize)),
@@ -691,11 +817,15 @@ pub fn ordinals() -> Vec<(u16, u64)> {
         (21, f(setsockopt as *const () as usize)),
         (22, f(shutdown as *const () as usize)),
         (23, f(socket as *const () as usize)),
+        (51, f(gethostbyaddr as *const () as usize)),
         (52, f(gethostbyname as *const () as usize)),
+        (53, f(getprotobyname as *const () as usize)),
+        (54, f(getprotobynumber as *const () as usize)),
         (57, f(gethostname as *const () as usize)),
         (111, f(WSAGetLastError as *const () as usize)),
         (112, f(WSASetLastError as *const () as usize)),
         (115, f(WSAStartup as *const () as usize)),
         (116, f(WSACleanup as *const () as usize)),
+        (151, f(__WSAFDIsSet as *const () as usize)),
     ]
 }

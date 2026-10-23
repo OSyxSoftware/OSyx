@@ -66,6 +66,7 @@ $programs = [ordered]@{
     'windll.dll'  = @{ Src = @('windll.c', 'windll.def'); Args = @('-shared', '-Wl,-e,DllMainCRTStartup', $apisetLib, '-lkernel32') }
     'gui.exe'     = @{ Src = @('gui.c'); Args = @('-Wl,--subsystem,windows', '-Wl,-e,start', '-luser32', '-lgdi32', '-lkernel32') }
     'winsock.exe' = @{ Src = @('winsock.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lws2_32', '-lkernel32') }
+    'wsock32.exe' = @{ Src = @('wsock32.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lwsock32', '-lkernel32') }
     'sysadmin.exe' = @{ Src = @('sysadmin.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-liphlpapi', '-lsetupapi', '-lkernel32') }
 }
 foreach ($name in $programs.Keys) {

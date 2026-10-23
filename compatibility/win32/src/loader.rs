@@ -157,6 +157,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("user32.dll", [crate::user32::exports(), crate::winsta::exports()].concat(), Vec::new()),
         builtin("gdi32.dll", crate::user32::gdi_exports(), Vec::new()),
         builtin("ws2_32.dll", crate::ws2_32::exports(), crate::ws2_32::ordinals()),
+        builtin("wsock32.dll", crate::ws2_32::exports(), crate::ws2_32::ordinals()),
         builtin("setupapi.dll", crate::setupapi::exports(), Vec::new()),
         builtin("iphlpapi.dll", crate::iphlpapi::exports(), Vec::new()),
         builtin("version.dll", crate::version::exports(), Vec::new()),
