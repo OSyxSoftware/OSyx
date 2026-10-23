@@ -22,6 +22,17 @@ fn wait(p: u64, expected: u32, ms: u32) -> i32 {
         Err(e) => fail(errno_to_win32(e), 0),
     }
 }
+// INIT_ONCE: 0 not started, 1 synchronous initialization in progress,
+// 3 asynchronous initialization(s) in progress, context | 2 done.
+const ONCE_SYNC: u64 = 1;
+const ONCE_DONE: u64 = 2;
+const ONCE_ASYNC: u64 = 3;
+const INIT_ONCE_CHECK_ONLY: u32 = 1;
+const INIT_ONCE_ASYNC: u32 = 2;
+const INIT_ONCE_INIT_FAILED: u32 = 4;
+fn once_state(once: u64) -> &'static AtomicU64 {
+    unsafe { &*(once as *const AtomicU64) }
+}
 pub(crate) extern "win64" fn InitOnceInitialize(once: u64) {
     unsafe { &*(once as *const AtomicU64) }.store(0, Ordering::Relaxed);
 }
@@ -39,6 +50,9 @@ pub(crate) extern "win64" fn InitOnceExecuteOnce(once: u64, callback: u64, param
                 }
             }
             return 1;
+        }
+        if old == ONCE_ASYNC {
+            return fail(ERROR_INVALID_PARAMETER, 0); // mixed with asynchronous initialization
         }
         if old == 0 && state.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
             let cb: extern "win64" fn(u64, u64, *mut u64) -> i32 = unsafe { core::mem::transmute(callback) };
@@ -61,6 +75,72 @@ pub(crate) extern "win64" fn InitOnceExecuteOnce(once: u64, callback: u64, param
             return 1;
         }
         let _ = os_sys::futex_wait(word(once).as_ptr(), 1, 0);
+    }
+}
+/// The caller initializes: a synchronous caller owns the object until
+/// InitOnceComplete (others wait); asynchronous callers race and the first
+/// InitOnceComplete wins. Error codes follow Windows.
+extern "win64" fn InitOnceBeginInitialize(once: u64, flags: u32, pending: *mut i32, context: *mut u64) -> i32 {
+    if once == 0 || !once.is_multiple_of(8) || pending.is_null() || flags & !(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC) != 0
+        || flags == INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC
+    {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let state = once_state(once);
+    loop {
+        let old = state.load(Ordering::Acquire);
+        if old & 3 == ONCE_DONE {
+            // SAFETY: the caller's out pointers.
+            unsafe {
+                *pending = 0;
+                if !context.is_null() {
+                    *context = old & !3;
+                }
+            }
+            return 1;
+        }
+        if flags & INIT_ONCE_CHECK_ONLY != 0 {
+            return fail(ERROR_GEN_FAILURE, 0);
+        }
+        let want = if flags & INIT_ONCE_ASYNC != 0 { ONCE_ASYNC } else { ONCE_SYNC };
+        let start = old == 0 && state.compare_exchange(0, want, Ordering::Acquire, Ordering::Relaxed).is_ok();
+        if start || (old == ONCE_ASYNC && want == ONCE_ASYNC) {
+            // SAFETY: as above.
+            unsafe { *pending = 1 };
+            return 1;
+        }
+        if old == 0 {
+            continue; // lost the race to start: look again
+        }
+        if want == ONCE_ASYNC || old == ONCE_ASYNC {
+            return fail(ERROR_INVALID_PARAMETER, 0); // synchronous and asynchronous mixed
+        }
+        let _ = os_sys::futex_wait(word(once).as_ptr(), ONCE_SYNC as u32, 0);
+    }
+}
+extern "win64" fn InitOnceComplete(once: u64, flags: u32, context: u64) -> i32 {
+    let failed = flags & INIT_ONCE_INIT_FAILED != 0;
+    let asynchronous = flags & INIT_ONCE_ASYNC != 0;
+    if once == 0 || !once.is_multiple_of(8) || flags & !(INIT_ONCE_ASYNC | INIT_ONCE_INIT_FAILED) != 0
+        || (failed && (asynchronous || context != 0)) || context & 3 != 0
+    {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let state = once_state(once);
+    let new = if failed { 0 } else { context | ONCE_DONE };
+    loop {
+        let old = state.load(Ordering::Acquire);
+        if old & 3 == ONCE_DONE {
+            return fail(ERROR_GEN_FAILURE, 0); // already complete (an async race was lost)
+        }
+        let allowed = if asynchronous { old == 0 || old == ONCE_ASYNC } else { old == ONCE_SYNC };
+        if !allowed {
+            return fail(ERROR_INVALID_PARAMETER, 0);
+        }
+        if state.compare_exchange(old, new, Ordering::Release, Ordering::Relaxed).is_ok() {
+            os_sys::futex_wake(word(once).as_ptr(), u32::MAX);
+            return 1;
+        }
     }
 }
 extern "win64" fn InitializeConditionVariable(cv: u64) {
@@ -119,6 +199,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         InitOnceInitialize,
         InitOnceExecuteOnce,
+        InitOnceBeginInitialize,
+        InitOnceComplete,
         InitializeConditionVariable,
         WakeConditionVariable,
         WakeAllConditionVariable,

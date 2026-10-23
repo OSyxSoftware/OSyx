@@ -57,6 +57,20 @@ void __stdcall start(void) {
     INIT_ONCE retry=INIT_ONCE_STATIC_INIT;void *context=NULL;
     check("failed once initialization reports failure",!InitOnceExecuteOnce(&retry,retry_initialize,NULL,&context)&&GetLastError()==ERROR_GEN_FAILURE);
     check("failed once initialization can retry",InitOnceExecuteOnce(&retry,retry_initialize,NULL,&context)&&context==&payload&&retry_calls==2);
+    /* InitOnceBeginInitialize / InitOnceComplete (codes checked on Windows). */
+    INIT_ONCE bo=INIT_ONCE_STATIC_INIT,ao=INIT_ONCE_STATIC_INIT;BOOL once_pending=7;void *got=NULL;
+    check("InitOnce check-only before initialization",!InitOnceBeginInitialize(&bo,INIT_ONCE_CHECK_ONLY,&once_pending,&got)&&GetLastError()==ERROR_GEN_FAILURE);
+    check("InitOnce check-only with async is invalid",!InitOnceBeginInitialize(&bo,INIT_ONCE_CHECK_ONLY|INIT_ONCE_ASYNC,&once_pending,&got)&&GetLastError()==ERROR_INVALID_PARAMETER);
+    check("InitOnceBeginInitialize makes the caller initialize",InitOnceBeginInitialize(&bo,0,&once_pending,NULL)&&once_pending);
+    check("InitOnceComplete rejects reserved context bits",!InitOnceComplete(&bo,0,(void*)3)&&GetLastError()==ERROR_INVALID_PARAMETER);
+    check("InitOnceComplete(INIT_FAILED) lets a later caller retry",InitOnceComplete(&bo,INIT_ONCE_INIT_FAILED,NULL)&&InitOnceBeginInitialize(&bo,0,&once_pending,&got)&&once_pending);
+    check("InitOnceComplete stores the context",InitOnceComplete(&bo,0,(void*)&payload));
+    check("a second InitOnceComplete fails",!InitOnceComplete(&bo,0,(void*)&payload)&&GetLastError()==ERROR_GEN_FAILURE);
+    check("InitOnce check-only returns the context",InitOnceBeginInitialize(&bo,INIT_ONCE_CHECK_ONLY,&once_pending,&got)&&!once_pending&&got==&payload);
+    check("two async initializers both proceed",InitOnceBeginInitialize(&ao,INIT_ONCE_ASYNC,&once_pending,&got)&&once_pending&&InitOnceBeginInitialize(&ao,INIT_ONCE_ASYNC,&once_pending,&got)&&once_pending);
+    check("async completion cannot report failure",!InitOnceComplete(&ao,INIT_ONCE_ASYNC|INIT_ONCE_INIT_FAILED,NULL)&&GetLastError()==ERROR_INVALID_PARAMETER);
+    check("the first async completion wins",InitOnceComplete(&ao,INIT_ONCE_ASYNC,(void*)&payload)&&!InitOnceComplete(&ao,INIT_ONCE_ASYNC,(void*)&calls)&&GetLastError()==ERROR_GEN_FAILURE);
+    check("later callers see the winner",InitOnceBeginInitialize(&ao,INIT_ONCE_ASYNC,&once_pending,&got)&&!once_pending&&got==&payload);
     AcquireSRWLockExclusive(&rw);
     check("condition variable timeout reports ERROR_TIMEOUT",!SleepConditionVariableSRW(&cv,&rw,20,0)&&GetLastError()==ERROR_TIMEOUT);
     check("condition timeout reacquires lock",!TryAcquireSRWLockExclusive(&rw));
