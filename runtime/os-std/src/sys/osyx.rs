@@ -408,6 +408,13 @@ pub fn current_exe() -> Result<String> {
 
 /// Minimum amount of address space requested from the kernel per growth.
 const GROW_MIN: usize = 256 * 1024;
+/// Blocks this large get a kernel mapping of their own, returned to the
+/// kernel when freed (the heap never shrinks its regions).
+const LARGE: usize = 1024 * 1024;
+
+fn is_large(layout: Layout) -> bool {
+    layout.size() >= LARGE && layout.align() <= 4096
+}
 
 struct UserHeap {
     locked: AtomicBool,
@@ -436,6 +443,10 @@ static HEAP: UserHeap = UserHeap { locked: AtomicBool::new(false), heap: UnsafeC
 // of memory the kernel mapped for this process.
 unsafe impl GlobalAlloc for UserHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if is_large(layout) {
+            // Page aligned and zeroed by the kernel.
+            return os_sys::map(layout.size().next_multiple_of(4096), PROT_READ | PROT_WRITE).unwrap_or(core::ptr::null_mut());
+        }
         self.with(|h| {
             if let Some(p) = h.alloc(layout) {
                 return p.as_ptr();
@@ -453,7 +464,26 @@ unsafe impl GlobalAlloc for UserHeap {
         })
     }
 
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if is_large(layout) {
+            // SAFETY: forwarded; kernel mappings are already zeroed.
+            return unsafe { self.alloc(layout) };
+        }
+        // SAFETY: forwarded.
+        let p = unsafe { self.alloc(layout) };
+        if !p.is_null() {
+            // SAFETY: `p` holds `layout.size()` bytes.
+            unsafe { core::ptr::write_bytes(p, 0, layout.size()) };
+        }
+        p
+    }
+
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if is_large(layout) {
+            // SAFETY: a mapping made by `alloc` above for this layout.
+            let _ = unsafe { os_sys::unmap(ptr, layout.size().next_multiple_of(4096)) };
+            return;
+        }
         if let Some(p) = core::ptr::NonNull::new(ptr) {
             // SAFETY: forwarded caller contract.
             self.with(|h| unsafe { h.dealloc(p, layout) });

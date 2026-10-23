@@ -163,7 +163,7 @@ address (`fs:[0]`).
 |---|---|---|
 | 1 | InvalidArgument | zero length, bad flags, unknown clock, partial unmap, malformed or oversized `ExecArgs` blocks |
 | 2 | Fault | pointer outside user space, unmapped, or read-only for output |
-| 3 | NoMemory | frames exhausted, 256 MiB per-process `map` limit, 64-process limit |
+| 3 | NoMemory | frames exhausted, 2 GiB per-process `map` limit, 64-process limit |
 | 4 | BadHandle | unknown handle, or a handle without the needed access (write on a read-only handle) |
 | 5 | NotSupported | unknown system call number |
 | 6 | PermissionDenied | writable + executable mapping (W^X); file permission checks, sticky directories, root-only calls (`mount`, `setuid`), creating files in `/dev`; `spawn`/`execve` of a file without execute permission or of a directory |

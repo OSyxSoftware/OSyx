@@ -99,7 +99,7 @@ The panic path may force-unlock SERIAL and only try-locks the display.
   whatever is still open when the last thread ends is closed.
 - Identity: `uid`/`gid` (root for `init`; `setuid` lets root drop to a user,
   permanently) and the current directory; children inherit both.
-- Limits: 64 processes, 256 MiB of `map` memory per process, 128 KiB of
+- Limits: 64 processes, 2 GiB of `map` memory per process, 128 KiB of
   arguments and environment (4096 strings each), 64 MiB executables, 64
   open handles.
 

@@ -436,7 +436,12 @@ pub fn exists<P: AsRef<Path>>(path: P) -> Result<bool> {
 /// The whole contents of a file.
 pub fn read<P: AsRef<Path>>(path: P) -> Result<Vec<u8>> {
     let mut f = File::open(path)?;
-    let mut buf = Vec::with_capacity(f.metadata().map_or(0, |m| m.len().min(1 << 24) as usize));
+    // The whole file at once (no doubling copies of a large file); a size
+    // that cannot be reserved falls back to growing while reading.
+    let mut buf = Vec::new();
+    if let Ok(m) = f.metadata() {
+        let _ = buf.try_reserve_exact(m.len() as usize);
+    }
     f.read_to_end(&mut buf)?;
     Ok(buf)
 }

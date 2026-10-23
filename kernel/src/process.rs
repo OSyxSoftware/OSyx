@@ -52,8 +52,11 @@ const STACK_LIMIT: u64 = STACK_TOP - (STACK_PAGES + 1) * PAGE_SIZE;
 const MAP_BASE: u64 = 0x0000_1000_0000_0000;
 /// Where program segments may lie: above the null guard, below `MAP_BASE`.
 const PROGRAM_RANGE: AddressRange = AddressRange { start: osyx_elf::USER_RANGE.start, end: MAP_BASE };
-/// Per-process cap on anonymous memory (256 MiB).
-const MAP_LIMIT_PAGES: u64 = 64 * 1024;
+/// Per-process cap on anonymous memory (2 GiB). Mappings are backed by
+/// frames at once, so physical memory remains the real bound; the cap
+/// keeps one process from taking all of it (a browser's main library
+/// alone is about 170 MiB of image).
+const MAP_LIMIT_PAGES: u64 = 512 * 1024;
 const MAX_PROCESSES: usize = 64;
 const OUTPUT_TAIL_LINES: usize = 3;
 
