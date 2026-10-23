@@ -130,6 +130,102 @@ extern "win64" fn CopyFileW(from: *const u16, to: *const u16, fail_if_exists: i3
 
 const COPY_FILE_FAIL_IF_EXISTS: u32 = 0x1;
 
+/// CopyFileEx: the copy is one step, so a progress routine is called once
+/// with the whole size when it is done (PROGRESS_CANCEL or _STOP then
+/// removes the copy, as an interrupted copy would).
+extern "win64" fn CopyFileExW(from: *const u16, to: *const u16, progress: u64, data: u64, cancel: *const i32, flags: u32) -> i32 {
+    if flags & !COPY_FILE_FAIL_IF_EXISTS != 0 {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    // SAFETY: NULL or the caller's cancel flag.
+    if !cancel.is_null() && unsafe { *cancel } != 0 {
+        return fail(ERROR_REQUEST_ABORTED, 0);
+    }
+    let (Some(f), Some(t)) = (name(from), name(to)) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    if let Err(e) = copy(&f, &t, flags & COPY_FILE_FAIL_IF_EXISTS != 0) {
+        return fail(e, 0);
+    }
+    if progress != 0 {
+        let size = stat_of(&t).map_or(0, |(_, st)| st.size as i64);
+        type Progress = extern "win64" fn(i64, i64, i64, i64, u32, u32, u64, u64, u64) -> u32;
+        // SAFETY: the caller's LPPROGRESS_ROUTINE.
+        let f: Progress = unsafe { core::mem::transmute(progress as usize) };
+        // CALLBACK_CHUNK_FINISHED (0), stream 1, no handles.
+        if matches!(f(size, size, size, size, 1, 0, 0, 0, data), 1 | 2) {
+            if let Ok((p, true)) = kernel32::locate(&t) {
+                let _ = os_sys::unlink(&p);
+            }
+            return fail(ERROR_REQUEST_ABORTED, 0);
+        }
+    }
+    1
+}
+
+/// ReplaceFile: `replacement` takes `replaced`'s name, after `replaced`
+/// is moved to `backup` when one is given. Attributes and ACLs are not
+/// merged (OSyx keeps only the read-only bit).
+extern "win64" fn ReplaceFileA(replaced: *const u8, replacement: *const u8, backup: *const u8, flags: u32, _e: u64, _r: u64) -> i32 {
+    // SAFETY: NULL or NUL-terminated names.
+    let (Some(old), Some(new), b) = (unsafe { path::ansi_to_string(replaced) }, unsafe { path::ansi_to_string(replacement) }, unsafe { path::ansi_to_string(backup) }) else {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    };
+    if flags & !0x6 != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if stat_of(&old).is_err() {
+        return fail(1176, 0); // ERROR_UNABLE_TO_REMOVE_REPLACED
+    }
+    if stat_of(&new).is_err() {
+        return fail(ERROR_FILE_NOT_FOUND, 0);
+    }
+    if let Some(b) = b {
+        if kernel32::move_file(Some(old.clone()), Some(b), 1) == 0 {
+            return fail(1176, 0);
+        }
+    }
+    if kernel32::move_file(Some(new), Some(old), 1) == 0 {
+        return fail(1177, 0); // ERROR_UNABLE_TO_MOVE_REPLACEMENT
+    }
+    1
+}
+
+/// OSyx file systems have no 8.3 names: the long and the short form of an
+/// existing path are the path itself.
+fn same_name(src: *const u16, buf: *mut u16, len: u32) -> u32 {
+    let Some(n) = name(src) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    if let Err(e) = stat_of(&n) {
+        return fail(e, 0);
+    }
+    kernel32::out_w(&n, buf, len)
+}
+
+extern "win64" fn GetLongPathNameW(src: *const u16, buf: *mut u16, len: u32) -> u32 {
+    same_name(src, buf, len)
+}
+
+extern "win64" fn GetShortPathNameW(src: *const u16, buf: *mut u16, len: u32) -> u32 {
+    same_name(src, buf, len)
+}
+
+/// The path an open handle was opened with, in DOS form (with the
+/// long-path prefix), NT device form (HarddiskVolume1) or volume-relative.
+extern "win64" fn GetFinalPathNameByHandleW(h: u64, buf: *mut u16, len: u32, flags: u32) -> u32 {
+    let f = match objects::file(h) {
+        Ok(f) if !f.path.is_empty() => f,
+        Ok(_) => return fail(ERROR_INVALID_FUNCTION, 0), // a pipe
+        Err(e) => return fail(e, 0),
+    };
+    let win = path::to_windows(&f.path);
+    let rest = win.get(2..).unwrap_or("\\");
+    let s = match flags & 0x7 {
+        0 => alloc::format!("\\\\?\\{win}"), // VOLUME_NAME_DOS
+        2 => alloc::format!("\\Device\\HarddiskVolume1{rest}"), // VOLUME_NAME_NT
+        4 => String::from(rest), // VOLUME_NAME_NONE
+        _ => return fail(ERROR_NOT_SUPPORTED, 0), // VOLUME_NAME_GUID
+    };
+    kernel32::out_w(&s, buf, len)
+}
+
 /// COPYFILE2_EXTENDED_PARAMETERS: size, flags, cancel flag, progress
 /// routine, context. Returns an HRESULT.
 extern "win64" fn CopyFile2(from: *const u16, to: *const u16, params: *const u8) -> u32 {
@@ -518,6 +614,11 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         FindFirstFileExW,
         GetFileAttributesExW,
         GetFileAttributesExA,
+        CopyFileExW,
+        ReplaceFileA,
+        GetLongPathNameW,
+        GetShortPathNameW,
+        GetFinalPathNameByHandleW,
         LockFile,
         UnlockFile,
         LockFileEx,

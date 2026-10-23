@@ -547,6 +547,121 @@ extern "win64" fn RtlGetVersion(info: *mut u8) -> NtStatus {
     STATUS_SUCCESS
 }
 
+
+const STATUS_NOT_FOUND: NtStatus = 0xC000_0225;
+const STATUS_INVALID_DEVICE_REQUEST: NtStatus = 0xC000_0010;
+
+/// Nothing is ever pending (kernel32's CancelIoEx says the same).
+extern "win64" fn NtCancelIoFileEx(h: u64, _io: u64, _status: u64) -> NtStatus {
+    if objects::get(h).is_none() {
+        return STATUS_INVALID_HANDLE;
+    }
+    STATUS_NOT_FOUND
+}
+
+/// No device controls are implemented for OSyx's files and devices.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn NtDeviceIoControlFile(h: u64, _e: u64, _apc: u64, _ctx: u64, _io: u64, _code: u32, _i: u64, _il: u32, _o: u64, _ol: u32) -> NtStatus {
+    if objects::get(h).is_none() {
+        return STATUS_INVALID_HANDLE;
+    }
+    STATUS_INVALID_DEVICE_REQUEST
+}
+
+/// OSyx has no NT object namespace with directories to open.
+extern "win64" fn NtOpenDirectoryObject(handle: *mut u64, _access: u32, oa: u64) -> NtStatus {
+    if handle.is_null() || oa == 0 {
+        return STATUS_INVALID_PARAMETER;
+    }
+    STATUS_OBJECT_NAME_NOT_FOUND
+}
+
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn NtQueryDirectoryObject(_h: u64, _buf: u64, _len: u32, _single: u8, _restart: u8, _ctx: *mut u32, _ret: *mut u32) -> NtStatus {
+    STATUS_INVALID_HANDLE
+}
+
+/// SystemBasicInformation (0) and SystemProcessorPerformanceInformation
+/// (8) from the kernel's memory and scheduler counters; other classes are
+/// not available.
+extern "win64" fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> NtStatus {
+    let Ok(info) = os_sys::sysinfo() else { return STATUS_UNSUCCESSFUL };
+    let need: u32 = match class {
+        0 => 64,
+        8 => 48,
+        _ => return STATUS_INVALID_INFO_CLASS,
+    };
+    if !ret.is_null() {
+        // SAFETY: the caller's out length.
+        unsafe { *ret = need };
+    }
+    if buf.is_null() || len != need {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+    let p = buf as u64;
+    // SAFETY: the caller's buffer of `need` bytes.
+    unsafe {
+        core::ptr::write_bytes(buf, 0, need as usize);
+        match class {
+            0 => {
+                teb::put(p, 4, 156_250u32); // timer resolution: 15.625 ms in 100 ns units
+                teb::put(p, 8, 4096u32);
+                teb::put(p, 12, (info.total_memory / 4096) as u32);
+                teb::put(p, 16, 1u32);
+                teb::put(p, 20, (info.total_memory / 4096) as u32);
+                teb::put(p, 24, 0x10000u32);
+                teb::put(p, 32, 0x10000u64);
+                teb::put(p, 40, 0x7FFF_FFFE_FFFFu64);
+                teb::put(p, 48, 1u64);
+                teb::put(p, 56, 1u8);
+            }
+            _ => {
+                // Samples are 10 ms; kernel time includes idle time.
+                let idle = info.idle_ticks * 100_000;
+                let busy = info.ticks.saturating_sub(info.idle_ticks) * 100_000;
+                teb::put(p, 0, idle);
+                teb::put(p, 8, idle);
+                teb::put(p, 16, busy);
+            }
+        }
+    }
+    STATUS_SUCCESS
+}
+
+/// DOS path → "\??\C:\..." NT path in a process-heap UNICODE_STRING
+/// (RtlFreeUnicodeString frees it), with the file part pointed to.
+extern "win64" fn RtlDosPathNameToNtPathName_U_WithStatus(dos: *const u16, nt: *mut u8, file_part: *mut u64, relative: *mut u8) -> NtStatus {
+    if nt.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    // SAFETY: a NUL-terminated name.
+    let Some(name) = (unsafe { crate::path::wide_to_string(dos) }) else { return STATUS_OBJECT_NAME_INVALID };
+    let full = match kernel32::full_path(Some(name)) {
+        Ok(f) => f,
+        Err(_) => return STATUS_OBJECT_NAME_INVALID,
+    };
+    let text = alloc::format!("{0}??{0}{full}", BACKSLASH);
+    let w: Vec<u16> = text.encode_utf16().chain(core::iter::once(0)).collect();
+    let Some(p) = kernel32::heap_alloc(w.len() * 2, false) else { return STATUS_NO_MEMORY };
+    // SAFETY: a fresh block for the string; the caller's structures.
+    unsafe {
+        core::ptr::copy_nonoverlapping(w.as_ptr(), p as *mut u16, w.len());
+        teb::put(nt as u64, 0, ((w.len() - 1) * 2) as u16);
+        teb::put(nt as u64, 2, (w.len() * 2) as u16);
+        teb::put(nt as u64, 8, p);
+        if !file_part.is_null() {
+            let last = text.rfind(BACKSLASH).map_or(0, |i| text[..=i].encode_utf16().count());
+            *file_part = if last < w.len() - 1 { p + last as u64 * 2 } else { 0 };
+        }
+        if !relative.is_null() {
+            core::ptr::write_bytes(relative, 0, 32); // RTL_RELATIVE_NAME_U: none
+        }
+    }
+    STATUS_SUCCESS
+}
+
+const BACKSLASH: char = '\\';
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     let mut exports=export_table![
         NtCreateFile,
@@ -573,6 +688,12 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RtlSetLastWin32Error,
         RtlGetCurrentPeb,
         RtlGetVersion,
+        NtCancelIoFileEx,
+        NtDeviceIoControlFile,
+        NtOpenDirectoryObject,
+        NtQueryDirectoryObject,
+        NtQuerySystemInformation,
+        RtlDosPathNameToNtPathName_U_WithStatus,
     ];
     exports.extend(crate::exceptions::native_exports());
     exports.extend(crate::rtl::ntdll_exports());

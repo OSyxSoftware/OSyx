@@ -193,6 +193,66 @@ extern "win64" fn SetStdHandle(which: u32, h: u64) -> Bool {
     TRUE
 }
 
+/// The console is the process's standard output: it exists already, so
+/// AllocConsole fails as for a process that has one.
+extern "win64" fn AllocConsole() -> Bool {
+    fail(ERROR_ACCESS_DENIED, FALSE)
+}
+
+/// CONSOLE_SCREEN_BUFFER_INFO for the text console: OSyx's console is a
+/// stream with no cursor or size to query, so the classic 80x25 window on
+/// an 80x300 buffer is reported.
+extern "win64" fn GetConsoleScreenBufferInfo(h: u64, out: *mut u8) -> Bool {
+    if !matches!(objects::get(h), Some(Object::Console(Console::Out | Console::Err))) {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's 22-byte structure.
+    unsafe {
+        core::ptr::write_bytes(out, 0, 22);
+        let p = out as u64;
+        teb::put(p, 0, [80i16, 300]); // dwSize
+        teb::put(p, 8, CONSOLE_ATTRIBUTE.load(Ordering::Relaxed) as u16);
+        teb::put(p, 10, [0i16, 0, 79, 24]); // srWindow
+        teb::put(p, 18, [80i16, 25]); // dwMaximumWindowSize
+    }
+    TRUE
+}
+
+/// Text attributes are kept and reported, not rendered: the console is a
+/// byte stream (often a serial line) without colour.
+static CONSOLE_ATTRIBUTE: AtomicU32 = AtomicU32::new(7);
+
+extern "win64" fn SetConsoleTextAttribute(h: u64, attr: u16) -> Bool {
+    if !matches!(objects::get(h), Some(Object::Console(Console::Out | Console::Err))) {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    CONSOLE_ATTRIBUTE.store(attr as u32, Ordering::Relaxed);
+    TRUE
+}
+
+// Serial ports: OSyx exposes none, so no handle is a communications device.
+extern "win64" fn GetCommState(h: u64, _dcb: *mut u8) -> Bool {
+    comm(h)
+}
+
+extern "win64" fn SetCommState(h: u64, _dcb: *const u8) -> Bool {
+    comm(h)
+}
+
+extern "win64" fn SetCommTimeouts(h: u64, _t: *const u8) -> Bool {
+    comm(h)
+}
+
+fn comm(h: u64) -> Bool {
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    fail(ERROR_INVALID_FUNCTION, FALSE)
+}
+
 extern "win64" fn GetConsoleMode(h: u64, mode: *mut u32) -> Bool {
     match objects::get(h) {
         Some(Object::Console(_)) if !mode.is_null() => {
@@ -541,6 +601,34 @@ extern "win64" fn GetOverlappedResult(h: u64, ov: *const u8, n: *mut u32, _wait:
     TRUE
 }
 
+/// Nothing is ever pending (see complete_overlapped): for CancelIoEx,
+/// as on Windows, that is ERROR_NOT_FOUND.
+extern "win64" fn CancelIoEx(h: u64, _ov: *const u8) -> Bool {
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    fail(ERROR_NOT_FOUND, FALSE)
+}
+
+/// A thread blocked in a synchronous kernel call cannot be interrupted
+/// from another thread on OSyx.
+extern "win64" fn CancelSynchronousIo(h: u64) -> Bool {
+    if GetThreadId(h) == 0 {
+        return FALSE;
+    }
+    fail(ERROR_NOT_SUPPORTED, FALSE)
+}
+
+/// No device or file system control codes are implemented for OSyx's
+/// files; Windows reports such codes as ERROR_INVALID_FUNCTION.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn DeviceIoControl(h: u64, _code: u32, _i: u64, _il: u32, _o: u64, _ol: u32, _ret: *mut u32, _ov: u64) -> Bool {
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    fail(ERROR_INVALID_FUNCTION, FALSE)
+}
+
 /// Nothing is ever pending (see complete_overlapped): there is nothing to
 /// cancel for a valid handle.
 extern "win64" fn CancelIo(h: u64) -> Bool {
@@ -879,7 +967,7 @@ extern "win64" fn SetCurrentDirectoryW(name: *const u16) -> Bool {
     set_current_directory(unsafe { sw(name) })
 }
 
-fn full_path(name: Option<String>) -> Result<String, u32> {
+pub(crate) fn full_path(name: Option<String>) -> Result<String, u32> {
     let name = name.ok_or(ERROR_INVALID_PARAMETER)?;
     Ok(path::to_windows(&path::to_osyx(&name, &cwd_win())?))
 }
@@ -1087,7 +1175,7 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
     os_std::thread::Builder::new()
         .stack_size(128 << 10)
         .spawn(move || {
-            let stack = match mem::alloc_pages(size, mem::Prot::ReadWrite) {
+            let stack = match mem::alloc_stack(size) {
                 Some(s) => s,
                 None => {
                     me.exit_code.store(ERROR_NOT_ENOUGH_MEMORY, Ordering::SeqCst);
@@ -1111,7 +1199,7 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
             crate::fls::thread_exit();
             loader::notify_threads(loader::DLL_THREAD_DETACH);
             let _ = os_sys::set_gs_base(0);
-            mem::free_pages(stack, size);
+            mem::free_stack(stack, size);
             mem::free_pages(t, teb::TEB_SIZE);
             me.exit_code.store(code, Ordering::SeqCst);
             me.done.store(true, Ordering::SeqCst);
@@ -1166,7 +1254,7 @@ extern "win64" fn SuspendThread(_h: u64) -> u32 {
     fail(ERROR_NOT_SUPPORTED, u32::MAX)
 }
 
-extern "win64" fn ExitThread(code: u32) -> ! {
+pub(crate) extern "win64" fn ExitThread(code: u32) -> ! {
     loader::exit_thread(code)
 }
 
@@ -1181,7 +1269,7 @@ extern "win64" fn GetExitCodeThread(h: u64, code: *mut u32) -> Bool {
     }
 }
 
-extern "win64" fn GetThreadId(h: u64) -> u32 {
+pub(crate) extern "win64" fn GetThreadId(h: u64) -> u32 {
     match objects::get(h) {
         Some(Object::Thread(t)) => t.tid.load(Ordering::SeqCst),
         _ if h == objects::CURRENT_THREAD => os_sys::gettid() as u32,
@@ -1393,7 +1481,7 @@ extern "win64" fn InitializeCriticalSectionEx(cs: u64, _spin: u32, _flags: u32) 
 
 extern "win64" fn DeleteCriticalSection(_cs: u64) {}
 
-extern "win64" fn EnterCriticalSection(cs: u64) {
+pub(crate) extern "win64" fn EnterCriticalSection(cs: u64) {
     let me = os_sys::gettid();
     // SAFETY: the caller's CRITICAL_SECTION.
     unsafe {
@@ -1436,7 +1524,7 @@ extern "win64" fn TryEnterCriticalSection(cs: u64) -> Bool {
     }
 }
 
-extern "win64" fn LeaveCriticalSection(cs: u64) {
+pub(crate) extern "win64" fn LeaveCriticalSection(cs: u64) {
     // SAFETY: the caller's CRITICAL_SECTION, held by this thread.
     unsafe {
         let r = teb::get::<i32>(cs, CS_RECURSION) - 1;
@@ -1502,6 +1590,11 @@ pub(crate) extern "win64" fn ReleaseSRWLockShared(l: u64) {
     if w.fetch_sub(1, Ordering::Release) == 1 { os_sys::futex_wake(w.as_ptr(), u32::MAX); }
 }
 
+/// An unnamed event, for objects that are waitable events on Windows too.
+pub(crate) fn new_event(manual: bool, initial: bool) -> u64 {
+    objects::insert(Object::Event(Arc::new(EventObj { signaled: AtomicBool::new(initial), manual, name: None })))
+}
+
 fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
     if let Some(o @ Object::Event(_)) = name.as_deref().and_then(objects::find_named) {
         teb::set_last_error(ERROR_ALREADY_EXISTS);
@@ -1509,6 +1602,49 @@ fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
     }
     teb::set_last_error(ERROR_SUCCESS);
     objects::insert(Object::Event(Arc::new(EventObj { signaled: AtomicBool::new(initial), manual, name })))
+}
+
+/// Opens a named object of this process (names are process-local here,
+/// like the objects themselves).
+fn open_named(name: Option<String>, want: fn(&Object) -> bool) -> u64 {
+    let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    match objects::find_named(&name) {
+        Some(o) if want(&o) => objects::insert(o),
+        Some(_) => fail(ERROR_INVALID_HANDLE, 0),
+        None => fail(ERROR_FILE_NOT_FOUND, 0),
+    }
+}
+
+extern "win64" fn OpenEventA(_access: u32, inherit: Bool, name: *const u8) -> u64 {
+    if inherit != 0 {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    // SAFETY: a NUL-terminated name.
+    open_named(unsafe { sa(name) }, |o| matches!(o, Object::Event(_)))
+}
+
+extern "win64" fn OpenMutexW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
+    if inherit != 0 {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    // SAFETY: a NUL-terminated name.
+    open_named(unsafe { sw(name) }, |o| matches!(o, Object::Mutex(_)))
+}
+
+pub(crate) extern "win64" fn OpenFileMappingW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
+    if inherit != 0 {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    // SAFETY: a NUL-terminated name.
+    open_named(unsafe { sw(name) }, |o| matches!(o, Object::Section(_)))
+}
+
+extern "win64" fn OpenFileMappingA(_access: u32, inherit: Bool, name: *const u8) -> u64 {
+    if inherit != 0 {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    // SAFETY: a NUL-terminated name.
+    open_named(unsafe { sa(name) }, |o| matches!(o, Object::Section(_)))
 }
 
 extern "win64" fn CreateEventA(attributes: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
@@ -1527,6 +1663,12 @@ extern "win64" fn CreateEventExW(attributes: u64, name: *const u16, flags: u32, 
     if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     // SAFETY: as above.
     create_event(flags & 1 != 0, flags & 2 != 0, unsafe { sw(name) })
+}
+
+/// Signals an event for code that is not a Windows caller (registry
+/// change notifications).
+pub(crate) fn set_event(h: u64) {
+    event_op(h, true);
 }
 
 fn event_op(h: u64, set: bool) -> Bool {
@@ -1755,7 +1897,35 @@ pub fn write_mbi(out: *mut u8, i: &mem::Info) {
     }
 }
 
-extern "win64" fn VirtualQuery(addr: u64, out: *mut u8, len: usize) -> usize {
+/// Locked ranges (base, size): OSyx never pages memory out, so a lock
+/// only has to be remembered for VirtualUnlock's ERROR_NOT_LOCKED.
+static LOCKED: Mutex<Vec<(u64, usize)>> = Mutex::new(Vec::new());
+
+extern "win64" fn VirtualLock(addr: u64, size: usize) -> Bool {
+    let mut info = [0u8; 48];
+    if VirtualQuery(addr, info.as_mut_ptr(), 48) == 0 || u32::from_le_bytes(info[32..36].try_into().unwrap()) != mem::MEM_COMMIT {
+        return fail(ERROR_NOACCESS, FALSE);
+    }
+    let base = addr & !(mem::PAGE as u64 - 1);
+    let end = (addr + size as u64).next_multiple_of(mem::PAGE as u64);
+    LOCKED.lock().unwrap().push((base, (end - base) as usize));
+    TRUE
+}
+
+extern "win64" fn VirtualUnlock(addr: u64, size: usize) -> Bool {
+    let base = addr & !(mem::PAGE as u64 - 1);
+    let end = (addr + size as u64).next_multiple_of(mem::PAGE as u64);
+    let mut l = LOCKED.lock().unwrap();
+    match l.iter().position(|&(b, n)| b == base && b + n as u64 == end) {
+        Some(i) => {
+            l.remove(i);
+            TRUE
+        }
+        None => fail(ERROR_NOT_LOCKED, FALSE),
+    }
+}
+
+pub(crate) extern "win64" fn VirtualQuery(addr: u64, out: *mut u8, len: usize) -> usize {
     if out.is_null() || len < 48 {
         return fail(ERROR_INSUFFICIENT_BUFFER, 0);
     }
@@ -1853,6 +2023,127 @@ extern "win64" fn HeapValidate(_h: u64, _flags: u32, _p: u64) -> Bool {
 extern "win64" fn HeapCompact(_h: u64, _flags: u32) -> usize {
     teb::set_last_error(0);
     0
+}
+
+// lstr* string calls. Like Windows they do not fault on bad pointers in
+// spirit, but OSyx has no SEH guard here: invalid pointers are the
+// caller's error.
+
+fn wlen(p: *const u16) -> usize {
+    // SAFETY: a NUL-terminated string.
+    (0..).take_while(|&i| unsafe { *p.add(i) } != 0).count()
+}
+
+extern "win64" fn lstrcpyW(dst: *mut u16, src: *const u16) -> *mut u16 {
+    if dst.is_null() || src.is_null() {
+        return core::ptr::null_mut();
+    }
+    let n = wlen(src);
+    // SAFETY: the caller's buffers; the copy includes the NUL.
+    unsafe { core::ptr::copy(src, dst, n + 1) };
+    dst
+}
+
+/// Copies at most `max - 1` units and always terminates.
+extern "win64" fn lstrcpynW(dst: *mut u16, src: *const u16, max: i32) -> *mut u16 {
+    if dst.is_null() || src.is_null() || max <= 0 {
+        return if max == 0 { dst } else { core::ptr::null_mut() };
+    }
+    let n = (0..(max - 1) as usize).take_while(|&i| unsafe { *src.add(i) } != 0).count();
+    // SAFETY: as above, within `max` units.
+    unsafe {
+        core::ptr::copy(src, dst, n);
+        *dst.add(n) = 0;
+    }
+    dst
+}
+
+extern "win64" fn lstrcatW(dst: *mut u16, src: *const u16) -> *mut u16 {
+    if dst.is_null() || src.is_null() {
+        return core::ptr::null_mut();
+    }
+    let at = wlen(dst);
+    // SAFETY: the caller's buffer has room for both strings.
+    unsafe { core::ptr::copy(src, dst.add(at), wlen(src) + 1) };
+    dst
+}
+
+/// Case-insensitive comparison in the user locale (CompareString order).
+extern "win64" fn lstrcmpiW(a: *const u16, b: *const u16) -> i32 {
+    match (a.is_null(), b.is_null()) {
+        (true, true) => 0,
+        (true, false) => -1,
+        (false, true) => 1,
+        _ => crate::locale::compare_wide(a, b, true) as i32,
+    }
+}
+
+// Global memory: only fixed blocks exist (GlobalAlloc refuses
+// GMEM_MOVEABLE), so a handle is the block's address and is never locked.
+
+extern "win64" fn GlobalLock(h: u64) -> u64 {
+    if h == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    h
+}
+
+/// A fixed block has no lock count; Windows reports TRUE for it.
+extern "win64" fn GlobalUnlock(h: u64) -> Bool {
+    if h == 0 {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    TRUE
+}
+
+extern "win64" fn GlobalSize(h: u64) -> usize {
+    if h == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    heap_size(h)
+}
+
+const GMEM_MOVEABLE: u32 = 0x2;
+const GMEM_ZEROINIT: u32 = 0x40;
+const GMEM_MODIFY: u32 = 0x80;
+
+/// A fixed block may move only with GMEM_MOVEABLE; shrinking keeps it.
+extern "win64" fn GlobalReAlloc(h: u64, size: usize, flags: u32) -> u64 {
+    if h == 0 {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if flags & GMEM_MODIFY != 0 {
+        return h;
+    }
+    let old = heap_size(h);
+    if size <= old {
+        // SAFETY: `h` came from heap_alloc; its header holds the size.
+        unsafe { *((h - 16) as *mut usize) = size };
+        return h;
+    }
+    if flags & GMEM_MOVEABLE == 0 {
+        return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+    }
+    let Some(n) = heap_alloc(size, flags & GMEM_ZEROINIT != 0) else { return fail(ERROR_NOT_ENOUGH_MEMORY, 0) };
+    // SAFETY: both blocks hold at least `old` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(h as *const u8, n as *mut u8, old) };
+    heap_free(h);
+    n
+}
+
+/// Heaps share one allocator whose own lock already serializes every
+/// call, so locking a heap leaves nothing more to exclude.
+extern "win64" fn HeapLock(_h: u64) -> Bool {
+    TRUE
+}
+
+extern "win64" fn HeapUnlock(_h: u64) -> Bool {
+    TRUE
+}
+
+/// The shared allocator keeps no per-heap block list to walk.
+extern "win64" fn HeapWalk(_h: u64, _entry: *mut u8) -> Bool {
+    fail(ERROR_NOT_SUPPORTED, FALSE)
 }
 
 extern "win64" fn LocalAlloc(flags: u32, size: usize) -> u64 {
@@ -2258,6 +2549,32 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ReadFile,
         GetOverlappedResult,
         CancelIo,
+        CancelIoEx,
+        CancelSynchronousIo,
+        DeviceIoControl,
+        OpenEventA,
+        OpenMutexW,
+        OpenFileMappingW,
+        OpenFileMappingA,
+        lstrcpyW,
+        lstrcpynW,
+        lstrcatW,
+        lstrcmpiW,
+        GlobalLock,
+        GlobalUnlock,
+        GlobalSize,
+        GlobalReAlloc,
+        HeapLock,
+        HeapUnlock,
+        HeapWalk,
+        VirtualLock,
+        VirtualUnlock,
+        AllocConsole,
+        GetConsoleScreenBufferInfo,
+        SetConsoleTextAttribute,
+        GetCommState,
+        SetCommState,
+        SetCommTimeouts,
         CreatePipe,
         WriteFile,
         GetFileSize,
@@ -2413,6 +2730,10 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::fls::exports());
     exports.extend(crate::files::exports());
     exports.extend(crate::locale::exports());
+    exports.extend(crate::zone::exports());
+    exports.extend(crate::nls::exports());
+    exports.extend(crate::procinfo::exports());
+    exports.push(("PathCchCanonicalize", crate::shlwapi::path_cch_canonicalize()));
     exports.extend(crate::threadpool::exports());
     exports.extend(crate::process::exports());
     exports.extend(crate::seh::ntdll_exports());

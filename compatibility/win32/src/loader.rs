@@ -164,7 +164,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("psapi.dll", crate::psapi::exports(), Vec::new()),
         builtin(
             "advapi32.dll",
-            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports()].concat(),
+            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports()].concat(),
             Vec::new()
         ),
         builtin("shlwapi.dll", crate::shlwapi::exports(), Vec::new()),
@@ -177,6 +177,13 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("userenv.dll", crate::userenv::exports(), Vec::new()),
         builtin("dbghelp.dll", crate::dbghelp::exports(), Vec::new()),
         builtin("crypt32.dll", crate::crypt32::exports(), Vec::new()),
+        builtin("rpcrt4.dll", crate::minordlls::rpcrt4_exports(), Vec::new()),
+        builtin("cfgmgr32.dll", crate::minordlls::cfgmgr32_exports(), Vec::new()),
+        builtin("ktmw32.dll", crate::minordlls::ktmw32_exports(), Vec::new()),
+        builtin("windowscodecs.dll", crate::minordlls::windowscodecs_exports(), Vec::new()),
+        builtin("bcryptprimitives.dll", crate::minordlls::bcryptprimitives_exports(), Vec::new()),
+        builtin("shcore.dll", crate::minordlls::shcore_exports(), Vec::new()),
+        builtin("propsys.dll", crate::propsys::exports(), Vec::new()),
     ]
 }
 
@@ -222,6 +229,8 @@ fn schema() -> Vec<u8> {
         b.add(c, "kernel32.dll", &[("kernel32.dll", "kernelbase.dll")]).expect("valid contract name");
     }
     b.add("api-ms-win-core-rtlsupport-l1-2-0", "ntdll.dll", &[]).expect("valid contract name");
+    b.add("api-ms-win-shcore-scaling-l1-1-1", "shcore.dll", &[]).expect("valid contract name");
+    b.add("api-ms-win-core-path-l1-1-0", "kernelbase.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-rtlsupport-l1-1-0", "ntdll.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-registry-l1-1-0", "advapi32.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-winrt-l1-1-0", "combase.dll", &[]).expect("valid contract name");
@@ -580,7 +589,7 @@ pub fn start(exe_path: &str, command_line: &str, environment: &[String]) -> Resu
         environment,
         heap,
     });
-    let stack = mem::alloc_pages(stack_size, mem::Prot::ReadWrite).ok_or("no memory for the main thread's stack")?;
+    let stack = mem::alloc_stack(stack_size).ok_or("no memory for the main thread's stack")?;
     let stack_top = stack + stack_size as u64;
     let main_teb = teb::create_teb(stack_top, stack, crate::kernel32::pid(), os_sys::gettid());
     teb::install(main_teb);
@@ -667,14 +676,20 @@ pub fn modules() -> Vec<ModuleInfo> {
 
 /// `GetModuleHandle`: None = the program.
 pub fn get_module_handle(name: Option<&str>) -> Option<u64> {
-    with(|l| match name {
+    let base = name.map(|n| normalize(n.rsplit(['\\', '/']).next().unwrap_or(n)));
+    let found = with(|l| match &base {
         None => Some(l.linker.modules[l.exe].base),
         Some(n) => {
-            let n = normalize(n.rsplit(['\\', '/']).next().unwrap_or(n));
-            let i = l.linker.find(&n)?;
+            let i = l.linker.find(n)?;
             Some(module_handle(l, i))
         }
-    })
+    });
+    // ntdll, kernel32 and kernelbase are in every Windows process, whether
+    // the program imports them or not: these built-ins load when first named.
+    match (found, base) {
+        (None, Some(n)) if ["ntdll.dll", "kernel32.dll", "kernelbase.dll"].contains(&n.as_str()) => load_library(&n).ok(),
+        (f, _) => f,
+    }
 }
 
 /// `GetModuleFileName` of a module handle (None = the program).

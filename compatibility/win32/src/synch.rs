@@ -172,6 +172,16 @@ pub(crate) extern "win64" fn SleepConditionVariableSRW(cv: u64, lock: u64, ms: u
     }
     result
 }
+pub(crate) extern "win64" fn SleepConditionVariableCS(cv: u64, cs: u64, ms: u32) -> i32 {
+    if cv == 0 || cs == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let sequence = word(cv).load(Ordering::Acquire);
+    kernel32::LeaveCriticalSection(cs);
+    let result = wait(cv, sequence, ms);
+    kernel32::EnterCriticalSection(cs);
+    result
+}
 extern "win64" fn WaitOnAddress(address: u64, compare: *const u32, size: usize, ms: u32) -> i32 {
     if address == 0 || compare.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -205,6 +215,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         WakeConditionVariable,
         WakeAllConditionVariable,
         SleepConditionVariableSRW,
+        SleepConditionVariableCS,
         WaitOnAddress,
         WakeByAddressSingle,
         WakeByAddressAll

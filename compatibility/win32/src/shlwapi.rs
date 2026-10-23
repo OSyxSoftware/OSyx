@@ -188,6 +188,67 @@ extern "win64" fn PathMatchSpecW(file: *const u16, spec: *const u16) -> i32 {
     0
 }
 
+
+/// PathCchCanonicalize: removes "." and ".." components (never above the
+/// root) of a path; the result must fit `cch` units with its NUL.
+extern "win64" fn PathCchCanonicalize(out: *mut u16, cch: usize, input: *const u16) -> u32 {
+    const E_INVALIDARG: u32 = 0x8007_0057;
+    const E_INSUFFICIENT_BUFFER: u32 = 0x8007_007A;
+    if out.is_null() || cch == 0 || cch > 32768 {
+        return E_INVALIDARG;
+    }
+    // SAFETY: a NUL-terminated path.
+    let Some(p) = (unsafe { crate::path::wide_to_string(input) }) else { return E_INVALIDARG };
+    let sep = '\\';
+    // A root that ".." cannot climb above: "C:\", "\\server\share\" or "\".
+    let (root, rest) = if p.len() >= 3 && p.as_bytes()[1] == b':' && p[2..].starts_with(sep) {
+        (alloc::string::String::from(&p[..3]), &p[3..])
+    } else if let Some(unc) = p.strip_prefix("\\\\") {
+        let parts: Vec<&str> = unc.splitn(3, sep).collect();
+        let root = alloc::format!("\\\\{}\\{}", parts.first().unwrap_or(&""), parts.get(1).unwrap_or(&""));
+        (if parts.len() > 2 { alloc::format!("{root}\\") } else { root }, *parts.get(2).unwrap_or(&""))
+    } else if let Some(r) = p.strip_prefix(sep) {
+        (alloc::string::String::from("\\"), r)
+    } else {
+        (alloc::string::String::new(), p.as_str())
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for c in rest.split(sep) {
+        match c {
+            "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
+        }
+    }
+    // A trailing "." or ".." leaves no empty last component behind.
+    if (rest.ends_with("\\.") || rest.ends_with("\\..") || rest == "." || rest == "..") && parts.last() == Some(&"") {
+        parts.pop();
+    }
+    let mut s = root + &parts.join("\\");
+    if s.is_empty() {
+        s.push('\\');
+    }
+    let w: Vec<u16> = s.encode_utf16().collect();
+    if w.len() + 1 > cch {
+        // SAFETY: the caller's buffer of at least one unit.
+        unsafe { *out = 0 };
+        return E_INSUFFICIENT_BUFFER;
+    }
+    // SAFETY: the caller's buffer of `cch` units.
+    unsafe {
+        core::ptr::copy_nonoverlapping(w.as_ptr(), out, w.len());
+        *out.add(w.len()) = 0;
+    }
+    0
+}
+
+/// The kernelbase export address of PathCchCanonicalize.
+pub fn path_cch_canonicalize() -> u64 {
+    PathCchCanonicalize as *const () as u64
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![PathRemoveFileSpecW, PathAppendW, PathMatchSpecW]
 }

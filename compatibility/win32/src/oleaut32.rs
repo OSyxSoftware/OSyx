@@ -129,6 +129,15 @@ fn plain(vt: u16) -> bool {
     matches!(vt, 0..=7 | 10 | 11 | 14 | 16..=23 | 25 | 26)
 }
 
+/// A copy of a BSTR (PropVariantCopy uses it).
+pub(crate) fn copy_bstr(b: u64) -> u64 {
+    SysAllocStringByteLen(b as *const u8, SysStringByteLen(b))
+}
+
+pub(crate) fn free_bstr(b: u64) {
+    SysFreeString(b);
+}
+
 extern "win64" fn VariantInit(v: *mut u8) {
     if !v.is_null() {
         // SAFETY: the caller's 24-byte VARIANT; only vt and the reserved words are set.

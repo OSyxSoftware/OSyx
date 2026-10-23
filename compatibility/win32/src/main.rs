@@ -63,6 +63,15 @@ mod threadpool;
 mod timers;
 mod tokens;
 mod tz;
+mod zone;
+mod nls;
+mod procinfo;
+mod etw;
+mod credman;
+mod accounts;
+mod capi;
+mod minordlls;
+mod propsys;
 mod ws2_32;
 
 use alloc::string::String;

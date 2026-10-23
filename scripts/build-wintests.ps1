@@ -69,6 +69,9 @@ $programs = [ordered]@{
     'wsock32.exe' = @{ Src = @('wsock32.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lwsock32', '-lkernel32') }
     'wsaext.exe'  = @{ Src = @('wsaext.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lws2_32', '-lkernel32') }
     'k32ansi.exe' = @{ Src = @('k32ansi.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
+    'advapi.exe'  = @{ Src = @('advapi.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-ladvapi32', '-lkernel32') }
+    'newdlls.exe' = @{ Src = @('newdlls.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lrpcrt4', '-lcfgmgr32', '-lpropsys', '-loleaut32', '-lole32', '-lkernel32') }
+    'k32xul.exe'  = @{ Src = @('k32xul.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'sysadmin.exe' = @{ Src = @('sysadmin.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-liphlpapi', '-lsetupapi', '-lkernel32') }
 }
 foreach ($name in $programs.Keys) {

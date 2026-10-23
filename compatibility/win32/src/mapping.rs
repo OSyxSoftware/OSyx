@@ -255,6 +255,15 @@ extern "win64" fn MapViewOfFile(section: u64, access: u32, high: u32, low: u32, 
     }
 }
 
+/// Views go where OSyx places them; a requested base address is not
+/// available (ERROR_INVALID_ADDRESS, as when Windows cannot use it).
+extern "win64" fn MapViewOfFileEx(section: u64, access: u32, high: u32, low: u32, len: usize, base: u64) -> u64 {
+    if base != 0 {
+        return fail(ERROR_INVALID_ADDRESS, 0);
+    }
+    MapViewOfFile(section, access, high, low, len)
+}
+
 extern "win64" fn UnmapViewOfFile(addr: u64) -> i32 {
     match unmap(addr) {
         Ok(()) => 1,
@@ -269,5 +278,5 @@ extern "win64" fn FlushViewOfFile(addr: u64, _len: usize) -> i32 {
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![CreateFileMappingW, CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FlushViewOfFile]
+    export_table![MapViewOfFileEx, CreateFileMappingW, CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FlushViewOfFile]
 }

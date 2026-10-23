@@ -27,7 +27,7 @@ pub extern "win64" fn CoTaskMemAlloc(size: usize) -> u64 {
     kernel32::heap_alloc(size, false).unwrap_or(0)
 }
 
-extern "win64" fn CoTaskMemFree(p: u64) {
+pub extern "win64" fn CoTaskMemFree(p: u64) {
     kernel32::heap_free(p);
 }
 
@@ -164,7 +164,7 @@ extern "win64" fn CoAllowSetForegroundWindow(unk: u64, reserved: u64) -> u32 {
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![
+    let mut e = export_table![
         CoTaskMemAlloc,
         CoTaskMemFree,
         CoTaskMemRealloc,
@@ -174,5 +174,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CoInitializeSecurity,
         CoCreateInstance,
         CoAllowSetForegroundWindow
-    ]
+    ];
+    e.push(("PropVariantClear", crate::propsys::PropVariantClear as *const () as u64));
+    e
 }

@@ -67,6 +67,9 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("legacy Winsock 1.1 through wsock32.dll ordinals", || run("wsock32.exe", &[]) == Some(0));
     t.check("Winsock 2 extensions, address text and the provider catalog", || run("wsaext.exe", &[]) == Some(0));
     t.check("ANSI file and process calls, file locks, pipes and memory status", || run("k32ansi.exe", &[]) == Some(0));
+    t.check("time zones, en-US formatting, named objects and machine information", || run("k32xul.exe", &[]) == Some(0));
+    t.check("registry enumeration and notification, CryptoAPI hashes, credentials, ETW and accounts", || run("advapi.exe", &[]) == Some(0));
+    t.check("rpcrt4, cfgmgr32, propsys, bcryptprimitives, shcore and ntdll additions", || run("newdlls.exe", &[]) == Some(0));
     t.check("a missing program is reported", || {
         Command::new("/bin/winrun").arg("/opt/wintests/none.exe").status().ok().and_then(|s| s.code()) == Some(2)
     });

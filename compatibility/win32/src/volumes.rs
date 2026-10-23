@@ -308,6 +308,36 @@ extern "win64" fn FindClose(h: u64) -> i32 {
         fail(ERROR_INVALID_HANDLE, 0)
     }
 }
+/// One volume, drive C:, as \Device\HarddiskVolume1. With a NULL name
+/// the list of DOS device names (just "C:") is returned.
+extern "win64" fn QueryDosDeviceW(name: *const u16, buf: *mut u16, max: u32) -> u32 {
+    // SAFETY: NULL or a NUL-terminated name.
+    let n = unsafe { path::wide_to_string(name) };
+    let target = match n.as_deref() {
+        None => "C:",
+        Some(d) if d.eq_ignore_ascii_case("C:") => "\\Device\\HarddiskVolume1",
+        Some(_) => return fail(ERROR_FILE_NOT_FOUND, 0),
+    };
+    let w: Vec<u16> = target.encode_utf16().chain([0, 0]).collect();
+    if buf.is_null() || (max as usize) < w.len() {
+        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer of `max` units.
+    unsafe { core::ptr::copy_nonoverlapping(w.as_ptr(), buf, w.len()) };
+    w.len() as u32
+}
+/// Every path lies on the one volume, mounted at C:.
+extern "win64" fn GetVolumePathNameW(name: *const u16, buf: *mut u16, len: u32) -> i32 {
+    // SAFETY: a NUL-terminated name.
+    if unsafe { path::wide_to_string(name) }.is_none() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let r = kernel32::out_w("C:\\", buf, len);
+    if r >= len {
+        return fail(ERROR_FILENAME_EXCED_RANGE, 0);
+    }
+    1
+}
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         GetLogicalDriveStringsW,
@@ -315,6 +345,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetDriveTypeW,
         GetDiskFreeSpaceExW,
         GetDiskFreeSpaceW,
+        QueryDosDeviceW,
+        GetVolumePathNameW,
         GetDiskFreeSpaceA,
         GetVolumeInformationW,
         FindFirstFileW,

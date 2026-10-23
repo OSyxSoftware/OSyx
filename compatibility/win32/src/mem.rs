@@ -125,6 +125,20 @@ struct Region {
 
 static REGIONS: Mutex<BTreeMap<u64, Region>> = Mutex::new(BTreeMap::new());
 
+/// A thread stack: committed read/write private memory, as VirtualQuery
+/// reports a Windows stack (its pages get frames when first touched).
+pub fn alloc_stack(size: usize) -> Option<u64> {
+    let base = alloc_pages(size, Prot::ReadWrite)?;
+    let size = size.next_multiple_of(PAGE);
+    REGIONS.lock().unwrap().insert(base, Region { size, pages: alloc::vec![PAGE_READWRITE; size / PAGE] });
+    Some(base)
+}
+
+pub fn free_stack(base: u64, size: usize) {
+    REGIONS.lock().unwrap().remove(&base);
+    free_pages(base, size);
+}
+
 /// `NtAllocateVirtualMemory` / `VirtualAlloc`. Returns the base.
 pub fn virtual_alloc(addr: u64, size: usize, kind: u32, protect: u32) -> Result<u64, NtStatus> {
     if size == 0

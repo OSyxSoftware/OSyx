@@ -159,6 +159,32 @@ pub fn add_table(table: u64, count: u32, base: u64) {
     RtlAddFunctionTable(table, count, base);
 }
 
+const STATUS_SUCCESS: u32 = 0;
+const STATUS_INVALID_PARAMETER: u32 = 0xC000_000D;
+
+/// A growable table (JIT code): its range is given up front and entries
+/// are appended in place, so lookups read the current count. The handle
+/// is the table's address.
+extern "win64" fn RtlAddGrowableFunctionTable(handle: *mut u64, table: u64, count: u32, max: u32, low: u64, high: u64) -> u32 {
+    if handle.is_null() || table == 0 || count > max || low >= high {
+        return STATUS_INVALID_PARAMETER;
+    }
+    DYNAMIC.lock().unwrap().push(Dynamic { table, count, base: low, low, high });
+    // SAFETY: the caller's out pointer.
+    unsafe { *handle = table };
+    STATUS_SUCCESS
+}
+
+extern "win64" fn RtlGrowFunctionTable(handle: u64, count: u32) {
+    if let Some(t) = DYNAMIC.lock().unwrap().iter_mut().find(|t| t.table == handle) {
+        t.count = t.count.max(count);
+    }
+}
+
+extern "win64" fn RtlDeleteGrowableFunctionTable(handle: u64) {
+    RtlDeleteFunctionTable(handle);
+}
+
 extern "win64" fn RtlDeleteFunctionTable(table: u64) -> u8 {
     let mut d = DYNAMIC.lock().unwrap();
     match d.iter().position(|t| t.table == table) {
@@ -562,6 +588,9 @@ pub fn ntdll_exports() -> Vec<(&'static str, u64)> {
         ("RtlVirtualUnwind", RtlVirtualUnwind as *const () as u64),
         ("RtlAddFunctionTable", RtlAddFunctionTable as *const () as u64),
         ("RtlDeleteFunctionTable", RtlDeleteFunctionTable as *const () as u64),
+        ("RtlAddGrowableFunctionTable", RtlAddGrowableFunctionTable as *const () as u64),
+        ("RtlGrowFunctionTable", RtlGrowFunctionTable as *const () as u64),
+        ("RtlDeleteGrowableFunctionTable", RtlDeleteGrowableFunctionTable as *const () as u64),
         ("RtlPcToFileHeader", RtlPcToFileHeader as *const () as u64),
         ("RtlCaptureContext", RtlCaptureContext as *const () as u64),
         ("RtlCaptureStackBackTrace", RtlCaptureStackBackTrace as *const () as u64),

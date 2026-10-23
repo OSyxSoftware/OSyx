@@ -5,7 +5,7 @@
 use super::*;
 
 /// Reads `buf.len()` bytes from the kernel's random device.
-fn entropy(buf: &mut [u8]) -> bool {
+pub(crate) fn entropy(buf: &mut [u8]) -> bool {
     let Ok(fd) = os_sys::open("/dev/random", osyx_abi::OPEN_READ, 0) else { return false };
     let mut done = 0;
     while done < buf.len() {

@@ -22,7 +22,7 @@ const LCID_EN_US: u32 = 0x0409;
 
 /// The locale a name denotes: Some(true) for en-US, Some(false) for the
 /// invariant locale.
-fn locale(name: *const u16) -> Option<bool> {
+pub(crate) fn locale(name: *const u16) -> Option<bool> {
     // SAFETY: NULL or a NUL-terminated name.
     match unsafe { path::wide_to_string(name) } {
         None => Some(true), // LOCALE_NAME_USER_DEFAULT
@@ -82,6 +82,12 @@ fn compare(a: &[char], b: &[char], ignore_case: bool) -> Ordering {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Compares two NUL-terminated strings in CompareString order.
+pub(crate) fn compare_wide(a: *const u16, b: *const u16, ignore_case: bool) -> Ordering {
+    let (Some(x), Some(y)) = (units(a, -1), units(b, -1)) else { return Ordering::Equal };
+    compare(&chars(&x), &chars(&y), ignore_case)
+}
+
 extern "win64" fn CompareStringEx(
     name: *const u16,
     flags: u32,
@@ -358,7 +364,7 @@ fn locale_info(lctype: u32, en_us: bool) -> Option<String> {
     Some(String::from(s))
 }
 
-extern "win64" fn GetLocaleInfoEx(name: *const u16, lctype: u32, buf: *mut u16, size: i32) -> i32 {
+pub(crate) extern "win64" fn GetLocaleInfoEx(name: *const u16, lctype: u32, buf: *mut u16, size: i32) -> i32 {
     let Some(en_us) = locale(name) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let kind = lctype & !(LOCALE_RETURN_NUMBER | LOCALE_NOUSEROVERRIDE | 0x0400_0000);
     let Some(v) = locale_info(kind, en_us) else { return fail(ERROR_INVALID_FLAGS, 0) };

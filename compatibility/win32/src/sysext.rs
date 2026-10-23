@@ -47,7 +47,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 }
 
 /// SYSTEMTIME: year, month, day of week, day, hour, minute, second, ms.
-fn system_time(ft: u64) -> [u16; 8] {
+pub(crate) fn system_time(ft: u64) -> [u16; 8] {
     let ms_total = ft / 10_000;
     let days = (ms_total / 86_400_000) as i64 - 134_774; // 1601 → 1970
     let ms_day = ms_total % 86_400_000;
@@ -65,7 +65,7 @@ fn system_time(ft: u64) -> [u16; 8] {
     ]
 }
 
-fn now_filetime() -> u64 {
+pub(crate) fn now_filetime() -> u64 {
     kernel32::filetime(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0) as i64)
 }
 
@@ -76,7 +76,7 @@ extern "win64" fn GetSystemTime(out: *mut [u16; 8]) {
     }
 }
 
-extern "win64" fn SystemTimeToFileTime(st: *const [u16; 8], out: *mut u64) -> i32 {
+pub(crate) extern "win64" fn SystemTimeToFileTime(st: *const [u16; 8], out: *mut u64) -> i32 {
     if st.is_null() || out.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -866,6 +866,11 @@ extern "win64" fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
     kernel32::out_w("C:\\Windows", buf, size)
 }
 
+/// One installation, no per-session Windows directory.
+extern "win64" fn GetSystemWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
+    GetWindowsDirectoryW(buf, size)
+}
+
 extern "win64" fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32 {
     // SAFETY: a NUL-terminated string.
     let Some(s) = (unsafe { path::wide_to_string(src) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
@@ -1044,6 +1049,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetProductInfo,
         GetSystemDirectoryW,
         GetWindowsDirectoryW,
+        GetSystemWindowsDirectoryW,
         ExpandEnvironmentStringsW,
         DebugBreak,
         AttachConsole,

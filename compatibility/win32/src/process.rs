@@ -346,7 +346,7 @@ fn local(h: u64) -> Result<(), u32> {
     }
 }
 
-extern "win64" fn QueryFullProcessImageNameW(h: u64, flags: u32, buf: *mut u16, size: *mut u32) -> i32 {
+pub(crate) extern "win64" fn QueryFullProcessImageNameW(h: u64, flags: u32, buf: *mut u16, size: *mut u32) -> i32 {
     if flags & !1 != 0 || size.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }

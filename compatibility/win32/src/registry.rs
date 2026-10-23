@@ -43,6 +43,13 @@ const ERROR_MORE_DATA: u32 = 234;
 const ERROR_UNSUPPORTED_TYPE: u32 = 1630;
 const ERROR_KEY_DELETED: u32 = 1018;
 const ERROR_CHILD_MUST_BE_VOLATILE: u32 = 1021;
+const ERROR_NO_MORE_ITEMS: u32 = 259;
+
+const REG_NOTIFY_CHANGE_NAME: u32 = 0x1;
+const REG_NOTIFY_CHANGE_ATTRIBUTES: u32 = 0x2;
+const REG_NOTIFY_CHANGE_LAST_SET: u32 = 0x4;
+const REG_NOTIFY_CHANGE_SECURITY: u32 = 0x8;
+const REG_NOTIFY_THREAD_AGNOSTIC: u32 = 0x1000_0000;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Hive {
@@ -79,17 +86,51 @@ struct Handle {
     access: u32,
 }
 
+/// A RegNotifyChangeKeyValue request: signals `event` once, on the first
+/// matching change made through this process's registry.
+struct Watch {
+    hive: Hive,
+    /// Lower-case path of the watched key.
+    path: String,
+    subtree: bool,
+    filter: u32,
+    event: u64,
+}
+
 struct Registry {
     hives: [HiveData; 2],
     handles: BTreeMap<u64, Handle>,
     next: u64,
+    watches: Vec<Watch>,
 }
 
 static REG: Mutex<Registry> = Mutex::new(Registry {
     hives: [HiveData { loaded: false, keys: BTreeMap::new() }, HiveData { loaded: false, keys: BTreeMap::new() }],
     handles: BTreeMap::new(),
     next: 0x7000_0000,
+    watches: Vec::new(),
 });
+
+/// Signals the watches a change of `kind` (REG_NOTIFY_CHANGE_*) to key
+/// `path` concerns: watches of the key itself, and subtree watches of its
+/// ancestors. A name change (a key added, removed or renamed) is also a
+/// change of the parent key.
+fn changed(r: &mut Registry, hive: Hive, path: &str, kind: u32) {
+    let lower = path.to_lowercase();
+    let parent = lower.rsplit_once('\\').map_or(String::new(), |(p, _)| String::from(p));
+    let hit = |w: &Watch| {
+        if w.hive != hive || w.filter & kind == 0 {
+            return false;
+        }
+        let under = w.path.is_empty() || lower == w.path || lower.starts_with(&format!("{}\\", w.path));
+        lower == w.path || (kind == REG_NOTIFY_CHANGE_NAME && parent == w.path) || (w.subtree && under)
+    };
+    let (fire, keep): (Vec<Watch>, Vec<Watch>) = core::mem::take(&mut r.watches).into_iter().partition(|w| hit(w));
+    r.watches = keep;
+    for w in fire {
+        crate::kernel32::set_event(w.event);
+    }
+}
 
 fn hive_file(h: Hive) -> (String, String) {
     match h {
@@ -327,6 +368,7 @@ extern "win64" fn RegCreateKeyExW(
                 return e;
             }
         }
+        changed(&mut r, hive, &path, REG_NOTIFY_CHANGE_NAME);
     }
     let h = new_handle(&mut r, hive, path, grant(sam));
     // SAFETY: the caller's out pointers.
@@ -510,10 +552,14 @@ extern "win64" fn RegSetValueExW(hkey: u64, name: *const u16, _reserved: u32, ki
     let key = d.keys.get_mut(&path.to_lowercase()).expect("resolved key exists");
     let old = key.values.insert(name.to_lowercase(), Value { name: name.clone(), kind, data: bytes });
     if key.volatile {
+        changed(&mut r, hive, &path, REG_NOTIFY_CHANGE_LAST_SET);
         return ERROR_SUCCESS;
     }
     match save(hive, d) {
-        Ok(()) => ERROR_SUCCESS,
+        Ok(()) => {
+            changed(&mut r, hive, &path, REG_NOTIFY_CHANGE_LAST_SET);
+            ERROR_SUCCESS
+        }
         Err(e) => {
             let key = d.keys.get_mut(&path.to_lowercase()).expect("resolved key exists");
             match old {
@@ -540,10 +586,14 @@ extern "win64" fn RegDeleteValueW(hkey: u64, name: *const u16) -> u32 {
     let key = d.keys.get_mut(&path.to_lowercase()).expect("resolved key exists");
     let Some(old) = key.values.remove(&name) else { return ERROR_FILE_NOT_FOUND };
     if key.volatile {
+        changed(&mut r, hive, &path, REG_NOTIFY_CHANGE_LAST_SET);
         return ERROR_SUCCESS;
     }
     match save(hive, d) {
-        Ok(()) => ERROR_SUCCESS,
+        Ok(()) => {
+            changed(&mut r, hive, &path, REG_NOTIFY_CHANGE_LAST_SET);
+            ERROR_SUCCESS
+        }
         Err(e) => {
             d.keys.get_mut(&path.to_lowercase()).expect("resolved key exists").values.insert(name, old);
             e
@@ -578,10 +628,14 @@ extern "win64" fn RegDeleteKeyW(hkey: u64, sub: *const u16) -> u32 {
     }
     let old = d.keys.remove(&lower).expect("checked");
     if old.volatile {
+        changed(&mut r, hive, &path, REG_NOTIFY_CHANGE_NAME);
         return ERROR_SUCCESS;
     }
     match save(hive, d) {
-        Ok(()) => ERROR_SUCCESS,
+        Ok(()) => {
+            changed(&mut r, hive, &path, REG_NOTIFY_CHANGE_NAME);
+            ERROR_SUCCESS
+        }
         Err(e) => {
             d.keys.insert(lower, old);
             e
@@ -590,6 +644,355 @@ extern "win64" fn RegDeleteKeyW(hkey: u64, sub: *const u16) -> u32 {
 }
 
 const ERROR_NOACCESS: u32 = 998;
+
+/// The direct subkeys of `path` (lower-case), in name order.
+fn children<'a>(d: &'a HiveData, path: &str) -> Vec<&'a Key> {
+    let lower = path.to_lowercase();
+    let prefix = if lower.is_empty() { String::new() } else { format!("{lower}\\") };
+    d.keys.iter().filter(|(k, _)| !k.is_empty() && k.starts_with(&prefix) && !k[prefix.len()..].contains('\\')).map(|(_, v)| v).collect()
+}
+
+fn last_component(name: &str) -> &str {
+    name.rsplit('\\').next().unwrap_or(name)
+}
+
+/// Copies a name into a WCHAR buffer of `*len` units: on success `*len`
+/// is its length without the NUL, else ERROR_MORE_DATA.
+fn name_out(s: &str, buf: *mut u16, len: *mut u32) -> u32 {
+    if len.is_null() || buf.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let units: Vec<u16> = s.encode_utf16().collect();
+    // SAFETY: the caller's in/out length and buffer of that many units.
+    unsafe {
+        if (*len as usize) <= units.len() {
+            return ERROR_MORE_DATA;
+        }
+        core::ptr::copy_nonoverlapping(units.as_ptr(), buf, units.len());
+        *buf.add(units.len()) = 0;
+        *len = units.len() as u32;
+    }
+    ERROR_SUCCESS
+}
+
+/// Subkeys in name order. Classes and write times are not kept: the class
+/// is empty and the time is zero.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn RegEnumKeyExW(
+    hkey: u64,
+    index: u32,
+    name: *mut u16,
+    name_len: *mut u32,
+    reserved: *const u32,
+    class: *mut u16,
+    class_len: *mut u32,
+    written: *mut u64,
+) -> u32 {
+    if !reserved.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let mut r = REG.lock().unwrap();
+    let (hive, path, access) = match resolve(&mut r, hkey) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if access & 0x8 == 0 {
+        return ERROR_ACCESS_DENIED; // KEY_ENUMERATE_SUB_KEYS
+    }
+    let kids = children(&r.hives[hive as usize], &path);
+    let Some(k) = kids.get(index as usize) else { return ERROR_NO_MORE_ITEMS };
+    let e = name_out(last_component(&k.name), name, name_len);
+    if e != ERROR_SUCCESS {
+        return e;
+    }
+    // SAFETY: the caller's optional out pointers.
+    unsafe {
+        if !class.is_null() && !class_len.is_null() && *class_len > 0 {
+            *class = 0;
+            *class_len = 0;
+        }
+        if !written.is_null() {
+            *written = 0;
+        }
+    }
+    ERROR_SUCCESS
+}
+
+/// Values in name order (Windows keeps insertion order; neither is
+/// documented).
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn RegEnumValueW(
+    hkey: u64,
+    index: u32,
+    name: *mut u16,
+    name_len: *mut u32,
+    reserved: *const u32,
+    kind: *mut u32,
+    data: *mut u8,
+    data_len: *mut u32,
+) -> u32 {
+    if !reserved.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let mut r = REG.lock().unwrap();
+    let (hive, path, access) = match resolve(&mut r, hkey) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if access & KEY_QUERY_VALUE == 0 {
+        return ERROR_ACCESS_DENIED;
+    }
+    let key = r.hives[hive as usize].keys.get(&path.to_lowercase()).expect("resolved key exists");
+    let Some(v) = key.values.values().nth(index as usize).cloned() else { return ERROR_NO_MORE_ITEMS };
+    drop(r);
+    let e = name_out(&v.name, name, name_len);
+    if e != ERROR_SUCCESS {
+        return e;
+    }
+    if !kind.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *kind = v.kind };
+    }
+    copy_out(&v.data, data, data_len)
+}
+
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn RegQueryInfoKeyW(
+    hkey: u64,
+    class: *mut u16,
+    class_len: *mut u32,
+    reserved: *const u32,
+    subkeys: *mut u32,
+    max_subkey: *mut u32,
+    max_class: *mut u32,
+    values: *mut u32,
+    max_value_name: *mut u32,
+    max_value: *mut u32,
+    security: *mut u32,
+    written: *mut u64,
+) -> u32 {
+    if !reserved.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let mut r = REG.lock().unwrap();
+    let (hive, path, _) = match resolve(&mut r, hkey) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let d = &r.hives[hive as usize];
+    let kids = children(d, &path);
+    let key = d.keys.get(&path.to_lowercase()).expect("resolved key exists");
+    let put = |p: *mut u32, v: usize| {
+        if !p.is_null() {
+            // SAFETY: the caller's out pointer.
+            unsafe { *p = v as u32 };
+        }
+    };
+    if !class.is_null() && !class_len.is_null() {
+        // SAFETY: as above; the class is empty.
+        unsafe {
+            if *class_len > 0 {
+                *class = 0;
+            }
+        }
+    }
+    put(class_len, 0);
+    put(subkeys, kids.len());
+    put(max_subkey, kids.iter().map(|k| last_component(&k.name).encode_utf16().count()).max().unwrap_or(0));
+    put(max_class, 0);
+    put(values, key.values.len());
+    put(max_value_name, key.values.values().map(|v| v.name.encode_utf16().count()).max().unwrap_or(0));
+    put(max_value, key.values.values().map(|v| v.data.len()).max().unwrap_or(0));
+    put(security, 0);
+    if !written.is_null() {
+        // SAFETY: the caller's FILETIME.
+        unsafe { *written = 0 };
+    }
+    ERROR_SUCCESS
+}
+
+/// Deletes `sub` and everything below it; with no `sub`, the subkeys and
+/// values of the key itself (which stays).
+extern "win64" fn RegDeleteTreeW(hkey: u64, sub: *const u16) -> u32 {
+    let mut r = REG.lock().unwrap();
+    let (hive, base, access) = match resolve(&mut r, hkey) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    // SAFETY: the caller's string.
+    let sub = unsafe { ws(sub) };
+    let path = match join(&base, &sub) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let lower = path.to_lowercase();
+    let d = &mut r.hives[hive as usize];
+    if !d.keys.contains_key(&lower) {
+        return ERROR_FILE_NOT_FOUND;
+    }
+    if sub.is_empty() && access & KEY_SET_VALUE == 0 {
+        return ERROR_ACCESS_DENIED;
+    }
+    let before = d.keys.clone();
+    let prefix = format!("{lower}\\");
+    d.keys.retain(|k, _| !(k.starts_with(&prefix) || (!sub.is_empty() && *k == lower) || (lower.is_empty() && !k.is_empty())));
+    if sub.is_empty() {
+        if let Some(k) = d.keys.get_mut(&lower) {
+            k.values.clear();
+        }
+    }
+    if let Err(e) = save(hive, d) {
+        d.keys = before;
+        return e;
+    }
+    changed(&mut r, hive, &path, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET);
+    ERROR_SUCCESS
+}
+
+/// Opens `sub` of `hkey` for a single value operation.
+fn sub_key(hkey: u64, sub: *const u16, sam: u32, create: bool) -> Result<(u64, bool), u32> {
+    // SAFETY: the caller's string.
+    if unsafe { path::wide_to_string(sub) }.is_none_or(|s| s.is_empty()) {
+        return Ok((hkey, false));
+    }
+    let mut h = 0u64;
+    let e = if create {
+        RegCreateKeyExW(hkey, sub, 0, core::ptr::null(), 0, sam, 0, &mut h, core::ptr::null_mut())
+    } else {
+        RegOpenKeyExW(hkey, sub, 0, sam, &mut h)
+    };
+    if e != ERROR_SUCCESS {
+        return Err(e);
+    }
+    Ok((h, true))
+}
+
+extern "win64" fn RegDeleteKeyValueW(hkey: u64, sub: *const u16, name: *const u16) -> u32 {
+    let (h, opened) = match sub_key(hkey, sub, KEY_SET_VALUE, false) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let e = RegDeleteValueW(h, name);
+    if opened {
+        RegCloseKey(h);
+    }
+    e
+}
+
+/// Creates `sub` when it does not exist, as Windows does.
+extern "win64" fn RegSetKeyValueW(hkey: u64, sub: *const u16, name: *const u16, kind: u32, data: *const u8, size: u32) -> u32 {
+    let (h, opened) = match sub_key(hkey, sub, KEY_SET_VALUE, true) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let e = RegSetValueExW(h, name, 0, kind, data, size);
+    if opened {
+        RegCloseKey(h);
+    }
+    e
+}
+
+/// Renames `sub` (or the key itself) and all its descendants.
+extern "win64" fn RegRenameKey(hkey: u64, sub: *const u16, new_name: *const u16) -> u32 {
+    let mut r = REG.lock().unwrap();
+    let (hive, base, _) = match resolve(&mut r, hkey) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    // SAFETY: the caller's strings.
+    let (sub, new) = unsafe { (ws(sub), ws(new_name)) };
+    if new.is_empty() || new.contains('\\') {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let old_path = match join(&base, &sub) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if old_path.is_empty() {
+        return ERROR_ACCESS_DENIED; // a hive root
+    }
+    let new_path = match old_path.rsplit_once('\\') {
+        Some((parent, _)) => format!("{parent}\\{new}"),
+        None => new.clone(),
+    };
+    let (old_l, new_l) = (old_path.to_lowercase(), new_path.to_lowercase());
+    let d = &mut r.hives[hive as usize];
+    if !d.keys.contains_key(&old_l) {
+        return ERROR_FILE_NOT_FOUND;
+    }
+    if d.keys.contains_key(&new_l) {
+        return ERROR_ACCESS_DENIED;
+    }
+    let before = d.keys.clone();
+    let moved: Vec<(String, Key)> = d
+        .keys
+        .iter()
+        .filter(|(k, _)| **k == old_l || k.starts_with(&format!("{old_l}\\")))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (k, mut v) in moved {
+        d.keys.remove(&k);
+        let rest = &v.name[old_path.len()..];
+        v.name = format!("{new_path}{rest}");
+        d.keys.insert(v.name.to_lowercase(), v);
+    }
+    if let Err(e) = save(hive, d) {
+        d.keys = before;
+        return e;
+    }
+    // Open handles follow the key.
+    for h in r.handles.values_mut().filter(|h| h.hive == hive) {
+        let l = h.path.to_lowercase();
+        if l == old_l || l.starts_with(&format!("{old_l}\\")) {
+            h.path = format!("{new_path}{}", &h.path[old_path.len()..]);
+        }
+    }
+    changed(&mut r, hive, &old_path, REG_NOTIFY_CHANGE_NAME);
+    ERROR_SUCCESS
+}
+
+/// Kernel Transaction Manager transactions are not available (see
+/// ktmw32), so no transacted key can be created.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn RegCreateKeyTransactedW(
+    _hkey: u64,
+    _sub: *const u16,
+    _reserved: u32,
+    _class: *const u16,
+    _options: u32,
+    _sam: u32,
+    _attributes: u64,
+    _out: *mut u64,
+    _disposition: *mut u32,
+    _transaction: u64,
+    _extended: u64,
+) -> u32 {
+    ERROR_NOT_SUPPORTED
+}
+
+/// Changes made by this process signal the event (asynchronous form) or
+/// end the wait (synchronous form). Changes another process makes to the
+/// hive files are not observed.
+extern "win64" fn RegNotifyChangeKeyValue(hkey: u64, subtree: i32, filter: u32, event: u64, asynchronous: i32) -> u32 {
+    let all = REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_ATTRIBUTES | REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_SECURITY;
+    if filter & !(all | REG_NOTIFY_THREAD_AGNOSTIC) != 0 || filter & all == 0 || (asynchronous != 0 && event == 0) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let wait_on = if asynchronous != 0 { event } else { crate::kernel32::new_event(false, false) };
+    {
+        let mut r = REG.lock().unwrap();
+        let (hive, path, _) = match resolve(&mut r, hkey) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        r.watches.push(Watch { hive, path: path.to_lowercase(), subtree: subtree != 0, filter, event: wait_on });
+    }
+    if asynchronous == 0 {
+        let _ = crate::objects::wait(&[wait_on], false, u32::MAX);
+        crate::objects::close(wait_on);
+    }
+    ERROR_SUCCESS
+}
 
 /// HKEY_CURRENT_USER is resolved on every use and never cached: a thread
 /// can only impersonate a token of the process's own user (tokens.rs), so
@@ -613,6 +1016,15 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RegDeleteValueW,
         RegDeleteKeyW,
         RegDisablePredefinedCache,
-        RegDisablePredefinedCacheEx
+        RegDisablePredefinedCacheEx,
+        RegEnumKeyExW,
+        RegEnumValueW,
+        RegQueryInfoKeyW,
+        RegDeleteTreeW,
+        RegDeleteKeyValueW,
+        RegSetKeyValueW,
+        RegRenameKey,
+        RegCreateKeyTransactedW,
+        RegNotifyChangeKeyValue,
     ]
 }

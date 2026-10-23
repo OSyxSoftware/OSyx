@@ -421,6 +421,11 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
 
 /// An existing named event or mutex (names are per process here: OSyx
 /// has no cross-process Win32 object namespace).
+/// The first open object that satisfies `f`.
+pub fn find(f: impl Fn(&Object) -> bool) -> Option<Object> {
+    TABLE.lock().unwrap().map.values().find(|o| f(o)).cloned()
+}
+
 pub fn find_named(name: &str) -> Option<Object> {
     let t = TABLE.lock().unwrap();
     t.map
