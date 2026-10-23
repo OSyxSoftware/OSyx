@@ -52,6 +52,7 @@ UEFI firmware (OVMF)
 | Filesystem (FAT32, VFS) | Planned | Not tested |
 | ACPI, APIC, PCI, drivers | Planned | Not tested |
 | C++23 components | Planned (no current need) | Not tested |
-| PE32+ parser / loader | Planned | Not tested |
+| PE32+ parser | Implemented (headers, sections, imports, exports, relocations, TLS, exception data) | host: fixtures, malformed, fuzz-style robustness; System32 sweep |
+| PE32+ loader | Planned | Not tested |
 | NT / Win32 compatibility | Planned | Not tested |
 | Windows 11 reverse-engineering research | Deferred by request | Not started |

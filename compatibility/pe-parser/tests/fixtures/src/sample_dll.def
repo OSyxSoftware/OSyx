@@ -1,0 +1,8 @@
+LIBRARY sample.dll
+EXPORTS
+    add_numbers
+    bump_counter
+    checksum
+    ordinal_only @7 NONAME
+    forwarded_tick = kernel32.GetTickCount
+    forwarded_by_ordinal = kernel32.#42

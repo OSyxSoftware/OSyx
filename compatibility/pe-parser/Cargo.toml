@@ -1,0 +1,8 @@
+[package]
+name = "osyx-pe"
+description = "Bounds-checked, zero-copy PE32+ (Windows x64 executable) parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

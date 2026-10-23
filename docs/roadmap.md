@@ -9,7 +9,7 @@ Status of the milestones from the project brief.
 | 3 | Kernel boot (serial, panic, CPU init, exceptions) | Done |
 | 4 | Memory subsystem (frames, paging, heap) | Done |
 | 5 | Initial OSyx Std | Done (convenience std; real `std` port planned) |
-| 6 | PE32+ parser | Not started |
+| 6 | PE32+ parser | Done (host tested; loader not started) |
 | 7 | User-space foundations (ring 3, syscalls, exit, console) | Done |
 | 7b | Scheduler, kernel threads, preemption, FPU state, spawn/wait | Done (single CPU) |
 | 7c | Threads per process, futexes, FS-base TLS, OSyx Std `thread`/`Mutex`/`Condvar` | Done (single CPU) |
@@ -17,18 +17,16 @@ Status of the milestones from the project brief.
 
 ## Next steps (in order)
 
-1. **More OSyx Std sync**: `RwLock`, `Once`/`OnceLock`, `mpsc` channels;
-   per-thread output line buffers in the kernel.
-2. **Local APIC + ACPI (MADT)**: replace PIC/PIT; then SMP bring-up and
-   per-CPU data with `swapgs`.
-3. **Storage**: PCI enumeration, virtio-blk driver, block layer, FAT32, VFS,
-   file handles; OSyx Std `fs`.
-4. **PE32+ parser** (`compatibility/pe-parser`): bounds-checked headers,
-   sections, imports, exports, relocations, TLS, exception directory; host
-   tests with locally compiled binaries and malformed inputs.
-5. **Windows 11 research with REA**: deferred by request; restart with the
+1. **PE loader milestone 1**: map a minimal PE32+ with no imports into a
+   user address space (relocations, section permissions) and run it.
+2. **Windows 11 research with REA**: deferred by request; restart with the
    PE loader behaviour questions (import resolution, relocations, TLS).
-6. **PE loader milestone 1**: map and run a minimal PE32+ with no imports.
-7. **OSyx Std**: threads, sync, fs, path; then the genuine `std` port
-   ([rust-std.md](rust-std.md)).
-8. **Input**: PS/2 or virtio keyboard, a text console and a shell.
+3. **PE loader milestone 2**: `hello.exe` against a minimal in-tree kernel32
+   (`GetStdHandle`, `WriteFile`, `GetLastError`, `ExitProcess`).
+4. **Storage**: PCI enumeration, virtio-blk driver, block layer, FAT32, VFS,
+   file handles; OSyx Std `fs`.
+5. **Local APIC + ACPI (MADT)**: replace PIC/PIT; then SMP bring-up and
+   per-CPU data with `swapgs`.
+6. **More OSyx Std**: `RwLock`, `Once`/`OnceLock`, `mpsc`, `fs`, `path`; then
+   the genuine `std` port ([rust-std.md](rust-std.md)).
+7. **Input**: PS/2 or virtio keyboard, a text console and a shell.

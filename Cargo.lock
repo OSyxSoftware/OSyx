@@ -60,6 +60,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "osyx-pe"
+version = "0.1.0"
+
+[[package]]
 name = "osyx-uefi-loader"
 version = "0.1.0"
 dependencies = [

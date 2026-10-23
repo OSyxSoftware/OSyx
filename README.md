@@ -22,6 +22,11 @@ compatibility layer; that work has not started yet (see
   heap, time, args, `process::Command`, `thread::spawn`, `thread_local!`,
   `Mutex`, `Condvar`, panics): `init` runs 37 checks using `worker` children.
 
+- Windows compatibility groundwork: a bounds-checked, zero-copy PE32+ parser
+  (headers, sections, imports, exports with forwarders, relocations, TLS,
+  exception data), tested on local fixtures, malformed and mutated inputs,
+  and swept without a single panic over the 4 372 files of `System32`.
+
 ## Quick start (Windows 11 host)
 
 ```powershell
@@ -40,6 +45,7 @@ compatibility layer; that work has not started yet (see
 | `boot/elf` | bounds-checked ELF64 validation (kernel and user policies) |
 | `boot/assets` | generated logo/font assets (`scripts/gen-assets.py`) |
 | `kernel` | the kernel; `kernel/mm` holds host-tested memory algorithms |
+| `compatibility/pe-parser` | PE32+ parser (`osyx-pe`), fixtures, `pe-dump` / `pe-sweep` tools |
 | `shared/bootinfo`, `shared/abi` | boot protocol and system call ABI |
 | `runtime/os-sys`, `runtime/os-std` | raw system calls, OSyx Std |
 | `userspace/apps` | user programs `init` and `worker` (`\EFI\OSYX\BIN\`) |

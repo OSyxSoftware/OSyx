@@ -7,3 +7,6 @@
 *.bmp binary
 *.ico binary
 *.png binary
+# PE fixtures (built locally from tests/fixtures/src)
+*.exe binary
+*.dll binary

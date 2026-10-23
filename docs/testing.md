@@ -17,7 +17,7 @@ ESP as a read-only virtio FAT disk (`fat:build/esp`), COM1 to a log file and
 
 | Test | Checks |
 |---|---|
-| host unit tests | `cargo test` for abi, bootinfo, gfx, elf, mm, os-sys, os-std |
+| host unit tests | `cargo test` for abi, bootinfo, gfx, elf, pe, mm, os-sys, os-std (the PE parser adds fixture, malformed-input and mutation tests) |
 | clippy | `-D warnings` for host crates, loader (UEFI), kernel and user crates |
 | QEMU boot + kernel self-tests | boot stages, 15 in-kernel tests (incl. preemption, sleep/join, FPU, FS base), exit 33 |
 | ring-3 init checks | 37 user checks: OSyx Std, syscall validation, spawn/wait, zombies, orphans, sleep, FPU, threads, Mutex/Condvar, futex, TLS, exit with blocked threads, faults/panics in threads |
@@ -39,6 +39,29 @@ close to deterministic here, so repeated boots do not stress the scheduler
 with different interleavings; the host tests of OSyx Std's `Mutex`,
 `Condvar` and threads run on real parallel host threads. The suite takes
 about 3 minutes.
+
+## PE32+ parser corpus sweep
+
+`pe-sweep` (release build with `-C overflow-checks=on`) over the read-only
+Windows 11 build 26300 directories of the development host. Files are only
+read; nothing is copied into the repository.
+
+| Directory | Files | Parsed | Rejected | Panics | Table errors |
+|---|---|---|---|---|---|
+| `System32` | 4372 | 4333 | 39 PE32 (32-bit) | 0 | 0 |
+| `System32\drivers` | 467 | 466 | 1 PE32 | 0 | 4: `.pdata` with begin > end in four VirtualBox drivers (confirmed in the files with an independent script) |
+| `SysWOW64` | 2746 | 3 | 2737 PE32, 6 16-bit NE files | 0 | 0 |
+
+In System32 the sweep walked 648 074 imports from 98 040 import
+descriptors, 319 142 exports (4 974 forwarders, every name and ordinal
+looked up again), 8 942 918 base relocations, 154 TLS callbacks and
+5 117 656 runtime functions with their unwind headers.
+
+The first sweep found three parser defects, now fixed and covered by
+regression tests: names longer than the original 512-byte limit (C++
+decorated exports of up to 699 bytes; limit raised to 4096), zero-length
+`RUNTIME_FUNCTION` entries (`symcryptk.dll`), and empty unwind-code arrays
+ending exactly at a section's file data (kernel-mode modules).
 
 ## Not covered yet
 
