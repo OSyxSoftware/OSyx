@@ -40,6 +40,7 @@ $programs = [ordered]@{
     'version.exe' = @{ Src = @('version.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', $versionObj, '-lversion', '-lkernel32') }
     'synch.exe' = @{ Src = @('synch.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32', '-lsynchronization') }
     'security.exe' = @{ Src = @('security.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ladvapi32', '-lkernel32') }
+    'exceptions.exe' = @{ Src = @('exceptions.c'); Args = @('-fasynchronous-unwind-tables', '-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'hello.exe'   = @{ Src = @('hello.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'fileio.exe'  = @{ Src = @('fileio.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'threads.exe' = @{ Src = @('threads.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
@@ -50,7 +51,7 @@ $programs = [ordered]@{
 }
 foreach ($name in $programs.Keys) {
     $p = $programs[$name]
-    $inputs = @($p.Src | ForEach-Object { Join-Path $src $_ }) + @("$src\common.h")
+    $inputs = @($p.Src | ForEach-Object { Join-Path $src $_ }) + @("$src\common.h", (Join-Path $PSScriptRoot 'build-wintests.ps1'))
     if ($name -eq 'version.exe') { $inputs += $versionObj }
     $target = Join-Path $out $name
     if (Stale $target $inputs) {

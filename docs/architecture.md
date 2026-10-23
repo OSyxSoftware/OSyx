@@ -41,6 +41,7 @@ UEFI firmware (OVMF)
 | BootInfo protocol v3 (boot modules) | Implemented | host layout tests, QEMU |
 | Kernel early init (GDT/TSS/IDT, serial, panic) | Implemented | QEMU |
 | Exception diagnostics (#PF/#GP/#UD/#DE) | Implemented | QEMU fault tests |
+| Resumable user faults and Win64 vectored exception callbacks | Implemented subset; [protocol and limits](user-exceptions.md) | Native CPU/SSE/security checks and same PE fixture on Windows/QEMU |
 | Frame allocator, paging, kernel heap | Implemented | host + in-kernel tests |
 | Timer interrupts (PIC/PIT) | Implemented | in-kernel test |
 | Framebuffer status screen | Implemented | QEMU screenshot |

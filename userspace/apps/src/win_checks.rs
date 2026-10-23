@@ -23,6 +23,9 @@ fn run(exe: &str, args: &[&str]) -> Option<i32> {
 }
 
 pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
+    t.check("native CPU fault delivery and safe context resumption", || {
+        Command::new("worker").arg("fault-checks").status().is_ok_and(|s|s.success())
+    });
     if fs::metadata(DIR).is_err() {
         println!("win: {DIR} is missing (the Windows test programs were not built)");
         t.check("Windows test programs installed", || false);
@@ -35,6 +38,7 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("Windows file I/O on OSyx file systems (target C)", || run("fileio.exe", &[]) == Some(0));
     t.check("Windows volume, device and adapter inventory", || run("sysadmin.exe", &[]) == Some(0));
     t.check("Windows file version resources and queries", || run("version.exe", &[]) == Some(0));
+    t.check("Windows vectored hardware exceptions and context resumption", || run("exceptions.exe", &[]) == Some(0));
     t.check("Windows SID ACL descriptor and token data", || run("security.exe", &[]) == Some(0));
     t.check("Windows tokens follow native uid after dropping root", || {
         Command::new("worker").args(["exec-as", "1000", "/bin/winrun", "/opt/wintests/security.exe"])

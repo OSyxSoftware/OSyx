@@ -553,7 +553,7 @@ extern "win64" fn RtlGetVersion(info: *mut u8) -> NtStatus {
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![
+    let mut exports=export_table![
         NtCreateFile,
         NtOpenFile,
         NtReadFile,
@@ -578,5 +578,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RtlSetLastWin32Error,
         RtlGetCurrentPeb,
         RtlGetVersion,
-    ]
+    ];
+    exports.extend(crate::exceptions::native_exports());
+    exports
 }

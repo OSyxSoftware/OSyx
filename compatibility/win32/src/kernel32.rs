@@ -159,21 +159,11 @@ extern "win64" fn OutputDebugStringW(s: *const u16) {
     }
 }
 
-static UNHANDLED_FILTER: AtomicU64 = AtomicU64::new(0);
-
-/// Stored and returned like on Windows; OSyx has no structured exception
-/// dispatch yet, so a fault still ends the process without calling it.
 extern "win64" fn SetUnhandledExceptionFilter(f: u64) -> u64 {
-    UNHANDLED_FILTER.swap(f, Ordering::Relaxed)
+    crate::exceptions::set_filter(f)
 }
 
-extern "win64" fn RaiseException(code: u32, flags: u32, nargs: u32, _args: *const u64) {
-    os_std::eprintln!(
-        "winrun: RaiseException({code:#x}, flags {flags:#x}, {nargs} arguments): no SEH dispatch on OSyx; terminating"
-    );
-    loader::notify_process_detach();
-    os_std::process::exit(code as i32);
-}
+use crate::exceptions::RaiseException;
 
 // ---- console and standard handles ----------------------------------------------
 
@@ -2131,6 +2121,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::synch::exports());
     exports.extend(crate::psapi::kernel_exports());
     exports.extend(crate::timers::exports());
+    exports.extend(crate::exceptions::exports());
     exports.push(("OpenProcessToken",crate::security::OpenProcessToken as *const () as u64));
     exports
 }

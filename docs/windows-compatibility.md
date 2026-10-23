@@ -24,7 +24,8 @@ DIR64 relocations, resolves named/ordinal imports and export forwarders,
 maps the implemented API set contracts, builds PEB/TEB and TLS state, runs
 DLL/TLS initializers, then calls the entry using the Windows x64 ABI. GS
 holds each Windows thread's TEB and is switched by the kernel. FS remains
-available to the OSyx runtime. A program fault terminates its OSyx process.
+available to the OSyx runtime. Supported exceptions may resume through a
+registered vectored handler; unhandled faults terminate the OSyx process.
 
 The built-in system DLLs take precedence over DLL files; other DLLs are
 searched beside the executable and in the current directory. Missing DLLs
@@ -44,6 +45,7 @@ and symbols produce a loader diagnostic before the entry point executes.
 | kernel32 waitable timers | Manual/automatic reset, relative/absolute deadlines, periodic timers, cancellation and object waits, using OSyx clocks/futexes |
 | kernel32 / psapi | K32EnumProcessModules/Ex and EnumProcessModules/Ex report actual modules of the current process with byte-capacity checks |
 | advapi32 / security-base | SID construction/copy/equality, common well-known SIDs, bounded ACL/ACE building and validation, absolute security-descriptor setters and absolute/self-relative getters; query-only process identity tokens |
+| kernel32 / ntdll exception callbacks | Vectored hardware exceptions and continue handlers, top-level filter and continuable RaiseException; real Win64 CONTEXT integer/control/x87/SSE state over native CPU fault delivery |
 
 SetupAPI rejects unsupported properties (including registry driver-service
 information); it does not install drivers or fabricate driver names.
@@ -89,6 +91,9 @@ their own assertions and the host TCP/UDP echo server's log:
 - `security.exe`: independently encoded SID/ACE/descriptor fields, bounds
   and error paths, self-relative offsets, token sizes/pointers, query rights
   and handle lifetimes. Also run after native setuid(1000,1000) and exec.
+- `exceptions.exe`: actual UD2, access faults, divide, INT3, software raise,
+  CONTEXT edits, callback order, independent threads and top-level filter.
+  Native `worker fault-checks` also verifies kernel continuation validation.
 
 `scripts/build-winapps.ps1` builds four GUI applications from
 `compatibility/win32/apps/src`: Text Editor, Disk Utility, Device Manager

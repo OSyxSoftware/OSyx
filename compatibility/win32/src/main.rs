@@ -21,6 +21,7 @@ macro_rules! export_table {
 }
 
 mod error;
+mod exceptions;
 mod iphlpapi;
 mod kernel32;
 mod loader;

@@ -1,4 +1,9 @@
-//! OSyx system call ABI, version 9.
+//! OSyx system call ABI, version 10.
+//!
+//! Version 10 includes device inventory. Compatible optional extensions add
+//! resumable user exception delivery (FAULT_HANDLER/FAULT_RETURN); an older
+//! kernel rejects these calls with NotSupported. Existing call numbers and
+//! layouts stay unchanged.
 //!
 //! Version 9 adds what the Windows runtime and VirtIO-GPU need: a
 //! per-thread GS base, page protection changes, placed and aligned
@@ -38,6 +43,7 @@ pub mod ipc;
 pub mod net;
 
 pub const ABI_VERSION: u32 = 10;
+pub mod fault;
 
 /// Highest user virtual address + 1 (the canonical lower half).
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -282,6 +288,13 @@ pub mod nr {
     pub const DISPLAY_SET_MODE: u64 = 75;
     /// `device_list(buf: *mut DeviceInfo, len_bytes) -> bytes`.
     pub const DEVICE_LIST: u64 = 76;
+    /// `fault_handler(entry) -> 0`: register a System V user exception
+    /// entry point receiving `*mut fault::Context`; 0 disables delivery.
+    /// It must finish via FAULT_RETURN or exit. Reset on execve/exit.
+    pub const FAULT_HANDLER: u64 = 77;
+    /// `fault_return(context)`: resume an outstanding exception of this
+    /// thread; success never returns. Invalid addresses/flags are rejected.
+    pub const FAULT_RETURN: u64 = 78;
 }
 
 /// `map_ex` flags.

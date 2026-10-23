@@ -38,6 +38,8 @@ use os_std::sync::atomic::AtomicU32;
 use os_std::time::{Duration, Instant};
 use os_std::fs::{self, File};
 use os_std::{env, thread};
+#[path="../fault_checks.rs"]
+mod fault_checks;
 
 #[path = "../fpu.rs"]
 mod fpu;
@@ -186,6 +188,8 @@ fn main() -> i32 {
             (cwd.ok().as_deref().map(|p| p.as_str()) != args.get(2).map(String::as_str)) as i32
         }
         Some("as-user") => as_user(arg_num(&args, 2) as u32),
+        Some("fault-checks")=>fault_checks::run(),
+        Some(mode @ ("fault-no-handler"|"fault-exec-reset"|"fault-nested"|"fault-bad-stack"))=>fault_checks::helper(mode),
         Some("exec-as") => {
             let (Some(uid),Some(program))=(args.get(2).and_then(|s|s.parse::<u32>().ok()),args.get(3)) else {return 2};
             if os_std::os::setuid(uid,uid).is_err() {return 1;}

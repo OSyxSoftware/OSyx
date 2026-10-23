@@ -350,6 +350,23 @@ mod imp {
         let v = syscall0(nr::GETUID);
         (v as u32, (v >> 32) as u32)
     }
+    /// Installs/disables the process-wide CPU exception entry point.
+    ///
+    /// # Safety
+    /// A nonzero entry must be a live System V `fn(*mut fault::Context)->!`
+    /// for the registration lifetime and must obey the fault return ABI.
+    pub unsafe fn fault_handler(entry: u64) -> Result<(),Errno> {
+        decode(syscall1(nr::FAULT_HANDLER,entry)).map(|_|())
+    }
+    /// Resumes the current thread's outstanding exception. On success
+    /// control transfers to the supplied user context rather than returning.
+    ///
+    /// # Safety
+    /// The context must describe a valid continuation of this program,
+    /// including its stack, register invariants and floating-point state.
+    pub unsafe fn fault_return(context: &osyx_abi::fault::Context) -> Result<(),Errno> {
+        decode(syscall1(nr::FAULT_RETURN,context as *const _ as u64)).map(|_|())
+    }
 
     /// Changes identity (root only, permanent for this process and its children).
     pub fn setuid(uid: u32, gid: u32) -> Result<(), Errno> {

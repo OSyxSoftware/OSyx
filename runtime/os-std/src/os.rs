@@ -63,6 +63,8 @@ pub use osyx_abi::auxv;
 /// Low-level system call access for tests and runtime code.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod raw {
+    pub use os_sys::{fault_handler,fault_return};
+    pub use osyx_abi::fault;
     pub use os_sys::{
         close, exec_raw, execve, futex_wait, futex_wake, gettid, map, map_ex, nr, open, protect, raw_syscall, read, read_raw,
         set_gs_base, spawn, sysinfo_raw, thread_exit, unmap, wait_raw, write, write_raw, Errno, ExecArgs, ABI_VERSION,

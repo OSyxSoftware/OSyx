@@ -50,6 +50,7 @@ mod storage;
 mod sync;
 mod sys_objects;
 mod syscall;
+mod user_fault;
 mod time;
 mod vfs;
 mod waitq;

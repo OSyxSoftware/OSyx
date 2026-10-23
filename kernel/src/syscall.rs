@@ -254,6 +254,8 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::MAP_EX => process::map_ex(f.rdi, f.rsi, f.rdx, f.r10),
         nr::DISPLAY_FLUSH => sys_objects::display_flush(f.rdi, f.rsi, f.rdx, f.r10),
         nr::DISPLAY_SET_MODE => sys_objects::display_set_mode(f.rdi, f.rsi),
+        nr::FAULT_HANDLER => crate::user_fault::register(f.rdi),
+        nr::FAULT_RETURN => crate::user_fault::resume(f.rdi),
         _ => Err(Errno::NotSupported),
     };
     // Safe point: a thread whose process is exiting ends here instead of

@@ -551,6 +551,7 @@ pub fn exec_current(req: ExecRequest) -> ExecError {
     sched::set_current_fs_base(0);
     sched::set_current_gs_base(0);
     sched::reset_current_fpu();
+    crate::user_fault::clear_process(pid);
     unmap_shared_from(space.root, old_shared);
     // SAFETY: the old space is no longer active anywhere.
     let r = unsafe { space.release() };
@@ -641,6 +642,7 @@ pub fn finish_current_thread(code: i32) -> ! {
     cpu::disable_interrupts();
     let pid = sched::current_pid();
     let me = sched::current_tid();
+    crate::user_fault::clear_thread(pid,me);
     let last = {
         let mut t = TABLE.lock();
         let p = t.procs.get_mut(&pid).expect("current process exists");
@@ -651,6 +653,7 @@ pub fn finish_current_thread(code: i32) -> ! {
     if !last {
         sched::exit_current();
     }
+    crate::user_fault::clear_process(pid);
     // Leave the process address space before destroying it.
     // SAFETY: the kernel root maps everything the kernel needs.
     unsafe { cpu::write_cr3(paging::kernel_root()) };

@@ -80,7 +80,9 @@ pub fn monotonic_ns() -> u64 {
 extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     let from_user = f.cs & 3 == 3;
     match f.vector {
-        0..=31 if from_user => kill_process(f),
+        0..=31 if from_user => {
+            if !crate::user_fault::deliver(f) {kill_process(f);}
+        },
         3 => {
             BREAKPOINTS.fetch_add(1, Ordering::Relaxed);
             kprintln!("breakpoint at {:#x}", f.rip);
