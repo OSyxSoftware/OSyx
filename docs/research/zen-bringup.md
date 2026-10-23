@@ -383,6 +383,35 @@ QEMU exit 33, no kernel panic. Evidence: `build/zen/attempt-{10,11}.*`.
 The next requirement is shell32's known folders, with paths that exist on
 OSyx.
 
+## Attempt 12: shell32 known folders
+
+`shell32.rs` implements SHGetKnownFolderPath and SHGetFolderPathW. The
+profile is $HOME with the Windows layout below it (AppData\Roaming,
+AppData\Local, AppData\LocalLow, Documents, Downloads, ...); machine
+folders are the C:\ paths winrun already reports. A missing folder is
+HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) unless KF_FLAG_CREATE /
+CSIDL_FLAG_CREATE creates it or KF_FLAG_DONT_VERIFY skips the check;
+other users' folders (a non-NULL token) are not supported. `ole32.rs`
+provides the task allocator the returned path is freed with; COM itself
+is not provided. The `shell.exe` fixture passed 13/13 on Windows (the
+OSyx-only missing-folder checks are skipped there) and 16/16 on OSyx; the
+Win32 QEMU suite passed 785/785.
+
+Attempt 12 got past the known-folder lookup and stopped at:
+
+```
+winrun: delay load failed: ADVAPI32.dll!GetSecurityInfo
+```
+
+(0xC06D007F, procedure not found; QEMU exit 33, no kernel panic.)
+zen.exe's remaining delay imports from advapi32 are its sandbox set:
+object security (Get/SetSecurityInfo, Get/SetNamedSecurityInfoW,
+SetEntriesInAclW, SetKernelObjectSecurity), restricted and impersonation
+tokens (CreateRestrictedToken, DuplicateTokenEx, SetTokenInformation,
+SetThreadToken, OpenThreadToken, RevertToSelf, AdjustTokenPrivileges,
+CreateProcessAsUserW), AccessCheck and the event log. They need a real
+model of object security descriptors and restricted tokens on OSyx.
+
 ## Validation
 
 Host parser/loader tests (including resource bounds, malformed delay

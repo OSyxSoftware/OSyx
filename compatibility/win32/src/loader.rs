@@ -165,6 +165,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("shlwapi.dll", crate::shlwapi::exports(), Vec::new()),
         builtin("combase.dll", crate::shlwapi::combase_exports(), Vec::new()),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
+        builtin("shell32.dll", crate::shell32::exports(), Vec::new()),
+        builtin("ole32.dll", crate::ole32::exports(), Vec::new()),
     ]
 }
 

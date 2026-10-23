@@ -49,6 +49,7 @@ $programs = [ordered]@{
     'seh.exe' = @{ Src = @('seh.c'); Args = @('-fasynchronous-unwind-tables', $sehObj, '-Wl,--subsystem,console', '-Wl,-e,start', '-lntdll', '-lkernel32') }
     'runtime.exe' = @{ Src = @('runtime.c'); Args = @('-fasynchronous-unwind-tables', '-Wl,--subsystem,console', '-Wl,-e,start', '-lntdll', '-ladvapi32', '-lkernel32') }
     'mapping.exe' = @{ Src = @('mapping.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
+    'shell.exe' = @{ Src = @('shell.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshell32', '-lole32', '-lkernel32') }
     'platform.exe' = @{ Src = @('platform.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshlwapi', '-lruntimeobject', '-lkernel32') }
     # The real UCRT import library: every C runtime function comes through
     # the api-ms-win-crt-* contracts.
