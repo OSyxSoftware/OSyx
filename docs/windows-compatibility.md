@@ -43,6 +43,7 @@ and symbols produce a loader diagnostic before the entry point executes.
 | kernel32 synchronization | Shared/exclusive SRW locks, serialized InitOnceExecuteOnce with failure retry, condition variables with lock reacquisition, aligned 32-bit WaitOnAddress and wake operations |
 | kernel32 waitable timers | Manual/automatic reset, relative/absolute deadlines, periodic timers, cancellation and object waits, using OSyx clocks/futexes |
 | kernel32 / psapi | K32EnumProcessModules/Ex and EnumProcessModules/Ex report actual modules of the current process with byte-capacity checks |
+| advapi32 / security-base | SID construction/copy/equality, common well-known SIDs, bounded ACL/ACE building and validation, absolute security-descriptor setters and absolute/self-relative getters; query-only process identity tokens |
 
 SetupAPI rejects unsupported properties (including registry driver-service
 information); it does not install drivers or fabricate driver names.
@@ -54,6 +55,16 @@ and requested high-resolution timer creation are unsupported.
 Timer creation currently accepts default security and TIMER_ALL_ACCESS;
 custom security attributes or restricted access requests fail explicitly.
 Module enumeration does not support remote processes or 32-bit module filters.
+Process tokens derive user/group SIDs from actual kernel credentials as
+S-1-22-1-uid / S-1-22-2-gid. Groups include World, Authenticated Users,
+Builtin Users and, for native uid 0, Builtin Administrators. These are OSyx
+identity mappings, not fabricated Windows accounts. Only TokenUser,
+TokenGroups, TokenOwner, TokenPrimaryGroup and TokenType queries are supported.
+Token handles enforce TOKEN_QUERY, including rights-reduced duplicates.
+Impersonation, Windows privileges, token mutation and sandbox enforcement
+are not implemented. Custom security descriptors/inheritable handles in
+Win32 file/directory/thread/event/mutex/semaphore creation fail explicitly;
+default attributes with a null descriptor and no inheritance are accepted.
 
 ## Programs and tests
 
@@ -75,6 +86,9 @@ their own assertions and the host TCP/UDP echo server's log:
   insufficient buffers and missing values; the same fixture also runs on Windows.
 - `synch.exe`: concurrent readers, once success/failure retry, condition
   handoff/timeouts, futex wakeups, module handles/capacities and real timers.
+- `security.exe`: independently encoded SID/ACE/descriptor fields, bounds
+  and error paths, self-relative offsets, token sizes/pointers, query rights
+  and handle lifetimes. Also run after native setuid(1000,1000) and exec.
 
 `scripts/build-winapps.ps1` builds four GUI applications from
 `compatibility/win32/apps/src`: Text Editor, Disk Utility, Device Manager

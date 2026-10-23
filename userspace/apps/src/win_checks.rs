@@ -35,6 +35,11 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("Windows file I/O on OSyx file systems (target C)", || run("fileio.exe", &[]) == Some(0));
     t.check("Windows volume, device and adapter inventory", || run("sysadmin.exe", &[]) == Some(0));
     t.check("Windows file version resources and queries", || run("version.exe", &[]) == Some(0));
+    t.check("Windows SID ACL descriptor and token data", || run("security.exe", &[]) == Some(0));
+    t.check("Windows tokens follow native uid after dropping root", || {
+        Command::new("worker").args(["exec-as", "1000", "/bin/winrun", "/opt/wintests/security.exe"])
+            .env("WIN_EXPECT_UID", "1000").status().is_ok_and(|s|s.success())
+    });
     t.check("Windows shared locks, once initialization, condition variables and modules", || run("synch.exe", &[]) == Some(0));
     t.check("threads, synchronisation, TLS, virtual memory, DLL loading (target D)", || {
         run("threads.exe", &[]) == Some(0)

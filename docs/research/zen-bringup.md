@@ -180,6 +180,44 @@ is loaded later and therefore is not in that static closure.
 | Tabs and page rendering | Not reached |
 | Menu/default registration | Withheld until functional success |
 
+## Continued bring-up: attempt 5
+
+The active objective remains a real running Zen Browser. The security
+data APIs and native-credential token queries were subsequently implemented
+in `compatibility/win32/src/security.rs`, with security-base mapped to
+advapi32. No token privilege, impersonation or sandbox success is fabricated.
+TokenUser/Groups/Owner/PrimaryGroup/Type use actual kernel uid/gid; unsupported
+classes fail. Rights-reduced token duplicates cannot use TOKEN_QUERY.
+Win32 creation calls reject custom DACL/inheritance requests they cannot
+enforce, before creating the object or file.
+
+The same PE security fixture passed **40 checks on Windows** and **46 checks
+per invocation on OSyx**, including runs as native uid 0 and uid 1000.
+The updated QEMU Windows integration suite passed **293 checks, 0 failed**;
+Clippy for the changed userspace crates passed with -D warnings. Evidence:
+`build/zen/security-final-windows.log`, `security-final-qemu.serial.log`,
+`security-final-qemu-tests.log` and `security-clippy.log`.
+
+Actual attempt 5 passed the security-base import gate and stopped at:
+
+```
+kernel32.dll!AddVectoredExceptionHandler (needed by mozglue.dll) does not exist
+```
+
+QEMU exited 33, winrun exited 126, no kernel panic. Files:
+`build/zen/attempt-5.serial.log`, `attempt-5.result.json`,
+`attempt-5.dependencies.json`. The new manifest audit has 4314 unresolved
+import occurrences (428 in the normal static startup closure), down from
+4404/437 for attempt 4. Adding advapi32 also changes many classifications
+from missing DLL to missing export; that reclassification alone is not
+API implementation or browser success. The earlier table and full regression
+above remain measurements of attempt 4's baseline, not this newer state.
+
+The next implementation requirement is real CPU exception delivery and
+resumption behind vectored exception callbacks. Registering callbacks
+without ever dispatching hardware faults would be a success stub and is
+not an acceptable way to satisfy this import.
+
 No fallback browser, mock UI or success-returning API placeholders were
 introduced. This is an incomplete Windows compatibility port, not a
 working Zen Browser release. Completing it requires implementing and

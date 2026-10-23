@@ -225,5 +225,25 @@
       "d54f3fd",
       "637da3a"
     ]
+  },
+  "continued_bringup": {
+    "attempt": 5,
+    "qemu_exit": 33,
+    "browser_result": "ZEN_PROBE_RESULT exit=Some(126)",
+    "loader_error": "[winrun:5] winrun: cannot load zen.exe: kernel32.dll!AddVectoredExceptionHandler (needed by mozglue.dll) does not exist",
+    "kernel_panic": false,
+    "serial_sha256": "7ba6c01ecb512ecf1f02f4c074ff6a2ea8e24b3b7817b15264408185b481bfb2",
+    "unresolved_import_occurrences": 4314,
+    "startup_unresolved_occurrences": 428,
+    "windows_fixture_checks": 40,
+    "osyx_security_checks_per_uid": 46,
+    "tested_uids": [
+      0,
+      1000
+    ],
+    "windows_integration_checks": 293,
+    "failures": 0,
+    "report": "build/zen/attempt-5.dependencies.json",
+    "report_sha256": "01a42d812cbd31b0d71bafd61ae483933d5d94b79cecd14595e8a2a2fb384368"
   }
 }

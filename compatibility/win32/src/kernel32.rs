@@ -392,11 +392,12 @@ extern "win64" fn CreateFileA(
     name: *const u8,
     access: u32,
     share: u32,
-    _sa: u64,
+    attributes: u64,
     disposition: u32,
     flags: u32,
     _template: u64,
 ) -> u64 {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,INVALID_HANDLE_VALUE); }
     // SAFETY: the caller passes a NUL-terminated name.
     create_file_common(unsafe { sa(name) }, access, share, disposition, flags)
 }
@@ -405,11 +406,12 @@ extern "win64" fn CreateFileW(
     name: *const u16,
     access: u32,
     share: u32,
-    _sa: u64,
+    attributes: u64,
     disposition: u32,
     flags: u32,
     _template: u64,
 ) -> u64 {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,INVALID_HANDLE_VALUE); }
     // SAFETY: as above.
     create_file_common(unsafe { sw(name) }, access, share, disposition, flags)
 }
@@ -664,12 +666,14 @@ fn create_directory(name: Option<String>) -> Bool {
     }
 }
 
-extern "win64" fn CreateDirectoryA(name: *const u8, _sa: u64) -> Bool {
+extern "win64" fn CreateDirectoryA(name: *const u8, attributes: u64) -> Bool {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,FALSE); }
     // SAFETY: NUL-terminated name.
     create_directory(unsafe { sa(name) })
 }
 
-extern "win64" fn CreateDirectoryW(name: *const u16, _sa: u64) -> Bool {
+extern "win64" fn CreateDirectoryW(name: *const u16, attributes: u64) -> Bool {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,FALSE); }
     // SAFETY: NUL-terminated name.
     create_directory(unsafe { sw(name) })
 }
@@ -860,14 +864,23 @@ extern "win64" fn DuplicateHandle(
     src: u64,
     dst_process: u64,
     dst: *mut u64,
-    _access: u32,
-    _inherit: Bool,
+    access: u32,
+    inherit: Bool,
     options: u32,
 ) -> Bool {
     if src_process != objects::CURRENT_PROCESS || dst_process != objects::CURRENT_PROCESS {
         return fail(ERROR_NOT_SUPPORTED, FALSE); // no other processes' handles
     }
-    let Some(o) = objects::get(src) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
+    let Some(mut o) = objects::get(src) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
+    if let Object::Token(token) = &o {
+        if inherit != 0 { return fail(ERROR_NOT_SUPPORTED, FALSE); }
+        if options & !3 != 0 || dst.is_null() { return fail(ERROR_INVALID_PARAMETER, FALSE); }
+        let rights = if options & 2 != 0 { token.access } else {
+            match crate::security::token_access(access) { Ok(a)=>a,Err(e)=>return fail(e,FALSE) }
+        };
+        if rights & !token.access != 0 { return fail(ERROR_ACCESS_DENIED,FALSE); }
+        o=Object::Token(Arc::new(crate::security::Token {access:rights,..(**token).clone()}));
+    }
     let h = objects::insert(o);
     if options & 1 != 0 {
         objects::close(src); // DUPLICATE_CLOSE_SOURCE
@@ -982,7 +995,8 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
     Ok(obj)
 }
 
-extern "win64" fn CreateThread(_sa: u64, stack: usize, start: u64, param: u64, flags: u32, tid: *mut u32) -> u64 {
+extern "win64" fn CreateThread(attributes: u64, stack: usize, start: u64, param: u64, flags: u32, tid: *mut u32) -> u64 {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     if start == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -1306,17 +1320,20 @@ fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
     objects::insert(Object::Event(Arc::new(EventObj { signaled: AtomicBool::new(initial), manual, name })))
 }
 
-extern "win64" fn CreateEventA(_sa: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
+extern "win64" fn CreateEventA(attributes: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     // SAFETY: NULL or NUL-terminated name.
     create_event(manual != 0, initial != 0, unsafe { sa(name) })
 }
 
-extern "win64" fn CreateEventW(_sa: u64, manual: Bool, initial: Bool, name: *const u16) -> u64 {
+extern "win64" fn CreateEventW(attributes: u64, manual: Bool, initial: Bool, name: *const u16) -> u64 {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     // SAFETY: as above.
     create_event(manual != 0, initial != 0, unsafe { sw(name) })
 }
 
-extern "win64" fn CreateEventExW(_sa: u64, name: *const u16, flags: u32, _access: u32) -> u64 {
+extern "win64" fn CreateEventExW(attributes: u64, name: *const u16, flags: u32, _access: u32) -> u64 {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     // SAFETY: as above.
     create_event(flags & 1 != 0, flags & 2 != 0, unsafe { sw(name) })
 }
@@ -1352,12 +1369,14 @@ fn create_mutex(owned: bool, name: Option<String>) -> u64 {
     objects::insert(Object::Mutex(Arc::new(MutexObj { state: Mutex::new(owner), name })))
 }
 
-extern "win64" fn CreateMutexA(_sa: u64, owned: Bool, name: *const u8) -> u64 {
+extern "win64" fn CreateMutexA(attributes: u64, owned: Bool, name: *const u8) -> u64 {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     // SAFETY: NULL or NUL-terminated name.
     create_mutex(owned != 0, unsafe { sa(name) })
 }
 
-extern "win64" fn CreateMutexW(_sa: u64, owned: Bool, name: *const u16) -> u64 {
+extern "win64" fn CreateMutexW(attributes: u64, owned: Bool, name: *const u16) -> u64 {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     // SAFETY: as above.
     create_mutex(owned != 0, unsafe { sw(name) })
 }
@@ -1379,7 +1398,8 @@ extern "win64" fn ReleaseMutex(h: u64) -> Bool {
     TRUE
 }
 
-extern "win64" fn CreateSemaphoreA(_sa: u64, initial: i32, max: i32, _name: *const u8) -> u64 {
+extern "win64" fn CreateSemaphoreA(attributes: u64, initial: i32, max: i32, _name: *const u8) -> u64 {
+    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     if max <= 0 || initial < 0 || initial > max {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -2111,5 +2131,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::synch::exports());
     exports.extend(crate::psapi::kernel_exports());
     exports.extend(crate::timers::exports());
+    exports.push(("OpenProcessToken",crate::security::OpenProcessToken as *const () as u64));
     exports
 }

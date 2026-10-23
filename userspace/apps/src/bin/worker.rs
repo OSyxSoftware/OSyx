@@ -186,6 +186,12 @@ fn main() -> i32 {
             (cwd.ok().as_deref().map(|p| p.as_str()) != args.get(2).map(String::as_str)) as i32
         }
         Some("as-user") => as_user(arg_num(&args, 2) as u32),
+        Some("exec-as") => {
+            let (Some(uid),Some(program))=(args.get(2).and_then(|s|s.parse::<u32>().ok()),args.get(3)) else {return 2};
+            if os_std::os::setuid(uid,uid).is_err() {return 1;}
+            let e=Command::new(program).args(&args[4..]).exec();
+            eprintln!("exec-as: {e}");1
+        }
         Some("exec-report") => {
             let (Some(handle_file), Some(report)) = (args.get(2), args.get(3)) else { return 2 };
             // The first file this process opens gets handle 3.

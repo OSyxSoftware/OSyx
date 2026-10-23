@@ -29,6 +29,7 @@ mod ntdll;
 mod objects;
 mod path;
 mod setupapi;
+mod security;
 mod teb;
 mod user32;
 mod volumes;

@@ -227,6 +227,7 @@ pub enum Object {
     Mutex(Arc<MutexObj>),
     Semaphore(Arc<SemaphoreObj>),
     Section(Arc<SectionObj>),
+    Token(Arc<crate::security::Token>),
 }
 
 struct Table {
@@ -313,7 +314,7 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
             free
         }
         Object::Console(_) | Object::File(_) | Object::Null => true,
-        Object::Section(_) => return Err(ERROR_INVALID_HANDLE),
+        Object::Section(_) | Object::Token(_) => return Err(ERROR_INVALID_HANDLE),
     })
 }
 

@@ -161,6 +161,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("iphlpapi.dll", crate::iphlpapi::exports(), Vec::new()),
         builtin("version.dll", crate::version::exports(), Vec::new()),
         builtin("psapi.dll", crate::psapi::exports(), Vec::new()),
+        builtin("advapi32.dll", crate::security::exports(), Vec::new()),
     ]
 }
 
@@ -170,6 +171,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
 fn schema() -> Vec<u8> {
     let mut b = SchemaBuilder::new();
     b.add("api-ms-win-core-version-l1-1-1", "version.dll", &[]).expect("version contract");
+    b.add("api-ms-win-security-base-l1-1-0", "advapi32.dll", &[]).expect("security contract");
     let k32 = [
         "api-ms-win-core-psapi-l1-1-0",
         "api-ms-win-core-synch-l1-1-0",
