@@ -71,6 +71,14 @@ impl File {
     pub fn sync_data(&self) -> Result<()> {
         self.inner.sync()
     }
+
+    /// The kernel handle (for `ipc::wait` on device nodes such as
+    /// `/dev/input/seat0`, or as a child's standard stream). It stays owned
+    /// by this `File`.
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    pub fn handle(&self) -> u64 {
+        self.inner.handle()
+    }
 }
 
 impl Read for File {

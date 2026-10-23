@@ -198,6 +198,35 @@ impl Command {
     }
 }
 
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+impl Command {
+    /// Starts the program with its standard input connected to a pipe the
+    /// caller writes, and its standard output and error to one pipe the
+    /// caller reads (end of data once the child and its descendants have
+    /// closed it, normally by exiting).
+    pub fn spawn_piped(&self) -> Result<(Child, crate::ipc::PipeWriter, crate::ipc::PipeReader)> {
+        let (argv, envp) = self.blocks()?;
+        let (in_r, in_w) = crate::ipc::pipe()?;
+        let (out_r, out_w) = crate::ipc::pipe()?;
+        let stdio = [in_r.handle(), out_w.handle(), out_w.handle()];
+        let pid = os_sys::spawn_stdio(&self.program, &argv, &envp, stdio).map_err(Error::from)?;
+        // The child holds its own references; ours would keep the pipes open.
+        drop(in_r);
+        drop(out_w);
+        Ok((Child { pid }, in_w, out_r))
+    }
+
+    /// Starts the program with handles 0, 1 and 2 set to the given handles
+    /// of this process (pipe ends or open files; `os::raw::HANDLE_NONE`
+    /// leaves one unset, so the child's writes go to the kernel log). A shell
+    /// passes its own redirected streams this way.
+    pub fn spawn_stdio(&self, stdio: [u64; 3]) -> Result<Child> {
+        let (argv, envp) = self.blocks()?;
+        let pid = os_sys::spawn_stdio(&self.program, &argv, &envp, stdio).map_err(Error::from)?;
+        Ok(Child { pid })
+    }
+}
+
 /// A running (or finished but not yet waited for) child process.
 #[derive(Debug)]
 pub struct Child {

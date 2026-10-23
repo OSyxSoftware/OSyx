@@ -342,6 +342,16 @@ pub fn tick(now: u64) {
     }
 }
 
+/// From an interrupt handler: switches away from the idle thread if the
+/// handler made another thread ready (instead of halting until the next
+/// timer tick).
+pub fn preempt_if_idle() {
+    let resched = SCHED.lock().as_ref().is_some_and(|s| s.current == s.idle && !s.ready.is_empty());
+    if resched {
+        schedule();
+    }
+}
+
 /// Gives up the rest of the time slice.
 pub fn yield_now() {
     schedule();

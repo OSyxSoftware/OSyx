@@ -20,6 +20,11 @@ pub const WRITABLE: u64 = 1 << 1;
 pub const USER: u64 = 1 << 2;
 pub const NO_CACHE: u64 = 1 << 4;
 pub const HUGE: u64 = 1 << 7;
+/// PAT bit of a 4 KiB page table entry (same position as HUGE one level up).
+const PAT_4K: u64 = 1 << 7;
+const IA32_PAT: u32 = 0x277;
+/// PAT memory type "write-combining".
+const PAT_WC: u64 = 0x01;
 pub const NO_EXEC: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -49,13 +54,15 @@ pub struct Flags {
     pub executable: bool,
     pub user: bool,
     pub uncached: bool,
+    /// Write-combining (framebuffers): PAT entry 4, see [`init`].
+    pub write_combining: bool,
 }
 
 impl Flags {
-    pub const KERNEL_RW: Flags = Flags { writable: true, executable: false, user: false, uncached: false };
+    pub const KERNEL_RW: Flags = Flags { writable: true, executable: false, user: false, uncached: false, write_combining: false };
 
     pub const fn user(writable: bool, executable: bool) -> Flags {
-        Flags { writable, executable, user: true, uncached: false }
+        Flags { writable, executable, user: true, uncached: false, write_combining: false }
     }
 
     fn bits(self) -> u64 {
@@ -68,6 +75,8 @@ impl Flags {
         }
         if self.uncached {
             b |= NO_CACHE;
+        } else if self.write_combining {
+            b |= PAT_4K;
         }
         if !self.executable && NX.load(Ordering::Relaxed) {
             b |= NO_EXEC;
@@ -111,6 +120,15 @@ pub fn init() {
     // SAFETY: IA32_EFER exists on every x86-64 CPU.
     let efer = unsafe { cpu::rdmsr(0xC000_0080) };
     NX.store(efer & (1 << 11) != 0, Ordering::Relaxed);
+    // PAT entry 4 (selected by the PAT bit alone) becomes write-combining;
+    // the default PAT has write-back there, which nothing uses (the kernel
+    // never set the PAT bit before). Entries 0-3 keep their defaults.
+    // SAFETY: IA32_PAT exists on every x86-64 CPU; no mapping uses entry 4
+    // yet, so changing it alters no live memory type.
+    unsafe {
+        let pat = cpu::rdmsr(IA32_PAT);
+        cpu::wrmsr(IA32_PAT, (pat & !(0xFF << 32)) | (PAT_WC << 32));
+    }
     let root = current_root();
     KERNEL_ROOT.store(root, Ordering::Relaxed);
     let _g = PAGING.lock();

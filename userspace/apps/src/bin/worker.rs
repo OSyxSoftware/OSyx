@@ -24,6 +24,10 @@
 //!   this program running; exit 0 if they did
 //! * `exec-threads`  `exec` with a second thread alive must fail with
 //!   `ResourceBusy`; exit 0 if it did
+//! * `echo-stdin`    copy standard input to standard output in upper case,
+//!   then print "stdin bytes: N"
+//! * `ipc-client S`  connect to service S, fill the shared memory it sends,
+//!   answer "done <pid>"
 
 #![no_std]
 #![no_main]
@@ -225,11 +229,70 @@ fn main() -> i32 {
             drop(f);
             0
         }
+        Some("echo-stdin") => {
+            // Standard input to standard output, upper-cased, then a count.
+            let mut input = Vec::new();
+            if os_std::io::stdin().read_to_end(&mut input).is_err() {
+                return 3;
+            }
+            print!("{}", String::from_utf8_lossy(&input).to_uppercase());
+            println!("stdin bytes: {}", input.len());
+            0
+        }
+        Some("ipc-client") => ipc_client(args.get(2).map_or("", String::as_str)),
+        Some("user-ipc") => {
+            // Privileged objects must be refused to an ordinary user.
+            use os_std::error::ErrorKind;
+            let uid = arg_num(&args, 2) as u32;
+            if os_std::os::setuid(uid, uid).is_err() {
+                return 20;
+            }
+            let denied = |r: Option<ErrorKind>| r == Some(ErrorKind::PermissionDenied);
+            let mut failed = 0;
+            if !denied(os_std::ipc::Listener::listen("user-service").err().map(|e| e.kind())) {
+                failed += 1;
+            }
+            if !denied(os_std::system::display_acquire().err().map(|e| e.kind())) {
+                failed += 1;
+            }
+            if !denied(File::open("/dev/input/seat0").err().map(|e| e.kind())) {
+                failed += 1;
+            }
+            if !denied(os_std::system::kill(1).err().map(|e| e.kind())) {
+                failed += 1;
+            }
+            failed
+        }
         other => {
             eprintln!("worker: unknown mode {other:?}");
             2
         }
     }
+}
+
+/// Connects to `service`, receives a shared memory object with the message
+/// "fill", writes a text into it and answers "done <pid>".
+fn ipc_client(service: &str) -> i32 {
+    use os_std::ipc::{item, wait, Channel, SharedMemory, WAIT_READABLE};
+    let Ok(ch) = Channel::connect(service) else { return 10 };
+    let mut items = [item(ch.handle(), WAIT_READABLE)];
+    if wait(&mut items, Some(Duration::from_secs(5))) != Ok(1) {
+        return 11;
+    }
+    let mut buf = [0u8; 64];
+    let Ok(Some((n, mut handles))) = ch.recv(&mut buf) else { return 12 };
+    if &buf[..n] != b"fill" || handles.len() != 1 {
+        return 13;
+    }
+    let Ok(shm) = SharedMemory::from_handle(handles.remove(0)) else { return 14 };
+    let Ok(mut map) = shm.map(true) else { return 15 };
+    let msg = b"written by the worker through shared memory";
+    map.bytes_mut()[..msg.len()].copy_from_slice(msg);
+    let pid = process::id().unwrap_or(0);
+    if ch.send(format!("done {pid}").as_bytes(), &[]).is_err() {
+        return 16;
+    }
+    0
 }
 
 /// Permission checks as an ordinary user (`init` prepares `/tmp/root-only`,

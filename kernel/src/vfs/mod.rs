@@ -546,6 +546,9 @@ pub struct OpenFile {
 
 impl Drop for OpenFile {
     fn drop(&mut self) {
+        if let Some(d) = &self.device {
+            d.close();
+        }
         self.node.mount.fs.release(self.node.ino);
     }
 }
@@ -608,6 +611,12 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
         d.check_open(write)?;
     }
     node.mount.fs.open(node.ino)?;
+    if let Some(d) = &device {
+        if let Err(e) = d.open() {
+            node.mount.fs.release(node.ino);
+            return Err(e);
+        }
+    }
     let f = OpenFile {
         kind: st.kind,
         node,
@@ -640,6 +649,11 @@ impl OpenFile {
     /// Canonical absolute path the file was opened under.
     pub fn path(&self) -> &str {
         &self.node.path
+    }
+
+    /// The device behind a device node.
+    pub fn device(&self) -> Option<DeviceFile> {
+        self.device.clone()
     }
 
     /// Reads at the current position into `buf` without moving it: the

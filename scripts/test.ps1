@@ -22,6 +22,8 @@ param(
 $ExpectedFsChecks = 19
 # "[user] exec: ..." checks init runs (userspace/apps/src/exec_checks.rs).
 $ExpectedExecChecks = 13
+# "[user] ipc: ..." checks init runs (userspace/apps/src/ipc_checks.rs).
+$ExpectedIpcChecks = 13
 $results = New-Object System.Collections.Generic.List[object]
 $testDir = Join-Path $BuildDir 'test'
 New-Item -ItemType Directory -Force $testDir | Out-Null
@@ -97,15 +99,18 @@ try {
         # may be left behind once init has exited.
         $released = [regex]::Matches($r.Log, 'process \d+ \(\w+\): released \d+ frames, no leak').Count
         $ok = $released -ge 10 -and $r.Log -notmatch 'FRAME LEAK' -and $r.Log -match ', 0 processes left' `
-            -and $r.Log -match 'scheduler: \d+ context switches, 2 threads alive'
+            -and $r.Log -match 'scheduler: \d+ context switches, \d+ threads alive \(0 ready\), 0 processes left' `
+            -and $r.Log -notmatch '  thread +\d+ \S+ +pid +[1-9]'
         Record 'process teardown without leaks' $ok "$released processes released cleanly"
 
         # Preemption between user processes: three children that never yield
         # must all have started before the first one finishes.
         $lines = $r.Log -split "`n"
-        $starts = @($lines | Select-String -Pattern 'spin \d+: started').Count
+        # Only the first three spinners belong to this check (later ones are$nl        # busy children of the IPC kill check).
+        $startLines = @($lines | Select-String -Pattern 'spin \d+: started' | Select-Object -First 3)
+        $starts = $startLines.Count
         $firstDone = ($lines | Select-String -Pattern 'spin \d+: finished' | Select-Object -First 1).LineNumber
-        $lastStart = ($lines | Select-String -Pattern 'spin \d+: started' | Select-Object -Last 1).LineNumber
+        $lastStart = if ($starts) { $startLines[-1].LineNumber } else { 0 }
         $took = [regex]::Match($r.Log, '3 x 300 ms spinners finished in (\d+) ms')
         $ok = $starts -eq 3 -and $firstDone -and $lastStart -lt $firstDone -and $took.Success -and [int]$took.Groups[1].Value -lt 650
         Record 'preemptive scheduling of user processes' $ok $took.Value
@@ -133,6 +138,17 @@ try {
             -and $r.Log -match 'process 1 \(init\): /bin/init spawned by 0' -and $r.Log -match '\(probe\): /usr/bin/probe spawned by' `
             -and $r.Log -match '\[test\] program loader: search path, permissions, bad images \.\.\. ok'
         Record 'ELF loader: spawn/execve from /bin and /usr/bin, argv, envp, auxv' $ok "$execOk of $ExpectedExecChecks exec checks passed, $oldImages execve image swaps"
+
+        # Kernel objects from ring 3: pipes, channels, shared memory, waiting.
+        $ipcOk = [regex]::Matches($r.Log, '\[user\] ipc: [^\n]* \.\.\. ok').Count
+        $ok = $ipcOk -eq $ExpectedIpcChecks -and $r.Log -cnotmatch '\[user\] ipc: [^\n]*FAILED' -and $r.Log -match 'ipc: 0 live service\(s\) \[\], 0 shared frames mapped'
+        Record 'pipes, channels, shared memory from ring 3' $ok "$ipcOk of $ExpectedIpcChecks ipc checks passed"
+
+        # Native xHCI driver: controller up with MSI-X, boot keyboard and mouse
+        # enumerated as input devices (QEMU has no PS/2 controller).
+        $ok = $r.Log -match 'xhci0: running \(MSI-X interrupts\)' -and $r.Log -match 'input: device \d+ "QEMU USB Keyboard" \(keyboard\) attached as /dev/input/event\d' `
+            -and $r.Log -match 'input: device \d+ "QEMU USB Mouse" \(mouse\) attached as /dev/input/event\d' -and $r.Log -match 'usb: controller 0 took [1-9]\d* interrupts'
+        Record 'xHCI controller, USB keyboard and mouse enumeration' $ok ([regex]::Match($r.Log, 'usb: controller 0 took \d+ interrupts').Value)
 
         # The files init left on the ESP, read back on the host by mtools (an
         # independent FAT implementation) after QEMU has exited.

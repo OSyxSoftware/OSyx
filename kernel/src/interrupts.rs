@@ -55,6 +55,11 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
                 pic::end_of_interrupt(irq);
             }
         }
+        v if (crate::irq::FIRST as u64..=crate::irq::LAST as u64).contains(&v) => crate::irq::dispatch(v as u8),
+        v if v == crate::arch::apic::SPURIOUS_VECTOR as u64 => {
+            // Local APIC spurious interrupt: no EOI.
+            SPURIOUS.fetch_add(1, Ordering::Relaxed);
+        }
         v => kprintln!("unexpected interrupt vector {v}"),
     }
     // Safe point: about to return to ring 3 in a thread whose process is

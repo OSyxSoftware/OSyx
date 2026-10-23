@@ -45,7 +45,11 @@ pub mod env;
 pub mod error;
 pub mod fs;
 pub mod io;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub mod ipc;
 pub mod os;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub mod system;
 pub mod path;
 pub mod process;
 pub mod rt;

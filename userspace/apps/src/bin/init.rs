@@ -29,6 +29,8 @@ mod fpu;
 mod exec_checks;
 #[path = "../fs_checks.rs"]
 mod fs_checks;
+#[path = "../ipc_checks.rs"]
+mod ipc_checks;
 
 os_std::entry!(main);
 
@@ -135,6 +137,7 @@ fn main() -> i32 {
     thread_checks(&mut t);
     fs_checks::run(&mut t);
     exec_checks::run(&mut t);
+    ipc_checks::run(&mut t);
 
     println!("user checks: {} passed, {} failed", t.passed, t.failed);
     t.failed as i32

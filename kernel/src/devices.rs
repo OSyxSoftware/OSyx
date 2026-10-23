@@ -3,8 +3,9 @@
 //!
 //! Drivers register nodes at run time ([`register`] / [`unregister`]);
 //! devfs reflects the registry immediately. Only devices that exist and
-//! work are registered: there is no keyboard driver yet, so there is no
-//! `/dev/input`, and `/dev/console` is write-only.
+//! work are registered: `/dev/input/event<N>` appear when the USB HID
+//! drivers attach a keyboard or mouse (and vanish when it is unplugged),
+//! and `/dev/console` is write-only.
 //!
 //! Block device nodes (`/dev/disks/*`) are owned by root with mode 0600, so
 //! ordinary users get no raw disk access, and even root cannot write raw
@@ -21,6 +22,22 @@ use osyx_abi::Errno;
 pub trait CharDevice: Send + Sync {
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno>;
     fn write(&self, data: &[u8]) -> Result<usize, Errno>;
+    /// `wait_handles` readiness (`WAIT_*`); devices that never block are
+    /// always ready.
+    fn poll(&self) -> u32 {
+        osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_WRITABLE
+    }
+    /// Signalled when `poll` may have changed.
+    fn wait_queue(&self) -> Option<&crate::waitq::WaitQueue> {
+        None
+    }
+    /// A handle is being opened (a device may refuse, e.g. `Busy` for an
+    /// exclusive one).
+    fn open(&self) -> Result<(), Errno> {
+        Ok(())
+    }
+    /// A handle was closed.
+    fn close(&self) {}
 }
 
 pub enum DeviceKind {
@@ -162,6 +179,33 @@ impl DeviceFile {
         match &self.0.kind {
             DeviceKind::Block(b) => b.flush().map_err(|_| Errno::Io),
             DeviceKind::Char(_) => Ok(()),
+        }
+    }
+
+    pub fn poll(&self) -> u32 {
+        match &self.0.kind {
+            DeviceKind::Char(c) => c.poll(),
+            DeviceKind::Block(_) => osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_WRITABLE,
+        }
+    }
+
+    pub fn wait_queue(&self) -> Option<&crate::waitq::WaitQueue> {
+        match &self.0.kind {
+            DeviceKind::Char(c) => c.wait_queue(),
+            DeviceKind::Block(_) => None,
+        }
+    }
+
+    pub fn open(&self) -> Result<(), Errno> {
+        match &self.0.kind {
+            DeviceKind::Char(c) => c.open(),
+            DeviceKind::Block(_) => Ok(()),
+        }
+    }
+
+    pub fn close(&self) {
+        if let DeviceKind::Char(c) = &self.0.kind {
+            c.close();
         }
     }
 }

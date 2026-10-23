@@ -15,9 +15,12 @@ pub use osyx_abi::{
     SEEK_CUR, SEEK_END, SEEK_SET, STDERR, STDOUT,
 };
 
+pub use osyx_abi::{ipc, HANDLE_NONE, KILLED_STATUS, STDIN};
+
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod imp {
     use core::arch::asm;
+    use osyx_abi::ipc::{ChannelMsg, DisplayInfo, MountInfo, ProcInfo, WaitItem};
     use osyx_abi::{decode, nr, Errno, FileStat, SystemInfo};
 
     #[inline]
@@ -354,6 +357,123 @@ mod imp {
 
     pub fn fsync(handle: u64) -> Result<(), Errno> {
         decode(syscall1(nr::FSYNC, handle)).map(|_| ())
+    }
+
+    // ---- ABI v7: objects, IPC, display, system ----------------------------------
+
+    /// A pipe: (read end, write end).
+    pub fn pipe() -> Result<(u64, u64), Errno> {
+        let mut out = [0u64; 2];
+        decode(syscall1(nr::PIPE, out.as_mut_ptr() as u64))?;
+        Ok((out[0], out[1]))
+    }
+
+    /// `spawn` with the child's handles 0-2 taken from `stdio`
+    /// (`HANDLE_NONE` keeps the console).
+    pub fn spawn_stdio(path: &str, argv: &[u8], envp: &[u8], stdio: [u64; 3]) -> Result<u64, Errno> {
+        let a = exec_args(path, argv, envp);
+        decode(syscall2(nr::SPAWN_STDIO, &a as *const osyx_abi::ExecArgs as u64, stdio.as_ptr() as u64))
+    }
+
+    pub fn channel_listen(name: &str) -> Result<u64, Errno> {
+        decode(syscall2(nr::CHANNEL_LISTEN, name.as_ptr() as u64, name.len() as u64))
+    }
+
+    pub fn channel_connect(name: &str) -> Result<u64, Errno> {
+        decode(syscall2(nr::CHANNEL_CONNECT, name.as_ptr() as u64, name.len() as u64))
+    }
+
+    pub fn channel_accept(listener: u64) -> Result<u64, Errno> {
+        decode(syscall1(nr::CHANNEL_ACCEPT, listener))
+    }
+
+    /// Sends `data` with `handles` duplicated to the receiver.
+    pub fn channel_send(channel: u64, data: &[u8], handles: &[u64]) -> Result<(), Errno> {
+        let m = ChannelMsg {
+            data: data.as_ptr() as u64,
+            len: data.len() as u64,
+            handles: handles.as_ptr() as u64,
+            handle_count: handles.len() as u64,
+        };
+        decode(syscall2(nr::CHANNEL_SEND, channel, &m as *const ChannelMsg as u64)).map(|_| ())
+    }
+
+    /// Receives one message into `buf`; received handles go to `handles`.
+    /// Returns (bytes, handles received).
+    pub fn channel_recv(channel: u64, buf: &mut [u8], handles: &mut [u64]) -> Result<(usize, usize), Errno> {
+        let mut m = ChannelMsg {
+            data: buf.as_mut_ptr() as u64,
+            len: buf.len() as u64,
+            handles: handles.as_mut_ptr() as u64,
+            handle_count: handles.len() as u64,
+        };
+        let n = decode(syscall2(nr::CHANNEL_RECV, channel, &mut m as *mut ChannelMsg as u64))?;
+        Ok((n as usize, m.handle_count as usize))
+    }
+
+    /// (pid, uid) of the channel's other end.
+    pub fn channel_peer(channel: u64) -> Result<(u64, u32), Errno> {
+        let v = decode(syscall1(nr::CHANNEL_PEER, channel))?;
+        Ok((v & 0xFFFF_FFFF, (v >> 32) as u32))
+    }
+
+    pub fn shm_create(size: u64) -> Result<u64, Errno> {
+        decode(syscall1(nr::SHM_CREATE, size))
+    }
+
+    /// Maps a shared memory object (unmap with [`unmap`] and its size).
+    pub fn shm_map(handle: u64, writable: bool) -> Result<*mut u8, Errno> {
+        let prot = osyx_abi::PROT_READ | if writable { osyx_abi::PROT_WRITE } else { 0 };
+        decode(syscall2(nr::SHM_MAP, handle, prot)).map(|a| a as *mut u8)
+    }
+
+    pub fn shm_size(handle: u64) -> Result<u64, Errno> {
+        decode(syscall1(nr::SHM_SIZE, handle))
+    }
+
+    /// Waits until an item is ready (`timeout_ns`: 0 polls, `u64::MAX`
+    /// forever); returns how many are ready (their `revents` are set).
+    pub fn wait_handles(items: &mut [WaitItem], timeout_ns: u64) -> Result<usize, Errno> {
+        decode(syscall3(nr::WAIT_HANDLES, items.as_mut_ptr() as u64, items.len() as u64, timeout_ns)).map(|n| n as usize)
+    }
+
+    pub fn display_info() -> Result<DisplayInfo, Errno> {
+        let mut d = DisplayInfo::default();
+        decode(syscall1(nr::DISPLAY_INFO, &mut d as *mut DisplayInfo as u64))?;
+        Ok(d)
+    }
+
+    /// Takes over the display; returns the mapped framebuffer.
+    pub fn display_acquire() -> Result<*mut u32, Errno> {
+        decode(syscall0(nr::DISPLAY_ACQUIRE)).map(|a| a as *mut u32)
+    }
+
+    pub fn display_release() -> Result<(), Errno> {
+        decode(syscall0(nr::DISPLAY_RELEASE)).map(|_| ())
+    }
+
+    /// Fills `out` with process records; returns how many.
+    pub fn proc_list(out: &mut [ProcInfo]) -> Result<usize, Errno> {
+        let bytes = core::mem::size_of_val(out) as u64;
+        decode(syscall2(nr::PROC_LIST, out.as_mut_ptr() as u64, bytes)).map(|n| n as usize / core::mem::size_of::<ProcInfo>())
+    }
+
+    /// Fills `out` with mount records; returns how many.
+    pub fn mount_list(out: &mut [MountInfo]) -> Result<usize, Errno> {
+        let bytes = core::mem::size_of_val(out) as u64;
+        decode(syscall2(nr::MOUNT_LIST, out.as_mut_ptr() as u64, bytes)).map(|n| n as usize / core::mem::size_of::<MountInfo>())
+    }
+
+    /// `POWER_OFF` / `POWER_REBOOT`; returns only on failure.
+    pub fn power(cmd: u64) -> Errno {
+        match decode(syscall1(nr::POWER, cmd)) {
+            Err(e) => e,
+            Ok(_) => Errno::NotSupported,
+        }
+    }
+
+    pub fn kill(pid: u64) -> Result<(), Errno> {
+        decode(syscall1(nr::KILL, pid)).map(|_| ())
     }
 }
 

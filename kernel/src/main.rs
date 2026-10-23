@@ -23,10 +23,16 @@ mod drivers;
 mod exec;
 mod fixup;
 mod futex;
+mod input;
 mod interrupts;
+mod ipc;
+mod irq;
 mod mem;
 mod modules;
+mod object;
 mod pci;
+mod pipe;
+mod power;
 mod process;
 mod qemu;
 mod random;
@@ -34,11 +40,14 @@ mod sched;
 mod selftest;
 mod selftest_fs;
 mod serial;
+mod shm;
 mod storage;
 mod sync;
+mod sys_objects;
 mod syscall;
 mod time;
 mod vfs;
+mod waitq;
 
 use alloc::vec::Vec;
 use arch::cpu;
@@ -144,6 +153,9 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
 
     // SAFETY: IDT is loaded, interrupts still disabled.
     unsafe { arch::pic::init() };
+    // The local APIC receives device MSIs; the PIC timer keeps flowing
+    // through it (LINT0, virtual wire).
+    arch::apic::init(cpuinfo.has_apic());
     cpu::enable_interrupts();
     kprintln!("timer: PIT at {} Hz, interrupts enabled", arch::pic::TIMER_HZ);
     sched::init();
@@ -158,6 +170,11 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let partitions = block::scan_partitions();
     random::init(&pci_devices);
     devices::init();
+    // USB comes up in its own threads: input devices appear asynchronously
+    // and never hold up the boot.
+    input::init(boot.has_option("input.log"));
+    let usb_controllers = drivers::xhci::probe(&pci_devices);
+    kprintln!("usb: {} xHCI controller(s)", usb_controllers);
     let mounted = storage::mount_all(boot);
     kprintln!(
         "storage: {} PCI functions, {} disks, {} partitions, {} mounts, root: {}",
@@ -186,6 +203,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let mut line2 = Line::new();
     let init_name = boot.option_value("init").unwrap_or("init");
     ok &= run_init(boot, init_name, &mut line2);
+    log_subsystems();
     let color = if ok { osyx_gfx::splash::OK } else { osyx_gfx::splash::ERROR };
     let title = if ok { "OSyx kernel is running" } else { "OSyx: a check failed" };
     display::status(title, color, &[line1.as_str(), line2.as_str()]);
@@ -266,6 +284,23 @@ fn run_init(boot: &BootData, name: &str, summary: &mut Line) -> bool {
             false
         }
     }
+}
+
+/// Logs the state of USB, input, interrupts and IPC once init has finished
+/// (integration tests read these lines as evidence).
+fn log_subsystems() {
+    for i in 0..drivers::xhci::controllers() {
+        kprintln!("usb: controller {} took {} interrupts", i, drivers::xhci::interrupts_of(i));
+    }
+    for line in drivers::xhci::status() {
+        kprintln!("usb: {}", line);
+    }
+    kprintln!("input: {} events in total", input::total_events());
+    for (vector, n) in irq::counts() {
+        kprintln!("irq: vector {:#x} fired {} times", vector, n);
+    }
+    let services = ipc::services();
+    kprintln!("ipc: {} live service(s) {:?}, {} shared frames mapped", services.len(), services, shm::shared_frames());
 }
 
 fn parse_int(s: &str) -> Option<i32> {

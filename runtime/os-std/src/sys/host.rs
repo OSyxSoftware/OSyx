@@ -19,6 +19,11 @@ pub fn write(fd: u64, buf: &[u8]) -> Result<usize> {
     r.map_err(|_| Error::new(ErrorKind::Other, "host write failed"))
 }
 
+pub fn read_stdin(buf: &mut [u8]) -> Result<usize> {
+    use std::io::Read;
+    std::io::stdin().read(buf).map_err(|_| Error::new(ErrorKind::Other, "host read failed"))
+}
+
 pub fn exit(code: i32) -> ! {
     std::process::exit(code)
 }

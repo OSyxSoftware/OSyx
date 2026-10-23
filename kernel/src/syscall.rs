@@ -11,8 +11,9 @@ use crate::arch::cpu;
 use crate::arch::gdt::{KERNEL_CS, USER_DS};
 use crate::exec::ExecRequest;
 use crate::fixup::{copy_from_user, copy_to_user};
+use crate::object::Object;
 use crate::vfs::Lookup;
-use crate::{interrupts, mem, process, sched, vfs};
+use crate::{interrupts, mem, process, sched, sys_objects, vfs};
 use osyx_vfs::Cred;
 use core::arch::global_asm;
 use osyx_abi::{nr, Errno, SystemInfo};
@@ -204,6 +205,25 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         }
         nr::SETUID => process::set_current_cred(Cred { uid: f.rdi as u32, gid: f.rsi as u32 }).map(|_| 0),
         nr::STATFS => user_path(f.rdi, f.rsi).and_then(|p| vfs::statfs(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st)),
+        nr::PIPE => sys_objects::pipe(f.rdi),
+        nr::SPAWN_STDIO => sys_objects::spawn_stdio(f.rdi, f.rsi),
+        nr::CHANNEL_LISTEN => sys_objects::channel_listen(f.rdi, f.rsi),
+        nr::CHANNEL_CONNECT => sys_objects::channel_connect(f.rdi, f.rsi),
+        nr::CHANNEL_ACCEPT => sys_objects::channel_accept(f.rdi),
+        nr::CHANNEL_SEND => sys_objects::channel_send(f.rdi, f.rsi),
+        nr::CHANNEL_RECV => sys_objects::channel_recv(f.rdi, f.rsi),
+        nr::CHANNEL_PEER => sys_objects::channel_peer(f.rdi),
+        nr::SHM_CREATE => sys_objects::shm_create(f.rdi),
+        nr::SHM_MAP => sys_objects::shm_map(f.rdi, f.rsi),
+        nr::SHM_SIZE => sys_objects::shm_size(f.rdi),
+        nr::WAIT_HANDLES => sys_objects::wait_handles(f.rdi, f.rsi, f.rdx),
+        nr::DISPLAY_INFO => sys_objects::display_info(f.rdi),
+        nr::DISPLAY_ACQUIRE => sys_objects::display_acquire(),
+        nr::DISPLAY_RELEASE => sys_objects::display_release(),
+        nr::PROC_LIST => sys_objects::proc_list(f.rdi, f.rsi),
+        nr::MOUNT_LIST => sys_objects::mount_list(f.rdi, f.rsi),
+        nr::POWER => sys_objects::power(f.rdi),
+        nr::KILL => sys_objects::kill(f.rdi),
         _ => Err(Errno::NotSupported),
     };
     // Safe point: a thread whose process is exiting ends here instead of
@@ -230,8 +250,12 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> Result<u64, Errno> {
     if !crate::fixup::user_range_ok(buf, len) {
         return Err(Errno::Fault);
     }
-    if fd >= osyx_abi::FIRST_FILE_HANDLE {
-        return write_file(fd, buf, len as usize);
+    // Any handle that exists, including standard streams redirected at spawn.
+    match process::get_object(fd) {
+        Ok(Object::File(_)) => return write_file(fd, buf, len as usize),
+        Ok(Object::Pipe(p)) => return sys_objects::write_pipe(&p, buf, len),
+        Ok(_) => return Err(Errno::BadHandle),
+        Err(_) => {}
     }
     if fd != osyx_abi::STDOUT && fd != osyx_abi::STDERR {
         return Err(Errno::BadHandle);
@@ -277,8 +301,10 @@ fn put_user<T: Copy>(addr: u64, v: &T) -> Result<u64, Errno> {
 /// Reads in chunks; after a chunk has been delivered, a later failure ends
 /// the call with the bytes delivered so far (like a short read).
 fn sys_read(handle: u64, buf: u64, len: u64) -> Result<u64, Errno> {
-    if handle < osyx_abi::FIRST_FILE_HANDLE {
-        return Err(Errno::BadHandle);
+    match process::get_object(handle)? {
+        Object::File(_) => {}
+        Object::Pipe(_) => return sys_objects::read_stdio(handle, buf, len),
+        _ => return Err(Errno::BadHandle),
     }
     let len = len.min(osyx_abi::MAX_READ as u64) as usize;
     if !crate::fixup::user_range_ok(buf, len as u64) {

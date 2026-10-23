@@ -14,6 +14,11 @@ pub const CMD_MEMORY: u16 = 1 << 1;
 pub const CMD_BUS_MASTER: u16 = 1 << 2;
 pub const CMD_INTX_DISABLE: u16 = 1 << 10;
 
+pub const CAP_MSI: u8 = 0x05;
+pub const CAP_MSIX: u8 = 0x11;
+const MSIX_ENABLE: u16 = 1 << 15;
+const MSIX_FUNCTION_MASK: u16 = 1 << 14;
+
 /// Serialises the address/data port pair.
 static CONFIG: IrqSpinLock<()> = IrqSpinLock::new(());
 
@@ -130,6 +135,64 @@ impl Device {
         };
         self.addr.write16(0x04, cmd);
         bar
+    }
+
+    /// Offset of the first capability with `id`.
+    pub fn find_capability(&self, id: u8) -> Option<u8> {
+        self.capabilities().into_iter().find(|&(_, c)| c == id).map(|(off, _)| off)
+    }
+
+    /// Routes vector-table entry 0 of MSI-X to `address`/`data` and enables
+    /// MSI-X (legacy INTx is disabled). The table is located through the
+    /// capability's BAR indicator and offset.
+    pub fn enable_msix(&self, address: u64, data: u32) -> Result<(), &'static str> {
+        let cap = self.find_capability(CAP_MSIX).ok_or("no MSI-X capability")?;
+        let control = self.addr.read16(cap + 2);
+        let table = self.addr.read32(cap + 4);
+        let bir = (table & 7) as u8;
+        let offset = (table & !7) as u64;
+        let entries = (control & 0x7FF) as u64 + 1;
+        let Some(Bar::Memory { base, size, .. }) = self.bar(bir) else { return Err("MSI-X table BAR is not memory") };
+        if base == 0 || offset + entries * 16 > size {
+            return Err("MSI-X table outside its BAR");
+        }
+        let virt = crate::mem::map_mmio(base + offset, entries * 16).map_err(|_| "cannot map the MSI-X table")?;
+        // Function mask on while the entry is written, then enable.
+        self.addr.write16(cap + 2, control | MSIX_FUNCTION_MASK | MSIX_ENABLE);
+        // SAFETY: `virt` maps the MSI-X table (entries * 16 bytes, uncached).
+        unsafe {
+            let e = virt as *mut u32;
+            e.add(3).write_volatile(1); // entry masked
+            e.write_volatile(address as u32);
+            e.add(1).write_volatile((address >> 32) as u32);
+            e.add(2).write_volatile(data);
+            e.add(3).write_volatile(0); // unmasked
+        }
+        self.addr.write16(cap + 2, (control | MSIX_ENABLE) & !MSIX_FUNCTION_MASK);
+        self.addr.write16(0x04, self.command() | CMD_INTX_DISABLE);
+        Ok(())
+    }
+
+    /// Enables a single-vector MSI to `address`/`data` (legacy INTx is
+    /// disabled).
+    pub fn enable_msi(&self, address: u64, data: u32) -> Result<(), &'static str> {
+        let cap = self.find_capability(CAP_MSI).ok_or("no MSI capability")?;
+        let control = self.addr.read16(cap + 2);
+        let is64 = control & (1 << 7) != 0;
+        if !is64 && address >> 32 != 0 {
+            return Err("MSI address above 4 GiB on a 32-bit MSI function");
+        }
+        self.addr.write32(cap + 4, address as u32);
+        if is64 {
+            self.addr.write32(cap + 8, (address >> 32) as u32);
+            self.addr.write16(cap + 12, data as u16);
+        } else {
+            self.addr.write16(cap + 8, data as u16);
+        }
+        // One message (MME = 0), enabled.
+        self.addr.write16(cap + 2, (control & !(7 << 4)) | 1);
+        self.addr.write16(0x04, self.command() | CMD_INTX_DISABLE);
+        Ok(())
     }
 
     /// Capability list: (offset, id) pairs, bounded against loops.

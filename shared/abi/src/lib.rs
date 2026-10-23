@@ -1,4 +1,10 @@
-//! OSyx system call ABI, version 6.
+//! OSyx system call ABI, version 7.
+//!
+//! Version 7 adds kernel objects beyond files (pipes, IPC channels and
+//! listeners, shared memory), waiting on several handles at once, standard
+//! stream redirection for children, display ownership, process and mount
+//! listings, `kill` and power control (see [`ipc`] and `nr::PIPE` ..
+//! `nr::KILL`).
 //!
 //! Calling convention (x86-64 `syscall` instruction):
 //! * `rax` = system call number, arguments in `rdi, rsi, rdx, r10, r8, r9`.
@@ -19,7 +25,9 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 6;
+pub mod ipc;
+
+pub const ABI_VERSION: u32 = 7;
 
 /// Highest user virtual address + 1 (the canonical lower half).
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -150,7 +158,77 @@ pub mod nr {
     /// the process has more than one thread. On any error the old program
     /// continues unchanged.
     pub const EXECVE: u64 = 40;
+    /// `pipe(out: *mut [u64; 2]) -> 0`: a pipe; `out[0]` is the read end,
+    /// `out[1]` the write end. Reads block until data arrives or every
+    /// write end is closed (then 0); writes block while the pipe is full and
+    /// fail with `BrokenPipe` once every read end is closed.
+    pub const PIPE: u64 = 41;
+    /// `spawn_stdio(args: *const ExecArgs, stdio: *const [u64; 3]) -> pid`:
+    /// like `spawn`, with the caller's handles `stdio[i]` installed as the
+    /// child's handles 0 (stdin), 1 (stdout) and 2 (stderr);
+    /// [`HANDLE_NONE`](super::HANDLE_NONE) keeps the console for that stream.
+    pub const SPAWN_STDIO: u64 = 42;
+    /// `channel_listen(name, name_len) -> listener`: registers an IPC
+    /// service (root only; `AlreadyExists` while another listener has the name).
+    pub const CHANNEL_LISTEN: u64 = 43;
+    /// `channel_connect(name, name_len) -> channel`: connects to a service
+    /// (`NotFound` if nobody listens, `Busy` if its backlog is full).
+    pub const CHANNEL_CONNECT: u64 = 44;
+    /// `channel_accept(listener) -> channel`: the next pending connection
+    /// (`WouldBlock` if none; wait with `wait_handles`).
+    pub const CHANNEL_ACCEPT: u64 = 45;
+    /// `channel_send(channel, msg: *const ChannelMsg) -> 0`: queues one
+    /// message with up to `MAX_MESSAGE_HANDLES` handles (shared memory and
+    /// pipe ends) duplicated to the receiver. Never blocks: `WouldBlock`
+    /// when the peer's queue is full, `BrokenPipe` when the peer is gone.
+    pub const CHANNEL_SEND: u64 = 46;
+    /// `channel_recv(channel, msg: *mut ChannelMsg) -> bytes`: takes the next
+    /// message; the received handles are written to `msg.handles` and their
+    /// number to `msg.handle_count`. `WouldBlock` if the queue is empty,
+    /// `BrokenPipe` if it is empty and the peer is gone.
+    pub const CHANNEL_RECV: u64 = 47;
+    /// `channel_peer(channel) -> pid | uid << 32` of the other end.
+    pub const CHANNEL_PEER: u64 = 48;
+    /// `shm_create(size) -> handle`: zeroed shared memory (at most `MAX_SHM` bytes).
+    pub const SHM_CREATE: u64 = 49;
+    /// `shm_map(handle, prot) -> addr`: maps the whole object (`PROT_READ`,
+    /// optionally `PROT_WRITE`); `unmap` releases the mapping.
+    pub const SHM_MAP: u64 = 50;
+    /// `shm_size(handle) -> bytes`
+    pub const SHM_SIZE: u64 = 51;
+    /// `wait_handles(items: *mut WaitItem, count, timeout_ns) -> ready`:
+    /// blocks until at least one item is ready (`WAIT_*` events), the
+    /// timeout expires (0 ready) or the process is exiting. `timeout_ns`
+    /// 0 polls, `u64::MAX` waits forever.
+    pub const WAIT_HANDLES: u64 = 52;
+    /// `display_info(out: *mut DisplayInfo) -> 0`
+    pub const DISPLAY_INFO: u64 = 53;
+    /// `display_acquire() -> addr`: root only. Makes the caller the display
+    /// owner (the kernel stops drawing) and maps the framebuffer into it.
+    /// `Busy` while another process owns it. Ownership ends with
+    /// `display_release` or the owner's exit; the kernel then draws its
+    /// status screen again.
+    pub const DISPLAY_ACQUIRE: u64 = 54;
+    /// `display_release() -> 0`
+    pub const DISPLAY_RELEASE: u64 = 55;
+    /// `proc_list(buf: *mut ProcInfo, len) -> bytes`: one record per process.
+    pub const PROC_LIST: u64 = 56;
+    /// `mount_list(buf: *mut MountInfo, len) -> bytes`: one record per mount.
+    pub const MOUNT_LIST: u64 = 57;
+    /// `power(cmd) -> !`: root only; `POWER_OFF` or `POWER_REBOOT` after
+    /// unmounting every volume. Returns `NotSupported` if the machine
+    /// offers no known way to do it.
+    pub const POWER: u64 = 58;
+    /// `kill(pid) -> 0`: ends a process (status `KILLED_STATUS`). Root may
+    /// kill any process, others only processes with their own uid.
+    pub const KILL: u64 = 59;
 }
+
+/// "No handle" in `spawn_stdio`'s array.
+pub const HANDLE_NONE: u64 = u64::MAX;
+pub const STDIN: u64 = 0;
+/// Exit status of a process ended by `kill`.
+pub const KILLED_STATUS: i32 = 0x4000_0100;
 
 pub const OPEN_READ: u64 = 1 << 0;
 pub const OPEN_WRITE: u64 = 1 << 1;
@@ -561,9 +639,11 @@ pub enum Errno {
     /// `spawn` / `execve`: not a loadable ELF64 x86-64 executable (or one
     /// needing a dynamic linker).
     BadExecutable = 25,
+    /// The other end of a pipe or channel is closed.
+    BrokenPipe = 26,
 }
 
-const ALL_ERRNOS: [Errno; 25] = [
+const ALL_ERRNOS: [Errno; 26] = [
     Errno::InvalidArgument,
     Errno::Fault,
     Errno::NoMemory,
@@ -589,6 +669,7 @@ const ALL_ERRNOS: [Errno; 25] = [
     Errno::Loop,
     Errno::Unsupported,
     Errno::BadExecutable,
+    Errno::BrokenPipe,
 ];
 
 impl Errno {
@@ -623,6 +704,7 @@ impl Errno {
             Errno::Loop => "too many symbolic links",
             Errno::Unsupported => "unsupported file system feature",
             Errno::BadExecutable => "not a loadable executable",
+            Errno::BrokenPipe => "the other end is closed",
         }
     }
 }
@@ -691,6 +773,11 @@ mod tests {
         assert_eq!(core::mem::size_of::<MountArgs>(), 64);
         assert_eq!(core::mem::size_of::<FsStat>(), 72);
         assert_eq!(core::mem::size_of::<ExecArgs>(), 48);
+        assert_eq!(core::mem::size_of::<ipc::ChannelMsg>(), 32);
+        assert_eq!(core::mem::size_of::<ipc::WaitItem>(), 16);
+        assert_eq!(core::mem::size_of::<ipc::DisplayInfo>(), 32);
+        assert_eq!(core::mem::size_of::<ipc::ProcInfo>(), 72);
+        assert_eq!(core::mem::size_of::<ipc::MountInfo>(), 144);
     }
 
     /// Reads NUL-terminated bytes at `addr` of an image that ends at `top`.

@@ -90,7 +90,7 @@ pub fn map_mmio(phys: u64, len: u64) -> Result<u64, paging::MapError> {
         *next = base + pages * PAGE_SIZE;
         base
     };
-    let flags = paging::Flags { writable: true, executable: false, user: false, uncached: true };
+    let flags = paging::Flags { writable: true, executable: false, user: false, uncached: true, write_combining: false };
     for i in 0..pages {
         paging::map(base + i * PAGE_SIZE, start + i * PAGE_SIZE, flags)?;
     }

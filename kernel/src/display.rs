@@ -14,6 +14,9 @@ use osyx_gfx::{Color, Rect, Surface};
 
 struct Display {
     fb: *mut u32,
+    /// Physical framebuffer (for mapping it into the owner process).
+    phys: u64,
+    size: u64,
     stride: u32,
     rgb: bool,
     width: u32,
@@ -22,6 +25,8 @@ struct Display {
     bg: Vec<u32>,
     layout: Layout,
     assets: Assets<'static>,
+    /// pid of the process that owns the display (0: the kernel draws).
+    owner: u64,
 }
 
 // SAFETY: the framebuffer pointer is only dereferenced under the DISPLAY lock.
@@ -39,6 +44,13 @@ impl Display {
     }
 
     fn present(&mut self, r: Rect) {
+        if self.owner != 0 {
+            return; // a user-space compositor draws now
+        }
+        self.force_present(r);
+    }
+
+    fn force_present(&mut self, r: Rect) {
         let (fb, stride, rgb) = (self.fb, self.stride, self.rgb);
         let (frame, _) = self.surfaces();
         // SAFETY: `fb` maps the whole framebuffer (stride * height pixels)
@@ -65,6 +77,9 @@ pub fn init(info: &FramebufferInfo, footer_right: &str) -> bool {
     let (w, h) = (info.width, info.height);
     let mut d = Display {
         fb: phys_to_virt(info.base) as *mut u32,
+        phys: info.base,
+        size: needed,
+        owner: 0,
         stride: info.stride,
         rgb,
         width: w,
@@ -122,11 +137,13 @@ pub fn spin(phase: u32) {
     d.present(r);
 }
 
-/// Best-effort panic screen; never blocks.
+/// Best-effort panic screen; never blocks. Drawn even over a user-space
+/// compositor: the system is halting.
 pub fn panic_screen(message: &str) {
     let Some(mut g) = DISPLAY.try_lock() else { return };
     let Some(d) = g.as_mut() else { return };
     let (l, a) = (d.layout, d.assets);
+    let owned = d.owner != 0;
     let r = {
         let (mut f, bg) = d.surfaces();
         splash::draw_progress(&mut f, &bg, &l, 1000, splash::ERROR)
@@ -134,5 +151,57 @@ pub fn panic_screen(message: &str) {
             .union(&splash::draw_details(&mut f, &bg, &l, &a, &[message, "System halted"], splash::TEXT))
             .union(&splash::draw_spinner(&mut f, &bg, &l, 0, 0, splash::ACCENT))
     };
-    d.present(r);
+    let full = Rect::new(0, 0, d.width, d.height);
+    d.force_present(if owned { full } else { r });
+}
+
+/// Geometry of the framebuffer for `display_info`.
+pub fn info() -> Option<osyx_abi::ipc::DisplayInfo> {
+    let g = DISPLAY.lock();
+    let d = g.as_ref()?;
+    Some(osyx_abi::ipc::DisplayInfo {
+        width: d.width,
+        height: d.height,
+        stride: d.stride,
+        format: if d.rgb { osyx_abi::ipc::pixel::RGBX } else { osyx_abi::ipc::pixel::BGRX },
+        size: d.size,
+        owner: d.owner,
+    })
+}
+
+/// Makes `pid` the display owner; returns the framebuffer as a device
+/// memory object to map into it. The current owner may acquire again (after
+/// `execve`, for example).
+pub fn acquire(pid: u64) -> Result<alloc::sync::Arc<crate::shm::SharedMemory>, osyx_abi::Errno> {
+    let mut g = DISPLAY.lock();
+    let d = g.as_mut().ok_or(osyx_abi::Errno::NotSupported)?;
+    if d.owner != 0 && d.owner != pid {
+        return Err(osyx_abi::Errno::Busy);
+    }
+    let first = d.owner == 0;
+    d.owner = pid;
+    if first {
+        crate::kprintln!("display: process {} owns the framebuffer ({}x{})", pid, d.width, d.height);
+    }
+    Ok(crate::shm::SharedMemory::device(d.phys, d.size))
+}
+
+/// Gives the display back to the kernel if `pid` owns it; the status
+/// screen is drawn again (the diagnostic fallback when a compositor dies).
+pub fn release(pid: u64) -> bool {
+    let mut g = DISPLAY.lock();
+    let Some(d) = g.as_mut() else { return false };
+    if d.owner != pid || pid == 0 {
+        return false;
+    }
+    d.owner = 0;
+    let full = Rect::new(0, 0, d.width, d.height);
+    d.present(full);
+    crate::kprintln!("display: released by process {}, kernel status screen restored", pid);
+    true
+}
+
+/// Process exit hook.
+pub fn owner_exited(pid: u64) {
+    release(pid);
 }

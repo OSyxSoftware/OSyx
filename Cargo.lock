@@ -68,9 +68,11 @@ dependencies = [
  "osyx-ext4",
  "osyx-fat",
  "osyx-gfx",
+ "osyx-input",
  "osyx-mm",
  "osyx-part",
  "osyx-tmpfs",
+ "osyx-usb",
  "osyx-vfs",
 ]
 

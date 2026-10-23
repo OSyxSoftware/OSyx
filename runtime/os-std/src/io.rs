@@ -150,6 +150,21 @@ impl Stream {
     }
 }
 
+/// Handle to the process's standard input. It exists only when the parent
+/// connected one (e.g. `Command::spawn_piped`); otherwise reads fail.
+pub struct Stdin;
+
+pub fn stdin() -> Stdin {
+    Stdin
+}
+
+impl Read for Stdin {
+    /// Blocks until input arrives; 0 at end of input.
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        sys::read_stdin(buf)
+    }
+}
+
 /// Handle to the process's standard output (unbuffered; `print!` batches
 /// each call into as few system calls as possible).
 pub struct Stdout;

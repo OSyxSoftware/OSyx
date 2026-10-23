@@ -95,7 +95,7 @@ function New-DiskImage {
 }
 
 # Returns the QEMU argument list for booting build/osyx.img.
-function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng) {
+function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb) {
     if (-not $Script:Qemu) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
     if (-not $Script:Ovmf) { throw 'OVMF (edk2-x86_64-code.fd) not found' }
     # Fresh firmware variables every boot: stale boot entries for devices
@@ -103,7 +103,8 @@ function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 5
     $vars = Join-Path $BuildDir 'OVMF_VARS.fd'
     Copy-Item $Script:Ovmf.Vars $vars -Force
     $a = @(
-        '-machine', 'q35',
+        # No PS/2 controller: keyboard and mouse input can only arrive over USB.
+        '-machine', 'q35,i8042=off',
         '-cpu', 'qemu64,+nx',
         '-m', "$MemoryMiB",
         '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$($Script:Ovmf.Code -replace '\\','/')",
@@ -116,6 +117,11 @@ function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 5
         '-no-reboot'
     )
     if (-not $NoRng) { $a += @('-device', 'virtio-rng-pci') }
+    # USB input through the native xHCI driver (no PS/2 driver exists, so
+    # the keyboard and mouse can only reach OSyx this way).
+    if (-not $NoUsb) {
+        $a += @('-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,bus=xhci.0,id=kbd', '-device', 'usb-mouse,bus=xhci.0,id=mouse')
+    }
     if ($Headless) { $a += @('-display', 'none') }
     if ($QmpPort -gt 0) { $a += @('-qmp', "tcp:127.0.0.1:$QmpPort,server,nowait") }
     if ($Gdb) { $a += @('-s', '-S') }

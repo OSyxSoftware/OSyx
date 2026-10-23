@@ -273,8 +273,10 @@ pub fn run(t: &mut Tests) {
             let v: Vec<_> = d.collect();
             !v.is_empty() && v.iter().all(|e| e.file_type().is_block_device())
         });
-        let no_input = !fs::exists("/dev/input").unwrap_or(true);
-        null && zero && random && console && disks && no_input
+        // The input core's seat stream; per-device nodes only for attached devices.
+        let input = fs::metadata("/dev/input/seat0").is_ok_and(|m| m.file_type().is_char_device())
+            && fs::read_dir("/dev/input").is_ok_and(|mut d| d.all(|e| e.file_name() == "seat0" || e.file_name().starts_with("event")));
+        null && zero && random && console && disks && input
     });
     t.check("fs: an unprivileged process is confined", || {
         let secret = File::options().write(true).create_new(true).mode(0o600).open("/tmp/root-only").is_ok_and(|mut f| f.write_all(b"secret").is_ok());

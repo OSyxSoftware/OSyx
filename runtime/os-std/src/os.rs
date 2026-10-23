@@ -65,8 +65,8 @@ pub use osyx_abi::auxv;
 pub mod raw {
     pub use os_sys::{
         close, exec_raw, execve, futex_wait, futex_wake, gettid, map, nr, open, raw_syscall, read, read_raw, spawn,
-        sysinfo_raw, thread_exit, unmap, wait_raw, write, write_raw, Errno, ExecArgs, ABI_VERSION, OPEN_CREATE,
-        OPEN_DIRECTORY, OPEN_READ, OPEN_WRITE, PROT_EXEC, PROT_READ, PROT_WRITE,
+        sysinfo_raw, thread_exit, unmap, wait_raw, write, write_raw, Errno, ExecArgs, ABI_VERSION, HANDLE_NONE,
+        KILLED_STATUS, OPEN_CREATE, OPEN_DIRECTORY, OPEN_READ, OPEN_WRITE, PROT_EXEC, PROT_READ, PROT_WRITE,
     };
 }
 

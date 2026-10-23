@@ -310,7 +310,25 @@ pub fn devfs() -> TestResult {
     for want in ["null", "zero", "console", "disks"] {
         ensure!(names.iter().any(|n| n == want), "/dev lacks {want}: {names:?}");
     }
-    ensure!(!names.iter().any(|n| n == "input"), "/dev/input listed without an input driver");
+    // /dev/input: the seat stream of the input core, plus one node per
+    // attached device and nothing else.
+    ensure!(names.iter().any(|n| n == "input"), "/dev lacks input: {names:?}");
+    let inputs = listing(&cx, "/dev/input").map_err(|x| e("ls /dev/input", x))?;
+    ensure!(inputs.iter().any(|(n, k)| n == "seat0" && *k == KIND_CHAR_DEVICE), "no seat0 in {inputs:?}");
+    let attached: Vec<String> = crate::input::devices().iter().map(|d| format!("event{}", d.0)).collect();
+    for (n, _) in &inputs {
+        ensure!(n == "seat0" || attached.contains(n), "/dev/input/{n} without an attached device ({attached:?})");
+    }
+    let seat = vfs::stat(&cx, "/dev/input/seat0").map_err(|x| e("stat seat0", x))?;
+    ensure!(seat.mode == 0o600 && seat.uid == 0, "seat0 mode {:o}", seat.mode);
+    ensure!(vfs::open(&user(1000), "/dev/input/seat0", OPEN_READ, 0).err() == Some(Errno::PermissionDenied), "seat0 open by a user");
+    {
+        let first = vfs::open(&cx, "/dev/input/seat0", OPEN_READ, 0).map_err(|x| e("open seat0", x))?;
+        ensure!(vfs::open(&cx, "/dev/input/seat0", OPEN_READ, 0).err() == Some(Errno::Busy), "seat0 is exclusive");
+        drop(first);
+    }
+    ensure!(vfs::open(&cx, "/dev/input/seat0", OPEN_READ, 0).is_ok(), "seat0 reopens after close");
+    kprintln!("[test]   /dev/input: seat0 exclusive and root-only, {} attached device node(s)", inputs.len() - 1);
     let disks = listing(&cx, "/dev/disks").map_err(|x| e("ls /dev/disks", x))?;
     ensure!(!disks.is_empty() && disks.iter().all(|(_, k)| *k == KIND_BLOCK_DEVICE), "disks {disks:?}");
     let first = format!("/dev/disks/{}", disks[0].0);

@@ -17,6 +17,10 @@ pub fn write(fd: u64, buf: &[u8]) -> Result<usize> {
     os_sys::write(fd, buf).map_err(Error::from)
 }
 
+pub fn read_stdin(buf: &mut [u8]) -> Result<usize> {
+    os_sys::read(osyx_abi::STDIN, buf).map_err(Error::from)
+}
+
 pub fn exit(code: i32) -> ! {
     os_sys::exit(code)
 }
@@ -89,6 +93,10 @@ pub mod fs {
 
         pub fn sync(&self) -> Result<()> {
             os_sys::fsync(self.0).map_err(Error::from)
+        }
+
+        pub fn handle(&self) -> u64 {
+            self.0
         }
     }
 

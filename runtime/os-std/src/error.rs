@@ -37,6 +37,8 @@ pub enum ErrorKind {
     Io,
     /// The file is not a program OSyx can load (`spawn` / `exec`).
     InvalidExecutable,
+    /// The other end of a pipe or channel is closed.
+    BrokenPipe,
     Other,
 }
 
@@ -68,6 +70,7 @@ impl ErrorKind {
             ErrorKind::InvalidData => "invalid data",
             ErrorKind::Io => "I/O error",
             ErrorKind::InvalidExecutable => "not a loadable executable",
+            ErrorKind::BrokenPipe => "broken pipe",
             ErrorKind::Other => "other error",
         }
     }
@@ -134,6 +137,7 @@ impl From<Errno> for Error {
             Errno::Loop => ErrorKind::FilesystemLoop,
             Errno::Unsupported => ErrorKind::Unsupported,
             Errno::BadExecutable => ErrorKind::InvalidExecutable,
+            Errno::BrokenPipe => ErrorKind::BrokenPipe,
         };
         Error { kind, errno: Some(e), message: None }
     }

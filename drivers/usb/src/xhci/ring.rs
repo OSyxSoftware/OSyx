@@ -184,6 +184,12 @@ impl EventRing {
         Some(t)
     }
 
+    /// True if the controller has written an event the driver has not
+    /// consumed yet.
+    pub fn ready(&self, mem: &impl TrbMemory) -> bool {
+        mem.read(self.dequeue).control() & CYCLE == u32::from(self.cycle)
+    }
+
     /// Value for ERDP: the address of the next slot the driver will read.
     pub fn dequeue_phys(&self) -> u64 {
         self.base + 16 * self.dequeue as u64

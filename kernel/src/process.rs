@@ -25,7 +25,9 @@ use crate::arch::cpu;
 use crate::exec::{self, ExecRequest, Program};
 use crate::mem::paging::{self, Flags, MapError};
 use crate::mem::{alloc_frame, free_frame, phys_to_virt, PAGE_SIZE};
+use crate::object::Object;
 use crate::sched::{self, Tid};
+use crate::shm::SharedMemory;
 use crate::sync::{IrqSpinLock, KMutex};
 use crate::vfs::{self, Lookup};
 use crate::kprintln;
@@ -243,6 +245,10 @@ pub struct Process {
     life: Life,
     space: Space,
     regions: BTreeMap<u64, u64>,
+    /// Shared memory mapped into this process: address -> (object, pages).
+    /// The frames belong to the object; they are unmapped (never freed)
+    /// before the address space is destroyed.
+    shared: BTreeMap<u64, (Arc<SharedMemory>, u64)>,
     next_map: u64,
     mapped_pages: u64,
     line: Vec<u8>,
@@ -250,8 +256,9 @@ pub struct Process {
     threads: Vec<Tid>,
     /// Set by `exit`: the status reported once the last thread has ended.
     exit_status: Option<i32>,
-    /// Open files by handle number (from `FIRST_FILE_HANDLE`).
-    handles: BTreeMap<u64, FileHandle>,
+    /// Open objects by handle number: 0-2 only if standard streams were
+    /// redirected at spawn, the rest from `FIRST_FILE_HANDLE`.
+    handles: BTreeMap<u64, Object>,
     /// User and group for permission checks (inherited by children).
     cred: Cred,
     /// Canonical absolute current directory (inherited by children).
@@ -355,6 +362,7 @@ impl Process {
             life: Life::Running,
             space,
             regions: BTreeMap::new(),
+            shared: BTreeMap::new(),
             next_map: MAP_BASE,
             mapped_pages: 0,
             line: Vec::new(),
@@ -366,8 +374,15 @@ impl Process {
         }
     }
 
+    /// Removes every shared memory mapping (the frames stay with their
+    /// objects; page tables stay with the address space).
+    fn unmap_shared(&mut self) {
+        unmap_shared_from(self.space.root, core::mem::take(&mut self.shared));
+    }
+
     /// Releases the address space and checks the frame accounting.
     fn release_memory(&mut self) {
+        self.unmap_shared();
         // SAFETY: the address space is not active (the caller switched to the
         // kernel root or never activated it).
         let r = unsafe { self.space.release() };
@@ -386,10 +401,24 @@ impl Process {
     }
 }
 
+fn unmap_shared_from(root: u64, shared: BTreeMap<u64, (Arc<SharedMemory>, u64)>) {
+    for (addr, (shm, pages)) in shared {
+        for i in 0..pages {
+            let _ = paging::unmap_in(root, addr + i * PAGE_SIZE, true);
+        }
+        drop(shm);
+    }
+}
+
 /// Starts the program of `req` as a child of `parent`, with the parent's
 /// credentials and current directory (root and `/` for the kernel).
 /// Returns the new pid; the process runs concurrently.
 pub fn spawn(parent: Pid, req: &ExecRequest) -> Result<Pid, ExecError> {
+    spawn_with_stdio(parent, req, [None, None, None])
+}
+
+/// [`spawn`] with the child's handles 0, 1 and 2 set to `stdio`.
+pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 3]) -> Result<Pid, ExecError> {
     if TABLE.lock().procs.len() >= MAX_PROCESSES {
         return Err(ExecError::TooManyProcesses);
     }
@@ -402,6 +431,11 @@ pub fn spawn(parent: Pid, req: &ExecRequest) -> Result<Pid, ExecError> {
     };
     let (space, entry, rsp, path) = build_image(&cx, req)?;
     let mut p = Process::new(parent, req.name(), cx.cred, cx.cwd, space);
+    for (i, o) in stdio.into_iter().enumerate() {
+        if let Some(o) = o {
+            p.handles.insert(i as u64, o);
+        }
+    }
     let pid = p.pid;
     const LOGGED_ARGS: usize = 8;
     let more = match req.argv.len() {
@@ -476,14 +510,15 @@ pub fn exec_current(req: ExecRequest) -> ExecError {
             let p = t.procs.get_mut(&pid).expect("current process exists");
             core::mem::swap(&mut p.space, &mut space);
             p.regions.clear();
+            let old_shared = core::mem::take(&mut p.shared);
             p.next_map = MAP_BASE;
             p.mapped_pages = 0;
             p.name = name.clone();
             kprintln!("process {} ({}): exec {}, entry {:#x}", pid, name, path, entry);
-            Some(p.space.root)
+            Some((p.space.root, old_shared))
         }
     };
-    let Some(root) = old else {
+    let Some((root, old_shared)) = old else {
         cpu::enable_interrupts();
         // SAFETY: the new space was never activated.
         unsafe { space.release() };
@@ -496,6 +531,7 @@ pub fn exec_current(req: ExecRequest) -> ExecError {
     sched::rename_current(&name);
     sched::set_current_fs_base(0);
     sched::reset_current_fpu();
+    unmap_shared_from(space.root, old_shared);
     // SAFETY: the old space is no longer active anywhere.
     let r = unsafe { space.release() };
     report_release(pid, &name, "old image ", r);
@@ -639,7 +675,9 @@ pub fn finish_current_thread(code: i32) -> ! {
         }
     }
     // Volume metadata is written through, so dropping the files needs no I/O.
+    // Pipe and channel ends wake their peers as they go.
     drop(closed);
+    crate::display::owner_exited(pid);
     for tid in to_wake {
         sched::wake(tid);
     }
@@ -648,25 +686,123 @@ pub fn finish_current_thread(code: i32) -> ! {
 
 /// Adds an open file to the current process; returns the lowest free handle.
 pub fn add_handle(f: vfs::OpenFile) -> Result<u64, Errno> {
-    let pid = sched::current_pid();
-    let file = Arc::new(KMutex::new(f));
-    let mut t = TABLE.lock();
-    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
-    if p.handles.len() >= osyx_abi::MAX_HANDLES {
-        return Err(Errno::TooManyHandles);
-    }
-    let mut h = osyx_abi::FIRST_FILE_HANDLE;
-    while p.handles.contains_key(&h) {
-        h += 1;
-    }
-    p.handles.insert(h, file);
-    Ok(h)
+    add_object(Object::File(Arc::new(KMutex::new(f))))
 }
 
+/// Adds objects to the current process: all of them or none; returns their
+/// handles (lowest free numbers from `FIRST_FILE_HANDLE`).
+pub fn add_objects(objects: Vec<Object>) -> Result<Vec<u64>, Errno> {
+    let pid = sched::current_pid();
+    let mut t = TABLE.lock();
+    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    if p.handles.len() + objects.len() > osyx_abi::MAX_HANDLES {
+        return Err(Errno::TooManyHandles);
+    }
+    let mut out = Vec::with_capacity(objects.len());
+    let mut h = osyx_abi::FIRST_FILE_HANDLE;
+    for o in objects {
+        while p.handles.contains_key(&h) {
+            h += 1;
+        }
+        p.handles.insert(h, o);
+        out.push(h);
+    }
+    Ok(out)
+}
+
+pub fn add_object(o: Object) -> Result<u64, Errno> {
+    add_objects(alloc::vec![o]).map(|v| v[0])
+}
+
+/// The open file behind handle `h` (`BadHandle` for other objects).
 pub fn get_handle(h: u64) -> Result<FileHandle, Errno> {
+    match get_object(h)? {
+        Object::File(f) => Ok(f),
+        _ => Err(Errno::BadHandle),
+    }
+}
+
+/// The object behind handle `h` of the current process.
+pub fn get_object(h: u64) -> Result<Object, Errno> {
     let pid = sched::current_pid();
     let t = TABLE.lock();
     t.procs.get(&pid).and_then(|p| p.handles.get(&h)).cloned().ok_or(Errno::BadHandle)
+}
+
+/// Maps all of `shm` into the current process (read-only unless
+/// `writable`); returns the address.
+pub fn map_shared(shm: Arc<SharedMemory>, writable: bool) -> Result<u64, Errno> {
+    let pid = sched::current_pid();
+    let mut t = TABLE.lock();
+    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let pages = shm.pages();
+    if p.mapped_pages + pages > MAP_LIMIT_PAGES {
+        return Err(Errno::NoMemory);
+    }
+    let base = p.next_map;
+    let mut flags = Flags::user(writable, false);
+    flags.write_combining = shm.write_combining;
+    for (i, &frame) in shm.frames().iter().enumerate() {
+        match paging::map_in(p.space.root, base + i as u64 * PAGE_SIZE, frame, flags) {
+            Ok(tables) => p.space.frames += tables,
+            Err(_) => {
+                for j in 0..i as u64 {
+                    let _ = paging::unmap_in(p.space.root, base + j * PAGE_SIZE, true);
+                }
+                return Err(Errno::NoMemory);
+            }
+        }
+    }
+    p.shared.insert(base, (shm, pages));
+    p.mapped_pages += pages;
+    p.next_map = base + (pages + 1) * PAGE_SIZE; // leave a guard page
+    Ok(base)
+}
+
+/// Ends process `pid` on behalf of the current process (root, or the same
+/// user). Its threads stop at their next safe point.
+pub fn kill(pid: Pid) -> Result<(), Errno> {
+    let me = sched::current_pid();
+    let (my_cred, _) = current_identity();
+    let threads: Vec<Tid> = {
+        let mut t = TABLE.lock();
+        let p = t.procs.get_mut(&pid).ok_or(Errno::NotFound)?;
+        if !my_cred.is_root() && p.cred.uid != my_cred.uid {
+            return Err(Errno::PermissionDenied);
+        }
+        if p.life != Life::Running {
+            return Err(Errno::NotFound);
+        }
+        p.exit_status.get_or_insert(osyx_abi::KILLED_STATUS);
+        p.threads.clone()
+    };
+    kprintln!("process {} killed by {}", pid, me);
+    for t in threads {
+        sched::request_kill(t);
+    }
+    Ok(())
+}
+
+/// One record per process (for `proc_list`).
+pub fn list() -> Vec<osyx_abi::ipc::ProcInfo> {
+    let t = TABLE.lock();
+    t.procs
+        .values()
+        .map(|p| {
+            let mut info = osyx_abi::ipc::ProcInfo {
+                pid: p.pid,
+                parent: p.parent,
+                uid: p.cred.uid,
+                gid: p.cred.gid,
+                threads: p.threads.len() as u32,
+                state: if p.life == Life::Running { osyx_abi::ipc::PROC_RUNNING } else { osyx_abi::ipc::PROC_ZOMBIE },
+                frames: p.space.frames,
+                name: [0; 32],
+            };
+            osyx_abi::ipc::fill_field(&mut info.name, &p.name);
+            info
+        })
+        .collect()
 }
 
 /// Removes a handle. A system call still using the file keeps it alive
@@ -736,11 +872,25 @@ pub fn map_anonymous(len: u64, prot: u64) -> Result<u64, Errno> {
     Ok(base)
 }
 
-/// `unmap` back end: releases exactly one region previously returned by `map`.
+/// `unmap` back end: releases exactly one region previously returned by
+/// `map` or `shm_map`.
 pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
     let pid = sched::current_pid();
     let mut t = TABLE.lock();
     let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    if let Some((_, pages)) = p.shared.get(&addr) {
+        if len.div_ceil(PAGE_SIZE) != *pages {
+            return Err(Errno::InvalidArgument);
+        }
+        let pages = *pages;
+        let entry = p.shared.remove(&addr).expect("checked above");
+        p.mapped_pages -= pages;
+        let root = p.space.root;
+        let mut one = BTreeMap::new();
+        one.insert(addr, entry);
+        unmap_shared_from(root, one);
+        return Ok(());
+    }
     let pages = *p.regions.get(&addr).ok_or(Errno::InvalidArgument)?;
     if len.div_ceil(PAGE_SIZE) != pages {
         return Err(Errno::InvalidArgument);
