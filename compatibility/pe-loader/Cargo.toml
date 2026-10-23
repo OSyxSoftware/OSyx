@@ -1,0 +1,9 @@
+[package]
+name = "osyx-pe-loader"
+description = "PE32+ loader core: API set schema v6, image mapping, relocations, import binding and forwarders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+osyx-pe = { path = "../pe-parser" }

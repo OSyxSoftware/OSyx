@@ -117,6 +117,13 @@ name = "osyx-pe"
 version = "0.1.0"
 
 [[package]]
+name = "osyx-pe-loader"
+version = "0.1.0"
+dependencies = [
+ "osyx-pe",
+]
+
+[[package]]
 name = "osyx-tmpfs"
 version = "0.1.0"
 dependencies = [
