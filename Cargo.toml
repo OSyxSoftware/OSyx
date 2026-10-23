@@ -10,6 +10,7 @@ members = [
     "boot/uefi-loader",
     "compatibility/pe-parser",
     "compatibility/pe-loader",
+    "compatibility/win32",
     "kernel",
     "kernel/mm",
     "drivers/usb",

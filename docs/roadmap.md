@@ -9,7 +9,7 @@ Status of the milestones from the project brief.
 | 3 | Kernel boot (serial, panic, CPU init, exceptions) | Done |
 | 4 | Memory subsystem (frames, paging, heap) | Done |
 | 5 | Initial OSyx Std | Done (convenience std; real `std` port planned) |
-| 6 | PE32+ parser | Done (host tested; loader not started) |
+| 6 | PE32+ parser | Done (host tested) |
 | 7 | User-space foundations (ring 3, syscalls, exit, console) | Done |
 | 7b | Scheduler, kernel threads, preemption, FPU state, spawn/wait | Done (single CPU) |
 | 7c | Threads per process, futexes, FS-base TLS, OSyx Std `thread`/`Mutex`/`Condvar` | Done (single CPU) |
@@ -19,22 +19,25 @@ Status of the milestones from the project brief.
 | 7g | Kernel objects and IPC: pipes, channels, shared memory, wait_handles (ABI v7) | Done |
 | 7h | Native xHCI driver, USB enumeration, HID keyboard/mouse, input core | Done (root ports, boot keyboards; see graphics.md) |
 | 7i | PRISM compositor, protocol v1, UI toolkit, desktop shell, AXIS Terminal, Files, System Information | Done (software composition; see graphics.md) |
-| 8 | Native Windows PE execution | Not started |
+| 8 | Native Windows PE execution | Initial subset implemented (console, files, threads, DLLs, GUI, Winsock; see windows-compatibility.md) |
+| 9 | Native networking | Implemented (VirtIO-Net and IPv4 stack; see network/net) |
+| 10 | VirtIO-GPU display backend | Implemented (2D scanout/damage/cursor; software composition) |
+| 11 | Task Manager, Settings and four PE32+ desktop utilities | Implemented initial versions |
 
 ## Next steps (in order)
 
-1. **PE loader milestone 1**: map a minimal PE32+ with no imports into a
-   user address space (relocations, section permissions) and run it, read
-   from the ext4 root through the same path as ELF programs (`exec.rs`).
-2. **Windows 11 research with REA**: continue from
-   `research/windows11-apiset-and-forwarding.md` with loader behaviour
-   (search order, KnownDLLs, TLS callbacks, delay loads).
-3. **PE loader milestone 2**: `hello.exe` against a minimal in-tree kernel32
-   (`GetStdHandle`, `WriteFile`, `GetLastError`, `ExitProcess`).
+1. **Real-hardware storage/network**: NVMe/AHCI for persistent root storage,
+   and a driver for a physical NIC. The current drivers target VirtIO.
+2. **Windows compatibility expansion**: cross-process sharing/object names,
+   child controls, true inaccessible reserved pages, SEH, delay imports,
+   process creation and the runtime dependencies of larger applications.
+3. **Windows 11 research with REA**: continue from
+   `research/windows11-apiset-and-forwarding.md`, maintaining explicit
+   supported/unsupported boundaries and executable regression programs.
 4. **Storage follow-ups**: ext4 htree insertion and deeper extent trees, a
    page cache with delayed writes (and demand-paged program images), FAT
    timestamps, interrupt-driven virtio.
-5. **Local APIC + ACPI (MADT)**: replace PIC/PIT; then SMP bring-up and
+5. **ACPI (MADT) and SMP**: extend the existing local APIC timer; then bring up
    per-CPU data with `swapgs`.
 6. **More OSyx Std**: `RwLock`, `Once`/`OnceLock`, `mpsc`; then the
    genuine `std` port ([rust-std.md](rust-std.md)).

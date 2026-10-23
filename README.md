@@ -4,7 +4,7 @@ OSyx is a new x86-64 operating system written from scratch, primarily in Rust:
 its own graphical UEFI boot manager, its own kernel, and its own user-space
 standard library (OSyx Std). The long-term goal is native execution of
 unmodified Windows PE32+ applications through an independently developed NT
-compatibility layer; that work has not started yet (see
+compatibility layer; an initial tested subset is implemented (see
 [docs/roadmap.md](docs/roadmap.md)).
 
 ## What works today (tested in QEMU + OVMF)
@@ -35,7 +35,19 @@ compatibility layer; that work has not started yet (see
   `env::current_dir`, `SystemTime`, panics): `init` runs 69 checks using
   `worker` and `probe` children.
 
-- Windows compatibility groundwork: Windows 11 research started
+- Windows compatibility: `/bin/winrun` loads PE32+ programs and DLLs with
+  relocations, imports, forwarding, API sets, PEB/TEB and TLS. Original
+  implementations of a subset of ntdll, kernel32, user32/gdi32, Winsock,
+  SetupAPI and IP Helper run console, file, thread and GUI tests on OSyx.
+  Four small applications (`textedit.exe`, `diskutil.exe`, `devmgr.exe`,
+  `netcenter.exe`) are installed in `/opt/apps`; the launcher runs them
+  through winrun. See [docs/windows-compatibility.md](docs/windows-compatibility.md).
+- Native networking: VirtIO-Net, Ethernet/ARP/IPv4/ICMP, DHCP, DNS, UDP/TCP,
+  ring-3 sockets and tools (`net`, `netstat`, `ping`, `dns`, `nc`).
+- Native graphics: VirtIO-GPU 2D scanout and damage flushing through PRISM,
+  with GOP framebuffer fallback; native Task Manager and Settings alongside
+  the existing desktop applications. Composition remains in software.
+- Windows 11 research
   ([API sets and forwarding](docs/research/windows11-apiset-and-forwarding.md));
   a bounds-checked, zero-copy PE32+ parser
   (headers, sections, imports, exports with forwarders, relocations, TLS,
@@ -51,6 +63,13 @@ compatibility layer; that work has not started yet (see
 .\scripts\test.ps1        # host unit tests, clippy, QEMU boot/fault/user tests
 ```
 
+For the interactive desktop, run
+`powershell -ExecutionPolicy Bypass -File scripts/run-qemu.ps1 -Cmdline init.args=desktop -MemoryMiB 1024`.
+Each interactive run uses its own image under `build/run/`; builds and tests
+can replace `build/osyx.img` without invalidating a running VM's filesystem.
+The session image is kept after exit. `-NoBuild` boots a private copy of the
+current base image, including that image's saved boot command line.
+
 Building the ext4 root image and checking it needs WSL (Ubuntu 24.04) with
 e2fsprogs; MSYS2 provides QEMU, OVMF and mtools. Only image files under
 `build/` are written; no host disk or partition is touched.
@@ -64,7 +83,7 @@ e2fsprogs; MSYS2 provides QEMU, OVMF and mtools. Only image files under
 | `boot/elf` | bounds-checked ELF64 validation (kernel and user policies) |
 | `boot/assets` | generated logo/font assets (`scripts/gen-assets.py`) |
 | `kernel` | the kernel; `kernel/mm` holds host-tested memory algorithms |
-| `compatibility/pe-parser` | PE32+ parser (`osyx-pe`), fixtures, `pe-dump` / `pe-sweep` tools |
+| `compatibility/pe-parser`, `compatibility/pe-loader`, `compatibility/win32` | PE parser/linker and winrun; tests and Windows application sources |
 | `storage/ext4` | ext4 driver (`osyx-ext4`), e2fsprogs-made test images |
 | `storage/fat` | FAT32 driver (`osyx-fat`), `mkfat32` / `fatcheck` tools |
 | `storage/vfs`, `storage/tmpfs`, `storage/part` | VFS building blocks, tmpfs, GPT (`mkdisk`) |

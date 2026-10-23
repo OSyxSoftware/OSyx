@@ -23,6 +23,17 @@ for d in bin usr/bin system/bin; do
     fi
 done
 # Desktop wallpapers (OSXI images converted by build.ps1).
+if [ -d "$BIN/opt/apps" ]; then
+    mkdir -p "$R/opt/apps"
+    find "$BIN/opt/apps" -maxdepth 1 -type f -exec install -m 0755 -t "$R/opt/apps/" {} +
+    chmod 0755 "$R/opt" "$R/opt/apps"
+fi
+# Windows programs (PE32+) for /bin/winrun: test programs and applications.
+if [ -d "$BIN/opt/wintests" ]; then
+    mkdir -p "$R/opt/wintests"
+    find "$BIN/opt/wintests" -maxdepth 1 -type f -exec install -m 0755 -t "$R/opt/wintests/" {} +
+    chmod 0755 "$R/opt" "$R/opt/wintests"
+fi
 mkdir -p "$R/system/share/wallpapers"
 if [ -d "$BIN/system/share/wallpapers" ]; then
     find "$BIN/system/share/wallpapers" -maxdepth 1 -type f -exec install -m 0644 -t "$R/system/share/wallpapers/" {} +
@@ -41,6 +52,12 @@ app() { # file name exec icon comment
 app 10-terminal "AXIS Terminal" /system/bin/terminal terminal "Run commands in the AXIS shell"
 app 20-files "Files" /system/bin/files files "Browse and manage files on every mounted volume"
 app 30-sysinfo "System Information" /system/bin/sysinfo info "Version, processor, memory, volumes and processes"
+app 40-taskmgr "Task Manager" /system/bin/taskmgr info "Processes, CPU, memory, disk and network performance"
+app 50-settings "Settings" /system/bin/settings info "Configure appearance, keyboard, time and networking"
+app 60-textedit "Text Editor" /opt/apps/textedit.exe info "Edit UTF-8 text with the Win32 application"
+app 70-diskutil "Disk Utility" /opt/apps/diskutil.exe info "Mounted volumes and directory usage"
+app 80-devmgr "Device Manager" /opt/apps/devmgr.exe info "Devices reported by OSyx"
+app 90-netcenter "Network Center" /opt/apps/netcenter.exe info "Network adapters, traffic, ping and DNS"
 chmod 0644 "$R"/etc/TZ "$R"/etc/osyx/keyboard
 find "$R/system/share/applications" -type f -exec chmod 0644 {} +
 # The home of the desktop user (uid 1000): a few documents to look at.

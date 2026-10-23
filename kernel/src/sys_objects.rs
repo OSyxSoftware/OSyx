@@ -8,7 +8,9 @@ use crate::object::{self, Object};
 use crate::{ipc, pipe, process, sched, shm};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use osyx_abi::ipc::{ChannelMsg, MountInfo, WaitItem, MAX_MESSAGE, MAX_MESSAGE_HANDLES, MAX_SERVICE_NAME, MAX_WAIT_ITEMS};
+use osyx_abi::ipc::{
+    ChannelMsg, MountInfo, WaitItem, MAX_MESSAGE, MAX_MESSAGE_HANDLES, MAX_SERVICE_NAME, MAX_WAIT_ITEMS,
+};
 use osyx_abi::{Errno, HANDLE_NONE, PROT_EXEC, PROT_READ, PROT_WRITE};
 
 /// Reads a plain `repr(C)` value from user memory.
@@ -292,6 +294,40 @@ pub fn proc_list(buf: u64, len: u64) -> Result<u64, Errno> {
     put_slice(buf, len, &process::list())
 }
 
+pub fn device_list(buf: u64, len: u64) -> Result<u64, Errno> {
+    use osyx_abi::ipc::{fill_field, DeviceInfo};
+    let mut list = Vec::new();
+    for d in crate::pci::enumerate() {
+        let mut info = DeviceInfo::default();
+        fill_field(
+            &mut info.description,
+            &alloc::format!("PCI {:04x}:{:04x} {}", d.vendor, d.device, crate::pci::class_name(d.class, d.subclass)),
+        );
+        fill_field(
+            &mut info.class,
+            match d.class {
+                1 => "Storage",
+                2 => "Net",
+                3 => "Display",
+                0x0c if d.subclass == 3 => "USB",
+                _ => "System",
+            },
+        );
+        fill_field(&mut info.hardware_id, &alloc::format!("PCI\\VEN_{:04X}&DEV_{:04X}", d.vendor, d.device));
+        fill_field(&mut info.location, &alloc::format!("PCI {}", d.addr));
+        list.push(info);
+    }
+    for (id, name, class, _) in crate::input::devices() {
+        let mut info = DeviceInfo::default();
+        fill_field(&mut info.description, &name);
+        fill_field(&mut info.class, if class == osyx_input::class::KEYBOARD { "Keyboard" } else { "Mouse" });
+        fill_field(&mut info.hardware_id, &alloc::format!("OSYX\\INPUT_{id}"));
+        fill_field(&mut info.location, &alloc::format!("/dev/input/event{id}"));
+        list.push(info);
+    }
+    put_slice(buf, len, &list)
+}
+
 pub fn mount_list(buf: u64, len: u64) -> Result<u64, Errno> {
     let list: Vec<MountInfo> = crate::vfs::mounts()
         .iter()
@@ -319,7 +355,9 @@ pub fn power(cmd: u64) -> Result<u64, Errno> {
         return Err(Errno::PermissionDenied);
     }
     match cmd {
-        osyx_abi::ipc::POWER_OFF | osyx_abi::ipc::POWER_REBOOT => crate::power::request(cmd == osyx_abi::ipc::POWER_REBOOT),
+        osyx_abi::ipc::POWER_OFF | osyx_abi::ipc::POWER_REBOOT => {
+            crate::power::request(cmd == osyx_abi::ipc::POWER_REBOOT)
+        }
         _ => Err(Errno::InvalidArgument),
     }
 }

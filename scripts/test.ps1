@@ -15,6 +15,7 @@
 #      System Information driven by injected USB keyboard and mouse events
 #   7. networking: VirtIO-Net, DHCP, ICMP, DNS, UDP, TCP (scripts/net-test.ps1)
 #   8. stage 6 again on a VirtIO-GPU as the only display (desktop-test -Gpu)
+#   9. Windows PE32+ programs under winrun (scripts/win-test.ps1)
 # Serial logs and screenshots are kept in build/test/.
 param(
     [switch]$SkipHost,
@@ -27,7 +28,7 @@ $ExpectedFsChecks = 19
 # "[user] exec: ..." checks init runs (userspace/apps/src/exec_checks.rs).
 $ExpectedExecChecks = 13
 # "[user] ipc: ..." checks init runs (userspace/apps/src/ipc_checks.rs).
-$ExpectedIpcChecks = 13
+$ExpectedIpcChecks = 15
 $results = New-Object System.Collections.Generic.List[object]
 $testDir = Join-Path $BuildDir 'test'
 New-Item -ItemType Directory -Force $testDir | Out-Null
@@ -78,8 +79,8 @@ try {
         Write-Host '==> clippy (host crates + freestanding targets)'
         $ok = $true
         try {
-            Invoke-Checked 'clippy host' { cargo clippy --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --exclude osyx-desktop --exclude prism-client --exclude osyx-nettools --all-targets -- -D warnings } | Out-Null
-            Invoke-Checked 'clippy user' { cargo clippy -p osyx-apps -p osyx-desktop -p osyx-nettools -p prism-client -p os-std -p os-sys --target x86_64-unknown-none --target-dir target/user -- -D warnings } | Out-Null
+            Invoke-Checked 'clippy host' { cargo clippy --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --exclude osyx-desktop --exclude prism-client --exclude osyx-nettools --exclude osyx-win32 --all-targets -- -D warnings } | Out-Null
+            Invoke-Checked 'clippy user' { cargo clippy -p osyx-apps -p osyx-desktop -p osyx-nettools -p osyx-win32 -p prism-client -p os-std -p os-sys --target x86_64-unknown-none --target-dir target/user -- -D warnings } | Out-Null
             Invoke-Checked 'clippy loader' { cargo clippy -p osyx-uefi-loader --target x86_64-unknown-uefi -- -D warnings } | Out-Null
             Invoke-Checked 'clippy kernel' { cargo clippy -p osyx-kernel --target x86_64-unknown-none -- -D warnings } | Out-Null
         } catch { $ok = $false; Write-Host $_ }
@@ -319,6 +320,16 @@ try {
         }
         $sum = $out | Select-String -Pattern 'desktop tests: (\d+) passed, (\d+) failed' | Select-Object -Last 1
         Record 'graphical session on VirtIO-GPU run' ($null -ne $sum -and $sum.Matches[0].Groups[2].Value -eq '0') $(if ($sum) { $sum.Line } else { 'no summary' })
+
+        # --- 9. Windows PE32+ programs -------------------------------------------------
+        # winrun with the OSyx Win32 runtime: console, files, threads, DLLs,
+        # Winsock and a GUI window (scripts/win-test.ps1).
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'win-test.ps1') 2>&1 | ForEach-Object { "$_" }
+        foreach ($line in $out) {
+            if ($line -match '^\[(PASS|FAIL)\] (.*)$') { $results.Add([pscustomobject]@{ Test = "win: $($Matches[2])"; Result = $Matches[1]; Detail = '' }); Write-Host $line }
+        }
+        $sum = $out | Select-String -Pattern 'windows test: (\d+) passed, (\d+) failed' | Select-Object -Last 1
+        Record 'Windows compatibility run' ($null -ne $sum -and $sum.Matches[0].Groups[2].Value -eq '0') $(if ($sum) { $sum.Line } else { 'no summary' })
         # Leave a usable default ESP behind.
         & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline '' | Out-Null
     }

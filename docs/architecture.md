@@ -60,9 +60,13 @@ UEFI firmware (OVMF)
 | tmpfs (`/tmp`, `/run`), devfs (`/dev`), device manager | Implemented | host + in-kernel + QEMU user tests |
 | VFS: driver interface, mounts, symlinks, cwd, permissions, uid/gid | Implemented | in-kernel + QEMU user tests |
 | `/dev/random` (ChaCha20 DRBG, virtio-rng / RDRAND seeded) | Implemented | test vectors; QEMU with and without an entropy source |
-| ACPI, APIC, other drivers (AHCI, NVMe, input) | Planned | Not tested |
+| Early boot screen, x2APIC, calibrated LAPIC timer, ACPI PM/HPET references, xHCI firmware handoff | Implemented | QEMU; physical machines still require testing |
+| AHCI, NVMe and physical NIC drivers | Planned | Not tested |
 | C++23 components | Planned (no current need) | Not tested |
 | PE32+ parser | Implemented (headers, sections, imports, exports, relocations, TLS, exception data) | host: fixtures, malformed, fuzz-style robustness; System32 sweep |
-| PE32+ loader | Planned | Not tested |
-| NT / Win32 compatibility | Planned | Not tested |
+| PE32+ loader | Implemented initial subset | host linker/image tests and QEMU execution |
+| NT / Win32 compatibility | Implemented initial subset | PE console/files/threads/TLS/DLL/GUI/Winsock/inventory tests in QEMU |
+| Native TCP/IP and VirtIO-Net | Implemented (IPv4) | host stack tests and QEMU/host communication |
+| VirtIO-GPU and PRISM display backend | Implemented (software composition) | QEMU desktop and damage-flush measurements |
+| Task Manager, Settings and four Windows GUI utilities | Implemented initial versions | USB-driven QEMU desktop tests |
 | Windows 11 reverse-engineering research | Started (API sets, forwarding) | research/ notes |

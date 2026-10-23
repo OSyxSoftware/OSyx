@@ -42,6 +42,7 @@ name = "osyx-desktop"
 version = "0.1.0"
 dependencies = [
  "os-std",
+ "osyx-abi",
  "osyx-gfx",
  "osyx-input",
  "osyx-ui",
@@ -157,6 +158,20 @@ name = "osyx-vfs"
 version = "0.1.0"
 dependencies = [
  "osyx-abi",
+]
+
+[[package]]
+name = "osyx-win32"
+version = "0.1.0"
+dependencies = [
+ "os-std",
+ "os-sys",
+ "osyx-abi",
+ "osyx-gfx",
+ "osyx-input",
+ "osyx-pe",
+ "osyx-pe-loader",
+ "prism-client",
 ]
 
 [[package]]

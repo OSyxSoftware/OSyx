@@ -12,7 +12,9 @@ param(
     # Run on a VirtIO-GPU as the only display device (no VGA, no usable GOP
     # framebuffer): everything the desktop shows goes through the
     # virtio-gpu driver and PRISM's damage flushes.
-    [switch]$Gpu
+    [switch]$Gpu,
+    # Regression for rebuilding while an interactive VM is still running.
+    [switch]$RebuildWhileRunning
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 $testDir = Join-Path $BuildDir 'test'
@@ -106,12 +108,24 @@ try {
     }
     if (Test-Path $log) { Remove-Item $log }
     $script:port = Get-Random -Minimum 20000 -Maximum 40000
-    $qargs = if ($Gpu) { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 -Gpu -GpuSize 1920x1080 } else { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 }
+    $diskFile = 'build/osyx.img'
+    if ($RebuildWhileRunning) {
+        $sessionDisk = Join-Path $BuildDir 'desktop-isolation.img'
+        Copy-Item -LiteralPath $DiskImage -Destination $sessionDisk -Force
+        $diskFile = 'build/desktop-isolation.img'
+    }
+    $qargs = if ($Gpu) { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 -Gpu -GpuSize 1920x1080 -DiskFile $diskFile } else { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 -DiskFile $diskFile }
     $script:qemu = Start-Qemu $qargs
     $ready = Wait-Log 'desktop: shell ready on a (\d+)x(\d+) screen' $TimeoutSec
     if (-not $ready) { Record 'desktop session starts' $false 'no "desktop: shell ready" in the log'; throw 'session did not start' }
     $sw = [int]$ready.Groups[1].Value; $sh = [int]$ready.Groups[2].Value
     Start-Sleep -Seconds 2
+    if ($RebuildWhileRunning) {
+        $activeVm = $script:qemu
+        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'init.args=desktop' | Out-Null
+        $script:qemu = $activeVm
+        Record 'build replaces base image while the running VM keeps its own disk' (Test-Path -LiteralPath $sessionDisk) ''
+    }
     $t = Log-Text
 
     Record 'xHCI: USB keyboard and mouse enumerated (no PS/2)' ($t -match 'xhci0: running \(MSI-X interrupts\)' -and $t -match '"QEMU USB Keyboard" \(keyboard\) attached' -and $t -match '"QEMU USB Mouse" \(mouse\) attached') ''
@@ -243,6 +257,55 @@ try {
         Record 'a killed client is cleaned up and PRISM keeps running' ($null -ne $gone -and $null -ne $alive) $(if ($gone) { $gone.Value } else { '' })
     }
 
+    # New native tools and the same PE32+ applications also built for Windows.
+    foreach ($app in @(
+        @{ Search = 'task'; Title = 'Task Manager'; Shot = 'taskmgr' },
+        @{ Search = 'settings'; Title = 'Settings'; Shot = 'settings' },
+        @{ Search = 'text editor'; Title = 'OSyx Text Editor'; Shot = 'textedit' },
+        @{ Search = 'disk utility'; Title = 'OSyx Disk Utility'; Shot = 'diskutil' },
+        @{ Search = 'device manager'; Title = 'OSyx Device Manager'; Shot = 'devmgr' },
+        @{ Search = 'network center'; Title = 'OSyx Network Center'; Shot = 'netcenter' }
+    )) {
+        Keys @('meta_l'); Start-Sleep -Milliseconds 300
+        TypeText $app.Search; Keys @('ret')
+        $window = Window-Rect ('[^"\r\n]*' + [regex]::Escape($app.Title))
+        Record ($app.Title + ' launches through desktop') ($null -ne $window) ''
+        if ($window) {
+            Start-Sleep -Seconds 2
+            Shot $app.Shot
+            if ($app.Shot -eq 'taskmgr') {
+                Click ($window.X + 80) ($window.Y + 120)
+                Start-Sleep -Seconds 2
+                Shot 'taskmgr-performance'
+            }
+            if ($app.Shot -eq 'settings') {
+                Click ($window.X + 100) ($window.Y + 120)
+                Shot 'settings-appearance'
+                Click ($window.X + 100) ($window.Y + 280)
+                Shot 'settings-network'
+            }
+            if ($app.Shot -eq 'textedit') {
+                TypeText 'OSyx editor save regression'
+                Keys @('ctrl', 's'); Start-Sleep -Milliseconds 200
+                TypeText 'C:/home/user/Documents/editor-test.txt'; Keys @('ret')
+                Start-Sleep -Milliseconds 500
+                $saved = Wait-Log 'window \d+ title "C:/home/user/Documents/editor-test.txt - OSyx Text Editor"' 5
+                Record 'Text Editor saves a file through Win32 on ext4' ($null -ne $saved) ''
+                TypeText 'x'
+                Click ($window.X + $window.W - 20) ($window.Y - 17)
+                $dialog = Window-Rect 'OSyx Text Editor'
+                Keys @('esc')
+                Start-Sleep -Milliseconds 300
+                $originalClosed = (Log-Text) -match ('window {0} .* closed' -f $window.Id)
+                Record 'Text Editor cancel preserves an unsaved document' ($null -ne $dialog -and -not $originalClosed) ''
+                Keys @('ctrl', 's')
+            }
+            Click ($window.X + $window.W - 20) ($window.Y - 17)
+            $closed = Wait-Log ('window {0} .* closed' -f $window.Id) 10
+            Record ($app.Title + ' closes cleanly') ($null -ne $closed) ''
+        }
+    }
+
     # USB hot-unplug of the keyboard while the session runs.
     Qmp '{"execute":"device_del","arguments":{"id":"kbd"}}'
     $un = Wait-Log 'prism: input device \d+ removed \(class 1\)'
@@ -259,7 +322,7 @@ try {
     $t = Log-Text
     Record 'no kernel panic, no CPU exception in PRISM or the shell' ($t -notmatch 'KERNEL PANIC' -and $t -notmatch '\((prism|desktop)\): .*exception') ''
 } finally {
-    if ($script:qemu -and -not $script:qemu.HasExited) { $script:qemu.Kill(); $script:qemu.WaitForExit() }
+    if ($script:qemu -is [System.Diagnostics.Process] -and -not $script:qemu.HasExited) { $script:qemu.Kill(); $script:qemu.WaitForExit() }
     Pop-Location
 }
 $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Host

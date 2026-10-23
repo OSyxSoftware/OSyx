@@ -32,7 +32,7 @@ type WantedSymbol = (Option<String>, u16, u32);
 pub const MAX_MODULES: usize = 256;
 
 /// A module's exports when the runtime implements it (no PE file).
-pub trait BuiltinModule {
+pub trait BuiltinModule: Send {
     /// Address of export `name`, if implemented.
     fn by_name(&self, name: &str) -> Option<u64>;
     /// Address of export `ordinal`, if implemented.
@@ -62,12 +62,28 @@ pub trait Host {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkError {
-    Image { module: String, error: ImageError },
-    DllNotFound { name: String, importer: String },
+    Image {
+        module: String,
+        error: ImageError,
+    },
+    DllNotFound {
+        name: String,
+        importer: String,
+    },
     /// An API set contract with no host on this system.
-    NoApiSetHost { name: String, importer: String },
-    SymbolNotFound { module: String, symbol: String, importer: String },
-    ForwarderTooDeep { module: String, symbol: String },
+    NoApiSetHost {
+        name: String,
+        importer: String,
+    },
+    SymbolNotFound {
+        module: String,
+        symbol: String,
+        importer: String,
+    },
+    ForwarderTooDeep {
+        module: String,
+        symbol: String,
+    },
     TooManyModules,
     /// The host could not provide memory.
     NoMemory,
@@ -79,9 +95,15 @@ impl core::fmt::Display for LinkError {
         match self {
             LinkError::Image { module, error } => write!(f, "{module}: invalid image: {error:?}"),
             LinkError::DllNotFound { name, importer } => write!(f, "{name} (needed by {importer}) was not found"),
-            LinkError::NoApiSetHost { name, importer } => write!(f, "API set {name} (needed by {importer}) has no host"),
-            LinkError::SymbolNotFound { module, symbol, importer } => write!(f, "{module}!{symbol} (needed by {importer}) does not exist"),
-            LinkError::ForwarderTooDeep { module, symbol } => write!(f, "forwarder chain from {module}!{symbol} is too long or circular"),
+            LinkError::NoApiSetHost { name, importer } => {
+                write!(f, "API set {name} (needed by {importer}) has no host")
+            }
+            LinkError::SymbolNotFound { module, symbol, importer } => {
+                write!(f, "{module}!{symbol} (needed by {importer}) does not exist")
+            }
+            LinkError::ForwarderTooDeep { module, symbol } => {
+                write!(f, "forwarder chain from {module}!{symbol} is too long or circular")
+            }
             LinkError::TooManyModules => f.write_str("too many modules"),
             LinkError::NoMemory => f.write_str("out of memory"),
             LinkError::Host(s) => f.write_str(s),
@@ -98,12 +120,7 @@ pub enum State {
 
 pub enum Kind {
     Builtin(Box<dyn BuiltinModule>),
-    Pe {
-        file: Vec<u8>,
-        size: u32,
-        entry: u32,
-        is_dll: bool,
-    },
+    Pe { file: Vec<u8>, size: u32, entry: u32, is_dll: bool },
 }
 
 pub struct Module {
@@ -215,7 +232,15 @@ impl<'s, H: Host> Linker<'s, H> {
                 if self.modules.len() >= MAX_MODULES {
                     return Err(LinkError::TooManyModules);
                 }
-                self.modules.push(Module { name: real, base: 0, kind: Kind::Builtin(b), deps: Vec::new(), state: State::Ready, relocations: 0, imports_bound: 0 });
+                self.modules.push(Module {
+                    name: real,
+                    base: 0,
+                    kind: Kind::Builtin(b),
+                    deps: Vec::new(),
+                    state: State::Ready,
+                    relocations: 0,
+                    imports_bound: 0,
+                });
                 Ok(self.modules.len() - 1)
             }
             Some(Source::Pe(bytes)) => self.load_pe(real, bytes, true),
@@ -292,7 +317,11 @@ impl<'s, H: Host> Linker<'s, H> {
 
     /// Address of `sym` exported by module `idx`, following forwarders.
     pub fn resolve(&mut self, idx: usize, sym: Symbol<'_>, importer: &str, depth: u32) -> Result<u64, LinkError> {
-        let not_found = |m: &Module| LinkError::SymbolNotFound { module: m.name.clone(), symbol: sym.describe(), importer: importer.to_string() };
+        let not_found = |m: &Module| LinkError::SymbolNotFound {
+            module: m.name.clone(),
+            symbol: sym.describe(),
+            importer: importer.to_string(),
+        };
         if depth > MAX_FORWARD_DEPTH {
             return Err(LinkError::ForwarderTooDeep { module: self.modules[idx].name.clone(), symbol: sym.describe() });
         }
@@ -306,7 +335,8 @@ impl<'s, H: Host> Linker<'s, H> {
                 return a.ok_or_else(|| not_found(m));
             }
             Kind::Pe { file, .. } => {
-                let pe = PeFile::parse(file).map_err(|e| LinkError::Image { module: m.name.clone(), error: e.into() })?;
+                let pe =
+                    PeFile::parse(file).map_err(|e| LinkError::Image { module: m.name.clone(), error: e.into() })?;
                 let exports = pe.exports().ok().flatten().ok_or_else(|| not_found(m))?;
                 let e = match sym {
                     Symbol::Name(n) => exports.by_name(n),
@@ -315,7 +345,9 @@ impl<'s, H: Host> Linker<'s, H> {
                 let e = e.ok().flatten().ok_or_else(|| not_found(m))?;
                 match e.target {
                     ExportTarget::Rva(rva) => return Ok(m.base + rva as u64),
-                    ExportTarget::Forwarder { dll, name, ordinal, .. } => (dll.to_string(), name.map(|s| s.to_string()), ordinal),
+                    ExportTarget::Forwarder { dll, name, ordinal, .. } => {
+                        (dll.to_string(), name.map(|s| s.to_string()), ordinal)
+                    }
                 }
             }
         };

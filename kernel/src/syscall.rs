@@ -14,9 +14,9 @@ use crate::fixup::{copy_from_user, copy_to_user};
 use crate::object::Object;
 use crate::vfs::Lookup;
 use crate::{interrupts, mem, process, sched, sys_objects, vfs};
-use osyx_vfs::Cred;
 use core::arch::global_asm;
 use osyx_abi::{nr, Errno, SystemInfo};
+use osyx_vfs::Cred;
 
 #[no_mangle]
 static mut OSYX_SYSCALL_KERNEL_RSP: u64 = 0;
@@ -164,8 +164,12 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::READ => sys_read(f.rdi, f.rsi, f.rdx),
         nr::SEEK => with_file(f.rdi, |o| o.seek(f.rsi as i64, f.rdx)),
         nr::FSTAT => with_file(f.rdi, |o| o.stat()).and_then(|st| put_user(f.rsi, &st)),
-        nr::STAT => user_path(f.rdi, f.rsi).and_then(|p| vfs::stat(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st)),
-        nr::LSTAT => user_path(f.rdi, f.rsi).and_then(|p| vfs::lstat(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st)),
+        nr::STAT => {
+            user_path(f.rdi, f.rsi).and_then(|p| vfs::stat(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st))
+        }
+        nr::LSTAT => {
+            user_path(f.rdi, f.rsi).and_then(|p| vfs::lstat(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st))
+        }
         nr::READDIR => sys_readdir(f.rdi, f.rsi, f.rdx),
         nr::MKDIR => user_path(f.rdi, f.rsi).and_then(|p| vfs::mkdir(&Lookup::current(), &p, f.rdx as u32)).map(|_| 0),
         nr::UNLINK => user_path(f.rdi, f.rsi).and_then(|p| vfs::unlink(&Lookup::current(), &p)).map(|_| 0),
@@ -204,7 +208,9 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             Ok(c.uid as u64 | (c.gid as u64) << 32)
         }
         nr::SETUID => process::set_current_cred(Cred { uid: f.rdi as u32, gid: f.rsi as u32 }).map(|_| 0),
-        nr::STATFS => user_path(f.rdi, f.rsi).and_then(|p| vfs::statfs(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st)),
+        nr::STATFS => user_path(f.rdi, f.rsi)
+            .and_then(|p| vfs::statfs(&Lookup::current(), &p))
+            .and_then(|st| put_user(f.rdx, &st)),
         nr::PIPE => sys_objects::pipe(f.rdi),
         nr::SPAWN_STDIO => sys_objects::spawn_stdio(f.rdi, f.rsi),
         nr::CHANNEL_LISTEN => sys_objects::channel_listen(f.rdi, f.rsi),
@@ -221,6 +227,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::DISPLAY_ACQUIRE => sys_objects::display_acquire(),
         nr::DISPLAY_RELEASE => sys_objects::display_release(),
         nr::PROC_LIST => sys_objects::proc_list(f.rdi, f.rsi),
+        nr::DEVICE_LIST => sys_objects::device_list(f.rdi, f.rsi),
         nr::MOUNT_LIST => sys_objects::mount_list(f.rdi, f.rsi),
         nr::POWER => sys_objects::power(f.rdi),
         nr::KILL => sys_objects::kill(f.rdi),
@@ -262,7 +269,11 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
 /// interpolated within it, so a wait must never end early by that clock.
 fn ns_to_ticks(ns: u64) -> u64 {
     let tick_ns = 1_000_000_000 / crate::arch::pic::TIMER_HZ as u64;
-    if ns == 0 { 0 } else { ns.div_ceil(tick_ns) + 1 }
+    if ns == 0 {
+        0
+    } else {
+        ns.div_ceil(tick_ns) + 1
+    }
 }
 
 /// Bounce buffer size for file data between user memory and the VFS.
@@ -394,6 +405,8 @@ fn sys_readdir(handle: u64, buf: u64, len: u64) -> Result<u64, Errno> {
 
 fn sys_sysinfo(out: u64) -> Result<u64, Errno> {
     let (free, total) = mem::frame_stats();
+    let (ticks, idle_ticks) = sched::cpu_stats();
+    let (disk_read_bytes, disk_write_bytes) = crate::block::io_bytes();
     let mut info = SystemInfo {
         abi_version: osyx_abi::ABI_VERSION,
         page_size: mem::PAGE_SIZE as u32,
@@ -402,6 +415,10 @@ fn sys_sysinfo(out: u64) -> Result<u64, Errno> {
         uptime_ns: interrupts::uptime_ms() * 1_000_000,
         pid: sched::current_pid(),
         kernel_version: [0; 16],
+        ticks,
+        idle_ticks,
+        disk_read_bytes,
+        disk_write_bytes,
     };
     let v = crate::VERSION.as_bytes();
     info.kernel_version[..v.len().min(16)].copy_from_slice(&v[..v.len().min(16)]);

@@ -91,16 +91,35 @@ function New-DiskImage {
         $parts += "root:$($Script:RootImage)"
         $size += [int][math]::Ceiling((Get-Item $Script:RootImage).Length / 1MB)
     }
-    Invoke-Checked 'disk image' { cargo run -q -p osyx-part --example mkdisk -- $Script:DiskImage $size @parts }
+    # Publish a complete image atomically. Truncating the file in place
+    # corrupts the view of any QEMU instance still booted from that image.
+    $stagedDisk = Join-Path $BuildDir ("osyx-{0}.tmp.img" -f [guid]::NewGuid().ToString('N'))
+    $backupDisk = $stagedDisk + '.previous'
+    try {
+        Invoke-Checked 'disk image' { cargo run -q -p osyx-part --example mkdisk -- $stagedDisk $size @parts }
+        if (Test-Path -LiteralPath $Script:DiskImage) {
+            # A real backup path also works in Windows PowerShell 5.1,
+            # whose binder converts $null string arguments into "".
+            [IO.File]::Replace($stagedDisk, $Script:DiskImage, $backupDisk)
+        } else {
+            [IO.File]::Move($stagedDisk, $Script:DiskImage)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $stagedDisk) { Remove-Item -LiteralPath $stagedDisk }
+        # A VM can still hold the old image open. Keep that backup if so.
+        if (Test-Path -LiteralPath $backupDisk) { Remove-Item -LiteralPath $backupDisk -ErrorAction SilentlyContinue }
+    }
 }
 
 # Returns the QEMU argument list for booting build/osyx.img.
-function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '', [switch]$Gpu, [string]$GpuSize = '') {
+function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '', [switch]$Gpu, [string]$GpuSize = '', [string]$DiskFile = 'build/osyx.img') {
     if (-not $Script:Qemu) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
     if (-not $Script:Ovmf) { throw 'OVMF (edk2-x86_64-code.fd) not found' }
     # Fresh firmware variables every boot: stale boot entries for devices
     # that no longer exist would otherwise send OVMF to its shell.
-    $vars = Join-Path $BuildDir 'OVMF_VARS.fd'
+    $firmwareDir = Join-Path $BuildDir 'qemu'
+    New-Item -ItemType Directory -Force $firmwareDir | Out-Null
+    $vars = Join-Path $firmwareDir ("OVMF_VARS-{0}.fd" -f [guid]::NewGuid().ToString('N'))
     Copy-Item $Script:Ovmf.Vars $vars -Force
     $a = @(
         # No PS/2 controller: keyboard and mouse input can only arrive over USB.
@@ -110,7 +129,7 @@ function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 5
         '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$($Script:Ovmf.Code -replace '\\','/')",
         '-drive', "if=pflash,format=raw,unit=1,file=$($vars -replace '\\','/')",
         # Relative path: the drive-letter colon would be parsed as an option separator.
-        '-drive', 'if=virtio,format=raw,file=build/osyx.img',
+        '-drive', "if=virtio,format=raw,file=$($DiskFile -replace '\\','/')",
         '-serial', "file:$($SerialLog -replace '\\','/')",
         '-device', 'isa-debug-exit,iobase=0xf4,iosize=0x04',
         '-no-reboot'

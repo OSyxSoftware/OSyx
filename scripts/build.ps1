@@ -27,7 +27,7 @@ try {
     $savedFlags = $env:RUSTFLAGS
     $env:RUSTFLAGS = '-C relocation-model=static -C code-model=small'
     try {
-        Invoke-Checked 'user build' { cargo build -p osyx-apps -p osyx-desktop -p osyx-nettools --target x86_64-unknown-none --target-dir target/user @profileArgs }
+        Invoke-Checked 'user build' { cargo build -p osyx-apps -p osyx-desktop -p osyx-nettools -p osyx-win32 --target x86_64-unknown-none --target-dir target/user @profileArgs }
     } finally { $env:RUSTFLAGS = $savedFlags }
     # Program -> directory on the root file system. The graphical session
     # (PRISM, the desktop shell and its applications) lives in /system/bin.
@@ -35,6 +35,8 @@ try {
         init = 'bin'; worker = 'bin'; probe = 'usr/bin'; axis = 'bin'
         prism = 'system/bin'; desktop = 'system/bin'; terminal = 'system/bin'; files = 'system/bin'; sysinfo = 'system/bin'
         ping = 'bin'; net = 'bin'; netstat = 'bin'; dns = 'bin'; nc = 'bin'
+        winrun = 'bin'
+        taskmgr = 'system/bin'; settings = 'system/bin'
     }
     $userBins = @($installDirs.Keys)
     # Only these are also boot modules (the fallback root's /bin).
@@ -91,6 +93,21 @@ try {
         $wallDir = Join-Path $stage 'system\share\wallpapers'
         New-Item -ItemType Directory -Force $wallDir | Out-Null
         Copy-Item $wallOut (Join-Path $wallDir 'default.osxi')
+        # Windows PE32+ test programs (built with clang when available).
+        & (Join-Path $PSScriptRoot 'build-winapps.ps1') | Out-Null
+        $winApps = Join-Path $BuildDir 'winapps'
+        if (Test-Path (Join-Path $winApps 'textedit.exe')) {
+            $appDir = Join-Path $stage 'opt\apps'
+            New-Item -ItemType Directory -Force $appDir | Out-Null
+            Copy-Item (Join-Path $winApps '*.exe') $appDir
+        }
+        & (Join-Path $PSScriptRoot 'build-wintests.ps1') | Out-Null
+        $winTests = Join-Path $BuildDir 'wintests'
+        if (Test-Path (Join-Path $winTests 'hello.exe')) {
+            $winDir = Join-Path $stage 'opt\wintests'
+            New-Item -ItemType Directory -Force $winDir | Out-Null
+            Copy-Item (Join-Path $winTests '*') $winDir -Include *.exe, *.dll
+        }
         if (-not $NoInit) {
             foreach ($bin in $userBins) {
                 Copy-Item (Join-Path $Root "target\user\x86_64-unknown-none\$profileDir\$bin") (Join-Path $stage "$($installDirs[$bin])\$bin")

@@ -91,6 +91,22 @@ pub const BACKEND_VIRTIO_GPU: u32 = 2;
 pub const PROC_RUNNING: u32 = 0;
 pub const PROC_ZOMBIE: u32 = 1;
 
+/// Read-only device inventory: PCI functions and attached input devices.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceInfo {
+    pub description: [u8; 96],
+    pub class: [u8; 32],
+    pub hardware_id: [u8; 64],
+    pub location: [u8; 64],
+}
+
+impl Default for DeviceInfo {
+    fn default() -> Self {
+        Self { description: [0; 96], class: [0; 32], hardware_id: [0; 64], location: [0; 64] }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProcInfo {
@@ -104,6 +120,8 @@ pub struct ProcInfo {
     pub frames: u64,
     /// NUL-padded UTF-8.
     pub name: [u8; 32],
+    /// Cumulative scheduler samples, including threads that already exited.
+    pub cpu_ticks: u64,
 }
 
 #[repr(C)]

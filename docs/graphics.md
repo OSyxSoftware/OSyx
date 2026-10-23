@@ -162,6 +162,27 @@ cannot start, init exits and the kernel status screen stays.
   unplugging the USB keyboard, and PRISM's frame statistics. Screenshots are
   kept in `build/test/desktop-*.png`.
 
+## Task Manager and Settings
+
+`/system/bin/taskmgr` has Processes, Details and Performance pages. Its
+60-sample CPU/memory/disk/network graphs use ABI v10 scheduler, frame,
+physical block-I/O and interface counters. CPU is tick-sampled on the
+single scheduled CPU; per-process totals retain samples of exited threads.
+Rates divide by measured elapsed time. The sortable process list preserves
+selection by PID; End task uses the existing kernel permission checks.
+
+`/system/bin/settings` shows General, Appearance, Displays, Keyboard,
+Date & Time, Network, Storage and About. Host name, accent, background,
+US/Polish keyboard layout and POSIX time zone write system configuration;
+DHCP/static IPv4 applies through the native net_config syscall. Keyboard
+layout needs a session restart. The desktop reloads background/time zone;
+new native application windows read the saved accent. Display information
+is read-only. Settings retains root credentials for system configuration.
+
+The application launcher also accepts `.exe` paths, invoking `/bin/winrun`.
+The four Windows GUI utilities are installed in `/opt/apps` and have their
+own launcher entries. They draw through the same PRISM compositor.
+
 ## Known limitations
 
 * Software composition only, single CPU; full-window commits from the

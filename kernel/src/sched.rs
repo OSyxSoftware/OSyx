@@ -81,6 +81,7 @@ pub struct Thread {
     /// Set when the owning process is exiting: the thread ends at its next
     /// safe point (return to user mode or an interrupted blocking call).
     kill_pending: bool,
+    cpu_ticks: u64,
 }
 
 const IA32_FS_BASE: u32 = 0xC000_0100;
@@ -94,6 +95,8 @@ struct Scheduler {
     next_tid: Tid,
     reap: Option<Tid>,
     switches: u64,
+    ticks: u64,
+    idle_ticks: u64,
 }
 
 static SCHED: IrqSpinLock<Option<Scheduler>> = IrqSpinLock::new(None);
@@ -182,6 +185,7 @@ fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b
         fs_base,
         gs_base: 0,
         kill_pending: false,
+        cpu_ticks: 0,
     })
 }
 
@@ -204,6 +208,7 @@ pub fn init() {
         fs_base: 0,
         gs_base: 0,
         kill_pending: false,
+        cpu_ticks: 0,
     });
     let idle = new_thread(2, "idle", 0, root, idle_loop, 0, 0, 0);
     let mut threads = BTreeMap::new();
@@ -217,6 +222,8 @@ pub fn init() {
         next_tid: 3,
         reap: None,
         switches: 0,
+        ticks: 0,
+        idle_ticks: 0,
     });
 }
 
@@ -333,6 +340,10 @@ pub fn tick(now: u64) {
     let resched = {
         let mut g = SCHED.lock();
         let Some(s) = g.as_mut() else { return };
+        s.ticks = s.ticks.saturating_add(1);
+        if s.current == s.idle {
+            s.idle_ticks = s.idle_ticks.saturating_add(1);
+        }
         for (tid, t) in s.threads.iter_mut() {
             if t.state == State::Blocked && t.wake_at.is_some_and(|w| w <= now) {
                 t.wake_at = None;
@@ -342,12 +353,21 @@ pub fn tick(now: u64) {
         }
         let idle = s.idle;
         let cur = s.threads.get_mut(&s.current).expect("current thread exists");
+        cur.cpu_ticks = cur.cpu_ticks.saturating_add(1);
         cur.slice = cur.slice.saturating_sub(1);
         (cur.slice == 0 || cur.tid == idle) && !s.ready.is_empty()
     };
     if resched {
         schedule();
     }
+}
+
+pub fn cpu_stats() -> (u64, u64) {
+    SCHED.lock().as_ref().map_or((0, 0), |s| (s.ticks, s.idle_ticks))
+}
+
+pub fn cpu_ticks(tid: Tid) -> u64 {
+    SCHED.lock().as_ref().and_then(|s| s.threads.get(&tid)).map_or(0, |t| t.cpu_ticks)
 }
 
 /// From an interrupt handler: switches away from the idle thread if the

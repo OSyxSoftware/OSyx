@@ -23,6 +23,7 @@
 
 use crate::arch::cpu;
 use crate::exec::{self, ExecRequest, Program};
+use crate::kprintln;
 use crate::mem::paging::{self, Flags, MapError};
 use crate::mem::{alloc_frame, free_frame, phys_to_virt, PAGE_SIZE};
 use crate::object::Object;
@@ -30,8 +31,6 @@ use crate::sched::{self, Tid};
 use crate::shm::SharedMemory;
 use crate::sync::{IrqSpinLock, KMutex};
 use crate::vfs::{self, Lookup};
-use crate::kprintln;
-use osyx_vfs::Cred;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -40,6 +39,7 @@ use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 use osyx_abi::{auxv, startup, Errno};
 use osyx_elf::{AddressRange, ElfError, ElfImage};
+use osyx_vfs::Cred;
 
 pub type Pid = u64;
 /// Parent id of processes started (or adopted) by the kernel.
@@ -124,7 +124,13 @@ impl Space {
 
     /// Maps the ELF segments, the stack and the start-up data; returns
     /// (entry, initial rsp).
-    fn populate(&mut self, elf: &ElfImage, prog: &Program, req: &ExecRequest, cred: Cred) -> Result<(u64, u64), ExecError> {
+    fn populate(
+        &mut self,
+        elf: &ElfImage,
+        prog: &Program,
+        req: &ExecRequest,
+        cred: Cred,
+    ) -> Result<(u64, u64), ExecError> {
         for seg in elf.segments() {
             let file = elf.file_bytes(seg);
             let flags = Flags::user(seg.writable(), seg.executable());
@@ -256,6 +262,7 @@ pub struct Process {
     line: Vec<u8>,
     /// Live threads; the process is finalised when the last one ends.
     threads: Vec<Tid>,
+    exited_cpu_ticks: u64,
     /// Set by `exit`: the status reported once the last thread has ended.
     exit_status: Option<i32>,
     /// Open objects by handle number: 0-2 only if standard streams were
@@ -369,6 +376,7 @@ impl Process {
             mapped_pages: 0,
             line: Vec::new(),
             threads: Vec::new(),
+            exited_cpu_ticks: 0,
             exit_status: None,
             handles: BTreeMap::new(),
             cred,
@@ -445,7 +453,16 @@ pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 
         _ => String::new(),
     };
     let shown = &req.argv[..req.argv.len().min(LOGGED_ARGS)];
-    kprintln!("process {} ({}): {} spawned by {}, entry {:#x}, args {:?}{}", pid, p.name, path, parent, entry, shown, more);
+    kprintln!(
+        "process {} ({}): {} spawned by {}, entry {:#x}, args {:?}{}",
+        pid,
+        p.name,
+        path,
+        parent,
+        entry,
+        shown,
+        more
+    );
     // With interrupts off the main thread cannot run (and exit) before the
     // process and its thread list are in the table.
     let were_enabled = cpu::interrupts_enabled();
@@ -627,6 +644,7 @@ pub fn finish_current_thread(code: i32) -> ! {
     let last = {
         let mut t = TABLE.lock();
         let p = t.procs.get_mut(&pid).expect("current process exists");
+        p.exited_cpu_ticks = p.exited_cpu_ticks.saturating_add(sched::cpu_ticks(me));
         p.threads.retain(|&t| t != me);
         p.threads.is_empty()
     };
@@ -801,6 +819,7 @@ pub fn list() -> Vec<osyx_abi::ipc::ProcInfo> {
                 state: if p.life == Life::Running { osyx_abi::ipc::PROC_RUNNING } else { osyx_abi::ipc::PROC_ZOMBIE },
                 frames: p.space.frames,
                 name: [0; 32],
+                cpu_ticks: p.exited_cpu_ticks.saturating_add(p.threads.iter().map(|&tid| sched::cpu_ticks(tid)).sum()),
             };
             osyx_abi::ipc::fill_field(&mut info.name, &p.name);
             info

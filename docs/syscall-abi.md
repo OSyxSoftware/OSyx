@@ -1,9 +1,18 @@
-# System call ABI (version 6)
+# System call ABI (version 10)
 
 Defined in `shared/abi`; kernel side in `kernel/src/syscall.rs`, user side in
 `runtime/os-sys`.
 
 ## Convention
+
+ABI v10 appends `ticks`, `idle_ticks`, `disk_read_bytes`, `disk_write_bytes`
+to SystemInfo (88 bytes), and `cpu_ticks` to ProcInfo (80 bytes). Programs
+and kernel must be rebuilt together. Tick counters are single-CPU scheduler
+samples, including kernel time on behalf of a process. Disk counters count
+successful physical transfers once, excluding duplicate partition wrappers.
+Call 76, `device_list(buf, len_bytes)`, copies 256-byte DeviceInfo records
+(description[96], class[32], hardware_id[64], location[64], all NUL-padded
+UTF-8). The inventory contains real PCI functions and attached HID inputs.
 
 - `syscall` instruction; number in `rax`; arguments in `rdi, rsi, rdx, r10, r8, r9`.
 - `rcx` and `r11` are clobbered; all other registers are preserved.
@@ -21,7 +30,7 @@ Defined in `shared/abi`; kernel side in `kernel/src/syscall.rs`, user side in
 | 1 | `write` | handle (1 stdout, 2 stderr, or a file), `buf`, `len ≤ 1 MiB` | bytes written |
 | 2 | `map` | `len`, `prot` (R=1, W=2, X=4) | address of zeroed pages |
 | 3 | `unmap` | `addr`, `len` (must match one whole `map`) | 0 |
-| 4 | `sysinfo` | `out: *mut SystemInfo` (56 bytes) | 0 |
+| 4 | `sysinfo` | `out: *mut SystemInfo` (88 bytes) | 0 |
 | 5 | `clock` | `id` (0 = monotonic since boot, 1 = wall clock since 1970 UTC) | nanoseconds (10 ms resolution) |
 | 6 | `spawn` | `args: *const ExecArgs` (48 bytes) | child pid |
 | 7 | `wait` | `pid` (0 = any child), `status: *mut i32` (may be null) | pid of the reaped child |

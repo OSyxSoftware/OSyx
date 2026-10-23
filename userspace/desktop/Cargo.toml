@@ -42,6 +42,7 @@ test = false
 bench = false
 
 [dependencies]
+osyx-abi = { path = "../../shared/abi" }
 os-std = { path = "../../runtime/os-std" }
 osyx-gfx = { path = "../../boot/gfx" }
 osyx-input = { path = "../../shared/input" }

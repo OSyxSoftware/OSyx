@@ -1,0 +1,22 @@
+[package]
+name = "osyx-win32"
+description = "OSyx Windows runtime: runs PE32+ programs (winrun) with original ntdll/kernel32/user32/gdi32/ws2_32 implementations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "winrun"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+os-std = { path = "../../runtime/os-std" }
+os-sys = { path = "../../runtime/os-sys" }
+osyx-abi = { path = "../../shared/abi" }
+osyx-pe = { path = "../pe-parser" }
+osyx-pe-loader = { path = "../pe-loader" }
+osyx-gfx = { path = "../../boot/gfx" }
+prism-client = { path = "../../graphics/prism-client" }
+osyx-input = { path = "../../shared/input" }

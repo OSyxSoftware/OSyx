@@ -5,7 +5,8 @@ use crate::error::{Error, Result};
 use alloc::string::String;
 use alloc::vec::Vec;
 pub use os_sys::ipc::{
-    field_str, pixel, DisplayInfo, MountInfo, ProcInfo, BACKEND_LINEAR, BACKEND_VIRTIO_GPU, POWER_OFF, POWER_REBOOT, PROC_RUNNING, PROC_ZOMBIE,
+    field_str, pixel, DisplayInfo, MountInfo, ProcInfo, BACKEND_LINEAR, BACKEND_VIRTIO_GPU, POWER_OFF, POWER_REBOOT,
+    PROC_RUNNING, PROC_ZOMBIE,
 };
 
 /// Every process (running and not yet collected).
@@ -20,6 +21,13 @@ pub fn processes() -> Result<Vec<ProcInfo>> {
 pub fn mounts() -> Result<Vec<MountInfo>> {
     let mut buf = alloc::vec![MountInfo::default(); 64];
     let n = os_sys::mount_list(&mut buf).map_err(Error::from)?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+pub fn devices() -> Result<Vec<os_sys::ipc::DeviceInfo>> {
+    let mut buf = alloc::vec![os_sys::ipc::DeviceInfo::default(); 512];
+    let n = os_sys::device_list(&mut buf).map_err(Error::from)?;
     buf.truncate(n);
     Ok(buf)
 }

@@ -1,0 +1,5 @@
+LIBRARY windll.dll
+EXPORTS
+    multiply
+    attach_count @5
+    Ticks = kernel32.GetTickCount

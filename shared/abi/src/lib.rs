@@ -37,7 +37,7 @@
 pub mod ipc;
 pub mod net;
 
-pub const ABI_VERSION: u32 = 9;
+pub const ABI_VERSION: u32 = 10;
 
 /// Highest user virtual address + 1 (the canonical lower half).
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -280,6 +280,8 @@ pub mod nr {
     /// display. An owner must call `display_acquire` again for the new
     /// buffer (the old mapping stays valid but is no longer shown).
     pub const DISPLAY_SET_MODE: u64 = 75;
+    /// `device_list(buf: *mut DeviceInfo, len_bytes) -> bytes`.
+    pub const DEVICE_LIST: u64 = 76;
 }
 
 /// `map_ex` flags.
@@ -583,7 +585,9 @@ pub mod startup {
             s += RANDOM_LEN;
             let execfn = sp + s as u64;
             out[s..s + self.execfn.len()].copy_from_slice(self.execfn);
-            for &(k, v) in self.aux.iter().chain(&[(auxv::AT_RANDOM, random), (auxv::AT_EXECFN, execfn), (auxv::AT_NULL, 0)]) {
+            for &(k, v) in
+                self.aux.iter().chain(&[(auxv::AT_RANDOM, random), (auxv::AT_EXECFN, execfn), (auxv::AT_NULL, 0)])
+            {
                 word(out, k);
                 word(out, v);
             }
@@ -839,6 +843,12 @@ pub struct SystemInfo {
     pub pid: u64,
     /// NUL-padded UTF-8 kernel version.
     pub kernel_version: [u8; 16],
+    /// Scheduler timer samples since scheduler initialization (single CPU).
+    pub ticks: u64,
+    pub idle_ticks: u64,
+    /// Successful physical block I/O, excluding partition wrapper duplicates.
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
 }
 
 /// Exit status reported when the kernel terminates a process because of a
@@ -868,7 +878,7 @@ mod tests {
 
     #[test]
     fn sysinfo_layout_is_stable() {
-        assert_eq!(core::mem::size_of::<SystemInfo>(), 56);
+        assert_eq!(core::mem::size_of::<SystemInfo>(), 88);
         assert_eq!(core::mem::size_of::<FileStat>(), 88);
         assert_eq!(core::mem::size_of::<DirRecord>(), DIR_RECORD_HEADER);
         assert_eq!(core::mem::size_of::<MountArgs>(), 64);
@@ -877,7 +887,7 @@ mod tests {
         assert_eq!(core::mem::size_of::<ipc::ChannelMsg>(), 32);
         assert_eq!(core::mem::size_of::<ipc::WaitItem>(), 16);
         assert_eq!(core::mem::size_of::<ipc::DisplayInfo>(), 48);
-        assert_eq!(core::mem::size_of::<ipc::ProcInfo>(), 72);
+        assert_eq!(core::mem::size_of::<ipc::ProcInfo>(), 80);
         assert_eq!(core::mem::size_of::<ipc::MountInfo>(), 144);
         assert_eq!(core::mem::size_of::<net::SockAddr>(), 8);
         assert_eq!(core::mem::size_of::<net::NetIface>(), 112);

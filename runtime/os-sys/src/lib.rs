@@ -9,10 +9,11 @@
 #![no_std]
 
 pub use osyx_abi::{
-    auxv, nr, startup, DirRecord, Errno, ExecArgs, FileStat, FsStat, MountArgs, SystemInfo, ABI_VERSION, CLOCK_MONOTONIC, CLOCK_REALTIME, KIND_BLOCK_DEVICE,
-    KIND_CHAR_DEVICE, KIND_DIR, KIND_FILE, KIND_SYMLINK, MOUNT_READ_ONLY, OPEN_APPEND, OPEN_CASE_INSENSITIVE, OPEN_CREATE,
-    OPEN_DIRECTORY, OPEN_EXCLUSIVE, OPEN_NOFOLLOW, OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE, PROT_EXEC, PROT_READ, PROT_WRITE,
-    SEEK_CUR, SEEK_END, SEEK_SET, STDERR, STDOUT,
+    auxv, nr, startup, DirRecord, Errno, ExecArgs, FileStat, FsStat, MountArgs, SystemInfo, ABI_VERSION,
+    CLOCK_MONOTONIC, CLOCK_REALTIME, KIND_BLOCK_DEVICE, KIND_CHAR_DEVICE, KIND_DIR, KIND_FILE, KIND_SYMLINK,
+    MOUNT_READ_ONLY, OPEN_APPEND, OPEN_CASE_INSENSITIVE, OPEN_CREATE, OPEN_DIRECTORY, OPEN_EXCLUSIVE, OPEN_NOFOLLOW,
+    OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE, PROT_EXEC, PROT_READ, PROT_WRITE, SEEK_CUR, SEEK_END, SEEK_SET, STDERR,
+    STDOUT,
 };
 
 pub use osyx_abi::{ipc, net, HANDLE_NONE, KILLED_STATUS, MAP_ALIGN_64K, MAP_FIXED, STDIN};
@@ -300,14 +301,26 @@ mod imp {
     }
 
     pub fn symlink(target: &str, path: &str) -> Result<(), Errno> {
-        decode(syscall4(nr::SYMLINK, target.as_ptr() as u64, target.len() as u64, path.as_ptr() as u64, path.len() as u64))
-            .map(|_| ())
+        decode(syscall4(
+            nr::SYMLINK,
+            target.as_ptr() as u64,
+            target.len() as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        ))
+        .map(|_| ())
     }
 
     /// Writes the link target into `buf`; returns its length (truncated to `buf`).
     pub fn readlink(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
-        decode(syscall4(nr::READLINK, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64))
-            .map(|n| n as usize)
+        decode(syscall4(
+            nr::READLINK,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ))
+        .map(|n| n as usize)
     }
 
     pub fn chmod(path: &str, mode: u32) -> Result<(), Errno> {
@@ -445,7 +458,8 @@ mod imp {
     /// Waits until an item is ready (`timeout_ns`: 0 polls, `u64::MAX`
     /// forever); returns how many are ready (their `revents` are set).
     pub fn wait_handles(items: &mut [WaitItem], timeout_ns: u64) -> Result<usize, Errno> {
-        decode(syscall3(nr::WAIT_HANDLES, items.as_mut_ptr() as u64, items.len() as u64, timeout_ns)).map(|n| n as usize)
+        decode(syscall3(nr::WAIT_HANDLES, items.as_mut_ptr() as u64, items.len() as u64, timeout_ns))
+            .map(|n| n as usize)
     }
 
     pub fn display_info() -> Result<DisplayInfo, Errno> {
@@ -495,13 +509,20 @@ mod imp {
     /// Fills `out` with process records; returns how many.
     pub fn proc_list(out: &mut [ProcInfo]) -> Result<usize, Errno> {
         let bytes = core::mem::size_of_val(out) as u64;
-        decode(syscall2(nr::PROC_LIST, out.as_mut_ptr() as u64, bytes)).map(|n| n as usize / core::mem::size_of::<ProcInfo>())
+        decode(syscall2(nr::PROC_LIST, out.as_mut_ptr() as u64, bytes))
+            .map(|n| n as usize / core::mem::size_of::<ProcInfo>())
     }
 
     /// Fills `out` with mount records; returns how many.
     pub fn mount_list(out: &mut [MountInfo]) -> Result<usize, Errno> {
         let bytes = core::mem::size_of_val(out) as u64;
-        decode(syscall2(nr::MOUNT_LIST, out.as_mut_ptr() as u64, bytes)).map(|n| n as usize / core::mem::size_of::<MountInfo>())
+        decode(syscall2(nr::MOUNT_LIST, out.as_mut_ptr() as u64, bytes))
+            .map(|n| n as usize / core::mem::size_of::<MountInfo>())
+    }
+
+    pub fn device_list(out: &mut [osyx_abi::ipc::DeviceInfo]) -> Result<usize, Errno> {
+        decode(syscall2(nr::DEVICE_LIST, out.as_mut_ptr() as u64, core::mem::size_of_val(out) as u64))
+            .map(|n| n as usize / core::mem::size_of::<osyx_abi::ipc::DeviceInfo>())
     }
 
     /// `POWER_OFF` / `POWER_REBOOT`; returns only on failure.
@@ -547,7 +568,14 @@ mod imp {
 
     pub fn sock_recv(h: u64, buf: &mut [u8], flags: u64) -> Result<(usize, SockAddr), Errno> {
         let mut from = SockAddr::default();
-        let n = decode(syscall5(nr::SOCK_RECV, h, buf.as_mut_ptr() as u64, buf.len() as u64, &mut from as *mut SockAddr as u64, flags))?;
+        let n = decode(syscall5(
+            nr::SOCK_RECV,
+            h,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            &mut from as *mut SockAddr as u64,
+            flags,
+        ))?;
         Ok((n as usize, from))
     }
 
@@ -557,13 +585,21 @@ mod imp {
 
     /// IPv4 addresses of `name`; returns how many were stored in `out`.
     pub fn resolve(name: &str, out: &mut [[u8; 4]]) -> Result<usize, Errno> {
-        decode(syscall4(nr::RESOLVE, name.as_ptr() as u64, name.len() as u64, out.as_mut_ptr() as u64, out.len() as u64)).map(|n| n as usize)
+        decode(syscall4(
+            nr::RESOLVE,
+            name.as_ptr() as u64,
+            name.len() as u64,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        ))
+        .map(|n| n as usize)
     }
 
     /// Fills `out` with `kind` records (`net::query`); returns how many.
     pub fn net_query<T: Copy>(kind: u64, out: &mut [T]) -> Result<usize, Errno> {
         let bytes = core::mem::size_of_val(out) as u64;
-        decode(syscall3(nr::NET_QUERY, kind, out.as_mut_ptr() as u64, bytes)).map(|n| n as usize / core::mem::size_of::<T>())
+        decode(syscall3(nr::NET_QUERY, kind, out.as_mut_ptr() as u64, bytes))
+            .map(|n| n as usize / core::mem::size_of::<T>())
     }
 
     pub fn net_config(c: &NetConfig) -> Result<(), Errno> {

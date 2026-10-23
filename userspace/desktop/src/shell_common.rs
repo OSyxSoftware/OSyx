@@ -71,13 +71,21 @@ pub fn run_app(name: &str, spec: WindowSpec, app: &mut dyn App) -> i32 {
             return 1;
         }
     };
-    let mut cx = Ctx { fonts: Fonts::load(), theme: Theme::default(), focused: false, quit: false, title: None, notes: Vec::new() };
+    let mut cx = Ctx {
+        fonts: Fonts::load(),
+        theme: configured_theme(),
+        focused: false,
+        quit: false,
+        title: None,
+        notes: Vec::new(),
+    };
     let mut adapter = Adapter::default();
     let mut size = (0, 0);
     let mut last_tick = os_std::time::Instant::now();
     loop {
         let mut extra = app.wait_items();
-        let timeout = app.tick_ms().map(|ms| Duration::from_millis(ms.saturating_sub(last_tick.elapsed().as_millis() as u64)));
+        let timeout =
+            app.tick_ms().map(|ms| Duration::from_millis(ms.saturating_sub(last_tick.elapsed().as_millis() as u64)));
         if let Err(e) = conn.wait(&mut extra, timeout) {
             eprintln!("{name}: lost PRISM: {e}");
             return 2;
@@ -186,6 +194,25 @@ pub struct AppEntry {
 
 pub const APP_DIR: &str = "/system/share/applications";
 
+pub fn configured_theme() -> Theme {
+    let mut theme = Theme::default();
+    let name = fs::read_to_string("/etc/osyx/accent").unwrap_or_default();
+    let (r, g, b) = match name.trim() {
+        "Purple" => (160, 110, 240),
+        "Pink" => (236, 92, 160),
+        "Red" => (240, 84, 84),
+        "Orange" => (245, 150, 60),
+        "Yellow" => (240, 200, 60),
+        "Green" => (80, 196, 120),
+        "Graphite" => (140, 146, 160),
+        _ => (76, 141, 255),
+    };
+    theme.accent = osyx_gfx::rgb(r, g, b);
+    theme.accent_hover = osyx_gfx::rgb(r.saturating_add(20), g.saturating_add(20), b.saturating_add(20));
+    theme.accent_pressed = osyx_gfx::rgb(r.saturating_sub(20), g.saturating_sub(20), b.saturating_sub(20));
+    theme
+}
+
 pub fn icon_by_name(name: &str) -> Icon {
     match name {
         "terminal" => Icon::Terminal,
@@ -256,10 +283,15 @@ pub fn human_duration(secs: u64) -> String {
 
 /// The configured time zone (`/etc/TZ`, a POSIX TZ string), UTC otherwise.
 pub fn system_tz() -> osyx_ui::time::Tz {
-    fs::read_to_string("/etc/TZ").ok().and_then(|s| osyx_ui::time::Tz::parse(s.trim())).unwrap_or_else(osyx_ui::time::Tz::utc)
+    fs::read_to_string("/etc/TZ")
+        .ok()
+        .and_then(|s| osyx_ui::time::Tz::parse(s.trim()))
+        .unwrap_or_else(osyx_ui::time::Tz::utc)
 }
 
 /// Seconds since the Unix epoch from the real-time clock.
 pub fn unix_now() -> i64 {
-    os_std::time::SystemTime::now().duration_since(os_std::time::SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+    os_std::time::SystemTime::now()
+        .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }

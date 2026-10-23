@@ -142,9 +142,9 @@ fn main() -> i32 {
         return 1;
     }
     let (w, h) = (conn.screen_width, conn.screen_height);
-    let windows = conn
-        .create_window(WindowSpec::with_role(Role::Desktop, 0, 0, w, h))
-        .and_then(|d| conn.create_window(WindowSpec::with_role(Role::Panel, 0, (h - PANEL_H) as i32, w, PANEL_H)).map(|p| (d, p)));
+    let windows = conn.create_window(WindowSpec::with_role(Role::Desktop, 0, 0, w, h)).and_then(|d| {
+        conn.create_window(WindowSpec::with_role(Role::Panel, 0, (h - PANEL_H) as i32, w, PANEL_H)).map(|p| (d, p))
+    });
     let (desktop, panel) = match windows {
         Ok(v) => v,
         Err(e) => {
@@ -157,7 +157,7 @@ fn main() -> i32 {
     let mut shell = Shell {
         conn,
         fonts,
-        theme: Theme::default(),
+        theme: common::configured_theme(),
         adapter: Adapter::default(),
         start: Instant::now(),
         w,
@@ -165,7 +165,11 @@ fn main() -> i32 {
         desktop,
         wallpaper: vec![0; (w * h) as usize],
         image: os_std::fs::read(DEFAULT_WALLPAPER).ok().filter(|d| osyx_gfx::Image::parse(d).is_ok()),
-        style: 0,
+        style: os_std::fs::read_to_string("/etc/osyx/wallpaper")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+            % WALLPAPERS,
         panel,
         launcher_btn: Button::new(0, "", ButtonStyle::Flat).with_icon(Icon::Apps),
         power_btn: Button::new(0, "", ButtonStyle::Flat).with_icon(Icon::Power),
@@ -350,7 +354,9 @@ impl Shell {
                 redraw |= self.clock_hover;
                 self.clock_hover = false;
             }
-            Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && contains(&clock, x, y) => action = Some(PanelAction::Clock),
+            Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && contains(&clock, x, y) => {
+                action = Some(PanelAction::Clock)
+            }
             _ => {}
         }
         self.panel.dirty |= redraw;
@@ -360,7 +366,10 @@ impl Shell {
                 if self.recently_closed(PopupTag::PowerMenu) {
                     return;
                 }
-                let items = vec![MenuItem::new("Restart", Some(Icon::Restart)), MenuItem::new("Shut down", Some(Icon::Power)).danger()];
+                let items = vec![
+                    MenuItem::new("Restart", Some(Icon::Restart)),
+                    MenuItem::new("Shut down", Some(Icon::Power)).danger(),
+                ];
                 let (mw, mh) = Menu::new(items.clone()).size(&self.fonts);
                 let r = self.power_btn.rect;
                 let x = r.right() as i32 - mw as i32;
@@ -416,7 +425,10 @@ impl Shell {
                 let before = String::from(search.text());
                 match search.event(&ui, !*list_focus, &fonts) {
                     Response::Submitted => {
-                        launch = list.selected().or(if shown.is_empty() { None } else { Some(0) }).and_then(|i| shown.get(i).copied());
+                        launch = list
+                            .selected()
+                            .or(if shown.is_empty() { None } else { Some(0) })
+                            .and_then(|i| shown.get(i).copied());
                     }
                     Response::Cancelled => close = true,
                     r if r.needs_redraw() => p.win.dirty = true,
@@ -486,6 +498,7 @@ impl Shell {
                 paint_wallpaper(&mut self.wallpaper, self.w, self.h, self.style, self.image.as_deref(), &self.fonts);
                 self.desktop.dirty = true;
                 println!("desktop: wallpaper {}", self.style);
+                let _ = os_std::fs::write("/etc/osyx/wallpaper", format!("{}\n", self.style));
             }
             (MenuPurpose::Desktop, 4) => {
                 let info = os_std::os::sysinfo().ok();
@@ -493,8 +506,18 @@ impl Shell {
                 let body = format!("Kernel {version}, PRISM compositor, AXIS shell. Many surfaces. One vision.");
                 self.show_note("OSyx", &body);
             }
-            (MenuPurpose::Power, 0) => self.confirm(CONFIRM_REBOOT, "Restart OSyx?", "All applications will be closed and the computer restarts.", "Restart"),
-            (MenuPurpose::Power, 1) => self.confirm(CONFIRM_OFF, "Shut down OSyx?", "All applications will be closed, file systems unmounted and the computer switched off.", "Shut down"),
+            (MenuPurpose::Power, 0) => self.confirm(
+                CONFIRM_REBOOT,
+                "Restart OSyx?",
+                "All applications will be closed and the computer restarts.",
+                "Restart",
+            ),
+            (MenuPurpose::Power, 1) => self.confirm(
+                CONFIRM_OFF,
+                "Shut down OSyx?",
+                "All applications will be closed, file systems unmounted and the computer switched off.",
+                "Shut down",
+            ),
             _ => {}
         }
     }
@@ -508,7 +531,11 @@ impl Shell {
     }
 
     fn launch(&mut self, name: &str, exec: &str) {
-        match Command::new(exec).spawn() {
+        let mut command = Command::new(if exec.ends_with(".exe") { "/bin/winrun" } else { exec });
+        if exec.ends_with(".exe") {
+            command.arg(exec);
+        }
+        match command.spawn() {
             Ok(child) => {
                 println!("desktop: launched {} ({}) as process {}", name, exec, child.id());
                 self.children.push((child.id(), String::from(name)));
@@ -601,7 +628,8 @@ impl Shell {
     }
 
     fn confirm(&mut self, tag: u32, title: &str, message: &str, action: &str) {
-        let mut dialog = Dialog::new(tag, title, message, &[("Cancel", ButtonStyle::Secondary), (action, ButtonStyle::Danger)]);
+        let mut dialog =
+            Dialog::new(tag, title, message, &[("Cancel", ButtonStyle::Secondary), (action, ButtonStyle::Danger)]);
         let w = 440;
         let h = dialog.height_for(w, &self.fonts);
         dialog.layout_card(Rect::new(0, 0, w, h), &self.fonts);
@@ -662,6 +690,19 @@ impl Shell {
     }
 
     fn update_clock(&mut self) {
+        self.tz = system_tz();
+        if let Some(style) = os_std::fs::read_to_string("/etc/osyx/wallpaper")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|&s| s < WALLPAPERS)
+        {
+            if style != self.style && (style != 0 || self.image.is_some()) {
+                self.style = style;
+                paint_wallpaper(&mut self.wallpaper, self.w, self.h, style, self.image.as_deref(), &self.fonts);
+                self.desktop.dirty = true;
+                println!("desktop: wallpaper {style}");
+            }
+        }
         let l = self.tz.local(unix_now());
         let c = (l.hm(), l.short_date());
         if c != self.clock {
@@ -712,7 +753,16 @@ impl Shell {
             let clock = self.clock_rect();
             let mut s = self.panel.surface()?;
             let mut p = Painter::new(&mut s, &theme, &fonts);
-            draw_panel(&mut p, &self.launcher_btn, &self.power_btn, &self.tasks, &self.clock, clock, self.clock_hover, self.windows.is_empty());
+            draw_panel(
+                &mut p,
+                &self.launcher_btn,
+                &self.power_btn,
+                &self.tasks,
+                &self.clock,
+                clock,
+                self.clock_hover,
+                self.windows.is_empty(),
+            );
             self.panel.present(&mut self.conn, None)?;
         }
         if let Some(pop) = &mut self.popup {
@@ -750,7 +800,9 @@ fn task_icon(title: &str) -> Icon {
 fn filter_apps(apps: &[AppEntry], q: &str) -> Vec<usize> {
     let q = q.to_lowercase();
     (0..apps.len())
-        .filter(|&i| q.is_empty() || apps[i].name.to_lowercase().contains(&q) || apps[i].comment.to_lowercase().contains(&q))
+        .filter(|&i| {
+            q.is_empty() || apps[i].name.to_lowercase().contains(&q) || apps[i].comment.to_lowercase().contains(&q)
+        })
         .collect()
 }
 
@@ -762,7 +814,16 @@ const PANEL_BG: Color = rgb(11, 14, 21);
 const PANEL_LINE: Color = rgb(34, 41, 56);
 
 #[allow(clippy::too_many_arguments)]
-fn draw_panel(p: &mut Painter, launcher: &Button, power: &Button, tasks: &[Button], clock: &(String, String), clock_rect: Rect, clock_hover: bool, empty: bool) {
+fn draw_panel(
+    p: &mut Painter,
+    launcher: &Button,
+    power: &Button,
+    tasks: &[Button],
+    clock: &(String, String),
+    clock_rect: Rect,
+    clock_hover: bool,
+    empty: bool,
+) {
     let t = *p.theme;
     let full = p.s.bounds();
     p.fill(full, PANEL_BG);
@@ -773,7 +834,13 @@ fn draw_panel(p: &mut Painter, launcher: &Button, power: &Button, tasks: &[Butto
     }
     if empty {
         let r = Rect::new(72, 0, 460, full.h);
-        p.text_in(FontKind::Ui, r, "Press Super or click the launcher to start an application", t.text_faint, Align::Left);
+        p.text_in(
+            FontKind::Ui,
+            r,
+            "Press Super or click the launcher to start an application",
+            t.text_faint,
+            Align::Left,
+        );
     }
     if clock_hover {
         p.rounded(clock_rect, t.radius_small, t.raised, 255);
@@ -797,7 +864,13 @@ fn draw_popup(p: &mut Painter, kind: &PopupKind, apps: &[AppEntry]) {
             search.draw(p, !*list_focus);
             if shown.is_empty() {
                 let r = list.rect;
-                p.text_in(FontKind::Ui, r, if apps.is_empty() { "No applications installed" } else { "Nothing matches" }, t.text_faint, Align::Center);
+                p.text_in(
+                    FontKind::Ui,
+                    r,
+                    if apps.is_empty() { "No applications installed" } else { "Nothing matches" },
+                    t.text_faint,
+                    Align::Center,
+                );
             } else {
                 list.draw(p, true);
             }
@@ -844,7 +917,11 @@ fn paint_wallpaper(buf: &mut [u32], w: u32, h: u32, style: usize, image: Option<
         if let Some(img) = image.and_then(|d| osyx_gfx::Image::parse(d).ok()) {
             // Cover: fill the screen keeping the aspect ratio, centred.
             let (iw, ih) = (img.width() as u64, img.height() as u64);
-            let (dw, dh) = if w as u64 * ih > h as u64 * iw { (w as u64, ih * w as u64 / iw) } else { (iw * h as u64 / ih, h as u64) };
+            let (dw, dh) = if w as u64 * ih > h as u64 * iw {
+                (w as u64, ih * w as u64 / iw)
+            } else {
+                (iw * h as u64 / ih, h as u64)
+            };
             let dst = Rect::new((w as i32 - dw as i32) / 2, (h as i32 - dh as i32) / 2, dw as u32, dh as u32);
             s.fill(rgb(4, 8, 20));
             img.draw_scaled(&mut s, dst, 255);

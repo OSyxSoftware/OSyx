@@ -11,6 +11,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+static READ_BYTES: AtomicU64 = AtomicU64::new(0);
+static WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+pub fn io_bytes() -> (u64, u64) {
+    (READ_BYTES.load(Ordering::Relaxed), WRITE_BYTES.load(Ordering::Relaxed))
+}
 
 pub const SECTOR_SIZE: usize = 512;
 
@@ -57,6 +65,9 @@ pub fn read(dev: &dyn BlockDev, lba: u64, buf: &mut [u8]) -> Result<(), BlockErr
     let step = dev.max_sectors() * SECTOR_SIZE;
     for (i, chunk) in buf.chunks_mut(step).enumerate() {
         dev.read_blocks(lba + (i * dev.max_sectors()) as u64, chunk)?;
+        if dev.partition().is_none() {
+            READ_BYTES.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        }
     }
     Ok(())
 }
@@ -69,6 +80,9 @@ pub fn write(dev: &dyn BlockDev, lba: u64, buf: &[u8]) -> Result<(), BlockError>
     let step = dev.max_sectors() * SECTOR_SIZE;
     for (i, chunk) in buf.chunks(step).enumerate() {
         dev.write_blocks(lba + (i * dev.max_sectors()) as u64, chunk)?;
+        if dev.partition().is_none() {
+            WRITE_BYTES.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        }
     }
     Ok(())
 }
@@ -116,7 +130,13 @@ impl BlockDev for Partition {
     }
 
     fn describe(&self) -> String {
-        format!("partition {} of {} ({}, \"{}\")", self.info.number, self.parent.name(), self.info.type_guid, self.info.name)
+        format!(
+            "partition {} of {} ({}, \"{}\")",
+            self.info.number,
+            self.parent.name(),
+            self.info.type_guid,
+            self.info.name
+        )
     }
 
     fn sector_count(&self) -> u64 {

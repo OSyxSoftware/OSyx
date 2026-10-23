@@ -13,6 +13,8 @@
 //! * `crash-prep`:  leave an open, removed file on / for the power-cut test
 //! * `net,<tcp>,<udp>`: network checks against the host's echo servers on
 //!   10.0.2.2 (see `net_checks.rs`); exit status = failed checks
+//! * `win,<tcp>,<udp>`: Windows PE32+ programs under /bin/winrun (see
+//!   `win_checks.rs`); exit status = failed checks
 
 #![no_std]
 #![no_main]
@@ -25,16 +27,18 @@ use os_std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use os_std::time::{Duration, Instant};
 use os_std::{env, os, process, thread};
 
-#[path = "../fpu.rs"]
-mod fpu;
 #[path = "../exec_checks.rs"]
 mod exec_checks;
+#[path = "../fpu.rs"]
+mod fpu;
 #[path = "../fs_checks.rs"]
 mod fs_checks;
 #[path = "../ipc_checks.rs"]
 mod ipc_checks;
 #[path = "../net_checks.rs"]
 mod net_checks;
+#[path = "../win_checks.rs"]
+mod win_checks;
 
 os_std::entry!(main);
 
@@ -64,6 +68,13 @@ fn main() -> i32 {
             let mut t = Tests::default();
             net_checks::run(&mut t, port(2, 7101), port(3, 7102));
             println!("net checks: {} passed, {} failed", t.passed, t.failed);
+            return t.failed as i32;
+        }
+        Some("win") => {
+            let port = |i: usize, d: u16| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+            let mut t = Tests::default();
+            win_checks::run_all(&mut t, port(2, 7101), port(3, 7102));
+            println!("win checks: {} passed, {} failed", t.passed, t.failed);
             return t.failed as i32;
         }
         Some("crash-prep") => {
@@ -127,7 +138,8 @@ fn main() -> i32 {
             println!("display: virtio-gpu {}x{} -> 800x600 -> back: {}", d.width, d.height, switched && back);
             same && switched && back
         } else {
-            let refused = os_std::system::display_set_mode(800, 600).err().map(|e| e.kind()) == Some(ErrorKind::Unsupported);
+            let refused =
+                os_std::system::display_set_mode(800, 600).err().map(|e| e.kind()) == Some(ErrorKind::Unsupported);
             same && refused
         }
     });

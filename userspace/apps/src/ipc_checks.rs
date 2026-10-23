@@ -12,6 +12,24 @@ use os_std::system;
 use os_std::time::{Duration, Instant};
 
 pub fn run(t: &mut Tests) {
+    t.check("ipc: scheduler and disk counters are monotonic", || {
+        let Ok(before) = os::sysinfo() else { return false };
+        let Ok(procs) = system::processes() else { return false };
+        let Some(me) = procs.iter().find(|p| p.pid == before.pid) else { return false };
+        os_std::thread::sleep(Duration::from_millis(40));
+        let Ok(after) = os::sysinfo() else { return false };
+        let Ok(procs) = system::processes() else { return false };
+        let Some(later) = procs.iter().find(|p| p.pid == before.pid) else { return false };
+        after.ticks > before.ticks && after.idle_ticks >= before.idle_ticks && after.idle_ticks <= after.ticks
+            && after.disk_read_bytes >= before.disk_read_bytes && after.disk_write_bytes >= before.disk_write_bytes
+            && later.cpu_ticks >= me.cpu_ticks && later.cpu_ticks <= after.ticks
+    });
+    t.check("ipc: device inventory includes PCI and attached USB inputs", || {
+        let Ok(devs) = system::devices() else { return false };
+        devs.iter().any(|d| system::field_str(&d.hardware_id).starts_with("PCI\\VEN_"))
+            && devs.iter().any(|d| system::field_str(&d.class) == "Keyboard")
+            && devs.iter().any(|d| system::field_str(&d.class) == "Mouse")
+    });
     t.check("ipc: pipe round trip and end of data", || {
         let Ok((mut r, mut w)) = ipc::pipe() else { return false };
         let wrote = w.write_all(b"through the pipe").is_ok();

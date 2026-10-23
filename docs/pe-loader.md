@@ -47,16 +47,17 @@ rejections, table errors and panics. It reads files only; nothing is copied
 into the repository. See [testing.md](testing.md) for the last recorded run.
 `pe-dump` prints the parse of one file.
 
-## Loader — planned
+## Loader — implemented initial subset
 
-1. Map a PE32+ image with no imports into a user address space, apply base
-   relocations, set section permissions, run its entry point.
-2. Resolve imports against a minimal in-tree DLL providing `GetStdHandle`,
-   `WriteFile`, `GetLastError`, `ExitProcess` with real behaviour
-   (`hello.exe` is the first target).
-3. A non-trivial console program; a compatibility matrix in
-   `research/compatibility-matrix/`.
+`compatibility/pe-loader` provides API set schema v6 parsing, validated
+image layout and section protection, DIR64 relocations and linking against
+built-in modules or PE DLLs. Imports by name and ordinal, export forwarding,
+dependency cycles and failure cleanup are covered by host tests.
 
-Loader policy (machine AMD64 only, DIR64/ABSOLUTE relocations only, W^X
-section permissions, subsystem console) will be enforced by the loader, not
-the parser.
+`compatibility/win32` provides the OSyx mapping backend and `/bin/winrun`:
+DLL search, initializers, TLS callbacks/templates, PEB/TEB, GS-base and the
+Windows x64 calling convention. Both console and GUI subsystem programs
+run in the calling ring-3 process. The executable is loaded from the VFS;
+unresolved imports fail before entering Windows code. See
+[windows-compatibility.md](windows-compatibility.md) for the tested API
+surface and limitations. No Microsoft binaries are distributed.
