@@ -591,6 +591,28 @@ extern "win64" fn RegDeleteKeyW(hkey: u64, sub: *const u16) -> u32 {
 
 const ERROR_NOACCESS: u32 = 998;
 
+/// HKEY_CURRENT_USER is resolved on every use and never cached: a thread
+/// can only impersonate a token of the process's own user (tokens.rs), so
+/// there is no per-user handle to stop caching.
+extern "win64" fn RegDisablePredefinedCache() -> u32 {
+    ERROR_SUCCESS
+}
+
+extern "win64" fn RegDisablePredefinedCacheEx() -> u32 {
+    ERROR_SUCCESS
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![RegOpenKeyExW, RegCreateKeyExW, RegCloseKey, RegQueryValueExW, RegGetValueW, RegSetValueExW, RegDeleteValueW, RegDeleteKeyW]
+    export_table![
+        RegOpenKeyExW,
+        RegCreateKeyExW,
+        RegCloseKey,
+        RegQueryValueExW,
+        RegGetValueW,
+        RegSetValueExW,
+        RegDeleteValueW,
+        RegDeleteKeyW,
+        RegDisablePredefinedCache,
+        RegDisablePredefinedCacheEx
+    ]
 }

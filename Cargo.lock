@@ -167,6 +167,7 @@ dependencies = [
  "os-std",
  "os-sys",
  "osyx-abi",
+ "osyx-crypto",
  "osyx-gfx",
  "osyx-input",
  "osyx-pe",

@@ -699,6 +699,7 @@ fn create_window(
         Ok(h) => h,
         Err(e) => return fail(e, 0),
     };
+    crate::winsta::note_gui();
     let wndproc = wndproc_of(hwnd).unwrap_or(0);
     // CREATESTRUCT (80 bytes) for WM_NCCREATE / WM_CREATE.
     let mut cs = [0u8; 80];
@@ -1104,7 +1105,10 @@ extern "win64" fn GetMessageA(msg: *mut u8, hwnd: u64, _min: u32, _max: u32) -> 
                 write_msg(msg, &m);
                 return (m.msg != WM_QUIT) as Bool;
             }
-            Err(t) => with(|g| g.wait(t)),
+            Err(t) => {
+                crate::winsta::note_idle();
+                with(|g| g.wait(t))
+            }
         }
     }
 }

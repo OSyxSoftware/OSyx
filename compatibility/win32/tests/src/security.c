@@ -92,7 +92,7 @@ void __stdcall start(void) {
     HANDLE limited=NULL;check("token duplication can drop query access",DuplicateHandle(GetCurrentProcess(),token,GetCurrentProcess(),&limited,0,FALSE,0)&&!GetTokenInformation(limited,TokenType,&type,sizeof type,&needed)&&GetLastError()==ERROR_ACCESS_DENIED);
     CloseHandle(limited);HANDLE duplicate=NULL;
     check("same-access duplicate survives original close",DuplicateHandle(GetCurrentProcess(),token,GetCurrentProcess(),&duplicate,0,FALSE,DUPLICATE_SAME_ACCESS)&&CloseHandle(token)&&GetTokenInformation(duplicate,TokenType,&type,sizeof type,&needed));
-    if(native)check("unsupported token classes fail explicitly",!GetTokenInformation(duplicate,TokenDefaultDacl,NULL,0,&needed)&&GetLastError()==ERROR_NOT_SUPPORTED);
+    if(native)check("unsupported token classes fail explicitly",!GetTokenInformation(duplicate,TokenAuditPolicy,NULL,0,&needed)&&GetLastError()==ERROR_NOT_SUPPORTED);
     CloseHandle(duplicate);check("closed token handle is rejected",!GetTokenInformation(duplicate,TokenType,&type,sizeof type,&needed)&&GetLastError()==ERROR_INVALID_HANDLE);
     finish("security");
 }

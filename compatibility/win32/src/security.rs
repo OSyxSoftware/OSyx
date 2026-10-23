@@ -1,13 +1,7 @@
-//! Win64 SID/ACL/security-descriptor data APIs and queryable process tokens.
-//! Tokens derive their identity from the kernel's actual uid/gid. This is
-//! not impersonation, a Windows sandbox, or an ACL enforcement service.
-//! Unsupported token classes/remote process queries fail explicitly.
+//! Win64 SID/ACL/security-descriptor data APIs. Tokens are in tokens.rs,
+//! object security and access checks in objsec.rs.
 #![allow(non_snake_case)]
-use crate::{
-    error::*,
-    kernel32::fail,
-    objects::{self, Object},
-};
+use crate::{error::*, kernel32::fail};
 use alloc::{sync::Arc, vec::Vec};
 use core::ptr::{copy_nonoverlapping, read_unaligned, write_unaligned};
 
@@ -16,15 +10,17 @@ const INVALID_ACL: u32 = 1336;
 const BAD_DESCRIPTOR: u32 = 1338;
 const REVISION_MISMATCH: u32 = 1306;
 const NO_SPACE: u32 = 1344;
-const TOKEN_QUERY: u32 = 8;
 const TOKEN_ALL: u32 = 0x000f_01ff;
 
-/// Access is per handle, including copies made with DuplicateHandle.
+/// A token handle's view of a token: the identity, this handle's access
+/// (per handle, including copies made with DuplicateHandle) and the token
+/// itself, shared by every handle to it.
 #[derive(Clone)]
 pub struct Token {
     pub uid: u32,
     pub gid: u32,
     pub access: u32,
+    pub state: Arc<crate::tokens::TokenState>,
 }
 /// Default attributes are implementable with native credentials. Custom
 /// DACLs and inheritable handles require additional kernel/object support;
@@ -59,20 +55,20 @@ pub fn token_access(access: u32) -> Result<u32, u32> {
     }
     Ok(mapped)
 }
-unsafe fn rd<T: Copy>(p: *const u8, at: usize) -> T {
+pub(crate) unsafe fn rd<T: Copy>(p: *const u8, at: usize) -> T {
     unsafe { read_unaligned(p.add(at).cast()) }
 }
-unsafe fn wr<T>(p: *mut u8, at: usize, value: T) {
+pub(crate) unsafe fn wr<T>(p: *mut u8, at: usize, value: T) {
     unsafe { write_unaligned(p.add(at).cast(), value) }
 }
-unsafe fn sid_len(sid: *const u8) -> Option<usize> {
+pub(crate) unsafe fn sid_len(sid: *const u8) -> Option<usize> {
     if sid.is_null() || unsafe { *sid } != 1 {
         return None;
     }
     let count = unsafe { *sid.add(1) };
     (count <= 15).then_some(8 + count as usize * 4)
 }
-fn sid(authority: u64, sub: &[u32]) -> Vec<u8> {
+pub(crate) fn sid(authority: u64, sub: &[u32]) -> Vec<u8> {
     let mut data = alloc::vec![1, sub.len() as u8];
     data.extend_from_slice(&authority.to_be_bytes()[2..]);
     for n in sub {
@@ -80,7 +76,7 @@ fn sid(authority: u64, sub: &[u32]) -> Vec<u8> {
     }
     data
 }
-unsafe fn same_sid(a: *const u8, b: *const u8) -> bool {
+pub(crate) unsafe fn same_sid(a: *const u8, b: *const u8) -> bool {
     let Some(n) = (unsafe { sid_len(a) }) else { return false };
     if unsafe { sid_len(b) } != Some(n) {
         return false;
@@ -148,7 +144,7 @@ extern "win64" fn CopySid(bytes: u32, out: *mut u8, source: *const u8) -> i32 {
 extern "win64" fn EqualSid(a: *const u8, b: *const u8) -> i32 {
     unsafe { same_sid(a, b) as i32 }
 }
-fn known_sid(kind: u32, domain: *const u8) -> Result<Vec<u8>, u32> {
+pub(crate) fn known_sid(kind: u32, domain: *const u8) -> Result<Vec<u8>, u32> {
     Ok(match kind {
         0 => sid(0, &[0]),
         1 => sid(1, &[0]),
@@ -202,7 +198,7 @@ extern "win64" fn IsWellKnownSid(p: *const u8, kind: u32) -> i32 {
 }
 
 // ACL walks are bounded by the caller's WORD AclSize, never by AceCount alone.
-unsafe fn acl_used(p: *const u8) -> Result<usize, u32> {
+pub(crate) unsafe fn acl_used(p: *const u8) -> Result<usize, u32> {
     if p.is_null() {
         return Err(INVALID_ACL);
     }
@@ -248,7 +244,63 @@ extern "win64" fn InitializeAcl(p: *mut u8, size: u32, revision: u32) -> i32 {
 extern "win64" fn IsValidAcl(p: *const u8) -> i32 {
     unsafe { acl_used(p).is_ok() as i32 }
 }
-fn add_ace(p: *mut u8, revision: u32, flags: u32, access: u32, who: *const u8, kind: u8) -> i32 {
+/// An ACE of the basic kinds: (type, flags, access mask, SID).
+pub(crate) type Ace = (u8, u8, u32, Vec<u8>);
+
+pub(crate) const ACCESS_ALLOWED: u8 = 0;
+pub(crate) const ACCESS_DENIED: u8 = 1;
+pub(crate) const SYSTEM_AUDIT: u8 = 2;
+pub(crate) const MANDATORY_LABEL: u8 = 0x11;
+
+/// A revision-2 ACL holding exactly `aces`.
+pub(crate) fn build_acl(aces: &[Ace]) -> Vec<u8> {
+    let size = 8 + aces.iter().map(|a| 8 + a.3.len()).sum::<usize>();
+    let mut v = alloc::vec![2u8, 0];
+    v.extend_from_slice(&(size as u16).to_le_bytes());
+    v.extend_from_slice(&(aces.len() as u16).to_le_bytes());
+    v.extend_from_slice(&[0, 0]);
+    for (kind, flags, mask, s) in aces {
+        v.extend_from_slice(&[*kind, *flags]);
+        v.extend_from_slice(&((8 + s.len()) as u16).to_le_bytes());
+        v.extend_from_slice(&mask.to_le_bytes());
+        v.extend_from_slice(s);
+    }
+    v
+}
+
+/// The ACEs of a valid ACL. ACE kinds other than allow, deny, audit and
+/// mandatory label (object and callback ACEs) are not supported.
+pub(crate) unsafe fn acl_aces(p: *const u8) -> Result<Vec<Ace>, u32> {
+    unsafe { acl_used(p) }?;
+    let count: u16 = unsafe { rd(p, 4) };
+    let mut at = 8;
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let kind: u8 = unsafe { rd(p, at) };
+        let size: u16 = unsafe { rd(p, at + 2) };
+        if ![ACCESS_ALLOWED, ACCESS_DENIED, SYSTEM_AUDIT, MANDATORY_LABEL].contains(&kind) {
+            return Err(ERROR_NOT_SUPPORTED);
+        }
+        let s = unsafe { p.add(at + 8) };
+        let n = unsafe { sid_len(s) }.ok_or(INVALID_ACL)?;
+        out.push((kind, unsafe { rd(p, at + 1) }, unsafe { rd(p, at + 4) }, unsafe { core::slice::from_raw_parts(s, n) }.to_vec()));
+        at += size as usize;
+    }
+    Ok(out)
+}
+
+/// A copy of a valid ACL, trimmed to its used size.
+pub(crate) unsafe fn acl_bytes(p: *const u8) -> Result<Vec<u8>, u32> {
+    Ok(build_acl(&unsafe { acl_aces(p) }?))
+}
+
+/// A copy of a valid SID.
+pub(crate) unsafe fn sid_bytes(p: *const u8) -> Result<Vec<u8>, u32> {
+    let n = unsafe { sid_len(p) }.ok_or(INVALID_SID)?;
+    Ok(unsafe { core::slice::from_raw_parts(p, n) }.to_vec())
+}
+
+pub(crate) fn add_ace(p: *mut u8, revision: u32, flags: u32, access: u32, who: *const u8, kind: u8) -> i32 {
     if revision != 2 && revision != 4 {
         return fail(REVISION_MISMATCH, 0);
     }
@@ -319,13 +371,13 @@ struct Descriptor {
     dacl: u64,
 }
 const _: () = assert!(core::mem::size_of::<Descriptor>() == 40);
-unsafe fn descriptor_control(p: *const u8) -> Result<u16, u32> {
+pub(crate) unsafe fn descriptor_control(p: *const u8) -> Result<u16, u32> {
     if p.is_null() || unsafe { *p } != 1 {
         return Err(BAD_DESCRIPTOR);
     }
     Ok(unsafe { rd(p, 2) })
 }
-unsafe fn component(p: *const u8, field: usize) -> Result<*const u8, u32> {
+pub(crate) unsafe fn component(p: *const u8, field: usize) -> Result<*const u8, u32> {
     let control = unsafe { descriptor_control(p) }?;
     if control & 0x8000 != 0 {
         let offset = unsafe { rd::<u32>(p, 4 + field * 4) } as usize;
@@ -472,82 +524,6 @@ extern "win64" fn IsValidSecurityDescriptor(p: *const u8) -> i32 {
     1
 }
 
-pub(crate) extern "win64" fn OpenProcessToken(process: u64, access: u32, out: *mut u64) -> i32 {
-    if out.is_null() {
-        return fail(ERROR_INVALID_PARAMETER, 0);
-    }
-    if process != objects::CURRENT_PROCESS {
-        return fail(ERROR_INVALID_HANDLE, 0);
-    }
-    let access = match token_access(access) {
-        Ok(v) => v,
-        Err(e) => return fail(e, 0),
-    };
-    let (uid, gid) = os_sys::getuid();
-    unsafe {
-        *out = objects::insert(Object::Token(Arc::new(Token { uid, gid, access })));
-    }
-    1
-}
-fn group_sids(token: &Token) -> Vec<Vec<u8>> {
-    let mut groups = alloc::vec![sid(22, &[2, token.gid]), sid(1, &[0]), sid(5, &[11]), sid(5, &[32, 545])];
-    if token.uid == 0 {
-        groups.push(sid(5, &[32, 544]));
-    }
-    groups
-}
-fn put_sid(data: &mut Vec<u8>, at: usize, s: &[u8], base: u64) {
-    let offset = data.len();
-    data[at..at + 8].copy_from_slice(&(base + offset as u64).to_le_bytes());
-    data.extend_from_slice(s);
-}
-fn token_info(t: &Token, class: u32, base: u64) -> Result<Vec<u8>, u32> {
-    let mut data;
-    match class {
-        1 | 4 | 5 => {
-            data = alloc::vec![0; if class==1 {16} else {8}];
-            let value = if class == 5 { sid(22, &[2, t.gid]) } else { sid(22, &[1, t.uid]) };
-            put_sid(&mut data, 0, &value, base);
-        }
-        2 => {
-            let groups = group_sids(t);
-            data = alloc::vec![0; 8+16*groups.len()];
-            data[..4].copy_from_slice(&(groups.len() as u32).to_le_bytes());
-            for (i, s) in groups.iter().enumerate() {
-                let at = 8 + 16 * i;
-                data[at + 8..at + 12].copy_from_slice(&7u32.to_le_bytes());
-                put_sid(&mut data, at, s, base);
-            }
-        }
-        8 => data = 1u32.to_le_bytes().to_vec(), // TokenPrimary; no thread impersonation
-        _ => return Err(ERROR_NOT_SUPPORTED),
-    }
-    Ok(data)
-}
-extern "win64" fn GetTokenInformation(h: u64, class: u32, out: *mut u8, size: u32, needed: *mut u32) -> i32 {
-    let Some(Object::Token(t)) = objects::get(h) else { return fail(ERROR_INVALID_HANDLE, 0) };
-    if t.access & TOKEN_QUERY == 0 {
-        return fail(ERROR_ACCESS_DENIED, 0);
-    }
-    if needed.is_null() || out.is_null() && size != 0 {
-        return fail(ERROR_INVALID_PARAMETER, 0);
-    }
-    let data = match token_info(&t, class, out as u64) {
-        Ok(v) => v,
-        Err(e) => return fail(e, 0),
-    };
-    unsafe {
-        *needed = data.len() as u32;
-    }
-    if size < data.len() as u32 || out.is_null() {
-        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
-    }
-    unsafe {
-        copy_nonoverlapping(data.as_ptr(), out, data.len());
-    }
-    1
-}
-
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         IsValidSid,
@@ -579,7 +555,5 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetSecurityDescriptorDacl,
         GetSecurityDescriptorSacl,
         GetSecurityDescriptorControl,
-        OpenProcessToken,
-        GetTokenInformation
     ]
 }

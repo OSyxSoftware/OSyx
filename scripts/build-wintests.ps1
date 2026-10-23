@@ -50,6 +50,8 @@ $programs = [ordered]@{
     'runtime.exe' = @{ Src = @('runtime.c'); Args = @('-fasynchronous-unwind-tables', '-Wl,--subsystem,console', '-Wl,-e,start', '-lntdll', '-ladvapi32', '-lkernel32') }
     'mapping.exe' = @{ Src = @('mapping.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'winmm.exe' = @{ Src = @('winmm.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lwinmm', '-lkernel32') }
+    'sandbox.exe' = @{ Src = @('sandbox.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ladvapi32', '-lkernel32') }
+    'interop.exe' = @{ Src = @('interop.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lole32', '-loleaut32', '-luser32', '-luserenv', '-ldbghelp', '-lcrypt32', '-ladvapi32', '-lkernel32') }
     'shell.exe' = @{ Src = @('shell.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshell32', '-lole32', '-lkernel32') }
     'platform.exe' = @{ Src = @('platform.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshlwapi', '-lruntimeobject', '-lkernel32') }
     # The real UCRT import library: every C runtime function comes through
@@ -68,6 +70,7 @@ foreach ($name in $programs.Keys) {
     $inputs = @($p.Src | ForEach-Object { Join-Path $src $_ }) + @("$src\common.h", (Join-Path $PSScriptRoot 'build-wintests.ps1'))
     if ($name -eq 'version.exe') { $inputs += $versionObj }
     if ($name -eq 'seh.exe') { $inputs += $sehObj }
+    if ($name -eq 'interop.exe') { $inputs += "$src\pkcs7_sample.h" }
     $target = Join-Path $out $name
     if (Stale $target $inputs) {
         Invoke-Checked $name { & $clang @common @($p.Src | ForEach-Object { Join-Path $src $_ }) @($p.Args) -o $target }

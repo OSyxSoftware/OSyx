@@ -966,6 +966,8 @@ extern "win64" fn NtQueryObject(h: u64, class: u32, buf: *mut u8, len: u32, ret:
                 objects::Object::Port(_) => "IoCompletion",
                 objects::Object::Process(_) => "Process",
                 objects::Object::Job(_) => "Job",
+                objects::Object::WindowStation(_) => "WindowStation",
+                objects::Object::Desktop(_) => "Desktop",
             };
             // OBJECT_TYPE_INFORMATION: UNICODE_STRING TypeName, then
             // counters (zero here); the name follows the 104-byte header.

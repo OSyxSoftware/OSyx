@@ -843,6 +843,47 @@ extern "win64" fn GetTempPathW(size: u32, buf: *mut u16) -> u32 {
     out_w("C:\\tmp\\", buf, size)
 }
 
+/// `<dir>\<up to 3 prefix chars><hex>.TMP`; with `unique` 0 a new number
+/// is chosen and the file created (empty), as on Windows.
+extern "win64" fn GetTempFileNameW(dir: *const u16, prefix: *const u16, unique: u32, out: *mut u16) -> u32 {
+    // SAFETY: NUL-terminated strings (prefix may be NULL).
+    let (Some(dir), prefix) = (unsafe { sw(dir) }, unsafe { sw(prefix) }.unwrap_or_default()) else {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    };
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let prefix: String = prefix.chars().take(3).collect();
+    let name = |n: u32| alloc::format!("{}\\{prefix}{:X}.TMP", dir.trim_end_matches('\\'), n & 0xffff);
+    let mut chosen = unique & 0xffff;
+    if unique == 0 {
+        let start = ((now_ns() / 1000) as u32 & 0xffff).max(1);
+        let mut n = start;
+        loop {
+            match create_file(&name(n), objects::GENERIC_WRITE, 0, CREATE_NEW, 0) {
+                Ok((h, _)) => {
+                    objects::close(h);
+                    chosen = n;
+                    break;
+                }
+                Err(ERROR_FILE_EXISTS) => {}
+                Err(e) => return fail(e, 0),
+            }
+            n = if n == 0xffff { 1 } else { n + 1 };
+            if n == start {
+                return fail(ERROR_FILE_EXISTS, 0);
+            }
+        }
+    }
+    let w: Vec<u16> = name(chosen).encode_utf16().chain([0]).collect();
+    if w.len() > 260 {
+        return fail(ERROR_FILENAME_EXCED_RANGE, 0);
+    }
+    // SAFETY: the caller's MAX_PATH buffer.
+    unsafe { core::ptr::copy_nonoverlapping(w.as_ptr(), out, w.len()) };
+    chosen
+}
+
 // ---- handles ------------------------------------------------------------------------
 
 extern "win64" fn CloseHandle(h: u64) -> Bool {
@@ -916,6 +957,7 @@ extern "win64" fn GetCurrentThreadId() -> u32 {
 pub extern "win64" fn ExitProcess(code: u32) -> ! {
     crate::fls::thread_exit();
     loader::notify_process_detach();
+    crate::winsta::clear_markers();
     os_std::process::exit(code as i32)
 }
 
@@ -2037,6 +2079,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetFullPathNameW,
         GetTempPathA,
         GetTempPathW,
+        GetTempFileNameW,
         CloseHandle,
         DuplicateHandle,
         GetCurrentProcess,
@@ -2156,6 +2199,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::threadpool::exports());
     exports.extend(crate::process::exports());
     exports.extend(crate::seh::ntdll_exports());
-    exports.push(("OpenProcessToken",crate::security::OpenProcessToken as *const () as u64));
+    exports.push(("OpenProcessToken",crate::tokens::OpenProcessToken as *const () as u64));
     exports
 }

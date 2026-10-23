@@ -20,3 +20,4 @@ osyx-pe-loader = { path = "../pe-loader" }
 osyx-gfx = { path = "../../boot/gfx" }
 prism-client = { path = "../../graphics/prism-client" }
 osyx-input = { path = "../../shared/input" }
+osyx-crypto = { path = "../../shared/crypto" }

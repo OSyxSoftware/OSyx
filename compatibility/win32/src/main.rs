@@ -20,7 +20,10 @@ macro_rules! export_table {
     };
 }
 
+mod crypt32;
+mod dbghelp;
 mod error;
+mod eventlog;
 mod exceptions;
 mod files;
 mod fls;
@@ -32,8 +35,10 @@ mod mapping;
 mod mem;
 mod ntdll;
 mod objects;
+mod objsec;
 mod path;
 mod ole32;
+mod oleaut32;
 mod setupapi;
 mod shell32;
 mod shlwapi;
@@ -42,8 +47,10 @@ mod seh;
 mod teb;
 mod ucrt;
 mod user32;
+mod userenv;
 mod volumes;
 mod winmm;
+mod winsta;
 mod version;
 mod synch;
 mod process;
@@ -54,6 +61,7 @@ mod sysext;
 mod unwind;
 mod threadpool;
 mod timers;
+mod tokens;
 mod ws2_32;
 
 use alloc::string::String;
@@ -130,6 +138,7 @@ fn main() -> i32 {
     }
     let env_strings: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     kernel32::init_process(&exe, &cmd, env);
+    winsta::clear_markers();
     exceptions::install();
     let started = match loader::start(&exe, &cmd, &env_strings) {
         Ok(s) => s,

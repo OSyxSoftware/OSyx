@@ -183,7 +183,7 @@ const STARTF_USESTDHANDLES: u32 = 0x100;
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: u64 = 0x20002;
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn CreateProcessW(
+pub(crate) extern "win64" fn CreateProcessW(
     app: *const u16,
     cmdline: *mut u16,
     psa: u64,

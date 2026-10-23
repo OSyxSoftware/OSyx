@@ -154,20 +154,28 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("ntdll.dll", crate::ntdll::exports(), Vec::new()),
         builtin("kernel32.dll", k32.clone(), Vec::new()),
         builtin("kernelbase.dll", k32, Vec::new()),
-        builtin("user32.dll", crate::user32::exports(), Vec::new()),
+        builtin("user32.dll", [crate::user32::exports(), crate::winsta::exports()].concat(), Vec::new()),
         builtin("gdi32.dll", crate::user32::gdi_exports(), Vec::new()),
         builtin("ws2_32.dll", crate::ws2_32::exports(), crate::ws2_32::ordinals()),
         builtin("setupapi.dll", crate::setupapi::exports(), Vec::new()),
         builtin("iphlpapi.dll", crate::iphlpapi::exports(), Vec::new()),
         builtin("version.dll", crate::version::exports(), Vec::new()),
         builtin("psapi.dll", crate::psapi::exports(), Vec::new()),
-        builtin("advapi32.dll", [crate::security::exports(), crate::registry::exports()].concat(), Vec::new()),
+        builtin(
+            "advapi32.dll",
+            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports()].concat(),
+            Vec::new()
+        ),
         builtin("shlwapi.dll", crate::shlwapi::exports(), Vec::new()),
         builtin("combase.dll", crate::shlwapi::combase_exports(), Vec::new()),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
         builtin("shell32.dll", crate::shell32::exports(), Vec::new()),
         builtin("ole32.dll", crate::ole32::exports(), Vec::new()),
         builtin("winmm.dll", crate::winmm::exports(), Vec::new()),
+        builtin("oleaut32.dll", crate::oleaut32::exports(), crate::oleaut32::ordinals()),
+        builtin("userenv.dll", crate::userenv::exports(), Vec::new()),
+        builtin("dbghelp.dll", crate::dbghelp::exports(), Vec::new()),
+        builtin("crypt32.dll", crate::crypt32::exports(), Vec::new()),
     ]
 }
 
@@ -257,6 +265,15 @@ struct WinHost {
     /// LoadLibrary with a path: (normalised name, OSyx path).
     explicit: Option<(String, String)>,
     images: Vec<Image>,
+    /// OSyx paths of the DLL files loaded, by module name.
+    paths: BTreeMap<String, String>,
+}
+
+impl WinHost {
+    /// The Windows path of a module (built-ins: the system directory).
+    fn file_name(&self, name: &str) -> String {
+        self.paths.get(name).map_or_else(|| alloc::format!("C:\\Windows\\OSyx\\{name}"), |p| path::to_windows(p))
+    }
 }
 
 impl Host for WinHost {
@@ -276,7 +293,10 @@ impl Host for WinHost {
         for c in candidates {
             if let Ok((p, true)) = path::resolve(&c) {
                 return match os_std::fs::read(&p) {
-                    Ok(bytes) => Ok(Some(Source::Pe(bytes))),
+                    Ok(bytes) => {
+                        self.paths.insert(String::from(name), p);
+                        Ok(Some(Source::Pe(bytes)))
+                    }
                     Err(e) => Err(LinkError::Host(alloc::format!("{p}: {e}"))),
                 };
             }
@@ -373,7 +393,7 @@ fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> 
         let m = &l.linker.modules[i];
         let Kind::Pe { file, size, is_dll, .. } = &m.kind else { continue };
         let (base, size, is_dll) = (m.base, *size, *is_dll);
-        let full = alloc::format!("C:\\Windows\\OSyx\\{}", m.name);
+        let full = l.linker.host.file_name(&m.name);
         let entry = if is_dll { m.entry() } else { 0 };
         l.state[i].ldr = teb::add_ldr_entry(base, m.entry(), size, &full, &m.name);
         let Ok(pe) = PeFile::parse(file) else { continue };
@@ -539,10 +559,13 @@ pub fn start(exe_path: &str, command_line: &str, environment: &[String]) -> Resu
         search: alloc::vec![exe_dir.clone(), cwd.clone()],
         explicit: None,
         images: Vec::new(),
+        paths: BTreeMap::new(),
     };
     let mut linker = Linker::new(host, Some(schema));
     let exe =
         linker.load_executable(&exe_name, bytes.clone()).map_err(|e| alloc::format!("cannot load {exe_name}: {e}"))?;
+    let exe_module = linker.modules[exe].name.clone();
+    linker.host.paths.insert(exe_module, String::from(exe_path));
     let image_base = linker.modules[exe].base;
     let entry = linker.modules[exe].entry();
     // Process environment.
@@ -587,6 +610,58 @@ pub fn summary() -> Vec<(String, u64, bool, usize, usize)> {
     })
 }
 
+/// A loaded module, for debugging help.
+pub struct ModuleInfo {
+    pub name: String,
+    /// Its Windows path.
+    pub path: String,
+    pub base: u64,
+    pub size: u64,
+    pub time_date_stamp: u32,
+    pub checksum: u32,
+    /// The code and data it exports, sorted by address: (address, name).
+    pub symbols: Vec<(u64, String)>,
+}
+
+/// Every loaded module with its exported symbols. A built-in module's
+/// image is its handle page; its exports live in winrun's own code.
+pub fn modules() -> Vec<ModuleInfo> {
+    with(|l| {
+        (0..l.linker.modules.len())
+            .map(|i| {
+                let m = &l.linker.modules[i];
+                let base = module_handle(l, i);
+                let (mut size, mut stamp, mut checksum, mut symbols) = (mem::PAGE as u64, 0, 0, Vec::new());
+                match &m.kind {
+                    Kind::Pe { size: s, .. } => {
+                        size = *s as u64;
+                        if let Some(pe) = m.pe() {
+                            stamp = pe.coff().time_date_stamp;
+                            checksum = pe.optional().check_sum;
+                            if let Ok(Some(e)) = pe.exports() {
+                                let names: BTreeMap<u16, &str> = e.names().filter_map(|r| r.ok()).map(|(n, o)| (o, n)).collect();
+                                for (ordinal, target) in e.functions().filter_map(|r| r.ok()) {
+                                    if let osyx_pe::ExportTarget::Rva(rva) = target {
+                                        let name = names.get(&ordinal).map_or_else(|| alloc::format!("Ordinal{ordinal}"), |n| String::from(*n));
+                                        symbols.push((m.base + rva as u64, name));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Kind::Builtin(_) => {
+                        if let Some(b) = l.linker.host.builtins.iter().find(|b| b.name == m.name) {
+                            symbols = b.by_name.iter().map(|(n, a)| (*a, String::from(*n))).collect();
+                        }
+                    }
+                }
+                symbols.sort();
+                ModuleInfo { name: m.name.clone(), path: l.linker.host.file_name(&m.name), base, size, time_date_stamp: stamp, checksum, symbols }
+            })
+            .collect()
+    })
+}
+
 // ---- run-time loader API -------------------------------------------------------
 
 /// `GetModuleHandle`: None = the program.
@@ -611,7 +686,7 @@ pub fn module_file_name(h: Option<u64>, exe_path: &str) -> Option<String> {
         Some(if i == l.exe {
             path::to_windows(exe_path)
         } else {
-            alloc::format!("C:\\Windows\\OSyx\\{}", l.linker.modules[i].name)
+            l.linker.host.file_name(&l.linker.modules[i].name)
         })
     })
 }

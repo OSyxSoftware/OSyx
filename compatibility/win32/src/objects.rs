@@ -237,6 +237,8 @@ pub enum Object {
     Port(Arc<crate::threadpool::PortObj>),
     Process(Arc<crate::process::ProcessObj>),
     Job(Arc<crate::process::JobObj>),
+    WindowStation(Arc<crate::winsta::Station>),
+    Desktop(Arc<crate::winsta::DesktopObj>),
 }
 
 struct Table {
@@ -264,6 +266,11 @@ pub fn count() -> usize {
 
 pub fn get(h: u64) -> Option<Object> {
     TABLE.lock().unwrap().map.get(&h).cloned()
+}
+
+/// Whether any open handle's object satisfies `f`.
+pub fn any(f: impl Fn(&Object) -> bool) -> bool {
+    TABLE.lock().unwrap().map.values().any(f)
 }
 
 /// Removes a handle; the object goes away with its last handle.
@@ -329,7 +336,9 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
         }
         Object::Console(_) | Object::File(_) | Object::Null => true,
         Object::Process(p) => p.done.load(Ordering::SeqCst),
-        Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) => return Err(ERROR_INVALID_HANDLE),
+        Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) | Object::WindowStation(_) | Object::Desktop(_) => {
+            return Err(ERROR_INVALID_HANDLE)
+        }
     })
 }
 

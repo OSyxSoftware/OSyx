@@ -45,6 +45,8 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("newer Win32: files, NLS, thread pool, processes, jobs, shlwapi, WinRT", || run("platform.exe", &[]) == Some(0));
     t.check("shell32 known folders and the ole32 task allocator", || run("shell.exe", &[]) == Some(0));
     t.check("winmm timers at the kernel tick resolution", || run("winmm.exe", &[]) == Some(0));
+    t.check("object security, ACLs, AccessCheck, restricted tokens and the event log", || run("sandbox.exe", &[]) == Some(0));
+    t.check("COM apartments, BSTRs, window stations, dbghelp and crypt32", || run("interop.exe", &[]) == Some(0));
     t.check("Windows SID ACL descriptor and token data", || run("security.exe", &[]) == Some(0));
     t.check("Universal C Runtime through the api-ms-win-crt contracts", || {
         run("ucrt.exe", &["one", "two words", "a\\b", "x\"y"]) == Some(0)
