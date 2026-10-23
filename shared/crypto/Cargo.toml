@@ -1,0 +1,8 @@
+[package]
+name = "osyx-crypto"
+description = "ChaCha20, SHA-256 and a ChaCha20 DRBG for the kernel's random number generator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

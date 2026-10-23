@@ -1,0 +1,9 @@
+[package]
+name = "osyx-vfs"
+description = "Host-testable VFS building blocks: paths, permissions, mount table, shared types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+osyx-abi = { path = "../../shared/abi" }

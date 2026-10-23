@@ -25,6 +25,10 @@ pub enum ErrorKind {
     FileTooLarge,
     ReadOnlyFilesystem,
     CrossesDevices,
+    /// The object is in use (e.g. unmounting a volume with open files).
+    ResourceBusy,
+    /// Too many symbolic links while resolving a path.
+    FilesystemLoop,
     /// A read ended before the requested amount of data.
     UnexpectedEof,
     /// Data was not valid for the operation (e.g. not UTF-8).
@@ -56,6 +60,8 @@ impl ErrorKind {
             ErrorKind::FileTooLarge => "file too large",
             ErrorKind::ReadOnlyFilesystem => "read-only filesystem or storage medium",
             ErrorKind::CrossesDevices => "cross-device link or rename",
+            ErrorKind::ResourceBusy => "resource busy",
+            ErrorKind::FilesystemLoop => "filesystem loop or indirection limit",
             ErrorKind::UnexpectedEof => "unexpected end of file",
             ErrorKind::InvalidData => "invalid data",
             ErrorKind::Io => "I/O error",
@@ -121,6 +127,9 @@ impl From<Errno> for Error {
             Errno::ReadOnly => ErrorKind::ReadOnlyFilesystem,
             Errno::TooManyHandles => ErrorKind::OutOfMemory,
             Errno::CrossDevice => ErrorKind::CrossesDevices,
+            Errno::Busy => ErrorKind::ResourceBusy,
+            Errno::Loop => ErrorKind::FilesystemLoop,
+            Errno::Unsupported => ErrorKind::Unsupported,
         };
         Error { kind, errno: Some(e), message: None }
     }

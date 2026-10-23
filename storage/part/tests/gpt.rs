@@ -1,0 +1,134 @@
+use osyx_part::*;
+use std::process::Command;
+
+struct Mem(Vec<u8>);
+
+impl SectorReader for Mem {
+    fn sectors(&self) -> u64 {
+        (self.0.len() / SECTOR) as u64
+    }
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), GptError> {
+        let o = lba as usize * SECTOR;
+        let src = self.0.get(o..o + buf.len()).ok_or(GptError::Io)?;
+        buf.copy_from_slice(src);
+        Ok(())
+    }
+}
+
+fn disk(mib: u64) -> (Mem, Vec<NewPartition<'static>>) {
+    let parts = vec![
+        NewPartition { type_guid: TYPE_ESP, unique_guid: Guid([1; 16]), first_lba: 2048, sectors: 8192, name: "EFI system" },
+        NewPartition { type_guid: TYPE_ROOT_X86_64, unique_guid: Guid([2; 16]), first_lba: 10240, sectors: 4096, name: "ROOT ŻÓŁW" },
+    ];
+    let mut img = vec![0u8; (mib << 20) as usize];
+    for (lba, data) in build(mib << 11, Guid([9; 16]), &parts).unwrap() {
+        img[lba as usize * SECTOR..lba as usize * SECTOR + data.len()].copy_from_slice(&data);
+    }
+    (Mem(img), parts)
+}
+
+#[test]
+fn guid_text_round_trip() {
+    assert_eq!(TYPE_ESP.to_string(), "C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
+    assert_eq!(TYPE_ESP.0[0], 0x28, "first field is little-endian on disk");
+    assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+}
+
+#[test]
+fn build_then_parse() {
+    let (mut d, parts) = disk(8);
+    let t = parse(&mut d).unwrap();
+    assert!(!t.used_backup);
+    assert_eq!(t.disk_guid, Guid([9; 16]));
+    assert_eq!(t.partitions.len(), 2);
+    for (p, n) in t.partitions.iter().zip(&parts) {
+        assert_eq!((p.type_guid, p.first_lba, p.sectors(), p.name.as_str()), (n.type_guid, n.first_lba, n.sectors, n.name));
+    }
+    assert_eq!(t.partitions[1].number, 2);
+}
+
+#[test]
+fn damaged_primary_falls_back_to_backup() {
+    let (mut d, _) = disk(8);
+    d.0[SECTOR + 30] ^= 0xFF; // primary header field
+    let t = parse(&mut d).unwrap();
+    assert!(t.used_backup);
+    assert_eq!(t.partitions.len(), 2);
+    // Damaged primary array: CRC mismatch, backup used.
+    let (mut d, _) = disk(8);
+    d.0[2 * SECTOR + 40] ^= 1;
+    assert!(parse(&mut d).unwrap().used_backup);
+}
+
+#[test]
+fn corrupt_tables_are_rejected() {
+    let (mut d, _) = disk(8);
+    let last = d.0.len() - SECTOR;
+    d.0[SECTOR + 30] ^= 0xFF;
+    d.0[last + 30] ^= 0xFF;
+    assert!(matches!(parse(&mut d), Err(GptError::Corrupt(_))));
+    assert_eq!(parse(&mut Mem(vec![0; 1 << 20])), Err(GptError::NotGpt));
+    assert_eq!(parse(&mut Mem(vec![0; 512])), Err(GptError::NotGpt));
+    // Overlapping and out-of-range partitions are refused by the writer too.
+    let bad = [
+        NewPartition { type_guid: TYPE_ESP, unique_guid: Guid([1; 16]), first_lba: 2048, sectors: 100, name: "" },
+        NewPartition { type_guid: TYPE_ESP, unique_guid: Guid([1; 16]), first_lba: 1 << 30, sectors: 100, name: "" },
+    ];
+    assert!(build(1 << 14, Guid([0; 16]), &bad).is_err());
+}
+
+/// Flips every byte of the primary header and array one at a time: parsing
+/// must never panic, and must either succeed via the backup or fail cleanly.
+#[test]
+fn single_byte_corruptions_never_panic() {
+    let (mut d, _) = disk(8);
+    for off in SECTOR..SECTOR * 34 {
+        d.0[off] ^= 0x5A;
+        match parse(&mut d) {
+            Ok(t) => assert_eq!(t.partitions.len(), 2, "offset {off}"),
+            Err(e) => panic!("offset {off}: backup should have saved us: {e:?}"),
+        }
+        d.0[off] ^= 0x5A;
+    }
+}
+
+fn wsl(cmd: &str) -> Option<std::process::Output> {
+    Command::new("wsl.exe").args(["-d", "Ubuntu-24.04", "--", "bash", "-lc", cmd]).output().ok().filter(|o| o.status.code().is_some())
+}
+
+fn wsl_path(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
+    let (drive, rest) = s.split_once(':').expect("absolute Windows path");
+    format!("/mnt/{}{}", drive.to_lowercase(), rest)
+}
+
+/// Cross-check with sgdisk (an independent GPT implementation) when WSL is
+/// available: it must accept our table, and we must read its tables.
+#[test]
+fn interoperates_with_sgdisk() {
+    if wsl("command -v sgdisk").is_none_or(|o| !o.status.success()) {
+        eprintln!("SKIPPED: sgdisk not available through WSL");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("osyx-gpt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ours = dir.join("ours.img");
+    let (d, _) = disk(8);
+    std::fs::write(&ours, &d.0).unwrap();
+    let o = wsl(&format!("sgdisk -v '{}'", wsl_path(&ours))).unwrap();
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert!(o.status.success() && text.contains("No problems found"), "sgdisk -v: {text}");
+    let theirs = dir.join("theirs.img");
+    std::fs::write(&theirs, vec![0u8; 16 << 20]).unwrap();
+    let o = wsl(&format!(
+        "sgdisk -n 1:2048:+4M -t 1:EF00 -c 1:boot -n 2:0:0 -t 2:8304 -c 2:root '{}'",
+        wsl_path(&theirs)
+    ))
+    .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let t = parse(&mut Mem(std::fs::read(&theirs).unwrap())).unwrap();
+    assert_eq!(t.partitions.len(), 2);
+    assert_eq!((t.partitions[0].type_guid, t.partitions[0].first_lba, t.partitions[0].name.as_str()), (TYPE_ESP, 2048, "boot"));
+    assert_eq!(t.partitions[1].type_guid, TYPE_ROOT_X86_64);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -17,6 +17,7 @@ extern crate alloc;
 
 mod arch;
 mod block;
+mod devices;
 mod display;
 mod drivers;
 mod fixup;
@@ -27,11 +28,15 @@ mod modules;
 mod pci;
 mod process;
 mod qemu;
+mod random;
 mod sched;
 mod selftest;
+mod selftest_fs;
 mod serial;
+mod storage;
 mod sync;
 mod syscall;
+mod time;
 mod vfs;
 
 use alloc::vec::Vec;
@@ -144,9 +149,23 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     kprintln!("scheduler: round robin, {} ms time slice", sched::TIME_SLICE_TICKS * 10);
     let pci_devices = pci::enumerate();
     pci::log_devices(&pci_devices);
+    match time::init() {
+        Some(secs) => kprintln!("time: RTC says {} UTC", time::format_utc(secs)),
+        None => kprintln!("time: RTC unreadable; timestamps count from boot"),
+    }
     let disks = block::probe(&pci_devices);
-    let volumes = vfs::mount_all();
-    kprintln!("storage: {} PCI functions, {} disks, {} volumes mounted", pci_devices.len(), disks, volumes);
+    let partitions = block::scan_partitions();
+    random::init(&pci_devices);
+    devices::init();
+    let mounted = storage::mount_all(boot);
+    kprintln!(
+        "storage: {} PCI functions, {} disks, {} partitions, {} mounts, root: {}",
+        pci_devices.len(),
+        disks,
+        partitions,
+        mounted.mounts,
+        mounted.root
+    );
 
     let mut footer = Line::new();
     let fb = &raw.framebuffer;
@@ -179,7 +198,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
         trigger_fault(kind);
     }
     if boot.has_option("test.exit") {
-        vfs::sync_all();
+        vfs::shutdown();
         kprintln!("test.exit: leaving QEMU ({})", if ok { "success" } else { "failure" });
         qemu::exit(if ok { qemu::ExitCode::Success } else { qemu::ExitCode::TestFailure });
     }

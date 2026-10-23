@@ -5,7 +5,10 @@ $ErrorActionPreference = 'Stop'
 $Script:Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Script:BuildDir = Join-Path $Root 'build'
 $Script:EspDir = Join-Path $BuildDir 'esp'
-$Script:DataImage = Join-Path $BuildDir 'data.img'
+$Script:DiskImage = Join-Path $BuildDir 'osyx.img'
+$Script:EspImage = Join-Path $BuildDir 'esp.img'
+$Script:RootImage = Join-Path $BuildDir 'root.img'
+$Script:EspSizeMiB = 64
 
 function Find-Tool([string]$Name, [string[]]$Candidates) {
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
@@ -40,31 +43,41 @@ function Invoke-Checked([string]$What, [scriptblock]$Block) {
     if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" }
 }
 
-# Returns the QEMU argument list for booting build/esp (plus build/data.img
-# as a writable second disk when it exists, unless -NoDataDisk).
-function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoDataDisk) {
+# Packs build/esp into a FAT32 image and assembles build/osyx.img: GPT with
+# the EFI system partition and, if build/root.img exists, the ext4 root.
+function New-DiskImage {
+    Invoke-Checked 'ESP image' { cargo run -q -p osyx-fat --example mkfat32 -- $Script:EspImage $Script:EspSizeMiB OSYX-ESP $Script:EspDir }
+    $parts = @("esp:$($Script:EspImage)")
+    $size = $Script:EspSizeMiB + 2
+    if (Test-Path $Script:RootImage) {
+        $parts += "root:$($Script:RootImage)"
+        $size += [int][math]::Ceiling((Get-Item $Script:RootImage).Length / 1MB)
+    }
+    Invoke-Checked 'disk image' { cargo run -q -p osyx-part --example mkdisk -- $Script:DiskImage $size @parts }
+}
+
+# Returns the QEMU argument list for booting build/osyx.img.
+function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng) {
     if (-not $Script:Qemu) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
     if (-not $Script:Ovmf) { throw 'OVMF (edk2-x86_64-code.fd) not found' }
+    # Fresh firmware variables every boot: stale boot entries for devices
+    # that no longer exist would otherwise send OVMF to its shell.
     $vars = Join-Path $BuildDir 'OVMF_VARS.fd'
-    if (-not (Test-Path $vars)) { Copy-Item $Script:Ovmf.Vars $vars }
+    Copy-Item $Script:Ovmf.Vars $vars -Force
     $a = @(
         '-machine', 'q35',
         '-cpu', 'qemu64,+nx',
         '-m', "$MemoryMiB",
         '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$($Script:Ovmf.Code -replace '\\','/')",
         '-drive', "if=pflash,format=raw,unit=1,file=$($vars -replace '\\','/')",
-        # vvfat exposes build/esp as a read-only FAT disk; relative path because
-        # the drive-letter colon would be parsed as an option separator.
-        # virtio-blk because IDE disks cannot be read-only.
-        '-drive', 'if=virtio,format=raw,readonly=on,file=fat:build/esp',
+        # Relative path: the drive-letter colon would be parsed as an option separator.
+        '-drive', 'if=virtio,format=raw,file=build/osyx.img',
         '-net', 'none',
         '-serial', "file:$($SerialLog -replace '\\','/')",
         '-device', 'isa-debug-exit,iobase=0xf4,iosize=0x04',
         '-no-reboot'
     )
-    if (-not $NoDataDisk -and (Test-Path $Script:DataImage)) {
-        $a += @('-drive', 'if=virtio,format=raw,file=build/data.img')
-    }
+    if (-not $NoRng) { $a += @('-device', 'virtio-rng-pci') }
     if ($Headless) { $a += @('-display', 'none') }
     if ($QmpPort -gt 0) { $a += @('-qmp', "tcp:127.0.0.1:$QmpPort,server,nowait") }
     if ($Gdb) { $a += @('-s', '-S') }

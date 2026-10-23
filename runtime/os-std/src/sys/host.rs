@@ -53,14 +53,20 @@ pub fn yield_now() {
     std::thread::yield_now()
 }
 
+pub fn realtime_ns() -> Result<i64> {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| ErrorKind::Other)?;
+    Ok(d.as_nanos() as i64)
+}
+
 // Files: OSyx paths are mapped below a per-process scratch directory of the
 // host, so the OSyx Std file API can be unit-tested against a real file
-// system. This says nothing about the OSyx kernel's VFS or FAT32 driver.
+// system. This says nothing about the OSyx kernel's VFS or its drivers.
+// Symbolic links, ownership and mounts are not emulated (`Unsupported`).
 pub mod fs {
     use crate::error::{Error, ErrorKind, Result};
     use alloc::string::String;
     use alloc::vec::Vec;
-    use osyx_abi::FileStat;
+    use osyx_abi::{FileStat, FsStat};
     use std::io::{Read as _, Seek as _, Write as _};
 
     pub struct RawFile(std::fs::File);
@@ -90,12 +96,24 @@ pub mod fs {
         })
     }
 
-    fn map(path: &str) -> Result<std::path::PathBuf> {
-        if !path.starts_with('/') {
-            return Err(Error::new(ErrorKind::InvalidInput, "paths must be absolute"));
+    static CWD: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+    /// Lexically resolved OSyx path (absolute, or relative to the emulated cwd).
+    fn resolve(path: &str) -> Result<String> {
+        let cwd = {
+            let c = CWD.lock().unwrap_or_else(|e| e.into_inner());
+            if c.is_empty() { String::from("/") } else { c.clone() }
+        };
+        osyx_vfs_free_normalize(&cwd, path)
+    }
+
+    fn osyx_vfs_free_normalize(cwd: &str, path: &str) -> Result<String> {
+        if path.is_empty() || path.contains('\0') {
+            return Err(Error::new(ErrorKind::InvalidInput, "empty path"));
         }
         let mut parts: Vec<&str> = Vec::new();
-        for c in path.split('/') {
+        let base = if path.starts_with('/') { "" } else { cwd };
+        for c in base.split('/').chain(path.split('/')) {
             match c {
                 "" | "." => {}
                 ".." => {
@@ -104,20 +122,38 @@ pub mod fs {
                 c => parts.push(c),
             }
         }
+        Ok(alloc::format!("/{}", parts.join("/")))
+    }
+
+    fn map(path: &str) -> Result<std::path::PathBuf> {
+        let abs = resolve(path)?;
         let mut p = host_root().to_path_buf();
-        p.extend(parts);
+        p.extend(abs.split('/').filter(|c| !c.is_empty()));
         Ok(p)
     }
 
     fn stat_of(md: &std::fs::Metadata) -> FileStat {
-        let mut attributes = if md.is_dir() { osyx_abi::ATTR_DIRECTORY } else { osyx_abi::ATTR_ARCHIVE };
-        if md.permissions().readonly() {
-            attributes |= osyx_abi::ATTR_READ_ONLY;
-        }
+        let ro = md.permissions().readonly();
+        let (kind, mode) = if md.is_dir() {
+            (osyx_abi::KIND_DIR, 0o755)
+        } else {
+            (osyx_abi::KIND_FILE, if ro { 0o444 } else { 0o644 })
+        };
+        let mtime = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as i64);
         FileStat {
             size: if md.is_dir() { 0 } else { md.len() },
-            kind: if md.is_dir() { osyx_abi::KIND_DIR } else { osyx_abi::KIND_FILE },
-            attributes,
+            kind,
+            mode,
+            nlink: 1,
+            mtime_ns: mtime,
+            atime_ns: mtime,
+            ctime_ns: mtime,
+            attributes: if ro { osyx_abi::ATTR_READ_ONLY } else { 0 },
+            ..Default::default()
         }
     }
 
@@ -152,7 +188,7 @@ pub mod fs {
         }
     }
 
-    pub fn open(path: &str, flags: u64) -> Result<RawFile> {
+    pub fn open(path: &str, flags: u64, _mode: u32) -> Result<RawFile> {
         use osyx_abi::*;
         let target = map(path)?;
         if target.is_dir() {
@@ -174,17 +210,21 @@ pub mod fs {
         std::fs::metadata(map(path)?).map(|m| stat_of(&m)).map_err(err)
     }
 
-    pub fn read_dir(path: &str) -> Result<Vec<(String, FileStat)>> {
+    pub fn lstat(path: &str) -> Result<FileStat> {
+        stat(path)
+    }
+
+    pub fn read_dir(path: &str) -> Result<Vec<(String, u64, u32)>> {
         let mut out = Vec::new();
         for e in std::fs::read_dir(map(path)?).map_err(err)? {
             let e = e.map_err(err)?;
-            let md = e.metadata().map_err(err)?;
-            out.push((e.file_name().to_string_lossy().into_owned(), stat_of(&md)));
+            let kind = if e.file_type().map_err(err)?.is_dir() { osyx_abi::KIND_DIR } else { osyx_abi::KIND_FILE };
+            out.push((e.file_name().to_string_lossy().into_owned(), 0, kind));
         }
         Ok(out)
     }
 
-    pub fn mkdir(path: &str) -> Result<()> {
+    pub fn mkdir(path: &str, _mode: u32) -> Result<()> {
         std::fs::create_dir(map(path)?).map_err(err)
     }
 
@@ -199,8 +239,55 @@ pub mod fs {
     pub fn rename(from: &str, to: &str) -> Result<()> {
         std::fs::rename(map(from)?, map(to)?).map_err(err)
     }
-}
 
+    pub fn symlink(_target: &str, _path: &str) -> Result<()> {
+        Err(Error::unsupported("symbolic links are not emulated by the host back end"))
+    }
+
+    pub fn readlink(_path: &str) -> Result<String> {
+        Err(Error::unsupported("symbolic links are not emulated by the host back end"))
+    }
+
+    pub fn chmod(path: &str, mode: u32) -> Result<()> {
+        let p = map(path)?;
+        let mut perm = std::fs::metadata(&p).map_err(err)?.permissions();
+        perm.set_readonly(mode & 0o222 == 0);
+        std::fs::set_permissions(p, perm).map_err(err)
+    }
+
+    pub fn chdir(path: &str) -> Result<()> {
+        let abs = resolve(path)?;
+        if !map(&abs)?.is_dir() {
+            return Err(Error::from(ErrorKind::NotADirectory));
+        }
+        *CWD.lock().unwrap_or_else(|e| e.into_inner()) = abs;
+        Ok(())
+    }
+
+    pub fn getcwd() -> Result<String> {
+        resolve(".")
+    }
+
+    pub fn statfs(_path: &str) -> Result<FsStat> {
+        Err(Error::unsupported("statfs is only available on OSyx"))
+    }
+
+    pub fn mount(_s: &str, _t: &str, _f: &str, _flags: u64, _limit: u64) -> Result<()> {
+        Err(Error::unsupported("mounting is only possible on OSyx"))
+    }
+
+    pub fn umount(_path: &str) -> Result<()> {
+        Err(Error::unsupported("mounting is only possible on OSyx"))
+    }
+
+    pub fn getuid() -> (u32, u32) {
+        (0, 0)
+    }
+
+    pub fn setuid(_uid: u32, _gid: u32) -> Result<()> {
+        Err(Error::unsupported("identities are only available on OSyx"))
+    }
+}
 // Threads, futexes and TLS are emulated with the host's std so the OSyx Std
 // synchronisation code can be tested with real, parallel host threads.
 

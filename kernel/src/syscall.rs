@@ -10,7 +10,9 @@
 use crate::arch::cpu;
 use crate::arch::gdt::{KERNEL_CS, USER_DS};
 use crate::fixup::{copy_from_user, copy_to_user};
+use crate::vfs::Lookup;
 use crate::{interrupts, mem, process, sched, vfs};
+use osyx_vfs::Cred;
 use core::arch::global_asm;
 use osyx_abi::{nr, Errno, SystemInfo};
 
@@ -151,23 +153,54 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             }
         }
         nr::GETTID => Ok(sched::current_tid()),
-        nr::OPEN => user_path(f.rdi, f.rsi).and_then(|p| vfs::open(&p, f.rdx)).and_then(process::add_handle),
+        nr::OPEN => user_path(f.rdi, f.rsi)
+            .and_then(|p| vfs::open(&Lookup::current(), &p, f.rdx, f.r10 as u32))
+            .and_then(process::add_handle),
         nr::CLOSE => process::close_handle(f.rdi).map(|_| 0),
         nr::READ => sys_read(f.rdi, f.rsi, f.rdx),
         nr::SEEK => with_file(f.rdi, |o| o.seek(f.rsi as i64, f.rdx)),
         nr::FSTAT => with_file(f.rdi, |o| o.stat()).and_then(|st| put_user(f.rsi, &st)),
-        nr::STAT => user_path(f.rdi, f.rsi).and_then(|p| vfs::stat(&p)).and_then(|st| put_user(f.rdx, &st)),
+        nr::STAT => user_path(f.rdi, f.rsi).and_then(|p| vfs::stat(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st)),
+        nr::LSTAT => user_path(f.rdi, f.rsi).and_then(|p| vfs::lstat(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st)),
         nr::READDIR => sys_readdir(f.rdi, f.rsi, f.rdx),
-        nr::MKDIR => user_path(f.rdi, f.rsi).and_then(|p| vfs::mkdir(&p)).map(|_| 0),
-        nr::UNLINK => user_path(f.rdi, f.rsi).and_then(|p| vfs::unlink(&p)).map(|_| 0),
-        nr::RMDIR => user_path(f.rdi, f.rsi).and_then(|p| vfs::rmdir(&p)).map(|_| 0),
+        nr::MKDIR => user_path(f.rdi, f.rsi).and_then(|p| vfs::mkdir(&Lookup::current(), &p, f.rdx as u32)).map(|_| 0),
+        nr::UNLINK => user_path(f.rdi, f.rsi).and_then(|p| vfs::unlink(&Lookup::current(), &p)).map(|_| 0),
+        nr::RMDIR => user_path(f.rdi, f.rsi).and_then(|p| vfs::rmdir(&Lookup::current(), &p)).map(|_| 0),
         nr::RENAME => user_path(f.rdi, f.rsi)
             .and_then(|from| Ok((from, user_path(f.rdx, f.r10)?)))
-            .and_then(|(from, to)| vfs::rename(&from, &to))
+            .and_then(|(from, to)| vfs::rename(&Lookup::current(), &from, &to))
             .map(|_| 0),
         nr::FTRUNCATE => with_file(f.rdi, |o| o.truncate(f.rsi)).map(|_| 0),
         nr::FSYNC => with_file(f.rdi, |o| o.sync()).map(|_| 0),
-        _ => Err(Errno::NotSupported),
+        nr::CHDIR => user_path(f.rdi, f.rsi)
+            .and_then(|p| vfs::chdir(&Lookup::current(), &p))
+            .and_then(process::set_current_cwd)
+            .map(|_| 0),
+        nr::GETCWD => {
+            let cwd = process::current_identity().1;
+            if (cwd.len() as u64) > f.rsi {
+                Err(Errno::InvalidArgument)
+            } else {
+                copy_to_user(f.rdi, cwd.as_bytes()).map(|_| cwd.len() as u64)
+            }
+        }
+        nr::SYMLINK => user_path(f.rdi, f.rsi)
+            .and_then(|target| Ok((target, user_path(f.rdx, f.r10)?)))
+            .and_then(|(target, p)| vfs::symlink(&Lookup::current(), &target, &p))
+            .map(|_| 0),
+        nr::READLINK => user_path(f.rdi, f.rsi).and_then(|p| vfs::readlink(&Lookup::current(), &p)).and_then(|t| {
+            let n = t.len().min(f.r10 as usize);
+            copy_to_user(f.rdx, &t.as_bytes()[..n]).map(|_| n as u64)
+        }),
+        nr::CHMOD => user_path(f.rdi, f.rsi).and_then(|p| vfs::chmod(&Lookup::current(), &p, f.rdx as u32)).map(|_| 0),
+        nr::MOUNT => sys_mount(f.rdi),
+        nr::UMOUNT => user_path(f.rdi, f.rsi).and_then(|p| sys_umount(&p)).map(|_| 0),
+        nr::GETUID => {
+            let c = process::current_identity().0;
+            Ok(c.uid as u64 | (c.gid as u64) << 32)
+        }
+        nr::SETUID => process::set_current_cred(Cred { uid: f.rdi as u32, gid: f.rsi as u32 }).map(|_| 0),
+        nr::STATFS => user_path(f.rdi, f.rsi).and_then(|p| vfs::statfs(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st)),        _ => Err(Errno::NotSupported),
     };
     // Safe point: a thread whose process is exiting ends here instead of
     // returning to user mode.
@@ -210,7 +243,7 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> Result<u64, Errno> {
     Ok(len)
 }
 
-/// Copies an absolute path argument out of user memory.
+/// Copies a path argument (absolute or relative, UTF-8, no NUL) out of user memory.
 fn user_path(ptr: u64, len: u64) -> Result<alloc::string::String, Errno> {
     if len == 0 || len > osyx_abi::MAX_PATH as u64 {
         return Err(Errno::InvalidArgument);
@@ -327,6 +360,7 @@ fn sys_sysinfo(out: u64) -> Result<u64, Errno> {
 fn sys_clock(id: u64) -> Result<u64, Errno> {
     match id {
         osyx_abi::CLOCK_MONOTONIC => Ok(interrupts::uptime_ms() * 1_000_000),
+        osyx_abi::CLOCK_REALTIME => Ok(crate::time::now_ns().max(0) as u64),
         _ => Err(Errno::InvalidArgument),
     }
 }
@@ -367,4 +401,32 @@ fn sys_wait(pid: u64, status_ptr: u64) -> Result<u64, Errno> {
         copy_to_user(status_ptr, &status.to_le_bytes())?;
     }
     Ok(child)
+}
+
+fn user_string(ptr: u64, len: u64, max: usize) -> Result<alloc::string::String, Errno> {
+    if len > max as u64 {
+        return Err(Errno::InvalidArgument);
+    }
+    let mut buf = alloc::vec![0u8; len as usize];
+    copy_from_user(&mut buf, ptr)?;
+    alloc::string::String::from_utf8(buf).map_err(|_| Errno::InvalidArgument)
+}
+
+fn sys_mount(args_ptr: u64) -> Result<u64, Errno> {
+    let mut raw = [0u8; core::mem::size_of::<osyx_abi::MountArgs>()];
+    copy_from_user(&mut raw, args_ptr)?;
+    // SAFETY: MountArgs is plain repr(C) data of exactly this size.
+    let a: osyx_abi::MountArgs = unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const osyx_abi::MountArgs) };
+    let source = user_string(a.source, a.source_len, osyx_abi::MAX_PATH)?;
+    let target = user_path(a.target, a.target_len)?;
+    let fstype = user_string(a.fstype, a.fstype_len, 16)?;
+    vfs::mount(&Lookup::current(), &source, &target, &fstype, a.flags, a.size_limit).map(|_| 0)
+}
+
+fn sys_umount(p: &str) -> Result<(), Errno> {
+    let cx = Lookup::current();
+    if !cx.cred.is_root() {
+        return Err(Errno::PermissionDenied);
+    }
+    vfs::unmount(&cx, p)
 }

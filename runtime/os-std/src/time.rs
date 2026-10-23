@@ -1,5 +1,6 @@
-//! Monotonic time. On OSyx the clock currently ticks at the kernel timer
-//! resolution (10 ms); `Instant` still has nanosecond units.
+//! Monotonic time ([`Instant`]) and wall-clock time ([`SystemTime`]). On
+//! OSyx both tick at the kernel timer resolution (10 ms); the wall clock is
+//! the CMOS RTC read at boot plus the uptime.
 
 use crate::sys;
 use core::ops::{Add, Sub};
@@ -55,9 +56,52 @@ impl Sub<Instant> for Instant {
     }
 }
 
+/// A point in wall-clock time (nanoseconds since 1970-01-01 UTC).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SystemTime {
+    ns: i64,
+}
+
+pub const UNIX_EPOCH: SystemTime = SystemTime { ns: 0 };
+
+impl SystemTime {
+    pub const UNIX_EPOCH: SystemTime = UNIX_EPOCH;
+
+    pub fn now() -> SystemTime {
+        SystemTime { ns: sys::realtime_ns().expect("wall clock unavailable") }
+    }
+
+    pub(crate) fn from_unix_nanos(ns: i64) -> SystemTime {
+        SystemTime { ns }
+    }
+
+    /// `Err` holds how far `earlier` is in the future, like std.
+    pub fn duration_since(&self, earlier: SystemTime) -> core::result::Result<Duration, Duration> {
+        if self.ns >= earlier.ns {
+            Ok(Duration::from_nanos((self.ns - earlier.ns) as u64))
+        } else {
+            Err(Duration::from_nanos((earlier.ns - self.ns) as u64))
+        }
+    }
+
+    pub fn elapsed(&self) -> core::result::Result<Duration, Duration> {
+        SystemTime::now().duration_since(*self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_time_is_after_2020() {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        assert!(now.as_secs() > 1_577_836_800);
+        let a = SystemTime::from_unix_nanos(5);
+        let b = SystemTime::from_unix_nanos(8);
+        assert_eq!(b.duration_since(a), Ok(Duration::from_nanos(3)));
+        assert_eq!(a.duration_since(b), Err(Duration::from_nanos(3)));
+    }
 
     #[test]
     fn instant_arithmetic() {

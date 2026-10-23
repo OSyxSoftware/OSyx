@@ -33,11 +33,15 @@ pub trait BlockDev: Send + Sync {
     fn read_blocks(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError>;
     fn write_blocks(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError>;
     fn flush(&self) -> Result<(), BlockError>;
+    /// The GPT entry, if this device is a partition.
+    fn partition(&self) -> Option<&osyx_part::Partition> {
+        None
+    }
 }
 
 static DEVICES: IrqSpinLock<Vec<Arc<dyn BlockDev>>> = IrqSpinLock::new(Vec::new());
 
-fn check(dev: &dyn BlockDev, lba: u64, len: usize) -> Result<(), BlockError> {
+fn check(dev: &(impl BlockDev + ?Sized), lba: u64, len: usize) -> Result<(), BlockError> {
     if !len.is_multiple_of(SECTOR_SIZE) {
         return Err(BlockError::InvalidRequest);
     }
@@ -92,6 +96,95 @@ pub fn probe(pci: &[pci::Device]) -> usize {
                 found += 1;
             }
             Err(e) => kprintln!("virtio-blk at {}: not usable: {:?}", d.addr, e),
+        }
+    }
+    found
+}
+
+/// A GPT partition of a disk, registered as `<disk><number>` (e.g. `vda2`).
+pub struct Partition {
+    name: String,
+    parent: Arc<dyn BlockDev>,
+    start: u64,
+    sectors: u64,
+    pub info: osyx_part::Partition,
+}
+
+impl BlockDev for Partition {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn describe(&self) -> String {
+        format!("partition {} of {} ({}, \"{}\")", self.info.number, self.parent.name(), self.info.type_guid, self.info.name)
+    }
+
+    fn sector_count(&self) -> u64 {
+        self.sectors
+    }
+
+    fn read_only(&self) -> bool {
+        self.parent.read_only()
+    }
+
+    fn max_sectors(&self) -> usize {
+        self.parent.max_sectors()
+    }
+
+    fn read_blocks(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        check(self, lba, buf.len())?;
+        self.parent.read_blocks(self.start + lba, buf)
+    }
+
+    fn write_blocks(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        check(self, lba, buf.len())?;
+        self.parent.write_blocks(self.start + lba, buf)
+    }
+
+    fn flush(&self) -> Result<(), BlockError> {
+        self.parent.flush()
+    }
+
+    fn partition(&self) -> Option<&osyx_part::Partition> {
+        Some(&self.info)
+    }
+}
+
+struct Reader<'a>(&'a dyn BlockDev);
+
+impl osyx_part::SectorReader for Reader<'_> {
+    fn sectors(&self) -> u64 {
+        self.0.sector_count()
+    }
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), osyx_part::GptError> {
+        read(self.0, lba, buf).map_err(|_| osyx_part::GptError::Io)
+    }
+}
+
+/// Reads the GPT of every whole disk and registers its partitions.
+pub fn scan_partitions() -> usize {
+    let mut found = 0;
+    for disk in devices().into_iter().filter(|d| d.partition().is_none()) {
+        match osyx_part::parse(&mut Reader(&*disk)) {
+            Ok(t) => {
+                if t.used_backup {
+                    kprintln!("gpt {}: primary table damaged, using the backup", disk.name());
+                }
+                for p in t.partitions {
+                    let part = Partition {
+                        name: format!("{}{}", disk.name(), p.number),
+                        parent: disk.clone(),
+                        start: p.first_lba,
+                        sectors: p.sectors(),
+                        info: p,
+                    };
+                    kprintln!("gpt {}: {} {} MiB, {}", disk.name(), part.name, part.sectors >> 11, part.describe());
+                    register(Arc::new(part));
+                    found += 1;
+                }
+            }
+            Err(osyx_part::GptError::NotGpt) => {}
+            Err(e) => kprintln!("gpt {}: unusable partition table: {:?}", disk.name(), e),
         }
     }
     found

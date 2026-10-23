@@ -14,6 +14,9 @@
 //! * `thread-fault` / `thread-panic`: a spawned thread faults / panics
 //! * `fs-write PATH` write "written by worker <pid>" to PATH
 //! * `fs-leak PATH`  write PATH, then exit with 11 handles still open
+//! * `pwd DIR`       exit 0 if the inherited current directory is DIR
+//! * `as-user UID`   drop root, then check that permissions confine us;
+//!   exit status = number of failed checks
 
 #![no_std]
 #![no_main]
@@ -153,7 +156,7 @@ fn main() -> i32 {
             let Some(path) = args.get(2) else { return 2 };
             let mut files = Vec::new();
             for _ in 0..10 {
-                match File::open("/hello.txt") {
+                match File::open("/dev/null") {
                     Ok(f) => files.push(f),
                     Err(_) => return 1,
                 }
@@ -166,9 +169,50 @@ fn main() -> i32 {
             core::mem::forget(files);
             process::exit(0)
         }
+        Some("pwd") => {
+            let cwd = env::current_dir();
+            println!("pwd {pid}: {cwd:?}");
+            (cwd.ok().as_deref().map(|p| p.as_str()) != args.get(2).map(String::as_str)) as i32
+        }
+        Some("as-user") => as_user(arg_num(&args, 2) as u32),
         other => {
             eprintln!("worker: unknown mode {other:?}");
             2
         }
     }
+}
+
+/// Permission checks as an ordinary user (`init` prepares `/tmp/root-only`,
+/// mode 0600, owned by root).
+fn as_user(uid: u32) -> i32 {
+    use os_std::error::ErrorKind;
+    use os_std::os;
+    if os::setuid(uid, uid).is_err() || os::getuid() != (uid, uid) {
+        eprintln!("as-user: setuid failed");
+        return 100;
+    }
+    let kind = |r: os_std::error::Result<()>| r.err().map(|e| e.kind());
+    let checks: [(&str, bool); 9] = [
+        ("cannot become root again", kind(os::setuid(0, 0)) == Some(ErrorKind::PermissionDenied)),
+        ("raw disks are root-only", fs::read_dir("/dev/disks").is_ok_and(|d| {
+            d.into_iter().all(|e| File::open(e.path()).err().map(|e| e.kind()) == Some(ErrorKind::PermissionDenied))
+        })),
+        ("0600 root file unreadable", kind(File::open("/tmp/root-only").map(|_| ())) == Some(ErrorKind::PermissionDenied)),
+        ("/boot is read-only for users", kind(fs::write("/boot/user.txt", "x")) == Some(ErrorKind::PermissionDenied)),
+        ("/run is root's", kind(fs::write("/run/user.txt", "x")) == Some(ErrorKind::PermissionDenied)),
+        ("/tmp is writable (sticky)", fs::write("/tmp/user-file", "mine").is_ok()
+            && fs::metadata("/tmp/user-file").is_ok_and(|m| m.uid() == uid)),
+        ("others' files in /tmp are protected", kind(fs::remove_file("/tmp/root-only")) == Some(ErrorKind::PermissionDenied)),
+        ("mount is root-only", kind(os::mount("", "/tmp", "tmpfs", false, 0)) == Some(ErrorKind::PermissionDenied)),
+        ("chmod of root's file refused", kind(fs::set_permissions("/tmp/root-only", fs::Permissions::from_mode(0o666))) == Some(ErrorKind::PermissionDenied)),
+    ];
+    let mut failed = 0;
+    for (name, ok) in checks {
+        if !ok {
+            eprintln!("as-user {uid}: {name} ... FAILED");
+            failed += 1;
+        }
+    }
+    println!("as-user {uid}: {} of {} permission checks passed", 9 - failed, 9);
+    failed
 }

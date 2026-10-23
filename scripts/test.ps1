@@ -16,6 +16,8 @@ param(
     [int]$TimeoutSec = 120
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
+# "[user] fs: ..." checks init runs (userspace/apps/src/fs_checks.rs).
+$ExpectedFsChecks = 17
 $results = New-Object System.Collections.Generic.List[object]
 $testDir = Join-Path $BuildDir 'test'
 New-Item -ItemType Directory -Force $testDir | Out-Null
@@ -31,12 +33,12 @@ function Clean-Log([string]$Path) {
 }
 
 # Boots the current build/esp and waits for QEMU to exit (or kills it).
-function Invoke-Boot([string]$Name, [int]$Timeout, [string]$WaitPattern = '', [string]$Screenshot = '', [switch]$NoDataDisk) {
+function Invoke-Boot([string]$Name, [int]$Timeout, [string]$WaitPattern = '', [string]$Screenshot = '', [switch]$NoRng) {
     $log = Join-Path $testDir "$Name.serial.log"
     if (Test-Path $log) { Remove-Item $log }
     $port = 0
     if ($Screenshot) { $port = Get-Random -Minimum 20000 -Maximum 40000 }
-    $p = Start-Qemu (Get-QemuArgs -SerialLog $log -Headless -QmpPort $port -NoDataDisk:$NoDataDisk)
+    $p = Start-Qemu (Get-QemuArgs -SerialLog $log -Headless -QmpPort $port -NoRng:$NoRng)
     $shot = $null
     if ($WaitPattern) {
         if (Wait-ForLog $log $WaitPattern $Timeout $p) {
@@ -104,19 +106,21 @@ try {
         $ok = $starts -eq 3 -and $firstDone -and $lastStart -lt $firstDone -and $took.Success -and [int]$took.Groups[1].Value -lt 650
         Record 'preemptive scheduling of user processes' $ok $took.Value
 
-        # Storage: PCI scan, both virtio-blk disks, the FAT32 data disk at /,
-        # and the kernel-side block and VFS self-tests.
-        $ok = $r.Log -match 'virtio-blk vda: .*read-only' -and $r.Log -match 'virtio-blk vdb: .*131072 sectors' `
-            -and $r.Log -match 'vfs: vdb mounted at / \(FAT32 "OSYXDATA"' `
+        # Storage: GPT disk, FAT32 ESP at /boot, tmpfs, devfs, entropy, and
+        # the kernel-side VFS self-tests.
+        $ok = $r.Log -match 'gpt vda: vda1 64 MiB' -and $r.Log -match 'vfs: fat32 /dev/disks/vda1 mounted at /boot \(read-write' `
+            -and $r.Log -match 'vfs: tmpfs tmpfs mounted at /tmp' -and $r.Log -match 'vfs: tmpfs tmpfs mounted at /run' `
+            -and $r.Log -match 'vfs: devfs devfs mounted at /dev' -and $r.Log -match 'random: ChaCha20 DRBG seeded from' `
             -and $r.Log -match '\[test\] PCI enumeration \.\.\. ok' -and $r.Log -match '\[test\] block device I/O \.\.\. ok' `
-            -and $r.Log -match '\[test\] VFS files and directories \.\.\. ok'
-        Record 'PCI, virtio-blk, block layer and VFS mount' $ok ([regex]::Match($r.Log, 'storage: [^\n]*').Value)
+            -and ([regex]::Matches($r.Log, '\[test\] (VFS|devfs|FAT32|concurrent)[^\n]*\.\.\. ok').Count -eq 6)
+        Record 'GPT, FAT32 /boot, tmpfs, devfs and VFS self-tests' $ok ([regex]::Match($r.Log, 'storage: [^\n]*').Value)
         $fsOk = [regex]::Matches($r.Log, '\[user\] fs: [^\n]* \.\.\. ok').Count
-        $ok = $fsOk -eq 12 -and $r.Log -notmatch '\[user\] fs: [^\n]*FAILED' -and $r.Log -match 'closed 11 open handles'
-        Record 'OSyx Std fs from ring 3 (files, dirs, handles)' $ok "$fsOk fs checks passed"
+        $ok = $fsOk -eq $ExpectedFsChecks -and $r.Log -notmatch '\[user\] fs: [^\n]*FAILED' -and $r.Log -match 'closed 11 open handles' `
+            -and $r.Log -match 'as-user 1000: 9 of 9 permission checks passed'
+        Record 'OSyx Std fs from ring 3 (all mounts, perms, devices)' $ok "$fsOk of $ExpectedFsChecks fs checks passed"
 
-        # The files init left on the data disk, read back on the host by
-        # mtools (an independent FAT implementation) after QEMU has exited.
+        # The files init left on the ESP, read back on the host by mtools (an
+        # independent FAT implementation) after QEMU has exited.
         $mtype = Find-Tool 'mtype' @('C:\msys64\ucrt64\bin\mtype.exe')
         $mcopy = Find-Tool 'mcopy' @('C:\msys64\ucrt64\bin\mcopy.exe')
         $ok = $false; $detail = 'mtools not found'
@@ -124,10 +128,11 @@ try {
             Push-Location $BuildDir
             try {
                 $saved = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-                $text = (& $mtype -i data.img ::/osyx-out/hello-from-osyx.txt) -join "`n"
-                $fromWorker = (& $mtype -i data.img ::/osyx-out/from-worker.txt) -join "`n"
+                $img = 'osyx.img@@1M'
+                $text = (& $mtype -i $img ::/osyx-out/hello-from-osyx.txt) -join "`n"
+                $fromWorker = (& $mtype -i $img ::/osyx-out/from-worker.txt) -join "`n"
                 if (Test-Path pattern.bin) { Remove-Item pattern.bin }
-                & $mcopy -n -i data.img ::/osyx-out/pattern.bin pattern.bin 2>&1 | Out-Null
+                & $mcopy -n -i $img ::/osyx-out/pattern.bin pattern.bin 2>&1 | Out-Null
                 $ErrorActionPreference = $saved
                 $patternOk = $false
                 if (Test-Path pattern.bin) {
@@ -138,23 +143,21 @@ try {
                     }
                     Remove-Item pattern.bin
                 }
-                $check = (Invoke-Checked 'fatcheck' { cargo run -q -p osyx-fat --example fatcheck -- data.img }) -join ' '
+                $check = (Invoke-Checked 'fatcheck' { cargo run -q -p osyx-fat --example fatcheck -- $img }) -join ' '
                 $ok = $text -eq 'Written by OSyx init through os_std::fs.' -and $fromWorker -match '^written by worker \d+$' `
                     -and $patternOk -and $check -match 'FSInfo accurate'
                 $detail = "text=$($text -ne '') pattern=$patternOk; $check"
             } catch { $detail = "$_" } finally { Pop-Location }
         }
-        Record 'host reads OSyx-written files (mtools + fsck)' $ok $detail
+        Record 'host reads OSyx-written ESP files (mtools + fsck)' $ok $detail
 
-        # Without the data disk the storage self-tests and init's fs checks
-        # must skip cleanly rather than fail.
-        $r = Invoke-Boot 'boot-no-data-disk' $TimeoutSec -NoDataDisk
-        $user = [regex]::Match($r.Log, 'user checks: (\d+) passed, (\d+) failed')
-        $ok = $r.Exit -eq 33 -and $r.Log -match 'self-tests: \d+ passed, 0 failed' -and $user.Success `
-            -and $user.Groups[2].Value -eq '0' -and $r.Log -match 'no volume mounted at /: file system checks skipped' `
-            -and $r.Log -match 'skipped: no writable disk attached'
-        Record 'boot without data disk' $ok "exit=$($r.Exit) $($user.Value)"
-
+        # Without an entropy source /dev/random must not exist (no
+        # predictable bytes); everything else still works.
+        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast init.args=exit,0' | Out-Null
+        $r = Invoke-Boot 'boot-no-entropy' $TimeoutSec -NoRng
+        $ok = $r.Exit -eq 33 -and $r.Log -match 'random: no hardware entropy source; /dev/random is unavailable' `
+            -and $r.Log -match '\[test\]   no entropy source: /dev/random absent' -and $r.Log -match 'self-tests: \d+ passed, 0 failed'
+        Record 'no entropy source: /dev/random withheld' $ok "exit=$($r.Exit)"
         $userCases = @(
             @{ Name = 'user page fault kills process'; Args = 'fault'; Expect = '0x4000000e'
                Pattern = 'process 1 terminated: Page fault \(#PF\) at rip 0x[0-9a-f]+, error code 0x4' }
@@ -197,6 +200,7 @@ try {
         $bytes = [IO.File]::ReadAllBytes($kernelPath)
         $bytes[4] = 1  # ELFCLASS32: must be rejected
         [IO.File]::WriteAllBytes($kernelPath, $bytes)
+        New-DiskImage | Out-Null
         $shot = Join-Path $testDir 'loader-error.png'
         if (Test-Path $shot) { Remove-Item $shot }
         $r = Invoke-Boot 'bad-kernel' $TimeoutSec 'BOOT FAILED' $shot

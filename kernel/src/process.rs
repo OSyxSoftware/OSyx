@@ -22,6 +22,7 @@ use crate::mem::{alloc_frame, free_frame, phys_to_virt, PAGE_SIZE};
 use crate::sched::{self, Tid};
 use crate::sync::{IrqSpinLock, KMutex};
 use crate::{kprintln, modules, vfs};
+use osyx_vfs::Cred;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -101,6 +102,10 @@ pub struct Process {
     exit_status: Option<i32>,
     /// Open files by handle number (from `FIRST_FILE_HANDLE`).
     handles: BTreeMap<u64, FileHandle>,
+    /// User and group for permission checks (inherited by children).
+    cred: Cred,
+    /// Canonical absolute current directory (inherited by children).
+    cwd: String,
 }
 
 /// An open file shared by the handle table and in-flight system calls.
@@ -182,7 +187,7 @@ fn start_thread(p: &mut Process, rip: u64, rsp: u64, arg: u64, fs_base: u64) -> 
 }
 
 impl Process {
-    fn new(parent: Pid, name: &str) -> Result<Process, SpawnError> {
+    fn new(parent: Pid, name: &str, cred: Cred, cwd: String) -> Result<Process, SpawnError> {
         let root = paging::new_address_space().map_err(SpawnError::Map)?;
         Ok(Process {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
@@ -199,6 +204,8 @@ impl Process {
             threads: Vec::new(),
             exit_status: None,
             handles: BTreeMap::new(),
+            cred,
+            cwd,
         })
     }
 
@@ -315,7 +322,11 @@ pub fn spawn(parent: Pid, name: &str, args: &[&str]) -> Result<Pid, SpawnError> 
     if TABLE.lock().procs.len() >= MAX_PROCESSES {
         return Err(SpawnError::TooManyProcesses);
     }
-    let mut p = Process::new(parent, name)?;
+    let (cred, cwd) = {
+        let t = TABLE.lock();
+        t.procs.get(&parent).map_or((Cred::ROOT, String::from("/")), |p| (p.cred, p.cwd.clone()))
+    };
+    let mut p = Process::new(parent, name, cred, cwd)?;
     let (entry, rsp) = match p.populate(image, args) {
         Ok(v) => v,
         Err(e) => {
@@ -612,5 +623,34 @@ pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
     }
     p.regions.remove(&addr);
     p.mapped_pages -= pages;
+    Ok(())
+}
+
+/// Credentials and current directory of the calling process (root and `/`
+/// for kernel threads).
+pub fn current_identity() -> (Cred, String) {
+    let pid = sched::current_pid();
+    let t = TABLE.lock();
+    t.procs.get(&pid).map_or((Cred::ROOT, String::from("/")), |p| (p.cred, p.cwd.clone()))
+}
+
+pub fn set_current_cwd(cwd: String) -> Result<(), Errno> {
+    let pid = sched::current_pid();
+    let mut t = TABLE.lock();
+    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    p.cwd = cwd;
+    Ok(())
+}
+
+/// `setuid`: only root may change identity (permanently, for this process
+/// and its future children).
+pub fn set_current_cred(cred: Cred) -> Result<(), Errno> {
+    let pid = sched::current_pid();
+    let mut t = TABLE.lock();
+    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    if !p.cred.is_root() {
+        return Err(Errno::PermissionDenied);
+    }
+    p.cred = cred;
     Ok(())
 }

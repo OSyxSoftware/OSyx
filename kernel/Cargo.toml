@@ -14,7 +14,11 @@ bench = false
 [dependencies]
 osyx-abi = { path = "../shared/abi" }
 osyx-bootinfo = { path = "../shared/bootinfo" }
+osyx-crypto = { path = "../shared/crypto" }
 osyx-elf = { path = "../boot/elf" }
 osyx-fat = { path = "../storage/fat" }
 osyx-gfx = { path = "../boot/gfx" }
 osyx-mm = { path = "mm" }
+osyx-part = { path = "../storage/part" }
+osyx-tmpfs = { path = "../storage/tmpfs" }
+osyx-vfs = { path = "../storage/vfs" }

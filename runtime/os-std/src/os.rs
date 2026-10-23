@@ -15,6 +15,35 @@ pub fn kernel_version(info: &SystemInfo) -> &str {
     core::str::from_utf8(&info.kernel_version[..end]).unwrap_or("?")
 }
 
+/// The (user id, group id) of the calling process.
+pub fn getuid() -> (u32, u32) {
+    sys::fs::getuid()
+}
+
+/// Changes the process's identity; only root (uid 0) may, and the change is
+/// permanent for this process and inherited by its children.
+pub fn setuid(uid: u32, gid: u32) -> Result<()> {
+    sys::fs::setuid(uid, gid)
+}
+
+/// Capacity and type of the volume holding `path`.
+pub fn statfs(path: &str) -> Result<osyx_abi::FsStat> {
+    sys::fs::statfs(path)
+}
+
+/// Mounts a file system (root only): `fstype` is "tmpfs" (with an optional
+/// memory limit in bytes), "fat32" or "ext4" (with a block device node such
+/// as `/dev/disks/vda2` as `source`).
+pub fn mount(source: &str, target: &str, fstype: &str, read_only: bool, size_limit: u64) -> Result<()> {
+    let flags = if read_only { osyx_abi::MOUNT_READ_ONLY } else { 0 };
+    sys::fs::mount(source, target, fstype, flags, size_limit)
+}
+
+/// Unmounts the volume mounted at `target` (root only).
+pub fn unmount(target: &str) -> Result<()> {
+    sys::fs::umount(target)
+}
+
 /// Statistics of the OSyx Std heap (capacity obtained from the kernel, bytes
 /// in use, number of free blocks).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -27,8 +56,8 @@ pub fn heap_stats() -> osyx_mm::heap::HeapStats {
 pub mod raw {
     pub use os_sys::{
         close, futex_wait, futex_wake, gettid, map, open, raw_syscall, read, read_raw, sysinfo_raw, thread_exit, unmap,
-        wait_raw, write, write_raw, Errno, ABI_VERSION, OPEN_CREATE, OPEN_READ, OPEN_WRITE, PROT_EXEC, PROT_READ,
-        PROT_WRITE,
+        wait_raw, write, write_raw, Errno, ABI_VERSION, OPEN_CREATE, OPEN_DIRECTORY, OPEN_READ, OPEN_WRITE, PROT_EXEC,
+        PROT_READ, PROT_WRITE,
     };
 }
 

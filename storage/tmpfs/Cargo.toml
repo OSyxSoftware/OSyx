@@ -1,0 +1,10 @@
+[package]
+name = "osyx-tmpfs"
+description = "Memory-backed file system (tmpfs) with a per-instance memory limit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+osyx-abi = { path = "../../shared/abi" }
+osyx-vfs = { path = "../vfs" }

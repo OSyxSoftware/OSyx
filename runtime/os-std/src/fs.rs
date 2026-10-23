@@ -1,29 +1,35 @@
-//! Files and directories on the volumes the kernel has mounted.
+//! Files and directories, like `std::fs`.
 //!
 //! ```ignore
 //! use os_std::fs;
-//! fs::write("/notes/hello.txt", "Hello from OSyx")?;
-//! let text = fs::read_to_string("/notes/hello.txt")?;
-//! for entry in fs::read_dir("/notes")? {
-//!     println!("{} {}", entry.file_name(), entry.metadata().len());
+//! fs::create_dir("/tmp/example")?;
+//! fs::write("/tmp/example/hello.txt", b"Hello OSyx!")?;
+//! assert_eq!(fs::read("/tmp/example/hello.txt")?, b"Hello OSyx!");
+//! for entry in fs::read_dir("/tmp/example")? {
+//!     println!("{} {}", entry.file_name(), entry.metadata()?.len());
 //! }
 //! ```
 //!
-//! Paths are absolute (there is no current directory yet). On OSyx they are
-//! resolved by the kernel VFS; the data volume is FAT32, so names are
-//! case-insensitive and there are no permissions beyond the read-only
-//! attribute. The host back end maps paths below a scratch directory and only
-//! exists to unit-test this module.
+//! Paths are absolute or relative to the current directory
+//! ([`crate::env::set_current_dir`]). On OSyx the kernel VFS resolves them
+//! across the mounted file systems (ext4 `/`, FAT32 `/boot`, tmpfs `/tmp`
+//! and `/run`, devfs `/dev`); FAT32 names are case-insensitive and have no
+//! owners, symbolic links or permission bits beyond read-only. Files and
+//! directories are created with modes 0644 / 0755 unless
+//! [`OpenOptions::mode`] says otherwise (there is no umask). The host back
+//! end maps paths below a scratch directory and only exists to unit-test
+//! this module; it does not emulate symbolic links or ownership.
 
 use crate::error::{Error, ErrorKind, Result};
 use crate::io::{Read, Seek, SeekFrom, Write};
 use crate::path::{Path, PathBuf};
 use crate::sys::fs as imp;
+use crate::time::SystemTime;
 use alloc::string::String;
 use alloc::vec::Vec;
 use osyx_abi::FileStat;
 
-/// An open file (or, on OSyx, a directory opened for reading). Closed on drop.
+/// An open file, directory or device node. Closed on drop.
 pub struct File {
     inner: imp::RawFile,
 }
@@ -57,8 +63,12 @@ impl File {
         self.inner.set_len(len)
     }
 
-    /// Writes the file's metadata and flushes the disk's write cache.
+    /// Writes cached data and metadata and flushes the disk's write cache.
     pub fn sync_all(&self) -> Result<()> {
+        self.inner.sync()
+    }
+
+    pub fn sync_data(&self) -> Result<()> {
         self.inner.sync()
     }
 }
@@ -93,7 +103,7 @@ impl core::fmt::Debug for File {
 }
 
 /// How to open a file, like `std::fs::OpenOptions`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct OpenOptions {
     read: bool,
     write: bool,
@@ -101,11 +111,28 @@ pub struct OpenOptions {
     truncate: bool,
     create: bool,
     create_new: bool,
+    mode: u32,
+    case_insensitive: bool,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        OpenOptions::new()
+    }
 }
 
 impl OpenOptions {
     pub fn new() -> OpenOptions {
-        OpenOptions::default()
+        OpenOptions {
+            read: false,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+            mode: 0o644,
+            case_insensitive: false,
+        }
     }
 
     pub fn read(&mut self, on: bool) -> &mut OpenOptions {
@@ -140,6 +167,19 @@ impl OpenOptions {
         self
     }
 
+    /// Permission bits of a file this call creates (default 0644).
+    pub fn mode(&mut self, mode: u32) -> &mut OpenOptions {
+        self.mode = mode;
+        self
+    }
+
+    /// Resolve every path component case-insensitively (exact matches
+    /// first), as Windows does. OSyx extension.
+    pub fn case_insensitive(&mut self, on: bool) -> &mut OpenOptions {
+        self.case_insensitive = on;
+        self
+    }
+
     fn flags(&self) -> Result<u64> {
         use osyx_abi::*;
         let write = self.write || self.append;
@@ -160,6 +200,7 @@ impl OpenOptions {
             (self.truncate, OPEN_TRUNCATE),
             (self.create || self.create_new, OPEN_CREATE),
             (self.create_new, OPEN_EXCLUSIVE),
+            (self.case_insensitive, OPEN_CASE_INSENSITIVE),
         ] {
             if on {
                 flags |= bit;
@@ -170,40 +211,145 @@ impl OpenOptions {
 
     pub fn open<P: AsRef<Path>>(&self, path: P) -> Result<File> {
         let flags = self.flags()?;
-        imp::open(path_str(path.as_ref())?, flags).map(|inner| File { inner })
+        imp::open(path_str(path.as_ref())?, flags, self.mode).map(|inner| File { inner })
     }
 }
 
-/// Size, kind and attributes of a file or directory.
+/// The kind of a file system object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileType(u32);
+
+impl FileType {
+    pub fn is_dir(&self) -> bool {
+        self.0 == osyx_abi::KIND_DIR
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.0 == osyx_abi::KIND_FILE
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        self.0 == osyx_abi::KIND_SYMLINK
+    }
+
+    pub fn is_char_device(&self) -> bool {
+        self.0 == osyx_abi::KIND_CHAR_DEVICE
+    }
+
+    pub fn is_block_device(&self) -> bool {
+        self.0 == osyx_abi::KIND_BLOCK_DEVICE
+    }
+}
+
+/// Permission bits of a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Permissions(u32);
+
+impl Permissions {
+    pub fn from_mode(mode: u32) -> Permissions {
+        Permissions(mode & osyx_abi::MODE_PERMS)
+    }
+
+    pub fn mode(&self) -> u32 {
+        self.0
+    }
+
+    /// True if nobody has write permission.
+    pub fn readonly(&self) -> bool {
+        self.0 & 0o222 == 0
+    }
+
+    pub fn set_readonly(&mut self, on: bool) {
+        if on {
+            self.0 &= !0o222;
+        } else {
+            self.0 |= 0o200;
+        }
+    }
+}
+
+/// Size, kind, ownership, permissions and times of a file system object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Metadata(FileStat);
 
 impl Metadata {
+    pub fn file_type(&self) -> FileType {
+        FileType(self.0.kind)
+    }
+
     pub fn is_dir(&self) -> bool {
-        self.0.kind == osyx_abi::KIND_DIR
+        self.file_type().is_dir()
     }
 
     pub fn is_file(&self) -> bool {
-        self.0.kind == osyx_abi::KIND_FILE
+        self.file_type().is_file()
     }
 
-    /// Size in bytes (0 for directories).
+    pub fn is_symlink(&self) -> bool {
+        self.file_type().is_symlink()
+    }
+
+    /// Size in bytes (for symbolic links: the length of the target).
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> u64 {
         self.0.size
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.0.size == 0
+    pub fn permissions(&self) -> Permissions {
+        Permissions(self.0.mode)
     }
 
-    /// The `osyx_abi::ATTR_*` bits (FAT attributes on the data volume).
+    pub fn uid(&self) -> u32 {
+        self.0.uid
+    }
+
+    pub fn gid(&self) -> u32 {
+        self.0.gid
+    }
+
+    /// Inode number, unique within [`Metadata::dev`].
+    pub fn ino(&self) -> u64 {
+        self.0.ino
+    }
+
+    /// Id of the mounted volume.
+    pub fn dev(&self) -> u64 {
+        self.0.dev
+    }
+
+    pub fn nlink(&self) -> u32 {
+        self.0.nlink
+    }
+
+    /// Storage used, in 512-byte units.
+    pub fn blocks(&self) -> u64 {
+        self.0.blocks
+    }
+
+    /// FAT attribute bits (`osyx_abi::ATTR_*`), 0 on other file systems.
     pub fn attributes(&self) -> u32 {
         self.0.attributes
     }
 
-    pub fn readonly(&self) -> bool {
-        self.0.attributes & osyx_abi::ATTR_READ_ONLY != 0
+    pub fn modified(&self) -> Result<SystemTime> {
+        time_of(self.0.mtime_ns)
     }
+
+    pub fn accessed(&self) -> Result<SystemTime> {
+        time_of(self.0.atime_ns)
+    }
+
+    /// Time of the last metadata change.
+    pub fn changed(&self) -> Result<SystemTime> {
+        time_of(self.0.ctime_ns)
+    }
+}
+
+fn time_of(ns: i64) -> Result<SystemTime> {
+    if ns == 0 {
+        return Err(Error::new(ErrorKind::Unsupported, "the file system does not record this time"));
+    }
+    Ok(SystemTime::from_unix_nanos(ns))
 }
 
 /// One entry of [`read_dir`].
@@ -211,7 +357,8 @@ impl Metadata {
 pub struct DirEntry {
     dir: PathBuf,
     name: String,
-    stat: FileStat,
+    ino: u64,
+    kind: u32,
 }
 
 impl DirEntry {
@@ -223,9 +370,18 @@ impl DirEntry {
         self.dir.join(self.name.as_str())
     }
 
-    /// Metadata as of the listing (no further system call).
-    pub fn metadata(&self) -> Metadata {
-        Metadata(self.stat)
+    pub fn ino(&self) -> u64 {
+        self.ino
+    }
+
+    /// The entry's kind, without following a symbolic link.
+    pub fn file_type(&self) -> FileType {
+        FileType(self.kind)
+    }
+
+    /// Metadata of the entry itself (a symbolic link is not followed).
+    pub fn metadata(&self) -> Result<Metadata> {
+        symlink_metadata(self.path())
     }
 }
 
@@ -243,17 +399,21 @@ impl Iterator for ReadDir {
 }
 
 fn path_str(p: &Path) -> Result<&str> {
-    if !p.is_absolute() {
-        return Err(Error::new(ErrorKind::InvalidInput, "paths must be absolute"));
+    let s = p.as_str();
+    if s.is_empty() || s.len() > osyx_abi::MAX_PATH || s.contains('\0') {
+        return Err(Error::new(ErrorKind::InvalidInput, "invalid path"));
     }
-    if p.as_str().len() > osyx_abi::MAX_PATH {
-        return Err(Error::new(ErrorKind::InvalidInput, "path too long"));
-    }
-    Ok(p.as_str())
+    Ok(s)
 }
 
+/// Metadata of `path`, following symbolic links.
 pub fn metadata<P: AsRef<Path>>(path: P) -> Result<Metadata> {
     imp::stat(path_str(path.as_ref())?).map(Metadata)
+}
+
+/// Metadata of `path` itself, even if it is a symbolic link.
+pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> Result<Metadata> {
+    imp::lstat(path_str(path.as_ref())?).map(Metadata)
 }
 
 /// True if `path` exists; errors other than `NotFound` are reported.
@@ -268,7 +428,7 @@ pub fn exists<P: AsRef<Path>>(path: P) -> Result<bool> {
 /// The whole contents of a file.
 pub fn read<P: AsRef<Path>>(path: P) -> Result<Vec<u8>> {
     let mut f = File::open(path)?;
-    let mut buf = Vec::with_capacity(f.metadata().map_or(0, |m| m.len() as usize));
+    let mut buf = Vec::with_capacity(f.metadata().map_or(0, |m| m.len().min(1 << 24) as usize));
     f.read_to_end(&mut buf)?;
     Ok(buf)
 }
@@ -307,21 +467,22 @@ pub fn read_dir<P: AsRef<Path>>(path: P) -> Result<ReadDir> {
     let list = imp::read_dir(path_str(dir)?)?;
     let entries: Vec<DirEntry> = list
         .into_iter()
-        .filter(|(name, _)| name != "." && name != "..")
-        .map(|(name, stat)| DirEntry { dir: dir.to_path_buf(), name, stat })
+        .filter(|(name, _, _)| name != "." && name != "..")
+        .map(|(name, ino, kind)| DirEntry { dir: dir.to_path_buf(), name, ino, kind })
         .collect();
     Ok(ReadDir { entries: entries.into_iter() })
 }
 
+/// Creates a directory (mode 0755).
 pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<()> {
-    imp::mkdir(path_str(path.as_ref())?)
+    imp::mkdir(path_str(path.as_ref())?, 0o755)
 }
 
 /// Creates `path` and any missing parents.
 pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
     let path = path.as_ref();
     path_str(path)?;
-    let mut cur = PathBuf::from("/");
+    let mut cur = PathBuf::from(if path.is_absolute() { "/" } else { "." });
     for c in path.components() {
         if c == ".." {
             return Err(Error::new(ErrorKind::InvalidInput, "create_dir_all does not accept `..`"));
@@ -336,6 +497,7 @@ pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
     Ok(())
 }
 
+/// Removes a file, symbolic link or device node.
 pub fn remove_file<P: AsRef<Path>>(path: P) -> Result<()> {
     imp::unlink(path_str(path.as_ref())?)
 }
@@ -345,11 +507,12 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> Result<()> {
     imp::rmdir(path_str(path.as_ref())?)
 }
 
-/// Removes a directory and everything below it.
+/// Removes a directory and everything below it (symbolic links are
+/// removed, not followed).
 pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
     let path = path.as_ref();
     for entry in read_dir(path)? {
-        if entry.metadata().is_dir() {
+        if entry.file_type().is_dir() {
             remove_dir_all(entry.path())?;
         } else {
             remove_file(entry.path())?;
@@ -361,6 +524,20 @@ pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
 /// Moves `from` to `to` on the same volume, replacing an existing file.
 pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<()> {
     imp::rename(path_str(from.as_ref())?, path_str(to.as_ref())?)
+}
+
+/// Creates a symbolic link at `link` pointing to `target` (stored as given).
+pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(target: P, link: Q) -> Result<()> {
+    imp::symlink(path_str(target.as_ref())?, path_str(link.as_ref())?)
+}
+
+/// The target of a symbolic link.
+pub fn read_link<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
+    imp::readlink(path_str(path.as_ref())?).map(PathBuf::from)
+}
+
+pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> Result<()> {
+    imp::chmod(path_str(path.as_ref())?, perm.mode())
 }
 
 #[cfg(test)]
@@ -386,10 +563,17 @@ mod tests {
         assert_eq!(read(&f).unwrap(), b"hello, OSyx");
         let m = metadata(&f).unwrap();
         assert!(m.is_file() && !m.is_dir() && m.len() == 11);
+        assert!(m.modified().is_ok());
         assert!(metadata(&d).unwrap().is_dir());
         assert!(exists(&f).unwrap() && !exists(d.join("missing")).unwrap());
         assert_eq!(File::open(d.join("missing")).unwrap_err().kind(), ErrorKind::NotFound);
         assert_eq!(File::create_new(&f).unwrap_err().kind(), ErrorKind::AlreadyExists);
+        let mut p = m.permissions();
+        p.set_readonly(true);
+        set_permissions(&f, p).unwrap();
+        assert!(metadata(&f).unwrap().permissions().readonly());
+        p.set_readonly(false);
+        set_permissions(&f, p).unwrap();
     }
 
     #[test]
@@ -422,8 +606,10 @@ mod tests {
         create_dir_all(d.join("x/y")).unwrap();
         write(d.join("x/one.txt"), [1u8; 3]).unwrap();
         write(d.join("x/y/two.txt"), vec![2u8; 5]).unwrap();
-        let mut names: Vec<(String, bool, u64)> =
-            read_dir(d.join("x")).unwrap().map(|e| (String::from(e.file_name()), e.metadata().is_dir(), e.metadata().len())).collect();
+        let mut names: Vec<(String, bool, u64)> = read_dir(d.join("x"))
+            .unwrap()
+            .map(|e| (String::from(e.file_name()), e.file_type().is_dir(), e.metadata().unwrap().len()))
+            .collect();
         names.sort();
         assert_eq!(names, [(String::from("one.txt"), false, 3), (String::from("y"), true, 0)]);
         rename(d.join("x/one.txt"), d.join("x/y/moved.txt")).unwrap();
@@ -444,9 +630,19 @@ mod tests {
             OpenOptions::new().append(true).truncate(true).open("/x").unwrap_err().kind(),
             ErrorKind::InvalidInput
         );
-        assert_eq!(read("relative.txt").unwrap_err().kind(), ErrorKind::InvalidInput);
+        assert_eq!(read("").unwrap_err().kind(), ErrorKind::InvalidInput);
         let long = alloc::format!("/{}", "a".repeat(osyx_abi::MAX_PATH));
         assert_eq!(metadata(long).unwrap_err().kind(), ErrorKind::InvalidInput);
         assert_eq!(create_dir_all("/a/../b").unwrap_err().kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn permissions_bits() {
+        let mut p = Permissions::from_mode(0o100644);
+        assert_eq!(p.mode(), 0o644);
+        assert!(!p.readonly());
+        p.set_readonly(true);
+        assert_eq!(p.mode(), 0o444);
+        assert!(p.readonly());
     }
 }

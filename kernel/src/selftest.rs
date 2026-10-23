@@ -36,7 +36,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 18] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 23] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -54,7 +54,12 @@ pub fn run(boot: &BootData) -> Summary {
         ("FS base per thread", &fs_base),
         ("PCI enumeration", &pci_scan),
         ("block device I/O", &block_io),
-        ("VFS files and directories", &vfs_ops),
+        ("VFS on tmpfs: files and directories", &crate::selftest_fs::tmpfs_files),
+        ("VFS: symlinks, cwd and permissions", &crate::selftest_fs::links_cwd_perms),
+        ("VFS: mount, unmount and limits", &crate::selftest_fs::mount_unmount),
+        ("devfs devices and /dev/random", &crate::selftest_fs::devfs),
+        ("FAT32 /boot through the VFS", &crate::selftest_fs::fat_boot),
+        ("concurrent writers (tmpfs + FAT32)", &crate::selftest_fs::concurrent),
     ];
     let mut s = Summary { passed: 0, failed: 0 };
     for (name, t) in tests.iter() {
@@ -454,109 +459,5 @@ fn block_io() -> TestResult {
         ensure!(block::write(&**ro, 0, &s0) == Err(BlockError::ReadOnly), "write to read-only {} accepted", ro.name());
     }
     kprintln!("[test]   {} ({}): {} sectors, {} per request", dev.name(), dev.describe(), end, dev.max_sectors());
-    Ok(())
-}
-
-static VFS_WORKER_OK: [core::sync::atomic::AtomicBool; 2] =
-    [core::sync::atomic::AtomicBool::new(false), core::sync::atomic::AtomicBool::new(false)];
-
-fn vfs_pattern(seed: u64, len: usize) -> Vec<u8> {
-    (0..len).map(|i| (i as u64 * 31 + seed * 7) as u8).collect()
-}
-
-/// Two kernel threads write files concurrently (they contend for the
-/// volume's sleeping mutex while the disk driver yields).
-fn vfs_worker(slot: u64, _: u64) {
-    let path = format!("/kselftest-{slot}.bin");
-    let data = vfs_pattern(slot, 20_000);
-    let ok = (|| -> Result<(), osyx_abi::Errno> {
-        use osyx_abi::*;
-        let mut f = crate::vfs::open(&path, OPEN_READ | OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE)?;
-        for chunk in data.chunks(3000) {
-            f.write(chunk)?;
-            sched::yield_now();
-        }
-        f.seek(0, SEEK_SET)?;
-        let mut back = alloc::vec![0u8; data.len() + 10];
-        let n = f.read(&mut back)?;
-        if back[..n] != data[..] {
-            return Err(Errno::Io);
-        }
-        Ok(())
-    })();
-    if let Err(e) = ok {
-        kprintln!("[test]   vfs worker {slot}: {e:?}");
-    }
-    VFS_WORKER_OK[slot as usize].store(ok.is_ok(), core::sync::atomic::Ordering::Relaxed);
-}
-
-fn vfs_ops() -> TestResult {
-    use crate::vfs;
-    use core::sync::atomic::Ordering;
-    use osyx_abi::*;
-    let mounts = vfs::mounts();
-    let Some(root) = mounts.iter().find(|m| m.path == "/" && !m.read_only()) else {
-        kprintln!("[test]   skipped: no writable volume mounted at /");
-        return Ok(());
-    };
-    let e = |what: &str, err: Errno| format!("{what}: {err:?}");
-    let _ = vfs::unlink("/kselftest-renamed.txt");
-    let _ = vfs::rmdir("/kselftest-dir");
-    // Create, write, append, seek, read.
-    let mut f = vfs::open("/kselftest.txt", OPEN_READ | OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE).map_err(|x| e("create", x))?;
-    f.write(b"Hello, ").map_err(|x| e("write", x))?;
-    f.write(b"VFS").map_err(|x| e("write", x))?;
-    ensure!(f.seek(-3, SEEK_END) == Ok(7), "seek from end");
-    let mut buf = [0u8; 16];
-    let n = f.read(&mut buf).map_err(|x| e("read", x))?;
-    ensure!(&buf[..n] == b"VFS", "read back {:?}", core::str::from_utf8(&buf[..n]));
-    ensure!(f.stat().map(|s| (s.size, s.kind)) == Ok((10, KIND_FILE)), "fstat");
-    f.truncate(5).map_err(|x| e("truncate", x))?;
-    drop(f);
-    let mut a = vfs::open("/kselftest.txt", OPEN_WRITE | OPEN_APPEND).map_err(|x| e("open append", x))?;
-    a.write(b"!").map_err(|x| e("append", x))?;
-    ensure!(vfs::stat("/KSELFTEST.TXT").map(|s| s.size) == Ok(6), "case-insensitive stat after append");
-    drop(a);
-    ensure!(vfs::open("/kselftest.txt", OPEN_WRITE | OPEN_CREATE | OPEN_EXCLUSIVE).err() == Some(Errno::AlreadyExists), "exclusive create of an existing file");
-    ensure!(vfs::open("/missing/x", OPEN_READ).err() == Some(Errno::NotFound), "open in a missing directory");
-    ensure!(vfs::open("relative", OPEN_READ).err() == Some(Errno::InvalidArgument), "relative path accepted");
-    ensure!(vfs::open("/kselftest.txt", OPEN_CREATE).err() == Some(Errno::InvalidArgument), "create without write");
-    // Directories, rename, listing, removal.
-    vfs::mkdir("/kselftest-dir").map_err(|x| e("mkdir", x))?;
-    vfs::rename("/kselftest.txt", "/kselftest-dir/./../kselftest-dir/moved.txt").map_err(|x| e("rename", x))?;
-    ensure!(vfs::rmdir("/kselftest-dir") == Err(Errno::DirectoryNotEmpty), "removed a non-empty directory");
-    let mut d = vfs::open("/kselftest-dir", OPEN_READ).map_err(|x| e("open dir", x))?;
-    let mut listing = [0u8; 256];
-    let n = d.readdir(&mut listing).map_err(|x| e("readdir", x))?;
-    let (rec, name, _) = DirRecord::decode(&listing[..n]).ok_or("bad dir record")?;
-    ensure!(name == b"moved.txt" && rec.size == 6 && rec.kind == KIND_FILE, "listing {:?}", rec);
-    ensure!(d.readdir(&mut listing) == Ok(0), "listing did not end");
-    ensure!(vfs::open("/kselftest-dir", OPEN_WRITE).err() == Some(Errno::IsADirectory), "opened a directory for writing");
-    drop(d);
-    vfs::rename("/kselftest-dir/moved.txt", "/kselftest-renamed.txt").map_err(|x| e("rename back", x))?;
-    vfs::rmdir("/kselftest-dir").map_err(|x| e("rmdir", x))?;
-    vfs::unlink("/kselftest-renamed.txt").map_err(|x| e("unlink", x))?;
-    ensure!(vfs::stat("/kselftest-renamed.txt") == Err(Errno::NotFound), "file still there after unlink");
-    // Concurrent writers.
-    let t0 = sched::spawn_kernel("vfs-0", vfs_worker, 0, 0);
-    let t1 = sched::spawn_kernel("vfs-1", vfs_worker, 1, 0);
-    sched::join(t0);
-    sched::join(t1);
-    ensure!(VFS_WORKER_OK.iter().all(|w| w.load(Ordering::Relaxed)), "a concurrent writer failed");
-    for slot in 0..2u64 {
-        let path = format!("/kselftest-{slot}.bin");
-        ensure!(vfs::stat(&path).map(|s| s.size) == Ok(20_000), "{path} has the wrong size");
-        vfs::unlink(&path).map_err(|x| e("unlink worker file", x))?;
-    }
-    let report = root.check().map_err(|x| format!("volume check: {x}"))?;
-    ensure!(report.fsinfo_accurate, "FSInfo free count is stale");
-    kprintln!(
-        "[test]   volume {} on {}: {} files, {} directories, {} clusters used, consistent",
-        root.label,
-        root.device,
-        report.files,
-        report.directories,
-        report.used_clusters
-    );
     Ok(())
 }

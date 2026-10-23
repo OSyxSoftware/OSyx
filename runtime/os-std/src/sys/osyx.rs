@@ -45,13 +45,17 @@ pub fn yield_now() {
     os_sys::yield_now()
 }
 
+pub fn realtime_ns() -> Result<i64> {
+    os_sys::clock(osyx_abi::CLOCK_REALTIME).map(|v| v as i64).map_err(Error::from)
+}
+
 // ---- files -------------------------------------------------------------------
 
 pub mod fs {
     use crate::error::{Error, ErrorKind, Result};
     use alloc::string::String;
     use alloc::vec::Vec;
-    use osyx_abi::{DirRecord, FileStat};
+    use osyx_abi::{DirRecord, FileStat, FsStat};
 
     /// A kernel file handle, closed on drop.
     pub struct RawFile(u64);
@@ -90,17 +94,21 @@ pub mod fs {
         }
     }
 
-    pub fn open(path: &str, flags: u64) -> Result<RawFile> {
-        os_sys::open(path, flags).map(RawFile).map_err(Error::from)
+    pub fn open(path: &str, flags: u64, mode: u32) -> Result<RawFile> {
+        os_sys::open(path, flags, mode).map(RawFile).map_err(Error::from)
     }
 
     pub fn stat(path: &str) -> Result<FileStat> {
         os_sys::stat(path).map_err(Error::from)
     }
 
-    /// The whole listing of a directory: (name, size, kind, attributes).
-    pub fn read_dir(path: &str) -> Result<Vec<(String, FileStat)>> {
-        let dir = open(path, osyx_abi::OPEN_READ)?;
+    pub fn lstat(path: &str) -> Result<FileStat> {
+        os_sys::lstat(path).map_err(Error::from)
+    }
+
+    /// The whole listing of a directory: (name, ino, kind).
+    pub fn read_dir(path: &str) -> Result<Vec<(String, u64, u32)>> {
+        let dir = open(path, osyx_abi::OPEN_READ | osyx_abi::OPEN_DIRECTORY, 0)?;
         let mut buf = alloc::vec![0u8; 4096];
         let mut out = Vec::new();
         loop {
@@ -113,14 +121,14 @@ pub mod fs {
                 let bad = || Error::new(ErrorKind::InvalidData, "malformed directory record");
                 let (r, name, len) = DirRecord::decode(&buf[off..n]).ok_or_else(bad)?;
                 let name = core::str::from_utf8(name).map_err(|_| bad())?;
-                out.push((String::from(name), FileStat { size: r.size, kind: r.kind, attributes: r.attributes as u32 }));
+                out.push((String::from(name), r.ino, r.kind));
                 off += len;
             }
         }
     }
 
-    pub fn mkdir(path: &str) -> Result<()> {
-        os_sys::mkdir(path).map_err(Error::from)
+    pub fn mkdir(path: &str, mode: u32) -> Result<()> {
+        os_sys::mkdir(path, mode).map_err(Error::from)
     }
 
     pub fn unlink(path: &str) -> Result<()> {
@@ -134,8 +142,51 @@ pub mod fs {
     pub fn rename(from: &str, to: &str) -> Result<()> {
         os_sys::rename(from, to).map_err(Error::from)
     }
-}
 
+    pub fn symlink(target: &str, path: &str) -> Result<()> {
+        os_sys::symlink(target, path).map_err(Error::from)
+    }
+
+    pub fn readlink(path: &str) -> Result<String> {
+        let mut buf = alloc::vec![0u8; osyx_abi::MAX_PATH];
+        let n = os_sys::readlink(path, &mut buf).map_err(Error::from)?;
+        String::from_utf8(buf[..n].to_vec()).map_err(|_| Error::new(ErrorKind::InvalidData, "link target is not UTF-8"))
+    }
+
+    pub fn chmod(path: &str, mode: u32) -> Result<()> {
+        os_sys::chmod(path, mode).map_err(Error::from)
+    }
+
+    pub fn chdir(path: &str) -> Result<()> {
+        os_sys::chdir(path).map_err(Error::from)
+    }
+
+    pub fn getcwd() -> Result<String> {
+        let mut buf = alloc::vec![0u8; osyx_abi::MAX_PATH];
+        let n = os_sys::getcwd(&mut buf).map_err(Error::from)?;
+        String::from_utf8(buf[..n].to_vec()).map_err(|_| Error::new(ErrorKind::InvalidData, "cwd is not UTF-8"))
+    }
+
+    pub fn statfs(path: &str) -> Result<FsStat> {
+        os_sys::statfs(path).map_err(Error::from)
+    }
+
+    pub fn mount(source: &str, target: &str, fstype: &str, flags: u64, size_limit: u64) -> Result<()> {
+        os_sys::mount(source, target, fstype, flags, size_limit).map_err(Error::from)
+    }
+
+    pub fn umount(path: &str) -> Result<()> {
+        os_sys::umount(path).map_err(Error::from)
+    }
+
+    pub fn getuid() -> (u32, u32) {
+        os_sys::getuid()
+    }
+
+    pub fn setuid(uid: u32, gid: u32) -> Result<()> {
+        os_sys::setuid(uid, gid).map_err(Error::from)
+    }
+}
 // ---- threads, futexes, TLS --------------------------------------------------
 
 /// Stack size of threads created with `thread::spawn` (the region `map`

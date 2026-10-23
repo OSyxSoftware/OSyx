@@ -34,6 +34,10 @@ name = "osyx-bootinfo"
 version = "0.1.0"
 
 [[package]]
+name = "osyx-crypto"
+version = "0.1.0"
+
+[[package]]
 name = "osyx-elf"
 version = "0.1.0"
 
@@ -51,10 +55,14 @@ version = "0.1.0"
 dependencies = [
  "osyx-abi",
  "osyx-bootinfo",
+ "osyx-crypto",
  "osyx-elf",
  "osyx-fat",
  "osyx-gfx",
  "osyx-mm",
+ "osyx-part",
+ "osyx-tmpfs",
+ "osyx-vfs",
 ]
 
 [[package]]
@@ -65,8 +73,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "osyx-part"
+version = "0.1.0"
+
+[[package]]
 name = "osyx-pe"
 version = "0.1.0"
+
+[[package]]
+name = "osyx-tmpfs"
+version = "0.1.0"
+dependencies = [
+ "osyx-abi",
+ "osyx-vfs",
+]
 
 [[package]]
 name = "osyx-uefi-loader"
@@ -75,4 +95,11 @@ dependencies = [
  "osyx-bootinfo",
  "osyx-elf",
  "osyx-gfx",
+]
+
+[[package]]
+name = "osyx-vfs"
+version = "0.1.0"
+dependencies = [
+ "osyx-abi",
 ]

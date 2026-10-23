@@ -9,9 +9,10 @@
 #![no_std]
 
 pub use osyx_abi::{
-    DirRecord, Errno, FileStat, SystemInfo, ABI_VERSION, CLOCK_MONOTONIC, KIND_DIR, KIND_FILE, OPEN_APPEND, OPEN_CREATE,
-    OPEN_EXCLUSIVE, OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE, PROT_EXEC, PROT_READ, PROT_WRITE, SEEK_CUR, SEEK_END, SEEK_SET,
-    STDERR, STDOUT,
+    DirRecord, Errno, FileStat, FsStat, MountArgs, SystemInfo, ABI_VERSION, CLOCK_MONOTONIC, CLOCK_REALTIME, KIND_BLOCK_DEVICE,
+    KIND_CHAR_DEVICE, KIND_DIR, KIND_FILE, KIND_SYMLINK, MOUNT_READ_ONLY, OPEN_APPEND, OPEN_CASE_INSENSITIVE, OPEN_CREATE,
+    OPEN_DIRECTORY, OPEN_EXCLUSIVE, OPEN_NOFOLLOW, OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE, PROT_EXEC, PROT_READ, PROT_WRITE,
+    SEEK_CUR, SEEK_END, SEEK_SET, STDERR, STDOUT,
 };
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -189,9 +190,10 @@ mod imp {
 
     // ---- files ----------------------------------------------------------
 
-    /// Opens `path` (absolute) with `OPEN_*` flags; returns a handle.
-    pub fn open(path: &str, flags: u64) -> Result<u64, Errno> {
-        decode(syscall3(nr::OPEN, path.as_ptr() as u64, path.len() as u64, flags))
+    /// Opens `path` with `OPEN_*` flags (`mode`: permissions of a created
+    /// file); returns a handle.
+    pub fn open(path: &str, flags: u64, mode: u32) -> Result<u64, Errno> {
+        decode(syscall4(nr::OPEN, path.as_ptr() as u64, path.len() as u64, flags, mode as u64))
     }
 
     pub fn close(handle: u64) -> Result<(), Errno> {
@@ -235,8 +237,73 @@ mod imp {
         decode(syscall2(n, path.as_ptr() as u64, path.len() as u64)).map(|_| ())
     }
 
-    pub fn mkdir(path: &str) -> Result<(), Errno> {
-        path_call(nr::MKDIR, path)
+    pub fn mkdir(path: &str, mode: u32) -> Result<(), Errno> {
+        decode(syscall3(nr::MKDIR, path.as_ptr() as u64, path.len() as u64, mode as u64)).map(|_| ())
+    }
+
+    pub fn lstat(path: &str) -> Result<FileStat, Errno> {
+        let mut st = FileStat::default();
+        decode(syscall3(nr::LSTAT, path.as_ptr() as u64, path.len() as u64, &mut st as *mut FileStat as u64))?;
+        Ok(st)
+    }
+
+    pub fn chdir(path: &str) -> Result<(), Errno> {
+        path_call(nr::CHDIR, path)
+    }
+
+    /// Writes the current directory into `buf`; returns its length.
+    pub fn getcwd(buf: &mut [u8]) -> Result<usize, Errno> {
+        decode(syscall2(nr::GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64)).map(|n| n as usize)
+    }
+
+    pub fn symlink(target: &str, path: &str) -> Result<(), Errno> {
+        decode(syscall4(nr::SYMLINK, target.as_ptr() as u64, target.len() as u64, path.as_ptr() as u64, path.len() as u64))
+            .map(|_| ())
+    }
+
+    /// Writes the link target into `buf`; returns its length (truncated to `buf`).
+    pub fn readlink(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
+        decode(syscall4(nr::READLINK, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64))
+            .map(|n| n as usize)
+    }
+
+    pub fn chmod(path: &str, mode: u32) -> Result<(), Errno> {
+        decode(syscall3(nr::CHMOD, path.as_ptr() as u64, path.len() as u64, mode as u64)).map(|_| ())
+    }
+
+    pub fn mount(source: &str, target: &str, fstype: &str, flags: u64, size_limit: u64) -> Result<(), Errno> {
+        let a = osyx_abi::MountArgs {
+            source: source.as_ptr() as u64,
+            source_len: source.len() as u64,
+            target: target.as_ptr() as u64,
+            target_len: target.len() as u64,
+            fstype: fstype.as_ptr() as u64,
+            fstype_len: fstype.len() as u64,
+            flags,
+            size_limit,
+        };
+        decode(syscall1(nr::MOUNT, &a as *const osyx_abi::MountArgs as u64)).map(|_| ())
+    }
+
+    pub fn umount(path: &str) -> Result<(), Errno> {
+        path_call(nr::UMOUNT, path)
+    }
+
+    /// (uid, gid) of the calling process.
+    pub fn getuid() -> (u32, u32) {
+        let v = syscall0(nr::GETUID);
+        (v as u32, (v >> 32) as u32)
+    }
+
+    /// Changes identity (root only, permanent for this process and its children).
+    pub fn setuid(uid: u32, gid: u32) -> Result<(), Errno> {
+        decode(syscall2(nr::SETUID, uid as u64, gid as u64)).map(|_| ())
+    }
+
+    pub fn statfs(path: &str) -> Result<osyx_abi::FsStat, Errno> {
+        let mut st = osyx_abi::FsStat::default();
+        decode(syscall3(nr::STATFS, path.as_ptr() as u64, path.len() as u64, &mut st as *mut osyx_abi::FsStat as u64))?;
+        Ok(st)
     }
 
     pub fn unlink(path: &str) -> Result<(), Errno> {
