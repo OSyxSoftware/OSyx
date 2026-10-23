@@ -22,10 +22,10 @@ fn wait(p: u64, expected: u32, ms: u32) -> i32 {
         Err(e) => fail(errno_to_win32(e), 0),
     }
 }
-extern "win64" fn InitOnceInitialize(once: u64) {
+pub(crate) extern "win64" fn InitOnceInitialize(once: u64) {
     unsafe { &*(once as *const AtomicU64) }.store(0, Ordering::Relaxed);
 }
-extern "win64" fn InitOnceExecuteOnce(once: u64, callback: u64, parameter: u64, context: *mut u64) -> i32 {
+pub(crate) extern "win64" fn InitOnceExecuteOnce(once: u64, callback: u64, parameter: u64, context: *mut u64) -> i32 {
     if once == 0 || !once.is_multiple_of(8) || callback == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -66,15 +66,15 @@ extern "win64" fn InitOnceExecuteOnce(once: u64, callback: u64, parameter: u64, 
 extern "win64" fn InitializeConditionVariable(cv: u64) {
     word(cv).store(0, Ordering::Relaxed);
 }
-extern "win64" fn WakeConditionVariable(cv: u64) {
+pub(crate) extern "win64" fn WakeConditionVariable(cv: u64) {
     word(cv).fetch_add(1, Ordering::Release);
     os_sys::futex_wake(word(cv).as_ptr(), 1);
 }
-extern "win64" fn WakeAllConditionVariable(cv: u64) {
+pub(crate) extern "win64" fn WakeAllConditionVariable(cv: u64) {
     word(cv).fetch_add(1, Ordering::Release);
     os_sys::futex_wake(word(cv).as_ptr(), u32::MAX);
 }
-extern "win64" fn SleepConditionVariableSRW(cv: u64, lock: u64, ms: u32, flags: u32) -> i32 {
+pub(crate) extern "win64" fn SleepConditionVariableSRW(cv: u64, lock: u64, ms: u32, flags: u32) -> i32 {
     if cv == 0 || lock == 0 || flags > 1 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }

@@ -575,5 +575,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RtlGetVersion,
     ];
     exports.extend(crate::exceptions::native_exports());
+    exports.extend(crate::rtl::ntdll_exports());
+    exports.extend(crate::unwind::ntdll_exports());
+    exports.extend(crate::sysext::ntdll_exports());
     exports
 }

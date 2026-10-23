@@ -99,7 +99,9 @@ void __stdcall start(void) {
     CloseHandle(pending); due.QuadPart=-200000;
     check("periodic timer can be armed",SetWaitableTimer(timer,&due,20,NULL,NULL,FALSE));
     check("periodic timer fires twice",WaitForSingleObject(timer,1000)==WAIT_OBJECT_0&&WaitForSingleObject(timer,1000)==WAIT_OBJECT_0);
-    check("cancel removes pending deadline",CancelWaitableTimer(timer)&&WaitForSingleObject(timer,30)==WAIT_TIMEOUT);
+    /* A period may elapse before the cancel; cancelling keeps that signal. */
+    BOOL cancelled=CancelWaitableTimer(timer); WaitForSingleObject(timer,0);
+    check("cancel removes pending deadline",cancelled&&WaitForSingleObject(timer,60)==WAIT_TIMEOUT);
     check("timer APC is explicitly unsupported",!SetWaitableTimerEx(timer,&due,0,(PTIMERAPCROUTINE)1,NULL,NULL,0)&&GetLastError()==ERROR_NOT_SUPPORTED);
     CloseHandle(timer);
     timer=CreateWaitableTimerW(NULL,TRUE,NULL);

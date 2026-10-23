@@ -40,6 +40,7 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("Windows file version resources and queries", || run("version.exe", &[]) == Some(0));
     t.check("Windows vectored hardware exceptions and context resumption", || run("exceptions.exe", &[]) == Some(0));
     t.check("Windows file mappings: shared, read-only and copy-on-write views", || run("mapping.exe", &[]) == Some(0));
+    t.check("NT runtime: Rtl strings and heap, SLists, unwinding, times, registry", || run("runtime.exe", &[]) == Some(0));
     t.check("Windows SID ACL descriptor and token data", || run("security.exe", &[]) == Some(0));
     t.check("Windows tokens follow native uid after dropping root", || {
         Command::new("worker").args(["exec-as", "1000", "/bin/winrun", "/opt/wintests/security.exe"])

@@ -38,6 +38,10 @@ mod volumes;
 mod version;
 mod synch;
 mod psapi;
+mod registry;
+mod rtl;
+mod sysext;
+mod unwind;
 mod timers;
 mod ws2_32;
 

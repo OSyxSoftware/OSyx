@@ -161,7 +161,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("iphlpapi.dll", crate::iphlpapi::exports(), Vec::new()),
         builtin("version.dll", crate::version::exports(), Vec::new()),
         builtin("psapi.dll", crate::psapi::exports(), Vec::new()),
-        builtin("advapi32.dll", crate::security::exports(), Vec::new()),
+        builtin("advapi32.dll", [crate::security::exports(), crate::registry::exports()].concat(), Vec::new()),
     ]
 }
 
@@ -682,6 +682,14 @@ pub fn free_library(h: u64) -> Result<(), u32> {
         }
     }
     Ok(())
+}
+
+/// (base, size) of the mapped PE image containing `addr`.
+pub fn image_containing(addr: u64) -> Option<(u64, u64)> {
+    let g = LOADER.lock().ok()?;
+    let l = g.as_ref()?;
+    let img = l.linker.host.images.iter().find(|i| addr >= i.base && addr < i.base + i.size)?;
+    Some((img.base, img.size))
 }
 
 /// `VirtualQuery` for addresses inside loaded images.

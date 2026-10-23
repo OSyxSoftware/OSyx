@@ -93,6 +93,7 @@ pub fn with_process<R>(f: impl FnOnce(&mut ProcessState) -> R) -> R {
 
 /// Sets up the console handles, command line and environment.
 pub fn init_process(exe_path: &str, command_line: &str, env: Vec<(String, String)>) {
+    crate::sysext::mark_start();
     let std = [
         objects::insert(Object::Console(Console::In)),
         objects::insert(Object::Console(Console::Out)),
@@ -1094,7 +1095,7 @@ extern "win64" fn GetStartupInfoW(si: *mut u8) {
 
 // ---- environment ---------------------------------------------------------------------
 
-fn env_get(name: &str) -> Option<String> {
+pub(crate) fn env_get(name: &str) -> Option<String> {
     with_process(|p| p.env.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone()))
 }
 
@@ -1743,7 +1744,7 @@ extern "win64" fn GetModuleHandleExW(flags: u32, name: *const u16, out: *mut u64
     b(h != 0)
 }
 
-fn module_name(h: u64) -> Option<String> {
+pub(crate) fn module_name(h: u64) -> Option<String> {
     let exe = with_process(|p| p.exe_path.clone());
     loader::module_file_name(if h == 0 { None } else { Some(h) }, &exe)
 }
@@ -2123,6 +2124,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::timers::exports());
     exports.extend(crate::exceptions::exports());
     exports.extend(crate::mapping::exports());
+    exports.extend(crate::rtl::kernel32_exports());
+    exports.extend(crate::unwind::kernel32_exports());
+    exports.extend(crate::sysext::exports());
     exports.push(("OpenProcessToken",crate::security::OpenProcessToken as *const () as u64));
     exports
 }
