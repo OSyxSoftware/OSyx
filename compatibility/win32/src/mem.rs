@@ -3,9 +3,12 @@
 //! loader structures (PEB, loader entries, strings) that live as long as
 //! the process.
 //!
-//! OSyx maps anonymous memory eagerly and enforces W^X, so:
-//! * `MEM_RESERVE` without `MEM_COMMIT` still allocates (zeroed) pages;
-//!   they are tracked as reserved and become usable on commit;
+//! OSyx gives anonymous memory a frame on first access (demand-zero) and
+//! enforces W^X, so:
+//! * `MEM_RESERVE` costs address space only; the pages are tracked as
+//!   reserved and become usable on commit;
+//! * `MEM_DECOMMIT` drops the pages' frames (`discard`), so a later commit
+//!   reads zeros again;
 //! * `PAGE_NOACCESS` pages are mapped read-only (OSyx has no "no access"
 //!   user mapping); `VirtualQuery` still reports `PAGE_NOACCESS`;
 //! * writable + executable protections (`PAGE_EXECUTE_READWRITE`,
@@ -182,12 +185,11 @@ pub fn virtual_free(addr: u64, size: usize, kind: u32) -> Result<(), NtStatus> {
             if last > r.pages.len() {
                 return Err(STATUS_MEMORY_NOT_ALLOCATED);
             }
-            // The pages stay mapped (OSyx has no partial unmap); their
-            // contents are cleared, as a later commit must see zeros.
+            // The range stays reserved; its frames go back to the kernel
+            // and a later commit reads zeros.
             let start = base + (first * PAGE) as u64;
-            protect_range(start, (last - first) * PAGE, Prot::ReadWrite).map_err(errno_to_status)?;
-            // SAFETY: the range lies in this region and is now writable.
-            unsafe { core::ptr::write_bytes(start as *mut u8, 0, (last - first) * PAGE) };
+            // SAFETY: decommitted pages may no longer be used by the program.
+            unsafe { os_sys::discard(start as *mut u8, (last - first) * PAGE) }.map_err(errno_to_status)?;
             for p in &mut r.pages[first..last] {
                 *p = 0;
             }

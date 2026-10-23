@@ -52,12 +52,12 @@ const STACK_LIMIT: u64 = STACK_TOP - (STACK_PAGES + 1) * PAGE_SIZE;
 const MAP_BASE: u64 = 0x0000_1000_0000_0000;
 /// Where program segments may lie: above the null guard, below `MAP_BASE`.
 const PROGRAM_RANGE: AddressRange = AddressRange { start: osyx_elf::USER_RANGE.start, end: MAP_BASE };
-/// Per-process cap on anonymous memory (2 GiB). Mappings are backed by
-/// frames at once, so physical memory remains the real bound; the cap
-/// keeps one process from taking all of it (a browser's main library
-/// alone is about 170 MiB of image).
-const MAP_LIMIT_PAGES: u64 = 512 * 1024;
-const MAX_PROCESSES: usize = 64;
+/// Per-process cap on anonymous address space (64 GiB). Anonymous memory
+/// is demand-zero: a frame is taken on the first access to a page, so this
+/// bounds reservations (a browser reserves far more than it touches), and
+/// physical memory bounds what is actually used.
+const MAP_LIMIT_PAGES: u64 = 16 * 1024 * 1024;
+const MAX_PROCESSES: usize = 512;
 const OUTPUT_TAIL_LINES: usize = 3;
 
 /// Why a program could not be started or executed.
@@ -104,6 +104,39 @@ impl ExecError {
 struct Space {
     root: u64,
     frames: u64,
+}
+
+/// An anonymous mapping. Its pages get frames on first access; until then
+/// only their protection is kept, as runs of equal protection.
+struct Region {
+    pages: u64,
+    /// Page index where a run starts -> `PROT_*` of the run (to the next key).
+    prot: BTreeMap<u64, u64>,
+}
+
+impl Region {
+    fn new(pages: u64, prot: u64) -> Region {
+        let mut runs = BTreeMap::new();
+        runs.insert(0, prot);
+        Region { pages, prot: runs }
+    }
+
+    fn prot_at(&self, page: u64) -> u64 {
+        self.prot.range(..=page).next_back().map_or(0, |(_, &p)| p)
+    }
+
+    /// Sets the protection of pages `first..last`.
+    fn set_prot(&mut self, first: u64, last: u64, prot: u64) {
+        let after = self.prot_at(last);
+        let inside: Vec<u64> = self.prot.range(first..last).map(|(&k, _)| k).collect();
+        for k in inside {
+            self.prot.remove(&k);
+        }
+        self.prot.insert(first, prot);
+        if last < self.pages {
+            self.prot.entry(last).or_insert(after);
+        }
+    }
 }
 
 impl Space {
@@ -255,7 +288,8 @@ pub struct Process {
     orphan: bool,
     life: Life,
     space: Space,
-    regions: BTreeMap<u64, u64>,
+    /// Anonymous mappings by base address (demand-zero).
+    regions: BTreeMap<u64, Region>,
     /// Shared memory mapped into this process: address -> (object, pages).
     /// The frames belong to the object; they are unmapped (never freed)
     /// before the address space is destroyed.
@@ -889,7 +923,7 @@ pub fn map_ex(addr: u64, len: u64, prot: u64, mflags: u64) -> Result<u64, Errno>
     if len == 0 || mflags & !(MAP_FIXED | MAP_ALIGN_64K) != 0 {
         return Err(Errno::InvalidArgument);
     }
-    let flags = prot_flags(prot)?;
+    prot_flags(prot)?;
     let pages = len.div_ceil(PAGE_SIZE);
     let pid = sched::current_pid();
     let mut t = TABLE.lock();
@@ -902,8 +936,15 @@ pub fn map_ex(addr: u64, len: u64, prot: u64, mflags: u64) -> Result<u64, Errno>
         if !addr.is_multiple_of(PAGE_SIZE) || addr < paging::USER_START || end > STACK_LIMIT {
             return Err(Errno::InvalidArgument);
         }
-        // Nothing may be mapped there yet (program, stack, other regions).
-        if (0..pages).any(|i| paging::translate_in(p.space.root, addr + i * PAGE_SIZE).is_some()) {
+        // Nothing may be mapped there yet: program, stack, shared memory,
+        // or a region (whose untouched pages are not in the page tables).
+        let overlaps = |m: &BTreeMap<u64, u64>| m.range(..end).next_back().is_some_and(|(&b, &n)| b + n * PAGE_SIZE > addr);
+        let regions: BTreeMap<u64, u64> = p.regions.range(..end).next_back().map(|(&b, r)| (b, r.pages)).into_iter().collect();
+        let shared: BTreeMap<u64, u64> = p.shared.range(..end).next_back().map(|(&b, s)| (b, s.1)).into_iter().collect();
+        if overlaps(&regions)
+            || overlaps(&shared)
+            || (0..pages).any(|i| paging::translate_in(p.space.root, addr + i * PAGE_SIZE).is_some())
+        {
             return Err(Errno::AlreadyExists);
         }
         addr
@@ -912,18 +953,9 @@ pub fn map_ex(addr: u64, len: u64, prot: u64, mflags: u64) -> Result<u64, Errno>
     } else {
         p.next_map
     };
-    for i in 0..pages {
-        if p.space.map_zeroed(base + i * PAGE_SIZE, flags).is_err() {
-            for j in 0..i {
-                if let Ok(f) = paging::unmap_in(p.space.root, base + j * PAGE_SIZE, true) {
-                    let _ = free_frame(f);
-                    p.space.frames -= 1;
-                }
-            }
-            return Err(Errno::NoMemory);
-        }
-    }
-    p.regions.insert(base, pages);
+    // No frames yet: each page is filled with zeros on first access
+    // (`demand_fault`).
+    p.regions.insert(base, Region::new(pages, prot));
     p.mapped_pages += pages;
     // Leave a guard page; a fixed region below the cursor does not move it.
     p.next_map = p.next_map.max(base + (pages + 1) * PAGE_SIZE);
@@ -942,18 +974,89 @@ pub fn protect(addr: u64, len: u64, prot: u64) -> Result<(), Errno> {
     let pid = sched::current_pid();
     let mut t = TABLE.lock();
     let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
-    let (&start, &n) = p.regions.range(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
-    if addr + pages * PAGE_SIZE > start + n * PAGE_SIZE {
+    let root = p.space.root;
+    let (&start, r) = p.regions.range_mut(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
+    if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE {
         return Err(Errno::InvalidArgument);
     }
-    let root = p.space.root;
     for i in 0..pages {
         let va = addr + i * PAGE_SIZE;
-        // Re-map the same frame with the new flags (the page tables exist).
-        let frame = paging::unmap_in(root, va, true).map_err(|_| Errno::Fault)?;
-        paging::map_in(root, va, frame, flags).map_err(|_| Errno::Fault)?;
+        // A page already touched keeps its frame under the new flags; the
+        // others get them when first touched.
+        if paging::translate_in(root, va).is_some() {
+            let frame = paging::unmap_in(root, va, true).map_err(|_| Errno::Fault)?;
+            paging::map_in(root, va, frame, flags).map_err(|_| Errno::Fault)?;
+        }
     }
+    let first = (addr - start) / PAGE_SIZE;
+    r.set_prot(first, first + pages, prot);
     Ok(())
+}
+
+/// Frees the frames of the touched pages in `addr..addr + pages` (the
+/// untouched ones have none).
+fn release_frames(space: &mut Space, addr: u64, pages: u64) {
+    for i in 0..pages {
+        let va = addr + i * PAGE_SIZE;
+        if paging::translate_in(space.root, va).is_some() {
+            if let Ok(frame) = paging::unmap_in(space.root, va, true) {
+                let _ = free_frame(frame);
+                space.frames -= 1;
+            }
+        }
+    }
+}
+
+/// `discard` back end: whole pages inside one anonymous region lose their
+/// contents and frames; the next access reads zeros again.
+pub fn discard(addr: u64, len: u64) -> Result<(), Errno> {
+    if len == 0 || !addr.is_multiple_of(PAGE_SIZE) {
+        return Err(Errno::InvalidArgument);
+    }
+    let pages = len.div_ceil(PAGE_SIZE);
+    let pid = sched::current_pid();
+    let mut t = TABLE.lock();
+    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let (&start, r) = p.regions.range(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
+    if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE {
+        return Err(Errno::InvalidArgument);
+    }
+    release_frames(&mut p.space, addr, pages);
+    Ok(())
+}
+
+/// A page fault on a not-present page at `va`: if it lies in an anonymous
+/// region of the current process, maps a zeroed frame there and returns
+/// true (the access is retried). False for any other address, an access
+/// the region's protection forbids, a busy process table (the faulting
+/// code holds it) or exhausted memory: the fault then takes its usual path.
+pub fn demand_fault(va: u64, write: bool, fetch: bool) -> bool {
+    if !(paging::USER_START..osyx_abi::USER_END).contains(&va) {
+        return false;
+    }
+    let pid = sched::current_pid();
+    let Some(mut t) = TABLE.try_lock() else { return false };
+    let Some(p) = t.procs.get_mut(&pid) else { return false };
+    let page = va & !(PAGE_SIZE - 1);
+    let Some((&start, r)) = p.regions.range(..=page).next_back() else { return false };
+    if page >= start + r.pages * PAGE_SIZE {
+        return false;
+    }
+    let prot = r.prot_at((page - start) / PAGE_SIZE);
+    let Ok(flags) = prot_flags(prot) else { return false };
+    if (write && !flags.writable) || (fetch && !flags.executable) {
+        return false;
+    }
+    if paging::translate_in(p.space.root, page).is_some() {
+        return true; // mapped meanwhile: retry
+    }
+    match p.space.map_zeroed(page, flags) {
+        Ok(_) => true,
+        Err(_) => {
+            kprintln!("process {pid}: out of memory on first access to {page:#x}");
+            false
+        }
+    }
 }
 
 /// `unmap` back end: releases exactly one region previously returned by
@@ -975,15 +1078,11 @@ pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
         unmap_shared_from(root, one);
         return Ok(());
     }
-    let pages = *p.regions.get(&addr).ok_or(Errno::InvalidArgument)?;
+    let pages = p.regions.get(&addr).ok_or(Errno::InvalidArgument)?.pages;
     if len.div_ceil(PAGE_SIZE) != pages {
         return Err(Errno::InvalidArgument);
     }
-    for i in 0..pages {
-        let frame = paging::unmap_in(p.space.root, addr + i * PAGE_SIZE, true).map_err(|_| Errno::Fault)?;
-        let _ = free_frame(frame);
-        p.space.frames -= 1;
-    }
+    release_frames(&mut p.space, addr, pages);
     p.regions.remove(&addr);
     p.mapped_pages -= pages;
     Ok(())

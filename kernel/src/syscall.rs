@@ -252,6 +252,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         }
         nr::PROTECT => process::protect(f.rdi, f.rsi, f.rdx).map(|_| 0),
         nr::MAP_EX => process::map_ex(f.rdi, f.rsi, f.rdx, f.r10),
+        nr::DISCARD => process::discard(f.rdi, f.rsi).map(|_| 0),
         nr::DISPLAY_FLUSH => sys_objects::display_flush(f.rdi, f.rsi, f.rdx, f.r10),
         nr::DISPLAY_SET_MODE => sys_objects::display_set_mode(f.rdi, f.rsi),
         nr::FAULT_HANDLER => crate::user_fault::register(f.rdi),

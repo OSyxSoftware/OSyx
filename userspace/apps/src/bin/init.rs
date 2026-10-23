@@ -222,6 +222,30 @@ fn main() -> i32 {
         // SAFETY: no references into the region remain.
         ok && unsafe { raw::unmap(p, 3 * 4096) }.is_ok() && unsafe { raw::unmap(p, 3 * 4096) }.is_err()
     });
+    t.check("memory: demand-zero pages, kernel access and discard", || {
+        const GIB: usize = 1 << 30;
+        let free = || os::sysinfo().map_or(0, |i| i.free_memory);
+        let before = free();
+        // A 1 GiB reservation costs no frames until its pages are touched.
+        let Ok(p) = raw::map(GIB, PROT_READ | PROT_WRITE) else { return false };
+        let cheap = before.saturating_sub(free()) < 4 << 20;
+        // SAFETY: inside the fresh mapping.
+        let touched = unsafe {
+            let q = p.add(GIB / 2);
+            let zero = q.read() == 0;
+            q.write(9);
+            zero && q.read() == 9
+        };
+        // The kernel fills an untouched page through a user copy.
+        let kernel = raw::sysinfo_raw(p as usize + 700 * (1 << 20)).is_ok();
+        // A fixed mapping may not land on untouched pages of the region.
+        let taken = raw::map_ex(p as usize + GIB - 4096, 4096, PROT_READ, raw::MAP_FIXED) == Err(Errno::AlreadyExists);
+        // SAFETY: the discarded page is only read again, as zeros.
+        let discarded = unsafe { raw::discard(p.add(GIB / 2), 4096).is_ok() && p.add(GIB / 2).read() == 0 };
+        // SAFETY: no references into the region remain.
+        let freed = unsafe { raw::unmap(p, GIB) }.is_ok();
+        cheap && touched && kernel && taken && discarded && freed
+    });
 
     process_checks(&mut t);
     thread_checks(&mut t);

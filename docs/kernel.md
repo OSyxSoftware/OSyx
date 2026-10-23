@@ -99,7 +99,13 @@ The panic path may force-unlock SERIAL and only try-locks the display.
   whatever is still open when the last thread ends is closed.
 - Identity: `uid`/`gid` (root for `init`; `setuid` lets root drop to a user,
   permanently) and the current directory; children inherit both.
-- Limits: 64 processes, 2 GiB of `map` memory per process, 128 KiB of
+- Anonymous memory (`map`, `map_ex`) is demand-zero: a mapping reserves
+  address space, and each page gets a zeroed frame on its first access
+  (from user code or a kernel copy to/from user memory). `protect` applies
+  to touched pages at once and to the others when touched; `discard`
+  returns pages' frames while keeping the mapping.
+- Limits: 512 processes, 256 threads per process, 64 GiB of `map` address
+  space per process (frames bounded by physical memory), 128 KiB of
   arguments and environment (4096 strings each), 64 MiB executables, 64
   open handles.
 

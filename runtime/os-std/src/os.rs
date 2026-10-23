@@ -66,7 +66,7 @@ pub mod raw {
     pub use os_sys::{fault_handler,fault_return};
     pub use osyx_abi::fault;
     pub use os_sys::{
-        close, exec_raw, execve, futex_wait, futex_wake, gettid, map, map_ex, nr, open, protect, raw_syscall, read, read_raw,
+        close, discard, exec_raw, execve, futex_wait, futex_wake, gettid, map, map_ex, nr, open, protect, raw_syscall, read, read_raw,
         set_gs_base, spawn, sysinfo_raw, thread_exit, unmap, wait_raw, write, write_raw, Errno, ExecArgs, ABI_VERSION,
         HANDLE_NONE, KILLED_STATUS, MAP_ALIGN_64K, MAP_FIXED, OPEN_CREATE, OPEN_DIRECTORY, OPEN_READ, OPEN_WRITE, PROT_EXEC,
         PROT_READ, PROT_WRITE,

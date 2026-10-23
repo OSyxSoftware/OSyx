@@ -42,7 +42,7 @@
 pub mod ipc;
 pub mod net;
 
-pub const ABI_VERSION: u32 = 10;
+pub const ABI_VERSION: u32 = 11;
 pub mod fault;
 
 /// Highest user virtual address + 1 (the canonical lower half).
@@ -295,6 +295,9 @@ pub mod nr {
     /// `fault_return(context)`: resume an outstanding exception of this
     /// thread; success never returns. Invalid addresses/flags are rejected.
     pub const FAULT_RETURN: u64 = 78;
+    /// `discard(addr, len) -> 0`: whole pages inside one anonymous mapping
+    /// drop their contents and memory; the next access reads zeros.
+    pub const DISCARD: u64 = 79;
 }
 
 /// `map_ex` flags.
@@ -483,7 +486,7 @@ pub struct FsStat {
 }
 
 /// Maximum number of threads per process.
-pub const MAX_THREADS: usize = 64;
+pub const MAX_THREADS: usize = 256;
 
 /// Largest argument + environment block of `spawn` / `execve` (bytes).
 pub const MAX_EXEC_ARGS: usize = 128 * 1024;

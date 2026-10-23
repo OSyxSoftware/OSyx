@@ -79,6 +79,14 @@ pub fn monotonic_ns() -> u64 {
 #[no_mangle]
 extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     let from_user = f.cs & 3 == 3;
+    // A not-present page in an anonymous region: give it its frame and
+    // retry, whether user code or a kernel copy to/from user memory touched it.
+    if f.vector == 14 && f.error_code & 1 == 0 {
+        let (write, fetch) = (f.error_code & 2 != 0, f.error_code & 0x10 != 0);
+        if crate::process::demand_fault(cpu::read_cr2(), write, fetch) {
+            return;
+        }
+    }
     match f.vector {
         0..=31 if from_user => {
             if !crate::user_fault::deliver(f) {kill_process(f);}

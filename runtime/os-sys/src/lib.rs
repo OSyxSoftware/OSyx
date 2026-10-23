@@ -523,6 +523,15 @@ mod imp {
         decode(syscall4(nr::MAP_EX, addr as u64, len as u64, prot, flags)).map(|a| a as *mut u8)
     }
 
+    /// Drops the contents and memory of whole pages inside one anonymous
+    /// mapping; the next access reads zeros.
+    ///
+    /// # Safety
+    /// No live reference may rely on the old contents.
+    pub unsafe fn discard(addr: *mut u8, len: usize) -> Result<(), Errno> {
+        decode(syscall2(nr::DISCARD, addr as u64, len as u64)).map(|_| ())
+    }
+
     /// Fills `out` with process records; returns how many.
     pub fn proc_list(out: &mut [ProcInfo]) -> Result<usize, Errno> {
         let bytes = core::mem::size_of_val(out) as u64;
