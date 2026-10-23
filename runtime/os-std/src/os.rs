@@ -25,7 +25,9 @@ pub fn heap_stats() -> osyx_mm::heap::HeapStats {
 /// Low-level system call access for tests and runtime code.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod raw {
-    pub use os_sys::{map, raw_syscall, sysinfo_raw, unmap, write_raw, Errno, PROT_EXEC, PROT_READ, PROT_WRITE};
+    pub use os_sys::{
+        map, raw_syscall, sysinfo_raw, unmap, wait_raw, write_raw, Errno, PROT_EXEC, PROT_READ, PROT_WRITE,
+    };
 }
 
 #[cfg(test)]

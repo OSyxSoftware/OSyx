@@ -23,6 +23,13 @@ name = "osyx-abi"
 version = "0.1.0"
 
 [[package]]
+name = "osyx-apps"
+version = "0.1.0"
+dependencies = [
+ "os-std",
+]
+
+[[package]]
 name = "osyx-bootinfo"
 version = "0.1.0"
 
@@ -33,13 +40,6 @@ version = "0.1.0"
 [[package]]
 name = "osyx-gfx"
 version = "0.1.0"
-
-[[package]]
-name = "osyx-hello"
-version = "0.1.0"
-dependencies = [
- "os-std",
-]
 
 [[package]]
 name = "osyx-kernel"

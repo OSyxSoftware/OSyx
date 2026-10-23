@@ -47,6 +47,7 @@ pub mod io;
 pub mod os;
 pub mod process;
 pub mod rt;
+pub mod thread;
 pub mod time;
 
 pub use alloc::{borrow, boxed, collections, fmt, format, rc, string, sync, vec};

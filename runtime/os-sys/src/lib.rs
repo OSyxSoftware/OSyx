@@ -50,6 +50,54 @@ mod imp {
         ret
     }
 
+    #[inline]
+    fn syscall4(n: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+        let ret: u64;
+        // SAFETY: as in `syscall1`.
+        unsafe {
+            asm!("syscall", inlateout("rax") n => ret, in("rdi") a1, in("rsi") a2, in("rdx") a3, in("r10") a4,
+                 lateout("rcx") _, lateout("r11") _, options(nostack));
+        }
+        ret
+    }
+
+    #[inline]
+    fn syscall0(n: u64) -> u64 {
+        let ret: u64;
+        // SAFETY: as in `syscall1`.
+        unsafe {
+            asm!("syscall", inlateout("rax") n => ret, lateout("rcx") _, lateout("r11") _, options(nostack));
+        }
+        ret
+    }
+
+    /// Starts boot module `name` as a child. `args` is the argument block:
+    /// NUL-terminated strings back to back (argv[0] is `name`).
+    pub fn spawn(name: &str, args: &[u8]) -> Result<u64, Errno> {
+        decode(syscall4(nr::SPAWN, name.as_ptr() as u64, name.len() as u64, args.as_ptr() as u64, args.len() as u64))
+    }
+
+    /// Waits for child `pid` (0 = any) and returns (pid, exit status).
+    pub fn wait(pid: u64) -> Result<(u64, i32), Errno> {
+        let mut status = 0i32;
+        let child = decode(syscall2(nr::WAIT, pid, &mut status as *mut i32 as u64))?;
+        Ok((child, status))
+    }
+
+    /// `wait` with an arbitrary status address (for validation tests).
+    pub fn wait_raw(pid: u64, status_addr: usize) -> Result<u64, Errno> {
+        decode(syscall2(nr::WAIT, pid, status_addr as u64))
+    }
+
+    pub fn yield_now() {
+        syscall0(nr::YIELD);
+    }
+
+    /// Blocks for at least `ns` nanoseconds (timer resolution: 10 ms).
+    pub fn sleep(ns: u64) {
+        syscall1(nr::SLEEP, ns);
+    }
+
     /// Terminates the calling process.
     pub fn exit(code: i32) -> ! {
         syscall1(nr::EXIT, code as u32 as u64);

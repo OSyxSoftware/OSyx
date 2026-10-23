@@ -29,6 +29,22 @@ pub fn sysinfo() -> Result<SystemInfo> {
     os_sys::sysinfo().map_err(Error::from)
 }
 
+pub fn spawn(name: &str, args: &[u8]) -> Result<u64> {
+    os_sys::spawn(name, args).map_err(Error::from)
+}
+
+pub fn wait(pid: u64) -> Result<(u64, i32)> {
+    os_sys::wait(pid).map_err(Error::from)
+}
+
+pub fn sleep_ns(ns: u64) {
+    os_sys::sleep(ns)
+}
+
+pub fn yield_now() {
+    os_sys::yield_now()
+}
+
 // ---- start-up -------------------------------------------------------------
 
 static ARGC: AtomicUsize = AtomicUsize::new(0);

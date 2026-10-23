@@ -13,11 +13,13 @@ compatibility layer; that work has not started yet (see
   stages, animated spinner), ELF64 kernel validation, page tables, BootInfo,
   ExitBootServices, kernel hand-off; clear error screen for bad kernels.
 - Kernel: GDT/TSS/IDT, exception diagnostics, bitmap frame allocator,
-  4-level paging with W^X/NX, growable heap, PIC/PIT timer, framebuffer status
-  screen, 11 in-kernel self-tests.
-- User space: ring 3 processes, SYSCALL/SYSRET ABI with pointer validation,
-  and a Rust program built on OSyx Std (`println!`, `Vec`, `BTreeMap`, heap,
-  time, args, panics) running as `init`.
+  4-level paging with W^X/NX, growable heap, preemptive round-robin scheduler
+  with kernel threads and per-thread FPU/SSE state, framebuffer status screen,
+  14 in-kernel self-tests.
+- User space: ring 3 processes with spawn/wait, zombies and orphans,
+  SYSCALL/SYSRET ABI with pointer validation, and Rust programs built on OSyx
+  Std (`println!`, collections, heap, time, args, `process::Command`,
+  `thread::sleep`, panics): `init` runs 25 checks using `worker` children.
 
 ## Quick start (Windows 11 host)
 
@@ -39,7 +41,7 @@ compatibility layer; that work has not started yet (see
 | `kernel` | the kernel; `kernel/mm` holds host-tested memory algorithms |
 | `shared/bootinfo`, `shared/abi` | boot protocol and system call ABI |
 | `runtime/os-sys`, `runtime/os-std` | raw system calls, OSyx Std |
-| `userspace/hello` | first user program (`INIT.ELF`) |
+| `userspace/apps` | user programs `init` and `worker` (`\EFI\OSYX\BIN\`) |
 | `docs` | design and status documentation |
 
 Documentation starts at [docs/architecture.md](docs/architecture.md).

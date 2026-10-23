@@ -3,7 +3,7 @@
 param(
     [string]$Cmdline = '',
     [switch]$DebugBuild,
-    # Leave \EFI\OSYX\INIT.ELF out of the ESP (kernel boots without a user program).
+    # Leave \EFI\OSYX\BIN out of the ESP (kernel boots without user programs).
     [switch]$NoInit
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -23,10 +23,13 @@ try {
     $savedFlags = $env:RUSTFLAGS
     $env:RUSTFLAGS = '-C relocation-model=static -C code-model=small'
     try {
-        Invoke-Checked 'user build' { cargo build -p osyx-hello --target x86_64-unknown-none --target-dir target/user @profileArgs }
+        Invoke-Checked 'user build' { cargo build -p osyx-apps --target x86_64-unknown-none --target-dir target/user @profileArgs }
     } finally { $env:RUSTFLAGS = $savedFlags }
-    $init = Join-Path $Root "target\user\x86_64-unknown-none\$profileDir\hello"
-    Invoke-Checked 'init validation' { cargo run -q -p osyx-elf --example inspect -- --user $init }
+    $userBins = @('init', 'worker')
+    foreach ($bin in $userBins) {
+        $path = Join-Path $Root "target\user\x86_64-unknown-none\$profileDir\$bin"
+        Invoke-Checked "$bin validation" { cargo run -q -p osyx-elf --example inspect -- --user $path }
+    }
 
     $efi = Join-Path $Root "target\x86_64-unknown-uefi\$profileDir\osyx-uefi-loader.efi"
     $kernel = Join-Path $Root "target\x86_64-unknown-none\$profileDir\osyx-kernel"
@@ -36,11 +39,16 @@ try {
     New-Item -ItemType Directory -Force (Join-Path $EspDir 'EFI\BOOT'), (Join-Path $EspDir 'EFI\OSYX') | Out-Null
     Copy-Item $efi (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI') -Force
     Copy-Item $kernel (Join-Path $EspDir 'EFI\OSYX\KERNEL.ELF') -Force
-    $initDest = Join-Path $EspDir 'EFI\OSYX\INIT.ELF'
-    if ($NoInit) {
-        if (Test-Path $initDest) { Remove-Item $initDest }
-    } else {
-        Copy-Item $init $initDest -Force
+    # Every file in \EFI\OSYX\BIN becomes a boot module that `spawn` can start.
+    $binDir = Join-Path $EspDir 'EFI\OSYX\BIN'
+    if (Test-Path $binDir) { Remove-Item $binDir -Recurse -Force }
+    $legacyInit = Join-Path $EspDir 'EFI\OSYX\INIT.ELF'
+    if (Test-Path $legacyInit) { Remove-Item $legacyInit }
+    if (-not $NoInit) {
+        New-Item -ItemType Directory -Force $binDir | Out-Null
+        foreach ($bin in $userBins) {
+            Copy-Item (Join-Path $Root "target\user\x86_64-unknown-none\$profileDir\$bin") (Join-Path $binDir $bin) -Force
+        }
     }
     $cmdFile = Join-Path $EspDir 'EFI\OSYX\CMDLINE.TXT'
     if ($Cmdline) {

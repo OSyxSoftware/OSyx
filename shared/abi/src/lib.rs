@@ -1,4 +1,4 @@
-//! OSyx system call ABI, version 1.
+//! OSyx system call ABI, version 2.
 //!
 //! Calling convention (x86-64 `syscall` instruction):
 //! * `rax` = system call number, arguments in `rdi, rsi, rdx, r10, r8, r9`.
@@ -16,7 +16,7 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// Highest user virtual address + 1 (the canonical lower half).
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -34,7 +34,27 @@ pub mod nr {
     pub const SYSINFO: u64 = 4;
     /// `clock(id: u64) -> u64` nanoseconds.
     pub const CLOCK: u64 = 5;
+    /// `spawn(name: *const u8, name_len: usize, args: *const u8, args_len: usize) -> pid`
+    ///
+    /// Starts the boot module `name` as a child process. `args` holds the
+    /// arguments after `argv[0]` as NUL-terminated strings back to back
+    /// (`args_len` may be 0); `argv[0]` is `name`.
+    pub const SPAWN: u64 = 6;
+    /// `wait(pid: u64, status: *mut i32) -> pid`
+    ///
+    /// Blocks until the child `pid` (or any child if `pid == 0`) has exited,
+    /// stores its exit status and releases it.
+    pub const WAIT: u64 = 7;
+    /// `yield() -> 0`: gives up the rest of the time slice.
+    pub const YIELD: u64 = 8;
+    /// `sleep(ns: u64) -> 0`: blocks for at least `ns` nanoseconds.
+    pub const SLEEP: u64 = 9;
 }
+
+/// Maximum length of a program name passed to `spawn`.
+pub const MAX_NAME: usize = 31;
+/// Maximum size of the `spawn` argument block.
+pub const MAX_SPAWN_ARGS: usize = 4096;
 
 pub const STDOUT: u64 = 1;
 pub const STDERR: u64 = 2;
@@ -63,6 +83,10 @@ pub enum Errno {
     NotSupported = 5,
     /// The operation violates a security policy (e.g. writable + executable).
     PermissionDenied = 6,
+    /// The named object (e.g. a program for `spawn`) does not exist.
+    NotFound = 7,
+    /// `wait` was called but the caller has no (matching) child.
+    NoChild = 8,
 }
 
 impl Errno {
@@ -74,6 +98,8 @@ impl Errno {
             4 => Errno::BadHandle,
             5 => Errno::NotSupported,
             6 => Errno::PermissionDenied,
+            7 => Errno::NotFound,
+            8 => Errno::NoChild,
             _ => return None,
         })
     }
@@ -86,6 +112,8 @@ impl Errno {
             Errno::BadHandle => "bad handle",
             Errno::NotSupported => "not supported",
             Errno::PermissionDenied => "permission denied",
+            Errno::NotFound => "not found",
+            Errno::NoChild => "no child process",
         }
     }
 }
@@ -141,13 +169,15 @@ mod tests {
             Errno::BadHandle,
             Errno::NotSupported,
             Errno::PermissionDenied,
+            Errno::NotFound,
+            Errno::NoChild,
         ] {
             assert_eq!(decode(encode(Err(e))), Err(e));
             assert_eq!(Errno::from_raw(e as u64), Some(e));
         }
         // Large unsigned values outside the error window are successes.
         assert_eq!(decode(u64::MAX - 5000), Ok(u64::MAX - 5000));
-        assert_eq!(decode((-9i64) as u64), Err(Errno::NotSupported));
+        assert_eq!(decode((-99i64) as u64), Err(Errno::NotSupported));
     }
 
     #[test]

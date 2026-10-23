@@ -175,7 +175,7 @@ pub fn map(va: u64, pa: u64, flags: Flags) -> Result<(), MapError> {
     if flags.user {
         return Err(MapError::ReservedRange);
     }
-    map_in(kernel_root(), va, pa, flags)
+    map_in(kernel_root(), va, pa, flags).map(|_| ())
 }
 
 /// Unmaps a kernel page and returns its frame.
@@ -190,14 +190,16 @@ pub fn translate(va: u64) -> Option<Translation> {
 
 /// Maps the 4 KiB page at `va` to the frame at `pa` in `root`. User mappings
 /// must lie in the lower half, kernel mappings in the upper half outside the
-/// HHDM and the kernel image.
-pub fn map_in(root: u64, va: u64, pa: u64, flags: Flags) -> Result<(), MapError> {
+/// HHDM and the kernel image. Returns how many page-table frames were
+/// allocated (so owners can account for every frame they cause).
+pub fn map_in(root: u64, va: u64, pa: u64, flags: Flags) -> Result<u64, MapError> {
     check_virt(va, flags.user)?;
     if !pa.is_multiple_of(PAGE_SIZE) {
         return Err(MapError::Unaligned);
     }
     let _g = PAGING.lock();
     let mut t = root;
+    let mut tables = 0;
     for shift in [39u64, 30, 21] {
         // SAFETY: `t` is a page table page reachable through the HHDM.
         let e = unsafe { table(t).add(((va >> shift) & 511) as usize) };
@@ -212,6 +214,7 @@ pub fn map_in(root: u64, va: u64, pa: u64, flags: Flags) -> Result<(), MapError>
             // SAFETY: as above.
             unsafe { *e = inter };
             t = new;
+            tables += 1;
         } else if val & HUGE != 0 {
             return Err(MapError::HugePage);
         } else {
@@ -230,7 +233,7 @@ pub fn map_in(root: u64, va: u64, pa: u64, flags: Flags) -> Result<(), MapError>
     if root == current_root() || va >= USER_END {
         cpu::invlpg(va);
     }
-    Ok(())
+    Ok(tables)
 }
 
 /// Unmaps the 4 KiB page at `va` in `root` and returns the frame it pointed to

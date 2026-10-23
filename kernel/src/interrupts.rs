@@ -40,8 +40,11 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
         }
         0..=31 => fatal(f),
         v if v == pic::TIMER_VECTOR as u64 => {
-            TICKS.fetch_add(1, Ordering::Relaxed);
+            let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            // Acknowledge first: the scheduler may switch to another thread
+            // before this handler returns.
             pic::end_of_interrupt(0);
+            crate::sched::tick(now);
         }
         v @ 33..=47 => {
             let irq = (v - pic::IRQ_BASE as u64) as u8;
@@ -61,7 +64,7 @@ fn kill_process(f: &TrapFrame) -> ! {
     let name = EXCEPTION_NAMES[f.vector as usize];
     kprintln!(
         "process {} terminated: {} at rip {:#x}, error code {:#x}",
-        crate::process::current_pid(),
+        crate::sched::current_pid(),
         name,
         f.rip,
         f.error_code
@@ -69,9 +72,9 @@ fn kill_process(f: &TrapFrame) -> ! {
     if f.vector == 14 {
         kprintln!("  faulting address {:#018x}", cpu::read_cr2());
     }
-    // SAFETY: the exception arrived from ring 3, so we run on the process's
-    // kernel stack (TSS.RSP0).
-    unsafe { crate::process::exit_current(osyx_abi::EXCEPTION_EXIT_BASE | f.vector as i32) }
+    // The exception arrived from ring 3, so we run on the thread's kernel
+    // stack (TSS.RSP0) and can end the process from here.
+    crate::process::exit_current(osyx_abi::EXCEPTION_EXIT_BASE | f.vector as i32)
 }
 
 fn fatal(f: &TrapFrame) -> ! {

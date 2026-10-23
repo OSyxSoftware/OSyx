@@ -6,7 +6,7 @@
 //!  3. frame allocator, NX state, removal of the boot identity map
 //!  4. kernel heap, then reclaim of bootloader memory
 //!  5. PIC/PIT timer, interrupts on, framebuffer status screen, self-tests
-//!  6. the init program (`\EFI\OSYX\INIT.ELF`, if present) in ring 3
+//!  6. scheduler (this flow becomes thread "kmain"), init program in ring 3
 
 #![no_std]
 #![no_main]
@@ -18,8 +18,10 @@ mod display;
 mod fixup;
 mod interrupts;
 mod mem;
+mod modules;
 mod process;
 mod qemu;
+mod sched;
 mod selftest;
 mod serial;
 mod sync;
@@ -105,8 +107,12 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     }
     let cpuinfo = cpu::CpuInfo::detect();
     kprintln!("cpu: {}", cpuinfo);
-    // SAFETY: CR0.WP makes read-only pages read-only for ring 0 too.
-    unsafe { core::arch::asm!("mov rax, cr0", "or rax, 0x10000", "mov cr0, rax", out("rax") _) };
+    // SAFETY: CR0.WP makes read-only pages read-only for ring 0 too; SSE is
+    // enabled for user code (the kernel itself is soft-float).
+    unsafe {
+        core::arch::asm!("mov rax, cr0", "or rax, 0x10000", "mov cr0, rax", out("rax") _);
+        cpu::enable_sse();
+    }
 
     log_memory_map(boot.memory_map());
     // SAFETY: own GDT/IDT are loaded; called once.
@@ -116,8 +122,9 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     kprintln!("paging: NX {}, removed {} identity-map PML4 entries", mem::paging::nx_enabled(), removed);
     let heap = mem::heap::init();
     kprintln!("heap: {} KiB mapped at {:#x}", heap >> 10, mem::heap::HEAP_START);
-    // The init image lives in bootloader memory: copy it before reclaiming.
-    let init_image = copy_init_module(&raw);
+    // Boot modules live in bootloader memory: copy them before reclaiming.
+    // SAFETY: BootInfo was validated; nothing has been reclaimed yet.
+    let module_count = unsafe { modules::init(&raw) };
     let reclaimed = mem::reclaim_bootloader_memory(boot.memory_map());
     let (free, total) = mem::frame_stats();
     kprintln!("reclaimed {} KiB of boot loader memory; {} / {} MiB free", reclaimed * 4, free >> 8, total >> 8);
@@ -126,6 +133,8 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     unsafe { arch::pic::init() };
     cpu::enable_interrupts();
     kprintln!("timer: PIT at {} Hz, interrupts enabled", arch::pic::TIMER_HZ);
+    sched::init();
+    kprintln!("scheduler: round robin, {} ms time slice", sched::TIME_SLICE_TICKS * 10);
 
     let mut footer = Line::new();
     let fb = &raw.framebuffer;
@@ -143,14 +152,12 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     display::status("Starting init", osyx_gfx::splash::TEXT, &[line1.as_str()]);
 
     let mut line2 = Line::new();
-    match init_image {
-        Some(image) => {
-            let user_ok = run_init(boot, &image, &mut line2);
-            ok &= user_ok;
-        }
-        None => {
-            let _ = write!(line2, "No init program (\\EFI\\OSYX\\INIT.ELF)");
-        }
+    let init_name = boot.option_value("init").unwrap_or("init");
+    if modules::get(init_name).is_some() {
+        ok &= run_init(boot, init_name, &mut line2);
+    } else {
+        kprintln!("no init program {:?} among {} boot modules", init_name, module_count);
+        let _ = write!(line2, "No init program (\\EFI\\OSYX\\BIN\\{})", init_name);
     }
     let color = if ok { osyx_gfx::splash::OK } else { osyx_gfx::splash::ERROR };
     let title = if ok { "OSyx kernel is running" } else { "OSyx: a check failed" };
@@ -169,14 +176,26 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
 
 /// Runs the init program with `init.args=a,b,c` and checks its exit status
 /// against `init.expect=N` (default 0). Returns whether it matched.
-fn run_init(boot: &BootData, image: &[u8], summary: &mut Line) -> bool {
-    let mut args: Vec<&str> = alloc::vec!["init"];
+fn run_init(boot: &BootData, name: &str, summary: &mut Line) -> bool {
+    let mut args: Vec<&str> = alloc::vec![name];
     if let Some(extra) = boot.option_value("init.args") {
         args.extend(extra.split(',').filter(|a| !a.is_empty()));
     }
     let expect = boot.option_value("init.expect").and_then(parse_int).unwrap_or(0);
-    match process::run("init", image, &args) {
-        Ok(status) => {
+    let result = process::spawn(process::KERNEL_PID, name, &args)
+        .map_err(|e| alloc::format!("{e}"))
+        .and_then(|pid| process::wait(process::KERNEL_PID, pid).map_err(|e| alloc::format!("{e:?}")));
+    match result {
+        Ok((_, status)) => {
+            let st = sched::stats();
+            kprintln!(
+                "scheduler: {} context switches, {} threads alive ({} ready), {} processes left",
+                st.switches,
+                st.threads,
+                st.ready,
+                process::count()
+            );
+            sched::dump();
             let ok = status == expect;
             kprintln!(
                 "init: exit status {:#x}, expected {:#x}: {}",
@@ -204,27 +223,14 @@ fn parse_int(s: &str) -> Option<i32> {
     }
 }
 
-fn copy_init_module(raw: &BootInfo) -> Option<Vec<u8>> {
-    if raw.flags & osyx_bootinfo::FLAG_INIT_MODULE == 0 || raw.init_module == 0 {
-        return None;
-    }
-    let size = raw.init_module_size as usize;
-    let mut v = alloc::vec![0u8; size];
-    // SAFETY: the loader placed `size` bytes at this HHDM address in
-    // bootloader-reclaimable memory, which has not been reclaimed yet.
-    unsafe { core::ptr::copy_nonoverlapping(raw.init_module as *const u8, v.as_mut_ptr(), size) };
-    kprintln!("init module: {} bytes", size);
-    Some(v)
-}
-
+/// kmain's final loop: animates the status screen while the idle thread
+/// halts the CPU in between.
 fn idle(line1: Line, line2: Line, ok: bool) -> ! {
     let mut last = 0;
     loop {
-        cpu::enable_and_halt();
+        sched::sleep_ticks(4);
         let t = interrupts::ticks();
-        if t / 4 != last / 4 {
-            display::spin((t * 4) as u32);
-        }
+        display::spin((t * 4) as u32);
         if t / 100 != last / 100 {
             let mut up = Line::new();
             let _ = write!(up, "Uptime {} s", t / 100);

@@ -10,7 +10,7 @@
 use crate::arch::cpu;
 use crate::arch::gdt::{KERNEL_CS, USER_DS};
 use crate::fixup::{copy_from_user, copy_to_user};
-use crate::{interrupts, mem, process};
+use crate::{interrupts, mem, process, sched};
 use core::arch::global_asm;
 use osyx_abi::{nr, Errno, SystemInfo};
 
@@ -119,15 +119,24 @@ pub unsafe fn set_kernel_stack(top: u64) {
 #[no_mangle]
 extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
     let r = match f.rax {
-        nr::EXIT => {
-            // SAFETY: we are on the process's kernel stack inside a system call.
-            unsafe { process::exit_current(f.rdi as i32) }
-        }
+        nr::EXIT => process::exit_current(f.rdi as i32),
         nr::WRITE => sys_write(f.rdi, f.rsi, f.rdx),
         nr::MAP => process::map_anonymous(f.rdi, f.rsi),
         nr::UNMAP => process::unmap_region(f.rdi, f.rsi).map(|_| 0),
         nr::SYSINFO => sys_sysinfo(f.rdi),
         nr::CLOCK => sys_clock(f.rdi),
+        nr::SPAWN => sys_spawn(f.rdi, f.rsi, f.rdx, f.r10),
+        nr::WAIT => sys_wait(f.rdi, f.rsi),
+        nr::YIELD => {
+            sched::yield_now();
+            Ok(0)
+        }
+        nr::SLEEP => {
+            // Round up to whole 10 ms ticks; at least one tick for ns > 0.
+            let tick_ns = 1_000_000_000 / crate::arch::pic::TIMER_HZ as u64;
+            sched::sleep_ticks(f.rdi.div_ceil(tick_ns));
+            Ok(0)
+        }
         _ => Err(Errno::NotSupported),
     };
     osyx_abi::encode(r)
@@ -162,7 +171,7 @@ fn sys_sysinfo(out: u64) -> Result<u64, Errno> {
         total_memory: total * mem::PAGE_SIZE,
         free_memory: free * mem::PAGE_SIZE,
         uptime_ns: interrupts::uptime_ms() * 1_000_000,
-        pid: process::current_pid(),
+        pid: sched::current_pid(),
         kernel_version: [0; 16],
     };
     let v = crate::VERSION.as_bytes();
@@ -181,4 +190,42 @@ fn sys_clock(id: u64) -> Result<u64, Errno> {
         osyx_abi::CLOCK_MONOTONIC => Ok(interrupts::uptime_ms() * 1_000_000),
         _ => Err(Errno::InvalidArgument),
     }
+}
+
+fn sys_spawn(name_ptr: u64, name_len: u64, args_ptr: u64, args_len: u64) -> Result<u64, Errno> {
+    if name_len == 0 || name_len > osyx_abi::MAX_NAME as u64 || args_len > osyx_abi::MAX_SPAWN_ARGS as u64 {
+        return Err(Errno::InvalidArgument);
+    }
+    let mut name_buf = [0u8; osyx_abi::MAX_NAME];
+    copy_from_user(&mut name_buf[..name_len as usize], name_ptr)?;
+    let name = core::str::from_utf8(&name_buf[..name_len as usize]).map_err(|_| Errno::InvalidArgument)?;
+    if !name.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(Errno::InvalidArgument);
+    }
+    let mut block = alloc::vec![0u8; args_len as usize];
+    copy_from_user(&mut block, args_ptr)?;
+    // The block is a sequence of NUL-terminated UTF-8 strings.
+    if block.last().is_some_and(|&b| b != 0) {
+        return Err(Errno::InvalidArgument);
+    }
+    let mut argv: alloc::vec::Vec<&str> = alloc::vec![name];
+    if !block.is_empty() {
+        for part in block[..block.len() - 1].split(|&b| b == 0) {
+            argv.push(core::str::from_utf8(part).map_err(|_| Errno::InvalidArgument)?);
+        }
+    }
+    process::spawn(sched::current_pid(), name, &argv).map_err(|e| e.errno())
+}
+
+fn sys_wait(pid: u64, status_ptr: u64) -> Result<u64, Errno> {
+    // Validate the output pointer before reaping, so a bad pointer cannot
+    // lose the child's status.
+    if status_ptr != 0 {
+        copy_to_user(status_ptr, &0i32.to_le_bytes())?;
+    }
+    let (child, status) = process::wait(sched::current_pid(), pid)?;
+    if status_ptr != 0 {
+        copy_to_user(status_ptr, &status.to_le_bytes())?;
+    }
+    Ok(child)
 }

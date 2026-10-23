@@ -19,20 +19,24 @@ ESP as a read-only virtio FAT disk (`fat:build/esp`), COM1 to a log file and
 |---|---|
 | host unit tests | `cargo test` for abi, bootinfo, gfx, elf, mm, os-sys, os-std |
 | clippy | `-D warnings` for host crates, loader (UEFI), kernel and user crates |
-| QEMU boot + kernel self-tests | boot stages, 11 in-kernel tests, exit 33 |
-| ring-3 init checks | `Hello from OSyx userspace!`, 13 user checks, exit 0, no frame leak |
+| QEMU boot + kernel self-tests | boot stages, 14 in-kernel tests (incl. preemption, sleep/join, FPU), exit 33 |
+| ring-3 init checks | 25 user checks: OSyx Std, syscall validation, spawn/wait, zombies, orphans, sleep, FPU |
+| process teardown | every process returns exactly its frames; 0 processes and 2 threads left |
+| preemptive scheduling | three never-yielding children all start before the first finishes; 3×300 ms in < 650 ms |
 | user page fault | process killed with `#PF`, error code 0x4, kernel survives |
 | user panic | panic message printed, status 101 |
 | user exit code | status 42 propagates |
-| boot without init | kernel runs without `INIT.ELF` |
+| boot without programs | kernel runs without `\EFI\OSYX\BIN` |
 | exception diagnostics | kernel `#PF`, `#GP`, `#UD`, `#DE`: decoded report + panic exit 37 |
 | invalid kernel | ELFCLASS32 kernel rejected with on-screen error |
 | screenshots | loader error screen and running kernel screen via QMP `screendump` |
 
 ## Last recorded result
 
-All 15 tests passed (54 host unit tests) on Windows 11 build 26300 with
-Rust 1.99.1, QEMU 11.1.2. The suite takes about 2–3 minutes.
+All 17 tests passed (58 host unit tests) on Windows 11 build 26300 with
+Rust 1.99.1, QEMU 11.1.2; the main boot was repeated 6 times with identical
+results (QEMU TCG is close to deterministic here, so this is not a stress
+test of the scheduler). The suite takes about 3 minutes.
 
 ## Not covered yet
 

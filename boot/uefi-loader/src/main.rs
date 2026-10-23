@@ -24,8 +24,8 @@ use core::ptr::null_mut;
 
 use efi::{memtype, BootServices, File, Handle, Status, SystemTable};
 use osyx_bootinfo::{
-    BootInfo, KernelImageInfo, MemoryDescriptor, MemoryKind, MemoryMapInfo, BOOTINFO_MAGIC, BOOTINFO_VERSION,
-    FLAG_ACPI, FLAG_FRAMEBUFFER, FLAG_INIT_MODULE,
+    BootInfo, KernelImageInfo, MemoryDescriptor, MemoryKind, MemoryMapInfo, ModuleInfo, BOOTINFO_MAGIC,
+    BOOTINFO_VERSION, FLAG_ACPI, FLAG_FRAMEBUFFER, FLAG_MODULES, MAX_MODULES,
 };
 use osyx_elf::{KernelImage, PAGE_SIZE};
 use paging::{TableBuilder, HHDM_OFFSET};
@@ -34,8 +34,8 @@ use serial::StrBuf;
 
 const KERNEL_PATH: &str = "\\EFI\\OSYX\\KERNEL.ELF";
 const CMDLINE_PATH: &str = "\\EFI\\OSYX\\CMDLINE.TXT";
-const INIT_PATH: &str = "\\EFI\\OSYX\\INIT.ELF";
-const INIT_MAX: u64 = 64 << 20;
+const BIN_PATH: &str = "\\EFI\\OSYX\\BIN";
+const MODULE_MAX: u64 = 64 << 20;
 const CMDLINE_MAX: usize = 4096;
 const STACK_PAGES: u64 = 32; // 128 KiB boot stack for the kernel
 const STAGES: u32 = 6;
@@ -179,7 +179,7 @@ fn boot(
         );
     }
     log!("kernel loaded at phys {:#x}, entry {:#x}", kphys, kernel.entry());
-    let init = load_init_module(bs, root)?;
+    let (module_table, module_count) = load_modules(bs, root)?;
     stage(screen, 4, "Preparing memory");
 
     // ---- Stage 5: page tables, stack, BootInfo, memory map ---------------
@@ -219,8 +219,8 @@ fn boot(
     if rsdp != 0 {
         flags |= FLAG_ACPI;
     }
-    if init.is_some() {
-        flags |= FLAG_INIT_MODULE;
+    if module_count > 0 {
+        flags |= FLAG_MODULES;
     }
     let info = BootInfo {
         magic: BOOTINFO_MAGIC,
@@ -252,8 +252,8 @@ fn boot(
         cmdline_len: cmd.len() as u64,
         hhdm_offset: HHDM_OFFSET,
         hhdm_size,
-        init_module: init.map_or(0, |(phys, _)| HHDM_OFFSET + phys),
-        init_module_size: init.map_or(0, |(_, size)| size),
+        modules: if module_count > 0 { HHDM_OFFSET + module_table } else { 0 },
+        module_count,
     };
     let info_ptr = region as *mut BootInfo;
     // SAFETY: region is 8-byte (page) aligned and large enough.
@@ -355,30 +355,93 @@ fn read_cmdline(bs: &BootServices, root: *mut File) -> Cmdline {
     c
 }
 
-/// Loads the optional initial user program into bootloader-reclaimable pages.
-/// Its contents are validated by the kernel, not here. Returns (phys, size).
-fn load_init_module(bs: &BootServices, root: *mut File) -> Result<Option<(u64, u64)>, BootError> {
-    let Ok(f) = open_file(root, INIT_PATH) else {
-        log!("no {INIT_PATH}; kernel starts without a user program");
-        return Ok(None);
+/// Loads every regular file in `\EFI\OSYX\BIN\` into bootloader-reclaimable
+/// pages and records it in a module table (contents are validated by the
+/// kernel, not here). Returns (table physical address, module count).
+fn load_modules(bs: &BootServices, root: *mut File) -> Result<(u64, u64), BootError> {
+    let Ok(dir) = open_file(root, BIN_PATH) else {
+        log!("no {BIN_PATH} directory; kernel starts without user programs");
+        return Ok((0, 0));
     };
-    let size = match file_size(f) {
-        Ok(n) if n > 0 && n <= INIT_MAX => n,
-        Ok(n) => fail!(Status::LOAD_ERROR, "Init program is invalid", "{} has implausible size {} bytes", INIT_PATH, n),
-        Err(st) => fail!(st, "Init program not readable", "cannot query size of {} ({})", INIT_PATH, st.name()),
+    let table = alloc_pages(bs, memtype::OSYX_BOOTINFO, 1)?;
+    // SAFETY: fresh page; MAX_MODULES entries of 48 bytes fit in 4 KiB.
+    let modules = unsafe {
+        core::ptr::write_bytes(table as *mut u8, 0, PAGE_SIZE as usize);
+        core::slice::from_raw_parts_mut(table as *mut ModuleInfo, MAX_MODULES)
     };
-    let phys = alloc_pages(bs, memtype::OSYX_BOOTINFO, size.div_ceil(PAGE_SIZE))?;
-    // SAFETY: fresh allocation of at least `size` bytes, identity mapped.
-    let buf = unsafe { core::slice::from_raw_parts_mut(phys as *mut u8, size as usize) };
-    if let Err(st) = read_exact(f, buf) {
-        fail!(st, "Init program not readable", "read of {} failed ({})", INIT_PATH, st.name());
+    let mut count = 0;
+    loop {
+        // One EFI_FILE_INFO per Read on a directory; 1 KiB fits any name we accept.
+        let mut entry = [0u64; 128];
+        let mut size = core::mem::size_of_val(&entry);
+        // SAFETY: `dir` is an open directory handle; buffer is `size` bytes.
+        let st = unsafe { ((*dir).read)(dir, &mut size, entry.as_mut_ptr() as *mut c_void) };
+        if st.is_error() {
+            fail!(st, "Boot modules not readable", "reading {} failed ({})", BIN_PATH, st.name());
+        }
+        if size == 0 {
+            break; // end of directory
+        }
+        let header_len = core::mem::size_of::<efi::FileInfoHeader>();
+        // SAFETY: the firmware wrote `size` bytes starting with the fixed header.
+        let attribute = unsafe { (*(entry.as_ptr() as *const efi::FileInfoHeader)).attribute };
+        if attribute & efi::FILE_DIRECTORY != 0 || size <= header_len {
+            continue;
+        }
+        // SAFETY: the UCS-2 name follows the header inside the `size` bytes.
+        let name16 = unsafe {
+            core::slice::from_raw_parts(
+                (entry.as_ptr() as *const u8).add(header_len) as *const u16,
+                (size - header_len) / 2,
+            )
+        };
+        let mut name = [0u8; 32];
+        let mut len = 0;
+        let mut valid = true;
+        for &ch in name16.iter().take_while(|&&c| c != 0) {
+            if len == name.len() - 1 || !(0x21..0x7F).contains(&ch) || ch == b'\\' as u16 {
+                valid = false;
+                break;
+            }
+            name[len] = (ch as u8).to_ascii_lowercase();
+            len += 1;
+        }
+        let name_str = core::str::from_utf8(&name[..len]).unwrap_or("");
+        if !valid || len == 0 {
+            log!("skipping module with unsupported file name");
+            continue;
+        }
+        if count == MAX_MODULES {
+            log!("skipping module {name_str}: more than {MAX_MODULES} modules");
+            continue;
+        }
+        let f = match open_file(dir, name_str) {
+            Ok(f) => f,
+            Err(st) => fail!(st, "Boot modules not readable", "cannot open {}\\{} ({})", BIN_PATH, name_str, st.name()),
+        };
+        let fsize = match file_size(f) {
+            Ok(n) if n > 0 && n <= MODULE_MAX => n,
+            Ok(n) => {
+                fail!(Status::LOAD_ERROR, "Boot module is invalid", "{} has implausible size {} bytes", name_str, n)
+            }
+            Err(st) => fail!(st, "Boot modules not readable", "cannot query size of {} ({})", name_str, st.name()),
+        };
+        let phys = alloc_pages(bs, memtype::OSYX_BOOTINFO, fsize.div_ceil(PAGE_SIZE))?;
+        // SAFETY: fresh allocation of at least `fsize` bytes, identity mapped.
+        let buf = unsafe { core::slice::from_raw_parts_mut(phys as *mut u8, fsize as usize) };
+        if let Err(st) = read_exact(f, buf) {
+            fail!(st, "Boot modules not readable", "read of {} failed ({})", name_str, st.name());
+        }
+        // SAFETY: handle opened above.
+        unsafe { ((*f).close)(f) };
+        log!("module {}: {} bytes at phys {:#x}", name_str, fsize, phys);
+        modules[count] = ModuleInfo { name, addr: HHDM_OFFSET + phys, size: fsize };
+        count += 1;
     }
-    // SAFETY: handle opened above.
-    unsafe { ((*f).close)(f) };
-    log!("init module: {} bytes at phys {:#x}", size, phys);
-    Ok(Some((phys, size)))
+    // SAFETY: directory handle opened above.
+    unsafe { ((*dir).close)(dir) };
+    Ok((table, count as u64))
 }
-
 fn open_boot_volume(bs: &BootServices, image: Handle) -> Result<*mut File, BootError> {
     let mut loaded: *mut efi::LoadedImage = null_mut();
     // SAFETY: HandleProtocol on our own image handle with a typed out pointer.

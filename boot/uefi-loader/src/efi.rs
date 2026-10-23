@@ -215,6 +215,7 @@ pub struct SimpleFileSystem {
 }
 
 pub const FILE_MODE_READ: u64 = 1;
+pub const FILE_DIRECTORY: u64 = 0x10;
 
 #[repr(C)]
 pub struct File {

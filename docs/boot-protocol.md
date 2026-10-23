@@ -1,7 +1,7 @@
-# Boot protocol (BootInfo v2)
+# Boot protocol (BootInfo v3)
 
 Defined in `shared/bootinfo` (`repr(C)`, layout checked by unit tests:
-`BootInfo` is 168 bytes, `MemoryDescriptor` 24 bytes).
+`BootInfo` is 168 bytes, `MemoryDescriptor` 24 bytes, `ModuleInfo` 48 bytes).
 
 ## Boot volume layout (EFI System Partition)
 
@@ -9,7 +9,7 @@ Defined in `shared/bootinfo` (`repr(C)`, layout checked by unit tests:
 |---|---|---|
 | `\EFI\BOOT\BOOTX64.EFI` | yes | OSyx Boot Manager |
 | `\EFI\OSYX\KERNEL.ELF` | yes | kernel, static ELF64 `ET_EXEC` |
-| `\EFI\OSYX\INIT.ELF` | no | first user program |
+| `\EFI\OSYX\BIN\*` | no | user programs (boot modules); `init` is started first |
 | `\EFI\OSYX\CMDLINE.TXT` | no | command line (≤ 4096 bytes) |
 
 ## Boot manager stages
@@ -19,7 +19,7 @@ The progress bar advances only when a stage has completed:
 1. firmware services, command line, GOP mode selection, splash
 2. kernel located
 3. kernel read
-4. kernel validated (`osyx-elf`, kernel policy) and segments loaded; init module read
+4. kernel validated (`osyx-elf`, kernel policy) and segments loaded; `BIN` files read
 5. page tables, stack, BootInfo, memory map prepared
 6. `ExitBootServices`, final frame drawn, jump to kernel
 
@@ -45,23 +45,23 @@ COM1, waits up to 30 s for a key, then returns the error to the firmware.
 
 | Field | Meaning |
 |---|---|
-| `magic`, `version`, `size` | `"OSYXBOOT"`, 2, `size_of::<BootInfo>()` (checked by `validate()`) |
+| `magic`, `version`, `size` | `"OSYXBOOT"`, 3, `size_of::<BootInfo>()` (checked by `validate()`) |
 | `bootloader_version` | `major << 16 \| minor << 8 \| patch` |
-| `flags` | `FLAG_FRAMEBUFFER`, `FLAG_ACPI`, `FLAG_INIT_MODULE` |
+| `flags` | `FLAG_FRAMEBUFFER`, `FLAG_ACPI`, `FLAG_MODULES` |
 | `framebuffer` | physical base, size, width, height, stride (pixels), RGB/BGR |
 | `memory_map` | HHDM pointer to sorted, merged, non-overlapping descriptors |
 | `kernel` | physical base/size, virtual base, entry point |
 | `acpi_rsdp` | physical RSDP address (ACPI 2.0 preferred) |
 | `cmdline_ptr/len` | HHDM pointer to UTF-8 command line |
 | `hhdm_offset/size` | direct map description |
-| `init_module/size` | HHDM pointer to the raw `INIT.ELF` bytes (unvalidated) |
+| `modules/module_count` | HHDM pointer to up to 32 `ModuleInfo { name[32], addr, size }`: one per regular file in `\EFI\OSYX\BIN\` (lower-case ASCII names, contents unvalidated) |
 
 ## Memory ownership
 
 | `MemoryKind` | Owner after hand-off |
 |---|---|
 | `Usable` | free RAM (includes former boot-services memory) |
-| `BootloaderReclaimable` | BootInfo, memory map, command line, init module, loader image and buffers; the kernel copies what it needs, then frees it |
+| `BootloaderReclaimable` | BootInfo, memory map, command line, boot modules, loader image and buffers; the kernel copies what it needs, then frees it |
 | `KernelImage` | kernel segments |
 | `KernelData` | boot page tables and boot stack (still in use) |
 | `AcpiReclaimable`, `AcpiNvs`, `Mmio`, `Reserved`, `Unusable` | never allocated |
@@ -72,7 +72,8 @@ COM1, waits up to 30 s for a key, then returns the error to the firmware.
 |---|---|
 | `boot.fast` | skip boot animations |
 | `boot.mode=WxH` | preferred GOP resolution (default: largest ≤ 1920×1080) |
-| `init.args=a,b` | extra arguments for init (`argv[0]` is `init`) |
+| `init=NAME` | boot module to start first (default `init`) |
+| `init.args=a,b` | extra arguments for init (`argv[0]` is the program name) |
 | `init.expect=N` | expected init exit status for `test.exit` (default 0) |
 | `test.exit` | leave QEMU after boot checks (status 33 ok, 35 failure, 37 panic) |
 | `test.fault=pf\|gp\|ud\|de` | trigger a kernel CPU exception to test diagnostics |

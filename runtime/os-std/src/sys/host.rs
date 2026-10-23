@@ -35,3 +35,19 @@ pub fn sysinfo() -> Result<SystemInfo> {
 pub fn args() -> Vec<String> {
     std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect()
 }
+
+pub fn spawn(_name: &str, _args: &[u8]) -> Result<u64> {
+    Err(Error::unsupported("spawning OSyx boot modules is only possible on OSyx"))
+}
+
+pub fn wait(_pid: u64) -> Result<(u64, i32)> {
+    Err(Error::unsupported("waiting for OSyx processes is only possible on OSyx"))
+}
+
+pub fn sleep_ns(ns: u64) {
+    std::thread::sleep(std::time::Duration::from_nanos(ns))
+}
+
+pub fn yield_now() {
+    std::thread::yield_now()
+}

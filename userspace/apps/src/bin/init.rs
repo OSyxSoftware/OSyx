@@ -1,5 +1,7 @@
-//! First OSyx user program. Runs as `\EFI\OSYX\INIT.ELF` in ring 3 and checks
-//! OSyx Std plus the kernel's system call validation from the user side.
+//! The init program (`\EFI\OSYX\BIN\init`). Runs in ring 3 and checks OSyx
+//! Std, the kernel's system call validation, processes (spawn / wait /
+//! zombies / orphans) and the preemptive scheduler from the user side,
+//! using `worker` as the child program.
 //!
 //! Arguments (kernel command line `init.args=...`):
 //! * none:          run the checks; exit status = number of failed checks
@@ -10,10 +12,15 @@
 #![no_std]
 #![no_main]
 
+use os_std::error::ErrorKind;
 use os_std::os::raw::{self, Errno, PROT_EXEC, PROT_READ, PROT_WRITE};
 use os_std::prelude::*;
-use os_std::time::Instant;
-use os_std::{env, os, process};
+use os_std::process::{Child, Command};
+use os_std::time::{Duration, Instant};
+use os_std::{env, os, process, thread};
+
+#[path = "../fpu.rs"]
+mod fpu;
 
 os_std::entry!(main);
 
@@ -72,7 +79,7 @@ fn main() -> i32 {
                 info.total_memory >> 20,
                 info.page_size
             );
-            info.abi_version == 1 && info.page_size == 4096 && info.free_memory <= info.total_memory
+            info.abi_version == 2 && info.page_size == 4096 && info.free_memory <= info.total_memory
         }
         Err(e) => {
             println!("sysinfo failed: {e}");
@@ -108,8 +115,92 @@ fn main() -> i32 {
         ok && unsafe { raw::unmap(p, 3 * 4096) }.is_ok() && unsafe { raw::unmap(p, 3 * 4096) }.is_err()
     });
 
+    process_checks(&mut t);
+
     println!("user checks: {} passed, {} failed", t.passed, t.failed);
     t.failed as i32
+}
+
+fn worker(args: &[&str]) -> Command {
+    let mut c = Command::new("worker");
+    c.args(args);
+    c
+}
+
+fn process_checks(t: &mut Tests) {
+    t.check(
+        "spawn + wait: child exit code",
+        || matches!(worker(&["exit", "7"]).status(), Ok(s) if s.code() == Some(7)),
+    );
+    t.check("spawn: unknown program is NotFound", || {
+        Command::new("no-such-program").spawn().map(|c| c.id()).map_err(|e| e.kind()) == Err(ErrorKind::NotFound)
+    });
+    t.check("wait: no such child", || raw::wait_raw(9999, 0) == Err(Errno::NoChild));
+    t.check("wait: bad status pointer keeps the child waitable", || {
+        let Ok(child) = worker(&["exit", "5"]).spawn() else { return false };
+        let bad = raw::wait_raw(child.id(), 0xFFFF_8000_0000_0000) == Err(Errno::Fault);
+        bad && matches!(child.wait(), Ok(s) if s.code() == Some(5))
+    });
+    t.check("wait_any collects every child once", || {
+        let a = worker(&["exit", "11"]).spawn();
+        let b = worker(&["exit", "12"]).spawn();
+        if a.is_err() || b.is_err() {
+            return false;
+        }
+        let mut codes = Vec::new();
+        for _ in 0..2 {
+            match process::wait_any() {
+                Ok((_, s)) => codes.push(s.code().unwrap_or(-1)),
+                Err(_) => return false,
+            }
+        }
+        codes.sort();
+        codes == [11, 12] && process::wait_any().map_err(|e| e.kind()).err() == Some(ErrorKind::NoChild)
+    });
+    t.check("nested spawn (grandchild)", || matches!(worker(&["child", "9"]).status(), Ok(s) if s.code() == Some(9)));
+    t.check(
+        "child CPU exception is reported",
+        || matches!(worker(&["fault"]).status(), Ok(s) if s.exception() == Some(14) && s.code().is_none()),
+    );
+    t.check("sleep blocks for the requested time", || {
+        let start = Instant::now();
+        thread::sleep(Duration::from_millis(50));
+        thread::yield_now();
+        start.elapsed() >= Duration::from_millis(50)
+    });
+    t.check("preemption: 3 busy children run concurrently", || {
+        // Each child spins 300 ms without yielding. Run one after another
+        // they would need ~900 ms; preempted round robin, ~300 ms.
+        let start = Instant::now();
+        let kids: Vec<Child> = (0..3).filter_map(|_| worker(&["spin", "300"]).spawn().ok()).collect();
+        let n = kids.len();
+        let all_ok = kids.into_iter().all(|k| matches!(k.wait(), Ok(s) if s.success()));
+        let took = start.elapsed();
+        println!("3 x 300 ms spinners finished in {} ms", took.as_millis());
+        n == 3 && all_ok && took >= Duration::from_millis(300) && took < Duration::from_millis(650)
+    });
+    t.check("FPU/SSE registers survive preemption", || {
+        let mut kids_ok = false;
+        // init keeps its own pattern in xmm0-15 while two children spin with
+        // different patterns in theirs.
+        let mine = fpu::preserved_across(0xAAAA_0000_0000_0000, || {
+            let a = worker(&["fpu", "1", "200"]).spawn();
+            let b = worker(&["fpu", "2", "200"]).spawn();
+            if let (Ok(a), Ok(b)) = (a, b) {
+                let sa = a.wait();
+                let sb = b.wait();
+                kids_ok = matches!(sa, Ok(s) if s.success()) && matches!(sb, Ok(s) if s.success());
+            }
+        });
+        mine && kids_ok
+    });
+    t.check("orphaned grandchild is adopted by the kernel", || {
+        let ok = matches!(worker(&["orphan"]).status(), Ok(s) if s.success());
+        // Give the orphan (sleeping 100 ms) time to exit before init does.
+        thread::sleep(Duration::from_millis(200));
+        ok && process::wait_any().map_err(|e| e.kind()).err() == Some(ErrorKind::NoChild)
+    });
+    t.check("process id from sysinfo", || process::id().is_ok_and(|p| p >= 1));
 }
 
 #[derive(Default)]

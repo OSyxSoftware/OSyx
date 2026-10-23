@@ -13,6 +13,7 @@ pub enum ErrorKind {
     Unsupported,
     PermissionDenied,
     WriteZero,
+    NoChild,
     Other,
 }
 
@@ -26,6 +27,7 @@ impl ErrorKind {
             ErrorKind::Unsupported => "unsupported",
             ErrorKind::PermissionDenied => "permission denied",
             ErrorKind::WriteZero => "write returned zero bytes",
+            ErrorKind::NoChild => "no child process",
             ErrorKind::Other => "other error",
         }
     }
@@ -73,6 +75,8 @@ impl From<Errno> for Error {
             Errno::BadHandle => ErrorKind::NotFound,
             Errno::NotSupported => ErrorKind::Unsupported,
             Errno::PermissionDenied => ErrorKind::PermissionDenied,
+            Errno::NotFound => ErrorKind::NotFound,
+            Errno::NoChild => ErrorKind::NoChild,
         };
         Error { kind, errno: Some(e), message: None }
     }

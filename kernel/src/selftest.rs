@@ -6,7 +6,7 @@ use crate::arch::cpu;
 use crate::fixup::{copy_from_user, copy_to_user, probe_read_u8, probe_write_u8};
 use crate::mem::paging::{self, Flags, MapError};
 use crate::mem::{self, heap, phys_to_virt, PAGE_SIZE};
-use crate::{interrupts, kprintln, BootData};
+use crate::{interrupts, kprintln, sched, BootData};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -36,7 +36,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 11] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 14] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -48,6 +48,9 @@ pub fn run(boot: &BootData) -> Summary {
         ("timer interrupts", &timer),
         ("user copy validation", &user_copy),
         ("address space lifecycle", &address_space),
+        ("preemptive kernel threads", &preemption),
+        ("sleep and join", &sleep_join),
+        ("FPU/SSE state per thread", &fpu_state),
     ];
     let mut s = Summary { passed: 0, failed: 0 };
     for (name, t) in tests.iter() {
@@ -264,5 +267,106 @@ fn address_space() -> TestResult {
     ensure!(freed == 5, "expected 5 frames released (root, PDPT, PD, PT, page), got {freed}");
     let (free_after, _) = mem::frame_stats();
     ensure!(free_after == free_before, "leak: {free_before} free before, {free_after} after");
+    Ok(())
+}
+
+static SPIN_STOP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SPIN_COUNT: [core::sync::atomic::AtomicU64; 2] =
+    [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)];
+
+/// Busy loop that never yields: it only stops running when preempted.
+fn spinner(slot: u64, _: u64) {
+    use core::sync::atomic::Ordering;
+    while !SPIN_STOP.load(Ordering::Relaxed) {
+        SPIN_COUNT[slot as usize].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn preemption() -> TestResult {
+    use core::sync::atomic::Ordering;
+    SPIN_STOP.store(false, Ordering::Relaxed);
+    let before = sched::stats().switches;
+    let a = sched::spawn_kernel("spin-a", spinner, 0, 0);
+    let b = sched::spawn_kernel("spin-b", spinner, 1, 0);
+    // kmain sleeps; the spinners never yield, so kmain only runs again (and
+    // both spinners only make progress) if the timer preempts them.
+    sched::sleep_ticks(20);
+    let (ca, cb) = (SPIN_COUNT[0].load(Ordering::Relaxed), SPIN_COUNT[1].load(Ordering::Relaxed));
+    SPIN_STOP.store(true, Ordering::Relaxed);
+    sched::join(a);
+    sched::join(b);
+    let switches = sched::stats().switches - before;
+    kprintln!("[test]   spinners counted {ca} and {cb}, {switches} context switches");
+    ensure!(ca > 0 && cb > 0, "a spinner never ran (a={ca}, b={cb})");
+    ensure!(switches >= 4, "only {switches} context switches");
+    Ok(())
+}
+
+static SLEPT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn sleeper(ticks: u64, _: u64) {
+    let start = interrupts::ticks();
+    sched::sleep_ticks(ticks);
+    SLEPT.store(interrupts::ticks() - start, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn sleep_join() -> TestResult {
+    use core::sync::atomic::Ordering;
+    SLEPT.store(0, Ordering::Relaxed);
+    let start = interrupts::ticks();
+    let t = sched::spawn_kernel("sleeper", sleeper, 5, 0);
+    sched::join(t);
+    let slept = SLEPT.load(Ordering::Relaxed);
+    ensure!(slept >= 5, "sleeper woke after {slept} ticks, expected >= 5");
+    ensure!(interrupts::ticks() - start >= 5, "join returned before the thread finished");
+    let threads = sched::stats().threads;
+    sched::join(t); // joining a finished thread returns at once
+    ensure!(sched::stats().threads <= threads, "dead thread not reaped");
+    Ok(())
+}
+
+static FPU_OK: [core::sync::atomic::AtomicBool; 2] =
+    [core::sync::atomic::AtomicBool::new(false), core::sync::atomic::AtomicBool::new(false)];
+
+/// Loads xmm0..xmm3 with a per-thread pattern, spins across several time
+/// slices (other threads run and load their own patterns), then checks the
+/// registers. The kernel is soft-float, so nothing else touches XMM here.
+fn fpu_worker(slot: u64, seed: u64) {
+    use core::sync::atomic::Ordering;
+    let mut out = [0u64; 4];
+    // SAFETY: SSE is enabled; the asm only uses xmm0-3 and the listed GPRs.
+    unsafe {
+        core::arch::asm!(
+            "movq xmm0, {s}", "add {s}, 1", "movq xmm1, {s}", "add {s}, 1",
+            "movq xmm2, {s}", "add {s}, 1", "movq xmm3, {s}",
+            s = inout(reg) seed => _,
+        );
+    }
+    let end = interrupts::ticks() + 8;
+    while interrupts::ticks() < end {
+        core::hint::spin_loop();
+    }
+    // SAFETY: as above; writes four u64 into `out`.
+    unsafe {
+        core::arch::asm!(
+            "movq [{o}], xmm0", "movq [{o} + 8], xmm1", "movq [{o} + 16], xmm2", "movq [{o} + 24], xmm3",
+            o = in(reg) out.as_mut_ptr(),
+        );
+    }
+    let ok = out == [seed, seed + 1, seed + 2, seed + 3];
+    if !ok {
+        kprintln!("[test]   fpu worker {slot}: expected {:#x}.., got {:x?}", seed, out);
+    }
+    FPU_OK[slot as usize].store(ok, Ordering::Relaxed);
+}
+
+fn fpu_state() -> TestResult {
+    use core::sync::atomic::Ordering;
+    let a = sched::spawn_kernel("fpu-a", fpu_worker, 0, 0x1111_0000_0000_0000);
+    let b = sched::spawn_kernel("fpu-b", fpu_worker, 1, 0x2222_0000_0000_0000);
+    sched::join(a);
+    sched::join(b);
+    ensure!(FPU_OK[0].load(Ordering::Relaxed), "thread A lost its XMM registers");
+    ensure!(FPU_OK[1].load(Ordering::Relaxed), "thread B lost its XMM registers");
     Ok(())
 }

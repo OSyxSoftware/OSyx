@@ -24,14 +24,16 @@
 /// "OSYXBOOT" in ASCII, little endian.
 pub const BOOTINFO_MAGIC: u64 = 0x544F_4F42_5859_534F;
 /// Bumped on any layout change of the structures in this crate.
-pub const BOOTINFO_VERSION: u32 = 2;
+pub const BOOTINFO_VERSION: u32 = 3;
 
 /// Boot flag: the framebuffer described in [`BootInfo::framebuffer`] is valid.
 pub const FLAG_FRAMEBUFFER: u32 = 1 << 0;
 /// Boot flag: `acpi_rsdp` holds a valid physical address.
 pub const FLAG_ACPI: u32 = 1 << 1;
-/// Boot flag: `init_module` describes a loaded user program image.
-pub const FLAG_INIT_MODULE: u32 = 1 << 2;
+/// Boot flag: `modules` describes loaded boot modules (user programs).
+pub const FLAG_MODULES: u32 = 1 << 2;
+/// Maximum number of boot modules the loader passes.
+pub const MAX_MODULES: usize = 32;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,10 +149,29 @@ pub struct BootInfo {
     pub hhdm_offset: u64,
     /// Exclusive upper bound of the physical range covered by the HHDM.
     pub hhdm_size: u64,
-    /// HHDM address of the initial user program (`\EFI\OSYX\INIT.ELF`), or 0.
-    /// Lives in bootloader-reclaimable memory: copy it before reclaiming.
-    pub init_module: u64,
-    pub init_module_size: u64,
+    /// HHDM address of an array of `module_count` [`ModuleInfo`] describing
+    /// the files of `\EFI\OSYX\BIN\`. The table and the file contents live in
+    /// bootloader-reclaimable memory: copy them before reclaiming.
+    pub modules: u64,
+    pub module_count: u64,
+}
+
+/// One boot module: a file the loader read from `\EFI\OSYX\BIN\`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModuleInfo {
+    /// Lower-case ASCII file name, NUL padded.
+    pub name: [u8; 32],
+    /// HHDM address of the contents (unvalidated).
+    pub addr: u64,
+    pub size: u64,
+}
+
+impl ModuleInfo {
+    pub fn name(&self) -> &str {
+        let end = self.name.iter().position(|&b| b == 0).unwrap_or(self.name.len());
+        core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +217,16 @@ impl BootInfo {
     }
 
     /// # Safety
+    /// When `FLAG_MODULES` is set, `modules` must point to `module_count`
+    /// readable `ModuleInfo`s that stay unmodified for the returned lifetime.
+    pub unsafe fn modules<'a>(&self) -> &'a [ModuleInfo] {
+        if self.flags & FLAG_MODULES == 0 || self.modules == 0 {
+            return &[];
+        }
+        core::slice::from_raw_parts(self.modules as *const ModuleInfo, self.module_count as usize)
+    }
+
+    /// # Safety
     /// `cmdline_ptr` must be 0 or point to `cmdline_len` readable bytes that
     /// stay unmodified for the returned lifetime.
     pub unsafe fn cmdline<'a>(&self) -> &'a str {
@@ -234,8 +265,8 @@ mod tests {
             cmdline_len: 0,
             hhdm_offset: 0,
             hhdm_size: 0,
-            init_module: 0,
-            init_module_size: 0,
+            modules: 0,
+            module_count: 0,
         }
     }
 
@@ -246,6 +277,7 @@ mod tests {
         assert_eq!(size_of::<MemoryMapInfo>(), 24);
         assert_eq!(size_of::<KernelImageInfo>(), 32);
         assert_eq!(size_of::<BootInfo>(), 168);
+        assert_eq!(size_of::<ModuleInfo>(), 48);
         assert_eq!(align_of::<BootInfo>(), 8);
     }
 

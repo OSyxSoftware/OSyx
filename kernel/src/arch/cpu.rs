@@ -40,6 +40,43 @@ pub unsafe fn wrmsr(msr: u32, v: u64) {
     asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32, options(nomem, nostack, preserves_flags));
 }
 
+/// Enables SSE for user code: CR0.EM = 0, CR0.MP = 1, CR4.OSFXSR and
+/// CR4.OSXMMEXCPT = 1. The kernel itself is compiled soft-float and never
+/// touches x87/SSE state except through `fxsave`/`fxrstor` on context switch.
+///
+/// # Safety
+/// Must run once during early boot.
+pub unsafe fn enable_sse() {
+    asm!(
+        "mov {t}, cr0",
+        "and {t}, ~4",
+        "or {t}, 2",
+        "mov cr0, {t}",
+        "mov {t}, cr4",
+        "or {t}, 0x600",
+        "mov cr4, {t}",
+        t = out(reg) _,
+        options(nostack)
+    );
+}
+
+/// Saves the x87/SSE state into a 512-byte, 16-byte aligned area.
+///
+/// # Safety
+/// `area` must be valid for 512 bytes of writes and 16-byte aligned; SSE must
+/// be enabled.
+pub unsafe fn fxsave(area: *mut u8) {
+    asm!("fxsave64 [{}]", in(reg) area, options(nostack, preserves_flags));
+}
+
+/// Loads x87/SSE state saved by [`fxsave`] (or a valid initial image).
+///
+/// # Safety
+/// `area` must hold a valid FXSAVE image, 16-byte aligned.
+pub unsafe fn fxrstor(area: *const u8) {
+    asm!("fxrstor64 [{}]", in(reg) area, options(nostack, preserves_flags));
+}
+
 pub fn read_cr2() -> u64 {
     let v;
     // SAFETY: reading CR2 has no side effects in ring 0.

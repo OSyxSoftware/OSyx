@@ -1,0 +1,21 @@
+[package]
+name = "osyx-apps"
+description = "OSyx user programs: init (system checks) and worker (child process modes)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "init"
+path = "src/bin/init.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+test = false
+bench = false
+
+[dependencies]
+os-std = { path = "../../runtime/os-std" }

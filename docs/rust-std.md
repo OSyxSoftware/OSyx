@@ -9,7 +9,7 @@ There are two different milestones:
 
 ## OSyx Std today
 
-Programs look like this (see `userspace/hello`):
+Programs look like this (see `userspace/apps`):
 
 ```rust
 #![no_std]
@@ -34,13 +34,15 @@ supplies the platform parts:
 | `print!`/`println!`/`eprint!`/`eprintln!`, `io::Write`, `stdout`/`stderr` | Implemented | OSyx (tested), host back end (tested) |
 | global allocator | Implemented (heap on `map`) | OSyx (tested with 2 MiB + 10 000 allocations) |
 | `error::{Error, ErrorKind}`, errno mapping | Implemented | host tests |
-| `process::{exit, abort, id}` | Implemented | OSyx (`exit` tested) |
+| `process::{exit, abort, id}` | Implemented | OSyx (tested) |
+| `process::{Command, Child, ExitStatus, wait_any}` | Implemented (programs = boot modules) | OSyx (spawn, wait, exit codes, exceptions, nested, orphans tested); host returns `Unsupported` |
+| `thread::{sleep, yield_now}` | Implemented | OSyx + host |
 | `time::{Instant, Duration}` | Implemented (10 ms resolution) | OSyx + host |
 | `env::args` | Implemented | OSyx (tested with `init.args`) + host |
 | `env::var` | Returns `Unsupported` (no environment yet) | host test |
 | `os::{sysinfo, kernel_version, heap_stats, raw}` | Implemented | OSyx |
 | `rt`: `_start`, `entry!`, `Termination`, panic → status 101 | Implemented | OSyx (tested) |
-| `fs`, `thread`, `sync`, `path`, `net` | Planned | — |
+| `thread::spawn`, `sync`, `fs`, `path`, `net` | Planned | — |
 
 Back ends are selected at compile time: `sys/osyx.rs` on
 `x86_64-unknown-none`, `sys/host.rs` elsewhere. The host back end exists only
@@ -51,8 +53,10 @@ evidence about OSyx.
 
 User programs are built for `x86_64-unknown-none` with
 `-C relocation-model=static -C code-model=small` (set by `scripts/build.ps1`)
-and linked with `userspace/user.ld`. That target is soft-float, which is
-currently required because the kernel does not save FPU/SSE state.
+and linked with `userspace/user.ld`. That target is soft-float. The kernel
+does enable SSE and save x87/SSE state per thread (verified by `init` with
+inline-assembly XMM patterns), so a hard-float user target is now possible;
+switching requires a custom target spec (see below).
 
 ## Path to a genuine `std`
 
@@ -64,7 +68,8 @@ Requirements identified so far (not yet attempted):
   thread-local storage, thread spawn, synchronisation, fs, net);
 - TLS: the kernel must set up FS base per thread;
 - unwinding: start with `panic=abort`; unwinding needs `.eh_frame` handling;
-- kernel prerequisites: threads, futex-like waits, file handles, FPU state.
+- kernel prerequisites still missing: multiple threads per process,
+  futex-like waits, file handles (threads, preemption and FPU state exist).
 
 No claim of `std` compatibility will be made before real `std` programs
 compile and run on OSyx.
