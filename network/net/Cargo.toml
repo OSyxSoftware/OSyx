@@ -1,0 +1,8 @@
+[package]
+name = "osyx-net"
+description = "OSyx TCP/IP stack: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

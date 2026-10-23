@@ -1,4 +1,4 @@
-[workspace]
+﻿[workspace]
 resolver = "2"
 members = [
     "shared/abi",
@@ -16,6 +16,7 @@ members = [
     "graphics/prism-core",
     "graphics/ui",
     "graphics/prism-client",
+    "network/net",
     "runtime/os-sys",
     "runtime/os-std",
     "storage/ext4",
@@ -41,6 +42,7 @@ default-members = [
     "graphics/prism-proto",
     "graphics/prism-core",
     "graphics/ui",
+    "network/net",
     "runtime/os-sys",
     "runtime/os-std",
     "storage/ext4",

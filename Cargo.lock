@@ -97,6 +97,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "osyx-net"
+version = "0.1.0"
+
+[[package]]
 name = "osyx-part"
 version = "0.1.0"
 
