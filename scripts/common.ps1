@@ -100,7 +100,13 @@ function New-DiskImage {
         if (Test-Path -LiteralPath $Script:DiskImage) {
             # A real backup path also works in Windows PowerShell 5.1,
             # whose binder converts $null string arguments into "".
-            [IO.File]::Replace($stagedDisk, $Script:DiskImage, $backupDisk)
+            try {
+                [IO.File]::Replace($stagedDisk, $Script:DiskImage, $backupDisk)
+            } catch [IO.IOException] {
+                # Test boots (test.ps1, desktop/net/win-test) run QEMU on
+                # build/osyx.img itself; run-qemu.ps1 uses a private copy.
+                throw "build/osyx.img is open in another process (a QEMU test run?): $($_.Exception.GetBaseException().Message) Wait for scripts/test.ps1 to finish and build again."
+            }
         } else {
             [IO.File]::Move($stagedDisk, $Script:DiskImage)
         }
