@@ -218,6 +218,43 @@ resumption behind vectored exception callbacks. Registering callbacks
 without ever dispatching hardware faults would be a success stub and is
 not an acceptable way to satisfy this import.
 
+## Attempts 6–8: exceptions, file mappings, API-set revisions
+
+| Attempt | New implementation available | Actual next loader failure, needed by mozglue.dll |
+|---|---|---|
+| 6 | Resumable user CPU exceptions, vectored handlers, RaiseException (`ed8bb48`, [user-exceptions.md](../user-exceptions.md)) | kernel32.dll!CreateFileMappingW does not exist |
+| 7 | File mappings (`cd6aeb9`) | api-ms-win-core-file-l1-1-0.dll has no host |
+| 8 | Older kernel32/ntdll/advapi32 contract revisions in the schema | kernel32.dll!GetProcessTimes does not exist |
+
+Every attempt: QEMU exit 33, winrun 126, no kernel panic. Evidence:
+`build/zen/attempt-{6,7,8}.serial.log`, `.result.json`, `.dependencies.json`.
+
+File mappings: page-file sections are shared OSyx memory; file-backed
+sections give read-only, execute-read and copy-on-write views at 64 KiB
+offsets, filled from the file without moving its file pointer.
+VirtualQuery reports them as MEM_MAPPED. Writable shared file views
+and SEC_IMAGE need kernel page-cache sharing and fail with
+ERROR_NOT_SUPPORTED. The `mapping.exe` fixture passed 34/34 on Windows and
+on OSyx; the Windows QEMU suite passed 348/348. The full regression after
+the exception work was green: desktop 34/34, VirtIO-GPU 38/38, Win32 312/312,
+network 29/29 (rerun alone after an interactive build replaced
+build/osyx.img mid-run; the exit-code boot was rerun for the same reason).
+
+Contract revisions added to the schema (file-l1-1-0, heap-l2-1-0,
+interlocked-l1-1-0, localization-l1-2-0, processenvironment-l1-1-0,
+realtime-l1-1-1, sysinfo-l1-1-0, rtlsupport-l1-1-0, registry-l1-1-0) only
+name the DLL that hosts them on Windows. Functions those DLLs lack still
+fail as missing exports; nothing is bound to a placeholder.
+
+After attempt 8 the static startup closure has **412** unresolved import
+occurrences (168 missing exports, 241 unmapped contracts, 3 missing DLLs).
+The largest remaining block is the UCRT (`api-ms-win-crt-*`: stdio,
+printf family, locale, math, string, runtime startup), which needs a real
+C runtime implementation. The other blocks: ntdll Rtl string/heap/lock
+wrappers and unwinding (RtlLookupFunctionEntry, RtlVirtualUnwind,
+RtlCaptureStackBackTrace), the registry, thread pools, job objects,
+process creation, FLS, SList and locale APIs, and shlwapi paths.
+
 No fallback browser, mock UI or success-returning API placeholders were
 introduced. This is an incomplete Windows compatibility port, not a
 working Zen Browser release. Completing it requires implementing and

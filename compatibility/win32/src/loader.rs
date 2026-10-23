@@ -194,11 +194,21 @@ fn schema() -> Vec<u8> {
         "api-ms-win-core-datetime-l1-1-2",
         "api-ms-win-core-fibers-l1-1-1",
         "api-ms-win-core-util-l1-1-1",
+        // Older revisions mozglue imports (kernelbase hosts them on Windows).
+        "api-ms-win-core-file-l1-1-0",
+        "api-ms-win-core-heap-l2-1-0",
+        "api-ms-win-core-interlocked-l1-1-0",
+        "api-ms-win-core-localization-l1-2-0",
+        "api-ms-win-core-processenvironment-l1-1-0",
+        "api-ms-win-core-realtime-l1-1-1",
+        "api-ms-win-core-sysinfo-l1-1-0",
     ];
     for c in k32 {
         b.add(c, "kernel32.dll", &[("kernel32.dll", "kernelbase.dll")]).expect("valid contract name");
     }
     b.add("api-ms-win-core-rtlsupport-l1-2-0", "ntdll.dll", &[]).expect("valid contract name");
+    b.add("api-ms-win-core-rtlsupport-l1-1-0", "ntdll.dll", &[]).expect("valid contract name");
+    b.add("api-ms-win-core-registry-l1-1-0", "advapi32.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-winrt-l1-1-0", "", &[]).expect("valid contract name"); // no host
     b.add("ext-ms-win-ntuser-window-l1-1-4", "user32.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-gdi-dc-l1-2-0", "gdi32.dll", &[]).expect("valid contract name");
