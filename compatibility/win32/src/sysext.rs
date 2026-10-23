@@ -783,6 +783,19 @@ extern "win64" fn SetHandleInformation(h: u64, mask: u32, flags: u32) -> i32 {
     1
 }
 
+/// No handle is ever inheritable or protected (see SetHandleInformation).
+extern "win64" fn GetHandleInformation(h: u64, flags: *mut u32) -> i32 {
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if flags.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *flags = 0 };
+    1
+}
+
 /// ThreadMemoryPriority, absolute CPU priority, dynamic code policy and
 /// power throttling have no counterpart in the OSyx scheduler.
 extern "win64" fn SetThreadInformation(_thread: u64, _class: u32, _info: u64, _len: u32) -> i32 {
@@ -1023,6 +1036,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetProcessHeaps,
         HeapSetInformation,
         SetHandleInformation,
+        GetHandleInformation,
         SetThreadInformation,
         GetProcessMitigationPolicy,
         SetProcessMitigationPolicy,

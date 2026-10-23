@@ -226,6 +226,118 @@ extern "win64" fn GetFileAttributesExW(name_w: *const u16, level: u32, out: u64)
     1
 }
 
+extern "win64" fn GetFileAttributesExA(name_a: *const u8, level: u32, out: u64) -> i32 {
+    // SAFETY: NULL or a NUL-terminated string from the caller.
+    let Some(w) = (unsafe { path::ansi_to_wide(name_a) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    GetFileAttributesExW(w.as_ptr(), level, out)
+}
+
+// ---- byte-range locks ------------------------------------------------------------
+//
+// Locks belong to a file object (all handles duplicated from one open) and
+// are released when it closes. Like the sharing modes they are kept in
+// this process: they order the threads of one Windows program, as SQLite
+// and NSPR need, but neither bind other processes nor make ReadFile and
+// WriteFile fail inside a region another handle locked.
+
+struct Lock {
+    owner: usize,
+    start: u64,
+    len: u64,
+    exclusive: bool,
+}
+
+static LOCKS: os_std::sync::Mutex<alloc::collections::BTreeMap<(u64, u64), Vec<Lock>>> =
+    os_std::sync::Mutex::new(alloc::collections::BTreeMap::new());
+
+const LOCKFILE_FAIL_IMMEDIATELY: u32 = 1;
+const LOCKFILE_EXCLUSIVE_LOCK: u32 = 2;
+
+fn overlaps(a: u64, alen: u64, b: u64, blen: u64) -> bool {
+    alen != 0 && blen != 0 && a < b.saturating_add(blen) && b < a.saturating_add(alen)
+}
+
+/// The file object behind `h`: (sharing key, owner identity).
+fn lock_target(h: u64) -> Result<(alloc::sync::Arc<objects::FileObj>, usize), u32> {
+    let f = objects::file(h)?;
+    let owner = alloc::sync::Arc::as_ptr(&f) as usize;
+    Ok((f, owner))
+}
+
+fn lock(h: u64, start: u64, len: u64, exclusive: bool, wait: bool) -> Result<(), u32> {
+    let (f, owner) = lock_target(h)?;
+    loop {
+        {
+            let mut all = LOCKS.lock().unwrap();
+            let list = all.entry(f.key).or_default();
+            // Exclusive locks overlap nothing; shared ones overlap only shared.
+            if !list.iter().any(|l| overlaps(l.start, l.len, start, len) && (exclusive || l.exclusive)) {
+                list.push(Lock { owner, start, len, exclusive });
+                return Ok(());
+            }
+        }
+        if !wait {
+            return Err(ERROR_LOCK_VIOLATION);
+        }
+        os_sys::sleep(1_000_000);
+    }
+}
+
+fn unlock(h: u64, start: u64, len: u64) -> Result<(), u32> {
+    let (f, owner) = lock_target(h)?;
+    let mut all = LOCKS.lock().unwrap();
+    let list = all.get_mut(&f.key).ok_or(ERROR_NOT_LOCKED)?;
+    let i = list.iter().position(|l| l.owner == owner && l.start == start && l.len == len).ok_or(ERROR_NOT_LOCKED)?;
+    list.remove(i);
+    if list.is_empty() {
+        all.remove(&f.key);
+    }
+    Ok(())
+}
+
+/// Drops the locks of a closing file object.
+pub(crate) fn release_locks(key: (u64, u64), owner: usize) {
+    let mut all = LOCKS.lock().unwrap();
+    if let Some(list) = all.get_mut(&key) {
+        list.retain(|l| l.owner != owner);
+        if list.is_empty() {
+            all.remove(&key);
+        }
+    }
+}
+
+fn split(low: u32, high: u32) -> u64 {
+    (high as u64) << 32 | low as u64
+}
+
+fn result(r: Result<(), u32>) -> i32 {
+    r.map_or_else(|e| fail(e, 0), |()| 1)
+}
+
+extern "win64" fn LockFile(h: u64, off_low: u32, off_high: u32, len_low: u32, len_high: u32) -> i32 {
+    result(lock(h, split(off_low, off_high), split(len_low, len_high), true, false))
+}
+
+extern "win64" fn UnlockFile(h: u64, off_low: u32, off_high: u32, len_low: u32, len_high: u32) -> i32 {
+    result(unlock(h, split(off_low, off_high), split(len_low, len_high)))
+}
+
+extern "win64" fn LockFileEx(h: u64, flags: u32, reserved: u32, len_low: u32, len_high: u32, ov: *const u8) -> i32 {
+    if reserved != 0 || ov.is_null() || flags & !(LOCKFILE_FAIL_IMMEDIATELY | LOCKFILE_EXCLUSIVE_LOCK) != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let start = kernel32::overlapped_offset(ov).unwrap_or(0);
+    let exclusive = flags & LOCKFILE_EXCLUSIVE_LOCK != 0;
+    result(lock(h, start, split(len_low, len_high), exclusive, flags & LOCKFILE_FAIL_IMMEDIATELY == 0))
+}
+
+extern "win64" fn UnlockFileEx(h: u64, reserved: u32, len_low: u32, len_high: u32, ov: *const u8) -> i32 {
+    if reserved != 0 || ov.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    result(unlock(h, kernel32::overlapped_offset(ov).unwrap_or(0), split(len_low, len_high)))
+}
+
 /// Only read-only can be stored; ARCHIVE and NORMAL carry no state here.
 fn set_attributes(p: &str, st: &osyx_abi::FileStat, attrs: u32) -> Result<(), u32> {
     if attrs & !(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_NORMAL | 0x10) != 0 {
@@ -405,6 +517,11 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CreateSymbolicLinkW,
         FindFirstFileExW,
         GetFileAttributesExW,
+        GetFileAttributesExA,
+        LockFile,
+        UnlockFile,
+        LockFileEx,
+        UnlockFileEx,
         SetFileAttributesW,
         SetFileTime,
         GetFileInformationByHandleEx,

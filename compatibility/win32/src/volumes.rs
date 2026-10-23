@@ -63,6 +63,17 @@ extern "win64" fn GetDiskFreeSpaceExW(root: *const u16, avail: *mut u64, total: 
     }
     1
 }
+extern "win64" fn GetDiskFreeSpaceA(
+    root: *const u8,
+    sectors: *mut u32,
+    bytes: *mut u32,
+    free: *mut u32,
+    total: *mut u32,
+) -> i32 {
+    // SAFETY: NULL (the current drive) or a NUL-terminated name.
+    let w = unsafe { path::ansi_to_wide(root) };
+    GetDiskFreeSpaceW(w.as_ref().map_or(core::ptr::null(), |w| w.as_ptr()), sectors, bytes, free, total)
+}
 extern "win64" fn GetDiskFreeSpaceW(
     root: *const u16,
     sectors: *mut u32,
@@ -249,6 +260,47 @@ extern "win64" fn FindNextFileW(h: u64, out: u64) -> i32 {
     }
     ok
 }
+/// WIN32_FIND_DATAW (592 bytes) → WIN32_FIND_DATAA (320 bytes): the same
+/// 44-byte head, then cFileName[260] and cAlternateFileName[14] in the
+/// ANSI code page (UTF-8).
+fn find_data_to_ansi(w: &[u8; 592], out: u64) -> i32 {
+    // SAFETY: the name at offset 44 is NUL-terminated within 260 units.
+    let name = unsafe { path::wide_to_string(w.as_ptr().add(44) as *const u16) }.unwrap_or_default();
+    if name.len() >= 260 {
+        return fail(ERROR_FILENAME_EXCED_RANGE, 0);
+    }
+    // SAFETY: the caller's 320-byte WIN32_FIND_DATAA.
+    unsafe {
+        core::ptr::write_bytes(out as *mut u8, 0, 320);
+        core::ptr::copy_nonoverlapping(w.as_ptr(), out as *mut u8, 44);
+        core::ptr::copy_nonoverlapping(name.as_ptr(), (out + 44) as *mut u8, name.len());
+    }
+    1
+}
+extern "win64" fn FindFirstFileA(pattern: *const u8, out: u64) -> u64 {
+    if out == 0 {
+        return fail(ERROR_INVALID_PARAMETER, u64::MAX);
+    }
+    // SAFETY: a NUL-terminated pattern.
+    let Some(p) = (unsafe { path::ansi_to_wide(pattern) }) else { return fail(ERROR_INVALID_PARAMETER, u64::MAX) };
+    let mut w = [0u8; 592];
+    let h = FindFirstFileW(p.as_ptr(), w.as_mut_ptr() as u64);
+    if h != u64::MAX && find_data_to_ansi(&w, out) == 0 {
+        FindClose(h);
+        return u64::MAX;
+    }
+    h
+}
+extern "win64" fn FindNextFileA(h: u64, out: u64) -> i32 {
+    if out == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut w = [0u8; 592];
+    if FindNextFileW(h, w.as_mut_ptr() as u64) == 0 {
+        return 0;
+    }
+    find_data_to_ansi(&w, out)
+}
 extern "win64" fn FindClose(h: u64) -> i32 {
     if SEARCHES.lock().unwrap().remove(&h).is_some() {
         1
@@ -263,8 +315,11 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetDriveTypeW,
         GetDiskFreeSpaceExW,
         GetDiskFreeSpaceW,
+        GetDiskFreeSpaceA,
         GetVolumeInformationW,
         FindFirstFileW,
+        FindFirstFileA,
+        FindNextFileA,
         FindNextFileW,
         FindClose
     ]

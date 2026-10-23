@@ -96,6 +96,9 @@ pub fn delete_blocked(key: (u64, u64)) -> bool {
 
 // ---- objects ----------------------------------------------------------------
 
+/// The `key.0` of an anonymous pipe end (its `key.1` is the kernel handle).
+pub const PIPE_DEV: u64 = u64::MAX;
+
 pub struct FileObj {
     /// OSyx kernel file handle.
     pub fd: u64,
@@ -129,6 +132,7 @@ impl Drop for FileObj {
     fn drop(&mut self) {
         let _ = os_sys::close(self.fd);
         share_close(self.key, self.open_id);
+        crate::files::release_locks(self.key, self as *const FileObj as usize);
         if self.delete_on_close.load(Ordering::Relaxed) {
             let r = if self.is_dir { os_sys::rmdir(&self.path) } else { os_sys::unlink(&self.path) };
             let _ = r;

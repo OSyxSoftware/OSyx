@@ -170,6 +170,16 @@ pub unsafe fn wide_to_string(p: *const u16) -> Option<String> {
     Some(char::decode_utf16(units.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')).collect())
 }
 
+/// A NUL-terminated ANSI string as NUL-terminated UTF-16, for forwarding
+/// an -A function to its -W implementation (None for NULL).
+///
+/// # Safety
+/// As [`ansi_to_string`].
+pub unsafe fn ansi_to_wide(p: *const u8) -> Option<Vec<u16>> {
+    // SAFETY: forwarded.
+    unsafe { ansi_to_string(p) }.map(|s| s.encode_utf16().chain(core::iter::once(0)).collect())
+}
+
 /// Decodes a NUL-terminated ANSI string (treated as UTF-8, bytes above
 /// 0x7F that are not valid UTF-8 as Latin-1).
 ///

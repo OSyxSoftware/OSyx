@@ -414,7 +414,7 @@ extern "win64" fn CreateFileW(
 }
 
 /// OVERLAPPED: Internal, InternalHigh, Offset, OffsetHigh, hEvent.
-fn overlapped_offset(ov: *const u8) -> Option<u64> {
+pub(crate) fn overlapped_offset(ov: *const u8) -> Option<u64> {
     if ov.is_null() {
         return None;
     }
@@ -469,6 +469,25 @@ pub fn write_handle(h: u64, buf: *const u8, n: u32, offset: Option<u64>) -> Resu
     }
 }
 
+/// Every OSyx I/O completes synchronously. With an OVERLAPPED it is
+/// recorded there as completed (Internal = STATUS_SUCCESS, InternalHigh =
+/// bytes) and its event is signaled, as Windows does for I/O that
+/// finishes at once; GetOverlappedResult then reports it.
+fn complete_overlapped(ov: *const u8, n: u32) {
+    if ov.is_null() {
+        return;
+    }
+    // SAFETY: the caller's OVERLAPPED structure.
+    let event: u64 = unsafe {
+        teb::put(ov as u64, 0, 0u64);
+        teb::put(ov as u64, 8, n as u64);
+        teb::get(ov as u64, 24)
+    };
+    if event != 0 {
+        SetEvent(event);
+    }
+}
+
 extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u32, ov: *const u8) -> Bool {
     match read_handle(h, buf, n, overlapped_offset(ov)) {
         Ok(k) => {
@@ -476,6 +495,7 @@ extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u32, ov: *co
                 // SAFETY: the caller's out pointer.
                 unsafe { *read = k };
             }
+            complete_overlapped(ov, k);
             TRUE
         }
         Err(e) => fail(e, FALSE),
@@ -489,10 +509,69 @@ extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: *mut u32, o
                 // SAFETY: the caller's out pointer.
                 unsafe { *written = k };
             }
+            complete_overlapped(ov, k);
             TRUE
         }
         Err(e) => fail(e, FALSE),
     }
+}
+
+const STATUS_PENDING: u64 = 0x103;
+
+extern "win64" fn GetOverlappedResult(h: u64, ov: *const u8, n: *mut u32, _wait: Bool) -> Bool {
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    if ov.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's OVERLAPPED structure.
+    let (status, bytes): (u64, u64) = unsafe { (teb::get(ov as u64, 0), teb::get(ov as u64, 8)) };
+    if status == STATUS_PENDING {
+        // Never left pending by OSyx: an operation that was not started here.
+        return fail(ERROR_IO_INCOMPLETE, FALSE);
+    }
+    if !n.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *n = bytes as u32 };
+    }
+    if status != 0 {
+        return fail(ERROR_GEN_FAILURE, FALSE);
+    }
+    TRUE
+}
+
+/// Nothing is ever pending (see complete_overlapped): there is nothing to
+/// cancel for a valid handle.
+extern "win64" fn CancelIo(h: u64) -> Bool {
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    TRUE
+}
+
+/// An anonymous pipe over a kernel pipe; `size` is a hint Windows may
+/// ignore too. Inheritable ends are not supported (validate_attributes).
+extern "win64" fn CreatePipe(read: *mut u64, write: *mut u64, attributes: u64, _size: u32) -> Bool {
+    if read.is_null() || write.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if let Err(e) = crate::security::validate_attributes(attributes) {
+        return fail(e, FALSE);
+    }
+    let (r, w) = match os_sys::pipe() {
+        Ok(p) => p,
+        Err(e) => return fail(errno_to_win32(e), FALSE),
+    };
+    let end = |fd: u64, access: (bool, bool, bool)| {
+        objects::insert(Object::File(Arc::new(FileObj::new(fd, String::new(), access, (objects::PIPE_DEV, fd), 0, false, false, false))))
+    };
+    // SAFETY: the caller's out pointers.
+    unsafe {
+        *read = end(r, (true, false, false));
+        *write = end(w, (false, true, false));
+    }
+    TRUE
 }
 
 pub(crate) fn file_stat(h: u64) -> Result<osyx_abi::FileStat, u32> {
@@ -590,9 +669,11 @@ extern "win64" fn FlushFileBuffers(h: u64) -> Bool {
 
 const FILE_TYPE_DISK: u32 = 1;
 const FILE_TYPE_CHAR: u32 = 2;
+const FILE_TYPE_PIPE: u32 = 3;
 
 extern "win64" fn GetFileType(h: u64) -> u32 {
     match objects::get(h) {
+        Some(Object::File(f)) if f.key.0 == objects::PIPE_DEV => FILE_TYPE_PIPE,
         Some(Object::File(_)) => FILE_TYPE_DISK,
         Some(Object::Console(_)) | Some(Object::Null) => FILE_TYPE_CHAR,
         _ => fail(ERROR_INVALID_HANDLE, 0),
@@ -1108,6 +1189,36 @@ extern "win64" fn GetThreadId(h: u64) -> u32 {
     }
 }
 
+/// Thread priorities of the calling process, by thread id. The OSyx
+/// scheduler has no priority levels: a priority is a scheduling hint, kept
+/// so GetThreadPriority reports what was set.
+static PRIORITIES: Mutex<alloc::collections::BTreeMap<u32, i32>> = Mutex::new(alloc::collections::BTreeMap::new());
+const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x10000;
+const THREAD_MODE_BACKGROUND_END: i32 = 0x20000;
+
+extern "win64" fn SetThreadPriority(h: u64, priority: i32) -> Bool {
+    let tid = GetThreadId(h);
+    if tid == 0 {
+        return FALSE;
+    }
+    match priority {
+        -15 | -2..=2 | 15 => {
+            PRIORITIES.lock().unwrap().insert(tid, priority);
+            TRUE
+        }
+        THREAD_MODE_BACKGROUND_BEGIN | THREAD_MODE_BACKGROUND_END if h == objects::CURRENT_THREAD => TRUE,
+        _ => fail(ERROR_INVALID_PARAMETER, FALSE),
+    }
+}
+
+extern "win64" fn GetThreadPriority(h: u64) -> i32 {
+    let tid = GetThreadId(h);
+    if tid == 0 {
+        return 0x7FFF_FFFF; // THREAD_PRIORITY_ERROR_RETURN
+    }
+    PRIORITIES.lock().unwrap().get(&tid).copied().unwrap_or(0)
+}
+
 extern "win64" fn Sleep(ms: u32) {
     if ms == 0 {
         os_std::thread::yield_now();
@@ -1223,6 +1334,30 @@ extern "win64" fn GetEnvironmentStringsW() -> u64 {
 }
 
 extern "win64" fn FreeEnvironmentStringsW(p: u64) -> Bool {
+    b(heap_free(p))
+}
+
+/// GetEnvironmentStrings (the ANSI block has no -A suffix): as above in
+/// the ANSI code page (UTF-8).
+extern "win64" fn GetEnvironmentStrings() -> u64 {
+    let mut bytes: Vec<u8> = Vec::new();
+    with_process(|p| {
+        for (k, v) in &p.env {
+            bytes.extend(k.bytes());
+            bytes.push(b'=');
+            bytes.extend(v.bytes());
+            bytes.push(0);
+        }
+    });
+    bytes.push(0);
+    heap_alloc(bytes.len(), false).map_or(0, |p| {
+        // SAFETY: `p` holds `bytes.len()` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len()) };
+        p
+    })
+}
+
+extern "win64" fn FreeEnvironmentStringsA(p: u64) -> Bool {
     b(heap_free(p))
 }
 
@@ -1466,6 +1601,15 @@ extern "win64" fn CreateSemaphoreW(sa_: u64, initial: i32, max: i32, _name: *con
     CreateSemaphoreA(sa_, initial, max, core::ptr::null())
 }
 
+/// Semaphores are not registered under names (CreateSemaphore keeps
+/// none), so no name can be opened.
+extern "win64" fn OpenSemaphoreA(_access: u32, _inherit: Bool, name: *const u8) -> u64 {
+    if name.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    fail(ERROR_FILE_NOT_FOUND, 0)
+}
+
 extern "win64" fn ReleaseSemaphore(h: u64, n: i32, prev: *mut i32) -> Bool {
     let Some(Object::Semaphore(s)) = objects::get(h) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
     {
@@ -1697,6 +1841,20 @@ extern "win64" fn HeapReAlloc(_h: u64, flags: u32, p: u64, size: usize) -> u64 {
     n
 }
 
+/// Blocks carry no guard words or checksums, so there is no corruption
+/// this could detect.
+extern "win64" fn HeapValidate(_h: u64, _flags: u32, _p: u64) -> Bool {
+    TRUE
+}
+
+/// The shared allocator neither coalesces on request nor reports its
+/// largest free block: 0 with NO_ERROR means "no figure", as SQLite and
+/// other callers accept.
+extern "win64" fn HeapCompact(_h: u64, _flags: u32) -> usize {
+    teb::set_last_error(0);
+    0
+}
+
 extern "win64" fn LocalAlloc(flags: u32, size: usize) -> u64 {
     heap_alloc(size, flags & 0x40 != 0).unwrap_or_else(|| fail(ERROR_NOT_ENOUGH_MEMORY, 0))
 }
@@ -1735,6 +1893,37 @@ extern "win64" fn GetSystemInfo(out: *mut u8) {
         teb::put(out as u64, 40, 0x10000u32);
         teb::put(out as u64, 44, 6u16);
     }
+}
+
+/// The user address range GetSystemInfo reports.
+const USER_VIRTUAL: u64 = 0x7FFF_FFFE_FFFF - 0x10000 + 1;
+
+/// MEMORYSTATUSEX (64 bytes) from the kernel's memory counters. OSyx does
+/// not page, so the commit limit is physical memory; address-space use is
+/// not tracked, so all of the user range is reported available.
+extern "win64" fn GlobalMemoryStatusEx(out: *mut u8) -> Bool {
+    // SAFETY: the caller's structure; dwLength says how large it is.
+    if out.is_null() || unsafe { teb::get::<u32>(out as u64, 0) } != 64 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let s = match os_sys::sysinfo() {
+        Ok(s) => s,
+        Err(e) => return fail(errno_to_win32(e), FALSE),
+    };
+    let load = ((s.total_memory - s.free_memory.min(s.total_memory)) * 100).checked_div(s.total_memory).unwrap_or(0);
+    // SAFETY: as above.
+    unsafe {
+        let p = out as u64;
+        teb::put(p, 4, load as u32);
+        teb::put(p, 8, s.total_memory);
+        teb::put(p, 16, s.free_memory);
+        teb::put(p, 24, s.total_memory);
+        teb::put(p, 32, s.free_memory);
+        teb::put(p, 40, USER_VIRTUAL);
+        teb::put(p, 48, USER_VIRTUAL);
+        teb::put(p, 56, 0u64);
+    }
+    TRUE
 }
 
 extern "win64" fn GetNativeSystemInfo(out: *mut u8) {
@@ -2067,6 +2256,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CreateFileA,
         CreateFileW,
         ReadFile,
+        GetOverlappedResult,
+        CancelIo,
+        CreatePipe,
         WriteFile,
         GetFileSize,
         GetFileSizeEx,
@@ -2125,6 +2317,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         SetEnvironmentVariableW,
         GetEnvironmentStringsW,
         FreeEnvironmentStringsW,
+        GetEnvironmentStrings,
+        FreeEnvironmentStringsA,
         InitializeCriticalSection,
         InitializeCriticalSectionAndSpinCount,
         InitializeCriticalSectionEx,
@@ -2146,6 +2340,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CreateMutexW,
         ReleaseMutex,
         CreateSemaphoreA,
+        OpenSemaphoreA,
+        SetThreadPriority,
+        GetThreadPriority,
         CreateSemaphoreW,
         ReleaseSemaphore,
         WaitForSingleObject,
@@ -2166,12 +2363,15 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         HeapAlloc,
         HeapFree,
         HeapSize,
+        HeapValidate,
+        HeapCompact,
         HeapReAlloc,
         LocalAlloc,
         LocalFree,
         GlobalAlloc,
         GlobalFree,
         GetSystemInfo,
+        GlobalMemoryStatusEx,
         GetNativeSystemInfo,
         GetTickCount,
         GetTickCount64,

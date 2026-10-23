@@ -182,6 +182,30 @@ const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x80000;
 const STARTF_USESTDHANDLES: u32 = 0x100;
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: u64 = 0x20002;
 
+/// STARTUPINFOA differs from STARTUPINFOW only in the string pointers
+/// (lpReserved, lpDesktop, lpTitle), which CreateProcessW does not read; an
+/// ANSI environment block is what CreateProcessW expects without
+/// CREATE_UNICODE_ENVIRONMENT.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn CreateProcessA(
+    app: *const u8,
+    cmdline: *mut u8,
+    psa: u64,
+    tsa: u64,
+    inherit: i32,
+    flags: u32,
+    env: u64,
+    cwd: *const u8,
+    startup: *const u8,
+    info: *mut u64,
+) -> i32 {
+    // SAFETY: NULL or NUL-terminated strings from the caller.
+    let (app, mut line, cwd) = unsafe { (path::ansi_to_wide(app), path::ansi_to_wide(cmdline), path::ansi_to_wide(cwd)) };
+    let p = |w: &Option<Vec<u16>>| w.as_ref().map_or(core::ptr::null(), |w| w.as_ptr());
+    let line_p = line.as_mut().map_or(core::ptr::null_mut(), |w| w.as_mut_ptr());
+    CreateProcessW(p(&app), line_p, psa, tsa, inherit, flags, env, p(&cwd), startup, info)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) extern "win64" fn CreateProcessW(
     app: *const u16,
@@ -673,6 +697,7 @@ extern "win64" fn IsProcessInJob(process: u64, h: u64, result: *mut i32) -> i32 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         CreateProcessW,
+        CreateProcessA,
         OpenProcess,
         QueryFullProcessImageNameW,
         ReadProcessMemory,
