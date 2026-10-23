@@ -57,7 +57,7 @@ $t = Read-Shared $log
 foreach ($m in [regex]::Matches($t, '\[winrun:\d+\]\s+(ok|FAIL)\s+(.+)')) {
     Record ("win32: " + $m.Groups[2].Value.Trim()) ($m.Groups[1].Value -eq 'ok') ''
 }
-foreach ($p in 'hello', 'fileio', 'threads', 'winsock', 'gui', 'sysadmin', 'version', 'synch', 'security', 'exceptions', 'mapping', 'runtime', 'seh') {
+foreach ($p in 'hello', 'fileio', 'threads', 'winsock', 'gui', 'sysadmin', 'version', 'synch', 'security', 'exceptions', 'mapping', 'runtime', 'seh', 'platform', 'ucrt') {
     $s = [regex]::Match($t, "\[winrun:\d+\] ${p}: (\d+) passed, (\d+) failed")
     Record "$p.exe summary" ($s.Success -and $s.Groups[2].Value -eq '0') $s.Value
 }

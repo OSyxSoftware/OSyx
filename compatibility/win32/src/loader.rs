@@ -164,6 +164,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("advapi32.dll", [crate::security::exports(), crate::registry::exports()].concat(), Vec::new()),
         builtin("shlwapi.dll", crate::shlwapi::exports(), Vec::new()),
         builtin("combase.dll", crate::shlwapi::combase_exports(), Vec::new()),
+        builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
     ]
 }
 
@@ -215,6 +216,10 @@ fn schema() -> Vec<u8> {
     b.add("api-ms-win-core-winrt-string-l1-1-0", "combase.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-ntuser-window-l1-1-4", "user32.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-gdi-dc-l1-2-0", "gdi32.dll", &[]).expect("valid contract name");
+    // The Universal C Runtime.
+    for c in ["runtime", "heap", "string", "convert", "stdio", "locale", "math", "environment", "filesystem", "time", "utility"] {
+        b.add(&alloc::format!("api-ms-win-crt-{c}-l1-1-0"), "ucrtbase.dll", &[]).expect("valid contract name");
+    }
     b.build()
 }
 

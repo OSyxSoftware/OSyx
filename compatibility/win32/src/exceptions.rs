@@ -356,7 +356,38 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         os_std::process::exit(0xc000000du32 as i32);
     }
     os_std::eprintln!("winrun: unhandled Windows exception {:#x} at {:#x}", record.code, record.address);
+    if let Some(what) = delay_load_failure(&record) {
+        os_std::eprintln!("winrun: delay load failed: {what}");
+    }
     os_std::process::exit(record.code as i32)
+}
+
+/// The DLL and function of a failed delay load (VcppException codes
+/// 0xC06D007E module / 0xC06D007F procedure not found), from the
+/// DelayLoadInfo the delay-load helper raises with.
+fn delay_load_failure(r: &Record) -> Option<alloc::string::String> {
+    if !matches!(r.code, 0xc06d_007e | 0xc06d_007f) || r.count < 1 {
+        return None;
+    }
+    // SAFETY (both closures): every address is probed readable first.
+    let read = |a: u64| (a != 0 && !crate::sysext::is_bad_read(a, 8)).then(|| unsafe { core::ptr::read_unaligned(a as *const u64) });
+    let text = |p: u64| -> Option<alloc::string::String> {
+        let mut s = alloc::string::String::new();
+        for i in 0..260 {
+            let b = (!crate::sysext::is_bad_read(p + i, 1)).then(|| unsafe { *((p + i) as *const u8) })?;
+            if b == 0 {
+                return Some(s);
+            }
+            s.push(b as char);
+        }
+        Some(s)
+    };
+    // DelayLoadInfo: cb, pidd, ppfn, szDll, dlp { fImportByName, name/ordinal }.
+    let info = r.info[0];
+    let dll = text(read(info + 24)?)?;
+    let by_name = read(info + 32)? as u32 != 0;
+    let name = read(info + 40)?;
+    Some(if by_name { alloc::format!("{dll}!{}", text(name)?) } else { alloc::format!("{dll}!#{}", name as u32) })
 }
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![

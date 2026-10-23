@@ -50,6 +50,9 @@ $programs = [ordered]@{
     'runtime.exe' = @{ Src = @('runtime.c'); Args = @('-fasynchronous-unwind-tables', '-Wl,--subsystem,console', '-Wl,-e,start', '-lntdll', '-ladvapi32', '-lkernel32') }
     'mapping.exe' = @{ Src = @('mapping.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'platform.exe' = @{ Src = @('platform.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshlwapi', '-lruntimeobject', '-lkernel32') }
+    # The real UCRT import library: every C runtime function comes through
+    # the api-ms-win-crt-* contracts.
+    'ucrt.exe'    = @{ Src = @('ucrt.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lucrt', '-lkernel32') }
     'hello.exe'   = @{ Src = @('hello.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'fileio.exe'  = @{ Src = @('fileio.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'threads.exe' = @{ Src = @('threads.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }

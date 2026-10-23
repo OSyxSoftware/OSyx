@@ -345,6 +345,44 @@ The UCRT is developed separately (branch `zen-ucrt`); until it lands, Zen
 still stops at `api-ms-win-crt-runtime-l1-1-0.dll (needed by
 vcruntime140.dll) has no host`, so no new Zen attempt was run.
 
+## Attempts 10-11: the Universal C Runtime
+
+`compatibility/win32/src/ucrt/` is a built-in `ucrtbase.dll` (398
+functions): heap, strings and ctype, conversions, runtime start-up and
+exit, threads, environment, file system, time, math, `rand_s`, the C and
+C.UTF-8 locales, low-level I/O, FILE streams with the buffer protocol
+msvcp140 uses, and the `__stdio_common_*` printf/scanf family. The eleven
+`api-ms-win-crt-*-l1-1-0` contracts map to it. Unsupported variants
+(Unicode stream encodings, other code pages) fail with EINVAL.
+
+winrun is built soft-float (x86_64-unknown-none), so Rust passes f32/f64
+in integer registers, while Windows code passes and returns them in
+xmm0-3. The 38 functions with float arguments or results are exported
+through naked trampolines (`xmm_abi!`) that move them between the two.
+Without them every math and strtod result was wrong in OSyx while the same
+fixture passed on Windows.
+
+The `ucrt.exe` fixture links the real UCRT import library: 242/242 on
+Windows and 242/242 on OSyx; the Win32 QEMU suite passed 767/767. Bugs
+the OSyx runs found and fixed: the float ABI above, fopen rejecting every
+mode (the terminator was parsed as a mode character), setvbuf dropping a
+"w" stream's write mode, and strtol("0x") converting a "0".
+
+The static startup closure now has **0** unresolved imports (337 crt
+imports remain in DLLs loaded later: xul 87, onnxruntime 46,
+Microsoft.WindowsAppRuntime 49, dxcompiler 40, nss3 22 and others).
+Attempt 10 passed the loader and ran zen.exe's start-up code until an
+unhandled 0xC06D007E (delay-load module not found). winrun now names the
+DLL and function of a failed delay load; attempt 11:
+
+```
+winrun: delay load failed: SHELL32.dll!SHGetKnownFolderPath
+```
+
+QEMU exit 33, no kernel panic. Evidence: `build/zen/attempt-{10,11}.*`.
+The next requirement is shell32's known folders, with paths that exist on
+OSyx.
+
 ## Validation
 
 Host parser/loader tests (including resource bounds, malformed delay
