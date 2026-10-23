@@ -36,7 +36,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 14] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 15] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -51,6 +51,7 @@ pub fn run(boot: &BootData) -> Summary {
         ("preemptive kernel threads", &preemption),
         ("sleep and join", &sleep_join),
         ("FPU/SSE state per thread", &fpu_state),
+        ("FS base per thread", &fs_base),
     ];
     let mut s = Summary { passed: 0, failed: 0 };
     for (name, t) in tests.iter() {
@@ -368,5 +369,35 @@ fn fpu_state() -> TestResult {
     sched::join(b);
     ensure!(FPU_OK[0].load(Ordering::Relaxed), "thread A lost its XMM registers");
     ensure!(FPU_OK[1].load(Ordering::Relaxed), "thread B lost its XMM registers");
+    Ok(())
+}
+
+static FS_OK: [core::sync::atomic::AtomicBool; 2] =
+    [core::sync::atomic::AtomicBool::new(false), core::sync::atomic::AtomicBool::new(false)];
+
+/// Sets a distinct FS base, gets preempted several times, checks it.
+fn fs_worker(slot: u64, value: u64) {
+    sched::set_current_fs_base(value);
+    let end = interrupts::ticks() + 6;
+    while interrupts::ticks() < end {
+        core::hint::spin_loop();
+    }
+    // SAFETY: IA32_FS_BASE exists on every x86-64 CPU.
+    let now = unsafe { cpu::rdmsr(0xC000_0100) };
+    FS_OK[slot as usize].store(now == value, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn fs_base() -> TestResult {
+    use core::sync::atomic::Ordering;
+    // SAFETY: as above.
+    let mine = unsafe { cpu::rdmsr(0xC000_0100) };
+    let a = sched::spawn_kernel("fs-a", fs_worker, 0, 0x0000_1111_0000_0000);
+    let b = sched::spawn_kernel("fs-b", fs_worker, 1, 0x0000_2222_0000_0000);
+    sched::join(a);
+    sched::join(b);
+    ensure!(FS_OK[0].load(Ordering::Relaxed) && FS_OK[1].load(Ordering::Relaxed), "a thread saw another FS base");
+    // SAFETY: as above.
+    let after = unsafe { cpu::rdmsr(0xC000_0100) };
+    ensure!(after == mine, "kmain's FS base changed from {mine:#x} to {after:#x}");
     Ok(())
 }

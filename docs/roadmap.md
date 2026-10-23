@@ -11,14 +11,14 @@ Status of the milestones from the project brief.
 | 5 | Initial OSyx Std | Done (convenience std; real `std` port planned) |
 | 6 | PE32+ parser | Not started |
 | 7 | User-space foundations (ring 3, syscalls, exit, console) | Done |
-| 7b | Scheduler, kernel threads, preemption, FPU state, spawn/wait | Done (single CPU, one thread per process) |
+| 7b | Scheduler, kernel threads, preemption, FPU state, spawn/wait | Done (single CPU) |
+| 7c | Threads per process, futexes, FS-base TLS, OSyx Std `thread`/`Mutex`/`Condvar` | Done (single CPU) |
 | 8 | Native Windows PE execution | Not started |
 
 ## Next steps (in order)
 
-1. **User threads and synchronisation**: `thread_spawn`/`thread_exit` for
-   multiple threads per process, futex-style wait/wake, TLS via FS base;
-   OSyx Std `thread::spawn`, `Mutex`, `Condvar`.
+1. **More OSyx Std sync**: `RwLock`, `Once`/`OnceLock`, `mpsc` channels;
+   per-thread output line buffers in the kernel.
 2. **Local APIC + ACPI (MADT)**: replace PIC/PIT; then SMP bring-up and
    per-CPU data with `swapgs`.
 3. **Storage**: PCI enumeration, virtio-blk driver, block layer, FAT32, VFS,

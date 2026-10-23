@@ -132,14 +132,39 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             Ok(0)
         }
         nr::SLEEP => {
-            // Round up to whole 10 ms ticks; at least one tick for ns > 0.
-            let tick_ns = 1_000_000_000 / crate::arch::pic::TIMER_HZ as u64;
-            sched::sleep_ticks(f.rdi.div_ceil(tick_ns));
+            sched::sleep_ticks(ns_to_ticks(f.rdi));
             Ok(0)
         }
+        nr::THREAD_SPAWN => process::spawn_thread(f.rdi, f.rsi, f.rdx, f.r10),
+        nr::THREAD_EXIT => process::thread_exit(f.rdi as i32, f.rsi),
+        nr::FUTEX_WAIT => {
+            let timeout = (f.rdx != 0).then(|| ns_to_ticks(f.rdx));
+            crate::futex::wait(f.rdi, f.rsi as u32, timeout).map(|_| 0)
+        }
+        nr::FUTEX_WAKE => crate::futex::wake(f.rdi, f.rsi as u32),
+        nr::SET_FS_BASE => {
+            if f.rdi != 0 && !crate::fixup::user_range_ok(f.rdi, 1) {
+                Err(Errno::InvalidArgument)
+            } else {
+                sched::set_current_fs_base(f.rdi);
+                Ok(0)
+            }
+        }
+        nr::GETTID => Ok(sched::current_tid()),
         _ => Err(Errno::NotSupported),
     };
+    // Safe point: a thread whose process is exiting ends here instead of
+    // returning to user mode.
+    if sched::current_kill_pending() {
+        process::finish_current_thread(0);
+    }
     osyx_abi::encode(r)
+}
+
+/// Nanoseconds to timer ticks, rounded up (at least one tick for ns > 0).
+fn ns_to_ticks(ns: u64) -> u64 {
+    let tick_ns = 1_000_000_000 / crate::arch::pic::TIMER_HZ as u64;
+    ns.div_ceil(tick_ns)
 }
 
 fn sys_write(fd: u64, buf: u64, len: u64) -> Result<u64, Errno> {

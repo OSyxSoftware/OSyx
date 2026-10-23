@@ -9,12 +9,16 @@
 //! * `fault`       read an unmapped address (the kernel terminates us)
 //! * `child N`     spawn `worker exit N`, wait, exit with its status
 //! * `orphan`      spawn `worker sleep 100` and exit without waiting
+//! * `threads-exit` return 42 from main while 4 threads are blocked/spinning
+//! * `thread-last` main thread exits first (5); the last thread exits with 9
+//! * `thread-fault` / `thread-panic`: a spawned thread faults / panics
 
 #![no_std]
 #![no_main]
 
 use os_std::prelude::*;
 use os_std::process::{self, Command};
+use os_std::sync::atomic::AtomicU32;
 use os_std::time::{Duration, Instant};
 use os_std::{env, thread};
 
@@ -87,6 +91,48 @@ fn main() -> i32 {
             }
             Err(_) => 1,
         },
+        Some("threads-exit") => {
+            // Leave threads blocked in every way possible, then return from
+            // main: the process must end with 42 instead of hanging.
+            static NEVER: AtomicU32 = AtomicU32::new(0);
+            thread::spawn(|| os_std::os::raw::futex_wait(NEVER.as_ptr(), 0, 0));
+            thread::spawn(|| thread::sleep(Duration::from_secs(3600)));
+            thread::spawn(|| loop {
+                core::hint::spin_loop();
+            });
+            let pair = Arc::new((Mutex::new(false), Condvar::new()));
+            let p2 = pair.clone();
+            thread::spawn(move || {
+                let (m, cv) = &*p2;
+                drop(cv.wait_while(m.lock().unwrap(), |go| !*go));
+            });
+            thread::sleep(Duration::from_millis(50));
+            println!("threads-exit {pid}: returning with 4 threads still blocked");
+            42
+        }
+        Some("thread-last") => {
+            // The main thread ends first; the process lives on until its last
+            // thread exits, whose code becomes the exit status.
+            thread::spawn(|| {
+                thread::sleep(Duration::from_millis(50));
+                println!("thread-last: second thread finishing");
+                os_std::os::raw::thread_exit(9, core::ptr::null())
+            });
+            os_std::os::raw::thread_exit(5, core::ptr::null())
+        }
+        Some("thread-fault") => {
+            let h = thread::spawn(|| {
+                // SAFETY: deliberately invalid; the kernel ends the process.
+                unsafe { core::ptr::read_volatile(0x1000 as *const u64) }
+            });
+            let _ = h.join();
+            3
+        }
+        Some("thread-panic") => {
+            let h = thread::spawn(|| -> u32 { panic!("panic in a spawned thread") });
+            let _ = h.join();
+            3
+        }
         other => {
             eprintln!("worker: unknown mode {other:?}");
             2

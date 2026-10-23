@@ -94,6 +94,10 @@ pub struct Process {
     /// Frames this process currently owns (root, page tables, pages).
     frames: u64,
     line: Vec<u8>,
+    /// Live threads; the process is finalised when the last one ends.
+    threads: Vec<Tid>,
+    /// Set by `exit`: the status reported once the last thread has ended.
+    exit_status: Option<i32>,
 }
 
 struct Table {
@@ -109,7 +113,9 @@ static OUTPUT_TAIL: IrqSpinLock<VecDeque<String>> = IrqSpinLock::new(VecDeque::n
 global_asm!(
     r#"
     .section .text
-    // ! osyx_iret_to_user(entry: u64, user_rsp: u64)
+    // ! osyx_iret_to_user(entry: u64, user_rsp: u64, arg: u64)
+    // Enters ring 3 at `entry` with rsp = user_rsp, rdi = arg and every
+    // other general purpose register zero.
     .global osyx_iret_to_user
 osyx_iret_to_user:
     cli
@@ -118,12 +124,12 @@ osyx_iret_to_user:
     push 0x202          // RFLAGS: IF set
     push 0x23           // CS  = USER_CS
     push rdi            // RIP
+    mov rdi, rdx
     xor eax, eax
     xor ebx, ebx
     xor ecx, ecx
     xor edx, edx
     xor esi, esi
-    xor edi, edi
     xor ebp, ebp
     xor r8d, r8d
     xor r9d, r9d
@@ -138,15 +144,35 @@ osyx_iret_to_user:
 );
 
 extern "C" {
-    fn osyx_iret_to_user(entry: u64, user_rsp: u64) -> !;
+    fn osyx_iret_to_user(entry: u64, user_rsp: u64, arg: u64) -> !;
 }
 
-/// Main-thread entry of every process: drop to ring 3. The scheduler has
-/// already loaded the process's CR3 and kernel stack.
-fn user_main_thread(entry: u64, user_rsp: u64) {
-    // SAFETY: entry and stack were set up by `Process::populate` in the
-    // address space that is active for this thread.
-    unsafe { osyx_iret_to_user(entry, user_rsp) }
+/// Where a user thread starts in ring 3.
+struct UserStart {
+    rip: u64,
+    rsp: u64,
+    arg: u64,
+}
+
+/// Kernel-side entry of every user thread: drop to ring 3. The scheduler has
+/// already loaded the process's CR3, kernel stack and FS base.
+fn user_thread_entry(start: u64, _: u64) {
+    // SAFETY: `start` is a `Box<UserStart>` leaked by `start_thread`.
+    let s = unsafe { alloc::boxed::Box::from_raw(start as *mut UserStart) };
+    let (rip, rsp, arg) = (s.rip, s.rsp, s.arg);
+    drop(s);
+    // SAFETY: the entry and stack lie in the user half of the address space
+    // that is active for this thread; a bad value only faults in ring 3.
+    unsafe { osyx_iret_to_user(rip, rsp, arg) }
+}
+
+/// Creates a thread of process `p` (caller holds no locks and has
+/// interrupts disabled, so the tid is recorded before the thread can run).
+fn start_thread(p: &mut Process, rip: u64, rsp: u64, arg: u64, fs_base: u64) -> Tid {
+    let start = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(UserStart { rip, rsp, arg })) as u64;
+    let tid = sched::spawn(&p.name, p.pid, p.root, user_thread_entry, start, 0, fs_base);
+    p.threads.push(tid);
+    tid
 }
 
 impl Process {
@@ -164,6 +190,8 @@ impl Process {
             mapped_pages: 0,
             frames: 1,
             line: Vec::new(),
+            threads: Vec::new(),
+            exit_status: None,
         })
     }
 
@@ -288,11 +316,45 @@ pub fn spawn(parent: Pid, name: &str, args: &[&str]) -> Result<Pid, SpawnError> 
             return Err(e);
         }
     };
-    let (pid, root) = (p.pid, p.root);
+    let pid = p.pid;
     kprintln!("process {} ({}): spawned by {}, entry {:#x}, args {:?}", pid, name, parent, entry, args);
+    // With interrupts off the main thread cannot run (and exit) before the
+    // process and its thread list are in the table.
+    let were_enabled = cpu::interrupts_enabled();
+    cpu::disable_interrupts();
+    start_thread(&mut p, entry, rsp, 0, 0);
     TABLE.lock().procs.insert(pid, p);
-    sched::spawn(name, pid, root, user_main_thread, entry, rsp);
+    if were_enabled {
+        cpu::enable_interrupts();
+    }
     Ok(pid)
+}
+
+/// `thread_spawn` back end: a new thread in the current process.
+pub fn spawn_thread(entry: u64, stack_top: u64, arg: u64, fs_base: u64) -> Result<Tid, Errno> {
+    let user = paging::USER_START..osyx_abi::USER_END;
+    if !user.contains(&entry) || !user.contains(&(stack_top.wrapping_sub(16))) || !stack_top.is_multiple_of(16) {
+        return Err(Errno::InvalidArgument);
+    }
+    if fs_base != 0 && !user.contains(&fs_base) {
+        return Err(Errno::InvalidArgument);
+    }
+    let pid = sched::current_pid();
+    let were_enabled = cpu::interrupts_enabled();
+    cpu::disable_interrupts();
+    let r = {
+        let mut t = TABLE.lock();
+        match t.procs.get_mut(&pid) {
+            Some(p) if p.exit_status.is_some() => Err(Errno::Interrupted),
+            Some(p) if p.threads.len() >= osyx_abi::MAX_THREADS => Err(Errno::NoMemory),
+            Some(p) => Ok(start_thread(p, entry, stack_top, arg, fs_base)),
+            None => Err(Errno::NotSupported),
+        }
+    };
+    if were_enabled {
+        cpu::enable_interrupts();
+    }
+    r
 }
 
 /// Waits for child `target` of `parent` (any child if `target` is 0) to exit,
@@ -320,6 +382,7 @@ pub fn wait(parent: Pid, target: Pid) -> Result<(Pid, i32), Errno> {
                     t.procs.remove(&pid);
                     Some(Ok((pid, status)))
                 }
+                (true, None) if sched::current_kill_pending() => Some(Err(Errno::Interrupted)),
                 (true, None) => {
                     t.waiters.push((parent, sched::current_tid()));
                     sched::mark_current_blocked();
@@ -340,26 +403,69 @@ pub fn wait(parent: Pid, target: Pid) -> Result<(Pid, i32), Errno> {
 }
 
 /// Terminates the current process with `status` and never returns. Called
-/// from `exit` and when a CPU exception hits user code.
+/// from `exit` and when a CPU exception hits user code. Other threads of the
+/// process are asked to end at their next safe point; the last thread to end
+/// tears the process down.
 pub fn exit_current(status: i32) -> ! {
     cpu::disable_interrupts();
     let pid = sched::current_pid();
     assert_ne!(pid, KERNEL_PID, "exit_current called by a kernel thread");
+    let me = sched::current_tid();
+    let others: Vec<Tid> = {
+        let mut t = TABLE.lock();
+        let p = t.procs.get_mut(&pid).expect("current process exists");
+        p.exit_status.get_or_insert(status);
+        p.threads.iter().copied().filter(|&t| t != me).collect()
+    };
+    for t in others {
+        sched::request_kill(t);
+    }
+    finish_current_thread(status)
+}
+
+/// `thread_exit` back end: publishes `done_word` (store 1 + futex wake, now
+/// that the thread no longer runs on its user stack) and ends the thread.
+pub fn thread_exit(code: i32, done_word: u64) -> ! {
+    if done_word != 0 && crate::fixup::copy_to_user(done_word, &1u32.to_le_bytes()).is_ok() {
+        let _ = crate::futex::wake(done_word, u32::MAX);
+    }
+    finish_current_thread(code)
+}
+
+/// Ends the current user thread. The last thread of a process finalises it:
+/// address space released, zombie with the exit status, parent woken.
+pub fn finish_current_thread(code: i32) -> ! {
+    cpu::disable_interrupts();
+    let pid = sched::current_pid();
+    let me = sched::current_tid();
+    let last = {
+        let mut t = TABLE.lock();
+        let p = t.procs.get_mut(&pid).expect("current process exists");
+        p.threads.retain(|&t| t != me);
+        p.threads.is_empty()
+    };
+    if !last {
+        sched::exit_current();
+    }
     // Leave the process address space before destroying it.
     // SAFETY: the kernel root maps everything the kernel needs.
     unsafe { cpu::write_cr3(paging::kernel_root()) };
     sched::set_current_root(paging::kernel_root());
+    crate::futex::forget_process(pid);
     let mut to_wake = Vec::new();
     {
         let mut t = TABLE.lock();
         let Table { procs, waiters } = &mut *t;
         let p = procs.get_mut(&pid).expect("current process exists");
+        let status = *p.exit_status.get_or_insert(code);
         if !p.line.is_empty() {
             p.flush_line();
         }
         p.release_memory();
         p.life = Life::Zombie(status);
         let (parent, orphan) = (p.parent, p.orphan);
+        // Threads of this process that were blocked in `wait` are gone.
+        waiters.retain(|&(ppid, _)| ppid != pid);
         kprintln!("process {} ({}) exited with status {} ({:#x})", pid, p.name, status, status);
         // Children: zombies are released, running ones become kernel orphans.
         procs.retain(|_, c| !(c.parent == pid && c.life != Life::Running));

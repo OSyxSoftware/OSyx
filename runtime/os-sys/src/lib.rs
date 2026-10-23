@@ -98,6 +98,39 @@ mod imp {
         syscall1(nr::SLEEP, ns);
     }
 
+    /// Starts a thread in this process at `entry` with `rsp = stack_top`,
+    /// `rdi = arg` and FS base `fs_base`. Returns its thread id.
+    pub fn thread_spawn(entry: usize, stack_top: usize, arg: usize, fs_base: usize) -> Result<u64, Errno> {
+        decode(syscall4(nr::THREAD_SPAWN, entry as u64, stack_top as u64, arg as u64, fs_base as u64))
+    }
+
+    /// Ends the calling thread; the kernel then stores 1 to `done_word` (if
+    /// not null) and wakes its futex waiters.
+    pub fn thread_exit(code: i32, done_word: *const u32) -> ! {
+        syscall2(nr::THREAD_EXIT, code as u32 as u64, done_word as u64);
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Blocks while `*word == expected` (0 = no timeout).
+    pub fn futex_wait(word: *const u32, expected: u32, timeout_ns: u64) -> Result<(), Errno> {
+        decode(syscall3(nr::FUTEX_WAIT, word as u64, expected as u64, timeout_ns)).map(|_| ())
+    }
+
+    /// Wakes up to `count` waiters on `word`; returns how many were woken.
+    pub fn futex_wake(word: *const u32, count: u32) -> u64 {
+        decode(syscall2(nr::FUTEX_WAKE, word as u64, count as u64)).unwrap_or(0)
+    }
+
+    pub fn set_fs_base(base: usize) -> Result<(), Errno> {
+        decode(syscall1(nr::SET_FS_BASE, base as u64)).map(|_| ())
+    }
+
+    pub fn gettid() -> u64 {
+        syscall0(nr::GETTID)
+    }
+
     /// Terminates the calling process.
     pub fn exit(code: i32) -> ! {
         syscall1(nr::EXIT, code as u32 as u64);

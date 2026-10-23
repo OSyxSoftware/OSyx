@@ -19,8 +19,8 @@ ESP as a read-only virtio FAT disk (`fat:build/esp`), COM1 to a log file and
 |---|---|
 | host unit tests | `cargo test` for abi, bootinfo, gfx, elf, mm, os-sys, os-std |
 | clippy | `-D warnings` for host crates, loader (UEFI), kernel and user crates |
-| QEMU boot + kernel self-tests | boot stages, 14 in-kernel tests (incl. preemption, sleep/join, FPU), exit 33 |
-| ring-3 init checks | 25 user checks: OSyx Std, syscall validation, spawn/wait, zombies, orphans, sleep, FPU |
+| QEMU boot + kernel self-tests | boot stages, 15 in-kernel tests (incl. preemption, sleep/join, FPU, FS base), exit 33 |
+| ring-3 init checks | 37 user checks: OSyx Std, syscall validation, spawn/wait, zombies, orphans, sleep, FPU, threads, Mutex/Condvar, futex, TLS, exit with blocked threads, faults/panics in threads |
 | process teardown | every process returns exactly its frames; 0 processes and 2 threads left |
 | preemptive scheduling | three never-yielding children all start before the first finishes; 3×300 ms in < 650 ms |
 | user page fault | process killed with `#PF`, error code 0x4, kernel survives |
@@ -33,10 +33,12 @@ ESP as a read-only virtio FAT disk (`fat:build/esp`), COM1 to a log file and
 
 ## Last recorded result
 
-All 17 tests passed (58 host unit tests) on Windows 11 build 26300 with
-Rust 1.99.1, QEMU 11.1.2; the main boot was repeated 6 times with identical
-results (QEMU TCG is close to deterministic here, so this is not a stress
-test of the scheduler). The suite takes about 3 minutes.
+All 17 tests passed (66 host unit tests, 15 kernel self-tests, 37 user
+checks) on Windows 11 build 26300 with Rust 1.99.1, QEMU 11.1.2. QEMU TCG is
+close to deterministic here, so repeated boots do not stress the scheduler
+with different interleavings; the host tests of OSyx Std's `Mutex`,
+`Condvar` and threads run on real parallel host threads. The suite takes
+about 3 minutes.
 
 ## Not covered yet
 

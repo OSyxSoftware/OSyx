@@ -16,6 +16,7 @@ use os_std::error::ErrorKind;
 use os_std::os::raw::{self, Errno, PROT_EXEC, PROT_READ, PROT_WRITE};
 use os_std::prelude::*;
 use os_std::process::{Child, Command};
+use os_std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use os_std::time::{Duration, Instant};
 use os_std::{env, os, process, thread};
 
@@ -79,7 +80,7 @@ fn main() -> i32 {
                 info.total_memory >> 20,
                 info.page_size
             );
-            info.abi_version == 2 && info.page_size == 4096 && info.free_memory <= info.total_memory
+            info.abi_version == 3 && info.page_size == 4096 && info.free_memory <= info.total_memory
         }
         Err(e) => {
             println!("sysinfo failed: {e}");
@@ -116,6 +117,7 @@ fn main() -> i32 {
     });
 
     process_checks(&mut t);
+    thread_checks(&mut t);
 
     println!("user checks: {} passed, {} failed", t.passed, t.failed);
     t.failed as i32
@@ -219,4 +221,168 @@ impl Tests {
             self.failed += 1;
         }
     }
+}
+
+os_std::thread_local! {
+    static LOCAL_ID: core::cell::Cell<u64> = core::cell::Cell::new(0);
+    static DROP_PROBE: DropProbe = DropProbe;
+}
+
+static TLS_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+struct DropProbe;
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        TLS_DROPS.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn thread_checks(t: &mut Tests) {
+    t.check("threads: spawn and join return values", || {
+        let hs: Vec<_> = (1..=4u64).map(|i| thread::spawn(move || (1..=i * 10_000).sum::<u64>())).collect();
+        let sums: Vec<u64> = hs.into_iter().filter_map(|h| h.join().ok()).collect();
+        sums == [50_005_000, 200_010_000, 450_015_000, 800_020_000]
+    });
+    t.check("threads: distinct ids and names", || {
+        let main_id = thread::current().id();
+        let h = thread::Builder::new()
+            .name(String::from("named"))
+            .spawn(|| (thread::current().id(), thread::current().name().map(String::from)))
+            .unwrap();
+        let (id, name) = h.join().unwrap();
+        id != main_id && name.as_deref() == Some("named") && thread::current().name() == Some("main")
+    });
+    t.check("Mutex: 4 threads x 20000 slow increments under preemption", || {
+        // Read, delay, write inside the lock: if the mutex did not exclude,
+        // a preemption between read and write would lose increments.
+        let m = Arc::new(Mutex::new(0u64));
+        let contended = Arc::new(AtomicUsize::new(0));
+        let start = Instant::now();
+        let hs: Vec<_> = (0..4)
+            .map(|_| {
+                let m = m.clone();
+                let contended = contended.clone();
+                thread::spawn(move || {
+                    for _ in 0..20_000 {
+                        let mut g = match m.try_lock() {
+                            Ok(g) => g,
+                            Err(_) => {
+                                contended.fetch_add(1, Ordering::Relaxed);
+                                m.lock().unwrap()
+                            }
+                        };
+                        let v = *g;
+                        for _ in 0..40 {
+                            core::hint::spin_loop();
+                        }
+                        *g = v + 1;
+                    }
+                })
+            })
+            .collect();
+        let joined = hs.into_iter().all(|h| h.join().is_ok());
+        let total = *m.lock().unwrap();
+        let waits = contended.load(Ordering::Relaxed);
+        println!("mutex counter: {total} in {} ms, {waits} contended acquisitions", start.elapsed().as_millis());
+        joined && total == 80_000 && waits > 0
+    });
+    t.check("Condvar: producer / 3 consumers", || {
+        let q = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
+        let consumers: Vec<_> = (0..3)
+            .map(|_| {
+                let q = q.clone();
+                thread::spawn(move || {
+                    let (m, cv) = &*q;
+                    let mut sum = 0u64;
+                    loop {
+                        let mut g = cv.wait_while(m.lock().unwrap(), |q: &mut VecDeque<u64>| q.is_empty()).unwrap();
+                        match g.pop_front() {
+                            Some(0) | None => return sum,
+                            Some(v) => sum += v,
+                        }
+                    }
+                })
+            })
+            .collect();
+        let (m, cv) = &*q;
+        for v in 1..=500u64 {
+            m.lock().unwrap().push_back(v);
+            cv.notify_one();
+            if v % 50 == 0 {
+                thread::yield_now();
+            }
+        }
+        m.lock().unwrap().extend([0, 0, 0]);
+        cv.notify_all();
+        let total: u64 = consumers.into_iter().filter_map(|h| h.join().ok()).sum();
+        total == 125_250
+    });
+    t.check("Condvar: wait_timeout expires", || {
+        let m = Mutex::new(());
+        let cv = Condvar::new();
+        let start = Instant::now();
+        let (_g, r) = cv.wait_timeout(m.lock().unwrap(), Duration::from_millis(30)).unwrap();
+        r.timed_out() && start.elapsed() >= Duration::from_millis(30)
+    });
+    t.check("futex: value mismatch and timeout", || {
+        let word = AtomicU32::new(0);
+        let mismatch = raw::futex_wait(word.as_ptr(), 1, 0) == Err(Errno::WouldBlock);
+        let start = Instant::now();
+        let timed = raw::futex_wait(word.as_ptr(), 0, 30_000_000) == Err(Errno::TimedOut);
+        let unaligned =
+            raw::futex_wait((word.as_ptr() as usize + 1) as *const u32, 0, 1) == Err(Errno::InvalidArgument);
+        mismatch
+            && timed
+            && unaligned
+            && start.elapsed() >= Duration::from_millis(30)
+            && raw::futex_wake(word.as_ptr(), 1) == 0
+    });
+    t.check("TLS: thread_local! per thread, destructors run", || {
+        LOCAL_ID.with(|c| c.set(1));
+        let before = TLS_DROPS.load(Ordering::SeqCst);
+        let hs: Vec<_> = (2..=4u64)
+            .map(|i| {
+                thread::spawn(move || {
+                    DROP_PROBE.with(|_| ());
+                    LOCAL_ID.with(|c| {
+                        let initial = c.get();
+                        c.set(i);
+                        thread::sleep(Duration::from_millis(20)); // let the others run
+                        (initial, c.get())
+                    })
+                })
+            })
+            .collect();
+        let results: Vec<(u64, u64)> = hs.into_iter().filter_map(|h| h.join().ok()).collect();
+        results == [(0, 2), (0, 3), (0, 4)]
+            && LOCAL_ID.with(|c| c.get()) == 1
+            && TLS_DROPS.load(Ordering::SeqCst) == before + 3
+    });
+    t.check("detached threads are reaped", || {
+        let flag = Arc::new(AtomicU32::new(0));
+        let f = flag.clone();
+        drop(thread::spawn(move || f.store(1, Ordering::SeqCst)));
+        let start = Instant::now();
+        while thread::detached_pending() > 0 && start.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        flag.load(Ordering::SeqCst) == 1 && thread::detached_pending() == 0
+    });
+    t.check(
+        "exit with blocked threads ends the process",
+        || matches!(worker(&["threads-exit"]).status(), Ok(s) if s.code() == Some(42)),
+    );
+    t.check(
+        "process lives until its last thread exits",
+        || matches!(worker(&["thread-last"]).status(), Ok(s) if s.code() == Some(9)),
+    );
+    t.check(
+        "fault in a spawned thread ends the process",
+        || matches!(worker(&["thread-fault"]).status(), Ok(s) if s.exception() == Some(14)),
+    );
+    t.check(
+        "panic in a spawned thread exits with 101",
+        || matches!(worker(&["thread-panic"]).status(), Ok(s) if s.code() == Some(101)),
+    );
 }

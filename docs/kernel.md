@@ -36,8 +36,8 @@ as a static ELF at `0xFFFF_FFFF_8000_0000` with three W^X segments
 `sync.rs` provides `SpinLock`, `IrqSpinLock` (interrupts disabled while
 held) and `BootCell`. All kernel data uses `IrqSpinLock`, so a thread is never
 preempted while holding a lock. Lock order (outer → inner):
-`process TABLE → SCHED → OUTPUT_TAIL → HEAP → PAGING → FRAMES → SERIAL`. The
-panic path may force-unlock SERIAL and only try-locks the display.
+`process TABLE → FUTEX → SCHED → OUTPUT_TAIL → HEAP → PAGING → FRAMES → SERIAL`.
+The panic path may force-unlock SERIAL and only try-locks the display.
 
 ## Threads and scheduling (`sched.rs`)
 
@@ -51,7 +51,11 @@ panic path may force-unlock SERIAL and only try-locks the display.
   that handler later. `idle` (`sti; hlt`) runs only when nothing is ready.
 - x87/SSE state is saved and restored on every switch (eager FXSAVE); SSE is
   enabled in CR0/CR4. The kernel itself is compiled soft-float.
-- CR3, TSS.RSP0 and the SYSCALL stack follow the incoming thread.
+- CR3, TSS.RSP0, the SYSCALL stack and the FS base (user TLS) follow the
+  incoming thread.
+- Kill requests: a flag on the thread (set when its process exits) that is
+  checked at safe points: the end of every system call and every interrupt
+  that returns to ring 3. Blocked threads are woken so they reach one.
 - `sleep_ticks`, `yield_now`, `join`, and a block/wake protocol whose
   "register wake-up, mark blocked, schedule" sequence runs with interrupts
   disabled so wake-ups cannot be lost. A dead thread's stack is freed by the
@@ -59,13 +63,18 @@ panic path may force-unlock SERIAL and only try-locks the display.
 
 ## Processes (`process.rs`)
 
-- Created by `spawn(parent, name, args)` from a boot module; each process has
-  one thread (its main thread) and its own address space: ELF segments with
+- Created by `spawn(parent, name, args)` from a boot module with one main
+  thread; `thread_spawn` adds more (up to 64). Each process has its own
+  address space: ELF segments with
   their permissions, a 256 KiB stack below `0x7FFF_FFFF_0000`, null guard below
   64 KiB, System V initial stack (`argc`, `argv`, `envp`, `auxv`).
-- `exit` (or a fatal CPU exception in ring 3) destroys the address space at
-  once and leaves a zombie with the exit status; the parent's waiting threads
-  are woken. `wait(parent, pid | 0)` returns and releases a zombie child.
+- `exit` (or a fatal CPU exception in any thread) records the exit status
+  and asks the other threads to stop; `thread_exit` ends one thread. The last
+  thread to end destroys the address space, drops the process's futex
+  registrations and leaves a zombie with the exit status; the parent's waiting
+  threads are woken. `wait(parent, pid | 0)` returns and releases a zombie.
+- Futexes (`futex.rs`): waiters keyed by (pid, address), FIFO wake-up,
+  timeouts through the scheduler's sleep mechanism.
 - Children of an exiting process become kernel orphans and are released as
   soon as they exit.
 - Frame accounting: every frame a process causes (root, page tables, pages)
@@ -81,10 +90,11 @@ fixups (#GP and #PF) · identity map removed · kernel W^X · kernel heap
 (including growth) · breakpoint exception · timer interrupts · user copy
 validation · address space lifecycle · preemptive kernel threads (two
 threads that never yield both make progress) · sleep and join · FPU/SSE
-state per thread.
+state per thread · FS base per thread.
 
 ## Not implemented yet
 
-Multiple threads per process, thread priorities, SMP and per-CPU data via
-`swapgs`, local APIC/IOAPIC, ACPI parsing, PCI, storage and filesystems,
-keyboard input, XSAVE (AVX state).
+Thread priorities, SMP and per-CPU data via `swapgs` (the futex and
+block/wake protocols rely on disabling interrupts on a single CPU and must be
+revisited for SMP), shared memory between processes, local APIC/IOAPIC, ACPI
+parsing, PCI, storage and filesystems, keyboard input, XSAVE (AVX state).

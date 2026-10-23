@@ -1,4 +1,4 @@
-# System call ABI (version 2)
+# System call ABI (version 3)
 
 Defined in `shared/abi`; kernel side in `kernel/src/syscall.rs`, user side in
 `runtime/os-sys`.
@@ -27,6 +27,41 @@ Defined in `shared/abi`; kernel side in `kernel/src/syscall.rs`, user side in
 | 7 | `wait` | `pid` (0 = any child), `status: *mut i32` (may be null) | pid of the reaped child |
 | 8 | `yield` | — | 0 |
 | 9 | `sleep` | `ns` (rounded up to 10 ms ticks) | 0 |
+| 10 | `thread_spawn` | `entry`, `stack_top` (16-byte aligned), `arg` (→ `rdi`), `fs_base` | thread id |
+| 11 | `thread_exit` | `code`, `done_word: *mut u32` (may be null) | does not return |
+| 12 | `futex_wait` | `addr` (4-byte aligned), `expected: u32`, `timeout_ns` (0 = none) | 0 |
+| 13 | `futex_wake` | `addr`, `count` | threads woken |
+| 14 | `set_fs_base` | `addr` (0 or a user address) | 0 |
+| 15 | `gettid` | — | thread id |
+
+### Threads
+
+- `thread_spawn` starts a thread in the calling process (at most 64 per
+  process); every other register is zero. Thread ids are global.
+- `thread_exit` ends the calling thread. The kernel then stores 1 to
+  `done_word` and wakes all futex waiters on it; because this happens after
+  the thread has left its user stack, a joiner that sees 1 may free that
+  stack. When the last thread of a process ends, the process exits with
+  `code` (unless `exit` set a status earlier).
+- `exit` ends the whole process: every other thread is asked to stop and does
+  so at its next safe point (return to user mode, or an interrupted
+  `futex_wait`, `sleep` or `wait`, which fail with `Interrupted`). The last
+  thread to stop releases the address space.
+- A CPU exception in any thread ends the whole process.
+
+### Futexes
+
+`futex_wait` reads `*addr`, and only if it equals `expected` blocks until a
+`futex_wake` on the same address in the same process, the timeout, or process
+exit. Check, registration and blocking are atomic with respect to
+`futex_wake`, so a wake that follows a store cannot be lost. Waiters are woken
+in FIFO order; callers must tolerate spurious returns.
+
+### Thread-local storage
+
+Each thread has its own FS base, saved and restored on context switch.
+OSyx Std points it at a thread control block whose first word is its own
+address (`fs:[0]`).
 
 `spawn` starts the boot module `name` (a file of `\EFI\OSYX\BIN\`); `args` is
 a block of NUL-terminated UTF-8 strings that become `argv[1..]` (`argv[0]` is
@@ -45,6 +80,9 @@ a block of NUL-terminated UTF-8 strings that become `argv[1..]` (`argv[0]` is
 | 6 | PermissionDenied | writable + executable mapping (W^X) |
 | 7 | NotFound | `spawn` of a program that is not a boot module |
 | 8 | NoChild | `wait` with no (matching) child |
+| 9 | WouldBlock | `futex_wait`: the word did not hold `expected` |
+| 10 | TimedOut | `futex_wait` timeout expired |
+| 11 | Interrupted | a blocking call ended because the process is exiting |
 
 ## Pointer validation
 

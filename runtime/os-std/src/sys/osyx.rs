@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::global_asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use osyx_abi::{SystemInfo, PROT_READ, PROT_WRITE};
 use osyx_mm::heap::Heap;
 
@@ -45,6 +45,110 @@ pub fn yield_now() {
     os_sys::yield_now()
 }
 
+// ---- threads, futexes, TLS --------------------------------------------------
+
+/// Stack size of threads created with `thread::spawn` (the region `map`
+/// returns is followed by a guard page; the previous region's guard page
+/// lies below it).
+pub const DEFAULT_STACK: usize = 256 * 1024;
+
+/// A started thread whose stack must be released once it has finished.
+pub struct RawThread {
+    stack: *mut u8,
+    stack_len: usize,
+}
+
+// SAFETY: the stack is only touched by the thread itself and freed after it
+// has provably left it (its done word is 1).
+unsafe impl Send for RawThread {}
+
+struct Start {
+    entry: fn(usize),
+    arg: usize,
+    done: *const AtomicU32,
+}
+
+global_asm!(
+    r#"
+    .section .text
+    // First instruction of every thread created by thread_spawn: rdi = Start.
+    .global osyx_rt_thread_entry
+osyx_rt_thread_entry:
+    and rsp, -16
+    xor ebp, ebp
+    call osyx_rt_thread_start
+    ud2
+    "#
+);
+
+extern "C" {
+    fn osyx_rt_thread_entry();
+}
+
+#[no_mangle]
+unsafe extern "C" fn osyx_rt_thread_start(start: *mut Start) -> ! {
+    // SAFETY: leaked by `thread_spawn` for exactly this thread.
+    let s = alloc::boxed::Box::from_raw(start);
+    let (entry, arg, done) = (s.entry, s.arg, s.done);
+    drop(s);
+    entry(arg);
+    // The kernel publishes `done` after we have left this stack.
+    os_sys::thread_exit(0, done as *const u32)
+}
+
+/// Starts `entry(arg)` on a new thread with thread pointer `tcb`. When it
+/// returns the kernel stores 1 to `done` and wakes its futex waiters.
+pub fn thread_spawn(entry: fn(usize), arg: usize, tcb: usize, done: &AtomicU32, stack: usize) -> Result<RawThread> {
+    let stack_len = stack.max(16 * 1024).next_multiple_of(4096);
+    let base = os_sys::map(stack_len, PROT_READ | PROT_WRITE).map_err(Error::from)?;
+    let start = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(Start { entry, arg, done }));
+    let top = base as usize + stack_len;
+    match os_sys::thread_spawn(osyx_rt_thread_entry as *const () as usize, top, start as usize, tcb) {
+        Ok(_) => Ok(RawThread { stack: base, stack_len }),
+        Err(e) => {
+            // SAFETY: the thread was not created, so nothing else owns these.
+            unsafe {
+                drop(alloc::boxed::Box::from_raw(start));
+                let _ = os_sys::unmap(base, stack_len);
+            }
+            Err(Error::from(e))
+        }
+    }
+}
+
+/// Frees the stack of a thread whose done word is 1.
+pub fn thread_release(t: RawThread) {
+    // SAFETY: the thread has exited, nothing references its stack.
+    let _ = unsafe { os_sys::unmap(t.stack, t.stack_len) };
+}
+
+/// Blocks while `word == expected`; false if the timeout expired.
+pub fn futex_wait(word: &AtomicU32, expected: u32, timeout: Option<core::time::Duration>) -> bool {
+    let ns = timeout.map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX).max(1));
+    !matches!(os_sys::futex_wait(word.as_ptr(), expected, ns), Err(osyx_abi::Errno::TimedOut))
+}
+
+pub fn futex_wake(word: *const AtomicU32, count: u32) {
+    os_sys::futex_wake(word as *const u32, count);
+}
+
+/// The current thread pointer (`fs:[0]`, which holds the TCB's own address).
+pub fn tcb() -> usize {
+    let p: usize;
+    // SAFETY: the runtime installs a TCB before any code can ask for it
+    // (main thread in `osyx_rt_start`, other threads in `thread::spawn`).
+    unsafe { core::arch::asm!("mov {}, fs:[0]", out(reg) p, options(nostack, readonly, preserves_flags)) };
+    p
+}
+
+pub fn set_tcb(p: usize) {
+    os_sys::set_fs_base(p).expect("set_fs_base rejected the TCB address");
+}
+
+pub fn current_tid() -> u64 {
+    os_sys::gettid()
+}
+
 // ---- start-up -------------------------------------------------------------
 
 static ARGC: AtomicUsize = AtomicUsize::new(0);
@@ -75,7 +179,9 @@ unsafe extern "C" fn osyx_rt_start(sp: *const usize) -> ! {
     let argc = *sp;
     ARGC.store(argc, Ordering::Relaxed);
     ARGV.store(sp.add(1) as usize, Ordering::Relaxed);
+    crate::tls::init_main_thread();
     let code = __osyx_user_main();
+    // Returning from main ends the whole process (other threads included).
     exit(code)
 }
 

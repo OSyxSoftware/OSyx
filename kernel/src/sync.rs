@@ -6,7 +6,8 @@
 //!   plain [`SpinLock`] taken in thread context could otherwise be re-taken by
 //!   an interrupt handler on the same CPU and deadlock.
 //! * Lock order (outer to inner):
-//!   process TABLE -> SCHED -> OUTPUT_TAIL -> HEAP -> PAGING -> FRAMES -> SERIAL.
+//!   process TABLE -> FUTEX -> SCHED -> OUTPUT_TAIL -> HEAP -> PAGING -> FRAMES
+//!   -> SERIAL.
 //!   Never acquire an outer lock while holding an inner one.
 //! * Because every lock disables interrupts, a thread is never preempted while
 //!   holding one (single CPU); the timer handler only takes SCHED (and, when it

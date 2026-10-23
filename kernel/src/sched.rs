@@ -74,7 +74,14 @@ pub struct Thread {
     wake_at: Option<u64>,
     joiners: Vec<Tid>,
     slice: u32,
+    /// FS base (user TLS thread pointer), switched with the thread.
+    fs_base: u64,
+    /// Set when the owning process is exiting: the thread ends at its next
+    /// safe point (return to user mode or an interrupted blocking call).
+    kill_pending: bool,
 }
+
+const IA32_FS_BASE: u32 = 0xC000_0100;
 
 struct Scheduler {
     threads: BTreeMap<Tid, Box<Thread>>,
@@ -147,11 +154,12 @@ fn idle_loop(_: u64, _: u64) {
     }
 }
 
-fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u64) -> Box<Thread> {
+#[allow(clippy::too_many_arguments)]
+fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u64, fs_base: u64) -> Box<Thread> {
     let mut stack = alloc::vec![0u128; KERNEL_STACK_SIZE / 16];
     let top = stack.as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64;
     // Frame consumed by osyx_switch: rflags, r15, r14, r13, r12, rbx, rbp, ret.
-    let frame: [u64; 8] = [0x2, 0, b, a, entry as usize as u64, 0, 0, osyx_thread_trampoline as *const () as u64];
+    let frame: [u64; 8] = [0x2, 0, b, a, entry as *const () as u64, 0, 0, osyx_thread_trampoline as *const () as u64];
     let rsp = top - 64;
     // SAFETY: the frame lies inside the freshly allocated stack.
     unsafe { core::ptr::copy_nonoverlapping(frame.as_ptr(), rsp as *mut u64, 8) };
@@ -168,6 +176,8 @@ fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b
         wake_at: None,
         joiners: Vec::new(),
         slice: TIME_SLICE_TICKS,
+        fs_base,
+        kill_pending: false,
     })
 }
 
@@ -187,8 +197,10 @@ pub fn init() {
         wake_at: None,
         joiners: Vec::new(),
         slice: TIME_SLICE_TICKS,
+        fs_base: 0,
+        kill_pending: false,
     });
-    let idle = new_thread(2, "idle", 0, root, idle_loop, 0, 0);
+    let idle = new_thread(2, "idle", 0, root, idle_loop, 0, 0, 0);
     let mut threads = BTreeMap::new();
     threads.insert(1, boot);
     threads.insert(2, idle);
@@ -203,13 +215,15 @@ pub fn init() {
     });
 }
 
-/// Creates a ready thread running `entry(a, b)` with page table `root`.
-pub fn spawn(name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u64) -> Tid {
+/// Creates a ready thread running `entry(a, b)` with page table `root` and
+/// FS base `fs_base`.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn(name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u64, fs_base: u64) -> Tid {
     let mut g = SCHED.lock();
     let s = g.as_mut().expect("scheduler not initialised");
     let tid = s.next_tid;
     s.next_tid += 1;
-    let t = new_thread(tid, name, pid, root, entry, a, b);
+    let t = new_thread(tid, name, pid, root, entry, a, b, fs_base);
     s.threads.insert(tid, t);
     s.ready.push_back(tid);
     tid
@@ -217,7 +231,7 @@ pub fn spawn(name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u64) -> T
 
 /// Spawns a kernel thread (kernel page tables, no process).
 pub fn spawn_kernel(name: &str, entry: Entry, a: u64, b: u64) -> Tid {
-    spawn(name, 0, paging::kernel_root(), entry, a, b)
+    spawn(name, 0, paging::kernel_root(), entry, a, b, 0)
 }
 
 type SwitchPlan = (*mut u64, u64, *mut FpuState, *const FpuState);
@@ -246,11 +260,17 @@ impl Scheduler {
         if next == cur {
             return None;
         }
-        let (new_rsp, new_root, new_top) = (nt.rsp, nt.root, nt.kstack_top);
+        let (new_rsp, new_root, new_top, new_fs) = (nt.rsp, nt.root, nt.kstack_top, nt.fs_base);
         let new_fpu: *const FpuState = &*nt.fpu;
         let old = self.threads.get_mut(&cur).expect("current thread exists");
         if old.state == State::Dead {
             self.reap = Some(cur);
+        }
+        // SAFETY: IA32_FS_BASE exists on every x86-64 CPU; the kernel never
+        // uses FS, so the value only matters to each thread's user code.
+        unsafe {
+            old.fs_base = cpu::rdmsr(IA32_FS_BASE);
+            cpu::wrmsr(IA32_FS_BASE, new_fs);
         }
         let old_rsp: *mut u64 = &mut old.rsp;
         let old_fpu: *mut FpuState = &mut *old.fpu;
@@ -351,10 +371,47 @@ pub fn sleep_ticks(ticks: u64) {
 /// wake-up (see [`wake`]) and must call [`schedule`] next, all with
 /// interrupts disabled so the wake-up cannot be lost.
 pub fn mark_current_blocked() {
+    mark_current_blocked_until(None);
+}
+
+/// Like [`mark_current_blocked`], but the timer also wakes the thread at
+/// tick `deadline`.
+pub fn mark_current_blocked_until(deadline: Option<u64>) {
     let mut g = SCHED.lock();
     let s = g.as_mut().expect("scheduler not initialised");
     let t = s.threads.get_mut(&s.current).expect("current thread exists");
     t.state = State::Blocked;
+    t.wake_at = deadline;
+}
+
+/// Asks thread `tid` to end at its next safe point and wakes it if blocked
+/// so that it gets there.
+pub fn request_kill(tid: Tid) {
+    let mut g = SCHED.lock();
+    let Some(s) = g.as_mut() else { return };
+    if let Some(t) = s.threads.get_mut(&tid) {
+        t.kill_pending = true;
+        if t.state == State::Blocked {
+            t.state = State::Ready;
+            t.wake_at = None;
+            s.ready.push_back(tid);
+        }
+    }
+}
+
+/// True if the current thread has been asked to end.
+pub fn current_kill_pending() -> bool {
+    SCHED.lock().as_ref().is_some_and(|s| s.threads.get(&s.current).is_some_and(|t| t.kill_pending))
+}
+
+/// Sets the FS base of the current thread and loads it into the CPU.
+pub fn set_current_fs_base(value: u64) {
+    let mut g = SCHED.lock();
+    let s = g.as_mut().expect("scheduler not initialised");
+    let t = s.threads.get_mut(&s.current).expect("current thread exists");
+    t.fs_base = value;
+    // SAFETY: see `pick_next`; the kernel does not use FS.
+    unsafe { cpu::wrmsr(IA32_FS_BASE, value) };
 }
 
 /// Makes a blocked thread ready again (no effect on other states).

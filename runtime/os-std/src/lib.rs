@@ -47,10 +47,12 @@ pub mod io;
 pub mod os;
 pub mod process;
 pub mod rt;
+pub mod sync;
 pub mod thread;
 pub mod time;
+mod tls;
 
-pub use alloc::{borrow, boxed, collections, fmt, format, rc, string, sync, vec};
+pub use alloc::{borrow, boxed, collections, fmt, format, rc, string, vec};
 pub use core::{array, cell, cmp, convert, hash, hint, iter, marker, mem, ops, option, ptr, result, slice, str};
 
 /// Name of the platform back end this build uses (`"osyx"` or `"host"`).
@@ -60,6 +62,7 @@ pub const BACKEND: &str = sys::NAME;
 pub mod prelude {
     pub use crate::error::{Error, ErrorKind};
     pub use crate::io::Write as _;
+    pub use crate::sync::{Arc, Condvar, Mutex};
     pub use crate::{eprint, eprintln, print, println};
     pub use alloc::borrow::ToOwned;
     pub use alloc::boxed::Box;

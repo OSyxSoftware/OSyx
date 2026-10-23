@@ -57,6 +57,11 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
         }
         v => kprintln!("unexpected interrupt vector {v}"),
     }
+    // Safe point: about to return to ring 3 in a thread whose process is
+    // exiting (e.g. it was preempted in user mode by the timer).
+    if from_user && crate::sched::current_kill_pending() {
+        crate::process::finish_current_thread(0);
+    }
 }
 
 /// A CPU exception raised by user code terminates the process, not the kernel.

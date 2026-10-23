@@ -16,6 +16,7 @@ extern crate alloc;
 mod arch;
 mod display;
 mod fixup;
+mod futex;
 mod interrupts;
 mod mem;
 mod modules;

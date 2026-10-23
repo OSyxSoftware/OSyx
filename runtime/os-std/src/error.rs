@@ -14,6 +14,9 @@ pub enum ErrorKind {
     PermissionDenied,
     WriteZero,
     NoChild,
+    WouldBlock,
+    TimedOut,
+    Interrupted,
     Other,
 }
 
@@ -28,6 +31,9 @@ impl ErrorKind {
             ErrorKind::PermissionDenied => "permission denied",
             ErrorKind::WriteZero => "write returned zero bytes",
             ErrorKind::NoChild => "no child process",
+            ErrorKind::WouldBlock => "operation would block",
+            ErrorKind::TimedOut => "timed out",
+            ErrorKind::Interrupted => "interrupted",
             ErrorKind::Other => "other error",
         }
     }
@@ -77,6 +83,9 @@ impl From<Errno> for Error {
             Errno::PermissionDenied => ErrorKind::PermissionDenied,
             Errno::NotFound => ErrorKind::NotFound,
             Errno::NoChild => ErrorKind::NoChild,
+            Errno::WouldBlock => ErrorKind::WouldBlock,
+            Errno::TimedOut => ErrorKind::TimedOut,
+            Errno::Interrupted => ErrorKind::Interrupted,
         };
         Error { kind, errno: Some(e), message: None }
     }

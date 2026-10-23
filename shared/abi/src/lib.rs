@@ -1,4 +1,4 @@
-//! OSyx system call ABI, version 2.
+//! OSyx system call ABI, version 3.
 //!
 //! Calling convention (x86-64 `syscall` instruction):
 //! * `rax` = system call number, arguments in `rdi, rsi, rdx, r10, r8, r9`.
@@ -16,7 +16,7 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// Highest user virtual address + 1 (the canonical lower half).
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -49,7 +49,34 @@ pub mod nr {
     pub const YIELD: u64 = 8;
     /// `sleep(ns: u64) -> 0`: blocks for at least `ns` nanoseconds.
     pub const SLEEP: u64 = 9;
+    /// `thread_spawn(entry: u64, stack_top: u64, arg: u64, fs_base: u64) -> tid`
+    ///
+    /// Starts a thread in the calling process at `entry` with `rsp =
+    /// stack_top` (16-byte aligned), `rdi = arg` and FS base `fs_base`.
+    pub const THREAD_SPAWN: u64 = 10;
+    /// `thread_exit(code: i32, done_word: *mut u32) -> !`
+    ///
+    /// Ends the calling thread. If `done_word` is not null the kernel stores
+    /// 1 there and wakes all futex waiters on it *after* the thread has left
+    /// its user stack, so a joiner may free that stack. If it was the last
+    /// thread, the process exits with `code`.
+    pub const THREAD_EXIT: u64 = 11;
+    /// `futex_wait(addr: *const u32, expected: u32, timeout_ns: u64) -> 0`
+    ///
+    /// Blocks while `*addr == expected` until a `futex_wake` on `addr`
+    /// (`timeout_ns == 0`: no timeout). Fails with `WouldBlock` if the value
+    /// differs, `TimedOut` on timeout. Spurious returns are allowed.
+    pub const FUTEX_WAIT: u64 = 12;
+    /// `futex_wake(addr: *const u32, count: u32) -> woken`
+    pub const FUTEX_WAKE: u64 = 13;
+    /// `set_fs_base(addr: u64) -> 0`: thread pointer for TLS (`fs:[0]`).
+    pub const SET_FS_BASE: u64 = 14;
+    /// `gettid() -> tid`
+    pub const GETTID: u64 = 15;
 }
+
+/// Maximum number of threads per process.
+pub const MAX_THREADS: usize = 64;
 
 /// Maximum length of a program name passed to `spawn`.
 pub const MAX_NAME: usize = 31;
@@ -87,6 +114,12 @@ pub enum Errno {
     NotFound = 7,
     /// `wait` was called but the caller has no (matching) child.
     NoChild = 8,
+    /// `futex_wait`: the value no longer matched; retry.
+    WouldBlock = 9,
+    /// A blocking call reached its timeout.
+    TimedOut = 10,
+    /// A blocking call was interrupted because the process is exiting.
+    Interrupted = 11,
 }
 
 impl Errno {
@@ -100,6 +133,9 @@ impl Errno {
             6 => Errno::PermissionDenied,
             7 => Errno::NotFound,
             8 => Errno::NoChild,
+            9 => Errno::WouldBlock,
+            10 => Errno::TimedOut,
+            11 => Errno::Interrupted,
             _ => return None,
         })
     }
@@ -114,6 +150,9 @@ impl Errno {
             Errno::PermissionDenied => "permission denied",
             Errno::NotFound => "not found",
             Errno::NoChild => "no child process",
+            Errno::WouldBlock => "operation would block",
+            Errno::TimedOut => "timed out",
+            Errno::Interrupted => "interrupted",
         }
     }
 }
@@ -171,6 +210,9 @@ mod tests {
             Errno::PermissionDenied,
             Errno::NotFound,
             Errno::NoChild,
+            Errno::WouldBlock,
+            Errno::TimedOut,
+            Errno::Interrupted,
         ] {
             assert_eq!(decode(encode(Err(e))), Err(e));
             assert_eq!(Errno::from_raw(e as u64), Some(e));

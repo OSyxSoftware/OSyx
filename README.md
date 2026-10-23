@@ -14,12 +14,13 @@ compatibility layer; that work has not started yet (see
   ExitBootServices, kernel hand-off; clear error screen for bad kernels.
 - Kernel: GDT/TSS/IDT, exception diagnostics, bitmap frame allocator,
   4-level paging with W^X/NX, growable heap, preemptive round-robin scheduler
-  with kernel threads and per-thread FPU/SSE state, framebuffer status screen,
-  14 in-kernel self-tests.
-- User space: ring 3 processes with spawn/wait, zombies and orphans,
-  SYSCALL/SYSRET ABI with pointer validation, and Rust programs built on OSyx
-  Std (`println!`, collections, heap, time, args, `process::Command`,
-  `thread::sleep`, panics): `init` runs 25 checks using `worker` children.
+  with kernel threads and per-thread FPU/SSE and FS state, framebuffer status
+  screen, 15 in-kernel self-tests.
+- User space: multi-threaded ring 3 processes with spawn/wait, zombies and
+  orphans, futexes and FS-base TLS, SYSCALL/SYSRET ABI with pointer
+  validation, and Rust programs built on OSyx Std (`println!`, collections,
+  heap, time, args, `process::Command`, `thread::spawn`, `thread_local!`,
+  `Mutex`, `Condvar`, panics): `init` runs 37 checks using `worker` children.
 
 ## Quick start (Windows 11 host)
 

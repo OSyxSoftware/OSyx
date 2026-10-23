@@ -42,12 +42,13 @@ UEFI firmware (OVMF)
 | Frame allocator, paging, kernel heap | Implemented | host + in-kernel tests |
 | Timer interrupts (PIC/PIT) | Implemented | in-kernel test |
 | Framebuffer status screen | Implemented | QEMU screenshot |
-| User processes, ring 3, SYSCALL ABI v2 | Implemented (one thread per process) | QEMU user tests |
+| User processes, ring 3, SYSCALL ABI v3 | Implemented | QEMU user tests |
+| Threads per process, futexes, FS-base TLS | Implemented (single CPU) | in-kernel + QEMU user tests |
 | Kernel threads, preemptive scheduler, FPU state | Implemented (single CPU) | in-kernel + QEMU user tests |
 | spawn / wait / zombies / orphans | Implemented | QEMU user tests |
 | OSyx Std (convenience std) | Partially implemented | host tests + running on OSyx |
 | Genuine Rust `std` port | Planned | Not tested |
-| Multiple threads per process, SMP | Planned | Not tested |
+| SMP | Planned | Not tested |
 | Filesystem (FAT32, VFS) | Planned | Not tested |
 | ACPI, APIC, PCI, drivers | Planned | Not tested |
 | C++23 components | Planned (no current need) | Not tested |
