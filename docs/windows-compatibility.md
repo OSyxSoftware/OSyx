@@ -39,11 +39,21 @@ and symbols produce a loader diagnostic before the entry point executes.
 | ws2_32 | IPv4 TCP/UDP sockets, bind/connect/listen/accept, send/receive, basic socket options, DNS/getaddrinfo and ordinal imports |
 | setupapi | Read-only ALLCLASSES/PRESENT inventory from real kernel PCI functions and attached HID inputs; descriptions, classes, hardware IDs, locations |
 | iphlpapi | GetAdaptersInfo, GetIfTable, GetNetworkParams and synchronous ICMP echo, backed by OSyx interface counters/configuration, DNS and PingSocket |
+| version | GetFileVersionInfoSizeW/GetFileVersionInfoW read actual PE RT_VERSION data; VerQueryValueW returns checked fixed, string and translation values |
+| kernel32 synchronization | Shared/exclusive SRW locks, serialized InitOnceExecuteOnce with failure retry, condition variables with lock reacquisition, aligned 32-bit WaitOnAddress and wake operations |
+| kernel32 waitable timers | Manual/automatic reset, relative/absolute deadlines, periodic timers, cancellation and object waits, using OSyx clocks/futexes |
+| kernel32 / psapi | K32EnumProcessModules/Ex and EnumProcessModules/Ex report actual modules of the current process with byte-capacity checks |
 
 SetupAPI rejects unsupported properties (including registry driver-service
 information); it does not install drivers or fabricate driver names.
 IP Helper reports unknown link speed as zero. Adapter statistics are the
 real stack counters; MIB_IFROW's legacy DWORD counters wrap at 32 bits.
+Version APIs do not merge MUI satellites. WaitOnAddress sizes other than
+an aligned DWORD fail explicitly. Waitable timer APCs, suspend wakeups
+and requested high-resolution timer creation are unsupported.
+Timer creation currently accepts default security and TIMER_ALL_ACCESS;
+custom security attributes or restricted access requests fail explicitly.
+Module enumeration does not support remote processes or 32-bit module filters.
 
 ## Programs and tests
 
@@ -61,6 +71,10 @@ their own assertions and the host TCP/UDP echo server's log:
 - `sysadmin.exe`: volume/directory data, buffer sizing, device/adapter
   enumeration, handle lifetime and ICMP payload preservation. C static
   assertions independently verify the Windows x64 structure sizes.
+- `version.exe`: real version-resource values, UTF-16 strings, translations,
+  insufficient buffers and missing values; the same fixture also runs on Windows.
+- `synch.exe`: concurrent readers, once success/failure retry, condition
+  handoff/timeouts, futex wakeups, module handles/capacities and real timers.
 
 `scripts/build-winapps.ps1` builds four GUI applications from
 `compatibility/win32/apps/src`: Text Editor, Disk Utility, Device Manager
@@ -106,3 +120,7 @@ plain ext4 driver):
 
 The executable tests and the module table above are the current subset
 matrix. See [testing.md](testing.md) for recorded validation results.
+The unmodified official Zen Browser Windows x64 package remains blocked;
+measured loader failures and package dependency gaps are documented in
+[research/zen-bringup.md](research/zen-bringup.md). It is not a supported
+desktop application and is not registered as the default browser.

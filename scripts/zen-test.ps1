@@ -27,12 +27,21 @@ $result = [ordered]@{
     state = 'blocked'; version = $Version; vm_exit = $vm.ExitCode
     browser_result = ([regex]::Match($text, 'ZEN_PROBE_RESULT [^\r\n]+')).Value
     loader_error = $(if ($errorLine) { $errorLine.Value } else { $null })
-    real_browser_window = $false; page_rendering = $false; tabs = $false
-    keyboard_mouse = $false; https_verified = $false
+    functional_tests = 'not reached; null means untested'
+    real_browser_window = $null; page_rendering = $null; tabs = $null
+    keyboard_mouse = $null; https_verified = $null
     kernel_panic = ($text -match 'KERNEL PANIC'); evidence = $log
 }
 if (-not $result.browser_result -and -not $result.loader_error) { $result.state = 'unverified' }
 $result | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $evidenceDir 'qemu-result.json')
 $result | ConvertTo-Json | Write-Host
+if ($text -match 'WIN_EXPORT ') {
+    Push-Location $Root
+    try {
+        Invoke-Checked 'Zen import audit' {
+            cargo run -q -p osyx-pe-loader --example dependency-audit -- (Join-Path $evidenceDir "$Version/core") $log (Join-Path $evidenceDir 'dependencies.json')
+        } | Write-Host
+    } finally { Pop-Location }
+}
 Write-Host 'ZEN STATUS: BLOCKED/UNVERIFIED. No functional browser success is claimed.'
 exit 2

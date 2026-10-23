@@ -19,7 +19,8 @@ if (-not (Test-Path -LiteralPath $installer)) {
 }
 if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha) { throw 'Zen SHA-256 mismatch' }
 $package = Join-Path $base $Version
-if (-not (Test-Path -LiteralPath (Join-Path $package 'core/zen.exe'))) {
+$extracted = Join-Path $package '.extracted.sha256'
+if (-not (Test-Path -LiteralPath $extracted) -or ([IO.File]::ReadAllText($extracted)).Trim() -ne $sha) {
     New-Item -ItemType Directory -Force $package | Out-Null
     $entries = & tar.exe -tf $installer
     if ($LASTEXITCODE -ne 0) { throw 'Cannot list Zen archive (Windows tar with 7z support required)' }
@@ -28,6 +29,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $package 'core/zen.exe'))) {
     }
     & tar.exe -xf $installer -C $package
     if ($LASTEXITCODE -ne 0) { throw 'Zen extraction failed' }
+    [IO.File]::WriteAllText($extracted, $sha)
 }
 $exe = Join-Path $package 'core/zen.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Archive has no core/zen.exe' }

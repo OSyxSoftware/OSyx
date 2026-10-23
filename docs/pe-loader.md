@@ -16,13 +16,17 @@ executed.
 | Section table | names, flags; virtual addresses section-aligned, ascending, not overlapping the headers or each other, inside `SizeOfImage`; raw data inside the file; overflow-checked |
 | RVA translation | `rva_to_offset` (file-backed bytes only), `slice_at_rva` (one section), `read_mapped` (loader view: zero-filled section tails read as 0), `va_to_rva`, bounded NUL-terminated names (≤ 512 bytes, UTF-8) |
 | Imports | descriptors until the null entry (≤ 4096), DLL names, ILT/IAT (falls back to the IAT without an ILT), by-name (hint + name) and by-ordinal thunks, reserved-bit checks, ≤ 65536 thunks |
+| Delay imports | Bounded RVA-form descriptors, DLL names, name/ordinal thunks and module/bound/unload table RVAs; legacy VA-form descriptors are rejected |
+| Resources | Numeric type/name/language tree with bounded offsets and file-backed payloads; checked VS_VERSIONINFO binary and UTF-16 value queries |
 | Exports | directory, address/name/ordinal tables file-backed, ordinals within 16 bits, forwarders (`DLL.Name`, `DLL.#ordinal`) detected by RVA-inside-directory, binary search by name, lookup by ordinal, sorted-name check, linear `functions()`/`names()` iterators |
 | Base relocations | block headers (size ≥ 8, even, inside the directory, page aligned inside the image), entry types (ABSOLUTE, DIR64, HIGHLOW, others reported for loader policy), target inside the image |
 | TLS | `IMAGE_TLS_DIRECTORY64` VAs converted to RVAs inside the image, callback array (≤ 1024, null-terminated), template data |
 | Exception data | `RUNTIME_FUNCTION` table size, begin < end, sorted and non-overlapping, inside the image; binary-search `lookup`; `UNWIND_INFO` header (version 1/2, flags, prolog, codes file-backed) |
 
-Not parsed yet: resources, debug directory contents, load config, delay
-imports, bound imports, CLR header, COFF symbol table, long section names.
+Not parsed yet: debug directory contents, load config, bound imports,
+CLR header, COFF symbol table, long section names. Resource string names
+are not exposed by the numeric lookup API. Delay-import parsing supports
+auditing; the runtime does not implement delay-load resolution yet.
 
 ### Tests
 
@@ -46,6 +50,13 @@ imports, bound imports, CLR header, COFF symbol table, long section names.
 rejections, table errors and panics. It reads files only; nothing is copied
 into the repository. See [testing.md](testing.md) for the last recorded run.
 `pe-dump` prints the parse of one file.
+
+`cargo run -p osyx-pe-loader --example dependency-audit -- <vendor-dir>
+<qemu-serial-log> <output.json>` compares static and delay imports with
+the actual `winrun --exports` manifest emitted in QEMU. It follows vendor
+exports/forwarders and distinguishes missing DLLs, contracts and symbols.
+Symbol presence is not a behavioural compatibility test; dynamically
+requested dependencies are additional. See [Zen bring-up](research/zen-bringup.md).
 
 ## Loader — implemented initial subset
 
