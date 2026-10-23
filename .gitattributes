@@ -1,12 +1,2 @@
-# Auto detect text files and perform LF normalization
-* text=auto
-
-# Generated binary boot assets
-*.osxi binary
-*.osxf binary
-*.bmp binary
-*.ico binary
-*.png binary
-# PE fixtures (built locally from tests/fixtures/src)
-*.exe binary
-*.dll binary
+*.sh text eol=lf
+*.img binary

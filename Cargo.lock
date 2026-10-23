@@ -42,6 +42,10 @@ name = "osyx-elf"
 version = "0.1.0"
 
 [[package]]
+name = "osyx-ext4"
+version = "0.1.0"
+
+[[package]]
 name = "osyx-fat"
 version = "0.1.0"
 

@@ -1,0 +1,8 @@
+[package]
+name = "osyx-ext4"
+description = "Native ext2/ext3/ext4 file system driver (read; journalled writes)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
