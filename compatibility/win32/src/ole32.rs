@@ -23,6 +23,12 @@ const CLASS_E_NOAGGREGATION: u32 = 0x8004_0110;
 const COINIT_APARTMENTTHREADED: u32 = 0x2;
 const COINIT_KNOWN: u32 = 0x2 | 0x4 | 0x8; // apartment, disable OLE1 DDE, speed over memory
 
+// APTTYPE / APTTYPEQUALIFIER, from the COM apartment API.
+const APTTYPE_STA: i32 = 0;
+const APTTYPE_MTA: i32 = 1;
+const APTTYPEQUALIFIER_NONE: i32 = 0;
+const APTTYPEQUALIFIER_IMPLICIT_MTA: i32 = 1;
+
 pub extern "win64" fn CoTaskMemAlloc(size: usize) -> u64 {
     kernel32::heap_alloc(size, false).unwrap_or(0)
 }
@@ -62,6 +68,14 @@ struct Com {
 
 static COM: Mutex<Com> = Mutex::new(Com { threads: BTreeMap::new(), security_set: false });
 
+impl Com {
+    /// Whether the process has an MTA (any thread entered one), which is what
+    /// makes every other thread implicitly part of it.
+    fn mta_exists(&self) -> bool {
+        self.threads.values().any(|(apartment, _)| *apartment == Apartment::Multi)
+    }
+}
+
 fn initialized() -> bool {
     COM.lock().unwrap().threads.contains_key(&os_sys::gettid())
 }
@@ -98,6 +112,28 @@ extern "win64" fn CoUninitialize() {
             com.threads.remove(&tid);
         }
     }
+}
+
+/// The calling thread's apartment, and whether it is in it explicitly or
+/// only because the process has an MTA (Windows puts every thread of such a
+/// process into the MTA implicitly).
+extern "win64" fn CoGetApartmentType(kind: *mut i32, qualifier: *mut i32) -> u32 {
+    if kind.is_null() || qualifier.is_null() {
+        return E_POINTER;
+    }
+    let com = COM.lock().unwrap();
+    let (t, q) = match (com.threads.get(&os_sys::gettid()), com.mta_exists()) {
+        (Some((Apartment::Single, _)), _) => (APTTYPE_STA, APTTYPEQUALIFIER_NONE),
+        (Some((Apartment::Multi, _)), _) => (APTTYPE_MTA, APTTYPEQUALIFIER_NONE),
+        (None, true) => (APTTYPE_MTA, APTTYPEQUALIFIER_IMPLICIT_MTA),
+        (None, false) => return CO_E_NOTINITIALIZED,
+    };
+    // SAFETY: both out pointers were checked above.
+    unsafe {
+        *kind = t;
+        *qualifier = q;
+    }
+    S_OK
 }
 
 /// Records the process's COM security. With no COM servers or remote
@@ -172,6 +208,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CoInitialize,
         CoUninitialize,
         CoInitializeSecurity,
+        CoGetApartmentType,
         CoCreateInstance,
         CoAllowSetForegroundWindow
     ];

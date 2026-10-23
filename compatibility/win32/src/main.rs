@@ -21,6 +21,7 @@ macro_rules! export_table {
 }
 
 mod crypt32;
+mod cryptbase;
 mod dbghelp;
 mod error;
 mod eventlog;
@@ -79,6 +80,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use os_std::prelude::*;
 
+/// `-v`: the module summary, every thread as it starts, and the loader's
+/// diagnostics. Set once in `main` before anything else runs.
+pub(crate) static VERBOSE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 os_std::entry!(main);
 
 /// Quotes an argument the way the Windows command-line parser expects.
@@ -99,6 +104,7 @@ fn main() -> i32 {
         return 0;
     }
     let verbose = args.first().is_some_and(|a| a == "-v");
+    VERBOSE.store(verbose, core::sync::atomic::Ordering::Relaxed);
     if verbose {
         args.remove(0);
     }

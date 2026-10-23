@@ -418,7 +418,7 @@ extern "win64" fn NtCreateThreadEx(
     if process != objects::CURRENT_PROCESS || start == 0 || out.is_null() {
         return STATUS_INVALID_PARAMETER;
     }
-    let size = if stack_reserve == 0 { kernel32::DEFAULT_STACK } else { stack_reserve };
+    let size = kernel32::stack_reserve(stack_reserve, true);
     match kernel32::spawn_thread(start, arg, size, flags & 1 != 0) {
         Ok(t) => {
             // SAFETY: the caller's out pointer.

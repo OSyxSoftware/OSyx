@@ -184,6 +184,106 @@ extern "win64" fn SHGetFolderPathW(_hwnd: u64, csidl: u32, token: u64, kind: u32
     S_OK
 }
 
+/// Splits a Windows command line into arguments with the rules
+/// `CommandLineToArgvW` documents: whitespace separates, double quotes group
+/// (and a doubled quote inside them is one quote), and 2n backslashes before
+/// a quote become n backslashes with the quote taking effect, 2n+1 become n
+/// backslashes and a literal quote.
+fn split_command_line(s: &[u16]) -> Vec<Vec<u16>> {
+    let is_space = |c: u16| c == 0x20 || c == 0x09;
+    let mut args = Vec::new();
+    let mut i = 0;
+    while i < s.len() {
+        while i < s.len() && is_space(s[i]) {
+            i += 1;
+        }
+        if i >= s.len() {
+            break;
+        }
+        let mut arg: Vec<u16> = Vec::new();
+        let mut quoted = false;
+        while i < s.len() {
+            match s[i] {
+                c if c == b'\\' as u16 => {
+                    let mut n = 0;
+                    while i < s.len() && s[i] == b'\\' as u16 {
+                        n += 1;
+                        i += 1;
+                    }
+                    let quoted_quote = i < s.len() && s[i] == b'"' as u16;
+                    let slashes = if quoted_quote { n / 2 } else { n };
+                    for _ in 0..slashes {
+                        arg.push(b'\\' as u16);
+                    }
+                    if quoted_quote && n % 2 == 1 {
+                        arg.push(b'"' as u16);
+                        i += 1;
+                    }
+                }
+                c if c == b'"' as u16 => {
+                    i += 1;
+                    if quoted && i < s.len() && s[i] == b'"' as u16 {
+                        arg.push(b'"' as u16);
+                        i += 1;
+                    } else {
+                        quoted = !quoted;
+                    }
+                }
+                c if !quoted && is_space(c) => break,
+                c => {
+                    arg.push(c);
+                    i += 1;
+                }
+            }
+        }
+        args.push(arg);
+    }
+    args
+}
+
+/// `CommandLineToArgvW`: the program's arguments in one LocalAlloc block.
+/// The pointer array comes first, because that is the pointer handed back
+/// (and the block `LocalFree` must free here); the strings follow it.
+extern "win64" fn CommandLineToArgvW(cmdline: *const u16, count: *mut i32) -> u64 {
+    if count.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's out parameter.
+    unsafe { *count = 0 };
+    if cmdline.is_null() {
+        return 0;
+    }
+    let mut len = 0;
+    // SAFETY: a NUL-terminated command line from the caller.
+    while unsafe { *cmdline.add(len) } != 0 {
+        len += 1;
+    }
+    // SAFETY: `len` units, as read above.
+    let text = unsafe { core::slice::from_raw_parts(cmdline, len) };
+    let args = if text.is_empty() {
+        // Windows reports the program path as the only argument.
+        let path: Vec<u16> = kernel32::module_name(0).unwrap_or_default().encode_utf16().collect();
+        alloc::vec![path]
+    } else {
+        split_command_line(text)
+    };
+    let array = (args.len() + 1) * 8;
+    let total: usize = array + args.iter().map(|a| (a.len() + 1) * 2).sum::<usize>();
+    let Some(block) = kernel32::heap_alloc(total, true) else { return 0 };
+    let mut at = block + array as u64;
+    for (i, arg) in args.iter().enumerate() {
+        // SAFETY: inside the block just allocated, zeroed and big enough.
+        unsafe {
+            core::ptr::copy_nonoverlapping(arg.as_ptr(), at as *mut u16, arg.len());
+            *((block + (i * 8) as u64) as *mut u64) = at;
+        }
+        at += ((arg.len() + 1) * 2) as u64;
+    }
+    // SAFETY: the caller's out parameter; the array's spare entry stays 0.
+    unsafe { *count = args.len() as i32 };
+    block
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![SHGetKnownFolderPath, SHGetFolderPathW]
+    export_table![SHGetKnownFolderPath, SHGetFolderPathW, CommandLineToArgvW]
 }

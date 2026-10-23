@@ -11,7 +11,7 @@ use crate::{loader, mem, path, teb};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use os_std::sync::Mutex;
 use osyx_abi::Errno;
 use osyx_pe_loader::link::Symbol;
@@ -1189,6 +1189,21 @@ extern "win64" fn GetExitCodeProcess(h: u64, code: *mut u32) -> Bool {
 const CREATE_SUSPENDED: u32 = 4;
 const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x10000;
 pub const DEFAULT_STACK: usize = 1 << 20;
+/// The program's SizeOfStackReserve: the stack a thread gets by default,
+/// as on Windows (set by the loader; stack pages cost memory only when used).
+pub static EXE_STACK_RESERVE: AtomicUsize = AtomicUsize::new(DEFAULT_STACK);
+
+/// A thread's reserve: `size` itself with STACK_SIZE_PARAM_IS_A_RESERVATION;
+/// otherwise `size` is the initial commit and the reserve is the program's
+/// default, grown to a 1 MiB multiple of a larger commit.
+pub fn stack_reserve(size: usize, is_reservation: bool) -> usize {
+    let default = EXE_STACK_RESERVE.load(Ordering::Relaxed);
+    match (size, is_reservation) {
+        (0, _) => default,
+        (s, true) => s,
+        (s, false) => default.max(s.next_multiple_of(1 << 20)),
+    }
+}
 
 /// Starts a Windows thread running `start(param)`; returns its object.
 pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) -> Result<Arc<ThreadObj>, u32> {
@@ -1219,15 +1234,24 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
             let t = teb::create_teb(stack + size as u64, stack, pid, tid);
             teb::install(t);
             me.teb.store(t, Ordering::SeqCst);
+            if crate::VERBOSE.load(Ordering::Relaxed) {
+                // Which module starts this thread, for crash reports that
+                // name only the thread id.
+                let at = match loader::where_is(start) {
+                    Some((module, offset)) => alloc::format!("{module}+{offset:#x}"),
+                    None => alloc::format!("{start:#x} (no module)"),
+                };
+                os_std::eprintln!("winrun: thread {tid} start {at} stack {stack:#x}..{:#x}", stack + size as u64);
+            }
             loader::setup_thread_tls(t);
             me.tid.store(tid as u32, Ordering::SeqCst);
             while me.suspended.load(Ordering::SeqCst) > 0 {
                 let _ = os_sys::futex_wait(me.suspended.as_ptr(), me.suspended.load(Ordering::SeqCst), 0);
             }
-            loader::notify_threads(loader::DLL_THREAD_ATTACH);
-            let code = loader::run_on_stack(start, param, stack + size as u64) as u32;
-            crate::fls::thread_exit();
-            loader::notify_threads(loader::DLL_THREAD_DETACH);
+            // DllMain, the start routine and DLL_THREAD_DETACH are Windows
+            // code: they run on the thread's Windows stack, not this one.
+            let env = loader::ThreadStart { start, param };
+            let code = loader::run_thread(&env, stack + size as u64) as u32;
             let _ = os_sys::set_gs_base(0);
             mem::free_stack(stack, size);
             mem::free_pages(t, teb::TEB_SIZE);
@@ -1250,8 +1274,7 @@ pub(crate) extern "win64" fn CreateThread(attributes: u64, stack: usize, start: 
     if start == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let _ = flags & STACK_SIZE_PARAM_IS_A_RESERVATION;
-    let size = if stack == 0 { DEFAULT_STACK } else { stack };
+    let size = stack_reserve(stack, flags & STACK_SIZE_PARAM_IS_A_RESERVATION != 0);
     match spawn_thread(start, param, size, flags & CREATE_SUSPENDED != 0) {
         Ok(t) => {
             if !tid.is_null() {
@@ -1897,7 +1920,15 @@ extern "win64" fn TlsSetValue(i: u32, v: u64) -> Bool {
 // ---- memory -----------------------------------------------------------------------
 
 extern "win64" fn VirtualAlloc(addr: u64, size: usize, kind: u32, protect: u32) -> u64 {
-    mem::virtual_alloc(addr, size, kind, protect).unwrap_or_else(|s| fail(status_to_win32(s), 0))
+    match mem::virtual_alloc(addr, size, kind, protect) {
+        Ok(p) => p,
+        Err(s) => {
+            if crate::VERBOSE.load(Ordering::Relaxed) {
+                os_std::eprintln!("winrun: VirtualAlloc({addr:#x}, {size:#x}, {kind:#x}, {protect:#x}) failed: {s:?}");
+            }
+            fail(status_to_win32(s), 0)
+        }
+    }
 }
 
 extern "win64" fn VirtualFree(addr: u64, size: usize, kind: u32) -> Bool {

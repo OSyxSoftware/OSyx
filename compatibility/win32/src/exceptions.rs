@@ -355,11 +355,117 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         os_std::eprintln!("winrun: exception continuation rejected: {error:?}");
         os_std::process::exit(0xc000000du32 as i32);
     }
-    os_std::eprintln!("winrun: unhandled Windows exception {:#x} at {:#x}", record.code, record.address);
+    os_std::eprintln!(
+        "winrun: unhandled Windows exception {:#x} at {:#x} ({}) in thread {}",
+        record.code,
+        record.address,
+        where_text(record.address),
+        os_sys::gettid()
+    );
+    if record.code == 0xc000_0005 && record.count >= 2 {
+        // EXCEPTION_ACCESS_VIOLATION: [0] read/write/execute, [1] the address.
+        let kind = match record.info[0] {
+            0 => "reading",
+            1 => "writing",
+            _ => "executing",
+        };
+        let t = crate::teb::current();
+        // SAFETY: this thread's TEB.
+        let (base, limit): (u64, u64) = unsafe { (crate::teb::get(t, crate::teb::TEB_STACK_BASE), crate::teb::get(t, crate::teb::TEB_STACK_LIMIT)) };
+        os_std::eprintln!("winrun: ... {kind} {:#x} (stack {limit:#x}..{base:#x})", record.info[1]);
+        if record.info[1] < limit && record.info[1] + 0x10000 >= limit {
+            report_overflow(limit, base, n.gpr[fault::RSP], n.gpr[fault::RBP]);
+        } else {
+            trace(limit, base, n.gpr[fault::RSP]);
+        }
+    }
     if let Some(what) = delay_load_failure(&record) {
         os_std::eprintln!("winrun: delay load failed: {what}");
     }
     os_std::process::exit(record.code as i32)
+}
+
+/// `module+offset` for a code address, for crash reports.
+fn where_text(addr: u64) -> alloc::string::String {
+    match crate::loader::where_is(addr) {
+        Some((module, offset)) => alloc::format!("{module}+{offset:#x}"),
+        None => alloc::string::String::from("no module"),
+    }
+}
+
+/// A poor man's backtrace for a fault that is not a stack overflow: the code
+/// addresses on the stack above the faulting stack pointer, in the order they
+/// appear (the innermost return addresses first). Unwinding the real frames
+/// would be better, but this says which module failed without it.
+fn trace(limit: u64, base: u64, rsp: u64) {
+    let start = rsp.max(limit).min(base);
+    let end = start.saturating_add(16 << 10).min(base);
+    let mut found: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut at = start;
+    while at + 8 <= end && found.len() < 12 {
+        // SAFETY: inside this thread's stack, between its limit and base.
+        let v: u64 = unsafe { core::ptr::read_volatile(at as *const u64) };
+        if let Some((module, offset)) = crate::loader::where_is(v) {
+            let entry = alloc::format!("{module}+{offset:#x}");
+            if found.last() != Some(&entry) {
+                found.push(entry);
+            }
+        }
+        at += 8;
+    }
+    if found.is_empty() {
+        return;
+    }
+    os_std::eprintln!("winrun: call chain guesses (innermost first): {}", found.join(", "));
+}
+
+/// A stack overflow: the code addresses found in the used part of the
+/// thread's stack, most frequent first, as module+offset (a recursion shows
+/// as a few addresses repeated many times; one huge frame shows a short
+/// list).
+///
+/// Two windows are read, because they answer different questions: the
+/// bottom one shows where the stack died, the top one shows the call chain
+/// that got there when the stack pointer was moved rather than walked down.
+/// Only addresses inside `[limit, base)` are read — anything outside may be
+/// unmapped and a second fault here would lose the report.
+fn report_overflow(limit: u64, base: u64, rsp: u64, rbp: u64) {
+    let where_rsp = match rsp {
+        r if r < limit => alloc::format!("{:#x} ({:#x} BELOW the stack limit)", r, limit - r),
+        r if r >= base => alloc::format!("{r:#x} (ABOVE the stack base)"),
+        r => alloc::format!("{r:#x} ({:#x} above the limit)", r - limit),
+    };
+    os_std::eprintln!("winrun: stack overflow: rsp {where_rsp}, rbp {rbp:#x}, limit {limit:#x}, base {base:#x}");
+    for (what, start, end) in [
+        ("bottom", limit, limit.saturating_add(0x4000).min(base)),
+        ("top", base.saturating_sub(0x10000).max(limit), base),
+    ] {
+        let mut seen: alloc::collections::BTreeMap<u64, u32> = alloc::collections::BTreeMap::new();
+        let (mut words, mut zero) = (0u32, 0u32);
+        let mut at = start;
+        while at + 8 <= end {
+            // SAFETY: inside this thread's stack, between its limit and base.
+            let v: u64 = unsafe { core::ptr::read_volatile(at as *const u64) };
+            words += 1;
+            if v == 0 {
+                zero += 1;
+            } else if crate::loader::where_is(v).is_some() {
+                *seen.entry(v).or_default() += 1;
+            }
+            at += 8;
+        }
+        os_std::eprintln!(
+            "winrun: {what} {start:#x}..{end:#x}: {words} words, {zero} zero, code addresses most frequent first:"
+        );
+        let mut top: alloc::vec::Vec<(u64, u32)> = seen.into_iter().collect();
+        top.sort_by_key(|&(_, n)| core::cmp::Reverse(n));
+        if top.is_empty() {
+            os_std::eprintln!("winrun:   none: no word points into a loaded module");
+        }
+        for (pc, n) in top.into_iter().take(12) {
+            os_std::eprintln!("winrun:   {n:4} x {}", where_text(pc));
+        }
+    }
 }
 
 /// The DLL and function of a failed delay load (VcppException codes

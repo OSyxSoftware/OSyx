@@ -107,7 +107,7 @@ fn wake() {
 
 /// Makes sure a worker will pick up new work (or watch the timers).
 fn ensure_worker(p: &mut Pool) {
-    if p.idle == 0 && p.workers < MAX_WORKERS && kernel32::spawn_thread(worker as *const () as u64, 0, 256 << 10, false).is_ok() {
+    if p.idle == 0 && p.workers < MAX_WORKERS && kernel32::spawn_thread(worker as *const () as u64, 0, kernel32::stack_reserve(0, false), false).is_ok() {
         p.workers += 1;
     }
 }

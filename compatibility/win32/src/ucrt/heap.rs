@@ -34,6 +34,9 @@ fn alloc(size: usize, zero: bool) -> *mut u8 {
             return p as *mut u8;
         }
         if NEW_MODE.load(Ordering::SeqCst) == 0 || !call_new_handler(size) {
+            if crate::VERBOSE.load(Ordering::Relaxed) {
+                os_std::eprintln!("winrun: the CRT heap has no room for {size:#x} bytes");
+            }
             set_errno(ENOMEM);
             return core::ptr::null_mut();
         }

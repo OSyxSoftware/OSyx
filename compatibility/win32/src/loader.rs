@@ -105,7 +105,48 @@ pub fn run_on_stack(func: u64, arg: u64, stack_top: u64) -> u64 {
     r
 }
 
-/// Ends the Windows code of the calling thread with `code` (ExitThread).
+/// The Windows part of a new thread: its start routine and the DLL
+/// notifications around it.
+pub struct ThreadStart {
+    pub start: u64,
+    pub param: u64,
+}
+
+/// Runs on the thread's Windows stack: DllMain (and the TLS callbacks) must
+/// see the stack the thread is going to use, as on Windows.
+extern "win64" fn thread_main(env: *const ThreadStart) -> u64 {
+    // SAFETY: `env` points into `run_thread`'s frame, which outlives this call.
+    let env = unsafe { &*env };
+    notify_threads(DLL_THREAD_ATTACH);
+    // SAFETY: a thread start routine of a mapped image, Windows x64 ABI.
+    let f: extern "win64" fn(u64) -> u32 = unsafe { core::mem::transmute(env.start as usize) };
+    let code = f(env.param);
+    crate::fls::thread_exit();
+    notify_threads(DLL_THREAD_DETACH);
+    code as u64
+}
+
+/// Runs a thread's Windows part on the stack `[.., stack_top)` it was given.
+pub fn run_thread(env: &ThreadStart, stack_top: u64) -> u64 {
+    run_on_stack(thread_main as *const () as u64, env as *const ThreadStart as u64, stack_top)
+}
+
+/// The DLLs waiting for their first DllMain: (base, entry, TLS callbacks,
+/// is a DLL).
+pub type AttachList = Vec<(u64, u64, Vec<u64>, bool)>;
+
+/// Runs the DLL_PROCESS_ATTACH delivery on the main thread's Windows stack.
+/// Returns false if a DllMain refused.
+pub fn run_attach(todo: &AttachList, stack_top: u64) -> bool {
+    run_on_stack(attach_on_stack as *const () as u64, todo as *const AttachList as u64, stack_top) != 0
+}
+
+extern "win64" fn attach_on_stack(todo: *const AttachList) -> u64 {
+    // SAFETY: `todo` points into `run_attach`'s caller, alive across the call.
+    deliver_attach(unsafe { &*todo }) as u64
+}
+
+
 pub fn exit_thread(code: u32) -> ! {
     let frame = EXIT_FRAMES.lock().unwrap().get(&os_sys::gettid()).copied();
     match frame {
@@ -164,7 +205,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("psapi.dll", crate::psapi::exports(), Vec::new()),
         builtin(
             "advapi32.dll",
-            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports()].concat(),
+            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports(), crate::cryptbase::exports()].concat(),
             Vec::new()
         ),
         builtin("shlwapi.dll", crate::shlwapi::exports(), Vec::new()),
@@ -177,6 +218,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("userenv.dll", crate::userenv::exports(), Vec::new()),
         builtin("dbghelp.dll", crate::dbghelp::exports(), Vec::new()),
         builtin("crypt32.dll", crate::crypt32::exports(), Vec::new()),
+        builtin("cryptbase.dll", crate::cryptbase::exports(), Vec::new()),
         builtin("rpcrt4.dll", crate::minordlls::rpcrt4_exports(), Vec::new()),
         builtin("cfgmgr32.dll", crate::minordlls::cfgmgr32_exports(), Vec::new()),
         builtin("ktmw32.dll", crate::minordlls::ktmw32_exports(), Vec::new()),
@@ -230,6 +272,8 @@ fn schema() -> Vec<u8> {
     }
     b.add("api-ms-win-core-rtlsupport-l1-2-0", "ntdll.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-shcore-scaling-l1-1-1", "shcore.dll", &[]).expect("valid contract name");
+    // The Windows 7 "downlevel" contracts that programs still import.
+    b.add("api-ms-win-downlevel-shell32-l1-1-0", "shell32.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-path-l1-1-0", "kernelbase.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-rtlsupport-l1-1-0", "ntdll.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-registry-l1-1-0", "advapi32.dll", &[]).expect("valid contract name");
@@ -441,7 +485,12 @@ fn deliver_attach(todo: &[(u64, u64, Vec<u64>, bool)]) -> bool {
         if *entry != 0 {
             // SAFETY: the entry point of a mapped DLL image.
             let f: DllMain = unsafe { core::mem::transmute(*entry as usize) };
-            if f(*base, DLL_PROCESS_ATTACH, 0) == 0 {
+            let ok = f(*base, DLL_PROCESS_ATTACH, 0);
+            if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+                let name = where_is(*entry).map_or_else(|| alloc::format!("{base:#x}"), |(n, _)| n);
+                os_std::eprintln!("winrun: DllMain(PROCESS_ATTACH) {name} = {ok}");
+            }
+            if ok == 0 {
                 return false;
             }
         }
@@ -449,33 +498,53 @@ fn deliver_attach(todo: &[(u64, u64, Vec<u64>, bool)]) -> bool {
     true
 }
 
+/// Slots reserved in every thread's TLS array. A program loads its DLLs over
+/// time (Firefox loads NSS's modules lazily), so the array is sized once and
+/// both thread creation and later loads fill it in.
+const TLS_SLOTS: usize = 256;
+
 /// TLS blocks for the calling thread (call after `teb::install`).
+///
+/// A module loaded later needs a block too, and the thread may already have
+/// data in its earlier blocks: Windows keeps those, so this only adds the
+/// missing ones. Rebuilding the array would silently wipe every thread-local
+/// the program had stored (jemalloc's thread cache, NSS's, Gecko's).
 pub fn setup_thread_tls(teb_addr: u64) {
-    let blocks: Vec<Vec<u8>> = with(|l| {
-        l.tls
-            .iter()
-            .map(|t| {
-                let mut b = t.template.clone();
-                b.resize(t.template.len() + t.zero_fill, 0);
-                b
-            })
-            .collect()
+    with(|l| {
+        if l.tls.is_empty() {
+            return;
+        }
+        // SAFETY: `teb_addr` is a TEB; its TLS pointer is either 0 or an array
+        // this function allocated with TLS_SLOTS entries.
+        let existing = unsafe { teb::get::<u64>(teb_addr, teb::TEB_TLS_POINTER) };
+        let array: &'static mut [u64] = if existing == 0 {
+            let a = Vec::leak(alloc::vec![0u64; TLS_SLOTS]);
+            // SAFETY: as above.
+            unsafe { teb::put(teb_addr, teb::TEB_TLS_POINTER, a.as_mut_ptr() as u64) };
+            a
+        } else {
+            // SAFETY: as above.
+            unsafe { core::slice::from_raw_parts_mut(existing as *mut u64, TLS_SLOTS) }
+        };
+        for (i, t) in l.tls.iter().enumerate() {
+            if i >= TLS_SLOTS || array[i] != 0 {
+                continue;
+            }
+            let mut b = t.template.clone();
+            b.resize(t.template.len() + t.zero_fill, 0);
+            // Leaked deliberately: the block lives as long as the thread.
+            array[i] = Vec::leak(b).as_mut_ptr() as u64;
+        }
     });
-    if blocks.is_empty() {
-        return;
-    }
-    // Leaked deliberately: the blocks live as long as the thread, and the
-    // runtime does not track thread exit for them.
-    let array: &'static mut [u64] = Vec::leak(alloc::vec![0u64; blocks.len().max(8)]);
-    for (i, b) in blocks.into_iter().enumerate() {
-        array[i] = Vec::leak(b).as_mut_ptr() as u64;
-    }
-    // SAFETY: `teb_addr` is this thread's TEB.
-    unsafe { teb::put(teb_addr, teb::TEB_TLS_POINTER, array.as_mut_ptr() as u64) };
 }
 
 /// DLL_THREAD_ATTACH / DETACH for the calling thread (TLS callbacks and
 /// DllMain of every attached DLL, in load order).
+///
+/// This is Windows code: it must be called with the stack pointer inside the
+/// thread's Windows stack (`run_thread`, `run_main`), because a function
+/// prologue there probes `[gs:0x10]`/`[gs:0x08]` and a mismatch faults at the
+/// stack limit instead of growing the stack.
 pub fn notify_threads(reason: u32) {
     let list: Vec<(u64, u64, Vec<u64>)> = with(|l| {
         (0..l.linker.modules.len())
@@ -558,7 +627,8 @@ pub struct Started {
 pub fn start(exe_path: &str, command_line: &str, environment: &[String]) -> Result<Started, String> {
     let bytes = os_std::fs::read(exe_path).map_err(|e| alloc::format!("{exe_path}: {e}"))?;
     let pe = PeFile::parse(&bytes).map_err(|e| alloc::format!("{exe_path}: not a valid PE32+ image: {e}"))?;
-    let stack_size = (pe.optional().size_of_stack_reserve as usize).clamp(256 << 10, 8 << 20);
+    let stack_size = (pe.optional().size_of_stack_reserve as usize).clamp(256 << 10, 64 << 20);
+    crate::kernel32::EXE_STACK_RESERVE.store(stack_size, core::sync::atomic::Ordering::Relaxed);
     let exe_dir = exe_path.rsplit_once('/').map_or("/", |(d, _)| if d.is_empty() { "/" } else { d }).to_string();
     let exe_name = exe_path.rsplit('/').next().unwrap_or(exe_path).to_string();
     let cwd = os_std::env::current_dir().map(|p| p.as_str().to_string()).unwrap_or_else(|_| String::from("/"));
@@ -601,8 +671,9 @@ pub fn start(exe_path: &str, command_line: &str, environment: &[String]) -> Resu
     *LOADER.lock().unwrap() = Some(l);
     setup_thread_tls(main_teb);
     // The program's own TLS callbacks run with the DLLs' attach (Windows
-    // runs them before the entry point too); DllMain only for DLLs.
-    if !deliver_attach(&todo) {
+    // runs them before the entry point too); DllMain only for DLLs. Both are
+    // Windows code, so they run on the stack the program will use.
+    if !run_attach(&todo, stack_top) {
         return Err(String::from("a DLL failed to initialise (DllMain returned FALSE)"));
     }
     Ok(Started { entry, stack_top, stack_limit: stack, peb: teb::peb() })
@@ -751,6 +822,9 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         l.state[i].refs += 1;
         (todo, module_handle(l, i))
     };
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: loaded {name} at {h:#x}");
+    }
     if !todo.is_empty() {
         // New TLS indices need blocks for this thread too.
         setup_thread_tls(teb::current());
@@ -857,6 +931,16 @@ pub fn image_containing(addr: u64) -> Option<(u64, u64)> {
     let l = g.as_ref()?;
     let img = l.linker.host.images.iter().find(|i| addr >= i.base && addr < i.base + i.size)?;
     Some((img.base, img.size))
+}
+
+/// The module a code address belongs to, as its name and offset — the form
+/// crash reports use. Only PE images (not built-in DLLs) have code here.
+pub fn where_is(addr: u64) -> Option<(String, u64)> {
+    let g = LOADER.lock().ok()?;
+    let l = g.as_ref()?;
+    let image = l.linker.host.images.iter().find(|i| addr >= i.base && addr < i.base + i.size)?;
+    let name = l.linker.modules.iter().find(|m| m.base == image.base)?.name.clone();
+    Some((name, addr - image.base))
 }
 
 /// `VirtualQuery` for addresses inside loaded images.
