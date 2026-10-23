@@ -142,6 +142,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ("labs", abs as *const () as u64),
         ("_abs64", llabs as *const () as u64),
         ("ldiv", div as *const () as u64),
+        ("imaxdiv", lldiv as *const () as u64),
     ]);
     v
 }

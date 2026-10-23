@@ -62,14 +62,20 @@ macro_rules! xmm_abi {
 }
 
 mod convert;
+mod diagnostics;
 mod env;
+mod fenv;
 mod fs;
 mod heap;
+mod libm;
 mod locale;
 mod lowio;
 mod math;
+mod metadata;
+mod multibyte;
 mod printf;
 mod runtime;
+mod scan;
 mod stdio;
 mod string;
 mod time;
@@ -113,9 +119,10 @@ pub struct Ptd {
     pub rand_next: u32,
     /// `_set_thread_local_invalid_parameter_handler`.
     pub iph: u64,
-    /// Lazily formatted `asctime`-style buffers and similar per-thread
-    /// results live here.
-    pub scratch: Vec<u8>,
+    /// These APIs have independent buffers and natural element alignment.
+    pub calendar: time::Tm,
+    pub error_text: Vec<u8>,
+    pub wide_error_text: Vec<u16>,
 }
 
 static PTDS: Mutex<BTreeMap<u64, Box<Ptd>>> = Mutex::new(BTreeMap::new());
@@ -135,7 +142,9 @@ pub fn ptd() -> &'static mut Ptd {
                 wcstok: 0,
                 rand_next: 1,
                 iph: 0,
-                scratch: Vec::new(),
+                calendar: time::Tm::default(),
+                error_text: Vec::new(),
+                wide_error_text: Vec::new(),
             })
         })
     };
@@ -392,10 +401,16 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     v.extend(fs::exports());
     v.extend(time::exports());
     v.extend(math::exports());
+    v.extend(libm::exports());
     v.extend(utility::exports());
     v.extend(locale::exports());
     v.extend(lowio::exports());
     v.extend(stdio::exports());
     v.extend(printf::exports());
+    v.extend(scan::exports());
+    v.extend(diagnostics::exports());
+    v.extend(fenv::exports());
+    v.extend(metadata::exports());
+    v.extend(multibyte::exports());
     v
 }

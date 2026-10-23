@@ -51,6 +51,9 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("Universal C Runtime through the api-ms-win-crt contracts", || {
         run("ucrt.exe", &["one", "two words", "a\\b", "x\"y"]) == Some(0)
     });
+    t.check("C Runtime extended math and floating-point edge cases", || run("crt2.exe", &[]) == Some(0));
+    t.check("C Runtime scanf, floating-point control, diagnostics and local time", || run("crt3.exe", &[]) == Some(0));
+    t.check("C Runtime file metadata, temporary names, environment and multibyte conversion", || run("crt4.exe", &[]) == Some(0));
     t.check("Windows tokens follow native uid after dropping root", || {
         Command::new("worker").args(["exec-as", "1000", "/bin/winrun", "/opt/wintests/security.exe"])
             .env("WIN_EXPECT_UID", "1000").status().is_ok_and(|s|s.success())

@@ -57,6 +57,9 @@ $programs = [ordered]@{
     # The real UCRT import library: every C runtime function comes through
     # the api-ms-win-crt-* contracts.
     'ucrt.exe'    = @{ Src = @('ucrt.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lucrt', '-lkernel32') }
+    'crt2.exe'    = @{ Src = @('crt2.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lucrt', '-lkernel32') }
+    'crt3.exe'    = @{ Src = @('crt3.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lucrt', '-lkernel32') }
+    'crt4.exe'    = @{ Src = @('crt4.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lucrt', '-lkernel32') }
     'hello.exe'   = @{ Src = @('hello.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'fileio.exe'  = @{ Src = @('fileio.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'threads.exe' = @{ Src = @('threads.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
@@ -71,6 +74,7 @@ foreach ($name in $programs.Keys) {
     if ($name -eq 'version.exe') { $inputs += $versionObj }
     if ($name -eq 'seh.exe') { $inputs += $sehObj }
     if ($name -eq 'interop.exe') { $inputs += "$src\pkcs7_sample.h" }
+    if ($name -eq 'crt2.exe') { $inputs += "$src\crtmath_cases.h" }
     $target = Join-Path $out $name
     if (Stale $target $inputs) {
         Invoke-Checked $name { & $clang @common @($p.Src | ForEach-Object { Join-Path $src $_ }) @($p.Args) -o $target }

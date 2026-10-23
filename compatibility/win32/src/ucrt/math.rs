@@ -11,22 +11,22 @@ use super::*;
 // ---- double-double arithmetic ---------------------------------------------------------
 
 #[derive(Clone, Copy)]
-struct Dd {
-    hi: f64,
-    lo: f64,
+pub(super) struct Dd {
+    pub(super) hi: f64,
+    pub(super) lo: f64,
 }
 
-fn dd(x: f64) -> Dd {
+pub(super) fn dd(x: f64) -> Dd {
     Dd { hi: x, lo: 0.0 }
 }
 
-fn two_sum(a: f64, b: f64) -> Dd {
+pub(super) fn two_sum(a: f64, b: f64) -> Dd {
     let s = a + b;
     let bb = s - a;
     Dd { hi: s, lo: (a - (s - bb)) + (b - bb) }
 }
 
-fn quick_two_sum(a: f64, b: f64) -> Dd {
+pub(super) fn quick_two_sum(a: f64, b: f64) -> Dd {
     let s = a + b;
     Dd { hi: s, lo: b - (s - a) }
 }
@@ -37,34 +37,34 @@ fn split(a: f64) -> (f64, f64) {
     (hi, a - hi)
 }
 
-fn two_prod(a: f64, b: f64) -> Dd {
+pub(super) fn two_prod(a: f64, b: f64) -> Dd {
     let p = a * b;
     let (ah, al) = split(a);
     let (bh, bl) = split(b);
     Dd { hi: p, lo: ((ah * bh - p) + ah * bl + al * bh) + al * bl }
 }
 
-fn add(a: Dd, b: Dd) -> Dd {
+pub(super) fn add(a: Dd, b: Dd) -> Dd {
     let s = two_sum(a.hi, b.hi);
     let t = two_sum(a.lo, b.lo);
     let s = quick_two_sum(s.hi, s.lo + t.hi);
     quick_two_sum(s.hi, s.lo + t.lo)
 }
 
-fn neg(a: Dd) -> Dd {
+pub(super) fn neg(a: Dd) -> Dd {
     Dd { hi: -a.hi, lo: -a.lo }
 }
 
-fn sub(a: Dd, b: Dd) -> Dd {
+pub(super) fn sub(a: Dd, b: Dd) -> Dd {
     add(a, neg(b))
 }
 
-fn mul(a: Dd, b: Dd) -> Dd {
+pub(super) fn mul(a: Dd, b: Dd) -> Dd {
     let p = two_prod(a.hi, b.hi);
     quick_two_sum(p.hi, p.lo + (a.hi * b.lo + a.lo * b.hi))
 }
 
-fn div(a: Dd, b: Dd) -> Dd {
+pub(super) fn div(a: Dd, b: Dd) -> Dd {
     let q1 = a.hi / b.hi;
     let r = sub(a, mul(b, dd(q1)));
     let q2 = r.hi / b.hi;
@@ -74,12 +74,12 @@ fn div(a: Dd, b: Dd) -> Dd {
 }
 
 /// Multiplies by 2^k exactly (no overflow in the uses here).
-fn scale(a: Dd, k: i32) -> Dd {
+pub(super) fn scale(a: Dd, k: i32) -> Dd {
     let f = pow2(k);
     Dd { hi: a.hi * f, lo: a.lo * f }
 }
 
-fn pow2(k: i32) -> f64 {
+pub(super) fn pow2(k: i32) -> f64 {
     f64::from_bits(((k + 1023) as u64) << 52)
 }
 
@@ -94,7 +94,7 @@ fn atanh2(s: Dd) -> Dd {
 }
 
 /// ln 2 and ln 10 (derived once from the series).
-fn consts() -> (Dd, Dd, Dd) {
+pub(super) fn consts() -> (Dd, Dd, Dd) {
     static C: Mutex<Option<(Dd, Dd, Dd)>> = Mutex::new(None);
     let mut g = C.lock().unwrap();
     *g.get_or_insert_with(|| {
@@ -109,7 +109,7 @@ fn consts() -> (Dd, Dd, Dd) {
 }
 
 /// ln of a positive finite double-double.
-fn ln_dd(x: Dd, ln2: Dd) -> Dd {
+pub(super) fn ln_dd(x: Dd, ln2: Dd) -> Dd {
     let mut x = x;
     let mut k = 0i32;
     if x.hi < f64::MIN_POSITIVE {
@@ -129,7 +129,7 @@ fn ln_dd(x: Dd, ln2: Dd) -> Dd {
 
 /// e^x for a double-double argument, rounded to double. Over- and
 /// underflow give inf and 0 (the caller reports them).
-fn exp_dd(x: Dd, ln2: Dd) -> f64 {
+pub(super) fn exp_dd(x: Dd, ln2: Dd) -> f64 {
     if x.hi > 709.8 {
         return f64::INFINITY;
     }
@@ -158,10 +158,10 @@ fn exp_dd(x: Dd, ln2: Dd) -> f64 {
 
 // ---- errors ----------------------------------------------------------------------------
 
-const DOMAIN: i32 = 1;
-const SING: i32 = 2;
-const OVERFLOW: i32 = 3;
-const UNDERFLOW: i32 = 4;
+pub(super) const DOMAIN: i32 = 1;
+pub(super) const SING: i32 = 2;
+pub(super) const OVERFLOW: i32 = 3;
+pub(super) const UNDERFLOW: i32 = 4;
 
 static MATHERR: AtomicU64 = AtomicU64::new(0);
 
@@ -180,7 +180,7 @@ struct Exception {
 
 /// Reports a math error: the program's `_matherr` may take it (and
 /// replace the result); otherwise errno is set.
-fn error(kind: i32, name: &'static [u8], a1: f64, a2: f64, ret: f64) -> f64 {
+pub(super) fn error(kind: i32, name: &'static [u8], a1: f64, a2: f64, ret: f64) -> f64 {
     let h = MATHERR.load(Ordering::SeqCst);
     if h != 0 {
         let mut e = Exception { kind, name: name.as_ptr(), arg1: a1, arg2: a2, retval: ret };
@@ -195,7 +195,7 @@ fn error(kind: i32, name: &'static [u8], a1: f64, a2: f64, ret: f64) -> f64 {
 }
 
 /// The default NaN of an invalid operation (the "indeterminate" NaN).
-const IND: f64 = f64::from_bits(0xFFF8_0000_0000_0000);
+pub(super) const IND: f64 = f64::from_bits(0xFFF8_0000_0000_0000);
 
 // ---- classification and bits ---------------------------------------------------------------
 
@@ -225,7 +225,7 @@ extern "win64" fn _fdsign_soft(x: f32) -> i32 {
     x.is_sign_negative() as i32
 }
 
-extern "win64" fn copysign_soft(x: f64, y: f64) -> f64 {
+pub(super) extern "win64" fn copysign_soft(x: f64, y: f64) -> f64 {
     f64::from_bits((x.to_bits() & !(1 << 63)) | (y.to_bits() & (1 << 63)))
 }
 
@@ -233,12 +233,12 @@ extern "win64" fn copysignf_soft(x: f32, y: f32) -> f32 {
     f32::from_bits((x.to_bits() & !(1 << 31)) | (y.to_bits() & (1 << 31)))
 }
 
-extern "win64" fn fabs_soft(x: f64) -> f64 {
+pub(super) extern "win64" fn fabs_soft(x: f64) -> f64 {
     f64::from_bits(x.to_bits() & !(1 << 63))
 }
 
 /// Rounds toward zero by clearing fraction bits.
-fn trunc_f(x: f64) -> f64 {
+pub(super) fn trunc_f(x: f64) -> f64 {
     let e = ((x.to_bits() >> 52) & 0x7FF) as i32 - 1023;
     if e >= 52 {
         return x; // integral, inf or NaN
@@ -249,7 +249,7 @@ fn trunc_f(x: f64) -> f64 {
     f64::from_bits(x.to_bits() & !((1u64 << (52 - e)) - 1))
 }
 
-fn floor_f(x: f64) -> f64 {
+pub(super) fn floor_f(x: f64) -> f64 {
     let t = trunc_f(x);
     if t > x { t - 1.0 } else { t }
 }
@@ -289,7 +289,7 @@ extern "win64" fn round_soft(x: f64) -> f64 {
     if fabs_soft(x - t) >= 0.5 { t + copysign_soft(1.0, x) } else { t }
 }
 
-extern "win64" fn sqrt_soft(x: f64) -> f64 {
+pub(super) extern "win64" fn sqrt_soft(x: f64) -> f64 {
     if x < 0.0 {
         return error(DOMAIN, b"sqrt\0", x, 0.0, IND);
     }
@@ -324,7 +324,7 @@ extern "win64" fn frexp_soft(x: f64, e: *mut i32) -> f64 {
 }
 
 /// x * 2^n with a single rounding (subnormal results included).
-fn scalbn(x: f64, n: i32) -> f64 {
+pub(super) fn scalbn(x: f64, n: i32) -> f64 {
     let (mut y, mut n) = (x, n);
     if n > 1023 {
         y *= pow2(1023);
@@ -354,7 +354,7 @@ extern "win64" fn ldexp_soft(x: f64, n: i32) -> f64 {
 }
 
 /// fmod: exact (the remainder of doubles is representable).
-extern "win64" fn fmod_soft(x: f64, y: f64) -> f64 {
+pub(super) extern "win64" fn fmod_soft(x: f64, y: f64) -> f64 {
     if x.is_nan() || y.is_nan() {
         return x + y;
     }
@@ -383,7 +383,7 @@ extern "win64" fn fmod_soft(x: f64, y: f64) -> f64 {
     copysign_soft(r, x)
 }
 
-fn frexp_parts(x: f64) -> (f64, i32) {
+pub(super) fn frexp_parts(x: f64) -> (f64, i32) {
     let mut e = 0;
     let m = frexp_soft(x, &mut e);
     (m, e)
@@ -444,11 +444,11 @@ extern "win64" fn exp_soft(x: f64) -> f64 {
     r
 }
 
-fn is_int(y: f64) -> bool {
+pub(super) fn is_int(y: f64) -> bool {
     y.is_finite() && trunc_f(y) == y
 }
 
-fn is_odd_int(y: f64) -> bool {
+pub(super) fn is_odd_int(y: f64) -> bool {
     is_int(y) && fabs_soft(y) < 9_007_199_254_740_992.0 && (y as i64) & 1 == 1
 }
 
@@ -611,7 +611,7 @@ fn sinpi(x: f64) -> f64 {
     }
 }
 
-fn round_half_even(x: f64) -> f64 {
+pub(super) fn round_half_even(x: f64) -> f64 {
     let t = trunc_f(x);
     let d = x - t;
     if fabs_soft(d) > 0.5 || (fabs_soft(d) == 0.5 && (t / 2.0) != trunc_f(t / 2.0)) { t + copysign_soft(1.0, x) } else { t }

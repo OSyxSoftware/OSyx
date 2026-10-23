@@ -21,3 +21,4 @@ osyx-gfx = { path = "../../boot/gfx" }
 prism-client = { path = "../../graphics/prism-client" }
 osyx-input = { path = "../../shared/input" }
 osyx-crypto = { path = "../../shared/crypto" }
+osyx-ui = { path = "../../graphics/ui" }

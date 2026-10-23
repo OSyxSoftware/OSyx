@@ -228,7 +228,7 @@ fn schema() -> Vec<u8> {
     b.add("ext-ms-win-ntuser-window-l1-1-4", "user32.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-gdi-dc-l1-2-0", "gdi32.dll", &[]).expect("valid contract name");
     // The Universal C Runtime.
-    for c in ["runtime", "heap", "string", "convert", "stdio", "locale", "math", "environment", "filesystem", "time", "utility"] {
+    for c in ["runtime", "heap", "string", "convert", "stdio", "locale", "math", "environment", "filesystem", "time", "utility", "multibyte"] {
         b.add(&alloc::format!("api-ms-win-crt-{c}-l1-1-0"), "ucrtbase.dll", &[]).expect("valid contract name");
     }
     b.build()
@@ -717,11 +717,16 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         let importer = l.linker.modules[l.exe].name.clone();
         let r = l.linker.load_dll(&n, &importer);
         l.linker.host.explicit = None;
-        let i = r.map_err(|e| match e {
-            LinkError::DllNotFound { .. } | LinkError::NoApiSetHost { .. } => ERROR_MOD_NOT_FOUND,
-            LinkError::SymbolNotFound { .. } | LinkError::ForwarderTooDeep { .. } => ERROR_PROC_NOT_FOUND,
-            LinkError::NoMemory => ERROR_NOT_ENOUGH_MEMORY,
-            _ => 193, // ERROR_BAD_EXE_FORMAT
+        let i = r.map_err(|e| {
+            // Preserve the dependency error before reducing it to a Win32
+            // code. A browser otherwise reports only "Couldn't load XPCOM".
+            os_std::eprintln!("winrun: LoadLibrary({name}) failed: {e}");
+            match e {
+                LinkError::DllNotFound { .. } | LinkError::NoApiSetHost { .. } => ERROR_MOD_NOT_FOUND,
+                LinkError::SymbolNotFound { .. } | LinkError::ForwarderTooDeep { .. } => ERROR_PROC_NOT_FOUND,
+                LinkError::NoMemory => ERROR_NOT_ENOUGH_MEMORY,
+                _ => 193, // ERROR_BAD_EXE_FORMAT
+            }
         })?;
         let todo = register_new(l, i);
         while l.state.len() < l.linker.modules.len() {

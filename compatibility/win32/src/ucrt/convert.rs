@@ -206,6 +206,19 @@ struct Parsed {
     range: bool,
 }
 
+/// Convert the complete, NUL-terminated token collected by scanf. The
+/// scanner handles the input-item grammar and never reads past its width.
+pub(super) fn scan_float(token: &[u8], single: bool) -> Option<f64> {
+    let p = parse_float(token.as_ptr(), single);
+    if p.len == 0 || p.len + 1 != token.len() {
+        return None;
+    }
+    if p.range {
+        set_errno(ERANGE);
+    }
+    Some(p.value)
+}
+
 /// Parses the C floating-point grammar at `s` (after white space).
 fn parse_float<T: Unit>(s: *const T, f32: bool) -> Parsed {
     let none = Parsed { value: 0.0, len: 0, range: false };

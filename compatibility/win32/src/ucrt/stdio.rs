@@ -106,7 +106,7 @@ fn std_streams() {
     *done = true;
 }
 
-extern "win64" fn __acrt_iob_func(i: u32) -> *mut File {
+pub(super) extern "win64" fn __acrt_iob_func(i: u32) -> *mut File {
     std_streams();
     if i < 3 { STD[i as usize].load(Ordering::SeqCst) as *mut File } else { core::ptr::null_mut() }
 }
@@ -839,7 +839,7 @@ extern "win64" fn fputc(c: i32, f: *mut File) -> i32 {
     with(f, EOF, |s| putc_nolock(c, s))
 }
 
-extern "win64" fn fgetc(f: *mut File) -> i32 {
+pub(super) extern "win64" fn fgetc(f: *mut File) -> i32 {
     with(f, EOF, getc_nolock)
 }
 
@@ -851,7 +851,7 @@ extern "win64" fn getchar() -> i32 {
     fgetc(__acrt_iob_func(0))
 }
 
-extern "win64" fn ungetc(c: i32, f: *mut File) -> i32 {
+pub(super) extern "win64" fn ungetc(c: i32, f: *mut File) -> i32 {
     with(f, EOF, |s| ungetc_nolock(c, s))
 }
 
@@ -929,11 +929,11 @@ extern "win64" fn fputwc(c: u16, f: *mut File) -> u16 {
     with(f, WEOF, |s| putwc_nolock(c, s))
 }
 
-extern "win64" fn fgetwc(f: *mut File) -> u16 {
+pub(super) extern "win64" fn fgetwc(f: *mut File) -> u16 {
     with(f, WEOF, getwc_nolock)
 }
 
-extern "win64" fn ungetwc(c: u16, f: *mut File) -> u16 {
+pub(super) extern "win64" fn ungetwc(c: u16, f: *mut File) -> u16 {
     if c == WEOF {
         return WEOF;
     }

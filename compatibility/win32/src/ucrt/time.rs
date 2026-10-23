@@ -2,9 +2,8 @@
 //! strftime with the C locale's names and formats (also as the
 //! `__crt_lc_time_data` that msvcp140 passes back to `_Strftime`).
 //!
-//! OSyx keeps UTC and has no time zone database: the zone is UTC unless
-//! the TZ variable names one ("XXX[+|-]h[:mm[:ss]][YYY]"), as the UCRT
-//! reads it.
+//! Uses the OSyx system zone from /etc/TZ, with the CRT's TZ variable
+//! override ("XXX[+|-]h[:mm[:ss]][YYY]" and POSIX transition rules).
 
 use super::*;
 use alloc::string::String;
@@ -131,12 +130,12 @@ extern "win64" fn _gmtime64_s(out: *mut Tm, t: *const i64) -> i32 {
 }
 
 extern "win64" fn _gmtime64(t: *const i64) -> *mut Tm {
-    let p = ptd();
-    if p.scratch.len() < core::mem::size_of::<Tm>() {
-        p.scratch.resize(core::mem::size_of::<Tm>(), 0);
+    let out = &raw mut ptd().calendar;
+    if _gmtime64_s(out, t) != 0 {
+        core::ptr::null_mut()
+    } else {
+        out
     }
-    let out = p.scratch.as_mut_ptr() as *mut Tm;
-    if _gmtime64_s(out, t) != 0 { core::ptr::null_mut() } else { out }
 }
 
 /// `_mkgmtime64`: normalises the fields and returns the UTC time.
@@ -164,45 +163,188 @@ extern "win64" fn _difftime64_soft(a: i64, b: i64) -> f64 {
 
 // ---- time zone ---------------------------------------------------------------------------
 
-/// (standard name, daylight name, seconds west of UTC) from TZ, or UTC.
+/// (standard name, daylight name, seconds west of UTC) of the C runtime's zone.
 fn zone() -> (String, String, i64) {
-    let tz = crate::kernel32::with_process(|p| {
-        p.env.iter().find(|(k, _)| k.eq_ignore_ascii_case("TZ")).map(|(_, v)| v.clone())
-    });
-    let Some(tz) = tz.filter(|t| !t.is_empty()) else {
-        return (String::from("UTC"), String::from("UTC"), 0);
-    };
-    let b = tz.as_bytes();
-    let mut i = 0;
-    while i < b.len() && b[i].is_ascii_alphabetic() && i < 3 {
-        i += 1;
-    }
-    let std = String::from(&tz[..i]);
-    let neg = b.get(i) == Some(&b'-');
-    if matches!(b.get(i), Some(b'-' | b'+')) {
-        i += 1;
-    }
-    let mut parts = [0i64; 3];
-    for (n, part) in parts.iter_mut().enumerate() {
-        if n > 0 {
-            if b.get(i) != Some(&b':') {
-                break;
-            }
-            i += 1;
-        }
-        while let Some(d) = b.get(i).filter(|c| c.is_ascii_digit()) {
-            *part = *part * 10 + (d - b'0') as i64;
-            i += 1;
-        }
-    }
-    let mut secs = parts[0] * 3600 + parts[1] * 60 + parts[2];
-    if neg {
-        secs = -secs;
-    }
-    let dst = String::from(&tz[i..]);
-    (std, dst, secs)
+    let tz = crate::tz::crt();
+    let dst = tz.dst.as_ref().map(|d| d.0.clone()).unwrap_or_default();
+    (tz.std_name.clone(), dst, -tz.std_offset)
 }
 
+/// The globals `_tzset` fills: _timezone (seconds west), _daylight,
+/// _dstbias (seconds, daylight minus standard, negated) and _tzname.
+static TIMEZONE: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+static DAYLIGHT: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+static DSTBIAS: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-3600);
+static TZ_SET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static TZ_LOCK: RLock = RLock::new();
+/// _tzname: two 64-byte name buffers and the array of pointers to them.
+static mut TZNAME_BUF: [[u8; 64]; 2] = [[0; 64]; 2];
+static mut TZNAME: [*mut u8; 2] = [core::ptr::null_mut(); 2];
+
+extern "win64" fn _tzset() {
+    TZ_LOCK.lock();
+    let tz = crate::tz::crt();
+    TIMEZONE.store(-tz.std_offset as i32, Ordering::SeqCst);
+    DAYLIGHT.store(tz.dst.is_some() as i32, Ordering::SeqCst);
+    DSTBIAS.store(tz.dst.as_ref().map_or(-3600, |d| -(d.1 - tz.std_offset)) as i32, Ordering::SeqCst);
+    let dst = tz.dst.as_ref().map(|d| d.0.clone()).unwrap_or_default();
+    // SAFETY: the buffers are written only here, with TZ_LOCK held.
+    unsafe {
+        let bufs = &mut *core::ptr::addr_of_mut!(TZNAME_BUF);
+        for (i, name) in [tz.std_name.as_bytes(), dst.as_bytes()].iter().enumerate() {
+            let n = name.len().min(63);
+            bufs[i] = [0; 64];
+            bufs[i][..n].copy_from_slice(&name[..n]);
+        }
+        let names = &mut *core::ptr::addr_of_mut!(TZNAME);
+        names[0] = bufs[0].as_mut_ptr();
+        names[1] = bufs[1].as_mut_ptr();
+    }
+    TZ_SET.store(true, Ordering::SeqCst);
+    TZ_LOCK.unlock();
+}
+
+fn tzset_once() {
+    if !TZ_SET.load(Ordering::SeqCst) {
+        _tzset();
+    }
+}
+
+extern "win64" fn __timezone() -> *mut i32 {
+    tzset_once();
+    TIMEZONE.as_ptr()
+}
+
+extern "win64" fn __daylight() -> *mut i32 {
+    tzset_once();
+    DAYLIGHT.as_ptr()
+}
+
+extern "win64" fn __dstbias() -> *mut i32 {
+    tzset_once();
+    DSTBIAS.as_ptr()
+}
+
+extern "win64" fn __tzname() -> *mut *mut u8 {
+    tzset_once();
+    core::ptr::addr_of_mut!(TZNAME) as *mut *mut u8
+}
+
+extern "win64" fn _get_timezone(out: *mut i32) -> i32 {
+    validate!(!out.is_null(), EINVAL, EINVAL);
+    tzset_once();
+    // SAFETY: validated.
+    unsafe { *out = TIMEZONE.load(Ordering::SeqCst) };
+    0
+}
+
+extern "win64" fn _get_daylight(out: *mut i32) -> i32 {
+    validate!(!out.is_null(), EINVAL, EINVAL);
+    tzset_once();
+    // SAFETY: validated.
+    unsafe { *out = DAYLIGHT.load(Ordering::SeqCst) };
+    0
+}
+
+extern "win64" fn _get_dstbias(out: *mut i32) -> i32 {
+    validate!(!out.is_null(), EINVAL, EINVAL);
+    tzset_once();
+    // SAFETY: validated.
+    unsafe { *out = DSTBIAS.load(Ordering::SeqCst) };
+    0
+}
+
+/// Local time of `t` and whether daylight time applies.
+fn local_tm(t: i64) -> Tm {
+    let tz = crate::tz::crt();
+    let (off, _) = tz.offset_at(t);
+    let mut tm = to_tm(t + off);
+    tm.isdst = (tz.dst.is_some() && off != tz.std_offset) as i32;
+    tm
+}
+
+extern "win64" fn _localtime64_s(out: *mut Tm, t: *const i64) -> i32 {
+    validate!(!out.is_null(), EINVAL, EINVAL);
+    // SAFETY: validated; filled with -1 on failure as the UCRT does.
+    unsafe { core::ptr::write_bytes(out as *mut u8, 0xFF, core::mem::size_of::<Tm>()) };
+    validate!(!t.is_null(), EINVAL, EINVAL);
+    // SAFETY: the caller's time value.
+    let t = unsafe { *t };
+    validate!((0..=MAX_TIME64).contains(&t), EINVAL, EINVAL);
+    tzset_once();
+    // SAFETY: validated out pointer.
+    unsafe { *out = local_tm(t) };
+    0
+}
+
+extern "win64" fn _localtime64(t: *const i64) -> *mut Tm {
+    let out = &raw mut ptd().calendar;
+    if _localtime64_s(out, t) != 0 {
+        core::ptr::null_mut()
+    } else {
+        out
+    }
+}
+
+/// `_mktime64`: the fields as local time (tm_isdst > 0 daylight, 0
+/// standard, < 0 whichever applies), normalised in place.
+extern "win64" fn _mktime64(tm: *mut Tm) -> i64 {
+    validate!(!tm.is_null(), EINVAL, -1);
+    tzset_once();
+    // SAFETY: validated.
+    let v = unsafe { *tm };
+    let mon = v.mon as i64;
+    let y = v.year as i64 + 1900 + mon.div_euclid(12);
+    let m = mon.rem_euclid(12) + 1;
+    let days = days_from_civil(y, m, 1) + v.mday as i64 - 1;
+    let local = days * 86_400 + v.hour as i64 * 3600 + v.min as i64 * 60 + v.sec as i64;
+    let tz = crate::tz::crt();
+    let dst = match v.isdst {
+        i32::MIN..=-1 => None,
+        0 => Some(false),
+        _ => Some(tz.dst.is_some()),
+    };
+    let t = crate::tz::to_utc(&tz, local, dst);
+    if !(0..=MAX_TIME64).contains(&t) {
+        set_errno(EINVAL);
+        return -1;
+    }
+    // SAFETY: validated.
+    unsafe { *tm = local_tm(t) };
+    t
+}
+
+/// `struct __timeb64`: time, millitm, timezone (minutes west), dstflag.
+#[repr(C)]
+struct Timeb {
+    time: i64,
+    millitm: u16,
+    timezone: i16,
+    dstflag: i16,
+}
+
+extern "win64" fn _ftime64(out: *mut Timeb) {
+    if out.is_null() {
+        invalid(EINVAL, ());
+        return;
+    }
+    tzset_once();
+    let ns = os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0);
+    let t = (ns / 1_000_000_000) as i64;
+    // _ftime's dstflag reports the system's daylight status even when
+    // TZ overrides the CRT's _timezone value (as on Windows).
+    let tz = crate::tz::system();
+    let (off, _) = tz.offset_at(t);
+    // SAFETY: the caller's structure.
+    unsafe {
+        *out = Timeb {
+            time: t,
+            millitm: (ns / 1_000_000 % 1000) as u16,
+            timezone: (TIMEZONE.load(Ordering::SeqCst) / 60) as i16,
+            dstflag: (tz.dst.is_some() && off != tz.std_offset) as i16,
+        };
+    }
+}
 // ---- names -------------------------------------------------------------------------------
 
 fn names_text(months: bool) -> String {
@@ -449,8 +591,11 @@ fn format(fmt: &[u32], tm: &Tm, data: u64, out: &mut String) -> Result<(), ()> {
                 }
             }
             'z' => {
-                let (_, _, west) = zone();
-                let east = -(west - if tm.isdst > 0 { 3600 } else { 0 });
+                let tz = crate::tz::crt();
+                let east = match (&tz.dst, tm.isdst > 0) {
+                    (Some(d), true) => d.1,
+                    _ => tz.std_offset,
+                };
                 let sign = if east < 0 { '-' } else { '+' };
                 let a = east.abs();
                 out.push_str(&alloc::format!("{sign}{:02}{:02}", a / 3600, a / 60 % 60));
@@ -552,6 +697,18 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         _gmtime64,
         _mkgmtime64,
         _difftime64,
+        _tzset,
+        __timezone,
+        __daylight,
+        __dstbias,
+        __tzname,
+        _get_timezone,
+        _get_daylight,
+        _get_dstbias,
+        _localtime64_s,
+        _localtime64,
+        _mktime64,
+        _ftime64,
         _Getdays,
         _Getmonths,
         _W_Getdays,

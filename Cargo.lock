@@ -172,6 +172,7 @@ dependencies = [
  "osyx-input",
  "osyx-pe",
  "osyx-pe-loader",
+ "osyx-ui",
  "prism-client",
 ]
 

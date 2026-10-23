@@ -101,7 +101,11 @@ pub fn init(wide: bool) {
 }
 
 pub fn environ_ptr(wide: bool) -> u64 {
-    if wide { WENVIRON.load(Ordering::SeqCst) } else { ENVIRON.load(Ordering::SeqCst) }
+    if wide {
+        WENVIRON.load(Ordering::SeqCst)
+    } else {
+        ENVIRON.load(Ordering::SeqCst)
+    }
 }
 
 /// Looks `name` up; returns the address of its value.
@@ -183,6 +187,42 @@ extern "win64" fn _wgetenv(name: *const u16) -> u64 {
     lookup(n, true)
 }
 
+extern "win64" fn getenv_s(need: *mut usize, buf: *mut u8, cap: usize, name: *const u8) -> i32 {
+    validate!(!need.is_null(), EINVAL, EINVAL);
+    // SAFETY: the required-length output was validated.
+    unsafe { *need = 0 };
+    validate!(!buf.is_null() || cap == 0, EINVAL, EINVAL);
+    if !buf.is_null() && cap > 0 {
+        // SAFETY: the caller provided a nonempty output buffer.
+        unsafe { *buf = 0 };
+    }
+    validate!(!name.is_null(), EINVAL, EINVAL);
+    // SAFETY: a NUL-terminated environment name.
+    let name = unsafe { cstr(name) };
+    validate!(name.len() < MAX_ENV, EINVAL, EINVAL);
+    let name = widen(name);
+    // Keep the environment locked until the value has been copied out.
+    let mut env = ENV.lock().unwrap();
+    ensure(&mut env, false);
+    let value = env.narrow.as_ref().and_then(|t| t.iter().find(|e| eq_ci(name_of(&e.text), &name)));
+    let Some(value) = value else { return 0 };
+    let text = narrow(&value.text[name.len() + 1..]);
+    // SAFETY: validated length output.
+    unsafe { *need = text.len() + 1 };
+    if buf.is_null() {
+        return 0;
+    }
+    if text.len() >= cap {
+        return ERANGE;
+    }
+    // SAFETY: text.len() + 1 <= cap, with ENV held throughout the copy.
+    unsafe {
+        core::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+        *buf.add(text.len()) = 0;
+    }
+    0
+}
+
 /// "NAME=value" (value empty: remove).
 fn putenv(s: Vec<u16>) -> i32 {
     let Some(eq) = s.iter().position(|&c| c == b'=' as u16).filter(|&i| i > 0) else {
@@ -210,7 +250,11 @@ extern "win64" fn _wputenv(s: *const u16) -> i32 {
 
 fn putenv_s(name: Vec<u16>, value: Vec<u16>) -> i32 {
     validate!(!name.is_empty() && !name.contains(&(b'=' as u16)), EINVAL, EINVAL);
-    if set(&name, &value) == 0 { 0 } else { errno() }
+    if set(&name, &value) == 0 {
+        0
+    } else {
+        errno()
+    }
 }
 
 extern "win64" fn _putenv_s(name: *const u8, value: *const u8) -> i32 {
@@ -333,9 +377,37 @@ extern "win64" fn _getcwd(buf: *mut u8, max: i32) -> *mut u8 {
     getcwd(buf, max, &narrow(&current_dir()))
 }
 
+extern "win64" fn _wgetdcwd(drive: i32, buf: *mut u16, max: i32) -> *mut u16 {
+    if !(0..=26).contains(&drive) {
+        ptd().doserrno = 15;
+        set_errno(EACCES);
+        invalid_parameter();
+        return core::ptr::null_mut();
+    }
+    // OSyx exposes only C:. Drive 0 means the current drive.
+    if drive != 0 && drive != 3 {
+        ptd().doserrno = 15; // ERROR_INVALID_DRIVE
+        set_errno(EACCES);
+        return core::ptr::null_mut();
+    }
+    _wgetcwd(buf, max)
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
-        getenv, _wgetenv, _putenv, _wputenv, _putenv_s, _wputenv_s, _dupenv_s, _wdupenv_s, __p__environ, __p__wenviron,
-        _wgetcwd, _getcwd,
+        getenv,
+        _wgetenv,
+        _putenv,
+        _wputenv,
+        _putenv_s,
+        _wputenv_s,
+        _dupenv_s,
+        _wdupenv_s,
+        __p__environ,
+        __p__wenviron,
+        _wgetcwd,
+        _getcwd,
+        _wgetdcwd,
+        getenv_s,
     ]
 }

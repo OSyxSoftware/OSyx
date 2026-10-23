@@ -62,6 +62,7 @@ mod unwind;
 mod threadpool;
 mod timers;
 mod tokens;
+mod tz;
 mod ws2_32;
 
 use alloc::string::String;
