@@ -316,7 +316,13 @@ impl Transport {
         self.device.r16(off)
     }
 
+    pub fn device_config_u32(&self, off: u64) -> u32 {
+        self.device.r32(off)
+    }
 
+    pub fn write_device_config_u32(&self, off: u64, v: u32) {
+        self.device.w32(off, v)
+    }
 
     pub fn device_config_u64(&self, off: u64) -> u64 {
         // Re-read until the 64-bit value is consistent (config generation).
