@@ -213,6 +213,17 @@ impl<T> KMutex<T> {
             }
         }
     }
+
+    /// Takes the mutex if it is free; never blocks (usable where sleeping
+    /// is not allowed, e.g. the panic path).
+    pub fn try_lock(&self) -> Option<KMutexGuard<'_, T>> {
+        let mut s = self.state.lock();
+        if s.locked {
+            return None;
+        }
+        s.locked = true;
+        Some(KMutexGuard { m: self })
+    }
 }
 
 impl<T> Deref for KMutexGuard<'_, T> {

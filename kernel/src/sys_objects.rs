@@ -264,6 +264,22 @@ pub fn display_acquire() -> Result<u64, Errno> {
     }
 }
 
+pub fn display_flush(x: u64, y: u64, w: u64, h: u64) -> Result<u64, Errno> {
+    let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
+    crate::display::flush(sched::current_pid(), clamp(x), clamp(y), clamp(w), clamp(h)).map(|_| 0)
+}
+
+pub fn display_set_mode(width: u64, height: u64) -> Result<u64, Errno> {
+    let (cred, _) = process::current_identity();
+    if !cred.is_root() {
+        return Err(Errno::PermissionDenied);
+    }
+    if width > 16384 || height > 16384 {
+        return Err(Errno::InvalidArgument);
+    }
+    crate::display::set_mode(sched::current_pid(), width as u32, height as u32).map(|_| 0)
+}
+
 pub fn display_release() -> Result<u64, Errno> {
     if crate::display::release(sched::current_pid()) {
         Ok(0)

@@ -71,7 +71,21 @@ pub struct DisplayInfo {
     pub size: u64,
     /// pid of the owner, 0 if the kernel draws the display.
     pub owner: u64,
+    /// `BACKEND_*`: how pixels reach the screen.
+    pub backend: u32,
+    /// Outputs the device reports (scanouts).
+    pub outputs: u32,
+    /// The output's preferred (native) mode, 0 if unknown.
+    pub native_width: u32,
+    pub native_height: u32,
 }
+
+/// `DisplayInfo::backend`: a linear framebuffer the hardware scans out
+/// (UEFI GOP); writes are visible at once.
+pub const BACKEND_LINEAR: u32 = 1;
+/// A VirtIO-GPU scanout: writes go to guest memory and reach the screen
+/// with `display_flush`.
+pub const BACKEND_VIRTIO_GPU: u32 = 2;
 
 /// `ProcInfo::state`
 pub const PROC_RUNNING: u32 = 0;

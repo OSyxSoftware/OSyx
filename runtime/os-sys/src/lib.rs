@@ -15,7 +15,7 @@ pub use osyx_abi::{
     SEEK_CUR, SEEK_END, SEEK_SET, STDERR, STDOUT,
 };
 
-pub use osyx_abi::{ipc, net, HANDLE_NONE, KILLED_STATUS, STDIN};
+pub use osyx_abi::{ipc, net, HANDLE_NONE, KILLED_STATUS, MAP_ALIGN_64K, MAP_FIXED, STDIN};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod imp {
@@ -461,6 +461,35 @@ mod imp {
 
     pub fn display_release() -> Result<(), Errno> {
         decode(syscall0(nr::DISPLAY_RELEASE)).map(|_| ())
+    }
+
+    /// Presents a changed rectangle of the display buffer (owner only).
+    pub fn display_flush(x: u32, y: u32, w: u32, h: u32) -> Result<(), Errno> {
+        decode(syscall4(nr::DISPLAY_FLUSH, x as u64, y as u64, w as u64, h as u64)).map(|_| ())
+    }
+
+    /// Switches the display resolution (root only).
+    pub fn display_set_mode(width: u32, height: u32) -> Result<(), Errno> {
+        decode(syscall2(nr::DISPLAY_SET_MODE, width as u64, height as u64)).map(|_| ())
+    }
+
+    /// Sets the calling thread's GS base.
+    pub fn set_gs_base(base: usize) -> Result<(), Errno> {
+        decode(syscall1(nr::SET_GS_BASE, base as u64)).map(|_| ())
+    }
+
+    /// Changes the protection of whole pages of an anonymous mapping.
+    ///
+    /// # Safety
+    /// Removing access from memory still in use makes later accesses fault.
+    pub unsafe fn protect(addr: *mut u8, len: usize, prot: u64) -> Result<(), Errno> {
+        decode(syscall3(nr::PROTECT, addr as u64, len as u64, prot)).map(|_| ())
+    }
+
+    /// Anonymous zeroed memory, optionally at a fixed address
+    /// (`MAP_FIXED`) or 64 KiB aligned (`MAP_ALIGN_64K`).
+    pub fn map_ex(addr: usize, len: usize, prot: u64, flags: u64) -> Result<*mut u8, Errno> {
+        decode(syscall4(nr::MAP_EX, addr as u64, len as u64, prot, flags)).map(|a| a as *mut u8)
     }
 
     /// Fills `out` with process records; returns how many.

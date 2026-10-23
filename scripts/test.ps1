@@ -13,6 +13,8 @@
 #   5. screenshots of the kernel screen and the loader error screen via QMP
 #   6. the graphical session: PRISM, desktop shell, AXIS Terminal, Files and
 #      System Information driven by injected USB keyboard and mouse events
+#   7. networking: VirtIO-Net, DHCP, ICMP, DNS, UDP, TCP (scripts/net-test.ps1)
+#   8. stage 6 again on a VirtIO-GPU as the only display (desktop-test -Gpu)
 # Serial logs and screenshots are kept in build/test/.
 param(
     [switch]$SkipHost,
@@ -306,6 +308,17 @@ try {
         }
         $sum = $out | Select-String -Pattern 'network test: (\d+) passed, (\d+) failed' | Select-Object -Last 1
         Record 'network stack run' ($null -ne $sum -and $sum.Matches[0].Groups[2].Value -eq '0') $(if ($sum) { $sum.Line } else { 'no summary' })
+
+        # --- 8. graphical session on VirtIO-GPU -------------------------------------
+        # The same desktop run with a VirtIO-GPU as the only display device:
+        # PRISM presents through the virtio-gpu driver (damage flushes), the
+        # cursor queue is exercised, input and windows must work unchanged.
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'desktop-test.ps1') -Gpu -TimeoutSec $TimeoutSec 2>&1 | ForEach-Object { "$_" }
+        foreach ($line in $out) {
+            if ($line -match '^\[(PASS|FAIL)\] (.*)$') { $results.Add([pscustomobject]@{ Test = "gpu: $($Matches[2])"; Result = $Matches[1]; Detail = '' }); Write-Host $line }
+        }
+        $sum = $out | Select-String -Pattern 'desktop tests: (\d+) passed, (\d+) failed' | Select-Object -Last 1
+        Record 'graphical session on VirtIO-GPU run' ($null -ne $sum -and $sum.Matches[0].Groups[2].Value -eq '0') $(if ($sum) { $sum.Line } else { 'no summary' })
         # Leave a usable default ESP behind.
         & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline '' | Out-Null
     }

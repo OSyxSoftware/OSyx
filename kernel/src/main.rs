@@ -207,12 +207,29 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let fb = &raw.framebuffer;
     let _ = write!(footer, "{}x{}  {} MiB RAM", fb.width, fb.height, total >> 8);
     let keep_log = boot.has_option("log.screen");
-    let has_display = raw.has_framebuffer() && display::init(fb, footer.as_str(), keep_log);
+    // A VirtIO-GPU is preferred over the firmware framebuffer (with one,
+    // GOP is usually Blt-only anyway); `display=gop` keeps GOP.
+    let gpu = if boot.option_value("display") == Some("gop") { None } else { drivers::virtio_gpu::find(&pci_devices) };
+    let mode = boot.option_value("display.mode").and_then(|m| {
+        let (w, h) = m.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    });
+    let has_display = match gpu {
+        Some(g) if display::init_gpu(g.clone(), footer.as_str(), mode) => {
+            match display::cursor_selftest() {
+                Ok(what) => kprintln!("display: cursor check ok: {}", what),
+                Err(e) => kprintln!("display: cursor check FAILED: {}", e),
+            }
+            true
+        }
+        _ => raw.has_framebuffer() && display::init(fb, footer.as_str(), keep_log),
+    };
     kprintln!(
         "display: {}",
         match (has_display, earlycon::active()) {
             (true, true) => "status screen ready; the boot log stays until a process takes the display (log.screen)",
-            (true, false) => "framebuffer console active",
+            (true, false) if display::info().is_some_and(|d| d.backend == osyx_abi::ipc::BACKEND_VIRTIO_GPU) => "status screen active on virtio-gpu",
+            (true, false) => "status screen active on the GOP framebuffer",
             (false, true) => "status screen unavailable; the boot log stays",
             (false, false) => "none",
         }
@@ -329,6 +346,9 @@ fn log_subsystems() {
     let services = ipc::services();
     kprintln!("ipc: {} live service(s) {:?}, {} shared frames mapped", services.len(), services, shm::shared_frames());
     net::log_summary();
+    if let Some(line) = display::gpu_summary() {
+        kprintln!("{}", line);
+    }
 }
 
 fn parse_int(s: &str) -> Option<i32> {
@@ -346,6 +366,9 @@ fn idle(line1: Line, line2: Line, ok: bool) -> ! {
         sched::sleep_ticks(4);
         let t = interrupts::ticks();
         display::spin((t * 4) as u32);
+        if t / 100 != last / 100 {
+            display::poll_hotplug();
+        }
         if t / 100 != last / 100 {
             let mut up = Line::new();
             let _ = write!(up, "Uptime {} s", t / 100);

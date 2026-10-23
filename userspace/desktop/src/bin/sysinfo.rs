@@ -17,7 +17,7 @@ use os_std::{fs, os, system};
 use osyx_gfx::Rect;
 use osyx_ui::layout::{inset, split_left, split_top};
 use osyx_ui::time::Tz;
-use osyx_ui::widget::{Column, ListItem, ListView, Panel};
+use osyx_ui::widget::{Column, ListItem, ListView, Panel, ScrollView};
 use osyx_ui::{Align, Event as Ui, FontKind, Icon, Painter};
 use prism_client::WindowSpec;
 
@@ -52,6 +52,8 @@ struct SysInfo {
     tz: Tz,
     procs: ListView,
     cards: [Panel; 4],
+    /// The file system list scrolls when it does not fit its card.
+    fs_view: ScrollView,
     size: (u32, u32),
     refreshes: u64,
 }
@@ -103,7 +105,8 @@ fn gather(procs: &mut Vec<ListItem>) -> Info {
     }
     let display = system::display_info().map_or(String::from("none"), |d| {
         let fmt = if d.format == system::pixel::RGBX { "RGBX" } else { "BGRX" };
-        format!("{}x{} framebuffer, 32-bit {fmt}, owned by process {}", d.width, d.height, d.owner)
+        let backend = if d.backend == system::BACKEND_VIRTIO_GPU { "VirtIO-GPU scanout" } else { "framebuffer" };
+        format!("{}x{} {backend}, 32-bit {fmt}, owned by process {}", d.width, d.height, d.owner)
     });
     let mut inputs: Vec<String> = fs::read_dir("/dev/input").map(|d| d.map(|e| format!("/dev/input/{}", e.file_name())).collect()).unwrap_or_default();
     inputs.sort();
@@ -143,6 +146,7 @@ fn main() -> i32 {
         tz: system_tz(),
         procs,
         cards: [Panel::new(Some("System")), Panel::new(Some("Memory")), Panel::new(Some("File systems")), Panel::new(Some("Processes"))],
+        fs_view: ScrollView::default(),
         size: (0, 0),
         refreshes: 0,
     };
@@ -151,6 +155,9 @@ fn main() -> i32 {
     spec.min_height = 420;
     run_app("sysinfo", spec, &mut app)
 }
+
+/// Height of one row of the file system list.
+const FS_ROW: u32 = 46;
 
 fn bar(p: &mut Painter, r: Rect, used: u64, total: u64) {
     let t = *p.theme;
@@ -189,15 +196,18 @@ impl App for SysInfo {
         let sys_h = 236.min(left.h * 60 / 100);
         self.cards[0].rect = Rect::new(left.x, left.y, left.w, sys_h);
         self.cards[1].rect = Rect::new(left.x, left.y + sys_h as i32 + 12, left.w, left.h.saturating_sub(sys_h + 12));
-        let fs_h = (44 + self.info.mounts.len() as u32 * 46).min(right.h / 2);
+        let fs_h = (44 + self.info.mounts.len() as u32 * FS_ROW).min(right.h / 2);
         self.cards[2].rect = Rect::new(right.x, right.y, right.w, fs_h);
+        self.fs_view.rect = self.cards[2].content(&cx.fonts);
+        self.fs_view.set_content_height(self.info.mounts.len() as u32 * FS_ROW);
         self.cards[3].rect = Rect::new(right.x, right.y + fs_h as i32 + 12, right.w, right.h.saturating_sub(fs_h + 12));
         let c = self.cards[3].content(&cx.fonts);
         self.procs.rect = Rect::new(c.x - 6, c.y, c.w + 12, c.h + 6);
     }
 
     fn event(&mut self, ev: Ui, cx: &mut Ctx) -> bool {
-        self.procs.event(&ev, cx.focused).needs_redraw()
+        let fs = self.fs_view.event(&ev).needs_redraw();
+        self.procs.event(&ev, cx.focused).needs_redraw() || fs
     }
 
     fn tick_ms(&self) -> Option<u64> {
@@ -254,10 +264,10 @@ impl App for SysInfo {
         let y2 = y + 28;
         Self::rows(p, Rect::new(r.x, y2, r.w, 60), &[("Processes", format!("{} ({} threads)", i.procs, i.threads))]);
         // File systems.
-        let r = self.cards[2].content(&cx.fonts);
+        let r = self.fs_view.content();
         let old = p.push_clip(r);
         for (k, m) in i.mounts.iter().enumerate() {
-            let y = r.y + k as i32 * 46;
+            let y = r.y + (k as u32 * FS_ROW) as i32 - self.fs_view.scroll.offset as i32;
             let used = m.total.saturating_sub(m.free);
             let label = format!("{}  ·  {}  ·  {}", m.path, m.fstype, m.source);
             p.text_in(FontKind::Ui, Rect::new(r.x, y, r.w.saturating_sub(150), 22), &label, t.text, Align::Left);
@@ -266,6 +276,7 @@ impl App for SysInfo {
             bar(p, Rect::new(r.x, y + 26, r.w, 8), used, m.total);
         }
         p.restore_clip(old);
+        self.fs_view.draw_bar(p);
         self.procs.draw(p, cx.focused);
     }
 }

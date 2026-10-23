@@ -97,6 +97,27 @@ pub fn map_mmio(phys: u64, len: u64) -> Result<u64, paging::MapError> {
     Ok(base + (phys - start))
 }
 
+/// Maps RAM frames (in order, write-back cached) at consecutive kernel
+/// virtual addresses in the device window, so physically scattered memory
+/// (a display backing store) can be addressed linearly. Permanent like
+/// `map_mmio`; the frames stay owned by the caller.
+pub fn map_frames(frames: &[u64]) -> Result<u64, paging::MapError> {
+    let pages = frames.len() as u64;
+    let base = {
+        let mut next = MMIO_NEXT.lock();
+        let base = *next;
+        if base + pages * PAGE_SIZE > MMIO_LIMIT {
+            return Err(paging::MapError::OutOfMemory);
+        }
+        *next = base + pages * PAGE_SIZE;
+        base
+    };
+    for (i, &f) in frames.iter().enumerate() {
+        paging::map(base + i as u64 * PAGE_SIZE, f, paging::Flags::KERNEL_RW)?;
+    }
+    Ok(base)
+}
+
 /// Returns bootloader-owned memory to the allocator. The caller must have
 /// copied everything it needs out of BootInfo first.
 pub fn reclaim_bootloader_memory(map: &[MemoryDescriptor]) -> u64 {

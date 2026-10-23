@@ -95,7 +95,7 @@ function New-DiskImage {
 }
 
 # Returns the QEMU argument list for booting build/osyx.img.
-function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '') {
+function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '', [switch]$Gpu, [string]$GpuSize = '') {
     if (-not $Script:Qemu) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
     if (-not $Script:Ovmf) { throw 'OVMF (edk2-x86_64-code.fd) not found' }
     # Fresh firmware variables every boot: stale boot entries for devices
@@ -129,6 +129,13 @@ function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 5
     # the keyboard and mouse can only reach OSyx this way).
     if (-not $NoUsb) {
         $a += @('-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,bus=xhci.0,id=kbd', '-device', 'usb-mouse,bus=xhci.0,id=mouse')
+    }
+    # VirtIO-GPU as the only display device (no VGA): the desktop must be
+    # presented through the virtio-gpu driver, the GOP framebuffer is gone.
+    if ($Gpu) {
+        $dev = 'virtio-gpu-pci'
+        if ($GpuSize) { $w, $h = $GpuSize -split 'x'; $dev += ",xres=$w,yres=$h" }
+        $a += @('-vga', 'none', '-device', $dev)
     }
     if ($Headless) { $a += @('-display', 'none') }
     if ($QmpPort -gt 0) { $a += @('-qmp', "tcp:127.0.0.1:$QmpPort,server,nowait") }

@@ -58,7 +58,6 @@ const EVENT_DISPLAY: u32 = 1;
 /// Pixel formats (`enum virtio_gpu_formats`).
 pub const FORMAT_B8G8R8A8: u32 = 1;
 pub const FORMAT_B8G8R8X8: u32 = 2;
-pub const FORMAT_R8G8B8X8: u32 = 134;
 
 pub const CURSOR_SIZE: u32 = 64;
 
@@ -70,7 +69,6 @@ pub enum GpuError {
     /// Response type or fence did not match the request.
     BadResponse(u32),
     InvalidArgument,
-    OutOfMemory,
 }
 
 impl GpuError {
@@ -85,7 +83,6 @@ impl GpuError {
             GpuError::Device(_) => "device error",
             GpuError::BadResponse(_) => "unexpected response",
             GpuError::InvalidArgument => "invalid argument",
-            GpuError::OutOfMemory => "out of memory",
         }
     }
 }
@@ -180,6 +177,17 @@ fn read32(base: u64, off: usize) -> u32 {
     // SAFETY: the response page belongs to the driver; the device has
     // returned it.
     unsafe { read_volatile((base + off as u64) as *const u32) }
+}
+
+/// The first VirtIO-GPU among `devices` that initialises.
+pub fn find(devices: &[pci::Device]) -> Option<alloc::sync::Arc<VirtioGpu>> {
+    for d in devices.iter().filter(|d| d.vendor == super::virtio::VENDOR && d.device == DEVICE_ID) {
+        match VirtioGpu::probe(d) {
+            Ok(g) => return Some(alloc::sync::Arc::new(g)),
+            Err(e) => crate::kprintln!("virtio-gpu at {}: initialisation failed: {:?}", d.addr, e),
+        }
+    }
+    None
 }
 
 impl VirtioGpu {
@@ -417,14 +425,24 @@ impl VirtioGpu {
         })
     }
 
+    /// No command is in flight (the panic path only submits then).
+    pub fn is_idle(&self) -> bool {
+        self.control.try_lock().is_some()
+    }
+
     /// Copies `r` of the backing store (row stride `stride` bytes) to the
-    /// host resource and flushes it to every output showing it.
-    pub fn present(&self, id: u32, r: Rect, stride: u32) -> Result<(), GpuError> {
-        let t0 = crate::interrupts::monotonic_ns();
+    /// host resource.
+    pub fn transfer(&self, id: u32, r: Rect, stride: u32) -> Result<(), GpuError> {
         let offset = r.y as u64 * stride as u64 + r.x as u64 * 4;
         self.simple(CMD_TRANSFER_TO_HOST_2D, |w| {
             w.rect(r).u64(offset).u32(id).u32(0);
-        })?;
+        })
+    }
+
+    /// `transfer`, then flushes `r` to every output showing the resource.
+    pub fn present(&self, id: u32, r: Rect, stride: u32) -> Result<(), GpuError> {
+        let t0 = crate::interrupts::monotonic_ns();
+        self.transfer(id, r, stride)?;
         self.simple(CMD_RESOURCE_FLUSH, |w| {
             w.rect(r).u32(id).u32(0);
         })?;

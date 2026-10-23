@@ -47,6 +47,8 @@ pub const KERNEL_PID: Pid = 0;
 
 pub const STACK_TOP: u64 = 0x0000_7FFF_FFFF_0000;
 const STACK_PAGES: u64 = 128; // 512 KiB
+/// Fixed mappings must end below the main stack and its guard page.
+const STACK_LIMIT: u64 = STACK_TOP - (STACK_PAGES + 1) * PAGE_SIZE;
 const MAP_BASE: u64 = 0x0000_1000_0000_0000;
 /// Where program segments may lie: above the null guard, below `MAP_BASE`.
 const PROGRAM_RANGE: AddressRange = AddressRange { start: osyx_elf::USER_RANGE.start, end: MAP_BASE };
@@ -530,6 +532,7 @@ pub fn exec_current(req: ExecRequest) -> ExecError {
     sched::set_current_root(root);
     sched::rename_current(&name);
     sched::set_current_fs_base(0);
+    sched::set_current_gs_base(0);
     sched::reset_current_fpu();
     unmap_shared_from(space.root, old_shared);
     // SAFETY: the old space is no longer active anywhere.
@@ -837,15 +840,31 @@ pub fn write_output(bytes: &[u8]) {
     }
 }
 
-/// `map` back end: zeroed anonymous memory, W^X enforced.
-pub fn map_anonymous(len: u64, prot: u64) -> Result<u64, Errno> {
+/// Page flags for `prot`, W^X enforced.
+fn prot_flags(prot: u64) -> Result<Flags, Errno> {
     use osyx_abi::{PROT_EXEC, PROT_READ, PROT_WRITE};
-    if len == 0 || prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
         return Err(Errno::InvalidArgument);
     }
     if prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0 {
         return Err(Errno::PermissionDenied);
     }
+    Ok(Flags::user(prot & PROT_WRITE != 0, prot & PROT_EXEC != 0))
+}
+
+/// `map` back end: zeroed anonymous memory, W^X enforced.
+pub fn map_anonymous(len: u64, prot: u64) -> Result<u64, Errno> {
+    map_ex(0, len, prot, 0)
+}
+
+/// `map_ex` back end: like `map`, at a fixed address (`MAP_FIXED`) or
+/// 64 KiB aligned (`MAP_ALIGN_64K`).
+pub fn map_ex(addr: u64, len: u64, prot: u64, mflags: u64) -> Result<u64, Errno> {
+    use osyx_abi::{MAP_ALIGN_64K, MAP_FIXED};
+    if len == 0 || mflags & !(MAP_FIXED | MAP_ALIGN_64K) != 0 {
+        return Err(Errno::InvalidArgument);
+    }
+    let flags = prot_flags(prot)?;
     let pages = len.div_ceil(PAGE_SIZE);
     let pid = sched::current_pid();
     let mut t = TABLE.lock();
@@ -853,8 +872,21 @@ pub fn map_anonymous(len: u64, prot: u64) -> Result<u64, Errno> {
     if p.mapped_pages + pages > MAP_LIMIT_PAGES {
         return Err(Errno::NoMemory);
     }
-    let base = p.next_map;
-    let flags = Flags::user(prot & PROT_WRITE != 0, prot & PROT_EXEC != 0);
+    let base = if mflags & MAP_FIXED != 0 {
+        let end = addr.checked_add(pages * PAGE_SIZE).ok_or(Errno::InvalidArgument)?;
+        if !addr.is_multiple_of(PAGE_SIZE) || addr < paging::USER_START || end > STACK_LIMIT {
+            return Err(Errno::InvalidArgument);
+        }
+        // Nothing may be mapped there yet (program, stack, other regions).
+        if (0..pages).any(|i| paging::translate_in(p.space.root, addr + i * PAGE_SIZE).is_some()) {
+            return Err(Errno::AlreadyExists);
+        }
+        addr
+    } else if mflags & MAP_ALIGN_64K != 0 {
+        p.next_map.next_multiple_of(0x10000)
+    } else {
+        p.next_map
+    };
     for i in 0..pages {
         if p.space.map_zeroed(base + i * PAGE_SIZE, flags).is_err() {
             for j in 0..i {
@@ -868,8 +900,35 @@ pub fn map_anonymous(len: u64, prot: u64) -> Result<u64, Errno> {
     }
     p.regions.insert(base, pages);
     p.mapped_pages += pages;
-    p.next_map = base + (pages + 1) * PAGE_SIZE; // leave a guard page
+    // Leave a guard page; a fixed region below the cursor does not move it.
+    p.next_map = p.next_map.max(base + (pages + 1) * PAGE_SIZE);
     Ok(base)
+}
+
+/// `protect` back end: new protection for whole pages that all lie in one
+/// anonymous region (W^X enforced; shared memory and program images keep
+/// theirs).
+pub fn protect(addr: u64, len: u64, prot: u64) -> Result<(), Errno> {
+    let flags = prot_flags(prot)?;
+    if len == 0 || !addr.is_multiple_of(PAGE_SIZE) {
+        return Err(Errno::InvalidArgument);
+    }
+    let pages = len.div_ceil(PAGE_SIZE);
+    let pid = sched::current_pid();
+    let mut t = TABLE.lock();
+    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let (&start, &n) = p.regions.range(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
+    if addr + pages * PAGE_SIZE > start + n * PAGE_SIZE {
+        return Err(Errno::InvalidArgument);
+    }
+    let root = p.space.root;
+    for i in 0..pages {
+        let va = addr + i * PAGE_SIZE;
+        // Re-map the same frame with the new flags (the page tables exist).
+        let frame = paging::unmap_in(root, va, true).map_err(|_| Errno::Fault)?;
+        paging::map_in(root, va, frame, flags).map_err(|_| Errno::Fault)?;
+    }
+    Ok(())
 }
 
 /// `unmap` back end: releases exactly one region previously returned by

@@ -4,7 +4,9 @@
 use crate::error::{Error, Result};
 use alloc::string::String;
 use alloc::vec::Vec;
-pub use os_sys::ipc::{field_str, pixel, DisplayInfo, MountInfo, ProcInfo, POWER_OFF, POWER_REBOOT, PROC_RUNNING, PROC_ZOMBIE};
+pub use os_sys::ipc::{
+    field_str, pixel, DisplayInfo, MountInfo, ProcInfo, BACKEND_LINEAR, BACKEND_VIRTIO_GPU, POWER_OFF, POWER_REBOOT, PROC_RUNNING, PROC_ZOMBIE,
+};
 
 /// Every process (running and not yet collected).
 pub fn processes() -> Result<Vec<ProcInfo>> {
@@ -57,4 +59,15 @@ pub fn display_acquire() -> Result<*mut u32> {
 /// Gives the display back to the kernel.
 pub fn display_release() -> Result<()> {
     os_sys::display_release().map_err(Error::from)
+}
+
+/// Presents a changed rectangle of the acquired buffer. Required when
+/// `display_info().backend` is `BACKEND_VIRTIO_GPU`, a no-op otherwise.
+pub fn display_flush(x: u32, y: u32, w: u32, h: u32) -> Result<()> {
+    os_sys::display_flush(x, y, w, h).map_err(Error::from)
+}
+
+/// Switches the display resolution (root only); acquire again afterwards.
+pub fn display_set_mode(width: u32, height: u32) -> Result<()> {
+    os_sys::display_set_mode(width, height).map_err(Error::from)
 }

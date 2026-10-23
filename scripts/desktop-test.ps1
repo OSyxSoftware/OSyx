@@ -8,13 +8,18 @@
 # are kept in build/test/desktop-*.png for people to look at).
 param(
     [switch]$SkipBuild,
-    [int]$TimeoutSec = 120
+    [int]$TimeoutSec = 120,
+    # Run on a VirtIO-GPU as the only display device (no VGA, no usable GOP
+    # framebuffer): everything the desktop shows goes through the
+    # virtio-gpu driver and PRISM's damage flushes.
+    [switch]$Gpu
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 $testDir = Join-Path $BuildDir 'test'
 New-Item -ItemType Directory -Force $testDir | Out-Null
 $results = New-Object System.Collections.Generic.List[object]
-$log = Join-Path $testDir 'desktop.serial.log'
+$prefix = if ($Gpu) { 'desktop-gpu' } else { 'desktop' }
+$log = Join-Path $testDir "$prefix.serial.log"
 
 function Record([string]$Name, [bool]$Ok, [string]$Detail) {
     $results.Add([pscustomobject]@{ Test = $Name; Result = $(if ($Ok) { 'PASS' } else { 'FAIL' }); Detail = $Detail })
@@ -84,7 +89,7 @@ function TypeText([string]$Text) {
         else { Keys @($s) }
     }
 }
-function Shot([string]$Name) { Save-Screenshot $script:port (Join-Path $testDir "desktop-$Name.png") | Out-Null; Start-Sleep -Milliseconds 300 }
+function Shot([string]$Name) { Save-Screenshot $script:port (Join-Path $testDir "$prefix-$Name.png") | Out-Null; Start-Sleep -Milliseconds 300 }
 
 # Content rectangle of a window from PRISM's "mapped at" report.
 function Window-Rect([string]$TitlePattern) {
@@ -101,7 +106,8 @@ try {
     }
     if (Test-Path $log) { Remove-Item $log }
     $script:port = Get-Random -Minimum 20000 -Maximum 40000
-    $script:qemu = Start-Qemu (Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024)
+    $qargs = if ($Gpu) { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 -Gpu -GpuSize 1920x1080 } else { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 }
+    $script:qemu = Start-Qemu $qargs
     $ready = Wait-Log 'desktop: shell ready on a (\d+)x(\d+) screen' $TimeoutSec
     if (-not $ready) { Record 'desktop session starts' $false 'no "desktop: shell ready" in the log'; throw 'session did not start' }
     $sw = [int]$ready.Groups[1].Value; $sh = [int]$ready.Groups[2].Value
@@ -109,9 +115,15 @@ try {
     $t = Log-Text
 
     Record 'xHCI: USB keyboard and mouse enumerated (no PS/2)' ($t -match 'xhci0: running \(MSI-X interrupts\)' -and $t -match '"QEMU USB Keyboard" \(keyboard\) attached' -and $t -match '"QEMU USB Mouse" \(mouse\) attached') ''
-    Record 'PRISM in ring 3 from ext4 owns the display' ($t -match 'process 2 \(prism\): /system/bin/prism spawned by 1' -and $t -match 'display: process 2 owns the framebuffer' -and $t -match 'prism: compositor running') ([regex]::Match($t, 'prism: display \S+').Value)
+    Record 'PRISM in ring 3 from ext4 owns the display' ($t -match 'process 2 \(prism\): /system/bin/prism spawned by 1' -and $t -match 'display: process 2 owns the display' -and $t -match 'prism: compositor running') ([regex]::Match($t, 'prism: display \S+').Value)
     Record 'desktop shell is a separate process and PRISM client' ($t -match '\(desktop\): /system/bin/desktop spawned by 2' -and $t -match 'prism: client 1 connected \(process 3' -and $t -match 'window 1 "" created \(Desktop' -and $t -match 'window 2 "" created \(Panel') "${sw}x$sh"
     Shot 'start'
+    if ($Gpu) {
+        $g = [regex]::Match($t, 'display: virtio-gpu at \S+: .*')
+        Record 'VirtIO-GPU initialised: scanout, 2D resource, backing, EDID' ($g.Success -and $g.Value -match 'resource \d+' -and $t -notmatch 'virtio-gpu.*failed') $g.Value
+        Record 'VirtIO-GPU cursor queue: resource, update, move, hide' ($t -match 'display: cursor check ok') ([regex]::Match($t, 'display: cursor check \S+').Value)
+        Record 'PRISM presents through VirtIO-GPU (not GOP)' ($t -match 'prism: display 1920x1080 .*backend virtio-gpu' -and $t -match 'display: status screen active on virtio-gpu') ([regex]::Match($t, 'prism: display .*').Value)
+    }
 
     # Pointer: USB mouse motion moves the cursor; a right click on the
     # desktop opens the context menu exactly where the pointer is.
@@ -240,6 +252,10 @@ try {
     # Measured composition performance (PRISM reports every 30 s).
     $st = Wait-Log 'prism: (\d+) frames, (\d+) Mpx composed, (\d+) commits, (\d+) input events, \d+ clients; frame time avg ([\d.]+) ms' 40
     Record 'PRISM frame statistics measured' ($null -ne $st) $(if ($st) { $st.Value } else { '' })
+    if ($Gpu) {
+        $fl = [regex]::Match((Log-Text), 'prism: virtio-gpu: (\d+) damage flushes, (\d+) Mpx transferred, avg (\d+) us per flush.*')
+        Record 'damage-region flushes measured (VirtIO-GPU)' ($fl.Success -and [int]$fl.Groups[1].Value -gt 0) $fl.Value
+    }
     $t = Log-Text
     Record 'no kernel panic, no CPU exception in PRISM or the shell' ($t -notmatch 'KERNEL PANIC' -and $t -notmatch '\((prism|desktop)\): .*exception') ''
 } finally {

@@ -89,7 +89,15 @@ fn main() -> i32 {
         }
     };
     let rgb = info.format == system::pixel::RGBX;
-    println!("prism: display {}x{} (stride {} px, {}) acquired", info.width, info.height, info.stride, if rgb { "RGBX" } else { "BGRX" });
+    let gpu = info.backend == system::BACKEND_VIRTIO_GPU;
+    println!(
+        "prism: display {}x{} (stride {} px, {}) acquired, backend {}",
+        info.width,
+        info.height,
+        info.stride,
+        if rgb { "RGBX" } else { "BGRX" },
+        if gpu { "virtio-gpu (damage flushed per frame)" } else { "linear framebuffer" }
+    );
     let listener = match Listener::listen(prism_proto::SERVICE) {
         Ok(l) => l,
         Err(e) => {
@@ -121,6 +129,10 @@ fn main() -> i32 {
         width: info.width,
         height: info.height,
         rgb,
+        gpu,
+        flush_time_us: 0,
+        flushes: 0,
+        flushed_pixels: 0,
         last_frame: 0,
         last_snapshot: Vec::new(),
         last_focus: None,
@@ -149,6 +161,11 @@ struct Prism {
     width: u32,
     height: u32,
     rgb: bool,
+    /// VirtIO-GPU backend: changed rectangles must be flushed.
+    gpu: bool,
+    flush_time_us: u64,
+    flushes: u64,
+    flushed_pixels: u64,
     last_frame: u64,
     last_snapshot: Vec<WindowSnapshot>,
     last_focus: Option<u32>,
@@ -409,6 +426,21 @@ impl Prism {
         for r in &rects {
             self.present(*r);
         }
+        if self.gpu {
+            let t1 = Instant::now();
+            for r in &rects {
+                let r = r.intersect(&Rect::new(0, 0, self.width, self.height));
+                if r.w == 0 || r.h == 0 {
+                    continue;
+                }
+                if let Err(e) = system::display_flush(r.x as u32, r.y as u32, r.w, r.h) {
+                    eprintln!("prism: display flush failed: {e}");
+                }
+                self.flushes += 1;
+                self.flushed_pixels += r.w as u64 * r.h as u64;
+            }
+            self.flush_time_us += t1.elapsed().as_micros() as u64;
+        }
         self.last_frame = now;
         if !rects.is_empty() {
             self.frame_time_us += t0.elapsed().as_micros() as u64;
@@ -511,5 +543,15 @@ impl Prism {
             avg / 1000,
             avg % 1000
         );
+        if self.gpu {
+            let per = self.flush_time_us.checked_div(self.flushes).unwrap_or(0);
+            println!(
+                "prism: virtio-gpu: {} damage flushes, {} Mpx transferred, avg {} us per flush ({} ms in flushes)",
+                self.flushes,
+                self.flushed_pixels / 1_000_000,
+                per,
+                self.flush_time_us / 1000
+            );
+        }
     }
 }

@@ -116,6 +116,71 @@ fn main() -> i32 {
             false
         }
     });
+    t.check("display: mode setting (VirtIO-GPU switches, GOP keeps its mode)", || {
+        let Ok(d) = os_std::system::display_info() else { return true }; // headless
+        let same = os_std::system::display_set_mode(d.width, d.height).is_ok();
+        if d.backend == os_std::system::BACKEND_VIRTIO_GPU {
+            let switched = os_std::system::display_set_mode(800, 600).is_ok()
+                && os_std::system::display_info().is_ok_and(|n| (n.width, n.height, n.stride) == (800, 600, 800));
+            let back = os_std::system::display_set_mode(d.width, d.height).is_ok()
+                && os_std::system::display_info().is_ok_and(|n| (n.width, n.height) == (d.width, d.height));
+            println!("display: virtio-gpu {}x{} -> 800x600 -> back: {}", d.width, d.height, switched && back);
+            same && switched && back
+        } else {
+            let refused = os_std::system::display_set_mode(800, 600).err().map(|e| e.kind()) == Some(ErrorKind::Unsupported);
+            same && refused
+        }
+    });
+    t.check("memory: protect, fixed and 64 KiB aligned mappings", || {
+        let Ok(p) = raw::map_ex(0, 3 * 4096, PROT_READ | PROT_WRITE, raw::MAP_ALIGN_64K) else { return false };
+        let aligned = (p as usize).is_multiple_of(0x10000);
+        // SAFETY: `p` maps three fresh pages.
+        unsafe { p.add(4096).write(7) };
+        // SAFETY: the middle page becomes read-only; it is not written again.
+        let ro = unsafe { raw::protect(p.add(4096), 4096, PROT_READ) }.is_ok();
+        // W^X: writable + executable is refused; outside a mapping is invalid.
+        // SAFETY: the calls are expected to fail and change nothing.
+        let wx = unsafe { raw::protect(p, 4096, PROT_READ | PROT_WRITE | PROT_EXEC) } == Err(Errno::PermissionDenied);
+        // SAFETY: as above.
+        let outside = unsafe { raw::protect(p.add(16 * 4096), 4096, PROT_READ) } == Err(Errno::InvalidArgument);
+        // SAFETY: the page is still readable.
+        let kept = unsafe { p.add(4096).read() } == 7;
+        let fixed_at = p as usize + 0x100_0000;
+        let fixed = raw::map_ex(fixed_at, 4096, PROT_READ | PROT_WRITE, raw::MAP_FIXED) == Ok(fixed_at as *mut u8);
+        let taken = raw::map_ex(fixed_at, 4096, PROT_READ, raw::MAP_FIXED) == Err(Errno::AlreadyExists);
+        // SAFETY: both regions were mapped above with these lengths.
+        let freed = unsafe { raw::unmap(p, 3 * 4096).is_ok() && raw::unmap(fixed_at as *mut u8, 4096).is_ok() };
+        aligned && ro && wx && outside && kept && fixed && taken && freed
+    });
+    t.check("GS base per thread (set_gs_base)", || {
+        let read_gs = || {
+            let v: u64;
+            // SAFETY: gs:[0] is readable whenever the GS base points at `cell`.
+            unsafe { core::arch::asm!("mov {}, gs:[0]", out(reg) v, options(nostack, readonly)) };
+            v
+        };
+        let cell = Box::new(0x5EED_u64);
+        if raw::set_gs_base(&*cell as *const u64 as usize).is_err() {
+            return false;
+        }
+        let mine = read_gs() == 0x5EED;
+        // Another thread has its own GS base (0 until it sets one).
+        let other = thread::spawn(move || {
+            let cell2 = Box::new(0xBEEF_u64);
+            raw::set_gs_base(&*cell2 as *const u64 as usize).is_ok() && {
+                let v: u64;
+                // SAFETY: as above, for this thread's cell.
+                unsafe { core::arch::asm!("mov {}, gs:[0]", out(reg) v, options(nostack, readonly)) };
+                v == 0xBEEF
+            }
+        })
+        .join()
+        .unwrap_or(false);
+        thread::yield_now();
+        let still = read_gs() == 0x5EED;
+        let _ = raw::set_gs_base(0);
+        mine && other && still
+    });
     t.check("monotonic clock", || {
         let a = Instant::now();
         let b = Instant::now();

@@ -235,6 +235,18 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::RESOLVE => crate::net::sys_resolve(f.rdi, f.rsi, f.rdx, f.r10),
         nr::NET_QUERY => crate::net::sys_query(f.rdi, f.rsi, f.rdx),
         nr::NET_CONFIG => crate::net::sys_config(f.rdi),
+        nr::SET_GS_BASE => {
+            if f.rdi != 0 && !crate::fixup::user_range_ok(f.rdi, 1) {
+                Err(Errno::InvalidArgument)
+            } else {
+                sched::set_current_gs_base(f.rdi);
+                Ok(0)
+            }
+        }
+        nr::PROTECT => process::protect(f.rdi, f.rsi, f.rdx).map(|_| 0),
+        nr::MAP_EX => process::map_ex(f.rdi, f.rsi, f.rdx, f.r10),
+        nr::DISPLAY_FLUSH => sys_objects::display_flush(f.rdi, f.rsi, f.rdx, f.r10),
+        nr::DISPLAY_SET_MODE => sys_objects::display_set_mode(f.rdi, f.rsi),
         _ => Err(Errno::NotSupported),
     };
     // Safe point: a thread whose process is exiting ends here instead of

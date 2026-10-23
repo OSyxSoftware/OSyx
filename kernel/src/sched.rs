@@ -76,12 +76,15 @@ pub struct Thread {
     slice: u32,
     /// FS base (user TLS thread pointer), switched with the thread.
     fs_base: u64,
+    /// GS base (the Windows runtime's TEB pointer), switched likewise.
+    gs_base: u64,
     /// Set when the owning process is exiting: the thread ends at its next
     /// safe point (return to user mode or an interrupted blocking call).
     kill_pending: bool,
 }
 
 const IA32_FS_BASE: u32 = 0xC000_0100;
+const IA32_GS_BASE: u32 = 0xC000_0101;
 
 struct Scheduler {
     threads: BTreeMap<Tid, Box<Thread>>,
@@ -177,6 +180,7 @@ fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b
         joiners: Vec::new(),
         slice: TIME_SLICE_TICKS,
         fs_base,
+        gs_base: 0,
         kill_pending: false,
     })
 }
@@ -198,6 +202,7 @@ pub fn init() {
         joiners: Vec::new(),
         slice: TIME_SLICE_TICKS,
         fs_base: 0,
+        gs_base: 0,
         kill_pending: false,
     });
     let idle = new_thread(2, "idle", 0, root, idle_loop, 0, 0, 0);
@@ -260,17 +265,20 @@ impl Scheduler {
         if next == cur {
             return None;
         }
-        let (new_rsp, new_root, new_top, new_fs) = (nt.rsp, nt.root, nt.kstack_top, nt.fs_base);
+        let (new_rsp, new_root, new_top, new_fs, new_gs) = (nt.rsp, nt.root, nt.kstack_top, nt.fs_base, nt.gs_base);
         let new_fpu: *const FpuState = &*nt.fpu;
         let old = self.threads.get_mut(&cur).expect("current thread exists");
         if old.state == State::Dead {
             self.reap = Some(cur);
         }
-        // SAFETY: IA32_FS_BASE exists on every x86-64 CPU; the kernel never
-        // uses FS, so the value only matters to each thread's user code.
+        // SAFETY: IA32_FS_BASE and IA32_GS_BASE exist on every x86-64 CPU;
+        // the kernel uses neither FS nor GS (no swapgs), so the values only
+        // matter to each thread's user code.
         unsafe {
             old.fs_base = cpu::rdmsr(IA32_FS_BASE);
             cpu::wrmsr(IA32_FS_BASE, new_fs);
+            old.gs_base = cpu::rdmsr(IA32_GS_BASE);
+            cpu::wrmsr(IA32_GS_BASE, new_gs);
         }
         let old_rsp: *mut u64 = &mut old.rsp;
         let old_fpu: *mut FpuState = &mut *old.fpu;
@@ -412,6 +420,16 @@ pub fn request_kill(tid: Tid) {
 /// True if the current thread has been asked to end.
 pub fn current_kill_pending() -> bool {
     SCHED.lock().as_ref().is_some_and(|s| s.threads.get(&s.current).is_some_and(|t| t.kill_pending))
+}
+
+/// Sets the GS base of the current thread and loads it into the CPU.
+pub fn set_current_gs_base(value: u64) {
+    let mut g = SCHED.lock();
+    let s = g.as_mut().expect("scheduler not initialised");
+    let t = s.threads.get_mut(&s.current).expect("current thread exists");
+    t.gs_base = value;
+    // SAFETY: see `pick_next`; the kernel does not use GS.
+    unsafe { cpu::wrmsr(IA32_GS_BASE, value) };
 }
 
 /// Sets the FS base of the current thread and loads it into the CPU.

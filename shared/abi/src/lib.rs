@@ -1,4 +1,9 @@
-//! OSyx system call ABI, version 8.
+//! OSyx system call ABI, version 9.
+//!
+//! Version 9 adds what the Windows runtime and VirtIO-GPU need: a
+//! per-thread GS base, page protection changes, placed and aligned
+//! anonymous mappings, display damage flushing and mode setting, and a
+//! larger [`ipc::DisplayInfo`] (`nr::SET_GS_BASE` .. `nr::DISPLAY_SET_MODE`).
 //!
 //! Version 8 adds networking (sockets, name resolution, interface
 //! queries and configuration; see [`net`] and `nr::SOCKET` ..
@@ -32,7 +37,7 @@
 pub mod ipc;
 pub mod net;
 
-pub const ABI_VERSION: u32 = 8;
+pub const ABI_VERSION: u32 = 9;
 
 /// Highest user virtual address + 1 (the canonical lower half).
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -256,7 +261,30 @@ pub mod nr {
     pub const NET_QUERY: u64 = 69;
     /// `net_config(args: *const NetConfig) -> 0`: root only.
     pub const NET_CONFIG: u64 = 70;
+    /// `set_gs_base(addr: u64) -> 0`: the calling thread's GS base (the
+    /// kernel does not use GS; the Windows runtime keeps its TEB there).
+    pub const SET_GS_BASE: u64 = 71;
+    /// `protect(addr, len, prot) -> 0`: changes the protection of whole
+    /// pages inside one anonymous mapping (W^X enforced).
+    pub const PROTECT: u64 = 72;
+    /// `map_ex(addr, len, prot, flags) -> addr`: anonymous zeroed memory
+    /// like `map`; `MAP_FIXED` places it exactly at `addr` (`AlreadyExists`
+    /// if anything is mapped there), `MAP_ALIGN_64K` aligns it to 64 KiB.
+    pub const MAP_EX: u64 = 73;
+    /// `display_flush(x, y, w, h) -> 0`: the display owner presents a
+    /// changed rectangle (needed when `DisplayInfo::backend` is
+    /// `BACKEND_VIRTIO_GPU`; a no-op on a linear framebuffer).
+    pub const DISPLAY_FLUSH: u64 = 74;
+    /// `display_set_mode(width, height) -> 0`: root only; switches the
+    /// resolution while the kernel status screen or the caller owns the
+    /// display. An owner must call `display_acquire` again for the new
+    /// buffer (the old mapping stays valid but is no longer shown).
+    pub const DISPLAY_SET_MODE: u64 = 75;
 }
+
+/// `map_ex` flags.
+pub const MAP_FIXED: u64 = 1;
+pub const MAP_ALIGN_64K: u64 = 2;
 
 /// "No handle" in `spawn_stdio`'s array.
 pub const HANDLE_NONE: u64 = u64::MAX;
@@ -848,7 +876,7 @@ mod tests {
         assert_eq!(core::mem::size_of::<ExecArgs>(), 48);
         assert_eq!(core::mem::size_of::<ipc::ChannelMsg>(), 32);
         assert_eq!(core::mem::size_of::<ipc::WaitItem>(), 16);
-        assert_eq!(core::mem::size_of::<ipc::DisplayInfo>(), 32);
+        assert_eq!(core::mem::size_of::<ipc::DisplayInfo>(), 48);
         assert_eq!(core::mem::size_of::<ipc::ProcInfo>(), 72);
         assert_eq!(core::mem::size_of::<ipc::MountInfo>(), 144);
         assert_eq!(core::mem::size_of::<net::SockAddr>(), 8);
