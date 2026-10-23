@@ -41,6 +41,12 @@ void __stdcall start(void) {
     SetLastError(0);
     check("GetProcAddress of a missing export fails", GetProcAddress(GetModuleHandleA("kernel32.dll"), "NoSuchFunction") == NULL);
     check_eq("... with ERROR_PROC_NOT_FOUND", GetLastError(), ERROR_PROC_NOT_FOUND);
+    HMODULE from = NULL;
+    const DWORD by_address = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    check("GetModuleHandleExW finds the module of an address", GetModuleHandleExW(by_address, (LPCWSTR)start, &from) && from == GetModuleHandleA(NULL));
+    check("an address in no module is not found", !GetModuleHandleExW(by_address, (LPCWSTR)&from, &from) && from == NULL && GetLastError() == ERROR_MOD_NOT_FOUND);
+    check("PIN contradicts UNCHANGED_REFCOUNT",
+          !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, NULL, &from) && GetLastError() == ERROR_INVALID_PARAMETER);
     char env[64];
     check("GetEnvironmentVariableA(\"OSYX\")", GetEnvironmentVariableA("OSYX", env, sizeof env) == 1 && env[0] == '1');
     finish("hello");

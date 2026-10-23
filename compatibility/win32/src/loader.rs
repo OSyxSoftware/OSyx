@@ -740,6 +740,32 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
     Ok(h)
 }
 
+/// The handle of the module whose image contains `addr`. Built-in modules'
+/// code is winrun's own, so only their handle page belongs to them.
+pub fn module_from_address(addr: u64) -> Option<u64> {
+    with(|l| {
+        (0..l.linker.modules.len()).map(|i| module_handle(l, i)).zip(l.linker.modules.iter()).find_map(|(h, m)| {
+            let size = match &m.kind {
+                Kind::Pe { size, .. } => *size as u64,
+                Kind::Builtin(_) => mem::PAGE as u64,
+            };
+            (addr >= h && addr < h + size).then_some(h)
+        })
+    })
+}
+
+/// `GetModuleHandleEx` without UNCHANGED_REFCOUNT: one more reference,
+/// or a reference that is never dropped (PIN).
+pub fn add_module_reference(h: u64, pin: bool) {
+    with(|l| {
+        if let Some(i) = module_by_handle(l, h) {
+            if let Some(s) = l.state.get_mut(i) {
+                s.refs = if pin { u32::MAX } else { s.refs.saturating_add(1) };
+            }
+        }
+    })
+}
+
 /// `FreeLibrary`: drops a reference. The image stays mapped (OSyx does not
 /// unload DLLs yet); the last reference delivers DLL_PROCESS_DETACH.
 pub fn free_library(h: u64) -> Result<(), u32> {

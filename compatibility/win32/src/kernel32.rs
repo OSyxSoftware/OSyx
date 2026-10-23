@@ -1800,10 +1800,27 @@ extern "win64" fn GetModuleHandleW(name: *const u16) -> u64 {
 }
 
 extern "win64" fn GetModuleHandleExW(flags: u32, name: *const u16, out: *mut u64) -> Bool {
-    if flags & 4 != 0 || out.is_null() {
-        return fail(ERROR_NOT_SUPPORTED, FALSE); // FROM_ADDRESS
+    const PIN: u32 = 1;
+    const UNCHANGED_REFCOUNT: u32 = 2;
+    const FROM_ADDRESS: u32 = 4;
+    if out.is_null() || flags & !(PIN | UNCHANGED_REFCOUNT | FROM_ADDRESS) != 0 || flags & PIN != 0 && flags & UNCHANGED_REFCOUNT != 0 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let h = GetModuleHandleW(name);
+    let h = if flags & FROM_ADDRESS != 0 {
+        match loader::module_from_address(name as u64) {
+            Some(h) => h,
+            None => {
+                // SAFETY: the caller's out pointer.
+                unsafe { *out = 0 };
+                return fail(ERROR_MOD_NOT_FOUND, FALSE);
+            }
+        }
+    } else {
+        GetModuleHandleW(name)
+    };
+    if h != 0 && flags & UNCHANGED_REFCOUNT == 0 {
+        loader::add_module_reference(h, flags & PIN != 0);
+    }
     // SAFETY: the caller's out pointer.
     unsafe { *out = h };
     b(h != 0)
