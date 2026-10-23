@@ -15,19 +15,25 @@ compatibility layer; that work has not started yet (see
 - Kernel: GDT/TSS/IDT, exception diagnostics, bitmap frame allocator,
   4-level paging with W^X/NX, growable heap, preemptive round-robin scheduler
   with kernel threads and per-thread FPU/SSE and FS state, framebuffer status
-  screen, 18 in-kernel self-tests.
-- Storage: PCI enumeration, a modern virtio-blk driver, a block layer, an
-  in-tree FAT32 driver with long file names, a VFS with per-process file
-  handles ([docs/storage.md](docs/storage.md)). Files OSyx writes are read
-  back on the host with mtools.
+  screen, 24 in-kernel self-tests.
+- Storage ([docs/storage.md](docs/storage.md)): GPT boot disk; a native,
+  journalled **ext4** driver as `/` (crash recovery and orphan handling
+  tested by cutting power at every write), the EFI partition as FAT32
+  `/boot`, tmpfs `/tmp` and `/run`, devfs `/dev` (null, zero, a
+  ChaCha20-based `random`, console, root-only disks); a VFS with mounts,
+  symbolic links, current directories, Unix permissions and per-process
+  handles. What OSyx writes is verified on the host with e2fsck, debugfs
+  and mtools.
 - User space: multi-threaded ring 3 processes with spawn/wait, zombies and
-  orphans, futexes and FS-base TLS, SYSCALL/SYSRET ABI v4 with pointer
+  orphans, futexes and FS-base TLS, SYSCALL/SYSRET ABI v5 with pointer
   validation, and Rust programs built on OSyx Std (`println!`, collections,
   heap, time, args, `process::Command`, `thread::spawn`, `thread_local!`,
-  `Mutex`, `Condvar`, `fs::File`, `read_dir`, `path::Path`, panics): `init`
-  runs 49 checks using `worker` children.
+  `Mutex`, `Condvar`, `fs`, `env::current_dir`, `SystemTime`, panics): `init`
+  runs 56 checks using `worker` children.
 
-- Windows compatibility groundwork: a bounds-checked, zero-copy PE32+ parser
+- Windows compatibility groundwork: Windows 11 research started
+  ([API sets and forwarding](docs/research/windows11-apiset-and-forwarding.md));
+  a bounds-checked, zero-copy PE32+ parser
   (headers, sections, imports, exports with forwarders, relocations, TLS,
   exception data), tested on local fixtures, malformed and mutated inputs,
   and swept without a single panic over the 4 372 files of `System32`.
@@ -36,10 +42,14 @@ compatibility layer; that work has not started yet (see
 
 ```powershell
 .\scripts\check-env.ps1   # verify Rust targets, QEMU, OVMF
-.\scripts\build.ps1       # build loader, kernel, init; assemble build\esp and build\data.img
+.\scripts\build.ps1       # build loader, kernel, programs; GPT disk build\osyx.img (ESP + ext4 root)
 .\scripts\run-qemu.ps1    # boot in a QEMU window (serial log: build\serial.log)
 .\scripts\test.ps1        # host unit tests, clippy, QEMU boot/fault/user tests
 ```
+
+Building the ext4 root image and checking it needs WSL (Ubuntu 24.04) with
+e2fsprogs; MSYS2 provides QEMU, OVMF and mtools. Only image files under
+`build/` are written; no host disk or partition is touched.
 
 ## Layout
 
@@ -51,7 +61,10 @@ compatibility layer; that work has not started yet (see
 | `boot/assets` | generated logo/font assets (`scripts/gen-assets.py`) |
 | `kernel` | the kernel; `kernel/mm` holds host-tested memory algorithms |
 | `compatibility/pe-parser` | PE32+ parser (`osyx-pe`), fixtures, `pe-dump` / `pe-sweep` tools |
+| `storage/ext4` | ext4 driver (`osyx-ext4`), e2fsprogs-made test images |
 | `storage/fat` | FAT32 driver (`osyx-fat`), `mkfat32` / `fatcheck` tools |
+| `storage/vfs`, `storage/tmpfs`, `storage/part` | VFS building blocks, tmpfs, GPT (`mkdisk`) |
+| `shared/crypto` | ChaCha20 DRBG and SHA-256 for `/dev/random` |
 | `shared/bootinfo`, `shared/abi` | boot protocol and system call ABI |
 | `runtime/os-sys`, `runtime/os-std` | raw system calls, OSyx Std |
 | `userspace/apps` | user programs `init` and `worker` (`\EFI\OSYX\BIN\`) |

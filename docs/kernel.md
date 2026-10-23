@@ -17,11 +17,15 @@ as a static ELF at `0xFFFF_FFFF_8000_0000` with three W^X segments
 6. PIC remapped (vectors 32–47), PIT at 100 Hz, interrupts enabled, SSE
    enabled for user code, scheduler started (the boot flow becomes thread 1,
    `kmain`; thread 2 is `idle`).
-7. PCI enumeration, virtio-blk disks registered (`vda`, `vdb`, ...), FAT32
-   volumes mounted by the VFS ([storage.md](storage.md)).
+7. PCI enumeration; wall clock from the CMOS RTC (`time.rs`); virtio-blk
+   disks (`vda`, …) and their GPT partitions (`vda1`, …); `/dev/random`
+   seeded (`random.rs`); device nodes registered (`devices.rs`); the file
+   system tree mounted: ext4 `/`, devfs, tmpfs `/tmp` `/run`, FAT32 `/boot`
+   ([storage.md](storage.md)).
 8. Framebuffer status screen, self-tests, `init` spawned and waited for,
    then `kmain` animates the status screen (sleeping between frames). With
-   `test.exit` the volumes are flushed before QEMU is stopped.
+   `test.exit` every volume is unmounted cleanly before QEMU is stopped
+   (`test.power-cut` skips that to simulate a power loss).
 
 ## Interrupts and exceptions
 
@@ -89,6 +93,8 @@ The panic path may force-unlock SERIAL and only try-locks the display.
   `FRAME LEAK` otherwise.
 - File handles: a per-process table (`3..`, at most 64) of open VFS files;
   whatever is still open when the last thread ends is closed.
+- Identity: `uid`/`gid` (root for `init`; `setuid` lets root drop to a user,
+  permanently) and the current directory; children inherit both.
 - Limits: 64 processes, 256 MiB of `map` memory per process, 16 KiB of
   arguments, 64 open handles.
 
@@ -100,8 +106,10 @@ fixups (#GP and #PF) · identity map removed · kernel W^X · kernel heap
 validation · address space lifecycle · preemptive kernel threads (two
 threads that never yield both make progress) · sleep and join · FPU/SSE
 state per thread · FS base per thread · PCI enumeration · block device I/O ·
-VFS files and directories (incl. two concurrent writer threads and a volume
-check). The storage tests skip when no writable disk is attached.
+VFS on tmpfs · symlinks, cwd, permissions and case-insensitive lookup ·
+mount, unmount and limits · devfs and `/dev/random` · FAT32 `/boot` · ext4
+`/` · concurrent writers on tmpfs, FAT32 and ext4 followed by volume checks.
+Tests of volumes that are not mounted skip with a log line.
 
 ## Not implemented yet
 
@@ -109,4 +117,4 @@ Thread priorities, SMP and per-CPU data via `swapgs` (the futex and
 block/wake protocols rely on disabling interrupts on a single CPU and must be
 revisited for SMP), shared memory between processes, local APIC/IOAPIC, ACPI
 parsing, PCIe ECAM, device interrupts/MSI-X, storage controllers other than
-virtio-blk, file systems other than FAT32, keyboard input, XSAVE (AVX state).
+virtio-blk, NTFS, keyboard input, XSAVE (AVX state).

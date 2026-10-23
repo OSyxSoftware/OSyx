@@ -1,108 +1,168 @@
-# Storage: PCI, virtio-blk, block layer, FAT32, VFS
+# Storage and file systems
+
+## Layout
+
+| Mount point | File system | Source | Notes |
+|---|---|---|---|
+| `/` | ext4 | GPT partition "Linux root (x86-64)" (`root=<dev>` overrides) | read-write, journalled; `ro` on the command line mounts it read-only |
+| `/boot` | FAT32 | the EFI system partition | read-write for root, case-insensitive |
+| `/tmp` | tmpfs | RAM, 64 MiB, mode 1777 | independent instance |
+| `/run` | tmpfs | RAM, 8 MiB, mode 0755 | independent instance |
+| `/dev` | devfs | device registry | read-only view |
+| `/mnt/<dev>` | FAT32 / ext4 | other recognised volumes | |
+
+Without a usable root partition a 16 MiB tmpfs becomes `/` (with the mount
+point directories created), and the log says so. Root can also mount and
+unmount volumes at run time (`mount` / `umount`).
+
+The boot disk `build/osyx.img` is a GPT disk built by `scripts/build.ps1`:
+the ESP (FAT32, `osyx-fat` `mkfat32`) and the root partition (ext4,
+`mke2fs -d` in WSL via `scripts/mkrootfs.sh`), assembled by
+`osyx-part`'s `mkdisk`. OVMF boots from the ESP; the kernel finds both
+partitions by their GPT type GUIDs.
 
 ```
-ring 3   os_std::fs (File, OpenOptions, read_dir, ...) ── os-sys ── ABI v4 syscalls 16-28
-ring 0   handle table per process (process.rs)
-         vfs.rs      mount table, path resolution, OpenFile (KMutex per handle)
-         osyx-fat    FAT32 driver (storage/fat, no_std, host-tested)  (KMutex per volume)
-         block.rs    disk registry vda, vdb, ...; range checks, chunking
-         drivers/virtio_blk.rs ── drivers/virtio.rs (modern virtio-pci, split virtqueue)
-         pci.rs      config space via 0xCF8/0xCFC, bus scan, BARs, capabilities
+ring 3     os_std::fs, env::current_dir, os::mount ── os-sys ── ABI v5 (open … statfs)
+ring 0     process: handle table, credentials (uid/gid), current directory
+           vfs/mod.rs   resolution, permissions, mount table, open files
+           ├─ vfs/ext4.rs   ── osyx-ext4  (storage/ext4)
+           ├─ vfs/fat.rs    ── osyx-fat   (storage/fat)
+           ├─ vfs/tmpfs.rs  ── osyx-tmpfs (storage/tmpfs)
+           └─ vfs/devfs.rs  ── devices.rs (registry, /dev/null, zero, random, console, disks)
+           block.rs     disks vda…, GPT partitions vda1… (osyx-part)
+           drivers/     virtio-blk, virtio-rng (modern virtio-pci, polled)
 ```
 
-## PCI (`kernel/src/pci.rs`)
+Host-testable building blocks live in no_std crates: `osyx-vfs` (path
+syntax, permission checks, mount table), `osyx-tmpfs`, `osyx-ext4`,
+`osyx-fat`, `osyx-part`, `osyx-crypto`.
 
-- Configuration mechanism #1 (ports `0xCF8`/`0xCFC`), first 256 bytes of each
-  function; no ECAM/MCFG yet.
-- Recursive scan from bus 0 through PCI-to-PCI bridges; multi-function
-  devices; each function is reported once.
-- BAR decoding with size probing (memory decoding is switched off while a BAR
-  is probed), 32- and 64-bit memory BARs, I/O BARs.
-- Capability list walk bounded against loops and checked to stay at or above
-  offset `0x40`.
+## VFS (`kernel/src/vfs`)
 
-## Virtio transport and virtio-blk (`kernel/src/drivers`)
+- **Driver interface** (`Filesystem`): inode-style — `lookup(dir, name)`,
+  `stat`, `read_dir`, `read`/`write`/`truncate` by node number, `create`
+  (file, directory, symlink), `unlink`, `rmdir`, `rename`, `set_mode`,
+  `readlink`, `open`/`release` notifications, `device`, `sync`, `usage`,
+  `unmount`, `fsck`. New file systems implement it and are added to
+  `vfs::mount_disk` (disk-backed) or mounted directly; the VFS itself does
+  not change.
+- **Resolution**: one component at a time from `/` or the caller's current
+  directory. A component whose canonical path is a mount point continues in
+  the mounted root (longest-prefix match). Symbolic links are expanded in
+  place (40 at most, then `Loop`); `..` returns to the previous directory on
+  the walk, so it is "physical", crosses mount points correctly and stops at
+  `/`.
+- **Permissions**: search permission on every directory walked; read/write
+  on the final node; write + search on directories whose entries change;
+  sticky directories (`/tmp`) only let owners remove or rename; only owners
+  and root `chmod`; only root mounts. uid 0 bypasses read/write checks.
+  Processes carry `uid/gid` (inherited, root may `setuid` once to drop) and
+  a current directory (inherited).
+- **Open files and handles**: per-process tables (3…66, 64 at most) of
+  shared open files; directory handles list with `readdir`. An open file
+  keeps its mount alive (unmount → `Busy`) and its node alive in the driver
+  (removed-while-open files keep their data until the last close on tmpfs
+  and ext4; FAT refuses with `Busy`).
+- **Locking**: one sleeping mutex per volume, one per open file (order open
+  file → volume → disk); the mount table is a spinlock never held while a
+  driver runs.
 
-- Only the modern (virtio 1.x) PCI transport: vendor capabilities
-  (`cfg_type` common / notify / ISR / device) locate register blocks inside
-  BARs, which are mapped uncached into the kernel MMIO window
-  (`0xFFFF_E000_0000_0000`, see [memory.md](memory.md)), so BARs above 4 GiB
-  work. QEMU's transitional devices (`1af4:1001`) expose this interface.
-- Feature negotiation requires `VIRTIO_F_VERSION_1`; virtio-blk additionally
-  accepts read-only (`VIRTIO_BLK_F_RO`) and flush (`VIRTIO_BLK_F_FLUSH`).
-- One split virtqueue per disk, rings in one 4 KiB frame, at most 64 entries.
-  Requests are polled (device interrupts are suppressed); the polling loop
-  yields the CPU, so other threads run while a request is in flight. A
-  request that does not complete in time marks the disk failed (the device
-  may still own the buffers, so they are never reused).
-- Data goes through DMA bounce pages owned by the driver (64 KiB = 128 sectors
-  per request); callers pass ordinary kernel buffers.
-- No interrupts, no MSI-X, one request in flight per disk.
+## ext4 (`storage/ext4`, crate `osyx-ext4`)
 
-## Block layer (`kernel/src/block.rs`)
+Written from the on-disk format description; tested against images made by
+e2fsprogs 1.47 (`storage/ext4/tests/gen-fixtures.sh`).
 
-Registry of disks named `vda`, `vdb`, ... in PCI order. `block::read` /
-`block::write` check that the range lies on the disk and that the buffer is a
-whole number of sectors, refuse writes to read-only disks and split
-transfers into the driver's request size. `Disk` adapts a registered disk to
-the FAT driver's `BlockDevice` trait.
+Reading:
+- block sizes 1–64 KiB, 32/64-byte descriptors (`64bit`), `flex_bg`,
+  `meta_bg`, sparse superblock backups;
+- extents (any depth) and ext2/ext3 direct/indirect block maps; unwritten
+  extents and holes read as zeros; files beyond 4 GiB;
+- linear and hashed (`dir_index`) directories (read linearly);
+- fast and slow symbolic links, uid/gid/mode, nanosecond times;
+- `metadata_csum` (crc32c) and `gdt_csum` (crc16) verified on every
+  superblock, descriptor, inode, extent block and directory block read;
+- every on-disk value is range-checked: corrupt metadata gives an error,
+  never a panic (fuzzed).
 
-## FAT32 driver (`storage/fat`, crate `osyx-fat`)
+Refused at mount (`Unsupported`): `inline_data`, `encrypt`, `casefold`,
+`compression`, external journals, `mmp`, `dirdata`, `bigalloc`, unknown
+incompatible features.
 
-`no_std` + `alloc`, written from the Microsoft FAT specification, tested on
-the host (unit tests on in-memory volumes, and both directions against
-mtools: images made by `mformat`/`mcopy` are read by OSyx, images written by
-OSyx are read by `mdir`/`mtype`).
+Writing (only volumes whose features the driver maintains; otherwise the
+volume stays read-only and the reason is logged):
+- allocation of blocks and inodes (bitmaps with checksums, `BLOCK_UNINIT` /
+  `INODE_UNINIT` groups initialised on first use, `itable_unused`), free
+  counts in descriptors and superblock kept exact;
+- create files, directories, fast/slow symlinks; write (sparse), truncate
+  (shrink frees blocks and zeroes the tail; grow leaves a hole); unlink,
+  rmdir, rename (replacing files or empty directories, `..` and link counts
+  updated, no moves into a subtree); chmod; extent trees of depth 0 or 1;
+- **journalling**: every operation is one JBD2 transaction (descriptor,
+  block copies, commit, checksum v2/v3 when the journal uses them), written,
+  committed, checkpointed and the journal emptied before the call returns;
+  file data is written before the metadata that points to it ("ordered");
+  blocks freed in a transaction are not reused in it;
+- **recovery**: a mount with `needs_recovery` replays committed
+  transactions (read-only mounts into memory only); files removed while
+  open go on the superblock orphan list and are freed at the last close or
+  at the next writable mount;
+- refused writes: block-mapped (ext2/ext3) files, `meta_bg`, quota/project,
+  `ea_inode`, fast commits, not-cleanly-unmounted volumes without a journal,
+  adding entries to hashed directories (removing from them works), extent
+  trees needing more than 4 leaves.
 
-- BPB validation, FSInfo (treated as advisory, rewritten on flush), all FAT
-  copies kept in sync, 8-sector write-back FAT cache.
-- Long file names (UCS-2, checksums, sequence numbers), NT lower-case flags,
-  case-insensitive lookup, `~N` short-name aliases.
-- Files: read, write with zero-filled gaps, truncate/extend, clusters
-  trimmed after a failed write. Directories: create (with `.`/`..`), list,
-  remove when empty. Rename within a volume, replacing an existing file,
-  directory moves update `..`, moving a directory into itself is refused.
-- `format` (32 reserved sectors, 2 FATs, backup boot sector at 6) and a
-  consistency `check` (cross-links, loops, chain length vs. size, lost
-  clusters, FSInfo accuracy).
-- Not implemented: FAT12/16, exFAT, real timestamps (always 1980-01-01),
-  changing attributes, journaling. A damaged volume is reported, not
-  repaired.
+The root partition is mounted read-write; `vfs::shutdown` (used by
+`test.exit`) leaves it clean (journal empty, `needs_recovery` cleared,
+state clean), which `e2fsck -fn` confirms after every QEMU test run.
 
-Host tools: `cargo run -p osyx-fat --example mkfat32 -- <image> <MiB> <label> [dir]`
-creates an image from a host directory; `--example fatcheck -- <image>` runs
-`check` on an image.
+## FAT32, tmpfs, devfs
 
-## VFS (`kernel/src/vfs.rs`)
+- FAT32 (`osyx-fat`): see the driver's own documentation in the crate; the
+  VFS adapter assigns stable inode numbers by path, synthesises root-owned
+  0755/0644 permissions (0444 with the read-only attribute) and the FAT
+  timestamp, and writes metadata through after every change.
+- tmpfs (`osyx-tmpfs`): 4 KiB pages allocated on first write (holes are
+  free), a per-instance memory limit (nodes, names, pages are charged;
+  `NoSpace` when exceeded, short writes when partly possible), memory
+  returned on removal or last close of a removed file, case-sensitive.
+- devfs: `null`, `zero`, `random` (only when seeded), `console`
+  (write-only: no input driver yet), `disks/<dev>` (block devices, root-only
+  0600, raw writes refused while a volume on the disk is mounted). Drivers
+  register and unregister nodes at run time.
 
-- At boot every registered disk is probed; FAT32 volumes are mounted, the
-  first writable one at `/`, others at `/vol1`, `/vol2`, ... The vvfat ESP
-  disk QEMU synthesises is not FAT32 and is skipped.
-- Paths are absolute UTF-8, normalised lexically (`.`, `..`, repeated `/`)
-  before the longest matching mount point is chosen.
-- An open file is a `FileRef` plus position and access mode; directories
-  are opened read-only and listed with `readdir`.
-- Locking: sleeping `KMutex`es (open file → volume), so a thread waiting for
-  the disk does not spin and can be preempted. Every mutating operation ends
-  with a flush of the FAT cache, FSInfo and the disk's write cache, so data a
-  call reported as written survives QEMU exiting.
-- Handles are per process (`3..`, up to 64), closed when the process exits
-  (the kernel logs `closed N open handles`).
+## /dev/random
+
+`kernel/src/random.rs`: a ChaCha20 DRBG with fast key erasure
+(`osyx-crypto`, checked against RFC 8439 and FIPS 180-4 vectors), seeded
+with SHA-256 over 64 bytes from each hardware source: RDSEED/RDRAND (when
+CPUID reports them) and virtio-rng. RDRAND output is mixed in on every
+request, virtio-rng every 64 requests. Without a source the generator is
+not seeded and `/dev/random` is not created; it never returns predictable
+bytes. QEMU's `qemu64` CPU has no RDRAND; the test VM gets
+`-device virtio-rng-pci`.
 
 ## Tests
 
-- Kernel self-tests: PCI enumeration, block I/O (boot signature, transfers
-  crossing the request size, range checks, rewrite of the backup boot
-  sector, read-only enforcement), VFS operations including two kernel
-  threads writing concurrently and a full volume check afterwards.
-- `init` (ring 3): 12 `os_std::fs` checks, including reading files the build
-  host put on the disk, 200 KB writes with seeks, append/`set_len`,
-  directories and rename, error kinds, pointer and handle validation, the
-  64-handle limit, 4 threads writing concurrently, a child process writing a
-  file, and handles leaked at process exit.
-- After QEMU exits, `test.ps1` reads the files OSyx wrote with mtools and
-  runs `fatcheck` on the image.
-- Boots without the data disk must skip the storage tests cleanly.
+- Host: `osyx-ext4` (read: 6 image variants, sparse 6 GiB files, refused
+  features, journal replay; corruption and fuzz; write: three feature sets
+  checked by e2fsck and debugfs, extent trees, ENOSPC, orphans, journal
+  replay to disk, **power cut after every device write of a workload**,
+  model-based random operations), `osyx-tmpfs` (limits, reclamation,
+  rename semantics, model test), `osyx-vfs`, `osyx-part` (sgdisk interop,
+  corruption), `osyx-crypto` (vectors), `os-std` fs/env.
+- Kernel self-tests: tmpfs through the VFS, symlinks/cwd/permissions/
+  case-insensitive lookup, mount/unmount/limits, devfs and `/dev/random`,
+  FAT32 `/boot`, ext4 `/`, concurrent writers on all three.
+- `init` (ring 3): 19 file system checks across all mounts, and a child
+  that drops to uid 1000 and checks 12 permission rules.
+- After QEMU exits, the host checks the ESP with mtools + `fatcheck` and
+  the root with `e2fsck -fn` + `debugfs`, and runs a power-cut scenario
+  (QEMU stopped with an open removed file, recovery at the next boot).
 
-Not covered: AHCI/NVMe/IDE, interrupts-driven I/O, multiple requests in
-flight, power-loss consistency beyond write-through, real hardware.
+## Not implemented
+
+NTFS (out of scope), ext4 inline data/encryption/case folding/xattrs,
+htree insertion, delayed allocation and caching (every operation is
+synchronous), hard-link creation, FIFOs/sockets/device nodes on disk,
+`statx`-style birth times, `/dev/input` (no input driver), interrupt-driven
+disk I/O.

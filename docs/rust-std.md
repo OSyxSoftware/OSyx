@@ -33,7 +33,10 @@ supplies the platform parts:
 |---|---|---|
 | `print!`/`println!`/`eprint!`/`eprintln!`, `io::Write`, `stdout`/`stderr` | Implemented | OSyx (tested), host back end (tested) |
 | `io::{Read, Seek, SeekFrom}` (`read_exact`, `read_to_end`, `read_to_string`, `rewind`) | Implemented | OSyx (through `fs`) + host |
-| `fs::{File, OpenOptions, Metadata, DirEntry, ReadDir}`, `read`, `read_to_string`, `write`, `copy`, `read_dir`, `metadata`, `exists`, `create_dir(_all)`, `remove_file`, `remove_dir(_all)`, `rename` | Implemented (absolute paths; FAT32 data volume) | OSyx (12 checks in `init`, files verified on the host with mtools) + host (mapped below a temp directory) |
+| `fs::{File, OpenOptions, Metadata, FileType, Permissions, DirEntry, ReadDir}`, `read`, `read_to_string`, `write`, `copy`, `read_dir`, `metadata`, `symlink_metadata`, `exists`, `create_dir(_all)`, `remove_file`, `remove_dir(_all)`, `rename`, `symlink`, `read_link`, `set_permissions`; `OpenOptions::mode`, `case_insensitive` | Implemented on ext4 `/`, FAT32 `/boot`, tmpfs `/tmp` `/run`, devfs `/dev` | OSyx (19 checks in `init`; files verified on the host with mtools, e2fsck and debugfs) + host (mapped below a temp directory; no symlinks or owners there) |
+| `env::{current_dir, set_current_dir}` (relative paths everywhere) | Implemented; children inherit the directory | OSyx + host |
+| `time::SystemTime`, `UNIX_EPOCH`, `Metadata::{modified, accessed, changed}` | Implemented (RTC wall clock) | OSyx + host |
+| `os::{getuid, setuid, statfs, mount, unmount}` | Implemented (root-only where it matters) | OSyx |
 | `path::{Path, PathBuf}` (UTF-8 only: `join`, `parent`, `file_name`, `extension`, `components`, `exists`) | Implemented | host tests + OSyx |
 | global allocator | Implemented (heap on `map`) | OSyx (tested with 2 MiB + 10 000 allocations) |
 | `error::{Error, ErrorKind}`, errno mapping | Implemented | host tests |
@@ -48,7 +51,7 @@ supplies the platform parts:
 | `env::var` | Returns `Unsupported` (no environment yet) | host test |
 | `os::{sysinfo, kernel_version, heap_stats, raw}` | Implemented | OSyx |
 | `rt`: `_start`, `entry!`, `Termination`, panic → status 101 | Implemented | OSyx (tested) |
-| `sync::{RwLock, Once, OnceLock, mpsc}`, `net`, current directory, file times and permissions | Planned | — |
+| `sync::{RwLock, Once, OnceLock, mpsc}`, `net`, `fs::hard_link`, `fs::canonicalize`, `env::var` | Planned | — |
 
 On the host back end, futexes are emulated (per-address wake generations on
 a global `std` condition variable) and threads are real host threads, so the
@@ -80,8 +83,8 @@ Requirements identified so far (not yet attempted):
 - TLS: the kernel must set up FS base per thread;
 - unwinding: start with `panic=abort`; unwinding needs `.eh_frame` handling;
 - kernel prerequisites: threads per process, futexes, FS-base TLS,
-  preemption, FPU state and file handles exist; an environment block, a
-  current directory and sockets are still missing.
+  preemption, FPU state, file handles, a current directory and file
+  permissions exist; an environment block and sockets are still missing.
 
 No claim of `std` compatibility will be made before real `std` programs
 compile and run on OSyx.
