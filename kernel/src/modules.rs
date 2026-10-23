@@ -1,6 +1,8 @@
 //! Boot modules: the files the loader read from `\EFI\OSYX\BIN\`, copied
-//! into kernel memory before bootloader memory is reclaimed. Until a real
-//! filesystem exists, this read-only table is where `spawn` finds programs.
+//! into kernel memory before bootloader memory is reclaimed. Programs run
+//! from the root file system; the modules only matter when there is no
+//! usable root partition: they are then installed into `/bin` of the
+//! fallback tmpfs root (see `storage`).
 
 use crate::kprintln;
 use crate::sync::BootCell;
@@ -30,8 +32,7 @@ pub unsafe fn init(info: &BootInfo) -> usize {
     n
 }
 
-/// Contents of the module called `name` (names are lower case).
-pub fn get(name: &str) -> Option<&'static [u8]> {
-    let list = MODULES.get()?;
-    list.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, d)| d.as_slice())
+/// Every module as (lower-case file name, contents).
+pub fn all() -> &'static [(String, Vec<u8>)] {
+    MODULES.get().map_or(&[], |l| l.as_slice())
 }

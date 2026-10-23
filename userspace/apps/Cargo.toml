@@ -1,6 +1,6 @@
 [package]
 name = "osyx-apps"
-description = "OSyx user programs: init (system checks) and worker (child process modes)"
+description = "OSyx user programs: init (system checks), worker (child process modes) and probe (program loader checks)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,12 @@ bench = false
 [[bin]]
 name = "worker"
 path = "src/bin/worker.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "probe"
+path = "src/bin/probe.rs"
 test = false
 bench = false
 

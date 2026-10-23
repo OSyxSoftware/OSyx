@@ -41,17 +41,18 @@ supplies the platform parts:
 | global allocator | Implemented (heap on `map`) | OSyx (tested with 2 MiB + 10 000 allocations) |
 | `error::{Error, ErrorKind}`, errno mapping | Implemented | host tests |
 | `process::{exit, abort, id}` | Implemented | OSyx (tested) |
-| `process::{Command, Child, ExitStatus, wait_any}` | Implemented (programs = boot modules) | OSyx (spawn, wait, exit codes, exceptions, nested, orphans tested); host returns `Unsupported` |
+| `process::{Command, Child, ExitStatus, wait_any}`; `Command::{env, envs, env_remove, env_clear, arg0, get_envs, exec}` | Implemented: programs are ELF files found in `/bin`, `/usr/bin` or by path; `exec` replaces the running program | OSyx (spawn, wait, exit codes, exceptions, nested, orphans, 13 loader checks incl. `exec` chains and refusals); host returns `Unsupported` |
 | `thread::{sleep, yield_now}` | Implemented | OSyx + host |
 | `thread::{spawn, Builder, JoinHandle, current, Thread, ThreadId}` | Implemented; a panicking thread ends the process (panic = abort) | OSyx (join values, ids/names, detached reaping, faults and panics in threads) + host |
 | `thread_local!`, `thread::LocalKey` | Implemented on the FS base (own TLS, not ELF TLS) with per-thread destructors | OSyx + host |
 | `sync::{Mutex, Condvar}` (futex based), `Arc`, `Weak`, `atomic` | Implemented; never poisoned; the mutex is not fair | OSyx (contention under preemption, producer/consumer, timeouts) + host (8 parallel threads) |
 | `time::{Instant, Duration}` | Implemented (10 ms resolution) | OSyx + host |
 | `env::args` | Implemented | OSyx (tested with `init.args`) + host |
-| `env::var` | Returns `Unsupported` (no environment yet) | host test |
-| `os::{sysinfo, kernel_version, heap_stats, raw}` | Implemented | OSyx |
-| `rt`: `_start`, `entry!`, `Termination`, panic → status 101 | Implemented | OSyx (tested) |
-| `sync::{RwLock, Once, OnceLock, mpsc}`, `net`, `fs::hard_link`, `fs::canonicalize`, `env::var` | Planned | — |
+| `env::{var, vars, set_var, remove_var}` | Implemented: the `envp` block from the start-up stack, kept in a locked process-wide copy that children inherit | OSyx (inheritance, `env_clear`, exact `envp` in children) + host |
+| `env::current_exe` | Implemented (`AT_EXECFN`: canonical path the kernel loaded) | OSyx + host |
+| `os::{sysinfo, kernel_version, heap_stats, aux_value, raw}` | Implemented | OSyx |
+| `rt`: `_start` (argv, envp and auxv located with `osyx_abi::startup`), `entry!`, `Termination`, panic → status 101 | Implemented | OSyx (tested) |
+| `sync::{RwLock, Once, OnceLock, mpsc}`, `net`, `fs::hard_link`, `fs::canonicalize` | Planned | — |
 
 On the host back end, futexes are emulated (per-address wake generations on
 a global `std` condition variable) and threads are real host threads, so the
@@ -83,8 +84,9 @@ Requirements identified so far (not yet attempted):
 - TLS: the kernel must set up FS base per thread;
 - unwinding: start with `panic=abort`; unwinding needs `.eh_frame` handling;
 - kernel prerequisites: threads per process, futexes, FS-base TLS,
-  preemption, FPU state, file handles, a current directory and file
-  permissions exist; an environment block and sockets are still missing.
+  preemption, FPU state, file handles, a current directory, file
+  permissions, `execve` and an environment block exist; sockets are still
+  missing.
 
 No claim of `std` compatibility will be made before real `std` programs
 compile and run on OSyx.

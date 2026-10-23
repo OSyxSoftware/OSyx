@@ -15,7 +15,7 @@ compatibility layer; that work has not started yet (see
 - Kernel: GDT/TSS/IDT, exception diagnostics, bitmap frame allocator,
   4-level paging with W^X/NX, growable heap, preemptive round-robin scheduler
   with kernel threads and per-thread FPU/SSE and FS state, framebuffer status
-  screen, 24 in-kernel self-tests.
+  screen, 25 in-kernel self-tests.
 - Storage ([docs/storage.md](docs/storage.md)): GPT boot disk; a native,
   journalled **ext4** driver as `/` (crash recovery and orphan handling
   tested by cutting power at every write), the EFI partition as FAT32
@@ -24,12 +24,16 @@ compatibility layer; that work has not started yet (see
   symbolic links, current directories, Unix permissions and per-process
   handles. What OSyx writes is verified on the host with e2fsck, debugfs
   and mtools.
-- User space: multi-threaded ring 3 processes with spawn/wait, zombies and
-  orphans, futexes and FS-base TLS, SYSCALL/SYSRET ABI v5 with pointer
+- User space: static ELF64 programs loaded from the file system
+  (`/bin/init` starts the system; names are searched in `/bin` and
+  `/usr/bin`), `spawn` and `execve` with argv, environment and a System V
+  auxiliary vector; multi-threaded ring 3 processes with wait, zombies and
+  orphans, futexes and FS-base TLS, SYSCALL/SYSRET ABI v6 with pointer
   validation, and Rust programs built on OSyx Std (`println!`, collections,
-  heap, time, args, `process::Command`, `thread::spawn`, `thread_local!`,
-  `Mutex`, `Condvar`, `fs`, `env::current_dir`, `SystemTime`, panics): `init`
-  runs 56 checks using `worker` children.
+  heap, time, args, environment variables, `process::Command` incl. `exec`,
+  `thread::spawn`, `thread_local!`, `Mutex`, `Condvar`, `fs`,
+  `env::current_dir`, `SystemTime`, panics): `init` runs 69 checks using
+  `worker` and `probe` children.
 
 - Windows compatibility groundwork: Windows 11 research started
   ([API sets and forwarding](docs/research/windows11-apiset-and-forwarding.md));
@@ -67,7 +71,7 @@ e2fsprogs; MSYS2 provides QEMU, OVMF and mtools. Only image files under
 | `shared/crypto` | ChaCha20 DRBG and SHA-256 for `/dev/random` |
 | `shared/bootinfo`, `shared/abi` | boot protocol and system call ABI |
 | `runtime/os-sys`, `runtime/os-std` | raw system calls, OSyx Std |
-| `userspace/apps` | user programs `init` and `worker` (`\EFI\OSYX\BIN\`) |
+| `userspace/apps` | user programs `init`, `worker` (`/bin`) and `probe` (`/usr/bin`) |
 | `docs` | design and status documentation |
 
 Documentation starts at [docs/architecture.md](docs/architecture.md).

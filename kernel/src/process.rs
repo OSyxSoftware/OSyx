@@ -1,27 +1,34 @@
-//! User processes: creation from boot modules, exit, zombies and `wait`.
+//! User processes: creation from executable files, `execve`, exit, zombies
+//! and `wait`.
 //!
-//! A process owns an address space and (for now) exactly one thread, its
-//! main thread, scheduled by `sched`. On exit the address space is destroyed
-//! at once; the process stays in the table as a zombie holding its exit
-//! status until the parent collects it with [`wait`]. Children of an exiting
-//! process are re-parented to the kernel (pid 0) and released automatically
-//! when they exit.
+//! A process owns an address space and one or more threads scheduled by
+//! `sched`. On exit the address space is destroyed at once; the process
+//! stays in the table as a zombie holding its exit status until the parent
+//! collects it with [`wait`]. Children of an exiting process are re-parented
+//! to the kernel (pid 0) and released automatically when they exit.
+//!
+//! Programs are static ELF64 executables read from the VFS (see `exec`).
+//! `execve` builds the new image in a fresh address space and only then
+//! swaps it in, so a failure leaves the caller untouched.
 //!
 //! Every frame a process causes to be allocated (page tables included) is
 //! counted, and teardown checks that exactly that many frames come back.
 //!
 //! User address space layout:
 //! * `0x0000_0000_0000_0000..0x0000_0000_0001_0000` never mapped (null guard)
-//! * ELF segments at their link addresses (`osyx_elf::USER_RANGE`)
+//! * ELF segments at their link addresses, below `MAP_BASE`
 //! * anonymous memory from `MAP_BASE` upwards, a guard page after each region
-//! * stack: `STACK_PAGES` pages below `STACK_TOP`, guard page below that
+//! * stack: `STACK_PAGES` pages below `STACK_TOP`, guard page below that;
+//!   at its top the System V start-up data (`osyx_abi::startup`)
 
 use crate::arch::cpu;
+use crate::exec::{self, ExecRequest, Program};
 use crate::mem::paging::{self, Flags, MapError};
 use crate::mem::{alloc_frame, free_frame, phys_to_virt, PAGE_SIZE};
 use crate::sched::{self, Tid};
 use crate::sync::{IrqSpinLock, KMutex};
-use crate::{kprintln, modules, vfs};
+use crate::vfs::{self, Lookup};
+use crate::kprintln;
 use osyx_vfs::Cred;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString};
@@ -29,49 +36,194 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
-use osyx_abi::Errno;
-use osyx_elf::{ElfError, ElfImage};
+use osyx_abi::{auxv, startup, Errno};
+use osyx_elf::{AddressRange, ElfError, ElfImage};
 
 pub type Pid = u64;
 /// Parent id of processes started (or adopted) by the kernel.
 pub const KERNEL_PID: Pid = 0;
 
 pub const STACK_TOP: u64 = 0x0000_7FFF_FFFF_0000;
-const STACK_PAGES: u64 = 64; // 256 KiB
+const STACK_PAGES: u64 = 128; // 512 KiB
 const MAP_BASE: u64 = 0x0000_1000_0000_0000;
+/// Where program segments may lie: above the null guard, below `MAP_BASE`.
+const PROGRAM_RANGE: AddressRange = AddressRange { start: osyx_elf::USER_RANGE.start, end: MAP_BASE };
 /// Per-process cap on anonymous memory (256 MiB).
 const MAP_LIMIT_PAGES: u64 = 64 * 1024;
-const MAX_ARG_BYTES: usize = 16 * 1024;
 const MAX_PROCESSES: usize = 64;
 const OUTPUT_TAIL_LINES: usize = 3;
 
+/// Why a program could not be started or executed.
 #[derive(Debug)]
-pub enum SpawnError {
-    NotFound,
+pub enum ExecError {
+    /// Finding or reading the program, or the arguments (an `Errno` of `exec`).
+    Load(Errno),
     BadImage(ElfError),
     Map(MapError),
+    /// The start-up data does not fit on the stack.
     ArgsTooLarge,
     TooManyProcesses,
+    /// `execve` in a process with more than one thread.
+    Busy,
 }
 
-impl core::fmt::Display for SpawnError {
+impl core::fmt::Display for ExecError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            SpawnError::NotFound => write!(f, "no such program"),
-            SpawnError::BadImage(e) => write!(f, "invalid executable: {}", e.describe()),
-            SpawnError::Map(e) => write!(f, "cannot map memory: {e:?}"),
-            SpawnError::ArgsTooLarge => write!(f, "arguments exceed {MAX_ARG_BYTES} bytes"),
-            SpawnError::TooManyProcesses => write!(f, "process limit of {MAX_PROCESSES} reached"),
+            ExecError::Load(e) => write!(f, "{}", e.name()),
+            ExecError::BadImage(e) => write!(f, "invalid executable: {}", e.describe()),
+            ExecError::Map(e) => write!(f, "cannot map memory: {e:?}"),
+            ExecError::ArgsTooLarge => write!(f, "arguments do not fit on the stack"),
+            ExecError::TooManyProcesses => write!(f, "process limit of {MAX_PROCESSES} reached"),
+            ExecError::Busy => write!(f, "process has other threads"),
         }
     }
 }
 
-impl SpawnError {
+impl ExecError {
     pub fn errno(&self) -> Errno {
         match self {
-            SpawnError::NotFound => Errno::NotFound,
-            SpawnError::BadImage(_) | SpawnError::ArgsTooLarge => Errno::InvalidArgument,
-            SpawnError::Map(_) | SpawnError::TooManyProcesses => Errno::NoMemory,
+            ExecError::Load(e) => *e,
+            ExecError::BadImage(_) => Errno::BadExecutable,
+            ExecError::ArgsTooLarge => Errno::InvalidArgument,
+            ExecError::Map(_) | ExecError::TooManyProcesses => Errno::NoMemory,
+            ExecError::Busy => Errno::Busy,
+        }
+    }
+}
+
+/// A page-table root and the number of frames it owns (itself, page
+/// tables and mapped pages).
+struct Space {
+    root: u64,
+    frames: u64,
+}
+
+impl Space {
+    fn new() -> Result<Space, MapError> {
+        Ok(Space { root: paging::new_address_space()?, frames: 1 })
+    }
+
+    fn map_zeroed(&mut self, va: u64, flags: Flags) -> Result<u64, MapError> {
+        let frame = alloc_frame().ok_or(MapError::OutOfMemory)?;
+        match paging::map_in(self.root, va, frame, flags) {
+            Ok(tables) => {
+                self.frames += 1 + tables;
+                Ok(frame)
+            }
+            Err(e) => {
+                let _ = free_frame(frame);
+                Err(e)
+            }
+        }
+    }
+
+    /// Maps the ELF segments, the stack and the start-up data; returns
+    /// (entry, initial rsp).
+    fn populate(&mut self, elf: &ElfImage, prog: &Program, req: &ExecRequest, cred: Cred) -> Result<(u64, u64), ExecError> {
+        for seg in elf.segments() {
+            let file = elf.file_bytes(seg);
+            let flags = Flags::user(seg.writable(), seg.executable());
+            let mut va = seg.vaddr;
+            while va < seg.page_end() {
+                let frame = self.map_zeroed(va, flags).map_err(ExecError::Map)?;
+                // Copy the part of the file image that falls into this page.
+                let start = va.max(seg.vaddr);
+                let end = (va + PAGE_SIZE).min(seg.vaddr + file.len() as u64);
+                if end > start {
+                    let src = &file[(start - seg.vaddr) as usize..(end - seg.vaddr) as usize];
+                    // SAFETY: the frame was just allocated and is reachable via the HHDM.
+                    unsafe {
+                        let dst = (phys_to_virt(frame) + (start - va)) as *mut u8;
+                        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+                    }
+                }
+                va += PAGE_SIZE;
+            }
+        }
+        for i in 0..STACK_PAGES {
+            self.map_zeroed(STACK_TOP - (i + 1) * PAGE_SIZE, Flags::user(true, false)).map_err(ExecError::Map)?;
+        }
+        let (uid, gid) = (cred.uid as u64, cred.gid as u64);
+        let mut aux = Vec::with_capacity(11);
+        if let Some(phdr) = elf.phdr_vaddr() {
+            aux.push((auxv::AT_PHDR, phdr));
+        }
+        aux.extend_from_slice(&[
+            (auxv::AT_PHENT, 56),
+            (auxv::AT_PHNUM, elf.phnum() as u64),
+            (auxv::AT_PAGESZ, PAGE_SIZE),
+            (auxv::AT_ENTRY, elf.entry()),
+            (auxv::AT_UID, uid),
+            (auxv::AT_EUID, uid),
+            (auxv::AT_GID, gid),
+            (auxv::AT_EGID, gid),
+            (auxv::AT_SECURE, 0),
+        ]);
+        let argv: Vec<&[u8]> = req.argv.iter().map(|s| s.as_bytes()).collect();
+        let envp: Vec<&[u8]> = req.envp.iter().map(|s| s.as_bytes()).collect();
+        let image = startup::Image {
+            argv: &argv,
+            envp: &envp,
+            aux: &aux,
+            random: exec::random_bytes(),
+            execfn: prog.path.as_bytes(),
+        };
+        // Keep at least a quarter of the stack for the program itself.
+        let size = image.size();
+        if size as u64 > STACK_PAGES * PAGE_SIZE * 3 / 4 {
+            return Err(ExecError::ArgsTooLarge);
+        }
+        let mut bytes = alloc::vec![0u8; size];
+        let sp = image.build(STACK_TOP, &mut bytes).ok_or(ExecError::ArgsTooLarge)?;
+        self.poke(sp, &bytes).map_err(ExecError::Map)?;
+        Ok((elf.entry(), sp))
+    }
+
+    /// Writes `bytes` at user address `va` of this (not active) address space.
+    fn poke(&self, mut va: u64, mut bytes: &[u8]) -> Result<(), MapError> {
+        while !bytes.is_empty() {
+            let t = paging::translate_in(self.root, va).ok_or(MapError::NotMapped)?;
+            let room = (PAGE_SIZE - (va % PAGE_SIZE)) as usize;
+            let n = room.min(bytes.len());
+            // SAFETY: `t.phys` is a frame of this address space, reachable via the HHDM.
+            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), phys_to_virt(t.phys) as *mut u8, n) };
+            va += n as u64;
+            bytes = &bytes[n..];
+        }
+        Ok(())
+    }
+
+    /// Destroys the address space; returns (frames owned, frames freed).
+    ///
+    /// # Safety
+    /// The space must not be active on any CPU.
+    unsafe fn release(&mut self) -> (u64, u64) {
+        // SAFETY: forwarded caller contract; the frames belong to us.
+        let freed = unsafe { paging::destroy_address_space(self.root) };
+        let owned = self.frames;
+        self.frames = 0;
+        self.root = 0;
+        (owned, freed)
+    }
+}
+
+/// Reads, validates and maps `req`'s program into a new address space as
+/// `cx` (whose credentials and current directory apply); returns the space,
+/// the entry point, the initial rsp and the canonical program path.
+fn build_image(cx: &Lookup, req: &ExecRequest) -> Result<(Space, u64, u64, String), ExecError> {
+    let prog = exec::load(cx, &req.path).map_err(ExecError::Load)?;
+    let elf = ElfImage::parse_with(&prog.image, PROGRAM_RANGE).map_err(|e| {
+        kprintln!("exec {}: rejected: {}", prog.path, e.describe());
+        ExecError::BadImage(e)
+    })?;
+    let mut space = Space::new().map_err(ExecError::Map)?;
+    match space.populate(&elf, &prog, req, cx.cred) {
+        Ok((entry, sp)) => Ok((space, entry, sp, prog.path)),
+        Err(e) => {
+            // SAFETY: the space was never activated.
+            unsafe { space.release() };
+            Err(e)
         }
     }
 }
@@ -89,12 +241,10 @@ pub struct Process {
     /// Set when the parent exited: released immediately on exit.
     orphan: bool,
     life: Life,
-    root: u64,
+    space: Space,
     regions: BTreeMap<u64, u64>,
     next_map: u64,
     mapped_pages: u64,
-    /// Frames this process currently owns (root, page tables, pages).
-    frames: u64,
     line: Vec<u8>,
     /// Live threads; the process is finalised when the last one ends.
     threads: Vec<Tid>,
@@ -181,126 +331,47 @@ fn user_thread_entry(start: u64, _: u64) {
 /// interrupts disabled, so the tid is recorded before the thread can run).
 fn start_thread(p: &mut Process, rip: u64, rsp: u64, arg: u64, fs_base: u64) -> Tid {
     let start = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(UserStart { rip, rsp, arg })) as u64;
-    let tid = sched::spawn(&p.name, p.pid, p.root, user_thread_entry, start, 0, fs_base);
+    let tid = sched::spawn(&p.name, p.pid, p.space.root, user_thread_entry, start, 0, fs_base);
     p.threads.push(tid);
     tid
 }
 
+/// Logs the frame accounting of a released address space.
+fn report_release(pid: Pid, name: &str, what: &str, (owned, freed): (u64, u64)) {
+    if freed == owned {
+        kprintln!("process {} ({}): {}released {} frames, no leak", pid, name, what, freed);
+    } else {
+        kprintln!("process {} ({}): {}FRAME LEAK: owned {}, released {}", pid, name, what, owned, freed);
+    }
+}
+
 impl Process {
-    fn new(parent: Pid, name: &str, cred: Cred, cwd: String) -> Result<Process, SpawnError> {
-        let root = paging::new_address_space().map_err(SpawnError::Map)?;
-        Ok(Process {
+    fn new(parent: Pid, name: &str, cred: Cred, cwd: String, space: Space) -> Process {
+        Process {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
             name: name.to_string(),
             parent,
             orphan: false,
             life: Life::Running,
-            root,
+            space,
             regions: BTreeMap::new(),
             next_map: MAP_BASE,
             mapped_pages: 0,
-            frames: 1,
             line: Vec::new(),
             threads: Vec::new(),
             exit_status: None,
             handles: BTreeMap::new(),
             cred,
             cwd,
-        })
-    }
-
-    fn map_zeroed(&mut self, va: u64, flags: Flags) -> Result<u64, MapError> {
-        let frame = alloc_frame().ok_or(MapError::OutOfMemory)?;
-        match paging::map_in(self.root, va, frame, flags) {
-            Ok(tables) => {
-                self.frames += 1 + tables;
-                Ok(frame)
-            }
-            Err(e) => {
-                let _ = free_frame(frame);
-                Err(e)
-            }
         }
-    }
-
-    /// Maps the ELF segments and the stack; returns (entry, initial rsp).
-    fn populate(&mut self, image: &[u8], args: &[&str]) -> Result<(u64, u64), SpawnError> {
-        let elf = ElfImage::parse_user(image).map_err(SpawnError::BadImage)?;
-        for seg in elf.segments() {
-            let file = elf.file_bytes(seg);
-            let flags = Flags::user(seg.writable(), seg.executable());
-            let mut va = seg.vaddr;
-            while va < seg.page_end() {
-                let frame = self.map_zeroed(va, flags).map_err(SpawnError::Map)?;
-                // Copy the part of the file image that falls into this page.
-                let start = va.max(seg.vaddr);
-                let end = (va + PAGE_SIZE).min(seg.vaddr + file.len() as u64);
-                if end > start {
-                    let src = &file[(start - seg.vaddr) as usize..(end - seg.vaddr) as usize];
-                    // SAFETY: the frame was just allocated and is reachable via the HHDM.
-                    unsafe {
-                        let dst = (phys_to_virt(frame) + (start - va)) as *mut u8;
-                        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
-                    }
-                }
-                va += PAGE_SIZE;
-            }
-        }
-        for i in 0..STACK_PAGES {
-            self.map_zeroed(STACK_TOP - (i + 1) * PAGE_SIZE, Flags::user(true, false)).map_err(SpawnError::Map)?;
-        }
-        Ok((elf.entry(), self.build_stack(args)?))
-    }
-
-    /// Writes `bytes` at user address `va` of this (not active) address space.
-    fn poke(&self, mut va: u64, mut bytes: &[u8]) -> Result<(), SpawnError> {
-        while !bytes.is_empty() {
-            let t = paging::translate_in(self.root, va).ok_or(SpawnError::Map(MapError::NotMapped))?;
-            let room = (PAGE_SIZE - (va % PAGE_SIZE)) as usize;
-            let n = room.min(bytes.len());
-            // SAFETY: `t.phys` is a frame of this address space, reachable via the HHDM.
-            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), phys_to_virt(t.phys) as *mut u8, n) };
-            va += n as u64;
-            bytes = &bytes[n..];
-        }
-        Ok(())
-    }
-
-    /// System V initial stack: argc, argv[], NULL, envp NULL, AT_NULL auxv.
-    fn build_stack(&self, args: &[&str]) -> Result<u64, SpawnError> {
-        if args.iter().map(|a| a.len() + 1).sum::<usize>() > MAX_ARG_BYTES {
-            return Err(SpawnError::ArgsTooLarge);
-        }
-        let mut sp = STACK_TOP;
-        let mut ptrs = Vec::with_capacity(args.len());
-        for a in args {
-            sp -= a.len() as u64 + 1;
-            self.poke(sp, a.as_bytes())?;
-            self.poke(sp + a.len() as u64, &[0])?;
-            ptrs.push(sp);
-        }
-        let mut words: Vec<u64> = Vec::with_capacity(args.len() + 5);
-        words.push(args.len() as u64);
-        words.extend_from_slice(&ptrs);
-        words.extend_from_slice(&[0, 0, 0, 0]); // argv NULL, envp NULL, AT_NULL pair
-        sp = (sp - words.len() as u64 * 8) & !15;
-        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-        self.poke(sp, &bytes)?;
-        Ok(sp)
     }
 
     /// Releases the address space and checks the frame accounting.
     fn release_memory(&mut self) {
         // SAFETY: the address space is not active (the caller switched to the
-        // kernel root or never activated it) and its frames belong to us.
-        let freed = unsafe { paging::destroy_address_space(self.root) };
-        if freed == self.frames {
-            kprintln!("process {} ({}): released {} frames, no leak", self.pid, self.name, freed);
-        } else {
-            kprintln!("process {} ({}): FRAME LEAK: owned {}, released {}", self.pid, self.name, self.frames, freed);
-        }
-        self.frames = 0;
-        self.root = 0;
+        // kernel root or never activated it).
+        let r = unsafe { self.space.release() };
+        report_release(self.pid, &self.name, "", r);
     }
 
     fn flush_line(&mut self) {
@@ -315,27 +386,30 @@ impl Process {
     }
 }
 
-/// Starts boot module `name` as a child of `parent`. `args[0]` should be the
-/// program name. Returns the new pid; the process runs concurrently.
-pub fn spawn(parent: Pid, name: &str, args: &[&str]) -> Result<Pid, SpawnError> {
-    let image = modules::get(name).ok_or(SpawnError::NotFound)?;
+/// Starts the program of `req` as a child of `parent`, with the parent's
+/// credentials and current directory (root and `/` for the kernel).
+/// Returns the new pid; the process runs concurrently.
+pub fn spawn(parent: Pid, req: &ExecRequest) -> Result<Pid, ExecError> {
     if TABLE.lock().procs.len() >= MAX_PROCESSES {
-        return Err(SpawnError::TooManyProcesses);
+        return Err(ExecError::TooManyProcesses);
     }
-    let (cred, cwd) = {
+    let cx = {
         let t = TABLE.lock();
-        t.procs.get(&parent).map_or((Cred::ROOT, String::from("/")), |p| (p.cred, p.cwd.clone()))
-    };
-    let mut p = Process::new(parent, name, cred, cwd)?;
-    let (entry, rsp) = match p.populate(image, args) {
-        Ok(v) => v,
-        Err(e) => {
-            p.release_memory();
-            return Err(e);
+        match t.procs.get(&parent) {
+            Some(p) => Lookup { cred: p.cred, cwd: p.cwd.clone(), case_insensitive: false },
+            None => Lookup::kernel(),
         }
     };
+    let (space, entry, rsp, path) = build_image(&cx, req)?;
+    let mut p = Process::new(parent, req.name(), cx.cred, cx.cwd, space);
     let pid = p.pid;
-    kprintln!("process {} ({}): spawned by {}, entry {:#x}, args {:?}", pid, name, parent, entry, args);
+    const LOGGED_ARGS: usize = 8;
+    let more = match req.argv.len() {
+        n if n > LOGGED_ARGS => alloc::format!(" and {} more", n - LOGGED_ARGS),
+        _ => String::new(),
+    };
+    let shown = &req.argv[..req.argv.len().min(LOGGED_ARGS)];
+    kprintln!("process {} ({}): {} spawned by {}, entry {:#x}, args {:?}{}", pid, p.name, path, parent, entry, shown, more);
     // With interrupts off the main thread cannot run (and exit) before the
     // process and its thread list are in the table.
     let were_enabled = cpu::interrupts_enabled();
@@ -373,6 +447,61 @@ pub fn spawn_thread(entry: u64, stack_top: u64, arg: u64, fs_base: u64) -> Resul
         cpu::enable_interrupts();
     }
     r
+}
+
+/// `execve` back end: replaces the current process's program. Returns only
+/// on failure, with the old program untouched. On success the old address
+/// space is released and the thread drops to ring 3 at the new entry point;
+/// the kernel stack of this system call is abandoned, so the caller must
+/// not own anything that needs dropping (`req` is consumed here).
+pub fn exec_current(req: ExecRequest) -> ExecError {
+    let pid = sched::current_pid();
+    let one_thread = |t: &Table| t.procs.get(&pid).is_some_and(|p| p.threads.len() == 1);
+    if !one_thread(&TABLE.lock()) {
+        return ExecError::Busy;
+    }
+    let cx = Lookup::current();
+    let (mut space, entry, rsp, path) = match build_image(&cx, &req) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let name = String::from(req.name());
+    drop(req);
+    cpu::disable_interrupts();
+    let old = {
+        let mut t = TABLE.lock();
+        if !one_thread(&t) {
+            None
+        } else {
+            let p = t.procs.get_mut(&pid).expect("current process exists");
+            core::mem::swap(&mut p.space, &mut space);
+            p.regions.clear();
+            p.next_map = MAP_BASE;
+            p.mapped_pages = 0;
+            p.name = name.clone();
+            kprintln!("process {} ({}): exec {}, entry {:#x}", pid, name, path, entry);
+            Some(p.space.root)
+        }
+    };
+    let Some(root) = old else {
+        cpu::enable_interrupts();
+        // SAFETY: the new space was never activated.
+        unsafe { space.release() };
+        return ExecError::Busy;
+    };
+    // `space` now holds the old image: leave it, then destroy it.
+    // SAFETY: the new root maps the kernel half like every process root.
+    unsafe { cpu::write_cr3(root) };
+    sched::set_current_root(root);
+    sched::rename_current(&name);
+    sched::set_current_fs_base(0);
+    sched::reset_current_fpu();
+    // SAFETY: the old space is no longer active anywhere.
+    let r = unsafe { space.release() };
+    report_release(pid, &name, "old image ", r);
+    drop((name, path));
+    // SAFETY: entry and stack were mapped into the now active address space.
+    unsafe { osyx_iret_to_user(entry, rsp, 0) }
 }
 
 /// Waits for child `target` of `parent` (any child if `target` is 0) to exit,
@@ -591,11 +720,11 @@ pub fn map_anonymous(len: u64, prot: u64) -> Result<u64, Errno> {
     let base = p.next_map;
     let flags = Flags::user(prot & PROT_WRITE != 0, prot & PROT_EXEC != 0);
     for i in 0..pages {
-        if p.map_zeroed(base + i * PAGE_SIZE, flags).is_err() {
+        if p.space.map_zeroed(base + i * PAGE_SIZE, flags).is_err() {
             for j in 0..i {
-                if let Ok(f) = paging::unmap_in(p.root, base + j * PAGE_SIZE, true) {
+                if let Ok(f) = paging::unmap_in(p.space.root, base + j * PAGE_SIZE, true) {
                     let _ = free_frame(f);
-                    p.frames -= 1;
+                    p.space.frames -= 1;
                 }
             }
             return Err(Errno::NoMemory);
@@ -617,9 +746,9 @@ pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
         return Err(Errno::InvalidArgument);
     }
     for i in 0..pages {
-        let frame = paging::unmap_in(p.root, addr + i * PAGE_SIZE, true).map_err(|_| Errno::Fault)?;
+        let frame = paging::unmap_in(p.space.root, addr + i * PAGE_SIZE, true).map_err(|_| Errno::Fault)?;
         let _ = free_frame(frame);
-        p.frames -= 1;
+        p.space.frames -= 1;
     }
     p.regions.remove(&addr);
     p.mapped_pages -= pages;

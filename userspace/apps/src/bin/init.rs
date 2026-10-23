@@ -1,8 +1,9 @@
-//! The init program (`\EFI\OSYX\BIN\init`). Runs in ring 3 and checks OSyx
-//! Std, the kernel's system call validation, processes (spawn / wait /
-//! zombies / orphans) and the preemptive scheduler from the user side,
-//! using `worker` as the child program, and the file systems through
-//! `os_std::fs` (see `fs_checks.rs`).
+//! The init program (`/bin/init` on the root file system). Runs in ring 3
+//! and checks OSyx Std, the kernel's system call validation, processes
+//! (spawn / wait / zombies / orphans) and the preemptive scheduler from the
+//! user side, using `worker` as the child program, the file systems through
+//! `os_std::fs` (see `fs_checks.rs`) and the program loader with `probe`
+//! (see `exec_checks.rs`).
 //!
 //! Arguments (kernel command line `init.args=...`):
 //! * none:          run the checks; exit status = number of failed checks
@@ -24,6 +25,8 @@ use os_std::{env, os, process, thread};
 
 #[path = "../fpu.rs"]
 mod fpu;
+#[path = "../exec_checks.rs"]
+mod exec_checks;
 #[path = "../fs_checks.rs"]
 mod fs_checks;
 
@@ -131,6 +134,7 @@ fn main() -> i32 {
     process_checks(&mut t);
     thread_checks(&mut t);
     fs_checks::run(&mut t);
+    exec_checks::run(&mut t);
 
     println!("user checks: {} passed, {} failed", t.passed, t.failed);
     t.failed as i32

@@ -22,7 +22,7 @@ the ESP (FAT32, `osyx-fat` `mkfat32`) and the root partition (ext4,
 partitions by their GPT type GUIDs.
 
 ```
-ring 3     os_std::fs, env::current_dir, os::mount ── os-sys ── ABI v5 (open … statfs)
+ring 3     os_std::fs, env::current_dir, os::mount ── os-sys ── ABI v6 (open … statfs)
 ring 0     process: handle table, credentials (uid/gid), current directory
            vfs/mod.rs   resolution, permissions, mount table, open files
            ├─ vfs/ext4.rs   ── osyx-ext4  (storage/ext4)

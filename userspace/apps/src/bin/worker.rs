@@ -18,6 +18,12 @@
 //! * `hold-orphan P` create P (1 MiB), remove it, keep it open, sleep
 //! * `as-user UID`   drop root, then check that permissions confine us;
 //!   exit status = number of failed checks
+//! * `exec-report HANDLE_FILE REPORT` open HANDLE_FILE (handle 3), change
+//!   to /tmp, then `exec` `probe report REPORT` with `FROM=worker` added
+//! * `exec-fail`     failing `exec`s must return the right errors and leave
+//!   this program running; exit 0 if they did
+//! * `exec-threads`  `exec` with a second thread alive must fail with
+//!   `ResourceBusy`; exit 0 if it did
 
 #![no_std]
 #![no_main]
@@ -176,6 +182,37 @@ fn main() -> i32 {
             (cwd.ok().as_deref().map(|p| p.as_str()) != args.get(2).map(String::as_str)) as i32
         }
         Some("as-user") => as_user(arg_num(&args, 2) as u32),
+        Some("exec-report") => {
+            let (Some(handle_file), Some(report)) = (args.get(2), args.get(3)) else { return 2 };
+            // The first file this process opens gets handle 3.
+            let Ok(f) = File::create(handle_file) else { return 1 };
+            if env::set_current_dir("/tmp").is_err() {
+                return 1;
+            }
+            let e = Command::new("probe").args(["report", report, "after-exec"]).env("FROM", "worker").exec();
+            drop(f);
+            eprintln!("exec-report {pid}: exec failed: {e}");
+            1
+        }
+        Some("exec-fail") => {
+            use os_std::error::ErrorKind;
+            let kind = |c: &mut Command| c.exec().kind();
+            let results = [
+                kind(&mut Command::new("no-such-program")) == ErrorKind::NotFound,
+                kind(&mut Command::new("/tmp")) == ErrorKind::PermissionDenied,
+                kind(&mut Command::new("/osyx-seed/hello.txt")) == ErrorKind::PermissionDenied,
+                kind(&mut Command::new("/tmp/exec-script")) == ErrorKind::InvalidExecutable,
+                kind(Command::new("probe").env("BAD=KEY", "x")) == ErrorKind::InvalidInput,
+            ];
+            println!("exec-fail {pid}: still running after failed execs: {results:?}");
+            results.iter().filter(|ok| !**ok).count() as i32
+        }
+        Some("exec-threads") => {
+            let h = thread::spawn(|| thread::sleep(Duration::from_millis(100)));
+            let busy = Command::new("probe").args(["chain", "0"]).exec().kind() == os_std::error::ErrorKind::ResourceBusy;
+            let joined = h.join().is_ok();
+            (!(busy && joined)) as i32
+        }
         Some("hold-orphan") => {
             // Keeps a removed file open until the machine stops.
             let Some(path) = args.get(2) else { return 2 };

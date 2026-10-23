@@ -414,6 +414,22 @@ pub fn set_current_fs_base(value: u64) {
     unsafe { cpu::wrmsr(IA32_FS_BASE, value) };
 }
 
+/// Loads the initial x87/SSE state into the CPU for the current thread
+/// (`execve`: nothing of the old program's registers survives). The saved
+/// copy is refreshed from the CPU at the next switch.
+pub fn reset_current_fpu() {
+    let init = FpuState::initial();
+    // SAFETY: a valid, 16-byte aligned FXSAVE image.
+    unsafe { cpu::fxrstor(&*init as *const FpuState as *const u8) };
+}
+
+pub fn rename_current(name: &str) {
+    let mut g = SCHED.lock();
+    if let Some(t) = g.as_mut().and_then(|s| s.threads.get_mut(&s.current)) {
+        t.name = name.to_string();
+    }
+}
+
 /// Makes a blocked thread ready again (no effect on other states).
 pub fn wake(tid: Tid) {
     let mut g = SCHED.lock();

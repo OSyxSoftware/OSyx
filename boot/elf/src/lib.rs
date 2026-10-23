@@ -118,6 +118,8 @@ pub struct ElfImage<'a> {
     entry: u64,
     segments: [Segment; MAX_SEGMENTS],
     count: usize,
+    phoff: u64,
+    phnum: u16,
 }
 
 fn u16_at(d: &[u8], off: usize) -> Result<u16, ElfError> {
@@ -240,7 +242,7 @@ impl<'a> ElfImage<'a> {
         if !entry_ok {
             return Err(ElfError::EntryNotExecutable(entry));
         }
-        Ok(ElfImage { data, entry, segments, count })
+        Ok(ElfImage { data, entry, segments, count, phoff, phnum: phnum as u16 })
     }
 
     fn check_segment(data: &[u8], s: &Segment, index: usize, range: AddressRange) -> Result<(), ElfError> {
@@ -280,6 +282,21 @@ impl<'a> ElfImage<'a> {
     /// Bytes from `virt_base` to the page-aligned end of the last segment.
     pub fn virt_span(&self) -> u64 {
         self.segments[self.count - 1].page_end() - self.virt_base()
+    }
+
+    /// Number of program headers (all types).
+    pub fn phnum(&self) -> u16 {
+        self.phnum
+    }
+
+    /// Virtual address at which the program headers are mapped, if a
+    /// loadable segment contains them (the `AT_PHDR` auxiliary value).
+    pub fn phdr_vaddr(&self) -> Option<u64> {
+        let end = self.phoff + self.phnum as u64 * 56;
+        self.segments()
+            .iter()
+            .find(|s| s.file_offset <= self.phoff && end <= s.file_offset + s.file_size)
+            .map(|s| s.vaddr + (self.phoff - s.file_offset))
     }
 
     /// File bytes backing `seg` (validated during parsing).

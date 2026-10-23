@@ -35,6 +35,8 @@ pub enum ErrorKind {
     InvalidData,
     /// Storage hardware or volume error.
     Io,
+    /// The file is not a program OSyx can load (`spawn` / `exec`).
+    InvalidExecutable,
     Other,
 }
 
@@ -65,6 +67,7 @@ impl ErrorKind {
             ErrorKind::UnexpectedEof => "unexpected end of file",
             ErrorKind::InvalidData => "invalid data",
             ErrorKind::Io => "I/O error",
+            ErrorKind::InvalidExecutable => "not a loadable executable",
             ErrorKind::Other => "other error",
         }
     }
@@ -130,6 +133,7 @@ impl From<Errno> for Error {
             Errno::Busy => ErrorKind::ResourceBusy,
             Errno::Loop => ErrorKind::FilesystemLoop,
             Errno::Unsupported => ErrorKind::Unsupported,
+            Errno::BadExecutable => ErrorKind::InvalidExecutable,
         };
         Error { kind, errno: Some(e), message: None }
     }

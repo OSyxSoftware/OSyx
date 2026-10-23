@@ -27,8 +27,9 @@ partitions are addressed inside the image file with `?offset=`).
 |---|---|
 | host unit tests | `cargo test` for every host crate: abi, bootinfo, gfx, elf, pe, mm, crypto (RFC 8439 / FIPS 180-4 vectors), vfs, tmpfs, part (sgdisk interop), fat (mtools both ways), ext4 (e2fsprogs images, corruption/fuzz, writes checked by e2fsck and debugfs, power cut after every write), os-sys, os-std |
 | clippy | `-D warnings` for host crates, loader (UEFI), kernel and user crates |
-| QEMU boot + kernel self-tests | boot stages, 24 in-kernel tests (incl. preemption, FPU, PCI, block I/O, tmpfs, symlinks/cwd/permissions, mount/unmount, devfs, FAT32 `/boot`, ext4 `/`, concurrent writers), exit 33 |
-| ring-3 init checks | 56 user checks: OSyx Std, syscalls, processes, threads, sync, TLS, faults, and 19 file system checks |
+| QEMU boot + kernel self-tests | boot stages, 25 in-kernel tests (incl. preemption, FPU, PCI, block I/O, tmpfs, symlinks/cwd/permissions, mount/unmount, devfs, FAT32 `/boot`, ext4 `/`, concurrent writers, program loader), exit 33 |
+| ring-3 init checks | 69 user checks: OSyx Std, syscalls, processes, threads, sync, TLS, faults, 19 file system and 13 program loader checks |
+| ELF loader | `/bin/init` started from the ext4 root, `probe` found in `/usr/bin`; exact argv (incl. empty and non-ASCII strings, a custom `argv[0]`) and envp in the child; inherited and edited environments; auxv (`AT_ENTRY` = `_start`, `AT_PHDR` headers covering the entry, ids, distinct `AT_RANDOM`); absolute and relative paths; 1000 × 100-byte arguments; no `x` bit / directory → `PermissionDenied`, a 0755 script → `InvalidExecutable`, a binary copied to tmpfs runs once made executable; malformed `ExecArgs` → `Fault` / `InvalidArgument`; `execve` keeps pid, cwd and handle 3, swaps program and environment, failed `execve` leaves the caller running, `Busy` with a second thread, a chain of 5 `execve` ends with the last status; 6 old images released without a leak |
 | process teardown | every process returns exactly its frames; 0 processes and 2 threads left |
 | preemptive scheduling | three never-yielding children all start before the first finishes; 3×300 ms in < 650 ms |
 | storage tree | GPT partitions found, ext4 `/` read-write, FAT32 `/boot`, tmpfs `/tmp` `/run`, devfs `/dev`, DRBG seeded; all 7 VFS self-tests ok |
@@ -40,7 +41,8 @@ partitions are addressed inside the image file with `?offset=`).
 | user page fault | process killed with `#PF`, error code 0x4, kernel survives |
 | user panic | panic message printed, status 101 |
 | user exit code | status 42 propagates |
-| boot without programs | kernel runs without `\EFI\OSYX\BIN` |
+| boot without programs | no `\EFI\OSYX\BIN` and an empty `/bin`: the kernel says there is no init program and keeps running |
+| fallback root | `root=vdz` (no such disk): tmpfs `/`, the boot modules installed as `/bin/*`, `/bin/init` runs from there |
 | exception diagnostics | kernel `#PF`, `#GP`, `#UD`, `#DE`: decoded report + panic exit 37 |
 | invalid kernel | ELFCLASS32 kernel rejected with on-screen error |
 | screenshots | loader error screen and running kernel screen via QMP `screendump` |

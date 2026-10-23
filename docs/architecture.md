@@ -11,9 +11,9 @@ UEFI firmware (OVMF)
   kernel (ring 0)  ── kernel (+ kernel/mm, boot/gfx, shared/abi)
        │  GDT/IDT, memory, timer, scheduler, display, self-tests, processes
        │  PCI, virtio-blk/-rng, GPT, VFS: ext4 /, FAT32 /boot, tmpfs, devfs (+ storage/*)
-       │  SYSCALL/SYSRET (shared/abi)
+       │  SYSCALL/SYSRET (shared/abi), ELF loader: spawn/execve from /bin, /usr/bin
        ▼
-  init, worker (ring 3) ── userspace/apps  (+ runtime/os-std, runtime/os-sys)
+  /bin/init, /bin/worker, /usr/bin/probe (ring 3) ── userspace/apps  (+ runtime/os-std, runtime/os-sys)
 ```
 
 ## Design rules
@@ -28,8 +28,9 @@ UEFI firmware (OVMF)
   crates with host unit tests (`boot/elf`, `boot/gfx`, `kernel/mm`,
   `storage/*`, `shared/*`, `runtime/os-std` host back end). Hardware paths are tested by
   in-kernel self-tests and QEMU boots.
-- **Untrusted input is validated.** Kernel and user ELF images, BootInfo,
-  and every user pointer passed to a system call.
+- **Untrusted input is validated.** Kernel and user ELF images (programs
+  read from disk included), BootInfo, and every user pointer passed to a
+  system call.
 - **W^X everywhere.** Kernel and user segments, anonymous mappings.
 
 ## Status
@@ -43,7 +44,8 @@ UEFI firmware (OVMF)
 | Frame allocator, paging, kernel heap | Implemented | host + in-kernel tests |
 | Timer interrupts (PIC/PIT) | Implemented | in-kernel test |
 | Framebuffer status screen | Implemented | QEMU screenshot |
-| User processes, ring 3, SYSCALL ABI v5 | Implemented | QEMU user tests |
+| User processes, ring 3, SYSCALL ABI v6 | Implemented | QEMU user tests |
+| ELF64 program loader: VFS lookup (`/bin`, `/usr/bin`), `spawn`, `execve`, argv/envp/auxv | Implemented (static `ET_EXEC`) | host tests of the start-up stack layout; in-kernel test; QEMU user tests |
 | Threads per process, futexes, FS-base TLS | Implemented (single CPU) | in-kernel + QEMU user tests |
 | Kernel threads, preemptive scheduler, FPU state | Implemented (single CPU) | in-kernel + QEMU user tests |
 | spawn / wait / zombies / orphans | Implemented | QEMU user tests |

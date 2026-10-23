@@ -29,8 +29,12 @@ pub fn sysinfo() -> Result<SystemInfo> {
     os_sys::sysinfo().map_err(Error::from)
 }
 
-pub fn spawn(name: &str, args: &[u8]) -> Result<u64> {
-    os_sys::spawn(name, args).map_err(Error::from)
+pub fn spawn(path: &str, argv: &[u8], envp: &[u8]) -> Result<u64> {
+    os_sys::spawn(path, argv, envp).map_err(Error::from)
+}
+
+pub fn execve(path: &str, argv: &[u8], envp: &[u8]) -> Error {
+    Error::from(os_sys::execve(path, argv, envp))
 }
 
 pub fn wait(pid: u64) -> Result<(u64, i32)> {
@@ -295,6 +299,21 @@ pub fn current_tid() -> u64 {
 
 static ARGC: AtomicUsize = AtomicUsize::new(0);
 static ARGV: AtomicUsize = AtomicUsize::new(0);
+static ENVC: AtomicUsize = AtomicUsize::new(0);
+static ENVP: AtomicUsize = AtomicUsize::new(0);
+static AUXV: AtomicUsize = AtomicUsize::new(0);
+
+/// Environment strings scanned at most (the kernel's own limit).
+const MAX_ENV: u64 = osyx_abi::MAX_EXEC_STRINGS as u64;
+/// Auxiliary pairs scanned at most.
+const MAX_AUX: u64 = 64;
+
+/// Reads a start-up stack word.
+fn word(addr: u64) -> u64 {
+    // SAFETY: only called with addresses inside the start-up data the kernel
+    // placed on the main stack, which stays mapped for the whole run.
+    unsafe { core::ptr::read(addr as *const u64) }
+}
 
 global_asm!(
     r#"
@@ -316,33 +335,65 @@ extern "Rust" {
 
 #[no_mangle]
 unsafe extern "C" fn osyx_rt_start(sp: *const usize) -> ! {
-    // SAFETY: the kernel builds a System V initial stack: argc followed by
-    // argc pointers to NUL-terminated strings that live for the whole run.
-    let argc = *sp;
-    ARGC.store(argc, Ordering::Relaxed);
-    ARGV.store(sp.add(1) as usize, Ordering::Relaxed);
+    // The kernel builds the start-up stack described in `osyx_abi::startup`:
+    // pointers to NUL-terminated strings that live for the whole run.
+    let Some(l) = osyx_abi::startup::locate(sp as u64, MAX_ENV, word) else {
+        let _ = os_sys::write(osyx_abi::STDERR, b"OSyx Std: malformed start-up stack\n");
+        exit(127)
+    };
+    ARGC.store(l.argc as usize, Ordering::Relaxed);
+    ARGV.store(l.argv as usize, Ordering::Relaxed);
+    ENVC.store(l.envc as usize, Ordering::Relaxed);
+    ENVP.store(l.envp as usize, Ordering::Relaxed);
+    AUXV.store(l.auxv as usize, Ordering::Relaxed);
     crate::tls::init_main_thread();
     let code = __osyx_user_main();
     // Returning from main ends the whole process (other threads included).
     exit(code)
 }
 
-pub fn args() -> Vec<String> {
-    let argc = ARGC.load(Ordering::Relaxed);
-    let argv = ARGV.load(Ordering::Relaxed) as *const *const u8;
-    let mut out = Vec::with_capacity(argc);
-    for i in 0..argc {
-        // SAFETY: see `osyx_rt_start`; every argv entry is a C string.
-        unsafe {
-            let p = *argv.add(i);
-            let mut len = 0;
-            while *p.add(len) != 0 {
-                len += 1;
-            }
-            out.push(String::from_utf8_lossy(core::slice::from_raw_parts(p, len)).into_owned());
-        }
+/// The NUL-terminated string at `p`.
+///
+/// # Safety
+/// `p` must point to a NUL-terminated string that stays valid.
+unsafe fn c_str(p: *const u8) -> &'static [u8] {
+    let mut len = 0;
+    while *p.add(len) != 0 {
+        len += 1;
     }
-    out
+    core::slice::from_raw_parts(p, len)
+}
+
+/// `count` strings from the pointer array at `array`.
+fn strings(array: usize, count: usize) -> Vec<String> {
+    (0..count)
+        // SAFETY: the array and its strings come from the start-up stack.
+        .map(|i| unsafe { String::from_utf8_lossy(c_str(*(array as *const *const u8).add(i))).into_owned() })
+        .collect()
+}
+
+pub fn args() -> Vec<String> {
+    strings(ARGV.load(Ordering::Relaxed), ARGC.load(Ordering::Relaxed))
+}
+
+/// The environment the program was started with (`KEY=value` strings).
+pub fn initial_env() -> Vec<String> {
+    strings(ENVP.load(Ordering::Relaxed), ENVC.load(Ordering::Relaxed))
+}
+
+/// Value of auxiliary vector entry `key` (`osyx_abi::auxv`).
+pub fn aux_value(key: u64) -> Option<u64> {
+    match AUXV.load(Ordering::Relaxed) {
+        0 => None,
+        a => osyx_abi::startup::aux_value(a as u64, key, MAX_AUX, word),
+    }
+}
+
+/// The program path the kernel loaded (`AT_EXECFN`).
+pub fn current_exe() -> Result<String> {
+    let p = aux_value(osyx_abi::auxv::AT_EXECFN).ok_or_else(|| Error::unsupported("no AT_EXECFN entry"))?;
+    // SAFETY: AT_EXECFN points to a NUL-terminated string on the start-up stack.
+    Ok(String::from_utf8_lossy(unsafe { c_str(p as *const u8) }).into_owned())
 }
 
 // ---- heap -----------------------------------------------------------------

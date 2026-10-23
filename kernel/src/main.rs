@@ -20,6 +20,7 @@ mod block;
 mod devices;
 mod display;
 mod drivers;
+mod exec;
 mod fixup;
 mod futex;
 mod interrupts;
@@ -136,7 +137,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     kprintln!("heap: {} KiB mapped at {:#x}", heap >> 10, mem::heap::HEAP_START);
     // Boot modules live in bootloader memory: copy them before reclaiming.
     // SAFETY: BootInfo was validated; nothing has been reclaimed yet.
-    let module_count = unsafe { modules::init(&raw) };
+    unsafe { modules::init(&raw) };
     let reclaimed = mem::reclaim_bootloader_memory(boot.memory_map());
     let (free, total) = mem::frame_stats();
     kprintln!("reclaimed {} KiB of boot loader memory; {} / {} MiB free", reclaimed * 4, free >> 8, total >> 8);
@@ -184,12 +185,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
 
     let mut line2 = Line::new();
     let init_name = boot.option_value("init").unwrap_or("init");
-    if modules::get(init_name).is_some() {
-        ok &= run_init(boot, init_name, &mut line2);
-    } else {
-        kprintln!("no init program {:?} among {} boot modules", init_name, module_count);
-        let _ = write!(line2, "No init program (\\EFI\\OSYX\\BIN\\{})", init_name);
-    }
+    ok &= run_init(boot, init_name, &mut line2);
     let color = if ok { osyx_gfx::splash::OK } else { osyx_gfx::splash::ERROR };
     let title = if ok { "OSyx kernel is running" } else { "OSyx: a check failed" };
     display::status(title, color, &[line1.as_str(), line2.as_str()]);
@@ -211,15 +207,34 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     idle(line1, line2, ok)
 }
 
-/// Runs the init program with `init.args=a,b,c` and checks its exit status
-/// against `init.expect=N` (default 0). Returns whether it matched.
+/// Environment of the init program.
+const INIT_ENV: [&str; 3] = ["PATH=/bin:/usr/bin", "HOME=/", "TERM=osyx"];
+
+/// Runs the init program (`init=<name or path>`, searched in /bin and
+/// /usr/bin like any program) with `init.args=a,b,c` and checks its exit
+/// status against `init.expect=N` (default 0). Returns whether it matched;
+/// a missing init program is not an error.
 fn run_init(boot: &BootData, name: &str, summary: &mut Line) -> bool {
     let mut args: Vec<&str> = alloc::vec![name];
     if let Some(extra) = boot.option_value("init.args") {
         args.extend(extra.split(',').filter(|a| !a.is_empty()));
     }
     let expect = boot.option_value("init.expect").and_then(parse_int).unwrap_or(0);
-    let result = process::spawn(process::KERNEL_PID, name, &args)
+    let req = match exec::ExecRequest::new(name, &args, &INIT_ENV) {
+        Ok(r) => r,
+        Err(e) => {
+            kprintln!("init: bad arguments: {}", e.name());
+            let _ = write!(summary, "init: bad arguments");
+            return false;
+        }
+    };
+    let spawned = process::spawn(process::KERNEL_PID, &req);
+    if let Err(process::ExecError::Load(osyx_abi::Errno::NotFound)) = spawned {
+        kprintln!("no init program {:?} in {}", name, osyx_abi::PROGRAM_PATH.join(" or "));
+        let _ = write!(summary, "No init program (/bin/{})", name);
+        return true;
+    }
+    let result = spawned
         .map_err(|e| alloc::format!("{e}"))
         .and_then(|pid| process::wait(process::KERNEL_PID, pid).map_err(|e| alloc::format!("{e:?}")));
     match result {

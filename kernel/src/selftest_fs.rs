@@ -492,3 +492,57 @@ pub fn concurrent() -> TestResult {
     }
     Ok(())
 }
+
+/// The program loader's lookup and refusals (`spawn` / `execve`), without
+/// running anything: search path, permissions, non-ELF files, limits.
+pub fn program_loader() -> TestResult {
+    use crate::exec::{self, ExecRequest};
+    use crate::process::{self, ExecError};
+    let cx = root();
+    let load = |cx: &Lookup, p: &str| exec::load(cx, p).map(|prog| prog.path);
+    match load(&cx, "init") {
+        Ok(p) => {
+            ensure!(p == "/bin/init", "init found at {p}");
+            let prog = exec::load(&cx, "/bin/../bin/init").map_err(|err| e("load by path", err))?;
+            ensure!(prog.image.starts_with(b"\x7fELF"), "/bin/init is not ELF");
+        }
+        Err(Errno::NotFound) => kprintln!("[test]   no /bin/init on this root; search path checked without it"),
+        Err(err) => return Err(e("load init", err)),
+    }
+    ensure!(load(&cx, "no-such-program") == Err(Errno::NotFound), "missing program not NotFound");
+    ensure!(load(&cx, "/bin/no-such-program") == Err(Errno::NotFound), "missing path not NotFound");
+    ensure!(load(&cx, "..") == Err(Errno::InvalidArgument), "'..' accepted as a program name");
+
+    let dir = "/tmp/loader-test";
+    remove_tree(dir);
+    vfs::mkdir(&cx, dir, 0o755).map_err(|err| e("mkdir", err))?;
+    let r = (|| -> TestResult {
+        let elf = &b"\x7fELF\x02\x01\x01"[..];
+        write_file(&cx, &format!("{dir}/plain"), elf).map_err(|err| e("write plain", err))?;
+        ensure!(load(&cx, &format!("{dir}/plain")) == Err(Errno::PermissionDenied), "0644 file executable by root");
+        ensure!(load(&cx, dir) == Err(Errno::PermissionDenied), "directory executable");
+        write_file(&cx, &format!("{dir}/garbage"), b"#!/bin/sh\necho no interpreters\n").map_err(|err| e("write", err))?;
+        vfs::chmod(&cx, &format!("{dir}/garbage"), 0o700).map_err(|err| e("chmod", err))?;
+        ensure!(load(&cx, &format!("{dir}/garbage")).is_ok(), "0700 file not loadable by root");
+        ensure!(load(&user(1000), &format!("{dir}/garbage")) == Err(Errno::PermissionDenied), "0700 root file loadable by a user");
+        let req = ExecRequest::new(&format!("{dir}/garbage"), &["garbage"], &[]).map_err(|err| e("request", err))?;
+        let r = process::spawn(process::KERNEL_PID, &req);
+        ensure!(matches!(r, Err(ExecError::BadImage(_))), "non-ELF file spawned: {:?}", r.map_err(|e| e.errno()));
+        ensure!(ExecError::BadImage(osyx_elf::ElfError::BadMagic).errno() == Errno::BadExecutable, "errno of a bad image");
+        // A relative path resolves from the current directory.
+        let here = Lookup { cwd: String::from(dir), ..root() };
+        ensure!(load(&here, "./garbage").map(|p| p == format!("{dir}/garbage")) == Ok(true), "relative path");
+        Ok(())
+    })();
+    remove_tree(dir);
+    r?;
+
+    let big = "x".repeat(MAX_EXEC_ARGS);
+    ensure!(ExecRequest::new("init", &["init", &big], &[]).err() == Some(Errno::InvalidArgument), "oversized argv accepted");
+    let many = alloc::vec!["A=1"; MAX_EXEC_STRINGS + 1];
+    ensure!(ExecRequest::new("init", &["init"], &many).err() == Some(Errno::InvalidArgument), "too many env strings accepted");
+    ensure!(ExecRequest::new("init", &["a\0b"], &[]).err() == Some(Errno::InvalidArgument), "NUL in argv accepted");
+    let ok = ExecRequest::new("/usr/bin/probe", &["probe"], &["K=V"]).map_err(|err| e("request", err))?;
+    ensure!(ok.name() == "probe", "process name {:?}", ok.name());
+    Ok(())
+}

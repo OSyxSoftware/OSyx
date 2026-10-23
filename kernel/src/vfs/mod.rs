@@ -624,7 +624,23 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
     Ok(f)
 }
 
+/// Opens a regular file for the program loader. As on Unix this needs
+/// execute permission, not read permission (root: any execute bit).
+pub fn open_exec(cx: &Lookup, p: &str) -> Result<OpenFile> {
+    let node = walk(cx, p, true)?;
+    let st = node.stat()?;
+    if st.kind != KIND_FILE || !may(&st, &cx.cred, Access::EXEC) {
+        return Err(Errno::PermissionDenied);
+    }
+    node.mount.fs.open(node.ino)?;
+    Ok(OpenFile { kind: st.kind, node, pos: 0, read: true, write: false, append: false, listing: None, device: None })
+}
+
 impl OpenFile {
+    /// Canonical absolute path the file was opened under.
+    pub fn path(&self) -> &str {
+        &self.node.path
+    }
 
     /// Reads at the current position into `buf` without moving it: the
     /// caller calls [`advance`](Self::advance) once the data has reached

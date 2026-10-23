@@ -1,18 +1,20 @@
-/* Static OSyx user programs: loaded at 4 MiB, three W^X segments. */
+/* Static OSyx user programs: loaded at 4 MiB, three W^X segments. The
+   first one also maps the ELF and program headers (the kernel passes their
+   address as AT_PHDR). */
 ENTRY(_start)
 
 PHDRS
 {
-    text   PT_LOAD FLAGS(5);
+    text   PT_LOAD FILEHDR PHDRS FLAGS(5);
     rodata PT_LOAD FLAGS(4);
     data   PT_LOAD FLAGS(6);
 }
 
 SECTIONS
 {
-    . = 0x400000;
+    . = 0x400000 + SIZEOF_HEADERS;
 
-    .text : ALIGN(4K)
+    .text :
     {
         *(.text._start)
         *(.text .text.*)

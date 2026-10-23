@@ -9,7 +9,7 @@ Defined in `shared/bootinfo` (`repr(C)`, layout checked by unit tests:
 |---|---|---|
 | `\EFI\BOOT\BOOTX64.EFI` | yes | OSyx Boot Manager |
 | `\EFI\OSYX\KERNEL.ELF` | yes | kernel, static ELF64 `ET_EXEC` |
-| `\EFI\OSYX\BIN\*` | no | user programs (boot modules); `init` is started first |
+| `\EFI\OSYX\BIN\*` | no | boot modules: user programs the kernel installs as `/bin/*` when it has no usable root partition (normally programs come from the ext4 root) |
 | `\EFI\OSYX\CMDLINE.TXT` | no | command line (≤ 4096 bytes) |
 
 ## Boot manager stages
@@ -72,7 +72,7 @@ COM1, waits up to 30 s for a key, then returns the error to the firmware.
 |---|---|
 | `boot.fast` | skip boot animations |
 | `boot.mode=WxH` | preferred GOP resolution (default: largest ≤ 1920×1080) |
-| `init=NAME` | boot module to start first (default `init`) |
+| `init=NAME` | program to start first (default `init`): a name is searched in `/bin` and `/usr/bin`, a path with `/` is used as it is |
 | `init.args=a,b` | extra arguments for init (`argv[0]` is the program name) |
 | `init.expect=N` | expected init exit status for `test.exit` (default 0) |
 | `test.exit` | leave QEMU after boot checks (status 33 ok, 35 failure, 37 panic) |

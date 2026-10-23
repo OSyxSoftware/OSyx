@@ -1,4 +1,4 @@
-//! OSyx system call ABI, version 5.
+//! OSyx system call ABI, version 6.
 //!
 //! Calling convention (x86-64 `syscall` instruction):
 //! * `rax` = system call number, arguments in `rdi, rsi, rdx, r10, r8, r9`.
@@ -10,13 +10,16 @@
 //! against the user half of the address space and accessed with fault
 //! recovery, so a bad pointer yields [`Errno::Fault`] instead of a crash.
 //!
-//! Process start-up state (System V style):
-//! `rsp` -> `argc`, `argv[0..argc]`, `NULL`, `envp[..]`, `NULL`; `rsp` is
-//! 16-byte aligned; all other general purpose registers are zero.
+//! Process start-up state (System V x86-64 style):
+//! `rsp` -> `argc`, `argv[0..argc]`, `NULL`, `envp[..]`, `NULL`, auxiliary
+//! vector (`auxv::*` key/value pairs ending with `AT_NULL`); the strings,
+//! 16 random bytes (`AT_RANDOM`) and the program path (`AT_EXECFN`) lie
+//! above. `rsp` is 16-byte aligned; all other general purpose registers are
+//! zero.
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 5;
+pub const ABI_VERSION: u32 = 6;
 
 /// Highest user virtual address + 1 (the canonical lower half).
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -34,11 +37,14 @@ pub mod nr {
     pub const SYSINFO: u64 = 4;
     /// `clock(id: u64) -> u64` nanoseconds.
     pub const CLOCK: u64 = 5;
-    /// `spawn(name: *const u8, name_len: usize, args: *const u8, args_len: usize) -> pid`
+    /// `spawn(args: *const ExecArgs) -> pid`
     ///
-    /// Starts the boot module `name` as a child process. `args` holds the
-    /// arguments after `argv[0]` as NUL-terminated strings back to back
-    /// (`args_len` may be 0); `argv[0]` is `name`.
+    /// Starts the ELF64 program `path` as a child process with the given
+    /// argument and environment blocks (see [`ExecArgs`](super::ExecArgs)).
+    /// A path without `/` is searched in `/bin`, then `/usr/bin`; a path
+    /// with `/` is resolved like any other (relative to the current
+    /// directory). The file must be a regular file with execute permission
+    /// for the caller. The child inherits credentials and current directory.
     pub const SPAWN: u64 = 6;
     /// `wait(pid: u64, status: *mut i32) -> pid`
     ///
@@ -136,6 +142,14 @@ pub mod nr {
     pub const SETUID: u64 = 38;
     /// `statfs(path, path_len, out: *mut FsStat) -> 0`
     pub const STATFS: u64 = 39;
+    /// `execve(args: *const ExecArgs) -> !`
+    ///
+    /// Replaces the calling process's program (same rules as `spawn`).
+    /// pid, handles, credentials and current directory are kept; the
+    /// address space, FS base and FPU state are new. Fails with `Busy` if
+    /// the process has more than one thread. On any error the old program
+    /// continues unchanged.
+    pub const EXECVE: u64 = 40;
 }
 
 pub const OPEN_READ: u64 = 1 << 0;
@@ -316,10 +330,169 @@ pub struct FsStat {
 /// Maximum number of threads per process.
 pub const MAX_THREADS: usize = 64;
 
-/// Maximum length of a program name passed to `spawn`.
-pub const MAX_NAME: usize = 31;
-/// Maximum size of the `spawn` argument block.
-pub const MAX_SPAWN_ARGS: usize = 4096;
+/// Largest argument + environment block of `spawn` / `execve` (bytes).
+pub const MAX_EXEC_ARGS: usize = 128 * 1024;
+/// Most argument or environment strings.
+pub const MAX_EXEC_STRINGS: usize = 4096;
+/// Directories searched for a program name without `/`.
+pub const PROGRAM_PATH: [&str; 2] = ["/bin", "/usr/bin"];
+
+/// Argument block of `spawn` and `execve`. `argv` and `envp` are
+/// NUL-terminated UTF-8 strings back to back (`argv_len` 0: `argv` is just
+/// the path; `envp_len` 0: empty environment).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExecArgs {
+    pub path: u64,
+    pub path_len: u64,
+    pub argv: u64,
+    pub argv_len: u64,
+    pub envp: u64,
+    pub envp_len: u64,
+}
+
+/// Auxiliary vector keys passed on the initial stack.
+pub mod auxv {
+    pub const AT_NULL: u64 = 0;
+    /// Address of the program headers in memory.
+    pub const AT_PHDR: u64 = 3;
+    pub const AT_PHENT: u64 = 4;
+    pub const AT_PHNUM: u64 = 5;
+    pub const AT_PAGESZ: u64 = 6;
+    pub const AT_ENTRY: u64 = 9;
+    pub const AT_UID: u64 = 11;
+    pub const AT_EUID: u64 = 12;
+    pub const AT_GID: u64 = 13;
+    pub const AT_EGID: u64 = 14;
+    /// 1 if the program runs with privileges it was not started with (never on OSyx).
+    pub const AT_SECURE: u64 = 23;
+    /// Address of 16 random bytes.
+    pub const AT_RANDOM: u64 = 25;
+    /// Address of the NUL-terminated path the program was loaded from.
+    pub const AT_EXECFN: u64 = 31;
+}
+
+/// The initial stack of a new program: built by the kernel, read by the
+/// program's runtime. Layout from `rsp` upwards: `argc`, `argv[]`, `NULL`,
+/// `envp[]`, `NULL`, auxiliary pairs ending with `AT_NULL`, padding to 16
+/// bytes, then the argument and environment strings, the 16 `AT_RANDOM`
+/// bytes and the `AT_EXECFN` path, which ends right below the stack top.
+pub mod startup {
+    use super::auxv;
+
+    pub const RANDOM_LEN: usize = 16;
+
+    /// Contents of an initial stack.
+    pub struct Image<'a> {
+        pub argv: &'a [&'a [u8]],
+        pub envp: &'a [&'a [u8]],
+        /// Auxiliary entries; `AT_RANDOM`, `AT_EXECFN` and `AT_NULL` are added.
+        pub aux: &'a [(u64, u64)],
+        pub random: [u8; RANDOM_LEN],
+        /// Path the program was loaded from (without NUL).
+        pub execfn: &'a [u8],
+    }
+
+    impl Image<'_> {
+        fn strings_len(&self) -> usize {
+            let strs: usize = self.argv.iter().chain(self.envp).map(|s| s.len() + 1).sum();
+            strs + RANDOM_LEN + self.execfn.len() + 1
+        }
+
+        fn words(&self) -> usize {
+            1 + self.argv.len() + 1 + self.envp.len() + 1 + 2 * (self.aux.len() + 3)
+        }
+
+        /// Bytes the image occupies below a 16-byte aligned stack top.
+        pub fn size(&self) -> usize {
+            (self.strings_len() + self.words() * 8 + 15) & !15
+        }
+
+        /// Writes the image for a stack whose top is `top` (16-byte aligned)
+        /// into `out`, which stands for the `size()` bytes below `top`.
+        /// Returns the initial `rsp` (`top - size()`), or `None` if `top` is
+        /// misaligned, `out` has the wrong length or a string contains NUL.
+        pub fn build(&self, top: u64, out: &mut [u8]) -> Option<u64> {
+            let size = self.size();
+            if !top.is_multiple_of(16) || out.len() != size || (top as usize) < size {
+                return None;
+            }
+            if self.argv.iter().chain(self.envp).chain([&self.execfn]).any(|s| s.contains(&0)) {
+                return None;
+            }
+            let sp = top - size as u64;
+            out.fill(0);
+            // Strings in order argv, envp, random, execfn, ending at `top`.
+            let mut s = size - self.strings_len();
+            let mut w = 0;
+            let mut word = |out: &mut [u8], v: u64| {
+                out[w..w + 8].copy_from_slice(&v.to_le_bytes());
+                w += 8;
+            };
+            word(out, self.argv.len() as u64);
+            for list in [self.argv, self.envp] {
+                for text in list {
+                    out[s..s + text.len()].copy_from_slice(text);
+                    word(out, sp + s as u64);
+                    s += text.len() + 1;
+                }
+                word(out, 0);
+            }
+            let random = sp + s as u64;
+            out[s..s + RANDOM_LEN].copy_from_slice(&self.random);
+            s += RANDOM_LEN;
+            let execfn = sp + s as u64;
+            out[s..s + self.execfn.len()].copy_from_slice(self.execfn);
+            for &(k, v) in self.aux.iter().chain(&[(auxv::AT_RANDOM, random), (auxv::AT_EXECFN, execfn), (auxv::AT_NULL, 0)]) {
+                word(out, k);
+                word(out, v);
+            }
+            Some(sp)
+        }
+    }
+
+    /// Where the parts of an initial stack are (addresses).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Layout {
+        pub argc: u64,
+        /// Address of `argv[0]` (the pointer).
+        pub argv: u64,
+        /// Address of `envp[0]`.
+        pub envp: u64,
+        /// Number of environment pointers before the `NULL`.
+        pub envc: u64,
+        /// Address of the first auxiliary pair.
+        pub auxv: u64,
+    }
+
+    /// Finds the arrays of the initial stack at `sp`; `read` loads the
+    /// 8-byte word at an address. At most `max_env` environment pointers are
+    /// scanned for the terminating `NULL` (`None` if it is not found).
+    pub fn locate(sp: u64, max_env: u64, read: impl Fn(u64) -> u64) -> Option<Layout> {
+        let argc = read(sp);
+        let argv = sp + 8;
+        if read(argv + argc * 8) != 0 {
+            return None;
+        }
+        let envp = argv + (argc + 1) * 8;
+        let envc = (0..=max_env).find(|&i| read(envp + i * 8) == 0)?;
+        Some(Layout { argc, argv, envp, envc, auxv: envp + (envc + 1) * 8 })
+    }
+
+    /// Value of auxiliary entry `key`, scanning at most `max` pairs.
+    pub fn aux_value(auxv: u64, key: u64, max: u64, read: impl Fn(u64) -> u64) -> Option<u64> {
+        for i in 0..max {
+            let k = read(auxv + i * 16);
+            if k == auxv::AT_NULL {
+                return None;
+            }
+            if k == key {
+                return Some(read(auxv + i * 16 + 8));
+            }
+        }
+        None
+    }
+}
 
 pub const STDOUT: u64 = 1;
 pub const STDERR: u64 = 2;
@@ -385,9 +558,12 @@ pub enum Errno {
     /// The volume uses a feature this driver does not implement (it is
     /// refused rather than risked).
     Unsupported = 24,
+    /// `spawn` / `execve`: not a loadable ELF64 x86-64 executable (or one
+    /// needing a dynamic linker).
+    BadExecutable = 25,
 }
 
-const ALL_ERRNOS: [Errno; 24] = [
+const ALL_ERRNOS: [Errno; 25] = [
     Errno::InvalidArgument,
     Errno::Fault,
     Errno::NoMemory,
@@ -412,6 +588,7 @@ const ALL_ERRNOS: [Errno; 24] = [
     Errno::Busy,
     Errno::Loop,
     Errno::Unsupported,
+    Errno::BadExecutable,
 ];
 
 impl Errno {
@@ -445,6 +622,7 @@ impl Errno {
             Errno::Busy => "resource busy",
             Errno::Loop => "too many symbolic links",
             Errno::Unsupported => "unsupported file system feature",
+            Errno::BadExecutable => "not a loadable executable",
         }
     }
 }
@@ -512,6 +690,85 @@ mod tests {
         assert_eq!(core::mem::size_of::<DirRecord>(), DIR_RECORD_HEADER);
         assert_eq!(core::mem::size_of::<MountArgs>(), 64);
         assert_eq!(core::mem::size_of::<FsStat>(), 72);
+        assert_eq!(core::mem::size_of::<ExecArgs>(), 48);
+    }
+
+    /// Reads NUL-terminated bytes at `addr` of an image that ends at `top`.
+    fn c_str(mem: &[u8], top: u64, addr: u64) -> &[u8] {
+        let off = mem.len() - (top - addr) as usize;
+        let len = mem[off..].iter().position(|&b| b == 0).unwrap();
+        &mem[off..off + len]
+    }
+
+    #[test]
+    fn startup_image_round_trips() {
+        use startup::*;
+        let top = 0x7FFF_FFFF_0000u64;
+        let argv: [&[u8]; 3] = [b"/bin/probe", b"one", b""];
+        let envp: [&[u8]; 2] = [b"PATH=/bin:/usr/bin", b"HOME=/"];
+        let img = Image {
+            argv: &argv,
+            envp: &envp,
+            aux: &[(auxv::AT_PAGESZ, 4096), (auxv::AT_ENTRY, 0x40_1000)],
+            random: [7; RANDOM_LEN],
+            execfn: b"/usr/bin/probe",
+        };
+        let mut mem = [0xEEu8; 512];
+        let size = img.size();
+        assert_eq!(size % 16, 0);
+        assert!(img.build(top, &mut mem[..size - 8]).is_none(), "wrong buffer length");
+        assert!(img.build(top + 8, &mut mem[..size]).is_none(), "misaligned top");
+        let sp = img.build(top, &mut mem[..size]).unwrap();
+        assert_eq!(sp, top - size as u64);
+        assert_eq!(sp % 16, 0);
+        let mem = &mem[..size];
+        let read = |a: u64| {
+            let off = (a - sp) as usize;
+            u64::from_le_bytes(mem[off..off + 8].try_into().unwrap())
+        };
+        let l = locate(sp, 100, read).unwrap();
+        assert_eq!((l.argc, l.envc), (3, 2));
+        for (i, want) in argv.iter().enumerate() {
+            assert_eq!(c_str(mem, top, read(l.argv + i as u64 * 8)), *want);
+        }
+        for (i, want) in envp.iter().enumerate() {
+            assert_eq!(c_str(mem, top, read(l.envp + i as u64 * 8)), *want);
+        }
+        assert_eq!(aux_value(l.auxv, auxv::AT_PAGESZ, 64, read), Some(4096));
+        assert_eq!(aux_value(l.auxv, auxv::AT_ENTRY, 64, read), Some(0x40_1000));
+        assert_eq!(aux_value(l.auxv, auxv::AT_UID, 64, read), None);
+        let random = aux_value(l.auxv, auxv::AT_RANDOM, 64, read).unwrap();
+        let off = (random - sp) as usize;
+        assert_eq!(&mem[off..off + RANDOM_LEN], &[7; RANDOM_LEN]);
+        let execfn = aux_value(l.auxv, auxv::AT_EXECFN, 64, read).unwrap();
+        assert_eq!(c_str(mem, top, execfn), b"/usr/bin/probe");
+        // The path ends right below the top; nothing is written above it.
+        assert_eq!(execfn + 15, top);
+    }
+
+    #[test]
+    fn startup_image_edge_cases() {
+        use startup::*;
+        let empty = Image { argv: &[], envp: &[], aux: &[], random: [0; RANDOM_LEN], execfn: b"" };
+        let mut buf = [0u8; 128];
+        let sp = empty.build(0x1000, &mut buf[..empty.size()]).unwrap();
+        let mem = &buf[..empty.size()];
+        let read = |a: u64| u64::from_le_bytes(mem[(a - sp) as usize..(a - sp) as usize + 8].try_into().unwrap());
+        let l = locate(sp, 0, read).unwrap();
+        assert_eq!((l.argc, l.envc), (0, 0));
+        assert!(aux_value(l.auxv, auxv::AT_EXECFN, 8, read).is_some());
+        let nul: [&[u8]; 1] = [b"a\0b"];
+        let bad = Image { argv: &nul, ..empty };
+        assert!(bad.build(0x1000, &mut buf[..bad.size()]).is_none());
+        // An environment longer than the scan limit is reported, not overrun.
+        let many: [&[u8]; 5] = [b"A=1"; 5];
+        let long = Image { envp: &many, argv: &[], aux: &[], random: [0; RANDOM_LEN], execfn: b"" };
+        let mut buf = [0u8; 256];
+        let sp = long.build(0x1000, &mut buf[..long.size()]).unwrap();
+        let mem = &buf[..long.size()];
+        let read = |a: u64| u64::from_le_bytes(mem[(a - sp) as usize..(a - sp) as usize + 8].try_into().unwrap());
+        assert!(locate(sp, 4, read).is_none());
+        assert_eq!(locate(sp, 5, read).map(|l| l.envc), Some(5));
     }
 
     #[test]

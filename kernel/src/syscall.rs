@@ -9,6 +9,7 @@
 
 use crate::arch::cpu;
 use crate::arch::gdt::{KERNEL_CS, USER_DS};
+use crate::exec::ExecRequest;
 use crate::fixup::{copy_from_user, copy_to_user};
 use crate::vfs::Lookup;
 use crate::{interrupts, mem, process, sched, vfs};
@@ -127,7 +128,9 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::UNMAP => process::unmap_region(f.rdi, f.rsi).map(|_| 0),
         nr::SYSINFO => sys_sysinfo(f.rdi),
         nr::CLOCK => sys_clock(f.rdi),
-        nr::SPAWN => sys_spawn(f.rdi, f.rsi, f.rdx, f.r10),
+        nr::SPAWN => ExecRequest::from_user(f.rdi)
+            .and_then(|req| process::spawn(sched::current_pid(), &req).map_err(|e| e.errno())),
+        nr::EXECVE => sys_execve(f.rdi),
         nr::WAIT => sys_wait(f.rdi, f.rsi),
         nr::YIELD => {
             sched::yield_now();
@@ -200,7 +203,8 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             Ok(c.uid as u64 | (c.gid as u64) << 32)
         }
         nr::SETUID => process::set_current_cred(Cred { uid: f.rdi as u32, gid: f.rsi as u32 }).map(|_| 0),
-        nr::STATFS => user_path(f.rdi, f.rsi).and_then(|p| vfs::statfs(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st)),        _ => Err(Errno::NotSupported),
+        nr::STATFS => user_path(f.rdi, f.rsi).and_then(|p| vfs::statfs(&Lookup::current(), &p)).and_then(|st| put_user(f.rdx, &st)),
+        _ => Err(Errno::NotSupported),
     };
     // Safe point: a thread whose process is exiting ends here instead of
     // returning to user mode.
@@ -365,29 +369,10 @@ fn sys_clock(id: u64) -> Result<u64, Errno> {
     }
 }
 
-fn sys_spawn(name_ptr: u64, name_len: u64, args_ptr: u64, args_len: u64) -> Result<u64, Errno> {
-    if name_len == 0 || name_len > osyx_abi::MAX_NAME as u64 || args_len > osyx_abi::MAX_SPAWN_ARGS as u64 {
-        return Err(Errno::InvalidArgument);
-    }
-    let mut name_buf = [0u8; osyx_abi::MAX_NAME];
-    copy_from_user(&mut name_buf[..name_len as usize], name_ptr)?;
-    let name = core::str::from_utf8(&name_buf[..name_len as usize]).map_err(|_| Errno::InvalidArgument)?;
-    if !name.bytes().all(|b| b.is_ascii_graphic()) {
-        return Err(Errno::InvalidArgument);
-    }
-    let mut block = alloc::vec![0u8; args_len as usize];
-    copy_from_user(&mut block, args_ptr)?;
-    // The block is a sequence of NUL-terminated UTF-8 strings.
-    if block.last().is_some_and(|&b| b != 0) {
-        return Err(Errno::InvalidArgument);
-    }
-    let mut argv: alloc::vec::Vec<&str> = alloc::vec![name];
-    if !block.is_empty() {
-        for part in block[..block.len() - 1].split(|&b| b == 0) {
-            argv.push(core::str::from_utf8(part).map_err(|_| Errno::InvalidArgument)?);
-        }
-    }
-    process::spawn(sched::current_pid(), name, &argv).map_err(|e| e.errno())
+/// Returns only on failure; on success the new program is running.
+fn sys_execve(args_ptr: u64) -> Result<u64, Errno> {
+    let req = ExecRequest::from_user(args_ptr)?;
+    Err(process::exec_current(req).errno())
 }
 
 fn sys_wait(pid: u64, status_ptr: u64) -> Result<u64, Errno> {

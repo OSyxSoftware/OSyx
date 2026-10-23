@@ -38,6 +38,8 @@ const USED_OFFSET: u64 = 2048;
 
 /// A request that takes longer than this is treated as a device failure.
 const TIMEOUT_TICKS: u64 = 500;
+/// Checks of the used ring before a waiting request starts yielding.
+const SPIN_POLLS: u32 = 1_000;
 
 // Common configuration register offsets.
 const DEVICE_FEATURE_SELECT: u64 = 0x00;
@@ -282,8 +284,9 @@ impl Virtqueue {
         self.size
     }
 
-    /// Submits one descriptor chain and polls (yielding the CPU) until the
-    /// device has used it. Returns the number of bytes the device wrote.
+    /// Submits one descriptor chain and polls (briefly spinning, then
+    /// yielding the CPU) until the device has used it. Returns the number of
+    /// bytes the device wrote.
     pub fn run(&mut self, chain: &[Buffer]) -> Result<u32, VirtioError> {
         assert!(!chain.is_empty() && chain.len() <= self.size as usize, "descriptor chain does not fit the queue");
         for (i, b) in chain.iter().enumerate() {
@@ -314,6 +317,7 @@ impl Virtqueue {
 
         let used = self.virt + USED_OFFSET;
         let start = interrupts::ticks();
+        let mut polls = 0;
         loop {
             fence(Ordering::SeqCst);
             // SAFETY: the used ring lies in the queue frame.
@@ -328,7 +332,15 @@ impl Virtqueue {
             if interrupts::ticks() - start > TIMEOUT_TICKS {
                 return Err(VirtioError::Timeout);
             }
-            sched::yield_now();
+            // Most requests complete within microseconds: poll briefly
+            // before yielding, since a yield to a busy thread costs a whole
+            // time slice.
+            if polls < SPIN_POLLS {
+                polls += 1;
+                core::hint::spin_loop();
+            } else {
+                sched::yield_now();
+            }
         }
     }
 

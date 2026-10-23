@@ -51,13 +51,22 @@ pub fn heap_stats() -> osyx_mm::heap::HeapStats {
     sys::heap_stats()
 }
 
+/// Value of entry `key` of the auxiliary vector the kernel passed at start-up
+/// (`osyx_abi::auxv::AT_*`), e.g. `AT_ENTRY` or `AT_PAGESZ`.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn aux_value(key: u64) -> Option<u64> {
+    sys::aux_value(key)
+}
+
+pub use osyx_abi::auxv;
+
 /// Low-level system call access for tests and runtime code.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod raw {
     pub use os_sys::{
-        close, futex_wait, futex_wake, gettid, map, open, raw_syscall, read, read_raw, sysinfo_raw, thread_exit, unmap,
-        wait_raw, write, write_raw, Errno, ABI_VERSION, OPEN_CREATE, OPEN_DIRECTORY, OPEN_READ, OPEN_WRITE, PROT_EXEC,
-        PROT_READ, PROT_WRITE,
+        close, exec_raw, execve, futex_wait, futex_wake, gettid, map, nr, open, raw_syscall, read, read_raw, spawn,
+        sysinfo_raw, thread_exit, unmap, wait_raw, write, write_raw, Errno, ExecArgs, ABI_VERSION, OPEN_CREATE,
+        OPEN_DIRECTORY, OPEN_READ, OPEN_WRITE, PROT_EXEC, PROT_READ, PROT_WRITE,
     };
 }
 

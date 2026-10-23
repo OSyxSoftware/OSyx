@@ -9,7 +9,7 @@
 #![no_std]
 
 pub use osyx_abi::{
-    DirRecord, Errno, FileStat, FsStat, MountArgs, SystemInfo, ABI_VERSION, CLOCK_MONOTONIC, CLOCK_REALTIME, KIND_BLOCK_DEVICE,
+    auxv, nr, startup, DirRecord, Errno, ExecArgs, FileStat, FsStat, MountArgs, SystemInfo, ABI_VERSION, CLOCK_MONOTONIC, CLOCK_REALTIME, KIND_BLOCK_DEVICE,
     KIND_CHAR_DEVICE, KIND_DIR, KIND_FILE, KIND_SYMLINK, MOUNT_READ_ONLY, OPEN_APPEND, OPEN_CASE_INSENSITIVE, OPEN_CREATE,
     OPEN_DIRECTORY, OPEN_EXCLUSIVE, OPEN_NOFOLLOW, OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE, PROT_EXEC, PROT_READ, PROT_WRITE,
     SEEK_CUR, SEEK_END, SEEK_SET, STDERR, STDOUT,
@@ -76,10 +76,39 @@ mod imp {
         ret
     }
 
-    /// Starts boot module `name` as a child. `args` is the argument block:
-    /// NUL-terminated strings back to back (argv[0] is `name`).
-    pub fn spawn(name: &str, args: &[u8]) -> Result<u64, Errno> {
-        decode(syscall4(nr::SPAWN, name.as_ptr() as u64, name.len() as u64, args.as_ptr() as u64, args.len() as u64))
+    fn exec_args(path: &str, argv: &[u8], envp: &[u8]) -> osyx_abi::ExecArgs {
+        osyx_abi::ExecArgs {
+            path: path.as_ptr() as u64,
+            path_len: path.len() as u64,
+            argv: argv.as_ptr() as u64,
+            argv_len: argv.len() as u64,
+            envp: envp.as_ptr() as u64,
+            envp_len: envp.len() as u64,
+        }
+    }
+
+    /// Starts program `path` (a name without `/` is searched in `/bin` and
+    /// `/usr/bin`) as a child. `argv` (including `argv[0]`) and `envp` are
+    /// blocks of NUL-terminated strings back to back.
+    pub fn spawn(path: &str, argv: &[u8], envp: &[u8]) -> Result<u64, Errno> {
+        let a = exec_args(path, argv, envp);
+        decode(syscall1(nr::SPAWN, &a as *const osyx_abi::ExecArgs as u64))
+    }
+
+    /// Replaces the calling program (arguments as for [`spawn`]). Returns
+    /// only if that failed, with the reason.
+    pub fn execve(path: &str, argv: &[u8], envp: &[u8]) -> Errno {
+        let a = exec_args(path, argv, envp);
+        match decode(syscall1(nr::EXECVE, &a as *const osyx_abi::ExecArgs as u64)) {
+            Err(e) => e,
+            Ok(_) => Errno::NotSupported,
+        }
+    }
+
+    /// `spawn` / `execve` with an arbitrary argument block address (for
+    /// validation tests).
+    pub fn exec_raw(n: u64, args_addr: usize) -> Result<u64, Errno> {
+        decode(syscall1(n, args_addr as u64))
     }
 
     /// Waits for child `pid` (0 = any) and returns (pid, exit status).

@@ -1,15 +1,18 @@
-//! Processes: exit, and starting and waiting for child programs.
+//! Processes: exit, starting and waiting for child programs, and replacing
+//! the running program.
 //!
-//! Programs are the boot modules in `\EFI\OSYX\BIN\` (starting a program from
-//! a path on the VFS is not implemented yet), started by file name:
+//! Programs are static ELF64 files. A name without `/` is looked up by the
+//! kernel in `/bin`, then `/usr/bin`; a path with `/` is used as it is
+//! (relative to the current directory). The file needs execute permission.
 //!
 //! ```ignore
-//! let status = Command::new("worker").arg("exit").arg("7").status()?;
+//! let status = Command::new("worker").arg("exit").arg("7").env("MODE", "test").status()?;
 //! assert_eq!(status.code(), Some(7));
 //! ```
 
 use crate::error::{Error, ErrorKind, Result};
 use crate::sys;
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
@@ -79,16 +82,22 @@ impl fmt::Display for ExitStatus {
     }
 }
 
-/// Builder for starting a child program.
+/// Builder for starting a child program, or for replacing the running one
+/// ([`Command::exec`]). The child gets the current environment
+/// ([`crate::env::vars`]) with the changes made through this builder.
 #[derive(Clone, Debug)]
 pub struct Command {
     program: String,
+    arg0: Option<String>,
     args: Vec<String>,
+    env_clear: bool,
+    /// `Some(value)` sets, `None` removes.
+    env_changes: BTreeMap<String, Option<String>>,
 }
 
 impl Command {
     pub fn new(program: &str) -> Command {
-        Command { program: program.to_string(), args: Vec::new() }
+        Command { program: program.to_string(), arg0: None, args: Vec::new(), env_clear: false, env_changes: BTreeMap::new() }
     }
 
     pub fn arg(&mut self, arg: &str) -> &mut Command {
@@ -101,15 +110,91 @@ impl Command {
         self
     }
 
+    /// `argv[0]` of the program (default: the program as given to [`Command::new`]).
+    pub fn arg0(&mut self, arg0: &str) -> &mut Command {
+        self.arg0 = Some(arg0.to_string());
+        self
+    }
+
+    pub fn env(&mut self, key: &str, value: &str) -> &mut Command {
+        self.env_changes.insert(key.to_string(), Some(value.to_string()));
+        self
+    }
+
+    pub fn envs<I: IntoIterator<Item = (K, V)>, K: AsRef<str>, V: AsRef<str>>(&mut self, vars: I) -> &mut Command {
+        for (k, v) in vars {
+            self.env(k.as_ref(), v.as_ref());
+        }
+        self
+    }
+
+    pub fn env_remove(&mut self, key: &str) -> &mut Command {
+        self.env_changes.insert(key.to_string(), None);
+        self
+    }
+
+    /// Starts from an empty environment: drops the inherited variables and
+    /// earlier [`Command::env`] calls (later ones still apply).
+    pub fn env_clear(&mut self) -> &mut Command {
+        self.env_clear = true;
+        self.env_changes.clear();
+        self
+    }
+
+    pub fn get_program(&self) -> &str {
+        &self.program
+    }
+
+    pub fn get_args(&self) -> impl Iterator<Item = &str> {
+        self.args.iter().map(String::as_str)
+    }
+
+    /// The environment the program will get, as `KEY=value` strings.
+    pub fn get_envs(&self) -> Vec<String> {
+        let mut env: Vec<(String, String)> = if self.env_clear { Vec::new() } else { crate::env::vars().collect() };
+        for (k, change) in &self.env_changes {
+            env.retain(|(key, _)| key != k);
+            if let Some(v) = change {
+                env.push((k.clone(), v.clone()));
+            }
+        }
+        env.into_iter().map(|(k, v)| alloc::format!("{k}={v}")).collect()
+    }
+
+    /// The `argv` and `envp` blocks for the kernel.
+    fn blocks(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        let arg0 = self.arg0.as_deref().unwrap_or(&self.program);
+        let argv = encode_args(&core::iter::once(arg0).chain(self.get_args()).collect::<Vec<_>>())?;
+        if self.env_changes.keys().any(|k| k.is_empty() || k.contains('=')) {
+            return Err(Error::new(ErrorKind::InvalidInput, "invalid environment variable name"));
+        }
+        let envp = encode_args(&self.get_envs())?;
+        if argv.len() + envp.len() > osyx_abi::MAX_EXEC_ARGS {
+            return Err(Error::new(ErrorKind::InvalidInput, "arguments and environment too long"));
+        }
+        Ok((argv, envp))
+    }
+
     /// Starts the program; it runs concurrently with the caller.
     pub fn spawn(&self) -> Result<Child> {
-        let block = encode_args(&self.args)?;
-        Ok(Child { pid: sys::spawn(&self.program, &block)? })
+        let (argv, envp) = self.blocks()?;
+        Ok(Child { pid: sys::spawn(&self.program, &argv, &envp)? })
     }
 
     /// Starts the program and waits for it to finish.
     pub fn status(&self) -> Result<ExitStatus> {
         self.spawn()?.wait()
+    }
+
+    /// Replaces the running program with this one, keeping the process id,
+    /// open files, credentials and current directory. Returns only if that
+    /// failed (the current program then simply continues). The process must
+    /// have only one thread (`ResourceBusy` otherwise).
+    pub fn exec(&self) -> Error {
+        match self.blocks() {
+            Ok((argv, envp)) => sys::execve(&self.program, &argv, &envp),
+            Err(e) => e,
+        }
     }
 }
 
@@ -137,8 +222,12 @@ pub fn wait_any() -> Result<(u64, ExitStatus)> {
     Ok((pid, ExitStatus::from_raw(raw)))
 }
 
-/// Encodes arguments as the kernel's `spawn` argument block.
+/// Encodes strings as a `spawn` / `execve` block (NUL-terminated strings
+/// back to back).
 pub fn encode_args<S: AsRef<str>>(args: &[S]) -> Result<Vec<u8>> {
+    if args.len() > osyx_abi::MAX_EXEC_STRINGS {
+        return Err(Error::new(ErrorKind::InvalidInput, "too many arguments"));
+    }
     let mut block = Vec::new();
     for a in args {
         let a = a.as_ref();
@@ -148,7 +237,7 @@ pub fn encode_args<S: AsRef<str>>(args: &[S]) -> Result<Vec<u8>> {
         block.extend_from_slice(a.as_bytes());
         block.push(0);
     }
-    if block.len() > osyx_abi::MAX_SPAWN_ARGS {
+    if block.len() > osyx_abi::MAX_EXEC_ARGS {
         return Err(Error::new(ErrorKind::InvalidInput, "arguments too long"));
     }
     Ok(block)
@@ -164,8 +253,32 @@ mod tests {
         assert_eq!(encode_args::<&str>(&[]).unwrap(), b"");
         assert_eq!(encode_args(&["spin", "30"]).unwrap(), b"spin\x0030\x00");
         assert_eq!(encode_args(&["a\0b"]).unwrap_err().kind(), ErrorKind::InvalidInput);
-        let long = "x".repeat(osyx_abi::MAX_SPAWN_ARGS);
+        let long = "x".repeat(osyx_abi::MAX_EXEC_ARGS);
         assert_eq!(encode_args(&[long]).unwrap_err().kind(), ErrorKind::InvalidInput);
+        let many = alloc::vec![""; osyx_abi::MAX_EXEC_STRINGS + 1];
+        assert_eq!(encode_args(&many).unwrap_err().kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn command_environment_and_blocks() {
+        crate::env::set_var("OSYX_CMD_INHERITED", "yes");
+        crate::env::set_var("OSYX_CMD_REMOVED", "gone");
+        let mut c = Command::new("/usr/bin/probe");
+        c.arg("x").env("OSYX_CMD_SET", "a=b").env_remove("OSYX_CMD_REMOVED");
+        let envs = c.get_envs();
+        assert!(envs.contains(&"OSYX_CMD_INHERITED=yes".to_string()));
+        assert!(envs.contains(&"OSYX_CMD_SET=a=b".to_string()));
+        assert!(!envs.iter().any(|e| e.starts_with("OSYX_CMD_REMOVED=")));
+        let (argv, envp) = c.blocks().unwrap();
+        assert_eq!(argv, b"/usr/bin/probe\x00x\x00");
+        assert!(envp.ends_with(b"\x00") && envp.windows(17).any(|w| w == b"OSYX_CMD_SET=a=b\x00"));
+        c.arg0("probe").env_clear().env("ONLY", "1");
+        assert_eq!(c.get_envs(), ["ONLY=1"]);
+        assert_eq!(c.blocks().unwrap(), (b"probe\x00x\x00".to_vec(), b"ONLY=1\x00".to_vec()));
+        assert_eq!(Command::new("p").env("A=B", "x").spawn().unwrap_err().kind(), ErrorKind::InvalidInput);
+        assert_eq!(Command::new("p").exec().kind(), ErrorKind::Unsupported);
+        crate::env::remove_var("OSYX_CMD_INHERITED");
+        crate::env::remove_var("OSYX_CMD_REMOVED");
     }
 
     #[test]

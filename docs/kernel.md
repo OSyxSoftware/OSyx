@@ -22,8 +22,10 @@ as a static ELF at `0xFFFF_FFFF_8000_0000` with three W^X segments
    seeded (`random.rs`); device nodes registered (`devices.rs`); the file
    system tree mounted: ext4 `/`, devfs, tmpfs `/tmp` `/run`, FAT32 `/boot`
    ([storage.md](storage.md)).
-8. Framebuffer status screen, self-tests, `init` spawned and waited for,
-   then `kmain` animates the status screen (sleeping between frames). With
+8. Framebuffer status screen, self-tests, `/bin/init` from the root file
+   system spawned (`init=` picks another program, `init.args=a,b` adds
+   arguments; environment `PATH=/bin:/usr/bin HOME=/ TERM=osyx`) and waited
+   for, then `kmain` animates the status screen (sleeping between frames). With
    `test.exit` every volume is unmounted cleanly before QEMU is stopped
    (`test.power-cut` skips that to simulate a power loss).
 
@@ -74,11 +76,13 @@ The panic path may force-unlock SERIAL and only try-locks the display.
 
 ## Processes (`process.rs`)
 
-- Created by `spawn(parent, name, args)` from a boot module with one main
-  thread; `thread_spawn` adds more (up to 64). Each process has its own
-  address space: ELF segments with
-  their permissions, a 256 KiB stack below `0x7FFF_FFFF_0000`, null guard below
-  64 KiB, System V initial stack (`argc`, `argv`, `envp`, `auxv`).
+- Created by `spawn(parent, request)` from an executable file (see
+  [Program loader](#program-loader)) with one main thread; `thread_spawn`
+  adds more (up to 64). Each process has its own address space: ELF
+  segments with their permissions, a 512 KiB stack below
+  `0x7FFF_FFFF_0000`, null guard below 64 KiB, System V initial stack
+  (`argc`, `argv`, `envp`, `auxv`). `execve` swaps in a new address space
+  (below).
 - `exit` (or a fatal CPU exception in any thread) records the exit status
   and asks the other threads to stop; `thread_exit` ends one thread. The last
   thread to end destroys the address space, drops the process's futex
@@ -95,8 +99,46 @@ The panic path may force-unlock SERIAL and only try-locks the display.
   whatever is still open when the last thread ends is closed.
 - Identity: `uid`/`gid` (root for `init`; `setuid` lets root drop to a user,
   permanently) and the current directory; children inherit both.
-- Limits: 64 processes, 256 MiB of `map` memory per process, 16 KiB of
-  arguments, 64 open handles.
+- Limits: 64 processes, 256 MiB of `map` memory per process, 128 KiB of
+  arguments and environment (4096 strings each), 64 MiB executables, 64
+  open handles.
+
+## Program loader
+
+`exec.rs` finds and reads programs; `process.rs` maps them.
+
+- **Lookup**: a name without `/` is tried as `/bin/<name>`, then
+  `/usr/bin/<name>` (`osyx_abi::PROGRAM_PATH`); a path with `/` is resolved
+  from the caller's current directory. `vfs::open_exec` requires a regular
+  file with execute permission for the caller (root: any `x` bit), not read
+  permission. Missing everywhere → `NotFound`; found only without
+  permission → `PermissionDenied`.
+- **Reading**: the ELF header and program header table are read first;
+  then only the header range and the file data of each `PT_LOAD` segment
+  (debug information is never read). Anything that does not look like a
+  sane header table is read whole, so the parser reports precisely what is
+  wrong.
+- **Validation** (`osyx-elf`, user policy): ELF64, x86-64, `ET_EXEC`, no
+  `PT_INTERP`/`PT_DYNAMIC`, page-aligned, non-overlapping W^X segments in
+  `[64 KiB, 0x1000_0000_0000)` (below the anonymous-memory area), entry in
+  an executable segment. Failures are `BadExecutable` and logged.
+- **Mapping** into a fresh address space: segments page by page (file
+  bytes, then zeros), 512 KiB stack, then the start-up data built by
+  `osyx_abi::startup` (argv, envp, auxv with `AT_PHDR`, `AT_ENTRY`,
+  `AT_RANDOM`, `AT_EXECFN`, …; see [syscall-abi.md](syscall-abi.md)).
+- **`execve`**: refused with `Busy` if the process has other threads. The
+  new image is complete before anything changes; then, with interrupts off,
+  the process table entry gets the new space (anonymous regions reset,
+  name updated), CR3 and the thread's root are switched, FS base is zeroed,
+  x87/SSE state reset, the old space destroyed with its frame accounting
+  checked (`old image released N frames, no leak`), and the thread enters
+  ring 3 at the new entry with `iretq`. The system call's kernel stack is
+  abandoned; nothing on it owns memory at that point.
+- **Boot modules** (`\EFI\OSYX\BIN`) are only used when there is no usable
+  root partition: they are installed into `/bin` of the fallback tmpfs
+  root.
+- Disk requests are polled: the virtio queue spins briefly before it starts
+  yielding, because a yield to a CPU-bound thread costs a whole time slice.
 
 ## Self-tests (run on every boot)
 
@@ -108,7 +150,9 @@ threads that never yield both make progress) · sleep and join · FPU/SSE
 state per thread · FS base per thread · PCI enumeration · block device I/O ·
 VFS on tmpfs · symlinks, cwd, permissions and case-insensitive lookup ·
 mount, unmount and limits · devfs and `/dev/random` · FAT32 `/boot` · ext4
-`/` · concurrent writers on tmpfs, FAT32 and ext4 followed by volume checks.
+`/` · concurrent writers on tmpfs, FAT32 and ext4 followed by volume checks ·
+program loader (search path, execute permission, directories, non-ELF
+files, relative paths, argument limits).
 Tests of volumes that are not mounted skip with a log line.
 
 ## Not implemented yet
@@ -117,4 +161,7 @@ Thread priorities, SMP and per-CPU data via `swapgs` (the futex and
 block/wake protocols rely on disabling interrupts on a single CPU and must be
 revisited for SMP), shared memory between processes, local APIC/IOAPIC, ACPI
 parsing, PCIe ECAM, device interrupts/MSI-X, storage controllers other than
-virtio-blk, NTFS, keyboard input, XSAVE (AVX state).
+virtio-blk, NTFS, keyboard input, XSAVE (AVX state), dynamically linked or
+position-independent (`ET_DYN`) programs, `#!` interpreter scripts,
+set-user-ID programs, close-on-exec handles, demand paging of program
+images.

@@ -12,16 +12,17 @@
 //! | `/run` | tmpfs | RAM, mode 0755 |
 //!
 //! Without a usable root partition a small tmpfs becomes `/` so the rest
-//! of the tree still works (and the log says so). Other FAT32/ext4 volumes
-//! are mounted below `/mnt/<device>`.
+//! of the tree still works (and the log says so); the boot modules from
+//! `\EFI\OSYX\BIN` become its `/bin`. Other FAT32/ext4 volumes are mounted
+//! below `/mnt/<device>`.
 
 use crate::block::{self, BlockDev};
 use crate::vfs::{self, devfs::DevFs, tmpfs::TmpfsVolume, Filesystem, Lookup};
-use crate::{kprintln, BootData};
+use crate::{kprintln, modules, BootData};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use osyx_abi::MOUNT_READ_ONLY;
+use osyx_abi::{MOUNT_READ_ONLY, OPEN_CREATE, OPEN_TRUNCATE, OPEN_WRITE};
 
 const TMP_LIMIT: u64 = 64 << 20;
 const RUN_LIMIT: u64 = 8 << 20;
@@ -64,12 +65,31 @@ fn try_mount(fstype: &str, disk: Arc<dyn BlockDev>, at: &str, read_only: bool) -
     }
 }
 
-/// Creates the standard mount points on a fresh fallback root.
+/// Creates the standard mount points on a fresh fallback root and installs
+/// the boot modules as programs in `/bin`.
 fn populate_fallback_root() {
     let cx = Lookup::kernel();
-    for d in ["boot", "dev", "tmp", "run", "mnt"] {
+    for d in ["boot", "dev", "tmp", "run", "mnt", "bin"] {
         if let Err(e) = vfs::mkdir(&cx, &alloc::format!("/{d}"), 0o755) {
             kprintln!("storage: cannot create /{d} on the fallback root: {e:?}");
+        }
+    }
+    for (name, data) in modules::all() {
+        let path = alloc::format!("/bin/{name}");
+        let flags = OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE;
+        let r = vfs::open(&cx, &path, flags, 0o755).and_then(|mut f| {
+            let mut done = 0;
+            while done < data.len() {
+                match f.write(&data[done..])? {
+                    0 => return Err(osyx_abi::Errno::NoSpace),
+                    n => done += n,
+                }
+            }
+            Ok(())
+        });
+        match r {
+            Ok(()) => kprintln!("storage: boot module {name} installed as {path}"),
+            Err(e) => kprintln!("storage: cannot install {path}: {e:?}"),
         }
     }
 }

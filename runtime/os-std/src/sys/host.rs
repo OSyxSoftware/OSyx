@@ -37,8 +37,23 @@ pub fn args() -> Vec<String> {
     std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect()
 }
 
-pub fn spawn(_name: &str, _args: &[u8]) -> Result<u64> {
-    Err(Error::unsupported("spawning OSyx boot modules is only possible on OSyx"))
+pub fn spawn(_path: &str, _argv: &[u8], _envp: &[u8]) -> Result<u64> {
+    Err(Error::unsupported("starting OSyx programs is only possible on OSyx"))
+}
+
+pub fn execve(_path: &str, _argv: &[u8], _envp: &[u8]) -> Error {
+    Error::unsupported("execve of OSyx programs is only possible on OSyx")
+}
+
+/// The host process's environment as `KEY=value` strings.
+pub fn initial_env() -> Vec<String> {
+    std::env::vars_os().map(|(k, v)| alloc::format!("{}={}", k.to_string_lossy(), v.to_string_lossy())).collect()
+}
+
+pub fn current_exe() -> Result<String> {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|_| Error::new(ErrorKind::Other, "host current_exe failed"))
 }
 
 pub fn wait(_pid: u64) -> Result<(u64, i32)> {

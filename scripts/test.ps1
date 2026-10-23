@@ -1,11 +1,13 @@
 # Full OSyx test suite:
 #   1. host unit tests (cargo test) and clippy
 #   2. QEMU boot test: loader -> kernel -> in-kernel self-tests (incl. threads,
-#      preemption, FPU, PCI, virtio-blk, VFS) -> ring-3 init running its checks
-#      (incl. os_std::fs on the FAT32 data disk) with worker child processes
-#      -> exit 33; leak and preemption checks on the log; the files OSyx wrote
-#      are then read back on the host with mtools; variants for user faults,
-#      user panics, exit codes, no data disk and a boot without programs
+#      preemption, FPU, PCI, virtio-blk, VFS, program loader) -> /bin/init
+#      from the ext4 root in ring 3 running its checks (incl. os_std::fs on
+#      every mount, spawn/execve of worker and /usr/bin/probe) -> exit 33;
+#      leak and preemption checks on the log; the files OSyx wrote are then
+#      read back on the host with mtools and e2fsprogs; variants for user
+#      faults, user panics, exit codes, power cut, no entropy, a boot
+#      without programs and one on the fallback root
 #   3. controlled CPU exception tests (#PF, #GP, #UD, #DE) -> diagnostics + exit 37
 #   4. invalid kernel image -> boot loader error screen
 #   5. screenshots of the kernel screen and the loader error screen via QMP
@@ -18,6 +20,8 @@ param(
 . (Join-Path $PSScriptRoot 'common.ps1')
 # "[user] fs: ..." checks init runs (userspace/apps/src/fs_checks.rs).
 $ExpectedFsChecks = 19
+# "[user] exec: ..." checks init runs (userspace/apps/src/exec_checks.rs).
+$ExpectedExecChecks = 13
 $results = New-Object System.Collections.Generic.List[object]
 $testDir = Join-Path $BuildDir 'test'
 New-Item -ItemType Directory -Force $testDir | Out-Null
@@ -120,6 +124,16 @@ try {
             -and $r.Log -match 'as-user 1000: 12 of 12 permission checks passed'
         Record 'OSyx Std fs from ring 3 (all mounts, perms, devices)' $ok "$fsOk of $ExpectedFsChecks fs checks passed"
 
+        # Program loader: init from /bin/init on the ext4 root, probe from
+        # /usr/bin, argv / envp / auxv, execve (5 in a chain + 1), refusals.
+        $execOk = [regex]::Matches($r.Log, '\[user\] exec: [^\n]* \.\.\. ok').Count
+        $oldImages = [regex]::Matches($r.Log, 'process \d+ \(probe\): old image released \d+ frames, no leak').Count
+        # -cnotmatch: one check is named "exec: failed execve ...".
+        $ok = $execOk -eq $ExpectedExecChecks -and $r.Log -cnotmatch '\[user\] exec: [^\n]*FAILED' -and $oldImages -eq 6 `
+            -and $r.Log -match 'process 1 \(init\): /bin/init spawned by 0' -and $r.Log -match '\(probe\): /usr/bin/probe spawned by' `
+            -and $r.Log -match '\[test\] program loader: search path, permissions, bad images \.\.\. ok'
+        Record 'ELF loader: spawn/execve from /bin and /usr/bin, argv, envp, auxv' $ok "$execOk of $ExpectedExecChecks exec checks passed, $oldImages execve image swaps"
+
         # The files init left on the ESP, read back on the host by mtools (an
         # independent FAT implementation) after QEMU has exited.
         $mtype = Find-Tool 'mtype' @('C:\msys64\ucrt64\bin\mtype.exe')
@@ -205,9 +219,18 @@ try {
 
         & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast' -NoInit | Out-Null
         $r = Invoke-Boot 'boot-no-init' $TimeoutSec
-        $ok = $r.Exit -eq 33 -and $r.Log -match 'no \\EFI\\OSYX\\BIN directory' -and $r.Log -match 'no init program' `
+        $ok = $r.Exit -eq 33 -and $r.Log -match 'no \\EFI\\OSYX\\BIN directory' -and $r.Log -match 'no init program "init" in /bin or /usr/bin' `
             -and $r.Log -notmatch 'process 1'
         Record 'boot without init program' $ok "exit=$($r.Exit)"
+
+        # No usable root partition: the boot modules become /bin of the
+        # fallback tmpfs root and init starts from there.
+        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast root=vdz init.args=exit,0' | Out-Null
+        $r = Invoke-Boot 'boot-fallback-root' $TimeoutSec
+        $ok = $r.Exit -eq 33 -and $r.Log -match 'storage: root=vdz: no such block device' `
+            -and $r.Log -match 'storage: boot module init installed as /bin/init' -and $r.Log -match 'process 1 \(init\): /bin/init spawned by 0' `
+            -and $r.Log -match 'init: exit status 0x0, expected 0x0: ok' -and $r.Log -match 'self-tests: \d+ passed, 0 failed'
+        Record 'fallback root: init from boot modules in /bin' $ok "exit=$($r.Exit)"
 
         # --- 3. controlled exceptions --------------------------------------
         $faults = @{
