@@ -6,8 +6,9 @@
 //!   plain [`SpinLock`] taken in thread context could otherwise be re-taken by
 //!   an interrupt handler on the same CPU and deadlock.
 //! * Lock order (outer to inner):
-//!   process TABLE -> FUTEX -> SCHED -> OUTPUT_TAIL -> HEAP -> PAGING -> FRAMES
-//!   -> SERIAL.
+//!   [`KMutex`]es (sleeping: open file -> volume -> block device) ->
+//!   BLOCK/MOUNTS registries -> process TABLE -> FUTEX -> KMutex state ->
+//!   SCHED -> OUTPUT_TAIL -> HEAP -> PAGING -> MMIO -> FRAMES -> PCI -> SERIAL.
 //!   Never acquire an outer lock while holding an inner one.
 //! * Because every lock disables interrupts, a thread is never preempted while
 //!   holding one (single CPU); the timer handler only takes SCHED (and, when it
@@ -143,6 +144,101 @@ impl<T> Drop for IrqGuard<'_, T> {
         self.guard.take();
         if self.were_enabled {
             cpu::enable_interrupts();
+        }
+    }
+}
+
+struct MutexState {
+    locked: bool,
+    waiters: alloc::vec::Vec<crate::sched::Tid>,
+}
+
+/// A sleeping mutex for long critical sections such as disk I/O: waiting
+/// threads block instead of spinning, and interrupts stay enabled while it
+/// is held (so the holder can be preempted and can itself block).
+///
+/// Rules: never take a `KMutex` while holding a spinlock, never in interrupt
+/// context, and only after the scheduler is running. Its internal state lock
+/// sits above SCHED in the lock order. Unlocking wakes every waiter; they
+/// compete again, which keeps the wake-up logic trivially lossless.
+pub struct KMutex<T> {
+    state: IrqSpinLock<MutexState>,
+    data: UnsafeCell<T>,
+}
+
+// SAFETY: access to `data` is serialised by `state.locked`.
+unsafe impl<T: Send> Sync for KMutex<T> {}
+unsafe impl<T: Send> Send for KMutex<T> {}
+
+pub struct KMutexGuard<'a, T> {
+    m: &'a KMutex<T>,
+}
+
+impl<T> KMutex<T> {
+    pub const fn new(v: T) -> Self {
+        KMutex {
+            state: IrqSpinLock::new(MutexState { locked: false, waiters: alloc::vec::Vec::new() }),
+            data: UnsafeCell::new(v),
+        }
+    }
+
+    pub fn lock(&self) -> KMutexGuard<'_, T> {
+        loop {
+            let were_enabled = cpu::interrupts_enabled();
+            cpu::disable_interrupts();
+            let acquired = {
+                let mut s = self.state.lock();
+                if !s.locked {
+                    s.locked = true;
+                    true
+                } else {
+                    let me = crate::sched::current_tid();
+                    if !s.waiters.contains(&me) {
+                        s.waiters.push(me);
+                    }
+                    // Interrupts are off: the holder cannot unlock (and miss
+                    // us) between this and the switch.
+                    crate::sched::mark_current_blocked();
+                    false
+                }
+            };
+            if !acquired {
+                crate::sched::schedule();
+            }
+            if were_enabled {
+                cpu::enable_interrupts();
+            }
+            if acquired {
+                return KMutexGuard { m: self };
+            }
+        }
+    }
+}
+
+impl<T> Deref for KMutexGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // SAFETY: the guard proves exclusive ownership.
+        unsafe { &*self.m.data.get() }
+    }
+}
+
+impl<T> DerefMut for KMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: the guard proves exclusive ownership.
+        unsafe { &mut *self.m.data.get() }
+    }
+}
+
+impl<T> Drop for KMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        let waiters = {
+            let mut s = self.m.state.lock();
+            s.locked = false;
+            core::mem::take(&mut s.waiters)
+        };
+        for t in waiters {
+            crate::sched::wake(t);
         }
     }
 }

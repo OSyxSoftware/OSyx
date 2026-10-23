@@ -10,7 +10,7 @@
 use crate::arch::cpu;
 use crate::arch::gdt::{KERNEL_CS, USER_DS};
 use crate::fixup::{copy_from_user, copy_to_user};
-use crate::{interrupts, mem, process, sched};
+use crate::{interrupts, mem, process, sched, vfs};
 use core::arch::global_asm;
 use osyx_abi::{nr, Errno, SystemInfo};
 
@@ -151,6 +151,22 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             }
         }
         nr::GETTID => Ok(sched::current_tid()),
+        nr::OPEN => user_path(f.rdi, f.rsi).and_then(|p| vfs::open(&p, f.rdx)).and_then(process::add_handle),
+        nr::CLOSE => process::close_handle(f.rdi).map(|_| 0),
+        nr::READ => sys_read(f.rdi, f.rsi, f.rdx),
+        nr::SEEK => with_file(f.rdi, |o| o.seek(f.rsi as i64, f.rdx)),
+        nr::FSTAT => with_file(f.rdi, |o| o.stat()).and_then(|st| put_user(f.rsi, &st)),
+        nr::STAT => user_path(f.rdi, f.rsi).and_then(|p| vfs::stat(&p)).and_then(|st| put_user(f.rdx, &st)),
+        nr::READDIR => sys_readdir(f.rdi, f.rsi, f.rdx),
+        nr::MKDIR => user_path(f.rdi, f.rsi).and_then(|p| vfs::mkdir(&p)).map(|_| 0),
+        nr::UNLINK => user_path(f.rdi, f.rsi).and_then(|p| vfs::unlink(&p)).map(|_| 0),
+        nr::RMDIR => user_path(f.rdi, f.rsi).and_then(|p| vfs::rmdir(&p)).map(|_| 0),
+        nr::RENAME => user_path(f.rdi, f.rsi)
+            .and_then(|from| Ok((from, user_path(f.rdx, f.r10)?)))
+            .and_then(|(from, to)| vfs::rename(&from, &to))
+            .map(|_| 0),
+        nr::FTRUNCATE => with_file(f.rdi, |o| o.truncate(f.rsi)).map(|_| 0),
+        nr::FSYNC => with_file(f.rdi, |o| o.sync()).map(|_| 0),
         _ => Err(Errno::NotSupported),
     };
     // Safe point: a thread whose process is exiting ends here instead of
@@ -167,15 +183,21 @@ fn ns_to_ticks(ns: u64) -> u64 {
     ns.div_ceil(tick_ns)
 }
 
+/// Bounce buffer size for file data between user memory and the VFS.
+const FILE_CHUNK: usize = 64 * 1024;
+
 fn sys_write(fd: u64, buf: u64, len: u64) -> Result<u64, Errno> {
-    if fd != osyx_abi::STDOUT && fd != osyx_abi::STDERR {
-        return Err(Errno::BadHandle);
-    }
     if len > osyx_abi::MAX_WRITE as u64 {
         return Err(Errno::InvalidArgument);
     }
     if !crate::fixup::user_range_ok(buf, len) {
         return Err(Errno::Fault);
+    }
+    if fd >= osyx_abi::FIRST_FILE_HANDLE {
+        return write_file(fd, buf, len as usize);
+    }
+    if fd != osyx_abi::STDOUT && fd != osyx_abi::STDERR {
+        return Err(Errno::BadHandle);
     }
     let mut chunk = [0u8; 512];
     let mut done = 0;
@@ -186,6 +208,98 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> Result<u64, Errno> {
         done += n as u64;
     }
     Ok(len)
+}
+
+/// Copies an absolute path argument out of user memory.
+fn user_path(ptr: u64, len: u64) -> Result<alloc::string::String, Errno> {
+    if len == 0 || len > osyx_abi::MAX_PATH as u64 {
+        return Err(Errno::InvalidArgument);
+    }
+    let mut buf = alloc::vec![0u8; len as usize];
+    copy_from_user(&mut buf, ptr)?;
+    if buf.contains(&0) {
+        return Err(Errno::InvalidArgument);
+    }
+    alloc::string::String::from_utf8(buf).map_err(|_| Errno::InvalidArgument)
+}
+
+fn with_file<T>(handle: u64, op: impl FnOnce(&mut vfs::OpenFile) -> Result<T, Errno>) -> Result<T, Errno> {
+    let file = process::get_handle(handle)?;
+    let mut g = file.lock();
+    op(&mut g)
+}
+
+/// Copies a plain `repr(C)` value to user memory.
+fn put_user<T: Copy>(addr: u64, v: &T) -> Result<u64, Errno> {
+    // SAFETY: only used with padding-free repr(C) ABI structs.
+    let bytes = unsafe { core::slice::from_raw_parts(v as *const T as *const u8, core::mem::size_of::<T>()) };
+    copy_to_user(addr, bytes)?;
+    Ok(0)
+}
+
+/// Reads in chunks; after a chunk has been delivered, a later failure ends
+/// the call with the bytes delivered so far (like a short read).
+fn sys_read(handle: u64, buf: u64, len: u64) -> Result<u64, Errno> {
+    if handle < osyx_abi::FIRST_FILE_HANDLE {
+        return Err(Errno::BadHandle);
+    }
+    let len = len.min(osyx_abi::MAX_READ as u64) as usize;
+    if !crate::fixup::user_range_ok(buf, len as u64) {
+        return Err(Errno::Fault);
+    }
+    with_file(handle, |o| {
+        let mut k = alloc::vec![0u8; len.min(FILE_CHUNK)];
+        let mut done = 0;
+        while done < len {
+            let want = (len - done).min(k.len());
+            let n = match o.read(&mut k[..want]).and_then(|n| copy_to_user(buf + done as u64, &k[..n]).map(|_| n)) {
+                Ok(n) => n,
+                Err(e) if done == 0 => return Err(e),
+                Err(_) => break,
+            };
+            o.advance(n);
+            done += n;
+            if n < want {
+                break;
+            }
+        }
+        Ok(done as u64)
+    })
+}
+
+fn write_file(handle: u64, buf: u64, len: usize) -> Result<u64, Errno> {
+    with_file(handle, |o| {
+        let mut k = alloc::vec![0u8; len.min(FILE_CHUNK)];
+        let mut done = 0;
+        while done < len {
+            let n = (len - done).min(k.len());
+            let r = copy_from_user(&mut k[..n], buf + done as u64).and_then(|_| o.write(&k[..n]));
+            match r {
+                Ok(w) => {
+                    done += w;
+                    if w < n {
+                        break;
+                    }
+                }
+                Err(e) if done == 0 => return Err(e),
+                Err(_) => break,
+            }
+        }
+        Ok(done as u64)
+    })
+}
+
+fn sys_readdir(handle: u64, buf: u64, len: u64) -> Result<u64, Errno> {
+    let len = len.min(FILE_CHUNK as u64);
+    if !crate::fixup::user_range_ok(buf, len) {
+        return Err(Errno::Fault);
+    }
+    with_file(handle, |o| {
+        let mut k = alloc::vec![0u8; len as usize];
+        let n = o.readdir(&mut k)?;
+        copy_to_user(buf, &k[..n])?;
+        Ok(n as u64)
+    })
 }
 
 fn sys_sysinfo(out: u64) -> Result<u64, Errno> {

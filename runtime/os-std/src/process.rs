@@ -1,7 +1,7 @@
 //! Processes: exit, and starting and waiting for child programs.
 //!
-//! Programs are the boot modules in `\EFI\OSYX\BIN\` (there is no filesystem
-//! yet), started by file name:
+//! Programs are the boot modules in `\EFI\OSYX\BIN\` (starting a program from
+//! a path on the VFS is not implemented yet), started by file name:
 //!
 //! ```ignore
 //! let status = Command::new("worker").arg("exit").arg("7").status()?;

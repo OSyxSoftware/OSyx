@@ -1,8 +1,91 @@
-//! Byte-oriented I/O: the [`Write`] trait, standard output and error.
+//! Byte-oriented I/O: the [`Read`], [`Write`] and [`Seek`] traits, standard
+//! output and error.
 
 use crate::error::{Error, ErrorKind, Result};
 use crate::sys;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
+
+pub trait Read {
+    /// Reads some bytes into `buf`, returning how many (0 = end of data).
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+
+    /// Fills `buf` completely or fails with `UnexpectedEof`.
+    fn read_exact(&mut self, mut buf: &mut [u8]) -> Result<()> {
+        while !buf.is_empty() {
+            match self.read(buf)? {
+                0 => return Err(Error::new(ErrorKind::UnexpectedEof, "failed to fill whole buffer")),
+                n => buf = &mut buf[n..],
+            }
+        }
+        Ok(())
+    }
+
+    /// Appends everything up to the end of the data to `buf`.
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
+        let start = buf.len();
+        let mut chunk = 8 * 1024;
+        loop {
+            let len = buf.len();
+            buf.resize(len + chunk, 0);
+            match self.read(&mut buf[len..]) {
+                Ok(0) => {
+                    buf.truncate(len);
+                    return Ok(len - start);
+                }
+                Ok(n) => {
+                    buf.truncate(len + n);
+                    if n == chunk && chunk < 256 * 1024 {
+                        chunk *= 2;
+                    }
+                }
+                Err(e) => {
+                    buf.truncate(len);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Appends everything up to the end of the data, which must be UTF-8.
+    fn read_to_string(&mut self, buf: &mut String) -> Result<usize> {
+        let mut bytes = Vec::new();
+        let n = self.read_to_end(&mut bytes)?;
+        let s = core::str::from_utf8(&bytes).map_err(|_| Error::new(ErrorKind::InvalidData, "stream did not contain valid UTF-8"))?;
+        buf.push_str(s);
+        Ok(n)
+    }
+}
+
+impl Read for &[u8] {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let n = buf.len().min(self.len());
+        buf[..n].copy_from_slice(&self[..n]);
+        *self = &self[n..];
+        Ok(n)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeekFrom {
+    Start(u64),
+    End(i64),
+    Current(i64),
+}
+
+pub trait Seek {
+    /// Moves the position; returns the new position from the start.
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64>;
+
+    fn rewind(&mut self) -> Result<()> {
+        self.seek(SeekFrom::Start(0)).map(|_| ())
+    }
+
+    fn stream_position(&mut self) -> Result<u64> {
+        self.seek(SeekFrom::Current(0))
+    }
+}
 
 pub trait Write {
     /// Writes some prefix of `buf`, returning how many bytes were written.
@@ -173,6 +256,25 @@ mod tests {
         v.write_all(b"OSyx ").unwrap();
         Write::write_fmt(&mut v, format_args!("{}-{:04}", "std", 7)).unwrap();
         assert_eq!(v, b"OSyx std-0007");
+    }
+
+    #[test]
+    fn read_helpers_on_slices() {
+        let data: Vec<u8> = (0..20_000u32).map(|i| i as u8).collect();
+        let mut src = &data[..];
+        let mut head = [0u8; 3];
+        src.read_exact(&mut head).unwrap();
+        let mut rest = Vec::new();
+        assert_eq!(src.read_to_end(&mut rest).unwrap(), 19_997);
+        assert_eq!(head, [0, 1, 2]);
+        assert_eq!(&rest[..], &data[3..]);
+        let mut short = &b"ab"[..];
+        assert_eq!(short.read_exact(&mut [0u8; 3]).unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        let mut s = String::from(">");
+        "zażółć".as_bytes().read_to_string(&mut s).unwrap();
+        assert_eq!(s, ">zażółć");
+        let mut bad = &[0xFFu8, 0xFE][..];
+        assert_eq!(bad.read_to_string(&mut s).unwrap_err().kind(), ErrorKind::InvalidData);
     }
 
     #[test]

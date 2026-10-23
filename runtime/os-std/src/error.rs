@@ -17,6 +17,20 @@ pub enum ErrorKind {
     WouldBlock,
     TimedOut,
     Interrupted,
+    AlreadyExists,
+    NotADirectory,
+    IsADirectory,
+    DirectoryNotEmpty,
+    StorageFull,
+    FileTooLarge,
+    ReadOnlyFilesystem,
+    CrossesDevices,
+    /// A read ended before the requested amount of data.
+    UnexpectedEof,
+    /// Data was not valid for the operation (e.g. not UTF-8).
+    InvalidData,
+    /// Storage hardware or volume error.
+    Io,
     Other,
 }
 
@@ -34,6 +48,17 @@ impl ErrorKind {
             ErrorKind::WouldBlock => "operation would block",
             ErrorKind::TimedOut => "timed out",
             ErrorKind::Interrupted => "interrupted",
+            ErrorKind::AlreadyExists => "entity already exists",
+            ErrorKind::NotADirectory => "not a directory",
+            ErrorKind::IsADirectory => "is a directory",
+            ErrorKind::DirectoryNotEmpty => "directory not empty",
+            ErrorKind::StorageFull => "no storage space",
+            ErrorKind::FileTooLarge => "file too large",
+            ErrorKind::ReadOnlyFilesystem => "read-only filesystem or storage medium",
+            ErrorKind::CrossesDevices => "cross-device link or rename",
+            ErrorKind::UnexpectedEof => "unexpected end of file",
+            ErrorKind::InvalidData => "invalid data",
+            ErrorKind::Io => "I/O error",
             ErrorKind::Other => "other error",
         }
     }
@@ -86,6 +111,16 @@ impl From<Errno> for Error {
             Errno::WouldBlock => ErrorKind::WouldBlock,
             Errno::TimedOut => ErrorKind::TimedOut,
             Errno::Interrupted => ErrorKind::Interrupted,
+            Errno::AlreadyExists => ErrorKind::AlreadyExists,
+            Errno::NotADirectory => ErrorKind::NotADirectory,
+            Errno::IsADirectory => ErrorKind::IsADirectory,
+            Errno::DirectoryNotEmpty => ErrorKind::DirectoryNotEmpty,
+            Errno::NoSpace => ErrorKind::StorageFull,
+            Errno::Io => ErrorKind::Io,
+            Errno::FileTooLarge => ErrorKind::FileTooLarge,
+            Errno::ReadOnly => ErrorKind::ReadOnlyFilesystem,
+            Errno::TooManyHandles => ErrorKind::OutOfMemory,
+            Errno::CrossDevice => ErrorKind::CrossesDevices,
         };
         Error { kind, errno: Some(e), message: None }
     }

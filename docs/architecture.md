@@ -10,6 +10,7 @@ UEFI firmware (OVMF)
        ▼
   kernel (ring 0)  ── kernel (+ kernel/mm, boot/gfx, shared/abi)
        │  GDT/IDT, memory, timer, scheduler, display, self-tests, processes
+       │  PCI, virtio-blk, block layer, VFS (+ storage/fat)
        │  SYSCALL/SYSRET (shared/abi)
        ▼
   init, worker (ring 3) ── userspace/apps  (+ runtime/os-std, runtime/os-sys)
@@ -25,7 +26,7 @@ UEFI firmware (OVMF)
   allocators, locks and graphics are all in-tree. Builds use stable Rust.
 - **Host-testable cores.** Hardware-independent algorithms live in `no_std`
   crates with host unit tests (`boot/elf`, `boot/gfx`, `kernel/mm`,
-  `shared/*`, `runtime/os-std` host back end). Hardware paths are tested by
+  `storage/fat`, `shared/*`, `runtime/os-std` host back end). Hardware paths are tested by
   in-kernel self-tests and QEMU boots.
 - **Untrusted input is validated.** Kernel and user ELF images, BootInfo,
   and every user pointer passed to a system call.
@@ -42,15 +43,18 @@ UEFI firmware (OVMF)
 | Frame allocator, paging, kernel heap | Implemented | host + in-kernel tests |
 | Timer interrupts (PIC/PIT) | Implemented | in-kernel test |
 | Framebuffer status screen | Implemented | QEMU screenshot |
-| User processes, ring 3, SYSCALL ABI v3 | Implemented | QEMU user tests |
+| User processes, ring 3, SYSCALL ABI v4 | Implemented | QEMU user tests |
 | Threads per process, futexes, FS-base TLS | Implemented (single CPU) | in-kernel + QEMU user tests |
 | Kernel threads, preemptive scheduler, FPU state | Implemented (single CPU) | in-kernel + QEMU user tests |
 | spawn / wait / zombies / orphans | Implemented | QEMU user tests |
 | OSyx Std (convenience std) | Partially implemented | host tests + running on OSyx |
 | Genuine Rust `std` port | Planned | Not tested |
 | SMP | Planned | Not tested |
-| Filesystem (FAT32, VFS) | Planned | Not tested |
-| ACPI, APIC, PCI, drivers | Planned | Not tested |
+| PCI enumeration (port I/O config space) | Implemented | in-kernel test, QEMU |
+| virtio-blk (modern virtio-pci, polled) + block layer | Implemented | in-kernel tests, QEMU |
+| FAT32 driver (`storage/fat`) | Implemented (no timestamps) | host tests incl. mtools both ways; QEMU |
+| VFS, per-process file handles, ABI v4 file calls | Implemented | in-kernel + QEMU user tests, host mtools check of the written disk |
+| ACPI, APIC, other drivers (AHCI, NVMe, input) | Planned | Not tested |
 | C++23 components | Planned (no current need) | Not tested |
 | PE32+ parser | Implemented (headers, sections, imports, exports, relocations, TLS, exception data) | host: fixtures, malformed, fuzz-style robustness; System32 sweep |
 | PE32+ loader | Planned | Not tested |

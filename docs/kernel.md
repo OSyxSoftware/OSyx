@@ -17,8 +17,11 @@ as a static ELF at `0xFFFF_FFFF_8000_0000` with three W^X segments
 6. PIC remapped (vectors 32–47), PIT at 100 Hz, interrupts enabled, SSE
    enabled for user code, scheduler started (the boot flow becomes thread 1,
    `kmain`; thread 2 is `idle`).
-7. Framebuffer status screen, self-tests, `init` spawned and waited for,
-   then `kmain` animates the status screen (sleeping between frames).
+7. PCI enumeration, virtio-blk disks registered (`vda`, `vdb`, ...), FAT32
+   volumes mounted by the VFS ([storage.md](storage.md)).
+8. Framebuffer status screen, self-tests, `init` spawned and waited for,
+   then `kmain` animates the status screen (sleeping between frames). With
+   `test.exit` the volumes are flushed before QEMU is stopped.
 
 ## Interrupts and exceptions
 
@@ -34,9 +37,13 @@ as a static ELF at `0xFFFF_FFFF_8000_0000` with three W^X segments
 ## Locking
 
 `sync.rs` provides `SpinLock`, `IrqSpinLock` (interrupts disabled while
-held) and `BootCell`. All kernel data uses `IrqSpinLock`, so a thread is never
-preempted while holding a lock. Lock order (outer → inner):
-`process TABLE → FUTEX → SCHED → OUTPUT_TAIL → HEAP → PAGING → FRAMES → SERIAL`.
+held), `BootCell` and `KMutex`, a sleeping mutex for long operations (file
+system and disk I/O): waiters block in the scheduler instead of spinning,
+and the holder may be preempted. Spinlocked data uses `IrqSpinLock`, so a
+thread is never preempted while holding a spinlock. A `KMutex` is never
+taken while a spinlock is held. Lock order (outer → inner):
+`KMutex (open file → volume → disk) → BLOCK/MOUNTS → process TABLE → FUTEX →
+KMutex state → SCHED → OUTPUT_TAIL → HEAP → PAGING → MMIO → FRAMES → PCI → SERIAL`.
 The panic path may force-unlock SERIAL and only try-locks the display.
 
 ## Threads and scheduling (`sched.rs`)
@@ -80,8 +87,10 @@ The panic path may force-unlock SERIAL and only try-locks the display.
 - Frame accounting: every frame a process causes (root, page tables, pages)
   is counted; teardown checks that exactly that many come back and logs
   `FRAME LEAK` otherwise.
+- File handles: a per-process table (`3..`, at most 64) of open VFS files;
+  whatever is still open when the last thread ends is closed.
 - Limits: 64 processes, 256 MiB of `map` memory per process, 16 KiB of
-  arguments.
+  arguments, 64 open handles.
 
 ## Self-tests (run on every boot)
 
@@ -90,11 +99,14 @@ fixups (#GP and #PF) · identity map removed · kernel W^X · kernel heap
 (including growth) · breakpoint exception · timer interrupts · user copy
 validation · address space lifecycle · preemptive kernel threads (two
 threads that never yield both make progress) · sleep and join · FPU/SSE
-state per thread · FS base per thread.
+state per thread · FS base per thread · PCI enumeration · block device I/O ·
+VFS files and directories (incl. two concurrent writer threads and a volume
+check). The storage tests skip when no writable disk is attached.
 
 ## Not implemented yet
 
 Thread priorities, SMP and per-CPU data via `swapgs` (the futex and
 block/wake protocols rely on disabling interrupts on a single CPU and must be
 revisited for SMP), shared memory between processes, local APIC/IOAPIC, ACPI
-parsing, PCI, storage and filesystems, keyboard input, XSAVE (AVX state).
+parsing, PCIe ECAM, device interrupts/MSI-X, storage controllers other than
+virtio-blk, file systems other than FAT32, keyboard input, XSAVE (AVX state).

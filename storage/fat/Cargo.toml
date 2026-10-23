@@ -1,0 +1,8 @@
+[package]
+name = "osyx-fat"
+description = "FAT32 file system driver (read/write, long names, mkfs, consistency check)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

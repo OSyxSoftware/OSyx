@@ -38,6 +38,10 @@ name = "osyx-elf"
 version = "0.1.0"
 
 [[package]]
+name = "osyx-fat"
+version = "0.1.0"
+
+[[package]]
 name = "osyx-gfx"
 version = "0.1.0"
 
@@ -48,6 +52,7 @@ dependencies = [
  "osyx-abi",
  "osyx-bootinfo",
  "osyx-elf",
+ "osyx-fat",
  "osyx-gfx",
  "osyx-mm",
 ]

@@ -11,6 +11,7 @@
 | `0xFFFF_8000_0000_0000 + phys` | HHDM: direct map of RAM (NX) |
 | `0xFFFF_C000_0000_0000` | kernel heap (grows on demand, max 1 GiB) |
 | `0xFFFF_D000_0000_0000` | scratch page for paging self-tests |
+| `0xFFFF_E000_0000_0000` (512 GiB) | MMIO window: device BARs mapped uncached, NX (`map_mmio`) |
 | `0xFFFF_FFFF_8000_0000` | kernel image |
 
 ## Physical frames (`kernel/mm/src/frames.rs`)

@@ -26,8 +26,9 @@ pub fn heap_stats() -> osyx_mm::heap::HeapStats {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod raw {
     pub use os_sys::{
-        futex_wait, futex_wake, gettid, map, raw_syscall, sysinfo_raw, thread_exit, unmap, wait_raw, write_raw, Errno,
-        PROT_EXEC, PROT_READ, PROT_WRITE,
+        close, futex_wait, futex_wake, gettid, map, open, raw_syscall, read, read_raw, sysinfo_raw, thread_exit, unmap,
+        wait_raw, write, write_raw, Errno, ABI_VERSION, OPEN_CREATE, OPEN_READ, OPEN_WRITE, PROT_EXEC, PROT_READ,
+        PROT_WRITE,
     };
 }
 

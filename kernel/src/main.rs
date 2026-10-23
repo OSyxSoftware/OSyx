@@ -6,7 +6,9 @@
 //!  3. frame allocator, NX state, removal of the boot identity map
 //!  4. kernel heap, then reclaim of bootloader memory
 //!  5. PIC/PIT timer, interrupts on, framebuffer status screen, self-tests
-//!  6. scheduler (this flow becomes thread "kmain"), init program in ring 3
+//!  6. scheduler (this flow becomes thread "kmain")
+//!  7. PCI enumeration, disk drivers, volume mounts (drivers sleep, so they
+//!     need the scheduler), then self-tests and the init program in ring 3
 
 #![no_std]
 #![no_main]
@@ -14,12 +16,15 @@
 extern crate alloc;
 
 mod arch;
+mod block;
 mod display;
+mod drivers;
 mod fixup;
 mod futex;
 mod interrupts;
 mod mem;
 mod modules;
+mod pci;
 mod process;
 mod qemu;
 mod sched;
@@ -27,6 +32,7 @@ mod selftest;
 mod serial;
 mod sync;
 mod syscall;
+mod vfs;
 
 use alloc::vec::Vec;
 use arch::cpu;
@@ -136,6 +142,11 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     kprintln!("timer: PIT at {} Hz, interrupts enabled", arch::pic::TIMER_HZ);
     sched::init();
     kprintln!("scheduler: round robin, {} ms time slice", sched::TIME_SLICE_TICKS * 10);
+    let pci_devices = pci::enumerate();
+    pci::log_devices(&pci_devices);
+    let disks = block::probe(&pci_devices);
+    let volumes = vfs::mount_all();
+    kprintln!("storage: {} PCI functions, {} disks, {} volumes mounted", pci_devices.len(), disks, volumes);
 
     let mut footer = Line::new();
     let fb = &raw.framebuffer;
@@ -168,6 +179,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
         trigger_fault(kind);
     }
     if boot.has_option("test.exit") {
+        vfs::sync_all();
         kprintln!("test.exit: leaving QEMU ({})", if ok { "success" } else { "failure" });
         qemu::exit(if ok { qemu::ExitCode::Success } else { qemu::ExitCode::TestFailure });
     }

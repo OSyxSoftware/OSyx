@@ -27,6 +27,15 @@ pub unsafe fn outl(port: u16, v: u32) {
 }
 
 /// # Safety
+/// See [`outb`].
+#[inline]
+pub unsafe fn inl(port: u16) -> u32 {
+    let v: u32;
+    asm!("in eax, dx", out("eax") v, in("dx") port, options(nomem, nostack, preserves_flags));
+    v
+}
+
+/// # Safety
 /// Reading an MSR that does not exist raises #GP.
 pub unsafe fn rdmsr(msr: u32) -> u64 {
     let (lo, hi): (u32, u32);

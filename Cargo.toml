@@ -11,6 +11,7 @@ members = [
     "kernel/mm",
     "runtime/os-sys",
     "runtime/os-std",
+    "storage/fat",
     "userspace/apps",
 ]
 # Host-testable crates only. The loader, kernel and user programs are freestanding and are
@@ -24,6 +25,7 @@ default-members = [
     "kernel/mm",
     "runtime/os-sys",
     "runtime/os-std",
+    "storage/fat",
 ]
 
 [workspace.package]

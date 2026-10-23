@@ -1,4 +1,4 @@
-//! OSyx system call ABI, version 3.
+//! OSyx system call ABI, version 4.
 //!
 //! Calling convention (x86-64 `syscall` instruction):
 //! * `rax` = system call number, arguments in `rdi, rsi, rdx, r10, r8, r9`.
@@ -16,7 +16,7 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 /// Highest user virtual address + 1 (the canonical lower half).
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -73,6 +73,134 @@ pub mod nr {
     pub const SET_FS_BASE: u64 = 14;
     /// `gettid() -> tid`
     pub const GETTID: u64 = 15;
+    /// `open(path: *const u8, path_len: usize, flags: u64) -> handle`
+    ///
+    /// Opens a file or directory by absolute path (`OPEN_*` flags). A
+    /// directory can only be opened for reading and is then listed with
+    /// `readdir`. Handles are per process, start at 3 and are closed when
+    /// the process exits.
+    pub const OPEN: u64 = 16;
+    /// `close(handle) -> 0`
+    pub const CLOSE: u64 = 17;
+    /// `read(handle, buf: *mut u8, len: usize) -> bytes` (0 at end of file).
+    /// `write` (number 1) also accepts file handles.
+    pub const READ: u64 = 18;
+    /// `seek(handle, offset: i64, whence: u64) -> new position` (`SEEK_*`).
+    pub const SEEK: u64 = 19;
+    /// `fstat(handle, out: *mut FileStat) -> 0`
+    pub const FSTAT: u64 = 20;
+    /// `stat(path, path_len, out: *mut FileStat) -> 0`
+    pub const STAT: u64 = 21;
+    /// `readdir(handle, buf: *mut u8, len: usize) -> bytes`
+    ///
+    /// Fills `buf` with as many [`DirRecord`](super::DirRecord)s as fit and
+    /// returns the number of bytes used; 0 means the listing is complete.
+    pub const READDIR: u64 = 22;
+    /// `mkdir(path, path_len) -> 0`
+    pub const MKDIR: u64 = 23;
+    /// `unlink(path, path_len) -> 0`: removes a file.
+    pub const UNLINK: u64 = 24;
+    /// `rmdir(path, path_len) -> 0`: removes an empty directory.
+    pub const RMDIR: u64 = 25;
+    /// `rename(from, from_len, to, to_len) -> 0`: replaces an existing file
+    /// at `to`; both paths must be on the same volume.
+    pub const RENAME: u64 = 26;
+    /// `ftruncate(handle, len: u64) -> 0`
+    pub const FTRUNCATE: u64 = 27;
+    /// `fsync(handle) -> 0`: writes cached metadata and flushes the disk.
+    pub const FSYNC: u64 = 28;
+}
+
+pub const OPEN_READ: u64 = 1 << 0;
+pub const OPEN_WRITE: u64 = 1 << 1;
+/// Create the file if it does not exist (requires `OPEN_WRITE`).
+pub const OPEN_CREATE: u64 = 1 << 2;
+/// Truncate to zero length (requires `OPEN_WRITE`).
+pub const OPEN_TRUNCATE: u64 = 1 << 3;
+/// Every write goes to the end of the file.
+pub const OPEN_APPEND: u64 = 1 << 4;
+/// With `OPEN_CREATE`: fail with `AlreadyExists` if the file exists.
+pub const OPEN_EXCLUSIVE: u64 = 1 << 5;
+pub const OPEN_ALL: u64 = (1 << 6) - 1;
+
+pub const SEEK_SET: u64 = 0;
+pub const SEEK_CUR: u64 = 1;
+pub const SEEK_END: u64 = 2;
+
+/// Longest path accepted by the file system calls.
+pub const MAX_PATH: usize = 1024;
+/// Open handles per process.
+pub const MAX_HANDLES: usize = 64;
+/// Largest single `read`.
+pub const MAX_READ: usize = 1 << 20;
+/// First handle number used for files (0-2 are the console streams).
+pub const FIRST_FILE_HANDLE: u64 = 3;
+
+pub const KIND_FILE: u32 = 1;
+pub const KIND_DIR: u32 = 2;
+
+/// File attributes (FAT attribute bits).
+pub const ATTR_READ_ONLY: u32 = 0x01;
+pub const ATTR_HIDDEN: u32 = 0x02;
+pub const ATTR_SYSTEM: u32 = 0x04;
+pub const ATTR_DIRECTORY: u32 = 0x10;
+pub const ATTR_ARCHIVE: u32 = 0x20;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileStat {
+    pub size: u64,
+    /// `KIND_FILE` or `KIND_DIR`.
+    pub kind: u32,
+    pub attributes: u32,
+}
+
+/// One `readdir` record: this header, then `name_len` bytes of UTF-8 name,
+/// padded so the next record starts 8-byte aligned (`record_len` bytes in all).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DirRecord {
+    pub size: u64,
+    pub kind: u32,
+    pub attributes: u16,
+    pub name_len: u16,
+}
+
+pub const DIR_RECORD_HEADER: usize = 16;
+
+impl DirRecord {
+    /// Total bytes of a record with a `name_len`-byte name.
+    pub const fn record_len(name_len: usize) -> usize {
+        (DIR_RECORD_HEADER + name_len + 7) & !7
+    }
+
+    pub fn encode(&self, name: &[u8], out: &mut [u8]) -> Option<usize> {
+        let len = Self::record_len(name.len());
+        if out.len() < len || name.len() != self.name_len as usize {
+            return None;
+        }
+        out[0..8].copy_from_slice(&self.size.to_le_bytes());
+        out[8..12].copy_from_slice(&self.kind.to_le_bytes());
+        out[12..14].copy_from_slice(&self.attributes.to_le_bytes());
+        out[14..16].copy_from_slice(&self.name_len.to_le_bytes());
+        out[16..16 + name.len()].copy_from_slice(name);
+        out[16 + name.len()..len].fill(0);
+        Some(len)
+    }
+
+    /// Parses the record at the start of `buf`: (record, name, record length).
+    pub fn decode(buf: &[u8]) -> Option<(DirRecord, &[u8], usize)> {
+        let h = buf.get(..DIR_RECORD_HEADER)?;
+        let r = DirRecord {
+            size: u64::from_le_bytes(h[0..8].try_into().ok()?),
+            kind: u32::from_le_bytes(h[8..12].try_into().ok()?),
+            attributes: u16::from_le_bytes([h[12], h[13]]),
+            name_len: u16::from_le_bytes([h[14], h[15]]),
+        };
+        let len = Self::record_len(r.name_len as usize);
+        let name = buf.get(DIR_RECORD_HEADER..DIR_RECORD_HEADER + r.name_len as usize)?;
+        (buf.len() >= len).then_some((r, name, len))
+    }
 }
 
 /// Maximum number of threads per process.
@@ -120,24 +248,51 @@ pub enum Errno {
     TimedOut = 10,
     /// A blocking call was interrupted because the process is exiting.
     Interrupted = 11,
+    AlreadyExists = 12,
+    NotADirectory = 13,
+    IsADirectory = 14,
+    DirectoryNotEmpty = 15,
+    /// The volume is full.
+    NoSpace = 16,
+    /// The device reported an error or the volume is damaged.
+    Io = 17,
+    /// The file would exceed the file system's size limit.
+    FileTooLarge = 18,
+    /// The volume or handle does not allow writing.
+    ReadOnly = 19,
+    /// The process already has `MAX_HANDLES` open handles.
+    TooManyHandles = 20,
+    /// `rename` between different volumes.
+    CrossDevice = 21,
 }
+
+const ALL_ERRNOS: [Errno; 21] = [
+    Errno::InvalidArgument,
+    Errno::Fault,
+    Errno::NoMemory,
+    Errno::BadHandle,
+    Errno::NotSupported,
+    Errno::PermissionDenied,
+    Errno::NotFound,
+    Errno::NoChild,
+    Errno::WouldBlock,
+    Errno::TimedOut,
+    Errno::Interrupted,
+    Errno::AlreadyExists,
+    Errno::NotADirectory,
+    Errno::IsADirectory,
+    Errno::DirectoryNotEmpty,
+    Errno::NoSpace,
+    Errno::Io,
+    Errno::FileTooLarge,
+    Errno::ReadOnly,
+    Errno::TooManyHandles,
+    Errno::CrossDevice,
+];
 
 impl Errno {
     pub fn from_raw(v: u64) -> Option<Errno> {
-        Some(match v {
-            1 => Errno::InvalidArgument,
-            2 => Errno::Fault,
-            3 => Errno::NoMemory,
-            4 => Errno::BadHandle,
-            5 => Errno::NotSupported,
-            6 => Errno::PermissionDenied,
-            7 => Errno::NotFound,
-            8 => Errno::NoChild,
-            9 => Errno::WouldBlock,
-            10 => Errno::TimedOut,
-            11 => Errno::Interrupted,
-            _ => return None,
-        })
+        ALL_ERRNOS.iter().copied().find(|&e| e as u64 == v)
     }
 
     pub fn name(self) -> &'static str {
@@ -153,6 +308,16 @@ impl Errno {
             Errno::WouldBlock => "operation would block",
             Errno::TimedOut => "timed out",
             Errno::Interrupted => "interrupted",
+            Errno::AlreadyExists => "already exists",
+            Errno::NotADirectory => "not a directory",
+            Errno::IsADirectory => "is a directory",
+            Errno::DirectoryNotEmpty => "directory not empty",
+            Errno::NoSpace => "no space left on volume",
+            Errno::Io => "I/O error",
+            Errno::FileTooLarge => "file too large",
+            Errno::ReadOnly => "read-only",
+            Errno::TooManyHandles => "too many open handles",
+            Errno::CrossDevice => "cross-volume operation",
         }
     }
 }
@@ -201,22 +366,13 @@ mod tests {
         for v in [0u64, 1, 4096, u64::MAX >> 1] {
             assert_eq!(decode(encode(Ok(v))), Ok(v));
         }
-        for e in [
-            Errno::InvalidArgument,
-            Errno::Fault,
-            Errno::NoMemory,
-            Errno::BadHandle,
-            Errno::NotSupported,
-            Errno::PermissionDenied,
-            Errno::NotFound,
-            Errno::NoChild,
-            Errno::WouldBlock,
-            Errno::TimedOut,
-            Errno::Interrupted,
-        ] {
+        for (i, e) in ALL_ERRNOS.into_iter().enumerate() {
+            assert_eq!(e as usize, i + 1, "errno values are dense");
             assert_eq!(decode(encode(Err(e))), Err(e));
             assert_eq!(Errno::from_raw(e as u64), Some(e));
         }
+        assert_eq!(Errno::from_raw(0), None);
+        assert_eq!(Errno::from_raw(ALL_ERRNOS.len() as u64 + 1), None);
         // Large unsigned values outside the error window are successes.
         assert_eq!(decode(u64::MAX - 5000), Ok(u64::MAX - 5000));
         assert_eq!(decode((-99i64) as u64), Err(Errno::NotSupported));
@@ -225,5 +381,22 @@ mod tests {
     #[test]
     fn sysinfo_layout_is_stable() {
         assert_eq!(core::mem::size_of::<SystemInfo>(), 56);
+        assert_eq!(core::mem::size_of::<FileStat>(), 16);
+        assert_eq!(core::mem::size_of::<DirRecord>(), DIR_RECORD_HEADER);
+    }
+
+    #[test]
+    fn dir_records_round_trip_and_reject_truncation() {
+        let mut buf = [0xAAu8; 64];
+        let rec = DirRecord { size: 1234, kind: KIND_FILE, attributes: 0x20, name_len: 9 };
+        let n = rec.encode(b"hello.txt", &mut buf).unwrap();
+        assert_eq!(n, 32);
+        let (r, name, len) = DirRecord::decode(&buf).unwrap();
+        assert_eq!((r, name, len), (rec, &b"hello.txt"[..], 32));
+        assert!(DirRecord::decode(&buf[..31]).is_none());
+        assert!(rec.encode(b"hello.txt", &mut buf[..31]).is_none());
+        assert!(rec.encode(b"wrong", &mut buf).is_none());
+        assert_eq!(DirRecord::record_len(0), 16);
+        assert_eq!(DirRecord::record_len(1), 24);
     }
 }

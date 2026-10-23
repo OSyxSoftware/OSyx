@@ -50,6 +50,20 @@ try {
             Copy-Item (Join-Path $Root "target\user\x86_64-unknown-none\$profileDir\$bin") (Join-Path $binDir $bin) -Force
         }
     }
+    # Writable FAT32 data disk (second virtio-blk drive, mounted at / by the
+    # kernel), recreated on every build so each boot starts from known files.
+    # init checks these contents; keep them in sync with userspace init.rs.
+    Write-Host '==> creating FAT32 data disk'
+    $seed = Join-Path $BuildDir 'data-seed'
+    if (Test-Path $seed) { Remove-Item $seed -Recurse -Force }
+    New-Item -ItemType Directory -Force (Join-Path $seed 'Docs') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $seed 'hello.txt'), "Hello from the build host!`n")
+    [IO.File]::WriteAllText((Join-Path $seed 'Docs\Read Me Long Name.txt'), "Long file names work.`n")
+    $bytes = New-Object byte[] 150000
+    for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [byte](($i * 13 + 7) % 256) }
+    [IO.File]::WriteAllBytes((Join-Path $seed 'seed.bin'), $bytes)
+    Invoke-Checked 'data disk' { cargo run -q -p osyx-fat --example mkfat32 -- $DataImage 64 OSYXDATA $seed }
+
     $cmdFile = Join-Path $EspDir 'EFI\OSYX\CMDLINE.TXT'
     if ($Cmdline) {
         [IO.File]::WriteAllText($cmdFile, $Cmdline)

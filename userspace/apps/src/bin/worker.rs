@@ -12,6 +12,8 @@
 //! * `threads-exit` return 42 from main while 4 threads are blocked/spinning
 //! * `thread-last` main thread exits first (5); the last thread exits with 9
 //! * `thread-fault` / `thread-panic`: a spawned thread faults / panics
+//! * `fs-write PATH` write "written by worker <pid>" to PATH
+//! * `fs-leak PATH`  write PATH, then exit with 11 handles still open
 
 #![no_std]
 #![no_main]
@@ -20,6 +22,7 @@ use os_std::prelude::*;
 use os_std::process::{self, Command};
 use os_std::sync::atomic::AtomicU32;
 use os_std::time::{Duration, Instant};
+use os_std::fs::{self, File};
 use os_std::{env, thread};
 
 #[path = "../fpu.rs"]
@@ -132,6 +135,36 @@ fn main() -> i32 {
             let h = thread::spawn(|| -> u32 { panic!("panic in a spawned thread") });
             let _ = h.join();
             3
+        }
+        Some("fs-write") => {
+            let text = format!("written by worker {pid}\n");
+            match args.get(2).map(|p| fs::write(p, &text)) {
+                Some(Ok(())) => 0,
+                Some(Err(e)) => {
+                    eprintln!("fs-write {pid}: {e}");
+                    1
+                }
+                None => 2,
+            }
+        }
+        Some("fs-leak") => {
+            // Write a file, then exit without running destructors: the open
+            // handles must be closed by the kernel, and the data kept.
+            let Some(path) = args.get(2) else { return 2 };
+            let mut files = Vec::new();
+            for _ in 0..10 {
+                match File::open("/hello.txt") {
+                    Ok(f) => files.push(f),
+                    Err(_) => return 1,
+                }
+            }
+            let Ok(mut f) = File::create(path) else { return 1 };
+            if f.write_all(b"still here\n").is_err() {
+                return 1;
+            }
+            files.push(f);
+            core::mem::forget(files);
+            process::exit(0)
         }
         other => {
             eprintln!("worker: unknown mode {other:?}");

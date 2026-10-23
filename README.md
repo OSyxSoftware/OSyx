@@ -15,12 +15,17 @@ compatibility layer; that work has not started yet (see
 - Kernel: GDT/TSS/IDT, exception diagnostics, bitmap frame allocator,
   4-level paging with W^X/NX, growable heap, preemptive round-robin scheduler
   with kernel threads and per-thread FPU/SSE and FS state, framebuffer status
-  screen, 15 in-kernel self-tests.
+  screen, 18 in-kernel self-tests.
+- Storage: PCI enumeration, a modern virtio-blk driver, a block layer, an
+  in-tree FAT32 driver with long file names, a VFS with per-process file
+  handles ([docs/storage.md](docs/storage.md)). Files OSyx writes are read
+  back on the host with mtools.
 - User space: multi-threaded ring 3 processes with spawn/wait, zombies and
-  orphans, futexes and FS-base TLS, SYSCALL/SYSRET ABI with pointer
+  orphans, futexes and FS-base TLS, SYSCALL/SYSRET ABI v4 with pointer
   validation, and Rust programs built on OSyx Std (`println!`, collections,
   heap, time, args, `process::Command`, `thread::spawn`, `thread_local!`,
-  `Mutex`, `Condvar`, panics): `init` runs 37 checks using `worker` children.
+  `Mutex`, `Condvar`, `fs::File`, `read_dir`, `path::Path`, panics): `init`
+  runs 49 checks using `worker` children.
 
 - Windows compatibility groundwork: a bounds-checked, zero-copy PE32+ parser
   (headers, sections, imports, exports with forwarders, relocations, TLS,
@@ -31,7 +36,7 @@ compatibility layer; that work has not started yet (see
 
 ```powershell
 .\scripts\check-env.ps1   # verify Rust targets, QEMU, OVMF
-.\scripts\build.ps1       # build loader, kernel, init; assemble build\esp
+.\scripts\build.ps1       # build loader, kernel, init; assemble build\esp and build\data.img
 .\scripts\run-qemu.ps1    # boot in a QEMU window (serial log: build\serial.log)
 .\scripts\test.ps1        # host unit tests, clippy, QEMU boot/fault/user tests
 ```
@@ -46,6 +51,7 @@ compatibility layer; that work has not started yet (see
 | `boot/assets` | generated logo/font assets (`scripts/gen-assets.py`) |
 | `kernel` | the kernel; `kernel/mm` holds host-tested memory algorithms |
 | `compatibility/pe-parser` | PE32+ parser (`osyx-pe`), fixtures, `pe-dump` / `pe-sweep` tools |
+| `storage/fat` | FAT32 driver (`osyx-fat`), `mkfat32` / `fatcheck` tools |
 | `shared/bootinfo`, `shared/abi` | boot protocol and system call ABI |
 | `runtime/os-sys`, `runtime/os-std` | raw system calls, OSyx Std |
 | `userspace/apps` | user programs `init` and `worker` (`\EFI\OSYX\BIN\`) |

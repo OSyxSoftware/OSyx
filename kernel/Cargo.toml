@@ -15,5 +15,6 @@ bench = false
 osyx-abi = { path = "../shared/abi" }
 osyx-bootinfo = { path = "../shared/bootinfo" }
 osyx-elf = { path = "../boot/elf" }
+osyx-fat = { path = "../storage/fat" }
 osyx-gfx = { path = "../boot/gfx" }
 osyx-mm = { path = "mm" }

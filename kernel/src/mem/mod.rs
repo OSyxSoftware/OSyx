@@ -69,6 +69,34 @@ pub fn frame_stats() -> (u64, u64) {
     (fb.free_frames(), fb.total_frames())
 }
 
+/// Virtual window for device memory (PML4 slot 448), mapped uncached.
+const MMIO_BASE: u64 = 0xFFFF_E000_0000_0000;
+const MMIO_LIMIT: u64 = MMIO_BASE + (1 << 39);
+static MMIO_NEXT: IrqSpinLock<u64> = IrqSpinLock::new(MMIO_BASE);
+
+/// Maps `len` bytes of device memory at physical `phys` (uncached,
+/// non-executable) and returns the virtual address of `phys`. Mappings are
+/// permanent (devices stay attached).
+pub fn map_mmio(phys: u64, len: u64) -> Result<u64, paging::MapError> {
+    let start = phys & !(PAGE_SIZE - 1);
+    let end = phys.checked_add(len).ok_or(paging::MapError::NonCanonical)?.next_multiple_of(PAGE_SIZE);
+    let pages = (end - start) / PAGE_SIZE;
+    let base = {
+        let mut next = MMIO_NEXT.lock();
+        let base = *next;
+        if base + pages * PAGE_SIZE > MMIO_LIMIT {
+            return Err(paging::MapError::OutOfMemory);
+        }
+        *next = base + pages * PAGE_SIZE;
+        base
+    };
+    let flags = paging::Flags { writable: true, executable: false, user: false, uncached: true };
+    for i in 0..pages {
+        paging::map(base + i * PAGE_SIZE, start + i * PAGE_SIZE, flags)?;
+    }
+    Ok(base + (phys - start))
+}
+
 /// Returns bootloader-owned memory to the allocator. The caller must have
 /// copied everything it needs out of BootInfo first.
 pub fn reclaim_bootloader_memory(map: &[MemoryDescriptor]) -> u64 {

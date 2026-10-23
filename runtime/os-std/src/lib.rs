@@ -43,8 +43,10 @@ mod sys;
 
 pub mod env;
 pub mod error;
+pub mod fs;
 pub mod io;
 pub mod os;
+pub mod path;
 pub mod process;
 pub mod rt;
 pub mod sync;
@@ -61,7 +63,7 @@ pub const BACKEND: &str = sys::NAME;
 /// The usual imports for OSyx programs.
 pub mod prelude {
     pub use crate::error::{Error, ErrorKind};
-    pub use crate::io::Write as _;
+    pub use crate::io::{Read as _, Seek as _, Write as _};
     pub use crate::sync::{Arc, Condvar, Mutex};
     pub use crate::{eprint, eprintln, print, println};
     pub use alloc::borrow::ToOwned;

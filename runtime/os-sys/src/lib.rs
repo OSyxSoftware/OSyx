@@ -8,12 +8,16 @@
 
 #![no_std]
 
-pub use osyx_abi::{Errno, SystemInfo, ABI_VERSION, CLOCK_MONOTONIC, PROT_EXEC, PROT_READ, PROT_WRITE, STDERR, STDOUT};
+pub use osyx_abi::{
+    DirRecord, Errno, FileStat, SystemInfo, ABI_VERSION, CLOCK_MONOTONIC, KIND_DIR, KIND_FILE, OPEN_APPEND, OPEN_CREATE,
+    OPEN_EXCLUSIVE, OPEN_READ, OPEN_TRUNCATE, OPEN_WRITE, PROT_EXEC, PROT_READ, PROT_WRITE, SEEK_CUR, SEEK_END, SEEK_SET,
+    STDERR, STDOUT,
+};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod imp {
     use core::arch::asm;
-    use osyx_abi::{decode, nr, Errno, SystemInfo};
+    use osyx_abi::{decode, nr, Errno, FileStat, SystemInfo};
 
     #[inline]
     fn syscall1(n: u64, a1: u64) -> u64 {
@@ -181,6 +185,79 @@ mod imp {
     /// Issues an arbitrary system call number (for ABI tests).
     pub fn raw_syscall(n: u64, a1: u64, a2: u64, a3: u64) -> Result<u64, Errno> {
         decode(syscall3(n, a1, a2, a3))
+    }
+
+    // ---- files ----------------------------------------------------------
+
+    /// Opens `path` (absolute) with `OPEN_*` flags; returns a handle.
+    pub fn open(path: &str, flags: u64) -> Result<u64, Errno> {
+        decode(syscall3(nr::OPEN, path.as_ptr() as u64, path.len() as u64, flags))
+    }
+
+    pub fn close(handle: u64) -> Result<(), Errno> {
+        decode(syscall1(nr::CLOSE, handle)).map(|_| ())
+    }
+
+    /// Reads up to `buf.len()` bytes; 0 at end of file.
+    pub fn read(handle: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        decode(syscall3(nr::READ, handle, buf.as_mut_ptr() as u64, buf.len() as u64)).map(|n| n as usize)
+    }
+
+    /// `read` into an arbitrary address (for validation tests).
+    pub fn read_raw(handle: u64, addr: usize, len: usize) -> Result<usize, Errno> {
+        decode(syscall3(nr::READ, handle, addr as u64, len as u64)).map(|n| n as usize)
+    }
+
+    /// Moves the file position (`SEEK_*`); returns the new position.
+    pub fn seek(handle: u64, offset: i64, whence: u64) -> Result<u64, Errno> {
+        decode(syscall3(nr::SEEK, handle, offset as u64, whence))
+    }
+
+    pub fn fstat(handle: u64) -> Result<FileStat, Errno> {
+        let mut st = FileStat::default();
+        decode(syscall2(nr::FSTAT, handle, &mut st as *mut FileStat as u64))?;
+        Ok(st)
+    }
+
+    pub fn stat(path: &str) -> Result<FileStat, Errno> {
+        let mut st = FileStat::default();
+        decode(syscall3(nr::STAT, path.as_ptr() as u64, path.len() as u64, &mut st as *mut FileStat as u64))?;
+        Ok(st)
+    }
+
+    /// Fills `buf` with directory records (see `osyx_abi::DirRecord`);
+    /// returns the bytes used, 0 when the listing is complete.
+    pub fn readdir(handle: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        decode(syscall3(nr::READDIR, handle, buf.as_mut_ptr() as u64, buf.len() as u64)).map(|n| n as usize)
+    }
+
+    fn path_call(n: u64, path: &str) -> Result<(), Errno> {
+        decode(syscall2(n, path.as_ptr() as u64, path.len() as u64)).map(|_| ())
+    }
+
+    pub fn mkdir(path: &str) -> Result<(), Errno> {
+        path_call(nr::MKDIR, path)
+    }
+
+    pub fn unlink(path: &str) -> Result<(), Errno> {
+        path_call(nr::UNLINK, path)
+    }
+
+    pub fn rmdir(path: &str) -> Result<(), Errno> {
+        path_call(nr::RMDIR, path)
+    }
+
+    pub fn rename(from: &str, to: &str) -> Result<(), Errno> {
+        decode(syscall4(nr::RENAME, from.as_ptr() as u64, from.len() as u64, to.as_ptr() as u64, to.len() as u64))
+            .map(|_| ())
+    }
+
+    pub fn ftruncate(handle: u64, len: u64) -> Result<(), Errno> {
+        decode(syscall2(nr::FTRUNCATE, handle, len)).map(|_| ())
+    }
+
+    pub fn fsync(handle: u64) -> Result<(), Errno> {
+        decode(syscall1(nr::FSYNC, handle)).map(|_| ())
     }
 }
 

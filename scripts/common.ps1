@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 $Script:Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Script:BuildDir = Join-Path $Root 'build'
 $Script:EspDir = Join-Path $BuildDir 'esp'
+$Script:DataImage = Join-Path $BuildDir 'data.img'
 
 function Find-Tool([string]$Name, [string[]]$Candidates) {
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
@@ -39,8 +40,9 @@ function Invoke-Checked([string]$What, [scriptblock]$Block) {
     if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" }
 }
 
-# Returns the QEMU argument list for booting build/esp.
-function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb) {
+# Returns the QEMU argument list for booting build/esp (plus build/data.img
+# as a writable second disk when it exists, unless -NoDataDisk).
+function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoDataDisk) {
     if (-not $Script:Qemu) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
     if (-not $Script:Ovmf) { throw 'OVMF (edk2-x86_64-code.fd) not found' }
     $vars = Join-Path $BuildDir 'OVMF_VARS.fd'
@@ -60,6 +62,9 @@ function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 5
         '-device', 'isa-debug-exit,iobase=0xf4,iosize=0x04',
         '-no-reboot'
     )
+    if (-not $NoDataDisk -and (Test-Path $Script:DataImage)) {
+        $a += @('-drive', 'if=virtio,format=raw,file=build/data.img')
+    }
     if ($Headless) { $a += @('-display', 'none') }
     if ($QmpPort -gt 0) { $a += @('-qmp', "tcp:127.0.0.1:$QmpPort,server,nowait") }
     if ($Gdb) { $a += @('-s', '-S') }

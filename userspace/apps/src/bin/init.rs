@@ -1,7 +1,9 @@
 //! The init program (`\EFI\OSYX\BIN\init`). Runs in ring 3 and checks OSyx
 //! Std, the kernel's system call validation, processes (spawn / wait /
 //! zombies / orphans) and the preemptive scheduler from the user side,
-//! using `worker` as the child program.
+//! using `worker` as the child program. With a FAT32 data disk mounted at
+//! `/` it also checks `os_std::fs` and leaves `/osyx-out/*` behind for the
+//! host to verify with mtools.
 //!
 //! Arguments (kernel command line `init.args=...`):
 //! * none:          run the checks; exit status = number of failed checks
@@ -18,6 +20,8 @@ use os_std::prelude::*;
 use os_std::process::{Child, Command};
 use os_std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use os_std::time::{Duration, Instant};
+use os_std::fs::{self, File, OpenOptions};
+use os_std::io::SeekFrom;
 use os_std::{env, os, process, thread};
 
 #[path = "../fpu.rs"]
@@ -80,7 +84,7 @@ fn main() -> i32 {
                 info.total_memory >> 20,
                 info.page_size
             );
-            info.abi_version == 3 && info.page_size == 4096 && info.free_memory <= info.total_memory
+            info.abi_version == raw::ABI_VERSION && info.page_size == 4096 && info.free_memory <= info.total_memory
         }
         Err(e) => {
             println!("sysinfo failed: {e}");
@@ -118,6 +122,11 @@ fn main() -> i32 {
 
     process_checks(&mut t);
     thread_checks(&mut t);
+    if fs::metadata("/").is_ok() {
+        fs_checks(&mut t);
+    } else {
+        println!("[user] no volume mounted at /: file system checks skipped");
+    }
 
     println!("user checks: {} passed, {} failed", t.passed, t.failed);
     t.failed as i32
@@ -385,4 +394,157 @@ fn thread_checks(t: &mut Tests) {
         "panic in a spawned thread exits with 101",
         || matches!(worker(&["thread-panic"]).status(), Ok(s) if s.code() == Some(101)),
     );
+}
+
+/// Contents of the files `scripts/build.ps1` puts on the data disk.
+const SEED_HELLO: &str = "Hello from the build host!\n";
+const SEED_LONG: &str = "Long file names work.\n";
+const SEED_BIN_LEN: usize = 150_000;
+/// Files left on the disk for the host to check after QEMU exits.
+const OUT_TEXT: &str = "Written by OSyx init through os_std::fs.\n";
+const OUT_BIN_LEN: usize = 200_000;
+
+fn seed_byte(i: usize) -> u8 {
+    (i * 13 + 7) as u8
+}
+
+fn out_byte(i: usize) -> u8 {
+    (i * 31 + 5) as u8
+}
+
+fn kind_of<T>(r: os_std::error::Result<T>) -> Option<ErrorKind> {
+    r.err().map(|e| e.kind())
+}
+
+fn fs_checks(t: &mut Tests) {
+    match fs::remove_dir_all("/osyx-out") {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => println!("[user] removing an old /osyx-out failed: {e}"),
+    }
+    t.check("fs: seed files written by the host are readable", || {
+        let bin = fs::read("/seed.bin").unwrap_or_default();
+        fs::read_to_string("/hello.txt").as_deref() == Ok(SEED_HELLO)
+            && fs::read_to_string("/DOCS/read me long name.TXT").as_deref() == Ok(SEED_LONG)
+            && bin.len() == SEED_BIN_LEN
+            && bin.iter().enumerate().all(|(i, &b)| b == seed_byte(i))
+    });
+    t.check("fs: read_dir lists the root with kinds and sizes", || {
+        let Ok(dir) = fs::read_dir("/") else { return false };
+        let entries: Vec<fs::DirEntry> = dir.collect();
+        let find = |n: &str| entries.iter().find(|e| e.file_name() == n).map(|e| e.metadata());
+        println!("root: {:?}", entries.iter().map(|e| e.file_name()).collect::<Vec<_>>());
+        find("hello.txt").is_some_and(|m| m.is_file() && m.len() == SEED_HELLO.len() as u64)
+            && find("Docs").is_some_and(|m| m.is_dir())
+            && find("seed.bin").is_some_and(|m| m.len() == SEED_BIN_LEN as u64)
+    });
+    t.check("fs: 200 KB file written, re-read, seek and partial reads", || {
+        let data: Vec<u8> = (0..OUT_BIN_LEN).map(out_byte).collect();
+        let written = fs::create_dir("/osyx-out").is_ok()
+            && File::create("/osyx-out/pattern.bin").is_ok_and(|mut f| {
+                data.chunks(7_000).all(|c| f.write_all(c).is_ok()) && f.sync_all().is_ok()
+            });
+        let Ok(mut f) = File::open("/osyx-out/pattern.bin") else { return false };
+        let mut mid = [0u8; 1000];
+        let seeked = f.seek(SeekFrom::Start(123_457)).ok() == Some(123_457)
+            && f.read_exact(&mut mid).is_ok()
+            && mid[..] == data[123_457..124_457]
+            && f.seek(SeekFrom::Current(-1000)).ok() == Some(123_457)
+            && f.seek(SeekFrom::End(-10)).ok() == Some(OUT_BIN_LEN as u64 - 10);
+        let mut tail = Vec::new();
+        let tail_ok = f.read_to_end(&mut tail).ok() == Some(10) && tail[..] == data[OUT_BIN_LEN - 10..];
+        written && seeked && tail_ok && fs::read("/osyx-out/pattern.bin").is_ok_and(|b| b == data)
+    });
+    t.check("fs: append, set_len and create_new", || {
+        let p = "/osyx-out/log.txt";
+        let created = File::create_new(p).is_ok_and(|mut f| f.write_all(b"one\n").is_ok());
+        let appended = OpenOptions::new().append(true).open(p).is_ok_and(|mut f| {
+            f.write_all(b"two\n").is_ok() && f.seek(SeekFrom::Start(0)).is_ok() && f.write_all(b"three\n").is_ok()
+        });
+        let text_ok = fs::read_to_string(p).as_deref() == Ok("one\ntwo\nthree\n");
+        let grown = OpenOptions::new().read(true).write(true).open(p).is_ok_and(|f| {
+            f.set_len(3).is_ok() && f.set_len(5000).is_ok() && f.metadata().is_ok_and(|m| m.len() == 5000)
+        });
+        let back = fs::read(p).unwrap_or_default();
+        let zero_filled = back.len() == 5000 && &back[..3] == b"one" && back[3..].iter().all(|&b| b == 0);
+        created && appended && text_ok && grown && zero_filled && kind_of(File::create_new(p)) == Some(ErrorKind::AlreadyExists)
+    });
+    t.check("fs: directories, rename and recursive removal", || {
+        let made = fs::create_dir_all("/osyx-out/tree/a/b/c").is_ok()
+            && fs::write("/osyx-out/tree/a/one.txt", "1").is_ok()
+            && fs::write("/osyx-out/tree/a/b/A Longer Name.txt", "22").is_ok();
+        let renamed = fs::rename("/osyx-out/tree/a/one.txt", "/osyx-out/tree/a/b/c/uno.txt").is_ok()
+            && fs::rename("/osyx-out/tree/a/b", "/osyx-out/tree/moved").is_ok();
+        let layout = !fs::exists("/osyx-out/tree/a/b").unwrap_or(true)
+            && fs::read_to_string("/osyx-out/tree/moved/c/uno.txt").as_deref() == Ok("1")
+            && fs::metadata("/osyx-out/tree/moved/a longer name.txt").is_ok_and(|m| m.len() == 2);
+        let not_empty = kind_of(fs::remove_dir("/osyx-out/tree")) == Some(ErrorKind::DirectoryNotEmpty);
+        let into_itself = fs::rename("/osyx-out/tree", "/osyx-out/tree/moved/inside").is_err();
+        let removed = fs::remove_dir_all("/osyx-out/tree").is_ok() && !fs::exists("/osyx-out/tree").unwrap_or(true);
+        made && renamed && layout && not_empty && into_itself && removed
+    });
+    t.check("fs: errors map to the right kinds", || {
+        kind_of(File::open("/osyx-out/missing.txt")) == Some(ErrorKind::NotFound)
+            && kind_of(File::open("/no-dir/x.txt")) == Some(ErrorKind::NotFound)
+            && kind_of(File::create("/Docs")) == Some(ErrorKind::IsADirectory)
+            && kind_of(fs::read_dir("/hello.txt")) == Some(ErrorKind::NotADirectory)
+            && kind_of(fs::create_dir("/Docs")) == Some(ErrorKind::AlreadyExists)
+            && kind_of(fs::remove_file("/Docs")) == Some(ErrorKind::IsADirectory)
+            && kind_of(fs::read("hello.txt")) == Some(ErrorKind::InvalidInput)
+            && kind_of(fs::write("/osyx-out/bad\u{1}name", "x")) == Some(ErrorKind::InvalidInput)
+    });
+    t.check("fs: kernel validates handles and buffers", || {
+        let Ok(h) = raw::open("/hello.txt", raw::OPEN_READ) else { return false };
+        let bad_path = raw::raw_syscall(16, 0xFFFF_8000_0000_0000, 4, raw::OPEN_READ) == Err(Errno::Fault);
+        let bad_buf = raw::read_raw(h, 0xFFFF_8000_0000_0000, 16) == Err(Errno::Fault);
+        // A failed copy-out must not consume data.
+        let mut first = [0u8; 5];
+        let intact = raw::read(h, &mut first) == Ok(5) && &first == b"Hello";
+        let ro_write = raw::write(h, b"x") == Err(Errno::BadHandle);
+        let closed = raw::close(h).is_ok() && raw::close(h) == Err(Errno::BadHandle);
+        let stale = raw::read(h, &mut first) == Err(Errno::BadHandle);
+        let console = raw::close(1) == Err(Errno::BadHandle);
+        bad_path && bad_buf && intact && ro_write && closed && stale && console
+    });
+    t.check("fs: per-process handle limit", || {
+        let mut open = Vec::new();
+        let err = loop {
+            match File::open("/hello.txt") {
+                Ok(f) => open.push(f),
+                Err(e) => break e,
+            }
+            if open.len() > 1000 {
+                return false;
+            }
+        };
+        let n = open.len();
+        open.clear();
+        println!("opened {n} handles before {err}");
+        n == 64 && err.raw_os_error() == Some(Errno::TooManyHandles) && File::open("/hello.txt").is_ok()
+    });
+    t.check("fs: 4 threads write their own files concurrently", || {
+        let hs: Vec<_> = (0..4usize)
+            .map(|k| {
+                thread::spawn(move || {
+                    let path = format!("/osyx-out/thread-{k}.bin");
+                    let data: Vec<u8> = (0..40_000usize).map(|i| (i * (k + 3)) as u8).collect();
+                    let w = File::create(&path).is_ok_and(|mut f| data.chunks(4096).all(|c| f.write_all(c).is_ok()));
+                    w && fs::read(&path).is_ok_and(|b| b == data) && fs::remove_file(&path).is_ok()
+                })
+            })
+            .collect();
+        hs.into_iter().all(|h| h.join().unwrap_or(false))
+    });
+    t.check("fs: a child process writes, init reads", || {
+        let ok = matches!(worker(&["fs-write", "/osyx-out/from-worker.txt"]).status(), Ok(s) if s.success());
+        ok && fs::read_to_string("/osyx-out/from-worker.txt").is_ok_and(|s| s.starts_with("written by worker "))
+    });
+    t.check("fs: handles left open at exit are closed by the kernel", || {
+        let ok = matches!(worker(&["fs-leak", "/osyx-out/leaked.txt"]).status(), Ok(s) if s.success());
+        ok && fs::read_to_string("/osyx-out/leaked.txt").as_deref() == Ok("still here\n")
+    });
+    t.check("fs: final output for the host", || {
+        File::create("/osyx-out/hello-from-osyx.txt")
+            .is_ok_and(|mut f| f.write_all(OUT_TEXT.as_bytes()).is_ok() && f.sync_all().is_ok())
+    });
 }

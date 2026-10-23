@@ -1,4 +1,4 @@
-# System call ABI (version 3)
+# System call ABI (version 4)
 
 Defined in `shared/abi`; kernel side in `kernel/src/syscall.rs`, user side in
 `runtime/os-sys`.
@@ -18,7 +18,7 @@ Defined in `shared/abi`; kernel side in `kernel/src/syscall.rs`, user side in
 | # | Name | Arguments | Result |
 |---|---|---|---|
 | 0 | `exit` | `code: i32` | does not return |
-| 1 | `write` | `fd` (1 stdout, 2 stderr), `buf`, `len ≤ 1 MiB` | bytes written |
+| 1 | `write` | handle (1 stdout, 2 stderr, or a file), `buf`, `len ≤ 1 MiB` | bytes written |
 | 2 | `map` | `len`, `prot` (R=1, W=2, X=4) | address of zeroed pages |
 | 3 | `unmap` | `addr`, `len` (must match one whole `map`) | 0 |
 | 4 | `sysinfo` | `out: *mut SystemInfo` (56 bytes) | 0 |
@@ -33,6 +33,40 @@ Defined in `shared/abi`; kernel side in `kernel/src/syscall.rs`, user side in
 | 13 | `futex_wake` | `addr`, `count` | threads woken |
 | 14 | `set_fs_base` | `addr` (0 or a user address) | 0 |
 | 15 | `gettid` | — | thread id |
+| 16 | `open` | `path`, `path_len ≤ 1024`, `flags` (`OPEN_*`) | handle (≥ 3) |
+| 17 | `close` | `handle` | 0 |
+| 18 | `read` | `handle`, `buf`, `len ≤ 1 MiB` | bytes read (0 at end of file) |
+| 19 | `seek` | `handle`, `offset: i64`, `whence` (0 set, 1 current, 2 end) | new position |
+| 20 | `fstat` | `handle`, `out: *mut FileStat` (16 bytes) | 0 |
+| 21 | `stat` | `path`, `path_len`, `out: *mut FileStat` | 0 |
+| 22 | `readdir` | `handle` (directory), `buf`, `len` | bytes of `DirRecord`s (0 = done) |
+| 23 | `mkdir` | `path`, `path_len` | 0 |
+| 24 | `unlink` | `path`, `path_len` (a file) | 0 |
+| 25 | `rmdir` | `path`, `path_len` (an empty directory) | 0 |
+| 26 | `rename` | `from`, `from_len`, `to`, `to_len` (same volume; replaces a file) | 0 |
+| 27 | `ftruncate` | `handle`, `len` | 0 |
+| 28 | `fsync` | `handle` | 0 |
+
+### Files
+
+- `OPEN_READ` 1, `OPEN_WRITE` 2, `OPEN_CREATE` 4, `OPEN_TRUNCATE` 8,
+  `OPEN_APPEND` 16, `OPEN_EXCLUSIVE` 32. At least one of read/write is
+  required; create, truncate, append and exclusive require write; exclusive
+  requires create. A directory can only be opened for reading.
+- Handles are per process, numbered from 3, at most 64 open at once, and
+  closed by the kernel when the process exits. Closing 0–2 fails with
+  `BadHandle`.
+- `read` copies to user memory before moving the position, so a bad buffer
+  returns `Fault` without consuming data. With `OPEN_APPEND` every write goes
+  to the current end of the file.
+- `FileStat { size: u64, kind: u32 (1 file, 2 directory), attributes: u32 }`;
+  attributes are FAT bits (read-only 0x01, hidden 0x02, system 0x04,
+  directory 0x10, archive 0x20).
+- `DirRecord`: `size: u64, kind: u32, attributes: u16, name_len: u16`, then
+  the UTF-8 name, padded to 8 bytes. `readdir` returns as many whole records
+  as fit and `InvalidArgument` if not even one fits.
+- Every call that changes a volume writes its metadata through before it
+  returns (see [storage.md](storage.md)).
 
 ### Threads
 
@@ -75,14 +109,24 @@ a block of NUL-terminated UTF-8 strings that become `argv[1..]` (`argv[0]` is
 | 1 | InvalidArgument | zero length, bad flags, unknown clock, partial unmap, malformed spawn arguments, invalid executable |
 | 2 | Fault | pointer outside user space, unmapped, or read-only for output |
 | 3 | NoMemory | frames exhausted, 256 MiB per-process `map` limit, 64-process limit |
-| 4 | BadHandle | unknown file descriptor |
+| 4 | BadHandle | unknown handle, or a handle without the needed access (write on a read-only handle) |
 | 5 | NotSupported | unknown system call number |
-| 6 | PermissionDenied | writable + executable mapping (W^X) |
-| 7 | NotFound | `spawn` of a program that is not a boot module |
+| 6 | PermissionDenied | writable + executable mapping (W^X); removing or renaming a volume root |
+| 7 | NotFound | `spawn` of a program that is not a boot module; missing file or directory |
 | 8 | NoChild | `wait` with no (matching) child |
 | 9 | WouldBlock | `futex_wait`: the word did not hold `expected` |
 | 10 | TimedOut | `futex_wait` timeout expired |
 | 11 | Interrupted | a blocking call ended because the process is exiting |
+| 12 | AlreadyExists | `OPEN_EXCLUSIVE` or `mkdir` of an existing name |
+| 13 | NotADirectory | a path component or `readdir` handle is a file |
+| 14 | IsADirectory | opening a directory for writing, `unlink` of a directory |
+| 15 | DirectoryNotEmpty | `rmdir` of a non-empty directory |
+| 16 | NoSpace | the volume is full |
+| 17 | Io | device error or damaged volume |
+| 18 | FileTooLarge | beyond FAT32's 4 GiB − 1 file size |
+| 19 | ReadOnly | writing to a read-only volume |
+| 20 | TooManyHandles | the process already has 64 open handles |
+| 21 | CrossDevice | `rename` between volumes |
 
 ## Pointer validation
 

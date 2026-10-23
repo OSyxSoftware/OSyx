@@ -45,6 +45,97 @@ pub fn yield_now() {
     os_sys::yield_now()
 }
 
+// ---- files -------------------------------------------------------------------
+
+pub mod fs {
+    use crate::error::{Error, ErrorKind, Result};
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use osyx_abi::{DirRecord, FileStat};
+
+    /// A kernel file handle, closed on drop.
+    pub struct RawFile(u64);
+
+    impl RawFile {
+        pub fn read(&self, buf: &mut [u8]) -> Result<usize> {
+            let n = buf.len().min(osyx_abi::MAX_READ);
+            os_sys::read(self.0, &mut buf[..n]).map_err(Error::from)
+        }
+
+        pub fn write(&self, buf: &[u8]) -> Result<usize> {
+            let n = buf.len().min(osyx_abi::MAX_WRITE);
+            os_sys::write(self.0, &buf[..n]).map_err(Error::from)
+        }
+
+        pub fn seek(&self, offset: i64, whence: u64) -> Result<u64> {
+            os_sys::seek(self.0, offset, whence).map_err(Error::from)
+        }
+
+        pub fn stat(&self) -> Result<FileStat> {
+            os_sys::fstat(self.0).map_err(Error::from)
+        }
+
+        pub fn set_len(&self, len: u64) -> Result<()> {
+            os_sys::ftruncate(self.0, len).map_err(Error::from)
+        }
+
+        pub fn sync(&self) -> Result<()> {
+            os_sys::fsync(self.0).map_err(Error::from)
+        }
+    }
+
+    impl Drop for RawFile {
+        fn drop(&mut self) {
+            let _ = os_sys::close(self.0);
+        }
+    }
+
+    pub fn open(path: &str, flags: u64) -> Result<RawFile> {
+        os_sys::open(path, flags).map(RawFile).map_err(Error::from)
+    }
+
+    pub fn stat(path: &str) -> Result<FileStat> {
+        os_sys::stat(path).map_err(Error::from)
+    }
+
+    /// The whole listing of a directory: (name, size, kind, attributes).
+    pub fn read_dir(path: &str) -> Result<Vec<(String, FileStat)>> {
+        let dir = open(path, osyx_abi::OPEN_READ)?;
+        let mut buf = alloc::vec![0u8; 4096];
+        let mut out = Vec::new();
+        loop {
+            let n = os_sys::readdir(dir.0, &mut buf).map_err(Error::from)?;
+            if n == 0 {
+                return Ok(out);
+            }
+            let mut off = 0;
+            while off < n {
+                let bad = || Error::new(ErrorKind::InvalidData, "malformed directory record");
+                let (r, name, len) = DirRecord::decode(&buf[off..n]).ok_or_else(bad)?;
+                let name = core::str::from_utf8(name).map_err(|_| bad())?;
+                out.push((String::from(name), FileStat { size: r.size, kind: r.kind, attributes: r.attributes as u32 }));
+                off += len;
+            }
+        }
+    }
+
+    pub fn mkdir(path: &str) -> Result<()> {
+        os_sys::mkdir(path).map_err(Error::from)
+    }
+
+    pub fn unlink(path: &str) -> Result<()> {
+        os_sys::unlink(path).map_err(Error::from)
+    }
+
+    pub fn rmdir(path: &str) -> Result<()> {
+        os_sys::rmdir(path).map_err(Error::from)
+    }
+
+    pub fn rename(from: &str, to: &str) -> Result<()> {
+        os_sys::rename(from, to).map_err(Error::from)
+    }
+}
+
 // ---- threads, futexes, TLS --------------------------------------------------
 
 /// Stack size of threads created with `thread::spawn` (the region `map`

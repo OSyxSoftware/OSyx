@@ -20,10 +20,11 @@ use crate::arch::cpu;
 use crate::mem::paging::{self, Flags, MapError};
 use crate::mem::{alloc_frame, free_frame, phys_to_virt, PAGE_SIZE};
 use crate::sched::{self, Tid};
-use crate::sync::IrqSpinLock;
-use crate::{kprintln, modules};
+use crate::sync::{IrqSpinLock, KMutex};
+use crate::{kprintln, modules, vfs};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -98,7 +99,12 @@ pub struct Process {
     threads: Vec<Tid>,
     /// Set by `exit`: the status reported once the last thread has ended.
     exit_status: Option<i32>,
+    /// Open files by handle number (from `FIRST_FILE_HANDLE`).
+    handles: BTreeMap<u64, FileHandle>,
 }
+
+/// An open file shared by the handle table and in-flight system calls.
+pub type FileHandle = Arc<KMutex<vfs::OpenFile>>;
 
 struct Table {
     procs: BTreeMap<Pid, Process>,
@@ -192,6 +198,7 @@ impl Process {
             line: Vec::new(),
             threads: Vec::new(),
             exit_status: None,
+            handles: BTreeMap::new(),
         })
     }
 
@@ -453,6 +460,7 @@ pub fn finish_current_thread(code: i32) -> ! {
     sched::set_current_root(paging::kernel_root());
     crate::futex::forget_process(pid);
     let mut to_wake = Vec::new();
+    let closed;
     {
         let mut t = TABLE.lock();
         let Table { procs, waiters } = &mut *t;
@@ -462,6 +470,10 @@ pub fn finish_current_thread(code: i32) -> ! {
             p.flush_line();
         }
         p.release_memory();
+        closed = core::mem::take(&mut p.handles);
+        if !closed.is_empty() {
+            kprintln!("process {} ({}): closed {} open handles", pid, p.name, closed.len());
+        }
         p.life = Life::Zombie(status);
         let (parent, orphan) = (p.parent, p.orphan);
         // Threads of this process that were blocked in `wait` are gone.
@@ -486,10 +498,43 @@ pub fn finish_current_thread(code: i32) -> ! {
             });
         }
     }
+    // Volume metadata is written through, so dropping the files needs no I/O.
+    drop(closed);
     for tid in to_wake {
         sched::wake(tid);
     }
     sched::exit_current()
+}
+
+/// Adds an open file to the current process; returns the lowest free handle.
+pub fn add_handle(f: vfs::OpenFile) -> Result<u64, Errno> {
+    let pid = sched::current_pid();
+    let file = Arc::new(KMutex::new(f));
+    let mut t = TABLE.lock();
+    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    if p.handles.len() >= osyx_abi::MAX_HANDLES {
+        return Err(Errno::TooManyHandles);
+    }
+    let mut h = osyx_abi::FIRST_FILE_HANDLE;
+    while p.handles.contains_key(&h) {
+        h += 1;
+    }
+    p.handles.insert(h, file);
+    Ok(h)
+}
+
+pub fn get_handle(h: u64) -> Result<FileHandle, Errno> {
+    let pid = sched::current_pid();
+    let t = TABLE.lock();
+    t.procs.get(&pid).and_then(|p| p.handles.get(&h)).cloned().ok_or(Errno::BadHandle)
+}
+
+/// Removes a handle. A system call still using the file keeps it alive
+/// until that call returns.
+pub fn close_handle(h: u64) -> Result<(), Errno> {
+    let pid = sched::current_pid();
+    let removed = TABLE.lock().procs.get_mut(&pid).and_then(|p| p.handles.remove(&h));
+    removed.map(drop).ok_or(Errno::BadHandle)
 }
 
 /// Last lines written by user processes (for the status screen).

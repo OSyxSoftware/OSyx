@@ -53,6 +53,154 @@ pub fn yield_now() {
     std::thread::yield_now()
 }
 
+// Files: OSyx paths are mapped below a per-process scratch directory of the
+// host, so the OSyx Std file API can be unit-tested against a real file
+// system. This says nothing about the OSyx kernel's VFS or FAT32 driver.
+pub mod fs {
+    use crate::error::{Error, ErrorKind, Result};
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use osyx_abi::FileStat;
+    use std::io::{Read as _, Seek as _, Write as _};
+
+    pub struct RawFile(std::fs::File);
+
+    fn err(e: std::io::Error) -> Error {
+        use std::io::ErrorKind as K;
+        Error::from(match e.kind() {
+            K::NotFound => ErrorKind::NotFound,
+            K::AlreadyExists => ErrorKind::AlreadyExists,
+            K::PermissionDenied => ErrorKind::PermissionDenied,
+            K::InvalidInput | K::InvalidFilename => ErrorKind::InvalidInput,
+            K::NotADirectory => ErrorKind::NotADirectory,
+            K::IsADirectory => ErrorKind::IsADirectory,
+            K::DirectoryNotEmpty => ErrorKind::DirectoryNotEmpty,
+            K::UnexpectedEof => ErrorKind::UnexpectedEof,
+            _ => ErrorKind::Other,
+        })
+    }
+
+    /// Host directory that plays the OSyx root (created on first use).
+    pub fn host_root() -> &'static std::path::Path {
+        static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| {
+            let dir = std::env::temp_dir().join(alloc::format!("os-std-fs-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        })
+    }
+
+    fn map(path: &str) -> Result<std::path::PathBuf> {
+        if !path.starts_with('/') {
+            return Err(Error::new(ErrorKind::InvalidInput, "paths must be absolute"));
+        }
+        let mut parts: Vec<&str> = Vec::new();
+        for c in path.split('/') {
+            match c {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                c => parts.push(c),
+            }
+        }
+        let mut p = host_root().to_path_buf();
+        p.extend(parts);
+        Ok(p)
+    }
+
+    fn stat_of(md: &std::fs::Metadata) -> FileStat {
+        let mut attributes = if md.is_dir() { osyx_abi::ATTR_DIRECTORY } else { osyx_abi::ATTR_ARCHIVE };
+        if md.permissions().readonly() {
+            attributes |= osyx_abi::ATTR_READ_ONLY;
+        }
+        FileStat {
+            size: if md.is_dir() { 0 } else { md.len() },
+            kind: if md.is_dir() { osyx_abi::KIND_DIR } else { osyx_abi::KIND_FILE },
+            attributes,
+        }
+    }
+
+    impl RawFile {
+        pub fn read(&self, buf: &mut [u8]) -> Result<usize> {
+            (&self.0).read(buf).map_err(err)
+        }
+
+        pub fn write(&self, buf: &[u8]) -> Result<usize> {
+            (&self.0).write(buf).map_err(err)
+        }
+
+        pub fn seek(&self, offset: i64, whence: u64) -> Result<u64> {
+            let pos = match whence {
+                osyx_abi::SEEK_SET => std::io::SeekFrom::Start(u64::try_from(offset).map_err(|_| ErrorKind::InvalidInput)?),
+                osyx_abi::SEEK_CUR => std::io::SeekFrom::Current(offset),
+                _ => std::io::SeekFrom::End(offset),
+            };
+            (&self.0).seek(pos).map_err(err)
+        }
+
+        pub fn stat(&self) -> Result<FileStat> {
+            self.0.metadata().map(|m| stat_of(&m)).map_err(err)
+        }
+
+        pub fn set_len(&self, len: u64) -> Result<()> {
+            self.0.set_len(len).map_err(err)
+        }
+
+        pub fn sync(&self) -> Result<()> {
+            self.0.sync_all().map_err(err)
+        }
+    }
+
+    pub fn open(path: &str, flags: u64) -> Result<RawFile> {
+        use osyx_abi::*;
+        let target = map(path)?;
+        if target.is_dir() {
+            return Err(Error::new(ErrorKind::Unsupported, "the host back end cannot open directories as files"));
+        }
+        std::fs::OpenOptions::new()
+            .read(flags & OPEN_READ != 0)
+            .write(flags & OPEN_WRITE != 0 && flags & OPEN_APPEND == 0)
+            .append(flags & OPEN_APPEND != 0)
+            .truncate(flags & OPEN_TRUNCATE != 0)
+            .create(flags & OPEN_CREATE != 0 && flags & OPEN_EXCLUSIVE == 0)
+            .create_new(flags & OPEN_EXCLUSIVE != 0)
+            .open(target)
+            .map(RawFile)
+            .map_err(err)
+    }
+
+    pub fn stat(path: &str) -> Result<FileStat> {
+        std::fs::metadata(map(path)?).map(|m| stat_of(&m)).map_err(err)
+    }
+
+    pub fn read_dir(path: &str) -> Result<Vec<(String, FileStat)>> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(map(path)?).map_err(err)? {
+            let e = e.map_err(err)?;
+            let md = e.metadata().map_err(err)?;
+            out.push((e.file_name().to_string_lossy().into_owned(), stat_of(&md)));
+        }
+        Ok(out)
+    }
+
+    pub fn mkdir(path: &str) -> Result<()> {
+        std::fs::create_dir(map(path)?).map_err(err)
+    }
+
+    pub fn unlink(path: &str) -> Result<()> {
+        std::fs::remove_file(map(path)?).map_err(err)
+    }
+
+    pub fn rmdir(path: &str) -> Result<()> {
+        std::fs::remove_dir(map(path)?).map_err(err)
+    }
+
+    pub fn rename(from: &str, to: &str) -> Result<()> {
+        std::fs::rename(map(from)?, map(to)?).map_err(err)
+    }
+}
+
 // Threads, futexes and TLS are emulated with the host's std so the OSyx Std
 // synchronisation code can be tested with real, parallel host threads.
 
