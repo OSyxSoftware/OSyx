@@ -48,6 +48,8 @@ make() {
     debugfs -w -R "sif /hello.txt uid 1000" "$OUT/$name.img" >/dev/null 2>&1
     debugfs -w -R "sif /hello.txt gid 1000" "$OUT/$name.img" >/dev/null 2>&1
     debugfs -w -R "sif /small.bin mode 0100600" "$OUT/$name.img" >/dev/null 2>&1
+    # Index large directories (dir_index) as a long-running system would.
+    e2fsck -fyD "$OUT/$name.img" >/dev/null 2>&1 || true
     e2fsck -fn "$OUT/$name.img" >/dev/null
     echo "$name: $(dumpe2fs -h "$OUT/$name.img" 2>/dev/null | grep -E 'features' | head -1)"
 }

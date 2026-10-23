@@ -28,7 +28,6 @@ pub struct DirEntry {
 }
 
 /// A raw entry inside a directory block.
-#[allow(dead_code)] // offsets are used by the writer
 pub(crate) struct Raw<'a> {
     pub off: usize,
     pub ino: u32,

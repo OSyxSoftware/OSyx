@@ -9,7 +9,7 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 fn ro(img: Vec<u8>) -> Result<Ext4<Vec<u8>>, Error> {
-    Ext4::mount(img, MountOptions { read_only: true })
+    Ext4::mount(img, MountOptions { read_only: true, clock: None })
 }
 
 fn pattern(n: usize, seed: usize) -> Vec<u8> {
@@ -125,7 +125,7 @@ fn unsupported_features_are_refused() {
     for name in ["ext3-1k", "ext2-4k"] {
         let fs = ro(fixture(name)).unwrap();
         assert!(fs.write_refusal().is_some(), "{name}");
-        assert!(matches!(Ext4::mount(fixture(name), MountOptions { read_only: false }), Err(Error::Unsupported(_))));
+        assert!(matches!(Ext4::mount(fixture(name), MountOptions { read_only: false, clock: None }), Err(Error::Unsupported(_))));
     }
     assert!(matches!(ro(vec![0u8; 1 << 20]), Err(Error::NotExt)));
     assert!(matches!(ro(vec![0u8; 512]), Err(Error::NotExt)));

@@ -409,7 +409,6 @@ impl GroupDesc {
         }
     }
 
-    #[allow(dead_code)] // used by the writer
     pub(crate) fn store(&self, b: &mut [u8], wide: bool) {
         put32(b, 0, self.block_bitmap as u32);
         put32(b, 4, self.inode_bitmap as u32);
@@ -462,7 +461,6 @@ impl Cache {
         self.blocks.insert(b, (data, self.clock));
     }
 
-    #[allow(dead_code)] // used by the writer
     fn forget(&mut self, b: u64) {
         self.blocks.remove(&b);
     }
@@ -473,6 +471,10 @@ impl Cache {
 pub struct MountOptions {
     /// Never write to the device.
     pub read_only: bool,
+    /// Wall clock for timestamps (seconds, nanoseconds since the Unix
+    /// epoch). Without one, times written fall back to the superblock's
+    /// last write time.
+    pub clock: Option<fn() -> (i64, u32)>,
 }
 
 /// A mounted volume.
@@ -490,10 +492,14 @@ pub struct Ext4<D: BlockDevice> {
     /// Clock for timestamps: seconds and nanoseconds since the Unix epoch.
     pub(crate) clock: fn() -> (i64, u32),
     /// Inodes removed while still open: freed on their last release.
-    #[allow(dead_code)] // used by the writer
     pub(crate) orphans: BTreeMap<u32, u32>,
-    #[allow(dead_code)] // used by the writer
     pub(crate) open_counts: BTreeMap<u32, u32>,
+    /// Metadata changes of the operation in progress.
+    pub(crate) tx: write::Tx,
+    /// Blocks replayed from the journal at mount time.
+    pub recovered_blocks: usize,
+    /// Orphaned inodes freed at mount time.
+    pub orphans_freed: u32,
 }
 
 fn zero_clock() -> (i64, u32) {
@@ -545,9 +551,12 @@ impl<D: BlockDevice> Ext4<D> {
             read_only: true,
             write_refusal: None,
             journal: None,
-            clock: zero_clock,
+            clock: opts.clock.unwrap_or(zero_clock),
             orphans: BTreeMap::new(),
             open_counts: BTreeMap::new(),
+            tx: write::Tx::default(),
+            recovered_blocks: 0,
+            orphans_freed: 0,
         };
         fs.load_groups()?;
         let root = fs.inode(ROOT_INO)?;
@@ -720,6 +729,9 @@ impl<D: BlockDevice> Ext4<D> {
         if b >= self.sb.blocks_count {
             return Err(Error::Corrupt("block number beyond the end of the file system"));
         }
+        if let Some(d) = self.tx.blocks.get(&b) {
+            return Ok(d.clone());
+        }
         if let Some(j) = &self.journal {
             if let Some(d) = j.overlay.get(&b) {
                 return Ok(d.clone());
@@ -772,7 +784,6 @@ impl<D: BlockDevice> Ext4<D> {
         Ok(())
     }
 
-    #[allow(dead_code)] // used by the writer
     pub(crate) fn forget_cached(&mut self, b: u64) {
         self.cache.forget(b);
     }
@@ -861,6 +872,12 @@ impl<D: BlockDevice> Ext4<D> {
         let inode = self.inode(ino)?;
         let run = self.map(&inode, lblk)?;
         Ok(run.phys.filter(|_| !run.uninit))
+    }
+
+    /// Returns the device as it is, without the clean-unmount steps: what
+    /// a power cut leaves behind (for crash tests).
+    pub fn into_device_unclean(self) -> D {
+        self.dev
     }
 
     /// Flushes and returns the device (writes leave a clean volume).

@@ -308,6 +308,7 @@ impl<D: BlockDevice> Ext4<D> {
         }
         // Blocks read before recovery may be stale.
         self.clear_cache();
+        self.recovered_blocks = replayed.len();
         if read_only {
             j.overlay = replayed;
             // Replayed metadata may include group descriptors and the
@@ -361,11 +362,9 @@ impl<D: BlockDevice> Ext4<D> {
         self.dev.flush()
     }
 
-    #[allow(dead_code)] // used by the writer
     /// Writes `blocks` (metadata block number -> new contents) as one
     /// transaction and checkpoints it. Volumes without a journal get the
     /// blocks written in place directly.
-    #[allow(dead_code)] // used by the writer
     pub(crate) fn commit(&mut self, blocks: &BTreeMap<u64, Vec<u8>>) -> Result<()> {
         if blocks.is_empty() {
             return Ok(());
@@ -484,7 +483,6 @@ impl<D: BlockDevice> Ext4<D> {
     }
 
     /// Prepares the journal for writing (after any recovery).
-    #[allow(dead_code)] // used by the writer
     pub(crate) fn open_journal_for_writing(&mut self) -> Result<()> {
         if !self.sb.has_compat(feature::COMPAT_HAS_JOURNAL) {
             return Ok(());
