@@ -217,6 +217,10 @@ impl CpuInfo {
     pub fn has_apic(&self) -> bool {
         self.edx1 & (1 << 9) != 0
     }
+
+    pub fn has_x2apic(&self) -> bool {
+        self.ecx1 & (1 << 21) != 0
+    }
 }
 
 impl fmt::Display for CpuInfo {
@@ -227,7 +231,7 @@ impl fmt::Display for CpuInfo {
             ("avx", self.ecx1 & (1 << 28) != 0),
             ("avx2", self.ebx7 & (1 << 5) != 0),
             ("apic", self.has_apic()),
-            ("x2apic", self.ecx1 & (1 << 21) != 0),
+            ("x2apic", self.has_x2apic()),
             ("nx", self.has_nx()),
             ("1g-pages", self.has_1g_pages()),
             ("rdrand", self.ecx1 & (1 << 30) != 0),

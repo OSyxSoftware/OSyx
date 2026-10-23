@@ -25,7 +25,7 @@ static COUNTS: [AtomicU64; COUNT] = [const { AtomicU64::new(0) }; COUNT];
 /// Reserves a vector for `f(arg)`; `None` if all are taken or no local APIC
 /// can receive MSIs.
 pub fn allocate(f: fn(u64), arg: u64) -> Option<u8> {
-    if !apic::available() {
+    if !apic::msi_capable() {
         return None;
     }
     let mut h = HANDLERS.lock();

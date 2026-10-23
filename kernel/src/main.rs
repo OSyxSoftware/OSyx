@@ -1,25 +1,29 @@
 //! OSyx kernel entry point and early initialisation.
 //!
 //! Init order matters:
-//!  1. serial (diagnostics), BootInfo validation and copy into kernel memory
+//!  1. serial and the early framebuffer log (diagnostics), BootInfo
+//!     validation and copy into kernel memory
 //!  2. own GDT/TSS/IDT (firmware tables live in memory we are about to reuse)
 //!  3. frame allocator, NX state, removal of the boot identity map
 //!  4. kernel heap, then reclaim of bootloader memory
-//!  5. PIC/PIT timer, interrupts on, framebuffer status screen, self-tests
+//!  5. local APIC, tick source (APIC timer, PIT fallback), interrupts on
 //!  6. scheduler (this flow becomes thread "kmain")
 //!  7. PCI enumeration, disk drivers, volume mounts (drivers sleep, so they
-//!     need the scheduler), then self-tests and the init program in ring 3
+//!     need the scheduler), then the framebuffer status screen, self-tests
+//!     and the init program in ring 3
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+mod acpi;
 mod arch;
 mod block;
 mod devices;
 mod display;
 mod drivers;
+mod earlycon;
 mod exec;
 mod fixup;
 mod futex;
@@ -98,6 +102,14 @@ static BOOT: BootCell<BootData> = BootCell::new();
 #[link_section = ".text.entry"]
 pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     serial::init();
+    if !info.is_null() {
+        // SAFETY: as below; the framebuffer fields are only used once the
+        // header has been validated.
+        let raw = unsafe { info.read() };
+        if raw.validate().is_ok() && raw.has_framebuffer() {
+            earlycon::init(&raw.framebuffer, raw.hhdm_offset, raw.hhdm_size);
+        }
+    }
     kprintln!("OSyx kernel {} (x86_64) starting", VERSION);
     if info.is_null() {
         kprintln!("FATAL: no BootInfo");
@@ -151,13 +163,17 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let (free, total) = mem::frame_stats();
     kprintln!("reclaimed {} KiB of boot loader memory; {} / {} MiB free", reclaimed * 4, free >> 8, total >> 8);
 
+    if let Some((cols, rows)) = earlycon::geometry() {
+        kprintln!("console: early framebuffer log, {} x {} characters", cols, rows);
+    }
+    acpi::init(if raw.flags & osyx_bootinfo::FLAG_ACPI != 0 { raw.acpi_rsdp } else { 0 });
     // SAFETY: IDT is loaded, interrupts still disabled.
     unsafe { arch::pic::init() };
-    // The local APIC receives device MSIs; the PIC timer keeps flowing
-    // through it (LINT0, virtual wire).
-    arch::apic::init(cpuinfo.has_apic());
+    // The local APIC receives device MSIs and provides the tick timer.
+    arch::apic::init(cpuinfo.has_apic(), cpuinfo.has_x2apic(), boot.option_value("apic") == Some("x2apic"));
+    arch::timer::init(boot.option_value("timer"), boot.option_value("timer.calib"));
     cpu::enable_interrupts();
-    kprintln!("timer: PIT at {} Hz, interrupts enabled", arch::pic::TIMER_HZ);
+    arch::timer::verify();
     sched::init();
     kprintln!("scheduler: round robin, {} ms time slice", sched::TIME_SLICE_TICKS * 10);
     let pci_devices = pci::enumerate();
@@ -188,8 +204,17 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let mut footer = Line::new();
     let fb = &raw.framebuffer;
     let _ = write!(footer, "{}x{}  {} MiB RAM", fb.width, fb.height, total >> 8);
-    let has_display = raw.has_framebuffer() && display::init(fb, footer.as_str());
-    kprintln!("display: {}", if has_display { "framebuffer console active" } else { "none" });
+    let keep_log = boot.has_option("log.screen");
+    let has_display = raw.has_framebuffer() && display::init(fb, footer.as_str(), keep_log);
+    kprintln!(
+        "display: {}",
+        match (has_display, earlycon::active()) {
+            (true, true) => "status screen ready; the boot log stays until a process takes the display (log.screen)",
+            (true, false) => "framebuffer console active",
+            (false, true) => "status screen unavailable; the boot log stays",
+            (false, false) => "none",
+        }
+    );
     display::status("Running self-tests", osyx_gfx::splash::TEXT, &[]);
 
     let summary = selftest::run(boot);

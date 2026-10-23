@@ -3,6 +3,7 @@
 //! cannot reach. Results go to the serial log as `[test] <name> ... ok|FAILED`.
 
 use crate::arch::cpu;
+use crate::arch::timer::Deadline;
 use crate::fixup::{copy_from_user, copy_to_user, probe_read_u8, probe_write_u8};
 use crate::mem::paging::{self, Flags, MapError};
 use crate::mem::{self, heap, phys_to_virt, PAGE_SIZE};
@@ -230,11 +231,13 @@ fn breakpoint() -> TestResult {
 fn timer() -> TestResult {
     ensure!(cpu::interrupts_enabled(), "interrupts disabled");
     let start = interrupts::ticks();
-    for _ in 0..1000 {
+    // Spin rather than halt: with no timer interrupt `hlt` would not return.
+    let deadline = Deadline::after_ms(1000);
+    while !deadline.expired() {
         if interrupts::ticks() >= start + 5 {
             return Ok(());
         }
-        cpu::enable_and_halt();
+        core::hint::spin_loop();
     }
     Err(format!("timer stuck at {} ticks", interrupts::ticks()))
 }
@@ -353,8 +356,8 @@ fn fpu_worker(slot: u64, seed: u64) {
             s = inout(reg) seed => _,
         );
     }
-    let end = interrupts::ticks() + 8;
-    while interrupts::ticks() < end {
+    let end = Deadline::after_ticks(8);
+    while !end.expired() {
         core::hint::spin_loop();
     }
     // SAFETY: as above; writes four u64 into `out`.
@@ -388,8 +391,8 @@ static FS_OK: [core::sync::atomic::AtomicBool; 2] =
 /// Sets a distinct FS base, gets preempted several times, checks it.
 fn fs_worker(slot: u64, value: u64) {
     sched::set_current_fs_base(value);
-    let end = interrupts::ticks() + 6;
-    while interrupts::ticks() < end {
+    let end = Deadline::after_ticks(6);
+    while !end.expired() {
         core::hint::spin_loop();
     }
     // SAFETY: IA32_FS_BASE exists on every x86-64 CPU.

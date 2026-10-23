@@ -47,6 +47,9 @@ impl Display {
         if self.owner != 0 {
             return; // a user-space compositor draws now
         }
+        if crate::earlycon::active() {
+            return; // `log.screen`: the boot log keeps the screen
+        }
         self.force_present(r);
     }
 
@@ -59,8 +62,11 @@ impl Display {
     }
 }
 
-/// Takes over the framebuffer. Returns false if there is none or it is unusable.
-pub fn init(info: &FramebufferInfo, footer_right: &str) -> bool {
+/// Takes over the framebuffer. Returns false if there is none or it is
+/// unusable (the early boot log then stays). With `keep_log` the early log
+/// keeps the screen until a process acquires the display; the status screen
+/// is still prepared, but only drawn once that process releases it.
+pub fn init(info: &FramebufferInfo, footer_right: &str, keep_log: bool) -> bool {
     let rgb = match info.format {
         PixelFormat::Rgb => true,
         PixelFormat::Bgr => false,
@@ -74,6 +80,9 @@ pub fn init(info: &FramebufferInfo, footer_right: &str) -> bool {
         return false;
     }
     let Ok(assets) = Assets::embedded() else { return false };
+    if !keep_log {
+        crate::earlycon::stop();
+    }
     let (w, h) = (info.width, info.height);
     let mut d = Display {
         fb: phys_to_virt(info.base) as *mut u32,
@@ -140,6 +149,9 @@ pub fn spin(phase: u32) {
 /// Best-effort panic screen; never blocks. Drawn even over a user-space
 /// compositor: the system is halting.
 pub fn panic_screen(message: &str) {
+    if crate::earlycon::active() {
+        return; // the panic message is the last line of the boot log
+    }
     let Some(mut g) = DISPLAY.try_lock() else { return };
     let Some(d) = g.as_mut() else { return };
     let (l, a) = (d.layout, d.assets);
@@ -180,6 +192,8 @@ pub fn acquire(pid: u64) -> Result<alloc::sync::Arc<crate::shm::SharedMemory>, o
     }
     let first = d.owner == 0;
     d.owner = pid;
+    // The new owner draws now; the early log (`log.screen`) ends here.
+    crate::earlycon::stop();
     if first {
         crate::kprintln!("display: process {} owns the framebuffer ({}x{})", pid, d.width, d.height);
     }

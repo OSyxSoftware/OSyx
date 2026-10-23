@@ -21,6 +21,7 @@
 pub mod dma;
 mod hid;
 
+use crate::arch::timer::{self, Deadline};
 use crate::sync::IrqSpinLock;
 use crate::waitq::{block_on, WaitQueue};
 use crate::{input, interrupts, irq, kprintln, pci, sched};
@@ -46,6 +47,8 @@ const MAX_CONTROLLERS: usize = 4;
 const COMMAND_TIMEOUT_MS: u64 = 1000;
 const TRANSFER_TIMEOUT_MS: u64 = 1000;
 const RESET_TIMEOUT_MS: u64 = 1000;
+/// How long the firmware gets to release the controller (Linux waits 1 s).
+const HANDOFF_TIMEOUT_MS: u64 = 1000;
 const PORT_RESET_TIMEOUT_MS: u64 = 500;
 /// Interrupt moderation interval, in 250 ns units (40 us).
 const IMOD_INTERVAL: u32 = 160;
@@ -184,8 +187,19 @@ fn irq_handler(index: u64) {
     WAKE[index as usize].wake_all();
 }
 
-fn ms_to_ticks(ms: u64) -> u64 {
-    (ms * crate::arch::pic::TIMER_HZ as u64).div_ceil(1000)
+/// Waits until `done()` with pauses of one tick, for at most `timeout_ms`
+/// (by ticks or, if they stall, the TSC); false on timeout.
+fn poll_mmio(timeout_ms: u64, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Deadline::after_ms(timeout_ms);
+    loop {
+        if done() {
+            return true;
+        }
+        if deadline.expired() {
+            return done();
+        }
+        timer::pause_tick();
+    }
 }
 
 /// A HID interrupt IN endpoint with its transfer ring and report buffer.
@@ -281,18 +295,9 @@ impl Xhci {
         self.mmio.w32(self.op(op::portsc(port)), v);
     }
 
-    /// Waits until `done()` with sleeps of one tick; false on timeout.
+    /// Waits until `done()` with pauses of one tick; false on timeout.
     fn poll_until(&self, timeout_ms: u64, mut done: impl FnMut(&Xhci) -> bool) -> bool {
-        let deadline = interrupts::ticks() + ms_to_ticks(timeout_ms).max(1);
-        loop {
-            if done(self) {
-                return true;
-            }
-            if interrupts::ticks() > deadline {
-                return false;
-            }
-            sched::sleep_ticks(1);
-        }
+        poll_mmio(timeout_ms, || done(self))
     }
 
     // ---- bring-up ------------------------------------------------------------------
@@ -390,6 +395,13 @@ impl Xhci {
         let cmd = self.op(op::USBCMD);
         let sts = self.op(op::USBSTS);
         let m = self.mmio;
+        if m.r32(sts) == u32::MAX {
+            return Err(XhciError::Unsupported("controller registers read all ones (powered down or gone)"));
+        }
+        // No operational register may be written while CNR is set (xHCI 4.2).
+        if !self.poll_until(RESET_TIMEOUT_MS, |h| h.mmio.r32(sts) & usbsts::CNR == 0) {
+            return Err(XhciError::Timeout("controller not ready"));
+        }
         if m.r32(sts) & usbsts::HCH == 0 {
             m.w32(cmd, m.r32(cmd) & !usbcmd::RUN);
             if !self.poll_until(RESET_TIMEOUT_MS, |h| h.mmio.r32(sts) & usbsts::HCH != 0) {
@@ -487,7 +499,7 @@ impl Xhci {
                     self.write_portsc(p, portsc::neutral(v) | portsc::PP);
                 }
             }
-            sched::sleep_ticks(ms_to_ticks(20));
+            timer::sleep_ms(20);
         }
         Ok(())
     }
@@ -586,6 +598,12 @@ impl Xhci {
     fn wait_activity(&mut self, deadline_tick: u64) {
         let index = self.index;
         let seen = self.seen_irqs;
+        if !timer::healthy() {
+            // No ticks to end a blocking wait: poll once per (spun) tick.
+            timer::pause_tick();
+            self.seen_irqs = IRQS[index].load(Ordering::Relaxed);
+            return;
+        }
         let polling = self.irq_vector.is_none();
         let limit = if polling { (interrupts::ticks() + 1).min(deadline_tick) } else { deadline_tick };
         let events = &self.events;
@@ -602,7 +620,7 @@ impl Xhci {
         let ptr = self.cmd.push_td(&mut self.cmd_mem, &[trb])?;
         fence(Ordering::SeqCst);
         self.mmio.w32(self.caps.doorbell(0), 0);
-        let deadline = interrupts::ticks() + ms_to_ticks(COMMAND_TIMEOUT_MS);
+        let deadline = Deadline::after_ms(COMMAND_TIMEOUT_MS);
         loop {
             self.pump();
             if let Some(ev) = self.completions.remove(&ptr) {
@@ -611,11 +629,11 @@ impl Xhci {
                     c => Err(XhciError::Command(c)),
                 };
             }
-            if interrupts::ticks() > deadline {
+            if deadline.expired() {
                 self.abort_command();
                 return Err(XhciError::Timeout("command"));
             }
-            self.wait_activity(deadline);
+            self.wait_activity(deadline.tick());
         }
     }
 
@@ -655,7 +673,7 @@ impl Xhci {
             (dev.ep0.push_td(&mut dev.ep0_mem, &trbs)?, len > 0)
         };
         self.ring_doorbell(slot, 1);
-        let deadline = interrupts::ticks() + ms_to_ticks(TRANSFER_TIMEOUT_MS);
+        let deadline = Deadline::after_ms(TRANSFER_TIMEOUT_MS);
         loop {
             self.pump();
             let dev = self.devices.get_mut(&slot).ok_or(XhciError::PortGone)?;
@@ -679,10 +697,10 @@ impl Xhci {
                 }
                 return Ok(done);
             }
-            if interrupts::ticks() > deadline {
+            if deadline.expired() {
                 return Err(XhciError::Timeout("control transfer"));
             }
-            self.wait_activity(deadline);
+            self.wait_activity(deadline.tick());
         }
     }
 
@@ -798,7 +816,7 @@ impl Xhci {
         let speed = Speed::from_psi(portsc::speed(v)).ok_or(XhciError::Unsupported("unknown port speed"))?;
         kprintln!("usb: port {}: {} device connected (USB {} port)", port, speed.name(), if usb3 { 3 } else { 2 });
         // Reset recovery time (USB 2.0 7.1.7.5: 10 ms).
-        sched::sleep_ticks(ms_to_ticks(10));
+        timer::sleep_ms(10);
         let ev = self.command(Trb::enable_slot(0))?;
         let slot = ev.slot_id();
         if slot == 0 || slot > self.max_slots {
@@ -1157,27 +1175,36 @@ impl Xhci {
                 self.pump();
             }
             self.update_leds();
-            let deadline = interrupts::ticks() + ms_to_ticks(1000);
+            let deadline = interrupts::ticks() + timer::ms_to_ticks(1000);
             self.wait_activity(deadline);
         }
     }
 }
 
-/// USB legacy support: asks the firmware to release the controller and
-/// disables its SMIs (xHCI 4.22.1).
+/// USB legacy support (USBLEGSUP): asks the firmware to release the
+/// controller, waits a bounded time for it, and disables its SMIs (xHCI
+/// 4.22.1). Firmware that keeps the controller (or whose SMI handler
+/// hangs) costs at most `HANDOFF_TIMEOUT_MS`; the controller is then
+/// taken anyway, and a failing reset afterwards only fails this controller.
 fn take_ownership(index: usize, m: Mmio, off: u64) {
     let v = m.r32(off);
+    if v == u32::MAX {
+        kprintln!("xhci{}: legacy support register reads all ones; skipping the firmware handoff", index);
+        return;
+    }
     if v & ext::BIOS_OWNED != 0 {
+        kprintln!("xhci{}: firmware owns the controller (USBLEGSUP {:#x}); requesting handoff", index, v);
         m.w32(off, v | ext::OS_OWNED);
-        let deadline = interrupts::ticks() + ms_to_ticks(1000);
-        while m.r32(off) & ext::BIOS_OWNED != 0 && interrupts::ticks() < deadline {
-            sched::sleep_ticks(1);
-        }
-        if m.r32(off) & ext::BIOS_OWNED != 0 {
-            kprintln!("xhci{}: firmware did not release the controller; taking it anyway", index);
-            m.w32(off, (m.r32(off) & !ext::BIOS_OWNED) | ext::OS_OWNED);
-        } else {
+        let released = poll_mmio(HANDOFF_TIMEOUT_MS, || m.r32(off) & ext::BIOS_OWNED == 0);
+        if released {
             kprintln!("xhci{}: ownership handed over by the firmware", index);
+        } else {
+            kprintln!(
+                "xhci{}: WARNING: firmware did not release the controller within {} ms; taking it anyway",
+                index,
+                HANDOFF_TIMEOUT_MS
+            );
+            m.w32(off, (m.r32(off) & !ext::BIOS_OWNED) | ext::OS_OWNED);
         }
     } else {
         m.w32(off, v | ext::OS_OWNED);
