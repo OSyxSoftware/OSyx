@@ -10,16 +10,17 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use os_std::sync::Mutex;
 use osyx_abi::fault::{self, Context as NativeContext};
 #[repr(C, align(16))]
-struct Context {
+#[derive(Clone, Copy)]
+pub(crate) struct Context {
     home: [u64; 6],
-    flags: u32,
-    mxcsr: u32,
+    pub flags: u32,
+    pub mxcsr: u32,
     segments: [u16; 6],
-    eflags: u32,
+    pub eflags: u32,
     debug: [u64; 6],
-    regs: [u64; 16],
-    rip: u64,
-    fx: [u8; 512],
+    pub regs: [u64; 16],
+    pub rip: u64,
+    pub fx: [u8; 512],
     vectors: [u128; 26],
     vector_control: u64,
     debug_control: u64,
@@ -27,14 +28,14 @@ struct Context {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Record {
-    code: u32,
-    flags: u32,
-    nested: u64,
-    address: u64,
-    count: u32,
-    reserved: u32,
-    info: [u64; 15],
+pub(crate) struct Record {
+    pub code: u32,
+    pub flags: u32,
+    pub nested: u64,
+    pub address: u64,
+    pub count: u32,
+    pub reserved: u32,
+    pub info: [u64; 15],
 }
 #[repr(C)]
 struct Pointers {
@@ -132,10 +133,16 @@ extern "win64" {
     #[link_name = "osyx_windows_raise_entry"]
     pub(crate) fn RaiseException(code: u32, flags: u32, count: u32, args: *const u64);
 }
+/// Faults of Windows code always go through entry: frame-based handlers
+/// (seh.rs) need no registration. Without kernel support, faults keep
+/// terminating the process as before.
+pub fn install() {
+    // SAFETY: entry is a valid fault callback for the whole process.
+    let _ = unsafe { os_sys::fault_handler(entry as *const () as u64) };
+}
 pub fn set_filter(callback: u64) -> u64 {
-    let handlers = HANDLERS.lock().unwrap();
-    let target = if callback != 0 || !handlers.is_empty() { entry as *const () as u64 } else { 0 };
-    if let Err(e) = unsafe { os_sys::fault_handler(target) } {
+    let _handlers = HANDLERS.lock().unwrap();
+    if let Err(e) = unsafe { os_sys::fault_handler(entry as *const () as u64) } {
         return fail(errno_to_win32(e), 0);
     }
     FILTER.swap(callback, Ordering::SeqCst)
@@ -199,9 +206,6 @@ fn remove(id: u64, continuation: bool) -> u32 {
     let mut handlers = HANDLERS.lock().unwrap();
     let Some(at) = handlers.iter().position(|h| h.id == id && h.continuation == continuation) else { return 0 };
     handlers.remove(at);
-    if handlers.is_empty() && FILTER.load(Ordering::SeqCst) == 0 {
-        let _ = unsafe { os_sys::fault_handler(0) };
-    }
     1
 }
 extern "win64" fn AddVectoredExceptionHandler(first: u32, callback: u64) -> u64 {
@@ -297,6 +301,12 @@ fn apply(c: &Context, n: &mut NativeContext) {
         }
     }
 }
+/// Every register of `c` into the native frame (RtlRestoreContext).
+pub(crate) fn apply_all(c: &Context, n: &mut NativeContext) {
+    let mut full = *c;
+    full.flags |= 0xb;
+    apply(&full, n);
+}
 extern "C" fn entry(native: *mut NativeContext) -> ! {
     let n = unsafe { &mut *native };
     let mut context = windows_context(n);
@@ -309,9 +319,16 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
             context = windows_context(n);
         }
     }
+    // Unwinding during this dispatch (RtlUnwindEx) starts at this context
+    // and ends the kernel delivery through `native`.
+    crate::seh::begin(native, &context);
     let mut p = Pointers { record: &mut record, context: &mut context };
     let handlers = HANDLERS.lock().unwrap().clone();
     let mut handled = handlers.iter().filter(|h| !h.continuation).any(|h| call(*h, &mut p) == -1);
+    if !handled {
+        // SAFETY: `p` points at this frame's record and context.
+        handled = unsafe { crate::seh::dispatch(&mut *p.record, &mut *p.context) };
+    }
     if !handled {
         let callback = FILTER.load(Ordering::SeqCst);
         if callback != 0 {
@@ -328,6 +345,7 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
     // fault_return never returns on success: explicitly release this heap
     // snapshot before abandoning the dispatcher's Rust stack frames.
     drop(handlers);
+    crate::seh::end();
     if handled {
         if record.flags & 1 != 0 {
             os_std::process::exit(0xc0000025u32 as i32);

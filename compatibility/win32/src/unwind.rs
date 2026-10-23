@@ -154,6 +154,11 @@ extern "win64" fn RtlAddFunctionTable(table: u64, count: u32, base: u64) -> u8 {
     1
 }
 
+/// Registers a function table of winrun's own code (see seh.rs).
+pub fn add_table(table: u64, count: u32, base: u64) {
+    RtlAddFunctionTable(table, count, base);
+}
+
 extern "win64" fn RtlDeleteFunctionTable(table: u64) -> u8 {
     let mut d = DYNAMIC.lock().unwrap();
     match d.iter().position(|t| t.table == table) {

@@ -908,6 +908,7 @@ extern "win64" fn GetCurrentThreadId() -> u32 {
 
 /// Ends the process: DLL_PROCESS_DETACH notifications, then exit.
 pub extern "win64" fn ExitProcess(code: u32) -> ! {
+    crate::fls::thread_exit();
     loader::notify_process_detach();
     os_std::process::exit(code as i32)
 }
@@ -968,6 +969,7 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
             }
             loader::notify_threads(loader::DLL_THREAD_ATTACH);
             let code = loader::run_on_stack(start, param, stack + size as u64) as u32;
+            crate::fls::thread_exit();
             loader::notify_threads(loader::DLL_THREAD_DETACH);
             let _ = os_sys::set_gs_base(0);
             mem::free_pages(stack, size);
@@ -2127,6 +2129,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::rtl::kernel32_exports());
     exports.extend(crate::unwind::kernel32_exports());
     exports.extend(crate::sysext::exports());
+    exports.extend(crate::fls::exports());
+    exports.extend(crate::seh::ntdll_exports());
     exports.push(("OpenProcessToken",crate::security::OpenProcessToken as *const () as u64));
     exports
 }

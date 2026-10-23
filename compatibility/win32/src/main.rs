@@ -22,6 +22,7 @@ macro_rules! export_table {
 
 mod error;
 mod exceptions;
+mod fls;
 mod iphlpapi;
 mod kernel32;
 mod loader;
@@ -32,6 +33,7 @@ mod objects;
 mod path;
 mod setupapi;
 mod security;
+mod seh;
 mod teb;
 mod user32;
 mod volumes;
@@ -111,6 +113,7 @@ fn main() -> i32 {
     }
     let env_strings: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     kernel32::init_process(&exe, &cmd, env);
+    exceptions::install();
     let started = match loader::start(&exe, &cmd, &env_strings) {
         Ok(s) => s,
         Err(e) => {

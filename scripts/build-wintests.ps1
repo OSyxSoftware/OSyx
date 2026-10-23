@@ -31,6 +31,11 @@ if (Stale $versionObj @("$src\version.rc")) {
     if (-not $windres) { throw 'windres required for version API regression fixture' }
     Invoke-Checked 'version resource' { & $windres "$src\version.rc" -O coff -o $versionObj }
 }
+# SEH cases need real __try scope tables: compiled for the MSVC ABI.
+$sehObj = Join-Path $out 'seh-cases.o'
+if (Stale $sehObj @("$src\seh_cases.c")) {
+    Invoke-Checked 'seh cases' { & $clang --target=x86_64-pc-windows-msvc -O2 -Wall -Werror -c "$src\seh_cases.c" -o $sehObj }
+}
 $apisetLib = Join-Path $out 'libapiset-processthreads.a'
 if (Stale $apisetLib @("$src\apiset-processthreads.def")) {
     Invoke-Checked 'apiset import library' { & $dlltool -d "$src\apiset-processthreads.def" -l $apisetLib -m i386:x86-64 }
@@ -41,6 +46,7 @@ $programs = [ordered]@{
     'synch.exe' = @{ Src = @('synch.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32', '-lsynchronization') }
     'security.exe' = @{ Src = @('security.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ladvapi32', '-lkernel32') }
     'exceptions.exe' = @{ Src = @('exceptions.c'); Args = @('-fasynchronous-unwind-tables', '-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
+    'seh.exe' = @{ Src = @('seh.c'); Args = @('-fasynchronous-unwind-tables', $sehObj, '-Wl,--subsystem,console', '-Wl,-e,start', '-lntdll', '-lkernel32') }
     'runtime.exe' = @{ Src = @('runtime.c'); Args = @('-fasynchronous-unwind-tables', '-Wl,--subsystem,console', '-Wl,-e,start', '-lntdll', '-ladvapi32', '-lkernel32') }
     'mapping.exe' = @{ Src = @('mapping.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'hello.exe'   = @{ Src = @('hello.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
@@ -55,6 +61,7 @@ foreach ($name in $programs.Keys) {
     $p = $programs[$name]
     $inputs = @($p.Src | ForEach-Object { Join-Path $src $_ }) + @("$src\common.h", (Join-Path $PSScriptRoot 'build-wintests.ps1'))
     if ($name -eq 'version.exe') { $inputs += $versionObj }
+    if ($name -eq 'seh.exe') { $inputs += $sehObj }
     $target = Join-Path $out $name
     if (Stale $target $inputs) {
         Invoke-Checked $name { & $clang @common @($p.Src | ForEach-Object { Join-Path $src $_ }) @($p.Args) -o $target }
