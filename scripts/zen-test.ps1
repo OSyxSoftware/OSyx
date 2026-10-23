@@ -1,12 +1,14 @@
 # A real boot attempt of the unmodified Windows browser. Exit 2 means
 # BLOCKED/UNVERIFIED, never success. Functional success needs a later test
 # of real PRISM windows, tabs, input, page rendering and verified HTTPS.
-param([string]$Version = '1.23.4b', [switch]$SkipBuild, [int]$TimeoutSec = 90)
+# -SkipFetch reuses an already verified build/zen/<version>/core tree, for
+# reruns when the release API cannot be reached.
+param([string]$Version = '1.23.4b', [switch]$SkipBuild, [switch]$SkipFetch, [int]$TimeoutSec = 90)
 . (Join-Path $PSScriptRoot 'common.ps1')
 $evidenceDir = Join-Path $BuildDir 'zen'
 New-Item -ItemType Directory -Force $evidenceDir | Out-Null
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'fetch-zen.ps1') -Version $Version
+    if (-not $SkipFetch) { & (Join-Path $PSScriptRoot 'fetch-zen.ps1') -Version $Version }
     & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'init.args=zen-probe test.exit' -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
 }
 $log = Join-Path $evidenceDir 'qemu.serial.log'
