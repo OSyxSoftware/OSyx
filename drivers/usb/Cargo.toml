@@ -1,0 +1,8 @@
+[package]
+name = "osyx-usb"
+description = "Hardware-independent USB and xHCI building blocks: registers, TRBs, rings, contexts, descriptors, HID reports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -8,10 +8,12 @@
 #![no_std]
 
 pub mod image;
+pub mod prop;
 pub mod splash;
 pub mod text;
 
 pub use image::Image;
+pub use prop::PropFont;
 pub use text::Font;
 
 /// Canonical pixel: `0x00RRGGBB`.
@@ -183,6 +185,12 @@ impl<'a> Surface<'a> {
     pub fn row(&self, y: u32) -> &[Color] {
         let start = (y * self.stride) as usize;
         &self.pixels[start..start + self.width as usize]
+    }
+
+    /// Row `y` (`width` pixels) for in-place writing.
+    pub fn row_mut(&mut self, y: u32) -> &mut [Color] {
+        let start = y as usize * self.stride as usize;
+        &mut self.pixels[start..start + self.width as usize]
     }
 
     #[inline]

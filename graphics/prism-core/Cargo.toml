@@ -1,0 +1,11 @@
+[package]
+name = "prism-core"
+description = "PRISM compositor core: surfaces, window management, input routing, damage tracking and software composition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+osyx-gfx = { path = "../../boot/gfx" }
+osyx-input = { path = "../../shared/input" }
+prism-proto = { path = "../prism-proto" }

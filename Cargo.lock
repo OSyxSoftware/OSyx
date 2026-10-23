@@ -54,6 +54,10 @@ name = "osyx-gfx"
 version = "0.1.0"
 
 [[package]]
+name = "osyx-input"
+version = "0.1.0"
+
+[[package]]
 name = "osyx-kernel"
 version = "0.1.0"
 dependencies = [
@@ -103,8 +107,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "osyx-usb"
+version = "0.1.0"
+
+[[package]]
 name = "osyx-vfs"
 version = "0.1.0"
 dependencies = [
  "osyx-abi",
 ]
+
+[[package]]
+name = "prism-core"
+version = "0.1.0"
+dependencies = [
+ "osyx-gfx",
+ "osyx-input",
+ "prism-proto",
+]
+
+[[package]]
+name = "prism-proto"
+version = "0.1.0"

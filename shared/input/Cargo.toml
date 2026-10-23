@@ -1,0 +1,8 @@
+[package]
+name = "osyx-input"
+description = "OSyx input events: wire format, key codes, modifiers, key repeat and keyboard layouts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
