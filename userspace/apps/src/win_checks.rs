@@ -65,6 +65,7 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     let (tp, up) = (format!("{tcp}"), format!("{udp}"));
     t.check("Winsock over the OSyx network stack (target F)", || run("winsock.exe", &[&tp, &up]) == Some(0));
     t.check("legacy Winsock 1.1 through wsock32.dll ordinals", || run("wsock32.exe", &[]) == Some(0));
+    t.check("Winsock 2 extensions, address text and the provider catalog", || run("wsaext.exe", &[]) == Some(0));
     t.check("a missing program is reported", || {
         Command::new("/bin/winrun").arg("/opt/wintests/none.exe").status().ok().and_then(|s| s.code()) == Some(2)
     });

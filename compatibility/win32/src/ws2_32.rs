@@ -18,6 +18,7 @@ use osyx_abi::Errno;
 const INVALID_SOCKET: u64 = u64::MAX;
 const SOCKET_ERROR: i32 = -1;
 const AF_INET: u16 = 2;
+const AF_INET6: i32 = 23;
 const SOCK_STREAM: i32 = 1;
 const SOCK_DGRAM: i32 = 2;
 const SOL_SOCKET: i32 = 0xFFFF;
@@ -59,6 +60,8 @@ const WSAHOST_NOT_FOUND: u32 = 11001;
 const WSATRY_AGAIN: u32 = 11002;
 const WSAVERNOTSUPPORTED: u32 = 10092;
 const WSANO_DATA: u32 = 11004;
+const WSAEINVALIDPROVIDER: u32 = 10105;
+const ERROR_INVALID_PARAMETER: u32 = 87;
 
 fn wsa(e: Errno) -> u32 {
     match e {
@@ -673,6 +676,273 @@ extern "win64" fn freeaddrinfo(mut p: u64) {
     }
 }
 
+/// WSASocketW: a plain socket. Overlapped I/O is not offered (calls block
+/// or fail with WSAEWOULDBLOCK), so WSA_FLAG_OVERLAPPED changes nothing;
+/// a specific provider (WSAPROTOCOL_INFOW) is not supported.
+extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *const u8, group: u32, _flags: u32) -> u64 {
+    if !info.is_null() || group != 0 {
+        return err(WSAEINVAL, INVALID_SOCKET);
+    }
+    socket(af, kind, proto)
+}
+
+const FIONREAD: u32 = 0x4004_667F;
+
+/// WSAIoctl: FIONBIO only, synchronously. Extension functions
+/// (SIO_GET_EXTENSION_FUNCTION_POINTER: ConnectEx, AcceptEx, ...) need
+/// overlapped I/O and are reported unsupported, so callers fall back.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn WSAIoctl(
+    s: u64,
+    code: u32,
+    input: *const u8,
+    in_len: u32,
+    _output: *mut u8,
+    _out_len: u32,
+    returned: *mut u32,
+    overlapped: *mut u8,
+    completion: u64,
+) -> i32 {
+    result((|| {
+        fd(s)?;
+        if !overlapped.is_null() || completion != 0 {
+            return Err(WSAEOPNOTSUPP);
+        }
+        match code {
+            FIONBIO => {
+                if input.is_null() || in_len < 4 {
+                    return Err(WSAEFAULT);
+                }
+                // SAFETY: the caller's 4-byte input.
+                let mut v = unsafe { core::ptr::read_unaligned(input as *const u32) };
+                if ioctlsocket(s, FIONBIO, &mut v) != 0 {
+                    return Err(teb::last_error());
+                }
+            }
+            FIONREAD => return Err(WSAEOPNOTSUPP),
+            _ => return Err(WSAEINVAL),
+        }
+        if !returned.is_null() {
+            // SAFETY: the caller's out count.
+            unsafe { *returned = 0 };
+        }
+        Ok(())
+    })())
+}
+
+/// WSASendMsg: WSAMSG { name, namelen, lpBuffers, dwBufferCount, Control,
+/// dwFlags } with the buffers gathered into one datagram or stream write.
+/// Control data (ancillary messages) is not supported.
+extern "win64" fn WSASendMsg(s: u64, msg: *const u8, f: u32, sent: *mut u32, overlapped: *mut u8, completion: u64) -> i32 {
+    let r = (|| {
+        let (fd, _) = fd(s)?;
+        if msg.is_null() {
+            return Err(WSAEFAULT);
+        }
+        if f != 0 || !overlapped.is_null() || completion != 0 {
+            return Err(WSAEOPNOTSUPP);
+        }
+        // SAFETY: the caller's WSAMSG (x64 layout: 56 bytes) and WSABUFs.
+        let (to, data) = unsafe {
+            let m = msg as u64;
+            let name: u64 = teb::get(m, 0);
+            let name_len: i32 = teb::get(m, 8);
+            let bufs: u64 = teb::get(m, 16);
+            let count: u32 = teb::get(m, 24);
+            if teb::get::<u32>(m, 32) != 0 {
+                return Err(WSAEINVAL);
+            }
+            let to = if name == 0 { None } else { Some(read_addr(name as *const u8, name_len)?) };
+            let mut data = Vec::new();
+            for i in 0..count as u64 {
+                let len: u32 = teb::get(bufs, (i * 16) as usize);
+                let p: u64 = teb::get(bufs, (i * 16 + 8) as usize);
+                data.extend_from_slice(core::slice::from_raw_parts(p as *const u8, len as usize));
+            }
+            (to, data)
+        };
+        os_sys::sock_send(fd, &data, to.as_ref(), 0).map_err(wsa)
+    })();
+    match r {
+        Ok(n) => {
+            if !sent.is_null() {
+                // SAFETY: the caller's out count.
+                unsafe { *sent = n as u32 };
+            }
+            0
+        }
+        Err(e) => err(e, SOCKET_ERROR),
+    }
+}
+
+/// inet_pton: dotted-decimal IPv4 or textual IPv6 into network order.
+extern "win64" fn inet_pton(af: i32, src: *const u8, dst: *mut u8) -> i32 {
+    if src.is_null() || dst.is_null() {
+        return err(WSAEFAULT, -1);
+    }
+    // SAFETY: a NUL-terminated string.
+    let Some(text) = (unsafe { crate::path::ansi_to_string(src) }) else { return err(WSAEFAULT, -1) };
+    let bytes: Vec<u8> = match af {
+        a if a == AF_INET as i32 => match text.parse::<core::net::Ipv4Addr>() {
+            Ok(a) => a.octets().to_vec(),
+            Err(_) => return 0,
+        },
+        AF_INET6 => match text.parse::<core::net::Ipv6Addr>() {
+            Ok(a) => a.octets().to_vec(),
+            Err(_) => return 0,
+        },
+        _ => return err(WSAEAFNOSUPPORT, -1),
+    };
+    // SAFETY: the caller's in_addr / in6_addr.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len()) };
+    1
+}
+
+/// inet_ntop: the RFC 5952 text of an IPv4 or IPv6 address.
+extern "win64" fn inet_ntop(af: i32, src: *const u8, dst: *mut u8, size: usize) -> u64 {
+    if src.is_null() || dst.is_null() {
+        return err(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's in_addr (4 bytes) / in6_addr (16 bytes).
+    let text = unsafe {
+        match af {
+            a if a == AF_INET as i32 => {
+                let mut b = [0u8; 4];
+                core::ptr::copy_nonoverlapping(src, b.as_mut_ptr(), 4);
+                alloc::format!("{}", core::net::Ipv4Addr::from(b))
+            }
+            AF_INET6 => {
+                let mut b = [0u8; 16];
+                core::ptr::copy_nonoverlapping(src, b.as_mut_ptr(), 16);
+                alloc::format!("{}", core::net::Ipv6Addr::from(b))
+            }
+            _ => return err(WSAEAFNOSUPPORT, 0),
+        }
+    };
+    if size < text.len() + 1 {
+        return err(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's buffer of `size` bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(text.as_ptr(), dst, text.len());
+        *dst.add(text.len()) = 0;
+    }
+    dst as u64
+}
+
+/// The catalog: one base provider each for TCP and UDP over IPv4, both
+/// served by OSyx's own stack. No layered (LSP) providers exist.
+const PROVIDER_ID: [u8; 16] = *b"OSyx-Winsock-TCP";
+const PROTOCOL_INFO_SIZE: usize = 628;
+const PROVIDER_PATH: &str = "%SystemRoot%\\system32\\mswsock.dll";
+
+/// WSAPROTOCOL_INFOW of catalog entry `(socket type, protocol)`.
+fn protocol_info(p: u64, kind: i32, proto: i32) {
+    // XP1_GUARANTEED_DELIVERY | GUARANTEED_ORDER | GRACEFUL_CLOSE for TCP;
+    // XP1_CONNECTIONLESS | MESSAGE_ORIENTED | SUPPORT_BROADCAST for UDP.
+    let (flags, msg_size, name) = if kind == SOCK_STREAM {
+        (0x26u32, 0u32, "OSyx TCP/IP [TCP/IP]")
+    } else {
+        (0x209, 65507, "OSyx TCP/IP [UDP/IP]")
+    };
+    // SAFETY: the caller's 628-byte WSAPROTOCOL_INFOW.
+    unsafe {
+        core::ptr::write_bytes(p as *mut u8, 0, PROTOCOL_INFO_SIZE);
+        teb::put(p, 0, flags);
+        core::ptr::copy_nonoverlapping(PROVIDER_ID.as_ptr(), (p + 20) as *mut u8, 16);
+        teb::put(p, 36, 1000 + proto as u32);
+        teb::put(p, 40, 1i32); // ProtocolChain.ChainLen: BASE_PROTOCOL
+        teb::put(p, 72, 2i32); // iVersion
+        teb::put(p, 76, AF_INET as i32);
+        teb::put(p, 80, 16i32);
+        teb::put(p, 84, 16i32);
+        teb::put(p, 88, kind);
+        teb::put(p, 92, proto);
+        teb::put(p, 108, msg_size);
+        for (i, c) in name.encode_utf16().enumerate() {
+            teb::put(p, 116 + i * 2, c);
+        }
+    }
+}
+
+extern "win64" fn WSCEnumProtocols(filter: *const i32, buf: *mut u8, len: *mut u32, errno: *mut i32) -> i32 {
+    let set_errno = |e: u32| {
+        if !errno.is_null() {
+            // SAFETY: the caller's error out-parameter.
+            unsafe { *errno = e as i32 };
+        }
+    };
+    let wanted = |proto: i32| -> bool {
+        if filter.is_null() {
+            return true;
+        }
+        // SAFETY: the caller's zero-terminated protocol list.
+        unsafe { (0..).map(|i| *filter.add(i)).take_while(|&v| v != 0).any(|v| v == proto) }
+    };
+    let entries: Vec<(i32, i32)> =
+        [(SOCK_STREAM, IPPROTO_TCP), (SOCK_DGRAM, 17)].into_iter().filter(|&(_, p)| wanted(p)).collect();
+    if len.is_null() {
+        set_errno(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+    let need = (entries.len() * PROTOCOL_INFO_SIZE) as u32;
+    // SAFETY: the caller's buffer length.
+    unsafe {
+        if buf.is_null() || *len < need {
+            *len = need;
+            set_errno(WSAENOBUFS);
+            return SOCKET_ERROR;
+        }
+    }
+    for (i, &(kind, proto)) in entries.iter().enumerate() {
+        protocol_info(buf as u64 + (i * PROTOCOL_INFO_SIZE) as u64, kind, proto);
+    }
+    entries.len() as i32
+}
+
+/// Whether `id` points at OSyx's provider GUID.
+fn our_provider(id: *const u8) -> bool {
+    // SAFETY: the caller's GUID.
+    !id.is_null() && unsafe { core::slice::from_raw_parts(id, 16) } == PROVIDER_ID
+}
+
+/// WSCGetProviderInfo: LSP categories are recorded only for layered
+/// providers (WSCSetProviderInfo); for a base provider Windows reports
+/// WSAEINVALIDPROVIDER, and so does OSyx, which has only base providers.
+extern "win64" fn WSCGetProviderInfo(id: *const u8, _kind: i32, _info: *mut u8, _size: *mut usize, _flags: u32, errno: *mut i32) -> i32 {
+    if !errno.is_null() {
+        // SAFETY: the caller's error out-parameter.
+        unsafe { *errno = if our_provider(id) { WSAEINVALIDPROVIDER } else { WSAEINVAL } as i32 };
+    }
+    SOCKET_ERROR
+}
+
+extern "win64" fn WSCGetProviderPath(id: *const u8, path: *mut u16, len: *mut i32, errno: *mut i32) -> i32 {
+    let fail = |e: u32| {
+        if !errno.is_null() {
+            // SAFETY: the caller's error out-parameter.
+            unsafe { *errno = e as i32 };
+        }
+        SOCKET_ERROR
+    };
+    if !our_provider(id) {
+        return fail(WSAEINVAL);
+    }
+    let w: Vec<u16> = PROVIDER_PATH.encode_utf16().chain(core::iter::once(0)).collect();
+    if len.is_null() {
+        return fail(WSAEFAULT);
+    }
+    // SAFETY: the caller's length (in characters) and buffer.
+    unsafe {
+        if path.is_null() || (*len as usize) < w.len() {
+            *len = w.len() as i32;
+            return fail(WSAEFAULT);
+        }
+        core::ptr::copy_nonoverlapping(w.as_ptr(), path, w.len());
+    }
+    0
+}
+
 /// FD_ISSET: whether fd_set `set` holds `s`.
 extern "win64" fn __WSAFDIsSet(s: u64, set: *const u8) -> i32 {
     if set.is_null() {
@@ -786,6 +1056,14 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         freeaddrinfo,
         select,
         __WSAFDIsSet,
+        WSASocketW,
+        WSAIoctl,
+        WSASendMsg,
+        inet_pton,
+        inet_ntop,
+        WSCEnumProtocols,
+        WSCGetProviderInfo,
+        WSCGetProviderPath,
     ]
 }
 
