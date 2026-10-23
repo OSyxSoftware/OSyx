@@ -43,6 +43,7 @@ mod teb;
 mod ucrt;
 mod user32;
 mod volumes;
+mod winmm;
 mod version;
 mod synch;
 mod process;

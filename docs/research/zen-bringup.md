@@ -412,6 +412,18 @@ SetThreadToken, OpenThreadToken, RevertToSelf, AdjustTokenPrivileges,
 CreateProcessAsUserW), AccessCheck and the event log. They need a real
 model of object security descriptors and restricted tokens on OSyx.
 
+## winmm timers
+
+`winmm.rs` provides timeGetTime (the monotonic clock in milliseconds),
+timeBeginPeriod/timeEndPeriod and timeGetDevCaps, which zen.exe and
+mozglue delay-import. The OSyx kernel ticks at a fixed 100 Hz, so the
+reported minimum period is 10 ms; finer requests (such as the usual
+timeBeginPeriod(1)) return TIMERR_NOCANDO rather than claiming a
+resolution OSyx does not have, and timeEndPeriod must match an earlier
+timeBeginPeriod. The `winmm.exe` fixture passed 7/7 on Windows and 10/10
+on OSyx; the Win32 QEMU suite passed 797/797. No new Zen attempt was
+run: Zen still stops first at the advapi32 delay import of attempt 12.
+
 ## Validation
 
 Host parser/loader tests (including resource bounds, malformed delay

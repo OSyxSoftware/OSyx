@@ -1701,7 +1701,7 @@ extern "win64" fn GetNativeSystemInfo(out: *mut u8) {
 
 // ---- time -------------------------------------------------------------------------
 
-fn now_ns() -> u64 {
+pub(crate) fn now_ns() -> u64 {
     os_sys::clock(osyx_abi::CLOCK_MONOTONIC).unwrap_or(0)
 }
 
