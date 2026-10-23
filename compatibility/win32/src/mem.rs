@@ -249,5 +249,5 @@ pub fn virtual_query(addr: u64) -> Option<Info> {
         }
     }
     drop(regions);
-    crate::loader::query_image(addr)
+    crate::mapping::query(addr).or_else(|| crate::loader::query_image(addr))
 }

@@ -2122,6 +2122,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::psapi::kernel_exports());
     exports.extend(crate::timers::exports());
     exports.extend(crate::exceptions::exports());
+    exports.extend(crate::mapping::exports());
     exports.push(("OpenProcessToken",crate::security::OpenProcessToken as *const () as u64));
     exports
 }

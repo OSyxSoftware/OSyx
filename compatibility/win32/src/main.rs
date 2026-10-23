@@ -25,6 +25,7 @@ mod exceptions;
 mod iphlpapi;
 mod kernel32;
 mod loader;
+mod mapping;
 mod mem;
 mod ntdll;
 mod objects;

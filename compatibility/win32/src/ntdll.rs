@@ -6,10 +6,9 @@
 
 use crate::error::*;
 use crate::kernel32;
-use crate::objects::{self, Object, SectionObj};
-use crate::{mem, teb};
+use crate::objects::{self, Object};
+use crate::{mapping, mem, teb};
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
@@ -243,30 +242,26 @@ extern "win64" fn NtClose(h: u64) -> NtStatus {
     }
 }
 
-/// Sections backed by the page file (no file handle): OSyx shared memory.
-/// File-backed sections are not supported.
+/// Sections of the page file or of a file handle (mapping.rs). Names in
+/// the object attributes are not read: NT sections here are unnamed.
 extern "win64" fn NtCreateSection(
     out: *mut u64,
     _access: u32,
     _oa: u64,
     size: *const i64,
     protect: u32,
-    _attrs: u32,
+    attrs: u32,
     file: u64,
 ) -> NtStatus {
-    if file != 0 {
-        return STATUS_NOT_SUPPORTED;
+    let size = byte_offset(size).unwrap_or(0);
+    match mapping::create((file != 0).then_some(file), protect | (attrs & !0xFF), size, None) {
+        Ok((h, _)) => {
+            // SAFETY: the caller's out pointer.
+            unsafe { *out = h };
+            STATUS_SUCCESS
+        }
+        Err(s) => s,
     }
-    let Some(sz) = byte_offset(size).filter(|&s| s > 0) else { return STATUS_INVALID_PARAMETER };
-    let writable = matches!(protect & 0xFF, mem::PAGE_READWRITE | mem::PAGE_WRITECOPY);
-    let shm = match os_sys::shm_create(sz) {
-        Ok(h) => h,
-        Err(e) => return errno_to_status(e),
-    };
-    let h = objects::insert(Object::Section(Arc::new(SectionObj { shm, size: sz, writable })));
-    // SAFETY: the caller's out pointer.
-    unsafe { *out = h };
-    STATUS_SUCCESS
 }
 
 extern "win64" fn NtMapViewOfSection(
@@ -284,40 +279,40 @@ extern "win64" fn NtMapViewOfSection(
     if process != objects::CURRENT_PROCESS {
         return STATUS_NOT_SUPPORTED;
     }
-    let Some(Object::Section(s)) = objects::get(section) else { return STATUS_INVALID_HANDLE };
-    if byte_offset(offset).unwrap_or(0) != 0 {
-        return STATUS_NOT_SUPPORTED; // whole-section views only
+    // SAFETY: the caller's in/out pointers.
+    if !base.is_null() && unsafe { *base } != 0 {
+        return STATUS_NOT_SUPPORTED; // placement at a chosen address
     }
-    let write = s.writable && matches!(protect & 0xFF, mem::PAGE_READWRITE | mem::PAGE_WRITECOPY);
-    match os_sys::shm_map(s.shm, write) {
-        Ok(p) => {
+    let access = match protect & 0xFF {
+        mem::PAGE_READWRITE => mapping::FILE_MAP_WRITE | mapping::FILE_MAP_READ,
+        mem::PAGE_WRITECOPY => mapping::FILE_MAP_COPY,
+        mem::PAGE_EXECUTE_READ => mapping::FILE_MAP_EXECUTE | mapping::FILE_MAP_READ,
+        _ => mapping::FILE_MAP_READ,
+    };
+    // SAFETY: as above.
+    let len = if view_size.is_null() { 0 } else { (unsafe { *view_size }) as u64 };
+    match mapping::map(section, access, byte_offset(offset).unwrap_or(0), len) {
+        Ok((p, size)) => {
             // SAFETY: the caller's in/out pointers.
             unsafe {
-                *base = p as u64;
+                *base = p;
                 if !view_size.is_null() {
-                    *view_size = s.size as usize;
+                    *view_size = size as usize;
                 }
             }
-            VIEWS.lock().unwrap().push((p as u64, s.size));
             STATUS_SUCCESS
         }
-        Err(e) => errno_to_status(e),
+        Err(s) => s,
     }
 }
-
-static VIEWS: os_std::sync::Mutex<Vec<(u64, u64)>> = os_std::sync::Mutex::new(Vec::new());
 
 extern "win64" fn NtUnmapViewOfSection(process: u64, base: u64) -> NtStatus {
     if process != objects::CURRENT_PROCESS {
         return STATUS_NOT_SUPPORTED;
     }
-    let mut v = VIEWS.lock().unwrap();
-    let Some(i) = v.iter().position(|&(b, _)| b == base) else { return STATUS_INVALID_PARAMETER };
-    let (b, size) = v.remove(i);
-    // SAFETY: a whole view mapped by NtMapViewOfSection.
-    match unsafe { os_sys::unmap(b as *mut u8, size as usize) } {
+    match mapping::unmap(base) {
         Ok(()) => STATUS_SUCCESS,
-        Err(e) => errno_to_status(e),
+        Err(s) => s,
     }
 }
 

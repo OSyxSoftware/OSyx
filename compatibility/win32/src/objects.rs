@@ -203,16 +203,22 @@ pub struct SemaphoreObj {
     pub max: i32,
 }
 
-/// A section (file mapping): its memory as an OSyx shared memory object.
+/// A section (file mapping): page-file memory as an OSyx shared memory
+/// object (`shm`), or the file it maps (`shm` 0); see mapping.rs.
 pub struct SectionObj {
     pub shm: u64,
     pub size: u64,
     pub writable: bool,
+    pub executable: bool,
+    pub file: Option<Arc<FileObj>>,
+    pub name: Option<String>,
 }
 
 impl Drop for SectionObj {
     fn drop(&mut self) {
-        let _ = os_sys::close(self.shm);
+        if self.shm != 0 {
+            let _ = os_sys::close(self.shm);
+        }
     }
 }
 
@@ -401,6 +407,7 @@ pub fn find_named(name: &str) -> Option<Object> {
             Object::Event(e) => e.name.as_deref().is_some_and(|n| n == name),
             Object::Timer(t) => t.name.as_deref().is_some_and(|n| n == name),
             Object::Mutex(m) => m.name.as_deref().is_some_and(|n| n == name),
+            Object::Section(s) => s.name.as_deref().is_some_and(|n| n == name),
             _ => false,
         })
         .cloned()
