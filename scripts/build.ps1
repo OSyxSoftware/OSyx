@@ -5,7 +5,10 @@ param(
     [string]$Cmdline = '',
     [switch]$DebugBuild,
     # Leave \EFI\OSYX\BIN out of the ESP (kernel boots without user programs).
-    [switch]$NoInit
+    [switch]$NoInit,
+    # Keep the root partition of the current build/osyx.img (e.g. to boot
+    # again after a simulated power cut) instead of building a fresh one.
+    [switch]$KeepRoot
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 Push-Location $Root
@@ -60,6 +63,13 @@ try {
     Write-Host "==> ESP contents in $EspDir"
     Get-ChildItem $EspDir -Recurse -File | ForEach-Object {
         Write-Host ("    {0,-28} {1,10} bytes" -f $_.FullName.Substring($EspDir.Length + 1), $_.Length)
+    }
+    if ($KeepRoot) {
+        Write-Host '==> keeping the root partition of the current disk image'
+        Save-RootPartition
+    } else {
+        Write-Host '==> building ext4 root file system (mke2fs in WSL)'
+        New-RootImage (Join-Path $Root "target\user\x86_64-unknown-none\$profileDir")
     }
     Write-Host '==> assembling GPT disk image'
     New-DiskImage

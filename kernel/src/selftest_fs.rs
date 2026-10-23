@@ -379,7 +379,61 @@ pub fn fat_boot() -> TestResult {
     Ok(())
 }
 
-static WORKER_OK: [AtomicBool; 4] = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
+fn root_ext4() -> Option<Arc<vfs::Mount>> {
+    vfs::mounts().into_iter().find(|m| m.path == "/" && m.fs.fs_type() == "ext4" && !m.read_only())
+}
+
+pub fn ext4_root() -> TestResult {
+    let Some(m) = root_ext4() else {
+        kprintln!("[test]   skipped: no writable ext4 root");
+        return Ok(());
+    };
+    let cx = root();
+    ensure!(read_file(&cx, "/etc/osyx-release") == Ok(b"OSyx 0.1.0\n".to_vec()), "/etc/osyx-release");
+    let st = vfs::stat(&cx, "/osyx-seed/secret").map_err(|x| e("stat secret", x))?;
+    ensure!((st.mode, st.uid, st.kind) == (0o600, 0, KIND_FILE), "ext4 ownership and mode {st:?}");
+    ensure!(vfs::open(&user(1000), "/osyx-seed/secret", OPEN_READ, 0).err() == Some(Errno::PermissionDenied), "ext4 permissions");
+    ensure!(vfs::stat(&cx, "/home/user").map(|s| s.uid) == Ok(1000), "home directory owner");
+    ensure!(vfs::readlink(&cx, "/osyx-seed/link").as_deref() == Ok("hello.txt"), "ext4 symlink");
+    ensure!(vfs::stat(&cx, "/osyx-seed/sparse.bin").map(|s| s.size) == Ok((5 << 30) + 3), "large sparse file");
+    let d = "/kselftest-ext4";
+    remove_tree(d);
+    vfs::mkdir(&cx, d, 0o755).map_err(|x| e("mkdir", x))?;
+    let data: Vec<u8> = (0..100_000u32).map(|i| (i * 13 + 1) as u8).collect();
+    write_file(&cx, "/kselftest-ext4/data.bin", &data).map_err(|x| e("write", x))?;
+    ensure!(read_file(&cx, "/kselftest-ext4/data.bin") == Ok(data.clone()), "read back 100 KB");
+    vfs::rename(&cx, "/kselftest-ext4/data.bin", "/kselftest-ext4/renamed.bin").map_err(|x| e("rename", x))?;
+    vfs::symlink(&cx, "renamed.bin", "/kselftest-ext4/link").map_err(|x| e("symlink", x))?;
+    ensure!(vfs::stat(&cx, "/kselftest-ext4/link").map(|s| s.size) == Ok(100_000), "ext4 symlink to a new file");
+    vfs::chmod(&cx, "/kselftest-ext4/renamed.bin", 0o600).map_err(|x| e("chmod", x))?;
+    ensure!(vfs::stat(&cx, "/kselftest-ext4/renamed.bin").map(|s| s.mode) == Ok(0o600), "chmod persisted");
+    // Removed while open: data stays until the handle closes.
+    let mut h = vfs::open(&cx, "/kselftest-ext4/renamed.bin", OPEN_READ, 0).map_err(|x| e("open", x))?;
+    vfs::unlink(&cx, "/kselftest-ext4/renamed.bin").map_err(|x| e("unlink open file", x))?;
+    let mut buf = [0u8; 16];
+    ensure!(h.read(&mut buf) == Ok(16) && buf[..] == data[..16], "orphaned data readable");
+    let before = vfs::statfs(&cx, "/").map_err(|x| e("statfs", x))?.free_blocks;
+    drop(h);
+    let after = vfs::statfs(&cx, "/").map_err(|x| e("statfs", x))?.free_blocks;
+    ensure!(after > before, "blocks of the removed file freed on close ({before} -> {after})");
+    remove_tree(d);
+    ensure!(vfs::stat(&cx, d) == Err(Errno::NotFound), "cleanup");
+    match m.fs.fsck() {
+        Some(Ok(s)) => kprintln!("[test]   / ({}): {s}", m.source),
+        Some(Err(p)) => return Err(format!("ext4 root inconsistent: {p}")),
+        None => return Err(String::from("ext4 driver has no checker")),
+    }
+    Ok(())
+}
+
+static WORKER_OK: [AtomicBool; 6] = [
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+];
 
 fn pattern(seed: u64, len: usize) -> Vec<u8> {
     (0..len).map(|i| (i as u64 * 31 + seed * 7) as u8).collect()
@@ -387,7 +441,11 @@ fn pattern(seed: u64, len: usize) -> Vec<u8> {
 
 /// Writes its own file in chunks (yielding in between), reads it back.
 fn worker(slot: u64, _: u64) {
-    let dir = if slot < 2 { "/tmp" } else { "/boot" };
+    let dir = match slot {
+        0 | 1 => "/tmp",
+        2 | 3 => "/boot",
+        _ => "",
+    };
     let path = format!("{dir}/kst-worker-{slot}.bin");
     let data = pattern(slot, 20_000);
     let r = (|| -> Result<(), Errno> {
@@ -413,7 +471,13 @@ fn worker(slot: u64, _: u64) {
 }
 
 pub fn concurrent() -> TestResult {
-    let slots: Vec<u64> = if boot_fat().is_some() { alloc::vec![0, 1, 2, 3] } else { alloc::vec![0, 1] };
+    let mut slots: Vec<u64> = alloc::vec![0, 1];
+    if boot_fat().is_some() {
+        slots.extend([2, 3]);
+    }
+    if root_ext4().is_some() {
+        slots.extend([4, 5]);
+    }
     let tids: Vec<_> = slots.iter().map(|&s| sched::spawn_kernel("vfs-worker", worker, s, 0)).collect();
     for t in tids {
         sched::join(t);
@@ -421,9 +485,9 @@ pub fn concurrent() -> TestResult {
     for s in slots {
         ensure!(WORKER_OK[s as usize].load(Ordering::Relaxed), "worker {s} failed");
     }
-    if let Some(m) = boot_fat() {
+    for m in [boot_fat(), root_ext4()].into_iter().flatten() {
         if let Some(Err(p)) = m.fs.fsck() {
-            return Err(format!("/boot inconsistent after concurrent writes: {p}"));
+            return Err(format!("{} inconsistent after concurrent writes: {p}", m.path));
         }
     }
     Ok(())

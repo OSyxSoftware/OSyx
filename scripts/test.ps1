@@ -17,7 +17,7 @@ param(
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 # "[user] fs: ..." checks init runs (userspace/apps/src/fs_checks.rs).
-$ExpectedFsChecks = 17
+$ExpectedFsChecks = 19
 $results = New-Object System.Collections.Generic.List[object]
 $testDir = Join-Path $BuildDir 'test'
 New-Item -ItemType Directory -Force $testDir | Out-Null
@@ -112,11 +112,12 @@ try {
             -and $r.Log -match 'vfs: tmpfs tmpfs mounted at /tmp' -and $r.Log -match 'vfs: tmpfs tmpfs mounted at /run' `
             -and $r.Log -match 'vfs: devfs devfs mounted at /dev' -and $r.Log -match 'random: ChaCha20 DRBG seeded from' `
             -and $r.Log -match '\[test\] PCI enumeration \.\.\. ok' -and $r.Log -match '\[test\] block device I/O \.\.\. ok' `
-            -and ([regex]::Matches($r.Log, '\[test\] (VFS|devfs|FAT32|concurrent)[^\n]*\.\.\. ok').Count -eq 6)
-        Record 'GPT, FAT32 /boot, tmpfs, devfs and VFS self-tests' $ok ([regex]::Match($r.Log, 'storage: [^\n]*').Value)
+            -and ([regex]::Matches($r.Log, '\[test\] (VFS|devfs|FAT32|ext4|concurrent)[^\n]*\.\.\. ok').Count -eq 7)
+        $ok = $ok -and $r.Log -match 'vfs: ext4 /dev/disks/vda2 mounted at / \(read-write' -and $r.Log -match '\[test\] ext4 root through the VFS \.\.\. ok'
+        Record 'GPT, ext4 /, FAT32 /boot, tmpfs, devfs and VFS self-tests' $ok ([regex]::Match($r.Log, 'storage: [^\n]*').Value)
         $fsOk = [regex]::Matches($r.Log, '\[user\] fs: [^\n]* \.\.\. ok').Count
         $ok = $fsOk -eq $ExpectedFsChecks -and $r.Log -notmatch '\[user\] fs: [^\n]*FAILED' -and $r.Log -match 'closed 11 open handles' `
-            -and $r.Log -match 'as-user 1000: 9 of 9 permission checks passed'
+            -and $r.Log -match 'as-user 1000: 12 of 12 permission checks passed'
         Record 'OSyx Std fs from ring 3 (all mounts, perms, devices)' $ok "$fsOk of $ExpectedFsChecks fs checks passed"
 
         # The files init left on the ESP, read back on the host by mtools (an
@@ -150,6 +151,34 @@ try {
             } catch { $detail = "$_" } finally { Pop-Location }
         }
         Record 'host reads OSyx-written ESP files (mtools + fsck)' $ok $detail
+
+        # The ext4 root OSyx wrote to, checked after shutdown by e2fsck and
+        # read back by debugfs (e2fsprogs in WSL).
+        $rootOffset = (1 + $EspSizeMiB) * 1MB
+        $out = (Invoke-Checked 'check-root' { wsl.exe -d Ubuntu-24.04 -- bash (ConvertTo-WslPath (Join-Path $PSScriptRoot 'check-root.sh')) (ConvertTo-WslPath $DiskImage) $rootOffset }) -join "`n"
+        $kv = @{}
+        foreach ($line in $out -split "`n") { if ($line -match '^(\w+)=(.*)$') { $kv[$Matches[1]] = $Matches[2] } }
+        $ok = $kv['e2fsck'] -eq '0' -and $kv['hello'] -eq 'Written by OSyx init through os_std::fs.' `
+            -and $kv['worker'] -match '^written by worker \d+$' -and $kv['pattern_sha256'] -eq $kv['expected_sha256'] `
+            -and $kv['deep'] -eq 'deep' -and $kv['link'] -eq 'Fast link dest: "moved/c/deep.txt"' `
+            -and $kv['private_mode'] -eq 'Mode: 0640' -and $kv['temp_gone'] -eq '1'
+        Record 'host checks the ext4 root OSyx wrote (e2fsck + debugfs)' $ok "e2fsck=$($kv['e2fsck']): $($kv['e2fsck_summary'])"
+
+        # Power cut on the ext4 root while a removed file is still open: the
+        # next boot must recover (journal, orphan list) to a clean volume.
+        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast test.power-cut init.args=crash-prep' | Out-Null
+        $r = Invoke-Boot 'power-cut' $TimeoutSec
+        $cut = $r.Exit -eq 33 -and $r.Log -match 'hold-orphan \d+: holding removed /crash-orphan.bin open' `
+            -and $r.Log -match 'test.power-cut: stopping without unmounting'
+        $dump = (Invoke-Checked 'dumpe2fs' { wsl.exe -d Ubuntu-24.04 -- dumpe2fs -h "$(ConvertTo-WslPath $DiskImage)?offset=$rootOffset" }) -join "`n"
+        $dirty = $dump -match 'needs_recovery' -and $dump -match 'First orphan inode:\s+[1-9]' -and $dump -match 'Filesystem state:\s+not clean'
+        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast init.args=exit,0' -KeepRoot | Out-Null
+        $r = Invoke-Boot 'after-power-cut' $TimeoutSec
+        $recovered = $r.Exit -eq 33 -and $r.Log -match 'ext4 vda2: recovery replayed \d+ journal blocks, freed 1 orphaned inodes' `
+            -and $r.Log -match 'self-tests: \d+ passed, 0 failed'
+        $out = (Invoke-Checked 'check-root' { wsl.exe -d Ubuntu-24.04 -- bash (ConvertTo-WslPath (Join-Path $PSScriptRoot 'check-root.sh')) (ConvertTo-WslPath $DiskImage) $rootOffset }) -join "`n"
+        $clean = $out -match '(?m)^e2fsck=0$'
+        Record 'power cut with an open removed file, recovery at next boot' ($cut -and $dirty -and $recovered -and $clean) "cut=$cut dirty-on-disk=$dirty recovered=$recovered e2fsck-clean=$clean"
 
         # Without an entropy source /dev/random must not exist (no
         # predictable bytes); everything else still works.

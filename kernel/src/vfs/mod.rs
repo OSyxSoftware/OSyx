@@ -28,6 +28,7 @@
 //! compatibility layer, above this module (see docs/windows-compatibility.md).
 
 pub mod devfs;
+pub mod ext4;
 pub mod fat;
 pub mod tmpfs;
 
@@ -773,6 +774,7 @@ pub fn mount(cx: &Lookup, source: &str, target: &str, fstype: &str, flags: u64, 
 pub fn mount_disk(fstype: &str, disk: Arc<dyn crate::block::BlockDev>, read_only: bool) -> Result<Arc<dyn Filesystem>> {
     match fstype {
         "fat32" => Ok(Arc::new(fat::FatVolume::mount(disk, read_only)?)),
+        "ext4" => Ok(Arc::new(ext4::Ext4Volume::mount(disk, read_only)?)),
         _ => Err(Errno::InvalidArgument),
     }
 }

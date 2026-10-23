@@ -36,7 +36,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 23] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 24] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -59,7 +59,8 @@ pub fn run(boot: &BootData) -> Summary {
         ("VFS: mount, unmount and limits", &crate::selftest_fs::mount_unmount),
         ("devfs devices and /dev/random", &crate::selftest_fs::devfs),
         ("FAT32 /boot through the VFS", &crate::selftest_fs::fat_boot),
-        ("concurrent writers (tmpfs + FAT32)", &crate::selftest_fs::concurrent),
+        ("ext4 root through the VFS", &crate::selftest_fs::ext4_root),
+        ("concurrent writers (tmpfs, FAT32, ext4)", &crate::selftest_fs::concurrent),
     ];
     let mut s = Summary { passed: 0, failed: 0 };
     for (name, t) in tests.iter() {

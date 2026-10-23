@@ -9,6 +9,7 @@
 //! * `fault`:       dereference an unmapped address (the kernel must kill us)
 //! * `panic`:       panic (OSyx Std must report it and exit with 101)
 //! * `exit,<code>`: exit with `<code>`
+//! * `crash-prep`:  leave an open, removed file on / for the power-cut test
 
 #![no_std]
 #![no_main]
@@ -47,6 +48,14 @@ fn main() -> i32 {
         Some("exit") => {
             let code = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             process::exit(code);
+        }
+        Some("crash-prep") => {
+            // Leave a removed-but-open file on the ext4 root, then exit
+            // (the kernel's test.power-cut stops the machine right after).
+            let _holder = worker(&["hold-orphan", "/crash-orphan.bin"]).spawn();
+            thread::sleep(Duration::from_millis(500));
+            println!("crash-prep: orphan held by a child; exiting");
+            return 0;
         }
         _ => {}
     }

@@ -210,3 +210,21 @@ impl osyx_fat::BlockDevice for Disk {
         self.0.flush().map_err(|_| osyx_fat::FsError::Io)
     }
 }
+
+impl osyx_ext4::BlockDevice for Disk {
+    fn sector_count(&self) -> u64 {
+        self.0.sector_count()
+    }
+
+    fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> osyx_ext4::Result<()> {
+        read(&*self.0, lba, buf).map_err(|_| osyx_ext4::Error::Io)
+    }
+
+    fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> osyx_ext4::Result<()> {
+        write(&*self.0, lba, buf).map_err(|_| osyx_ext4::Error::Io)
+    }
+
+    fn flush(&mut self) -> osyx_ext4::Result<()> {
+        self.0.flush().map_err(|_| osyx_ext4::Error::Io)
+    }
+}

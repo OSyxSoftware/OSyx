@@ -15,6 +15,7 @@
 //! * `fs-write PATH` write "written by worker <pid>" to PATH
 //! * `fs-leak PATH`  write PATH, then exit with 11 handles still open
 //! * `pwd DIR`       exit 0 if the inherited current directory is DIR
+//! * `hold-orphan P` create P (1 MiB), remove it, keep it open, sleep
 //! * `as-user UID`   drop root, then check that permissions confine us;
 //!   exit status = number of failed checks
 
@@ -175,6 +176,18 @@ fn main() -> i32 {
             (cwd.ok().as_deref().map(|p| p.as_str()) != args.get(2).map(String::as_str)) as i32
         }
         Some("as-user") => as_user(arg_num(&args, 2) as u32),
+        Some("hold-orphan") => {
+            // Keeps a removed file open until the machine stops.
+            let Some(path) = args.get(2) else { return 2 };
+            let Ok(mut f) = File::create(path) else { return 1 };
+            if f.write_all(&vec![0x0Fu8; 1 << 20]).is_err() || f.sync_all().is_err() || fs::remove_file(path).is_err() {
+                return 1;
+            }
+            println!("hold-orphan {pid}: holding removed {path} open");
+            thread::sleep(Duration::from_secs(3600));
+            drop(f);
+            0
+        }
         other => {
             eprintln!("worker: unknown mode {other:?}");
             2
@@ -192,7 +205,12 @@ fn as_user(uid: u32) -> i32 {
         return 100;
     }
     let kind = |r: os_std::error::Result<()>| r.err().map(|e| e.kind());
-    let checks: [(&str, bool); 9] = [
+    let checks: [(&str, bool); 12] = [
+        ("ext4: 0600 root file unreadable", kind(File::open("/osyx-seed/secret").map(|_| ())) == Some(ErrorKind::PermissionDenied)),
+        ("ext4: /etc is read-only for users", kind(fs::write("/etc/user.txt", "x")) == Some(ErrorKind::PermissionDenied)),
+        ("ext4: own home directory is writable", fs::write("/home/user/note.txt", "mine").is_ok()
+            && fs::metadata("/home/user/note.txt").is_ok_and(|m| m.uid() == uid && m.gid() == uid)
+            && fs::remove_file("/home/user/note.txt").is_ok()),
         ("cannot become root again", kind(os::setuid(0, 0)) == Some(ErrorKind::PermissionDenied)),
         ("raw disks are root-only", fs::read_dir("/dev/disks").is_ok_and(|d| {
             d.into_iter().all(|e| File::open(e.path()).err().map(|e| e.kind()) == Some(ErrorKind::PermissionDenied))
@@ -213,6 +231,6 @@ fn as_user(uid: u32) -> i32 {
             failed += 1;
         }
     }
-    println!("as-user {uid}: {} of {} permission checks passed", 9 - failed, 9);
+    println!("as-user {uid}: {} of {} permission checks passed", 12 - failed, 12);
     failed
 }

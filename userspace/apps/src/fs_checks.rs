@@ -49,8 +49,52 @@ pub fn run(t: &mut Tests) {
         let table: Vec<(&str, String)> =
             ["/", "/boot", "/tmp", "/run", "/dev"].iter().map(|p| (*p, fstype(p))).collect();
         println!("mounts: {table:?}");
-        table[1].1 == "fat32" && table[2].1 == "tmpfs" && table[3].1 == "tmpfs" && table[4].1 == "devfs"
-            && (table[0].1 == "ext4" || table[0].1 == "tmpfs")
+        table[0].1 == "ext4" && table[1].1 == "fat32" && table[2].1 == "tmpfs" && table[3].1 == "tmpfs" && table[4].1 == "devfs"
+    });
+    t.check("fs: ext4 root: files from mke2fs, owners, links, sparse", || {
+        let pattern: Vec<u8> = (0..300_000usize).map(|i| ((i * 11 + 3) % 253) as u8).collect();
+        let hello = fs::read_to_string("/osyx-seed/hello.txt").as_deref() == Ok("Hello from the OSyx root file system!\n");
+        let bin = fs::read("/osyx-seed/pattern.bin").is_ok_and(|b| b == pattern);
+        let link = fs::read_link("/osyx-seed/link").is_ok_and(|p| p == "hello.txt")
+            && fs::read_to_string("/osyx-seed/link").is_ok_and(|s| s.starts_with("Hello"));
+        let sparse = File::open("/osyx-seed/sparse.bin").is_ok_and(|mut f| {
+            let mut end = [0u8; 3];
+            let mut hole = [1u8; 64];
+            f.metadata().is_ok_and(|m| m.len() == (5 << 30) + 3 && m.blocks() < 64)
+                && f.seek(SeekFrom::Start(3 << 30)).is_ok()
+                && f.read_exact(&mut hole).is_ok()
+                && hole == [0; 64]
+                && f.seek(SeekFrom::End(-3)).is_ok()
+                && f.read_exact(&mut end).is_ok()
+                && &end == b"end"
+        });
+        let owners = fs::metadata("/osyx-seed/secret").is_ok_and(|m| m.uid() == 0 && m.permissions().mode() == 0o600)
+            && fs::metadata("/home/user").is_ok_and(|m| m.uid() == 1000 && m.is_dir())
+            && fs::metadata("/tmp").is_ok_and(|m| m.permissions().mode() == 0o1777);
+        let programs = fs::metadata("/bin/init").is_ok_and(|m| m.is_file() && m.permissions().mode() == 0o755);
+        hello && bin && link && sparse && owners && programs
+    });
+    t.check("fs: ext4 root: write, rename, links, chmod; files for the host", || {
+        if !fresh_dir("/osyx-out") {
+            return false;
+        }
+        let data: Vec<u8> = (0..OUT_BIN_LEN).map(out_byte).collect();
+        let bin = File::create("/osyx-out/pattern.bin").is_ok_and(|mut f| {
+            data.chunks(7_000).all(|c| f.write_all(c).is_ok()) && f.sync_all().is_ok()
+        });
+        let tree = fs::create_dir_all("/osyx-out/a/b/c").is_ok()
+            && fs::write("/osyx-out/a/b/c/deep.txt", "deep\n").is_ok()
+            && fs::rename("/osyx-out/a/b", "/osyx-out/moved").is_ok()
+            && fs::symlink("moved/c/deep.txt", "/osyx-out/deep-link").is_ok()
+            && fs::read_to_string("/osyx-out/deep-link").as_deref() == Ok("deep\n");
+        let perm = fs::write("/osyx-out/private.txt", "640\n").is_ok()
+            && fs::set_permissions("/osyx-out/private.txt", fs::Permissions::from_mode(0o640)).is_ok();
+        let gone = fs::write("/osyx-out/temp.txt", "x").is_ok() && fs::remove_file("/osyx-out/temp.txt").is_ok();
+        let child = matches!(worker(&["fs-write", "/osyx-out/from-worker.txt"]).status(), Ok(s) if s.success());
+        let text = File::create("/osyx-out/hello-from-osyx.txt")
+            .is_ok_and(|mut f| f.write_all(OUT_TEXT.as_bytes()).is_ok() && f.sync_all().is_ok());
+        let back = fs::read("/osyx-out/pattern.bin").is_ok_and(|b| b == data);
+        bin && tree && perm && gone && child && text && back
     });
     t.check("fs: the specification example on /tmp", || {
         fresh_dir("/tmp/example")

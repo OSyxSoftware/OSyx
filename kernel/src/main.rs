@@ -198,7 +198,12 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
         trigger_fault(kind);
     }
     if boot.has_option("test.exit") {
-        vfs::shutdown();
+        if boot.has_option("test.power-cut") {
+            // Simulated power loss: no unmount, no flush of anything pending.
+            kprintln!("test.power-cut: stopping without unmounting");
+        } else {
+            vfs::shutdown();
+        }
         kprintln!("test.exit: leaving QEMU ({})", if ok { "success" } else { "failure" });
         qemu::exit(if ok { qemu::ExitCode::Success } else { qemu::ExitCode::TestFailure });
     }

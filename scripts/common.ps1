@@ -43,6 +43,44 @@ function Invoke-Checked([string]$What, [scriptblock]$Block) {
     if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" }
 }
 
+$Script:RootSizeMiB = 128
+
+# Path of a Windows file as WSL sees it.
+function ConvertTo-WslPath([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path) -replace '\\', '/'
+    return '/mnt/' + $full.Substring(0, 1).ToLower() + $full.Substring(2)
+}
+
+# Builds build/root.img (ext4) with mke2fs inside WSL; `$BinDir` holds the
+# user programs copied to /bin.
+function New-RootImage([string]$BinDir) {
+    $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if (-not $wsl) { throw 'WSL with e2fsprogs is needed to build the ext4 root image' }
+    $script = ConvertTo-WslPath (Join-Path $PSScriptRoot 'mkrootfs.sh')
+    $bin = ConvertTo-WslPath $BinDir
+    $out = ConvertTo-WslPath $Script:RootImage
+    Invoke-Checked 'root image' { wsl.exe -d Ubuntu-24.04 -u root -- bash $script $bin $out $Script:RootSizeMiB }
+}
+
+# Copies the root partition out of build/osyx.img into build/root.img.
+function Save-RootPartition {
+    $offset = (1 + $Script:EspSizeMiB) * 1MB
+    $len = (Get-Item $Script:RootImage).Length
+    $src = [IO.File]::OpenRead($Script:DiskImage)
+    $dst = [IO.File]::Create($Script:RootImage)
+    try {
+        [void]$src.Seek($offset, 'Begin')
+        $buf = New-Object byte[] (4MB)
+        $left = $len
+        while ($left -gt 0) {
+            $n = $src.Read($buf, 0, [int][math]::Min($buf.Length, $left))
+            if ($n -le 0) { throw 'disk image shorter than expected' }
+            $dst.Write($buf, 0, $n)
+            $left -= $n
+        }
+    } finally { $src.Close(); $dst.Close() }
+}
+
 # Packs build/esp into a FAT32 image and assembles build/osyx.img: GPT with
 # the EFI system partition and, if build/root.img exists, the ext4 root.
 function New-DiskImage {

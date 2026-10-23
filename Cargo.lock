@@ -61,6 +61,7 @@ dependencies = [
  "osyx-bootinfo",
  "osyx-crypto",
  "osyx-elf",
+ "osyx-ext4",
  "osyx-fat",
  "osyx-gfx",
  "osyx-mm",
