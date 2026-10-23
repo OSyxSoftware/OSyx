@@ -41,3 +41,25 @@ Status of the milestones from the project brief.
 7. **Desktop follow-ups**: per-pixel alpha in the toolkit, damage-based
    client redraws, USB hubs and report-protocol keyboards, AXIS pipelines
    and blocks (see [graphics.md](graphics.md)).
+
+## Real hardware: what is still missing
+
+The kernel now shows its boot log on the GOP framebuffer from `_start`
+(`log.screen` keeps it until a process takes the display), uses x2APIC
+when the firmware enabled it, takes its tick from a calibrated local APIC
+timer (PIT, ACPI PM timer or HPET as the reference; PIT virtual wire as
+the fallback), bounds every driver timeout by the TSC as well as by
+ticks, and does the xHCI BIOS-to-OS handoff with a 1 s limit. What a
+typical PC still lacks:
+
+- **Root disk drivers**: only virtio-blk exists. On real hardware no disk
+  is found and init runs from the ESP boot modules (fallback root). NVMe
+  (most PCs since ~2018) and AHCI/SATA are the next storage drivers.
+- **Network**: only VirtIO-Net; Intel e1000e/igc or Realtek r8169 would be
+  the first physical NICs.
+- **Display**: the GOP framebuffer works anywhere; there is no native
+  modesetting for Intel/AMD/NVIDIA GPUs (VirtIO-GPU only under QEMU).
+- **SMP**: one CPU; ACPI is read only for timers so far (FADT PM timer, HPET), not the MADT.
+- **USB**: root-port devices only (no hubs); keyboards behind a hub or a
+  USB-C dock are not seen.
+- **Power**: no ACPI S-states or AML; shutdown on real hardware only halts.

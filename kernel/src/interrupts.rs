@@ -1,7 +1,7 @@
 //! Rust side of interrupt handling: exception diagnostics, fixups, timer.
 
 use crate::arch::idt::{TrapFrame, EXCEPTION_NAMES};
-use crate::arch::{cpu, pic};
+use crate::arch::{apic, cpu, pic, timer};
 use crate::{fixup, kprintln};
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -19,7 +19,7 @@ pub fn breakpoints() -> u64 {
 
 /// Milliseconds since the timer was started.
 pub fn uptime_ms() -> u64 {
-    ticks() * 1000 / pic::TIMER_HZ as u64
+    ticks() * 1000 / timer::TIMER_HZ as u64
 }
 
 // High-resolution time: the TSC between timer ticks. The TSC rate is
@@ -101,6 +101,12 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
             pic::end_of_interrupt(0);
             crate::sched::tick(now);
         }
+        v if v == timer::APIC_TIMER_VECTOR as u64 => {
+            let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            record_tick(now);
+            apic::eoi();
+            crate::sched::tick(now);
+        }
         v @ 33..=47 => {
             let irq = (v - pic::IRQ_BASE as u64) as u8;
             if pic::is_spurious(irq) {
@@ -111,7 +117,7 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
             }
         }
         v if (crate::irq::FIRST as u64..=crate::irq::LAST as u64).contains(&v) => crate::irq::dispatch(v as u8),
-        v if v == crate::arch::apic::SPURIOUS_VECTOR as u64 => {
+        v if v == apic::SPURIOUS_VECTOR as u64 => {
             // Local APIC spurious interrupt: no EOI.
             SPURIOUS.fetch_add(1, Ordering::Relaxed);
         }

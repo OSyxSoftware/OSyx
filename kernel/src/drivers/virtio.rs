@@ -8,7 +8,8 @@
 
 use crate::mem::{self, alloc_frame, phys_to_virt};
 use crate::pci::{self, Bar};
-use crate::{interrupts, sched};
+use crate::arch::timer::Deadline;
+use crate::sched;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
 
@@ -40,7 +41,7 @@ const AVAIL_OFFSET: u64 = 1024;
 const USED_OFFSET: u64 = 2048;
 
 /// A request that takes longer than this is treated as a device failure.
-const TIMEOUT_TICKS: u64 = 500;
+const TIMEOUT_MS: u64 = 5000;
 /// Checks of the used ring before a waiting request starts yielding.
 const SPIN_POLLS: u32 = 1_000;
 
@@ -181,8 +182,8 @@ impl Transport {
     /// Resets the device and waits until the reset has completed.
     pub fn reset(&self) {
         self.set_status(0);
-        let start = interrupts::ticks();
-        while self.status() != 0 && interrupts::ticks() - start < TIMEOUT_TICKS {
+        let deadline = Deadline::after_ms(TIMEOUT_MS);
+        while self.status() != 0 && !deadline.expired() {
             core::hint::spin_loop();
         }
     }
@@ -325,14 +326,17 @@ impl Transport {
     }
 
     pub fn device_config_u64(&self, off: u64) -> u64 {
-        // Re-read until the 64-bit value is consistent (config generation).
-        loop {
+        // Re-read until the 64-bit value is consistent (config generation);
+        // a device whose generation never settles gets its last reading.
+        let mut v = 0;
+        for _ in 0..1000 {
             let generation = self.common.r8(0x15);
-            let v = self.device.r32(off) as u64 | (self.device.r32(off + 4) as u64) << 32;
+            v = self.device.r32(off) as u64 | (self.device.r32(off + 4) as u64) << 32;
             if self.common.r8(0x15) == generation {
-                return v;
+                break;
             }
         }
+        v
     }
 }
 
@@ -396,7 +400,7 @@ impl Virtqueue {
         unsafe { write_volatile(self.notify as *mut u16, self.index) };
 
         let used = self.virt + USED_OFFSET;
-        let start = interrupts::ticks();
+        let deadline = Deadline::after_ms(TIMEOUT_MS);
         let mut polls = 0;
         loop {
             fence(Ordering::SeqCst);
@@ -409,7 +413,7 @@ impl Virtqueue {
                 self.used_idx = self.used_idx.wrapping_add(1);
                 return Ok(written);
             }
-            if interrupts::ticks() - start > TIMEOUT_TICKS {
+            if deadline.expired() {
                 return Err(VirtioError::Timeout);
             }
             // Most requests complete within microseconds: poll briefly

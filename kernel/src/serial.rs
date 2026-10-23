@@ -60,9 +60,12 @@ pub fn _print(args: fmt::Arguments) {
     let _ = write!(port, "[{:5}.{:03}] ", ms / 1000, ms % 1000);
     let _ = port.write_fmt(args);
     let _ = port.write_str("\n");
+    // Under the serial lock, so both consoles show lines in the same order.
+    crate::earlycon::print(ms, args);
 }
 
-/// Kernel log line on the serial console, prefixed with the uptime.
+/// Kernel log line on the serial console (and the early framebuffer log
+/// while it is shown), prefixed with the uptime.
 #[macro_export]
 macro_rules! kprintln {
     ($($arg:tt)*) => { $crate::serial::_print(format_args!($($arg)*)) };
