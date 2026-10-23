@@ -1,4 +1,4 @@
-﻿//! Packet formats: checksums, parsing, generation and malformed input.
+//! Packet formats: checksums, parsing, generation and malformed input.
 
 use osyx_net::wire::{self, Ipv4Addr, MacAddr};
 use osyx_net::{arp, dhcp, dns, ethernet, icmp, ipv4, tcp, udp};

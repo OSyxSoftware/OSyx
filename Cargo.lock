@@ -83,6 +83,7 @@ dependencies = [
  "osyx-gfx",
  "osyx-input",
  "osyx-mm",
+ "osyx-net",
  "osyx-part",
  "osyx-tmpfs",
  "osyx-usb",
@@ -99,6 +100,13 @@ dependencies = [
 [[package]]
 name = "osyx-net"
 version = "0.1.0"
+
+[[package]]
+name = "osyx-nettools"
+version = "0.1.0"
+dependencies = [
+ "os-std",
+]
 
 [[package]]
 name = "osyx-part"

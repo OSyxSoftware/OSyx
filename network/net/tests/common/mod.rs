@@ -1,4 +1,4 @@
-﻿//! A simulated Ethernet segment between two stacks, with latency and
+//! A simulated Ethernet segment between two stacks, with latency and
 //! optional loss, duplication and reordering.
 
 #![allow(dead_code)]

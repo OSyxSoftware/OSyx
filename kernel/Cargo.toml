@@ -21,6 +21,7 @@ osyx-fat = { path = "../storage/fat" }
 osyx-gfx = { path = "../boot/gfx" }
 osyx-input = { path = "../shared/input" }
 osyx-mm = { path = "mm" }
+osyx-net = { path = "../network/net" }
 osyx-usb = { path = "../drivers/usb" }
 osyx-part = { path = "../storage/part" }
 osyx-tmpfs = { path = "../storage/tmpfs" }

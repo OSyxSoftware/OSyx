@@ -76,8 +76,8 @@ try {
         Write-Host '==> clippy (host crates + freestanding targets)'
         $ok = $true
         try {
-            Invoke-Checked 'clippy host' { cargo clippy --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --exclude osyx-desktop --exclude prism-client --all-targets -- -D warnings } | Out-Null
-            Invoke-Checked 'clippy user' { cargo clippy -p osyx-apps -p osyx-desktop -p prism-client -p os-std -p os-sys --target x86_64-unknown-none --target-dir target/user -- -D warnings } | Out-Null
+            Invoke-Checked 'clippy host' { cargo clippy --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --exclude osyx-desktop --exclude prism-client --exclude osyx-nettools --all-targets -- -D warnings } | Out-Null
+            Invoke-Checked 'clippy user' { cargo clippy -p osyx-apps -p osyx-desktop -p osyx-nettools -p prism-client -p os-std -p os-sys --target x86_64-unknown-none --target-dir target/user -- -D warnings } | Out-Null
             Invoke-Checked 'clippy loader' { cargo clippy -p osyx-uefi-loader --target x86_64-unknown-uefi -- -D warnings } | Out-Null
             Invoke-Checked 'clippy kernel' { cargo clippy -p osyx-kernel --target x86_64-unknown-none -- -D warnings } | Out-Null
         } catch { $ok = $false; Write-Host $_ }
@@ -296,6 +296,16 @@ try {
         }
         $sum = $out | Select-String -Pattern 'desktop tests: (\d+) passed, (\d+) failed' | Select-Object -Last 1
         Record 'graphical session (PRISM + desktop) run' ($null -ne $sum -and $sum.Matches[0].Groups[2].Value -eq '0') $(if ($sum) { $sum.Line } else { 'no summary' })
+
+        # --- 7. network ---------------------------------------------------------
+        # VirtIO-Net, DHCP, ICMP, DNS, UDP and TCP against an independent host
+        # process (scripts/net-test.ps1).
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'net-test.ps1') 2>&1 | ForEach-Object { "$_" }
+        foreach ($line in $out) {
+            if ($line -match '^\[(PASS|FAIL)\] (.*)$') { $results.Add([pscustomobject]@{ Test = "net: $($Matches[2])"; Result = $Matches[1]; Detail = '' }); Write-Host $line }
+        }
+        $sum = $out | Select-String -Pattern 'network test: (\d+) passed, (\d+) failed' | Select-Object -Last 1
+        Record 'network stack run' ($null -ne $sum -and $sum.Matches[0].Groups[2].Value -eq '0') $(if ($sum) { $sum.Line } else { 'no summary' })
         # Leave a usable default ESP behind.
         & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline '' | Out-Null
     }

@@ -1,4 +1,4 @@
-﻿//! Two stacks talking over a simulated link: ARP, ping, UDP, TCP under
+//! Two stacks talking over a simulated link: ARP, ping, UDP, TCP under
 //! loss and reordering, DHCP and DNS against test servers.
 
 mod common;

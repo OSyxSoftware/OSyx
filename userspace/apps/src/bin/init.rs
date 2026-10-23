@@ -11,6 +11,8 @@
 //! * `panic`:       panic (OSyx Std must report it and exit with 101)
 //! * `exit,<code>`: exit with `<code>`
 //! * `crash-prep`:  leave an open, removed file on / for the power-cut test
+//! * `net,<tcp>,<udp>`: network checks against the host's echo servers on
+//!   10.0.2.2 (see `net_checks.rs`); exit status = failed checks
 
 #![no_std]
 #![no_main]
@@ -31,6 +33,8 @@ mod exec_checks;
 mod fs_checks;
 #[path = "../ipc_checks.rs"]
 mod ipc_checks;
+#[path = "../net_checks.rs"]
+mod net_checks;
 
 os_std::entry!(main);
 
@@ -55,6 +59,13 @@ fn main() -> i32 {
             process::exit(code);
         }
         Some("desktop") => return desktop_session(),
+        Some("net") => {
+            let port = |i: usize, d: u16| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+            let mut t = Tests::default();
+            net_checks::run(&mut t, port(2, 7101), port(3, 7102));
+            println!("net checks: {} passed, {} failed", t.passed, t.failed);
+            return t.failed as i32;
+        }
         Some("crash-prep") => {
             // Leave a removed-but-open file on the ext4 root, then exit
             // (the kernel's test.power-cut stops the machine right after).

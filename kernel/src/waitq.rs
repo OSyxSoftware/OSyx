@@ -86,11 +86,13 @@ pub fn block_on<T>(queues: &[&WaitQueue], deadline: Option<u64>, mut ready: impl
 }
 
 /// Timer tick at which a timeout of `ns` nanoseconds from now expires
-/// (`None` = no timeout).
+/// (`None` = no timeout). One extra tick covers the part of the current
+/// tick already gone, as CLOCK_MONOTONIC is interpolated within a tick.
 pub fn deadline_after_ns(ns: u64) -> Option<u64> {
     if ns == u64::MAX {
         return None;
     }
     let tick_ns = 1_000_000_000 / crate::arch::pic::TIMER_HZ as u64;
-    Some(crate::interrupts::ticks().saturating_add(ns.div_ceil(tick_ns)))
+    let extra = u64::from(ns > 0);
+    Some(crate::interrupts::ticks().saturating_add(ns.div_ceil(tick_ns) + extra))
 }

@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 resolver = "2"
 members = [
     "shared/abi",
@@ -26,6 +26,7 @@ members = [
     "storage/vfs",
     "userspace/apps",
     "userspace/desktop",
+    "userspace/nettools",
 ]
 # Host-testable crates only. The loader, kernel and user programs are freestanding and are
 # built with an explicit --target by scripts/build.ps1.

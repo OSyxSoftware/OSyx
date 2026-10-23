@@ -27,13 +27,14 @@ try {
     $savedFlags = $env:RUSTFLAGS
     $env:RUSTFLAGS = '-C relocation-model=static -C code-model=small'
     try {
-        Invoke-Checked 'user build' { cargo build -p osyx-apps -p osyx-desktop --target x86_64-unknown-none --target-dir target/user @profileArgs }
+        Invoke-Checked 'user build' { cargo build -p osyx-apps -p osyx-desktop -p osyx-nettools --target x86_64-unknown-none --target-dir target/user @profileArgs }
     } finally { $env:RUSTFLAGS = $savedFlags }
     # Program -> directory on the root file system. The graphical session
     # (PRISM, the desktop shell and its applications) lives in /system/bin.
     $installDirs = [ordered]@{
         init = 'bin'; worker = 'bin'; probe = 'usr/bin'; axis = 'bin'
         prism = 'system/bin'; desktop = 'system/bin'; terminal = 'system/bin'; files = 'system/bin'; sysinfo = 'system/bin'
+        ping = 'bin'; net = 'bin'; netstat = 'bin'; dns = 'bin'; nc = 'bin'
     }
     $userBins = @($installDirs.Keys)
     # Only these are also boot modules (the fallback root's /bin).

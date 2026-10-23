@@ -1,4 +1,4 @@
-﻿//! Addresses, byte-order helpers and the Internet checksum (RFC 1071).
+//! Addresses, byte-order helpers and the Internet checksum (RFC 1071).
 
 use core::fmt;
 

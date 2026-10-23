@@ -39,6 +39,20 @@ pub enum ErrorKind {
     InvalidExecutable,
     /// The other end of a pipe or channel is closed.
     BrokenPipe,
+    AddrInUse,
+    AddrNotAvailable,
+    NetworkUnreachable,
+    HostUnreachable,
+    ConnectionRefused,
+    ConnectionReset,
+    NotConnected,
+    AlreadyConnected,
+    /// A datagram larger than the network can carry.
+    MessageTooLong,
+    /// DNS: the host name does not exist.
+    HostNotFound,
+    /// DNS: the lookup failed for another reason.
+    NameResolution,
     Other,
 }
 
@@ -71,6 +85,17 @@ impl ErrorKind {
             ErrorKind::Io => "I/O error",
             ErrorKind::InvalidExecutable => "not a loadable executable",
             ErrorKind::BrokenPipe => "broken pipe",
+            ErrorKind::AddrInUse => "address in use",
+            ErrorKind::AddrNotAvailable => "address not available",
+            ErrorKind::NetworkUnreachable => "network unreachable",
+            ErrorKind::HostUnreachable => "host unreachable",
+            ErrorKind::ConnectionRefused => "connection refused",
+            ErrorKind::ConnectionReset => "connection reset",
+            ErrorKind::NotConnected => "not connected",
+            ErrorKind::AlreadyConnected => "already connected",
+            ErrorKind::MessageTooLong => "message too long",
+            ErrorKind::HostNotFound => "host not found",
+            ErrorKind::NameResolution => "name resolution failed",
             ErrorKind::Other => "other error",
         }
     }
@@ -138,6 +163,17 @@ impl From<Errno> for Error {
             Errno::Unsupported => ErrorKind::Unsupported,
             Errno::BadExecutable => ErrorKind::InvalidExecutable,
             Errno::BrokenPipe => ErrorKind::BrokenPipe,
+            Errno::AddrInUse => ErrorKind::AddrInUse,
+            Errno::AddrNotAvailable => ErrorKind::AddrNotAvailable,
+            Errno::NetUnreachable => ErrorKind::NetworkUnreachable,
+            Errno::HostUnreachable => ErrorKind::HostUnreachable,
+            Errno::ConnRefused => ErrorKind::ConnectionRefused,
+            Errno::ConnReset => ErrorKind::ConnectionReset,
+            Errno::NotConnected => ErrorKind::NotConnected,
+            Errno::AlreadyConnected => ErrorKind::AlreadyConnected,
+            Errno::MessageTooLong => ErrorKind::MessageTooLong,
+            Errno::NameNotFound => ErrorKind::HostNotFound,
+            Errno::DnsFailure => ErrorKind::NameResolution,
         };
         Error { kind, errno: Some(e), message: None }
     }

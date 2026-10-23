@@ -1,4 +1,4 @@
-﻿//! Interfaces, routing, sockets and the DNS resolver on top of the
+//! Interfaces, routing, sockets and the DNS resolver on top of the
 //! protocol modules.
 //!
 //! The stack is a single-threaded state machine (`&mut self`); the kernel

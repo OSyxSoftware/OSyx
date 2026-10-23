@@ -224,6 +224,17 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::MOUNT_LIST => sys_objects::mount_list(f.rdi, f.rsi),
         nr::POWER => sys_objects::power(f.rdi),
         nr::KILL => sys_objects::kill(f.rdi),
+        nr::SOCKET => crate::net::sys_socket(f.rdi),
+        nr::SOCK_BIND => crate::net::sys_bind(f.rdi, f.rsi),
+        nr::SOCK_CONNECT => crate::net::sys_connect(f.rdi, f.rsi),
+        nr::SOCK_LISTEN => crate::net::sys_listen(f.rdi, f.rsi),
+        nr::SOCK_ACCEPT => crate::net::sys_accept(f.rdi, f.rsi),
+        nr::SOCK_SEND => crate::net::sys_send(f.rdi, f.rsi, f.rdx, f.r10, f.r8),
+        nr::SOCK_RECV => crate::net::sys_recv(f.rdi, f.rsi, f.rdx, f.r10, f.r8),
+        nr::SOCK_CTL => crate::net::sys_ctl(f.rdi, f.rsi, f.rdx),
+        nr::RESOLVE => crate::net::sys_resolve(f.rdi, f.rsi, f.rdx, f.r10),
+        nr::NET_QUERY => crate::net::sys_query(f.rdi, f.rsi, f.rdx),
+        nr::NET_CONFIG => crate::net::sys_config(f.rdi),
         _ => Err(Errno::NotSupported),
     };
     // Safe point: a thread whose process is exiting ends here instead of
@@ -234,10 +245,12 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
     osyx_abi::encode(r)
 }
 
-/// Nanoseconds to timer ticks, rounded up (at least one tick for ns > 0).
+/// Nanoseconds to timer ticks, rounded up, plus one tick for ns > 0: the
+/// caller may be anywhere inside the current tick, and CLOCK_MONOTONIC is
+/// interpolated within it, so a wait must never end early by that clock.
 fn ns_to_ticks(ns: u64) -> u64 {
     let tick_ns = 1_000_000_000 / crate::arch::pic::TIMER_HZ as u64;
-    ns.div_ceil(tick_ns)
+    if ns == 0 { 0 } else { ns.div_ceil(tick_ns) + 1 }
 }
 
 /// Bounce buffer size for file data between user memory and the VFS.
@@ -254,6 +267,7 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> Result<u64, Errno> {
     match process::get_object(fd) {
         Ok(Object::File(_)) => return write_file(fd, buf, len as usize),
         Ok(Object::Pipe(p)) => return sys_objects::write_pipe(&p, buf, len),
+        Ok(Object::Socket(_)) => return crate::net::sys_send(fd, buf, len, 0, 0),
         Ok(_) => return Err(Errno::BadHandle),
         Err(_) => {}
     }
@@ -304,6 +318,7 @@ fn sys_read(handle: u64, buf: u64, len: u64) -> Result<u64, Errno> {
     match process::get_object(handle)? {
         Object::File(_) => {}
         Object::Pipe(_) => return sys_objects::read_stdio(handle, buf, len),
+        Object::Socket(_) => return crate::net::sys_recv(handle, buf, len, 0, 0),
         _ => return Err(Errno::BadHandle),
     }
     let len = len.min(osyx_abi::MAX_READ as u64) as usize;
@@ -389,7 +404,7 @@ fn sys_sysinfo(out: u64) -> Result<u64, Errno> {
 
 fn sys_clock(id: u64) -> Result<u64, Errno> {
     match id {
-        osyx_abi::CLOCK_MONOTONIC => Ok(interrupts::uptime_ms() * 1_000_000),
+        osyx_abi::CLOCK_MONOTONIC => Ok(interrupts::monotonic_ns()),
         osyx_abi::CLOCK_REALTIME => Ok(crate::time::now_ns().max(0) as u64),
         _ => Err(Errno::InvalidArgument),
     }

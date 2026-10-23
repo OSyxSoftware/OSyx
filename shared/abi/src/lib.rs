@@ -1,4 +1,8 @@
-//! OSyx system call ABI, version 7.
+//! OSyx system call ABI, version 8.
+//!
+//! Version 8 adds networking (sockets, name resolution, interface
+//! queries and configuration; see [`net`] and `nr::SOCKET` ..
+//! `nr::NET_CONFIG`).
 //!
 //! Version 7 adds kernel objects beyond files (pipes, IPC channels and
 //! listeners, shared memory), waiting on several handles at once, standard
@@ -26,8 +30,9 @@
 #![no_std]
 
 pub mod ipc;
+pub mod net;
 
-pub const ABI_VERSION: u32 = 7;
+pub const ABI_VERSION: u32 = 8;
 
 /// Highest user virtual address + 1 (the canonical lower half).
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -222,6 +227,35 @@ pub mod nr {
     /// `kill(pid) -> 0`: ends a process (status `KILLED_STATUS`). Root may
     /// kill any process, others only processes with their own uid.
     pub const KILL: u64 = 59;
+    /// `socket(kind) -> handle`: a TCP (`net::SOCK_STREAM`), UDP
+    /// (`SOCK_DGRAM`) or ICMP echo (`SOCK_PING`) socket.
+    pub const SOCKET: u64 = 60;
+    /// `sock_bind(h, addr: *const SockAddr) -> 0`: port 0 picks an
+    /// ephemeral port; address 0.0.0.0 means any local address.
+    pub const SOCK_BIND: u64 = 61;
+    /// `sock_connect(h, addr: *const SockAddr) -> 0`: TCP waits for the
+    /// handshake (`WouldBlock` when non-blocking: poll for writable);
+    /// UDP fixes the peer.
+    pub const SOCK_CONNECT: u64 = 62;
+    /// `sock_listen(h, backlog) -> 0` (TCP, after `sock_bind`).
+    pub const SOCK_LISTEN: u64 = 63;
+    /// `sock_accept(h, peer: *mut SockAddr) -> handle` of the next connection.
+    pub const SOCK_ACCEPT: u64 = 64;
+    /// `sock_send(h, buf, len, to: *const SockAddr | 0, flags) -> bytes`.
+    pub const SOCK_SEND: u64 = 65;
+    /// `sock_recv(h, buf, len, from: *mut SockAddr | 0, flags) -> bytes`;
+    /// 0 on a TCP socket is the end of the stream.
+    pub const SOCK_RECV: u64 = 66;
+    /// `sock_ctl(h, op, arg) -> value` (`net::ctl`).
+    pub const SOCK_CTL: u64 = 67;
+    /// `resolve(name, len, out: *mut [u8; 4], max) -> count`: IPv4
+    /// addresses of a host name (DNS, cached by TTL). `NameNotFound` if it
+    /// does not exist, `DnsFailure` / `TimedOut` otherwise.
+    pub const RESOLVE: u64 = 68;
+    /// `net_query(kind, buf, len) -> bytes` (`net::query`).
+    pub const NET_QUERY: u64 = 69;
+    /// `net_config(args: *const NetConfig) -> 0`: root only.
+    pub const NET_CONFIG: u64 = 70;
 }
 
 /// "No handle" in `spawn_stdio`'s array.
@@ -641,9 +675,26 @@ pub enum Errno {
     BadExecutable = 25,
     /// The other end of a pipe or channel is closed.
     BrokenPipe = 26,
+    /// The local port (or address and port) is taken.
+    AddrInUse = 27,
+    /// The address is not configured on this machine.
+    AddrNotAvailable = 28,
+    /// No route to the destination network.
+    NetUnreachable = 29,
+    HostUnreachable = 30,
+    /// The peer refused the connection (TCP reset, ICMP port unreachable).
+    ConnRefused = 31,
+    ConnReset = 32,
+    NotConnected = 33,
+    AlreadyConnected = 34,
+    MessageTooLong = 35,
+    /// The host name does not exist.
+    NameNotFound = 36,
+    /// Name resolution failed (no server, server failure, bad answer).
+    DnsFailure = 37,
 }
 
-const ALL_ERRNOS: [Errno; 26] = [
+const ALL_ERRNOS: [Errno; 37] = [
     Errno::InvalidArgument,
     Errno::Fault,
     Errno::NoMemory,
@@ -670,6 +721,17 @@ const ALL_ERRNOS: [Errno; 26] = [
     Errno::Unsupported,
     Errno::BadExecutable,
     Errno::BrokenPipe,
+    Errno::AddrInUse,
+    Errno::AddrNotAvailable,
+    Errno::NetUnreachable,
+    Errno::HostUnreachable,
+    Errno::ConnRefused,
+    Errno::ConnReset,
+    Errno::NotConnected,
+    Errno::AlreadyConnected,
+    Errno::MessageTooLong,
+    Errno::NameNotFound,
+    Errno::DnsFailure,
 ];
 
 impl Errno {
@@ -705,6 +767,17 @@ impl Errno {
             Errno::Unsupported => "unsupported file system feature",
             Errno::BadExecutable => "not a loadable executable",
             Errno::BrokenPipe => "the other end is closed",
+            Errno::AddrInUse => "address in use",
+            Errno::AddrNotAvailable => "address not available",
+            Errno::NetUnreachable => "network unreachable",
+            Errno::HostUnreachable => "host unreachable",
+            Errno::ConnRefused => "connection refused",
+            Errno::ConnReset => "connection reset by peer",
+            Errno::NotConnected => "not connected",
+            Errno::AlreadyConnected => "already connected",
+            Errno::MessageTooLong => "message too long",
+            Errno::NameNotFound => "host name not found",
+            Errno::DnsFailure => "name resolution failed",
         }
     }
 }
@@ -778,6 +851,22 @@ mod tests {
         assert_eq!(core::mem::size_of::<ipc::DisplayInfo>(), 32);
         assert_eq!(core::mem::size_of::<ipc::ProcInfo>(), 72);
         assert_eq!(core::mem::size_of::<ipc::MountInfo>(), 144);
+        assert_eq!(core::mem::size_of::<net::SockAddr>(), 8);
+        assert_eq!(core::mem::size_of::<net::NetIface>(), 112);
+        assert_eq!(core::mem::size_of::<net::NetRoute>(), 12);
+        assert_eq!(core::mem::size_of::<net::NetArp>(), 16);
+        assert_eq!(core::mem::size_of::<net::NetSocket>(), 56);
+        assert_eq!(core::mem::size_of::<net::NetStats>(), 8 * net::NET_STATS);
+        assert_eq!(core::mem::size_of::<net::NetDnsEntry>(), 80);
+        assert_eq!(core::mem::size_of::<net::NetConfig>(), 28);
+        assert_eq!(core::mem::size_of::<net::SockAddr>(), 8);
+        assert_eq!(core::mem::size_of::<net::NetIface>(), 112);
+        assert_eq!(core::mem::size_of::<net::NetRoute>(), 12);
+        assert_eq!(core::mem::size_of::<net::NetArp>(), 16);
+        assert_eq!(core::mem::size_of::<net::NetSocket>(), 56);
+        assert_eq!(core::mem::size_of::<net::NetStats>(), 8 * net::NET_STATS);
+        assert_eq!(core::mem::size_of::<net::NetDnsEntry>(), 80);
+        assert_eq!(core::mem::size_of::<net::NetConfig>(), 28);
     }
 
     /// Reads NUL-terminated bytes at `addr` of an image that ends at `top`.

@@ -1,0 +1,39 @@
+[package]
+name = "osyx-nettools"
+description = "OSyx network commands: ping, net, netstat, dns and nc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ping"
+path = "src/bin/ping.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "net"
+path = "src/bin/net.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "netstat"
+path = "src/bin/netstat.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "dns"
+path = "src/bin/dns.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "nc"
+path = "src/bin/nc.rs"
+test = false
+bench = false
+
+[dependencies]
+os-std = { path = "../../runtime/os-std" }

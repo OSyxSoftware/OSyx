@@ -6,6 +6,7 @@
 
 use crate::devices::DeviceFile;
 use crate::ipc::{Endpoint, Listener};
+use crate::net::SocketObj;
 use crate::pipe::PipeEnd;
 use crate::process::FileHandle;
 use crate::shm::SharedMemory;
@@ -22,6 +23,7 @@ pub enum Object {
     Channel(Arc<Endpoint>),
     Listener(Arc<Listener>),
     Shm(Arc<SharedMemory>),
+    Socket(Arc<SocketObj>),
 }
 
 impl Object {
@@ -49,6 +51,7 @@ impl Object {
             Object::Channel(c) => Waitable::Channel(c.clone()),
             Object::Listener(l) => Waitable::Listener(l.clone()),
             Object::Shm(_) => Waitable::Always,
+            Object::Socket(s) => Waitable::Socket(s.clone()),
         }
     }
 }
@@ -61,6 +64,7 @@ pub enum Waitable {
     Pipe(Arc<PipeEnd>),
     Channel(Arc<Endpoint>),
     Listener(Arc<Listener>),
+    Socket(Arc<SocketObj>),
 }
 
 impl Waitable {
@@ -71,6 +75,7 @@ impl Waitable {
             Waitable::Pipe(p) => p.poll(),
             Waitable::Channel(c) => c.poll(),
             Waitable::Listener(l) => l.poll(),
+            Waitable::Socket(s) => s.poll(),
         }
     }
 
@@ -81,6 +86,7 @@ impl Waitable {
             Waitable::Pipe(p) => Some(p.queue()),
             Waitable::Channel(c) => Some(c.queue()),
             Waitable::Listener(l) => Some(l.queue()),
+            Waitable::Socket(_) => Some(crate::net::socket_queue()),
         }
     }
 }

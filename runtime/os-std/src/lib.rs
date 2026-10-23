@@ -47,6 +47,8 @@ pub mod fs;
 pub mod io;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod ipc;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub mod net;
 pub mod os;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod system;

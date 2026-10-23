@@ -1,4 +1,4 @@
-﻿//! DHCPv4 client (RFC 2131, options from RFC 2132).
+//! DHCPv4 client (RFC 2131, options from RFC 2132).
 //!
 //! INIT â†’ SELECTING (DISCOVER, wait for OFFER) â†’ REQUESTING (REQUEST, wait
 //! for ACK) â†’ BOUND; at T1 RENEWING (unicast REQUEST to the server), at T2

@@ -1,6 +1,7 @@
 //! Monotonic time ([`Instant`]) and wall-clock time ([`SystemTime`]). On
-//! OSyx both tick at the kernel timer resolution (10 ms); the wall clock is
-//! the CMOS RTC read at boot plus the uptime.
+//! OSyx the monotonic clock is the timer tick (10 ms) interpolated with the
+//! TSC (sub-microsecond); the wall clock is the CMOS RTC read at boot plus
+//! the uptime.
 
 use crate::sys;
 use core::ops::{Add, Sub};

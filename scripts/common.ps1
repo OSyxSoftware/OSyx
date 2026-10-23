@@ -95,7 +95,7 @@ function New-DiskImage {
 }
 
 # Returns the QEMU argument list for booting build/osyx.img.
-function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb) {
+function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '') {
     if (-not $Script:Qemu) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
     if (-not $Script:Ovmf) { throw 'OVMF (edk2-x86_64-code.fd) not found' }
     # Fresh firmware variables every boot: stale boot entries for devices
@@ -111,12 +111,20 @@ function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 5
         '-drive', "if=pflash,format=raw,unit=1,file=$($vars -replace '\\','/')",
         # Relative path: the drive-letter colon would be parsed as an option separator.
         '-drive', 'if=virtio,format=raw,file=build/osyx.img',
-        '-net', 'none',
         '-serial', "file:$($SerialLog -replace '\\','/')",
         '-device', 'isa-debug-exit,iobase=0xf4,iosize=0x04',
         '-no-reboot'
     )
     if (-not $NoRng) { $a += @('-device', 'virtio-rng-pci') }
+    # A virtio-net NIC on QEMU's user-mode network (DHCP 10.0.2.15, gateway
+    # and host at 10.0.2.2, DNS 10.0.2.3); $HostFwd adds hostfwd rules.
+    if ($NoNet) {
+        $a += @('-net', 'none')
+    } else {
+        $nd = 'user,id=n0'
+        if ($HostFwd) { $nd += ',' + $HostFwd }
+        $a += @('-netdev', $nd, '-device', 'virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56')
+    }
     # USB input through the native xHCI driver (no PS/2 driver exists, so
     # the keyboard and mouse can only reach OSyx this way).
     if (-not $NoUsb) {

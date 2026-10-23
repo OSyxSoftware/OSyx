@@ -15,7 +15,7 @@ pub use osyx_abi::{
     SEEK_CUR, SEEK_END, SEEK_SET, STDERR, STDOUT,
 };
 
-pub use osyx_abi::{ipc, HANDLE_NONE, KILLED_STATUS, STDIN};
+pub use osyx_abi::{ipc, net, HANDLE_NONE, KILLED_STATUS, STDIN};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod imp {
@@ -64,6 +64,17 @@ mod imp {
         // SAFETY: as in `syscall1`.
         unsafe {
             asm!("syscall", inlateout("rax") n => ret, in("rdi") a1, in("rsi") a2, in("rdx") a3, in("r10") a4,
+                 lateout("rcx") _, lateout("r11") _, options(nostack));
+        }
+        ret
+    }
+
+    #[inline]
+    fn syscall5(n: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+        let ret: u64;
+        // SAFETY: as in `syscall1`.
+        unsafe {
+            asm!("syscall", inlateout("rax") n => ret, in("rdi") a1, in("rsi") a2, in("rdx") a3, in("r10") a4, in("r8") a5,
                  lateout("rcx") _, lateout("r11") _, options(nostack));
         }
         ret
@@ -474,6 +485,60 @@ mod imp {
 
     pub fn kill(pid: u64) -> Result<(), Errno> {
         decode(syscall1(nr::KILL, pid)).map(|_| ())
+    }
+
+    use osyx_abi::net::{NetConfig, SockAddr};
+
+    pub fn socket(kind: u64) -> Result<u64, Errno> {
+        decode(syscall1(nr::SOCKET, kind))
+    }
+
+    pub fn sock_bind(h: u64, addr: &SockAddr) -> Result<(), Errno> {
+        decode(syscall2(nr::SOCK_BIND, h, addr as *const SockAddr as u64)).map(|_| ())
+    }
+
+    pub fn sock_connect(h: u64, addr: &SockAddr) -> Result<(), Errno> {
+        decode(syscall2(nr::SOCK_CONNECT, h, addr as *const SockAddr as u64)).map(|_| ())
+    }
+
+    pub fn sock_listen(h: u64, backlog: u32) -> Result<(), Errno> {
+        decode(syscall2(nr::SOCK_LISTEN, h, backlog as u64)).map(|_| ())
+    }
+
+    pub fn sock_accept(h: u64) -> Result<(u64, SockAddr), Errno> {
+        let mut peer = SockAddr::default();
+        let c = decode(syscall2(nr::SOCK_ACCEPT, h, &mut peer as *mut SockAddr as u64))?;
+        Ok((c, peer))
+    }
+
+    pub fn sock_send(h: u64, buf: &[u8], to: Option<&SockAddr>, flags: u64) -> Result<usize, Errno> {
+        let to = to.map_or(0, |a| a as *const SockAddr as u64);
+        decode(syscall5(nr::SOCK_SEND, h, buf.as_ptr() as u64, buf.len() as u64, to, flags)).map(|n| n as usize)
+    }
+
+    pub fn sock_recv(h: u64, buf: &mut [u8], flags: u64) -> Result<(usize, SockAddr), Errno> {
+        let mut from = SockAddr::default();
+        let n = decode(syscall5(nr::SOCK_RECV, h, buf.as_mut_ptr() as u64, buf.len() as u64, &mut from as *mut SockAddr as u64, flags))?;
+        Ok((n as usize, from))
+    }
+
+    pub fn sock_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
+        decode(syscall3(nr::SOCK_CTL, h, op, arg))
+    }
+
+    /// IPv4 addresses of `name`; returns how many were stored in `out`.
+    pub fn resolve(name: &str, out: &mut [[u8; 4]]) -> Result<usize, Errno> {
+        decode(syscall4(nr::RESOLVE, name.as_ptr() as u64, name.len() as u64, out.as_mut_ptr() as u64, out.len() as u64)).map(|n| n as usize)
+    }
+
+    /// Fills `out` with `kind` records (`net::query`); returns how many.
+    pub fn net_query<T: Copy>(kind: u64, out: &mut [T]) -> Result<usize, Errno> {
+        let bytes = core::mem::size_of_val(out) as u64;
+        decode(syscall3(nr::NET_QUERY, kind, out.as_mut_ptr() as u64, bytes)).map(|n| n as usize / core::mem::size_of::<T>())
+    }
+
+    pub fn net_config(c: &NetConfig) -> Result<(), Errno> {
+        decode(syscall1(nr::NET_CONFIG, c as *const NetConfig as u64)).map(|_| ())
     }
 }
 

@@ -22,6 +22,60 @@ pub fn uptime_ms() -> u64 {
     ticks() * 1000 / pic::TIMER_HZ as u64
 }
 
+// High-resolution time: the TSC between timer ticks. The TSC rate is
+// measured against the PIT (first tick vs. the latest one), so no
+// assumption about invariant-TSC CPUIDs is needed; the result is clamped
+// to the tick interval and never runs backwards.
+static FIRST_TSC: AtomicU64 = AtomicU64::new(0);
+static FIRST_TICK: AtomicU64 = AtomicU64::new(0);
+static LAST_TSC: AtomicU64 = AtomicU64::new(0);
+static LAST_TICK: AtomicU64 = AtomicU64::new(0);
+/// TSC counts per tick (0 until calibrated).
+static TSC_PER_TICK: AtomicU64 = AtomicU64::new(0);
+static LAST_NS: AtomicU64 = AtomicU64::new(0);
+
+fn rdtsc() -> u64 {
+    // SAFETY: RDTSC is available on every x86-64 CPU and has no side effects.
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+fn record_tick(now: u64) {
+    let tsc = rdtsc();
+    if FIRST_TICK.load(Ordering::Relaxed) == 0 {
+        FIRST_TSC.store(tsc, Ordering::Relaxed);
+        FIRST_TICK.store(now, Ordering::Relaxed);
+    } else {
+        let ticks = now - FIRST_TICK.load(Ordering::Relaxed);
+        if ticks >= 10 {
+            let per = tsc.wrapping_sub(FIRST_TSC.load(Ordering::Relaxed)) / ticks;
+            TSC_PER_TICK.store(per, Ordering::Relaxed);
+        }
+    }
+    LAST_TSC.store(tsc, Ordering::Relaxed);
+    LAST_TICK.store(now, Ordering::Relaxed);
+}
+
+/// Nanoseconds since the timer was started, interpolated with the TSC
+/// between ticks (tick resolution until the TSC is calibrated).
+pub fn monotonic_ns() -> u64 {
+    let tick_ns = 1_000_000_000 / pic::TIMER_HZ as u64;
+    let were = cpu::interrupts_enabled();
+    cpu::disable_interrupts();
+    let (tick, base, per) = (LAST_TICK.load(Ordering::Relaxed), LAST_TSC.load(Ordering::Relaxed), TSC_PER_TICK.load(Ordering::Relaxed));
+    let tsc = rdtsc();
+    if were {
+        cpu::enable_interrupts();
+    }
+    let mut ns = tick * tick_ns;
+    if per > 0 {
+        let extra = (tsc.wrapping_sub(base) as u128 * tick_ns as u128 / per as u128) as u64;
+        ns += extra.min(tick_ns - 1);
+    }
+    // Monotonic across calls even if the rate estimate moves.
+    let prev = LAST_NS.fetch_max(ns, Ordering::Relaxed);
+    ns.max(prev)
+}
+
 #[no_mangle]
 extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     let from_user = f.cs & 3 == 3;
@@ -41,6 +95,7 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
         0..=31 => fatal(f),
         v if v == pic::TIMER_VECTOR as u64 => {
             let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            record_tick(now);
             // Acknowledge first: the scheduler may switch to another thread
             // before this handler returns.
             pic::end_of_interrupt(0);

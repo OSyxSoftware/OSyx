@@ -23,6 +23,7 @@ pub const STATUS_ACKNOWLEDGE: u8 = 1;
 pub const STATUS_DRIVER: u8 = 2;
 pub const STATUS_DRIVER_OK: u8 = 4;
 pub const STATUS_FEATURES_OK: u8 = 8;
+pub const STATUS_NEEDS_RESET: u8 = 0x40;
 pub const STATUS_FAILED: u8 = 0x80;
 
 pub const F_VERSION_1: u64 = 1 << 32;
@@ -33,6 +34,8 @@ const AVAIL_F_NO_INTERRUPT: u16 = 1;
 
 /// Largest queue this driver sets up (all rings fit one 4 KiB frame).
 const MAX_QUEUE: u16 = 64;
+/// Largest asynchronous queue (each ring in its own frame).
+const MAX_ASYNC_QUEUE: u16 = 256;
 const AVAIL_OFFSET: u64 = 1024;
 const USED_OFFSET: u64 = 2048;
 
@@ -46,7 +49,9 @@ const DEVICE_FEATURE_SELECT: u64 = 0x00;
 const DEVICE_FEATURE: u64 = 0x04;
 const DRIVER_FEATURE_SELECT: u64 = 0x08;
 const DRIVER_FEATURE: u64 = 0x0C;
+const MSIX_CONFIG: u64 = 0x10;
 const DEVICE_STATUS: u64 = 0x14;
+const QUEUE_MSIX_VECTOR: u64 = 0x1A;
 const QUEUE_SELECT: u64 = 0x16;
 const QUEUE_SIZE: u64 = 0x18;
 const QUEUE_ENABLE: u64 = 0x1C;
@@ -240,9 +245,78 @@ impl Transport {
         Ok(q)
     }
 
+    /// Sets up queue `index` for asynchronous use: up to `MAX_QUEUE`
+    /// descriptors handed out from a free list, completions signalled
+    /// through MSI-X table entry `vector` (`None`: no interrupt, the driver
+    /// polls).
+    pub fn setup_async_queue(&self, index: u16, vector: Option<u16>) -> Result<AsyncQueue, VirtioError> {
+        self.common.w16(QUEUE_SELECT, index);
+        let max = self.common.r16(QUEUE_SIZE);
+        if max == 0 {
+            return Err(VirtioError::NoQueue);
+        }
+        // Up to 256 entries: descriptors (16 bytes each), the available ring
+        // and the used ring get one frame each.
+        let size = max.min(MAX_ASYNC_QUEUE);
+        let desc = alloc_frame().ok_or(VirtioError::OutOfMemory)?;
+        let avail = alloc_frame().ok_or(VirtioError::OutOfMemory)?;
+        let used = alloc_frame().ok_or(VirtioError::OutOfMemory)?;
+        self.common.w16(QUEUE_SIZE, size);
+        self.common.w64(QUEUE_DESC, desc);
+        self.common.w64(QUEUE_DRIVER, avail);
+        self.common.w64(QUEUE_DEVICE, used);
+        let mut irq = false;
+        if let Some(v) = vector {
+            self.common.w16(QUEUE_MSIX_VECTOR, v);
+            // The device answers NO_VECTOR if it could not take the entry.
+            irq = self.common.r16(QUEUE_MSIX_VECTOR) == v;
+        }
+        let notify_off = self.common.r16(QUEUE_NOTIFY_OFF) as u64;
+        // SAFETY: the avail ring is the frame just allocated.
+        unsafe { write_volatile(phys_to_virt(avail) as *mut u16, if irq { 0 } else { AVAIL_F_NO_INTERRUPT }) };
+        let next: alloc::vec::Vec<u16> = (1..=size).collect();
+        self.common.w16(QUEUE_ENABLE, 1);
+        Ok(AsyncQueue {
+            index,
+            size,
+            phys: desc,
+            desc: phys_to_virt(desc),
+            avail: phys_to_virt(avail),
+            used: phys_to_virt(used),
+            notify: self.notify.0 + notify_off * self.notify_multiplier as u64,
+            avail_idx: 0,
+            used_idx: 0,
+            free_head: 0,
+            free: size,
+            next,
+            chain_len: alloc::vec![0; size as usize],
+        })
+    }
+
+    /// Routes configuration-change interrupts to MSI-X entry `vector`.
+    pub fn set_config_vector(&self, vector: u16) -> bool {
+        self.common.w16(MSIX_CONFIG, vector);
+        self.common.r16(MSIX_CONFIG) == vector
+    }
+
     pub fn driver_ok(&self) {
         self.set_status(self.status() | STATUS_DRIVER_OK);
     }
+
+    /// The device asks to be reset after an internal error.
+    pub fn needs_reset(&self) -> bool {
+        self.status() & (STATUS_NEEDS_RESET | STATUS_FAILED) != 0
+    }
+
+    pub fn device_config_u8(&self, off: u64) -> u8 {
+        self.device.r8(off)
+    }
+
+    pub fn device_config_u16(&self, off: u64) -> u16 {
+        self.device.r16(off)
+    }
+
+
 
     pub fn device_config_u64(&self, off: u64) -> u64 {
         // Re-read until the 64-bit value is consistent (config generation).
@@ -347,5 +421,134 @@ impl Virtqueue {
     /// Physical address of the queue frame (for diagnostics).
     pub fn phys(&self) -> u64 {
         self.phys
+    }
+}
+
+/// A split virtqueue with many requests in flight: descriptors come from a
+/// free list, the driver adds chains and later collects completions from
+/// the used ring (after an interrupt, or by polling).
+///
+/// Ownership: a buffer belongs to the device from `add` until its chain is
+/// returned by `pop_used`; the driver must neither touch nor free it in
+/// between.
+pub struct AsyncQueue {
+    index: u16,
+    size: u16,
+    phys: u64,
+    desc: u64,
+    avail: u64,
+    used: u64,
+    notify: u64,
+    avail_idx: u16,
+    used_idx: u16,
+    free_head: u16,
+    free: u16,
+    next: alloc::vec::Vec<u16>,
+    chain_len: alloc::vec::Vec<u16>,
+}
+
+// SAFETY: owned by one driver instance and only used under its lock.
+unsafe impl Send for AsyncQueue {}
+
+impl AsyncQueue {
+    pub fn size(&self) -> u16 {
+        self.size
+    }
+
+    pub fn free(&self) -> u16 {
+        self.free
+    }
+
+    pub fn phys(&self) -> u64 {
+        self.phys
+    }
+
+    /// Makes a descriptor chain available; returns its head (the token
+    /// `pop_used` reports), or `None` if not enough descriptors are free.
+    /// Call `kick` to tell the device.
+    pub fn add(&mut self, chain: &[Buffer]) -> Option<u16> {
+        if chain.is_empty() || chain.len() > self.free as usize {
+            return None;
+        }
+        let head = self.free_head;
+        let mut d = head;
+        for (i, b) in chain.iter().enumerate() {
+            let mut flags = if b.device_writes { DESC_F_WRITE } else { 0 };
+            let last = i + 1 == chain.len();
+            let next = self.next[d as usize];
+            if !last {
+                flags |= DESC_F_NEXT;
+            }
+            let addr = self.desc + d as u64 * 16;
+            // SAFETY: descriptor `d` (< size) lies in the queue frame and is free.
+            unsafe {
+                write_volatile(addr as *mut u64, b.phys);
+                write_volatile((addr + 8) as *mut u32, b.len);
+                write_volatile((addr + 12) as *mut u16, flags);
+                write_volatile((addr + 14) as *mut u16, next);
+            }
+            if !last {
+                d = next;
+            } else {
+                self.free_head = next;
+            }
+        }
+        self.free -= chain.len() as u16;
+        self.chain_len[head as usize] = chain.len() as u16;
+        let avail = self.avail;
+        let slot = (self.avail_idx % self.size) as u64;
+        // SAFETY: the avail ring frame holds 4 + 2 * size bytes.
+        unsafe { write_volatile((avail + 4 + slot * 2) as *mut u16, head) };
+        // The ring entry must be visible before the index that publishes it.
+        fence(Ordering::SeqCst);
+        self.avail_idx = self.avail_idx.wrapping_add(1);
+        // SAFETY: as above.
+        unsafe { write_volatile((avail + 2) as *mut u16, self.avail_idx) };
+        Some(head)
+    }
+
+    /// Notifies the device of new available buffers.
+    pub fn kick(&self) {
+        fence(Ordering::SeqCst);
+        // SAFETY: `notify` is this queue's doorbell in the mapped notify area.
+        unsafe { write_volatile(self.notify as *mut u16, self.index) };
+    }
+
+    /// The next completed chain: (head token, bytes the device wrote). Its
+    /// descriptors return to the free list.
+    pub fn pop_used(&mut self) -> Option<(u16, u32)> {
+        let used = self.used;
+        fence(Ordering::SeqCst);
+        // SAFETY: the used ring lies in the queue frame.
+        let idx = unsafe { read_volatile((used + 2) as *const u16) };
+        if idx == self.used_idx {
+            return None;
+        }
+        // Read the element only after seeing the index.
+        fence(Ordering::SeqCst);
+        let slot = (self.used_idx % self.size) as u64;
+        // SAFETY: as above.
+        let (id, len) = unsafe {
+            (read_volatile((used + 4 + slot * 8) as *const u32), read_volatile((used + 4 + slot * 8 + 4) as *const u32))
+        };
+        self.used_idx = self.used_idx.wrapping_add(1);
+        let head = id as u16;
+        if head >= self.size || self.chain_len[head as usize] == 0 {
+            // A device bug: an id we never handed out. Ignore it rather
+            // than corrupt the free list.
+            crate::kprintln!("virtio: queue {} used an unknown descriptor {}", self.index, id);
+            return self.pop_used();
+        }
+        // Walk the chain to its tail and splice it onto the free list.
+        let n = self.chain_len[head as usize];
+        self.chain_len[head as usize] = 0;
+        let mut tail = head;
+        for _ in 1..n {
+            tail = self.next[tail as usize];
+        }
+        self.next[tail as usize] = self.free_head;
+        self.free_head = head;
+        self.free += n;
+        Some((head, len))
     }
 }

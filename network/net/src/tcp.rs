@@ -1,4 +1,4 @@
-﻿//! TCP (RFC 9293, the consolidated RFC 793) connections.
+//! TCP (RFC 9293, the consolidated RFC 793) connections.
 //!
 //! [`Tcb`] is one connection's state machine. It is driven by three inputs
 //! â€” arriving segments ([`Tcb::input`]), application calls (`send`, `recv`,

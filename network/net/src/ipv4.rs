@@ -1,4 +1,4 @@
-﻿//! IPv4 (RFC 791): header validation and generation, fragmentation and
+//! IPv4 (RFC 791): header validation and generation, fragmentation and
 //! bounded reassembly.
 
 use crate::wire::{be16, checksum, ip_at, put16, Ipv4Addr};

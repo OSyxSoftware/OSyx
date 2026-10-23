@@ -289,6 +289,7 @@ impl Shell {
                 println!("  cd pwd ls cat echo mkdir rmdir rm touch mv cp stat");
                 println!("  ps kill mounts df free uptime uname whoami env history clear help exit");
                 println!("Statements: name = expr   print(expr, ...)   $name in commands, $? = last status");
+                println!("Network: ping HOST, net list|info|configure, dns lookup NAME, netstat [-a|-s], nc");
                 println!("Other words run programs from /bin, /usr/bin and /system/bin.");
                 Ok(0)
             }

@@ -29,6 +29,7 @@ mod ipc;
 mod irq;
 mod mem;
 mod modules;
+mod net;
 mod object;
 mod pci;
 mod pipe;
@@ -173,8 +174,9 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     // USB comes up in its own threads: input devices appear asynchronously
     // and never hold up the boot.
     input::init(boot.has_option("input.log"));
+    let nics = net::init(&pci_devices, boot);
     let usb_controllers = drivers::xhci::probe(&pci_devices);
-    kprintln!("usb: {} xHCI controller(s)", usb_controllers);
+    kprintln!("usb: {} xHCI controller(s), net: {} interface(s)", usb_controllers, nics);
     let mounted = storage::mount_all(boot);
     kprintln!(
         "storage: {} PCI functions, {} disks, {} partitions, {} mounts, root: {}",
@@ -301,6 +303,7 @@ fn log_subsystems() {
     }
     let services = ipc::services();
     kprintln!("ipc: {} live service(s) {:?}, {} shared frames mapped", services.len(), services, shm::shared_frames());
+    net::log_summary();
 }
 
 fn parse_int(s: &str) -> Option<i32> {
