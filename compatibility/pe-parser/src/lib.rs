@@ -24,16 +24,20 @@ mod exports;
 mod imports;
 mod relocs;
 mod tls;
+mod resources;
 
 pub use exception::{RuntimeFunction, RuntimeFunctions, UnwindInfo};
 pub use exports::{Export, ExportTarget, Exports};
-pub use imports::{Import, ImportDescriptors, ImportEntries, ImportEntry};
+pub use imports::{DelayImport, DelayImportDescriptors, Import, ImportDescriptors, ImportEntries, ImportEntry};
 pub use relocs::{BaseRelocations, Relocation, RelocationKind};
 pub use tls::{TlsCallbacks, TlsInfo};
+pub use resources::{version_value, VersionValue};
 
 use core::fmt;
 
 pub const MACHINE_AMD64: u16 = 0x8664;
+
+impl core::error::Error for PeError {}
 pub const MACHINE_I386: u16 = 0x014C;
 pub const MACHINE_ARM64: u16 = 0xAA64;
 pub const PE32_MAGIC: u16 = 0x10B;
@@ -137,6 +141,9 @@ pub enum PeError {
     BadImport {
         reason: &'static str,
     },
+    BadResource {
+        reason: &'static str,
+    },
     BadExport {
         reason: &'static str,
     },
@@ -174,6 +181,7 @@ impl fmt::Display for PeError {
             PeError::RvaNotInFile(r) => write!(f, "RVA {r:#x} is not backed by file data"),
             PeError::BadName { rva } => write!(f, "invalid name at RVA {rva:#x}"),
             PeError::BadImport { reason } => write!(f, "import table: {reason}"),
+            PeError::BadResource { reason } => write!(f, "resource: {reason}"),
             PeError::BadExport { reason } => write!(f, "export table: {reason}"),
             PeError::BadRelocation { reason } => write!(f, "base relocations: {reason}"),
             PeError::BadTls { reason } => write!(f, "TLS directory: {reason}"),
@@ -665,6 +673,18 @@ impl<'a> PeFile<'a> {
     /// The import descriptors (data directory 1).
     pub fn imports(&self) -> Result<ImportDescriptors<'a>> {
         imports::descriptors(*self)
+    }
+
+    /// Read-only modern RVA-based delay-load descriptors (directory 13).
+    pub fn delay_imports(&self) -> Result<DelayImportDescriptors<'a>> {
+        imports::delay_descriptors(*self)
+    }
+
+    /// Numeric PE resource lookup. None selects the first name/language.
+    /// Every directory offset stays inside the resource directory; payload
+    /// RVAs must reference file-backed image bytes. No host APIs are called.
+    pub fn resource(&self, kind: u16, name: Option<u16>, language: Option<u16>) -> Result<Option<&'a [u8]>> {
+        resources::resource(*self, kind, name, language)
     }
 
     /// The export table (data directory 0), if present.

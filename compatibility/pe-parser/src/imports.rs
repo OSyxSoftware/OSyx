@@ -10,6 +10,92 @@ const MAX_DESCRIPTORS: u32 = 4096;
 const MAX_THUNKS: u32 = 65536;
 const ORDINAL_FLAG: u64 = 1 << 63;
 
+#[derive(Clone, Copy, Debug)]
+pub struct DelayImport<'a> {
+    pub import: Import<'a>,
+    pub module_handle_rva: u32,
+    pub bound_table_rva: u32,
+    pub unload_table_rva: u32,
+}
+pub struct DelayImportDescriptors<'a> {
+    pe: PeFile<'a>,
+    next: u32,
+    remaining: u32,
+    count: u32,
+    done: bool,
+}
+pub(crate) fn delay_descriptors(pe: PeFile<'_>) -> Result<DelayImportDescriptors<'_>> {
+    let d = pe.directory(dir::DELAY_IMPORT);
+    Ok(DelayImportDescriptors { pe, next: d.virtual_address, remaining: d.size, count: 0, done: !d.is_present() })
+}
+impl<'a> DelayImportDescriptors<'a> {
+    fn read(&mut self) -> Result<Option<DelayImport<'a>>> {
+        let bad = |reason| PeError::BadImport { reason };
+        if self.count >= MAX_DESCRIPTORS {
+            return Err(bad("too many delay descriptors"));
+        }
+        if self.remaining < 32 {
+            return Err(bad("delay descriptor array not terminated"));
+        }
+        let raw = self.pe.slice_at_rva(self.next, 32).map_err(|_| bad("delay descriptor not in file"))?;
+        let f = |i| u32::from_le_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]);
+        if raw.iter().all(|&b| b == 0) {
+            return Ok(None);
+        }
+        if f(0) != 1 {
+            return Err(bad("unsupported delay attributes (RVA form required)"));
+        }
+        let (name, handle, iat, int, bound, unload) = (f(4), f(8), f(12), f(16), f(20), f(24));
+        if name == 0 || iat == 0 || int == 0 {
+            return Err(bad("delay descriptor without name, IAT or INT"));
+        }
+        for rva in [handle, iat, int, bound, unload].into_iter().filter(|&r| r != 0) {
+            if rva.checked_add(8).is_none_or(|end| end > self.pe.size_of_image()) {
+                return Err(bad("delay table outside image"));
+            }
+        }
+        let dll = self.pe.cstr_at_rva(name).map_err(|_| bad("invalid delay DLL name"))?;
+        if dll.is_empty() {
+            return Err(bad("empty delay DLL name"));
+        }
+        self.next = self.next.checked_add(32).ok_or(bad("delay array overflows"))?;
+        self.remaining -= 32;
+        self.count += 1;
+        Ok(Some(DelayImport {
+            import: Import {
+                pe: self.pe,
+                dll,
+                lookup_table_rva: int,
+                address_table_rva: iat,
+                time_date_stamp: f(28),
+                forwarder_chain: 0,
+            },
+            module_handle_rva: handle,
+            bound_table_rva: bound,
+            unload_table_rva: unload,
+        }))
+    }
+}
+impl<'a> Iterator for DelayImportDescriptors<'a> {
+    type Item = Result<DelayImport<'a>>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        match self.read() {
+            Ok(Some(d)) => Some(Ok(d)),
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
+    }
+}
+
 /// One imported DLL.
 #[derive(Clone, Copy, Debug)]
 pub struct Import<'a> {

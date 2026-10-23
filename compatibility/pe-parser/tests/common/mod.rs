@@ -119,6 +119,11 @@ impl Builder {
 /// Calls every accessor and iterator; must never panic on any input.
 pub fn walk(pe: &PeFile) -> usize {
     let mut n = 0;
+    if let Ok(ds) = pe.delay_imports() { for d in ds.flatten() { n += d.import.entries().count(); } }
+    if let Ok(Some(resource)) = pe.resource(16, None, None) {
+        let _ = osyx_pe::version_value(resource, "\\");
+        let _ = osyx_pe::version_value(resource, "\\StringFileInfo\\040904b0\\CompanyName");
+    }
     for s in pe.sections() {
         n += s.name().len();
         let _ = pe.rva_to_offset(s.virtual_address);
