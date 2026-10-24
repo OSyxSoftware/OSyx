@@ -10,6 +10,11 @@ static const WORD nss3_ordinals[] = {
     51, 52, 53, 54, 57, 111, 115, 116, 151,
 };
 
+static DWORD WINAPI signal_socket(void *arg) {
+    Sleep(40);
+    return send((SOCKET)(ULONG_PTR)arg,"W",1,0)==1 ? 0 : 1;
+}
+
 void __stdcall start(void) {
     WSADATA wsa;
     check_eq("WSAStartup(1.1)", WSAStartup(MAKEWORD(1, 1), &wsa), 0);
@@ -100,14 +105,33 @@ void __stdcall start(void) {
     SOCKET duplicate=socket(AF_INET,SOCK_STREAM,0);
     check("bound TCP port is reserved before listen",bind(duplicate,(struct sockaddr*)&endpoint,sizeof endpoint)==SOCKET_ERROR && WSAGetLastError()==WSAEADDRINUSE);
     closesocket(duplicate);
+    nonblocking=1;
+    check_eq("make the listener nonblocking before accept",legacy_ioctl(dynamic,FIONBIO,&nonblocking),0);
     check_eq("listen on the assigned dynamic port",listen(dynamic,5),0);
     c=socket(AF_INET,SOCK_STREAM,0);
     check_eq("connect to the port obtained before listen",connect(c,(struct sockaddr*)&endpoint,sizeof endpoint),0);
     SOCKET accepted=accept(dynamic,NULL,NULL);
     check("accept the pollable event connection",accepted!=INVALID_SOCKET);
+    nonblocking=0;
+    check_eq("restore the listener to blocking after accept",legacy_ioctl(dynamic,FIONBIO,&nonblocking),0);
     check_eq("signal the pollable event",send(c,"M",1,0),1);
     char signal=0;
     check("receive the pollable event signal",recv(accepted,&signal,1,0)==1 && signal=='M');
+    check("accepted socket keeps the inherited nonblocking mode",recv(accepted,&signal,1,0)==SOCKET_ERROR && WSAGetLastError()==WSAEWOULDBLOCK);
+    nonblocking=1;
+    check_eq("pollable reader uses nonblocking I/O",legacy_ioctl(accepted,FIONBIO,&nonblocking),0);
+    check("draining the pollable reader reports would-block",recv(accepted,&signal,1,0)==SOCKET_ERROR && WSAGetLastError()==WSAEWOULDBLOCK);
+    FD_ZERO(&rd);
+    FD_SET(accepted,&rd);
+    tv.tv_sec=2;
+    tv.tv_usec=0;
+    HANDLE sender=CreateThread(NULL,0,signal_socket,(void*)(ULONG_PTR)c,0,NULL);
+    check("create a cross-thread socket notifier",sender!=NULL);
+    check("select wakes on another thread's signal",select(0,&rd,NULL,NULL,&tv)==1 && FD_ISSET(accepted,&rd));
+    check("read the cross-thread notification",recv(accepted,&signal,1,0)==1 && signal=='W');
+    DWORD sender_status=1;
+    check("socket notifier finishes",sender && WaitForSingleObject(sender,2000)==WAIT_OBJECT_0 && GetExitCodeThread(sender,&sender_status) && sender_status==0);
+    if(sender) CloseHandle(sender);
     closesocket(accepted);
     closesocket(c);
     closesocket(dynamic);

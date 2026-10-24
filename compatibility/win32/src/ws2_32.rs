@@ -97,14 +97,23 @@ fn err<T>(code: u32, v: T) -> T {
     v
 }
 
+#[derive(Clone, Copy)]
 struct Sock {
     fd: u64,
     stream: bool,
+    nonblocking: bool,
 }
 
 static SOCKETS: Mutex<BTreeMap<u64, Sock>> = Mutex::new(BTreeMap::new());
 static NEXT: Mutex<u64> = Mutex::new(0x1000);
 static STARTED: AtomicU32 = AtomicU32::new(0);
+
+fn trace_io(args: core::fmt::Arguments<'_>) {
+    static LINES: AtomicU32 = AtomicU32::new(0);
+    if crate::kernel32::TRACE.load(Ordering::Relaxed) && LINES.fetch_add(1, Ordering::Relaxed) < 96 {
+        os_std::eprintln!("winrun: socket I/O thread {}: {args}", os_sys::gettid());
+    }
+}
 
 fn started() -> bool {
     STARTED.load(Ordering::SeqCst) > 0
@@ -112,10 +121,14 @@ fn started() -> bool {
 
 /// The kernel socket of SOCKET `s`.
 fn fd(s: u64) -> Result<(u64, bool), u32> {
+    socket_state(s).map(|s| (s.fd, s.stream))
+}
+
+fn socket_state(s: u64) -> Result<Sock, u32> {
     if !started() {
         return Err(WSANOTINITIALISED);
     }
-    SOCKETS.lock().unwrap().get(&s).map(|k| (k.fd, k.stream)).ok_or(WSAENOTSOCK)
+    SOCKETS.lock().unwrap().get(&s).copied().ok_or(WSAENOTSOCK)
 }
 
 /// sockaddr_in (family, port big-endian, address, zero[8]) → SockAddr.
@@ -215,7 +228,7 @@ extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
             let mut n = NEXT.lock().unwrap();
             let s = *n;
             *n += 4;
-            SOCKETS.lock().unwrap().insert(s, Sock { fd, stream });
+            SOCKETS.lock().unwrap().insert(s, Sock { fd, stream, nonblocking: false });
             s
         }
         Err(e) => err(wsa(e), INVALID_SOCKET),
@@ -270,16 +283,24 @@ extern "win64" fn listen(s: u64, backlog: i32) -> i32 {
 
 extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
     let r = (|| {
-        let (fd, stream) = fd(s)?;
-        if !stream {
+        let listener = socket_state(s)?;
+        if !listener.stream {
             return Err(WSAEOPNOTSUPP);
         }
-        let (nfd, peer) = os_sys::sock_accept(fd).map_err(wsa)?;
+        let (nfd, peer) = os_sys::sock_accept(listener.fd).map_err(wsa)?;
+        // Winsock accept inherits the listener's blocking mode. OSyx's
+        // native accept creates a blocking endpoint, so apply it here.
+        if listener.nonblocking {
+            if let Err(e) = os_sys::sock_ctl(nfd, net::ctl::NONBLOCK, 1) {
+                let _ = os_sys::close(nfd);
+                return Err(wsa(e));
+            }
+        }
         write_addr(&peer, addr, len);
         let mut n = NEXT.lock().unwrap();
         let ns = *n;
         *n += 4;
-        SOCKETS.lock().unwrap().insert(ns, Sock { fd: nfd, stream: true });
+        SOCKETS.lock().unwrap().insert(ns, Sock { fd: nfd, stream: true, nonblocking: listener.nonblocking });
         Ok(ns)
     })();
     r.unwrap_or_else(|e| err(e, INVALID_SOCKET))
@@ -293,6 +314,7 @@ fn flags(f: i32) -> Result<u64, u32> {
 }
 
 extern "win64" fn send(s: u64, buf: *const u8, len: i32, f: i32) -> i32 {
+    trace_io(format_args!("send({s:#x}, {len}) begin"));
     let r = (|| {
         let (fd, _) = fd(s)?;
         if f != 0 {
@@ -302,6 +324,7 @@ extern "win64" fn send(s: u64, buf: *const u8, len: i32, f: i32) -> i32 {
         let data = unsafe { core::slice::from_raw_parts(buf, len.max(0) as usize) };
         os_sys::sock_send(fd, data, None, 0).map_err(wsa)
     })();
+    trace_io(format_args!("send({s:#x}) -> {r:?}"));
     r.map_or_else(|e| err(e, SOCKET_ERROR), |n| n as i32)
 }
 
@@ -324,6 +347,7 @@ extern "win64" fn recv(s: u64, buf: *mut u8, len: i32, f: i32) -> i32 {
 }
 
 extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8, fromlen: *mut i32) -> i32 {
+    trace_io(format_args!("recv({s:#x}, {len}) begin"));
     let r = (|| {
         let (fd, _) = fd(s)?;
         let fl = flags(f)?;
@@ -333,6 +357,7 @@ extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8
         write_addr(&peer, from, fromlen);
         Ok(n)
     })();
+    trace_io(format_args!("recv({s:#x}) -> {r:?}"));
     r.map_or_else(|e| err(e, SOCKET_ERROR), |n| n as i32)
 }
 
@@ -416,7 +441,9 @@ extern "win64" fn ioctlsocket(s: u64, cmd: u32, arg: *mut u32) -> i32 {
         }
         // SAFETY: the caller's argument.
         let on = unsafe { *arg } != 0;
-        os_sys::sock_ctl(fd, net::ctl::NONBLOCK, on as u64).map(|_| ()).map_err(wsa)
+        os_sys::sock_ctl(fd, net::ctl::NONBLOCK, on as u64).map_err(wsa)?;
+        SOCKETS.lock().unwrap().get_mut(&s).ok_or(WSAENOTSOCK)?.nonblocking = on;
+        Ok(())
     })())
 }
 
@@ -975,6 +1002,7 @@ extern "win64" fn __WSAFDIsSet(s: u64, set: *const u8) -> i32 {
 /// select over fd_set { u32 count; SOCKET array[64] } for reading and
 /// writing (the exception set is reported empty); timeval {sec, usec}.
 extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *mut u8, timeout: *const i32) -> i32 {
+    trace_io(format_args!("select begin"));
     let read_set = |p: *mut u8| -> Vec<u64> {
         if p.is_null() {
             return Vec::new();
@@ -1007,6 +1035,7 @@ extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *mut u8, time
             return err(wsa(e), SOCKET_ERROR);
         }
     }
+    trace_io(format_args!("select woke: {raw:?}"));
     let mut count = 0;
     let write_set = |p: *mut u8, list: &[u64]| {
         if p.is_null() {
