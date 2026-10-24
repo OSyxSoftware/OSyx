@@ -87,7 +87,12 @@ fn wsa(e: Errno) -> u32 {
     }
 }
 
+#[track_caller]
 fn err<T>(code: u32, v: T) -> T {
+    static ERRORS: AtomicU32 = AtomicU32::new(0);
+    if code != WSAEWOULDBLOCK && crate::VERBOSE.load(Ordering::Relaxed) && ERRORS.fetch_add(1, Ordering::Relaxed) < 128 {
+        os_std::eprintln!("winrun: Winsock error {code} in thread {} at {}", os_sys::gettid(), core::panic::Location::caller());
+    }
     teb::set_last_error(code);
     v
 }
@@ -191,6 +196,9 @@ extern "win64" fn WSASetLastError(e: i32) {
 }
 
 extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
+    if crate::VERBOSE.load(Ordering::Relaxed) {
+        os_std::eprintln!("winrun: socket family {af}, kind {kind}, protocol {proto}, started {}", started());
+    }
     if !started() {
         return err(WSANOTINITIALISED, INVALID_SOCKET);
     }
@@ -340,6 +348,9 @@ extern "win64" fn shutdown(s: u64, how: i32) -> i32 {
 }
 
 extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len: i32) -> i32 {
+    if crate::VERBOSE.load(Ordering::Relaxed) {
+        os_std::eprintln!("winrun: setsockopt {s:#x} level {level:#x}, option {name:#x}, len {len}");
+    }
     result((|| {
         let (fd, _) = fd(s)?;
         let int = || -> Result<u32, u32> {
@@ -420,8 +431,11 @@ extern "win64" fn getpeername(s: u64, addr: *mut u8, len: *mut i32) -> i32 {
 fn sock_name(s: u64, op: u64, addr: *mut u8, len: *mut i32) -> i32 {
     result((|| {
         let (fd, _) = fd(s)?;
-        let v = os_sys::sock_ctl(fd, op, 0).map_err(wsa)?;
-        let a = SockAddr::new((v as u32).to_be_bytes(), (v >> 32) as u16);
+        if addr.is_null() || len.is_null() || unsafe { *len } < 16 {
+            return Err(WSAEFAULT);
+        }
+        let mut a = SockAddr::default();
+        os_sys::sock_ctl(fd, op, &mut a as *mut SockAddr as u64).map_err(wsa)?;
         write_addr(&a, addr, len);
         Ok(())
     })())
@@ -680,6 +694,9 @@ extern "win64" fn freeaddrinfo(mut p: u64) {
 /// or fail with WSAEWOULDBLOCK), so WSA_FLAG_OVERLAPPED changes nothing;
 /// a specific provider (WSAPROTOCOL_INFOW) is not supported.
 extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *const u8, group: u32, _flags: u32) -> u64 {
+    if crate::VERBOSE.load(Ordering::Relaxed) {
+        os_std::eprintln!("winrun: WSASocket family {af}, kind {kind}, protocol {proto}, provider {}, group {group}, flags {_flags:#x}", !info.is_null());
+    }
     if !info.is_null() || group != 0 {
         return err(WSAEINVAL, INVALID_SOCKET);
     }
@@ -1067,8 +1084,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     ]
 }
 
-/// The classic Winsock export ordinals, shared by ws2_32 and wsock32
-/// (programs may import by ordinal).
+/// Winsock 2 export ordinals. The legacy DLL differs at ordinals 10-12.
 pub fn ordinals() -> Vec<(u16, u64)> {
     let f = |p: usize| p as u64;
     alloc::vec![
@@ -1106,4 +1122,19 @@ pub fn ordinals() -> Vec<(u16, u64)> {
         (116, f(WSACleanup as *const () as usize)),
         (151, f(__WSAFDIsSet as *const () as usize)),
     ]
+}
+
+/// WSOCK32 preserves its older order: inet_addr, inet_ntoa, ioctlsocket.
+/// NSPR imports ordinal 12 rather than the function name.
+pub fn legacy_ordinals() -> Vec<(u16, u64)> {
+    let mut entries = ordinals();
+    for (ordinal, address) in &mut entries {
+        *address = match *ordinal {
+            10 => inet_addr as *const () as u64,
+            11 => inet_ntoa as *const () as u64,
+            12 => ioctlsocket as *const () as u64,
+            _ => *address,
+        };
+    }
+    entries
 }

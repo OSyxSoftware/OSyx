@@ -286,7 +286,7 @@ fn zen_probe() -> i32 {
     println!("zen-probe: profile {profile}");
     if os_std::fs::create_dir_all(&profile).and_then(|_| os_std::fs::write(
         format!("{profile}/user.js"),
-        "user_pref(\"gfx.webrender.software\", true);\nuser_pref(\"gfx.webrender.software.d3d11\", false);\nuser_pref(\"gfx.webrender.compositor\", false);\nuser_pref(\"layers.acceleration.disabled\", true);\nuser_pref(\"layers.gpu-process.enabled\", false);\nuser_pref(\"layers.gpu-process.force-enabled\", false);\n",
+        "user_pref(\"gfx.webrender.software\", true);\nuser_pref(\"gfx.webrender.software.d3d11\", false);\nuser_pref(\"gfx.webrender.compositor\", false);\nuser_pref(\"layers.acceleration.disabled\", true);\nuser_pref(\"layers.gpu-process.enabled\", false);\nuser_pref(\"layers.gpu-process.force-enabled\", false);\nuser_pref(\"zen.welcome-screen.seen\", true);\nuser_pref(\"browser.aboutwelcome.enabled\", false);\nuser_pref(\"browser.shell.checkDefaultBrowser\", false);\nuser_pref(\"devtools.console.stdout.chrome\", true);\nuser_pref(\"devtools.console.stdout.content\", true);\n",
     )).and_then(|_| os_std::fs::write(
         "/tmp/zen-probe-page.html",
         "<!doctype html><meta charset=utf-8><title>OSyx Zen rendering test</title><style>body{margin:40px;background:#dbeafe;color:#172554;font:20px Lato,sans-serif}button{font:inherit;padding:16px}#box{width:240px;height:120px;background:#16a34a;margin:24px 0}</style><h1>Zen renders HTML</h1><p>This page is rendered by the unmodified browser.</p><div id=box></div><button onclick=\"document.title='OSyx click verified';this.textContent='Click verified';document.getElementById('box').style.background='#f97316'\">Verify click</button>",
@@ -306,7 +306,7 @@ fn zen_probe() -> i32 {
     // Mozilla's own switches start them unsandboxed instead.
     // Every failing Windows API call goes to the serial log (bring-up).
     zen.env("OSYX_WINRUN_TRACE", "1");
-    zen.env("MOZ_LOG", "timestamp,sync,Widget:5,WidgetScreen:5,RenderThread:5,WinOcclusionTracker:5,WinOcclusionCalculator:5,nsDocShell:5,DocLoader:5,ipc:5");
+    zen.env("MOZ_LOG", "timestamp,sync,Widget:5,WidgetScreen:5,RenderThread:5,nsDocShell:5,DocLoader:5,nsSocketTransport:5,nsHostResolver:5,pipnss:5,nsHttp:3");
     for kind in ["CONTENT", "GPU", "RDD", "SOCKET_PROCESS", "GMP", "UTILITY", "VR"] {
         zen.env(&format!("MOZ_DISABLE_{kind}_SANDBOX"), "1");
     }

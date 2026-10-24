@@ -863,9 +863,61 @@ Win32 suite passes 2080/0, including direct kernel checks on tmpfs and ext4
 for rights, bounds, aliases, deferred writeback and truncation. Host tests
 pass 360/0 and all clippy targets pass with -D warnings. Evidence:
 build/zen/filemap-native.log, filemap-child-native.log,
-win-filemap-102.log and host-filemap-101.log. Attempt 100 uses a fresh full
-image containing this kernel; functional browser verification is pending.
+win-filemap-102.log and host-filemap-101.log.
+
+Attempt 100 uses a fresh full image containing this kernel. SQLite I/O
+errors disappear. The real vendor browser renders its chrome and the local
+HTML page, including Lato text, the blue background and green rectangle.
+Injected USB mouse input activates the real page's button: its label changes
+to Click verified, the rectangle turns orange and the window/tab title
+becomes OSyx click verified. Typed input and multiple tabs also work; the
+desktop continues to show one task for the whole browser family. Screenshots:
+build/zen/attempt-100-render.png, attempt-100-click2.png and
+attempt-100-mouse-tab.png. The fresh probe profile skips the welcome screen
+and enables console output; vendor binaries and browser assets are unchanged.
+
+External HTTPS remains blocked: example.com resolves, but the channel stops
+with NS_ERROR_SOCKET_CREATE_FAILED (0x804b0034), then attempts HTTP fallback.
+No certificate bypass was used. The host can reach the same HTTPS URL.
+attempt-100.result.json records these manual observations separately from
+the conservative probe script defaults: local rendering/input/tabs pass,
+https_verified is false, and state is partial. The VM ran to the 900-second
+observation timeout without a fatal process fault or kernel panic. Bounded
+Winsock diagnostics and socket-transport logs are the next investigation.
 
 References: [MapViewOfFile](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-mapviewoffile),
 [UnmapViewOfFile](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-unmapviewoffile),
 [FlushViewOfFile](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-flushviewoffile).
+
+### Legacy Winsock ordinals and socket endpoint queries
+
+Attempts 101/103 isolate the generic socket-create error to NSPR's
+PR_OpenTCPSocket. The same unmodified vendor nss3.dll passes an eight-check
+initialization/TCP/SSL preflight on Windows but fails its TCP descriptor
+check on OSyx with PR_UNKNOWN_ERROR and OS error zero. Disassembling the
+vendor DLL shows it importing WSOCK32 ordinal 12 for ioctlsocket. OSyx had
+used the WS2_32 table for both libraries: ordinal 12 instead returned the
+non-null string pointer from inet_ntoa. NSPR interpreted it as ioctl failure.
+
+The DLLs now have separate ordinal tables for the three differing entries:
+WSOCK32 10/11/12 are inet_addr/inet_ntoa/ioctlsocket; WS2_32 retains
+ioctlsocket/inet_addr/inet_ntoa. Pointer comparisons against both native
+Windows DLLs and direct legacy ioctl calls form the regression fixture.
+Attempt 104 then passes the same vendor NSS preflight 8/0 in OSyx, including
+SSL_ImportFD, hostname setup and client-handshake initialization.
+
+The subsequent endpoint error is independent: getsockname/getpeername
+passed zero to the kernel control call and assumed a packed return value,
+although the ABI writes a SockAddr into a supplied buffer. Both now pass a
+real output structure and validate the Windows buffer and length pointers.
+Six reference checks cover listener/local/remote endpoints and invalid
+buffers. Native wsock32 passes 34/0; the complete OSyx Win32 suite passes
+2094/0, including all 34 checks; targeted clippy passes with -D warnings.
+Evidence: build/zen/wsock-endpoint-native-105.log, win-wsock-105.log,
+clippy-wsock-final-106.log and attempt-104.serial.log.
+
+Attempt 106 advances through real TLS certificate verification and logs
+successful handshakes and HTTP/2 response data from Mozilla services. A
+fresh interactive external-page check is in progress. The temporary vendor
+NSS preflight hook was removed from init after the diagnosis; the browser
+uses its original NSS implementation and certificate verification.

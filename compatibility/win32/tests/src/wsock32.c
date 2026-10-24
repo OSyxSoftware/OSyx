@@ -23,6 +23,13 @@ void __stdcall start(void) {
         if (!GetProcAddress(w, MAKEINTRESOURCEA(nss3_ordinals[i]))) missing++;
     check_eq("the 30 ordinals nss3.dll imports resolve", missing, 0);
     check("ordinal 115 is WSAStartup", (FARPROC)GetProcAddress(w, MAKEINTRESOURCEA(115)) == GetProcAddress(w, "WSAStartup"));
+    HMODULE modern=LoadLibraryA("ws2_32.dll");
+    check("legacy ordinal 10 is inet_addr",GetProcAddress(w,MAKEINTRESOURCEA(10))==GetProcAddress(w,"inet_addr"));
+    check("legacy ordinal 11 is inet_ntoa",GetProcAddress(w,MAKEINTRESOURCEA(11))==GetProcAddress(w,"inet_ntoa"));
+    check("legacy ordinal 12 is ioctlsocket",GetProcAddress(w,MAKEINTRESOURCEA(12))==GetProcAddress(w,"ioctlsocket"));
+    check("Winsock 2 ordinal 10 is ioctlsocket",modern && GetProcAddress(modern,MAKEINTRESOURCEA(10))==GetProcAddress(modern,"ioctlsocket"));
+    check("Winsock 2 ordinal 11 is inet_addr",modern && GetProcAddress(modern,MAKEINTRESOURCEA(11))==GetProcAddress(modern,"inet_addr"));
+    check("Winsock 2 ordinal 12 is inet_ntoa",modern && GetProcAddress(modern,MAKEINTRESOURCEA(12))==GetProcAddress(modern,"inet_ntoa"));
 
     struct protoent *pe = getprotobyname("tcp");
     check("getprotobyname(\"tcp\") is 6", pe != NULL && pe->p_proto == 6 && mem_eq(pe->p_name, "tcp", 4));
@@ -37,6 +44,12 @@ void __stdcall start(void) {
 
     SOCKET l = socket(AF_INET, SOCK_STREAM, 0);
     SOCKET u = socket(AF_INET, SOCK_DGRAM, 0);
+    typedef int (WSAAPI *ioctl_fn)(SOCKET,long,u_long*);
+    ioctl_fn legacy_ioctl=(ioctl_fn)GetProcAddress(w,MAKEINTRESOURCEA(12));
+    u_long nonblocking=1;
+    check_eq("NSPR ordinal call enables nonblocking I/O",legacy_ioctl(u,FIONBIO,&nonblocking),0);
+    nonblocking=0;
+    check_eq("NSPR ordinal call restores blocking I/O",legacy_ioctl(u,FIONBIO,&nonblocking),0);
     int type = 0, len = sizeof type;
     check("getsockopt(SO_TYPE) of a TCP socket", getsockopt(l, SOL_SOCKET, SO_TYPE, (char *)&type, &len) == 0 && type == SOCK_STREAM && len == 4);
     len = sizeof type;
@@ -54,6 +67,18 @@ void __stdcall start(void) {
     check_eq("listen", listen(l, 4), 0);
     SOCKET c = socket(AF_INET, SOCK_STREAM, 0);
     check_eq("connect over loopback", connect(c, (struct sockaddr *)&la, sizeof la), 0);
+    struct sockaddr_in endpoint={0};
+    len=sizeof endpoint;
+    check("listener getsockname reports the bound endpoint",getsockname(l,(struct sockaddr*)&endpoint,&len)==0 && len==sizeof endpoint && endpoint.sin_family==AF_INET && endpoint.sin_port==la.sin_port && endpoint.sin_addr.s_addr==la.sin_addr.s_addr);
+    len=sizeof endpoint;
+    check("connected getsockname reports its ephemeral endpoint",getsockname(c,(struct sockaddr*)&endpoint,&len)==0 && endpoint.sin_family==AF_INET && endpoint.sin_port!=0 && endpoint.sin_addr.s_addr==la.sin_addr.s_addr);
+    len=sizeof endpoint;
+    check("getpeername reports the remote endpoint",getpeername(c,(struct sockaddr*)&endpoint,&len)==0 && endpoint.sin_family==AF_INET && endpoint.sin_port==la.sin_port && endpoint.sin_addr.s_addr==la.sin_addr.s_addr);
+    len=sizeof endpoint-1;
+    check("getsockname rejects a short buffer",getsockname(c,(struct sockaddr*)&endpoint,&len)==SOCKET_ERROR && WSAGetLastError()==WSAEFAULT);
+    len=sizeof endpoint;
+    check("getpeername rejects a null address",getpeername(c,NULL,&len)==SOCKET_ERROR && WSAGetLastError()==WSAEFAULT);
+    check("getsockname rejects a null length",getsockname(c,(struct sockaddr*)&endpoint,NULL)==SOCKET_ERROR && WSAGetLastError()==WSAEFAULT);
     fd_set rd;
     FD_ZERO(&rd);
     FD_SET(l, &rd);
