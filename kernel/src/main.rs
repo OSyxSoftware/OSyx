@@ -25,6 +25,7 @@ mod display;
 mod drivers;
 mod earlycon;
 mod exec;
+mod filemap;
 mod fixup;
 mod futex;
 mod input;

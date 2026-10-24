@@ -23,6 +23,9 @@ pub struct SharedMemory {
     owned: bool,
     /// Device memory is mapped write-combining (framebuffers).
     pub write_combining: bool,
+    /// A file-view alias borrows frames from a shared backing object.
+    _owner: Option<Arc<dyn core::any::Any + Send + Sync>>,
+    identity: Option<(usize, u64)>,
 }
 
 impl SharedMemory {
@@ -50,7 +53,7 @@ impl SharedMemory {
             }
         }
         SHARED_FRAMES.fetch_add(pages, Ordering::Relaxed);
-        Ok(Arc::new(SharedMemory { frames, size, owned: true, write_combining: false }))
+        Ok(Arc::new(SharedMemory { frames, size, owned: true, write_combining: false, _owner: None, identity: None }))
     }
 
     /// Physical memory of a device (page aligned).
@@ -58,7 +61,17 @@ impl SharedMemory {
         let start = phys & !(PAGE_SIZE - 1);
         let end = (phys + size).next_multiple_of(PAGE_SIZE);
         let frames = (start..end).step_by(PAGE_SIZE as usize).collect();
-        Arc::new(SharedMemory { frames, size: end - start, owned: false, write_combining: true })
+        Arc::new(SharedMemory { frames, size: end - start, owned: false, write_combining: true, _owner: None, identity: None })
+    }
+
+    pub fn alias(frames: Vec<u64>, owner: Arc<dyn core::any::Any + Send + Sync>, identity: (usize, u64)) -> Arc<SharedMemory> {
+        let size = frames.len() as u64 * PAGE_SIZE;
+        Arc::new(SharedMemory { frames, size, owned: false, write_combining: false, _owner: Some(owner), identity: Some(identity) })
+    }
+
+    pub fn key(&self, offset: u64) -> (usize, u64) {
+        let (object, base) = self.identity.unwrap_or((self as *const Self as usize, 0));
+        (object, base + offset)
     }
 
     pub fn size(&self) -> u64 {

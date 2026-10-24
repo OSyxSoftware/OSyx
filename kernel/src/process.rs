@@ -798,7 +798,7 @@ pub fn shared_key(addr: u64) -> Option<(usize, u64)> {
     let t = TABLE.lock();
     let p = t.procs.get(&pid)?;
     let (&base, (shm, pages)) = p.shared.range(..=addr).next_back()?;
-    (addr < base + pages * PAGE_SIZE).then(|| (Arc::as_ptr(shm) as usize, addr - base))
+    (addr < base + pages * PAGE_SIZE).then(|| shm.key(addr - base))
 }
 
 /// Maps all of `shm` into the current process (read-only unless

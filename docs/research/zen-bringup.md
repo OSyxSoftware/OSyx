@@ -830,3 +830,42 @@ Attempt 97's WidgetScreen log confirms a real 1920x1080 screen at 96 DPI
 and 60 Hz, and the initial browser size changes to 1280x972. Functional
 rendering is still being checked. Implementation reference:
 [Mozilla ScreenHelperWin](https://github.com/mozilla-firefox/firefox/blob/main/widget/windows/ScreenHelperWin.cpp).
+
+### SQLite shared file sections
+
+Attempts 97-99 keep a correctly sized browser window, but the client area
+remains blank. Attempt 99 compares the same surface pixels before and after
+the GDI copy, in PRISM and in the screenshot: the purple first row and gray
+interior agree. This rules out the suspected shared-buffer copy failure.
+Enabling the browser console instead reveals SQLite disk I/O errors and
+NS_ERROR_STORAGE_IOERR during profile and session initialization. The shim
+rejects PAGE_READWRITE mappings of the SQLite -shm files with error 50.
+
+File sections now use a kernel cache keyed by mounted volume and inode.
+Independent sections, inherited handles and views in different processes
+alias the same frames. Growing a section retains frames already visible
+through earlier views. Kernel section capabilities enforce read/write
+rights, including against attempts to use generic SHM_MAP on a file section.
+Copy views stay private, view references retain backing after handle close,
+and FlushViewOfFile writes the selected range without changing the source
+file position. A kernel worker writes and retires unused backing outside
+process locks. Explicit truncation rejects live backing and invalidates an
+unused cache entry, preventing old pages from reappearing after CREATE_ALWAYS.
+
+The existing 64 MiB kernel shared-memory limit also bounds coherent file
+sections. Larger immutable resources retain the previous snapshot fallback;
+larger writable sections and SEC_IMAGE remain unsupported. Named section
+lookup remains process-local. FlushViewOfFile does not promise physical
+storage durability; callers can follow it with FlushFileBuffers.
+
+Native Windows fixtures pass mapping 45/0 and childproc 18/0. The full OSyx
+Win32 suite passes 2080/0, including direct kernel checks on tmpfs and ext4
+for rights, bounds, aliases, deferred writeback and truncation. Host tests
+pass 360/0 and all clippy targets pass with -D warnings. Evidence:
+build/zen/filemap-native.log, filemap-child-native.log,
+win-filemap-102.log and host-filemap-101.log. Attempt 100 uses a fresh full
+image containing this kernel; functional browser verification is pending.
+
+References: [MapViewOfFile](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-mapviewoffile),
+[UnmapViewOfFile](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-unmapviewoffile),
+[FlushViewOfFile](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-flushviewoffile).

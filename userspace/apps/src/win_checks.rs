@@ -23,6 +23,9 @@ fn run(exe: &str, args: &[&str]) -> Option<i32> {
 }
 
 pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
+    t.check("native file sections: rights, sharing, writeback and truncation", || {
+        Command::new("worker").arg("filemap-checks").status().is_ok_and(|s| s.success())
+    });
     t.check("native CPU fault delivery and safe context resumption", || {
         Command::new("worker").arg("fault-checks").status().is_ok_and(|s|s.success())
     });

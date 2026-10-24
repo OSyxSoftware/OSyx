@@ -2,12 +2,10 @@
 //! `NtMapViewOfSection`.
 //!
 //! Page-file sections are OSyx shared memory objects; their views alias
-//! the same pages. File-backed sections are read-only or copy-on-write:
-//! each view is private memory filled from the file at map time, which is
-//! exactly what Windows gives those views until the file itself changes.
-//! Writable shared file views (`PAGE_READWRITE` with a file handle) and
-//! image sections (`SEC_IMAGE`) need kernel page-cache sharing and fail
-//! with `ERROR_NOT_SUPPORTED` rather than silently losing writes.
+//! the same pages. File sections use kernel frames shared by volume/inode,
+//! including independent sections and inherited handles in other processes.
+//! Copy-on-write and executable views use private snapshots. Large immutable
+//! resources retain the snapshot fallback; image sections remain unsupported.
 //! Section names are process-local, like the other named objects here.
 #![allow(non_snake_case)]
 use crate::{
@@ -54,6 +52,9 @@ struct View {
     /// Windows protection reported by VirtualQuery.
     protect: u32,
     allocation_protect: u32,
+    section: Arc<SectionObj>,
+    offset: u64,
+    file_write: bool,
 }
 
 static VIEWS: Mutex<BTreeMap<u64, View>> = Mutex::new(BTreeMap::new());
@@ -98,15 +99,12 @@ fn create_section(file: Option<u64>, protect: u32, size: u64, name: Option<Strin
                 return Err(STATUS_INVALID_PARAMETER);
             }
             let shm = os_sys::shm_create(size).map_err(errno_to_status)?;
-            SectionObj { shm, size, writable, executable, file: None, name }
+            SectionObj { shm, file_mapping: false, size, writable, executable, file: None, name }
         }
         Some(h) => {
             let f = objects::file(h).map_err(|_| STATUS_INVALID_HANDLE)?;
             if !f.access.0 || (page == PAGE_READWRITE && !f.access.1) {
                 return Err(STATUS_ACCESS_DENIED);
-            }
-            if page == PAGE_READWRITE {
-                return Err(STATUS_NOT_SUPPORTED);
             }
             let len = os_sys::fstat(f.fd).map_err(errno_to_status)?.size;
             let size = if size == 0 { len } else { size };
@@ -114,11 +112,19 @@ fn create_section(file: Option<u64>, protect: u32, size: u64, name: Option<Strin
                 return Err(STATUS_MAPPED_FILE_SIZE_ZERO);
             }
             // Growing the file needs write access, which these sections lack.
-            if size > len {
+            if size > len && page != PAGE_READWRITE {
                 return Err(STATUS_SECTION_TOO_BIG);
             }
-            // PAGE_WRITECOPY grants read (and copy) views only.
-            SectionObj { shm: 0, size, writable: false, executable, file: Some(f), name }
+            let write = page == PAGE_READWRITE;
+            match os_sys::filemap_create(f.fd, size, write) {
+                Ok(shm) => SectionObj { shm, file_mapping: true, size, writable: write, executable, file: Some(f), name },
+                // Large immutable resources keep the existing snapshot path.
+                // Writable mappings require the coherent kernel backing.
+                Err(osyx_abi::Errno::NotSupported) if !write => SectionObj {
+                    shm: 0, file_mapping: false, size, writable: false, executable, file: Some(f), name,
+                },
+                Err(e) => return Err(errno_to_status(e)),
+            }
         }
     };
     Ok((objects::insert(Object::Section(Arc::new(section))), false))
@@ -166,7 +172,27 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
     if len > s.size - offset {
         return Err(STATUS_INVALID_VIEW_SIZE);
     }
-    let (base, protect) = match &s.file {
+    let (base, protect) = if s.file_mapping {
+        let source = os_sys::filemap_map(s.shm, offset, len, write).map_err(errno_to_status)?;
+        if copy || exec {
+            let Some(p) = mem::alloc_pages(len as usize, Prot::ReadWrite) else {
+                let _ = unsafe { os_sys::unmap(source, (len as usize).next_multiple_of(PAGE)) };
+                return Err(STATUS_NO_MEMORY);
+            };
+            // SAFETY: the kernel view and new private mapping both cover len.
+            unsafe { core::ptr::copy_nonoverlapping(source, p as *mut u8, len as usize); }
+            let _ = unsafe { os_sys::unmap(source, (len as usize).next_multiple_of(PAGE)) };
+            if exec {
+                if let Err(e) = mem::protect(p, len as usize, Prot::ExecuteRead) {
+                    mem::free_pages(p, len as usize);
+                    return Err(errno_to_status(e));
+                }
+            }
+            (p, if exec { PAGE_EXECUTE_READ } else { PAGE_WRITECOPY })
+        } else {
+            (source as u64, if write { PAGE_READWRITE } else { PAGE_READONLY })
+        }
+    } else { match &s.file {
         None => {
             // Shared pages: views alias the whole object.
             if offset != 0 || copy || exec {
@@ -197,10 +223,11 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
             }
             (p, protect)
         }
-    };
-    let size = if s.file.is_some() { len } else { s.size };
+    }};
+    let size = if s.file.is_some() || s.file_mapping { len } else { s.size };
     let allocation_protect = if s.writable { PAGE_READWRITE } else { PAGE_READONLY };
-    VIEWS.lock().unwrap().insert(base, View { size, protect, allocation_protect });
+    let file_write = s.file_mapping && write && !copy;
+    VIEWS.lock().unwrap().insert(base, View { size, protect, allocation_protect, section: s, offset, file_write });
     Ok((base, size))
 }
 
@@ -291,8 +318,19 @@ extern "win64" fn UnmapViewOfFile(addr: u64) -> i32 {
 
 /// Views are private copies or shared memory: nothing is pending for the
 /// file, so flushing only validates the address.
-extern "win64" fn FlushViewOfFile(addr: u64, _len: usize) -> i32 {
-    if query(addr).is_some() { 1 } else { fail(ERROR_INVALID_ADDRESS, 0) }
+extern "win64" fn FlushViewOfFile(addr: u64, len: usize) -> i32 {
+    let view = {
+        let views = VIEWS.lock().unwrap();
+        views.range(..=addr).next_back().and_then(|(&base, v)| {
+            (addr < base + v.size).then(|| (base, v.size, v.offset, v.file_write, v.section.clone()))
+        })
+    };
+    let Some((base, size, offset, write, section)) = view else { return fail(ERROR_INVALID_ADDRESS, 0) };
+    let within = addr - base;
+    let len = if len == 0 { size - within } else { len as u64 };
+    if len > size - within { return fail(ERROR_INVALID_PARAMETER, 0); }
+    if !write { return 1; }
+    os_sys::filemap_flush(section.shm, offset + within, len).map_or_else(|e| fail(errno_to_win32(e), 0), |_| 1)
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {

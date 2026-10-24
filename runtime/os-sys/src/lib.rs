@@ -472,6 +472,18 @@ mod imp {
         decode(syscall1(nr::SHM_SIZE, handle))
     }
 
+    pub fn filemap_create(file: u64, size: u64, writable: bool) -> Result<u64, Errno> {
+        decode(syscall3(nr::FILEMAP_CREATE, file, size, writable as u64))
+    }
+
+    pub fn filemap_map(section: u64, offset: u64, len: u64, writable: bool) -> Result<*mut u8, Errno> {
+        decode(syscall4(nr::FILEMAP_MAP, section, offset, len, writable as u64)).map(|a| a as *mut u8)
+    }
+
+    pub fn filemap_flush(section: u64, offset: u64, len: u64) -> Result<(), Errno> {
+        decode(syscall3(nr::FILEMAP_FLUSH, section, offset, len)).map(|_| ())
+    }
+
     /// Waits until an item is ready (`timeout_ns`: 0 polls, `u64::MAX`
     /// forever); returns how many are ready (their `revents` are set).
     pub fn wait_handles(items: &mut [WaitItem], timeout_ns: u64) -> Result<usize, Errno> {

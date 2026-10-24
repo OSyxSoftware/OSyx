@@ -178,7 +178,11 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             .and_then(|from| Ok((from, user_path(f.rdx, f.r10)?)))
             .and_then(|(from, to)| vfs::rename(&Lookup::current(), &from, &to))
             .map(|_| 0),
-        nr::FTRUNCATE => with_file(f.rdi, |o| o.truncate(f.rsi)).map(|_| 0),
+        nr::FTRUNCATE => (|| {
+            let file = process::get_handle(f.rdi)?;
+            let stat = file.lock().stat()?;
+            crate::filemap::truncate((stat.dev, stat.ino), f.rsi, || file.lock().truncate(f.rsi)).map(|_| 0)
+        })(),
         nr::FSYNC => with_file(f.rdi, |o| o.sync()).map(|_| 0),
         nr::CHDIR => user_path(f.rdi, f.rsi)
             .and_then(|p| vfs::chdir(&Lookup::current(), &p))
@@ -221,6 +225,9 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::CHANNEL_PEER => sys_objects::channel_peer(f.rdi),
         nr::SHM_CREATE => sys_objects::shm_create(f.rdi),
         nr::SHM_MAP => sys_objects::shm_map(f.rdi, f.rsi),
+        nr::FILEMAP_CREATE => sys_objects::filemap_create(f.rdi, f.rsi, f.rdx),
+        nr::FILEMAP_MAP => sys_objects::filemap_map(f.rdi, f.rsi, f.rdx, f.r10),
+        nr::FILEMAP_FLUSH => sys_objects::filemap_flush(f.rdi, f.rsi, f.rdx),
         nr::SHM_SIZE => sys_objects::shm_size(f.rdi),
         nr::WAIT_HANDLES => sys_objects::wait_handles(f.rdi, f.rsi, f.rdx),
         nr::DISPLAY_INFO => sys_objects::display_info(f.rdi),

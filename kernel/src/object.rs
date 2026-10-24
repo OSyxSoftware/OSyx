@@ -23,13 +23,14 @@ pub enum Object {
     Channel(Arc<Endpoint>),
     Listener(Arc<Listener>),
     Shm(Arc<SharedMemory>),
+    FileMap(Arc<crate::filemap::Section>),
     Socket(Arc<SocketObj>),
 }
 
 impl Object {
     /// Objects that may travel in channel messages.
     pub fn transferable(&self) -> bool {
-        matches!(self, Object::Pipe(_) | Object::Shm(_))
+        matches!(self, Object::Pipe(_) | Object::Shm(_) | Object::FileMap(_))
     }
 
     pub fn shm(&self) -> Result<&Arc<SharedMemory>, Errno> {
@@ -50,7 +51,7 @@ impl Object {
             Object::Pipe(p) => Waitable::Pipe(p.clone()),
             Object::Channel(c) => Waitable::Channel(c.clone()),
             Object::Listener(l) => Waitable::Listener(l.clone()),
-            Object::Shm(_) => Waitable::Always,
+            Object::Shm(_) | Object::FileMap(_) => Waitable::Always,
             Object::Socket(s) => Waitable::Socket(s.clone()),
         }
     }

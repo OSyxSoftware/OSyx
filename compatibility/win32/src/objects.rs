@@ -315,6 +315,8 @@ pub struct SemaphoreObj {
 /// object (`shm`), or the file it maps (`shm` 0); see mapping.rs.
 pub struct SectionObj {
     pub shm: u64,
+    /// shm names a kernel file-section capability instead of page-file RAM.
+    pub file_mapping: bool,
     pub size: u64,
     pub writable: bool,
     pub executable: bool,

@@ -628,7 +628,7 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
         device,
     };
     if flags & OPEN_TRUNCATE != 0 && st.kind == KIND_FILE {
-        f.node.mount.fs.truncate(f.node.ino, 0)?;
+        crate::filemap::truncate((st.dev, st.ino), 0, || f.node.mount.fs.truncate(f.node.ino, 0))?;
     }
     Ok(f)
 }
@@ -646,6 +646,23 @@ pub fn open_exec(cx: &Lookup, p: &str) -> Result<OpenFile> {
 }
 
 impl OpenFile {
+    /// Mapped I/O does not move the file position or apply OPEN_APPEND.
+    pub fn mapping_access(&self, writable: bool) -> Result<()> {
+        if self.kind != KIND_FILE || self.device.is_some() { return Err(Errno::NotSupported); }
+        if !self.read || (writable && !self.write) { return Err(Errno::PermissionDenied); }
+        Ok(())
+    }
+
+    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        self.mapping_access(false)?;
+        self.node.mount.fs.read(self.node.ino, offset, buf)
+    }
+
+    pub fn write_at(&self, offset: u64, data: &[u8]) -> Result<usize> {
+        self.mapping_access(true)?;
+        self.node.mount.fs.write(self.node.ino, offset, data)
+    }
+
     /// Canonical absolute path the file was opened under.
     pub fn path(&self) -> &str {
         &self.node.path

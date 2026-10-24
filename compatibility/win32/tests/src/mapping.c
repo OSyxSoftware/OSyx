@@ -7,6 +7,40 @@
 
 static BYTE pattern(DWORD i) { return (BYTE)(i * 7 + (i >> 16)); }
 
+static void writable_file_views(const WCHAR *name) {
+    HANDLE f=CreateFileW(name,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,CREATE_ALWAYS,0,NULL);
+    check("create writable mapping file",f!=INVALID_HANDLE_VALUE);
+    if(f==INVALID_HANDLE_VALUE) return;
+    HANDLE small=CreateFileMappingW(f,NULL,PAGE_READWRITE,0,100,NULL);
+    BYTE *a=small?MapViewOfFile(small,FILE_MAP_WRITE,0,0,0):NULL;
+    check("writable section grows an empty file",a && GetFileSize(f,NULL)==100);
+    if(!a){if(small) CloseHandle(small);CloseHandle(f);return;}
+    a[3]=42;
+    HANDLE big=CreateFileMappingW(f,NULL,PAGE_READWRITE,0,90000,NULL);
+    BYTE *b=big?MapViewOfFile(big,FILE_MAP_WRITE,0,0,0):NULL;
+    check("growing a file section preserves an earlier live view",b && b[3]==42 && GetFileSize(f,NULL)==90000);
+    if(b) b[4]=43;
+    check("independent file sections alias the same prefix",b && a[4]==43);
+    HANDLE ro=CreateFileMappingW(f,NULL,PAGE_READONLY,0,0,NULL);
+    BYTE *r=ro?MapViewOfFile(ro,FILE_MAP_READ,0,0,0):NULL;
+    check("read-only file sections see shared mapped writes",r && r[3]==42 && r[4]==43);
+    BYTE *tail=big?MapViewOfFile(big,FILE_MAP_WRITE,0,65536,1000):NULL;
+    if(tail) tail[14]=91;
+    check("offset writable views alias the whole-file view",b && tail && b[65550]==91);
+    BYTE *copy=big?MapViewOfFile(big,FILE_MAP_COPY,0,0,4096):NULL;
+    if(copy) copy[3]=99;
+    check("copy views of writable file sections stay private",copy && a[3]==42 && copy[3]==99 && FlushViewOfFile(copy,0));
+    if(copy) UnmapViewOfFile(copy);
+    SetFilePointer(f,10,NULL,FILE_BEGIN);
+    check("flush writes mapped ranges without moving the file pointer",FlushViewOfFile(a+3,1) && tail && FlushViewOfFile(tail+14,1) && SetFilePointer(f,0,NULL,FILE_CURRENT)==10 && FlushFileBuffers(f));
+    BYTE value=0; DWORD read=0;
+    check("flushed prefix reaches file I/O",SetFilePointer(f,3,NULL,FILE_BEGIN)==3 && ReadFile(f,&value,1,&read,NULL) && read==1 && value==42);
+    check("flushed offset reaches file I/O",SetFilePointer(f,65550,NULL,FILE_BEGIN)==65550 && ReadFile(f,&value,1,&read,NULL) && read==1 && value==91);
+    if(ro) CloseHandle(ro); if(big) CloseHandle(big); CloseHandle(small); CloseHandle(f);
+    if(r) { check("views keep the file section alive after handle close",r[3]==42 && r[65550]==91); UnmapViewOfFile(r); }
+    if(tail) UnmapViewOfFile(tail); if(b) UnmapViewOfFile(b); UnmapViewOfFile(a);
+}
+
 void __stdcall start(void) {
     /* Page-file memory: two views of one section see the same bytes. */
     HANDLE anon = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 8192, NULL);
@@ -111,6 +145,7 @@ void __stdcall start(void) {
     check("empty file cannot be mapped",
           !CreateFileMappingW(empty, NULL, PAGE_READONLY, 0, 0, NULL) && GetLastError() == ERROR_FILE_INVALID);
     CloseHandle(empty);
+    writable_file_views(name);
     SetLastError(0);
     /* (The image itself is a view on Windows; use private memory.) */
     BYTE *priv = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);

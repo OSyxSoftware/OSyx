@@ -63,6 +63,7 @@ pub use osyx_abi::auxv;
 /// Low-level system call access for tests and runtime code.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod raw {
+    pub use os_sys::{filemap_create, filemap_map, filemap_flush, fstat, ftruncate, shm_map, OPEN_TRUNCATE};
     pub use os_sys::{fault_handler,fault_return};
     pub use osyx_abi::{fault, MAX_HANDLES};
     pub use os_sys::{

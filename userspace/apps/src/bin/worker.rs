@@ -40,6 +40,8 @@ use os_std::fs::{self, File};
 use os_std::{env, thread};
 #[path="../fault_checks.rs"]
 mod fault_checks;
+#[path = "../filemap_checks.rs"]
+mod filemap_checks;
 
 #[path = "../fpu.rs"]
 mod fpu;
@@ -189,6 +191,7 @@ fn main() -> i32 {
         }
         Some("as-user") => as_user(arg_num(&args, 2) as u32),
         Some("fault-checks")=>fault_checks::run(),
+        Some("filemap-checks") => filemap_checks::run(),
         Some(mode @ ("fault-no-handler"|"fault-exec-reset"|"fault-nested"|"fault-bad-stack"))=>fault_checks::helper(mode),
         Some("exec-as") => {
             let (Some(uid),Some(program))=(args.get(2).and_then(|s|s.parse::<u32>().ok()),args.get(3)) else {return 2};

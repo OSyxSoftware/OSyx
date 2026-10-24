@@ -31,6 +31,21 @@ static int same(const char *a, const char *b) { while(*b) if(*a++!=*b++) return 
 
 static void copy(char *d, const char *s) { while((*d++=*s++)) {} }
 
+static void section_path(WCHAR *out, const WCHAR *leaf) {
+    DWORD n=GetTempPathW(MAX_PATH,out);
+    while(*leaf) out[n++]=*leaf++;
+    out[n]=0;
+}
+
+static HANDLE file_section(const WCHAR *leaf, int create) {
+    WCHAR path[MAX_PATH]; section_path(path,leaf);
+    HANDLE f=CreateFileW(path,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,create?CREATE_ALWAYS:OPEN_EXISTING,0,NULL);
+    if(f==INVALID_HANDLE_VALUE) return NULL;
+    HANDLE section=CreateFileMappingW(f,NULL,PAGE_READWRITE,0,4096,NULL);
+    CloseHandle(f);
+    return section;
+}
+
 /* The child: map the inherited section, take the parent's other section,
    and give the parent a section of its own (its handle is the exit code). */
 static DWORD child(const WCHAR *args) {
@@ -55,6 +70,13 @@ static DWORD child(const WCHAR *args) {
     v=MapViewOfFile(mine,FILE_MAP_READ,0,0,0);
     if(!v || !same(v,"not inherited")) return 6;
     UnmapViewOfFile(v);
+    HANDLE independent=file_section(L"osyx-child-section-other.bin",0);
+    char *shared=MapViewOfFile(mine,FILE_MAP_WRITE,0,0,0);
+    char *alias=independent?MapViewOfFile(independent,FILE_MAP_WRITE,0,0,0):NULL;
+    if(!shared || !alias) return 12;
+    shared[100]=51; alias[101]=52;
+    if(alias[100]!=51 || shared[101]!=52) return 13;
+    UnmapViewOfFile(shared); UnmapViewOfFile(alias); CloseHandle(independent); CloseHandle(mine);
     HANDLE back=CreateFileMappingW(INVALID_HANDLE_VALUE,NULL,PAGE_READWRITE,0,4096,NULL);
     v=back?MapViewOfFile(back,FILE_MAP_WRITE,0,0,0):NULL;
     if(!v) return 7;
@@ -70,9 +92,10 @@ void __stdcall start(void) {
     const WCHAR *cmd=GetCommandLineW(), *at=cmd;
     for(;*at;at++) if(at[0]==L'-'&&at[1]==L'-'&&at[2]==L'c'&&at[3]==L'h'&&at[4]==L'i'&&at[5]==L'l'&&at[6]==L'd') ExitProcess(child(at+7));
 
-    HANDLE s=CreateFileMappingW(INVALID_HANDLE_VALUE,NULL,PAGE_READWRITE,0,4096,NULL);
-    HANDLE other=CreateFileMappingW(INVALID_HANDLE_VALUE,NULL,PAGE_READWRITE,0,4096,NULL);
+    HANDLE s=file_section(L"osyx-child-section-inherit.bin",1);
+    HANDLE other=file_section(L"osyx-child-section-other.bin",1);
     check("sections",s && other);
+    if(!s || !other) finish("childproc");
     char *v=MapViewOfFile(s,FILE_MAP_WRITE,0,0,0); copy(v,message); UnmapViewOfFile(v);
     v=MapViewOfFile(other,FILE_MAP_WRITE,0,0,0); copy(v,"not inherited"); UnmapViewOfFile(v);
     DWORD flags=7;
@@ -130,5 +153,7 @@ void __stdcall start(void) {
     check("the child's section arrived in this process",v && same(v,"pushed to the parent"));
     if(v) UnmapViewOfFile(v);
     CloseHandle(s); CloseHandle(other);
+    WCHAR path[MAX_PATH]; section_path(path,L"osyx-child-section-inherit.bin"); DeleteFileW(path);
+    section_path(path,L"osyx-child-section-other.bin"); DeleteFileW(path);
     finish("childproc");
 }

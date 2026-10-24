@@ -217,6 +217,24 @@ pub fn shm_size(handle: u64) -> Result<u64, Errno> {
     Ok(process::get_object(handle)?.shm()?.size())
 }
 
+pub fn filemap_create(file: u64, size: u64, writable: u64) -> Result<u64, Errno> {
+    if writable > 1 { return Err(Errno::InvalidArgument); }
+    let Object::File(file) = process::get_object(file)? else { return Err(Errno::BadHandle) };
+    let section = crate::filemap::create(file, size, writable != 0)?;
+    process::add_object(Object::FileMap(section))
+}
+
+pub fn filemap_map(handle: u64, offset: u64, len: u64, writable: u64) -> Result<u64, Errno> {
+    if writable > 1 { return Err(Errno::InvalidArgument); }
+    let Object::FileMap(section) = process::get_object(handle)? else { return Err(Errno::BadHandle) };
+    section.map(offset, len, writable != 0)
+}
+
+pub fn filemap_flush(handle: u64, offset: u64, len: u64) -> Result<u64, Errno> {
+    let Object::FileMap(section) = process::get_object(handle)? else { return Err(Errno::BadHandle) };
+    section.flush(offset, len).map(|_| 0)
+}
+
 pub fn wait_handles(items_ptr: u64, count: u64, timeout_ns: u64) -> Result<u64, Errno> {
     if count == 0 || count > MAX_WAIT_ITEMS as u64 {
         return Err(Errno::InvalidArgument);

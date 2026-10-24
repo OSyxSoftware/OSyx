@@ -35,6 +35,7 @@ const KIND_EVENT: u32 = 3;
 const EVENT_MANUAL: u32 = 1;
 const SECTION_WRITABLE: u32 = 1;
 const SECTION_EXECUTABLE: u32 = 2;
+const SECTION_FILE: u32 = 4;
 /// One record: handle value, kind, flags, size.
 const RECORD: usize = 24;
 /// How long the parent waits for the child to collect its handles.
@@ -54,11 +55,12 @@ struct Item {
 
 fn item(h: u64) -> Result<Item, u32> {
     match objects::get(h) {
-        Some(Object::Section(s)) if s.shm != 0 && s.file.is_none() => Ok(Item {
+        Some(Object::Section(s)) if s.shm != 0 && (s.file.is_none() || s.file_mapping) => Ok(Item {
             handle: h,
             kernel: Some(s.shm),
             kind: KIND_SECTION,
-            flags: if s.writable { SECTION_WRITABLE } else { 0 } | if s.executable { SECTION_EXECUTABLE } else { 0 },
+            flags: if s.writable { SECTION_WRITABLE } else { 0 } | if s.executable { SECTION_EXECUTABLE } else { 0 }
+                | if s.file_mapping { SECTION_FILE } else { 0 },
             size: s.size,
         }),
         Some(Object::Event(e)) => Ok(Item {
@@ -210,6 +212,7 @@ fn object(r: &[u8], kernel: Option<u64>) -> Option<Object> {
         KIND_EVENT => crate::objects::EventObj::from_shared(kernel?, half(12) & EVENT_MANUAL != 0).map(Object::Event),
         KIND_SECTION => Some(Object::Section(Arc::new(SectionObj {
             shm: kernel?,
+            file_mapping: half(12) & SECTION_FILE != 0,
             size,
             writable: half(12) & SECTION_WRITABLE != 0,
             executable: half(12) & SECTION_EXECUTABLE != 0,

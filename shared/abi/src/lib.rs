@@ -1,9 +1,12 @@
-//! OSyx system call ABI, version 10.
+//! OSyx system call ABI, version 11.
+//!
+//! Version 11 adds DISCARD for demand-zero anonymous memory.
 //!
 //! Version 10 includes device inventory. Compatible optional extensions add
 //! resumable user exception delivery (FAULT_HANDLER/FAULT_RETURN); an older
-//! kernel rejects these calls with NotSupported. Existing call numbers and
-//! layouts stay unchanged.
+//! kernel rejects these calls with NotSupported. Optional FILEMAP_CREATE,
+//! FILEMAP_MAP and FILEMAP_FLUSH calls add coherent local file sections.
+//! Existing call numbers and layouts stay unchanged.
 //!
 //! Version 9 adds what the Windows runtime and VirtIO-GPU need: a
 //! per-thread GS base, page protection changes, placed and aligned
@@ -298,6 +301,15 @@ pub mod nr {
     /// `discard(addr, len) -> 0`: whole pages inside one anonymous mapping
     /// drop their contents and memory; the next access reads zeros.
     pub const DISCARD: u64 = 79;
+    /// `filemap_create(file, size, writable) -> handle`: a coherent file
+    /// section; size 0 uses the file length. Writable sections may grow it.
+    pub const FILEMAP_CREATE: u64 = 80;
+    /// `filemap_map(section, offset, len, writable) -> address`: page-aligned
+    /// offset, nonzero view length; permissions cannot exceed the section.
+    pub const FILEMAP_MAP: u64 = 81;
+    /// `filemap_flush(section, offset, len) -> 0`: writes the requested range
+    /// to the file without changing the open file position.
+    pub const FILEMAP_FLUSH: u64 = 82;
 }
 
 /// `map_ex` flags.
