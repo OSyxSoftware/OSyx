@@ -19,11 +19,20 @@ Official release: https://github.com/zen-browser/desktop/releases/tag/1.23.4b
   original mozglue, xul, NSS, Visual C++ libraries and browser resources.
 - Downloaded/vendor files remain ignored under `build/zen`.
 
-Run `powershell -ExecutionPolicy Bypass -File scripts/zen-test.ps1`.
+Run `powershell -ExecutionPolicy Bypass -File scripts/zen-test.ps1 -MemoryMiB 8192 -TimeoutSec 900`.
 It verifies/downloads the pinned package, builds a 1 GiB ext4 root image,
-installs the full payload in `/opt/zen`, then boots QEMU with 4 GiB RAM.
-Init starts PRISM and invokes `/bin/winrun -v /opt/zen/zen.exe --no-remote
---profile C:\home\user\zen-profile about:blank`.
+installs the full payload in `/opt/zen`, then boots QEMU. The default RAM
+setting is 6144 MiB; recent functional probes use 8192 MiB. Init starts
+PRISM and invokes `/bin/winrun -v /opt/zen/zen.exe --no-remote -profile
+C:\tmp\zen-probe-profile-<timestamp> file:///C:/tmp/zen-probe-page.html
+-no-deelevate`. Each run creates a fresh profile with software rendering
+and first-run welcome URLs suppressed. The temporary HTML page has a button
+that changes its rectangle, label and title, plus a link to example.com.
+Use `-ProbeUrl https://example.com/` for a separate external-page probe and
+`-SkipFetch` to reuse the verified vendor payload. `-SkipBuild` reuses the
+image's existing URL and cannot be combined with an explicit `-ProbeUrl`.
+The selected URL is logged and copied into the probe result. The browser's
+own sandbox-disable switches remain necessary for this bring-up configuration.
 
 The probe's exit code **2** means blocked/unverified, never browser success.
 Kernel boot success (QEMU exit 33) is recorded separately. Evidence is in
@@ -921,3 +930,58 @@ successful handshakes and HTTP/2 response data from Mozilla services. A
 fresh interactive external-page check is in progress. The temporary vendor
 NSS preflight hook was removed from init after the diagnosis; the browser
 uses its original NSS implementation and certificate verification.
+
+### TCP port-zero binding and probe command-line handling
+
+Attempt 107 reaches a certificate-verified example.com TLS handshake and
+HTTP/2 200, including the 334-byte compressed response body. The external
+page remains blank at the 900-second timeout; transport success alone is
+not a page-rendering pass. Browser chrome, a single browser-family taskbar
+entry and delayed URL-bar typing are visible. Preserved evidence is
+build/zen/attempt-107.serial.log, attempt-107.result.json and
+attempt-107-late.png.
+
+Firefox's pollable event creates a loopback TCP listener with bind(port 0),
+queries the assigned port before listen, then connects a second socket.
+OSyx previously only remembered the requested endpoint in bind and rejected
+port zero in listen. TCP bindings now reserve a stack socket and an actual
+dynamic port immediately. That reservation converts in place into a
+listener or connection, remains reserved after rejected connect parameters,
+and is released when a bound socket closes. Other bindings and connections
+cannot reuse the reserved port. Netstat reports the intermediate BOUND state.
+
+A host network regression covers reservation, rejected parameters, bound
+connect, loopback transfer and releasing an unused binding. The native
+Windows and OSyx wsock32 fixture both pass 42/0, including eight checks for
+the browser's dynamic-port loopback signal sequence. The complete OSyx
+Win32 suite passes 2102/0; network tests and network/kernel clippy pass.
+Evidence: build/zen/net-bind-tests-109.log, net-bind-clippy-109.log,
+kernel-bind-clippy-109.log, wsock-bind-native-109.log and win-bind-109.log.
+
+Attempt 108 also exposes a probe startup defect. The original vendor
+BrowserContentHandler.sys.mjs warns that -no-deelevate is unknown and skips
+the following argument. With one URL it silently drops that URL; with two
+it opens only the second. The launcher flag now comes last, and the probe
+accepts exactly one requested URL through init's second argument. The local
+HTML remains the default, and external HTTPS has its own explicit probe URL.
+The unchanged vendor resources establish the argument-skipping behavior;
+attempt-108.serial.log records the warning.
+
+Attempts 110/112 then isolate an earlier startup stall exposed by the now
+successful socket-pair creation. The socket thread sends its priming byte,
+select wakes and recv reads that byte, but the next recv never returns.
+Winsock accept must inherit the listener's nonblocking mode; OSyx's native
+accept starts in blocking mode. The shim now records successful FIONBIO
+changes and applies the listener's mode to each accepted socket. Changes to
+the listener after accept do not change the accepted endpoint's saved mode.
+The I/O trace is bounded to 96 lines and requires OSYX_WINRUN_TRACE.
+
+The expanded native Windows and OSyx fixtures both pass 51/0. They cover inherited mode,
+draining an empty nonblocking reader, and select waking when another thread
+sends a signal. The complete OSyx Win32 suite passes 2111/0, recorded in
+build/zen/win-inherit-nonblock-113.log. Win32 clippy passes with -D warnings. Preserved diagnostic
+evidence is build/zen/attempt-112.serial.log; reference results are in
+wsock-inherit-native-113.log and clippy-inherit-nonblock-113.log.
+
+References: Mozilla's [PollableEvent.cpp](https://github.com/mozilla-firefox/firefox/blob/main/netwerk/base/PollableEvent.cpp),
+Microsoft's [accept](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept).

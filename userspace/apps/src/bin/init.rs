@@ -63,7 +63,7 @@ fn main() -> i32 {
             process::exit(code);
         }
         Some("desktop") => return desktop_session(),
-        Some("zen-probe") => return zen_probe(),
+        Some("zen-probe") => return zen_probe(args.get(2).map(String::as_str)),
         // `init winrun <program> [args...]`: one Windows program with no
         // sessions around it, for bring-up diagnostics.
         Some("winrun") => {
@@ -271,7 +271,7 @@ fn main() -> i32 {
 /// system, which starts the desktop shell) and restarts it if it fails. If
 /// it cannot be brought up, init exits and the kernel's status screen
 /// stays as the diagnostic fallback.
-fn zen_probe() -> i32 {
+fn zen_probe(url: Option<&str>) -> i32 {
     println!("zen-probe: official /opt/zen/zen.exe via /bin/winrun; no substitute browser");
     let _ = Command::new("/bin/winrun").arg("--exports").status();
     let prism = Command::new("/system/bin/prism").spawn();
@@ -286,10 +286,24 @@ fn zen_probe() -> i32 {
     println!("zen-probe: profile {profile}");
     if os_std::fs::create_dir_all(&profile).and_then(|_| os_std::fs::write(
         format!("{profile}/user.js"),
-        "user_pref(\"gfx.webrender.software\", true);\nuser_pref(\"gfx.webrender.software.d3d11\", false);\nuser_pref(\"gfx.webrender.compositor\", false);\nuser_pref(\"layers.acceleration.disabled\", true);\nuser_pref(\"layers.gpu-process.enabled\", false);\nuser_pref(\"layers.gpu-process.force-enabled\", false);\nuser_pref(\"zen.welcome-screen.seen\", true);\nuser_pref(\"browser.aboutwelcome.enabled\", false);\nuser_pref(\"browser.shell.checkDefaultBrowser\", false);\nuser_pref(\"devtools.console.stdout.chrome\", true);\nuser_pref(\"devtools.console.stdout.content\", true);\n",
+        r#"user_pref("gfx.webrender.software", true);
+user_pref("gfx.webrender.software.d3d11", false);
+user_pref("gfx.webrender.compositor", false);
+user_pref("layers.acceleration.disabled", true);
+user_pref("layers.gpu-process.enabled", false);
+user_pref("layers.gpu-process.force-enabled", false);
+user_pref("zen.welcome-screen.seen", true);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("startup.homepage_welcome_url", "");
+user_pref("startup.homepage_welcome_url.additional", "");
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("devtools.console.stdout.chrome", true);
+user_pref("devtools.console.stdout.content", true);
+"#,
     )).and_then(|_| os_std::fs::write(
         "/tmp/zen-probe-page.html",
-        "<!doctype html><meta charset=utf-8><title>OSyx Zen rendering test</title><style>body{margin:40px;background:#dbeafe;color:#172554;font:20px Lato,sans-serif}button{font:inherit;padding:16px}#box{width:240px;height:120px;background:#16a34a;margin:24px 0}</style><h1>Zen renders HTML</h1><p>This page is rendered by the unmodified browser.</p><div id=box></div><button onclick=\"document.title='OSyx click verified';this.textContent='Click verified';document.getElementById('box').style.background='#f97316'\">Verify click</button>",
+        "<!doctype html><meta charset=utf-8><title>OSyx Zen rendering test</title><style>body{margin:40px;background:#dbeafe;color:#172554;font:20px Lato,sans-serif}button{font:inherit;padding:16px}#box{width:240px;height:120px;background:#16a34a;margin:24px 0}</style><h1>Zen renders HTML</h1><p>This page is rendered by the unmodified browser.</p><div id=box></div><button onclick=\"document.title='OSyx click verified';this.textContent='Click verified';document.getElementById('box').style.background='#f97316'\">Verify click</button><p><a target=_blank href=https://example.com/>Open example.com over HTTPS</a></p>",
     )).is_err() {
         println!("ZEN_PROBE_RESULT infrastructure=profile_creation_failed");
         if let Ok(p) = prism { let _ = os_std::system::kill(p.id()); let _ = p.wait(); }
@@ -299,14 +313,20 @@ fn zen_probe() -> i32 {
     // The session runs as root, so Gecko's launcher would start the browser
     // with a de-elevated token, which OSyx cannot run: keep its own. The
     // probe has its own temporary profile with software-rendering prefs.
-    zen.args(["-v", "/opt/zen/zen.exe", "--no-remote", "-no-deelevate", "-profile"]);
-    zen.arg(&format!("C:{}", profile.replace('/', "\\"))).arg("file:///C:/tmp/zen-probe-page.html");
+    zen.args(["-v", "/opt/zen/zen.exe", "--no-remote", "-profile"]);
+    let url = url.unwrap_or("file:///C:/tmp/zen-probe-page.html");
+    println!("zen-probe: URL {url}");
+    zen.arg(&format!("C:{}", profile.replace('/', "\\"))).arg(url);
+    // This bootstrap flag also reaches Gecko's command-line handler, which
+    // still sees it as unknown and skips the following argument. Keep it
+    // last so that the requested URL is not silently discarded.
+    zen.arg("-no-deelevate");
     // Gecko's Windows sandbox broker starts its children suspended and
     // patches their memory, which OSyx gives no process the right to do:
     // Mozilla's own switches start them unsandboxed instead.
     // Every failing Windows API call goes to the serial log (bring-up).
     zen.env("OSYX_WINRUN_TRACE", "1");
-    zen.env("MOZ_LOG", "timestamp,sync,Widget:5,WidgetScreen:5,RenderThread:5,nsDocShell:5,DocLoader:5,nsSocketTransport:5,nsHostResolver:5,pipnss:5,nsHttp:3");
+    zen.env("MOZ_LOG", "timestamp,sync,nsDocShell:5,DocLoader:5,nsStreamPump:5,nsSocketTransport:2,nsHostResolver:3,pipnss:4,nsHttp:5,nsChannelClassifier:5");
     for kind in ["CONTENT", "GPU", "RDD", "SOCKET_PROCESS", "GMP", "UTILITY", "VR"] {
         zen.env(&format!("MOZ_DISABLE_{kind}_SANDBOX"), "1");
     }

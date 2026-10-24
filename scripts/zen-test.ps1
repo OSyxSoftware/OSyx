@@ -4,13 +4,17 @@
 # -SkipFetch reuses an already verified build/zen/<version>/core tree, for
 # reruns when the release API cannot be reached.
 param([string]$Version = '1.23.4b', [switch]$SkipBuild, [switch]$SkipFetch, [int]$TimeoutSec = 90,
-      [ValidateRange(1024, 16384)][int]$MemoryMiB = 6144)
+      [ValidateRange(1024, 16384)][int]$MemoryMiB = 6144,
+      [ValidatePattern('^(https?://|file:///)[^\s,]+$')][string]$ProbeUrl = 'file:///C:/tmp/zen-probe-page.html')
+if ($SkipBuild -and $PSBoundParameters.ContainsKey('ProbeUrl')) {
+    throw '-ProbeUrl is embedded at build time; omit -SkipBuild when changing the URL.'
+}
 . (Join-Path $PSScriptRoot 'common.ps1')
 $evidenceDir = Join-Path $BuildDir 'zen'
 New-Item -ItemType Directory -Force $evidenceDir | Out-Null
 if (-not $SkipBuild) {
     if (-not $SkipFetch) { & (Join-Path $PSScriptRoot 'fetch-zen.ps1') -Version $Version }
-    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'init.args=zen-probe test.exit' -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
+    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=zen-probe,$ProbeUrl test.exit" -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
 }
 $log = Join-Path $evidenceDir 'qemu.serial.log'
 if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
@@ -37,13 +41,15 @@ try {
 $text = [IO.File]::ReadAllText($log)
 $errorLine = [regex]::Matches($text, '\[winrun:\d+\] winrun: (?:delay load failed:|unhandled Windows exception)[^\r\n]+') | Select-Object -Last 1
 $fatalLine = [regex]::Matches($text, 'process \d+(?:: out of memory on first access| terminated:)[^\r\n]+') | Select-Object -Last 1
+$probeUrlEvidence = [regex]::Match($text, 'zen-probe: URL ([^\r\n]+)')
 $result = [ordered]@{
     state = 'blocked'; version = $Version; vm_exit = $vm.ExitCode; memory_mib = $MemoryMiB
     browser_result = ([regex]::Match($text, 'ZEN_PROBE_RESULT [^\r\n]+')).Value
+    probe_url = $(if ($probeUrlEvidence.Success) { $probeUrlEvidence.Groups[1].Value } else { $null })
     loader_error = $(if ($errorLine) { $errorLine.Value } else { $null })
     process_fault = $(if ($fatalLine) { $fatalLine.Value } else { $null })
     timed_out = (-not $finished)
-    functional_tests = 'not reached; null means untested'
+    functional_tests = 'requires manual verification; null means untested'
     real_browser_window = $null; page_rendering = $null; tabs = $null
     keyboard_mouse = $null; https_verified = $null
     kernel_panic = ($text -match 'KERNEL PANIC'); evidence = $log
