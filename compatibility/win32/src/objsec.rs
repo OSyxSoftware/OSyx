@@ -105,7 +105,7 @@ pub type Mapping = [u32; 4];
 const FILE: Mapping = [0x0012_0089, 0x0012_0116, 0x0012_00a0, 0x001f_01ff];
 const EVENT: Mapping = [0x0002_0001, 0x0002_0002, 0x0010_0000, 0x001f_0003];
 const MUTEX: Mapping = [0x0002_0001, 0x0002_0000, 0x0010_0000, 0x001f_0001];
-const SECTION: Mapping = [0x0002_0005, 0x0002_0002, 0x0002_0008, 0x000f_001f];
+pub const SECTION: Mapping = [0x0002_0005, 0x0002_0002, 0x0002_0008, 0x000f_001f];
 const PROCESS: Mapping = [0x0002_0410, 0x0002_0bea, 0x0012_1000, 0x001f_ffff];
 const THREAD: Mapping = [0x0002_0048, 0x0002_0037, 0x0012_1400, 0x001f_ffff];
 const TOKEN: Mapping = [0x0002_0008, 0x0002_00e0, 0x0002_0000, 0x000f_01ff];
@@ -438,6 +438,66 @@ fn set_file(p: &str, info: u32, owner: Option<&[u8]>, group: Option<&[u8]>, dacl
         }
     }
     Ok(())
+}
+
+/// The security descriptor of an object created with SECURITY_ATTRIBUTES
+/// `sa` (NULL: the token's default security).
+pub fn initial_sd(sa: u64, mapping: &Mapping) -> Result<Option<Sd>, u32> {
+    if sa == 0 {
+        return Ok(None);
+    }
+    // SAFETY: the caller's SECURITY_ATTRIBUTES (24 bytes).
+    let (len, sd, inherit) = unsafe { (*(sa as *const u32), *((sa + 8) as *const u64), *((sa + 16) as *const i32)) };
+    if len != 24 {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    if inherit != 0 {
+        return Err(ERROR_NOT_SUPPORTED); // no handle inheritance on OSyx
+    }
+    if sd == 0 {
+        return Ok(None);
+    }
+    let mut out = default_sd(&tokens::effective_data(), mapping);
+    // SAFETY: the caller's descriptor.
+    let (owner, group, dacl, sacl) = unsafe { sd_parts(sd as *const u8) }?;
+    if let Some(o) = owner {
+        out.owner = o;
+    }
+    if let Some(g) = group {
+        out.group = g;
+    }
+    if let Some(d) = dacl {
+        out.dacl = d.map(|aces| aces.into_iter().map(|(k, f, m, s)| (k, f, map_generic(m, mapping), s)).collect());
+    }
+    if let Some(s) = sacl {
+        if s.iter().any(|a| a.0 != MANDATORY_LABEL) {
+            return Err(ERROR_NOT_SUPPORTED); // no auditing on OSyx
+        }
+        out.sacl = s;
+    }
+    Ok(Some(out))
+}
+
+/// Applies the descriptor of a new file or directory's SECURITY_ATTRIBUTES
+/// to it: its DACL becomes the mode (see `dacl_mode`). Inheritable ACEs
+/// describe what children get; OSyx gives new files their own mode, so
+/// inherit-only ACEs are left out and the rest apply to the object itself.
+pub fn apply_new_file_sd(p: &str, sd: u64) -> Result<(), u32> {
+    // SAFETY: the caller's descriptor.
+    let (owner, group, dacl, sacl) = unsafe { sd_parts(sd as *const u8) }?;
+    let dacl = dacl.map(|d| {
+        d.map(|aces| {
+            aces.into_iter()
+                .filter(|a| a.1 & INHERIT_ONLY_ACE == 0)
+                .map(|(k, f, m, s)| (k, f & !(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE), m, s))
+                .collect()
+        })
+    });
+    let r = set_file(p, DACL, owner.as_deref(), group.as_deref(), dacl.as_ref(), sacl.as_deref());
+    if r.is_err() && crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: new file security not supported for {p}: owner {} group {} dacl {:?}", owner.is_some(), group.is_some(), dacl.as_ref().map(|d| d.as_ref().map(|a| a.iter().map(|x| (x.0, x.1, x.2, sid_string(&x.3))).collect::<Vec<_>>())));
+    }
+    r
 }
 
 // ---- changing descriptors ---------------------------------------------------------------

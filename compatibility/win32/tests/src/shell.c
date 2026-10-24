@@ -6,6 +6,15 @@
 #include "common.h"
 #include <shlobj.h>
 
+_Static_assert(sizeof(WCHAR) == 2 && sizeof(HRESULT) == 4, "Windows string and HRESULT ABI");
+_Static_assert(sizeof(GUID) == 16 && sizeof(void *) == 8, "Windows x64 shell ABI");
+_Static_assert(sizeof(STARTUPINFOW) == 104 && sizeof(PROCESS_INFORMATION) == 24, "Windows child process ABI");
+
+typedef HRESULT (WINAPI *GetAppID)(PWSTR *);
+typedef HRESULT (WINAPI *SetAppID)(PCWSTR);
+static GetAppID get_app_id;
+static SetAppID set_app_id;
+
 static const GUID ID_Profile = {0x5E6C858F, 0x0E22, 0x4760, {0x9A, 0xFE, 0xEA, 0x33, 0x17, 0xB6, 0x71, 0x73}};
 static const GUID ID_Roaming = {0x3EB685DB, 0x65F9, 0x4CF6, {0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D}};
 static const GUID ID_Local = {0xF1B32785, 0x6FBA, 0x4FCF, {0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91}};
@@ -30,8 +39,10 @@ static int wide_ends(const WCHAR *s, const WCHAR *tail) {
 }
 
 static int starts_with(const WCHAR *s, const WCHAR *prefix) {
+    const WCHAR *start = prefix;
     while (*prefix && *s == *prefix) s++, prefix++;
-    return *prefix == 0 && *s == L'\\';
+    /* A root profile ("C:\") already ends in the separator. */
+    return *prefix == 0 && (*s == L'\\' || (prefix > start && prefix[-1] == L'\\'));
 }
 
 static int is_dir(const WCHAR *p) {
@@ -39,7 +50,76 @@ static int is_dir(const WCHAR *p) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+static DWORD WINAPI app_id_thread(void *unused) {
+    (void)unused;
+    WCHAR *id=NULL;
+    if (get_app_id(&id)!=S_OK || !id || !wide_eq(id,L"OSyx.Shell.Parent")) return 1;
+    CoTaskMemFree(id);
+    return set_app_id(L"OSyx.Shell.Worker")==S_OK ? 0 : 2;
+}
+
+static void app_ids(void) {
+    WCHAR *a=(WCHAR *)1,*b=NULL;
+    SetLastError(777);
+    check_eq("no explicit process AppUserModelID",(DWORD)get_app_id(&a),(DWORD)E_FAIL);
+    check("missing AppUserModelID clears output",a==NULL);
+    check_eq("AppUserModelID query preserves last error",GetLastError(),777);
+    WCHAR name[]=L"OSyx.Shell.Case\u017b\U0001f680";
+    check_eq("SetCurrentProcessExplicitAppUserModelID",set_app_id(name),S_OK);
+    name[0]='X';
+    check("setter copies UTF-16 input",get_app_id(&a)==S_OK && a && wide_eq(a,L"OSyx.Shell.Case\u017b\U0001f680"));
+    check("each AppUserModelID query allocates independently",get_app_id(&b)==S_OK && b && a!=b && wide_eq(a,b));
+    if (a) a[0]='Y';
+    check("returned AppUserModelID does not alias another result",b && b[0]=='O');
+    CoTaskMemFree(a); CoTaskMemFree(b); a=NULL; b=NULL;
+    WCHAR limit[130]; for(int i=0;i<129;i++)limit[i]='a'; limit[129]=0;
+    limit[127]=0;
+    check_eq("AppUserModelID accepts 127 UTF-16 units",set_app_id(limit),S_OK);
+    limit[127]='a'; limit[128]=0;
+    check_eq("AppUserModelID rejects 128 UTF-16 units",(DWORD)set_app_id(limit),(DWORD)E_INVALIDARG);
+    check("oversized AppUserModelID preserves previous value",get_app_id(&a)==S_OK && a && wide_len(a)==127);
+    CoTaskMemFree(a); a=NULL;
+    check_eq("empty AppUserModelID clears identity",set_app_id(L""),S_OK);
+    a=(WCHAR *)1;
+    check("empty ID is absent on retrieval",get_app_id(&a)==E_FAIL && a==NULL);
+    check_eq("AppUserModelID accepts spaces verbatim",set_app_id(L"test with spaces"),S_OK);
+    check("space-containing AppUserModelID round trip",get_app_id(&a)==S_OK && a && wide_eq(a,L"test with spaces"));
+    CoTaskMemFree(a); a=NULL;
+    check_eq("NULL AppUserModelID returns E_INVALIDARG",(DWORD)set_app_id(NULL),(DWORD)E_INVALIDARG);
+    a=(WCHAR *)1;
+    check("NULL setter clears old identity despite failure",get_app_id(&a)==E_FAIL && a==NULL);
+    check_eq("set parent AppUserModelID",set_app_id(L"OSyx.Shell.Parent"),S_OK);
+    HANDLE thread=CreateThread(NULL,0,app_id_thread,NULL,0,NULL); DWORD code=99;
+    check("process AppUserModelID is shared across threads",thread && WaitForSingleObject(thread,5000)==WAIT_OBJECT_0 && GetExitCodeThread(thread,&code) && code==0);
+    if(thread)CloseHandle(thread);
+    check("worker updates process AppUserModelID",get_app_id(&a)==S_OK && a && wide_eq(a,L"OSyx.Shell.Worker"));
+    CoTaskMemFree(a); a=NULL;
+    WCHAR exe[MAX_PATH],cmd[MAX_PATH+32];
+    GetModuleFileNameW(NULL,exe,MAX_PATH);
+    DWORD n=0;cmd[n++]='"';for(DWORD i=0;exe[i];i++)cmd[n++]=exe[i];cmd[n++]='"';
+    static const WCHAR tail[]=L" --appid-child";for(DWORD i=0;i<sizeof(tail)/sizeof(tail[0]);i++)cmd[n++]=tail[i];
+    STARTUPINFOW si={0};si.cb=sizeof si; PROCESS_INFORMATION pi={0};
+    BOOL child=CreateProcessW(exe,cmd,NULL,NULL,FALSE,0,NULL,NULL,&si,&pi);code=99;
+    check("explicit AppUserModelID is process-local",child && WaitForSingleObject(pi.hProcess,10000)==WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess,&code) && code==0);
+    if(child){CloseHandle(pi.hThread);CloseHandle(pi.hProcess);}
+    check("child does not alter parent's AppUserModelID",get_app_id(&a)==S_OK && a && wide_eq(a,L"OSyx.Shell.Worker"));
+    CoTaskMemFree(a);
+    check_eq("clear explicit AppUserModelID",set_app_id(L""),S_OK);
+}
+
 void __stdcall start(void) {
+    HMODULE sh=LoadLibraryA("shell32.dll");
+    get_app_id=(GetAppID)GetProcAddress(sh,"GetCurrentProcessExplicitAppUserModelID");
+    set_app_id=(SetAppID)GetProcAddress(sh,"SetCurrentProcessExplicitAppUserModelID");
+    check("process AppUserModelID exports",get_app_id && set_app_id);
+    if (!get_app_id || !set_app_id) finish("shell");
+    if (wide_ends(GetCommandLineW(),L" --appid-child")) {
+        WCHAR *id=(WCHAR *)1;
+        check("child starts without an explicit AppUserModelID",get_app_id(&id)==E_FAIL && id==NULL);
+        check("child can set its own AppUserModelID",set_app_id(L"OSyx.Shell.Child")==S_OK);
+        finish("shell-child");
+    }
+    app_ids();
     char marker[8];
     int native = GetEnvironmentVariableA("OSYX", marker, sizeof marker) > 0;
 

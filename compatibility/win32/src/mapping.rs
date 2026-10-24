@@ -61,6 +61,14 @@ static VIEWS: Mutex<BTreeMap<u64, View>> = Mutex::new(BTreeMap::new());
 /// A new section. `file` is None for page-file memory of `size` bytes;
 /// with a file, `size` 0 means the file's size.
 pub fn create(file: Option<u64>, protect: u32, size: u64, name: Option<String>) -> Result<(u64, bool), NtStatus> {
+    let r = create_section(file, protect, size, name);
+    if r == Err(STATUS_NOT_SUPPORTED) && crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: section not supported: protect {protect:#x}, file {}, size {size:#x}", file.is_some());
+    }
+    r
+}
+
+fn create_section(file: Option<u64>, protect: u32, size: u64, name: Option<String>) -> Result<(u64, bool), NtStatus> {
     if protect & SEC_IMAGE != 0 {
         return Err(STATUS_NOT_SUPPORTED);
     }
@@ -224,13 +232,20 @@ pub fn query(addr: u64) -> Option<mem::Info> {
     })
 }
 
+/// A named section keeps the descriptor of its SECURITY_ATTRIBUTES; an
+/// unnamed one has no security at all, as on Windows.
 fn create_common(file: u64, attributes: u64, protect: u32, high: u32, low: u32, name: Option<String>) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) {
-        return fail(e, 0);
-    }
+    let sd = match crate::objsec::initial_sd(attributes, &crate::objsec::SECTION) {
+        Ok(sd) => sd,
+        Err(e) => return fail(e, 0),
+    };
+    let named = name.is_some();
     let file = (file != INVALID_HANDLE_VALUE).then_some(file);
     match create(file, protect, (high as u64) << 32 | low as u64, name) {
         Ok((h, existed)) => {
+            if named && !existed {
+                crate::objsec::set_initial(h, sd);
+            }
             teb::set_last_error(if existed { ERROR_ALREADY_EXISTS } else { ERROR_SUCCESS });
             h
         }

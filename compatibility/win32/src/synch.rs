@@ -186,23 +186,38 @@ extern "win64" fn WaitOnAddress(address: u64, compare: *const u32, size: usize, 
     if address == 0 || compare.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    if size != 4 || !address.is_multiple_of(4) {
-        return fail(ERROR_NOT_SUPPORTED, 0);
+    if !matches!(size, 1 | 2 | 4 | 8) || !address.is_multiple_of(size as u64) {
+        return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let expected = unsafe { core::ptr::read_unaligned(compare) };
-    if word(address).load(Ordering::Acquire) != expected {
+    // Waiters sleep on the aligned 32-bit word holding the value (the low
+    // one for 8 bytes); WakeByAddress* wakes the same word.
+    let key = address & !3;
+    let differs = || {
+        // SAFETY: the caller's value and comparand of `size` bytes.
+        unsafe {
+            match size {
+                1 => core::ptr::read_volatile(address as *const u8) != *(compare as *const u8),
+                2 => core::ptr::read_volatile(address as *const u16) != core::ptr::read_unaligned(compare as *const u16),
+                4 => word(address).load(Ordering::Acquire) != core::ptr::read_unaligned(compare),
+                _ => core::ptr::read_volatile(address as *const u64) != core::ptr::read_unaligned(compare as *const u64),
+            }
+        }
+    };
+    let observed = word(key).load(Ordering::Acquire);
+    if differs() {
         return 1;
     }
-    wait(address, expected, ms)
+    let expected = observed;
+    wait(key, expected, ms)
 }
 extern "win64" fn WakeByAddressSingle(address: u64) {
-    if address != 0 && address.is_multiple_of(4) {
-        os_sys::futex_wake(word(address).as_ptr(), 1);
+    if address != 0 {
+        os_sys::futex_wake(word(address & !3).as_ptr(), 1);
     }
 }
 extern "win64" fn WakeByAddressAll(address: u64) {
-    if address != 0 && address.is_multiple_of(4) {
-        os_sys::futex_wake(word(address).as_ptr(), u32::MAX);
+    if address != 0 {
+        os_sys::futex_wake(word(address & !3).as_ptr(), u32::MAX);
     }
 }
 pub fn exports() -> Vec<(&'static str, u64)> {

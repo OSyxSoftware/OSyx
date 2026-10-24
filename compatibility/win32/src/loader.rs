@@ -208,7 +208,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
             [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports(), crate::cryptbase::exports()].concat(),
             Vec::new()
         ),
-        builtin("shlwapi.dll", crate::shlwapi::exports(), Vec::new()),
+        builtin("shlwapi.dll", crate::shlwapi::exports(), crate::shlwapi::ordinals()),
         builtin("combase.dll", crate::shlwapi::combase_exports(), Vec::new()),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
         builtin("shell32.dll", crate::shell32::exports(), Vec::new()),
@@ -227,6 +227,12 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("shcore.dll", crate::minordlls::shcore_exports(), Vec::new()),
         builtin("uxtheme.dll", crate::minordlls::uxtheme_exports(), Vec::new()),
         builtin("propsys.dll", crate::propsys::exports(), Vec::new()),
+        builtin("dwmapi.dll", crate::dwmapi::exports(), Vec::new()),
+        builtin("imm32.dll", crate::dwmapi::imm32_exports(), Vec::new()),
+        builtin("wtsapi32.dll", crate::dwmapi::wtsapi32_exports(), Vec::new()),
+        builtin("d3d11.dll", crate::dwmapi::d3d11_exports(), Vec::new()),
+        builtin("dxgi.dll", crate::dwmapi::dxgi_exports(), Vec::new()),
+        builtin("d3dcompiler_47.dll", crate::dwmapi::d3dcompiler_exports(), Vec::new()),
     ]
 }
 

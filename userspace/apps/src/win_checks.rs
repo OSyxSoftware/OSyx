@@ -46,6 +46,9 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("shell32 known folders and the ole32 task allocator", || run("shell.exe", &[]) == Some(0));
     t.check("winmm timers at the kernel tick resolution", || run("winmm.exe", &[]) == Some(0));
     t.check("object security, ACLs, AccessCheck, restricted tokens and the event log", || run("sandbox.exe", &[]) == Some(0));
+    t.check("US keyboard layout, key mapping and keyboard state", || run("keyboard.exe", &[]) == Some(0));
+    t.check("shlwapi paths, environment folders, StrStrIW and IsOS", || run("shlpath.exe", &[]) == Some(0));
+    t.check("security descriptors on sections and new directories", || run("secattr.exe", &[]) == Some(0));
     t.check("COM apartments, BSTRs, window stations, dbghelp and crypt32", || run("interop.exe", &[]) == Some(0));
     t.check("Windows SID ACL descriptor and token data", || run("security.exe", &[]) == Some(0));
     t.check("Universal C Runtime through the api-ms-win-crt contracts", || {
@@ -89,6 +92,15 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     });
     t.check("Win32 GUI window through PRISM (target E)", || {
         prism.is_ok() && run("gui.exe", &[]) == Some(0)
+    });
+    // These create windows too.
+    t.check("OLE apartments, GUID strings, drag-drop registration and the OLE clipboard", || {
+        prism.is_ok() && run("ole2.exe", &[]) == Some(0)
+    });
+    t.check("message-queue waits and window property stores", || prism.is_ok() && run("msgwait.exe", &[]) == Some(0));
+    t.check("DWM window attributes and timing, imm32 and wtsapi32", || prism.is_ok() && run("dwm.exe", &[]) == Some(0));
+    t.check("mouse capture and tracking, displays and input registrations", || {
+        prism.is_ok() && run("input.exe", &[]) == Some(0)
     });
     if let Ok(p) = prism {
         let _ = os_std::system::kill(p.id());

@@ -5,13 +5,18 @@
 //! missing unless the caller asks for it to be created (KF_FLAG_CREATE /
 //! CSIDL_FLAG_CREATE) or not verified (KF_FLAG_DONT_VERIFY). Folders of
 //! other users (a token other than the caller's) are not supported.
+//! Explicit AppUserModelIDs are process metadata: every thread sees the
+//! latest value and each successful query returns a task-allocator copy.
 #![allow(non_snake_case)]
 use crate::{kernel32, path};
 use alloc::{format, string::String, vec::Vec};
+use os_std::sync::Mutex;
 
 const S_OK: u32 = 0;
 const E_INVALIDARG: u32 = 0x8007_0057;
 const E_OUTOFMEMORY: u32 = 0x8007_000e;
+const E_FAIL: u32 = 0x8000_4005;
+const E_POINTER: u32 = 0x8000_4003;
 const HRESULT_FILE_NOT_FOUND: u32 = 0x8007_0002;
 const HRESULT_NOT_SUPPORTED: u32 = 0x8007_0032;
 
@@ -53,13 +58,14 @@ const FOLDERS: &[Folder] = &[
 /// The profile directory as a Windows path.
 fn profile() -> String {
     let home = os_std::env::var("HOME").unwrap_or_else(|_| String::from("/home/user"));
-    path::to_windows(home.trim_end_matches('/'))
+    let home = home.trim_end_matches('/');
+    path::to_windows(if home.is_empty() { "/" } else { home })
 }
 
 fn location(base: Base) -> String {
     match base {
         Base::Profile("") => profile(),
-        Base::Profile(rel) => format!("{}\\{rel}", profile()),
+        Base::Profile(rel) => format!("{}\\{rel}", profile().trim_end_matches('\\')),
         Base::Machine(p) => String::from(p),
     }
 }
@@ -284,6 +290,65 @@ extern "win64" fn CommandLineToArgvW(cmdline: *const u16, count: *mut i32) -> u6
     block
 }
 
+// Explicit identity belongs to this process, independently of COM apartments
+// and the thread that sets it. Store UTF-16 verbatim (including its NUL).
+static APP_ID: Mutex<Option<Vec<u16>>> = Mutex::new(None);
+
+extern "win64" fn GetCurrentProcessExplicitAppUserModelID(out: *mut u64) -> u32 {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: caller supplies a PWSTR output slot, cleared on failure.
+    unsafe { *out = 0 };
+    let state = APP_ID.lock().unwrap();
+    let Some(id) = state.as_ref() else { return E_FAIL };
+    let block = crate::ole32::CoTaskMemAlloc(id.len() * 2);
+    if block == 0 {
+        return E_OUTOFMEMORY;
+    }
+    // SAFETY: fresh task-allocator block of id.len() UTF-16 units.
+    unsafe {
+        core::ptr::copy_nonoverlapping(id.as_ptr(), block as *mut u16, id.len());
+        *out = block;
+    }
+    S_OK
+}
+
+extern "win64" fn SetCurrentProcessExplicitAppUserModelID(id: *const u16) -> u32 {
+    if id.is_null() {
+        // Windows clears the old value even though NULL returns E_INVALIDARG.
+        *APP_ID.lock().unwrap() = None;
+        return E_INVALIDARG;
+    }
+    let mut units = Vec::new();
+    // Windows accepts at most 127 UTF-16 units plus the terminator. A longer
+    // value fails without changing the old ID; empty successfully removes it.
+    for i in 0..128 {
+        // SAFETY: caller supplies a NUL-terminated string; read only up to
+        // the maximum accepted length when rejecting an oversized input.
+        let unit = unsafe { *id.add(i) };
+        units.push(unit);
+        if unit == 0 {
+            *APP_ID.lock().unwrap() = if i == 0 { None } else { Some(units) };
+            return S_OK;
+        }
+    }
+    E_INVALIDARG
+}
+
+/// The window's property store (taskbar identity and relaunch properties):
+/// values are kept but OSyx has no taskbar that groups windows by them.
+extern "win64" fn SHGetPropertyStoreForWindow(hwnd: u64, riid: *const [u8; 16], out: *mut u64) -> u32 {
+    crate::propsys::window_property_store(hwnd, riid, out)
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![SHGetKnownFolderPath, SHGetFolderPathW, CommandLineToArgvW]
+    export_table![
+        SHGetKnownFolderPath,
+        SHGetFolderPathW,
+        CommandLineToArgvW,
+        GetCurrentProcessExplicitAppUserModelID,
+        SetCurrentProcessExplicitAppUserModelID,
+        SHGetPropertyStoreForWindow,
+    ]
 }

@@ -512,3 +512,105 @@ monospace glyph. Native test host: Windows 10.0.26300.
 The GUI fixture copies a green 16x16 DIB into the PRISM window and verifies
 the resulting pixel before EndPaint. The screenshot is
 `build/test/win-gui.png` and the GUI fixture reports 17/0.
+
+## Explicit process AppUserModelID (2026-10-24)
+
+Attempts 47/48 stopped at shell32 GetCurrentProcessExplicitAppUserModelID.
+Implement that export and its setter from the xul.dll shell32 gap list.
+The metadata is process-wide, separate from COM apartments, and queries
+allocate independent UTF-16 copies through the task allocator. It starts
+unset in a new winrun process. This does not add PRISM taskbar grouping.
+
+Native observations on Windows 10.0.26300, using the public APIs in a fresh
+console process (`build/appid-native-probe.log`, then `shell.exe`):
+
+| Operation | Observed result |
+|---|---|
+| Get before an explicit set | E_FAIL (0x80004005), output cleared |
+| Get after setting an ID | S_OK, independent CoTaskMemFree-owned copy |
+| Set empty string | S_OK, removes the explicit ID |
+| Set NULL | E_INVALIDARG, also removes the old ID |
+| Set 127 UTF-16 units | S_OK |
+| Set 128 UTF-16 units | E_INVALIDARG, old ID preserved |
+
+Spaces and Unicode are preserved verbatim. Setters copy their input; callers
+can modify or release it after return. Another thread sees and can replace
+the process ID; a child process starts unset and cannot change the parent's
+ID. Calling the native getter with a NULL output slot caused an access
+violation in the isolated exploratory probe; the regression fixture only
+passes valid output slots. The OSyx implementation rejects NULL safely.
+
+The fixture passed 36/0 on native Windows, plus 3/0 in its child process,
+before QEMU testing. It verifies copy ownership, boundary lengths, clearing,
+last-error preservation, thread sharing and process isolation. Static
+assertions cover WCHAR/HRESULT/GUID and the child-launch structure sizes.
+
+API contracts: [GetCurrentProcessExplicitAppUserModelID](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-getcurrentprocessexplicitappusermodelid),
+[SetCurrentProcessExplicitAppUserModelID](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-setcurrentprocessexplicitappusermodelid).
+
+Attempt 49 (`zen-test.ps1 -SkipFetch`) passed the previous shell32 failure
+and stopped at `ole32.dll!OleInitialize`, serial time 17.600 s. Evidence is
+preserved in `build/zen/attempt-49.serial.log` and `attempt-49.result.json`;
+the screen is `attempt-49.png`. The script returned 2, with no panic and
+no browser pixel buffer. The audit has 1029 unresolved occurrences, three
+fewer than attempt 48 (the two APIs are imported by xul.dll and zen.exe).
+
+## OLE apartment initialization (2026-10-24)
+
+Attempt 49 reached OleInitialize. The new OleInitialize/OleUninitialize
+exports acquire and release COM STA references, with an independent OLE
+nesting count for each thread. This permits existing COM callers to keep
+their own references, and rejects an OLE call in an explicit MTA with
+RPC_E_CHANGED_MODE without changing either count. Invalid reserved input
+returns E_INVALIDARG. This adds apartment setup, not clipboard, drag/drop
+or OLE class servers.
+
+The exploratory public-API probe on Windows 10.0.26300
+(`build/ole-init-native-probe.log`) showed that the first OLE call in an
+already initialized COM STA returns S_OK, not the S_FALSE returned by a
+second CoInitializeEx call. Repeated OLE calls return S_FALSE. Each
+successful call acquires a COM reference; OleUninitialize without an OLE
+reference leaves an independently initialized COM apartment intact.
+
+`ole2.exe` passed 15/0 natively before QEMU testing, checking these counts,
+MTA conflicts and thread isolation. It is a separate fixture because the
+unchanged native interop.exe baseline has three window-station failures on
+this host (`build/interop-baseline-native.log`: 61/3). The new apartment
+tests do not depend on that host-specific station policy. No existing
+interop assertion was removed or weakened.
+
+API contracts: [OleInitialize](https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-oleinitialize),
+[OleUninitialize](https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-oleuninitialize).
+
+## Window creation, input and the first child process (attempts 50-58, 2026-10-24)
+
+Each attempt was `zen-test.ps1 -SkipFetch`; each ended with script exit 2,
+no kernel panic and no browser pixels. Every API below was first observed
+on Windows 10.0.26300 with a public-API probe (`build/probe/*.c`) and its
+fixture passed natively before the QEMU run.
+
+| Attempt | Stopped at | Added |
+|---|---|---|
+| 50 | SHELL32!SHGetPropertyStoreForWindow | OleInitialize passed |
+| 51 | dwmapi!DwmSetWindowAttribute | window property stores; MsgWaitForMultipleObjects(Ex), real GetQueueStatus |
+| 52 | USER32!GetKeyboardLayout | dwmapi, imm32 (no IME), wtsapi32 |
+| 53 | USER32!EnumDisplayDevicesW | US keyboard layout from Windows' tables; key messages now carry set-1 scan codes and the extended bit |
+| 54 | ole32!CLSIDFromString | displays, capture, mouse tracking, icons, clipboard, touch/raw-input registration |
+| 55 | MOZ_RELEASE_ASSERT(result.isOk()) in xul.dll | GUID strings, drag-drop registration, OLE clipboard, MTA usage; no-GPU d3d11/dxgi/d3dcompiler |
+| 56 | same; failure trace showed CreateFileMapping refusing a descriptor | `-v` keeps the last 32 API failures (source location, error, thread) and prints them with an unhandled exception |
+| 57 | same | WaitOnAddress for 1, 2 and 8 bytes (Rust's parker spun on ERROR_NOT_SUPPORTED) |
+| 58 | int3 in zen.exe (sandbox broker), thread 42, after SetHandleInformation(HANDLE_FLAG_INHERIT) | section and directory descriptors |
+
+Message waits no longer hold the GUI lock while sleeping; a post wakes
+waiters at once, and PRISM input is polled every 10 ms while idle.
+
+Attempt 58 is the first time Gecko launches a child process: the IPC pipe
+`winpipe.gecko.*` is listening and the broker marks a handle inheritable.
+OSyx winrun has no handle inheritance, and events, mutexes and semaphores
+exist only inside one process. The next stage is cross-process handles
+(inheritance and PROC_THREAD_ATTRIBUTE_HANDLE_LIST, shared sections and
+events) and the Chromium sandbox broker's requirements (jobs, restricted
+tokens, alternate desktops), or launching children without the sandbox.
+DirectWrite is absent (`dwrite.dll` not found), so Gecko also needs real
+TrueType fonts behind its GDI font path before text can render: the
+atlas fonts have no sfnt tables (GetFontData fails).

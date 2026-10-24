@@ -95,12 +95,47 @@ browser window.
 
 ## Programs and tests
 
+Shell process identity supports Get/SetCurrentProcessExplicitAppUserModelID.
+The explicit UTF-16 ID is shared by the process's threads, starts unset in
+each child process, and each query returns a separate CoTaskMemFree-owned
+copy. These APIs store application metadata; PRISM taskbar grouping policy
+is still separate.
+
 `scripts/build-wintests.ps1` uses MSYS2 clang/lld and public import libraries
 to build the test executables without a C runtime. `scripts/win-test.ps1`
 boots `init.args=win,7111,7112 test.exit`, runs them on OSyx, and checks both
 their own assertions and the host TCP/UDP echo server's log:
 
 - `minimal.exe`: relocation and exit code 42.
+- `shell.exe`: known folders, the task allocator, and explicit process
+  AppUserModelIDs, including Unicode/copy ownership, length limits, clearing,
+  cross-thread updates and child-process isolation.
+- `ole2.exe`: OLE apartment initialization, nested counts separate from COM
+  counts, STA/MTA conflicts, matching teardown and thread isolation; GUID
+  strings (CLSIDFromString, IIDFromString, StringFromGUID2/CLSID/IID),
+  drop-target registration, the OLE clipboard calls, ReleaseStgMedium and
+  CoIncrementMTAUsage. No drag source exists between windows, so DoDragDrop
+  ends as cancelled and no drop ever reaches a target; OleGetClipboard only
+  returns a data object this process set.
+- `msgwait.exe`: MsgWaitForMultipleObjects(Ex) and GetQueueStatus (current
+  and new QS_* bits, MWMO_INPUTAVAILABLE, cross-thread post wake-up) and
+  SHGetPropertyStoreForWindow (values shared per window as VT_LPWSTR text,
+  S_FALSE for a stored value, dropped with the window).
+- `dwm.exe`: dwmapi window attributes (cloaking, extended frame bounds),
+  composition timing on a 60 Hz clock and DwmFlush; imm32 with no input
+  context (OSyx has no IME); wtsapi32 session notifications.
+- `keyboard.exe`: the US layout (00000409) through MapVirtualKeyEx and
+  ToUnicodeEx, generated from Windows' own layout tables, layout queries and
+  Get/SetKeyboardState.
+- `input.exe`: capture, TrackMouseEvent (WM_MOUSELEAVE), GetLastInputInfo,
+  MapWindowPoints, EnumThreadWindows, display devices and the current mode,
+  clipboard format atoms, icons (CreateIconIndirect/GetIconInfo/DestroyIcon)
+  and the user32 clipboard, which is always empty (OLE is the only writer).
+- `shlpath.exe`: PathCombineW, PathFindFileNameW, PathIsNetworkPathW,
+  PathUnExpandEnvStringsW, StrStrIW and IsOS (ordinal 437).
+- `secattr.exe`: SECURITY_ATTRIBUTES with a descriptor on unnamed sections
+  (ignored, as Windows does), named sections (stored and reported by
+  GetSecurityInfo) and new directories (the DACL becomes the mode).
 - `hello.exe`: console, command line, PEB/TEB, modules and errors.
 - `fileio.exe`: files, sharing and delete-on-close inside one winrun process.
 - `threads.exe` / `windll.dll`: synchronization, TLS, memory and DLL loading.

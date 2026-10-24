@@ -72,6 +72,7 @@ mod credman;
 mod accounts;
 mod capi;
 mod minordlls;
+mod dwmapi;
 mod propsys;
 mod pipes;
 mod ws2_32;
@@ -141,7 +142,33 @@ fn main() -> i32 {
             return 126;
         }
     }
+    // The profile variables every Windows process has, matching shell32's
+    // known folders (the profile is $HOME).
+    let home = os_std::env::var("HOME").unwrap_or_else(|_| String::from("/home/user"));
+    let home = home.trim_end_matches('/');
+    let profile = path::to_windows(if home.is_empty() { "/" } else { home });
+    let base = profile.trim_end_matches('\\');
+    let user = base.rsplit('\\').next().filter(|u| !u.is_empty() && !u.ends_with(':')).unwrap_or("user").to_string();
+    let home_path = profile.strip_prefix("C:").unwrap_or(&profile).to_string();
     for (k, v) in [
+        ("USERPROFILE", profile.clone()),
+        ("APPDATA", format!("{base}\\AppData\\Roaming")),
+        ("LOCALAPPDATA", format!("{base}\\AppData\\Local")),
+        ("HOMEDRIVE", String::from("C:")),
+        ("HOMEPATH", home_path),
+        ("USERNAME", user),
+    ] {
+        if !env.iter().any(|(e, _)| e.eq_ignore_ascii_case(k)) {
+            env.push((String::from(k), v));
+        }
+    }
+    for (k, v) in [
+        ("ALLUSERSPROFILE", "C:\\ProgramData"),
+        ("ProgramData", "C:\\ProgramData"),
+        ("ProgramFiles", "C:\\Program Files"),
+        ("SystemRoot", "C:\\Windows"),
+        ("windir", "C:\\Windows"),
+        ("COMPUTERNAME", "OSYX"),
         ("OS", "Windows_NT"),
         ("OSYX", "1"),
         ("SystemDrive", "C:"),

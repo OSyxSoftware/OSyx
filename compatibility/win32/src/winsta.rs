@@ -18,7 +18,7 @@ use crate::{
     error::*,
     kernel32::{self, fail},
     objects::{self, Object},
-    objsec, path, tokens,
+    objsec, path,
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -76,49 +76,11 @@ fn station(h: u64) -> Result<Arc<Station>, u32> {
     }
 }
 
-/// The security descriptor of an object created with SECURITY_ATTRIBUTES
-/// `sa` (NULL: the token's default security).
-fn initial_sd(sa: u64, mapping: &objsec::Mapping) -> Result<Option<objsec::Sd>, u32> {
-    if sa == 0 {
-        return Ok(None);
-    }
-    // SAFETY: the caller's SECURITY_ATTRIBUTES (24 bytes).
-    let (len, sd, inherit) = unsafe { (*(sa as *const u32), *((sa + 8) as *const u64), *((sa + 16) as *const i32)) };
-    if len != 24 {
-        return Err(ERROR_INVALID_PARAMETER);
-    }
-    if inherit != 0 {
-        return Err(ERROR_NOT_SUPPORTED); // no handle inheritance on OSyx
-    }
-    if sd == 0 {
-        return Ok(None);
-    }
-    let mut out = objsec::default_sd(&tokens::effective_data(), mapping);
-    // SAFETY: the caller's descriptor.
-    let (owner, group, dacl, sacl) = unsafe { objsec::sd_parts(sd as *const u8) }?;
-    if let Some(o) = owner {
-        out.owner = o;
-    }
-    if let Some(g) = group {
-        out.group = g;
-    }
-    if let Some(d) = dacl {
-        out.dacl = d.map(|aces| aces.into_iter().map(|(k, f, m, s)| (k, f, objsec::map_generic(m, mapping), s)).collect());
-    }
-    if let Some(s) = sacl {
-        if s.iter().any(|a| a.0 != crate::security::MANDATORY_LABEL) {
-            return Err(ERROR_NOT_SUPPORTED); // no auditing on OSyx
-        }
-        out.sacl = s;
-    }
-    Ok(Some(out))
-}
-
 extern "win64" fn CreateWindowStationW(name: *const u16, flags: u32, _access: u32, sa: u64) -> u64 {
     if flags & !CWF_CREATE_ONLY != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let sd = match initial_sd(sa, &objsec::WINSTA) {
+    let sd = match objsec::initial_sd(sa, &objsec::WINSTA) {
         Ok(s) => s,
         Err(e) => return fail(e, 0),
     };
@@ -159,7 +121,7 @@ extern "win64" fn CreateDesktopW(name: *const u16, device: *const u16, mode: u64
     let Some(name) = (unsafe { path::wide_to_string(name) }).filter(|n| !n.is_empty() && !n.contains('\\')) else {
         return fail(ERROR_INVALID_PARAMETER, 0);
     };
-    let sd = match initial_sd(sa, &objsec::DESKTOP) {
+    let sd = match objsec::initial_sd(sa, &objsec::DESKTOP) {
         Ok(s) => s,
         Err(e) => return fail(e, 0),
     };

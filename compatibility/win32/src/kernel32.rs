@@ -22,9 +22,43 @@ pub const FALSE: Bool = 0;
 pub const INVALID_HANDLE_VALUE: u64 = u64::MAX;
 
 /// Sets the thread's last error and returns `v`.
+#[track_caller]
 pub fn fail<T>(err: u32, v: T) -> T {
     teb::set_last_error(err);
+    if crate::VERBOSE.load(Ordering::Relaxed) {
+        note_failure(core::panic::Location::caller(), err);
+    }
     v
+}
+
+/// The last API failures (under -v): the implementing source location,
+/// and the error and thread packed together. Lock-free, since `fail` runs
+/// everywhere, including with locks held.
+const FAILURES: usize = 32;
+static FAILURE_AT: [AtomicU64; FAILURES] = [const { AtomicU64::new(0) }; FAILURES];
+static FAILURE_WHAT: [AtomicU64; FAILURES] = [const { AtomicU64::new(0) }; FAILURES];
+static FAILURE_NEXT: AtomicU64 = AtomicU64::new(0);
+
+fn note_failure(at: &'static core::panic::Location<'static>, err: u32) {
+    let i = (FAILURE_NEXT.fetch_add(1, Ordering::Relaxed) as usize) % FAILURES;
+    FAILURE_AT[i].store(at as *const _ as u64, Ordering::Relaxed);
+    FAILURE_WHAT[i].store(((os_sys::gettid() as u64) << 32) | err as u64, Ordering::Relaxed);
+}
+
+/// Prints the recorded failures, oldest first (for crash reports).
+pub(crate) fn print_failures() {
+    let next = FAILURE_NEXT.load(Ordering::Relaxed) as usize;
+    for k in next.saturating_sub(FAILURES)..next {
+        let i = k % FAILURES;
+        let at = FAILURE_AT[i].load(Ordering::Relaxed);
+        if at == 0 {
+            continue;
+        }
+        // SAFETY: stored from a &'static Location by note_failure.
+        let loc = unsafe { &*(at as *const core::panic::Location<'static>) };
+        let what = FAILURE_WHAT[i].load(Ordering::Relaxed);
+        os_std::eprintln!("winrun:   recent failure: error {} in thread {} at {}:{}", what as u32, what >> 32, loc.file(), loc.line());
+    }
 }
 
 fn b(ok: bool) -> Bool {
@@ -853,25 +887,50 @@ extern "win64" fn GetFileAttributesW(name: *const u16) -> u32 {
     get_attributes(unsafe { sw(name) })
 }
 
-fn create_directory(name: Option<String>) -> Bool {
+/// SECURITY_ATTRIBUTES of a new file or directory: its descriptor, if any.
+/// bInheritHandle is meaningless here (no handle is returned).
+fn new_file_attributes(attributes: u64) -> Result<u64, u32> {
+    if attributes == 0 {
+        return Ok(0);
+    }
+    // SAFETY: the caller's SECURITY_ATTRIBUTES (24 bytes).
+    let (len, sd) = unsafe { (*(attributes as *const u32), *((attributes + 8) as *const u64)) };
+    if len != 24 { Err(ERROR_INVALID_PARAMETER) } else { Ok(sd) }
+}
+
+fn create_directory(name: Option<String>, attributes: u64) -> Bool {
+    let sd = match new_file_attributes(attributes) {
+        Ok(sd) => sd,
+        Err(e) => return fail(e, FALSE),
+    };
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
     match locate(&name) {
         Ok((_, true)) => fail(ERROR_ALREADY_EXISTS, FALSE),
-        Ok((p, false)) => os_sys::mkdir(&p, 0o755).map_or_else(|e| fail(errno_to_win32(e), FALSE), |_| TRUE),
+        Ok((p, false)) => {
+            if let Err(e) = os_sys::mkdir(&p, 0o755) {
+                return fail(errno_to_win32(e), FALSE);
+            }
+            if sd != 0 {
+                if let Err(e) = crate::objsec::apply_new_file_sd(&p, sd) {
+                    // Windows creates nothing when the descriptor is refused.
+                    let _ = os_sys::rmdir(&p);
+                    return fail(e, FALSE);
+                }
+            }
+            TRUE
+        }
         Err(e) => fail(e, FALSE),
     }
 }
 
 extern "win64" fn CreateDirectoryA(name: *const u8, attributes: u64) -> Bool {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,FALSE); }
     // SAFETY: NUL-terminated name.
-    create_directory(unsafe { sa(name) })
+    create_directory(unsafe { sa(name) }, attributes)
 }
 
 extern "win64" fn CreateDirectoryW(name: *const u16, attributes: u64) -> Bool {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,FALSE); }
     // SAFETY: NUL-terminated name.
-    create_directory(unsafe { sw(name) })
+    create_directory(unsafe { sw(name) }, attributes)
 }
 
 fn remove_directory(name: Option<String>) -> Bool {
@@ -2270,6 +2329,10 @@ extern "win64" fn GlobalAlloc(flags: u32, size: usize) -> u64 {
     LocalAlloc(flags, size)
 }
 
+pub(crate) fn global_free(p: u64) {
+    LocalFree(p);
+}
+
 extern "win64" fn GlobalFree(p: u64) -> u64 {
     LocalFree(p)
 }
@@ -2335,8 +2398,12 @@ pub(crate) fn now_ns() -> u64 {
     os_sys::clock(osyx_abi::CLOCK_MONOTONIC).unwrap_or(0)
 }
 
-extern "win64" fn GetTickCount() -> u32 {
+pub(crate) fn tick_ms() -> u32 {
     (now_ns() / 1_000_000) as u32
+}
+
+extern "win64" fn GetTickCount() -> u32 {
+    tick_ms()
 }
 
 extern "win64" fn GetTickCount64() -> u64 {

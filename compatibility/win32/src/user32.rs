@@ -30,6 +30,7 @@ use osyx_gfx::{Color, Rect, Surface};
 use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
 mod gdi;
+mod keyboard;
 use gdi::{Bitmap, GdiPath, Region, Xform};
 
 static SANS14: &[u8] = include_bytes!("../../../graphics/assets/sans14.osxp");
@@ -69,6 +70,8 @@ pub const WM_RBUTTONUP: u32 = 0x0205;
 pub const WM_MBUTTONDOWN: u32 = 0x0207;
 pub const WM_MBUTTONUP: u32 = 0x0208;
 pub const WM_MOUSEWHEEL: u32 = 0x020A;
+const WM_CAPTURECHANGED: u32 = 0x0215;
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
@@ -96,6 +99,8 @@ struct Class {
 
 struct Win {
     class: usize,
+    /// The thread that created the window (EnumThreadWindows).
+    thread: u64,
     wndproc: u64,
     title: String,
     style: u32,
@@ -110,6 +115,14 @@ struct Win {
     user_data: i64,
     /// Rectangle drawn since the last present (BeginPaint/GetDC).
     drawn: Option<Rect>,
+}
+
+/// ICONINFO: icon or cursor, hotspot, and its own mask and colour bitmaps.
+struct Icon {
+    is_icon: bool,
+    hotspot: (u32, u32),
+    mask: u64,
+    color: u64,
 }
 
 struct Timer {
@@ -182,9 +195,25 @@ struct Gui {
     regions: BTreeMap<u64, Region>,
     next: u64,
     keys: [bool; 256],
+    /// Toggle state (Caps Lock, Num Lock, Scroll Lock...): the low bit of
+    /// GetKeyState/GetKeyboardState.
+    toggles: [bool; 256],
+    /// SetCapture's window (0: none).
+    capture: u64,
+    /// GetTickCount of the last keyboard or pointer input.
+    last_input: u32,
+    /// Windows that asked TrackMouseEvent for WM_MOUSELEAVE.
+    track_leave: Vec<u64>,
+    /// Icons and cursors from CreateIconIndirect.
+    icons: BTreeMap<u64, Icon>,
+    /// The window that has the clipboard open (Some(0): opened without one).
+    clipboard_open: Option<u64>,
     pointer: (i32, i32),
     last_click: (u64, u32, Instant),
     start: Instant,
+    /// QS_* kinds queued since the thread last looked (GetQueueStatus'
+    /// low word; MsgWaitForMultipleObjects without MWMO_INPUTAVAILABLE).
+    fresh: u32,
 }
 
 static GUI: Mutex<Option<Gui>> = Mutex::new(None);
@@ -244,9 +273,16 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             regions: BTreeMap::new(),
             next: 0x2_0000,
             keys: [false; 256],
+            toggles: [false; 256],
+            capture: 0,
+            last_input: 0,
+            track_leave: Vec::new(),
+            icons: BTreeMap::new(),
+            clipboard_open: None,
             pointer: (0, 0),
             last_click: (0, 0, Instant::now()),
             start: Instant::now(),
+            fresh: 0,
         }
     });
     f(gui)
@@ -313,6 +349,25 @@ impl Gui {
         let time = self.now_ms();
         let pt = self.pointer;
         self.queue.push_back(Msg { hwnd, msg, wparam, lparam, time, pt });
+        self.fresh |= qs_kind(msg);
+        // Wake MsgWaitForMultipleObjects and GetMessage in other threads.
+        crate::objects::signal_all();
+    }
+
+    /// QS_* kinds of what get/peek would return now.
+    fn status(&self) -> u32 {
+        let mut s = self.queue.iter().fold(0, |s, m| s | qs_kind(m.msg));
+        if self.quit.is_some() {
+            s |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+        }
+        let now = Instant::now();
+        if self.timers.iter().any(|t| t.due <= now) {
+            s |= QS_TIMER;
+        }
+        if self.windows.values().any(|w| w.visible && w.invalid.is_some() && w.win.is_configured()) {
+            s |= QS_PAINT;
+        }
+        s
     }
 
     fn invalidate(&mut self, hwnd: u64, r: Option<Rect>, erase: bool) {
@@ -364,16 +419,22 @@ impl Gui {
             }
             Event::CloseRequest { .. } => self.post(hwnd, WM_CLOSE, 0, 0),
             Event::Key { usage, state, modifiers, text, .. } => {
+                self.last_input = crate::kernel32::tick_ms();
                 let vk = vk_of(usage);
                 if vk == 0 {
                     return;
                 }
                 let down = state != proto::key_state::UP;
+                let repeat = state == proto::key_state::REPEAT;
+                if down && !repeat && !self.keys[vk as usize] {
+                    self.toggles[vk as usize] ^= true;
+                }
                 self.keys[vk as usize] = down;
                 let alt = modifiers & osyx_input::modifier::ALT != 0;
-                let repeat = state == proto::key_state::REPEAT;
+                let scan = scan_of(vk);
                 let lparam = 1
-                    | ((usage as i64 & 0xFF) << 16)
+                    | ((scan as i64 & 0xFF) << 16)
+                    | if scan & 0xE000 == 0xE000 || matches!(vk, 0x21..=0x28 | 0x2D | 0x2E) { 1 << 24 } else { 0 }
                     | if repeat { 1 << 30 } else { 0 }
                     | if down { 0 } else { (1 << 30) | (1 << 31) };
                 let msg = match (down, alt) {
@@ -397,6 +458,13 @@ impl Gui {
                 }
             }
             Event::Pointer { kind, x, y, button, pressed, wheel_v, .. } => {
+                self.last_input = crate::kernel32::tick_ms();
+                // A tracked window the pointer moves out of gets WM_MOUSELEAVE.
+                let leave: Vec<u64> = self.track_leave.iter().copied().filter(|&w| w != hwnd).collect();
+                for w in leave {
+                    self.track_leave.retain(|&t| t != w);
+                    self.post(w, WM_MOUSELEAVE, 0, 0);
+                }
                 self.pointer = (x, y);
                 let lp = (x as i64 & 0xFFFF) | ((y as i64 & 0xFFFF) << 16);
                 let mk = self.mouse_keys();
@@ -701,6 +769,7 @@ fn create_window(
             hwnd,
             Win {
                 class: ci,
+                thread: os_sys::gettid(),
                 wndproc,
                 title: title.clone(),
                 style,
@@ -817,8 +886,12 @@ extern "win64" fn DestroyWindow(hwnd: u64) -> Bool {
     }
 }
 
+pub(crate) fn is_window(hwnd: u64) -> bool {
+    with(|g| g.windows.contains_key(&hwnd))
+}
+
 extern "win64" fn IsWindow(hwnd: u64) -> Bool {
-    with(|g| g.windows.contains_key(&hwnd)) as Bool
+    is_window(hwnd) as Bool
 }
 
 extern "win64" fn IsWindowVisible(hwnd: u64) -> Bool {
@@ -935,6 +1008,11 @@ extern "win64" fn GetClientRect(hwnd: u64, r: *mut i32) -> Bool {
         }
         None => fail(ERROR_INVALID_WINDOW_HANDLE, FALSE),
     }
+}
+
+/// The window's RECT (left, top, right, bottom) in screen coordinates.
+pub(crate) fn window_rect(hwnd: u64) -> Option<[i32; 4]> {
+    with(|g| g.windows.get(&hwnd).map(|w| [w.pos.0, w.pos.1, w.pos.0 + w.size.0 as i32, w.pos.1 + w.size.1 as i32]))
 }
 
 extern "win64" fn GetWindowRect(hwnd: u64, r: *mut i32) -> Bool {
@@ -1083,6 +1161,36 @@ extern "win64" fn SetWindowLongA(hwnd: u64, idx: i32, v: i32) -> i32 {
 
 // ---- messages -------------------------------------------------------------------------
 
+const QS_KEY: u32 = 0x1;
+const QS_MOUSEMOVE: u32 = 0x2;
+const QS_MOUSEBUTTON: u32 = 0x4;
+const QS_POSTMESSAGE: u32 = 0x8;
+const QS_TIMER: u32 = 0x10;
+const QS_PAINT: u32 = 0x20;
+const QS_ALLPOSTMESSAGE: u32 = 0x100;
+const MWMO_WAITALL: u32 = 1;
+const MWMO_INPUTAVAILABLE: u32 = 4;
+/// How often an idle wait looks at PRISM, whose input does not wake
+/// object waiters.
+const PRISM_POLL: Duration = Duration::from_millis(10);
+
+/// The QS_* kind of a queued message.
+fn qs_kind(msg: u32) -> u32 {
+    match msg {
+        WM_MOUSEMOVE => QS_MOUSEMOVE,
+        0x0201..=0x020E => QS_MOUSEBUTTON,
+        0x0100..=0x0109 => QS_KEY,
+        _ => QS_POSTMESSAGE | QS_ALLPOSTMESSAGE,
+    }
+}
+
+/// Sleeps without the GUI lock until another thread posts or signals an
+/// object (after `seq`), `timeout` passes, or it is time to poll PRISM.
+fn idle(seq: u32, timeout: Duration) {
+    let prism = with(|g| g.conn.is_some());
+    crate::objects::wait_for_change(seq, if prism { timeout.min(PRISM_POLL) } else { timeout });
+}
+
 /// MSG (48 bytes): hwnd, message @8, wParam @16, lParam @24, time @32, pt @36.
 fn write_msg(p: *mut u8, m: &Msg) {
     // SAFETY: the caller's MSG.
@@ -1117,19 +1225,20 @@ extern "win64" fn GetMessageA(msg: *mut u8, hwnd: u64, _min: u32, _max: u32) -> 
     }
     loop {
         let r = with(|g| {
+            g.fresh = 0;
             if let Some(m) = g.next_message(hwnd) {
                 return Ok(m);
             }
-            Err(g.next_timer_in())
+            Err((crate::objects::sequence(), g.next_timer_in()))
         });
         match r {
             Ok(m) => {
                 write_msg(msg, &m);
                 return (m.msg != WM_QUIT) as Bool;
             }
-            Err(t) => {
+            Err((seq, t)) => {
                 crate::winsta::note_idle();
-                with(|g| g.wait(t))
+                idle(seq, t);
             }
         }
     }
@@ -1143,6 +1252,7 @@ const PM_REMOVE: u32 = 1;
 
 extern "win64" fn PeekMessageA(msg: *mut u8, hwnd: u64, _min: u32, _max: u32, flags: u32) -> Bool {
     let m = with(|g| {
+        g.fresh = 0;
         let m = g.next_message(hwnd)?;
         if flags & PM_REMOVE == 0 && !matches!(m.msg, WM_PAINT | WM_TIMER | WM_QUIT) {
             g.queue.push_front(m);
@@ -1309,16 +1419,236 @@ extern "win64" fn GetActiveWindow() -> u64 {
     with(|g| g.focus)
 }
 
+/// PRISM delivers a pressed button's motion to its window anyway; the
+/// capture window is recorded for GetCapture.
 extern "win64" fn SetCapture(hwnd: u64) -> u64 {
-    hwnd // PRISM delivers a pressed button's motion to its window anyway
+    with(|g| {
+        let new = if g.windows.contains_key(&hwnd) { hwnd } else { 0 };
+        core::mem::replace(&mut g.capture, new)
+    })
 }
 
 extern "win64" fn ReleaseCapture() -> Bool {
+    let old = with(|g| core::mem::replace(&mut g.capture, 0));
+    if old != 0 {
+        SendMessageW(old, WM_CAPTURECHANGED, 0, 0);
+    }
+    TRUE
+}
+
+extern "win64" fn GetCapture() -> u64 {
+    with(|g| if g.windows.contains_key(&g.capture) { g.capture } else { 0 })
+}
+
+const TME_LEAVE: u32 = 0x2;
+const TME_CANCEL: u32 = 0x8000_0000;
+const TME_QUERY: u32 = 0x4000_0000;
+
+/// TRACKMOUSEEVENT: cbSize, dwFlags @4, hwndTrack @8, dwHoverTime @16.
+/// Leaving is reported; hover (TME_HOVER) is accepted and never fires.
+extern "win64" fn TrackMouseEvent(tme: *mut u8) -> Bool {
+    if tme.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's TRACKMOUSEEVENT.
+    let (size, flags, hwnd) = unsafe { (teb::get::<u32>(tme as u64, 0), teb::get::<u32>(tme as u64, 4), teb::get::<u64>(tme as u64, 8)) };
+    if size != 24 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    with(|g| {
+        if flags & TME_QUERY != 0 {
+            let leave = g.track_leave.first().copied();
+            // SAFETY: as above.
+            unsafe {
+                teb::put(tme as u64, 4, if leave.is_some() { TME_LEAVE } else { 0u32 });
+                teb::put(tme as u64, 8, leave.unwrap_or(0));
+            }
+            return TRUE;
+        }
+        if !g.windows.contains_key(&hwnd) {
+            return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
+        }
+        if flags & TME_LEAVE != 0 {
+            g.track_leave.retain(|&w| w != hwnd);
+            if flags & TME_CANCEL == 0 {
+                g.track_leave.push(hwnd);
+            }
+        }
+        TRUE
+    })
+}
+
+extern "win64" fn GetLastInputInfo(info: *mut u32) -> Bool {
+    // SAFETY: the caller's LASTINPUTINFO (cbSize, dwTime).
+    if info.is_null() || unsafe { *info } != 8 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: as above.
+    unsafe { *info.add(1) = with(|g| g.last_input) };
     TRUE
 }
 
 extern "win64" fn GetKeyState(vk: i32) -> i16 {
-    with(|g| if g.keys.get(vk as usize).copied().unwrap_or(false) { -0x8000i16 } else { 0 })
+    with(|g| {
+        let i = vk as usize & 0xFF;
+        (if g.keys[i] { -0x8000i16 } else { 0 }) | g.toggles[i] as i16
+    })
+}
+
+// ---- keyboard layout ------------------------------------------------------------------
+
+/// The one keyboard layout: US English, locale 0409, device 0409.
+const HKL_US: u64 = 0x0409_0409;
+const HKL_PREV: u64 = 0;
+const HKL_NEXT: u64 = 1;
+
+fn key_of(vk: u32) -> Option<&'static keyboard::Key> {
+    keyboard::KEYS.iter().find(|k| k.vk as u32 == vk)
+}
+
+/// The scan code of a virtual key (0xE0nn for extended keys; 0: none).
+fn scan_of(vk: u32) -> u32 {
+    key_of(vk).map_or(0, |k| k.scan as u32)
+}
+
+extern "win64" fn GetKeyboardLayout(_thread: u32) -> u64 {
+    HKL_US
+}
+
+extern "win64" fn GetKeyboardLayoutList(n: i32, out: *mut u64) -> i32 {
+    if n > 0 && !out.is_null() {
+        // SAFETY: the caller's array of at least one HKL.
+        unsafe { *out = HKL_US };
+    }
+    1
+}
+
+extern "win64" fn GetKeyboardLayoutNameW(out: *mut u16) -> Bool {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    for (i, c) in "00000409\0".encode_utf16().enumerate() {
+        // SAFETY: the caller's KL_NAMELENGTH (9) buffer.
+        unsafe { *out.add(i) = c };
+    }
+    TRUE
+}
+
+extern "win64" fn GetKeyboardLayoutNameA(out: *mut u8) -> Bool {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's KL_NAMELENGTH (9) buffer.
+    unsafe { core::ptr::copy_nonoverlapping(c"00000409".as_ptr() as *const u8, out, 9) };
+    TRUE
+}
+
+/// Switching among the one layout returns it as the previous one.
+extern "win64" fn ActivateKeyboardLayout(hkl: u64, _flags: u32) -> u64 {
+    match hkl {
+        HKL_US | HKL_PREV | HKL_NEXT => HKL_US,
+        _ => fail(ERROR_INVALID_PARAMETER, 0),
+    }
+}
+
+/// Only the US layout (KLID 00000409) can be loaded.
+extern "win64" fn LoadKeyboardLayoutA(name: *const u8, _flags: u32) -> u64 {
+    // SAFETY: the caller's NUL-terminated KLID.
+    let id = unsafe { path::ansi_to_string(name) };
+    if id.is_some_and(|s| u32::from_str_radix(&s, 16) == Ok(0x409)) {
+        HKL_US
+    } else {
+        fail(ERROR_INVALID_PARAMETER, 0)
+    }
+}
+
+extern "win64" fn UnloadKeyboardLayout(hkl: u64) -> Bool {
+    if hkl == HKL_US { TRUE } else { fail(ERROR_INVALID_PARAMETER, FALSE) }
+}
+
+const MAPVK_VK_TO_VSC: u32 = 0;
+const MAPVK_VSC_TO_VK: u32 = 1;
+const MAPVK_VK_TO_CHAR: u32 = 2;
+const MAPVK_VSC_TO_VK_EX: u32 = 3;
+const MAPVK_VK_TO_VSC_EX: u32 = 4;
+
+extern "win64" fn MapVirtualKeyExW(code: u32, kind: u32, _hkl: u64) -> u32 {
+    let scan_table = |t: &[u8; 128], s: u32| if s < 128 { t[s as usize] as u32 } else { 0 };
+    match kind {
+        MAPVK_VK_TO_VSC => scan_of(code) & 0xFF,
+        MAPVK_VK_TO_VSC_EX => scan_of(code),
+        MAPVK_VK_TO_CHAR => key_of(code).map_or(0, |k| k.map_char as u32),
+        MAPVK_VSC_TO_VK => scan_table(&keyboard::SCAN_TO_VK, code & 0xFF),
+        MAPVK_VSC_TO_VK_EX if code & 0xFF00 == 0xE000 => scan_table(&keyboard::E0_SCAN_TO_VK_EX, code & 0xFF),
+        MAPVK_VSC_TO_VK_EX if code < 0x100 => scan_table(&keyboard::SCAN_TO_VK_EX, code),
+        _ => 0,
+    }
+}
+
+extern "win64" fn MapVirtualKeyW(code: u32, kind: u32) -> u32 {
+    MapVirtualKeyExW(code, kind, HKL_US)
+}
+
+/// The character a key makes in the given keyboard state. The US layout
+/// has no dead keys and nothing on AltGr (Ctrl+Alt); key releases make
+/// nothing.
+extern "win64" fn ToUnicodeEx(vk: u32, scan: u32, state: *const u8, out: *mut u16, cch: i32, _flags: u32, _hkl: u64) -> i32 {
+    if state.is_null() || scan & 0x8000 != 0 {
+        return 0;
+    }
+    // SAFETY: the caller's 256-byte keyboard state.
+    let s = |k: usize| unsafe { *state.add(k) };
+    let down = |k: usize| s(k) & 0x80 != 0;
+    let shift = down(0x10) || down(0xA0) || down(0xA1);
+    let ctrl = down(0x11) || down(0xA2) || down(0xA3);
+    let alt = down(0x12) || down(0xA4) || down(0xA5);
+    if ctrl && alt {
+        return 0;
+    }
+    let row = if ctrl { 2 } else if s(0x14) & 1 != 0 { 4 } else { 0 } + shift as usize;
+    let Some(c) = key_of(vk).map(|k| k.chars[row]).filter(|&c| c != keyboard::NONE) else { return 0 };
+    if !out.is_null() && cch > 0 {
+        // SAFETY: the caller's buffer of `cch` units.
+        unsafe {
+            *out = c;
+            if cch > 1 {
+                *out.add(1) = 0;
+            }
+        }
+    }
+    1
+}
+
+extern "win64" fn ToUnicode(vk: u32, scan: u32, state: *const u8, out: *mut u16, cch: i32, flags: u32) -> i32 {
+    ToUnicodeEx(vk, scan, state, out, cch, flags, HKL_US)
+}
+
+extern "win64" fn GetKeyboardState(out: *mut u8) -> Bool {
+    if out.is_null() {
+        return fail(ERROR_NOACCESS, FALSE);
+    }
+    with(|g| {
+        for i in 0..256 {
+            // SAFETY: the caller's 256-byte array.
+            unsafe { *out.add(i) = if g.keys[i] { 0x80 } else { 0 } | g.toggles[i] as u8 };
+        }
+    });
+    TRUE
+}
+
+extern "win64" fn SetKeyboardState(state: *const u8) -> Bool {
+    if state.is_null() {
+        return fail(ERROR_NOACCESS, FALSE);
+    }
+    with(|g| {
+        for i in 0..256 {
+            // SAFETY: the caller's 256-byte array.
+            let v = unsafe { *state.add(i) };
+            g.keys[i] = v & 0x80 != 0;
+            g.toggles[i] = v & 1 != 0;
+        }
+    });
+    TRUE
 }
 
 extern "win64" fn GetAsyncKeyState(vk: i32) -> i16 {
@@ -1359,6 +1689,38 @@ extern "win64" fn ClientToScreen(hwnd: u64, p: *mut i32) -> Bool {
         }
     }
     TRUE
+}
+
+/// The topmost visible window under a screen point (windows are top level
+/// and PRISM keeps no stacking order here: the newest wins).
+extern "win64" fn WindowFromPoint(x: i32, y: i32) -> u64 {
+    with(|g| {
+        g.windows
+            .iter()
+            .rev()
+            .find(|(_, w)| {
+                w.visible && x >= w.pos.0 && y >= w.pos.1 && x < w.pos.0 + w.size.0 as i32 && y < w.pos.1 + w.size.1 as i32
+            })
+            .map_or(0, |(h, _)| *h)
+    })
+}
+
+/// Client coordinates of `from` to those of `to` (0: the screen). Returns
+/// the horizontal offset in the low word and the vertical in the high.
+extern "win64" fn MapWindowPoints(from: u64, to: u64, pts: *mut i32, n: u32) -> i32 {
+    let origin = |h: u64| if h == 0 { Some((0, 0)) } else { with(|g| g.windows.get(&h).map(|w| w.pos)) };
+    let (Some(a), Some(b)) = (origin(from), origin(to)) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
+    let (dx, dy) = (a.0 - b.0, a.1 - b.1);
+    if !pts.is_null() {
+        for i in 0..n as usize {
+            // SAFETY: the caller's array of `n` POINTs.
+            unsafe {
+                *pts.add(2 * i) += dx;
+                *pts.add(2 * i + 1) += dy;
+            }
+        }
+    }
+    ((dx as u16 as u32) | ((dy as u16 as u32) << 16)) as i32
 }
 
 extern "win64" fn GetSystemMetrics(i: i32) -> i32 {
@@ -1457,6 +1819,79 @@ extern "win64" fn LoadCursorA(_inst: u64, id: u64) -> u64 {
     } else {
         fail(ERROR_NOT_SUPPORTED, 0)
     }
+}
+
+/// ICONINFO (32 bytes): fIcon, xHotspot @4, yHotspot @8, hbmMask @16,
+/// hbmColor @24. The bitmaps are copied, as on Windows.
+extern "win64" fn CreateIconIndirect(info: *const u8) -> u64 {
+    if info.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's ICONINFO.
+    let (is_icon, hx, hy, mask, color) = unsafe {
+        let p = info as u64;
+        (teb::get::<u32>(p, 0) != 0, teb::get::<u32>(p, 4), teb::get::<u32>(p, 8), teb::get::<u64>(p, 16), teb::get::<u64>(p, 24))
+    };
+    with(|g| {
+        let Some(m) = gdi::duplicate_bitmap(g, mask) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+        let c = if color == 0 { 0 } else { gdi::duplicate_bitmap(g, color).unwrap_or(0) };
+        let h = g.handle();
+        let hotspot = if is_icon { (0, 0) } else { (hx, hy) };
+        g.icons.insert(h, Icon { is_icon, hotspot, mask: m, color: c });
+        h
+    })
+}
+
+/// GetIconInfo hands out copies the caller deletes.
+extern "win64" fn GetIconInfo(icon: u64, out: *mut u8) -> Bool {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    with(|g| {
+        let Some((is_icon, hotspot, mask, color)) = g.icons.get(&icon).map(|i| (i.is_icon, i.hotspot, i.mask, i.color)) else {
+            return fail(ERROR_INVALID_CURSOR_HANDLE, FALSE);
+        };
+        let m = gdi::duplicate_bitmap(g, mask).unwrap_or(0);
+        let c = if color == 0 { 0 } else { gdi::duplicate_bitmap(g, color).unwrap_or(0) };
+        // SAFETY: the caller's ICONINFO.
+        unsafe {
+            let p = out as u64;
+            teb::put(p, 0, is_icon as u32);
+            teb::put(p, 4, hotspot.0);
+            teb::put(p, 8, hotspot.1);
+            teb::put(p, 16, m);
+            teb::put(p, 24, c);
+        }
+        TRUE
+    })
+}
+
+extern "win64" fn DestroyIcon(icon: u64) -> Bool {
+    with(|g| match g.icons.remove(&icon) {
+        Some(i) => {
+            g.bitmaps.remove(&i.mask);
+            g.gdi.remove(&i.mask);
+            g.bitmaps.remove(&i.color);
+            g.gdi.remove(&i.color);
+            TRUE
+        }
+        // Shared system icons (LoadIcon) are never destroyed.
+        None if (0x1_0000..0x2_0000).contains(&icon) => TRUE,
+        None => fail(ERROR_INVALID_CURSOR_HANDLE, FALSE),
+    })
+}
+
+const IMAGE_ICON: u32 = 1;
+const IMAGE_CURSOR: u32 = 2;
+const LR_LOADFROMFILE: u32 = 0x10;
+
+/// System icons and cursors by ordinal; images from resources or files
+/// are not supported (OSyx has no image resources to give).
+extern "win64" fn LoadImageW(inst: u64, name: u64, kind: u32, _w: i32, _h: i32, flags: u32) -> u64 {
+    if inst == 0 && name < 0x10000 && flags & LR_LOADFROMFILE == 0 && matches!(kind, IMAGE_ICON | IMAGE_CURSOR) {
+        return LoadCursorA(0, name);
+    }
+    fail(ERROR_RESOURCE_NAME_NOT_FOUND, 0)
 }
 
 extern "win64" fn LoadCursorW(inst: u64, id: u64) -> u64 {
@@ -2499,8 +2934,66 @@ extern "win64" fn GetMessageExtraInfo() -> i64 {
     0
 }
 
-extern "win64" fn GetQueueStatus(_flags: u32) -> u32 {
-    0 // no posted messages waiting for a peek
+/// High word: kinds of messages waiting; low word: kinds added since the
+/// last GetQueueStatus, GetMessage or PeekMessage.
+extern "win64" fn GetQueueStatus(flags: u32) -> u32 {
+    with(|g| {
+        g.pump();
+        let now = g.status() & flags;
+        let new = g.fresh & now;
+        g.fresh &= !flags;
+        (now << 16) | new
+    })
+}
+
+/// Waits for objects or for messages of `mask`'s kinds. Without
+/// MWMO_INPUTAVAILABLE only messages queued since the thread last looked
+/// count, as on Windows. Returns WAIT_OBJECT_0 + n for input.
+extern "win64" fn MsgWaitForMultipleObjectsEx(n: u32, hs: *const u64, ms: u32, mask: u32, flags: u32) -> u32 {
+    use crate::objects::{INFINITE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    if n > 63 || (n > 0 && hs.is_null()) {
+        return fail(ERROR_INVALID_PARAMETER, WAIT_FAILED);
+    }
+    let list: &[u64] = if n == 0 {
+        &[]
+    } else {
+        // SAFETY: the caller's array of `n` handles.
+        unsafe { core::slice::from_raw_parts(hs, n as usize) }
+    };
+    let all = flags & MWMO_WAITALL != 0;
+    let deadline = (ms != INFINITE).then(|| Instant::now() + Duration::from_millis(ms as u64));
+    loop {
+        let (seq, input, timer) = with(|g| {
+            g.pump();
+            let have = if flags & MWMO_INPUTAVAILABLE != 0 { g.status() } else { g.fresh & g.status() };
+            (crate::objects::sequence(), have & mask != 0, g.next_timer_in())
+        });
+        // With MWMO_WAITALL the objects count only together with input.
+        if !list.is_empty() && (!all || input) {
+            match crate::objects::wait(list, all, 0) {
+                Ok(WAIT_TIMEOUT) => {}
+                Ok(r) if all => return r.min(WAIT_OBJECT_0 + n),
+                Ok(r) => return r,
+                Err(e) => return fail(e, WAIT_FAILED),
+            }
+        }
+        if input && (!all || list.is_empty()) {
+            return WAIT_OBJECT_0 + n;
+        }
+        let left = match deadline {
+            Some(d) => match d.checked_duration_since(Instant::now()) {
+                Some(l) if !l.is_zero() => l,
+                _ => return WAIT_TIMEOUT,
+            },
+            None => Duration::from_secs(3600),
+        };
+        crate::winsta::note_idle();
+        idle(seq, left.min(timer));
+    }
+}
+
+extern "win64" fn MsgWaitForMultipleObjects(n: u32, hs: *const u64, wait_all: Bool, ms: u32, mask: u32) -> u32 {
+    MsgWaitForMultipleObjectsEx(n, hs, ms, mask, if wait_all != 0 { MWMO_WAITALL } else { 0 })
 }
 
 extern "win64" fn ReplyMessage(_result: i64) -> Bool {
@@ -2704,17 +3197,8 @@ extern "win64" fn RegisterWindowMessageW(name: *const u16) -> u32 {
     if name.is_null() {
         return 0;
     }
-    let mut text = String::new();
-    let mut i = 0;
     // SAFETY: a NUL-terminated string from the caller.
-    loop {
-        let c = unsafe { *name.add(i) };
-        if c == 0 {
-            break;
-        }
-        text.push(c as u8 as char);
-        i += 1;
-    }
+    let Some(text) = (unsafe { path::wide_to_string(name) }) else { return 0 };
     let mut list = REGISTERED_MESSAGES.lock().unwrap();
     match list.iter().position(|n| n.eq_ignore_ascii_case(&text)) {
         Some(i) => BASE + i as u32,
@@ -2824,6 +3308,195 @@ extern "win64" fn FindWindowW(class: *const u16, title: *const u16) -> u64 {
 
 extern "win64" fn FindWindowExW(_parent: u64, _after: u64, class: *const u16, title: *const u16) -> u64 {
     FindWindowW(class, title)
+}
+
+// ---- displays ----------------------------------------------------------------------------
+
+const DISPLAY_NAME: &str = r"\\.\DISPLAY1";
+
+fn put_wide(p: *mut u8, max_chars: usize, s: &str) {
+    for (i, c) in s.encode_utf16().chain(core::iter::once(0)).take(max_chars).enumerate() {
+        // SAFETY: the caller's field of `max_chars` WCHARs.
+        unsafe { teb::put(p as u64, i * 2, c) };
+    }
+}
+
+/// DISPLAY_DEVICEW (840 bytes): the one PRISM display adapter, and below it
+/// the one monitor.
+extern "win64" fn EnumDisplayDevicesW(device: *const u16, index: u32, out: *mut u8, _flags: u32) -> Bool {
+    // SAFETY: the caller's DISPLAY_DEVICEW starts with cb.
+    if out.is_null() || unsafe { teb::get::<u32>(out as u64, 0) } < 840 || index != 0 {
+        return FALSE;
+    }
+    // SAFETY: a NUL-terminated device name, or NULL.
+    let parent = unsafe { path::wide_to_string(device) };
+    let (name, text, flags) = match parent.as_deref() {
+        None | Some("") => (String::from(DISPLAY_NAME), "OSyx PRISM display", 0x1 | 0x4), // ATTACHED_TO_DESKTOP | PRIMARY_DEVICE
+        Some(p) if p.eq_ignore_ascii_case(DISPLAY_NAME) => (alloc::format!(r"{DISPLAY_NAME}\Monitor0"), "Generic PnP Monitor", 0x1 | 0x2), // ACTIVE | ATTACHED
+        _ => return FALSE,
+    };
+    // SAFETY: the caller's 840-byte DISPLAY_DEVICEW.
+    unsafe {
+        core::ptr::write_bytes(out.add(4), 0, 836);
+        put_wide(out.add(4), 32, &name);
+        put_wide(out.add(68), 128, text);
+        teb::put(out as u64, 324, flags as u32);
+    }
+    TRUE
+}
+
+const ENUM_CURRENT_SETTINGS: u32 = 0xFFFF_FFFF;
+const ENUM_REGISTRY_SETTINGS: u32 = 0xFFFF_FFFE;
+
+/// DEVMODEW (220 bytes) of the display's one mode: the screen at 32 bpp
+/// and 60 Hz.
+extern "win64" fn EnumDisplaySettingsExW(device: *const u16, mode: u32, out: *mut u8, _flags: u32) -> Bool {
+    if out.is_null() || !matches!(mode, ENUM_CURRENT_SETTINGS | ENUM_REGISTRY_SETTINGS | 0) {
+        return FALSE;
+    }
+    // SAFETY: a NUL-terminated device name, or NULL.
+    if let Some(d) = unsafe { path::wide_to_string(device) } {
+        if !d.is_empty() && !d.eq_ignore_ascii_case(DISPLAY_NAME) {
+            return FALSE;
+        }
+    }
+    let (_, _, w, h) = screen_rect();
+    // SAFETY: the caller's DEVMODEW: dmSize/dmDriverExtra at 68/70 say how
+    // much it is; the public fields fit in 220 bytes.
+    unsafe {
+        core::ptr::write_bytes(out, 0, 220);
+        put_wide(out, 32, "DISPLAY1");
+        teb::put(out as u64, 64, 0x0401u16); // dmSpecVersion (DM_SPECVERSION)
+        teb::put(out as u64, 68, 220u16); // dmSize
+        // DM_POSITION | DM_DISPLAYORIENTATION | DM_BITSPERPEL | DM_PELSWIDTH
+        // | DM_PELSHEIGHT | DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY
+        teb::put(out as u64, 72, 0x20u32 | 0x80 | 0x4_0000 | 0x8_0000 | 0x10_0000 | 0x20_0000 | 0x40_0000);
+        teb::put(out as u64, 166, 96u16); // dmLogPixels
+        teb::put(out as u64, 168, 32u32); // dmBitsPerPel
+        teb::put(out as u64, 172, w as u32);
+        teb::put(out as u64, 176, h as u32);
+        teb::put(out as u64, 184, 60u32); // dmDisplayFrequency
+    }
+    TRUE
+}
+
+extern "win64" fn EnumDisplaySettingsW(device: *const u16, mode: u32, out: *mut u8) -> Bool {
+    EnumDisplaySettingsExW(device, mode, out, 0)
+}
+
+const AR_NOSENSOR: u32 = 0x10;
+
+extern "win64" fn GetAutoRotationState(out: *mut u32) -> Bool {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's AR_STATE.
+    unsafe { *out = AR_NOSENSOR };
+    TRUE
+}
+
+/// No touch screen or gesture input exists: registering is accepted and no
+/// WM_TOUCH or WM_GESTURE is ever sent.
+extern "win64" fn RegisterTouchWindow(hwnd: u64, _flags: u32) -> Bool {
+    if is_window(hwnd) { TRUE } else { fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) }
+}
+
+extern "win64" fn SetGestureConfig(hwnd: u64, _reserved: u32, _n: u32, _configs: *const u8, _size: u32) -> Bool {
+    if is_window(hwnd) { TRUE } else { fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) }
+}
+
+/// RAWINPUTDEVICE (16 bytes) registrations are accepted; OSyx delivers
+/// input as window messages only, never WM_INPUT.
+extern "win64" fn RegisterRawInputDevices(devices: *const u8, n: u32, size: u32) -> Bool {
+    if devices.is_null() || n == 0 || size != 16 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    TRUE
+}
+
+// ---- clipboard --------------------------------------------------------------------------
+//
+// The clipboard of this process: OLE (OleSetClipboard) is the only way
+// Gecko puts data on it, so through user32 it is always empty.
+
+extern "win64" fn OpenClipboard(hwnd: u64) -> Bool {
+    with(|g| match g.clipboard_open {
+        Some(_) => fail(ERROR_ACCESS_DENIED, FALSE),
+        None => {
+            g.clipboard_open = Some(hwnd);
+            TRUE
+        }
+    })
+}
+
+extern "win64" fn CloseClipboard() -> Bool {
+    with(|g| match g.clipboard_open.take() {
+        Some(_) => TRUE,
+        None => fail(ERROR_CLIPBOARD_NOT_OPEN, FALSE),
+    })
+}
+
+extern "win64" fn GetOpenClipboardWindow() -> u64 {
+    with(|g| g.clipboard_open.unwrap_or(0))
+}
+
+extern "win64" fn GetClipboardData(_format: u32) -> u64 {
+    // Open: no data in any format. Closed: the clipboard must be opened first.
+    with(|g| if g.clipboard_open.is_some() { 0 } else { fail(ERROR_CLIPBOARD_NOT_OPEN, 0) })
+}
+
+extern "win64" fn IsClipboardFormatAvailable(_format: u32) -> Bool {
+    FALSE
+}
+
+/// Nothing ever changes the clipboard's contents through user32.
+extern "win64" fn GetClipboardSequenceNumber() -> u32 {
+    0
+}
+
+extern "win64" fn GetClipboardFormatNameW(format: u32, buf: *mut u16, n: i32) -> i32 {
+    let list = REGISTERED_MESSAGES.lock().unwrap();
+    let Some(name) = format.checked_sub(0xC000).and_then(|i| list.get(i as usize)) else {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    };
+    if buf.is_null() || n <= 0 {
+        return 0;
+    }
+    let units: Vec<u16> = name.encode_utf16().take(n as usize - 1).collect();
+    // SAFETY: the caller's buffer of `n` WCHARs.
+    unsafe {
+        core::ptr::copy_nonoverlapping(units.as_ptr(), buf, units.len());
+        *buf.add(units.len()) = 0;
+    }
+    units.len() as i32
+}
+
+/// Clipboard formats share the atom table of registered window messages.
+extern "win64" fn RegisterClipboardFormatW(name: *const u16) -> u32 {
+    RegisterWindowMessageW(name)
+}
+
+extern "win64" fn EnumThreadWindows(thread: u32, proc_: u64, param: u64) -> Bool {
+    if proc_ == 0 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let list: Vec<u64> = with(|g| g.windows.iter().filter(|(_, w)| w.thread as u32 == thread).map(|(h, _)| *h).collect());
+    if list.is_empty() {
+        return FALSE;
+    }
+    // SAFETY: a caller-supplied WNDENUMPROC of the Windows x64 ABI.
+    let f: extern "win64" fn(u64, i64) -> i32 = unsafe { core::mem::transmute(proc_ as usize) };
+    for h in list {
+        if f(h, param as i64) == 0 {
+            break;
+        }
+    }
+    TRUE
+}
+
+/// Windows here have no children to enumerate.
+extern "win64" fn EnumChildWindows(_parent: u64, _proc: u64, _param: u64) -> Bool {
+    FALSE
 }
 
 extern "win64" fn EnumWindows(proc_: u64, param: u64) -> Bool {
@@ -3138,6 +3811,47 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetMessageTime,
         GetMessageExtraInfo,
         GetQueueStatus,
+        GetCapture,
+        CreateIconIndirect,
+        GetIconInfo,
+        DestroyIcon,
+        LoadImageW,
+        OpenClipboard,
+        CloseClipboard,
+        GetOpenClipboardWindow,
+        GetClipboardData,
+        IsClipboardFormatAvailable,
+        GetClipboardSequenceNumber,
+        GetClipboardFormatNameW,
+        EnumDisplayDevicesW,
+        EnumDisplaySettingsExW,
+        EnumDisplaySettingsW,
+        GetAutoRotationState,
+        RegisterTouchWindow,
+        SetGestureConfig,
+        RegisterRawInputDevices,
+        RegisterClipboardFormatW,
+        TrackMouseEvent,
+        GetLastInputInfo,
+        WindowFromPoint,
+        MapWindowPoints,
+        EnumThreadWindows,
+        EnumChildWindows,
+        GetKeyboardLayout,
+        GetKeyboardLayoutList,
+        GetKeyboardLayoutNameW,
+        GetKeyboardLayoutNameA,
+        ActivateKeyboardLayout,
+        LoadKeyboardLayoutA,
+        UnloadKeyboardLayout,
+        MapVirtualKeyExW,
+        MapVirtualKeyW,
+        ToUnicodeEx,
+        ToUnicode,
+        GetKeyboardState,
+        SetKeyboardState,
+        MsgWaitForMultipleObjects,
+        MsgWaitForMultipleObjectsEx,
         ReplyMessage,
         InSendMessage,
         InSendMessageEx,

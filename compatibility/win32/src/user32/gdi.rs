@@ -248,6 +248,13 @@ impl Bitmap {
     }
 }
 
+/// An independent copy of a bitmap (icons keep their own), or None.
+pub(super) fn duplicate_bitmap(g: &mut Gui, h: u64) -> Option<u64> {
+    let b = g.bitmaps.get(&h)?;
+    let copy = Bitmap { dib: b.dib.clone(), storage: b.storage.clone(), section: false };
+    Some(insert_bitmap(g, copy))
+}
+
 fn insert_bitmap(g: &mut Gui, b: Bitmap) -> u64 {
     let h = g.handle();
     g.bitmaps.insert(h, b);

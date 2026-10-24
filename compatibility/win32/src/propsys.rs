@@ -3,13 +3,18 @@
 //! PropVariantCopy does for the scalar types, FILETIME, strings
 //! (VT_LPWSTR, VT_BSTR), VT_CLSID and VT_UNKNOWN; vectors, arrays, blobs
 //! and streams are not supported and are refused with E_INVALIDARG.
+//! Window property stores (SHGetPropertyStoreForWindow) keep each window's
+//! values as text, the way Windows hands them back (VT_LPWSTR), shared by
+//! every store of that window and dropped with the window.
 #![allow(non_snake_case)]
 use crate::path;
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 use os_std::sync::Mutex;
 
 const S_OK: u32 = 0;
+const S_FALSE: u32 = 1;
+const E_FAIL: u32 = 0x8000_4005;
 const E_NOINTERFACE: u32 = 0x8000_4002;
 const E_POINTER: u32 = 0x8000_4003;
 const E_INVALIDARG: u32 = 0x8007_0057;
@@ -298,6 +303,181 @@ extern "win64" fn PSCreateMemoryPropertyStore(riid: *const [u8; 16], out: *mut u
     Release(this);
     hr
 }
+
+// ---- window property stores ----------------------------------------------------------------
+
+/// Per window (or per detached store, keyed by its address): PROPERTYKEY and
+/// the value's text with its NUL, in insertion order.
+type WindowProps = BTreeMap<u64, Vec<([u8; 20], Vec<u16>)>>;
+static WINDOW_PROPS: Mutex<WindowProps> = Mutex::new(BTreeMap::new());
+
+#[repr(C)]
+struct WindowStore {
+    vtbl: &'static Vtbl,
+    refs: AtomicU32,
+    /// WINDOW_PROPS key.
+    key: u64,
+    detached: bool,
+}
+
+static WINDOW_VTBL: Vtbl = Vtbl {
+    query_interface: WsQueryInterface,
+    add_ref: WsAddRef,
+    release: WsRelease,
+    get_count: WsGetCount,
+    get_at: WsGetAt,
+    get_value: WsGetValue,
+    set_value: WsSetValue,
+    commit: Commit,
+};
+
+fn window_store<'a>(this: u64) -> &'a WindowStore {
+    // SAFETY: `this` is a WindowStore made by window_property_store.
+    unsafe { &*(this as *const WindowStore) }
+}
+
+extern "win64" fn WsQueryInterface(this: u64, riid: *const [u8; 16], out: *mut u64) -> u32 {
+    if riid.is_null() || out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's IID and out pointer.
+    unsafe {
+        if *riid == IID_IUNKNOWN || *riid == IID_IPROPERTYSTORE {
+            WsAddRef(this);
+            *out = this;
+            return S_OK;
+        }
+        *out = 0;
+    }
+    E_NOINTERFACE
+}
+
+extern "win64" fn WsAddRef(this: u64) -> u32 {
+    window_store(this).refs.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+extern "win64" fn WsRelease(this: u64) -> u32 {
+    let left = window_store(this).refs.fetch_sub(1, Ordering::AcqRel) - 1;
+    if left == 0 {
+        // SAFETY: the last reference: the Box made in window_property_store.
+        let s = unsafe { Box::from_raw(this as *mut WindowStore) };
+        if s.detached {
+            WINDOW_PROPS.lock().unwrap().remove(&s.key);
+        }
+    }
+    left
+}
+
+/// Windows reports an empty window store with E_FAIL and a count of 0.
+extern "win64" fn WsGetCount(this: u64, count: *mut u32) -> u32 {
+    if count.is_null() {
+        return E_POINTER;
+    }
+    let n = WINDOW_PROPS.lock().unwrap().get(&window_store(this).key).map_or(0, |p| p.len());
+    // SAFETY: the caller's out pointer.
+    unsafe { *count = n as u32 };
+    if n == 0 { E_FAIL } else { S_OK }
+}
+
+extern "win64" fn WsGetAt(this: u64, i: u32, key: *mut [u8; 20]) -> u32 {
+    if key.is_null() {
+        return E_POINTER;
+    }
+    let props = WINDOW_PROPS.lock().unwrap();
+    match props.get(&window_store(this).key).and_then(|p| p.get(i as usize)) {
+        Some((k, _)) => {
+            // SAFETY: the caller's PROPERTYKEY.
+            unsafe { *key = *k };
+            S_OK
+        }
+        None => E_INVALIDARG,
+    }
+}
+
+/// A stored value comes back as a fresh VT_LPWSTR with S_FALSE, as on
+/// Windows; an absent one as VT_EMPTY with S_OK.
+extern "win64" fn WsGetValue(this: u64, key: *const [u8; 20], out: *mut PropVariant) -> u32 {
+    if key.is_null() || out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's PROPERTYKEY.
+    let k = unsafe { *key };
+    let props = WINDOW_PROPS.lock().unwrap();
+    let mut v = [0u8; 24];
+    let found = props.get(&window_store(this).key).and_then(|p| p.iter().find(|(x, _)| *x == k));
+    let hr = match found {
+        Some((_, text)) => {
+            let d = crate::ole32::CoTaskMemAlloc(text.len() * 2);
+            if d == 0 {
+                return E_OUTOFMEMORY;
+            }
+            // SAFETY: a fresh block of text.len() UTF-16 units.
+            unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), d as *mut u16, text.len()) };
+            v[0..2].copy_from_slice(&VT_LPWSTR.to_le_bytes());
+            v[8..16].copy_from_slice(&d.to_le_bytes());
+            S_FALSE
+        }
+        None => S_OK,
+    };
+    // SAFETY: the caller's PROPVARIANT.
+    unsafe { *out = v };
+    hr
+}
+
+/// VT_EMPTY removes the property; any other value is kept as its text.
+extern "win64" fn WsSetValue(this: u64, key: *const [u8; 20], value: *const PropVariant) -> u32 {
+    if key.is_null() || value.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's PROPERTYKEY and PROPVARIANT.
+    let (k, v) = unsafe { (*key, *value) };
+    let mut props = WINDOW_PROPS.lock().unwrap();
+    let list = props.entry(window_store(this).key).or_default();
+    if vt(&v) == VT_EMPTY {
+        list.retain(|(x, _)| *x != k);
+        return S_OK;
+    }
+    let mut units: Vec<u16> = match text(&v) {
+        Ok(t) => t.encode_utf16().collect(),
+        Err(e) => return e,
+    };
+    units.push(0);
+    match list.iter_mut().find(|(x, _)| *x == k) {
+        Some(slot) => slot.1 = units,
+        None => list.push((k, units)),
+    }
+    S_OK
+}
+
+/// SHGetPropertyStoreForWindow. A handle that is not a window gets an
+/// empty store of its own (Windows does not reject it), and a destroyed
+/// window's values are gone.
+pub(crate) fn window_property_store(hwnd: u64, riid: *const [u8; 16], out: *mut u64) -> u32 {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    if hwnd == 0 {
+        // SAFETY: the caller's out pointer.
+        unsafe { *out = 0 };
+        return E_INVALIDARG;
+    }
+    let live = crate::user32::is_window(hwnd);
+    let mut props = WINDOW_PROPS.lock().unwrap();
+    props.retain(|&k, _| k & DETACHED != 0 || crate::user32::is_window(k));
+    drop(props);
+    let s = Box::new(WindowStore { vtbl: &WINDOW_VTBL, refs: AtomicU32::new(1), key: hwnd, detached: !live });
+    let this = Box::into_raw(s) as u64;
+    if !live {
+        // SAFETY: just made; nothing else refers to it yet.
+        unsafe { (*(this as *mut WindowStore)).key = this | DETACHED };
+    }
+    let hr = WsQueryInterface(this, riid, out);
+    WsRelease(this);
+    hr
+}
+
+/// Marks WINDOW_PROPS keys of detached stores (HWNDs never have this bit).
+const DETACHED: u64 = 1 << 63;
 
 // ---- conversions ----------------------------------------------------------------------------
 

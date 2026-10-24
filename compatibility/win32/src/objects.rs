@@ -304,6 +304,17 @@ pub fn signal_all() {
     os_sys::futex_wake(SEQ.as_ptr(), u32::MAX);
 }
 
+/// The change sequence, read before checking a condition that a later
+/// `signal_all` may change (see `wait_for_change`).
+pub fn sequence() -> u32 {
+    SEQ.load(Ordering::SeqCst)
+}
+
+/// Sleeps until `signal_all` runs after `seq` was read, or `timeout` passes.
+pub fn wait_for_change(seq: u32, timeout: Duration) {
+    let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, timeout.as_nanos().max(1) as u64);
+}
+
 pub const WAIT_OBJECT_0: u32 = 0;
 pub const WAIT_TIMEOUT: u32 = 0x102;
 pub const WAIT_FAILED: u32 = 0xFFFF_FFFF;

@@ -249,8 +249,170 @@ pub fn path_cch_canonicalize() -> u64 {
     PathCchCanonicalize as *const () as u64
 }
 
+/// Joins `dir` and `file` the way PathCombineW does: an absolute `file`
+/// (drive or UNC) replaces `dir`, a rooted one ("\x") keeps only the root
+/// of `dir`; the result is canonicalized. NULL if both are NULL or the
+/// result does not fit MAX_PATH (the buffer is then empty).
+extern "win64" fn PathCombineW(dest: *mut u16, dir: *const u16, file: *const u16) -> *mut u16 {
+    if dest.is_null() {
+        return core::ptr::null_mut();
+    }
+    let fail = || {
+        // SAFETY: the caller's MAX_PATH buffer.
+        unsafe { *dest = 0 };
+        core::ptr::null_mut()
+    };
+    if dir.is_null() && file.is_null() {
+        return fail();
+    }
+    // SAFETY: NUL-terminated strings (or NULL).
+    let d = if dir.is_null() { Vec::new() } else { unsafe { read(dir) } };
+    // SAFETY: as above.
+    let f = if file.is_null() { Vec::new() } else { unsafe { read(file) } };
+    let absolute = (f.len() >= 2 && f[1] == b':' as u16) || (f.len() >= 2 && f[0] == BS && f[1] == BS);
+    let joined = if absolute || d.is_empty() {
+        f
+    } else if f.first() == Some(&BS) {
+        let mut j = d[..root_len(&d)].to_vec();
+        while j.last() == Some(&BS) {
+            j.pop();
+        }
+        j.extend_from_slice(&f);
+        j
+    } else {
+        let mut j = d;
+        if !f.is_empty() {
+            if j.last() != Some(&BS) {
+                j.push(BS);
+            }
+            j.extend_from_slice(&f);
+        }
+        j
+    };
+    let out = canonicalize(&joined);
+    if out.len() >= MAX_PATH {
+        return fail();
+    }
+    // SAFETY: the caller's MAX_PATH buffer.
+    unsafe { write(dest, &out) };
+    dest
+}
+
+/// The last element: what follows the last '\', '/' or ':' that has a
+/// non-separator after it (so "C:\a\b\" gives "b\").
+extern "win64" fn PathFindFileNameW(p: *const u16) -> *const u16 {
+    if p.is_null() {
+        return p;
+    }
+    // SAFETY: the caller's NUL-terminated path.
+    let s = unsafe { read(p) };
+    let sep = |c: u16| c == BS || c == b'/' as u16;
+    let mut start = 0;
+    for i in 0..s.len() {
+        if (sep(s[i]) || s[i] == b':' as u16) && i + 1 < s.len() && !sep(s[i + 1]) {
+            start = i + 1;
+        }
+    }
+    // SAFETY: within the string.
+    unsafe { p.add(start) }
+}
+
+/// OSyx has no network drives: only UNC paths are network paths.
+extern "win64" fn PathIsNetworkPathW(p: *const u16) -> i32 {
+    if p.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's NUL-terminated path.
+    let s = unsafe { read(p) };
+    (s.len() >= 2 && s[0] == BS && s[1] == BS) as i32
+}
+
+/// Replaces the longest leading folder that one of the documented
+/// variables names with "%NAME%"; FALSE if none matches or it does not fit.
+extern "win64" fn PathUnExpandEnvStringsW(p: *const u16, out: *mut u16, cch: u32) -> i32 {
+    if p.is_null() || out.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's NUL-terminated path.
+    let s = unsafe { read(p) };
+    let mut best: Option<(&str, usize)> = None;
+    for name in ["ALLUSERSPROFILE", "APPDATA", "ProgramFiles", "SystemRoot", "SystemDrive", "USERPROFILE"] {
+        let Some(v) = kernel32::env_get(name) else { continue };
+        let v: Vec<u16> = v.encode_utf16().collect();
+        if v.is_empty() || v.len() > s.len() || best.is_some_and(|(_, n)| n >= v.len()) {
+            continue;
+        }
+        if s[..v.len()].iter().zip(&v).all(|(a, b)| lower(*a) == lower(*b)) {
+            best = Some((name, v.len()));
+        }
+    }
+    let Some((name, n)) = best else { return 0 };
+    let mut r: Vec<u16> = alloc::format!("%{name}%").encode_utf16().collect();
+    r.extend_from_slice(&s[n..]);
+    if r.len() + 1 > cch as usize {
+        return 0;
+    }
+    // SAFETY: the caller's buffer of `cch` units.
+    unsafe {
+        core::ptr::copy_nonoverlapping(r.as_ptr(), out, r.len());
+        *out.add(r.len()) = 0;
+    }
+    1
+}
+
+/// Case-insensitive search; an empty needle finds nothing.
+extern "win64" fn StrStrIW(hay: *const u16, needle: *const u16) -> *const u16 {
+    if hay.is_null() || needle.is_null() {
+        return core::ptr::null();
+    }
+    // SAFETY: the caller's NUL-terminated strings.
+    let (h, n) = unsafe { (read(hay), read(needle)) };
+    if n.is_empty() || n.len() > h.len() {
+        return core::ptr::null();
+    }
+    match (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].iter().zip(&n).all(|(a, b)| lower(*a) == lower(*b))) {
+        // SAFETY: within the string.
+        Some(i) => unsafe { hay.add(i) },
+        None => core::ptr::null(),
+    }
+}
+
+/// OSyx registers no file associations.
+extern "win64" fn AssocQueryStringW(_flags: u32, _what: u32, _assoc: *const u16, _extra: *const u16, out: *mut u16, len: *mut u32) -> u32 {
+    if !out.is_null() && !len.is_null() {
+        // SAFETY: the caller's buffer of at least one unit when *len > 0.
+        unsafe {
+            if *len > 0 {
+                *out = 0;
+            }
+        }
+    }
+    0x8007_0483 // HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION)
+}
+
+/// IsOS (ordinal 437): the answers Windows 10/11 Pro gives on a workstation
+/// that is not in a domain, as observed on Windows 10.0.26300.
+extern "win64" fn IsOS(feature: u32) -> i32 {
+    matches!(feature, 1 | 3 | 4 | 7 | 18 | 20 | 25 | 26 | 37) as i32
+}
+
+pub fn ordinals() -> Vec<(u16, u64)> {
+    alloc::vec![(437, IsOS as *const () as u64)]
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![PathRemoveFileSpecW, PathAppendW, PathMatchSpecW]
+    export_table![
+        PathRemoveFileSpecW,
+        PathAppendW,
+        PathMatchSpecW,
+        PathCombineW,
+        PathFindFileNameW,
+        PathIsNetworkPathW,
+        PathUnExpandEnvStringsW,
+        StrStrIW,
+        AssocQueryStringW,
+        IsOS,
+    ]
 }
 
 // ---- WinRT ---------------------------------------------------------------------

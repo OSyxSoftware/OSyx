@@ -362,6 +362,7 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         where_text(record.address),
         os_sys::gettid()
     );
+    crate::kernel32::print_failures();
     if record.code == 0xc000_0005 && record.count >= 2 {
         // EXCEPTION_ACCESS_VIOLATION: [0] read/write/execute, [1] the address.
         let kind = match record.info[0] {

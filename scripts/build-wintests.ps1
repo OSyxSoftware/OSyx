@@ -51,7 +51,14 @@ $programs = [ordered]@{
     'mapping.exe' = @{ Src = @('mapping.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'winmm.exe' = @{ Src = @('winmm.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lwinmm', '-lkernel32') }
     'sandbox.exe' = @{ Src = @('sandbox.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ladvapi32', '-lkernel32') }
+    'ole2.exe' = @{ Src = @('ole2.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lole32', '-luser32', '-lkernel32') }
     'interop.exe' = @{ Src = @('interop.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lole32', '-loleaut32', '-luser32', '-luserenv', '-ldbghelp', '-lcrypt32', '-ladvapi32', '-lkernel32') }
+    'msgwait.exe' = @{ Src = @('msgwait.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshell32', '-lole32', '-luser32', '-lkernel32') }
+    'dwm.exe' = @{ Src = @('dwm.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ldwmapi', '-limm32', '-lwtsapi32', '-luser32', '-lkernel32') }
+    'keyboard.exe' = @{ Src = @('keyboard.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lkernel32') }
+    'input.exe' = @{ Src = @('input.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lgdi32', '-lkernel32') }
+    'shlpath.exe' = @{ Src = @('shlpath.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshlwapi', '-lkernel32') }
+    'secattr.exe' = @{ Src = @('secattr.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ladvapi32', '-lkernel32') }
     'shell.exe' = @{ Src = @('shell.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshell32', '-lole32', '-lkernel32') }
     'platform.exe' = @{ Src = @('platform.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshlwapi', '-lruntimeobject', '-lkernel32') }
     # The real UCRT import library: every C runtime function comes through

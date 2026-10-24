@@ -39,6 +39,13 @@ static DWORD joined(HANDLE h) {
     DWORD code=0; if (WaitForSingleObject(h,2000)!=WAIT_OBJECT_0) return 99;
     GetExitCodeThread(h,&code);CloseHandle(h);return code;
 }
+static volatile BYTE byte_flag;
+static DWORD WINAPI byte_thread(void *arg) {
+    (void)arg; BYTE zero=0;
+    while (!byte_flag) { if (!WaitOnAddress((void *)&byte_flag,&zero,1,1000)) return 93; }
+    return 15;
+}
+
 void __stdcall start(void) {
     check("exclusive SRW try acquire",TryAcquireSRWLockExclusive(&rw));
     check("reader blocked by writer",!TryAcquireSRWLockShared(&rw));
@@ -83,7 +90,16 @@ void __stdcall start(void) {
     check("condition variable wakes and rechecks predicate",joined(waiter)==13);
     LONG different=1;check("WaitOnAddress mismatched value returns immediately",WaitOnAddress(&address,&different,4,0));
     LONG zero=0;check("WaitOnAddress zero timeout",!WaitOnAddress(&address,&zero,4,0)&&GetLastError()==ERROR_TIMEOUT);
-    check("unsupported address size fails explicitly",!WaitOnAddress(&address,&zero,1,10)&&GetLastError()==ERROR_NOT_SUPPORTED);
+    {
+        volatile BYTE b8[8]={0};BYTE bz=0,bo=1;
+        check("1-byte WaitOnAddress mismatch",WaitOnAddress((void *)&b8[1],&bo,1,0));
+        check("1-byte WaitOnAddress timeout",!WaitOnAddress((void *)&b8[1],&bz,1,20)&&GetLastError()==ERROR_TIMEOUT);
+        static volatile LONG64 q=5;LONG64 q5=5,q6=6;
+        check("8-byte WaitOnAddress mismatch",WaitOnAddress((void *)&q,&q6,8,0));
+        check("8-byte WaitOnAddress timeout",!WaitOnAddress((void *)&q,&q5,8,20)&&GetLastError()==ERROR_TIMEOUT);
+    }
+    byte_flag=0;waiter=CreateThread(NULL,0,byte_thread,NULL,0,NULL);Sleep(30);byte_flag=1;WakeByAddressSingle((void *)&byte_flag);
+    check("1-byte WaitOnAddress wakes",joined(waiter)==15);
     waiter=CreateThread(NULL,0,address_thread,NULL,0,NULL);Sleep(30);InterlockedExchange(&address,1);WakeByAddressAll((void *)&address);
     check("WaitOnAddress uses real futex wakeup",joined(waiter)==14);
     DWORD needed=0;check("module enumeration size query",K32EnumProcessModules(GetCurrentProcess(),NULL,0,&needed)&&needed>=16);
