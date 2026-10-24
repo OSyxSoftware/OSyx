@@ -998,5 +998,37 @@ roughly 50 MiB. Attempt 115 isolates the effect of synchronous tracing by
 retaining document/TLS logs while making full network tracing opt-in.
 No TLS verification or URL-classification preference is disabled.
 
+### Attempt 116: visible HTTPS page, remaining memory limit
+
+With normal document/TLS logging and 6144 MiB guest RAM, the unmodified
+browser visibly renders Example Domain over HTTPS. Its content process logs
+OnLocationChange to https://example.com/ at 245.03 seconds and the document's
+OnStopRequest with status zero at 245.71. The real browser title becomes
+Example Domain. Evidence: build/zen/attempt-116-https.png. No certificate or
+URL-classification bypass was used.
+
+USB mouse/keyboard input then opens a second tab and enters the local file
+URL. Both tab rows remain under one desktop taskbar entry. The file loads
+and its title changes, and typed text is visible in the real URL popup
+(attempt-116-tabs.png and attempt-116-local-render.png). This run does not
+repeat the successful local button click from attempt 100: the local content
+area stays white while additional content processes 15/16 exhaust the 6 GiB
+guest at 620.99/621.02 seconds. The result therefore remains partial despite
+the newly verified HTTPS rendering. The same VM was observed for about
+19 wall-clock minutes, ending at 803 seconds guest uptime, then stopped.
+
+Host memory pressure is material: an earlier 8192 MiB run measured about
+430 MiB free physical host RAM, with QEMU at 9401 MiB private memory and
+3616 MiB working set. Reducing the guest to 6144 MiB improves initial loading
+but does not provide enough guest RAM for the subsequent multi-tab sequence.
+Startup/input remain slow, bundled fonts lack CJK glyph coverage, and Gecko's
+sandbox remains disabled in this compatibility configuration. These limits
+keep Zen experimental; it is not registered in the launcher or as default.
+
+The tracked [functional smoke report](../../research/compatibility-matrix/zen-1.23.4b-functional-smoke.json)
+records current results and evidence hashes separately from the historical
+attempts 1–4 report. Full Win32 regression remains 2111/0; native wsock32 is
+51/0. Detailed manual observations are in build/zen/attempt-116.result.json.
+
 References: Mozilla's [PollableEvent.cpp](https://github.com/mozilla-firefox/firefox/blob/main/netwerk/base/PollableEvent.cpp),
 Microsoft's [accept](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept).

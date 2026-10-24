@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-24",
+  "osyx_version": "0.1.0",
+  "version": "1.23.4b",
+  "source_commit": "0118ff0",
+  "status": "partial_functional_smoke_with_memory_limit",
+  "vendor_payload_modified": false,
+  "https_page_rendered": true,
+  "browser_family_taskbar_entries": 1,
+  "win32_regression": {
+    "failed": 0,
+    "passed": 2111,
+    "log": "build/zen/win-inherit-nonblock-113.log"
+  },
+  "native_wsock32": {
+    "passed": 51,
+    "failed": 0
+  },
+  "guest_memory_mib": 6144,
+  "software_webrender": true,
+  "gecko_sandbox_disabled": true,
+  "certificate_verification_bypassed": false,
+  "launcher_registered": false,
+  "default_browser_set": false,
+  "observations": [
+    "Visible browser chrome and Example Domain over HTTPS.",
+    "Actual keyboard input and two tabs observed under one taskbar entry.",
+    "Additional content processes exhausted 6 GiB guest RAM; local button retest did not finish. Earlier local rendering/click/tabs passed in attempt 100."
+  ],
+  "remaining_limitations": [
+    "Slow startup and input on the current constrained QEMU host.",
+    "Memory grows with extra browser processes; 6 GiB is insufficient for the tested multi-tab sequence.",
+    "Missing CJK glyph coverage in bundled fonts.",
+    "Compatibility configuration still disables Gecko sandbox."
+  ],
+  "evidence": {
+    "serial": "build/zen/attempt-116.serial.log",
+    "result": "build/zen/attempt-116.result.json",
+    "https_screenshot": "build/zen/attempt-116-https.png",
+    "tabs_screenshot": "build/zen/attempt-116-tabs.png",
+    "https_screenshot_sha256": "d613d59eaed15259520746f5f3a50667ab80b8c9f008c8b0083d9aba5e0c84d6",
+    "serial_sha256": "518ef8f85c503ba95956cacaea86e8dab1156f2b1aa4ca67244397a75ee85bdd"
+  }
+}
