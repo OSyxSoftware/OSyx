@@ -63,7 +63,7 @@ fn main() -> i32 {
             process::exit(code);
         }
         Some("desktop") => return desktop_session(),
-        Some("zen-probe") => return zen_probe(args.get(2).map(String::as_str)),
+        Some("zen-probe") => return zen_probe(args.get(2).map(String::as_str), args.get(3).is_some_and(|s| s == "trace")),
         // `init winrun <program> [args...]`: one Windows program with no
         // sessions around it, for bring-up diagnostics.
         Some("winrun") => {
@@ -271,7 +271,7 @@ fn main() -> i32 {
 /// system, which starts the desktop shell) and restarts it if it fails. If
 /// it cannot be brought up, init exits and the kernel's status screen
 /// stays as the diagnostic fallback.
-fn zen_probe(url: Option<&str>) -> i32 {
+fn zen_probe(url: Option<&str>, network_trace: bool) -> i32 {
     println!("zen-probe: official /opt/zen/zen.exe via /bin/winrun; no substitute browser");
     let _ = Command::new("/bin/winrun").arg("--exports").status();
     let prism = Command::new("/system/bin/prism").spawn();
@@ -326,7 +326,12 @@ user_pref("devtools.console.stdout.content", true);
     // Mozilla's own switches start them unsandboxed instead.
     // Every failing Windows API call goes to the serial log (bring-up).
     zen.env("OSYX_WINRUN_TRACE", "1");
-    zen.env("MOZ_LOG", "timestamp,sync,nsDocShell:5,DocLoader:5,nsStreamPump:5,nsSocketTransport:2,nsHostResolver:3,pipnss:4,nsHttp:5,nsChannelClassifier:5");
+    let log_modules = if network_trace {
+        "timestamp,sync,nsDocShell:5,DocLoader:5,nsStreamPump:5,nsSocketTransport:2,nsHostResolver:3,pipnss:4,nsHttp:5,nsChannelClassifier:5"
+    } else {
+        "timestamp,sync,DocLoader:5,pipnss:4"
+    };
+    zen.env("MOZ_LOG", log_modules);
     for kind in ["CONTENT", "GPU", "RDD", "SOCKET_PROCESS", "GMP", "UTILITY", "VR"] {
         zen.env(&format!("MOZ_DISABLE_{kind}_SANDBOX"), "1");
     }

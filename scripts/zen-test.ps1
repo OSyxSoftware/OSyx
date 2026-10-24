@@ -5,16 +5,18 @@
 # reruns when the release API cannot be reached.
 param([string]$Version = '1.23.4b', [switch]$SkipBuild, [switch]$SkipFetch, [int]$TimeoutSec = 90,
       [ValidateRange(1024, 16384)][int]$MemoryMiB = 6144,
-      [ValidatePattern('^(https?://|file:///)[^\s,]+$')][string]$ProbeUrl = 'file:///C:/tmp/zen-probe-page.html')
-if ($SkipBuild -and $PSBoundParameters.ContainsKey('ProbeUrl')) {
-    throw '-ProbeUrl is embedded at build time; omit -SkipBuild when changing the URL.'
+      [ValidatePattern('^(https?://|file:///)[^\s,]+$')][string]$ProbeUrl = 'file:///C:/tmp/zen-probe-page.html',
+      [switch]$NetworkTrace)
+if ($SkipBuild -and ($PSBoundParameters.ContainsKey('ProbeUrl') -or $PSBoundParameters.ContainsKey('NetworkTrace'))) {
+    throw '-ProbeUrl and -NetworkTrace are embedded at build time; omit -SkipBuild when changing them.'
 }
 . (Join-Path $PSScriptRoot 'common.ps1')
 $evidenceDir = Join-Path $BuildDir 'zen'
 New-Item -ItemType Directory -Force $evidenceDir | Out-Null
 if (-not $SkipBuild) {
     if (-not $SkipFetch) { & (Join-Path $PSScriptRoot 'fetch-zen.ps1') -Version $Version }
-    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=zen-probe,$ProbeUrl test.exit" -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
+    $probeArgs = "zen-probe,$ProbeUrl" + $(if ($NetworkTrace) { ',trace' } else { '' })
+    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=$probeArgs test.exit" -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
 }
 $log = Join-Path $evidenceDir 'qemu.serial.log'
 if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }

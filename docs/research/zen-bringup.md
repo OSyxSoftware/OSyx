@@ -33,6 +33,11 @@ Use `-ProbeUrl https://example.com/` for a separate external-page probe and
 image's existing URL and cannot be combined with an explicit `-ProbeUrl`.
 The selected URL is logged and copied into the probe result. The browser's
 own sandbox-disable switches remain necessary for this bring-up configuration.
+Normal probes log document and TLS events. Add `-NetworkTrace` when building
+an image for detailed HTTP, stream-pump and classifier diagnostics; this can
+generate tens of MiB of synchronous serial output and affect responsiveness.
+Like `-ProbeUrl`, this setting is embedded in the image and is incompatible
+with an explicit `-SkipBuild` override.
 
 The probe's exit code **2** means blocked/unverified, never browser success.
 Kernel boot success (QEMU exit 33) is recorded separately. Evidence is in
@@ -982,6 +987,16 @@ sends a signal. The complete OSyx Win32 suite passes 2111/0, recorded in
 build/zen/win-inherit-nonblock-113.log. Win32 clippy passes with -D warnings. Preserved diagnostic
 evidence is build/zen/attempt-112.serial.log; reference results are in
 wsock-inherit-native-113.log and clippy-inherit-nonblock-113.log.
+
+Attempt 114 confirms that the corrected reader drains to would-block and
+startup continues. The single requested example.com URL is opened, its
+classification succeeds and TLS/HTTP/2 response data arrive. The HTTP
+background parent links at 345 seconds, sends the body and sends OnStop with
+status zero. The content child has not consumed those messages when this
+verbose run is manually stopped; the page remains white. The log reaches
+roughly 50 MiB. Attempt 115 isolates the effect of synchronous tracing by
+retaining document/TLS logs while making full network tracing opt-in.
+No TLS verification or URL-classification preference is disabled.
 
 References: Mozilla's [PollableEvent.cpp](https://github.com/mozilla-firefox/firefox/blob/main/netwerk/base/PollableEvent.cpp),
 Microsoft's [accept](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept).
