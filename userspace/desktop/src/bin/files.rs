@@ -86,7 +86,9 @@ impl Entry {
             ("Device", Icon::Device)
         } else if self.is_program() {
             ("Program", Icon::Program)
-        } else if [".txt", ".md", ".rs", ".ax", ".toml", ".conf", ".app", ".log", ".sh", ".py"].iter().any(|e| self.name.ends_with(e))
+        } else if [".txt", ".md", ".rs", ".ax", ".toml", ".conf", ".app", ".log", ".sh", ".py"]
+            .iter()
+            .any(|e| self.name.ends_with(e))
             || !self.name.contains('.')
         {
             ("Text document", Icon::TextFile)
@@ -134,7 +136,11 @@ fn main() -> i32 {
         Column::new("Modified", 140, Align::Left),
     ]);
     list.row_height = 30;
-    let mut places = vec![(String::from("Home"), String::from(USER_HOME), Icon::Home), (String::from("Root (ext4)"), String::from("/"), Icon::Drive)];
+    let mut places = vec![
+        (String::from("Home"), String::from(USER_HOME), Icon::Home),
+        (String::from("Desktop"), String::from(common::DESKTOP_DIR), Icon::Apps),
+        (String::from("Root (ext4)"), String::from("/"), Icon::Drive),
+    ];
     if let Ok(mounts) = system::mounts() {
         for m in mounts {
             let path = system::field_str(&m.path);
@@ -215,7 +221,9 @@ impl Files {
         if !self.hidden.checked {
             entries.retain(|e| !e.name.starts_with('.'));
         }
-        entries.sort_by(|a, b| b.is_dir().cmp(&a.is_dir()).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        entries.sort_by(|a, b| {
+            b.is_dir().cmp(&a.is_dir()).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
         if remember && self.cwd != path {
             self.back.push(self.cwd.clone());
         }
@@ -246,7 +254,10 @@ impl Files {
         }
         self.path.set_text(path);
         let folders = self.entries.iter().filter(|e| e.is_dir()).count();
-        self.set_status(format!("{} items ({} folders, {} files)", self.entries.len(), folders, self.entries.len() - folders), false);
+        self.set_status(
+            format!("{} items ({} folders, {} files)", self.entries.len(), folders, self.entries.len() - folders),
+            false,
+        );
         println!("files: listed {} ({} entries)", self.cwd, self.entries.len());
         true
     }
@@ -269,8 +280,32 @@ impl Files {
             if self.navigate(&path, true) {
                 cx.title = Some(format!("Files — {}", self.cwd));
             }
-        } else if e.is_program() {
-            match Command::new(&path).spawn() {
+        } else if e.is_program()
+            || e.name.ends_with(".app")
+            || [".html", ".htm", ".xhtml"].iter().any(|ext| e.name.to_ascii_lowercase().ends_with(ext))
+        {
+            let shortcut = if e.name.ends_with(".app") { common::load_app(&path) } else { None };
+            let command = if let Some(app) = &shortcut {
+                let mut c = Command::new(if app.exec.ends_with(".exe") { "/bin/winrun" } else { &app.exec });
+                if app.exec.ends_with(".exe") {
+                    c.arg(&app.exec);
+                }
+                c
+            } else if e.is_program() {
+                let mut c = Command::new(if path.ends_with(".exe") { "/bin/winrun" } else { &path });
+                if path.ends_with(".exe") {
+                    c.arg(&path);
+                }
+                c
+            } else if e.name.ends_with(".app") {
+                self.set_status(format!("Invalid application shortcut: {path}"), true);
+                return;
+            } else {
+                let mut c = Command::new("/bin/open");
+                c.arg(&path);
+                c
+            };
+            match command.spawn() {
                 Ok(child) => {
                     let pid = child.id();
                     self.set_status(format!("Started {} as process {pid}", e.name), false);
@@ -302,7 +337,8 @@ impl Files {
                 let mut v = Vec::new();
                 for (row, chunk) in shown[..shown.len().min(16 * 1024)].chunks(16).enumerate() {
                     let hexs: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-                    let ascii: String = chunk.iter().map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }).collect();
+                    let ascii: String =
+                        chunk.iter().map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }).collect();
                     v.push(format!("{:08x}  {:<47}  {}", row * 16, hexs.join(" "), ascii));
                 }
                 (v, true)
@@ -314,7 +350,13 @@ impl Files {
             note.push_str(", first 256 KiB");
         }
         self.set_status(note, false);
-        self.preview = Some(Preview { path, lines, view: ScrollView::default(), close: Button::new(0, "Close", ButtonStyle::Secondary), hex });
+        self.preview = Some(Preview {
+            path,
+            lines,
+            view: ScrollView::default(),
+            close: Button::new(0, "Close", ButtonStyle::Secondary),
+            hex,
+        });
         let (w, h) = self.size;
         self.layout_inner(w, h);
     }
@@ -335,19 +377,44 @@ impl Files {
             }
             Tool::Refresh => self.refresh(),
             Tool::NewFolder => {
-                self.dialog = Some(Dialog::new(D_NEW, "New folder", &format!("Create a folder in {}", self.cwd), &[("Cancel", ButtonStyle::Secondary), ("Create", ButtonStyle::Primary)]).with_input("New folder", "Folder name"));
+                self.dialog = Some(
+                    Dialog::new(
+                        D_NEW,
+                        "New folder",
+                        &format!("Create a folder in {}", self.cwd),
+                        &[("Cancel", ButtonStyle::Secondary), ("Create", ButtonStyle::Primary)],
+                    )
+                    .with_input("New folder", "Folder name"),
+                );
             }
             Tool::Rename => {
                 if let Some(e) = self.selected() {
                     let name = e.name.clone();
-                    self.dialog = Some(Dialog::new(D_RENAME, "Rename", &format!("New name for \"{name}\""), &[("Cancel", ButtonStyle::Secondary), ("Rename", ButtonStyle::Primary)]).with_input(&name, "Name"));
+                    self.dialog = Some(
+                        Dialog::new(
+                            D_RENAME,
+                            "Rename",
+                            &format!("New name for \"{name}\""),
+                            &[("Cancel", ButtonStyle::Secondary), ("Rename", ButtonStyle::Primary)],
+                        )
+                        .with_input(&name, "Name"),
+                    );
                 }
             }
             Tool::Delete => {
                 if let Some(e) = self.selected() {
                     let what = if e.is_dir() { "the folder" } else { "the file" };
-                    let msg = format!("Delete {what} \"{}\"? This cannot be undone.{}", e.name, if e.is_dir() { " Everything inside it is deleted too." } else { "" });
-                    self.dialog = Some(Dialog::new(D_DELETE, "Delete", &msg, &[("Cancel", ButtonStyle::Secondary), ("Delete", ButtonStyle::Danger)]));
+                    let msg = format!(
+                        "Delete {what} \"{}\"? This cannot be undone.{}",
+                        e.name,
+                        if e.is_dir() { " Everything inside it is deleted too." } else { "" }
+                    );
+                    self.dialog = Some(Dialog::new(
+                        D_DELETE,
+                        "Delete",
+                        &msg,
+                        &[("Cancel", ButtonStyle::Secondary), ("Delete", ButtonStyle::Danger)],
+                    ));
                 }
             }
             Tool::Info => {
@@ -361,7 +428,11 @@ impl Files {
                                     .map_or(String::from("-"), |d| self.tz.local(d.as_secs() as i64).iso())
                             };
                             let mode = m.permissions().mode();
-                            let target = if m.is_symlink() { fs::read_link(&path).map(|p| format!("\nPoints to: {}", p.as_str())).unwrap_or_default() } else { String::new() };
+                            let target = if m.is_symlink() {
+                                fs::read_link(&path).map(|p| format!("\nPoints to: {}", p.as_str())).unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
                             format!(
                                 "Location: {}\nType: {}\nSize: {} ({} bytes)\nPermissions: {} ({:04o})\nOwner: uid {}, gid {}\nInode {} on volume {}, {} link(s)\nModified: {}\nAccessed: {}{}",
                                 self.cwd,
@@ -401,7 +472,9 @@ impl Files {
                     Err(format!("\"{name}\" is not a valid folder name"))
                 } else {
                     let p = join(&self.cwd, name);
-                    fs::create_dir(&p).map(|_| format!("Created folder {p}")).map_err(|e| format!("Cannot create {p}: {e}"))
+                    fs::create_dir(&p)
+                        .map(|_| format!("Created folder {p}"))
+                        .map_err(|e| format!("Cannot create {p}: {e}"))
                 }
             }
             D_RENAME => match sel {
@@ -411,7 +484,9 @@ impl Files {
                         Err(format!("\"{new}\" is not a valid name"))
                     } else {
                         let (from, to) = (join(&self.cwd, &old), join(&self.cwd, new));
-                        fs::rename(&from, &to).map(|_| format!("Renamed {old} to {new}")).map_err(|e| format!("Cannot rename {from}: {e}"))
+                        fs::rename(&from, &to)
+                            .map(|_| format!("Renamed {old} to {new}"))
+                            .map_err(|e| format!("Cannot rename {from}: {e}"))
                     }
                 }
                 None => return,
@@ -565,7 +640,7 @@ impl App for Files {
                     key::BACKSPACE if !self.path_focus => Some(Tool::Up),
                     key::LEFT if k.alt() => Some(Tool::Back),
                     0x3B if !self.path_focus => Some(Tool::Rename), // F2
-                    0x3E => Some(Tool::Refresh),                     // F5
+                    0x3E => Some(Tool::Refresh),                    // F5
                     key::DELETE if !self.path_focus => Some(Tool::Delete),
                     key::N if k.ctrl() => Some(Tool::NewFolder),
                     key::I if k.ctrl() => Some(Tool::Info),
@@ -618,7 +693,12 @@ impl App for Files {
             }
         }
         if let Ui::PointerMove { x, y } = ev {
-            let hint = self.tools.iter().find(|(_, b)| contains(&b.rect, x, y)).and_then(|(t, _)| TOOLS.iter().find(|(tt, _, _)| tt == t)).map(|(_, _, h)| *h);
+            let hint = self
+                .tools
+                .iter()
+                .find(|(_, b)| contains(&b.rect, x, y))
+                .and_then(|(t, _)| TOOLS.iter().find(|(tt, _, _)| tt == t))
+                .map(|(_, _, h)| *h);
             if hint != self.hint {
                 self.hint = hint;
                 redraw = true;
@@ -668,7 +748,10 @@ impl App for Files {
                 let (w, h) = self.size;
                 self.layout_inner(w, h);
                 if let Some(e) = self.selected() {
-                    let detail = e.meta.as_ref().map_or(String::new(), |m| format!(" — {}, {}", e.kind().0, human_size(m.len())));
+                    let detail = e
+                        .meta
+                        .as_ref()
+                        .map_or(String::new(), |m| format!(" — {}, {}", e.kind().0, human_size(m.len())));
                     let msg = format!("{}{}", e.name, detail);
                     self.set_status(msg, false);
                 }
@@ -714,8 +797,19 @@ impl App for Files {
                 let (head, body) = split_top(main, 44);
                 p.fill(head, t.surface);
                 p.hline(head.x, head.bottom() as i32 - 1, head.w, t.border);
-                icon::draw(p, if pv.hex { Icon::File } else { Icon::TextFile }, Rect::new(head.x + 14, head.y + 12, 20, 20), t.text_dim);
-                p.text_in(FontKind::Bold, Rect::new(head.x + 44, head.y, head.w.saturating_sub(160), head.h), &pv.path, t.text, Align::Left);
+                icon::draw(
+                    p,
+                    if pv.hex { Icon::File } else { Icon::TextFile },
+                    Rect::new(head.x + 14, head.y + 12, 20, 20),
+                    t.text_dim,
+                );
+                p.text_in(
+                    FontKind::Bold,
+                    Rect::new(head.x + 44, head.y, head.w.saturating_sub(160), head.h),
+                    &pv.path,
+                    t.text,
+                    Align::Left,
+                );
                 pv.close.draw(p, false);
                 p.fill(body, t.field);
                 let content = pv.view.content();

@@ -31,6 +31,7 @@ use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
 mod gdi;
 mod keyboard;
+pub(crate) mod dialogs;
 use gdi::{Bitmap, GdiPath, Region, Xform};
 
 static SANS14: &[u8] = include_bytes!("../../../graphics/assets/sans14.osxp");
@@ -447,6 +448,7 @@ impl Gui {
             _ => None,
         };
         let Some(hwnd) = target else { return };
+        if matches!(ev, Event::Key { .. } | Event::Pointer { .. } | Event::CloseRequest { .. }) && self.windows.get(&hwnd).is_some_and(|w| w.style & 0x08000000 != 0) { return; }
         if let Some(w) = self.windows.get_mut(&hwnd) {
             w.win.on_event(&ev);
         }
@@ -3456,11 +3458,16 @@ extern "win64" fn IsWindowArranged(wnd: u64) -> Bool {
 }
 
 extern "win64" fn IsWindowEnabled(wnd: u64) -> Bool {
-    (with(|g| g.windows.contains_key(&wnd))) as Bool
+    (with(|g| g.windows.get(&wnd).is_some_and(|w| w.style & 0x08000000 == 0))) as Bool
 }
 
-extern "win64" fn EnableWindow(_wnd: u64, _enable: Bool) -> Bool {
-    TRUE // enabled
+extern "win64" fn EnableWindow(wnd: u64, enable: Bool) -> Bool {
+    with(|g| {
+        let Some(w) = g.windows.get_mut(&wnd) else { return FALSE };
+        let disabled = w.style & 0x08000000 != 0;
+        if enable != 0 { w.style &= !0x08000000; } else { w.style |= 0x08000000; }
+        disabled as Bool
+    })
 }
 
 extern "win64" fn GetWindowThreadProcessId(wnd: u64, pid_out: *mut u32) -> u32 {

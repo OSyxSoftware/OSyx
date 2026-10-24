@@ -14,6 +14,24 @@ use prism_proto::{self as proto, window_flags, Action, Event, Request, Role};
 const W: u32 = 800;
 const H: u32 = 600;
 
+#[test]
+fn cursor_overlay_moves_without_recomposing_and_matches_composed_pixels() {
+    let mut regular = Harness::new();
+    let mut overlay = Harness::new();
+    overlay.c.set_cursor_overlay(true);
+    regular.render(); overlay.render();
+    let clean = overlay.fb.clone();
+    regular.move_to(123,234); overlay.move_to(123,234);
+    assert!(regular.c.has_damage());
+    assert!(!overlay.c.has_damage(), "pointer-only motion must not schedule an application frame");
+    regular.render();
+    let mut frame = overlay.fb.clone();
+    overlay.c.draw_cursor_overlay(&mut Surface::new(&mut frame,W,H,W).unwrap());
+    assert_eq!(frame,regular.fb);
+    assert_eq!(overlay.fb,clean,"overlay must leave the clean back buffer intact");
+    assert!(overlay.c.cursor_area().w * overlay.c.cursor_area().h < 1024);
+}
+
 struct Harness {
     c: Compositor,
     now: u64,

@@ -42,7 +42,7 @@ function Wait-Log([string]$Pattern, [int]$Seconds) {
 }
 
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=net,$tcpPort,$udpPort test.exit" | Out-Host
+    & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline "init.args=tests,net,$tcpPort,$udpPort test.exit" | Out-Host
 }
 foreach ($f in $log, $hostLog) { if (Test-Path $f) { Remove-Item $f } }
 

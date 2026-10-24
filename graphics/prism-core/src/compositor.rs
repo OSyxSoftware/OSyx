@@ -341,6 +341,7 @@ pub struct Compositor {
     list_dirty: bool,
     shell_pid: Option<u32>,
     cursor: Cursor,
+    cursor_overlay: bool,
     shadow: ShadowTables,
     popup_shadow: ShadowTables,
     font: PropFont<'static>,
@@ -381,6 +382,7 @@ impl Compositor {
             list_dirty: false,
             shell_pid: None,
             cursor: Cursor::new(CursorShape::Arrow),
+            cursor_overlay: false,
             shadow: ShadowTables::new(theme::SHADOW, theme::RADIUS),
             popup_shadow: ShadowTables::new(12, theme::RADIUS),
             font: PropFont::parse(TITLE_FONT).expect("embedded title font"),
@@ -414,6 +416,16 @@ impl Compositor {
     pub fn pointer(&self) -> (i32, i32) {
         (self.ptr_x, self.ptr_y)
     }
+
+    /// The platform can draw the small cursor overlay independently of the
+    /// application frame deadline. Cursor motion then causes no composition.
+    pub fn set_cursor_overlay(&mut self, enabled: bool) { self.cursor_overlay = enabled; }
+
+    pub fn cursor_state(&self) -> (i32, i32, CursorShape) { (self.ptr_x, self.ptr_y, self.cursor.shape) }
+
+    pub fn cursor_area(&self) -> Rect { self.cursor.area(self.ptr_x, self.ptr_y).intersect(&self.screen) }
+
+    pub fn draw_cursor_overlay(&self, target: &mut Surface) { self.cursor.draw(target, self.ptr_x, self.ptr_y, self.screen); }
 
     pub fn focused(&self) -> Option<WindowId> {
         self.focus
@@ -1280,8 +1292,10 @@ impl Compositor {
             let old = self.cursor.area(self.ptr_x, self.ptr_y);
             self.cursor = Cursor::new(shape);
             let new = self.cursor.area(self.ptr_x, self.ptr_y);
-            self.damage.add(old, self.screen);
-            self.damage.add(new, self.screen);
+            if !self.cursor_overlay {
+                self.damage.add(old, self.screen);
+                self.damage.add(new, self.screen);
+            }
         }
     }
 
@@ -1303,8 +1317,10 @@ impl Compositor {
         self.ptr_x = self.ptr_x.saturating_add(dx).clamp(0, self.screen.w as i32 - 1);
         self.ptr_y = self.ptr_y.saturating_add(dy).clamp(0, self.screen.h as i32 - 1);
         let new = self.cursor.area(self.ptr_x, self.ptr_y);
-        self.damage.add(old, self.screen);
-        self.damage.add(new, self.screen);
+        if !self.cursor_overlay {
+            self.damage.add(old, self.screen);
+            self.damage.add(new, self.screen);
+        }
         match self.grab {
             Some(Grab::Move { win, dx, dy }) => {
                 let screen = self.screen;
@@ -1710,7 +1726,7 @@ impl Compositor {
                 self.draw_ghost(target, g, clip, now);
             }
         }
-        if !self.cursor.area(self.ptr_x, self.ptr_y).intersect(&clip).is_empty() {
+        if !self.cursor_overlay && !self.cursor.area(self.ptr_x, self.ptr_y).intersect(&clip).is_empty() {
             self.cursor.draw(target, self.ptr_x, self.ptr_y, clip);
         }
     }

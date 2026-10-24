@@ -21,6 +21,7 @@ macro_rules! export_table {
 }
 
 mod crypt32;
+mod commdlg;
 mod cryptbase;
 mod dbghelp;
 mod error;

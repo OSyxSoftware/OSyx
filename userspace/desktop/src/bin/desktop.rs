@@ -48,6 +48,8 @@ const DEFAULT_WALLPAPER: &str = "/system/share/wallpapers/default.osxi";
 enum MenuPurpose {
     Desktop,
     Power,
+    Application(usize),
+    Shortcut(usize),
 }
 
 const CONFIRM_OFF: u32 = 1;
@@ -62,6 +64,8 @@ enum PopupKind {
 struct Popup {
     win: Window,
     kind: PopupKind,
+    x: i32,
+    y: i32,
 }
 
 impl Popup {
@@ -86,6 +90,13 @@ struct Note {
     title: String,
     body: String,
     born: u64,
+}
+
+struct IconDrag {
+    index: usize,
+    start: (i32, i32),
+    pointer: (i32, i32),
+    moved: bool,
 }
 
 enum PanelAction {
@@ -125,6 +136,11 @@ struct Shell {
     popup_closed: Option<(u64, PopupTag)>,
     notes: Vec<Note>,
     apps: Vec<AppEntry>,
+    shortcuts: Vec<AppEntry>,
+    selected_shortcut: Option<usize>,
+    shortcut_scan: u64,
+    shortcut_cells: Vec<usize>,
+    icon_drag: Option<IconDrag>,
     /// (pid, application name) of programs started from the shell.
     children: Vec<(u64, String)>,
 }
@@ -182,6 +198,11 @@ fn main() -> i32 {
         popup_closed: None,
         notes: Vec::new(),
         apps: load_apps(),
+        shortcuts: common::load_apps_from(common::DESKTOP_DIR),
+        selected_shortcut: None,
+        shortcut_scan: 0,
+        shortcut_cells: Vec::new(),
+        icon_drag: None,
         children: Vec::new(),
     };
     let t0 = Instant::now();
@@ -192,6 +213,8 @@ fn main() -> i32 {
     paint_wallpaper(&mut shell.wallpaper, w, h, shell.style, shell.image.as_deref(), &shell.fonts);
     println!("desktop: wallpaper {} drawn in {} ms", shell.style, t0.elapsed().as_millis());
     shell.layout_panel();
+    shell.load_shortcut_layout();
+    println!("desktop: {} shortcut(s) in {}", shell.shortcuts.len(), common::DESKTOP_DIR);
     shell.update_clock();
     println!(
         "desktop: shell ready on a {}x{} screen, {} application(s) in {}, time zone {}",
@@ -243,6 +266,9 @@ impl Shell {
             self.update_clock();
             self.expire_notes();
             self.collect_exits();
+            if self.now().saturating_sub(self.shortcut_scan) >= 2000 {
+                self.refresh_shortcuts();
+            }
             if let Err(e) = self.redraw() {
                 eprintln!("desktop: drawing failed: {e}");
             }
@@ -255,11 +281,14 @@ impl Shell {
         match &ev {
             Event::WindowList { windows } => {
                 let processes = system::processes().unwrap_or_default();
-                let families: Vec<_> = processes.iter().map(|p| prism_core::taskbar::Process {
-                    pid: p.pid as u32,
-                    parent: p.parent as u32,
-                    win32: system::process_name(p) == "winrun",
-                }).collect();
+                let families: Vec<_> = processes
+                    .iter()
+                    .map(|p| prism_core::taskbar::Process {
+                        pid: p.pid as u32,
+                        parent: p.parent as u32,
+                        win32: system::process_name(p) == "winrun",
+                    })
+                    .collect();
                 self.windows = prism_core::taskbar::group(windows, &families);
                 self.layout_panel();
                 return;
@@ -318,7 +347,87 @@ impl Shell {
     }
 
     fn desktop_input(&mut self, ui: Ui) {
-        if let Ui::PointerDown { x, y, button: b, .. } = ui {
+        if let Ui::PointerMove { x, y } = ui {
+            if let Some(drag) = &mut self.icon_drag {
+                drag.pointer = (x, y);
+                drag.moved |= (x - drag.start.0).abs() + (y - drag.start.1).abs() > 6;
+                self.desktop.dirty |= drag.moved;
+            }
+        }
+        if let Ui::PointerUp { x, y, button: button::LEFT } = ui {
+            if let Some(drag) = self.icon_drag.take().filter(|d| d.moved) {
+                let rows = shortcut_rows(self.h);
+                let columns = (self.w.saturating_sub(32) / 116).max(1) as usize;
+                let col = ((x - 16).max(0) as usize / 116).min(columns - 1);
+                let row = ((y - 16).max(0) as usize / 100).min(rows - 1);
+                let cell = col * rows + row;
+                let old = self.shortcut_cells[drag.index];
+                if let Some(other) = self.shortcut_cells.iter().position(|&c| c == cell) {
+                    self.shortcut_cells[other] = old;
+                }
+                self.shortcut_cells[drag.index] = cell;
+                self.save_shortcut_layout();
+                println!("desktop: icon moved: {} to grid ({col}, {row})", self.shortcuts[drag.index].name);
+                self.desktop.dirty = true;
+            }
+        }
+        if let Ui::Key(k) = ui {
+            if !k.down {
+                return;
+            }
+            match k.key {
+                key::ENTER => {
+                    if let Some(i) = self.selected_shortcut {
+                        self.launch_shortcut(i);
+                    }
+                }
+                key::DELETE => {
+                    if let Some(i) = self.selected_shortcut {
+                        self.remove_shortcut(i);
+                    }
+                }
+                key::F5 => self.refresh_shortcuts(),
+                key::UP | key::DOWN | key::LEFT | key::RIGHT if !self.shortcuts.is_empty() => {
+                    let rows = shortcut_rows(self.h);
+                    let delta = match k.key {
+                        key::UP => -1,
+                        key::DOWN => 1,
+                        key::LEFT => -(rows as i32),
+                        _ => rows as i32,
+                    };
+                    self.selected_shortcut = Some(
+                        self.selected_shortcut
+                            .map_or(0, |i| (i as i32 + delta).clamp(0, self.shortcuts.len() as i32 - 1) as usize),
+                    );
+                    self.desktop.dirty = true;
+                }
+                _ => {}
+            }
+        }
+        if let Ui::PointerDown { x, y, button: b, clicks } = ui {
+            let hit =
+                (0..self.shortcuts.len()).find(|&i| contains(&shortcut_rect(self.shortcut_cells[i], self.h), x, y));
+            self.selected_shortcut = hit;
+            self.desktop.dirty = true;
+            if let Some(i) = hit {
+                if b == button::LEFT && clicks >= 2 {
+                    self.icon_drag = None;
+                    self.launch_shortcut(i);
+                } else if b == button::LEFT {
+                    self.icon_drag = Some(IconDrag { index: i, start: (x, y), pointer: (x, y), moved: false });
+                } else if b == button::RIGHT {
+                    self.open_menu(
+                        vec![
+                            MenuItem::new("Open", Some(Icon::Program)),
+                            MenuItem::new("Remove shortcut", Some(Icon::Trash)),
+                        ],
+                        MenuPurpose::Shortcut(i),
+                        x,
+                        y,
+                    );
+                }
+                return;
+            }
             if b == button::RIGHT {
                 let items = vec![
                     MenuItem::new("Open Terminal", Some(Icon::Terminal)),
@@ -326,6 +435,8 @@ impl Shell {
                     MenuItem::new("System Information", Some(Icon::Info)),
                     MenuItem::new("Next wallpaper", Some(Icon::Refresh)).separated(),
                     MenuItem::new("About OSyx", Some(Icon::Bell)),
+                    MenuItem::new("Add application shortcut...", Some(Icon::Apps)).separated(),
+                    MenuItem::new("Refresh desktop", Some(Icon::Refresh)),
                 ];
                 self.open_menu(items, MenuPurpose::Desktop, x, y);
             }
@@ -409,8 +520,12 @@ impl Shell {
         let mut pick = None;
         let mut confirm = None;
         let mut close = false;
+        let mut app_menu = None;
         match &mut p.kind {
             PopupKind::Launcher { search, list, shown, list_focus } => {
+                if let Ui::PointerDown { x, y, button: button::RIGHT, .. } = ui {
+                    app_menu = list.row_at(x, y).and_then(|i| shown.get(i).copied()).map(|i| (i, p.x + x, p.y + y));
+                }
                 // Arrow keys and Enter in the search field drive the list.
                 if let Ui::Key(k) = ui {
                     if k.down && matches!(k.key, key::UP | key::DOWN | key::PAGE_UP | key::PAGE_DOWN) {
@@ -476,7 +591,7 @@ impl Shell {
                 _ => {}
             },
         }
-        if close || launch.is_some() || pick.is_some() || confirm.is_some() {
+        if close || launch.is_some() || pick.is_some() || confirm.is_some() || app_menu.is_some() {
             self.close_popup();
         }
         if let Some(i) = launch {
@@ -489,10 +604,24 @@ impl Shell {
         if let Some(tag) = confirm {
             self.power(tag);
         }
+        if let Some((i, x, y)) = app_menu {
+            self.open_menu(vec![MenuItem::new("Add to desktop", Some(Icon::Link))], MenuPurpose::Application(i), x, y);
+        }
     }
 
     fn menu_pick(&mut self, purpose: MenuPurpose, i: usize) {
         match (purpose, i) {
+            (MenuPurpose::Application(app), 0) => self.add_shortcut(app),
+            (MenuPurpose::Shortcut(app), 0) => self.launch_shortcut(app),
+            (MenuPurpose::Shortcut(app), 1) => self.remove_shortcut(app),
+            (MenuPurpose::Desktop, 5) => {
+                self.toggle_launcher();
+                self.show_note(
+                    "Desktop shortcuts",
+                    "Right-click an application in the launcher and choose Add to desktop.",
+                );
+            }
+            (MenuPurpose::Desktop, 6) => self.refresh_shortcuts(),
             (MenuPurpose::Desktop, 0) => self.launch("Terminal", "/system/bin/terminal"),
             (MenuPurpose::Desktop, 1) => self.launch("Files", "/system/bin/files"),
             (MenuPurpose::Desktop, 2) => self.launch("System Information", "/system/bin/sysinfo"),
@@ -537,10 +666,8 @@ impl Shell {
     }
 
     fn launch(&mut self, name: &str, exec: &str) {
-        let mut command = Command::new(if exec.ends_with(".exe") { "/bin/winrun" } else { exec });
-        if exec.ends_with(".exe") {
-            command.arg(exec);
-        }
+        let mut command = Command::new("/system/bin/run-app");
+        command.arg(exec);
         match command.spawn() {
             Ok(child) => {
                 println!("desktop: launched {} ({}) as process {}", name, exec, child.id());
@@ -551,6 +678,103 @@ impl Shell {
                 eprintln!("desktop: cannot start {exec}: {e}");
                 self.show_note(&format!("Cannot start {name}"), &format!("{exec}: {e}"));
             }
+        }
+    }
+
+    fn refresh_shortcuts(&mut self) {
+        self.shortcut_scan = self.now();
+        let entries = common::load_apps_from(common::DESKTOP_DIR);
+        if entries.len() != self.shortcuts.len()
+            || entries
+                .iter()
+                .zip(&self.shortcuts)
+                .any(|(a, b)| a.source != b.source || a.name != b.name || a.exec != b.exec || a.icon != b.icon)
+        {
+            self.shortcuts = entries;
+            self.icon_drag = None;
+            self.load_shortcut_layout();
+            self.selected_shortcut = None;
+            self.desktop.dirty = true;
+            println!("desktop: {} shortcut(s) in {}", self.shortcuts.len(), common::DESKTOP_DIR);
+        }
+    }
+
+    fn add_shortcut(&mut self, i: usize) {
+        let Some(app) = self.apps.get(i) else { return };
+        let name = app.name.clone();
+        let file = app.source.rsplit('/').next().unwrap_or("application.app");
+        let target = format!("{}/{file}", common::DESKTOP_DIR);
+        let result = os_std::fs::create_dir_all(common::DESKTOP_DIR)
+            .and_then(|_| os_std::fs::read(&app.source))
+            .and_then(|data| os_std::fs::write(&target, data));
+        match result {
+            Ok(()) => {
+                println!("desktop: shortcut added: {name} -> {target}");
+                self.refresh_shortcuts();
+                self.show_note("Desktop shortcut", &format!("{name} added to the desktop."));
+            }
+            Err(e) => self.show_note("Cannot add shortcut", &format!("{e}")),
+        }
+    }
+
+    fn launch_shortcut(&mut self, i: usize) {
+        if let Some(app) = self.shortcuts.get(i).cloned() {
+            self.launch(&app.name, &app.exec);
+        }
+    }
+
+    fn load_shortcut_layout(&mut self) {
+        let text = os_std::fs::read_to_string(format!("{}/.layout", common::DESKTOP_DIR)).unwrap_or_default();
+        self.shortcut_cells.clear();
+        let rows = shortcut_rows(self.h);
+        let columns = (self.w.saturating_sub(32) / 116).max(1) as usize;
+        let saved: Vec<Option<usize>> = self
+            .shortcuts
+            .iter()
+            .map(|app| {
+                let file = app.source.rsplit('/').next().unwrap_or("");
+                text.lines().find_map(|line| {
+                    let mut fields = line.split('\t');
+                    if fields.next()? != file {
+                        return None;
+                    }
+                    let col = fields.next()?.parse::<usize>().ok()?;
+                    let row = fields.next()?.parse::<usize>().ok()?;
+                    (col < columns && row < rows).then_some(col * rows + row)
+                })
+            })
+            .collect();
+        for cell in &saved {
+            let cell = cell.filter(|c| !self.shortcut_cells.contains(c));
+            let cell = cell.unwrap_or_else(|| {
+                (0..).find(|c| !self.shortcut_cells.contains(c) && !saved.contains(&Some(*c))).unwrap_or(0)
+            });
+            self.shortcut_cells.push(cell);
+        }
+    }
+
+    fn save_shortcut_layout(&mut self) {
+        let rows = shortcut_rows(self.h);
+        let mut text = String::new();
+        for (app, &cell) in self.shortcuts.iter().zip(&self.shortcut_cells) {
+            let file = app.source.rsplit('/').next().unwrap_or("");
+            text.push_str(&format!("{file}\t{}\t{}\n", cell / rows, cell % rows));
+        }
+        let temp = format!("{}/.layout.tmp", common::DESKTOP_DIR);
+        let target = format!("{}/.layout", common::DESKTOP_DIR);
+        if let Err(e) = os_std::fs::write(&temp, text).and_then(|_| os_std::fs::rename(&temp, &target)) {
+            self.show_note("Cannot save icon positions", &format!("{e}"));
+        }
+    }
+
+    fn remove_shortcut(&mut self, i: usize) {
+        let Some(app) = self.shortcuts.get(i) else { return };
+        match os_std::fs::remove_file(&app.source) {
+            Ok(()) => {
+                println!("desktop: shortcut removed: {}", app.name);
+                self.refresh_shortcuts();
+            }
+            Err(e) => self.show_note("Cannot remove shortcut", &format!("{e}")),
         }
     }
 
@@ -596,7 +820,7 @@ impl Shell {
         let mut spec = WindowSpec::with_role(Role::Popup, x, y, w, h);
         spec.title = String::from("popup");
         match self.conn.create_window(spec) {
-            Ok(win) => self.popup = Some(Popup { win, kind }),
+            Ok(win) => self.popup = Some(Popup { win, kind, x, y }),
             Err(e) => eprintln!("desktop: cannot open a popup: {e}"),
         }
     }
@@ -752,6 +976,32 @@ impl Shell {
                     let row = &self.wallpaper[(y * w) as usize..][..w as usize];
                     s.row_mut(y).copy_from_slice(row);
                 }
+                let mut p = Painter::new(&mut s, &theme, &fonts);
+                for (i, app) in self.shortcuts.iter().enumerate() {
+                    let mut r = shortcut_rect(self.shortcut_cells[i], h);
+                    if let Some(drag) = &self.icon_drag {
+                        if drag.index == i && drag.moved {
+                            r.x += drag.pointer.0 - drag.start.0;
+                            r.y += drag.pointer.1 - drag.start.1;
+                        }
+                    }
+                    if r.right() > w as i64 {
+                        continue;
+                    }
+                    p.rounded(r, 10, rgb(10, 16, 28), if self.selected_shortcut == Some(i) { 205 } else { 100 });
+                    if self.selected_shortcut == Some(i) {
+                        p.rounded(r, 10, theme.accent, 65);
+                    }
+                    icon::draw(&mut p, app.icon, Rect::new(r.x + 32, r.y + 8, 40, 40), rgb(235, 240, 255));
+                    icon::draw(&mut p, Icon::Link, Rect::new(r.x + 28, r.y + 36, 16, 16), theme.accent);
+                    p.text_in(
+                        FontKind::Ui,
+                        Rect::new(r.x + 4, r.y + 54, r.w - 8, 30),
+                        &app.name,
+                        rgb(250, 251, 255),
+                        Align::Center,
+                    );
+                }
             }
             self.desktop.present(&mut self.conn, None)?;
         }
@@ -792,7 +1042,9 @@ impl Shell {
 }
 
 fn task_icon(title: &str) -> Icon {
-    if title.contains("Terminal") {
+    if title.contains("Zen") {
+        Icon::Browser
+    } else if title.contains("Terminal") {
         Icon::Terminal
     } else if title.contains("Files") {
         Icon::Folder
@@ -801,6 +1053,15 @@ fn task_icon(title: &str) -> Icon {
     } else {
         Icon::Program
     }
+}
+
+fn shortcut_rows(h: u32) -> usize {
+    (h.saturating_sub(PANEL_H + 32) / 100).max(1) as usize
+}
+
+fn shortcut_rect(i: usize, h: u32) -> Rect {
+    let rows = shortcut_rows(h);
+    Rect::new(16 + (i / rows) as i32 * 116, 16 + (i % rows) as i32 * 100, 104, 92)
 }
 
 fn filter_apps(apps: &[AppEntry], q: &str) -> Vec<usize> {

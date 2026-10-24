@@ -16,7 +16,7 @@ New-Item -ItemType Directory -Force $evidenceDir | Out-Null
 if (-not $SkipBuild) {
     if (-not $SkipFetch) { & (Join-Path $PSScriptRoot 'fetch-zen.ps1') -Version $Version }
     $probeArgs = "zen-probe,$ProbeUrl" + $(if ($NetworkTrace) { ',trace' } else { '' })
-    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=$probeArgs test.exit" -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
+    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=tests,$probeArgs test.exit" -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
 }
 $log = Join-Path $evidenceDir 'qemu.serial.log'
 if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }

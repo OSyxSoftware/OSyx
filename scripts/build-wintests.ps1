@@ -41,6 +41,7 @@ if (Stale $apisetLib @("$src\apiset-processthreads.def")) {
     Invoke-Checked 'apiset import library' { & $dlltool -d "$src\apiset-processthreads.def" -l $apisetLib -m i386:x86-64 }
 }
 $programs = [ordered]@{
+    'filedialogs.exe' = @{ Src = @('filedialogs.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lcomdlg32', '-lshell32', '-lole32', '-luser32', '-lkernel32') }
     'minimal.exe' = @{ Src = @('minimal.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'version.exe' = @{ Src = @('version.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', $versionObj, '-lversion', '-lkernel32') }
     'synch.exe' = @{ Src = @('synch.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32', '-lsynchronization') }

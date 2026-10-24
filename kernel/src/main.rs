@@ -216,12 +216,13 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
         let (w, h) = m.split_once('x')?;
         Some((w.parse().ok()?, h.parse().ok()?))
     });
+    let testing = boot.option_value("init.args").is_some_and(|s| s.split(',').next() == Some("tests"));
     let has_display = match gpu {
         Some(g) if display::init_gpu(g.clone(), footer.as_str(), mode) => {
-            match display::cursor_selftest() {
+            if testing { match display::cursor_selftest() {
                 Ok(what) => kprintln!("display: cursor check ok: {}", what),
                 Err(e) => kprintln!("display: cursor check FAILED: {}", e),
-            }
+            } }
             true
         }
         _ => raw.has_framebuffer() && display::init(fb, footer.as_str(), keep_log),
@@ -236,13 +237,20 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
             (false, false) => "none",
         }
     );
-    display::status("Running self-tests", osyx_gfx::splash::TEXT, &[]);
-
-    let summary = selftest::run(boot);
+    let summary = if testing {
+        display::status("Running self-tests", osyx_gfx::splash::TEXT, &[]);
+        selftest::run(boot)
+    } else {
+        kprintln!("normal boot: tests disabled (enable with init.args=tests)");
+        selftest::Summary { passed: 0, failed: 0 }
+    };
     let mut line1 = Line::new();
     let (free, _) = mem::frame_stats();
-    let _ =
-        write!(line1, "Self-tests: {} passed, {} failed  |  {} MiB free", summary.passed, summary.failed, free >> 8);
+    if testing {
+        let _ = write!(line1, "Self-tests: {} passed, {} failed  |  {} MiB free", summary.passed, summary.failed, free >> 8);
+    } else {
+        let _ = write!(line1, "{} MiB free", free >> 8);
+    }
     let mut ok = summary.failed == 0;
     display::status("Starting init", osyx_gfx::splash::TEXT, &[line1.as_str()]);
 
@@ -254,10 +262,10 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let title = if ok { "OSyx kernel is running" } else { "OSyx: a check failed" };
     display::status(title, color, &[line1.as_str(), line2.as_str()]);
 
-    if let Some(kind) = boot.option_value("test.fault") {
+    if let Some(kind) = boot.option_value("test.fault").filter(|_| testing) {
         trigger_fault(kind);
     }
-    if boot.has_option("test.exit") {
+    if testing && boot.has_option("test.exit") {
         if boot.has_option("test.power-cut") {
             // Simulated power loss: no unmount, no flush of anything pending.
             kprintln!("test.power-cut: stopping without unmounting");

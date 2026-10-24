@@ -104,7 +104,7 @@ Push-Location $Root
 try {
     if (-not $SkipBuild) {
         Write-Host '==> building the desktop image (init.args=desktop)'
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'init.args=desktop' | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'init.args=tests,desktop' | Out-Null
     }
     if (Test-Path $log) { Remove-Item $log }
     $script:port = Get-Random -Minimum 20000 -Maximum 40000
@@ -122,7 +122,7 @@ try {
     Start-Sleep -Seconds 2
     if ($RebuildWhileRunning) {
         $activeVm = $script:qemu
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'init.args=desktop' | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'init.args=tests,desktop' | Out-Null
         $script:qemu = $activeVm
         Record 'build replaces base image while the running VM keeps its own disk' (Test-Path -LiteralPath $sessionDisk) ''
     }
@@ -132,6 +132,7 @@ try {
     Record 'PRISM in ring 3 from ext4 owns the display' ($t -match 'process 2 \(prism\): /system/bin/prism spawned by 1' -and $t -match 'display: process 2 owns the display' -and $t -match 'prism: compositor running') ([regex]::Match($t, 'prism: display \S+').Value)
     Record 'desktop shell is a separate process and PRISM client' ($t -match '\(desktop\): /system/bin/desktop spawned by 2' -and $t -match 'prism: client 1 connected \(process 3' -and $t -match 'window 1 "" created \(Desktop' -and $t -match 'window 2 "" created \(Panel') "${sw}x$sh"
     Shot 'start'
+    Record 'desktop loads persistent Terminal and Files shortcuts' ($t -match 'desktop: 2 shortcut\(s\) in /home/user/Desktop') ''
     if ($Gpu) {
         $g = [regex]::Match($t, 'display: virtio-gpu at \S+: .*')
         Record 'VirtIO-GPU initialised: scanout, 2D resource, backing, EDID' ($g.Success -and $g.Value -match 'resource \d+' -and $t -notmatch 'virtio-gpu.*failed') $g.Value
@@ -199,7 +200,7 @@ try {
         $fm = Wait-Log ('focus -> window {0} "Files' -f $files.Id)
         Record 'clicking a window focuses and raises it' ($null -ne $fm) ''
         # Rows: 52 px tool bar, 28 px header, 30 px rows; folders first.
-        DoubleClick ($files.X + 300) ($files.Y + 52 + 28 + 15)
+        DoubleClick ($files.X + 300) ($files.Y + 52 + 28 + 30 + 15)
         $doc = Wait-Log 'files: listed /home/user/Documents \((\d+) entries\)'
         Keys @('ret')
         $open = Wait-Log 'files: opened /home/user/Documents/Welcome.txt \((\d+) bytes, text view\)'
@@ -289,7 +290,7 @@ try {
                 Keys @('ctrl', 's'); Start-Sleep -Milliseconds 200
                 TypeText 'C:/home/user/Documents/editor-test.txt'; Keys @('ret')
                 Start-Sleep -Milliseconds 500
-                $saved = Wait-Log 'window \d+ title "C:/home/user/Documents/editor-test.txt - OSyx Text Editor"' 5
+                $saved = Wait-Log 'window \d+ title "C:[/\\]+home[/\\]+user[/\\]+Documents[/\\]+editor-test.txt - OSyx Text Editor"' 5
                 Record 'Text Editor saves a file through Win32 on ext4' ($null -ne $saved) ''
                 TypeText 'x'
                 Click ($window.X + $window.W - 20) ($window.Y - 17)
@@ -305,6 +306,66 @@ try {
             Record ($app.Title + ' closes cleanly') ($null -ne $closed) ''
         }
     }
+
+    # Exercise actual Windows A/W common dialogs and filesystem PIDLs.
+    Keys @('meta_l'); Start-Sleep -Milliseconds 300
+    TypeText 'file dialog'; Keys @('ret')
+    foreach ($title in @('Test: Open UTF-16', 'Test: Save ANSI', 'Test: Replace file', 'Test: Select folder', 'Test: Cancel', 'Test: Small buffer')) {
+        $opened = Wait-Log ('file-dialog: opened ' + [regex]::Escape($title)) 15
+        Record ("WinAPI dialog opens: $title") ($null -ne $opened) ''
+        if ($title -eq 'Test: Open UTF-16') { Shot 'system-open-dialog' }
+        if ($title -eq 'Test: Save ANSI') { Shot 'system-save-dialog' }
+        if ($title -eq 'Test: Select folder') { Shot 'system-folder-dialog' }
+        if ($title -eq 'Test: Cancel') { Keys @('esc') } else { Keys @('ret') }
+        if ($title -eq 'Test: Replace file') { Start-Sleep -Milliseconds 300; Keys @('ret') }
+    }
+    $dialogSummary = Wait-Log 'filedialogs: (\d+) passed, (\d+) failed' 15
+    Record 'WinAPI file dialog ABI, cancel, overwrite, folder PIDL and buffer errors' ($null -ne $dialogSummary -and $dialogSummary.Groups[2].Value -eq '0') $(if ($dialogSummary) { $dialogSummary.Value } else { '' })
+
+    # Persistent desktop shortcuts: add from the launcher, drag on the grid,
+    # then open and remove the saved shortcut through the desktop.
+    Keys @('meta_l'); Start-Sleep -Milliseconds 300
+    TypeText 'settings'
+    $launcherY = $sh - 52 - 470 - 8
+    $rowY = $launcherY + 108 + 22
+    Click 100 $rowY 'right'
+    Click 125 ($rowY + 22)
+    $added = Wait-Log 'desktop: shortcut added: Settings -> /home/user/Desktop/50-settings.app'
+    Record 'launcher context menu saves an application shortcut to Desktop' ($null -ne $added) ''
+    Shot 'shortcut-added'
+    Drag 68 262 184 162
+    Record 'desktop icon snaps to the chosen grid cell' ($null -ne (Wait-Log 'desktop: icon moved: Settings to grid \(1, 1\)')) ''
+    # Close the terminal so the new cell is visible and the desktop owns focus.
+    if ($term) { Click ($term.X + 160 + $term.W + 120 - 20) ($term.Y + 90 - 17) }
+    # A clean restart flushes ext4, then the same image restores the layout.
+    Click ($sw - 28) ($sh - 26)
+    Keys @('down'); Keys @('ret'); Start-Sleep -Milliseconds 300; Keys @('ret')
+    if (-not $script:qemu.WaitForExit(15000)) { throw 'clean restart did not stop QEMU' }
+    $persistedLog = Log-Text
+    $restartLog = Join-Path $testDir "$prefix-restart.serial.log"
+    $restartArgs = if ($Gpu) { Get-QemuArgs -SerialLog $restartLog -Headless -QmpPort $script:port -MemoryMiB 1024 -DiskFile $diskFile -Gpu -GpuSize 1920x1080 } else { Get-QemuArgs -SerialLog $restartLog -Headless -QmpPort $script:port -MemoryMiB 1024 -DiskFile $diskFile }
+    $script:qemu = Start-Qemu $restartArgs
+    $log = $restartLog
+    $restarted = Wait-Log 'desktop: 3 shortcut\(s\) in /home/user/Desktop' 30
+    Record 'desktop shortcuts survive a clean restart on ext4' ($null -ne $restarted) ''
+    Start-Sleep -Seconds 2
+    Home
+    Click 184 162
+    $before = ([regex]::Matches((Log-Text), 'desktop: launched Settings')).Count
+    Start-Sleep -Milliseconds 400
+    Record 'single click selects a desktop icon without launching it' (([regex]::Matches((Log-Text), 'desktop: launched Settings')).Count -eq $before) ''
+    DoubleClick 184 162
+    Start-Sleep -Seconds 2
+    $allSettings = [regex]::Matches((Log-Text), 'window (\d+) "Settings" mapped at \((-?\d+), (-?\d+)\) (\d+)x(\d+)')
+    $lastSettings = if ($allSettings.Count -gt 0) { $allSettings[$allSettings.Count - 1] } else { $null }
+    Record 'saved grid position launches the shortcut after reboot' (([regex]::Matches((Log-Text), 'desktop: launched Settings')).Count -gt $before) ''
+    if ($lastSettings) {
+        Click ([int]$lastSettings.Groups[2].Value + [int]$lastSettings.Groups[4].Value - 20) ([int]$lastSettings.Groups[3].Value - 17)
+    }
+    Click 184 162 'right'
+    Click 210 (162 + 6 + 32 + 16)
+    Record 'Remove shortcut deletes the desktop link' ($null -ne (Wait-Log 'desktop: shortcut removed: Settings')) ''
+    Shot 'shortcuts-final'
 
     # USB hot-unplug of the keyboard while the session runs.
     Qmp '{"execute":"device_del","arguments":{"id":"kbd"}}'

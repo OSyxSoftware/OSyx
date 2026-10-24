@@ -16,7 +16,7 @@ $common = @('--target=x86_64-w64-windows-gnu', '-fuse-ld=lld', '-nostdlib', '-ff
             '-Wl,--dynamicbase', '-Wl,--high-entropy-va', '-Wl,--nxcompat', '-Wl,--no-insert-timestamp', '-Wl,--build-id=none',
             '-Wl,--subsystem,windows', '-Wl,-e,start')
 $apps = [ordered]@{
-    'textedit.exe' = @{ Src = 'textedit.c'; Libs = @('-luser32', '-lgdi32', '-lkernel32') }
+    'textedit.exe' = @{ Src = 'textedit.c'; Libs = @('-lcomdlg32', '-luser32', '-lgdi32', '-lkernel32') }
     'diskutil.exe' = @{ Src = 'diskutil.c'; Libs = @('-luser32', '-lgdi32', '-lkernel32') }
     'devmgr.exe'   = @{ Src = 'devmgr.c'; Libs = @('-lsetupapi', '-luser32', '-lgdi32', '-lkernel32') }
     'netcenter.exe' = @{ Src = 'netcenter.c'; Libs = @('-liphlpapi', '-lws2_32', '-luser32', '-lgdi32', '-lkernel32') }

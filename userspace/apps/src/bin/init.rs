@@ -6,7 +6,9 @@
 //! (see `exec_checks.rs`).
 //!
 //! Arguments (kernel command line `init.args=...`):
-//! * none:          run the checks; exit status = number of failed checks
+//! * none / desktop: start the graphical desktop (no tests)
+//! * tests:         run the checks; exit status = number of failed checks
+//!   Other diagnostic modes below require `init.args=tests,<mode>,...`.
 //! * `fault`:       dereference an unmapped address (the kernel must kill us)
 //! * `panic`:       panic (OSyx Std must report it and exit with 101)
 //! * `exit,<code>`: exit with `<code>`
@@ -48,6 +50,13 @@ fn main() -> i32 {
     println!("Hello from OSyx userspace!");
     let args: Vec<String> = env::args().collect();
     println!("args: {:?}", args);
+    if args.get(1).map(String::as_str) != Some("tests") {
+        return desktop_session();
+    }
+    // Keep submode argument positions stable after removing the explicit
+    // test-mode gate. No diagnostic/fault branch is reachable otherwise.
+    let mut args = args;
+    args.remove(1);
 
     match args.get(1).map(String::as_str) {
         Some("fault") => {

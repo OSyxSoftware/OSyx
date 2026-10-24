@@ -118,7 +118,9 @@ fn main() -> i32 {
         cfg.layout = l;
     }
     println!("prism: keyboard layout {}", cfg.layout.name());
-    let comp = Compositor::new(cfg);
+    let mut comp = Compositor::new(cfg);
+    comp.set_cursor_overlay(true);
+    println!("prism: cursor overlay follows input independently of the 60 Hz application frame limit");
     let mut prism = Prism {
         start: Instant::now(),
         comp,
@@ -134,6 +136,10 @@ fn main() -> i32 {
         flushes: 0,
         flushed_pixels: 0,
         last_frame: 0,
+        cursor_stamp: None,
+        cursor_area: Rect::EMPTY,
+        cursor_saved: Vec::with_capacity(1024),
+        cursor_updates: 0,
         last_snapshot: Vec::new(),
         last_focus: None,
         geometry_dirty_at: None,
@@ -167,6 +173,10 @@ struct Prism {
     flushes: u64,
     flushed_pixels: u64,
     last_frame: u64,
+    cursor_stamp: Option<(i32, i32, prism_core::draw::CursorShape)>,
+    cursor_area: Rect,
+    cursor_saved: Vec<u32>,
+    cursor_updates: u64,
     last_snapshot: Vec<WindowSnapshot>,
     last_focus: Option<u32>,
     /// When window geometry last changed (logged once it settles).
@@ -237,7 +247,8 @@ impl Prism {
             }
             // Client messages (the client list may have grown above; only
             // the ones we waited for have revents).
-            let ready: Vec<(usize, u32)> = items[first_client..].iter().enumerate().map(|(i, it)| (i, it.revents)).collect();
+            let ready: Vec<(usize, u32)> =
+                items[first_client..].iter().enumerate().map(|(i, it)| (i, it.revents)).collect();
             let mut gone = Vec::new();
             for (i, revents) in ready {
                 if revents & (WAIT_READABLE | WAIT_HANGUP) == 0 {
@@ -258,6 +269,7 @@ impl Prism {
                 self.frame(now);
                 self.deliver();
             }
+            self.paint_cursor(false);
             if now >= self.stats_at + 30_000 {
                 self.stats_at = now;
                 self.log_stats();
@@ -332,7 +344,10 @@ impl Prism {
                         None => None,
                     };
                     if let Err(e) = self.comp.handle(id, &buf[..n], buffer, now) {
-                        eprintln!("prism: client {id} (process {}) broke the protocol: {}", self.clients[i].pid, e.message);
+                        eprintln!(
+                            "prism: client {id} (process {}) broke the protocol: {}",
+                            self.clients[i].pid, e.message
+                        );
                         // The ERROR event is delivered before the disconnect.
                         return true;
                     }
@@ -378,7 +393,8 @@ impl Prism {
     }
 
     fn reap_dead_clients(&mut self) {
-        let dead: Vec<ClientId> = self.clients.iter().filter(|c| self.comp.is_dead(c.id) && c.backlog.is_empty()).map(|c| c.id).collect();
+        let dead: Vec<ClientId> =
+            self.clients.iter().filter(|c| self.comp.is_dead(c.id) && c.backlog.is_empty()).map(|c| c.id).collect();
         for id in dead {
             self.drop_client(id, "disconnected after a protocol error");
         }
@@ -442,10 +458,52 @@ impl Prism {
             self.flush_time_us += t1.elapsed().as_micros() as u64;
         }
         self.last_frame = now;
+        self.paint_cursor(true);
         if !rects.is_empty() {
             self.frame_time_us += t0.elapsed().as_micros() as u64;
             self.frames_measured += 1;
         }
+    }
+
+    /// Restore the old cursor from the clean back buffer, draw only the
+    /// new cursor rectangle, then restore the clean pixels in RAM. Moving
+    /// the pointer does not copy or recompose a full desktop surface.
+    fn paint_cursor(&mut self, force: bool) {
+        let stamp = self.comp.cursor_state();
+        if !force && self.cursor_stamp == Some(stamp) {
+            return;
+        }
+        let old = self.cursor_area;
+        if !old.is_empty() {
+            self.present(old);
+        }
+        let area = self.comp.cursor_area();
+        self.cursor_saved.clear();
+        for y in area.y as u32..area.bottom() as u32 {
+            let start = (y * self.width + area.x as u32) as usize;
+            self.cursor_saved.extend_from_slice(&self.back[start..start + area.w as usize]);
+        }
+        {
+            let mut surface =
+                Surface::new(&mut self.back, self.width, self.height, self.width).expect("cursor geometry");
+            self.comp.draw_cursor_overlay(&mut surface);
+        }
+        self.present(area);
+        for (row, y) in (area.y as u32..area.bottom() as u32).enumerate() {
+            let start = (y * self.width + area.x as u32) as usize;
+            self.back[start..start + area.w as usize]
+                .copy_from_slice(&self.cursor_saved[row * area.w as usize..(row + 1) * area.w as usize]);
+        }
+        if self.gpu {
+            for rect in [old, area] {
+                if !rect.is_empty() {
+                    let _ = system::display_flush(rect.x as u32, rect.y as u32, rect.w, rect.h);
+                }
+            }
+        }
+        self.cursor_stamp = Some(stamp);
+        self.cursor_area = area;
+        self.cursor_updates += 1;
     }
 
     /// Copies `r` of the back buffer to the framebuffer.
@@ -456,7 +514,12 @@ impl Prism {
             // SAFETY: `fb` maps `stride * height` pixels (display_info().size
             // bytes) for as long as PRISM owns the display; `r` is inside
             // `width x height` and `width <= stride`.
-            let dst = unsafe { core::slice::from_raw_parts_mut(self.fb.add(y as usize * self.stride as usize + r.x as usize), r.w as usize) };
+            let dst = unsafe {
+                core::slice::from_raw_parts_mut(
+                    self.fb.add(y as usize * self.stride as usize + r.x as usize),
+                    r.w as usize,
+                )
+            };
             if self.rgb {
                 for (d, s) in dst.iter_mut().zip(src) {
                     *d = osyx_gfx::to_device(*s, true);
@@ -481,7 +544,14 @@ impl Prism {
             self.last_focus = focus;
         }
         let changed = snap.len() != self.last_snapshot.len()
-            || snap.iter().zip(&self.last_snapshot).any(|(a, b)| a.id != b.id || a.rect != b.rect || a.minimized != b.minimized || a.maximized != b.maximized || a.mapped != b.mapped || a.title != b.title);
+            || snap.iter().zip(&self.last_snapshot).any(|(a, b)| {
+                a.id != b.id
+                    || a.rect != b.rect
+                    || a.minimized != b.minimized
+                    || a.maximized != b.maximized
+                    || a.mapped != b.mapped
+                    || a.title != b.title
+            });
         if changed {
             self.geometry_dirty_at = Some(now);
             // Windows that appeared or vanished are reported immediately.
@@ -515,10 +585,20 @@ impl Prism {
                     println!("prism: window {} \"{}\" resized to {}x{} at ({}, {})", w.id, w.title, r.w, r.h, r.x, r.y);
                 }
                 if o.minimized != w.minimized {
-                    println!("prism: window {} \"{}\" {}", w.id, w.title, if w.minimized { "minimized" } else { "restored" });
+                    println!(
+                        "prism: window {} \"{}\" {}",
+                        w.id,
+                        w.title,
+                        if w.minimized { "minimized" } else { "restored" }
+                    );
                 }
                 if o.maximized != w.maximized {
-                    println!("prism: window {} \"{}\" {}", w.id, w.title, if w.maximized { "maximized" } else { "unmaximized" });
+                    println!(
+                        "prism: window {} \"{}\" {}",
+                        w.id,
+                        w.title,
+                        if w.maximized { "maximized" } else { "unmaximized" }
+                    );
                 }
                 if o.mapped != w.mapped && w.mapped {
                     println!("prism: window {} \"{}\" mapped at ({}, {}) {}x{}", w.id, w.title, r.x, r.y, r.w, r.h);
@@ -543,6 +623,7 @@ impl Prism {
             avg / 1000,
             avg % 1000
         );
+        println!("prism: {} cursor overlay updates without desktop recomposition", self.cursor_updates);
         if self.gpu {
             let per = self.flush_time_us.checked_div(self.flushes).unwrap_or(0);
             println!(

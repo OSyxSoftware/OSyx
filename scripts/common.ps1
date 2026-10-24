@@ -17,13 +17,13 @@ function Find-Tool([string]$Name, [string[]]$Candidates) {
     return $null
 }
 
-$Script:Qemu = Find-Tool 'qemu-system-x86_64' @(
+$Script:QemuBinary = Find-Tool 'qemu-system-x86_64' @(
     'C:\msys64\ucrt64\bin\qemu-system-x86_64.exe',
     'C:\Program Files\qemu\qemu-system-x86_64.exe')
 
 function Find-Ovmf {
     $dirs = @('C:\msys64\ucrt64\share\qemu', 'C:\Program Files\qemu\share')
-    if ($Script:Qemu) { $dirs = @((Join-Path (Split-Path (Split-Path $Script:Qemu)) 'share\qemu')) + $dirs }
+    if ($Script:QemuBinary) { $dirs = @((Join-Path (Split-Path (Split-Path $Script:QemuBinary)) 'share\qemu')) + $dirs }
     foreach ($d in $dirs) {
         $code = Join-Path $d 'edk2-x86_64-code.fd'
         $vars = Join-Path $d 'edk2-i386-vars.fd'
@@ -119,7 +119,7 @@ function New-DiskImage {
 
 # Returns the QEMU argument list for booting build/osyx.img.
 function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '', [switch]$Gpu, [string]$GpuSize = '', [string]$DiskFile = 'build/osyx.img') {
-    if (-not $Script:Qemu) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
+    if (-not $Script:QemuBinary) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
     if (-not $Script:Ovmf) { throw 'OVMF (edk2-x86_64-code.fd) not found' }
     # Fresh firmware variables every boot: stale boot entries for devices
     # that no longer exist would otherwise send OVMF to its shell.
@@ -170,7 +170,7 @@ function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 5
 
 function Start-Qemu([string[]]$QemuArgs) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $Script:Qemu
+    $psi.FileName = $Script:QemuBinary
     $psi.WorkingDirectory = $Script:Root
     $psi.UseShellExecute = $false
     $psi.Arguments = ($QemuArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '

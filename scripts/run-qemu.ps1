@@ -1,17 +1,18 @@
 # Boots a private disk copy in QEMU + OVMF with a window. Serial output goes to
 # build/serial.log (and is echoed here when -Follow is given).
 param(
-    [string]$Cmdline = '',
-    [int]$MemoryMiB = 512,
+    [string]$Cmdline = 'init.args=desktop',
+    [int]$MemoryMiB = 6144,
     [switch]$NoBuild,
     [switch]$Headless,
     [switch]$Gdb,
     [switch]$Follow,
     [switch]$Gpu,
-    [int]$QmpPort = 0
+    [int]$QmpPort = 0,
+    [switch]$NoZen
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
-if (-not $NoBuild) { & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline $Cmdline }
+if (-not $NoBuild) { & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline $Cmdline -NoZen:$NoZen }
 # Each interactive VM owns its disk for its entire lifetime. Builds/tests
 # can replace build/osyx.img without changing this VM's filesystem blocks.
 $runDir = Join-Path $BuildDir 'run'

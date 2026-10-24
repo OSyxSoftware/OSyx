@@ -2,7 +2,7 @@
 # loader's own ELF rules, assembles the EFI system partition in build/esp and
 # packs it into the GPT disk image build/osyx.img.
 param(
-    [string]$Cmdline = '',
+    [string]$Cmdline = 'init.args=desktop',
     [switch]$DebugBuild,
     # Leave \EFI\OSYX\BIN out of the ESP (kernel boots without user programs).
     [switch]$NoInit,
@@ -10,11 +10,23 @@ param(
     # again after a simulated power cut) instead of building a fresh one.
     [switch]$KeepRoot,
     [ValidateRange(128, 16384)][int]$RootMiB = 128,
-    # Experimental vendor payload; does not install a menu entry or default.
-    [string]$ZenDirectory = ''
+    # Install the vendor payload, desktop shortcut and default web browser.
+    [string]$ZenDirectory = '',
+    # Small test/development images can explicitly omit the browser.
+    [switch]$NoZen
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 $Script:RootSizeMiB = $RootMiB
+if ($NoZen -and $ZenDirectory) { throw 'Use either -NoZen or -ZenDirectory' }
+if (-not $NoZen -and -not $NoInit -and -not $KeepRoot) {
+    if (-not $ZenDirectory) {
+        $ZenDirectory = Join-Path $BuildDir 'zen/1.23.4b/core'
+        if (-not (Test-Path -LiteralPath (Join-Path $ZenDirectory 'zen.exe'))) {
+            & (Join-Path $PSScriptRoot 'fetch-zen.ps1') -Version '1.23.4b'
+        }
+    }
+    if (-not $PSBoundParameters.ContainsKey('RootMiB')) { $RootMiB = 1024; $Script:RootSizeMiB = 1024 }
+}
 Push-Location $Root
 try {
     $profileArgs = @(if (-not $DebugBuild) { '--release' })
@@ -41,6 +53,7 @@ try {
         ping = 'bin'; net = 'bin'; netstat = 'bin'; dns = 'bin'; nc = 'bin'
         winrun = 'bin'
         taskmgr = 'system/bin'; settings = 'system/bin'
+        zen = 'system/bin'; open = 'bin'; 'run-app' = 'system/bin'
     }
     $userBins = @($installDirs.Keys)
     # Only these are also boot modules (the fallback root's /bin).
@@ -104,7 +117,8 @@ try {
         Copy-Item (Join-Path $Root 'graphics\assets\fonts\windows\*') $fontDir
         $regDir = Join-Path $stage 'etc\osyx\registry'
         New-Item -ItemType Directory -Force $regDir | Out-Null
-        Invoke-Checked 'registry seed' { python (Join-Path $PSScriptRoot 'seed-registry.py') (Join-Path $regDir 'machine.reg') }
+        $registryArgs = @(if ($ZenDirectory -and -not $NoInit) { '--zen' })
+        Invoke-Checked 'registry seed' { python (Join-Path $PSScriptRoot 'seed-registry.py') (Join-Path $regDir 'machine.reg') @registryArgs }
         # Windows PE32+ test programs (built with clang when available).
         if ($ZenDirectory) {
             $zenSource = (Resolve-Path -LiteralPath $ZenDirectory).Path
@@ -121,9 +135,10 @@ try {
             New-Item -ItemType Directory -Force $appDir | Out-Null
             Copy-Item (Join-Path $winApps '*.exe') $appDir
         }
-        & (Join-Path $PSScriptRoot 'build-wintests.ps1') | Out-Null
+        $testBuild = $Cmdline -match '(^|\s)init.args=tests(,|\s|$)'
+        if ($testBuild) { & (Join-Path $PSScriptRoot 'build-wintests.ps1') | Out-Null }
         $winTests = Join-Path $BuildDir 'wintests'
-        if (Test-Path (Join-Path $winTests 'hello.exe')) {
+        if ($testBuild -and (Test-Path (Join-Path $winTests 'hello.exe'))) {
             $winDir = Join-Path $stage 'opt\wintests'
             New-Item -ItemType Directory -Force $winDir | Out-Null
             Copy-Item (Join-Path $winTests '*') $winDir -Include *.exe, *.dll

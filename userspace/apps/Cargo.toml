@@ -25,3 +25,21 @@ bench = false
 
 [dependencies]
 os-std = { path = "../../runtime/os-std" }
+
+[[bin]]
+name = "zen"
+path = "src/bin/zen.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "open"
+path = "src/bin/open.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "run-app"
+path = "src/bin/run-app.rs"
+test = false
+bench = false

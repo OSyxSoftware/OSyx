@@ -214,7 +214,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         // ole32's COM entry points live in combase on Windows.
         builtin("combase.dll", [crate::shlwapi::combase_exports(), crate::ole32::exports()].concat(), Vec::new()),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
-        builtin("shell32.dll", crate::shell32::exports(), Vec::new()),
+        builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports()].concat(), Vec::new()),
+        builtin("comdlg32.dll", crate::commdlg::exports(), Vec::new()),
         builtin("ole32.dll", crate::ole32::exports(), Vec::new()),
         builtin("winmm.dll", crate::winmm::exports(), Vec::new()),
         builtin("oleaut32.dll", crate::oleaut32::exports(), crate::oleaut32::ordinals()),

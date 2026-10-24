@@ -26,6 +26,7 @@ pub enum Icon {
     Bell,
     Link,
     Device,
+    Browser,
 }
 
 const FOLDER_BACK: Color = rgb(58, 104, 196);
@@ -45,6 +46,14 @@ pub fn draw(p: &mut Painter, icon: Icon, r: Rect, c: Color) {
     let stroke = (s * 256 / 11).max(300);
     let sub = |fx: i32, fy: i32, fw: i32, fh: i32| Rect::new(x0 + px(fx), y0 + px(fy), px(fw).max(1) as u32, px(fh).max(1) as u32);
     match icon {
+        Icon::Browser => {
+            let ink = rgb(244, 220, 186);
+            p.disc(x0 + s / 2, y0 + s / 2, (s * 47 / 100) as u32, rgb(47, 43, 40), 255);
+            p.ring(x0 + s / 2, y0 + s / 2, (s * 36 / 100) as u32, (s / 16).max(1) as u32, ink, 255, false);
+            p.segment(pt(31, 32), pt(69, 32), stroke, ink, 255);
+            p.segment(pt(69, 32), pt(31, 68), stroke, ink, 255);
+            p.segment(pt(31, 68), pt(69, 68), stroke, ink, 255);
+        }
         Icon::Folder | Icon::NewFolder => {
             p.rounded(sub(6, 16, 40, 20), (s / 12) as u32, FOLDER_BACK, 255);
             p.rounded(sub(6, 24, 88, 62), (s / 10) as u32, FOLDER_BACK, 255);

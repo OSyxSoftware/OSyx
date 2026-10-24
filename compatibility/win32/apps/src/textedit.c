@@ -5,6 +5,7 @@
  * mouse positioning, wheel scrolling and a status bar. Runs on Windows
  * and on OSyx (winrun). Usage: textedit.exe [file] */
 #include "app.h"
+#include <commdlg.h>
 
 typedef struct {
     WCHAR *s;
@@ -224,9 +225,28 @@ static void delete_forward(void) {
 }
 
 static void start_path_mode(int mode) {
-    path_mode = mode;
-    wcopy(path_edit, path, MAX_PATH);
-    wcopy(status, mode == 1 ? L"Open: type a path, Enter to open, Esc to cancel" : L"Save as: type a path, Enter to save, Esc to cancel", 256);
+    WCHAR selected[MAX_PATH];
+    wcopy(selected, path, MAX_PATH);
+    OPENFILENAMEW dialog;
+    memset(&dialog, 0, sizeof(dialog));
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = main_wnd;
+    dialog.lpstrFile = selected;
+    dialog.nMaxFile = MAX_PATH;
+    dialog.lpstrFilter = L"Text documents (*.txt)\0*.txt;*.md;*.ax\0All files\0*.*\0\0";
+    dialog.nFilterIndex = 1;
+    dialog.lpstrDefExt = L"txt";
+    dialog.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST |
+                   (mode == 1 ? OFN_FILEMUSTEXIST : OFN_OVERWRITEPROMPT);
+    BOOL ok = mode == 1 ? GetOpenFileNameW(&dialog) : GetSaveFileNameW(&dialog);
+    if (ok) {
+        if (mode == 1) load_file(selected);
+        else save_file(selected);
+    } else if (CommDlgExtendedError()) {
+        wcopy(status, L"The system file dialog could not be opened", 256);
+    }
+    path_mode = 0;
+    InvalidateRect(main_wnd, NULL, FALSE);
 }
 
 static void paint(HWND hwnd) {
@@ -392,7 +412,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (ctrl && wp == 'S') {
-            if (path[0]) save_file(path);
+            if (path[0] && GetKeyState(VK_SHIFT) >= 0) save_file(path);
             else start_path_mode(2);
         } else if (ctrl && wp == 'O') {
             start_path_mode(1);

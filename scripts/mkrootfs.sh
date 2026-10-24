@@ -76,10 +76,21 @@ app 60-textedit "Text Editor" /opt/apps/textedit.exe info "Edit UTF-8 text with 
 app 70-diskutil "Disk Utility" /opt/apps/diskutil.exe info "Mounted volumes and directory usage"
 app 80-devmgr "Device Manager" /opt/apps/devmgr.exe info "Devices reported by OSyx"
 app 90-netcenter "Network Center" /opt/apps/netcenter.exe info "Network adapters, traffic, ping and DNS"
+app 99-filedialogs "File Dialog Tests" /opt/wintests/filedialogs.exe info "Interactive WinAPI dialog regression (test images only)"
+if [ -f "$R/opt/zen/zen.exe" ] && [ -f "$R/system/bin/zen" ]; then
+    app 95-zen "Zen Browser" /system/bin/zen zen "Browse the web with Zen (default browser)"
+    printf '/system/bin/zen\n' > "$R/etc/osyx/default-browser"
+    chmod 0644 "$R/etc/osyx/default-browser"
+fi
 chmod 0644 "$R"/etc/TZ "$R"/etc/osyx/keyboard
 find "$R/system/share/applications" -type f -exec chmod 0644 {} +
 # The home of the desktop user (uid 1000): a few documents to look at.
-mkdir -p "$R/home/user/Documents" "$R/home/user/Scripts"
+mkdir -p "$R/home/user/Documents" "$R/home/user/Scripts" "$R/home/user/Desktop"
+for shortcut in 10-terminal 20-files 95-zen; do
+    if [ -f "$R/system/share/applications/$shortcut.app" ]; then
+        cp "$R/system/share/applications/$shortcut.app" "$R/home/user/Desktop/"
+    fi
+done
 cat > "$R/home/user/Documents/Welcome.txt" <<'EOF'
 Welcome to OSyx.
 

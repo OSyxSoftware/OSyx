@@ -63,8 +63,34 @@ compatibility layer; an initial tested subset is implemented (see
 .\scripts\test.ps1        # host unit tests, clippy, QEMU boot/fault/user tests
 ```
 
+The default image boots directly to the desktop and includes the pinned,
+unmodified Zen Browser Windows payload (downloaded and verified on the first
+build). Zen is installed under `/opt/zen`, launched through `/system/bin/zen`,
+and registered as the default web/HTML browser. Its persistent profile is in
+`/home/user/.config/zen/profile`. The root partition grows to 1 GiB; interactive
+QEMU runs default to 6 GiB RAM. Use `-NoZen` for a small development image.
+The boot artifact is the GPT disk `build/osyx.img`, not an ISO.
+
+Desktop shortcuts live in `/home/user/Desktop`: right-click an application in
+the launcher and choose **Add to desktop**, double-click its icon to open it,
+and drag it to move it on the grid. Positions are saved across boots; dropping
+on an occupied cell swaps the icons. **Remove shortcut** removes only the link.
+
+The Text Editor uses OSyx system file dialogs through `GetOpenFileNameW` and
+`GetSaveFileNameW` (Ctrl+O, Ctrl+S and Ctrl+Shift+S). The common-dialog DLL also
+exports the ANSI variants and `CommDlgExtendedError`; folder selection uses
+`SHBrowseForFolderA/W` and `SHGetPathFromIDListA/W/Ex`. These are filesystem
+dialogs with filters, filename validation, default extensions, new folders,
+overwrite confirmation and cancellation. Custom hooks/templates, multiple
+selection and modern COM `IFileDialog` are not implemented.
+
+Kernel and userspace checks run only with `init.args=tests` (submodes such as
+`init.args=tests,win,7111,7112` select a suite). Without that gate, even
+`test.exit` / `test.fault` do not run diagnostics. Test images explicitly use
+`-NoZen` and omit the browser; release images omit the Windows test fixtures.
+
 For the interactive desktop, run
-`powershell -ExecutionPolicy Bypass -File scripts/run-qemu.ps1 -Cmdline init.args=desktop -MemoryMiB 1024`.
+`powershell -ExecutionPolicy Bypass -File scripts/run-qemu.ps1`.
 Each interactive run uses its own image under `build/run/`; builds and tests
 can replace `build/osyx.img` without invalidating a running VM's filesystem.
 The session image is kept after exit. `-NoBuild` boots a private copy of the

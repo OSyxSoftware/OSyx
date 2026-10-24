@@ -186,6 +186,7 @@ pub fn become_user() {
 /// `key=value` lines with `Name`, `Exec`, `Icon` and `Comment`.
 #[derive(Clone, Debug)]
 pub struct AppEntry {
+    pub source: String,
     pub name: String,
     pub exec: String,
     pub icon: Icon,
@@ -193,6 +194,7 @@ pub struct AppEntry {
 }
 
 pub const APP_DIR: &str = "/system/share/applications";
+pub const DESKTOP_DIR: &str = "/home/user/Desktop";
 
 pub fn configured_theme() -> Theme {
     let mut theme = Theme::default();
@@ -218,33 +220,52 @@ pub fn icon_by_name(name: &str) -> Icon {
         "terminal" => Icon::Terminal,
         "files" | "folder" => Icon::Folder,
         "info" | "sysinfo" => Icon::Info,
+        "zen" | "browser" => Icon::Browser,
         _ => Icon::Program,
     }
 }
 
 pub fn load_apps() -> Vec<AppEntry> {
+    load_apps_from(APP_DIR)
+}
+
+pub fn load_apps_from(path: &str) -> Vec<AppEntry> {
     let mut apps = Vec::new();
-    let Ok(dir) = fs::read_dir(APP_DIR) else { return apps };
+    let Ok(dir) = fs::read_dir(path) else { return apps };
     let mut names: Vec<String> = dir.map(|e| String::from(e.file_name())).filter(|n| n.ends_with(".app")).collect();
     names.sort();
     for n in names {
-        let Ok(text) = fs::read_to_string(format!("{APP_DIR}/{n}")) else { continue };
-        let mut e = AppEntry { name: String::new(), exec: String::new(), icon: Icon::Program, comment: String::new() };
-        for line in text.lines() {
-            let Some((k, v)) = line.split_once('=') else { continue };
-            match k.trim() {
-                "Name" => e.name = String::from(v.trim()),
-                "Exec" => e.exec = String::from(v.trim()),
-                "Icon" => e.icon = icon_by_name(v.trim()),
-                "Comment" => e.comment = String::from(v.trim()),
-                _ => {}
-            }
-        }
-        if !e.name.is_empty() && e.exec.starts_with('/') {
-            apps.push(e);
+        if let Some(app) = load_app(&format!("{path}/{n}")) {
+            apps.push(app);
         }
     }
     apps
+}
+
+pub fn load_app(path: &str) -> Option<AppEntry> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut e = AppEntry {
+        source: String::from(path),
+        name: String::new(),
+        exec: String::new(),
+        icon: Icon::Program,
+        comment: String::new(),
+    };
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        match k.trim() {
+            "Name" => e.name = String::from(v.trim()),
+            "Exec" => e.exec = String::from(v.trim()),
+            "Icon" => e.icon = icon_by_name(v.trim()),
+            "Comment" => e.comment = String::from(v.trim()),
+            _ => {}
+        }
+    }
+    if !e.name.is_empty() && e.exec.starts_with('/') {
+        Some(e)
+    } else {
+        None
+    }
 }
 
 /// `1.5 MiB`

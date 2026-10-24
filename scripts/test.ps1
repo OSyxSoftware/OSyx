@@ -89,7 +89,7 @@ try {
 
     if (-not $SkipQemu) {
         # --- 2. normal boot with self-tests --------------------------------
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast' | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'test.exit boot.fast init.args=tests' | Out-Null
         $r = Invoke-Boot 'boot' $TimeoutSec
         $selftest = [regex]::Match($r.Log, 'self-tests: (\d+) passed, (\d+) failed')
         $ok = $r.Exit -eq 33 -and $selftest.Success -and $selftest.Groups[2].Value -eq '0' `
@@ -201,13 +201,13 @@ try {
 
         # Power cut on the ext4 root while a removed file is still open: the
         # next boot must recover (journal, orphan list) to a clean volume.
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast test.power-cut init.args=crash-prep' | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'test.exit boot.fast test.power-cut init.args=tests,crash-prep' | Out-Null
         $r = Invoke-Boot 'power-cut' $TimeoutSec
         $cut = $r.Exit -eq 33 -and $r.Log -match 'hold-orphan \d+: holding removed /crash-orphan.bin open' `
             -and $r.Log -match 'test.power-cut: stopping without unmounting'
         $dump = (Invoke-Checked 'dumpe2fs' { wsl.exe -d Ubuntu-24.04 -- dumpe2fs -h "$(ConvertTo-WslPath $DiskImage)?offset=$rootOffset" }) -join "`n"
         $dirty = $dump -match 'needs_recovery' -and $dump -match 'First orphan inode:\s+[1-9]' -and $dump -match 'Filesystem state:\s+not clean'
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast init.args=exit,0' -KeepRoot | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'test.exit boot.fast init.args=tests,exit,0' -KeepRoot | Out-Null
         $r = Invoke-Boot 'after-power-cut' $TimeoutSec
         $recovered = $r.Exit -eq 33 -and $r.Log -match 'ext4 vda2: recovery replayed \d+ journal blocks, freed 1 orphaned inodes' `
             -and $r.Log -match 'self-tests: \d+ passed, 0 failed'
@@ -217,7 +217,7 @@ try {
 
         # Without an entropy source /dev/random must not exist (no
         # predictable bytes); everything else still works.
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast init.args=exit,0' | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'test.exit boot.fast init.args=tests,exit,0' | Out-Null
         $r = Invoke-Boot 'boot-no-entropy' $TimeoutSec -NoRng
         $ok = $r.Exit -eq 33 -and $r.Log -match 'random: no hardware entropy source; /dev/random is unavailable' `
             -and $r.Log -match '\[test\]   no entropy source: /dev/random absent' -and $r.Log -match 'self-tests: \d+ passed, 0 failed'
@@ -231,14 +231,14 @@ try {
                Pattern = 'process 1 \(init\) exited with status 42' }
         )
         foreach ($u in $userCases) {
-            & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "test.exit boot.fast init.args=$($u.Args) init.expect=$($u.Expect)" | Out-Null
+            & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline "test.exit boot.fast init.args=tests,$($u.Args) init.expect=$($u.Expect)" | Out-Null
             $r = Invoke-Boot "user-$($u.Args -replace ',', '-')" $TimeoutSec
             $ok = $r.Exit -eq 33 -and $r.Log -match $u.Pattern -and $r.Log -match ': ok' `
                 -and $r.Log -match 'process 1 \(init\): released \d+ frames, no leak' -and $r.Log -notmatch 'KERNEL PANIC'
             Record $u.Name $ok "exit=$($r.Exit)"
         }
 
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast' -NoInit | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'test.exit boot.fast init.args=tests' -NoInit | Out-Null
         $r = Invoke-Boot 'boot-no-init' $TimeoutSec
         $ok = $r.Exit -eq 33 -and $r.Log -match 'no \\EFI\\OSYX\\BIN directory' -and $r.Log -match 'no init program "init" in /bin or /usr/bin' `
             -and $r.Log -notmatch 'process 1'
@@ -246,7 +246,7 @@ try {
 
         # No usable root partition: the boot modules become /bin of the
         # fallback tmpfs root and init starts from there.
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'test.exit boot.fast root=vdz init.args=exit,0' | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'test.exit boot.fast root=vdz init.args=tests,exit,0' | Out-Null
         $r = Invoke-Boot 'boot-fallback-root' $TimeoutSec
         $ok = $r.Exit -eq 33 -and $r.Log -match 'storage: root=vdz: no such block device' `
             -and $r.Log -match 'storage: boot module init installed as /bin/init' -and $r.Log -match 'process 1 \(init\): /bin/init spawned by 0' `
@@ -261,14 +261,14 @@ try {
             de = 'EXCEPTION: Divide error \(#DE\)'
         }
         foreach ($kind in 'pf', 'gp', 'ud', 'de') {
-            & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "test.fault=$kind boot.fast" | Out-Null
+            & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline "test.fault=$kind boot.fast init.args=tests" | Out-Null
             $r = Invoke-Boot "fault-$kind" $TimeoutSec
             $ok = $r.Exit -eq 37 -and $r.Log -match $faults[$kind] -and $r.Log -match 'KERNEL PANIC: '
             Record "exception diagnostics ($kind)" $ok "exit=$($r.Exit)"
         }
 
         # --- 4. invalid kernel image + loader error screen ------------------
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline 'boot.fast' | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'boot.fast init.args=tests' | Out-Null
         $kernelPath = Join-Path $EspDir 'EFI\OSYX\KERNEL.ELF'
         $bytes = [IO.File]::ReadAllBytes($kernelPath)
         $bytes[4] = 1  # ELFCLASS32: must be rejected
@@ -283,7 +283,7 @@ try {
         Record 'loader error screenshot' (Test-Path $shot) $shot
 
         # --- 5. kernel screen screenshot ------------------------------------
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline '' | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'init.args=tests' | Out-Null
         $shot = Join-Path $testDir 'kernel-running.png'
         if (Test-Path $shot) { Remove-Item $shot }
         $r = Invoke-Boot 'kernel-screen' $TimeoutSec 'entering idle loop' $shot
@@ -331,7 +331,7 @@ try {
         $sum = $out | Select-String -Pattern 'windows test: (\d+) passed, (\d+) failed' | Select-Object -Last 1
         Record 'Windows compatibility run' ($null -ne $sum -and $sum.Matches[0].Groups[2].Value -eq '0') $(if ($sum) { $sum.Line } else { 'no summary' })
         # Leave a usable default ESP behind.
-        & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline '' | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'init.args=tests' | Out-Null
     }
 } finally {
     Pop-Location

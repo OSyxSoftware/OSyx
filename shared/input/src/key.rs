@@ -51,6 +51,7 @@ pub const PERIOD: u16 = 0x37;
 pub const SLASH: u16 = 0x38;
 pub const CAPS_LOCK: u16 = 0x39;
 pub const F1: u16 = 0x3A;
+pub const F5: u16 = 0x3E;
 pub const F12: u16 = 0x45;
 pub const PRINT_SCREEN: u16 = 0x46;
 pub const SCROLL_LOCK: u16 = 0x47;
