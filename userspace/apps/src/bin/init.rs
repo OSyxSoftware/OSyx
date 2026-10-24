@@ -64,6 +64,16 @@ fn main() -> i32 {
         }
         Some("desktop") => return desktop_session(),
         Some("zen-probe") => return zen_probe(),
+        // `init winrun <program> [args...]`: one Windows program with no
+        // sessions around it, for bring-up diagnostics.
+        Some("winrun") => {
+            let mut c = Command::new("/bin/winrun");
+            c.arg("-v");
+            for a in &args[2..] {
+                c.arg(a);
+            }
+            return c.status().ok().and_then(|s| s.code()).unwrap_or(1);
+        }
         Some("net") => {
             let port = |i: usize, d: u16| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
             let mut t = Tests::default();

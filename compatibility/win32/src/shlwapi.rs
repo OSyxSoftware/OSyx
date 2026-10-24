@@ -344,6 +344,45 @@ extern "win64" fn RoGetActivationFactory(class: u64, _iid: u64, out: *mut u64) -
     REGDB_E_CLASSNOTREG
 }
 
+/// Nothing on OSyx is an activatable WinRT class, so activation reports the
+/// class as not registered (as `RoGetActivationFactory` does) and the caller
+/// takes its non-WinRT path.
+extern "win64" fn RoActivateInstance(class: u64, out: *mut u64) -> u32 {
+    if out.is_null() || class == 0 {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = 0 };
+    REGDB_E_CLASSNOTREG
+}
+
+/// `WindowsCompareStringOrdinal`: the UTF-16 code units compared in order,
+/// which is what the WinRT string functions define.
+extern "win64" fn WindowsCompareStringOrdinal(a: u64, b: u64, out: *mut i32) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: NULL or a valid HSTRING.
+    let (pa, la) = if a == 0 { (core::ptr::null::<u16>(), 0) } else { unsafe { ((*(a as *const HString)).buffer, (*(a as *const HString)).length) } };
+    // SAFETY: as above.
+    let (pb, lb) = if b == 0 { (core::ptr::null::<u16>(), 0) } else { unsafe { ((*(b as *const HString)).buffer, (*(b as *const HString)).length) } };
+    let mut result = 0i32;
+    for i in 0..la.min(lb) {
+        // SAFETY: both strings have at least that many units.
+        let (x, y) = unsafe { (*pa.add(i as usize), *pb.add(i as usize)) };
+        if x != y {
+            result = if x < y { -1 } else { 1 };
+            break;
+        }
+    }
+    if result == 0 && la != lb {
+        result = if la < lb { -1 } else { 1 };
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = result };
+    S_OK
+}
+
 pub fn combase_exports() -> Vec<(&'static str, u64)> {
     export_table![
         WindowsCreateStringReference,
@@ -352,5 +391,7 @@ pub fn combase_exports() -> Vec<(&'static str, u64)> {
         WindowsGetStringRawBuffer,
         WindowsGetStringLen,
         RoGetActivationFactory,
+        RoActivateInstance,
+        WindowsCompareStringOrdinal,
     ]
 }

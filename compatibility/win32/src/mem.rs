@@ -37,6 +37,8 @@ pub const MEM_COMMIT: u32 = 0x1000;
 pub const MEM_RESERVE: u32 = 0x2000;
 pub const MEM_DECOMMIT: u32 = 0x4000;
 pub const MEM_RELEASE: u32 = 0x8000;
+/// "The contents are no longer needed": an allocator's purge hint.
+pub const MEM_RESET: u32 = 0x8_0000;
 pub const MEM_PRIVATE: u32 = 0x20000;
 pub const MEM_IMAGE: u32 = 0x100_0000;
 
@@ -141,11 +143,34 @@ pub fn free_stack(base: u64, size: usize) {
 
 /// `NtAllocateVirtualMemory` / `VirtualAlloc`. Returns the base.
 pub fn virtual_alloc(addr: u64, size: usize, kind: u32, protect: u32) -> Result<u64, NtStatus> {
+    // MEM_RESET says the pages' contents are no longer needed; it is what an
+    // allocator calls when it returns memory to the system (jemalloc's
+    // purge). OSyx hands the frames back and the region stays reserved, so a
+    // later read sees zeros, exactly as Windows promises.
+    if kind == MEM_RESET {
+        if addr == 0 || size == 0 {
+            return Err(STATUS_INVALID_PARAMETER);
+        }
+        let mut regions = REGIONS.lock().unwrap();
+        let (&base, r) = regions.range_mut(..=addr).next_back().ok_or(STATUS_MEMORY_NOT_ALLOCATED)?;
+        let first = (addr - base) as usize / PAGE;
+        let last = ((addr - base) as usize + size).div_ceil(PAGE);
+        if last > r.pages.len() {
+            return Err(STATUS_MEMORY_NOT_ALLOCATED);
+        }
+        let start = base + (first * PAGE) as u64;
+        // SAFETY: the caller declared the contents no longer needed.
+        unsafe { os_sys::discard(start as *mut u8, (last - first) * PAGE) }.map_err(errno_to_status)?;
+        for p in &mut r.pages[first..last] {
+            *p = 0;
+        }
+        return Ok(start);
+    }
     if size == 0
         || kind & (MEM_COMMIT | MEM_RESERVE) == 0
         || kind & !(MEM_COMMIT | MEM_RESERVE | 0x20_0000 | 0x10_0000) != 0
     {
-        return Err(STATUS_INVALID_PARAMETER); // (TOP_DOWN 0x100000 and RESET 0x80000 aside)
+        return Err(STATUS_INVALID_PARAMETER); // (TOP_DOWN 0x100000 aside)
     }
     let prot = from_win(protect)?;
     let mut regions = REGIONS.lock().unwrap();

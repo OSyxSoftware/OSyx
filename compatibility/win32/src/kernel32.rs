@@ -1108,7 +1108,37 @@ extern "win64" fn DuplicateHandle(
     if src_process != objects::CURRENT_PROCESS || dst_process != objects::CURRENT_PROCESS {
         return fail(ERROR_NOT_SUPPORTED, FALSE); // no other processes' handles
     }
-    let Some(mut o) = objects::get(src) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
+    // GetCurrentThread and GetCurrentProcess are pseudo-handles: they name an
+    // object but are not handles, and Windows lets a program duplicate them
+    // (NSPR does exactly that to attach a thread).
+    let mut o = match src {
+        objects::CURRENT_THREAD => {
+            let tid = os_sys::gettid() as u32;
+            match objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)) {
+                Some(o) => o,
+                // A thread the runtime did not hand out a handle for (the
+                // main thread): give the duplicate its own handle object.
+                None => Object::Thread(Arc::new(ThreadObj {
+                    tid: AtomicU32::new(tid),
+                    done: AtomicBool::new(false),
+                    exit_code: AtomicU32::new(259), // STILL_ACTIVE
+                    suspended: AtomicU32::new(0),
+                    teb: AtomicU64::new(teb::current()),
+                })),
+            }
+        }
+        objects::CURRENT_PROCESS => {
+            let id = pid();
+            match objects::find(|o| matches!(o, Object::Process(p) if p.pid == id)) {
+                Some(o) => o,
+                None => return fail(ERROR_INVALID_HANDLE, FALSE),
+            }
+        }
+        _ => match objects::get(src) {
+            Some(o) => o,
+            None => return fail(ERROR_INVALID_HANDLE, FALSE),
+        },
+    };
     if let Object::Token(token) = &o {
         if inherit != 0 { return fail(ERROR_NOT_SUPPORTED, FALSE); }
         if options & !3 != 0 || dst.is_null() { return fail(ERROR_INVALID_PARAMETER, FALSE); }
@@ -1859,6 +1889,9 @@ extern "win64" fn TlsAlloc() -> u32 {
             return (w * 64) as u32 + bit;
         }
     }
+    if crate::VERBOSE.load(Ordering::Relaxed) {
+        os_std::eprintln!("winrun: TlsAlloc: no index left");
+    }
     fail(ERROR_NO_MORE_ITEMS, u32::MAX)
 }
 
@@ -1902,7 +1935,12 @@ extern "win64" fn TlsGetValue(i: u32) -> u64 {
             // SAFETY: a slot of this thread's TEB or expansion array.
             unsafe { *p }
         }
-        None => fail(ERROR_INVALID_PARAMETER, 0),
+        None => {
+            if crate::VERBOSE.load(Ordering::Relaxed) {
+                os_std::eprintln!("winrun: TlsGetValue({i}): no such slot");
+            }
+            fail(ERROR_INVALID_PARAMETER, 0)
+        }
     }
 }
 
@@ -1913,7 +1951,12 @@ extern "win64" fn TlsSetValue(i: u32, v: u64) -> Bool {
             unsafe { *p = v };
             TRUE
         }
-        None => fail(ERROR_INVALID_PARAMETER, FALSE),
+        None => {
+            if crate::VERBOSE.load(Ordering::Relaxed) {
+                os_std::eprintln!("winrun: TlsSetValue({i}): no such slot");
+            }
+            fail(ERROR_INVALID_PARAMETER, FALSE)
+        }
     }
 }
 

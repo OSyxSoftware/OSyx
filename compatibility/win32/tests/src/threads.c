@@ -57,6 +57,13 @@ typedef DWORD(WINAPI *tick_fn)(void);
 typedef DWORD(__cdecl *attach_fn)(void);
 
 void __stdcall start(void) {
+    /* NSPR attaches a thread by duplicating GetCurrentThread(), which is a
+     * pseudo-handle rather than a handle: Windows allows that. */
+    HANDLE self = NULL;
+    check("GetCurrentThread pseudo-handle duplicates",
+          DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0, FALSE, DUPLICATE_SAME_ACCESS) &&
+              self != NULL && GetThreadId(self) == GetCurrentThreadId());
+    if (self) CloseHandle(self);
     check_eq("TLS callback ran for process attach", tls_attach_calls, 1);
     check_eq("implicit TLS initial value", per_thread, 7);
     InitializeCriticalSection(&lock);

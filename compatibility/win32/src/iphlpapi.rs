@@ -245,6 +245,52 @@ extern "win64" fn IcmpSendEcho(
         return 1;
     }
 }
+// ---- interface change notifications -----------------------------------------
+
+/// IP interface, address and route registrations: (handle, callback,
+/// context). OSyx's interfaces are fixed for the life of the boot (DHCP
+/// configures the one adapter once), so a registered callback is never
+/// called. Windows sends one initial notification when the caller asks for
+/// it; OSyx does not, so a program that needs the current state has to query
+/// it (GetAdaptersInfo/GetIfTable), not wait for the callback.
+static CHANGES: Mutex<Vec<(u64, u64, u64)>> = Mutex::new(Vec::new());
+static NEXT_CHANGE: AtomicU64 = AtomicU64::new(1);
+
+extern "win64" fn NotifyIpInterfaceChange(family: u16, callback: u64, context: u64, initial: u8, out: *mut u64) -> u32 {
+    register_change(family, callback, context, initial, out)
+}
+
+extern "win64" fn NotifyUnicastIpAddressChange(family: u16, callback: u64, context: u64, initial: u8, out: *mut u64) -> u32 {
+    register_change(family, callback, context, initial, out)
+}
+
+extern "win64" fn NotifyRouteChange2(_family: u16, callback: u64, context: u64, initial: u8, out: *mut u64) -> u32 {
+    register_change(0, callback, context, initial, out)
+}
+
+fn register_change(_family: u16, callback: u64, context: u64, _initial: u8, out: *mut u64) -> u32 {
+    if callback == 0 || out.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let h = NEXT_CHANGE.fetch_add(1, Ordering::SeqCst);
+    CHANGES.lock().unwrap().push((h, callback, context));
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = h };
+    0 // NO_ERROR
+}
+
+extern "win64" fn CancelMibChangeNotify2(h: u64) -> u32 {
+    let removed = {
+        let mut c = CHANGES.lock().unwrap();
+        c.iter().position(|(id, _, _)| *id == h).map(|i| c.remove(i))
+    };
+    if removed.is_some() {
+        0 // NO_ERROR
+    } else {
+        ERROR_INVALID_PARAMETER
+    }
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![GetAdaptersInfo, GetIfTable, GetNetworkParams, IcmpCreateFile, IcmpCloseHandle, IcmpSendEcho]
+    export_table![GetAdaptersInfo, GetIfTable, GetNetworkParams, IcmpCreateFile, IcmpCloseHandle, IcmpSendEcho, NotifyIpInterfaceChange, NotifyUnicastIpAddressChange, NotifyRouteChange2, CancelMibChangeNotify2]
 }

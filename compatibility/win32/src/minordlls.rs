@@ -204,6 +204,67 @@ pub fn windowscodecs_exports() -> Vec<(&'static str, u64)> {
     export_table![WICConvertBitmapSource]
 }
 
+// ---- uxtheme ---------------------------------------------------------------------------------
+
+/// Visual styles are off: the desktop draws its own widgets, so there is no
+/// theme to hand out and every query says so. Programs then take the classic
+/// drawing path, which is the one OSyx implements (user32/gdi32), instead of
+/// asking for theme parts OSyx cannot draw.
+extern "win64" fn IsThemeActive() -> u8 {
+    0
+}
+
+extern "win64" fn IsAppThemed() -> u8 {
+    0
+}
+
+extern "win64" fn OpenThemeData(_wnd: u64, _classes: *const u16) -> u64 {
+    0 // no theme: callers fall back to classic drawing
+}
+
+extern "win64" fn CloseThemeData(theme: u64) -> u32 {
+    if theme == 0 {
+        E_INVALIDARG
+    } else {
+        0 // S_OK
+    }
+}
+
+extern "win64" fn GetThemeColor(theme: u64, _part: i32, _state: i32, _property: i32, out: *mut u32) -> u32 {
+    if theme == 0 || out.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's COLORREF.
+    unsafe { *out = 0 };
+    E_INVALIDARG // no theme colours exist without a theme
+}
+
+/// Touch panning feedback needs a themed window manager.
+extern "win64" fn BeginPanningFeedback(_wnd: u64) -> u8 {
+    0
+}
+
+extern "win64" fn UpdatePanningFeedback(_wnd: u64, _x: i32, _y: i32, _overshoot: u8) -> u8 {
+    0
+}
+
+extern "win64" fn EndPanningFeedback(_wnd: u64, _animate: u8) -> u8 {
+    0
+}
+
+pub fn uxtheme_exports() -> Vec<(&'static str, u64)> {
+    export_table![
+        IsThemeActive,
+        IsAppThemed,
+        OpenThemeData,
+        CloseThemeData,
+        GetThemeColor,
+        BeginPanningFeedback,
+        UpdatePanningFeedback,
+        EndPanningFeedback
+    ]
+}
+
 // ---- bcryptprimitives ------------------------------------------------------------------------
 
 /// Fills `buf` from the kernel's CSPRNG (/dev/random). Windows documents

@@ -225,6 +225,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("windowscodecs.dll", crate::minordlls::windowscodecs_exports(), Vec::new()),
         builtin("bcryptprimitives.dll", crate::minordlls::bcryptprimitives_exports(), Vec::new()),
         builtin("shcore.dll", crate::minordlls::shcore_exports(), Vec::new()),
+        builtin("uxtheme.dll", crate::minordlls::uxtheme_exports(), Vec::new()),
         builtin("propsys.dll", crate::propsys::exports(), Vec::new()),
     ]
 }

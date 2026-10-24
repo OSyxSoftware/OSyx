@@ -12,6 +12,23 @@ _Static_assert(sizeof(FIXED_INFO) == 600, "network layout");
 _Static_assert(sizeof(ICMP_ECHO_REPLY) == 40, "icmp layout");
 _Static_assert(sizeof(WIN32_FIND_DATAW) == 592, "find layout");
 
+/* The interface-change callback OSyx registers but never calls. The types
+ * are spelled out here because mingw's netioapi.h needs a newer target
+ * version than this program sets. */
+typedef void(WINAPI *ip_change_cb)(PVOID context, PVOID row, int type);
+
+static void WINAPI on_interface_change(PVOID context, PVOID row, int type) {
+    (void)context;
+    (void)row;
+    (void)type;
+}
+
+/* mingw's import library does not carry these, so they are resolved at run
+ * time: the delay-load failure they cause is exactly what a missing export
+ * looks like to a real program. */
+typedef DWORD(WINAPI *notify_fn)(USHORT family, ip_change_cb callback, PVOID context, BOOLEAN initial, HANDLE *out);
+typedef DWORD(WINAPI *cancel_fn)(HANDLE);
+
 void __stdcall start(void) {
     WCHAR drives[8], fs[32], label[128];
     DWORD serial, flags, maxname;
@@ -46,6 +63,14 @@ void __stdcall start(void) {
     check("network parameters size query", GetNetworkParams(NULL, &nl) == ERROR_BUFFER_OVERFLOW && nl >= sizeof(FIXED_INFO));
     FIXED_INFO *info = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, nl);
     check("host name and DNS server", GetNetworkParams(info, &nl) == NO_ERROR && info->HostName[0] && info->DnsServerList.IpAddress.String[0]);
+    HMODULE ip = LoadLibraryA("iphlpapi.dll");
+    notify_fn notify = (notify_fn)(ULONG_PTR)GetProcAddress(ip, "NotifyIpInterfaceChange");
+    cancel_fn cancel = (cancel_fn)(ULONG_PTR)GetProcAddress(ip, "CancelMibChangeNotify2");
+    HANDLE change = NULL;
+    DWORD watched = (notify && cancel) ? notify(AF_INET, on_interface_change, NULL, FALSE, &change) : ERROR_CALL_NOT_IMPLEMENTED;
+    check("interface change notification registers and cancels",
+          watched == NO_ERROR && change != NULL && cancel(change) == NO_ERROR &&
+              cancel(change) == ERROR_INVALID_PARAMETER);
     HANDLE ping = IcmpCreateFile();
     char reply[128], payload[] = "OSyx echo";
     DWORD replies = IcmpSendEcho(ping, 0x0100007f, payload, sizeof payload, NULL, reply, sizeof reply, 2000);
@@ -64,3 +89,4 @@ void __stdcall start(void) {
     HeapFree(GetProcessHeap(), 0, a); HeapFree(GetProcessHeap(), 0, ifs); HeapFree(GetProcessHeap(), 0, info);
     finish("sysadmin");
 }
+
