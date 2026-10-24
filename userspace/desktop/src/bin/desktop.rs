@@ -666,6 +666,14 @@ impl Shell {
     }
 
     fn launch(&mut self, name: &str, exec: &str) {
+        if exec == "/system/bin/zen" && self.children.iter().any(|(_, n)| n == name) {
+            if let Some(window) = self.windows.iter().find(|w| w.title.contains("Zen")) {
+                let _ = self.conn.window_action(window.id, Action::Activate, true);
+            } else {
+                self.show_note("Zen Browser", "Zen is starting. Its window will appear when startup finishes.");
+            }
+            return;
+        }
         let mut command = Command::new("/system/bin/run-app");
         command.arg(exec);
         match command.spawn() {

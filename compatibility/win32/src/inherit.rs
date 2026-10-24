@@ -92,7 +92,7 @@ pub fn offer(handles: &[u64]) -> Result<Option<String>, u32> {
     if items.is_empty() {
         return Ok(None);
     }
-    let name = alloc::format!("winrun.inherit.{}.{}", crate::kernel32::pid(), OFFERS.fetch_add(1, Ordering::Relaxed));
+    let name = alloc::format!("user.{}.winrun.inherit.{}.{}", os_std::os::getuid().0, crate::kernel32::pid(), OFFERS.fetch_add(1, Ordering::Relaxed));
     let listener = os_sys::channel_listen(&name).map_err(errno_to_win32)?;
     // The records go first, then the kernel objects four per message.
     let mut records = Vec::with_capacity(items.len() * RECORD);
@@ -186,7 +186,7 @@ const PUT: u32 = 1;
 const TAKE: u32 = 2;
 
 fn service_name(pid: u64) -> String {
-    alloc::format!("winrun.handles.{pid}")
+    alloc::format!("user.{}.winrun.handles.{pid}", os_std::os::getuid().0)
 }
 
 fn record(i: &Item) -> [u8; RECORD] {

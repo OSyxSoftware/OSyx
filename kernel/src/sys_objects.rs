@@ -120,7 +120,10 @@ fn user_name(ptr: u64, len: u64) -> Result<alloc::string::String, Errno> {
 pub fn channel_listen(name: u64, len: u64) -> Result<u64, Errno> {
     let name = user_name(name, len)?;
     let (cred, _) = process::current_identity();
-    if !cred.is_root() {
+    // System-wide services stay privileged. Applications may create
+    // services only in their own UID namespace; the kernel checks peers
+    // when they connect, so another user cannot claim or access it.
+    if !cred.is_root() && !name.starts_with(&alloc::format!("user.{}.", cred.uid)) {
         return Err(Errno::PermissionDenied);
     }
     let l = ipc::listen(&name, sched::current_pid(), cred.uid)?;

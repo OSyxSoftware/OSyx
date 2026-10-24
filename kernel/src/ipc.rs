@@ -180,6 +180,9 @@ pub fn listen(name: &str, pid: u64, uid: u32) -> Result<Arc<Listener>, Errno> {
 pub fn connect(name: &str, pid: u64, uid: u32) -> Result<Endpoint, Errno> {
     check_name(name)?;
     let l = SERVICES.lock().get(name).and_then(Weak::upgrade).ok_or(Errno::NotFound)?;
+    if l.owner.1 != 0 && uid != 0 && uid != l.owner.1 {
+        return Err(Errno::PermissionDenied);
+    }
     let ch = Arc::new(Channel {
         sides: IrqSpinLock::new([Side::default(), Side::default()]),
         waitq: [WaitQueue::new(), WaitQueue::new()],

@@ -95,18 +95,18 @@ pub struct PipeObj {
 /// characters, or too long a one, keeps its allowed characters and gains
 /// a hash of the whole name.
 fn service(name: &str) -> String {
-    const PREFIX: &str = "winpipe.";
+    let prefix = format!("user.{}.winpipe.", os_std::os::getuid().0);
     let lower = name.to_lowercase();
     let allowed = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.';
-    let full = format!("{PREFIX}{lower}");
+    let full = format!("{prefix}{lower}");
     if lower.chars().all(allowed) && full.len() <= osyx_abi::ipc::MAX_SERVICE_NAME {
         return full;
     }
     let h = osyx_crypto::Sha256::digest(lower.as_bytes());
     let tail: String = h[..8].iter().map(|b| format!("{b:02x}")).collect();
-    let keep = osyx_abi::ipc::MAX_SERVICE_NAME - PREFIX.len() - tail.len() - 1;
+    let keep = osyx_abi::ipc::MAX_SERVICE_NAME - prefix.len() - tail.len() - 1;
     let kept: String = lower.chars().map(|c| if allowed(c) { c } else { '_' }).take(keep).collect();
-    format!("{PREFIX}{kept}-{tail}")
+    format!("{prefix}{kept}-{tail}")
 }
 
 /// The pipe name in `\\.\pipe\NAME` (either slash), if `win` is one.
@@ -600,7 +600,7 @@ const RELAY_WAIT_NS: u64 = 30_000_000_000;
 static RELAYS: AtomicU32 = AtomicU32::new(0);
 
 fn relay_name(pid: u64, id: u32) -> String {
-    format!("winrun.relay.{pid}.{id}")
+    format!("user.{}.winrun.relay.{pid}.{id}", os_std::os::getuid().0)
 }
 
 /// Sends `data` on `to`, waiting while its queue is full.

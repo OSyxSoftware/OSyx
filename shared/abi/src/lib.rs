@@ -188,7 +188,8 @@ pub mod nr {
     /// [`HANDLE_NONE`](super::HANDLE_NONE) keeps the console for that stream.
     pub const SPAWN_STDIO: u64 = 42;
     /// `channel_listen(name, name_len) -> listener`: registers an IPC
-    /// service (root only; `AlreadyExists` while another listener has the name).
+    /// service (root, or a name in `user.<uid>.` owned by the caller;
+    /// `AlreadyExists` while another listener has the name).
     pub const CHANNEL_LISTEN: u64 = 43;
     /// `channel_connect(name, name_len) -> channel`: connects to a service
     /// (`NotFound` if nobody listens, `Busy` if its backlog is full).
