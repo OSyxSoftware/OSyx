@@ -254,7 +254,13 @@ impl Shell {
     fn event(&mut self, ev: Event) {
         match &ev {
             Event::WindowList { windows } => {
-                self.windows = windows.clone();
+                let processes = system::processes().unwrap_or_default();
+                let families: Vec<_> = processes.iter().map(|p| prism_core::taskbar::Process {
+                    pid: p.pid as u32,
+                    parent: p.parent as u32,
+                    win32: system::process_name(p) == "winrun",
+                }).collect();
+                self.windows = prism_core::taskbar::group(windows, &families);
                 self.layout_panel();
                 return;
             }

@@ -59,6 +59,8 @@ $programs = [ordered]@{
     'input.exe' = @{ Src = @('input.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lgdi32', '-lkernel32') }
     'shlpath.exe' = @{ Src = @('shlpath.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshlwapi', '-lkernel32') }
     'secattr.exe' = @{ Src = @('secattr.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ladvapi32', '-lkernel32') }
+    'childproc.exe' = @{ Src = @('childproc.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
+    'dwrite.exe' = @{ Src = @('dwrite.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ldwrite', '-lkernel32') }
     'shell.exe' = @{ Src = @('shell.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshell32', '-lole32', '-lkernel32') }
     'platform.exe' = @{ Src = @('platform.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshlwapi', '-lruntimeobject', '-lkernel32') }
     # The real UCRT import library: every C runtime function comes through

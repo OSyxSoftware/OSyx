@@ -73,7 +73,7 @@ mod lowio;
 mod math;
 mod metadata;
 mod multibyte;
-mod printf;
+pub(crate) mod printf;
 mod runtime;
 mod scan;
 mod stdio;

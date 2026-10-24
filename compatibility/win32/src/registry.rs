@@ -399,6 +399,16 @@ fn get_value(hkey: u64, sub: Option<String>, name: &str, need: u32) -> Result<Va
     key.values.get(&name.to_lowercase()).cloned().ok_or(ERROR_FILE_NOT_FOUND)
 }
 
+/// The string values (REG_SZ) of HKLM\`path`, as (name, text) pairs.
+pub(crate) fn machine_strings(path: &str) -> Vec<(String, String)> {
+    let mut r = REG.lock().unwrap();
+    let d = &mut r.hives[Hive::Machine as usize];
+    load(Hive::Machine, d);
+    d.keys.get(&path.to_lowercase()).map_or_else(Vec::new, |k| {
+        k.values.values().filter(|v| v.kind == 1).map(|v| (v.name.clone(), utf16_string(&v.data))).collect()
+    })
+}
+
 /// Copies `data` out like RegQueryValueEx: size query, ERROR_MORE_DATA.
 fn copy_out(data: &[u8], buf: *mut u8, size: *mut u32) -> u32 {
     if size.is_null() {

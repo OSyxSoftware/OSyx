@@ -47,6 +47,7 @@ pub const WM_ACTIVATE: u32 = 0x0006;
 pub const WM_SETFOCUS: u32 = 0x0007;
 pub const WM_KILLFOCUS: u32 = 0x0008;
 pub const WM_SETTEXT: u32 = 0x000C;
+const WM_GETTEXT: u32 = 0x000D;
 pub const WM_GETTEXTLENGTH: u32 = 0x000E;
 pub const WM_PAINT: u32 = 0x000F;
 pub const WM_CLOSE: u32 = 0x0010;
@@ -88,6 +89,9 @@ struct Msg {
     lparam: i64,
     time: u32,
     pt: (i32, i32),
+    /// The thread whose queue holds it: the window's, or the poster's for
+    /// a thread message.
+    thread: u64,
 }
 
 struct Class {
@@ -104,6 +108,8 @@ struct Win {
     wndproc: u64,
     title: String,
     style: u32,
+    ex_style: u32,
+    owner: u64,
     win: Window,
     pos: (i32, i32),
     size: (u32, u32),
@@ -126,6 +132,8 @@ struct Icon {
 }
 
 struct Timer {
+    /// The window's thread, or SetTimer's caller for a thread timer.
+    thread: u64,
     hwnd: u64,
     id: u64,
     interval: u64,
@@ -185,7 +193,8 @@ struct Gui {
     by_prism: BTreeMap<u32, u64>,
     queue: VecDeque<Msg>,
     timers: Vec<Timer>,
-    quit: Option<i32>,
+    /// Per thread: the exit code PostQuitMessage left for WM_QUIT.
+    quit: BTreeMap<u64, i32>,
     focus: u64,
     /// Characters of key presses waiting for TranslateMessage (vk, char).
     chars: VecDeque<(u32, char)>,
@@ -213,7 +222,7 @@ struct Gui {
     start: Instant,
     /// QS_* kinds queued since the thread last looked (GetQueueStatus'
     /// low word; MsgWaitForMultipleObjects without MWMO_INPUTAVAILABLE).
-    fresh: u32,
+    fresh: BTreeMap<u64, u32>,
 }
 
 static GUI: Mutex<Option<Gui>> = Mutex::new(None);
@@ -264,7 +273,7 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             by_prism: BTreeMap::new(),
             queue: VecDeque::new(),
             timers: Vec::new(),
-            quit: None,
+            quit: BTreeMap::new(),
             focus: 0,
             chars: VecDeque::new(),
             gdi,
@@ -282,7 +291,7 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             pointer: (0, 0),
             last_click: (0, 0, Instant::now()),
             start: Instant::now(),
-            fresh: 0,
+            fresh: BTreeMap::new(),
         }
     });
     f(gui)
@@ -345,29 +354,45 @@ impl Gui {
         Ok(self.conn.as_mut().expect("connected"))
     }
 
+    /// The thread that owns `hwnd`'s messages (0: the calling thread).
+    fn owner(&self, hwnd: u64) -> u64 {
+        self.windows.get(&hwnd).map_or_else(os_sys::gettid, |w| w.thread)
+    }
+
     fn post(&mut self, hwnd: u64, msg: u32, wparam: u64, lparam: i64) {
         let time = self.now_ms();
         let pt = self.pointer;
-        self.queue.push_back(Msg { hwnd, msg, wparam, lparam, time, pt });
-        self.fresh |= qs_kind(msg);
+        let thread = self.owner(hwnd);
+        self.queue.push_back(Msg { hwnd, msg, wparam, lparam, time, pt, thread });
+        *self.fresh.entry(thread).or_insert(0) |= qs_kind(msg);
         // Wake MsgWaitForMultipleObjects and GetMessage in other threads.
         crate::objects::signal_all();
     }
 
-    /// QS_* kinds of what get/peek would return now.
+    /// QS_* kinds of what get/peek would return now on the calling thread.
     fn status(&self) -> u32 {
-        let mut s = self.queue.iter().fold(0, |s, m| s | qs_kind(m.msg));
-        if self.quit.is_some() {
+        let me = os_sys::gettid();
+        let mut s = self.queue.iter().filter(|m| m.thread == me).fold(0, |s, m| s | qs_kind(m.msg));
+        if self.quit.contains_key(&me) {
             s |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
         }
         let now = Instant::now();
-        if self.timers.iter().any(|t| t.due <= now) {
+        if self.timers.iter().any(|t| t.thread == me && t.due <= now) {
             s |= QS_TIMER;
         }
-        if self.windows.values().any(|w| w.visible && w.invalid.is_some() && w.win.is_configured()) {
+        if self.windows.values().any(|w| w.thread == me && w.visible && w.invalid.is_some() && w.win.is_configured()) {
             s |= QS_PAINT;
         }
         s
+    }
+
+    /// The calling thread's QS_* kinds queued since it last looked.
+    fn fresh_bits(&self) -> u32 {
+        self.fresh.get(&os_sys::gettid()).copied().unwrap_or(0)
+    }
+
+    fn set_fresh(&mut self, bits: u32) {
+        self.fresh.insert(os_sys::gettid(), bits);
     }
 
     fn invalidate(&mut self, hwnd: u64, r: Option<Rect>, erase: bool) {
@@ -549,14 +574,16 @@ impl Gui {
         self.pump();
     }
 
-    /// Next message for `get/peek`: queue, quit, timers, paint.
+    /// Next message of the calling thread for `get/peek`: queue, quit,
+    /// timers, paint. Each thread sees only its own windows' messages.
     fn next_message(&mut self, filter: u64) -> Option<Msg> {
         self.pump();
-        let matches = |m: &Msg| filter == 0 || m.hwnd == filter;
+        let me = os_sys::gettid();
+        let matches = |m: &Msg| m.thread == me && (filter == 0 || m.hwnd == filter);
         if let Some(i) = self.queue.iter().position(matches) {
             return self.queue.remove(i);
         }
-        if let Some(code) = self.quit.take() {
+        if let Some(code) = self.quit.remove(&me) {
             return Some(Msg {
                 hwnd: 0,
                 msg: WM_QUIT,
@@ -564,26 +591,29 @@ impl Gui {
                 lparam: 0,
                 time: self.now_ms(),
                 pt: self.pointer,
+                thread: me,
             });
         }
         let now = Instant::now();
-        if let Some(t) = self.timers.iter_mut().filter(|t| filter == 0 || t.hwnd == filter).find(|t| t.due <= now) {
+        if let Some(t) = self.timers.iter_mut().filter(|t| t.thread == me && (filter == 0 || t.hwnd == filter)).find(|t| t.due <= now) {
             t.due = now + Duration::from_millis(t.interval);
-            let m = Msg { hwnd: t.hwnd, msg: WM_TIMER, wparam: t.id, lparam: t.proc_ as i64, time: 0, pt: (0, 0) };
+            let m = Msg { hwnd: t.hwnd, msg: WM_TIMER, wparam: t.id, lparam: t.proc_ as i64, time: 0, pt: (0, 0), thread: me };
             return Some(Msg { time: self.now_ms(), pt: self.pointer, ..m });
         }
         let paint = self
             .windows
             .iter()
-            .find(|(h, w)| (filter == 0 || **h == filter) && w.visible && w.invalid.is_some() && w.win.is_configured())
+            .find(|(h, w)| w.thread == me && (filter == 0 || **h == filter) && w.visible && w.invalid.is_some() && w.win.is_configured())
             .map(|(h, _)| *h);
-        paint.map(|h| Msg { hwnd: h, msg: WM_PAINT, wparam: 0, lparam: 0, time: self.now_ms(), pt: self.pointer })
+        paint.map(|h| Msg { hwnd: h, msg: WM_PAINT, wparam: 0, lparam: 0, time: self.now_ms(), pt: self.pointer, thread: me })
     }
 
     fn next_timer_in(&self) -> Duration {
         let now = Instant::now();
+        let me = os_sys::gettid();
         self.timers
             .iter()
+            .filter(|t| t.thread == me)
             .map(|t| if t.due > now { t.due - now } else { Duration::ZERO })
             .min()
             .unwrap_or(Duration::from_millis(500))
@@ -755,6 +785,17 @@ fn create_window(
         let width = if w == CW_USEDEFAULT || w <= 0 { (cw * 2 / 3).max(320) } else { w as u32 };
         let height = if h == CW_USEDEFAULT || h <= 0 { (ch * 2 / 3).max(200) } else { h as u32 };
         let mut spec = WindowSpec::normal(&title, width, height);
+        spec.flags |= proto::window_flags::HIDDEN;
+        // Win32 message-only, tool, nonactivating and owned windows are
+        // implementation details of their application, not separate tasks.
+        const WS_EX_TOOLWINDOW: u32 = 0x80;
+        const WS_EX_APPWINDOW: u32 = 0x40000;
+        const WS_EX_NOACTIVATE: u32 = 0x08000000;
+        if parent == (-3i64) as u64 || ex_style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) != 0
+            || (parent != 0 && ex_style & WS_EX_APPWINDOW == 0) {
+            spec.flags |= proto::window_flags::SKIP_TASKBAR;
+        }
+        spec.parent = g.windows.get(&parent).map_or(0, |w| w.win.id);
         spec.min_width = 120;
         spec.min_height = 80;
         if x != CW_USEDEFAULT {
@@ -773,6 +814,8 @@ fn create_window(
                 wndproc,
                 title: title.clone(),
                 style,
+                ex_style,
+                owner: parent,
                 win,
                 pos: (x.max(0), y.max(0)),
                 size: (width, height),
@@ -858,6 +901,8 @@ extern "win64" fn CreateWindowExW(
 
 fn destroy(hwnd: u64, notify: bool) -> bool {
     let Some(proc_) = wndproc_of(hwnd) else { return false };
+    let owned: Vec<u64> = with(|g| g.windows.iter().filter_map(|(&id, w)| (id != hwnd && w.owner == hwnd).then_some(id)).collect());
+    for child in owned { destroy(child, notify); }
     if notify {
         call(proc_, hwnd, WM_DESTROY, 0, 0);
         call(proc_, hwnd, WM_NCDESTROY, 0, 0);
@@ -920,6 +965,7 @@ extern "win64" fn ShowWindow(hwnd: u64, cmd: i32) -> Bool {
     });
     match r {
         Some(was) => {
+            sync_window_visibility(hwnd);
             if !was && cmd != 0 {
                 if let Some(p) = wndproc_of(hwnd) {
                     call(p, hwnd, WM_SHOWWINDOW, 1, 0);
@@ -929,6 +975,19 @@ extern "win64" fn ShowWindow(hwnd: u64, cmd: i32) -> Bool {
         }
         None => fail(ERROR_INVALID_WINDOW_HANDLE, FALSE),
     }
+}
+
+fn sync_window_visibility(hwnd: u64) {
+    with(|g| {
+        let Some(w) = g.windows.get(&hwnd) else { return };
+        let auxiliary = w.owner == (-3i64) as u64 || w.ex_style & (0x80 | 0x08000000) != 0
+            || (w.owner != 0 && w.ex_style & 0x40000 == 0);
+        let request = proto::Request::SetWindowVisibility {
+            window: w.win.id, visible: w.visible && w.owner != (-3i64) as u64,
+            taskbar: w.visible && !auxiliary,
+        };
+        if let Some(c) = g.conn.as_mut() { let _ = c.send(&request, &[]); }
+    });
 }
 
 extern "win64" fn UpdateWindow(hwnd: u64) -> Bool {
@@ -1041,6 +1100,9 @@ extern "win64" fn SetWindowPos(hwnd: u64, _after: u64, x: i32, y: i32, cx: i32, 
             w.pos = (x, y);
         }
         let (nw, nh) = if flags & 0x1 == 0 { (cx.max(1) as u32, cy.max(1) as u32) } else { w.size };
+        let resized = w.size != (nw, nh);
+        w.size = (nw, nh);
+        if resized { w.reported = Some((nw, nh)); }
         let (px, py) = w.pos;
         if flags & 0x40 != 0 {
             w.visible = true;
@@ -1056,9 +1118,21 @@ extern "win64" fn SetWindowPos(hwnd: u64, _after: u64, x: i32, y: i32, cx: i32, 
             nw,
             nh,
         );
-        Some(())
+        if resized { g.invalidate(hwnd, None, true); }
+        Some((resized, nw, nh))
     });
-    r.map_or_else(|| fail(ERROR_INVALID_WINDOW_HANDLE, FALSE), |_| TRUE)
+    match r {
+        Some((resized, nw, nh)) => {
+            if flags & (0x40 | 0x80) != 0 { sync_window_visibility(hwnd); }
+            if resized {
+                if let Some(proc) = wndproc_of(hwnd) {
+                    call(proc, hwnd, WM_SIZE, 0, (nw as i64 & 0xffff) | ((nh as i64 & 0xffff) << 16));
+                }
+            }
+            TRUE
+        }
+        None => fail(ERROR_INVALID_WINDOW_HANDLE, FALSE),
+    }
 }
 
 extern "win64" fn MoveWindow(hwnd: u64, x: i32, y: i32, w: i32, h: i32, repaint: Bool) -> Bool {
@@ -1123,6 +1197,37 @@ extern "win64" fn GetWindowTextLengthA(hwnd: u64) -> i32 {
     with(|g| g.windows.get(&hwnd).map_or(0, |w| w.title.len() as i32))
 }
 
+extern "win64" fn wvsprintfW(out: *mut u16, fmt: *const u16, args: *const u64) -> i32 {
+    if out.is_null() { return fail(ERROR_INVALID_PARAMETER, 0); }
+    let Some(fmt) = wide(fmt) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let units: Vec<u16> = fmt.encode_utf16().collect();
+    let Some(text) = crate::ucrt::printf::win32_wide(&units, args) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let n = text.len().min(1023);
+    // SAFETY: wsprintf requires room for up to 1024 output units.
+    unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), out, n); *out.add(n) = 0; }
+    n as i32
+}
+
+extern "win64" fn wvsprintfA(out: *mut u8, fmt: *const u8, args: *const u64) -> i32 {
+    if out.is_null() { return fail(ERROR_INVALID_PARAMETER, 0); }
+    let Some(fmt) = (unsafe { path::ansi_to_string(fmt) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let Some(text) = crate::ucrt::printf::win32_narrow(fmt.as_bytes(), args) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let n = text.len().min(1023);
+    // SAFETY: wsprintf requires room for up to 1024 output bytes.
+    unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), out, n); *out.add(n) = 0; }
+    n as i32
+}
+
+#[unsafe(naked)]
+extern "win64" fn wsprintfW() {
+    core::arch::naked_asm!("mov [rsp+24], r8", "mov [rsp+32], r9", "lea r8, [rsp+24]", "jmp {target}", target = sym wvsprintfW)
+}
+
+#[unsafe(naked)]
+extern "win64" fn wsprintfA() {
+    core::arch::naked_asm!("mov [rsp+24], r8", "mov [rsp+32], r9", "lea r8, [rsp+24]", "jmp {target}", target = sym wvsprintfA)
+}
+
 const GWLP_WNDPROC: i32 = -4;
 const GWL_STYLE: i32 = -16;
 const GWLP_USERDATA: i32 = -21;
@@ -1133,6 +1238,8 @@ extern "win64" fn GetWindowLongPtrA(hwnd: u64, idx: i32) -> i64 {
         match idx {
             GWLP_WNDPROC => w.wndproc as i64,
             GWL_STYLE => w.style as i64,
+            -20 => w.ex_style as i64, // GWL_EXSTYLE
+            -8 => w.owner as i64, // GWLP_HWNDPARENT
             GWLP_USERDATA => w.user_data,
             _ => fail(ERROR_INVALID_PARAMETER, 0),
         }
@@ -1140,15 +1247,18 @@ extern "win64" fn GetWindowLongPtrA(hwnd: u64, idx: i32) -> i64 {
 }
 
 extern "win64" fn SetWindowLongPtrA(hwnd: u64, idx: i32, v: i64) -> i64 {
-    with(|g| {
+    let previous = with(|g| {
         let Some(w) = g.windows.get_mut(&hwnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
         match idx {
             GWLP_WNDPROC => core::mem::replace(&mut w.wndproc, v as u64) as i64,
             GWL_STYLE => core::mem::replace(&mut w.style, v as u32) as i64,
+            -20 => core::mem::replace(&mut w.ex_style, v as u32) as i64,
             GWLP_USERDATA => core::mem::replace(&mut w.user_data, v),
             _ => fail(ERROR_INVALID_PARAMETER, 0),
         }
-    })
+    });
+    if idx == -20 { sync_window_visibility(hwnd); }
+    previous
 }
 
 extern "win64" fn GetWindowLongA(hwnd: u64, idx: i32) -> i32 {
@@ -1215,6 +1325,7 @@ fn read_msg(p: *const u8) -> Msg {
             lparam: teb::get(p as u64, 24),
             time: teb::get(p as u64, 32),
             pt: (teb::get(p as u64, 36), teb::get(p as u64, 40)),
+            thread: os_sys::gettid(),
         }
     }
 }
@@ -1225,7 +1336,7 @@ extern "win64" fn GetMessageA(msg: *mut u8, hwnd: u64, _min: u32, _max: u32) -> 
     }
     loop {
         let r = with(|g| {
-            g.fresh = 0;
+            g.set_fresh(0);
             if let Some(m) = g.next_message(hwnd) {
                 return Ok(m);
             }
@@ -1252,12 +1363,12 @@ const PM_REMOVE: u32 = 1;
 
 extern "win64" fn PeekMessageA(msg: *mut u8, hwnd: u64, _min: u32, _max: u32, flags: u32) -> Bool {
     let m = with(|g| {
-        g.fresh = 0;
+        g.set_fresh(0);
         let m = g.next_message(hwnd)?;
         if flags & PM_REMOVE == 0 && !matches!(m.msg, WM_PAINT | WM_TIMER | WM_QUIT) {
             g.queue.push_front(m);
         } else if flags & PM_REMOVE == 0 && m.msg == WM_QUIT {
-            g.quit = Some(m.wparam as i32);
+            g.quit.insert(os_sys::gettid(), m.wparam as i32);
         }
         Some(m)
     });
@@ -1288,7 +1399,7 @@ extern "win64" fn TranslateMessage(msg: *const u8) -> Bool {
         if let Some(i) = g.chars.iter().position(|(vk, _)| *vk as u64 == m.wparam) {
             let (_, c) = g.chars.remove(i).expect("found");
             let time = m.time;
-            g.queue.push_front(Msg { hwnd: m.hwnd, msg: WM_CHAR, wparam: c as u64, lparam: m.lparam, time, pt: m.pt });
+            g.queue.push_front(Msg { hwnd: m.hwnd, msg: WM_CHAR, wparam: c as u64, lparam: m.lparam, time, pt: m.pt, thread: m.thread });
             TRUE
         } else {
             FALSE
@@ -1343,7 +1454,7 @@ extern "win64" fn PostMessageW(hwnd: u64, msg: u32, w: u64, l: i64) -> Bool {
 }
 
 extern "win64" fn PostQuitMessage(code: i32) {
-    with(|g| g.quit = Some(code));
+    with(|g| g.quit.insert(os_sys::gettid(), code));
 }
 
 extern "win64" fn DefWindowProcA(hwnd: u64, msg: u32, _w: u64, l: i64) -> i64 {
@@ -1370,6 +1481,7 @@ extern "win64" fn DefWindowProcA(hwnd: u64, msg: u32, _w: u64, l: i64) -> i64 {
             1
         }
         WM_GETTEXTLENGTH => GetWindowTextLengthA(hwnd) as i64,
+        WM_GETTEXT => GetWindowTextA(hwnd, l as *mut u8, _w as i32) as i64,
         WM_SETTEXT => {
             // SAFETY: lParam is a NUL-terminated string.
             set_title(hwnd, unsafe { path::ansi_to_string(l as *const u8) }.unwrap_or_default()) as i64
@@ -1378,8 +1490,17 @@ extern "win64" fn DefWindowProcA(hwnd: u64, msg: u32, _w: u64, l: i64) -> i64 {
     }
 }
 
+/// The text messages carry UTF-16 here; everything else is as DefWindowProcA.
 extern "win64" fn DefWindowProcW(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
-    DefWindowProcA(hwnd, msg, w, l)
+    match msg {
+        WM_SETTEXT => {
+            // SAFETY: lParam is a NUL-terminated UTF-16 string.
+            set_title(hwnd, unsafe { path::wide_to_string(l as *const u16) }.unwrap_or_default()) as i64
+        }
+        WM_GETTEXT => GetWindowTextW(hwnd, l as *mut u16, w as i32) as i64,
+        WM_GETTEXTLENGTH => GetWindowTextLengthW(hwnd) as i64,
+        _ => DefWindowProcA(hwnd, msg, w, l),
+    }
 }
 
 extern "win64" fn SetTimer(hwnd: u64, id: u64, ms: u32, proc_: u64) -> u64 {
@@ -1390,7 +1511,8 @@ extern "win64" fn SetTimer(hwnd: u64, id: u64, ms: u32, proc_: u64) -> u64 {
         let id = if hwnd == 0 { g.handle() } else { id };
         let interval = (ms as u64).max(10);
         g.timers.retain(|t| !(t.hwnd == hwnd && t.id == id));
-        g.timers.push(Timer { hwnd, id, interval, due: Instant::now() + Duration::from_millis(interval), proc_ });
+        let thread = g.owner(hwnd);
+        g.timers.push(Timer { thread, hwnd, id, interval, due: Instant::now() + Duration::from_millis(interval), proc_ });
         if id == 0 {
             1
         } else {
@@ -2051,6 +2173,12 @@ extern "win64" fn ReleaseDC(hwnd: u64, dc: u64) -> i32 {
         present(hwnd, None);
     }
     had as i32
+}
+
+/// PRISM draws decorations outside the application's surface, so its
+/// window and client drawing areas share the same origin and dimensions.
+extern "win64" fn GetWindowDC(hwnd: u64) -> u64 {
+    GetDC(hwnd)
 }
 
 /// Runs `f` on the DC's window surface, clipped to its paint rectangle;
@@ -2940,8 +3068,9 @@ extern "win64" fn GetQueueStatus(flags: u32) -> u32 {
     with(|g| {
         g.pump();
         let now = g.status() & flags;
-        let new = g.fresh & now;
-        g.fresh &= !flags;
+        let new = g.fresh_bits() & now;
+        let left = g.fresh_bits() & !flags;
+        g.set_fresh(left);
         (now << 16) | new
     })
 }
@@ -2965,7 +3094,7 @@ extern "win64" fn MsgWaitForMultipleObjectsEx(n: u32, hs: *const u64, ms: u32, m
     loop {
         let (seq, input, timer) = with(|g| {
             g.pump();
-            let have = if flags & MWMO_INPUTAVAILABLE != 0 { g.status() } else { g.fresh & g.status() };
+            let have = if flags & MWMO_INPUTAVAILABLE != 0 { g.status() } else { g.fresh_bits() & g.status() };
             (crate::objects::sequence(), have & mask != 0, g.next_timer_in())
         });
         // With MWMO_WAITALL the objects count only together with input.
@@ -3044,15 +3173,23 @@ extern "win64" fn RemovePropW(_wnd: u64, _name: *const u16) -> u64 {
     0
 }
 
-/// OSyx's windows are all top-level: no window has a parent.
-extern "win64" fn GetParent(_wnd: u64) -> u64 {
-    0
+extern "win64" fn GetParent(wnd: u64) -> u64 {
+    with(|g| g.windows.get(&wnd).filter(|w| w.style & 0x80000000 != 0).map_or(0, |w| w.owner))
 }
 
 extern "win64" fn GetAncestor(wnd: u64, flags: u32) -> u64 {
     match flags {
-        1 | 2 => wnd, // GA_PARENT (top level) and GA_ROOT
-        3 => wnd,     // GA_ROOTOWNER
+        1 => 0, // GA_PARENT: no child controls yet.
+        2 => if is_window(wnd) { wnd } else { 0 }, // GA_ROOT
+        3 => with(|g| {
+            let mut root = wnd;
+            for _ in 0..g.windows.len() {
+                let Some(w) = g.windows.get(&root) else { return 0 };
+                if !g.windows.contains_key(&w.owner) { return root; }
+                root = w.owner;
+            }
+            root
+        }),
         _ => 0,
     }
 }
@@ -3061,8 +3198,10 @@ extern "win64" fn IsChild(_parent: u64, _wnd: u64) -> Bool {
     FALSE
 }
 
-extern "win64" fn GetWindow(_wnd: u64, _cmd: u32) -> u64 {
-    0
+extern "win64" fn GetWindow(wnd: u64, cmd: u32) -> u64 {
+    if cmd == 4 { // GW_OWNER
+        with(|g| g.windows.get(&wnd).map_or(0, |w| if w.owner != wnd && g.windows.contains_key(&w.owner) { w.owner } else { 0 }))
+    } else { 0 }
 }
 
 extern "win64" fn GetTopWindow(_wnd: u64) -> u64 {
@@ -3755,6 +3894,10 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetWindowTextA,
         GetWindowTextW,
         GetWindowTextLengthA,
+        wsprintfA,
+        wsprintfW,
+        wvsprintfA,
+        wvsprintfW,
         GetWindowLongPtrA,
         SetWindowLongPtrA,
         GetWindowLongA,
@@ -3932,6 +4075,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         BeginPaint,
         EndPaint,
         GetDC,
+        GetWindowDC,
         ReleaseDC,
         FillRect,
         FrameRect,

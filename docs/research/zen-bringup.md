@@ -614,3 +614,125 @@ tokens, alternate desktops), or launching children without the sandbox.
 DirectWrite is absent (`dwrite.dll` not found), so Gecko also needs real
 TrueType fonts behind its GDI font path before text can render: the
 atlas fonts have no sfnt tables (GetFontData fails).
+
+## Inherited handles, DirectWrite and private JIT pages (2026-10-24)
+
+The work continued from attempt 58 with cross-process inheritance of
+events, page-file sections and connected pipes, an explicit handle list,
+and DuplicateHandle transfers in both directions. Shared event state uses
+shared memory; the kernel keys a futex in such a mapping by the shared
+object and byte offset rather than by process and virtual address.
+Files, mutexes and semaphores cannot yet be inherited. The diagnostic
+launcher uses Mozilla's sandbox-disable environment switches because the
+Windows broker's suspended-process patching is not implemented.
+
+The new DirectWrite subset provides the original factory and font/face
+interfaces, local and custom font loaders, metrics, cmap lookup, sfnt
+tables, TrueType outlines and grayscale glyph coverage. Build scripts
+install the unmodified OFL-licensed Lato and KaTeX fonts in C:\Windows\Fonts
+and seed HKLM FontSubstitutes. Text layout/analysis, CFF outlines, hinting
+and newer factory interfaces are unsupported. GDI's existing atlas font
+model remains separate; this does not turn GetFontData into a TrueType API.
+
+On resumption, attempt 77 crashed at mozavutil.dll+0x26be0 after a failed
+load reporting the missing kernel32 GetProcessAffinityMask. The one-CPU
+affinity query is now implemented. PE loads now roll back newly loaded
+dependencies and their reservations when binding fails, preventing a later
+LoadLibrary from finding a partially bound image and calling its entry.
+Two host regression tests cover repeated failure, repair and retry, and
+preservation of modules loaded before the failed operation.
+
+| Attempt | Configuration and observed result |
+|---|---|
+| 78 | 4 GiB; passed mozavutil; reached missing USER32 GetWindowDC. Content processes crashed with MOZ_CRASH(OOM). |
+| 79 | Added GetWindowDC; main process reached OLEAUT32 ordinal 200 (GetErrorInfo). Content failures came from VirtualAlloc(..., MEM_COMMIT, PAGE_EXECUTE_READWRITE), not exhausted RAM. Serial/result preserved as attempt-79.*. |
+| 80 | Added Get/SetErrorInfo (including ordinals 200/201) and private JIT page support. No delay-load exception; the VM exhausted its actual 4 GiB at guest time 163.430 s. PRISM counted one buffer / 50 KiB, from an empty window. Screenshot attempt-80-live.png; full serial/result attempt-80.*. |
+| 81 | Same image with 6 GiB, 240-second timeout. No unhandled Windows exception or memory exhaustion; remained alive with a tiny blank/black Zen window. Screenshot, serial and result are attempt-81.*. No browser UI or page rendering confirmed. |
+| 82 | Separate profile with software WebRender; progressed to USER32 wsprintfW. Added ANSI/wide wsprintf and wvsprintf adapters over the CRT formatter; native message fixture passed 59/0 including owner and extended-style queries. |
+| 83 | Software compositor preferences, wsprintf and initial taskbar grouping; 6 GiB, 300-second timeout. No loader error, unhandled Windows exception or fatal process fault. Functional UI still unverified; result state is unverified, not success. |
+| 84 | Final hidden/owned window handling and task grouping; 6 GiB, 180-second timeout. Screenshot attempt-84.png confirms exactly one Zen Browser task and no helper-window tasks. The main window stays maximized at 1920x994 instead of shrinking to 160x80. No loader error or fatal process fault; browser content is still blank. Serial/result/screenshot preserved as attempt-84.*; live intermediate screenshot attempt-84-live.png. |
+
+Private PAGE_EXECUTE_READWRITE pages are initially RW/NX. On instruction
+fetch, the fault dispatcher switches that page to RX; a subsequent write
+switches it back to RW/NX. The original CPU context is resumed, with no
+Windows exception delivered for these internal permission transitions.
+VirtualQuery reports the requested logical RWX protection. Kernel W^X is
+unchanged. Same-page self-modifying instructions and writable executable
+file/shared sections remain unsupported. The threads fixture tests code
+generation, execution, patching, explicit RX, subrange commit, decommit and
+zeroed recommit. Native Windows passed 39/0.
+
+GetErrorInfo/SetErrorInfo keep a retained COM object per thread, transfer
+ownership when retrieved, release replaced objects, and expose both named
+and ordinal exports. Windows also exports the functions through ole32;
+those aliases share the same state. The native interop fixture passes the
+new nine error-info checks; its existing three window-station failures on
+this Windows host remain (70 passed, 3 failed overall).
+
+The font and inheritance fixtures passed native Windows first:
+dwrite 83/0, childproc 18/0. The first resumed QEMU regression passed
+1960/0, including dwrite 83/0 and the initial JIT execution/patch checks.
+The final targeted Win32 rerun passed 1993/0, including threads 39/0,
+msgwait 61/0, gui 20/0, dwrite 83/0 and childproc 18/0. Host unit tests
+passed 359/0 and all target clippy checks passed with -D warnings.
+The complete QEMU system run passed boot, kernel diagnostics, storage,
+recovery, IPC, desktop (34/0), networking (29/0) and VirtIO-GPU desktop
+(38/0). Its Win32 stage exposed a missing lstrcmp import used only by the
+new fixture; replacing that dependency with a local exact comparison and
+rerunning win-test.ps1 produced the final 1993/0 result. Evidence is
+build/codex-resume-host-final.log, build/codex-resume-qemu-final.log and
+build/codex-resume-win-final.log (the latter supersedes the earlier Win32
+stage, not the independent system checks).
+The host tests need a writable TEMP/TMP; this session used
+build/host-test-tmp after Windows denied directory creation in its default
+temporary folder. No production host filesystem code was changed.
+
+The diagnostic probe now creates C:\tmp\zen-probe-profile with explicit
+software WebRender preferences. Direct3D acceleration and its GPU process
+are disabled for this probe; the browser binaries remain unchanged. The
+VM memory limit is configurable via zen-test.ps1 -MemoryMiB (default 6144).
+Result JSON now distinguishes actual loader/Windows exceptions and fatal
+process faults from expected feature-probing API failures, and records
+timeouts. A timeout, a mapped window or an empty pixel buffer is not
+functional browser success.
+
+### One application entry for Windows subprocesses
+
+PRISM now excludes unmapped and explicitly auxiliary windows from its
+task list. Winrun creates its windows hidden, forwards ShowWindow and
+SWP_SHOWWINDOW/SWP_HIDEWINDOW visibility, and classifies message-only,
+tool, nonactivating and owned windows as auxiliary. Drawing to a hidden
+helper no longer maps an accidental visible window. Runtime changes to
+extended styles update taskbar eligibility. Owned windows keep their
+PRISM parent and expose GW_OWNER/GA_ROOTOWNER to Windows callers.
+
+The desktop groups Windows windows by their highest winrun ancestor in
+the kernel's process snapshot. It prefers the named parent window as the
+task button's target, keeps other applications separate and retains a
+child entry if the parent has no window. Focusing an owned helper marks
+the parent's entry active; minimizing an application retains its task.
+Processes remain independent. This is window ownership and taskbar
+grouping, not a merger of Firefox's process address spaces.
+
+Host tests cover separate process families, named parent selection,
+missing parents, hidden-window pixels/focus/task lists, auxiliary windows,
+owned-window focus and minimized entries. SetWindowPos also updates its
+rectangle before returning; the GUI fixture checks immediate window and
+client rectangle queries so callers do not have to wait for a PRISM
+Configure event to observe their requested geometry. The message fixture
+also verifies that destroying an owner destroys its helpers (61/0 native
+Windows and QEMU).
+
+Attempt 84's result remains unverified (script exit 2, timed_out true,
+loader_error and process_fault null). Tabs, browser input, rendered web
+content and verified HTTPS have not passed. The dependency audit has 894
+unresolved import occurrences across the complete vendor package; unused
+gaps are not treated as reached runtime failures.
+
+API contracts and implementation references:
+[GetProcessAffinityMask](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprocessaffinitymask),
+[GetErrorInfo](https://learn.microsoft.com/en-us/windows/win32/api/oleauto/nf-oleauto-geterrorinfo),
+[SetErrorInfo](https://learn.microsoft.com/en-us/windows/win32/api/oleauto/nf-oleauto-seterrorinfo),
+[VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect),
+[Mozilla GPU process configuration](https://github.com/mozilla-firefox/firefox/blob/main/gfx/thebes/gfxPlatform.cpp),
+[Mozilla WebRender configuration](https://github.com/mozilla-firefox/firefox/blob/main/gfx/config/gfxConfigManager.cpp).

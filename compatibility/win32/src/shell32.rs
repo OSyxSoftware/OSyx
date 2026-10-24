@@ -108,8 +108,11 @@ fn resolve(base: Base, create: bool, verify: bool) -> Result<String, u32> {
 const KF_FLAG_DONT_VERIFY: u32 = 0x4000;
 const KF_FLAG_CREATE: u32 = 0x8000;
 /// Flags with no effect here: no folder redirection, aliases or
-/// unexpanded environment strings exist, so the default path is the path.
-const KF_FLAGS_NO_EFFECT: u32 = 0x0000_0200 | 0x0000_0400 | 0x0000_0800 | 0x0000_1000 | 0x0000_2000;
+/// unexpanded environment strings exist, so the default path is the path;
+/// KF_FLAG_SIMPLE_IDLIST only shapes ID lists; and with no packages or app
+/// containers, their (no-)redirection flags change nothing.
+const KF_FLAGS_NO_EFFECT: u32 =
+    0x0000_0100 | 0x0000_0200 | 0x0000_0400 | 0x0000_0800 | 0x0000_1000 | 0x0000_2000 | 0x0001_0000 | 0x0002_0000;
 
 /// A token other than the caller's (NULL) would name another user.
 fn token_ok(token: u64) -> bool {
@@ -117,6 +120,16 @@ fn token_ok(token: u64) -> bool {
 }
 
 extern "win64" fn SHGetKnownFolderPath(id: *const u8, flags: u32, token: u64, out: *mut u64) -> u32 {
+    let hr = known_folder_path(id, flags, token, out);
+    if hr != S_OK && crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+        // SAFETY: the caller's KNOWNFOLDERID, if any.
+        let d1 = if id.is_null() { 0 } else { unsafe { core::ptr::read_unaligned(id as *const u32) } };
+        os_std::eprintln!("winrun: SHGetKnownFolderPath({d1:08x}-..., flags {flags:#x}) failed: {hr:#x}");
+    }
+    hr
+}
+
+fn known_folder_path(id: *const u8, flags: u32, token: u64, out: *mut u64) -> u32 {
     if out.is_null() {
         return E_INVALIDARG;
     }

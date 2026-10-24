@@ -39,7 +39,14 @@ static FAILURE_AT: [AtomicU64; FAILURES] = [const { AtomicU64::new(0) }; FAILURE
 static FAILURE_WHAT: [AtomicU64; FAILURES] = [const { AtomicU64::new(0) }; FAILURES];
 static FAILURE_NEXT: AtomicU64 = AtomicU64::new(0);
 
+/// OSYX_WINRUN_TRACE=1: every failure is also printed as it happens,
+/// except the routine ones (timeouts, pending I/O, buffer-size queries).
+pub(crate) static TRACE: AtomicBool = AtomicBool::new(false);
+
 fn note_failure(at: &'static core::panic::Location<'static>, err: u32) {
+    if TRACE.load(Ordering::Relaxed) && !matches!(err, 258 | 997 | 234 | 122 | 111 | 259) {
+        os_std::eprintln!("winrun: failure: error {err} in thread {} at {}:{}", os_sys::gettid(), at.file(), at.line());
+    }
     let i = (FAILURE_NEXT.fetch_add(1, Ordering::Relaxed) as usize) % FAILURES;
     FAILURE_AT[i].store(at as *const _ as u64, Ordering::Relaxed);
     FAILURE_WHAT[i].store(((os_sys::gettid() as u64) << 32) | err as u64, Ordering::Relaxed);
@@ -510,7 +517,14 @@ extern "win64" fn CreateFileW(
 ) -> u64 {
     if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,INVALID_HANDLE_VALUE); }
     // SAFETY: as above.
-    create_file_common(unsafe { sw(name) }, access, share, disposition, flags)
+    let path = unsafe { sw(name) };
+    let traced = TRACE.load(Ordering::Relaxed).then(|| path.clone()).flatten();
+    let h = create_file_common(path, access, share, disposition, flags);
+    if let Some(p) = traced {
+        let result = if h == INVALID_HANDLE_VALUE { alloc::format!("failed: {}", teb::last_error()) } else { alloc::format!("{h:#x}") };
+        os_std::eprintln!("winrun: CreateFileW({p}, access {access:#x}, share {share:#x}, disposition {disposition}, flags {flags:#x}) {result}");
+    }
+    h
 }
 
 /// OVERLAPPED: Internal, InternalHigh, Offset, OffsetHigh, hEvent.
@@ -899,6 +913,9 @@ fn new_file_attributes(attributes: u64) -> Result<u64, u32> {
 }
 
 fn create_directory(name: Option<String>, attributes: u64) -> Bool {
+    if TRACE.load(Ordering::Relaxed) {
+        os_std::eprintln!("winrun: CreateDirectory({})", name.as_deref().unwrap_or(""));
+    }
     let sd = match new_file_attributes(attributes) {
         Ok(sd) => sd,
         Err(e) => return fail(e, FALSE),
@@ -1164,8 +1181,45 @@ extern "win64" fn DuplicateHandle(
     inherit: Bool,
     options: u32,
 ) -> Bool {
-    if src_process != objects::CURRENT_PROCESS || dst_process != objects::CURRENT_PROCESS {
-        return fail(ERROR_NOT_SUPPORTED, FALSE); // no other processes' handles
+    // Another process's handles go through its handle service.
+    let other = |p: u64| crate::process::other_pid(p);
+    match (other(src_process), other(dst_process)) {
+        (Err(e), _) | (_, Err(e)) => return fail(e, FALSE),
+        (Ok(Some(_)), Ok(Some(_))) => return fail(ERROR_NOT_SUPPORTED, FALSE),
+        (Ok(None), Ok(Some(pid))) => {
+            if dst.is_null() {
+                return fail(ERROR_INVALID_PARAMETER, FALSE);
+            }
+            return match crate::inherit::put(pid, src) {
+                Ok(h) => {
+                    if options & 1 != 0 {
+                        objects::close(src); // DUPLICATE_CLOSE_SOURCE
+                    }
+                    // SAFETY: the caller's out pointer.
+                    unsafe { *dst = h };
+                    TRUE
+                }
+                Err(e) => fail(e, FALSE),
+            };
+        }
+        (Ok(Some(pid)), Ok(None)) => {
+            return match crate::inherit::take(pid, src, options & 1 != 0) {
+                Ok(h) => {
+                    if inherit != 0 {
+                        objects::set_inheritable(h, true);
+                    }
+                    if dst.is_null() {
+                        objects::close(h);
+                    } else {
+                        // SAFETY: the caller's out pointer.
+                        unsafe { *dst = h };
+                    }
+                    TRUE
+                }
+                Err(e) => fail(e, FALSE),
+            };
+        }
+        (Ok(None), Ok(None)) => {}
     }
     // GetCurrentThread and GetCurrentProcess are pseudo-handles: they name an
     // object but are not handles, and Windows lets a program duplicate them
@@ -1208,6 +1262,9 @@ extern "win64" fn DuplicateHandle(
         o=Object::Token(Arc::new(crate::security::Token {access:rights,..(**token).clone()}));
     }
     let h = objects::insert(o);
+    if inherit != 0 {
+        objects::set_inheritable(h, true);
+    }
     if options & 1 != 0 {
         objects::close(src); // DUPLICATE_CLOSE_SOURCE
     }
@@ -1734,7 +1791,7 @@ pub(crate) extern "win64" fn ReleaseSRWLockShared(l: u64) {
 
 /// An unnamed event, for objects that are waitable events on Windows too.
 pub(crate) fn new_event(manual: bool, initial: bool) -> u64 {
-    objects::insert(Object::Event(Arc::new(EventObj { signaled: AtomicBool::new(initial), manual, name: None })))
+    objects::insert(Object::Event(EventObj::new(initial, manual, None)))
 }
 
 fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
@@ -1743,7 +1800,7 @@ fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
         return objects::insert(o);
     }
     teb::set_last_error(ERROR_SUCCESS);
-    objects::insert(Object::Event(Arc::new(EventObj { signaled: AtomicBool::new(initial), manual, name })))
+    objects::insert(Object::Event(EventObj::new(initial, manual, name)))
 }
 
 /// Opens a named object of this process (names are process-local here,
@@ -1790,21 +1847,33 @@ extern "win64" fn OpenFileMappingA(_access: u32, inherit: Bool, name: *const u8)
 }
 
 extern "win64" fn CreateEventA(attributes: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
+    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, 0) };
     // SAFETY: NULL or NUL-terminated name.
-    create_event(manual != 0, initial != 0, unsafe { sa(name) })
+    let h = create_event(manual != 0, initial != 0, unsafe { sa(name) });
+    if inherit && h != 0 {
+        objects::set_inheritable(h, true);
+    }
+    h
 }
 
 extern "win64" fn CreateEventW(attributes: u64, manual: Bool, initial: Bool, name: *const u16) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
+    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, 0) };
     // SAFETY: as above.
-    create_event(manual != 0, initial != 0, unsafe { sw(name) })
+    let h = create_event(manual != 0, initial != 0, unsafe { sw(name) });
+    if inherit && h != 0 {
+        objects::set_inheritable(h, true);
+    }
+    h
 }
 
 extern "win64" fn CreateEventExW(attributes: u64, name: *const u16, flags: u32, _access: u32) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
+    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, 0) };
     // SAFETY: as above.
-    create_event(flags & 1 != 0, flags & 2 != 0, unsafe { sw(name) })
+    let h = create_event(flags & 1 != 0, flags & 2 != 0, unsafe { sw(name) });
+    if inherit && h != 0 {
+        objects::set_inheritable(h, true);
+    }
+    h
 }
 
 /// Signals an event for code that is not a Windows caller (registry
@@ -1820,10 +1889,7 @@ pub(crate) fn reset_event(h: u64) {
 fn event_op(h: u64, set: bool) -> Bool {
     match objects::get(h) {
         Some(Object::Event(e)) => {
-            e.signaled.store(set, Ordering::SeqCst);
-            if set {
-                objects::signal_all();
-            }
+            e.set(set);
             TRUE
         }
         _ => fail(ERROR_INVALID_HANDLE, FALSE),
@@ -2388,6 +2454,25 @@ extern "win64" fn GlobalMemoryStatusEx(out: *mut u8) -> Bool {
     TRUE
 }
 
+/// MEMORYSTATUS (56 bytes): GlobalMemoryStatusEx's numbers in the older
+/// layout.
+extern "win64" fn GlobalMemoryStatus(out: *mut u8) {
+    if out.is_null() {
+        return;
+    }
+    let mut ex = [0u8; 64];
+    ex[0] = 64;
+    if GlobalMemoryStatusEx(ex.as_mut_ptr()) == FALSE {
+        return;
+    }
+    // SAFETY: the caller's MEMORYSTATUS.
+    unsafe {
+        teb::put(out as u64, 0, 56u32);
+        core::ptr::copy_nonoverlapping(ex.as_ptr().add(4), out.add(4), 4);
+        core::ptr::copy_nonoverlapping(ex.as_ptr().add(8), out.add(8), 48);
+    }
+}
+
 extern "win64" fn GetNativeSystemInfo(out: *mut u8) {
     GetSystemInfo(out)
 }
@@ -2533,7 +2618,16 @@ extern "win64" fn GetProcAddress(h: u64, name: *const u8) -> u64 {
         };
         Symbol::Name(&sym_name)
     };
-    loader::get_proc_address(h, sym).unwrap_or_else(|e| fail(e, 0))
+    loader::get_proc_address(h, sym).unwrap_or_else(|e| {
+        if crate::VERBOSE.load(Ordering::Relaxed) {
+            let module = loader::where_is(h).map_or_else(|| alloc::format!("{h:#x}"), |(m, _)| m);
+            match sym {
+                Symbol::Name(n) => os_std::eprintln!("winrun: GetProcAddress({module}, {n}) failed"),
+                Symbol::Ordinal(o) => os_std::eprintln!("winrun: GetProcAddress({module}, #{o}) failed"),
+            }
+        }
+        fail(e, 0)
+    })
 }
 
 fn load_library(name: Option<String>) -> u64 {
@@ -2864,6 +2958,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GlobalFree,
         GetSystemInfo,
         GlobalMemoryStatusEx,
+        GlobalMemoryStatus,
         GetNativeSystemInfo,
         GetTickCount,
         GetTickCount64,

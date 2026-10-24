@@ -97,6 +97,14 @@ try {
         $wallDir = Join-Path $stage 'system\share\wallpapers'
         New-Item -ItemType Directory -Force $wallDir | Out-Null
         Copy-Item $wallOut (Join-Path $wallDir 'default.osxi')
+        # Fonts for Windows programs (C:\Windows\Fonts) and the registry's
+        # substitutes for the usual Windows font names.
+        $fontDir = Join-Path $stage 'Windows\Fonts'
+        New-Item -ItemType Directory -Force $fontDir | Out-Null
+        Copy-Item (Join-Path $Root 'graphics\assets\fonts\windows\*') $fontDir
+        $regDir = Join-Path $stage 'etc\osyx\registry'
+        New-Item -ItemType Directory -Force $regDir | Out-Null
+        Invoke-Checked 'registry seed' { python (Join-Path $PSScriptRoot 'seed-registry.py') (Join-Path $regDir 'machine.reg') }
         # Windows PE32+ test programs (built with clang when available).
         if ($ZenDirectory) {
             $zenSource = (Resolve-Path -LiteralPath $ZenDirectory).Path

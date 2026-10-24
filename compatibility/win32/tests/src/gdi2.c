@@ -252,6 +252,9 @@ static void state_text(HDC dc) {
 }
 
 void __stdcall start(void) {
+    HDC window_screen = GetWindowDC(NULL);
+    check("GetWindowDC desktop", window_screen != NULL && GetDeviceCaps(window_screen, BITSPIXEL) > 0);
+    check("ReleaseDC desktop window context", ReleaseDC(NULL, window_screen) == 1);
     HDC screen=CreateDCW(L"DISPLAY",NULL,NULL,NULL);
     check("CreateDCW DISPLAY",screen!=NULL);
     HDC ansi=CreateDCA("DISPLAY",NULL,NULL,NULL), ic=CreateICW(L"DISPLAY",NULL,NULL,NULL);

@@ -223,14 +223,14 @@ pub fn run(t: &mut Tests) {
                 Ok(f) => open.push(f),
                 Err(e) => break e,
             }
-            if open.len() > 1000 {
+            if open.len() > raw::MAX_HANDLES + 16 {
                 return false;
             }
         };
         let n = open.len();
         open.clear();
         println!("opened {n} handles before {err}");
-        n == 64 && err.raw_os_error() == Some(Errno::TooManyHandles) && File::open("/dev/null").is_ok()
+        n == raw::MAX_HANDLES && err.raw_os_error() == Some(Errno::TooManyHandles) && File::open("/dev/null").is_ok()
     });
     t.check("fs: 4 threads write their own files concurrently", || {
         let hs: Vec<_> = (0..4usize)

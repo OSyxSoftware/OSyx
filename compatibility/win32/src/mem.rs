@@ -11,8 +11,10 @@
 //!   reads zeros again;
 //! * `PAGE_NOACCESS` pages are mapped read-only (OSyx has no "no access"
 //!   user mapping); `VirtualQuery` still reports `PAGE_NOACCESS`;
-//! * writable + executable protections (`PAGE_EXECUTE_READWRITE`,
-//!   `PAGE_EXECUTE_WRITECOPY`) are refused.
+//! * private `PAGE_EXECUTE_READWRITE` memory alternates between RW/NX and
+//!   RX on write/execute faults; the kernel never maps a page W+X. A write
+//!   instruction executing on the same page it modifies is unsupported.
+//!   Executable writable sections (`PAGE_EXECUTE_WRITECOPY`) are refused.
 
 use crate::error::*;
 use alloc::collections::BTreeMap;
@@ -65,6 +67,16 @@ pub fn from_win(protect: u32) -> Result<Prot, NtStatus> {
         PAGE_EXECUTE | PAGE_EXECUTE_READ => Ok(Prot::ExecuteRead),
         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY => Err(STATUS_INVALID_PAGE_PROTECTION),
         _ => Err(STATUS_INVALID_PAGE_PROTECTION),
+    }
+}
+
+/// Private JIT memory starts writable, with execution enabled lazily by
+/// the fault dispatcher. File/section mappings still use `from_win`.
+fn private_prot(protect: u32) -> Result<Prot, NtStatus> {
+    if protect == PAGE_EXECUTE_READWRITE {
+        Ok(Prot::ReadWrite)
+    } else {
+        from_win(protect)
     }
 }
 
@@ -172,7 +184,7 @@ pub fn virtual_alloc(addr: u64, size: usize, kind: u32, protect: u32) -> Result<
     {
         return Err(STATUS_INVALID_PARAMETER); // (TOP_DOWN 0x100000 aside)
     }
-    let prot = from_win(protect)?;
+    let prot = private_prot(protect)?;
     let mut regions = REGIONS.lock().unwrap();
     if kind & MEM_RESERVE == 0 {
         // Commit inside an existing reservation.
@@ -203,6 +215,35 @@ pub fn virtual_alloc(addr: u64, size: usize, kind: u32, protect: u32) -> Result<
 
 fn protect_range(addr: u64, size: usize, prot: Prot) -> Result<(), osyx_abi::Errno> {
     protect(addr, size, prot)
+}
+
+/// Emulates private RWX pages without granting simultaneous write and
+/// execute permission. Other faults retain normal Windows SEH handling.
+pub fn jit_fault(n: &osyx_abi::fault::Context) -> bool {
+    // Only a resident page's permission fault is a JIT transition.
+    // A non-present fault may be real memory exhaustion and must retain
+    // the kernel's normal failure/Windows exception path.
+    if n.vector != 14 || n.error & 1 == 0 {
+        return false;
+    }
+    let execute = n.error & 16 != 0;
+    let write = n.error & 2 != 0;
+    if !execute && !write {
+        return false;
+    }
+    let page = n.address & !(PAGE as u64 - 1);
+    // Retrying a same-page self-modifying instruction would alternate
+    // forever between a write fault and an instruction-fetch fault.
+    if write && n.rip & !(PAGE as u64 - 1) == page {
+        return false;
+    }
+    let regions = REGIONS.lock().unwrap();
+    let Some((&base, r)) = regions.range(..=n.address).next_back() else { return false };
+    let index = ((n.address - base) / PAGE as u64) as usize;
+    if r.pages.get(index) != Some(&PAGE_EXECUTE_READWRITE) {
+        return false;
+    }
+    protect(page, PAGE, if execute { Prot::ExecuteRead } else { Prot::ReadWrite }).is_ok()
 }
 
 /// `NtFreeVirtualMemory` / `VirtualFree`.
@@ -241,7 +282,7 @@ pub fn virtual_free(addr: u64, size: usize, kind: u32) -> Result<(), NtStatus> {
 /// `NtProtectVirtualMemory` / `VirtualProtect`: returns the old protection
 /// of the first page.
 pub fn virtual_protect(addr: u64, size: usize, protect: u32) -> Result<u32, NtStatus> {
-    let prot = from_win(protect)?;
+    let prot = private_prot(protect)?;
     let mut regions = REGIONS.lock().unwrap();
     let (&base, r) = regions.range_mut(..=addr).next_back().ok_or(STATUS_MEMORY_NOT_ALLOCATED)?;
     let first = (addr - base) as usize / PAGE;

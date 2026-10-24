@@ -122,6 +122,7 @@ extern "win64" fn thread_main(env: *const ThreadStart) -> u64 {
     let f: extern "win64" fn(u64) -> u32 = unsafe { core::mem::transmute(env.start as usize) };
     let code = f(env.param);
     crate::fls::thread_exit();
+    crate::oleaut32::thread_exit();
     notify_threads(DLL_THREAD_DETACH);
     code as u64
 }
@@ -148,6 +149,7 @@ extern "win64" fn attach_on_stack(todo: *const AttachList) -> u64 {
 
 
 pub fn exit_thread(code: u32) -> ! {
+    crate::oleaut32::thread_exit();
     let frame = EXIT_FRAMES.lock().unwrap().get(&os_sys::gettid()).copied();
     match frame {
         // SAFETY: the frame belongs to the run_on_stack call that is still
@@ -209,7 +211,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
             Vec::new()
         ),
         builtin("shlwapi.dll", crate::shlwapi::exports(), crate::shlwapi::ordinals()),
-        builtin("combase.dll", crate::shlwapi::combase_exports(), Vec::new()),
+        // ole32's COM entry points live in combase on Windows.
+        builtin("combase.dll", [crate::shlwapi::combase_exports(), crate::ole32::exports()].concat(), Vec::new()),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
         builtin("shell32.dll", crate::shell32::exports(), Vec::new()),
         builtin("ole32.dll", crate::ole32::exports(), Vec::new()),
@@ -231,6 +234,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("imm32.dll", crate::dwmapi::imm32_exports(), Vec::new()),
         builtin("wtsapi32.dll", crate::dwmapi::wtsapi32_exports(), Vec::new()),
         builtin("d3d11.dll", crate::dwmapi::d3d11_exports(), Vec::new()),
+        builtin("dwrite.dll", crate::dwrite::exports(), Vec::new()),
+        builtin("dnsapi.dll", crate::dwmapi::dnsapi_exports(), Vec::new()),
         builtin("dxgi.dll", crate::dwmapi::dxgi_exports(), Vec::new()),
         builtin("d3dcompiler_47.dll", crate::dwmapi::d3dcompiler_exports(), Vec::new()),
     ]
@@ -393,6 +398,11 @@ impl Host for WinHost {
             }
         }
         Ok(())
+    }
+
+    fn release(&mut self, base: u64, size: u64) {
+        mem::free_pages(base, size as usize);
+        self.images.retain(|image| image.base != base);
     }
 }
 

@@ -101,6 +101,39 @@ extern "win64" fn GetDiskFreeSpaceW(
     }
     1
 }
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn GetVolumeInformationA(
+    root: *const u8,
+    label: *mut u8,
+    label_cap: u32,
+    serial: *mut u32,
+    max_component: *mut u32,
+    flags: *mut u32,
+    fsname: *mut u8,
+    fs_cap: u32,
+) -> i32 {
+    // SAFETY: NULL or a NUL-terminated root.
+    let wroot: Option<Vec<u16>> = unsafe { crate::path::ansi_to_wide(root) };
+    let mut wl = alloc::vec![0u16; label_cap as usize];
+    let mut wf = alloc::vec![0u16; fs_cap as usize];
+    let ok = GetVolumeInformationW(
+        wroot.as_ref().map_or(core::ptr::null(), |w| w.as_ptr()),
+        if label.is_null() { core::ptr::null_mut() } else { wl.as_mut_ptr() },
+        label_cap,
+        serial,
+        max_component,
+        flags,
+        if fsname.is_null() { core::ptr::null_mut() } else { wf.as_mut_ptr() },
+        fs_cap,
+    );
+    if ok != 0 {
+        let narrow = |w: &[u16]| String::from_utf16_lossy(&w[..w.iter().position(|&u| u == 0).unwrap_or(w.len())]);
+        crate::kernel32::out_a(&narrow(&wl), label, label_cap);
+        crate::kernel32::out_a(&narrow(&wf), fsname, fs_cap);
+    }
+    ok
+}
+
 extern "win64" fn GetVolumeInformationW(
     root: *const u16,
     label: *mut u16,
@@ -349,6 +382,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetVolumePathNameW,
         GetDiskFreeSpaceA,
         GetVolumeInformationW,
+        GetVolumeInformationA,
         FindFirstFileW,
         FindFirstFileA,
         FindNextFileA,

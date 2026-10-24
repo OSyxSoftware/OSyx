@@ -130,6 +130,9 @@ extern "win64" fn CoUninitialize() {
     uninitialize_apartment(&mut COM.lock().unwrap(), os_sys::gettid());
 }
 
+// Windows also exposes these OLE Automation functions through ole32.
+use crate::oleaut32::{GetErrorInfo, SetErrorInfo};
+
 extern "win64" fn OleInitialize(reserved: u64) -> u32 {
     if reserved != 0 {
         return E_INVALIDARG;
@@ -510,6 +513,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CoInitializeEx,
         CoInitialize,
         CoUninitialize,
+        GetErrorInfo,
+        SetErrorInfo,
         OleInitialize,
         OleUninitialize,
         CoInitializeSecurity,

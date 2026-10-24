@@ -197,6 +197,71 @@ fn committed_content_reaches_the_screen_with_decorations() {
 }
 
 #[test]
+fn taskbar_excludes_unmapped_and_auxiliary_windows_but_keeps_minimized_apps() {
+    let mut h = Harness::new();
+    let shell = h.shell(1);
+    let app = h.client(2);
+    h.events();
+    h.create(app, 1, Role::Normal, window_flags::DECORATED, (20, 40, 200, 100));
+    let events = h.events_for(shell);
+    assert!(events.iter().any(|e| matches!(e, Event::WindowList { windows } if windows.is_empty())));
+    h.paint(app, 1, 200, 100, 0);
+    let events = h.events_for(shell);
+    let id = events.iter().find_map(|e| match e {
+        Event::WindowList { windows } if windows.len() == 1 => Some(windows[0].id), _ => None,
+    }).expect("first buffer publishes the application task");
+    h.create(app, 2, Role::Normal, window_flags::SKIP_TASKBAR, (30, 50, 100, 80));
+    h.paint(app, 2, 100, 80, 0);
+    let events = h.events_for(shell);
+    assert!(events.iter().any(|e| matches!(e, Event::WindowList { windows } if windows.len() == 1 && windows[0].id == id)));
+    h.send(app, Request::WindowAction { target: 1, action: Action::Minimize, global: false });
+    let events = h.events_for(shell);
+    assert!(events.iter().any(|e| matches!(e, Event::WindowList { windows } if windows.len() == 1 && windows[0].flags & proto::state::MINIMIZED != 0)));
+}
+
+#[test]
+fn owned_helper_focus_highlights_its_parent_task() {
+    let mut h = Harness::new();
+    let shell = h.shell(1);
+    let app = h.client(2);
+    let parent = h.window(app, 1, 200, 100, 0);
+    h.events();
+    h.send(app, Request::CreateSurface { surface: 2 });
+    h.send(app, Request::CreateWindow {
+        window: 2, surface: 2, parent: 1, role: Role::Normal,
+        flags: window_flags::SKIP_TASKBAR, x: 30, y: 50,
+        width: 100, height: 80, min_width: 0, min_height: 0, title: "helper".to_string(),
+    });
+    h.paint(app, 2, 100, 80, 0);
+    let events = h.events_for(shell);
+    assert!(events.iter().any(|e| matches!(e, Event::WindowList { windows } if windows.len() == 1 && windows[0].id == parent && windows[0].flags & proto::state::ACTIVATED != 0)));
+}
+
+#[test]
+fn hidden_windows_stay_out_of_taskbar_and_focus_until_explicitly_shown() {
+    let mut h = Harness::new();
+    let shell = h.shell(1);
+    let app = h.client(2);
+    h.events();
+    h.create(app, 1, Role::Normal, window_flags::HIDDEN, (20, 40, 200, 100));
+    h.paint(app, 1, 200, 100, 0xff0000);
+    assert_eq!(h.c.focused(), None);
+    assert!(h.events_for(shell).iter().any(|e| matches!(e, Event::WindowList { windows } if windows.is_empty())));
+    h.render();
+    assert_ne!(h.fb[(60 * W + 40) as usize] & 0xffffff, 0xff0000);
+    h.send(app, Request::SetWindowVisibility { window: 1, visible: true, taskbar: true });
+    assert!(h.c.focused().is_some());
+    assert!(h.events_for(shell).iter().any(|e| matches!(e, Event::WindowList { windows } if windows.len() == 1)));
+    h.render();
+    assert_eq!(h.fb[(60 * W + 40) as usize] & 0xffffff, 0xff0000);
+    h.send(app, Request::SetWindowVisibility { window: 1, visible: false, taskbar: false });
+    assert_eq!(h.c.focused(), None);
+    assert!(h.events_for(shell).iter().any(|e| matches!(e, Event::WindowList { windows } if windows.is_empty())));
+    h.render();
+    assert_ne!(h.fb[(60 * W + 40) as usize] & 0xffffff, 0xff0000);
+}
+
+#[test]
 fn damage_after_mapping_is_limited_to_the_committed_area() {
     let mut h = Harness::new();
     let app = h.client(2);

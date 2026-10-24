@@ -122,9 +122,14 @@ struct MemHost {
     files: BTreeMap<String, Vec<u8>>,
     images: BTreeMap<u64, (Vec<u8>, Vec<Protection>)>,
     opened: Vec<String>,
+    released: Vec<u64>,
 }
 
 impl Host for MemHost {
+    fn release(&mut self, base: u64, _size: u64) {
+        self.images.remove(&base);
+        self.released.push(base);
+    }
     fn open(&mut self, name: &str) -> Result<Option<Source>, LinkError> {
         self.opened.push(name.to_string());
         if name == "kernel32.dll" {
@@ -275,6 +280,58 @@ fn executables_and_dlls_are_not_interchangeable() {
     let mut l = Linker::new(host, None);
     assert!(matches!(l.load_dll("hello", "t"), Err(LinkError::Image { .. })));
     assert!(matches!(l.load_executable("sample.dll", SAMPLE.to_vec()), Err(LinkError::Image { .. })));
+}
+
+#[test]
+fn failed_dll_load_is_retried_instead_of_returning_an_unbound_image() {
+    let mut dll = HELLO.to_vec();
+    let pe = PeFile::parse(&dll).unwrap();
+    let flags = pe.pe_offset() + 4 + 18;
+    dll[flags + 1] |= 0x20; // IMAGE_FILE_DLL
+    let good = dll.clone();
+    let name = b"ExitProcess";
+    let at = dll.windows(name.len()).position(|w| w == name).unwrap();
+    dll[at..at + name.len()].copy_from_slice(b"LostProcess");
+    let mut host = MemHost::default();
+    host.files.insert("broken.dll".into(), dll);
+    let mut l = Linker::new(host, None);
+    let kernel = l.load_dll("kernel32", "test").unwrap();
+    for _ in 0..2 {
+        assert!(matches!(l.load_dll("broken", "test"), Err(LinkError::SymbolNotFound { .. })));
+        assert!(l.find("broken").is_none());
+        assert_eq!(l.find("kernel32"), Some(kernel));
+        assert!(l.host.images.is_empty());
+        assert!(l.cycles.is_empty());
+    }
+    assert_eq!(l.host.released.len(), 2);
+    l.host.files.insert("broken.dll".into(), good);
+    let loaded = l.load_dll("broken", "test").unwrap();
+    assert_eq!(l.modules[loaded].state, osyx_pe_loader::link::State::Ready);
+    assert_eq!(l.host.images.len(), 1);
+}
+
+#[test]
+fn failed_root_releases_new_dependencies_and_preserves_loaded_modules() {
+    let mut child = HELLO.to_vec();
+    let flags = PeFile::parse(&child).unwrap().pe_offset() + 4 + 18;
+    child[flags + 1] |= 0x20;
+    let mut root = child.clone();
+    let name = b"KERNEL32.dll";
+    let at = root.windows(name.len()).position(|w| w == name).unwrap();
+    root[at..at + name.len()].copy_from_slice(b"CHILD123.dll");
+    let mut host = MemHost::default();
+    host.files.insert("sample.dll".into(), SAMPLE.to_vec());
+    host.files.insert("child123.dll".into(), child);
+    host.files.insert("root.dll".into(), root);
+    let mut l = Linker::new(host, None);
+    let sample = l.load_dll("sample", "test").unwrap();
+    let old_base = l.modules[sample].base;
+    assert!(matches!(l.load_dll("root", "test"), Err(LinkError::SymbolNotFound { .. })));
+    assert_eq!(l.modules.len(), 1);
+    assert_eq!(l.find("sample"), Some(sample));
+    assert_eq!(l.host.images.len(), 1);
+    assert!(l.host.images.contains_key(&old_base));
+    assert_eq!(l.host.released.len(), 2);
 }
 
 #[test]

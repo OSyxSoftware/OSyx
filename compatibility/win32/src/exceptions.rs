@@ -309,6 +309,11 @@ pub(crate) fn apply_all(c: &Context, n: &mut NativeContext) {
 }
 extern "C" fn entry(native: *mut NativeContext) -> ! {
     let n = unsafe { &mut *native };
+    if crate::mem::jit_fault(n) {
+        // SAFETY: retry the original instruction with the kernel's
+        // unchanged context after changing only its page permissions.
+        let _ = unsafe { os_sys::fault_return(n) };
+    }
     let mut context = windows_context(n);
     let mut record = record(n);
     let software = n.vector == 6 && n.rip == osyx_windows_raise_trap as *const () as u64;

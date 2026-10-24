@@ -41,6 +41,17 @@ if [ -d "$BIN/opt/wintests" ]; then
     find "$BIN/opt/wintests" -maxdepth 1 -type f -exec install -m 0755 -t "$R/opt/wintests/" {} +
     chmod 0755 "$R/opt" "$R/opt/wintests"
 fi
+# Fonts for Windows programs (C:\Windows\Fonts) and the initial HKLM hive.
+if [ -d "$BIN/Windows/Fonts" ]; then
+    mkdir -p "$R/Windows/Fonts"
+    find "$BIN/Windows/Fonts" -maxdepth 1 -type f -exec install -m 0644 -t "$R/Windows/Fonts/" {} +
+    chmod 0755 "$R/Windows" "$R/Windows/Fonts"
+fi
+if [ -f "$BIN/etc/osyx/registry/machine.reg" ]; then
+    mkdir -p "$R/etc/osyx/registry"
+    install -m 0644 "$BIN/etc/osyx/registry/machine.reg" "$R/etc/osyx/registry/machine.reg"
+    chmod 0755 "$R/etc/osyx/registry"
+fi
 mkdir -p "$R/system/share/wallpapers"
 if [ -d "$BIN/system/share/wallpapers" ]; then
     find "$BIN/system/share/wallpapers" -maxdepth 1 -type f -exec install -m 0644 -t "$R/system/share/wallpapers/" {} +

@@ -986,6 +986,14 @@ pub fn format_narrow(opts: u64, fmt: &[u8], args: &[u64]) -> Option<String> {
     format::<u8>(opts, fmt, args.as_ptr(), false).ok().map(|v| String::from_utf8_lossy(&v).into_owned())
 }
 
+pub(crate) fn win32_wide(fmt: &[u16], args: *const u64) -> Option<Vec<u16>> {
+    format(LEGACY_WIDE_SPECIFIERS, fmt, args, false).ok()
+}
+
+pub(crate) fn win32_narrow(fmt: &[u8], args: *const u64) -> Option<Vec<u8>> {
+    format(0, fmt, args, false).ok()
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         _set_printf_count_output,

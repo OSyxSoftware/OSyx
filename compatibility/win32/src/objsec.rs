@@ -364,6 +364,16 @@ fn everyone() -> Vec<u8> {
     sid(1, &[0])
 }
 
+/// BUILTIN\Users (S-1-5-32-545).
+fn users() -> Vec<u8> {
+    sid(5, &[32, 545])
+}
+
+/// NT AUTHORITY\Authenticated Users (S-1-5-11).
+fn authenticated_users() -> Vec<u8> {
+    sid(5, &[11])
+}
+
 fn administrators() -> Vec<u8> {
     sid(5, &[32, 544])
 }
@@ -399,7 +409,8 @@ fn dacl_mode(st: &osyx_abi::FileStat, dacl: &Option<Vec<Ace>>) -> Result<u32, u3
             u |= bits;
         } else if *s == group {
             g |= bits;
-        } else if *s == everyone() {
+        } else if *s == everyone() || *s == users() || *s == authenticated_users() {
+            // OSyx has no group of all users other than "others".
             o |= bits;
         } else if *s != administrators() && *s != system() {
             return Err(ERROR_NOT_SUPPORTED); // OSyx files have no other principals
@@ -451,9 +462,7 @@ pub fn initial_sd(sa: u64, mapping: &Mapping) -> Result<Option<Sd>, u32> {
     if len != 24 {
         return Err(ERROR_INVALID_PARAMETER);
     }
-    if inherit != 0 {
-        return Err(ERROR_NOT_SUPPORTED); // no handle inheritance on OSyx
-    }
+    let _ = inherit; // callers decide whether their handles can be inherited
     if sd == 0 {
         return Ok(None);
     }

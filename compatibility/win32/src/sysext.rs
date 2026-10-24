@@ -768,8 +768,9 @@ extern "win64" fn HeapSetInformation(_heap: u64, _class: u32, _info: u64, _len: 
 const HANDLE_FLAG_INHERIT: u32 = 1;
 const HANDLE_FLAG_PROTECT_FROM_CLOSE: u32 = 2;
 
-/// Clearing flags is always true here (handles are never inherited or
-/// protected); setting them is not supported.
+/// HANDLE_FLAG_INHERIT is kept per handle (CreateProcess passes such
+/// handles on, see inherit.rs); protecting a handle from CloseHandle is not
+/// supported.
 extern "win64" fn SetHandleInformation(h: u64, mask: u32, flags: u32) -> i32 {
     if objects::get(h).is_none() {
         return fail(ERROR_INVALID_HANDLE, 0);
@@ -777,13 +778,16 @@ extern "win64" fn SetHandleInformation(h: u64, mask: u32, flags: u32) -> i32 {
     if mask & !(HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE) != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    if flags & mask != 0 {
+    if flags & mask & HANDLE_FLAG_PROTECT_FROM_CLOSE != 0 {
         return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    if mask & HANDLE_FLAG_INHERIT != 0 {
+        objects::set_inheritable(h, flags & HANDLE_FLAG_INHERIT != 0);
     }
     1
 }
 
-/// No handle is ever inheritable or protected (see SetHandleInformation).
+/// The handle's HANDLE_FLAG_INHERIT; handles are never protected.
 extern "win64" fn GetHandleInformation(h: u64, flags: *mut u32) -> i32 {
     if objects::get(h).is_none() {
         return fail(ERROR_INVALID_HANDLE, 0);
@@ -792,7 +796,7 @@ extern "win64" fn GetHandleInformation(h: u64, flags: *mut u32) -> i32 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's out pointer.
-    unsafe { *flags = 0 };
+    unsafe { *flags = if objects::is_inheritable(h) { HANDLE_FLAG_INHERIT } else { 0 } };
     1
 }
 
@@ -826,15 +830,32 @@ extern "win64" fn GetProcessMitigationPolicy(process: u64, policy: u32, buf: *mu
     1
 }
 
-/// Enabling DEP is already true; other policies cannot be enforced.
+const PROCESS_EXTENSION_POINT_DISABLE_POLICY: u32 = 6;
+const PROCESS_IMAGE_LOAD_POLICY: u32 = 10;
+
+/// Policies OSyx already satisfies are accepted: DEP; disabled extension
+/// points (OSyx loads no AppInit, shim or IME DLLs into processes); and the
+/// image load policy's NoRemoteImages, NoLowMandatoryLabelImages and
+/// PreferSystem32Images (no network images or integrity labels exist, and
+/// system DLL names resolve to winrun's own before any folder). Others
+/// cannot be enforced.
 extern "win64" fn SetProcessMitigationPolicy(policy: u32, buf: *const u8, len: usize) -> i32 {
     if buf.is_null() || len < 4 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's policy structure.
     let flags = unsafe { teb::get::<u32>(buf as u64, 0) };
-    if policy == PROCESS_DEP_POLICY && flags & !0x3 == 0 && flags & 1 != 0 {
+    let ok = match policy {
+        PROCESS_DEP_POLICY => flags & !0x3 == 0 && flags & 1 != 0,
+        PROCESS_EXTENSION_POINT_DISABLE_POLICY => flags & !1 == 0,
+        PROCESS_IMAGE_LOAD_POLICY => flags & !0x7 == 0,
+        _ => false,
+    };
+    if ok {
         return 1;
+    }
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: SetProcessMitigationPolicy({policy}, {flags:#x}) is not supported");
     }
     fail(ERROR_NOT_SUPPORTED, 0)
 }

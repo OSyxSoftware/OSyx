@@ -8,12 +8,68 @@
 //! fails with DISP_E_BADVARTYPE and leaves it untouched.
 #![allow(non_snake_case)]
 use crate::kernel32;
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
+use os_std::sync::Mutex;
 
 const S_OK: u32 = 0;
 const E_INVALIDARG: u32 = 0x8007_0057;
 const E_OUTOFMEMORY: u32 = 0x8007_000e;
 const DISP_E_BADVARTYPE: u32 = 0x8002_0008;
+
+static ERROR_INFO: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
+
+pub fn thread_exit() {
+    let info = ERROR_INFO.lock().unwrap().remove(&os_sys::gettid());
+    if let Some(info) = info {
+        error_ref(info, 2);
+    }
+}
+
+fn error_ref(info: u64, slot: usize) {
+    // SAFETY: SetErrorInfo accepts an IErrorInfo, whose first three slots
+    // are IUnknown; the retained reference keeps it alive until removal.
+    unsafe {
+        let vtable = *(info as *const *const u64);
+        let f: extern "win64" fn(u64) -> u32 = core::mem::transmute(*vtable.add(slot));
+        f(info);
+    }
+}
+
+pub(crate) extern "win64" fn SetErrorInfo(reserved: u32, info: u64) -> u32 {
+    if reserved != 0 {
+        return E_INVALIDARG;
+    }
+    if info != 0 {
+        error_ref(info, 1);
+    }
+    let old = {
+        let mut errors = ERROR_INFO.lock().unwrap();
+        if info == 0 { errors.remove(&os_sys::gettid()) } else { errors.insert(os_sys::gettid(), info) }
+    };
+    if let Some(old) = old {
+        error_ref(old, 2);
+    }
+    S_OK
+}
+
+pub(crate) extern "win64" fn GetErrorInfo(reserved: u32, out: *mut u64) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller supplies an IErrorInfo* output.
+    unsafe { *out = 0 };
+    if reserved != 0 {
+        return E_INVALIDARG;
+    }
+    let info = ERROR_INFO.lock().unwrap().remove(&os_sys::gettid());
+    if let Some(info) = info {
+        // Transfer the thread's retained reference to the caller.
+        unsafe { *out = info };
+        S_OK
+    } else {
+        1 // S_FALSE: no error object on this thread.
+    }
+}
 
 /// The heap block of a BSTR: the 4-byte length sits right before the
 /// string, at the end of a 16-byte header.
@@ -230,6 +286,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         VariantInit,
         VariantClear,
         VariantCopy,
+        GetErrorInfo,
+        SetErrorInfo,
     ]
 }
 
@@ -248,6 +306,8 @@ pub fn ordinals() -> Vec<(u16, u64)> {
         (10, f(VariantCopy as *const ())),
         (149, f(SysStringByteLen as *const ())),
         (150, f(SysAllocStringByteLen as *const ())),
+        (200, f(GetErrorInfo as *const ())),
+        (201, f(SetErrorInfo as *const ())),
         (327, f(SetOaNoCache as *const ())),
     ]
 }

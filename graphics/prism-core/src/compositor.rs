@@ -178,6 +178,8 @@ struct Window {
     title: String,
     resizable: bool,
     decorated: bool,
+    skip_taskbar: bool,
+    shown: bool,
     /// Content rectangle in screen coordinates (the configured size).
     rect: Rect,
     min_w: u32,
@@ -230,7 +232,7 @@ impl Window {
     }
 
     fn visible(&self) -> bool {
-        self.mapped && !self.minimized
+        self.mapped && self.shown && !self.minimized
     }
 
     fn opacity(&self, now: u64) -> u32 {
@@ -537,16 +539,27 @@ impl Compositor {
     }
 
     fn window_list(&self) -> Vec<proto::WindowInfo> {
-        let mut v: Vec<&Window> = self.windows.values().filter(|w| w.role == Role::Normal).collect();
+        let mut v: Vec<&Window> = self.windows.values()
+            .filter(|w| w.role == Role::Normal && w.shown && !w.skip_taskbar && (w.mapped || w.minimized)).collect();
         v.sort_by_key(|w| w.seq);
         v.into_iter()
             .map(|w| proto::WindowInfo {
                 id: w.id,
                 pid: self.clients.get(&w.client).map_or(0, |c| c.pid),
-                flags: w.states(self.focus == Some(w.id)),
+                flags: w.states(self.focus_owned_by(w.id)),
                 title: w.title.clone(),
             })
             .collect()
+    }
+
+    fn focus_owned_by(&self, owner: WindowId) -> bool {
+        let mut current = self.focus;
+        for _ in 0..self.windows.len() {
+            let Some(id) = current else { return false };
+            if id == owner { return true; }
+            current = self.windows.get(&id).and_then(|w| w.parent);
+        }
+        false
     }
 
     // ---- protocol ----------------------------------------------------------------
@@ -689,6 +702,21 @@ impl Compositor {
                 self.set_geometry(id, x, y, width, height);
                 Ok(())
             }
+            Request::SetWindowVisibility { window, visible, taskbar } => {
+                let id = self.local_window(c, window)?;
+                let w = self.windows.get_mut(&id).expect("window exists");
+                let was_shown = w.shown;
+                self.damage.add(w.bounds(), self.screen);
+                w.shown = visible;
+                w.skip_taskbar = !taskbar;
+                self.list_dirty = true;
+                if !visible && self.focus == Some(id) {
+                    self.set_focus(self.next_focus_candidate());
+                } else if visible && !was_shown && taskbar {
+                    self.set_focus(Some(id));
+                }
+                Ok(())
+            }
             Request::WindowAction { target, action, global } => {
                 let id = if global {
                     if !self.clients.get(&c).is_some_and(|cl| cl.shell) {
@@ -826,6 +854,8 @@ impl Compositor {
             title,
             resizable,
             decorated,
+            skip_taskbar: flags & window_flags::SKIP_TASKBAR != 0,
+            shown: flags & window_flags::HIDDEN == 0,
             rect,
             min_w: min_w.max(if decorated { 160 } else { 1 }),
             min_h: min_h.max(if decorated { 48 } else { 1 }),
@@ -853,7 +883,7 @@ impl Compositor {
             self.mru.insert(0, id);
             self.list_dirty = true;
         }
-        if matches!(role, Role::Normal | Role::Popup) {
+        if flags & window_flags::HIDDEN == 0 && matches!(role, Role::Normal | Role::Popup) {
             self.set_focus(Some(id));
         }
         Ok(())
@@ -968,6 +998,7 @@ impl Compositor {
             let w = self.windows.get_mut(&wid).expect("window of a surface exists");
             if !w.mapped {
                 w.mapped = true;
+                self.list_dirty = true;
                 if w.role == Role::Normal || w.role == Role::Popup || w.role == Role::Notification {
                     w.fade = Some(Fade { start: now, from: 0, to: 256, dur: theme::FADE_IN_MS });
                 }

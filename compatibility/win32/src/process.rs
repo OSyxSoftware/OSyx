@@ -212,7 +212,7 @@ pub(crate) extern "win64" fn CreateProcessW(
     cmdline: *mut u16,
     psa: u64,
     tsa: u64,
-    _inherit: i32,
+    inherit: i32,
     flags: u32,
     env: u64,
     cwd: *const u16,
@@ -235,14 +235,39 @@ pub(crate) extern "win64" fn CreateProcessW(
         let attrs = if flags & EXTENDED_STARTUPINFO_PRESENT != 0 { teb::get::<u64>(startup as u64, 104) } else { 0 };
         (f, handles, attrs)
     };
+    // With bInheritHandles, the child gets the handle list's handles (each
+    // must be inheritable), or else every inheritable handle.
+    let mut handle_list: Option<Vec<u64>> = None;
     if attrs != 0 {
-        // Only the handle list is meaningful without handle inheritance.
         // SAFETY: a list made by InitializeProcThreadAttributeList below.
         let list = unsafe { &*(attrs as *const AttributeList) };
-        if list.entries[..list.used as usize].iter().any(|e| e.0 != PROC_THREAD_ATTRIBUTE_HANDLE_LIST) {
-            return fail(ERROR_NOT_SUPPORTED, 0);
+        for &(attribute, value, size) in &list.entries[..list.used as usize] {
+            if attribute != PROC_THREAD_ATTRIBUTE_HANDLE_LIST {
+                return fail(ERROR_NOT_SUPPORTED, 0);
+            }
+            if value == 0 || size % 8 != 0 {
+                return fail(ERROR_INVALID_PARAMETER, 0);
+            }
+            // SAFETY: the caller's array of `size` bytes of HANDLEs.
+            let hs = unsafe { core::slice::from_raw_parts(value as *const u64, size as usize / 8) };
+            handle_list.get_or_insert_with(Vec::new).extend_from_slice(hs);
         }
     }
+    let inherited: Vec<u64> = if inherit == 0 {
+        Vec::new()
+    } else {
+        match handle_list {
+            Some(list) => {
+                if list.iter().any(|&h| !objects::is_inheritable(h)) {
+                    return fail(ERROR_INVALID_PARAMETER, 0);
+                }
+                list
+            }
+            None => objects::inheritable(),
+        }
+    };
+    // The standard handles reach the child as its console streams.
+    let inherited: Vec<u64> = inherited.into_iter().filter(|h| !std_handles.contains(h)).collect();
     // SAFETY: NULL or NUL-terminated strings.
     let (app, line) = unsafe { (path::wide_to_string(app), path::wide_to_string(cmdline)) };
     let args = line.as_deref().map(split_command_line).unwrap_or_default();
@@ -258,8 +283,21 @@ pub(crate) extern "win64" fn CreateProcessW(
             _ => return fail(ERROR_DIRECTORY, 0),
         }
     }
+    if let Some(i) = environment.iter().position(|e| e.starts_with(crate::inherit::ENV) && e[crate::inherit::ENV.len()..].starts_with('=')) {
+        environment.remove(i);
+    }
+    match crate::inherit::offer(&inherited) {
+        Ok(Some(entry)) => environment.push(entry),
+        Ok(None) => {}
+        Err(e) => return fail(e, 0),
+    }
     let (path, argv): (String, Vec<String>) = if is_pe(&exe) {
-        let mut a = alloc::vec![String::from("/bin/winrun"), exe.clone()];
+        let mut a = alloc::vec![String::from("/bin/winrun")];
+        // A traced winrun traces its Windows children too.
+        if crate::VERBOSE.load(Ordering::Relaxed) {
+            a.push(String::from("-v"));
+        }
+        a.push(exe.clone());
         a.extend(rest);
         (String::from("/bin/winrun"), a)
     } else {
@@ -320,11 +358,32 @@ extern "win64" fn OpenProcess(_access: u32, inherit: i32, pid: u32) -> u64 {
     }
     let mut list = alloc::vec![osyx_abi::ipc::ProcInfo::default(); 256];
     let n = os_sys::proc_list(&mut list).unwrap_or(0);
-    if list[..n].iter().any(|p| p.pid == pid as u64) {
-        fail(ERROR_ACCESS_DENIED, 0) // not ours: OSyx gives no control over it
-    } else {
-        fail(ERROR_INVALID_PARAMETER, 0)
+    if !list[..n].iter().any(|p| p.pid == pid as u64) {
+        return fail(ERROR_INVALID_PARAMETER, 0);
     }
+    // Another process (a Windows child's parent, say): it can be waited
+    // for and named in DuplicateHandle, but not terminated or read.
+    let p = Arc::new(ProcessObj { pid: pid as u64, child: false, done: AtomicBool::new(false), exit_code: AtomicU32::new(STILL_ACTIVE), jobbed: AtomicBool::new(false) });
+    let watcher = p.clone();
+    let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
+        // OSyx reports only a child's exit, so poll the process list.
+        loop {
+            os_std::thread::sleep(core::time::Duration::from_millis(250));
+            let mut list = alloc::vec![osyx_abi::ipc::ProcInfo::default(); 256];
+            let n = os_sys::proc_list(&mut list).unwrap_or(0);
+            if !list[..n].iter().any(|q| q.pid == watcher.pid) {
+                break;
+            }
+        }
+        watcher.done.store(true, Ordering::SeqCst);
+        objects::signal_all();
+    });
+    objects::insert(Object::Process(p))
+}
+
+/// The process id a process handle names, if it is not this process.
+pub fn other_pid(h: u64) -> Result<Option<u64>, u32> {
+    process_of(h).map(|p| p.map(|p| p.pid))
 }
 
 fn process_of(h: u64) -> Result<Option<Arc<ProcessObj>>, u32> {

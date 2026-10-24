@@ -14,6 +14,7 @@
 //! (ImmGetContext returns NULL, as for a thread with IMM disabled) and
 //! keyboard layouts are not IMEs. There are no terminal-services sessions
 //! to switch, so a session notification is registered and never sent.
+//! dnsapi answers no record queries (see below).
 //!
 //! There is no GPU: d3d11 creates no device (DXGI_ERROR_UNSUPPORTED, as
 //! for a driver type the machine lacks), dxgi makes no factory and the
@@ -341,6 +342,35 @@ pub fn dxgi_exports() -> Vec<(&'static str, u64)> {
 
 pub fn d3dcompiler_exports() -> Vec<(&'static str, u64)> {
     export_table![D3DCompile]
+}
+
+// ---- dnsapi ------------------------------------------------------------------------------------
+//
+// Names resolve through ws2_32 (getaddrinfo). OSyx's resolver answers no
+// other record types, so DnsQuery reports that the name has none.
+
+const DNS_INFO_NO_RECORDS: u32 = 9501;
+
+extern "win64" fn DnsQuery_A(name: *const u8, _kind: u16, _options: u32, _extra: u64, results: *mut u64, _reserved: u64) -> u32 {
+    if name.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    if !results.is_null() {
+        // SAFETY: the caller's PDNS_RECORD.
+        unsafe { *results = 0 };
+    }
+    DNS_INFO_NO_RECORDS
+}
+
+extern "win64" fn DnsQuery_W(name: *const u16, kind: u16, options: u32, extra: u64, results: *mut u64, reserved: u64) -> u32 {
+    DnsQuery_A(name as *const u8, kind, options, extra, results, reserved)
+}
+
+/// There are never records to free.
+extern "win64" fn DnsFree(_data: u64, _kind: u32) {}
+
+pub fn dnsapi_exports() -> Vec<(&'static str, u64)> {
+    export_table![DnsQuery_A, DnsQuery_W, DnsFree]
 }
 
 // ---- wtsapi32 -------------------------------------------------------------------------------

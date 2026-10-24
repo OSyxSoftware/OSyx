@@ -17,6 +17,7 @@ pub mod compositor;
 pub mod damage;
 pub mod draw;
 pub mod theme;
+pub mod taskbar;
 
 #[cfg(test)]
 mod tests;

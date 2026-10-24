@@ -56,6 +56,14 @@ extern "win64" fn timeGetDevCaps(caps: *mut u32, size: u32) -> u32 {
     TIMERR_NOERROR
 }
 
+const SND_PURGE: u32 = 0x40;
+
+/// OSyx has no sound output: stopping (no sound, or SND_PURGE) succeeds and
+/// every sound fails to play, as when Windows cannot find or open it.
+extern "win64" fn PlaySoundW(sound: *const u16, _module: u64, flags: u32) -> i32 {
+    (sound.is_null() || flags & SND_PURGE != 0) as i32
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![timeGetTime, timeBeginPeriod, timeEndPeriod, timeGetDevCaps]
+    export_table![timeGetTime, timeBeginPeriod, timeEndPeriod, timeGetDevCaps, PlaySoundW]
 }

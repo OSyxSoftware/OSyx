@@ -33,9 +33,10 @@ static int str_eq(const char *a, const char *b) {
 
 /* A COM object with IUnknown only, counting its references. */
 static const GUID iid_unknown = {0, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+static const GUID iid_error_info = {0x1cf2b120, 0x547d, 0x101b, {0x8e, 0x65, 0x08, 0x00, 0x2b, 0x2b, 0xd1, 0x19}};
 static LONG refs;
 static HRESULT STDMETHODCALLTYPE qi(IUnknown *self, REFIID iid, void **out) {
-    if (mem_eq(iid, &iid_unknown, sizeof iid_unknown)) {
+    if (mem_eq(iid, &iid_unknown, sizeof iid_unknown) || mem_eq(iid, &iid_error_info, sizeof iid_error_info)) {
         *out = self;
         refs++;
         return S_OK;
@@ -48,6 +49,37 @@ static ULONG STDMETHODCALLTYPE release(IUnknown *self) { (void)self; return --re
 static IUnknownVtbl unk_vtbl = {qi, add_ref, release};
 static IUnknown unk_obj = {&unk_vtbl};
 
+static DWORD WINAPI error_worker(void *arg) {
+    (void)arg;
+    IErrorInfo *info = (IErrorInfo *)(UINT_PTR)1;
+    return GetErrorInfo(0, &info) == S_FALSE && info == NULL ? 0 : 1;
+}
+
+static void error_info_checks(void) {
+    IErrorInfo *info = (IErrorInfo *)(UINT_PTR)1;
+    SetErrorInfo(0, NULL);
+    check("GetErrorInfo empty", GetErrorInfo(0, &info) == S_FALSE && info == NULL);
+    refs = 1;
+    check("SetErrorInfo retains a reference", SetErrorInfo(0, (IErrorInfo *)&unk_obj) == S_OK && refs == 2);
+    check("SetErrorInfo replaces the same object", SetErrorInfo(0, (IErrorInfo *)&unk_obj) == S_OK && refs == 2);
+    HANDLE thread = CreateThread(NULL, 0, error_worker, NULL, 0, NULL);
+    DWORD code = 99;
+    check("error information is thread-local", thread && WaitForSingleObject(thread, 5000) == WAIT_OBJECT_0 &&
+          GetExitCodeThread(thread, &code) && code == 0);
+    if (thread) CloseHandle(thread);
+    HRESULT err_hr = GetErrorInfo(0, &info);
+    check("GetErrorInfo transfers the reference", err_hr == S_OK &&
+          info == (IErrorInfo *)&unk_obj && refs == 2);
+    if (info == (IErrorInfo *)&unk_obj) unk_obj.lpVtbl->Release((IUnknown *)info);
+    check("GetErrorInfo consumes the thread value", GetErrorInfo(0, &info) == S_FALSE && info == NULL && refs == 1);
+    SetErrorInfo(0, (IErrorInfo *)&unk_obj);
+    check("SetErrorInfo clears and releases", SetErrorInfo(0, NULL) == S_OK && refs == 1);
+    HMODULE ole = GetModuleHandleW(L"oleaut32.dll");
+    check("GetErrorInfo ordinal 200", GetProcAddress(ole, (LPCSTR)200) == GetProcAddress(ole, "GetErrorInfo"));
+    check("SetErrorInfo ordinal 201", GetProcAddress(ole, (LPCSTR)201) == GetProcAddress(ole, "SetErrorInfo"));
+    refs = 0;
+}
+
 static int modules_seen, exe_seen;
 static BOOL CALLBACK count_module(PCSTR name, DWORD64 base, ULONG size, PVOID ctx) {
     (void)name;
@@ -58,6 +90,7 @@ static BOOL CALLBACK count_module(PCSTR name, DWORD64 base, ULONG size, PVOID ct
 }
 
 void __stdcall start(void) {
+    error_info_checks();
     char marker[16];
     int native = GetEnvironmentVariableA("OSYX", marker, sizeof marker) > 0;
     const WCHAR *cl = GetCommandLineW();

@@ -157,10 +157,114 @@ pub struct ThreadObj {
     pub teb: AtomicU64,
 }
 
+/// An event's state is one word: 1 signalled, 0 not. It lives in the
+/// object until the event is passed to another process; then it moves to a
+/// page of shared memory both processes map, and setting it also wakes
+/// waiters there (a futex on shared memory).
 pub struct EventObj {
-    pub signaled: AtomicBool,
+    local: AtomicU32,
+    /// The word in use: `local`, or the shared page.
+    word: core::sync::atomic::AtomicPtr<AtomicU32>,
+    /// The shared memory object and its mapping, once shared.
+    shared: Mutex<Option<(u64, u64)>>,
     pub manual: bool,
     pub name: Option<String>,
+}
+
+impl EventObj {
+    pub fn new(signaled: bool, manual: bool, name: Option<String>) -> Arc<EventObj> {
+        let e = Arc::new(EventObj {
+            local: AtomicU32::new(signaled as u32),
+            word: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
+            shared: Mutex::new(None),
+            manual,
+            name,
+        });
+        e.word.store(&e.local as *const AtomicU32 as *mut AtomicU32, Ordering::SeqCst);
+        e
+    }
+
+    /// An event whose state is the first word of shared memory object `shm`.
+    pub fn from_shared(shm: u64, manual: bool) -> Option<Arc<EventObj>> {
+        let base = os_sys::shm_map(shm, true).ok()? as u64;
+        let e = Arc::new(EventObj {
+            local: AtomicU32::new(0),
+            word: core::sync::atomic::AtomicPtr::new(base as *mut AtomicU32),
+            shared: Mutex::new(Some((shm, base))),
+            manual,
+            name: None,
+        });
+        Some(e)
+    }
+
+    fn word(&self) -> &AtomicU32 {
+        // SAFETY: `local`, or the shared page this object keeps mapped.
+        unsafe { &*self.word.load(Ordering::SeqCst) }
+    }
+
+    pub fn is_shared(&self) -> bool {
+        self.shared.lock().unwrap().is_some()
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.word().load(Ordering::SeqCst) != 0
+    }
+
+    pub fn set(&self, on: bool) {
+        self.word().store(on as u32, Ordering::SeqCst);
+        if on {
+            if self.is_shared() {
+                os_sys::futex_wake(self.word().as_ptr(), u32::MAX);
+            }
+            signal_all();
+        }
+    }
+
+    /// Resets an auto-reset event that is set; true if it was.
+    pub fn take(&self) -> bool {
+        self.word().compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+    }
+
+    /// The shared memory object holding the state, moving it there first.
+    pub fn share(&self) -> Result<u64, u32> {
+        let mut s = self.shared.lock().unwrap();
+        if let Some((shm, _)) = *s {
+            return Ok(shm);
+        }
+        let shm = os_sys::shm_create(4096).map_err(errno_to_win32)?;
+        let base = match os_sys::shm_map(shm, true) {
+            Ok(b) => b as u64,
+            Err(e) => {
+                let _ = os_sys::close(shm);
+                return Err(errno_to_win32(e));
+            }
+        };
+        // SAFETY: the fresh page's first word.
+        let w = unsafe { &*(base as *const AtomicU32) };
+        w.store(self.local.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.word.store(base as *mut AtomicU32, Ordering::SeqCst);
+        // A set that raced with the move landed in `local`: carry it over.
+        if self.local.load(Ordering::SeqCst) != 0 {
+            w.store(1, Ordering::SeqCst);
+        }
+        *s = Some((shm, base));
+        Ok(shm)
+    }
+
+    /// The futex word waiters of a shared event sleep on.
+    fn futex_word(&self) -> *const u32 {
+        self.word().as_ptr()
+    }
+}
+
+impl Drop for EventObj {
+    fn drop(&mut self) {
+        if let Some((shm, base)) = *self.shared.lock().unwrap() {
+            // SAFETY: the mapping made in share/from_shared.
+            let _ = unsafe { os_sys::unmap(base as *mut u8, 4096) };
+            let _ = os_sys::close(shm);
+        }
+    }
 }
 
 pub struct TimerState {
@@ -249,9 +353,46 @@ pub enum Object {
 struct Table {
     map: BTreeMap<u64, Object>,
     next: u64,
+    /// Handles marked HANDLE_FLAG_INHERIT.
+    inheritable: alloc::collections::BTreeSet<u64>,
 }
 
-static TABLE: Mutex<Table> = Mutex::new(Table { map: BTreeMap::new(), next: 0x100 });
+static TABLE: Mutex<Table> =
+    Mutex::new(Table { map: BTreeMap::new(), next: 0x100, inheritable: alloc::collections::BTreeSet::new() });
+
+/// Puts `o` at the handle value `h` (an inherited handle keeps its value);
+/// false if `h` is taken or not a handle value.
+pub fn insert_at(h: u64, o: Object) -> bool {
+    let mut t = TABLE.lock().unwrap();
+    if h == 0 || !h.is_multiple_of(4) || t.map.contains_key(&h) {
+        return false;
+    }
+    t.map.insert(h, o);
+    true
+}
+
+/// Marks a handle inheritable or not; false if it is not open.
+pub fn set_inheritable(h: u64, on: bool) -> bool {
+    let mut t = TABLE.lock().unwrap();
+    if !t.map.contains_key(&h) {
+        return false;
+    }
+    if on {
+        t.inheritable.insert(h);
+    } else {
+        t.inheritable.remove(&h);
+    }
+    true
+}
+
+pub fn is_inheritable(h: u64) -> bool {
+    TABLE.lock().unwrap().inheritable.contains(&h)
+}
+
+/// The open handles marked inheritable.
+pub fn inheritable() -> alloc::vec::Vec<u64> {
+    TABLE.lock().unwrap().inheritable.iter().copied().collect()
+}
 
 pub fn insert(o: Object) -> u64 {
     let mut t = TABLE.lock().unwrap();
@@ -262,6 +403,28 @@ pub fn insert(o: Object) -> u64 {
     t.next += 4;
     t.map.insert(h, o);
     h
+}
+
+/// The object type, for diagnostics.
+pub fn kind_name(o: &Object) -> &'static str {
+    match o {
+        Object::File(_) => "file",
+        Object::Console(_) => "console",
+        Object::Null => "null device",
+        Object::Thread(_) => "thread",
+        Object::Event(_) => "event",
+        Object::Timer(_) => "timer",
+        Object::Mutex(_) => "mutex",
+        Object::Semaphore(_) => "semaphore",
+        Object::Section(_) => "section",
+        Object::Token(_) => "token",
+        Object::Port(_) => "completion port",
+        Object::Process(_) => "process",
+        Object::Job(_) => "job",
+        Object::WindowStation(_) => "window station",
+        Object::Desktop(_) => "desktop",
+        Object::Pipe(_) => "pipe",
+    }
 }
 
 /// Open handles of this process.
@@ -280,7 +443,10 @@ pub fn any(f: impl Fn(&Object) -> bool) -> bool {
 
 /// Removes a handle; the object goes away with its last handle.
 pub fn close(h: u64) -> bool {
-    let removed = TABLE.lock().unwrap().map.remove(&h);
+    let mut t = TABLE.lock().unwrap();
+    t.inheritable.remove(&h);
+    let removed = t.map.remove(&h);
+    drop(t);
     removed.is_some()
 }
 
@@ -328,9 +494,9 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
         Object::Timer(t) => t.ready(consume),
         Object::Event(e) => {
             if e.manual || !consume {
-                e.signaled.load(Ordering::SeqCst)
+                e.is_set()
             } else {
-                e.signaled.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+                e.take()
             }
         }
         Object::Mutex(m) => {
@@ -427,9 +593,30 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
                 (d - now).as_nanos().max(1) as u64
             }
         };
-        let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, wait_ns);
+        // Another process sets a shared event without touching SEQ: one
+        // shared event is waited for on its own word, several objects
+        // including one are polled.
+        let shared: Vec<&Arc<EventObj>> = objs.iter().filter_map(|o| match o {
+            Some(Object::Event(e)) if e.is_shared() => Some(e),
+            _ => None,
+        }).collect();
+        match shared.as_slice() {
+            [e] if objs.len() == 1 => {
+                let _ = os_sys::futex_wait(e.futex_word(), 0, wait_ns);
+            }
+            [] => {
+                let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, wait_ns);
+            }
+            _ => {
+                let slice = if wait_ns == 0 { SHARED_POLL_NS } else { wait_ns.min(SHARED_POLL_NS) };
+                let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, slice);
+            }
+        }
     }
 }
+
+/// How often a wait that includes a shared event looks at it again.
+const SHARED_POLL_NS: u64 = 2_000_000;
 
 /// An existing named event or mutex (names are per process here: OSyx
 /// has no cross-process Win32 object namespace).

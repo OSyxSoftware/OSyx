@@ -73,6 +73,8 @@ mod accounts;
 mod capi;
 mod minordlls;
 mod dwmapi;
+mod dwrite;
+mod inherit;
 mod propsys;
 mod pipes;
 mod ws2_32;
@@ -106,6 +108,9 @@ fn main() -> i32 {
     }
     let verbose = args.first().is_some_and(|a| a == "-v");
     VERBOSE.store(verbose, core::sync::atomic::Ordering::Relaxed);
+    if verbose && os_std::env::var("OSYX_WINRUN_TRACE").is_ok_and(|v| v == "1") {
+        kernel32::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
     if verbose {
         args.remove(0);
     }
@@ -135,6 +140,19 @@ fn main() -> i32 {
     }
     // CreateProcessW's working directory for a Windows child.
     let mut env: Vec<(String, String)> = os_std::env::vars().collect();
+    inherit::start_service();
+    // Inherited handles come first, at their own values (see inherit.rs).
+    if let Some(i) = env.iter().position(|(k, _)| k == inherit::ENV) {
+        let (_, name) = env.remove(i);
+        match inherit::receive(&name) {
+            Ok(n) if verbose => eprintln!("winrun: inherited {n} handles"),
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("winrun: cannot take inherited handles: {e}");
+                return 126;
+            }
+        }
+    }
     if let Some(i) = env.iter().position(|(k, _)| k == "OSYX_WINRUN_CWD") {
         let (_, dir) = env.remove(i);
         if let Err(e) = os_sys::chdir(&dir) {
@@ -150,6 +168,13 @@ fn main() -> i32 {
     let base = profile.trim_end_matches('\\');
     let user = base.rsplit('\\').next().filter(|u| !u.is_empty() && !u.ends_with(':')).unwrap_or("user").to_string();
     let home_path = profile.strip_prefix("C:").unwrap_or(&profile).to_string();
+    // A Windows profile always has these folders (created at first logon);
+    // programs read them without asking for creation.
+    if os_sys::stat(if home.is_empty() { "/" } else { home }).is_ok() {
+        for d in ["AppData", "AppData/Roaming", "AppData/Local", "AppData/LocalLow", "AppData/Local/Temp"] {
+            let _ = os_sys::mkdir(&format!("{home}/{d}"), 0o755);
+        }
+    }
     for (k, v) in [
         ("USERPROFILE", profile.clone()),
         ("APPDATA", format!("{base}\\AppData\\Roaming")),

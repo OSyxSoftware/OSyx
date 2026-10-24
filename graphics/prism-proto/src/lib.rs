@@ -67,6 +67,7 @@ pub mod opcode {
     pub const WINDOW_ACTION: u16 = 0x0B;
     pub const NOTIFY: u16 = 0x0C;
     pub const DESTROY_BUFFER: u16 = 0x0D;
+    pub const SET_WINDOW_VISIBILITY: u16 = 0x0E;
 
     pub const EV_HELLO: u16 = 0x81;
     pub const CONFIGURE: u16 = 0x82;
@@ -140,7 +141,10 @@ pub mod window_flags {
     pub const DECORATED: u32 = 1 << 1;
     /// Start maximized.
     pub const MAXIMIZED: u32 = 1 << 2;
-    pub const ALL: u32 = RESIZABLE | DECORATED | MAXIMIZED;
+    /// Auxiliary/owned windows do not get an independent taskbar entry.
+    pub const SKIP_TASKBAR: u32 = 1 << 3;
+    pub const HIDDEN: u32 = 1 << 4;
+    pub const ALL: u32 = RESIZABLE | DECORATED | MAXIMIZED | SKIP_TASKBAR | HIDDEN;
 }
 
 /// `CONFIGURE` states and `WINDOW_LIST` flags.
@@ -258,6 +262,7 @@ pub enum Request {
     Commit { surface: u32 },
     SetTitle { window: u32, title: String },
     SetGeometry { window: u32, x: i32, y: i32, width: u32, height: u32 },
+    SetWindowVisibility { window: u32, visible: bool, taskbar: bool },
     /// `global`: `target` is a compositor-wide id (shell only); otherwise
     /// one of the client's own window ids.
     WindowAction { target: u32, action: Action, global: bool },
@@ -478,6 +483,7 @@ impl Request {
             Request::Commit { .. } => COMMIT_SURFACE,
             Request::SetTitle { .. } => SET_TITLE,
             Request::SetGeometry { .. } => SET_GEOMETRY,
+            Request::SetWindowVisibility { .. } => SET_WINDOW_VISIBILITY,
             Request::WindowAction { .. } => WINDOW_ACTION,
             Request::Notify { .. } => NOTIFY,
             Request::DestroyBuffer { .. } => DESTROY_BUFFER,
@@ -527,6 +533,9 @@ impl Request {
             }
             Request::WindowAction { target, action, global } => {
                 w.u32(*target).u8(*action as u8).u8(u8::from(*global));
+            }
+            Request::SetWindowVisibility { window, visible, taskbar } => {
+                w.u32(*window).u8(u8::from(*visible)).u8(u8::from(*taskbar));
             }
             Request::Notify { title, body } => {
                 w.str(title, MAX_TITLE).str(body, MAX_TEXT);
@@ -591,6 +600,7 @@ impl Request {
             opcode::DESTROY_BUFFER => Request::DestroyBuffer { buffer: r.id()? },
             opcode::DAMAGE => Request::Damage { surface: r.id()?, rect: rect(&mut r)? },
             opcode::SET_TITLE => Request::SetTitle { window: r.id()?, title: r.str(MAX_TITLE)? },
+            opcode::SET_WINDOW_VISIBILITY => Request::SetWindowVisibility { window: r.id()?, visible: r.bool()?, taskbar: r.bool()? },
             opcode::SET_GEOMETRY => {
                 Request::SetGeometry { window: r.id()?, x: r.i32()?, y: r.i32()?, width: r.dim()?, height: r.dim()? }
             }
@@ -788,6 +798,7 @@ mod tests {
             Request::Damage { surface: 1, rect: Rect { x: 0, y: -3, w: 640, h: 20 } },
             Request::Commit { surface: 1 },
             Request::SetTitle { window: 2, title: String::new() },
+            Request::SetWindowVisibility { window: 2, visible: false, taskbar: false },
             Request::SetGeometry { window: 2, x: 5, y: 6, width: 300, height: 200 },
             Request::WindowAction { target: 77, action: Action::ToggleMaximize, global: true },
             Request::Notify { title: "Build".to_string(), body: "done".to_string() },

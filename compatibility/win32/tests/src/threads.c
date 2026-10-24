@@ -115,13 +115,36 @@ void __stdcall start(void) {
         check("VirtualProtect(PAGE_READONLY)", VirtualProtect(p, 4096, PAGE_READONLY, &old) && old == PAGE_READWRITE);
         MEMORY_BASIC_INFORMATION mbi;
         check("VirtualQuery reports the protection", VirtualQuery(p, &mbi, sizeof mbi) == sizeof mbi && mbi.Protect == PAGE_READONLY && mbi.State == MEM_COMMIT);
-        /* A deliberate difference: Windows grants RWX pages, OSyx enforces W^X. */
-        char e[4];
-        int on_osyx = GetEnvironmentVariableA("OSYX", e, sizeof e) == 1;
+        /* OSyx emulates private RWX pages using W^X permission switches. */
         BOOL rwx = VirtualProtect(p, 4096, PAGE_EXECUTE_READWRITE, &old);
-        check(on_osyx ? "PAGE_EXECUTE_READWRITE refused (OSyx W^X policy)" : "PAGE_EXECUTE_READWRITE granted (Windows)", on_osyx ? !rwx : rwx);
+        check("PAGE_EXECUTE_READWRITE private memory", rwx);
+        if (rwx) {
+            BYTE *code = (BYTE *)p;
+            code[0] = 0xB8; code[1] = 42; code[2] = code[3] = code[4] = 0; code[5] = 0xC3;
+            FlushInstructionCache(GetCurrentProcess(), code, 6);
+            int (*run)(void) = (int (*)(void))code;
+            check("execute generated code", run() == 42);
+            code[1] = 43;
+            FlushInstructionCache(GetCurrentProcess(), code, 6);
+            check("modify and reexecute generated code", run() == 43);
+            check("VirtualQuery retains logical RWX", VirtualQuery(p, &mbi, sizeof mbi) == sizeof mbi && mbi.Protect == PAGE_EXECUTE_READWRITE);
+            check("switch JIT memory to RX", VirtualProtect(p, 4096, PAGE_EXECUTE_READ, &old) && old == PAGE_EXECUTE_READWRITE);
+            check("execute after explicit RX", run() == 43);
+        }
         check("VirtualFree(MEM_RELEASE)", VirtualFree(p, 0, MEM_RELEASE));
     }
+
+    BYTE *jit = VirtualAlloc(NULL, 128 * 1024, MEM_RESERVE, PAGE_NOACCESS);
+    BYTE *committed = jit ? VirtualAlloc(jit + 4096, 65536, MEM_COMMIT, PAGE_EXECUTE_READWRITE) : NULL;
+    check("commit RWX inside a reservation", committed != NULL && committed == jit + 4096);
+    if (committed) {
+        committed[0] = 0xB8; committed[1] = 7; committed[2] = committed[3] = committed[4] = 0; committed[5] = 0xC3;
+        FlushInstructionCache(GetCurrentProcess(), committed, 6);
+        check("execute committed JIT page", ((int (*)(void))committed)() == 7);
+        check("decommit JIT page", VirtualFree(committed, 4096, MEM_DECOMMIT));
+        check("recommit JIT page as writable data", VirtualAlloc(committed, 4096, MEM_COMMIT, PAGE_READWRITE) == committed && committed[0] == 0);
+    }
+    if (jit) check("release JIT reservation", VirtualFree(jit, 0, MEM_RELEASE));
 
     /* A DLL from the file system, with its own imports and a forwarder. */
     HMODULE dll = LoadLibraryA("windll.dll");

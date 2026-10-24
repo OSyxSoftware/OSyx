@@ -582,6 +582,115 @@ extern "win64" fn TransactNamedPipe(h: u64, input: *const u8, in_len: u32, outpu
     finish(r, read)
 }
 
+// ---- pipes in another process ----------------------------------------------------------------
+//
+// A connected pipe handle can go to another process (inheritance,
+// DuplicateHandle), but the kernel does not pass channels. The process
+// that has it keeps the connection and relays it: the other process
+// connects to a one-shot relay channel, and a thread here copies messages
+// both ways until either side hangs up.
+
+const RELAY_MESSAGE: u32 = 1;
+const RELAY_READ_MESSAGE: u32 = 2;
+const RELAY_NOWAIT: u32 = 4;
+const RELAY_OVERLAPPED: u32 = 8;
+/// How long a relay waits for the other process to connect.
+const RELAY_WAIT_NS: u64 = 30_000_000_000;
+
+static RELAYS: AtomicU32 = AtomicU32::new(0);
+
+fn relay_name(pid: u64, id: u32) -> String {
+    format!("winrun.relay.{pid}.{id}")
+}
+
+/// Sends `data` on `to`, waiting while its queue is full.
+fn forward(to: u64, data: &[u8]) -> bool {
+    loop {
+        match os_sys::channel_send(to, data, &[]) {
+            Ok(()) => return true,
+            Err(Errno::WouldBlock) => {
+                if wait(to, osyx_abi::ipc::WAIT_WRITABLE, SLICE_NS).is_err() {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Offers the connection of pipe handle `h` to another process. Returns
+/// (relay id, flags) for `relay_in` there.
+pub(crate) fn relay_out(h: u64) -> Result<(u32, u32), u32> {
+    let p = pipe(h)?;
+    let chan = p.chan()?;
+    let id = RELAYS.fetch_add(1, Ordering::Relaxed);
+    let listener = Fd(os_sys::channel_listen(&relay_name(crate::kernel32::pid(), id)).map_err(errno_to_win32)?);
+    let flags = if p.message_type { RELAY_MESSAGE } else { 0 }
+        | if p.read_message.load(Ordering::SeqCst) { RELAY_READ_MESSAGE } else { 0 }
+        | if p.nowait.load(Ordering::SeqCst) { RELAY_NOWAIT } else { 0 }
+        | if p.overlapped { RELAY_OVERLAPPED } else { 0 };
+    // Bytes this handle had read but not handed out go first.
+    let rest = core::mem::take(&mut *p.rest.lock().unwrap());
+    let spawned = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
+        let _pipe = p;
+        if !matches!(wait(listener.0, osyx_abi::ipc::WAIT_READABLE, RELAY_WAIT_NS), Ok(true)) {
+            return;
+        }
+        let Ok(other) = os_sys::channel_accept(listener.0).map(Fd) else { return };
+        drop(listener);
+        if !rest.is_empty() && !forward(other.0, &rest) {
+            return;
+        }
+        let mut buf = alloc::vec![0u8; CHUNK];
+        loop {
+            let mut items = [
+                os_sys::ipc::WaitItem { handle: chan.0, events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP, revents: 0 },
+                os_sys::ipc::WaitItem { handle: other.0, events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP, revents: 0 },
+            ];
+            if os_sys::wait_handles(&mut items, u64::MAX).is_err() {
+                return;
+            }
+            for (from, to, ready) in [(chan.0, other.0, items[0].revents), (other.0, chan.0, items[1].revents)] {
+                if ready == 0 {
+                    continue;
+                }
+                match os_sys::channel_recv(from, &mut buf, &mut []) {
+                    Ok((n, _)) => {
+                        if !forward(to, &buf[..n]) {
+                            return;
+                        }
+                    }
+                    Err(Errno::WouldBlock) => {}
+                    // A hang-up on either side ends the relay; dropping
+                    // both ends passes it on to the other.
+                    Err(_) => return,
+                }
+            }
+        }
+    });
+    spawned.map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?;
+    Ok((id, flags))
+}
+
+/// The pipe handle another process (`pid`) relays to this one.
+pub(crate) fn relay_in(pid: u64, id: u32, flags: u32) -> Result<Object, u32> {
+    let c = os_sys::channel_connect(&relay_name(pid, id)).map_err(errno_to_win32)?;
+    Ok(Object::Pipe(Arc::new(PipeObj {
+        server: false,
+        message_type: flags & RELAY_MESSAGE != 0,
+        read_message: AtomicBool::new(flags & RELAY_READ_MESSAGE != 0),
+        nowait: AtomicBool::new(flags & RELAY_NOWAIT != 0),
+        overlapped: flags & RELAY_OVERLAPPED != 0,
+        listener: None,
+        chan: Mutex::new(Some(Arc::new(Fd(c)))),
+        rest: Mutex::new(Vec::new()),
+        port: Mutex::new(None),
+        cancel: AtomicU64::new(0),
+        pending: AtomicU32::new(0),
+        disconnected: AtomicBool::new(false),
+    })))
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         CreateNamedPipeW,

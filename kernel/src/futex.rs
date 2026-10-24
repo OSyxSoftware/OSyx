@@ -1,7 +1,9 @@
 //! Futexes: wait on / wake a 32-bit word in user memory.
 //!
-//! The key is (process, user virtual address); there is no memory shared
-//! between processes yet. `wait` reads the word, compares and registers the
+//! The key is (process, user virtual address), except for a word in shared
+//! memory: then it is (shared memory object, offset), so processes that map
+//! the same object wait and wake on the same word. `wait` reads the word,
+//! compares and registers the
 //! caller in one interrupts-disabled section (single CPU), so a `wake` that
 //! follows the user's store cannot be missed. Waiters are woken in FIFO order.
 //! A waiter that is still registered when it resumes was woken by its
@@ -15,10 +17,24 @@ use crate::{interrupts, process::Pid};
 use alloc::vec::Vec;
 use osyx_abi::Errno;
 
+#[derive(Clone, Copy, PartialEq)]
+enum Key {
+    Private(Pid, u64),
+    /// A shared memory object (its address) and the offset in it.
+    Shared(usize, u64),
+}
+
 struct Waiter {
     pid: Pid,
-    addr: u64,
+    key: Key,
     tid: Tid,
+}
+
+fn key_of(pid: Pid, addr: u64) -> Key {
+    match crate::process::shared_key(addr) {
+        Some((obj, off)) => Key::Shared(obj, off),
+        None => Key::Private(pid, addr),
+    }
 }
 
 static WAITERS: IrqSpinLock<Vec<Waiter>> = IrqSpinLock::new(Vec::new());
@@ -38,6 +54,8 @@ pub fn wait(addr: u64, expected: u32, timeout_ticks: Option<u64>) -> Result<(), 
     check_addr(addr)?;
     let pid = sched::current_pid();
     let tid = sched::current_tid();
+    // Looked up before interrupts go off: it takes the process table lock.
+    let key = key_of(pid, addr);
     let were_enabled = cpu::interrupts_enabled();
     cpu::disable_interrupts();
     let result = (|| {
@@ -49,7 +67,7 @@ pub fn wait(addr: u64, expected: u32, timeout_ticks: Option<u64>) -> Result<(), 
         if sched::current_kill_pending() {
             return Err(Errno::Interrupted);
         }
-        WAITERS.lock().push(Waiter { pid, addr, tid });
+        WAITERS.lock().push(Waiter { pid, key, tid });
         sched::mark_current_blocked_until(timeout_ticks.map(|t| interrupts::ticks() + t.max(1)));
         sched::schedule();
         // Still registered => not woken by `wake`.
@@ -70,20 +88,21 @@ pub fn wait(addr: u64, expected: u32, timeout_ticks: Option<u64>) -> Result<(), 
     result
 }
 
-/// Wakes up to `count` threads of the current process waiting on `addr`.
+/// Wakes up to `count` threads waiting on `addr` of the current process
+/// (in any process, for a word in shared memory).
 pub fn wake(addr: u64, count: u32) -> Result<u64, Errno> {
     check_addr(addr)?;
-    Ok(wake_in(sched::current_pid(), addr, count))
+    Ok(wake_key(key_of(sched::current_pid(), addr), count))
 }
 
-/// Wakes up to `count` waiters of process `pid` on `addr` (FIFO).
-pub fn wake_in(pid: Pid, addr: u64, count: u32) -> u64 {
+/// Wakes up to `count` waiters on `key` (FIFO).
+fn wake_key(key: Key, count: u32) -> u64 {
     let mut woken: Vec<Tid> = Vec::new();
     {
         let mut w = WAITERS.lock();
         let mut i = 0;
         while i < w.len() && woken.len() < count as usize {
-            if w[i].pid == pid && w[i].addr == addr {
+            if w[i].key == key {
                 woken.push(w.remove(i).tid);
             } else {
                 i += 1;

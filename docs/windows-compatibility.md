@@ -171,15 +171,48 @@ The desktop integration test launches and closes each with USB input.
 ## Known limits
 
 This is a small Win32 subset, not general Windows application compatibility.
-There is no MSVC C runtime/UCRT implementation, PE32/WoW64, .NET, DirectX,
-COM, registry service, Windows kernel drivers, child-window controls,
-SEH unwinding or general process creation. Imports outside the implemented
-surface fail. Delay imports and arbitrary application installers are not
-supported. The virtual-memory backend allocates eagerly; reservation is
-not demand paging, and PAGE_NOACCESS currently has a read-only backing
-mapping (see `mem.rs`). File sharing and named synchronization tables are
-local to one winrun process. ANSI strings are UTF-8 with Latin-1 fallback,
-not a full Windows code-page implementation.
+UCRT, COM, registry, SEH, process creation and delay imports have partial
+implementations. PE32/WoW64, .NET, Windows kernel drivers, general native
+child-window controls and accelerated DirectX rendering are absent.
+Imports outside the implemented surface fail, and arbitrary application
+installers are unsupported. Anonymous memory is demand-zero;
+PAGE_NOACCESS currently has a read-only backing mapping (see `mem.rs`).
+File sharing and named synchronization lookup tables remain local to one
+winrun process. ANSI strings are UTF-8 with Latin-1 fallback, not a full
+Windows code-page implementation.
+
+CreateProcess can inherit explicitly selected events, shared page-file
+sections and connected pipes; DuplicateHandle transfers these objects
+between Windows processes. File, mutex and semaphore inheritance is not
+implemented. Shared events use shared memory and kernel futexes keyed by
+the shared object, so a signal in one process wakes a waiter in another.
+The Zen diagnostic launcher disables Gecko's Windows sandboxes through
+Mozilla's environment switches; the Windows sandbox broker is unsupported.
+
+Windows windows start hidden and follow ShowWindow/SetWindowPos visibility.
+Message-only, tool and owned windows do not create separate taskbar items.
+The desktop groups eligible windows from a winrun process and its Windows
+descendants under the named parent window; unrelated applications retain
+their own entries. Popup ownership is exposed through GetParent,
+GetWindow(GW_OWNER) and GetAncestor(GA_ROOTOWNER). Native child controls
+inside a parent client area remain unsupported.
+
+DirectWrite exposes the original IDWriteFactory font/file/face APIs,
+custom font loaders, metrics, character maps, TrueType outlines and glyph
+coverage rasterization. The bundled unmodified Lato and KaTeX fonts and
+their SIL OFL license are in `graphics/assets/fonts/windows`; registry
+substitutes map common Windows family names to them. There is no hinting,
+ClearType subpixel filtering, CFF outline rendering, DirectWrite text
+layout/analysis or newer factory interface support. Existing GDI atlas
+fonts remain separate from these DirectWrite font faces.
+
+Private PAGE_EXECUTE_READWRITE allocations support JIT code by alternating
+individual pages between RW/NX and RX on write and instruction-fetch
+faults. Kernel W^X remains enforced. The logical protection returned by
+VirtualQuery remains PAGE_EXECUTE_READWRITE. Instructions that modify the
+same page they execute from, and writable executable shared/file sections,
+remain unsupported. JIT code patching and execution require external
+synchronization as on Windows.
 
 C: maps to `/`; other drive letters and UNC paths are rejected. Mounted
 filesystems are available through paths such as `C:\boot` and `C:\tmp`.

@@ -244,6 +244,37 @@ extern "win64" fn NtClose(h: u64) -> NtStatus {
 
 /// Sections of the page file or of a file handle (mapping.rs). Names in
 /// the object attributes are not read: NT sections here are unnamed.
+const STATUS_SECTION_NOT_IMAGE: NtStatus = 0xC000_0049;
+const SEC_FILE: u32 = 0x80_0000;
+const SEC_COMMIT: u32 = 0x800_0000;
+
+/// SectionBasicInformation (0): base address (none: sections are not
+/// based), allocation attributes and size (24 bytes). Sections here are
+/// never images (SectionImageInformation fails as for a data section).
+extern "win64" fn NtQuerySection(h: u64, class: u32, out: *mut u8, len: u32, ret: *mut u32) -> NtStatus {
+    let Some(Object::Section(s)) = objects::get(h) else { return STATUS_INVALID_HANDLE };
+    match class {
+        0 => {
+            if (len as usize) < 24 || out.is_null() {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            // SAFETY: the caller's SECTION_BASIC_INFORMATION.
+            unsafe {
+                core::ptr::write_bytes(out, 0, 24);
+                teb::put(out as u64, 8, if s.file.is_some() { SEC_FILE } else { SEC_COMMIT });
+                teb::put(out as u64, 16, s.size);
+            }
+            if !ret.is_null() {
+                // SAFETY: the caller's out pointer.
+                unsafe { *ret = 24 };
+            }
+            0
+        }
+        1 => STATUS_SECTION_NOT_IMAGE,
+        _ => STATUS_INVALID_INFO_CLASS,
+    }
+}
+
 extern "win64" fn NtCreateSection(
     out: *mut u64,
     _access: u32,
@@ -671,6 +702,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         NtQueryInformationFile,
         NtClose,
         NtCreateSection,
+        NtQuerySection,
         NtMapViewOfSection,
         NtUnmapViewOfSection,
         NtAllocateVirtualMemory,

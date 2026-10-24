@@ -15,7 +15,7 @@ use crate::{
     kernel32::{self, fail},
     objects::{self, EventObj, Object},
 };
-use alloc::{collections::VecDeque, string::String, sync::Arc, vec::Vec};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use os_std::{
     sync::Mutex,
@@ -322,13 +322,12 @@ extern "win64" fn CloseThreadpoolTimer(timer: u64) {
 // ---- waits -----------------------------------------------------------------------
 
 fn new_cancel_event() -> u64 {
-    objects::insert(Object::Event(Arc::new(EventObj { signaled: AtomicBool::new(false), manual: true, name: None::<String> })))
+    objects::insert(Object::Event(EventObj::new(false, true, None)))
 }
 
 fn signal(h: u64) {
     if let Some(Object::Event(e)) = objects::get(h) {
-        e.signaled.store(true, Ordering::SeqCst);
-        objects::signal_all();
+        e.set(true);
     }
 }
 

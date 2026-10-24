@@ -58,6 +58,8 @@ pub trait Host {
     /// Copies the finished image to `base` and applies the protections
     /// (RVAs relative to `base`).
     fn commit(&mut self, base: u64, image: &[u8], prot: &[Protection]) -> Result<(), LinkError>;
+    /// Releases an image reservation after a failed load.
+    fn release(&mut self, _base: u64, _size: u64) {}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -248,6 +250,23 @@ impl<'s, H: Host> Linker<'s, H> {
     }
 
     fn load_pe(&mut self, name: String, file: Vec<u8>, dll: bool) -> Result<usize, LinkError> {
+        let first = self.modules.len();
+        let cycles = self.cycles.len();
+        let result = self.load_pe_inner(name, file, dll);
+        if result.is_err() {
+            // A failed image, including dependencies bound back to it in a
+            // cycle, must never be found by a later LoadLibrary call.
+            for m in self.modules.drain(first..) {
+                if let Kind::Pe { size, .. } = m.kind {
+                    self.host.release(m.base, size as u64);
+                }
+            }
+            self.cycles.truncate(cycles);
+        }
+        result
+    }
+
+    fn load_pe_inner(&mut self, name: String, file: Vec<u8>, dll: bool) -> Result<usize, LinkError> {
         if self.modules.len() >= MAX_MODULES {
             return Err(LinkError::TooManyModules);
         }
@@ -258,10 +277,16 @@ impl<'s, H: Host> Linker<'s, H> {
             return Err(bad(&name, ImageError::Subsystem(pe.optional().subsystem)));
         }
         let size = pe.size_of_image();
-        let base = self.host.reserve(size as u64, pe.image_base(), !image::relocatable(&pe))?;
         let mut img = image::layout(&pe).map_err(|e| bad(&name, e))?;
-        let relocations = image::relocate(&pe, &mut img, base).map_err(|e| bad(&name, e))?;
         let prot = image::protections(&pe).map_err(|e| bad(&name, e))?;
+        let base = self.host.reserve(size as u64, pe.image_base(), !image::relocatable(&pe))?;
+        let relocations = match image::relocate(&pe, &mut img, base) {
+            Ok(n) => n,
+            Err(e) => {
+                self.host.release(base, size as u64);
+                return Err(bad(&name, e));
+            }
+        };
         let entry = pe.entry_point();
         let idx = self.modules.len();
         // The module is registered before its imports are bound so that a

@@ -14,8 +14,10 @@ use os_std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
+/// CREATE_WAITABLE_TIMER_MANUAL_RESET (1) and _HIGH_RESOLUTION (2): every
+/// timer here has the kernel tick's resolution.
 fn create(name: Option<String>, flags: u32) -> u64 {
-    if flags & !1 != 0 {
+    if flags & !3 != 0 {
         return fail(ERROR_NOT_SUPPORTED, 0);
     }
     if let Some(old) = name.as_deref().and_then(objects::find_named) {

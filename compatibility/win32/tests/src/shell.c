@@ -130,6 +130,10 @@ void __stdcall start(void) {
     check("local AppData, created", SHGetKnownFolderPath(&ID_Local, KF_FLAG_CREATE, NULL, &local) == S_OK && local &&
                                         wide_ends(local, L"\\AppData\\Local") && is_dir(local));
     check("AppData lies in the profile", profile && roaming && local && starts_with(roaming, profile) && starts_with(local, profile));
+    /* Gecko asks with DONT_VERIFY | NO_ALIAS | SIMPLE_IDLIST. */
+    WCHAR *again = NULL;
+    check("path flags that only shape ID lists", SHGetKnownFolderPath(&ID_Roaming, 0x5100, NULL, &again) == S_OK && again && roaming && wide_eq(again, roaming));
+    CoTaskMemFree(again);
 
     WCHAR buf[MAX_PATH], sysdir[MAX_PATH];
     check("CSIDL_APPDATA agrees", SHGetFolderPathW(NULL, CSIDL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, buf) == S_OK &&

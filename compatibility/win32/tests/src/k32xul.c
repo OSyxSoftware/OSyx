@@ -185,6 +185,11 @@ void __stdcall start(void) {
     check("GetSystemWindowsDirectoryW", GetSystemWindowsDirectoryW(fin, MAX_PATH) > 2);
 
     /* Machine and process */
+    DWORD_PTR process_mask = 0, system_mask = 0;
+    check("GetProcessAffinityMask", GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask) &&
+          process_mask != 0 && (process_mask & system_mask) == process_mask);
+    check("GetProcessAffinityMask invalid handle", !GetProcessAffinityMask(NULL, &process_mask, &system_mask) &&
+          GetLastError() == ERROR_INVALID_HANDLE);
     DWORD cn = 0;
     check("GetComputerNameW size query", !GetComputerNameW(NULL, &cn) && GetLastError() == ERROR_BUFFER_OVERFLOW && cn > 1);
     cn = 64;

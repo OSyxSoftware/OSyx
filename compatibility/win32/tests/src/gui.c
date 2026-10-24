@@ -97,6 +97,12 @@ void __stdcall start(void) {
     check("RegisterClassA", RegisterClassA(&wc) != 0);
     main_window = CreateWindowExA(0, "OSyxWin32Test", "Win32 on OSyx", WS_OVERLAPPEDWINDOW, 120, 90, 480, 260, NULL, NULL, wc.hInstance, NULL);
     check("CreateWindowExA", main_window != NULL && created);
+    RECT before, after, outer;
+    GetClientRect(main_window, &before);
+    check("SetWindowPos completes the size change", SetWindowPos(main_window, NULL, 0, 0, 500, 280, SWP_NOMOVE | SWP_NOZORDER));
+    check("window rectangle changes synchronously", GetWindowRect(main_window, &outer) && outer.right - outer.left == 500 && outer.bottom - outer.top == 280);
+    check("client rectangle changes synchronously", GetClientRect(main_window, &after) && after.right - before.right == 20 && after.bottom - before.bottom == 20);
+    SetWindowPos(main_window, NULL, 0, 0, 480, 260, SWP_NOMOVE | SWP_NOZORDER);
     char title[64];
     check("GetWindowTextA", GetWindowTextA(main_window, title, sizeof title) == 13);
     ShowWindow(main_window, SW_SHOW);

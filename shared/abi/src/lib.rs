@@ -340,7 +340,7 @@ pub const MAX_NAME_LEN: usize = 255;
 /// Symbolic links followed while resolving one path.
 pub const MAX_SYMLINKS: usize = 40;
 /// Open handles per process.
-pub const MAX_HANDLES: usize = 64;
+pub const MAX_HANDLES: usize = 4096;
 /// Largest single `read`.
 pub const MAX_READ: usize = 1 << 20;
 /// First handle number used for files (0-2 are the console streams).

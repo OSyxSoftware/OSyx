@@ -80,6 +80,9 @@ extern "win64" fn CreateWindowStationW(name: *const u16, flags: u32, _access: u3
     if flags & !CWF_CREATE_ONLY != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
+    if crate::security::inherit_flag(sa) {
+        return fail(ERROR_NOT_SUPPORTED, 0); // window stations stay in this process
+    }
     let sd = match objsec::initial_sd(sa, &objsec::WINSTA) {
         Ok(s) => s,
         Err(e) => return fail(e, 0),
@@ -121,6 +124,9 @@ extern "win64" fn CreateDesktopW(name: *const u16, device: *const u16, mode: u64
     let Some(name) = (unsafe { path::wide_to_string(name) }).filter(|n| !n.is_empty() && !n.contains('\\')) else {
         return fail(ERROR_INVALID_PARAMETER, 0);
     };
+    if crate::security::inherit_flag(sa) {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
     let sd = match objsec::initial_sd(sa, &objsec::DESKTOP) {
         Ok(s) => s,
         Err(e) => return fail(e, 0),

@@ -277,9 +277,31 @@ fn zen_probe() -> i32 {
     let prism = Command::new("/system/bin/prism").spawn();
     if prism.is_err() { println!("ZEN_PROBE_RESULT infrastructure=prism_start_failed"); return 1; }
     thread::sleep(Duration::from_secs(2));
-    let result = Command::new("/bin/winrun").args([
-        "-v", "/opt/zen/zen.exe", "--no-remote", "--profile", "C:\\home\\user\\zen-profile", "about:blank",
-    ]).status();
+    // OSyx has no Direct3D driver. Use Gecko's software WebRender path
+    // explicitly instead of repeatedly probing unsupported DXGI devices.
+    let profile = "/tmp/zen-probe-profile";
+    if os_std::fs::create_dir_all(profile).and_then(|_| os_std::fs::write(
+        format!("{profile}/user.js"),
+        "user_pref(\"gfx.webrender.software\", true);\nuser_pref(\"gfx.webrender.software.d3d11\", false);\nuser_pref(\"gfx.webrender.compositor\", false);\nuser_pref(\"layers.acceleration.disabled\", true);\nuser_pref(\"layers.gpu-process.enabled\", false);\nuser_pref(\"layers.gpu-process.force-enabled\", false);\n",
+    )).is_err() {
+        println!("ZEN_PROBE_RESULT infrastructure=profile_creation_failed");
+        if let Ok(p) = prism { let _ = os_std::system::kill(p.id()); let _ = p.wait(); }
+        return 1;
+    }
+    let mut zen = Command::new("/bin/winrun");
+    // The session runs as root, so Gecko's launcher would start the browser
+    // with a de-elevated token, which OSyx cannot run: keep its own. The
+    // probe has its own temporary profile with software-rendering prefs.
+    zen.args(["-v", "/opt/zen/zen.exe", "--no-remote", "-no-deelevate", "-profile", "C:\\tmp\\zen-probe-profile", "about:blank"]);
+    // Gecko's Windows sandbox broker starts its children suspended and
+    // patches their memory, which OSyx gives no process the right to do:
+    // Mozilla's own switches start them unsandboxed instead.
+    // Every failing Windows API call goes to the serial log (bring-up).
+    zen.env("OSYX_WINRUN_TRACE", "1");
+    for kind in ["CONTENT", "GPU", "RDD", "SOCKET_PROCESS", "GMP", "UTILITY", "VR"] {
+        zen.env(&format!("MOZ_DISABLE_{kind}_SANDBOX"), "1");
+    }
+    let result = zen.status();
     println!("ZEN_PROBE_RESULT exit={:?}", result.as_ref().ok().and_then(|s| s.code()));
     if let Ok(p) = prism { let _ = os_std::system::kill(p.id()); let _ = p.wait(); }
     // Boot completion is separate from browser success; the host reads

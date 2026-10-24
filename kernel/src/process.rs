@@ -790,6 +790,17 @@ pub fn get_object(h: u64) -> Result<Object, Errno> {
     t.procs.get(&pid).and_then(|p| p.handles.get(&h)).cloned().ok_or(Errno::BadHandle)
 }
 
+/// The shared memory object (as its address) and the offset in it behind
+/// `addr`, if `addr` lies in one of the current process's shared mappings:
+/// the futex key processes sharing that memory agree on.
+pub fn shared_key(addr: u64) -> Option<(usize, u64)> {
+    let pid = sched::current_pid();
+    let t = TABLE.lock();
+    let p = t.procs.get(&pid)?;
+    let (&base, (shm, pages)) = p.shared.range(..=addr).next_back()?;
+    (addr < base + pages * PAGE_SIZE).then(|| (Arc::as_ptr(shm) as usize, addr - base))
+}
+
 /// Maps all of `shm` into the current process (read-only unless
 /// `writable`); returns the address.
 pub fn map_shared(shm: Arc<SharedMemory>, writable: bool) -> Result<u64, Errno> {

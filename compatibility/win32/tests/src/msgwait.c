@@ -23,6 +23,11 @@ static int wide_eq(const WCHAR *a, const WCHAR *b) {
     return *a==*b;
 }
 
+static int ansi_eq(const char *a, const char *b) {
+    while(*a && *a==*b){a++;b++;}
+    return *a==*b;
+}
+
 static void drain(void) { MSG m; while(PeekMessageW(&m,NULL,0,0,PM_REMOVE)) {} }
 
 static DWORD WINAPI poster(void *arg) {
@@ -76,6 +81,46 @@ static void queue_waits(HWND w) {
     check_eq("64 handles are too many",MsgWaitForMultipleObjects(64,evs,FALSE,0,QS_ALLINPUT),WAIT_FAILED);
     check_eq("too many handles: ERROR_INVALID_PARAMETER",GetLastError(),ERROR_INVALID_PARAMETER);
     CloseHandle(ev);
+}
+
+static HWND worker_window;
+static HANDLE worker_ready, worker_go;
+
+/* A thread with its own window: it must receive what is posted to its
+   window, and nothing posted to the main thread's. */
+static DWORD WINAPI queue_owner(void *arg) {
+    (void)arg;
+    worker_window=make_window();
+    MSG m; PeekMessageW(&m,NULL,0,0,PM_NOREMOVE); /* make sure the queue exists */
+    SetEvent(worker_ready);
+    WaitForSingleObject(worker_go,5000);
+    DWORD start=GetTickCount(); int mine=0, foreign=0;
+    while(GetTickCount()-start<1000 && !mine) {
+        while(PeekMessageW(&m,NULL,0,0,PM_REMOVE)) {
+            if(m.message==WM_USER+20 && m.hwnd==worker_window) mine=1;
+            if(m.message==WM_USER+21) foreign=1;
+        }
+        MsgWaitForMultipleObjectsEx(0,NULL,50,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
+    }
+    DestroyWindow(worker_window);
+    return mine && !foreign ? 0 : (mine ? 2 : 1);
+}
+
+static void thread_queues(HWND w) {
+    drain();
+    worker_ready=CreateEventW(NULL,TRUE,FALSE,NULL); worker_go=CreateEventW(NULL,TRUE,FALSE,NULL);
+    HANDLE t=CreateThread(NULL,0,queue_owner,NULL,0,NULL);
+    check("worker window",WaitForSingleObject(worker_ready,5000)==WAIT_OBJECT_0 && worker_window);
+    check("post to the worker's window",PostMessageW(worker_window,WM_USER+20,0,0));
+    check("post to this thread's window",PostMessageW(w,WM_USER+21,0,0));
+    SetEvent(worker_go);
+    DWORD code=9;
+    check("each thread gets only its own windows' messages",WaitForSingleObject(t,5000)==WAIT_OBJECT_0 && GetExitCodeThread(t,&code) && code==0);
+    MSG m; int seen_worker=0, mine=0;
+    while(PeekMessageW(&m,NULL,0,0,PM_REMOVE)) { if(m.message==WM_USER+20) seen_worker=1; if(m.message==WM_USER+21) mine=1; }
+    check("this thread keeps its own post",mine);
+    check("this thread never sees the worker's post",!seen_worker);
+    CloseHandle(t); CloseHandle(worker_ready); CloseHandle(worker_go);
 }
 
 static void window_stores(HWND w, HWND w2) {
@@ -137,11 +182,30 @@ static void window_stores(HWND w, HWND w2) {
 }
 
 void __stdcall start(void) {
+    WCHAR formatted[1024]; char ansi[1024];
+    int formatted_n=wsprintfW(formatted,L"%s %d %x %I64u",L"Zen",-7,42,4294967297ULL);
+    check("wsprintfW strings, integers and stack arguments",formatted_n==lstrlenW(formatted) && wide_eq(formatted,L"Zen -7 2a 4294967297"));
+    formatted_n=wsprintfA(ansi,"%s %d %x %I64u","Zen",-7,42,4294967297ULL);
+    check("wsprintfA strings, integers and stack arguments",formatted_n==lstrlenA(ansi) && ansi_eq(ansi,"Zen -7 2a 4294967297"));
+    typedef int (WINAPI *WideFormat)(WCHAR *,const WCHAR *,const UINT_PTR *);
+    WideFormat wide_format=(WideFormat)GetProcAddress(GetModuleHandleW(L"user32.dll"),"wvsprintfW");
+    UINT_PTR args[2]={(UINT_PTR)L"Zen",17};
+    check("wvsprintfW argument list",wide_format && wide_format(formatted,L"%s %u",args)==6 && wide_eq(formatted,L"Zen 17"));
     WNDCLASSW wc={0}; wc.lpfnWndProc=proc; wc.hInstance=GetModuleHandleW(NULL); wc.lpszClassName=L"msgwait";
     check("register class",RegisterClassW(&wc)!=0);
     HWND w=make_window(), w2=make_window();
     check("create windows",w && w2);
+    HWND owned=CreateWindowExW(WS_EX_TOOLWINDOW,L"msgwait",L"owned helper",WS_POPUP,0,0,160,80,w,NULL,wc.hInstance,NULL);
+    check("owned helper keeps its parent",owned && GetParent(owned)==w && GetWindow(owned,GW_OWNER)==w && GetAncestor(owned,GA_ROOTOWNER)==w);
+    check("extended window styles survive creation",owned && (GetWindowLongPtrW(owned,GWL_EXSTYLE)&WS_EX_TOOLWINDOW)!=0);
+    if(owned) DestroyWindow(owned);
     queue_waits(w);
+    thread_queues(w);
     window_stores(w,w2);
+    HWND owner=make_window();
+    owned=CreateWindowExW(WS_EX_TOOLWINDOW,L"msgwait",L"owned helper",WS_POPUP,0,0,160,80,owner,NULL,wc.hInstance,NULL);
+    check("create owned window for destruction",owner && owned);
+    DestroyWindow(owner);
+    check("destroying the owner destroys its helper",!IsWindow(owned));
     finish("msgwait");
 }

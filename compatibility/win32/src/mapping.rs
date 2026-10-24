@@ -246,6 +246,9 @@ fn create_common(file: u64, attributes: u64, protect: u32, high: u32, low: u32, 
             if named && !existed {
                 crate::objsec::set_initial(h, sd);
             }
+            if crate::security::inherit_flag(attributes) {
+                objects::set_inheritable(h, true);
+            }
             teb::set_last_error(if existed { ERROR_ALREADY_EXISTS } else { ERROR_SUCCESS });
             h
         }

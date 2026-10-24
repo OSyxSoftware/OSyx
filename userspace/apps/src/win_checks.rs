@@ -49,6 +49,8 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("US keyboard layout, key mapping and keyboard state", || run("keyboard.exe", &[]) == Some(0));
     t.check("shlwapi paths, environment folders, StrStrIW and IsOS", || run("shlpath.exe", &[]) == Some(0));
     t.check("security descriptors on sections and new directories", || run("secattr.exe", &[]) == Some(0));
+    t.check("handle inheritance and DuplicateHandle between processes", || run("childproc.exe", &[]) == Some(0));
+    t.check("DirectWrite fonts, faces, metrics and glyph rasterization", || run("dwrite.exe", &[]) == Some(0));
     t.check("COM apartments, BSTRs, window stations, dbghelp and crypt32", || run("interop.exe", &[]) == Some(0));
     t.check("Windows SID ACL descriptor and token data", || run("security.exe", &[]) == Some(0));
     t.check("Universal C Runtime through the api-ms-win-crt contracts", || {

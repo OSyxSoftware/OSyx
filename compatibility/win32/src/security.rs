@@ -25,6 +25,28 @@ pub struct Token {
 /// Default attributes are implementable with native credentials. Custom
 /// DACLs and inheritable handles require additional kernel/object support;
 /// never silently ignore them while reporting successful object creation.
+/// SECURITY_ATTRIBUTES' bInheritHandle (false without attributes).
+pub fn inherit_flag(p: u64) -> bool {
+    // SAFETY: the caller's SECURITY_ATTRIBUTES (24 bytes).
+    p != 0 && unsafe { rd::<i32>(p as *const u8, 16) } != 0
+}
+
+/// Like `validate_attributes` for objects whose handles can be inherited
+/// (see inherit.rs): bInheritHandle is allowed, a descriptor is not.
+pub fn validate_inheritable(p: u64) -> Result<bool, u32> {
+    if p == 0 {
+        return Ok(false);
+    }
+    let q = p as *const u8;
+    if unsafe { rd::<u32>(q, 0) } != 24 {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    if unsafe { rd::<u64>(q, 8) } != 0 {
+        return Err(ERROR_NOT_SUPPORTED);
+    }
+    Ok(inherit_flag(p))
+}
+
 pub fn validate_attributes(p: u64) -> Result<(), u32> {
     if p == 0 {
         return Ok(());

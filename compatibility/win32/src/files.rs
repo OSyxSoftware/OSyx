@@ -308,7 +308,12 @@ extern "win64" fn GetFileAttributesExW(name_w: *const u16, level: u32, out: u64)
     let Some(n) = name(name_w) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let st = match stat_of(&n) {
         Ok((_, st)) => st,
-        Err(e) => return fail(e, 0),
+        Err(e) => {
+            if kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+                os_std::eprintln!("winrun: GetFileAttributesExW({n}) failed: {e}");
+            }
+            return fail(e, 0);
+        }
     };
     // SAFETY: the caller's 36-byte structure.
     unsafe {

@@ -32,6 +32,22 @@ fn is_process(h: u64) -> bool {
 
 // ---- threads ---------------------------------------------------------------------
 
+/// OSyx currently schedules all processes on logical processor zero.
+extern "win64" fn GetProcessAffinityMask(h: u64, process: *mut u64, system: *mut u64) -> i32 {
+    if !is_process(h) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if process.is_null() || system.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller supplies two writable DWORD_PTR outputs.
+    unsafe {
+        *process = 1;
+        *system = 1;
+    }
+    1
+}
+
 extern "win64" fn GetProcessIdOfThread(h: u64) -> u32 {
     if !is_thread(h) {
         return fail(ERROR_INVALID_HANDLE, 0);
@@ -496,6 +512,10 @@ extern "win64" fn GetComputerNameW(buf: *mut u16, size: *mut u32) -> i32 {
     name_out(&w, buf, size, 0, 111) // ERROR_BUFFER_OVERFLOW
 }
 
+extern "win64" fn GetComputerNameA(buf: *mut u8, size: *mut u32) -> i32 {
+    name_out(netbios().as_bytes(), buf, size, 0, 111) // ERROR_BUFFER_OVERFLOW
+}
+
 /// COMPUTER_NAME_FORMAT: NetBIOS forms (0, 4) are upper case; host name
 /// forms (1, 3, 5, 7) are /etc/hostname; there is no DNS domain (2, 6).
 extern "win64" fn GetComputerNameExA(kind: u32, buf: *mut u8, size: *mut u32) -> i32 {
@@ -510,6 +530,8 @@ extern "win64" fn GetComputerNameExA(kind: u32, buf: *mut u8, size: *mut u32) ->
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        GetComputerNameA,
+        GetProcessAffinityMask,
         GetProcessIdOfThread,
         OpenThread,
         GetThreadTimes,
