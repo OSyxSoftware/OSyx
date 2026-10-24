@@ -3537,9 +3537,18 @@ extern "win64" fn MonitorFromWindow(wnd: u64, flags: u32) -> u64 {
 }
 
 extern "win64" fn GetMonitorInfoW(monitor: u64, out: *mut u8) -> Bool {
-    if monitor != crate::minordlls::PRIMARY_MONITOR || out.is_null() || unsafe { teb::get::<u32>(out as u64, 0) } < 40 {
+    monitor_info(monitor, out, true)
+}
+
+fn monitor_info(monitor: u64, out: *mut u8, wide: bool) -> Bool {
+    if monitor != crate::minordlls::PRIMARY_MONITOR || out.is_null() {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
+    // MONITORINFO is 40 bytes; MONITORINFOEX adds 32 TCHARs naming the
+    // adapter. Screen enumeration uses this name with CreateDC.
+    let size = unsafe { teb::get::<u32>(out as u64, 0) };
+    let extended = if wide { 104 } else { 72 };
+    if size != 40 && size != extended { return fail(ERROR_INVALID_PARAMETER, FALSE); }
     let s = screen_rect();
     // MONITORINFO: cbSize, rcMonitor, rcWork, dwFlags.
     // SAFETY: the caller's MONITORINFO of at least 40 bytes.
@@ -3547,12 +3556,20 @@ extern "win64" fn GetMonitorInfoW(monitor: u64, out: *mut u8) -> Bool {
         put_rect(out.add(4), s);
         put_rect(out.add(20), s);
         teb::put(out as u64, 36, 1u32); // MONITORINFOF_PRIMARY
+        if size == extended {
+            core::ptr::write_bytes(out.add(40), 0, (extended - 40) as usize);
+            if wide {
+                put_wide(out.add(40), 32, DISPLAY_NAME);
+            } else {
+                core::ptr::copy_nonoverlapping(DISPLAY_NAME.as_ptr(), out.add(40), DISPLAY_NAME.len());
+            }
+        }
     }
     TRUE
 }
 
 extern "win64" fn GetMonitorInfoA(monitor: u64, out: *mut u8) -> Bool {
-    GetMonitorInfoW(monitor, out)
+    monitor_info(monitor, out, false)
 }
 
 /// Messages a program registers by name: the same name gets the same id for

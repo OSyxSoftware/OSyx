@@ -306,7 +306,7 @@ fn zen_probe() -> i32 {
     // Mozilla's own switches start them unsandboxed instead.
     // Every failing Windows API call goes to the serial log (bring-up).
     zen.env("OSYX_WINRUN_TRACE", "1");
-    zen.env("MOZ_LOG", "timestamp,sync,Widget:5,RenderThread:5,WinOcclusionTracker:5,WinOcclusionCalculator:5,nsDocShell:5,DocLoader:5,ipc:5");
+    zen.env("MOZ_LOG", "timestamp,sync,Widget:5,WidgetScreen:5,RenderThread:5,WinOcclusionTracker:5,WinOcclusionCalculator:5,nsDocShell:5,DocLoader:5,ipc:5");
     for kind in ["CONTENT", "GPU", "RDD", "SOCKET_PROCESS", "GMP", "UTILITY", "VR"] {
         zen.env(&format!("MOZ_DISABLE_{kind}_SANDBOX"), "1");
     }

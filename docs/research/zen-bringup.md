@@ -802,3 +802,31 @@ Functional page rendering, tabs, browser input and HTTPS remain unverified.
 References: [SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos),
 [IsWindowArranged](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-iswindowarranged),
 [Mozilla nsWindow frame state](https://github.com/mozilla-firefox/firefox/blob/main/widget/windows/nsWindow.cpp).
+
+### Monitor device names and the zero-size welcome window
+
+Attempt 96's document/IPC logs show the real browser chrome loading from
+omni.ja. Inspecting the unmodified vendor ZenWelcome.mjs explains the
+subsequent resize: its welcome screen uses min(1200, screen.availWidth)
+and min(720, screen.availHeight), then locks both dimensions with CSS.
+
+GetMonitorInfoW previously populated only the 40-byte MONITORINFO prefix
+even for a 104-byte MONITORINFOEXW. Gecko's ScreenHelperWin passes the
+missing szDevice to CreateDC, which failed with ERROR_NOT_SUPPORTED.
+It consequently registered no usable screen, making the welcome dimensions
+zero. The implementation now fills the adapter name for MONITORINFOEXW and
+the 72-byte ANSI variant, validates structure sizes and preserves output
+boundaries. The basic 40-byte query remains bounded to that structure.
+
+Eight new native checks exercise both names through CreateDC, bounds,
+ANSI/Unicode agreement, canaries and invalid sizes. Native gdi2 passes
+166/0; the full OSyx Win32 suite passes 2068/0, including gdi2 166/0.
+Targeted clippy passes with -D warnings. Evidence is
+build/zen/monitor-native-97.log, win-monitor-97.log and
+clippy-monitor-97.log. Attempt 96 was manually stopped after this diagnosis;
+its zero VM exit code is not a browser exit or functional pass.
+
+Attempt 97's WidgetScreen log confirms a real 1920x1080 screen at 96 DPI
+and 60 Hz, and the initial browser size changes to 1280x972. Functional
+rendering is still being checked. Implementation reference:
+[Mozilla ScreenHelperWin](https://github.com/mozilla-firefox/firefox/blob/main/widget/windows/ScreenHelperWin.cpp).

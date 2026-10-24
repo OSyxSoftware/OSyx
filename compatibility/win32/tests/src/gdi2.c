@@ -251,7 +251,31 @@ static void state_text(HDC dc) {
     SelectObject(dc,saved_font);
 }
 
+static void monitor_contexts(void) {
+    _Static_assert(sizeof(MONITORINFOEXW)==104 && sizeof(MONITORINFOEXA)==72,"monitor info layouts");
+    HMONITOR monitor=MonitorFromPoint((POINT){0,0},MONITOR_DEFAULTTOPRIMARY);
+    struct { MONITORINFOEXW info; DWORD guard; } w={0};
+    w.info.cbSize=sizeof(w.info); w.guard=0x12345678;
+    check("wide extended monitor info has a device and usable bounds",GetMonitorInfoW(monitor,(MONITORINFO *)&w.info) && w.info.szDevice[0] && w.info.rcWork.right>w.info.rcWork.left && w.info.rcWork.bottom>w.info.rcWork.top);
+    check("wide monitor info preserves its size and output boundary",w.info.cbSize==sizeof(w.info) && w.guard==0x12345678);
+    MONITORINFOEXA a={0}; a.cbSize=sizeof(a);
+    check("ANSI extended monitor info has a device name",GetMonitorInfoA(monitor,(MONITORINFO *)&a) && a.szDevice[0]);
+    int same_name=1;
+    for(int i=0;i<32;i++) { if(w.info.szDevice[i]!=(unsigned char)a.szDevice[i]) same_name=0; if(!w.info.szDevice[i] || !a.szDevice[i]) break; }
+    check("ANSI and wide monitor names select the same device",same_name);
+    HDC wd=CreateDCW(NULL,w.info.szDevice,NULL,NULL), ad=CreateDCA(NULL,a.szDevice,NULL,NULL);
+    check("wide monitor name creates the display context",wd && GetDeviceCaps(wd,HORZRES)>0 && GetDeviceCaps(wd,VERTRES)>0);
+    check("ANSI monitor name creates the display context",ad && GetDeviceCaps(ad,BITSPIXEL)>=24);
+    if(wd) DeleteDC(wd); if(ad) DeleteDC(ad);
+    struct { MONITORINFO info; DWORD guard; } basic={0};
+    basic.info.cbSize=sizeof(basic.info); basic.guard=0x87654321;
+    check("basic monitor info leaves memory past its structure untouched",GetMonitorInfoW(monitor,&basic.info) && basic.guard==0x87654321);
+    basic.info.cbSize=44;
+    check("unsupported monitor info size is rejected",!GetMonitorInfoW(monitor,&basic.info));
+}
+
 void __stdcall start(void) {
+    monitor_contexts();
     HDC window_screen = GetWindowDC(NULL);
     check("GetWindowDC desktop", window_screen != NULL && GetDeviceCaps(window_screen, BITSPIXEL) > 0);
     check("ReleaseDC desktop window context", ReleaseDC(NULL, window_screen) == 1);
