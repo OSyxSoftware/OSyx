@@ -395,11 +395,25 @@ pub fn sys_bind(h: u64, addr: u64) -> Result<u64, Errno> {
     match s.kind {
         abi::SOCK_DGRAM => ensure_udp(&s, Some(ep)).map(|_| 0),
         abi::SOCK_STREAM => {
-            let mut g = s.state.lock();
-            if g.id.is_some() || g.bound.is_some() {
+            if s.id().is_some() {
                 return Err(Errno::InvalidArgument);
             }
-            g.bound = Some(ep);
+            let (id, local) = stack_call(|st| {
+                let id = st.tcp_bind(ep)?;
+                Ok((id, st.tcp_bound_local(id)?))
+            })?;
+            let mut g = s.state.lock();
+            if g.id.is_some() {
+                // Another bind won the race. Release our unused reservation
+                // through the network thread, outside the socket state lock.
+                CLOSING.lock().push((id, false));
+                wake();
+                return Err(Errno::InvalidArgument);
+            }
+            g.id = Some(id);
+            g.bound = Some(local);
+            drop(g);
+            with_stack(|_| ());
             Ok(0)
         }
         _ => Err(Errno::NotSupported),
@@ -411,14 +425,14 @@ pub fn sys_listen(h: u64, backlog: u64) -> Result<u64, Errno> {
     if s.kind != abi::SOCK_STREAM {
         return Err(Errno::NotSupported);
     }
-    let local = {
+    let id = {
         let g = s.state.lock();
-        if g.id.is_some() {
+        if g.listening || g.bound.is_none() {
             return Err(Errno::InvalidArgument);
         }
-        g.bound.ok_or(Errno::InvalidArgument)?
+        g.id.ok_or(Errno::InvalidArgument)?
     };
-    let id = stack_call(|st| st.tcp_listen(local, backlog as usize))?;
+    stack_call(|st| st.tcp_listen_bound(id, backlog as usize))?;
     let mut g = s.state.lock();
     g.id = Some(id);
     g.listening = true;
@@ -471,6 +485,10 @@ pub fn sys_connect(h: u64, addr: u64) -> Result<u64, Errno> {
                     // A connect already in progress (non-blocking retry).
                     if s.state.lock().listening {
                         return Err(Errno::InvalidArgument);
+                    }
+                    if s.state.lock().bound.is_some() {
+                        stack_call(|st| st.tcp_connect_bound(id, remote))?;
+                        s.state.lock().bound = None;
                     }
                     id
                 }
@@ -638,11 +656,12 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
                     stack_call(|st| st.listener_local(id))?
                 }
                 (abi::SOCK_STREAM, Some(id)) => {
-                    let (l, r) = stack_call(|st| st.tcp_endpoints(id))?;
-                    if peer {
-                        r
+                    if let Some(local) = bound {
+                        if peer { return Err(Errno::NotConnected); }
+                        local
                     } else {
-                        l
+                        let (l, r) = stack_call(|st| st.tcp_endpoints(id))?;
+                        if peer { r } else { l }
                     }
                 }
                 (abi::SOCK_DGRAM, Some(id)) if !peer => stack_call(|st| st.udp_local(id))?,

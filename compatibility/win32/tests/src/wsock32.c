@@ -90,6 +90,27 @@ void __stdcall start(void) {
     closesocket(c);
     closesocket(u);
     closesocket(l);
+    /* Firefox's pollable event queries the dynamic port before listen. */
+    SOCKET dynamic = socket(AF_INET, SOCK_STREAM, 0);
+    la.sin_port = 0;
+    check_eq("bind a TCP socket to port zero", bind(dynamic,(struct sockaddr*)&la,sizeof la),0);
+    len=sizeof endpoint;
+    int got=getsockname(dynamic,(struct sockaddr*)&endpoint,&len);
+    check("bind assigns a nonzero port before listen",got==0 && endpoint.sin_port!=0 && endpoint.sin_addr.s_addr==la.sin_addr.s_addr);
+    SOCKET duplicate=socket(AF_INET,SOCK_STREAM,0);
+    check("bound TCP port is reserved before listen",bind(duplicate,(struct sockaddr*)&endpoint,sizeof endpoint)==SOCKET_ERROR && WSAGetLastError()==WSAEADDRINUSE);
+    closesocket(duplicate);
+    check_eq("listen on the assigned dynamic port",listen(dynamic,5),0);
+    c=socket(AF_INET,SOCK_STREAM,0);
+    check_eq("connect to the port obtained before listen",connect(c,(struct sockaddr*)&endpoint,sizeof endpoint),0);
+    SOCKET accepted=accept(dynamic,NULL,NULL);
+    check("accept the pollable event connection",accepted!=INVALID_SOCKET);
+    check_eq("signal the pollable event",send(c,"M",1,0),1);
+    char signal=0;
+    check("receive the pollable event signal",recv(accepted,&signal,1,0)==1 && signal=='M');
+    closesocket(accepted);
+    closesocket(c);
+    closesocket(dynamic);
     check_eq("WSACleanup", WSACleanup(), 0);
     finish("wsock32");
 }

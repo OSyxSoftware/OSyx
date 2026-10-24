@@ -63,6 +63,39 @@ fn loopback_ping_and_udp_work_without_a_link() {
 }
 
 #[test]
+fn tcp_bind_reserves_a_dynamic_port_before_listen_or_connect() {
+    let mut n = Net::new();
+    let bound = n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 0)).unwrap();
+    let local = n.a.tcp_bound_local(bound).unwrap();
+    assert_ne!(local.port, 0);
+    assert_eq!(local.addr, Ipv4Addr::LOOPBACK);
+    assert_eq!(n.a.tcp_bind(local), Err(NetError::AddrInUse));
+    assert_eq!(n.a.tcp_listen(local, 1), Err(NetError::AddrInUse));
+    assert_eq!(n.a.tcp_send(bound, b"x"), Err(NetError::NotConnected));
+    assert_eq!(n.a.poll_socket(bound), (false, false, false));
+    assert!(n.a.sockets().iter().any(|s| s.id == bound && s.state == "BOUND" && s.local == local));
+    // Rejected connect attempts keep the reservation available for listen.
+    assert_eq!(n.a.tcp_connect_bound(bound, Endpoint::new(Ipv4Addr::LOOPBACK, 0)), Err(NetError::InvalidArgument));
+    assert_eq!(n.a.tcp_bound_local(bound), Ok(local));
+    n.a.tcp_listen_bound(bound, 5).unwrap();
+    assert_eq!(n.a.listener_local(bound), Ok(local));
+    let client = n.a.tcp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let client_port = n.a.tcp_bound_local(client).unwrap().port;
+    assert_ne!(client_port, local.port);
+    assert_eq!(n.a.tcp_connect_bound(client, local), Ok(client));
+    assert_eq!(n.a.tcp_endpoints(client).unwrap().0, Endpoint::new(Ipv4Addr::LOOPBACK, client_port));
+    let (server, _) = n.a.tcp_accept(bound).unwrap();
+    assert_eq!(n.a.tcp_send(client, b"wake"), Ok(4));
+    let mut data = [0; 4];
+    assert_eq!(n.a.tcp_recv(server, &mut data), Ok(4));
+    assert_eq!(&data, b"wake");
+    let reservation = n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 0)).unwrap();
+    let released = n.a.tcp_bound_local(reservation).unwrap();
+    n.a.close(reservation, false);
+    assert!(n.a.tcp_listen(released, 1).is_ok());
+}
+
+#[test]
 fn udp_datagrams_flow_and_errors_are_reported() {
     let mut n = Net::new();
     let server = n.b.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 9000)).unwrap();

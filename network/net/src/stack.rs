@@ -195,6 +195,7 @@ struct TcpSocket {
 enum Socket {
     Udp(UdpSocket),
     Icmp(IcmpSocket),
+    BoundTcp(Endpoint),
     Listener(Listener),
     Tcp(alloc::boxed::Box<TcpSocket>),
 }
@@ -1208,6 +1209,7 @@ impl Stack {
         self.sockets.values().any(|s| match s {
             Socket::Udp(u) => udp && u.local.port == port,
             Socket::Listener(l) => !udp && l.local.port == port,
+            Socket::BoundTcp(local) => !udp && local.port == port,
             Socket::Tcp(t) => !udp && t.tcb.local.port == port && t.parent.is_none(),
             Socket::Icmp(_) => false,
         })
@@ -1389,19 +1391,47 @@ impl Stack {
         }
     }
 
-    pub fn tcp_listen(&mut self, local: Endpoint, backlog: usize) -> Result<SocketId, NetError> {
+    /// Reserves the local endpoint immediately, including a dynamic port.
+    /// The reservation survives until listen, connect or close.
+    pub fn tcp_bind(&mut self, local: Endpoint) -> Result<SocketId, NetError> {
         self.check_local(local.addr)?;
-        if local.port == 0 {
-            return Err(NetError::InvalidArgument);
-        }
-        if self.port_in_use(local.port, false) {
+        let port = if local.port == 0 { self.ephemeral(false)? } else { local.port };
+        if self.port_in_use(port, false) {
             return Err(NetError::AddrInUse);
         }
-        self.insert(Socket::Listener(Listener { local, backlog: backlog.clamp(1, MAX_BACKLOG), ready: VecDeque::new() }))
+        self.insert(Socket::BoundTcp(Endpoint::new(local.addr, port)))
+    }
+
+    pub fn tcp_bound_local(&self, id: SocketId) -> Result<Endpoint, NetError> {
+        match self.sockets.get(&id) {
+            Some(Socket::BoundTcp(local)) => Ok(*local),
+            _ => Err(NetError::BadSocket),
+        }
+    }
+
+    pub fn tcp_listen_bound(&mut self, id: SocketId, backlog: usize) -> Result<(), NetError> {
+        let local = self.tcp_bound_local(id)?;
+        self.sockets.insert(id, Socket::Listener(Listener { local, backlog: backlog.clamp(1, MAX_BACKLOG), ready: VecDeque::new() }));
+        Ok(())
+    }
+
+    pub fn tcp_listen(&mut self, local: Endpoint, backlog: usize) -> Result<SocketId, NetError> {
+        let id = self.tcp_bind(local)?;
+        self.tcp_listen_bound(id, backlog)?;
+        Ok(id)
     }
 
     /// Starts a connection; it completes asynchronously (see `tcp_state`).
     pub fn tcp_connect(&mut self, local: Option<Endpoint>, remote: Endpoint) -> Result<SocketId, NetError> {
+        self.tcp_connect_inner(None, local, remote)
+    }
+
+    pub fn tcp_connect_bound(&mut self, id: SocketId, remote: Endpoint) -> Result<SocketId, NetError> {
+        let local = self.tcp_bound_local(id)?;
+        self.tcp_connect_inner(Some(id), Some(local), remote)
+    }
+
+    fn tcp_connect_inner(&mut self, bound: Option<SocketId>, local: Option<Endpoint>, remote: Endpoint) -> Result<SocketId, NetError> {
         if remote.port == 0 || remote.addr.is_unspecified() || remote.addr.is_broadcast() || remote.addr.is_multicast() {
             return Err(NetError::InvalidArgument);
         }
@@ -1414,7 +1444,7 @@ impl Stack {
         };
         let port = match local {
             Some(l) if l.port != 0 => {
-                if self.port_in_use(l.port, false) {
+                if bound.is_none() && self.port_in_use(l.port, false) {
                     return Err(NetError::AddrInUse);
                 }
                 l.port
@@ -1425,7 +1455,11 @@ impl Stack {
         let iss = self.isn(l, remote);
         let mss = self.mss_for(remote.addr);
         let tcb = Tcb::connect(l, remote, iss, mss);
-        let id = self.insert(Socket::Tcp(alloc::boxed::Box::new(TcpSocket { tcb, parent: None, released: false, accepted: true })))?;
+        let socket = Socket::Tcp(alloc::boxed::Box::new(TcpSocket { tcb, parent: None, released: false, accepted: true }));
+        let id = match bound {
+            Some(id) => { self.sockets.insert(id, socket); id }
+            None => self.insert(socket)?,
+        };
         self.flush();
         Ok(id)
     }
@@ -1448,6 +1482,7 @@ impl Stack {
     fn tcb(&mut self, id: SocketId) -> Result<&mut Tcb, NetError> {
         match self.sockets.get_mut(&id) {
             Some(Socket::Tcp(t)) => Ok(&mut t.tcb),
+            Some(Socket::BoundTcp(_)) => Err(NetError::NotConnected),
             _ => Err(NetError::BadSocket),
         }
     }
@@ -1495,6 +1530,7 @@ impl Stack {
             Some(Socket::Udp(u)) => (!u.rx.is_empty() || u.error.is_some(), true, false),
             Some(Socket::Icmp(i)) => (!i.rx.is_empty(), true, false),
             Some(Socket::Listener(l)) => (!l.ready.is_empty(), false, false),
+            Some(Socket::BoundTcp(_)) => (false, false, false),
             Some(Socket::Tcp(t)) => {
                 let s = t.tcb.state();
                 let hup = t.tcb.error().is_some() || s == tcp::State::Closed;
@@ -1569,6 +1605,10 @@ impl Stack {
             .map(|(id, s)| {
                 let internal = self.internal.contains(id);
                 match s {
+                    Socket::BoundTcp(local) => SocketInfo {
+                        id: *id, kind: "tcp", local: *local, remote: None,
+                        state: "BOUND", rx_queue: 0, tx_queue: 0, internal,
+                    },
                     Socket::Udp(u) => SocketInfo {
                         id: *id,
                         kind: "udp",
