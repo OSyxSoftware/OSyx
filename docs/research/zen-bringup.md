@@ -736,3 +736,69 @@ API contracts and implementation references:
 [VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect),
 [Mozilla GPU process configuration](https://github.com/mozilla-firefox/firefox/blob/main/gfx/thebes/gfxPlatform.cpp),
 [Mozilla WebRender configuration](https://github.com/mozilla-firefox/firefox/blob/main/gfx/config/gfxConfigManager.cpp).
+
+## Continued rendering investigation (attempts 85 onward)
+
+The first rendering fixes address observable Windows contracts rather than
+browser-specific return values. IsIconic previously returned true for every
+valid window, causing Gecko's occlusion tracker to classify normal windows
+as hidden. Minimized/maximized style bits, IsZoomed, normal placement and
+restore-to-maximized state now follow ShowWindow and PRISM acknowledgements.
+PRISM reports minimize/restore transitions to its client; stale Configure
+states cannot overwrite a newer pending request. GetWindowRgn reports the
+absence of an explicit region without modifying the caller's region.
+
+Message retrieval now respects HWND/range/PM_QS filters, preserves
+PM_NOREMOVE ordering and generated timers, and delivers quit independently
+of filters. GetUpdateRect exposes invalidated areas. SystemParametersInfo
+provides ANSI/Unicode nonclient metrics and icon-title LOGFONTs using the
+installed Lato family, including legacy structure-size bounds.
+
+A full regression exposed an independent SLIST assembly defect. The
+cmpxchg16b success output could be allocated in BL and then overwritten
+while restoring RBX. This could spin forever or accept a failed CAS. The
+replacement uses explicit, separate registers for the address, replacement
+low word and success byte. The runtime fixture varies RBX seeds and pushes
+512 distinct entries from four threads, checking register preservation,
+depth and exactly-once retrieval. Its six new checks pass on Windows and
+OSyx; the complete OSyx runtime fixture passes 62/0. The native runtime
+fixture still has 15 pre-existing HKLM permission failures on this host.
+
+Gecko's FrameState also depends on WM_WINDOWPOSCHANGING/CHANGED. SetWindowPos
+now supplies live WINDOWPOS callbacks and applies callback changes before
+updating geometry. DefWindowProc derives WM_SIZE/WM_MOVE from CHANGED, so
+consuming it suppresses those messages. PRISM frame notifications are
+delivered when the owning thread pumps messages, outside the GUI mutex.
+Seven native reference checks cover callback order, mutation, thread,
+SWP_NOSENDCHANGING, consumed CHANGED and ShowWindow state.
+
+Verification through attempt 94: host tests 360/0, all target clippy checks
+passed; native msgwait 122/0; full QEMU Win32 suite 2060/0, including
+msgwait 122/0 and runtime 62/0. Evidence is build/zen/host-frame-91.log,
+arranged-native-94.log and win-arranged-94.log. Earlier compositor/desktop checks
+passed 35/0 host and 34/0 QEMU respectively.
+
+The probe uses a fresh profile per boot and a real local HTML page with a
+colored rectangle and a click-verification button. It removes old
+screenshots at the start so an early failure cannot reuse an earlier image.
+Attempt 90 (8 GiB, 360 seconds) had no unhandled loader exception, process
+fault or panic, but only a tiny unusable browser window. Attempts 91/92
+reach the new frame callbacks, then Gecko's protected window procedure
+terminates the process with code 253. A null loader_error in the result
+does not prove absence of a caught exception. Verbose process-exit traces
+and bounded exception-dispatch logs are used to investigate that path.
+Attempt 93 identifies the caught delay-load exception as
+USER32!IsWindowArranged. That query is now exported: PRISM has no Snap
+arrangement, so valid windows are unarranged; maximization is a separate
+state. The four added reference checks pass natively and in QEMU.
+Attempts 94/95 get past that exception and run to the 360-second timeout
+without a fatal process fault or panic. They still shrink after Gecko
+requests zero dimensions, and do not display the test page. The child
+renderer reports "Failed to connect WebRenderBridgeChild"; the next probe
+adds document-loader and IPC logs and a longer observation interval.
+The final package audit for these attempts has 889 unresolved occurrences.
+Functional page rendering, tabs, browser input and HTTPS remain unverified.
+
+References: [SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos),
+[IsWindowArranged](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-iswindowarranged),
+[Mozilla nsWindow frame state](https://github.com/mozilla-firefox/firefox/blob/main/widget/windows/nsWindow.cpp).

@@ -324,6 +324,19 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
             context = windows_context(n);
         }
     }
+    static REPORTS: Mutex<Vec<alloc::string::String>> = Mutex::new(Vec::new());
+    if crate::VERBOSE.load(Ordering::Relaxed) {
+        let delay = delay_load_failure(&record);
+        let key = delay.clone().unwrap_or_else(|| alloc::format!("{:x}:{:x}", record.code, record.address));
+        let report = {
+            let mut seen = REPORTS.lock().unwrap();
+            if seen.len() >= 32 || seen.contains(&key) { false } else { seen.push(key); true }
+        };
+        if report {
+            os_std::eprintln!("winrun: dispatching Windows exception {:#x} at {} in thread {}, info {:x?}", record.code, where_text(record.address), os_sys::gettid(), &record.info[..record.count.min(15) as usize]);
+            if let Some(what) = delay { os_std::eprintln!("winrun: delay-load exception: {what}"); }
+        }
+    }
     // Unwinding during this dispatch (RtlUnwindEx) starts at this context
     // and ends the kernel delivery through `native`.
     crate::seh::begin(native, &context);
@@ -403,6 +416,15 @@ fn where_text(addr: u64) -> alloc::string::String {
 /// addresses on the stack above the faulting stack pointer, in the order they
 /// appear (the innermost return addresses first). Unwinding the real frames
 /// would be better, but this says which module failed without it.
+pub(crate) fn trace_current() {
+    let teb = crate::teb::current();
+    if teb == 0 { return; }
+    let (limit, base) = unsafe { (crate::teb::get::<u64>(teb, crate::teb::TEB_STACK_LIMIT), crate::teb::get::<u64>(teb, crate::teb::TEB_STACK_BASE)) };
+    let rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)); }
+    trace(limit, base, rsp);
+}
+
 fn trace(limit: u64, base: u64, rsp: u64) {
     let start = rsp.max(limit).min(base);
     let end = start.saturating_add(16 << 10).min(base);
@@ -411,7 +433,7 @@ fn trace(limit: u64, base: u64, rsp: u64) {
     while at + 8 <= end && found.len() < 12 {
         // SAFETY: inside this thread's stack, between its limit and base.
         let v: u64 = unsafe { core::ptr::read_volatile(at as *const u64) };
-        if let Some((module, offset)) = crate::loader::where_is(v) {
+        if let Some((module, offset)) = crate::loader::where_is(v).filter(|_| crate::loader::is_executable(v)) {
             let entry = alloc::format!("{module}+{offset:#x}");
             if found.last() != Some(&entry) {
                 found.push(entry);

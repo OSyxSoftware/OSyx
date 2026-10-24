@@ -589,6 +589,14 @@ extern "win64" fn BitBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx:
     } else {
         None
     };
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) && with(|g| g.dcs.get(&dst).is_some_and(|d| !d.memory && d.hwnd != 0)) {
+        static TRACE_BLITS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if TRACE_BLITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+            if let Some((pixels, sw, sh)) = &source {
+                os_std::eprintln!("winrun: GDI present: dc {dst:#x}, dst ({x},{y}) {w}x{h}, source {src:#x} {sw}x{sh} at ({sx},{sy}), first pixels {:x?}", &pixels[..pixels.len().min(8)]);
+            }
+        }
+    }
     draw(dst, |s, d, _, clip| {
         let (x, y) = d.transform.point(x, y);
         let r = Rect::new(x, y, w as u32, h as u32).intersect(&clip);

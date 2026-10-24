@@ -12,7 +12,26 @@ static const GUID iid_bogus={1,2,3,{4,5,6,7,8,9,10,11}};
 static const PROPERTYKEY key_appid={{0x9F4C2855,0x9F79,0x4B39,{0xA8,0xD0,0xE1,0xD4,0x2D,0xE1,0xD5,0xF3}},5};
 static const PROPERTYKEY key_other={{0x12345678,0x1234,0x1234,{1,2,3,4,5,6,7,8}},2};
 
-static LRESULT CALLBACK proc(HWND w, UINT m, WPARAM wp, LPARAM lp) { return DefWindowProcW(w,m,wp,lp); }
+static HWND frame_window;
+static unsigned frame_sequence, frame_changing, frame_changed, frame_size;
+static DWORD frame_thread;
+static int frame_mutate, frame_consume;
+
+static LRESULT CALLBACK proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
+    if(w==frame_window) {
+        if(m==WM_WINDOWPOSCHANGING) {
+            frame_changing=++frame_sequence;
+            frame_thread=GetCurrentThreadId();
+            if(frame_mutate) { WINDOWPOS *p=(WINDOWPOS *)lp; p->cx=380; p->cy=280; }
+        }
+        if(m==WM_WINDOWPOSCHANGED) {
+            frame_changed=++frame_sequence;
+            if(frame_consume) return 0;
+        }
+        if(m==WM_SIZE) frame_size=++frame_sequence;
+    }
+    return DefWindowProcW(w,m,wp,lp);
+}
 
 static HWND make_window(void) {
     return CreateWindowExW(0,L"msgwait",L"msgwait",WS_OVERLAPPED,0,0,32,32,NULL,NULL,GetModuleHandleW(NULL),NULL);
@@ -83,6 +102,149 @@ static void queue_waits(HWND w) {
     CloseHandle(ev);
 }
 
+static void filtered_messages(HWND w) {
+    drain();
+    MSG m={0}, first={0};
+    PostMessageW(w,WM_USER+40,40,0);
+    PostMessageW(NULL,WM_USER+41,41,0);
+    PostMessageW(w,WM_USER+42,42,0);
+    check("range filter skips earlier unrelated messages",PeekMessageW(&m,NULL,WM_USER+42,WM_USER+42,PM_REMOVE) && m.message==WM_USER+42);
+    check("paint-only peek leaves posted work queued",!PeekMessageW(&m,NULL,0,0,PM_REMOVE|PM_QS_PAINT));
+    check("thread-only filter skips window messages",PeekMessageW(&m,(HWND)-1,0,0,PM_REMOVE) && !m.hwnd && m.message==WM_USER+41);
+    check("PM_NOREMOVE observes first remaining message",PeekMessageW(&first,w,0,0,PM_NOREMOVE) && first.message==WM_USER+40);
+    check("PM_NOREMOVE preserves order and content",PeekMessageW(&m,w,0,0,PM_REMOVE) && m.message==first.message && m.wParam==first.wParam && m.hwnd==first.hwnd);
+    check("filtered retrieval empties only matching posts",!PeekMessageW(&m,NULL,WM_USER+40,WM_USER+42,PM_REMOVE));
+    PostMessageW(w,WM_USER+43,43,0);
+    PostMessageW(w,WM_USER+44,44,0);
+    check("GetMessage honours the range",GetMessageW(&m,w,WM_USER+44,WM_USER+44)>0 && m.message==WM_USER+44);
+    check("GetMessage leaves earlier unrelated work",PeekMessageW(&m,w,WM_USER+43,WM_USER+43,PM_REMOVE) && m.message==WM_USER+43);
+    UINT_PTR timer=SetTimer(w,91,20,NULL);
+    Sleep(60);
+    check("paint-only peek does not generate timers",!PeekMessageW(&m,w,0,0,PM_REMOVE|PM_QS_PAINT));
+    check("timer peek generates without removing",PeekMessageW(&first,w,WM_TIMER,WM_TIMER,PM_NOREMOVE) && first.message==WM_TIMER && first.wParam==timer);
+    KillTimer(w,timer);
+    check("generated timer survives KillTimer and repeated peek",PeekMessageW(&m,w,WM_TIMER,WM_TIMER,PM_NOREMOVE) && m.message==first.message && m.wParam==first.wParam && m.time==first.time);
+    check("generated timer is removed once",PeekMessageW(&m,w,WM_TIMER,WM_TIMER,PM_REMOVE) && m.wParam==timer && !PeekMessageW(&m,w,WM_TIMER,WM_TIMER,PM_REMOVE));
+    PostQuitMessage(23);
+    check("WM_QUIT bypasses range and window filters",PeekMessageW(&first,(HWND)-1,WM_KEYFIRST,WM_KEYLAST,PM_NOREMOVE) && first.message==WM_QUIT && first.wParam==23);
+    check("WM_QUIT survives PM_NOREMOVE",PeekMessageW(&m,w,WM_TIMER,WM_TIMER,PM_REMOVE) && m.message==WM_QUIT && m.wParam==23);
+    drain();
+}
+
+static void window_states(HWND w) {
+    typedef BOOL (WINAPI *Arranged)(HWND);
+    Arranged arranged=(Arranged)GetProcAddress(GetModuleHandleW(L"user32.dll"),"IsWindowArranged");
+    check("window arrangement query is exported",arranged!=NULL);
+    SetLastError(1234);
+    check("a normal unsnapped window is not arranged",arranged && !arranged(w) && GetLastError()==1234);
+    SetLastError(1234);
+    check("valid zero window ID preserves last error",GetWindowLongPtrW(w,GWLP_ID)==0 && GetLastError()==1234);
+    SetWindowPos(w,NULL,0,0,320,240,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+    HRGN region=CreateRectRgn(2,3,9,11);
+    RECT bounds={0};
+    check("normal window has no explicit region",GetWindowRgn(w,region)==ERROR);
+    check("default window region query preserves destination",GetRgnBox(region,&bounds)==SIMPLEREGION && bounds.left==2 && bounds.top==3 && bounds.right==9 && bounds.bottom==11);
+    DeleteObject(region);
+    check("hidden window is not minimized",!IsIconic(w) && !IsZoomed(w) && !IsWindowVisible(w));
+    WINDOWPLACEMENT place={0}; place.length=sizeof(place);
+    check("hidden normal placement is not a minimized placement",GetWindowPlacement(w,&place) && place.showCmd==SW_SHOWNORMAL);
+    ShowWindow(w,SW_SHOWNORMAL);
+    check("shown window is visible and not minimized",IsWindowVisible(w) && !IsIconic(w));
+    check("ShowWindow sets WS_VISIBLE",(GetWindowLongPtrW(w,GWL_STYLE)&WS_VISIBLE)!=0);
+    UpdateWindow(w);
+    ValidateRect(w,NULL);
+    RECT dirty={3,4,13,14}, update={9,9,9,9};
+    check("validated window has no update rectangle",!GetUpdateRect(w,&update,FALSE) && IsRectEmpty(&update));
+    InvalidateRect(w,&dirty,FALSE);
+    check("GetUpdateRect reports the invalidated rectangle",GetUpdateRect(w,&update,FALSE) && update.left==3 && update.top==4 && update.right==13 && update.bottom==14);
+    check("querying update state does not validate it",GetUpdateRect(w,NULL,FALSE));
+    ValidateRect(w,NULL);
+    check("validation clears update state",!GetUpdateRect(w,NULL,FALSE));
+    ShowWindow(w,SW_MINIMIZE);
+    check("minimize updates IsIconic immediately",IsIconic(w) && !IsZoomed(w));
+    check("a minimized window is not arranged",arranged && !arranged(w));
+    check("minimize sets WS_MINIMIZE",(GetWindowLongPtrW(w,GWL_STYLE)&WS_MINIMIZE)!=0);
+    check("minimized window remains visible",IsWindowVisible(w));
+    check("placement reports minimized state",GetWindowPlacement(w,&place) && place.showCmd==SW_SHOWMINIMIZED);
+    ShowWindow(w,SW_RESTORE);
+    check("restore clears minimized state",!IsIconic(w) && !(GetWindowLongPtrW(w,GWL_STYLE)&WS_MINIMIZE));
+    ShowWindow(w,SW_MAXIMIZE);
+    check("maximize sets zoomed state",IsZoomed(w) && !IsIconic(w) && (GetWindowLongPtrW(w,GWL_STYLE)&WS_MAXIMIZE));
+    check("maximized and arranged are distinct states",arranged && !arranged(w));
+    check("placement reports maximized state",GetWindowPlacement(w,&place) && place.showCmd==SW_SHOWMAXIMIZED);
+    LONG normal_width=place.rcNormalPosition.right-place.rcNormalPosition.left;
+    check("maximizing preserves the normal placement width",normal_width==320);
+    ShowWindow(w,SW_MINIMIZE);
+    ShowWindow(w,SW_RESTORE);
+    check("restore of a minimized maximized window returns to maximized",IsZoomed(w) && !IsIconic(w));
+    Sleep(50);
+    MSG state_msg;
+    int stale_size=0;
+    while(PeekMessageW(&state_msg,w,0,0,PM_REMOVE)) {
+        if(state_msg.message==WM_SIZE && state_msg.wParam!=SIZE_MAXIMIZED) stale_size=1;
+        DispatchMessageW(&state_msg);
+    }
+    check("old restored-size messages do not follow a synchronous maximize",!stale_size);
+    check("queued compositor acknowledgements preserve the final requested state",IsZoomed(w) && !IsIconic(w));
+    ShowWindow(w,SW_SHOWNORMAL);
+    ShowWindow(w,SW_HIDE);
+    check("hide clears visibility without minimizing",!IsWindowVisible(w) && !IsIconic(w) && !(GetWindowLongPtrW(w,GWL_STYLE)&WS_VISIBLE));
+    SetWindowPos(w,NULL,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_SHOWWINDOW);
+    check("SWP_SHOWWINDOW sets visibility and style",IsWindowVisible(w) && (GetWindowLongPtrW(w,GWL_STYLE)&WS_VISIBLE));
+    SetWindowPos(w,NULL,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_HIDEWINDOW);
+    check("SWP_HIDEWINDOW clears visibility and style",!IsWindowVisible(w) && !(GetWindowLongPtrW(w,GWL_STYLE)&WS_VISIBLE));
+    place.showCmd=SW_SHOWNORMAL;
+    place.rcNormalPosition=(RECT){34,56,394,316};
+    check("SetWindowPlacement applies normal geometry and show state",SetWindowPlacement(w,&place) && IsWindowVisible(w) && !IsIconic(w) && GetWindowPlacement(w,&place) && place.rcNormalPosition.right-place.rcNormalPosition.left==360);
+    ShowWindow(w,SW_HIDE);
+    drain();
+}
+
+static void window_frame_callbacks(HWND w) {
+    frame_window=w;
+    frame_sequence=frame_changing=frame_changed=frame_size=0;
+    frame_mutate=1;
+    check("SetWindowPos accepts a changing callback",SetWindowPos(w,NULL,0,0,350,250,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE));
+    check("frame callbacks precede the derived WM_SIZE",frame_changing && frame_changing<frame_changed && frame_changed<frame_size);
+    RECT r={0}; GetWindowRect(w,&r);
+    check("WM_WINDOWPOSCHANGING can alter the requested size",r.right-r.left==380 && r.bottom-r.top==280);
+    check("frame callback runs on the window thread",frame_thread==GetCurrentThreadId());
+    frame_mutate=0;
+    frame_sequence=frame_changing=frame_changed=frame_size=0;
+    SetWindowPos(w,NULL,0,0,390,290,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSENDCHANGING);
+    check("SWP_NOSENDCHANGING skips only the changing callback",!frame_changing && frame_changed && frame_changed<frame_size);
+    frame_consume=1;
+    frame_sequence=frame_changing=frame_changed=frame_size=0;
+    SetWindowPos(w,NULL,0,0,400,300,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+    check("consuming WM_WINDOWPOSCHANGED suppresses derived WM_SIZE",frame_changing && frame_changed && !frame_size);
+    frame_consume=0;
+    frame_sequence=frame_changing=frame_changed=frame_size=0;
+    ShowWindow(w,SW_MAXIMIZE);
+    WINDOWPLACEMENT p={0}; p.length=sizeof(p);
+    check("ShowWindow sends frame callbacks with its new state",frame_changing && frame_changed && GetWindowPlacement(w,&p) && p.showCmd==SW_SHOWMAXIMIZED);
+    ShowWindow(w,SW_HIDE);
+    frame_window=NULL;
+    drain();
+}
+
+static void system_fonts(void) {
+    _Static_assert(sizeof(NONCLIENTMETRICSW)==504 && sizeof(NONCLIENTMETRICSA)==344,"nonclient metrics layouts");
+    NONCLIENTMETRICSW ncm={0}; ncm.cbSize=sizeof(ncm);
+    check("wide nonclient metrics query",SystemParametersInfoW(SPI_GETNONCLIENTMETRICS,sizeof(ncm),&ncm,0));
+    check("nonclient metrics include usable UI dimensions",ncm.iScrollWidth>0 && ncm.iCaptionHeight>0 && ncm.iMenuHeight>0);
+    check("nonclient metrics include five usable UI fonts",ncm.lfCaptionFont.lfHeight!=0 && ncm.lfSmCaptionFont.lfHeight!=0 && ncm.lfMenuFont.lfHeight!=0 && ncm.lfStatusFont.lfHeight!=0 && ncm.lfMessageFont.lfHeight!=0 && ncm.lfMessageFont.lfFaceName[0]);
+    NONCLIENTMETRICSA ansi={0}; ansi.cbSize=sizeof(ansi);
+    check("ANSI nonclient metrics use the ANSI layout",SystemParametersInfoA(SPI_GETNONCLIENTMETRICS,sizeof(ansi),&ansi,0) && ansi.lfMessageFont.lfHeight!=0 && ansi.lfMessageFont.lfFaceName[0] && ansi.iMenuHeight>0);
+    ncm.cbSize=sizeof(ncm)-4; ncm.iPaddedBorderWidth=0x12345678;
+    check("legacy nonclient metrics query",SystemParametersInfoW(SPI_GETNONCLIENTMETRICS,ncm.cbSize,&ncm,0));
+    check("legacy metrics preserve memory beyond cbSize",ncm.iPaddedBorderWidth==0x12345678);
+    ncm.cbSize=4;
+    check("undersized nonclient metrics are rejected",!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS,4,&ncm,0));
+    LOGFONTW icon={0}; LOGFONTA icon_a={0};
+    check("wide icon-title font",SystemParametersInfoW(SPI_GETICONTITLELOGFONT,sizeof(icon),&icon,0) && icon.lfHeight!=0 && icon.lfFaceName[0]);
+    check("ANSI icon-title font",SystemParametersInfoA(SPI_GETICONTITLELOGFONT,sizeof(icon_a),&icon_a,0) && icon_a.lfHeight!=0 && icon_a.lfFaceName[0]);
+}
+
 static HWND worker_window;
 static HANDLE worker_ready, worker_go;
 
@@ -109,8 +271,11 @@ static DWORD WINAPI queue_owner(void *arg) {
 static void thread_queues(HWND w) {
     drain();
     worker_ready=CreateEventW(NULL,TRUE,FALSE,NULL); worker_go=CreateEventW(NULL,TRUE,FALSE,NULL);
-    HANDLE t=CreateThread(NULL,0,queue_owner,NULL,0,NULL);
+    DWORD worker_tid=0;
+    HANDLE t=CreateThread(NULL,0,queue_owner,NULL,0,&worker_tid);
     check("worker window",WaitForSingleObject(worker_ready,5000)==WAIT_OBJECT_0 && worker_window);
+    DWORD window_pid=0;
+    check("window thread query returns its creator, not caller",GetWindowThreadProcessId(worker_window,&window_pid)==worker_tid && window_pid==GetCurrentProcessId());
     check("post to the worker's window",PostMessageW(worker_window,WM_USER+20,0,0));
     check("post to this thread's window",PostMessageW(w,WM_USER+21,0,0));
     SetEvent(worker_go);
@@ -182,6 +347,7 @@ static void window_stores(HWND w, HWND w2) {
 }
 
 void __stdcall start(void) {
+    system_fonts();
     WCHAR formatted[1024]; char ansi[1024];
     int formatted_n=wsprintfW(formatted,L"%s %d %x %I64u",L"Zen",-7,42,4294967297ULL);
     check("wsprintfW strings, integers and stack arguments",formatted_n==lstrlenW(formatted) && wide_eq(formatted,L"Zen -7 2a 4294967297"));
@@ -200,8 +366,13 @@ void __stdcall start(void) {
     check("extended window styles survive creation",owned && (GetWindowLongPtrW(owned,GWL_EXSTYLE)&WS_EX_TOOLWINDOW)!=0);
     if(owned) DestroyWindow(owned);
     queue_waits(w);
+    filtered_messages(w);
     thread_queues(w);
     window_stores(w,w2);
+    HWND state_window=make_window();
+    window_states(state_window);
+    window_frame_callbacks(state_window);
+    DestroyWindow(state_window);
     HWND owner=make_window();
     owned=CreateWindowExW(WS_EX_TOOLWINDOW,L"msgwait",L"owned helper",WS_POPUP,0,0,160,80,owner,NULL,wc.hInstance,NULL);
     check("create owned window for destruction",owner && owned);

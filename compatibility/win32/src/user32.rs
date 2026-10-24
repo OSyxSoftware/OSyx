@@ -43,6 +43,9 @@ static MONO15: &[u8] = include_bytes!("../../../graphics/assets/mono15.osxf");
 pub const WM_CREATE: u32 = 0x0001;
 pub const WM_DESTROY: u32 = 0x0002;
 pub const WM_SIZE: u32 = 0x0005;
+const WM_MOVE: u32 = 0x0003;
+const WM_WINDOWPOSCHANGING: u32 = 0x0046;
+const WM_WINDOWPOSCHANGED: u32 = 0x0047;
 pub const WM_ACTIVATE: u32 = 0x0006;
 pub const WM_SETFOCUS: u32 = 0x0007;
 pub const WM_KILLFOCUS: u32 = 0x0008;
@@ -76,6 +79,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
+const WS_MINIMIZE: u32 = 0x2000_0000;
+const WS_MAXIMIZE: u32 = 0x0100_0000;
 const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
 
 type WndProc = extern "win64" fn(u64, u32, u64, i64) -> i64;
@@ -92,6 +97,18 @@ struct Msg {
     /// The thread whose queue holds it: the window's, or the poster's for
     /// a thread message.
     thread: u64,
+}
+
+#[repr(C)]
+struct WindowPos {
+    hwnd: u64,
+    after: u64,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    flags: u32,
+    padding: u32,
 }
 
 struct Class {
@@ -113,6 +130,12 @@ struct Win {
     win: Window,
     pos: (i32, i32),
     size: (u32, u32),
+    /// The most recent normal geometry, preserved while maximized/minimized.
+    normal: Rect,
+    /// ShowWindow changes state synchronously; older Configure events must
+    /// not undo it while the compositor is acknowledging the request.
+    pending_state: Option<u32>,
+    restore_maximized: bool,
     /// Last size reported with WM_SIZE.
     reported: Option<(u32, u32)>,
     visible: bool,
@@ -192,6 +215,8 @@ struct Gui {
     /// PRISM window id → HWND.
     by_prism: BTreeMap<u32, u64>,
     queue: VecDeque<Msg>,
+    /// Nonqueued frame notifications, dispatched on the window's thread.
+    pending_frames: BTreeMap<u64, u32>,
     timers: Vec<Timer>,
     /// Per thread: the exit code PostQuitMessage left for WM_QUIT.
     quit: BTreeMap<u64, i32>,
@@ -272,6 +297,7 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             windows: BTreeMap::new(),
             by_prism: BTreeMap::new(),
             queue: VecDeque::new(),
+            pending_frames: BTreeMap::new(),
             timers: Vec::new(),
             quit: BTreeMap::new(),
             focus: 0,
@@ -376,6 +402,7 @@ impl Gui {
         if self.quit.contains_key(&me) {
             s |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
         }
+        if self.pending_frames.keys().any(|h| self.owner(*h) == me) { s |= QS_SENDMESSAGE; }
         let now = Instant::now();
         if self.timers.iter().any(|t| t.thread == me && t.due <= now) {
             s |= QS_TIMER;
@@ -399,6 +426,7 @@ impl Gui {
         if let Some(w) = self.windows.get_mut(&hwnd) {
             let full = Rect::new(0, 0, w.size.0, w.size.1);
             let r = r.unwrap_or(full).intersect(&full);
+            if r.w == 0 || r.h == 0 { return; }
             w.invalid = Some(match w.invalid {
                 Some(o) => o.union(&r),
                 None => r,
@@ -423,12 +451,23 @@ impl Gui {
             w.win.on_event(&ev);
         }
         match ev {
-            Event::Configure { width, height, .. } => {
+            Event::Configure { width, height, states, .. } => {
                 let Some(w) = self.windows.get_mut(&hwnd) else { return };
+                let next_state = if states & proto::state::MINIMIZED != 0 { WS_MINIMIZE }
+                    else if states & proto::state::MAXIMIZED != 0 { WS_MAXIMIZE } else { 0 };
+                if w.pending_state.is_some_and(|expected| expected != next_state) { return; }
+                w.pending_state = None;
+                let previous_state = w.style & (WS_MINIMIZE | WS_MAXIMIZE);
+                w.style = (w.style & !(WS_MINIMIZE | WS_MAXIMIZE)) | next_state;
+                let changed = previous_state != w.style & (WS_MINIMIZE | WS_MAXIMIZE);
                 w.size = (width, height);
-                if w.reported != Some((width, height)) {
+                if next_state == 0 { w.normal = Rect::new(w.pos.0, w.pos.1, width, height); }
+                if changed || w.reported != Some((width, height)) {
                     w.reported = Some((width, height));
-                    self.post(hwnd, WM_SIZE, 0, (width as i64 & 0xFFFF) | ((height as i64 & 0xFFFF) << 16));
+                    self.queue.retain(|m| m.hwnd != hwnd || m.msg != WM_SIZE);
+                    self.pending_frames.insert(hwnd, 0x2); // SWP_NOMOVE
+                    *self.fresh.entry(self.owner(hwnd)).or_insert(0) |= QS_SENDMESSAGE;
+                    crate::objects::signal_all();
                     self.invalidate(hwnd, None, true);
                 }
             }
@@ -574,16 +613,24 @@ impl Gui {
         self.pump();
     }
 
-    /// Next message of the calling thread for `get/peek`: queue, quit,
-    /// timers, paint. Each thread sees only its own windows' messages.
-    fn next_message(&mut self, filter: u64) -> Option<Msg> {
+    /// Next matching message on this thread. A filtered peek must leave
+    /// unrelated work alone: Gecko uses paint-only nested message pumps.
+    fn next_message(&mut self, filter: u64, min: u32, max: u32, kinds: u32, remove: bool) -> Option<Msg> {
         self.pump();
         let me = os_sys::gettid();
-        let matches = |m: &Msg| m.thread == me && (filter == 0 || m.hwnd == filter);
+        let window_matches = |hwnd: u64| filter == 0 || if filter == u64::MAX { hwnd == 0 } else { hwnd == filter };
+        let min = min & 0xffff;
+        let max = max & 0xffff;
+        let message_matches = |msg: u32| {
+            ((min == 0 && max == 0) || (min..=max).contains(&msg)) && (kinds == 0 || qs_kind(msg) & kinds != 0)
+        };
+        let matches = |m: &Msg| m.thread == me && window_matches(m.hwnd) && message_matches(m.msg);
         if let Some(i) = self.queue.iter().position(matches) {
-            return self.queue.remove(i);
+            return if remove { self.queue.remove(i) } else { self.queue.get(i).copied() };
         }
-        if let Some(code) = self.quit.remove(&me) {
+        // WM_QUIT ignores the range and window filter and survives a peek.
+        if let Some(&code) = self.quit.get(&me) {
+            if remove { self.quit.remove(&me); }
             return Some(Msg {
                 hwnd: 0,
                 msg: WM_QUIT,
@@ -594,18 +641,23 @@ impl Gui {
                 thread: me,
             });
         }
-        let now = Instant::now();
-        if let Some(t) = self.timers.iter_mut().filter(|t| t.thread == me && (filter == 0 || t.hwnd == filter)).find(|t| t.due <= now) {
-            t.due = now + Duration::from_millis(t.interval);
-            let m = Msg { hwnd: t.hwnd, msg: WM_TIMER, wparam: t.id, lparam: t.proc_ as i64, time: 0, pt: (0, 0), thread: me };
-            return Some(Msg { time: self.now_ms(), pt: self.pointer, ..m });
-        }
         let paint = self
             .windows
             .iter()
-            .find(|(h, w)| w.thread == me && (filter == 0 || **h == filter) && w.visible && w.invalid.is_some() && w.win.is_configured())
+            .find(|(h, w)| w.thread == me && window_matches(**h) && message_matches(WM_PAINT) && w.visible && w.invalid.is_some() && w.win.is_configured())
             .map(|(h, _)| *h);
-        paint.map(|h| Msg { hwnd: h, msg: WM_PAINT, wparam: 0, lparam: 0, time: self.now_ms(), pt: self.pointer, thread: me })
+        if let Some(hwnd) = paint {
+            return Some(Msg { hwnd, msg: WM_PAINT, wparam: 0, lparam: 0, time: self.now_ms(), pt: self.pointer, thread: me });
+        }
+        let now = Instant::now();
+        let t = self.timers.iter_mut().find(|t| t.thread == me && window_matches(t.hwnd) && message_matches(WM_TIMER) && t.due <= now)?;
+        t.due = now + Duration::from_millis(t.interval);
+        let m = Msg { hwnd: t.hwnd, msg: WM_TIMER, wparam: t.id, lparam: t.proc_ as i64, time: 0, pt: (0, 0), thread: me };
+        let m = Msg { time: self.now_ms(), pt: self.pointer, ..m };
+        // Once generated, a timer is a queued message. PM_NOREMOVE and
+        // KillTimer must not silently consume it.
+        if !remove { self.queue.push_back(m); }
+        Some(m)
     }
 
     fn next_timer_in(&self) -> Duration {
@@ -674,6 +726,33 @@ fn call(proc_: u64, hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
 
 fn wndproc_of(hwnd: u64) -> Option<u64> {
     with(|g| g.windows.get(&hwnd).map(|w| w.wndproc))
+}
+
+fn current_window_pos(hwnd: u64, flags: u32) -> Option<WindowPos> {
+    with(|g| g.windows.get(&hwnd).map(|w| WindowPos {
+        hwnd, after: 0, x: w.pos.0, y: w.pos.1, cx: w.size.0 as i32, cy: w.size.1 as i32, flags, padding: 0,
+    }))
+}
+
+fn notify_window_pos(hwnd: u64, flags: u32, changing: bool) {
+    let Some(mut position) = current_window_pos(hwnd, flags) else { return };
+    let Some(proc) = wndproc_of(hwnd) else { return };
+    let pointer = (&mut position as *mut WindowPos) as i64;
+    if changing { call(proc, hwnd, WM_WINDOWPOSCHANGING, 0, pointer); }
+    if is_window(hwnd) { call(proc, hwnd, WM_WINDOWPOSCHANGED, 0, pointer); }
+}
+
+/// PRISM events can arrive on the rendering thread. Deliver their frame
+/// callbacks only when the owner pumps messages, outside the GUI mutex.
+fn dispatch_pending_frames() {
+    let frames = with(|g| {
+        g.pump();
+        let me = os_sys::gettid();
+        let frames: Vec<_> = g.pending_frames.iter().filter(|(h, _)| g.owner(**h) == me).map(|(&h, &flags)| (h, flags)).collect();
+        for (h, _) in &frames { g.pending_frames.remove(h); }
+        frames
+    });
+    for (hwnd, flags) in frames { notify_window_pos(hwnd, flags, true); }
 }
 
 // ---- classes and windows ------------------------------------------------------------
@@ -819,6 +898,9 @@ fn create_window(
                 win,
                 pos: (x.max(0), y.max(0)),
                 size: (width, height),
+                normal: Rect::new(x.max(0), y.max(0), width, height),
+                pending_state: None,
+                restore_maximized: false,
                 reported: None,
                 visible: false,
                 invalid: None,
@@ -916,6 +998,7 @@ fn destroy(hwnd: u64, notify: bool) -> bool {
         }
         g.timers.retain(|t| t.hwnd != hwnd);
         g.queue.retain(|m| m.hwnd != hwnd);
+        g.pending_frames.remove(&hwnd);
         if g.focus == hwnd {
             g.focus = 0;
         }
@@ -943,29 +1026,88 @@ extern "win64" fn IsWindowVisible(hwnd: u64) -> Bool {
     with(|g| g.windows.get(&hwnd).is_some_and(|w| w.visible)) as Bool
 }
 
+/// No shaped-window API is exposed yet, so every valid window has the
+/// default rectangle and no explicit region. Windows reports ERROR (0),
+/// leaving the supplied region untouched in this case.
+extern "win64" fn GetWindowRgn(hwnd: u64, region: u64) -> i32 {
+    with(|g| {
+        if !g.windows.contains_key(&hwnd) { return fail(ERROR_INVALID_WINDOW_HANDLE, 0); }
+        if !g.regions.contains_key(&region) { return fail(ERROR_INVALID_HANDLE, 0); }
+        0
+    })
+}
+
 extern "win64" fn ShowWindow(hwnd: u64, cmd: i32) -> Bool {
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: ShowWindow({hwnd:#x}, {cmd})");
+        if cmd == 9 { crate::exceptions::trace_current(); }
+    }
     let r = with(|g| {
+        g.pump();
         let w = g.windows.get_mut(&hwnd)?;
         let was = w.visible;
+        let previous_state = w.style & (WS_MINIMIZE | WS_MAXIMIZE);
         let action = match cmd {
             0 => None,                                       // SW_HIDE
             2 | 6 | 7 | 11 => Some(proto::Action::Minimize), // SW_SHOWMINIMIZED, SW_MINIMIZE, ...
             3 => Some(proto::Action::Maximize),              // SW_MAXIMIZE
             9 => Some(proto::Action::Restore),               // SW_RESTORE
+            1 | 4 if previous_state != 0 => Some(proto::Action::Restore),
             _ => None,
         };
         w.visible = cmd != 0;
+        if w.visible { w.style |= WS_VISIBLE; } else { w.style &= !WS_VISIBLE; }
+        match cmd {
+            2 | 6 | 7 | 11 => {
+                if previous_state & WS_MINIMIZE == 0 { w.restore_maximized = previous_state & WS_MAXIMIZE != 0; }
+                w.style = (w.style & !WS_MAXIMIZE) | WS_MINIMIZE;
+            }
+            3 => { w.style = (w.style & !WS_MINIMIZE) | WS_MAXIMIZE; }
+            9 if previous_state & WS_MINIMIZE != 0 && w.restore_maximized => { w.style = (w.style & !WS_MINIMIZE) | WS_MAXIMIZE; }
+            1 | 4 | 9 => { w.style &= !(WS_MINIMIZE | WS_MAXIMIZE); }
+            _ => {}
+        }
+        let changed = previous_state != w.style & (WS_MINIMIZE | WS_MAXIMIZE);
+        if action.is_some() && (changed || !was || w.pending_state.is_some()) { w.pending_state = Some(w.style & (WS_MINIMIZE | WS_MAXIMIZE)); }
+        let size = w.size;
+        if changed { g.queue.retain(|m| m.hwnd != hwnd || m.msg != WM_SIZE); }
         if let (Some(a), Some(c)) = (action, g.conn.as_mut()) {
+            if matches!(cmd, 1 | 4) && previous_state & WS_MINIMIZE != 0 {
+                let _ = g.windows.get_mut(&hwnd)?.win.action(c, proto::Action::Activate);
+            }
             let _ = g.windows.get_mut(&hwnd)?.win.action(c, a);
         }
         if !was && cmd != 0 {
             g.invalidate(hwnd, None, true);
         }
-        Some(was)
+        Some((was, changed, size))
     });
     match r {
-        Some(was) => {
+        Some((was, changed, size)) => {
             sync_window_visibility(hwnd);
+            // Windows completes the state/geometry transition before
+            // calling WM_SIZE. Wait only for the compositor acknowledgement,
+            // without holding the GUI mutex or invoking window procedures.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                let pending = with(|g| {
+                    g.pump();
+                    g.windows.get(&hwnd).is_some_and(|w| w.pending_state.is_some())
+                });
+                if !pending || Instant::now() >= deadline { break; }
+                os_std::thread::sleep(Duration::from_millis(1));
+            }
+            let current_size = with(|g| {
+                let size = g.windows.get(&hwnd).map(|w| w.size);
+                g.queue.retain(|m| m.hwnd != hwnd || m.msg != WM_SIZE);
+                g.pending_frames.remove(&hwnd);
+                size
+            });
+            if changed || current_size.is_some_and(|current| current != size) || was != (cmd != 0) {
+                let flags = 0x6 | if cmd == 0 { 0x80 } else { 0x40 }
+                    | if !changed && current_size == Some(size) { 0x1 } else { 0 };
+                notify_window_pos(hwnd, flags, true);
+            }
             if !was && cmd != 0 {
                 if let Some(p) = wndproc_of(hwnd) {
                     call(p, hwnd, WM_SHOWWINDOW, 1, 0);
@@ -991,6 +1133,7 @@ fn sync_window_visibility(hwnd: u64) {
 }
 
 extern "win64" fn UpdateWindow(hwnd: u64) -> Bool {
+    dispatch_pending_frames();
     // Wait (bounded) for PRISM to configure a new window, then paint now.
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -1093,22 +1236,37 @@ extern "win64" fn AdjustWindowRectEx(r: *mut i32, _style: u32, _menu: Bool, _ex:
     (!r.is_null()) as Bool
 }
 
-extern "win64" fn SetWindowPos(hwnd: u64, _after: u64, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> Bool {
+extern "win64" fn SetWindowPos(hwnd: u64, after: u64, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> Bool {
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: SetWindowPos({hwnd:#x}, {x},{y}, {cx}x{cy}, flags {flags:#x})");
+        static SMALL_RESIZES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        if flags & 1 == 0 && cx <= 160 && cy <= 80 && SMALL_RESIZES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::exceptions::trace_current();
+        }
+    }
+    let Some(proc) = wndproc_of(hwnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+    let mut position = WindowPos { hwnd, after, x, y, cx, cy, flags, padding: 0 };
+    if flags & 0x400 == 0 { call(proc, hwnd, WM_WINDOWPOSCHANGING, 0, (&mut position as *mut WindowPos) as i64); }
+    let WindowPos { x, y, cx, cy, flags, .. } = position;
     let r = with(|g| {
         let w = g.windows.get_mut(&hwnd)?;
+        let previous_pos = w.pos;
         if flags & 0x2 == 0 {
             w.pos = (x, y);
         }
         let (nw, nh) = if flags & 0x1 == 0 { (cx.max(1) as u32, cy.max(1) as u32) } else { w.size };
         let resized = w.size != (nw, nh);
         w.size = (nw, nh);
+        if w.style & (WS_MINIMIZE | WS_MAXIMIZE) == 0 { w.normal = Rect::new(w.pos.0, w.pos.1, nw, nh); }
         if resized { w.reported = Some((nw, nh)); }
         let (px, py) = w.pos;
         if flags & 0x40 != 0 {
             w.visible = true;
+            w.style |= WS_VISIBLE;
         }
         if flags & 0x80 != 0 {
             w.visible = false;
+            w.style &= !WS_VISIBLE;
         }
         let c = g.conn.as_mut()?;
         let _ = g.windows.get_mut(&hwnd)?.win.set_geometry(
@@ -1119,16 +1277,14 @@ extern "win64" fn SetWindowPos(hwnd: u64, _after: u64, x: i32, y: i32, cx: i32, 
             nh,
         );
         if resized { g.invalidate(hwnd, None, true); }
-        Some((resized, nw, nh))
+        if resized { g.queue.retain(|m| m.hwnd != hwnd || m.msg != WM_SIZE); }
+        g.pending_frames.remove(&hwnd);
+        Some((resized, previous_pos != (px, py)))
     });
     match r {
-        Some((resized, nw, nh)) => {
+        Some((resized, moved)) => {
             if flags & (0x40 | 0x80) != 0 { sync_window_visibility(hwnd); }
-            if resized {
-                if let Some(proc) = wndproc_of(hwnd) {
-                    call(proc, hwnd, WM_SIZE, 0, (nw as i64 & 0xffff) | ((nh as i64 & 0xffff) << 16));
-                }
-            }
+            notify_window_pos(hwnd, flags | if !resized { 0x800 } else { 0 } | if !moved { 0x1000 } else { 0 }, false);
             TRUE
         }
         None => fail(ERROR_INVALID_WINDOW_HANDLE, FALSE),
@@ -1241,7 +1397,13 @@ extern "win64" fn GetWindowLongPtrA(hwnd: u64, idx: i32) -> i64 {
             -20 => w.ex_style as i64, // GWL_EXSTYLE
             -8 => w.owner as i64, // GWLP_HWNDPARENT
             GWLP_USERDATA => w.user_data,
-            _ => fail(ERROR_INVALID_PARAMETER, 0),
+            -12 => 0, // GWLP_ID: no child controls
+            _ => {
+                if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+                    os_std::eprintln!("winrun: GetWindowLongPtr({hwnd:#x}, {idx}) unsupported index");
+                }
+                fail(ERROR_INVALID_PARAMETER, 0)
+            }
         }
     })
 }
@@ -1251,13 +1413,16 @@ extern "win64" fn SetWindowLongPtrA(hwnd: u64, idx: i32, v: i64) -> i64 {
         let Some(w) = g.windows.get_mut(&hwnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
         match idx {
             GWLP_WNDPROC => core::mem::replace(&mut w.wndproc, v as u64) as i64,
-            GWL_STYLE => core::mem::replace(&mut w.style, v as u32) as i64,
+            GWL_STYLE => {
+                w.visible = v as u32 & WS_VISIBLE != 0;
+                core::mem::replace(&mut w.style, v as u32) as i64
+            }
             -20 => core::mem::replace(&mut w.ex_style, v as u32) as i64,
             GWLP_USERDATA => core::mem::replace(&mut w.user_data, v),
             _ => fail(ERROR_INVALID_PARAMETER, 0),
         }
     });
-    if idx == -20 { sync_window_visibility(hwnd); }
+    if idx == -20 || idx == GWL_STYLE { sync_window_visibility(hwnd); }
     previous
 }
 
@@ -1277,6 +1442,7 @@ const QS_MOUSEBUTTON: u32 = 0x4;
 const QS_POSTMESSAGE: u32 = 0x8;
 const QS_TIMER: u32 = 0x10;
 const QS_PAINT: u32 = 0x20;
+const QS_SENDMESSAGE: u32 = 0x40;
 const QS_ALLPOSTMESSAGE: u32 = 0x100;
 const MWMO_WAITALL: u32 = 1;
 const MWMO_INPUTAVAILABLE: u32 = 4;
@@ -1330,14 +1496,15 @@ fn read_msg(p: *const u8) -> Msg {
     }
 }
 
-extern "win64" fn GetMessageA(msg: *mut u8, hwnd: u64, _min: u32, _max: u32) -> Bool {
+extern "win64" fn GetMessageA(msg: *mut u8, hwnd: u64, min: u32, max: u32) -> Bool {
     if msg.is_null() {
         return fail(ERROR_INVALID_PARAMETER, -1);
     }
     loop {
+        dispatch_pending_frames();
         let r = with(|g| {
             g.set_fresh(0);
-            if let Some(m) = g.next_message(hwnd) {
+            if let Some(m) = g.next_message(hwnd, min, max, 0, true) {
                 return Ok(m);
             }
             Err((crate::objects::sequence(), g.next_timer_in()))
@@ -1361,16 +1528,11 @@ extern "win64" fn GetMessageW(msg: *mut u8, hwnd: u64, min: u32, max: u32) -> Bo
 
 const PM_REMOVE: u32 = 1;
 
-extern "win64" fn PeekMessageA(msg: *mut u8, hwnd: u64, _min: u32, _max: u32, flags: u32) -> Bool {
+extern "win64" fn PeekMessageA(msg: *mut u8, hwnd: u64, min: u32, max: u32, flags: u32) -> Bool {
+    dispatch_pending_frames();
     let m = with(|g| {
         g.set_fresh(0);
-        let m = g.next_message(hwnd)?;
-        if flags & PM_REMOVE == 0 && !matches!(m.msg, WM_PAINT | WM_TIMER | WM_QUIT) {
-            g.queue.push_front(m);
-        } else if flags & PM_REMOVE == 0 && m.msg == WM_QUIT {
-            g.quit.insert(os_sys::gettid(), m.wparam as i32);
-        }
-        Some(m)
+        g.next_message(hwnd, min, max, flags >> 16, flags & PM_REMOVE != 0)
     });
     match m {
         Some(m) => {
@@ -1459,6 +1621,18 @@ extern "win64" fn PostQuitMessage(code: i32) {
 
 extern "win64" fn DefWindowProcA(hwnd: u64, msg: u32, _w: u64, l: i64) -> i64 {
     match msg {
+        WM_WINDOWPOSCHANGED if l != 0 => {
+            // SAFETY: this message supplies a WINDOWPOS during the callback.
+            let flags = unsafe { teb::get::<u32>(l as u64, 32) };
+            if let Some((kind, pos, size)) = with(|g| g.windows.get(&hwnd).map(|w| (
+                if w.style & WS_MINIMIZE != 0 { 1 } else if w.style & WS_MAXIMIZE != 0 { 2 } else { 0 }, w.pos, w.size))) {
+                if let Some(proc) = wndproc_of(hwnd) {
+                    if flags & (0x1 | 0x800) == 0 { call(proc, hwnd, WM_SIZE, kind, if kind == 1 { 0 } else { (size.0 as i64 & 0xffff) | ((size.1 as i64 & 0xffff) << 16) }); }
+                    if flags & (0x2 | 0x1000) == 0 { call(proc, hwnd, WM_MOVE, 0, (pos.0 as i64 & 0xffff) | ((pos.1 as i64 & 0xffff) << 16)); }
+                }
+            }
+            0
+        }
         WM_NCCREATE => 1,
         WM_CLOSE => {
             DestroyWindow(hwnd);
@@ -1866,11 +2040,11 @@ extern "win64" fn GetSystemMetrics(i: i32) -> i32 {
 /// keeps its own appearance, and `SystemParametersInfo` is how Windows
 /// programs learn about it rather than how they set it.
 extern "win64" fn SystemParametersInfoW(action: u32, param: u32, value: *mut u8, _ini: u32) -> Bool {
-    system_parameters(action, param, value)
+    system_parameters(action, param, value, true)
 }
 
 extern "win64" fn SystemParametersInfoA(action: u32, param: u32, value: *mut u8, _ini: u32) -> Bool {
-    system_parameters(action, param, value)
+    system_parameters(action, param, value, false)
 }
 
 const SPI_GETWORKAREA: u32 = 0x0030;
@@ -1908,9 +2082,45 @@ fn parameter_value(action: u32) -> Option<i32> {
     })
 }
 
-fn system_parameters(action: u32, _param: u32, value: *mut u8) -> Bool {
+/// A usable system UI font backed by the installed OFL TrueType family.
+fn system_logfont(value: *mut u8, wide: bool) {
+    // SAFETY: the caller has a LOGFONTA (60 bytes) or LOGFONTW (92 bytes).
+    unsafe {
+        core::ptr::write_bytes(value, 0, if wide { 92 } else { 60 });
+        teb::put(value as u64, 0, -12i32);
+        teb::put(value as u64, 16, 400i32);
+        *value.add(23) = 1; // DEFAULT_CHARSET
+        if wide { out_w("Lato", value.add(28).cast(), 32); }
+        else { out_a("Lato", value.add(28), 32); }
+    }
+}
+
+fn system_parameters(action: u32, _param: u32, value: *mut u8, wide: bool) -> Bool {
     if value.is_null() {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if action == 0x1f { // SPI_GETICONTITLELOGFONT
+        system_logfont(value, wide);
+        return TRUE;
+    }
+    if action == 0x29 { // SPI_GETNONCLIENTMETRICS
+        let font_bytes = if wide { 92 } else { 60 };
+        let legacy_size = 40 + 5 * font_bytes;
+        // SAFETY: NONCLIENTMETRICS begins with cbSize.
+        let size = unsafe { teb::get::<u32>(value as u64, 0) } as usize;
+        if size != legacy_size && size != legacy_size + 4 { return fail(ERROR_INVALID_PARAMETER, FALSE); }
+        // SAFETY: the exact ANSI/wide modern or legacy structure size.
+        unsafe {
+            core::ptr::write_bytes(value.add(4), 0, size - 4);
+            for (offset, dimension) in [(4, 1i32), (8, 17), (12, 17), (16, 18), (20, 23),
+                (24 + font_bytes, 18), (28 + font_bytes, 19), (32 + 2 * font_bytes, 18), (36 + 2 * font_bytes, 19)] {
+                teb::put(value as u64, offset, dimension);
+            }
+            for offset in [24, 32 + font_bytes, 40 + 2 * font_bytes, 40 + 3 * font_bytes, 40 + 4 * font_bytes] {
+                system_logfont(value.add(offset), wide);
+            }
+        }
+        return TRUE;
     }
     if action == SPI_GETWORKAREA {
         let (w, h) = with(|g| g.conn().map(|c| (c.screen_width as i32, c.screen_height as i32)).unwrap_or((1024, 768)));
@@ -1929,7 +2139,12 @@ fn system_parameters(action: u32, _param: u32, value: *mut u8) -> Bool {
             unsafe { teb::put(value as u64, 0, v) };
             TRUE
         }
-        None => fail(ERROR_INVALID_PARAMETER, FALSE),
+        None => {
+            if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+                os_std::eprintln!("winrun: SystemParametersInfo({action:#x}) unsupported setting");
+            }
+            fail(ERROR_INVALID_PARAMETER, FALSE)
+        }
     }
 }
 
@@ -3092,6 +3307,7 @@ extern "win64" fn MsgWaitForMultipleObjectsEx(n: u32, hs: *const u64, ms: u32, m
     let all = flags & MWMO_WAITALL != 0;
     let deadline = (ms != INFINITE).then(|| Instant::now() + Duration::from_millis(ms as u64));
     loop {
+        dispatch_pending_frames();
         let (seq, input, timer) = with(|g| {
             g.pump();
             let have = if flags & MWMO_INPUTAVAILABLE != 0 { g.status() } else { g.fresh_bits() & g.status() };
@@ -3225,7 +3441,18 @@ extern "win64" fn BringWindowToTop(_wnd: u64) -> Bool {
 }
 
 extern "win64" fn IsIconic(wnd: u64) -> Bool {
-    (with(|g| g.windows.contains_key(&wnd))) as Bool
+    with(|g| g.windows.get(&wnd).is_some_and(|w| w.style & WS_MINIMIZE != 0)) as Bool
+}
+
+extern "win64" fn IsZoomed(wnd: u64) -> Bool {
+    with(|g| g.windows.get(&wnd).is_some_and(|w| w.style & WS_MAXIMIZE != 0)) as Bool
+}
+
+extern "win64" fn IsWindowArranged(wnd: u64) -> Bool {
+    // PRISM exposes normal, maximized and minimized windows, but no Snap
+    // arrangement. Maximization is explicitly distinct from arrangement.
+    if !is_window(wnd) { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE); }
+    FALSE
 }
 
 extern "win64" fn IsWindowEnabled(wnd: u64) -> Bool {
@@ -3237,11 +3464,12 @@ extern "win64" fn EnableWindow(_wnd: u64, _enable: Bool) -> Bool {
 }
 
 extern "win64" fn GetWindowThreadProcessId(wnd: u64, pid_out: *mut u32) -> u32 {
+    let thread = with(|g| g.windows.get(&wnd).map_or(0, |w| w.thread as u32));
     if !pid_out.is_null() {
         // SAFETY: the caller's out pointer.
-        unsafe { *pid_out = crate::kernel32::pid() as u32 };
+        unsafe { *pid_out = if thread != 0 { crate::kernel32::pid() as u32 } else { 0 } };
     }
-    if with(|g| g.windows.contains_key(&wnd)) { os_sys::gettid() as u32 } else { 0 }
+    thread
 }
 
 extern "win64" fn GetClassNameW(wnd: u64, buf: *mut u16, size: i32) -> i32 {
@@ -3653,11 +3881,20 @@ extern "win64" fn EnumWindows(proc_: u64, param: u64) -> Bool {
     TRUE
 }
 
-extern "win64" fn GetUpdateRect(_wnd: u64, rect: *mut u8, _erase: Bool) -> Bool {
-    if !rect.is_null() {
-        put_rect(rect, (0, 0, 0, 0));
+extern "win64" fn GetUpdateRect(wnd: u64, rect: *mut u8, erase: Bool) -> Bool {
+    let Some((invalid, needs_erase)) = with(|g| g.windows.get(&wnd).map(|w| (w.invalid, w.erase))) else {
+        return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
+    };
+    write_rect(rect.cast(), invalid.unwrap_or(Rect::EMPTY));
+    if invalid.is_some() && needs_erase && erase != 0 {
+        let dc = GetDC(wnd);
+        if dc != 0 {
+            let erased = wndproc_of(wnd).is_some_and(|p| call(p, wnd, WM_ERASEBKGND, dc, 0) != 0);
+            if erased { with(|g| { if let Some(w) = g.windows.get_mut(&wnd) { w.erase = false; } }); }
+            ReleaseDC(wnd, dc);
+        }
     }
-    FALSE // nothing is waiting to be painted outside WM_PAINT
+    invalid.is_some() as Bool
 }
 
 extern "win64" fn RedrawWindow(wnd: u64, _rect: *const u8, _rgn: u64, flags: u32) -> Bool {
@@ -3704,29 +3941,34 @@ extern "win64" fn GetWindowPlacement(wnd: u64, out: *mut u8) -> Bool {
     if out.is_null() || unsafe { teb::get::<u32>(out as u64, 0) } < 44 {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let (pos, size, visible) = with(|g| {
-        g.windows.get(&wnd).map(|w| (w.pos, (w.size.0 as i32, w.size.1 as i32), w.visible)).unwrap_or(((0, 0), (0, 0), false))
-    });
+    let Some((normal, style)) = with(|g| {
+        g.windows.get(&wnd).map(|w| (w.normal, w.style))
+    }) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
     // WINDOWPLACEMENT: length, flags, showCmd, ptMin, ptMax, rcNormal.
     // SAFETY: the caller's WINDOWPLACEMENT of at least 44 bytes.
     unsafe {
-        teb::put(out as u64, 8, if visible { 1u32 } else { 7u32 }); // SW_SHOWNORMAL / SW_SHOWMINNOACTIVE
-        put_rect(out.add(28), (pos.0, pos.1, pos.0 + size.0, pos.1 + size.1));
+        teb::put(out as u64, 4, 0u32);
+        teb::put(out as u64, 8, if style & WS_MINIMIZE != 0 { 2u32 } else if style & WS_MAXIMIZE != 0 { 3u32 } else { 1u32 });
+        teb::put(out as u64, 12, (-1i32, -1i32));
+        teb::put(out as u64, 20, (-1i32, -1i32));
+        write_rect(out.add(28).cast(), normal);
     }
     TRUE
 }
 
 extern "win64" fn SetWindowPlacement(wnd: u64, place: *const u8) -> Bool {
-    if place.is_null() {
+    if place.is_null() || unsafe { teb::get::<u32>(place as u64, 0) } < 44 {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
     let r = rect_at(unsafe { place.add(28) });
-    with(|g| {
-        if let Some(w) = g.windows.get_mut(&wnd) {
-            w.pos = (r.0, r.1);
-            w.size = ((r.2 - r.0).max(0) as u32, (r.3 - r.1).max(0) as u32);
-        }
-    });
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: SetWindowPlacement({wnd:#x}, normal {r:?}, show {})", unsafe { teb::get::<u32>(place as u64, 8) });
+    }
+    if r.2 <= r.0 || r.3 <= r.1 { return fail(ERROR_INVALID_PARAMETER, FALSE); }
+    if SetWindowPos(wnd, 0, r.0, r.1, r.2 - r.0, r.3 - r.1, 0x14) == FALSE { return FALSE; }
+    with(|g| { if let Some(w) = g.windows.get_mut(&wnd) { w.normal = Rect::new(r.0, r.1, (r.2 - r.0) as u32, (r.3 - r.1) as u32); } });
+    // SAFETY: the caller's WINDOWPLACEMENT has its showCmd at offset 8.
+    ShowWindow(wnd, unsafe { teb::get::<u32>(place as u64, 8) } as i32);
     TRUE
 }
 
@@ -3879,6 +4121,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         DestroyWindow,
         IsWindow,
         IsWindowVisible,
+        GetWindowRgn,
         ShowWindow,
         UpdateWindow,
         InvalidateRect,
@@ -4017,6 +4260,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetForegroundWindow,
         BringWindowToTop,
         IsIconic,
+        IsZoomed,
+        IsWindowArranged,
         IsWindowEnabled,
         EnableWindow,
         GetWindowThreadProcessId,

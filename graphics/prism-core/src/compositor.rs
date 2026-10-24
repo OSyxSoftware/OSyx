@@ -1076,6 +1076,7 @@ impl Compositor {
         }
         let old = w.bounds();
         if on {
+            w.minimized = false;
             if !w.maximized {
                 w.restore = w.rect;
             }
@@ -1098,6 +1099,7 @@ impl Compositor {
         let (client, local, maximized) = (w.client, w.local, w.maximized);
         match action {
             Action::Activate => {
+                let was_minimized = self.windows.get(&id).is_some_and(|w| w.minimized);
                 if let Some(w) = self.windows.get_mut(&id) {
                     if w.minimized {
                         w.minimized = false;
@@ -1109,6 +1111,11 @@ impl Compositor {
                 }
                 self.raise(id);
                 self.set_focus(Some(id));
+                if was_minimized {
+                    if let Some(w) = self.windows.get(&id) {
+                        self.send(client, Event::Configure { window: local, width: w.rect.w, height: w.rect.h, states: w.states(true) });
+                    }
+                }
             }
             Action::Minimize => {
                 if let Some(w) = self.windows.get_mut(&id) {
@@ -1125,6 +1132,9 @@ impl Compositor {
                     self.send(client, Event::FocusChanged { window: local, focused: false });
                     let next = self.next_focus_candidate();
                     self.set_focus(next);
+                }
+                if let Some(w) = self.windows.get(&id) {
+                    self.send(client, Event::Configure { window: local, width: w.rect.w, height: w.rect.h, states: w.states(false) });
                 }
             }
             Action::Maximize => self.apply_maximize(id, true),

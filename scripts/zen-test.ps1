@@ -14,6 +14,10 @@ if (-not $SkipBuild) {
 }
 $log = Join-Path $evidenceDir 'qemu.serial.log'
 if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
+foreach ($shot in 'qemu.png', 'qemu-mid.png') {
+    $path = Join-Path $evidenceDir $shot
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
+}
 $probeImage = Join-Path $evidenceDir 'qemu-probe.img'
 Copy-Item -LiteralPath $DiskImage -Destination $probeImage -Force
 $qmp = Get-Random -Minimum 20000 -Maximum 40000

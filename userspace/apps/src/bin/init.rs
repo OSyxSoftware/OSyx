@@ -279,10 +279,17 @@ fn zen_probe() -> i32 {
     thread::sleep(Duration::from_secs(2));
     // OSyx has no Direct3D driver. Use Gecko's software WebRender path
     // explicitly instead of repeatedly probing unsupported DXGI devices.
-    let profile = "/tmp/zen-probe-profile";
-    if os_std::fs::create_dir_all(profile).and_then(|_| os_std::fs::write(
+    // Keep repeated boots of a diagnostic image independent, including
+    // window-placement preferences and incomplete startup caches.
+    let stamp = os_std::time::SystemTime::now().duration_since(os_std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let profile = format!("/tmp/zen-probe-profile-{stamp}");
+    println!("zen-probe: profile {profile}");
+    if os_std::fs::create_dir_all(&profile).and_then(|_| os_std::fs::write(
         format!("{profile}/user.js"),
         "user_pref(\"gfx.webrender.software\", true);\nuser_pref(\"gfx.webrender.software.d3d11\", false);\nuser_pref(\"gfx.webrender.compositor\", false);\nuser_pref(\"layers.acceleration.disabled\", true);\nuser_pref(\"layers.gpu-process.enabled\", false);\nuser_pref(\"layers.gpu-process.force-enabled\", false);\n",
+    )).and_then(|_| os_std::fs::write(
+        "/tmp/zen-probe-page.html",
+        "<!doctype html><meta charset=utf-8><title>OSyx Zen rendering test</title><style>body{margin:40px;background:#dbeafe;color:#172554;font:20px Lato,sans-serif}button{font:inherit;padding:16px}#box{width:240px;height:120px;background:#16a34a;margin:24px 0}</style><h1>Zen renders HTML</h1><p>This page is rendered by the unmodified browser.</p><div id=box></div><button onclick=\"document.title='OSyx click verified';this.textContent='Click verified';document.getElementById('box').style.background='#f97316'\">Verify click</button>",
     )).is_err() {
         println!("ZEN_PROBE_RESULT infrastructure=profile_creation_failed");
         if let Ok(p) = prism { let _ = os_std::system::kill(p.id()); let _ = p.wait(); }
@@ -292,12 +299,14 @@ fn zen_probe() -> i32 {
     // The session runs as root, so Gecko's launcher would start the browser
     // with a de-elevated token, which OSyx cannot run: keep its own. The
     // probe has its own temporary profile with software-rendering prefs.
-    zen.args(["-v", "/opt/zen/zen.exe", "--no-remote", "-no-deelevate", "-profile", "C:\\tmp\\zen-probe-profile", "about:blank"]);
+    zen.args(["-v", "/opt/zen/zen.exe", "--no-remote", "-no-deelevate", "-profile"]);
+    zen.arg(&format!("C:{}", profile.replace('/', "\\"))).arg("file:///C:/tmp/zen-probe-page.html");
     // Gecko's Windows sandbox broker starts its children suspended and
     // patches their memory, which OSyx gives no process the right to do:
     // Mozilla's own switches start them unsandboxed instead.
     // Every failing Windows API call goes to the serial log (bring-up).
     zen.env("OSYX_WINRUN_TRACE", "1");
+    zen.env("MOZ_LOG", "timestamp,sync,Widget:5,RenderThread:5,WinOcclusionTracker:5,WinOcclusionCalculator:5,nsDocShell:5,DocLoader:5,ipc:5");
     for kind in ["CONTENT", "GPU", "RDD", "SOCKET_PROCESS", "GMP", "UTILITY", "VR"] {
         zen.env(&format!("MOZ_DISABLE_{kind}_SANDBOX"), "1");
     }

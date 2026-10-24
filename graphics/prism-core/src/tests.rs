@@ -377,6 +377,29 @@ fn layers_keep_panels_above_and_desktop_below() {
 }
 
 #[test]
+fn minimize_and_restore_report_state_to_the_client() {
+    let mut h = Harness::new();
+    let app = h.client(2);
+    let window = h.window(app, 1, 300, 200, 0x123456);
+    h.events();
+    h.send(app, Request::WindowAction { target: 1, action: Action::Minimize, global: false });
+    assert!(h.events_for(app).iter().any(|e| matches!(e,
+        Event::Configure { window: 1, states, .. } if states & proto::state::MINIMIZED != 0)));
+    h.send(app, Request::WindowAction { target: 1, action: Action::Restore, global: false });
+    assert!(h.events_for(app).iter().any(|e| matches!(e,
+        Event::Configure { window: 1, states, .. } if states & proto::state::MINIMIZED == 0)));
+    h.send(app, Request::WindowAction { target: 1, action: Action::Minimize, global: false });
+    h.events();
+    h.send(app, Request::WindowAction { target: 1, action: Action::Maximize, global: false });
+    let snapshot = h.c.snapshot();
+    let state = snapshot.iter().find(|w| w.id == window).unwrap();
+    assert!(!state.minimized);
+    assert!(state.maximized);
+    assert!(h.events_for(app).iter().any(|e| matches!(e,
+        Event::Configure { window: 1, states, .. } if states & proto::state::MINIMIZED == 0 && states & proto::state::MAXIMIZED != 0)));
+}
+
+#[test]
 fn keyboard_goes_to_the_focused_window_with_layout_text() {
     let mut h = Harness::new();
     h.c.set_layout(osyx_input::layout::Layout::Polish);
