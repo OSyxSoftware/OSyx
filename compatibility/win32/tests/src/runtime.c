@@ -26,6 +26,64 @@ static __attribute__((noinline)) USHORT level1(PVOID *frames) { volatile int pad
 
 typedef struct { SLIST_ENTRY entry; int value; } __attribute__((aligned(16))) Item;
 
+/* Drive the public ABI with known nonvolatile register values. The
+   compatibility implementation must retain RBX and its CAS success bit. */
+__attribute__((naked)) static PSLIST_ENTRY push_seeded(PSLIST_HEADER header, PSLIST_ENTRY entry, ULONG_PTR seed, int *preserved) {
+    __asm__ volatile(
+        "pushq %rbx\n\t"
+        "subq $48, %rsp\n\t"
+        "movq %r8, %rbx\n\t"
+        "movq %r8, 32(%rsp)\n\t"
+        "movq %r9, 40(%rsp)\n\t"
+        "callq *__imp_InterlockedPushEntrySList(%rip)\n\t"
+        "movq 40(%rsp), %r10\n\t"
+        "cmpq 32(%rsp), %rbx\n\t"
+        "sete %r11b\n\t"
+        "movzbl %r11b, %r11d\n\t"
+        "movl %r11d, (%r10)\n\t"
+        "addq $48, %rsp\n\t"
+        "popq %rbx\n\t"
+        "retq\n\t");
+}
+
+static SLIST_HEADER stress_head __attribute__((aligned(16)));
+static Item stress_items[4][128];
+static DWORD WINAPI slist_worker(void *parameter) {
+    unsigned worker=(unsigned)(ULONG_PTR)parameter;
+    const ULONG_PTR seeds[]={0,1,0x100,0xff,0x12340000,~(ULONG_PTR)0};
+    for(unsigned i=0;i<128;i++) {
+        stress_items[worker][i].value=(int)(worker*128+i);
+        int preserved=0;
+        push_seeded(&stress_head,&stress_items[worker][i].entry,seeds[i%6],&preserved);
+        if(!preserved) return 1;
+    }
+    return 0;
+}
+
+static void slist_abi_checks(void) {
+    InitializeSListHead(&stress_head);
+    HANDLE workers[4]; int started=1;
+    for(unsigned i=0;i<4;i++){workers[i]=CreateThread(NULL,0,slist_worker,(void *)(ULONG_PTR)i,0,NULL);if(!workers[i])started=0;}
+    check("SList ABI worker threads start",started);
+    if(!started || WaitForMultipleObjects(4,workers,TRUE,5000)!=WAIT_OBJECT_0) {
+        check("SList operations finish with zero and nonzero RBX",0);
+        finish("runtime");
+    }
+    check("SList operations finish with zero and nonzero RBX",1);
+    int preserved=1;
+    for(unsigned i=0;i<4;i++){DWORD code=9; if(!GetExitCodeThread(workers[i],&code)||code)preserved=0;CloseHandle(workers[i]);}
+    check("SList calls preserve the Win64 RBX register",preserved);
+    check_eq("concurrent SList push depth",QueryDepthSList(&stress_head),512);
+    BYTE seen[512]={0}; unsigned count=0; int valid=1;
+    for(;count<512;count++) {
+        Item *item=(Item *)InterlockedPopEntrySList(&stress_head);
+        if(!item || item->value<0 || item->value>=512 || seen[item->value]){valid=0;break;}
+        seen[item->value]=1;
+    }
+    check("concurrent SList entries are returned exactly once",valid && count==512 && !InterlockedPopEntrySList(&stress_head));
+    check_eq("concurrent SList drains to zero depth",QueryDepthSList(&stress_head),0);
+}
+
 static int wstr_eq(const WCHAR *a, const WCHAR *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
 
 void __stdcall start(void) {
@@ -58,6 +116,7 @@ void __stdcall start(void) {
           RtlRunOnceExecuteOnce(&once, once_fn, &runs, &ctx) == 0 && runs == 1 && ctx == (PVOID)0x1230);
 
     /* Interlocked singly linked list. */
+    slist_abi_checks();
     static SLIST_HEADER head __attribute__((aligned(16)));
     static Item items[3];
     InitializeSListHead(&head);

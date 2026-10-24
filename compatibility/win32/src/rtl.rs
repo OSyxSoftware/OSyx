@@ -389,15 +389,18 @@ extern "win64" fn DecodePointer(p: u64) -> u64 {
 unsafe fn cas16(p: *mut u64, old: [u64; 2], new: [u64; 2]) -> bool {
     let ok: u8;
     // SAFETY: the caller's header; RBX is saved around the instruction.
+    // Every scratch register is explicit: an unconstrained byte output
+    // may be BL, whose SETE result would be overwritten by restoring RBX.
+    // The address must not be allocated in RBX either, since we exchange it.
     unsafe {
         asm!(
-            "xchg {lo}, rbx",
-            "lock cmpxchg16b [{p}]",
-            "sete {ok}",
-            "mov rbx, {lo}",
-            p = in(reg) p,
-            lo = inout(reg) new[0] => _,
-            ok = out(reg_byte) ok,
+            "xchg r9, rbx",
+            "lock cmpxchg16b [r8]",
+            "sete r11b",
+            "mov rbx, r9",
+            in("r8") p,
+            inout("r9") new[0] => _,
+            out("r11b") ok,
             inout("rax") old[0] => _,
             inout("rdx") old[1] => _,
             in("rcx") new[1],
