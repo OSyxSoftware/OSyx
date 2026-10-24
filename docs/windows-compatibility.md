@@ -68,6 +68,31 @@ are not implemented. Custom security descriptors/inheritable handles in
 Win32 file/directory/thread/event/mutex/semaphore creation fail explicitly;
 default attributes with a null descriptor and no inheritance are accepted.
 
+## Software GDI surfaces
+
+`user32/gdi.rs` supplies display/information DCs and memory DCs. Selected
+bitmaps own stable DWORD-aligned storage; CreateDIBSection exposes that
+storage until DeleteObject. Both DIB row orientations and BI_RGB
+1/8/16/24/32-bpp data are decoded to the software renderer's 32-bit pixels;
+16/32-bit BI_BITFIELDS masks are also accepted. SRCCOPY preserves all four
+bytes between 32-bpp surfaces. Window drawing uses the same paint and region
+clipping as memory drawing, and EndPaint/ReleaseDC present damage to PRISM.
+Regions use nonoverlapping rectangles and preserve holes through boolean
+operations. SaveDC/RestoreDC retain selections, colors, clip and transform.
+
+This is still a software subset. Display DCs expose capabilities rather than
+permission to overwrite the desktop. File-mapping-backed DIB sections, RLE,
+DIB_PAL_COLORS, arbitrary raster operations and OpenGL pixel formats are
+unsupported. Bitmap atlas fonts have no sfnt tables or TrueType outlines;
+the compositor has no ICC profile. Those queries report failure. Glyph
+indices are local atlas identities; glyph bitmaps support an identity MAT2.
+Cubics are flattened to 24 line segments; geometric pen joins and transformed
+rectangular paths use rectangle approximations. Matrix state composes fully;
+raster blits and glyph images currently transform their origins without
+resampling their pixels for scale/rotation. Only MM_TEXT is accepted. These
+limits and a successful GDI fixture do not imply that Gecko can render a
+browser window.
+
 ## Programs and tests
 
 `scripts/build-wintests.ps1` uses MSYS2 clang/lld and public import libraries
@@ -80,7 +105,14 @@ their own assertions and the host TCP/UDP echo server's log:
 - `fileio.exe`: files, sharing and delete-on-close inside one winrun process.
 - `threads.exe` / `windll.dll`: synchronization, TLS, memory and DLL loading.
 - `winsock.exe`: TCP and UDP against a host server.
-- `gui.exe`: a real PRISM window, GDI painting and timers.
+- `gui.exe`: a real PRISM window, GDI painting and timers, including a
+  32-bpp DIB copied from a memory DC into the PRISM surface and read back.
+- `gdi2.exe`: native-Windows-verified DC/bitmap lifetimes, exposed DIB pixels,
+  SRCCOPY (including overlap), BLACKNESS/WHITENESS, row order and partial
+  scan lines, 32/24/16/8-bpp conversion, region holes and serialization,
+  paths, saved DC state, XFORM composition, aligned/clipped text, font queries
+  and unsupported OpenGL entry points. C static assertions verify the x64
+  layouts independently of Rust.
 - `sysadmin.exe`: volume/directory data, buffer sizing, device/adapter
   enumeration, handle lifetime and ICMP payload preservation. C static
   assertions independently verify the Windows x64 structure sizes.

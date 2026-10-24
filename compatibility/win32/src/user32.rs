@@ -29,6 +29,9 @@ use osyx_gfx::text::Font as MonoFont;
 use osyx_gfx::{Color, Rect, Surface};
 use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
+mod gdi;
+use gdi::{Bitmap, GdiPath, Region, Xform};
+
 static SANS14: &[u8] = include_bytes!("../../../graphics/assets/sans14.osxp");
 static SANS14B: &[u8] = include_bytes!("../../../graphics/assets/sans14b.osxp");
 static SANS20: &[u8] = include_bytes!("../../../graphics/assets/sans20.osxp");
@@ -132,8 +135,11 @@ enum Gdi {
     Pen(Color, u32),
     NullPen,
     Font(FontKind),
+    Bitmap,
+    Region,
 }
 
+#[derive(Clone)]
 struct Dc {
     hwnd: u64,
     paint: Rect,
@@ -144,6 +150,18 @@ struct Dc {
     pen: u64,
     font: u64,
     pos: (i32, i32),
+    bitmap: u64,
+    memory: bool,
+    clip: Option<Region>,
+    transform: Xform,
+    align: u32,
+    graphics_mode: i32,
+    map_mode: i32,
+    poly_mode: i32,
+    stretch_mode: i32,
+    miter: f32,
+    saved: Vec<Dc>,
+    path: GdiPath,
 }
 
 struct Gui {
@@ -160,6 +178,8 @@ struct Gui {
     chars: VecDeque<(u32, char)>,
     gdi: BTreeMap<u64, Gdi>,
     dcs: BTreeMap<u64, Dc>,
+    bitmaps: BTreeMap<u64, Bitmap>,
+    regions: BTreeMap<u64, Region>,
     next: u64,
     keys: [bool; 256],
     pointer: (i32, i32),
@@ -220,6 +240,8 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             chars: VecDeque::new(),
             gdi,
             dcs: BTreeMap::new(),
+            bitmaps: BTreeMap::new(),
+            regions: BTreeMap::new(),
             next: 0x2_0000,
             keys: [false; 256],
             pointer: (0, 0),
@@ -1501,6 +1523,18 @@ fn new_dc(g: &mut Gui, hwnd: u64, paint: Rect) -> u64 {
             pen: STOCK_BASE + BLACK_PEN as u64,
             font: STOCK_BASE + SYSTEM_FONT as u64,
             pos: (0, 0),
+            bitmap: 0,
+            memory: false,
+            clip: None,
+            transform: Xform::IDENTITY,
+            align: 0,
+            graphics_mode: 1,
+            map_mode: 1,
+            poly_mode: 1,
+            stretch_mode: 1,
+            miter: 10.0,
+            saved: Vec::new(),
+            path: GdiPath::default(),
         },
     );
     h
@@ -1564,7 +1598,10 @@ extern "win64" fn EndPaint(hwnd: u64, ps: *const u8) -> Bool {
 }
 
 extern "win64" fn GetDC(hwnd: u64) -> u64 {
-    if hwnd == 0 || !wait_drawable(hwnd) {
+    if hwnd == 0 {
+        return gdi::display_dc();
+    }
+    if !wait_drawable(hwnd) {
         return fail(ERROR_NOT_SUPPORTED, 0); // no drawing on the whole screen
     }
     with(|g| {
@@ -1583,22 +1620,8 @@ extern "win64" fn ReleaseDC(hwnd: u64, dc: u64) -> i32 {
 
 /// Runs `f` on the DC's window surface, clipped to its paint rectangle;
 /// records what was drawn for the next present.
-fn draw<R>(dc: u64, f: impl FnOnce(&mut Surface, &Dc, &BTreeMap<u64, Gdi>, Rect) -> (R, Rect)) -> Option<R> {
-    with(|g| {
-        let d = g.dcs.get(&dc)?;
-        let w = g.windows.get_mut(&d.hwnd)?;
-        let full = Rect::new(0, 0, w.size.0, w.size.1);
-        let clip = d.paint.intersect(&full);
-        let mut s = w.win.surface().ok()?;
-        let (r, touched) = f(&mut s, d, &g.gdi, clip);
-        let touched = touched.intersect(&clip);
-        let w = g.windows.get_mut(&g.dcs.get(&dc)?.hwnd)?;
-        w.drawn = Some(match w.drawn {
-            Some(o) => o.union(&touched),
-            None => touched,
-        });
-        Some(r)
-    })
+fn draw<R>(dc: u64, f: impl FnMut(&mut Surface, &Dc, &BTreeMap<u64, Gdi>, Rect) -> (R, Rect)) -> Option<R> {
+    gdi::draw_dc(dc, f)
 }
 
 /// A brush handle, or a system color index + 1 (as in WNDCLASS.hbrBackground).
@@ -1703,10 +1726,17 @@ fn draw_text(s: &mut Surface, k: FontKind, x: i32, y: i32, t: &str, c: Color, cl
         FontKind::SansBold => f.bold.draw_clipped(s, x, y, t, c, 255, clip),
         FontKind::Large => f.large.draw_clipped(s, x, y, t, c, 255, clip),
         FontKind::Mono => {
-            // The cell font has no clipped variant: draw into a clipped view.
+            // The cell font has no clipped variant. Rasterize coverage in a
+            // temporary surface, then blend only the visible part.
             let r = Rect::new(x, y, f.mono.measure(t), f.mono.line_height()).intersect(&clip);
             if r.w > 0 && r.h > 0 {
-                f.mono.draw(s, x, y, t, c, 255);
+                let (w,h)=(f.mono.measure(t),f.mono.line_height());
+                let mut pixels=alloc::vec![0;(w*h) as usize];
+                let mut mask=Surface::new(&mut pixels,w,h,w).expect("font cell surface");
+                f.mono.draw(&mut mask,0,0,t,0xffffff,255);
+                for dy in r.y..r.y+r.h as i32 { for dx in r.x..r.x+r.w as i32 {
+                    s.blend_px(dx,dy,c,mask.get(dx-x,dy-y).unwrap_or(0)&255);
+                } }
             }
             r
         }
@@ -1714,16 +1744,7 @@ fn draw_text(s: &mut Surface, k: FontKind, x: i32, y: i32, t: &str, c: Color, cl
 }
 
 fn text_out(dc: u64, x: i32, y: i32, t: &str) -> Bool {
-    draw(dc, |s, d, gdi, clip| {
-        let k = font_of(gdi, d.font);
-        let r = Rect::new(x, y, measure(k, t), line_height(k));
-        if d.opaque {
-            s.fill_rect(r.intersect(&clip), d.bk);
-        }
-        draw_text(s, k, x, y, t, d.text, clip);
-        (TRUE, r)
-    })
-    .unwrap_or(FALSE)
+    gdi::text_out_ex(dc, x, y, t, 0, None, None)
 }
 
 extern "win64" fn TextOutA(dc: u64, x: i32, y: i32, s: *const u8, n: i32) -> Bool {
@@ -2020,6 +2041,14 @@ extern "win64" fn SelectObject(dc: u64, obj: u64) -> u64 {
             Gdi::Brush(_) | Gdi::NullBrush => core::mem::replace(&mut d.brush, obj),
             Gdi::Pen(..) | Gdi::NullPen => core::mem::replace(&mut d.pen, obj),
             Gdi::Font(_) => core::mem::replace(&mut d.font, obj),
+            Gdi::Bitmap if d.memory => {
+                if obj != STOCK_BASE + 21 && g.dcs.iter().any(|(&h, d)| h != dc && d.bitmap == obj) {
+                    return None;
+                }
+                let d = g.dcs.get_mut(&dc)?;
+                core::mem::replace(&mut d.bitmap, obj)
+            }
+            _ => return None,
         })
     })
     .unwrap_or(0)
@@ -2029,7 +2058,14 @@ extern "win64" fn DeleteObject(obj: u64) -> Bool {
     if (STOCK_BASE..STOCK_BASE + 32).contains(&obj) {
         return TRUE; // stock objects are never deleted
     }
-    with(|g| g.gdi.remove(&obj).is_some()) as Bool
+    with(|g| {
+        if g.dcs.values().any(|d| d.bitmap == obj || d.saved.iter().any(|s| s.bitmap == obj)) {
+            return false;
+        }
+        g.bitmaps.remove(&obj);
+        g.regions.remove(&obj);
+        g.gdi.remove(&obj).is_some()
+    }) as Bool
 }
 
 extern "win64" fn MoveToEx(dc: u64, x: i32, y: i32, old: *mut i32) -> Bool {
@@ -2042,13 +2078,29 @@ extern "win64" fn MoveToEx(dc: u64, x: i32, y: i32, old: *mut i32) -> Bool {
             }
         }
         d.pos = (x, y);
+        if d.path.active {
+            d.path.move_to(d.transform.point(x, y));
+        }
     })
     .is_some() as Bool
 }
 
 extern "win64" fn LineTo(dc: u64, x: i32, y: i32) -> Bool {
+    if dc_set(dc, |d| {
+        if !d.path.active {
+            return false;
+        }
+        d.path.line_to(d.transform.point(x, y));
+        d.pos = (x, y);
+        true
+    })
+    .unwrap_or(false)
+    {
+        return TRUE;
+    }
     let r = draw(dc, |s, d, gdi, clip| {
-        let (x0, y0) = d.pos;
+        let (x0, y0) = d.transform.point(d.pos.0, d.pos.1);
+        let (x, y) = d.transform.point(x, y);
         let touched = Rect::new(x0.min(x), y0.min(y), (x0 - x).unsigned_abs() + 1, (y0 - y).unsigned_abs() + 1);
         if let Some(Gdi::Pen(c, width)) = gdi.get(&d.pen) {
             for o in 0..*width as i32 {
@@ -2094,8 +2146,21 @@ fn line_clipped(s: &mut Surface, x0: i32, y0: i32, x1: i32, y1: i32, c: Color, c
 }
 
 extern "win64" fn Rectangle(dc: u64, l: i32, t: i32, r: i32, b: i32) -> Bool {
+    if dc_set(dc, |d| {
+        if !d.path.active {
+            return false;
+        }
+        d.path.rect(d.transform.rect((l, t, r, b)));
+        true
+    })
+    .unwrap_or(false)
+    {
+        return TRUE;
+    }
     let rect = Rect::new(l, t, (r - l).max(0) as u32, (b - t).max(0) as u32);
     draw(dc, |s, d, gdi, clip| {
+        let rect = d.transform.rect((rect.x, rect.y, rect.x + rect.w as i32, rect.y + rect.h as i32));
+        let (l, t, r, b) = (rect.x, rect.y, rect.x + rect.w as i32, rect.y + rect.h as i32);
         if let Some(c) = brush_color(gdi, d.brush) {
             s.fill_rect(rect.intersect(&clip), c);
         }
@@ -2130,13 +2195,16 @@ extern "win64" fn RoundRect(dc: u64, l: i32, t: i32, r: i32, b: i32, w: i32, _h:
 }
 
 extern "win64" fn SetPixel(dc: u64, x: i32, y: i32, c: u32) -> u32 {
-    draw(dc, |s, _, _, clip| {
+    let mut written=false;
+    let result=draw(dc, |s, d, _, clip| {
+        let (x, y) = d.transform.point(x, y);
         if x >= clip.x && y >= clip.y && x < clip.x + clip.w as i32 && y < clip.y + clip.h as i32 {
             s.put(x, y, colorref(c));
+            written=true;
         }
-        (c, Rect::new(x, y, 1, 1))
-    })
-    .unwrap_or(0xFFFF_FFFF)
+        ((), Rect::new(x, y, 1, 1))
+    });
+    if result.is_some() && written { c } else { 0xffff_ffff }
 }
 
 /// A PRISM dialog implementing MB_OK and MB_OKCANCEL. Other button sets
@@ -3204,72 +3272,6 @@ extern "win64" fn GdiFlush() -> Bool {
     TRUE // drawing reaches PRISM in order already
 }
 
-/// Each save returns a new level; restore is accepted for any level, since
-/// the device contexts here keep no nested state to go back to.
-extern "win64" fn SaveDC(_dc: u64) -> i32 {
-    with(|g| {
-        g.next += 1;
-        (g.next & 0x7fff_ffff) as i32
-    })
-}
-
-extern "win64" fn RestoreDC(_dc: u64, _level: i32) -> Bool {
-    TRUE
-}
-
-extern "win64" fn SetMapMode(_dc: u64, _mode: i32) -> i32 {
-    1 // MM_TEXT
-}
-
-extern "win64" fn SetTextAlign(_dc: u64, _align: u32) -> u32 {
-    0 // TA_LEFT | TA_TOP
-}
-
-extern "win64" fn SetPolyFillMode(_dc: u64, _mode: i32) -> i32 {
-    1 // ALTERNATE
-}
-
-extern "win64" fn SetStretchBltMode(_dc: u64, _mode: i32) -> i32 {
-    1 // BLACKONWHITE
-}
-
-extern "win64" fn SetMiterLimit(_dc: u64, _limit: f32, old: *mut f32) -> Bool {
-    if !old.is_null() {
-        // SAFETY: the caller's out pointer.
-        unsafe { *old = 10.0 };
-    }
-    TRUE
-}
-
-extern "win64" fn GetGraphicsMode(_dc: u64) -> i32 {
-    1 // GM_COMPATIBLE
-}
-
-extern "win64" fn SetGraphicsMode(_dc: u64, _mode: i32) -> i32 {
-    1
-}
-
-extern "win64" fn GetCurrentObject(dc: u64, kind: u32) -> u64 {
-    with(|g| g.dcs.get(&dc).map(|d| match kind {
-        2 | 8 => d.pen,  // OBJ_PEN, OBJ_EXTPEN
-        4 | 5 => d.font, // OBJ_FONT, OBJ_TEXT
-        _ => d.brush,
-    }).unwrap_or(0))
-}
-
-extern "win64" fn GetClipBox(dc: u64, out: *mut u8) -> i32 {
-    if out.is_null() {
-        return 0;
-    }
-    let r = with(|g| g.dcs.get(&dc).map(|d| (d.paint.x, d.paint.y, d.paint.x + d.paint.w as i32, d.paint.y + d.paint.h as i32)));
-    put_rect(out, r.unwrap_or_else(screen_rect));
-    2 // COMPLEXREGION
-}
-
-extern "win64" fn IntersectClipRect(_dc: u64, _l: i32, _t: i32, _r: i32, _b: i32) -> i32 {
-    2 // a region, which is what Windows returns for a successful clip
-}
-
 /// Printing goes nowhere: there is no spooler, but a program that opens a
 /// job and ends it sees the calls succeed rather than fail mid-print.
 extern "win64" fn StartDocW(_dc: u64, _doc: *const u8) -> i32 {
@@ -3318,22 +3320,13 @@ pub fn gdi_exports() -> Vec<(&'static str, u64)> {
         SetPixel,
         GetDeviceCaps,
         GdiFlush,
-        SaveDC,
-        RestoreDC,
-        SetMapMode,
-        SetTextAlign,
-        SetPolyFillMode,
-        SetStretchBltMode,
-        SetMiterLimit,
-        GetGraphicsMode,
-        SetGraphicsMode,
-        GetCurrentObject,
-        GetClipBox,
-        IntersectClipRect,
         StartDocW,
         EndDoc,
         StartPage,
         EndPage,
         AbortDoc,
     ]
+    .into_iter()
+    .chain(gdi::exports())
+    .collect()
 }

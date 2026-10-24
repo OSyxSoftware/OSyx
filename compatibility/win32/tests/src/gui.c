@@ -38,6 +38,25 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetTextColor(dc, RGB(20, 20, 20));
         static const char line[] = "GDI text and rectangles drawn into a PRISM surface";
         TextOutA(dc, 20, 80, line, sizeof line - 1);
+        /* Exercise the same memory-DC -> PRISM path Gecko's software renderer
+         * needs, and read the window surface back before it is presented. */
+        BITMAPINFO bi = {0};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = 16; bi.bmiHeader.biHeight = -16;
+        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+        DWORD *pixels = NULL;
+        HBITMAP bitmap = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void **)&pixels, NULL, 0);
+        HDC memory = CreateCompatibleDC(dc);
+        check("PRISM raster source allocated", bitmap && memory && pixels);
+        if (bitmap && memory && pixels) {
+            for (int i = 0; i < 256; i++) pixels[i] = 0x0012ab34;
+            HGDIOBJ saved = SelectObject(memory, bitmap);
+            check("BitBlt memory DIB into PRISM", BitBlt(dc, 20, 110, 16, 16, memory, 0, 0, SRCCOPY));
+            check_eq("PRISM surface contains copied pixel", GetPixel(dc, 24, 114), RGB(0x12, 0xab, 0x34));
+            SelectObject(memory, saved);
+        }
+        if (memory) DeleteDC(memory);
+        if (bitmap) DeleteObject(bitmap);
         EndPaint(hwnd, &ps);
         paints++;
         put("gui: WM_PAINT ");

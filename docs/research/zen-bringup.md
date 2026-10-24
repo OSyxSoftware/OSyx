@@ -462,3 +462,53 @@ browser launcher/default registration is included.
 Implementation references: [PE/COFF format](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format),
 [condition variables](https://learn.microsoft.com/en-us/windows/win32/sync/condition-variables),
 [SleepConditionVariableSRW](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-sleepconditionvariablesrw).
+
+## GDI surfaces: attempts 47 and 48 (2026-10-24)
+
+The baseline was main at 2ec93b7, with attempt 46 blocked on
+`GDI32.dll!CreateDCW`. The worklist was the 46 gdi32 gaps imported by xul.dll
+in `build/zen/dependencies.json`; all 46 now have runtime exports, including
+WidenPath. The audit after attempt 47 reports no gdi32 gap for xul.dll.
+No Windows binary or Zen payload is committed.
+
+The new software GDI layer provides DCs, DIB storage and format conversion,
+bitmap selection, pixel copies to PRISM, rectangle-list regions, paths,
+DC snapshots, matrix state and bitmap-font queries. OpenGL entry points
+exist and explicitly report unavailable support. Current software limits are
+recorded in [windows-compatibility.md](../windows-compatibility.md).
+
+Attempt 47 used `scripts/zen-test.ps1 -SkipFetch`. Evidence in
+`build/zen/qemu.serial.log` (also preserved as `attempt-47.serial.log`):
+
+```
+[   15.800] [prism:3] prism: window 3 "nsAppShell:EventWindow" created (Normal, client 2)
+[   16.450] [winrun:5] winrun: delay load failed: SHELL32.dll!GetCurrentProcessExplicitAppUserModelID
+[   16.470] [prism:3] prism: client 2 (process 5) disconnected; released 1 window(s), 1 surface(s), 0 buffer(s), 0 KiB of pixels
+```
+
+Zen passes CreateDCW but still draws no pixels. The captured screen is
+`build/zen/attempt-47.png`; only the desktop and the auxiliary event-window
+entry appear. Probe result: exception 0xc06d007f, VM exit 33, no kernel panic,
+BLOCKED. The script's exit 2 remains intentional. Tabs, page rendering,
+keyboard/mouse and HTTPS are unverified. The next worklist remains the
+`gaps` array in `build/zen/dependencies.json`, filtered by importer xul.dll;
+the next reached failure belongs to shell32, outside this GDI round.
+
+Attempt 48 reproduced the same shell32 blocker (serial time 15.920 s), with
+one auxiliary window and zero pixel buffers. `zen-test.ps1` returned 2;
+`build/zen/qemu-result.json` remains blocked. Its captured screen is
+`build/zen/attempt-48.png`.
+
+The final gdi2 fixture passed 156/0 first on native Windows and then in QEMU.
+It covers each added export and asserts BITMAP, BITMAPINFOHEADER,
+DIBSECTION, XFORM, RGNDATAHEADER, LOGBRUSH, GLYPHMETRICS, MAT2, GLYPHSET
+and PIXELFORMATDESCRIPTOR layouts. The complete Win32 suite passed 1508/0
+(`build/wintest.log`, `build/test/win.serial.log`); clippy passed with
+`-D warnings` for x86_64-unknown-none using target/claude-check.
+
+Additional clipping checks cover SetPixel in a complex region and a clipped
+monospace glyph. Native test host: Windows 10.0.26300.
+
+The GUI fixture copies a green 16x16 DIB into the PRISM window and verifies
+the resulting pixel before EndPaint. The screenshot is
+`build/test/win-gui.png` and the GUI fixture reports 17/0.

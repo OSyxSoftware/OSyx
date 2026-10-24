@@ -80,12 +80,15 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     // The GUI program needs a compositor: start PRISM (with the desktop
     // shell) in the background, then run it as a client.
     let prism = Command::new("/system/bin/prism").spawn();
-    t.check("Win32 GUI window through PRISM (target E)", || {
+    t.check("Win32 GDI surfaces, pixel copies, regions, paths and DC state", || {
         if prism.is_err() {
             return false;
         }
         thread::sleep(Duration::from_millis(500));
-        run("gui.exe", &[]) == Some(0)
+        run("gdi2.exe", &[]) == Some(0)
+    });
+    t.check("Win32 GUI window through PRISM (target E)", || {
+        prism.is_ok() && run("gui.exe", &[]) == Some(0)
     });
     if let Ok(p) = prism {
         let _ = os_std::system::kill(p.id());
