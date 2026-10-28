@@ -28,6 +28,13 @@ global_asm!(
 .global osyx_fault_resume
 osyx_fault_resume:
     cli
+    push rdi
+    push rsi
+    sub rsp,8
+    call osyx_kernel_leave
+    add rsp,8
+    pop rsi
+    pop rdi
     fxrstor64 [rsi]
     mov rsp,rdi
     pop r15
@@ -46,6 +53,7 @@ osyx_fault_resume:
     pop rbx
     pop rax
     add rsp,16
+    swapgs
     iretq
 "#
 );

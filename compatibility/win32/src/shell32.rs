@@ -355,10 +355,506 @@ extern "win64" fn SHGetPropertyStoreForWindow(hwnd: u64, riid: *const [u8; 16], 
     crate::propsys::window_property_store(hwnd, riid, out)
 }
 
+// ---- SHGetFileInfo ---------------------------------------------------------
+
+const SHGFI_PIDL: u32 = 0x0000_0008;
+const SHGFI_USEFILEATTRIBUTES: u32 = 0x0000_0010;
+const SHGFI_DISPLAYNAME: u32 = 0x0000_0200;
+const SHGFI_TYPENAME: u32 = 0x0000_0400;
+const SHGFI_ATTRIBUTES: u32 = 0x0000_0800;
+const SHGFI_ICONLOCATION: u32 = 0x0000_1000;
+const SHGFI_EXETYPE: u32 = 0x0000_2000;
+
+// Shell item attributes, not FILE_ATTRIBUTE_*, in dwAttributes.
+const SFGAO_STREAM: u32 = 0x0040_0000;
+const SFGAO_FILESYSANCESTOR: u32 = 0x1000_0000;
+const SFGAO_FOLDER: u32 = 0x2000_0000;
+const SFGAO_FILESYSTEM: u32 = 0x4000_0000;
+
+/// `SHFILEINFOW`: hIcon, iIcon, dwAttributes, szDisplayName[MAX_PATH],
+/// szTypeName[80].
+#[repr(C)]
+struct ShFileInfoW {
+    icon: u64,
+    index: i32,
+    attributes: u32,
+    display: [u16; MAX_PATH],
+    kind: [u16; 80],
+}
+const SHFILEINFO_SIZE: u32 = 696;
+
+fn put_units(dst: &mut [u16], text: &str) {
+    let mut n = 0;
+    for unit in text.encode_utf16() {
+        if n + 1 >= dst.len() {
+            break;
+        }
+        dst[n] = unit;
+        n += 1;
+    }
+    dst[n] = 0;
+}
+
+fn extension(name: &str) -> &str {
+    name.rsplit_once('.').map_or("", |(_, e)| e)
+}
+
+fn file_kind(is_dir: bool, name: &str) -> &'static str {
+    if is_dir {
+        return "Folder";
+    }
+    match extension(name) {
+        e if e.eq_ignore_ascii_case("exe") || e.eq_ignore_ascii_case("com") => "Application",
+        e if e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd") => "Windows Command Script",
+        e if e.eq_ignore_ascii_case("msi") => "Windows Installer Package",
+        e if e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log") || e.eq_ignore_ascii_case("ini") || e.eq_ignore_ascii_case("md") => "Text Document",
+        e if e.eq_ignore_ascii_case("pdf") => "PDF Document",
+        e if e.eq_ignore_ascii_case("zip") => "Compressed (zipped) Folder",
+        e if e.eq_ignore_ascii_case("7z") || e.eq_ignore_ascii_case("rar") || e.eq_ignore_ascii_case("gz") || e.eq_ignore_ascii_case("xz") => "Compressed Archive",
+        e if e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm") => "HTML Document",
+        e if e.eq_ignore_ascii_case("png") || e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg") || e.eq_ignore_ascii_case("gif") || e.eq_ignore_ascii_case("webp") || e.eq_ignore_ascii_case("bmp") || e.eq_ignore_ascii_case("ico") => "Image",
+        e if e.eq_ignore_ascii_case("mp3") || e.eq_ignore_ascii_case("wav") || e.eq_ignore_ascii_case("flac") || e.eq_ignore_ascii_case("ogg") || e.eq_ignore_ascii_case("m4a") => "Audio",
+        e if e.eq_ignore_ascii_case("mp4") || e.eq_ignore_ascii_case("mkv") || e.eq_ignore_ascii_case("webm") || e.eq_ignore_ascii_case("avi") => "Video",
+        _ => "File",
+    }
+}
+
+/// Value `SHGetFileInfo` returns for SHGFI_EXETYPE.
+fn exetype(name: &str) -> u64 {
+    let ext = extension(name);
+    if ext.eq_ignore_ascii_case("exe") {
+        (0x4550 << 16) | 0x5A4D // PE signature high, "MZ" low
+    } else if ext.eq_ignore_ascii_case("com") {
+        0x5A4D
+    } else if ext.eq_ignore_ascii_case("bat") {
+        0x4261_546D // "Ba" high, "tM" low
+    } else {
+        0
+    }
+}
+
+/// No icons: hIcon stays NULL and the caller uses its generic icon (Firefox
+/// renders a fallback for a NULL icon). PIDLs belong to the shell namespace,
+/// which exists only for the file dialogs' own PIDLs; return 0 for those.
+fn sh_get_file_info(path: *const u16, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
+    if flags & SHGFI_PIDL != 0 || path.is_null() || info.is_null() || cb < SHFILEINFO_SIZE {
+        return 0;
+    }
+    // SAFETY: the caller's struct; its size was checked above.
+    unsafe { core::ptr::write_bytes(info, 0, SHFILEINFO_SIZE as usize) };
+    // SAFETY: NUL-terminated path from the caller.
+    let Some(win) = (unsafe { path::wide_to_string(path) }) else { return 0 };
+    if win.is_empty() {
+        return 0;
+    }
+    let (attributes, is_dir) = if flags & SHGFI_USEFILEATTRIBUTES != 0 {
+        (input, input & kernel32::FILE_ATTRIBUTE_DIRECTORY != 0)
+    } else {
+        match kernel32::locate(&win) {
+            Ok((p, true)) => match os_sys::stat(&p) {
+                Ok(st) => (kernel32::attributes(&st), st.kind == osyx_abi::KIND_DIR),
+                Err(_) => return 0,
+            },
+            _ => return 0,
+        }
+    };
+    let name = win.rsplit(['\\', '/']).next().unwrap_or(&win);
+    if flags & SHGFI_EXETYPE != 0 {
+        return if is_dir { 0 } else { exetype(name) };
+    }
+    // SAFETY: the caller's struct, zeroed above and at least SHFILEINFO_SIZE.
+    let sfi = info as *mut ShFileInfoW;
+    unsafe {
+        (*sfi).attributes = if flags & SHGFI_ATTRIBUTES != 0 {
+            if is_dir {
+                SFGAO_FILESYSTEM | SFGAO_FOLDER | SFGAO_FILESYSANCESTOR
+            } else {
+                SFGAO_FILESYSTEM | SFGAO_STREAM
+            }
+        } else {
+            attributes
+        };
+        if flags & SHGFI_ICONLOCATION != 0 {
+            put_units(&mut (*sfi).display, &win);
+        } else if flags & SHGFI_DISPLAYNAME != 0 {
+            put_units(&mut (*sfi).display, name);
+        }
+        if flags & SHGFI_TYPENAME != 0 {
+            put_units(&mut (*sfi).kind, file_kind(is_dir, name));
+        }
+    }
+    1
+}
+
+extern "win64" fn SHGetFileInfoW(p: *const u16, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
+    sh_get_file_info(p, input, info, cb, flags)
+}
+
+extern "win64" fn SHGetFileInfoA(p: *const u8, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
+    // SAFETY: NUL-terminated ANSI path; the wide copy lives for this call.
+    let Some(wide) = (unsafe { path::ansi_to_wide(p) }) else { return 0 };
+    sh_get_file_info(wide.as_ptr(), input, info, cb, flags)
+}
+
+extern "win64" fn SHGetSpecialFolderPathA(_hwnd: u64, out: *mut u8, csidl: u32, create: i32) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's MAX_PATH buffer.
+    unsafe { *out = 0 };
+    let id = match csidl & !(CSIDL_FLAG_CREATE | CSIDL_FLAG_DONT_VERIFY) {
+        0 => 0x10,
+        id => id,
+    };
+    let Some(&(_, _, base)) = FOLDERS.iter().find(|f| f.1 == id) else { return 0 };
+    match resolve(base, create != 0 || csidl & CSIDL_FLAG_CREATE != 0, csidl & CSIDL_FLAG_DONT_VERIFY == 0) {
+        Ok(p) => {
+            kernel32::out_a(&p, out, MAX_PATH as u32);
+            1
+        }
+        Err(_) => 0,
+    }
+}
+
+// ---- Shell functions without a shell ---------------------------------------
+//
+// Firefox delay-loads these; before they existed here, the first call raised
+// a delay-load exception that terminated the whole browser (a finished
+// download called SHGetFileInfoW through nsLocalFile::GetDisplayName). Each
+// one below fails in the way its callers already handle, so clicking a
+// download or a link cannot kill the process.
+
+const E_NOTIMPL: u32 = 0x8000_4001;
+
+extern "win64" fn SHGetSpecialFolderLocation(_hwnd: u64, _csidl: u32, pidl: *mut u64) -> u32 {
+    if !pidl.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *pidl = 0 };
+    }
+    E_INVALIDARG // no shell namespace: only the file dialogs' PIDLs exist
+}
+
+extern "win64" fn SHGetStockIconInfo(_id: i32, _flags: u32, _info: *mut u8) -> u32 {
+    E_NOTIMPL
+}
+
+extern "win64" fn SHQueryUserNotificationState(out: *mut u32) -> u32 {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = 5 }; // QUNS_ACCEPTS_NOTIFICATIONS
+    S_OK
+}
+
+extern "win64" fn SHAddToRecentDocs(_flags: u32, _item: u64) {}
+
+extern "win64" fn SHChangeNotify(_event: i32, _flags: u32, _a: u64, _b: u64) {}
+
+extern "win64" fn SHOpenFolderAndSelectItems(folder: u64, _count: u32, _items: u64, _flags: u32) -> u32 {
+    // A PIDL from this runtime names one OSyx path; show its folder.
+    let Some(path) = crate::commdlg::pidl_file_path(folder) else { return E_FAIL };
+    let dir = parent_dir(&path).trim_end_matches('/');
+    let dir = if dir.is_empty() { "/" } else { dir };
+    match spawn_line(&format!("/system/bin/files {}", quote_win_arg(dir)), None) {
+        Ok(handle) => {
+            crate::objects::close(handle);
+            S_OK
+        }
+        Err(_) => E_FAIL,
+    }
+}
+
+extern "win64" fn SHParseDisplayName(_name: *const u16, _bind: u64, pidl: *mut u64, _in: u32, out: *mut u32) -> u32 {
+    if !pidl.is_null() {
+        // SAFETY: the caller's out pointers.
+        unsafe { *pidl = 0 };
+    }
+    if !out.is_null() {
+        unsafe { *out = 0 };
+    }
+    E_NOTIMPL
+}
+
+extern "win64" fn SHCreateItemFromParsingName(_name: *const u16, _bind: u64, _riid: *const u8, out: *mut u64) -> u32 {
+    if !out.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *out = 0 };
+    }
+    E_NOTIMPL
+}
+
+extern "win64" fn SHGetKnownFolderItem(_id: *const u8, _flags: u32, _token: u64, _riid: *const u8, out: *mut u64) -> u32 {
+    if !out.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *out = 0 };
+    }
+    E_NOTIMPL
+}
+
+const SE_ERR_FNF: u64 = 2;
+const SE_ERR_ACCESSDENIED: u64 = 5;
+const SE_ERR_OOM: u64 = 8;
+const SE_ERR_NOASSOC: u64 = 31;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_NO_ASSOCIATION: u32 = 1155;
+
+/// One argument for a Windows command line.
+fn quote_win_arg(s: &str) -> String {
+    if !s.is_empty() && !s.contains([' ', '\t', '"']) {
+        return String::from(s);
+    }
+    let mut out = String::from("\"");
+    let mut backslashes = 0;
+    for c in s.chars() {
+        match c {
+            '\\' => {
+                backslashes += 1;
+                out.push('\\');
+            }
+            '"' => {
+                for _ in 0..backslashes + 1 {
+                    out.push('\\');
+                }
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    for _ in 0..backslashes {
+        out.push('\\');
+    }
+    out.push('"');
+    out
+}
+
+/// Starts one command line through CreateProcessW, the same path a Windows
+/// program uses for its children (a PE runs under a child winrun).
+fn spawn_line(line: &str, dir: Option<&str>) -> Result<u64, u32> {
+    let mut line: Vec<u16> = line.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut dir: Option<Vec<u16>> = dir.map(|d| d.encode_utf16().chain(core::iter::once(0)).collect());
+    let mut startup = [0u64; 13];
+    startup[0] = 104; // cb = sizeof(STARTUPINFOW)
+    let mut process = [0u64; 3];
+    // SAFETY: all buffers are valid for the call; startup declares 104
+    // bytes and CreateProcessW writes one PROCESS_INFORMATION.
+    let ok = crate::process::CreateProcessW(
+        core::ptr::null(),
+        line.as_mut_ptr(),
+        0,
+        0,
+        0,
+        0,
+        0,
+        dir.as_mut().map_or(core::ptr::null(), |d| d.as_mut_ptr()),
+        startup.as_ptr() as *const u8,
+        process.as_mut_ptr(),
+    );
+    if ok == 0 {
+        return Err(crate::teb::last_error());
+    }
+    crate::objects::close(process[1]);
+    Ok(process[0])
+}
+
+fn parent_dir(path: &str) -> &str {
+    match path.trim_end_matches('/').rsplit_once('/') {
+        Some(("", _)) | None => "/",
+        Some((dir, _)) => dir,
+    }
+}
+
+/// The ShellExecute error that matches a CreateProcess error.
+fn se_error(win32: u32) -> u64 {
+    match win32 {
+        ERROR_FILE_NOT_FOUND | 3 => SE_ERR_FNF,
+        5 => SE_ERR_ACCESSDENIED,
+        8 => SE_ERR_OOM,
+        1155 => SE_ERR_NOASSOC,
+        _ => SE_ERR_NOASSOC,
+    }
+}
+
+/// ShellExecute's "open" and "explore" on OSyx: Windows programs run under
+/// a child winrun, folders open in Files, web files and URLs in the default
+/// browser. Anything else has no registered handler, which callers like
+/// Firefox already report to the user.
+fn shell_launch(verb: &str, file: &str, params: Option<&str>, dir: Option<&str>) -> Result<u64, (u64, u32)> {
+    let file = file.trim();
+    if file.is_empty() {
+        return Err((SE_ERR_FNF, ERROR_FILE_NOT_FOUND));
+    }
+    if ["http://", "https://", "file://", "about:"].iter().any(|p| file.starts_with(p)) {
+        return spawn_line(&format!("/bin/open {}", quote_win_arg(file)), None)
+            .map_err(|e| (se_error(e), e));
+    }
+    // SAFETY: a NUL-terminated path from the caller.
+    let Ok((osyx, true)) = kernel32::locate(file) else {
+        return Err((SE_ERR_FNF, ERROR_FILE_NOT_FOUND));
+    };
+    let Ok(stat) = os_sys::stat(&osyx) else { return Err((SE_ERR_FNF, ERROR_FILE_NOT_FOUND)) };
+    if stat.kind == osyx_abi::KIND_DIR {
+        if matches!(verb, "" | "open" | "explore") {
+            return spawn_line(&format!("/system/bin/files {}", quote_win_arg(&osyx)), None)
+                .map_err(|e| (se_error(e), e));
+        }
+        return Err((SE_ERR_NOASSOC, ERROR_NO_ASSOCIATION));
+    }
+    if verb == "explore" {
+        return spawn_line(&format!("/system/bin/files {}", quote_win_arg(parent_dir(&osyx))), None)
+            .map_err(|e| (se_error(e), e));
+    }
+    if !verb.is_empty() && verb != "open" {
+        return Err((SE_ERR_NOASSOC, ERROR_NO_ASSOCIATION));
+    }
+    let lower = osyx.to_ascii_lowercase();
+    if lower.ends_with(".exe") {
+        let mut line = quote_win_arg(&osyx);
+        if let Some(p) = params.map(str::trim).filter(|p| !p.is_empty()) {
+            line.push(' ');
+            line.push_str(p);
+        }
+        return spawn_line(&line, dir).map_err(|e| (se_error(e), e));
+    }
+    if [".html", ".htm", ".xhtml"].iter().any(|e| lower.ends_with(e)) {
+        return spawn_line(&format!("/bin/open {}", quote_win_arg(&osyx)), None).map_err(|e| (se_error(e), e));
+    }
+    Err((SE_ERR_NOASSOC, ERROR_NO_ASSOCIATION))
+}
+
+extern "win64" fn ShellExecuteW(_hwnd: u64, op: *const u16, file: *const u16, params: *const u16, dir: *const u16, _show: i32) -> u64 {
+    // SAFETY: NULL or NUL-terminated strings from the caller.
+    let (verb, file, params, dir) = unsafe {
+        (path::wide_to_string(op), path::wide_to_string(file), path::wide_to_string(params), path::wide_to_string(dir))
+    };
+    let Some(file) = file else {
+        crate::teb::set_last_error(ERROR_NO_ASSOCIATION);
+        return SE_ERR_FNF;
+    };
+    let verb = verb.unwrap_or_default().to_ascii_lowercase();
+    match shell_launch(&verb, &file, params.as_deref(), dir.as_deref()) {
+        Ok(handle) => {
+            crate::objects::close(handle);
+            42 // > 32: success, as on Windows
+        }
+        Err((error, win32)) => {
+            crate::teb::set_last_error(win32);
+            error
+        }
+    }
+}
+
+/// SHELLEXECUTEINFOW.hInstApp, at byte 56 of the x64 layout.
+const SHELLEXECUTEINFO_HINSTAPP: usize = 56;
+const SHELLEXECUTEINFO_HPROCESS: usize = 104;
+const SHELLEXECUTEINFO_SIZE: u32 = 112;
+const SEE_MASK_NOCLOSEPROCESS: u32 = 0x40;
+const ERROR_INVALID_PARAMETER: u32 = 87;
+
+extern "win64" fn ShellExecuteExW(info: *mut u8) -> i32 {
+    if info.is_null() {
+        crate::teb::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // SAFETY: cbSize is the first field of the caller's struct.
+    let (cb, mask) = unsafe {
+        (core::ptr::read_unaligned(info as *const u32), core::ptr::read_unaligned((info as *const u32).add(1)))
+    };
+    if cb < SHELLEXECUTEINFO_SIZE {
+        crate::teb::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // SAFETY: the validated struct has every field below; strings are NULL
+    // or NUL-terminated.
+    let (verb, file, params, dir) = unsafe {
+        let field = |at: usize| core::ptr::read_unaligned(info.add(at) as *const u64) as *const u16;
+        (path::wide_to_string(field(16)), path::wide_to_string(field(24)), path::wide_to_string(field(32)), path::wide_to_string(field(40)))
+    };
+    // SAFETY: inside the validated struct.
+    let (hinst, hprocess) = unsafe {
+        ((info.add(SHELLEXECUTEINFO_HINSTAPP) as *mut u64), (info.add(SHELLEXECUTEINFO_HPROCESS) as *mut u64))
+    };
+    unsafe { hprocess.write_unaligned(0) };
+    let Some(file) = file else {
+        crate::teb::set_last_error(ERROR_NO_ASSOCIATION);
+        unsafe { hinst.write_unaligned(SE_ERR_FNF) };
+        return 0;
+    };
+    let verb = verb.unwrap_or_default().to_ascii_lowercase();
+    match shell_launch(&verb, &file, params.as_deref(), dir.as_deref()) {
+        Ok(handle) => {
+            unsafe { hinst.write_unaligned(42) };
+            if mask & SEE_MASK_NOCLOSEPROCESS != 0 {
+                unsafe { hprocess.write_unaligned(handle) };
+            } else {
+                crate::objects::close(handle);
+            }
+            1
+        }
+        Err((error, win32)) => {
+            crate::teb::set_last_error(win32);
+            unsafe { hinst.write_unaligned(error) };
+            0
+        }
+    }
+}
+
+
+extern "win64" fn Shell_NotifyIconW(_message: u32, _data: u64) -> i32 {
+    0
+}
+
+extern "win64" fn DragQueryFileW(_drop: u64, _index: u32, _buf: *mut u16, _count: u32) -> u32 {
+    0 // no shell drag-and-drop source exists
+}
+
+extern "win64" fn ILCreateFromPathW(path: *const u16) -> u64 {
+    // SAFETY: NULL or NUL-terminated path from the caller.
+    let Some(win) = (unsafe { path::wide_to_string(path) }) else { return 0 };
+    match kernel32::locate(&win) {
+        Ok((osyx, true)) => crate::commdlg::allocate_pidl(&osyx),
+        _ => 0,
+    }
+}
+
+extern "win64" fn ILCreateFromPathA(path: *const u8) -> u64 {
+    // SAFETY: NULL or NUL-terminated ANSI path; the wide copy lives for this call.
+    let Some(wide) = (unsafe { path::ansi_to_wide(path) }) else { return 0 };
+    ILCreateFromPathW(wide.as_ptr())
+}
+
+/// Functions xul.dll delay-imports by number; the numbers are the Windows
+/// shell32 ordinals (155 ILFree, 190 ILCreateFromPathW).
+pub fn ordinals() -> Vec<(u16, u64)> {
+    alloc::vec![(155, crate::commdlg::il_free_address()), (190, ILCreateFromPathW as *const () as u64)]
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         SHGetKnownFolderPath,
         SHGetFolderPathW,
+        SHGetSpecialFolderPathA,
+        SHGetSpecialFolderLocation,
+        SHGetFileInfoW,
+        SHGetFileInfoA,
+        SHGetStockIconInfo,
+        SHQueryUserNotificationState,
+        SHAddToRecentDocs,
+        SHChangeNotify,
+        SHOpenFolderAndSelectItems,
+        SHParseDisplayName,
+        SHCreateItemFromParsingName,
+        SHGetKnownFolderItem,
+        ILCreateFromPathW,
+        ILCreateFromPathA,
+        ShellExecuteW,
+        ShellExecuteExW,
+        Shell_NotifyIconW,
+        DragQueryFileW,
         CommandLineToArgvW,
         GetCurrentProcessExplicitAppUserModelID,
         SetCurrentProcessExplicitAppUserModelID,

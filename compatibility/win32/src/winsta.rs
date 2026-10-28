@@ -21,7 +21,7 @@ use crate::{
     objsec, path,
 };
 use alloc::{format, string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use os_std::sync::Mutex;
 
 const ERROR_BUSY: u32 = 170;
@@ -303,7 +303,12 @@ extern "win64" fn WaitForInputIdle(h: u64, timeout: u32) -> u32 {
     };
     let exists = |w: &str| os_sys::stat(&marker(pid, w)).is_ok();
     let start = kernel32::now_ns();
+    static ITERS: AtomicU64 = AtomicU64::new(0);
     loop {
+        let it = ITERS.fetch_add(1, Ordering::Relaxed) + 1;
+        if it.is_multiple_of(200) && crate::EVENTS.load(Ordering::Relaxed) {
+            os_std::eprintln!("winrun: waitforinputidle it={it} pid={pid} timeout={timeout}");
+        }
         if exists("idle") {
             return 0;
         }

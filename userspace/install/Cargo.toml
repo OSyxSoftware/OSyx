@@ -1,0 +1,12 @@
+[package]
+name = "osyx-install"
+description = "OSyx installation engine: partitioning, FAT32 EFI system partition, ext4 root, system copy and first-boot configuration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+osyx-crypto = { path = "../../shared/crypto" }
+osyx-ext4 = { path = "../../storage/ext4" }
+osyx-fat = { path = "../../storage/fat" }
+osyx-part = { path = "../../storage/part" }

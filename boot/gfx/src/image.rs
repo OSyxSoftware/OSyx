@@ -8,6 +8,9 @@ pub struct Image<'a> {
     width: u32,
     height: u32,
     rgba: &'a [u8],
+    /// Every texel has alpha 255, so scaling can skip blending and
+    /// un-premultiplication.
+    opaque: bool,
 }
 
 impl<'a> Image<'a> {
@@ -24,7 +27,8 @@ impl<'a> Image<'a> {
         }
         let len = width as usize * height as usize * 4;
         let rgba = bytes.get(Self::HEADER..Self::HEADER + len).ok_or(AssetError::Truncated)?;
-        Ok(Image { width, height, rgba })
+        let opaque = rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255);
+        Ok(Image { width, height, rgba, opaque })
     }
 
     pub fn width(&self) -> u32 {
@@ -56,6 +60,9 @@ impl<'a> Image<'a> {
         // Source step per destination pixel in 16.16 fixed point.
         let step_x = ((self.width as u64) << 16) / dst.w as u64;
         let step_y = ((self.height as u64) << 16) / dst.h as u64;
+        if self.opaque && alpha == 255 {
+            return self.draw_scaled_opaque(s, dst, area, step_x, step_y);
+        }
         for y in area.y..area.y + area.h as i32 {
             // Map the destination pixel centre to source space, minus half a texel.
             let sy = ((y - dst.y) as i64 * step_y as i64) + (step_y as i64 >> 1) - 0x8000;
@@ -90,6 +97,63 @@ impl<'a> Image<'a> {
                 let b = (acc[2] / a_sum).min(255) as u8;
                 let a = ((a_sum >> 16) as u32 * alpha + 127) / 255;
                 s.blend_px(x, y, rgb(r, g, b), a);
+            }
+        }
+        area
+    }
+
+    /// Fully opaque image and no extra alpha: every texel contributes its
+    /// colour with weight 65536 in total, so a shift replaces the divisions
+    /// and the destination pixel is simply overwritten.
+    fn draw_scaled_opaque(
+        &self,
+        s: &mut Surface,
+        dst: Rect,
+        area: Rect,
+        step_x: u64,
+        step_y: u64,
+    ) -> Rect {
+        let sw = self.width as i32;
+        let sh = self.height as i32;
+        let stride = self.width as usize * 4;
+        for y in area.y..area.y + area.h as i32 {
+            let sy = ((y - dst.y) as i64 * step_y as i64) + (step_y as i64 >> 1) - 0x8000;
+            let y0 = (sy >> 16) as i32;
+            let fy = ((sy >> 8) & 0xFF) as u32;
+            let row0 = {
+                let at = y0.clamp(0, sh - 1) as usize * stride;
+                &self.rgba[at..at + stride]
+            };
+            let row1 = {
+                let at = (y0 + 1).clamp(0, sh - 1) as usize * stride;
+                &self.rgba[at..at + stride]
+            };
+            let wy0 = 256 - fy;
+            let wy1 = fy;
+            let row = y as usize * s.stride as usize + area.x as usize;
+            for (at, x) in (row..).zip(area.x..area.x + area.w as i32) {
+                let sx = ((x - dst.x) as i64 * step_x as i64) + (step_x as i64 >> 1) - 0x8000;
+                let x0 = (sx >> 16) as i32;
+                let fx = ((sx >> 8) & 0xFF) as u32;
+                let c0 = x0.clamp(0, sw - 1) as usize * 4;
+                let c1 = (x0 + 1).clamp(0, sw - 1) as usize * 4;
+                let w00 = (256 - fx) * wy0;
+                let w10 = fx * wy0;
+                let w01 = (256 - fx) * wy1;
+                let w11 = fx * wy1;
+                let r = (row0[c0] as u32 * w00 + row0[c1] as u32 * w10
+                    + row1[c0] as u32 * w01
+                    + row1[c1] as u32 * w11)
+                    >> 16;
+                let g = (row0[c0 + 1] as u32 * w00 + row0[c1 + 1] as u32 * w10
+                    + row1[c0 + 1] as u32 * w01
+                    + row1[c1 + 1] as u32 * w11)
+                    >> 16;
+                let b = (row0[c0 + 2] as u32 * w00 + row0[c1 + 2] as u32 * w10
+                    + row1[c0 + 2] as u32 * w01
+                    + row1[c1 + 2] as u32 * w11)
+                    >> 16;
+                s.pixels[at] = rgb(r as u8, g as u8, b as u8);
             }
         }
         area

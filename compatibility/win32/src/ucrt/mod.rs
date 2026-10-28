@@ -67,7 +67,7 @@ mod env;
 mod fenv;
 mod fs;
 mod heap;
-mod libm;
+pub(crate) mod libm;
 mod locale;
 mod lowio;
 mod math;
@@ -130,7 +130,7 @@ static PTDS: Mutex<BTreeMap<u64, Box<Ptd>>> = Mutex::new(BTreeMap::new());
 
 /// The calling thread's data (created on first use).
 pub fn ptd() -> &'static mut Ptd {
-    let tid = os_sys::gettid();
+    let tid = crate::teb::current_tid();
     let p: *mut Ptd = {
         let mut m = PTDS.lock().unwrap();
         &mut **m.entry(tid).or_insert_with(|| {
@@ -213,7 +213,7 @@ impl RLock {
     }
 
     pub fn lock(&self) {
-        let me = os_sys::gettid();
+        let me = crate::teb::current_tid();
         if self.owner.load(Ordering::Acquire) == me {
             self.depth.fetch_add(1, Ordering::Relaxed);
             return;
@@ -229,7 +229,7 @@ impl RLock {
 
     /// Releases one level; false if the caller does not own the lock.
     pub fn unlock(&self) -> bool {
-        if self.owner.load(Ordering::Acquire) != os_sys::gettid() {
+        if self.owner.load(Ordering::Acquire) != crate::teb::current_tid() {
             return false;
         }
         if self.depth.fetch_sub(1, Ordering::Relaxed) == 1 {

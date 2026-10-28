@@ -1598,6 +1598,20 @@ impl Stack {
         self.sockets.len()
     }
 
+    /// TEMP: flow-control snapshot of every TCP connection with data in or
+    /// out, for the periodic stats.
+    pub fn tcp_snapshot(&self) -> Vec<String> {
+        self.sockets
+            .iter()
+            .filter_map(|(id, s)| match s {
+                Socket::Tcp(t) if t.tcb.stats.bytes_in > 0 || t.tcb.stats.bytes_out > 0 => {
+                    Some(alloc::format!("{}@{} {}", id, t.tcb.remote.addr, t.tcb.debug_line()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every socket (for `netstat`).
     pub fn sockets(&self) -> Vec<SocketInfo> {
         self.sockets

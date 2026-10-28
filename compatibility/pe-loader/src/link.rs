@@ -41,25 +41,70 @@ pub trait BuiltinModule: Send {
     }
 }
 
+pub trait PeMapping: Send {
+    fn bytes(&self) -> &[u8];
+}
+
+pub enum PeData {
+    Owned(Vec<u8>),
+    Mapped(Box<dyn PeMapping>),
+}
+
+impl AsRef<[u8]> for PeData {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            PeData::Owned(bytes) => bytes,
+            PeData::Mapped(mapping) => mapping.bytes(),
+        }
+    }
+}
+
 pub enum Source {
     Builtin(Box<dyn BuiltinModule>),
     /// The bytes of a PE32+ DLL.
     Pe(Vec<u8>),
+    PeMapped(Box<dyn PeMapping>),
 }
 
 pub trait Host {
+    /// A zero-filled image reservation with writable access for linking. It is
+    /// consumed by `commit` before the final protections are applied.
+    type Image: AsMut<[u8]>;
+
     /// Opens DLL `name` (lower-case, with extension). `Ok(None)`: not found.
     fn open(&mut self, name: &str) -> Result<Option<Source>, LinkError>;
     /// Reserves `size` bytes for an image linked at `preferred`. With
     /// `fixed` the image cannot be relocated and must go exactly there (or
     /// the host fails); otherwise `preferred` is only a hint. Returns the
-    /// base actually used.
-    fn reserve(&mut self, size: u64, preferred: u64, fixed: bool) -> Result<u64, LinkError>;
-    /// Copies the finished image to `base` and applies the protections
-    /// (RVAs relative to `base`).
-    fn commit(&mut self, base: u64, image: &[u8], prot: &[Protection]) -> Result<(), LinkError>;
+    /// base actually used and its writable mapping.
+    fn reserve(&mut self, size: u64, preferred: u64, fixed: bool) -> Result<(u64, Self::Image), LinkError>;
+    /// Finishes the image at `base` and applies the protections (RVAs relative
+    /// to `base`). Consuming the mapping ends writable access to the image.
+    fn commit(&mut self, base: u64, image: Self::Image, prot: &[Protection]) -> Result<(), LinkError>;
     /// Releases an image reservation after a failed load.
     fn release(&mut self, _base: u64, _size: u64) {}
+
+    /// Where another process already laid out `name`: the loader prefers
+    /// that base so the image can be shared instead of built again.
+    fn shared_base(&mut self, _name: &str) -> Option<u64> {
+        None
+    }
+    /// Called with the fresh, zeroed reservation before layout. True when
+    /// the host put `name` there already laid out and relocated for `base`
+    /// (a shared image); the loader then only binds the imports.
+    fn prepare(&mut self, _name: &str, _base: u64, _image: &mut [u8]) -> bool {
+        false
+    }
+    /// `image` is laid out and relocated for `base`; imports are not bound
+    /// yet. A host may offer it to later [`Host::prepare`] calls.
+    fn publish(&mut self, _name: &str, _base: u64, _image: &[u8]) {}
+
+    // TEMP load-phase timing: hosts that keep a clock return a mark and
+    // report how long the phase that started at it took.
+    fn mark(&mut self) -> u64 {
+        0
+    }
+    fn note(&mut self, _module: &str, _phase: &str, _mark: u64) {}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,7 +167,7 @@ pub enum State {
 
 pub enum Kind {
     Builtin(Box<dyn BuiltinModule>),
-    Pe { file: Vec<u8>, size: u32, entry: u32, is_dll: bool },
+    Pe { file: PeData, size: u32, entry: u32, is_dll: bool },
 }
 
 pub struct Module {
@@ -152,7 +197,7 @@ impl Module {
 
     pub fn pe(&self) -> Option<PeFile<'_>> {
         match &self.kind {
-            Kind::Pe { file, .. } => PeFile::parse(file).ok(),
+            Kind::Pe { file, .. } => PeFile::parse(file.as_ref()).ok(),
             Kind::Builtin(_) => None,
         }
     }
@@ -216,7 +261,7 @@ impl<'s, H: Host> Linker<'s, H> {
 
     /// Loads the main executable from its bytes. Returns its index.
     pub fn load_executable(&mut self, name: &str, file: Vec<u8>) -> Result<usize, LinkError> {
-        self.load_pe(normalize(name), file, false)
+        self.load_pe(normalize(name), PeData::Owned(file), false)
     }
 
     /// Loads (or finds) DLL `name` as needed by `importer`.
@@ -245,11 +290,12 @@ impl<'s, H: Host> Linker<'s, H> {
                 });
                 Ok(self.modules.len() - 1)
             }
-            Some(Source::Pe(bytes)) => self.load_pe(real, bytes, true),
+            Some(Source::Pe(bytes)) => self.load_pe(real, PeData::Owned(bytes), true),
+            Some(Source::PeMapped(mapping)) => self.load_pe(real, PeData::Mapped(mapping), true),
         }
     }
 
-    fn load_pe(&mut self, name: String, file: Vec<u8>, dll: bool) -> Result<usize, LinkError> {
+    fn load_pe(&mut self, name: String, file: PeData, dll: bool) -> Result<usize, LinkError> {
         let first = self.modules.len();
         let cycles = self.cycles.len();
         let result = self.load_pe_inner(name, file, dll);
@@ -266,27 +312,49 @@ impl<'s, H: Host> Linker<'s, H> {
         result
     }
 
-    fn load_pe_inner(&mut self, name: String, file: Vec<u8>, dll: bool) -> Result<usize, LinkError> {
+    fn load_pe_inner(&mut self, name: String, file: PeData, dll: bool) -> Result<usize, LinkError> {
         if self.modules.len() >= MAX_MODULES {
             return Err(LinkError::TooManyModules);
         }
         let bad = |name: &str, error| LinkError::Image { module: name.to_string(), error };
-        let pe = PeFile::parse(&file).map_err(|e| bad(&name, e.into()))?;
+        let pe = PeFile::parse(file.as_ref()).map_err(|e| bad(&name, e.into()))?;
         image::check(&pe, dll).map_err(|e| bad(&name, e))?;
         if dll != pe.is_dll() {
             return Err(bad(&name, ImageError::Subsystem(pe.optional().subsystem)));
         }
         let size = pe.size_of_image();
-        let mut img = image::layout(&pe).map_err(|e| bad(&name, e))?;
         let prot = image::protections(&pe).map_err(|e| bad(&name, e))?;
-        let base = self.host.reserve(size as u64, pe.image_base(), !image::relocatable(&pe))?;
-        let relocations = match image::relocate(&pe, &mut img, base) {
-            Ok(n) => n,
-            Err(e) => {
+        let m0 = self.host.mark();
+        let relocatable = image::relocatable(&pe);
+        let preferred = match self.host.shared_base(&name) {
+            Some(b) if relocatable => b,
+            _ => pe.image_base(),
+        };
+        let (base, mut img) = self.host.reserve(size as u64, preferred, !relocatable)?;
+        let m1 = self.host.mark();
+        let shared = self.host.prepare(&name, base, img.as_mut());
+        if !shared {
+            if let Err(e) = image::layout_into(&pe, img.as_mut()) {
                 self.host.release(base, size as u64);
                 return Err(bad(&name, e));
             }
+        }
+        let m2 = self.host.mark();
+        let relocations = if shared {
+            0
+        } else {
+            match image::relocate(&pe, img.as_mut(), base) {
+                Ok(n) => {
+                    self.host.publish(&name, base, img.as_mut());
+                    n
+                }
+                Err(e) => {
+                    self.host.release(base, size as u64);
+                    return Err(bad(&name, e));
+                }
+            }
         };
+        let m3 = self.host.mark();
         let entry = pe.entry_point();
         let idx = self.modules.len();
         // The module is registered before its imports are bound so that a
@@ -294,7 +362,7 @@ impl<'s, H: Host> Linker<'s, H> {
         self.modules.push(Module {
             name: name.clone(),
             base,
-            kind: Kind::Pe { file: Vec::new(), size, entry, is_dll: dll },
+            kind: Kind::Pe { file: PeData::Owned(Vec::new()), size, entry, is_dll: dll },
             deps: Vec::new(),
             state: State::Binding,
             relocations,
@@ -323,21 +391,83 @@ impl<'s, H: Host> Linker<'s, H> {
             if !self.modules[idx].deps.contains(&dep) {
                 self.modules[idx].deps.push(dep);
             }
-            for (sym, ordinal, iat) in entries {
-                let s = match &sym {
-                    Some(n) => Symbol::Name(n),
-                    None => Symbol::Ordinal(ordinal),
-                };
-                let addr = self.resolve(dep, s, &name, 0)?;
-                image::write_u64(&mut img, iat, addr).ok_or_else(|| bad(&name, ImageError::TooLarge))?;
+            let addresses = self.resolve_group(dep, &entries, &name)?;
+            for ((_, _, iat), addr) in entries.into_iter().zip(addresses) {
+                image::write_u64(img.as_mut(), iat, addr).ok_or_else(|| bad(&name, ImageError::TooLarge))?;
                 bound += 1;
             }
         }
-        self.host.commit(base, &img, &prot)?;
+        let m4 = self.host.mark();
+        self.host.commit(base, img, &prot)?;
+        self.host.note(&name, "reserve", m0);
+        self.host.note(&name, "layout", m1);
+        self.host.note(&name, "relocate", m2);
+        self.host.note(&name, "imports", m3);
+        self.host.note(&name, "commit", m4);
         let m = &mut self.modules[idx];
         m.imports_bound = bound;
         m.state = State::Ready;
         Ok(idx)
+    }
+
+    fn resolve_group(&mut self, idx: usize, symbols: &[WantedSymbol], importer: &str) -> Result<Vec<u64>, LinkError> {
+        let mut addresses = Vec::with_capacity(symbols.len());
+        while addresses.len() < symbols.len() {
+            if matches!(self.modules[idx].kind, Kind::Builtin(_)) {
+                let (name, ordinal, _) = &symbols[addresses.len()];
+                let sym = match name {
+                    Some(n) => Symbol::Name(n),
+                    None => Symbol::Ordinal(*ordinal),
+                };
+                addresses.push(self.resolve(idx, sym, importer, 0)?);
+                continue;
+            }
+            let mut forwarded = false;
+            {
+                let m = &self.modules[idx];
+                let Kind::Pe { file, .. } = &m.kind else { unreachable!() };
+                let not_found = |sym: Symbol<'_>| LinkError::SymbolNotFound {
+                    module: m.name.clone(),
+                    symbol: sym.describe(),
+                    importer: importer.to_string(),
+                };
+                let pe = PeFile::parse(file.as_ref())
+                    .map_err(|e| LinkError::Image { module: m.name.clone(), error: e.into() })?;
+                let (name, ordinal, _) = &symbols[addresses.len()];
+                let first = match name {
+                    Some(n) => Symbol::Name(n),
+                    None => Symbol::Ordinal(*ordinal),
+                };
+                let exports = pe.exports().ok().flatten().ok_or_else(|| not_found(first))?;
+                for (name, ordinal, _) in &symbols[addresses.len()..] {
+                    let sym = match name {
+                        Some(n) => Symbol::Name(n),
+                        None => Symbol::Ordinal(*ordinal),
+                    };
+                    let e = match sym {
+                        Symbol::Name(n) => exports.by_name(n),
+                        Symbol::Ordinal(o) => exports.by_ordinal(o),
+                    };
+                    let e = e.ok().flatten().ok_or_else(|| not_found(sym))?;
+                    match e.target {
+                        ExportTarget::Rva(rva) => addresses.push(m.base + rva as u64),
+                        ExportTarget::Forwarder { .. } => {
+                            forwarded = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if forwarded {
+                let (name, ordinal, _) = &symbols[addresses.len()];
+                let sym = match name {
+                    Some(n) => Symbol::Name(n),
+                    None => Symbol::Ordinal(*ordinal),
+                };
+                addresses.push(self.resolve(idx, sym, importer, 0)?);
+            }
+        }
+        Ok(addresses)
     }
 
     /// Address of `sym` exported by module `idx`, following forwarders.
@@ -360,8 +490,8 @@ impl<'s, H: Host> Linker<'s, H> {
                 return a.ok_or_else(|| not_found(m));
             }
             Kind::Pe { file, .. } => {
-                let pe =
-                    PeFile::parse(file).map_err(|e| LinkError::Image { module: m.name.clone(), error: e.into() })?;
+                let pe = PeFile::parse(file.as_ref())
+                    .map_err(|e| LinkError::Image { module: m.name.clone(), error: e.into() })?;
                 let exports = pe.exports().ok().flatten().ok_or_else(|| not_found(m))?;
                 let e = match sym {
                     Symbol::Name(n) => exports.by_name(n),

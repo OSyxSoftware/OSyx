@@ -1,14 +1,18 @@
 #!/bin/bash
 # Builds the ext4 root file system image of OSyx with e2fsprogs.
-#   mkrootfs.sh <program dir> <output image> <size MiB>
+#   mkrootfs.sh <program dir> <output image> <size MiB> [live]
 # <program dir> holds bin/, usr/bin/ and system/bin/ (any may be empty): the
 # user programs installed as /bin/*, /usr/bin/* and /system/bin/* (mode 0755).
 # /system also holds the desktop's application entries; /etc the time zone
 # and keyboard layout; /home/user a few documents to look at.
+# With "live" the same tree is stripped and packed as the compressed live
+# root module (mklivefs.py) instead of an ext4 image; the test seed is
+# left out because it does not fit (and is not needed) in RAM.
 # Runs as root inside WSL so that files belong to root (uid 0) in the image.
-# Only a staging directory under /tmp and the output image file are written.
+# Only a staging directory under /tmp and the output file are written.
 set -euo pipefail
-BIN="$1"; OUT="$2"; SIZE="$3"
+BIN="$1"; OUT="$2"; SIZE="$3"; MODE="${4:-image}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$(mktemp -d /tmp/osyx-rootfs.XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT
 R="$STAGE/root"
@@ -29,6 +33,13 @@ if [ -d "$BIN/opt/zen" ]; then
     find "$R/opt/zen" -type d -exec chmod 0755 {} +
     find "$R/opt/zen" -type f -exec chmod 0644 {} +
     chmod 0755 "$R/opt/zen/zen.exe"
+fi
+# The installer's boot files (live system only).
+if [ -d "$BIN/system/share/osyx-setup" ]; then
+    mkdir -p "$R/system/share/osyx-setup"
+    cp -a "$BIN/system/share/osyx-setup/." "$R/system/share/osyx-setup/"
+    find "$R/system/share/osyx-setup" -type d -exec chmod 0755 {} +
+    find "$R/system/share/osyx-setup" -type f -exec chmod 0644 {} +
 fi
 if [ -d "$BIN/opt/apps" ]; then
     mkdir -p "$R/opt/apps"
@@ -86,7 +97,11 @@ chmod 0644 "$R"/etc/TZ "$R"/etc/osyx/keyboard
 find "$R/system/share/applications" -type f -exec chmod 0644 {} +
 # The home of the desktop user (uid 1000): a few documents to look at.
 mkdir -p "$R/home/user/Documents" "$R/home/user/Scripts" "$R/home/user/Desktop"
-for shortcut in 10-terminal 20-files 95-zen; do
+if [ "$MODE" = live ]; then
+    app 05-setup "Install OSyx" /system/bin/setup apps "Install OSyx on a disk of this computer"
+    printf 'osyx-live\n' > "$R/etc/hostname"
+fi
+for shortcut in 05-setup 10-terminal 20-files 95-zen; do
     if [ -f "$R/system/share/applications/$shortcut.app" ]; then
         cp "$R/system/share/applications/$shortcut.app" "$R/home/user/Desktop/"
     fi
@@ -109,17 +124,31 @@ print("Hello from", name, "- the answer is", answer)
 uname
 EOF
 chmod 0644 "$R/home/user/Documents/Welcome.txt" "$R/home/user/Scripts/hello.ax"
-# Contents init checks (userspace/apps/src/fs_checks.rs).
-printf 'Hello from the OSyx root file system!\n' > "$R/osyx-seed/hello.txt"
-python3 -c "import sys; sys.stdout.buffer.write(bytes((i*11+3)%253 for i in range(300000)))" > "$R/osyx-seed/pattern.bin"
-ln -s hello.txt "$R/osyx-seed/link"
-printf 'end' | dd of="$R/osyx-seed/sparse.bin" bs=1 seek=$((5*1024*1024*1024)) conv=notrunc status=none
-printf 'root only\n' > "$R/osyx-seed/secret"
-chmod 0600 "$R/osyx-seed/secret"
-chmod 0644 "$R"/osyx-seed/{hello.txt,pattern.bin,sparse.bin}
+# Contents init checks (userspace/apps/src/fs_checks.rs); installed only.
+if [ "$MODE" != live ]; then
+    printf 'Hello from the OSyx root file system!\n' > "$R/osyx-seed/hello.txt"
+    python3 -c "import sys; sys.stdout.buffer.write(bytes((i*11+3)%253 for i in range(300000)))" > "$R/osyx-seed/pattern.bin"
+    ln -s hello.txt "$R/osyx-seed/link"
+    printf 'end' | dd of="$R/osyx-seed/sparse.bin" bs=1 seek=$((5*1024*1024*1024)) conv=notrunc status=none
+    printf 'root only\n' > "$R/osyx-seed/secret"
+    chmod 0600 "$R/osyx-seed/secret"
+    chmod 0644 "$R"/osyx-seed/{hello.txt,pattern.bin,sparse.bin}
+else
+    rmdir "$R/osyx-seed"
+fi
 chown -R 0:0 "$R"
 chown -R 1000:1000 "$R/home/user"
 chmod 0750 "$R/home/user"
+if [ "$MODE" = live ]; then
+    # Debug symbols only bloat the RAM root; the programs were validated
+    # before installation, and strip keeps the loader's PT_LOAD segments.
+    while IFS= read -r -d '' f; do
+        if [ "$(od -An -N4 -tx1 "$f" | tr -d ' \n')" = 7f454c46 ]; then strip --strip-all "$f"; fi
+    done < <(find "$R" -type f -print0)
+    rm -f "$OUT"
+    python3 "$HERE/mklivefs.py" "$R" "$OUT"
+    exit 0
+fi
 rm -f "$OUT"
 truncate -s "${SIZE}M" "$OUT.tmp"
 mke2fs -q -F -t ext4 -L OSYX-ROOT -U 0b5e0b5e-0000-4000-8000-0000000005e7 -E root_owner=0:0 -d "$R" "$OUT.tmp"

@@ -855,6 +855,8 @@ impl Shell {
         let mut list = ListView::new(vec![Column::new("Application", 0, Align::Left)]);
         list.row_height = 44;
         list.rect = Rect::new(8, 108, LAUNCHER_W - 16, LAUNCHER_H - 108 - 48);
+        // Programs installed while the session runs appear at once.
+        self.apps = load_apps();
         let shown = filter_apps(&self.apps, "");
         list.set_items(app_items(&self.apps, &shown));
         list.select(if shown.is_empty() { None } else { Some(0) });

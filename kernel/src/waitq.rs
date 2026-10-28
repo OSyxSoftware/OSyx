@@ -1,12 +1,12 @@
 //! Wait queues: threads blocked until a kernel object changes state.
 //!
 //! A waiter registers on one or more queues, marks itself blocked and
-//! switches away, all with interrupts disabled, after re-checking the
+//! switches away, with interrupts disabled and after re-checking the
 //! condition; a waker changes the object's state and then wakes every
-//! registered thread, which re-checks. On a single CPU with interrupts off
-//! nothing can happen between the check and the block, so wake-ups are
-//! never lost (SMP will need the check and the registration under the
-//! object's lock).
+//! registered thread, which re-checks. On SMP the waker can run on another
+//! CPU between the check and the registration, so the waiter checks again
+//! after registering, and `sched::wake` remembers a wake that arrives just
+//! before the thread blocks.
 
 use crate::arch::cpu;
 use crate::sched::{self, Tid};
@@ -69,12 +69,18 @@ pub fn block_on<T>(queues: &[&WaitQueue], deadline: Option<u64>, mut ready: impl
             for q in queues {
                 q.register(tid);
             }
-            sched::mark_current_blocked_until(deadline);
-            sched::schedule();
+            // A waker on another CPU may have run between the check above and
+            // the registration, so it did not see this thread. Check again;
+            // a wake after this point is caught by `sched::wake`.
+            let raced = ready();
+            if raced.is_none() {
+                sched::mark_current_blocked_until(deadline);
+                sched::schedule();
+            }
             for q in queues {
                 q.unregister(tid);
             }
-            None
+            raced.map(Ok)
         };
         if were_enabled {
             cpu::enable_interrupts();

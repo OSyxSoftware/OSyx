@@ -37,8 +37,8 @@ Status of the milestones from the project brief.
 4. **Storage follow-ups**: ext4 htree insertion and deeper extent trees, a
    page cache with delayed writes (and demand-paged program images), FAT
    timestamps, interrupt-driven virtio.
-5. **ACPI (MADT) and SMP**: extend the existing local APIC timer; then bring up
-   per-CPU data with `swapgs`.
+5. **SMP follow-ups**: audit kernel paths for finer-grained parallel execution,
+   then replace the common kernel entry lock and add load balancing policies.
 6. **More OSyx Std**: `RwLock`, `Once`/`OnceLock`, `mpsc`; then the
    genuine `std` port ([rust-std.md](rust-std.md)).
 7. **Desktop follow-ups**: per-pixel alpha in the toolkit, damage-based
@@ -62,7 +62,7 @@ typical PC still lacks:
   the first physical NICs.
 - **Display**: the GOP framebuffer works anywhere; there is no native
   modesetting for Intel/AMD/NVIDIA GPUs (VirtIO-GPU only under QEMU).
-- **SMP**: one CPU; ACPI is read only for timers so far (FADT PM timer, HPET), not the MADT.
+- **SMP**: enabled logical CPUs are discovered through MADT and started with INIT/SIPI. User threads run in parallel (up to 16 CPUs); kernel entry remains serialized pending a finer-grained locking audit.
 - **USB**: root-port devices only (no hubs); keyboards behind a hub or a
   USB-C dock are not seen.
 - **Power**: no ACPI S-states or AML; shutdown on real hardware only halts.

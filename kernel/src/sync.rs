@@ -1,6 +1,6 @@
 //! Spinlocks.
 //!
-//! Locking rules (single CPU for now, but written to stay correct on SMP):
+//! Locking rules (kernel entries are currently serialized across CPUs):
 //! * Data that is ever touched from an interrupt or exception handler must be
 //!   protected by [`IrqSpinLock`], which disables interrupts while held. A
 //!   plain [`SpinLock`] taken in thread context could otherwise be re-taken by
@@ -11,7 +11,7 @@
 //!   SCHED -> OUTPUT_TAIL -> HEAP -> PAGING -> MMIO -> FRAMES -> PCI -> SERIAL.
 //!   Never acquire an outer lock while holding an inner one.
 //! * Because every lock disables interrupts, a thread is never preempted while
-//!   holding one (single CPU); the timer handler only takes SCHED (and, when it
+//!   holding one; the timer handler only takes SCHED (and, when it
 //!   reaps a dead thread, HEAP).
 //! * The panic path may forcibly unlock SERIAL / DISPLAY (see `force_unlock`),
 //!   because the panicking context might be the holder.

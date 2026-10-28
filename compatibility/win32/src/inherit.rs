@@ -276,7 +276,11 @@ fn serve(c: u64) {
 /// Starts this process's handle service (once, at startup).
 pub fn start_service() {
     let Ok(listener) = os_sys::channel_listen(&service_name(crate::kernel32::pid())) else { return };
-    let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || loop {
+    let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            os_std::eprintln!("winrun: handle service tid={}", os_sys::gettid());
+        }
+        loop {
         let mut w = [os_sys::ipc::WaitItem { handle: listener, events: osyx_abi::ipc::WAIT_READABLE, revents: 0 }];
         if os_sys::wait_handles(&mut w, u64::MAX).is_err() {
             return;
@@ -284,6 +288,7 @@ pub fn start_service() {
         if let Ok(c) = os_sys::channel_accept(listener) {
             serve(c);
             let _ = os_sys::close(c);
+        }
         }
     });
 }

@@ -97,3 +97,116 @@ pub fn hpet() -> Option<u64> {
     let base = u64_at(&t, 44);
     (t[40] == 0 && base != 0).then_some(base)
 }
+
+/// How to reach S5 and reset the machine, from the FADT and the DSDT.
+pub struct Power {
+    pub pm1a_cnt: u16,
+    pub pm1b_cnt: Option<u16>,
+    /// SMI command port and the value that hands the chipset to the OS.
+    pub smi_cmd: u16,
+    pub acpi_enable: u8,
+    /// SLP_TYPa and SLP_TYPb of `\_S5`.
+    pub s5: Option<(u8, u8)>,
+    pub reset: Option<Reset>,
+}
+
+/// The FADT reset register.
+pub enum Reset {
+    Io(u16, u8),
+    /// Bus 0 configuration space: device, function, register, value.
+    Pci(u8, u8, u8, u8),
+}
+
+/// An I/O port from a generic address structure (space id 1) or a 32-bit
+/// block address.
+fn io_port(space: u8, addr: u64) -> Option<u16> {
+    (space == 1 && addr != 0 && addr <= 0xFFFF).then_some(addr as u16)
+}
+
+/// One `\_S5` package element: a data object that is a small integer.
+fn aml_byte(b: &[u8], i: &mut usize) -> Option<u8> {
+    let op = *b.get(*i)?;
+    *i += 1;
+    match op {
+        0x00 => Some(0),
+        0x01 => Some(1),
+        0xFF => Some(0xFF),
+        0x0A => {
+            *i += 1;
+            b.get(*i - 1).copied()
+        }
+        0x0B | 0x0C => {
+            let v = *b.get(*i)?;
+            *i += if op == 0x0B { 2 } else { 4 };
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
+/// SLP_TYPa/b from the `Name (_S5, Package () {a, b, ...})` object of the
+/// DSDT. Only this static form is read (it is how firmware declares S5);
+/// no AML is executed.
+fn s5_from_dsdt(pa: u64) -> Option<(u8, u8)> {
+    let (pa, len) = checked_table(pa)?;
+    // SAFETY: checked_table verified the range lies inside the HHDM.
+    let t = unsafe { core::slice::from_raw_parts(mem::phys_to_virt(pa) as *const u8, len) };
+    let body = &t[36..];
+    let mut from = 0;
+    while let Some(pos) = body[from..].windows(4).position(|w| w == b"_S5_") {
+        let at = from + pos;
+        from = at + 4;
+        // NameOp, optionally followed by the root prefix.
+        let name_op = match at.checked_sub(1).map(|i| body[i]) {
+            Some(0x08) => true,
+            Some(0x5C) => at >= 2 && body[at - 2] == 0x08,
+            _ => false,
+        };
+        if !name_op || body.get(at + 4) != Some(&0x12) {
+            continue;
+        }
+        let mut i = at + 5;
+        let lead = *body.get(i)?;
+        i += 1 + (lead >> 6) as usize; // PkgLength
+        i += 1; // NumElements
+        let a = aml_byte(body, &mut i)?;
+        let b = aml_byte(body, &mut i).unwrap_or(a);
+        return Some((a & 7, b & 7));
+    }
+    None
+}
+
+pub fn power() -> Option<Power> {
+    let (pa, len) = find(b"FACP")?;
+    if len < 116 {
+        return None;
+    }
+    let mut f = [0u8; 276];
+    // SAFETY: the table lies inside the HHDM (find checked it).
+    let src = unsafe { core::slice::from_raw_parts(mem::phys_to_virt(pa) as *const u8, len.min(276)) };
+    f[..src.len()].copy_from_slice(src);
+    let x = |off: usize| len >= off + 12;
+    let pm1a = if x(172) { io_port(f[172], u64_at(&f, 176)) } else { None }
+        .or_else(|| io_port(1, u32_at(&f, 64) as u64))?;
+    let pm1b = if x(184) { io_port(f[184], u64_at(&f, 188)) } else { None }.or_else(|| io_port(1, u32_at(&f, 68) as u64));
+    let dsdt = if len >= 148 && u64_at(&f, 140) != 0 { u64_at(&f, 140) } else { u32_at(&f, 40) as u64 };
+    let reset = if len >= 129 && u32_at(&f, 112) & (1 << 10) != 0 {
+        let addr = u64_at(&f, 120);
+        let value = f[128];
+        match f[116] {
+            1 if addr <= 0xFFFF && addr != 0 => Some(Reset::Io(addr as u16, value)),
+            2 => Some(Reset::Pci((addr >> 32) as u8, (addr >> 16) as u8, addr as u8, value)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    Some(Power {
+        pm1a_cnt: pm1a,
+        pm1b_cnt: pm1b,
+        smi_cmd: u32_at(&f, 48) as u16,
+        acpi_enable: f[52],
+        s5: s5_from_dsdt(dsdt),
+        reset,
+    })
+}

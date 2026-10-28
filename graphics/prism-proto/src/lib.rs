@@ -42,8 +42,8 @@ pub const SERVICE: &str = "prism";
 pub const VERSION: u16 = 1;
 pub const MIN_VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 16;
-/// Largest protocol message (header included).
-pub const MAX_MESSAGE: usize = 8192;
+/// Largest protocol message (header included), the kernel's channel limit.
+pub const MAX_MESSAGE: usize = 64 * 1024;
 /// Longest window title / client name (bytes of UTF-8).
 pub const MAX_TITLE: usize = 256;
 /// Longest notification body or error text.
@@ -52,6 +52,10 @@ pub const MAX_TEXT: usize = 1024;
 pub const MAX_DIMENSION: u32 = 8192;
 /// Most entries in one `WINDOW_LIST`.
 pub const MAX_LIST: usize = 64;
+/// Most clipboard formats in one contents set.
+pub const MAX_CLIPBOARD: usize = 16;
+/// Largest total clipboard payload in one set (leaves room for framing).
+pub const MAX_CLIPBOARD_BYTES: usize = 56 * 1024;
 
 pub mod opcode {
     pub const HELLO: u16 = 0x01;
@@ -68,6 +72,8 @@ pub mod opcode {
     pub const NOTIFY: u16 = 0x0C;
     pub const DESTROY_BUFFER: u16 = 0x0D;
     pub const SET_WINDOW_VISIBILITY: u16 = 0x0E;
+    pub const SYNC: u16 = 0x0F;
+    pub const CLIPBOARD_SET: u16 = 0x10;
 
     pub const EV_HELLO: u16 = 0x81;
     pub const CONFIGURE: u16 = 0x82;
@@ -80,6 +86,8 @@ pub mod opcode {
     pub const WINDOW_LIST: u16 = 0x89;
     pub const NOTIFICATION: u16 = 0x8A;
     pub const ERROR: u16 = 0x8B;
+    pub const SYNC_DONE: u16 = 0x8C;
+    pub const CLIPBOARD_CHANGED: u16 = 0x8D;
 }
 
 /// `HELLO` flags.
@@ -228,6 +236,16 @@ pub struct WindowInfo {
     pub title: String,
 }
 
+/// One clipboard format: `format` below 0xC000 is a Win32 CF_* constant,
+/// otherwise it is a registered format and `name` carries its registered
+/// name (ids of registered formats are per process).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipEntry {
+    pub format: u32,
+    pub name: Option<String>,
+    pub data: Vec<u8>,
+}
+
 /// Client -> compositor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -263,15 +281,20 @@ pub enum Request {
     SetTitle { window: u32, title: String },
     SetGeometry { window: u32, x: i32, y: i32, width: u32, height: u32 },
     SetWindowVisibility { window: u32, visible: bool, taskbar: bool },
+    /// Acknowledged after all preceding requests on this connection.
+    Sync { cookie: u32 },
     /// `global`: `target` is a compositor-wide id (shell only); otherwise
     /// one of the client's own window ids.
     WindowAction { target: u32, action: Action, global: bool },
     Notify { title: String, body: String },
+    /// Replaces the system clipboard contents.
+    ClipboardSet { entries: Vec<ClipEntry> },
 }
 
 /// Compositor -> client.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
+    SyncDone { cookie: u32 },
     Hello { version: u16, client_id: u32, flags: u32, screen_width: u32, screen_height: u32 },
     Configure { window: u32, width: u32, height: u32, states: u32 },
     FocusChanged { window: u32, focused: bool },
@@ -279,8 +302,12 @@ pub enum Event {
     Pointer {
         window: u32,
         kind: u8,
+        /// Pointer position in the window's client area.
         x: i32,
         y: i32,
+        /// Pointer position on the screen (compositor space).
+        screen_x: i32,
+        screen_y: i32,
         button: u16,
         pressed: bool,
         wheel_v: i32,
@@ -293,6 +320,9 @@ pub enum Event {
     FrameDone { surface: u32, time_ms: u64 },
     WindowList { windows: Vec<WindowInfo> },
     Notification { from_pid: u32, title: String, body: String },
+    /// The system clipboard contents, broadcast on every change and once to
+    /// each client after `HELLO`. `seq` is monotonic, 0 for "never set".
+    ClipboardChanged { seq: u32, entries: Vec<ClipEntry> },
     Error { code: u32, serial: u32, message: String },
 }
 
@@ -359,6 +389,10 @@ impl Writer {
         self.buf.extend_from_slice(&s.as_bytes()[..end]);
         self
     }
+    fn raw(&mut self, b: &[u8]) -> &mut Self {
+        self.buf.extend_from_slice(b);
+        self
+    }
     fn finish(mut self) -> Vec<u8> {
         let len = (self.buf.len() - HEADER_LEN) as u32;
         self.buf[4..8].copy_from_slice(&len.to_le_bytes());
@@ -413,6 +447,12 @@ impl<'a> Reader<'a> {
         let b = self.take(n)?;
         let s = core::str::from_utf8(b).map_err(|_| ProtoError::BadString)?;
         Ok(String::from(s))
+    }
+    fn bytes(&mut self, n: usize) -> Result<&'a [u8], ProtoError> {
+        if n > MAX_CLIPBOARD_BYTES {
+            return Err(ProtoError::OutOfRange);
+        }
+        self.take(n)
     }
     fn dim(&mut self) -> Result<u32, ProtoError> {
         let v = self.u32()?;
@@ -469,6 +509,47 @@ fn rect(r: &mut Reader) -> Result<Rect, ProtoError> {
     Ok(Rect { x, y, w, h })
 }
 
+fn clip_entries(w: &mut Writer, entries: &[ClipEntry]) {
+    let n = entries.len().min(MAX_CLIPBOARD);
+    w.u8(n as u8);
+    for e in &entries[..n] {
+        w.u32(e.format);
+        match &e.name {
+            Some(name) => {
+                w.u8(1).str(name, MAX_TITLE);
+            }
+            None => {
+                w.u8(0);
+            }
+        }
+        w.u32(e.data.len() as u32).raw(&e.data);
+    }
+}
+
+fn read_clip_entries(r: &mut Reader) -> Result<Vec<ClipEntry>, ProtoError> {
+    let n = r.u8()? as usize;
+    if n > MAX_CLIPBOARD {
+        return Err(ProtoError::OutOfRange);
+    }
+    let mut entries = Vec::with_capacity(n);
+    let mut total = 0usize;
+    for _ in 0..n {
+        let format = r.u32()?;
+        let name = match r.u8()? {
+            0 => None,
+            1 => Some(r.str(MAX_TITLE)?),
+            _ => return Err(ProtoError::BadValue),
+        };
+        let len = r.u32()? as usize;
+        total += len;
+        if total > MAX_CLIPBOARD_BYTES {
+            return Err(ProtoError::OutOfRange);
+        }
+        entries.push(ClipEntry { format, name, data: r.bytes(len)?.to_vec() });
+    }
+    Ok(entries)
+}
+
 impl Request {
     pub fn opcode(&self) -> u16 {
         use opcode::*;
@@ -483,10 +564,12 @@ impl Request {
             Request::Commit { .. } => COMMIT_SURFACE,
             Request::SetTitle { .. } => SET_TITLE,
             Request::SetGeometry { .. } => SET_GEOMETRY,
+            Request::Sync { .. } => SYNC,
             Request::SetWindowVisibility { .. } => SET_WINDOW_VISIBILITY,
             Request::WindowAction { .. } => WINDOW_ACTION,
             Request::Notify { .. } => NOTIFY,
             Request::DestroyBuffer { .. } => DESTROY_BUFFER,
+            Request::ClipboardSet { .. } => CLIPBOARD_SET,
         }
     }
 
@@ -539,6 +622,10 @@ impl Request {
             }
             Request::Notify { title, body } => {
                 w.str(title, MAX_TITLE).str(body, MAX_TEXT);
+            }
+            Request::Sync { cookie } => { w.u32(*cookie); }
+            Request::ClipboardSet { entries } => {
+                clip_entries(&mut w, entries);
             }
         }
         w.finish()
@@ -610,6 +697,8 @@ impl Request {
                 Request::WindowAction { target, action, global: r.bool()? }
             }
             opcode::NOTIFY => Request::Notify { title: r.str(MAX_TITLE)?, body: r.str(MAX_TEXT)? },
+            opcode::SYNC => Request::Sync { cookie: r.u32()? },
+            opcode::CLIPBOARD_SET => Request::ClipboardSet { entries: read_clip_entries(&mut r)? },
             op => return Err(ProtoError::UnknownOpcode(op)),
         };
         r.end()?;
@@ -631,7 +720,9 @@ impl Event {
             Event::FrameDone { .. } => FRAME_DONE,
             Event::WindowList { .. } => WINDOW_LIST,
             Event::Notification { .. } => NOTIFICATION,
+            Event::ClipboardChanged { .. } => CLIPBOARD_CHANGED,
             Event::Error { .. } => ERROR,
+            Event::SyncDone { .. } => SYNC_DONE,
         }
     }
 
@@ -642,6 +733,7 @@ impl Event {
         };
         let mut w = Writer::new(self.opcode(), serial);
         match self {
+            Event::SyncDone { cookie } => { w.u32(*cookie); }
             Event::Hello { version, client_id, flags, screen_width, screen_height } => {
                 w.u16(*version).u32(*client_id).u32(*flags).u32(*screen_width).u32(*screen_height);
             }
@@ -654,11 +746,15 @@ impl Event {
             Event::Key { window, usage, state, modifiers, text } => {
                 w.u32(*window).u16(*usage).u8(*state).u32(*modifiers).u32(text.map_or(0, |c| c as u32));
             }
-            Event::Pointer { window, kind, x, y, button, pressed, wheel_v, wheel_h, buttons, modifiers } => {
+            Event::Pointer {
+                window, kind, x, y, screen_x, screen_y, button, pressed, wheel_v, wheel_h, buttons, modifiers,
+            } => {
                 w.u32(*window)
                     .u8(*kind)
                     .i32(*x)
                     .i32(*y)
+                    .i32(*screen_x)
+                    .i32(*screen_y)
                     .u16(*button)
                     .u8(u8::from(*pressed))
                     .i32(*wheel_v)
@@ -685,6 +781,10 @@ impl Event {
             Event::Notification { from_pid, title, body } => {
                 w.u32(*from_pid).str(title, MAX_TITLE).str(body, MAX_TEXT);
             }
+            Event::ClipboardChanged { seq, entries } => {
+                w.u32(*seq);
+                clip_entries(&mut w, entries);
+            }
             Event::Error { code, message, .. } => {
                 w.u32(*code).str(message, MAX_TEXT);
             }
@@ -696,6 +796,7 @@ impl Event {
         let (op, serial, payload) = parse_header(msg)?;
         let mut r = Reader { b: payload };
         let ev = match op {
+            opcode::SYNC_DONE => Event::SyncDone { cookie: r.u32()? },
             opcode::EV_HELLO => Event::Hello {
                 version: r.u16()?,
                 client_id: r.u32()?,
@@ -730,6 +831,8 @@ impl Event {
                     kind,
                     x: r.i32()?,
                     y: r.i32()?,
+                    screen_x: r.i32()?,
+                    screen_y: r.i32()?,
                     button: r.u16()?,
                     pressed: r.bool()?,
                     wheel_v: r.i32()?,
@@ -753,6 +856,7 @@ impl Event {
                 Event::WindowList { windows }
             }
             opcode::NOTIFICATION => Event::Notification { from_pid: r.u32()?, title: r.str(MAX_TITLE)?, body: r.str(MAX_TEXT)? },
+            opcode::CLIPBOARD_CHANGED => Event::ClipboardChanged { seq: r.u32()?, entries: read_clip_entries(&mut r)? },
             opcode::ERROR => Event::Error { code: r.u32()?, serial, message: r.str(MAX_TEXT)? },
             op => return Err(ProtoError::UnknownOpcode(op)),
         };
@@ -800,13 +904,21 @@ mod tests {
             Request::SetTitle { window: 2, title: String::new() },
             Request::SetWindowVisibility { window: 2, visible: false, taskbar: false },
             Request::SetGeometry { window: 2, x: 5, y: 6, width: 300, height: 200 },
+            Request::Sync { cookie: 42 },
             Request::WindowAction { target: 77, action: Action::ToggleMaximize, global: true },
             Request::Notify { title: "Build".to_string(), body: "done".to_string() },
+            Request::ClipboardSet {
+                entries: vec![
+                    ClipEntry { format: 13, name: None, data: vec![b'h', 0, b'i', 0, 0, 0] },
+                    ClipEntry { format: 0xC001, name: Some("HTML Format".to_string()), data: b"<b>x</b>".to_vec() },
+                ],
+            },
         ]
     }
 
     fn sample_events() -> Vec<Event> {
         vec![
+            Event::SyncDone { cookie: 42 },
             Event::Hello { version: 1, client_id: 4, flags: 1, screen_width: 1280, screen_height: 800 },
             Event::Configure { window: 2, width: 800, height: 600, states: state::ACTIVATED | state::MAXIMIZED },
             Event::FocusChanged { window: 2, focused: true },
@@ -817,6 +929,8 @@ mod tests {
                 kind: pointer::BUTTON,
                 x: 10,
                 y: -2,
+                screen_x: 210,
+                screen_y: 98,
                 button: 1,
                 pressed: true,
                 wheel_v: 0,
@@ -834,6 +948,11 @@ mod tests {
                 ],
             },
             Event::Notification { from_pid: 9, title: "Copied".to_string(), body: "3 files".to_string() },
+            Event::ClipboardChanged { seq: 3, entries: Vec::new() },
+            Event::ClipboardChanged {
+                seq: 4,
+                entries: vec![ClipEntry { format: 1, name: None, data: b"plain".to_vec() }],
+            },
             Event::Error { code: error::MALFORMED, serial: 42, message: "bad payload".to_string() },
         ]
     }
@@ -954,6 +1073,24 @@ mod tests {
         let n = m.len();
         m[n - 4..].copy_from_slice(&0xD800u32.to_le_bytes());
         assert_eq!(Event::decode(&m), Err(ProtoError::BadValue));
+    }
+
+    #[test]
+    fn clipboard_contents_are_bounded() {
+        let entries = |n: usize| (0..n as u32).map(|format| ClipEntry { format, name: None, data: vec![b'x'; 4] }).collect();
+        assert!(Request::decode(&Request::ClipboardSet { entries: entries(MAX_CLIPBOARD) }.encode(0)).is_ok(), "the cap itself fits");
+        // The encoder drops formats past the cap instead of breaking framing.
+        let (r, _) = Request::decode(&Request::ClipboardSet { entries: entries(MAX_CLIPBOARD + 3) }.encode(0)).unwrap();
+        let Request::ClipboardSet { entries: kept } = r else { panic!() };
+        assert_eq!(kept.len(), MAX_CLIPBOARD);
+        // A forged format count over the cap.
+        let mut m = Request::ClipboardSet { entries: entries(1) }.encode(0);
+        m[HEADER_LEN] = MAX_CLIPBOARD as u8 + 1;
+        assert_eq!(Request::decode(&m), Err(ProtoError::OutOfRange));
+        // A forged data length over the payload cap.
+        let mut m = Request::ClipboardSet { entries: entries(1) }.encode(0);
+        m[HEADER_LEN + 6..HEADER_LEN + 10].copy_from_slice(&(MAX_CLIPBOARD_BYTES as u32 + 1).to_le_bytes());
+        assert_eq!(Request::decode(&m), Err(ProtoError::OutOfRange));
     }
 
     #[test]

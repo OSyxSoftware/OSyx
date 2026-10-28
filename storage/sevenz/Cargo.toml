@@ -1,0 +1,8 @@
+[package]
+name = "osyx-7z"
+description = "7z archive reader (LZMA, BCJ2, BCJ x86, Copy) for unpacking installers without running them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -76,7 +76,14 @@ impl Heap {
             prev = cur;
             cur = (*cur).next;
         }
-        debug_assert!(cur.is_null() || addr + size <= cur as usize, "double free or overlap");
+        // A double free or an out-of-range dealloc overlaps a free block. It
+        // would hand the same bytes to two owners, so stop here instead of
+        // corrupting live objects silently.
+        let clash = (!cur.is_null() && addr + size > cur as usize)
+            || (!prev.is_null() && prev as usize + (*prev).size > addr);
+        if clash || size == 0 {
+            panic!("heap: overlapping free addr={addr:#x} size={size:#x} prev={prev:p} cur={cur:p}");
+        }
         let block = addr as *mut FreeBlock;
         block.write(FreeBlock { size, next: cur });
         if !cur.is_null() && addr + size == cur as usize {

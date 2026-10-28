@@ -241,9 +241,16 @@ fn int_body(mut v: u64, radix: u64, upper: bool, prec: Option<usize>) -> Vec<u8>
 
 // ---- floating point ----------------------------------------------------------------------
 
+// TEMP: how often printf does an exact (767-digit) float conversion.
+static EXACT_CALLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// The exact decimal expansion of |x| (finite, nonzero): digits d1 d2 ...
 /// and E with |x| = d1.d2d3... * 10^E.
 fn exact(x: f64) -> (Vec<u8>, i32) {
+    let c = EXACT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    if c.is_multiple_of(2_000) {
+        os_std::eprintln!("winrun: exct n={c} x={x:e} tid={}", os_sys::gettid());
+    }
     // 767 fractional digits hold every double exactly.
     let s = alloc::format!("{:.767e}", if x < 0.0 { -x } else { x });
     let (m, e) = s.split_once('e').unwrap_or((&s, "0"));
@@ -713,6 +720,10 @@ fn format<C: Ch>(opts: u64, fmt: &[C], args: *const u64, secure: bool) -> Result
             'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 'a' | 'A' => {
                 if matches!(size, Size::Char | Size::Short | Size::LongLong | Size::Ptr | Size::I32 | Size::Wide) {
                     return Err(invalid());
+                }
+                let c = EXACT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+                if c.is_multiple_of(2_000) {
+                    os_std::eprintln!("winrun: pfct n={c} conv={} tid={}", { ty }, os_sys::gettid());
                 }
                 let x = a.float();
                 let upper = ty.is_ascii_uppercase();

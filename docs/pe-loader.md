@@ -64,6 +64,12 @@ requested dependencies are additional. See [Zen bring-up](research/zen-bringup.m
 image layout and section protection, DIR64 relocations and linking against
 built-in modules or PE DLLs. Imports by name and ordinal, export forwarding,
 dependency cycles and failure cleanup are covered by host tests.
+Hosts may share laid-out images: `Host::shared_base` suggests where another
+process placed a module, `Host::prepare` can fill the reservation with that
+relocated image (layout and relocation are skipped, imports are still bound
+per process) and `Host::publish` offers a freshly relocated image before its
+imports are bound. `winrun` implements them with the kernel's shared image
+sections ([memory.md](memory.md#shared-executable-images-kernelsrcimagers)).
 
 `compatibility/win32` provides the OSyx mapping backend and `/bin/winrun`:
 DLL search, initializers, TLS callbacks/templates, PEB/TEB, GS-base and the

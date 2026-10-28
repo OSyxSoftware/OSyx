@@ -1,5 +1,8 @@
 //! Host back end, used only to unit-test OSyx Std on the development machine.
 //! It is implemented with the host's Rust std; nothing here runs on OSyx.
+// thread_local! initializers here are `const` already; clippy 1.99 still
+// reports missing_const_for_thread_local for them.
+#![allow(clippy::missing_const_for_thread_local)]
 
 use crate::error::{Error, ErrorKind, Result};
 use alloc::string::String;
@@ -111,7 +114,7 @@ pub mod fs {
         static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         ROOT.get_or_init(|| {
             let dir = std::env::temp_dir().join(alloc::format!("os-std-fs-{}", std::process::id()));
-            let _ = std::fs::create_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("cannot create {}: {e}", dir.display()));
             dir
         })
     }

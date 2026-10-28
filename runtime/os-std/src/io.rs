@@ -28,22 +28,20 @@ pub trait Read {
         let mut chunk = 8 * 1024;
         loop {
             let len = buf.len();
-            buf.resize(len + chunk, 0);
-            match self.read(&mut buf[len..]) {
-                Ok(0) => {
-                    buf.truncate(len);
-                    return Ok(len - start);
-                }
+            buf.reserve(chunk);
+            // SAFETY: `reserve` provides `chunk` bytes; publish only what `read` initialized.
+            let dst = unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr().add(len), chunk) };
+            match self.read(dst) {
+                Ok(0) => return Ok(len - start),
                 Ok(n) => {
-                    buf.truncate(len + n);
-                    if n == chunk && chunk < 256 * 1024 {
+                    assert!(n <= chunk, "Read::read returned more bytes than the buffer");
+                    // SAFETY: `n <= chunk` and the reader initialized the returned prefix.
+                    unsafe { buf.set_len(len + n) };
+                    if n == chunk && chunk < 1024 * 1024 {
                         chunk *= 2;
                     }
                 }
-                Err(e) => {
-                    buf.truncate(len);
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
         }
     }

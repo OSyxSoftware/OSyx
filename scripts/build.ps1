@@ -9,15 +9,31 @@ param(
     # Keep the root partition of the current build/osyx.img (e.g. to boot
     # again after a simulated power cut) instead of building a fresh one.
     [switch]$KeepRoot,
-    [ValidateRange(128, 16384)][int]$RootMiB = 128,
+    [ValidateRange(128, 16384)][int]$RootMiB = 256,
     # Install the vendor payload, desktop shortcut and default web browser.
     [string]$ZenDirectory = '',
     # Small test/development images can explicitly omit the browser.
-    [switch]$NoZen
+    [switch]$NoZen,
+    # Build the compressed live ISO (system in RAM, no root partition).
+    [switch]$Live,
+    # Capture this exact build before another build can replace osyx.img.
+    [string]$OutputImage = ''
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
+$buildLock = Enter-BuildLock
+$stage = $null
+Push-Location $Root
+try {
 $Script:RootSizeMiB = $RootMiB
 if ($NoZen -and $ZenDirectory) { throw 'Use either -NoZen or -ZenDirectory' }
+if ($Live) {
+    if ($ZenDirectory) { throw '-Live cannot include Zen: the package exceeds the 64 MiB boot module limit' }
+    if ($NoInit) { throw '-Live needs its programs in the live root' }
+    if ($KeepRoot) { throw '-Live does not build a disk image' }
+    if ($OutputImage) { throw '-Live writes build/osyx-live.iso' }
+    if (-not $PSBoundParameters.ContainsKey('Cmdline')) { $Cmdline = 'init.args=desktop live' }
+    $NoZen = $true
+}
 if (-not $NoZen -and -not $NoInit -and -not $KeepRoot) {
     if (-not $ZenDirectory) {
         $ZenDirectory = Join-Path $BuildDir 'zen/1.23.4b/core'
@@ -25,10 +41,8 @@ if (-not $NoZen -and -not $NoInit -and -not $KeepRoot) {
             & (Join-Path $PSScriptRoot 'fetch-zen.ps1') -Version '1.23.4b'
         }
     }
-    if (-not $PSBoundParameters.ContainsKey('RootMiB')) { $RootMiB = 1024; $Script:RootSizeMiB = 1024 }
+    if (-not $PSBoundParameters.ContainsKey('RootMiB')) { $RootMiB = 8192; $Script:RootSizeMiB = 8192 }
 }
-Push-Location $Root
-try {
     $profileArgs = @(if (-not $DebugBuild) { '--release' })
     $profileDir = if ($DebugBuild) { 'debug' } else { 'release' }
 
@@ -41,18 +55,20 @@ try {
     # target dir keeps their flags from invalidating the kernel build cache.
     Write-Host '==> building user programs (x86_64-unknown-none, user code model)'
     $savedFlags = $env:RUSTFLAGS
-    $env:RUSTFLAGS = '-C relocation-model=static -C code-model=small'
+    # User programs are soft-float: the RustCrypto crates of osyx-web must use
+    # their portable code instead of SSE/AVX intrinsics.
+    $env:RUSTFLAGS = '-C relocation-model=static -C code-model=small --cfg polyval_force_soft --cfg poly1305_force_soft --cfg aes_force_soft --cfg chacha20_force_soft --cfg curve25519_dalek_backend="serial"'
     try {
-        Invoke-Checked 'user build' { cargo build -p osyx-apps -p osyx-desktop -p osyx-nettools -p osyx-win32 --target x86_64-unknown-none --target-dir target/user @profileArgs }
+        Invoke-Checked 'user build' { cargo build -p osyx-apps -p osyx-desktop -p osyx-nettools -p osyx-win32 -p osyx-web --target x86_64-unknown-none --target-dir target/user @profileArgs }
     } finally { $env:RUSTFLAGS = $savedFlags }
     # Program -> directory on the root file system. The graphical session
     # (PRISM, the desktop shell and its applications) lives in /system/bin.
     $installDirs = [ordered]@{
-        init = 'bin'; worker = 'bin'; probe = 'usr/bin'; axis = 'bin'
+        init = 'bin'; worker = 'bin'; probe = 'usr/bin'; axis = 'bin'; firstboot = 'bin'; fetch = 'bin'
         prism = 'system/bin'; desktop = 'system/bin'; terminal = 'system/bin'; files = 'system/bin'; sysinfo = 'system/bin'
         ping = 'bin'; net = 'bin'; netstat = 'bin'; dns = 'bin'; nc = 'bin'
         winrun = 'bin'
-        taskmgr = 'system/bin'; settings = 'system/bin'
+        taskmgr = 'system/bin'; settings = 'system/bin'; setup = 'system/bin'
         zen = 'system/bin'; open = 'bin'; 'run-app' = 'system/bin'
     }
     $userBins = @($installDirs.Keys)
@@ -98,8 +114,7 @@ try {
         Save-RootPartition
     } else {
         # Programs for /bin and /usr/bin of the root (none with -NoInit).
-        $stage = Join-Path $BuildDir 'rootfs-programs'
-        if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+        $stage = Join-Path $BuildDir ('rootfs-programs-' + [Guid]::NewGuid().ToString('N'))
         foreach ($d in 'bin', 'usr\bin', 'system\bin') { New-Item -ItemType Directory -Force (Join-Path $stage $d) | Out-Null }
         # The default desktop wallpaper, converted from PNG to OSXI (cached).
         $wallSrc = Join-Path $Root 'graphics\assets\wallpaper\osyx-default.png'
@@ -148,11 +163,38 @@ try {
                 Copy-Item (Join-Path $Root "target\user\x86_64-unknown-none\$profileDir\$bin") (Join-Path $stage "$($installDirs[$bin])\$bin")
             }
         }
-        Write-Host '==> building ext4 root file system (mke2fs in WSL)'
-        New-RootImage $stage
+        if ($Live) {
+            # The installer's payload: the boot files it writes to the new
+            # EFI system partition (the kernel is stripped with the tree).
+            $payload = Join-Path $stage 'system\share\osyx-setup\esp'
+            New-Item -ItemType Directory -Force (Join-Path $payload 'EFI\BOOT'), (Join-Path $payload 'EFI\OSYX') | Out-Null
+            Copy-Item (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI') (Join-Path $payload 'EFI\BOOT\BOOTX64.EFI')
+            Copy-Item (Join-Path $EspDir 'EFI\OSYX\KERNEL.ELF') (Join-Path $payload 'EFI\OSYX\KERNEL.ELF')
+            Write-Host '==> packing the compressed live root, the ISO and the USB image (WSL)'
+            New-LiveImage $stage
+        } else {
+            Write-Host '==> building ext4 root file system (mke2fs in WSL)'
+            New-RootImage $stage
+        }
     }
-    Write-Host '==> assembling GPT disk image'
-    New-DiskImage
+    if (-not $Live) {
+        Write-Host '==> assembling GPT disk image'
+        New-DiskImage
+        if ($OutputImage) {
+            Copy-Item -LiteralPath $DiskImage -Destination $OutputImage -Force
+        }
+    }
 } finally {
     Pop-Location
+    try {
+        if ($stage -and (Test-Path -LiteralPath $stage)) {
+            $stagePath = [IO.Path]::GetFullPath($stage)
+            $buildPath = [IO.Path]::GetFullPath($BuildDir).TrimEnd('\') + '\'
+            if (-not $stagePath.StartsWith($buildPath, [StringComparison]::OrdinalIgnoreCase) -or
+                [IO.Path]::GetFileName($stagePath) -notmatch '^rootfs-programs-[a-f0-9]{32}$') {
+                throw 'Refusing to remove a staging directory outside this build'
+            }
+            Remove-Item -LiteralPath $stagePath -Recurse -Force
+        }
+    } finally { $buildLock.ReleaseMutex(); $buildLock.Dispose() }
 }

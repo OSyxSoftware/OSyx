@@ -339,6 +339,7 @@ pub enum Object {
     Null,
     Thread(Arc<ThreadObj>),
     Event(Arc<EventObj>),
+    KeyedEvent(Arc<crate::keyed::KeyedEvent>),
     Timer(Arc<TimerObj>),
     Mutex(Arc<MutexObj>),
     Semaphore(Arc<SemaphoreObj>),
@@ -415,6 +416,7 @@ pub fn kind_name(o: &Object) -> &'static str {
         Object::Null => "null device",
         Object::Thread(_) => "thread",
         Object::Event(_) => "event",
+        Object::KeyedEvent(_) => "keyed event",
         Object::Timer(_) => "timer",
         Object::Mutex(_) => "mutex",
         Object::Semaphore(_) => "semaphore",
@@ -462,14 +464,24 @@ pub fn file(h: u64) -> Result<Arc<FileObj>, u32> {
 // ---- waiting ----------------------------------------------------------------
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
+/// Threads inside a futex sleep on [`SEQ`] (or about to enter one): a
+/// signal only needs a wake when this is non-zero. A thread that read an
+/// older sequence returns from its wait at once anyway.
+static WAITERS: AtomicU32 = AtomicU32::new(0);
 /// Serialises check-and-consume of wait conditions (auto-reset events,
 /// mutex ownership, semaphore counts, wait-all).
 static WAIT_LOCK: Mutex<()> = Mutex::new(());
 
+/// How many `signal_all` calls have run (`OSYX_WINRUN_COUNT` diagnostics).
+pub static SIGNALS: AtomicU64 = AtomicU64::new(0);
+
 /// Wakes every waiter to re-check its objects.
 pub fn signal_all() {
+    SIGNALS.fetch_add(1, Ordering::Relaxed);
     SEQ.fetch_add(1, Ordering::SeqCst);
-    os_sys::futex_wake(SEQ.as_ptr(), u32::MAX);
+    if WAITERS.load(Ordering::SeqCst) != 0 {
+        os_sys::futex_wake(SEQ.as_ptr(), u32::MAX);
+    }
 }
 
 /// The change sequence, read before checking a condition that a later
@@ -479,8 +491,13 @@ pub fn sequence() -> u32 {
 }
 
 /// Sleeps until `signal_all` runs after `seq` was read, or `timeout` passes.
-pub fn wait_for_change(seq: u32, timeout: Duration) {
-    let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, timeout.as_nanos().max(1) as u64);
+/// Returns true when a signal cut the sleep short.
+pub fn wait_for_change(seq: u32, timeout: Duration) -> bool {
+    WAITERS.fetch_add(1, Ordering::SeqCst);
+    let ns = timeout.as_nanos().max(1) as u64;
+    let r = os_sys::futex_wait(SEQ.as_ptr(), seq, ns);
+    WAITERS.fetch_sub(1, Ordering::SeqCst);
+    matches!(r, Err(osyx_abi::Errno::WouldBlock))
 }
 
 pub const WAIT_OBJECT_0: u32 = 0;
@@ -520,7 +537,7 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
         }
         Object::Console(_) | Object::File(_) | Object::Null | Object::Pipe(_) => true,
         Object::Process(p) => p.done.load(Ordering::SeqCst),
-        Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) | Object::WindowStation(_) | Object::Desktop(_) => {
+        Object::KeyedEvent(_) | Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) | Object::WindowStation(_) | Object::Desktop(_) => {
             return Err(ERROR_INVALID_HANDLE)
         }
     })
@@ -598,20 +615,24 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
         // Another process sets a shared event without touching SEQ: one
         // shared event is waited for on its own word, several objects
         // including one are polled.
-        let shared: Vec<&Arc<EventObj>> = objs.iter().filter_map(|o| match o {
+        let mut shared = objs.iter().filter_map(|o| match o {
             Some(Object::Event(e)) if e.is_shared() => Some(e),
             _ => None,
-        }).collect();
-        match shared.as_slice() {
-            [e] if objs.len() == 1 => {
+        });
+        match (shared.next(), shared.next()) {
+            (Some(e), _) if objs.len() == 1 => {
                 let _ = os_sys::futex_wait(e.futex_word(), 0, wait_ns);
             }
-            [] => {
+            (None, _) => {
+                WAITERS.fetch_add(1, Ordering::SeqCst);
                 let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, wait_ns);
+                WAITERS.fetch_sub(1, Ordering::SeqCst);
             }
             _ => {
                 let slice = if wait_ns == 0 { SHARED_POLL_NS } else { wait_ns.min(SHARED_POLL_NS) };
+                WAITERS.fetch_add(1, Ordering::SeqCst);
                 let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, slice);
+                WAITERS.fetch_sub(1, Ordering::SeqCst);
             }
         }
     }

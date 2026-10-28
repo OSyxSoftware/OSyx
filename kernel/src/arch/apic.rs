@@ -161,6 +161,44 @@ pub fn id() -> u32 {
     ID.load(Ordering::Relaxed)
 }
 
+/// The local CPU's hardware ID; `id()` remains the BSP's MSI destination.
+pub fn local_id() -> u32 {
+    if !available() { return cpu::cpuid(1,0).1 >> 24; }
+    if x2apic() { read(REG_ID) } else { read(REG_ID) >> 24 }
+}
+
+pub fn init_secondary() {
+    unsafe {
+        let mut msr=cpu::rdmsr(IA32_APIC_BASE)|APIC_GLOBAL_ENABLE;
+        if msr & APIC_X2APIC_ENABLE == 0 {
+            cpu::wrmsr(IA32_APIC_BASE,msr);
+            if x2apic() { msr |= APIC_X2APIC_ENABLE;cpu::wrmsr(IA32_APIC_BASE,msr); }
+        }
+    }
+    write(REG_LVT_TIMER,LVT_MASKED);
+    write(REG_LINT0,LVT_MASKED);
+    write(REG_LINT1,DELIVERY_NMI);
+    write(REG_TPR,0);
+    write(REG_SVR,SVR_ENABLE|SPURIOUS_VECTOR as u32);
+}
+
+/// Physical-destination IPI. x2APIC accepts the destination in ICR[63:32].
+pub fn send_ipi(destination:u32,flags:u32)->bool {
+    if x2apic() {
+        unsafe { cpu::wrmsr(0x830,((destination as u64)<<32)|flags as u64); }
+        return true;
+    }
+    if destination>255 { return false; }
+    for _ in 0..1_000_000 {
+        if read(0x300)&(1<<12)==0 {
+            write(0x310,destination<<24);write(0x300,flags);
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
 /// Whether MSIs can target this CPU (its ID fits the 8-bit MSI
 /// destination field; larger IDs need interrupt remapping).
 pub fn msi_capable() -> bool {

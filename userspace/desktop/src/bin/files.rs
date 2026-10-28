@@ -3,9 +3,11 @@
 //! `/boot`, tmpfs `/tmp` and `/run`, devfs `/dev`).
 //!
 //! Double click / Enter opens: folders are entered, programs started,
-//! other files shown in a text (or hex) viewer. Tool bar and keys: Back
-//! (Alt+Left), Up (Backspace), Home, New folder (Ctrl+N), Rename (F2),
-//! Delete (Del), Properties (Ctrl+I), Refresh (F5), hidden files (Ctrl+H).
+//! other files shown in a text (or hex) viewer. A row dragged onto a folder
+//! row or a place (Home, Desktop, a volume) moves the file or folder there.
+//! Tool bar and keys: Back (Alt+Left), Up (Backspace), Home, New folder
+//! (Ctrl+N), Rename (F2), Delete (Del), Properties (Ctrl+I), Refresh (F5),
+//! hidden files (Ctrl+H).
 
 #![no_std]
 #![no_main]
@@ -66,6 +68,12 @@ struct Entry {
     meta: Option<Metadata>,
 }
 
+/// A Windows program (.exe): run by winrun even without the executable bit,
+/// which downloads and FAT32 volumes do not set.
+fn is_win_program(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".exe")
+}
+
 impl Entry {
     fn is_dir(&self) -> bool {
         self.meta.as_ref().is_some_and(|m| m.is_dir())
@@ -84,7 +92,7 @@ impl Entry {
             ("Symbolic link", Icon::Link)
         } else if ft.is_char_device() || ft.is_block_device() {
             ("Device", Icon::Device)
-        } else if self.is_program() {
+        } else if self.is_program() || is_win_program(&self.name) {
             ("Program", Icon::Program)
         } else if [".txt", ".md", ".rs", ".ax", ".toml", ".conf", ".app", ".log", ".sh", ".py"]
             .iter()
@@ -106,6 +114,13 @@ struct Preview {
     hex: bool,
 }
 
+struct FileDrag {
+    index: usize,
+    start: (i32, i32),
+    pointer: (i32, i32),
+    moved: bool,
+}
+
 struct Files {
     cwd: String,
     back: Vec<String>,
@@ -121,6 +136,7 @@ struct Files {
     status_error: bool,
     dialog: Option<Dialog>,
     preview: Option<Preview>,
+    drag: Option<FileDrag>,
     tz: Tz,
     size: (u32, u32),
     hint: Option<&'static str>,
@@ -164,6 +180,7 @@ fn main() -> i32 {
         status_error: false,
         dialog: None,
         preview: None,
+        drag: None,
         tz: system_tz(),
         size: (0, 0),
         hint: None,
@@ -273,6 +290,58 @@ impl Files {
         self.list.selected().and_then(|i| self.entries.get(i))
     }
 
+    /// The folder a drag at (`x`, `y`) would drop into: another row that is
+    /// a folder, or a place in the side bar.
+    fn drop_folder(&self, x: i32, y: i32, source: usize) -> Option<(String, String)> {
+        if let Some(i) = self.list.row_at(x, y) {
+            if i != source {
+                let e = self.entries.get(i)?;
+                if e.is_dir() {
+                    return Some((join(&self.cwd, &e.name), e.name.clone()));
+                }
+            }
+            return None;
+        }
+        for (r, (label, path, _)) in self.place_rects().iter().zip(&self.places) {
+            if contains(r, x, y) {
+                let path = path.trim_end_matches('/');
+                if path != self.cwd.trim_end_matches('/') {
+                    return Some((String::from(path), label.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    fn move_entry(&mut self, index: usize, target: &str, label: &str) {
+        let Some(e) = self.entries.get(index) else { return };
+        let name = e.name.clone();
+        let is_dir = e.is_dir();
+        let from = join(&self.cwd, &name);
+        let to = join(target, &name);
+        if fs::symlink_metadata(&to).is_ok() {
+            self.set_status(format!("\"{name}\" already exists in {label}"), true);
+            return;
+        }
+        let moved = if is_dir {
+            fs::rename(&from, &to).map(|_| ())
+        } else {
+            match fs::rename(&from, &to) {
+                Ok(()) => Ok(()),
+                // Another volume: rename cannot cross file systems.
+                Err(_) => fs::copy(&from, &to).map(|_| ()).and_then(|_| fs::remove_file(&from)),
+            }
+        };
+        match moved {
+            Ok(()) => {
+                println!("files: moved {from} to {to}");
+                self.refresh();
+                self.set_status(format!("Moved {name} to {label}"), false);
+            }
+            Err(err) => self.set_status(format!("Cannot move {from}: {err}"), true),
+        }
+    }
+
     fn open(&mut self, i: usize, cx: &mut Ctx) {
         let Some(e) = self.entries.get(i) else { return };
         let path = join(&self.cwd, &e.name);
@@ -281,19 +350,22 @@ impl Files {
                 cx.title = Some(format!("Files — {}", self.cwd));
             }
         } else if e.is_program()
+            || is_win_program(&e.name)
             || e.name.ends_with(".app")
             || [".html", ".htm", ".xhtml"].iter().any(|ext| e.name.to_ascii_lowercase().ends_with(ext))
         {
             let shortcut = if e.name.ends_with(".app") { common::load_app(&path) } else { None };
             let command = if let Some(app) = &shortcut {
-                let mut c = Command::new(if app.exec.ends_with(".exe") { "/bin/winrun" } else { &app.exec });
-                if app.exec.ends_with(".exe") {
+                let windows = is_win_program(&app.exec);
+                let mut c = Command::new(if windows { "/bin/winrun" } else { &app.exec });
+                if windows {
                     c.arg(&app.exec);
                 }
                 c
-            } else if e.is_program() {
-                let mut c = Command::new(if path.ends_with(".exe") { "/bin/winrun" } else { &path });
-                if path.ends_with(".exe") {
+            } else if e.is_program() || is_win_program(&e.name) {
+                let windows = is_win_program(&path);
+                let mut c = Command::new(if windows { "/bin/winrun" } else { &path });
+                if windows {
                     c.arg(&path);
                 }
                 c
@@ -629,6 +701,31 @@ impl App for Files {
             }
         }
         let mut redraw = false;
+        // A drag that started on a row: follow the pointer and move the
+        // entry when it is released over a folder row or a place.
+        match ev {
+            Ui::PointerMove { x, y } => {
+                if let Some(d) = &mut self.drag {
+                    d.pointer = (x, y);
+                    if (x - d.start.0).abs().max((y - d.start.1).abs()) > 5 {
+                        d.moved = true;
+                    }
+                }
+            }
+            Ui::PointerUp { x, y, button: b } if b == button::LEFT => {
+                if let Some(d) = self.drag.take() {
+                    if d.moved {
+                        if let Some((target, label)) = self.drop_folder(x, y, d.index) {
+                            self.move_entry(d.index, &target, &label);
+                            let (w, h) = self.size;
+                            self.layout_inner(w, h);
+                        }
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
         // Keyboard shortcuts.
         if let Ui::Key(k) = ev {
             if k.down {
@@ -735,6 +832,14 @@ impl App for Files {
         if self.hidden.event(&ev, false) == Response::Changed {
             self.refresh();
             return true;
+        }
+        // A left press on a row is a possible drag (the list also selects it).
+        if let Ui::PointerDown { x, y, button: b, clicks } = ev {
+            if b == button::LEFT && clicks == 1 && self.preview.is_none() {
+                if let Some(i) = self.list.row_at(x, y) {
+                    self.drag = Some(FileDrag { index: i, start: (x, y), pointer: (x, y), moved: false });
+                }
+            }
         }
         // The list.
         match self.list.event(&ev, !self.path_focus) {

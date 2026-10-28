@@ -115,6 +115,22 @@ fn wake_key(key: Key, count: u32) -> u64 {
     woken.len() as u64
 }
 
+pub fn dump_waiters() {
+    use core::fmt::Write;
+    let waiters = WAITERS.lock();
+    let mut line = alloc::string::String::new();
+    for waiter in waiters.iter() {
+        match waiter.key {
+            Key::Private(_, addr) => write!(line, " {}/{}@{addr:#x}", waiter.pid, waiter.tid).ok(),
+            Key::Shared(obj, off) => write!(line, " {}/{}@s{obj:#x}+{off:#x}", waiter.pid, waiter.tid).ok(),
+        };
+    }
+    drop(waiters);
+    if !line.is_empty() {
+        crate::kprintln!("futexwait:{line}");
+    }
+}
+
 /// Drops every registration of process `pid` (called when it is torn down).
 pub fn forget_process(pid: Pid) {
     WAITERS.lock().retain(|w| w.pid != pid);

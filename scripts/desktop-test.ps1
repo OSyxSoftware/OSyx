@@ -14,9 +14,11 @@ param(
     # virtio-gpu driver and PRISM's damage flushes.
     [switch]$Gpu,
     # Regression for rebuilding while an interactive VM is still running.
-    [switch]$RebuildWhileRunning
+    [switch]$RebuildWhileRunning,
+    [ValidateRange(1,16)][int]$CpuCount = 1
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
+$script:qemu = $null
 $testDir = Join-Path $BuildDir 'test'
 New-Item -ItemType Directory -Force $testDir | Out-Null
 $results = New-Object System.Collections.Generic.List[object]
@@ -56,19 +58,26 @@ function MovePtr([int]$Dx, [int]$Dy) {
         $sx = [math]::Max(-100, [math]::Min(100, $Dx)); $sy = [math]::Max(-100, [math]::Min(100, $Dy))
         Qmp "{`"execute`":`"input-send-event`",`"arguments`":{`"events`":[{`"type`":`"rel`",`"data`":{`"axis`":`"x`",`"value`":$sx}},{`"type`":`"rel`",`"data`":{`"axis`":`"y`",`"value`":$sy}}]}}"
         $Dx -= $sx; $Dy -= $sy
-        Start-Sleep -Milliseconds 15
+        Start-Sleep -Milliseconds 40
     }
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds 300
 }
 $script:px = 0; $script:py = 0
-function Home { MovePtr -4000 -4000; MovePtr -1000 -1000; $script:px = 0; $script:py = 0 }
+function Home { MovePtr -4000 -4000; MovePtr -1000 -1000; Start-Sleep -Milliseconds 800; $script:px = 0; $script:py = 0 }
 function MoveTo([int]$X, [int]$Y) { MovePtr ($X - $script:px) ($Y - $script:py); $script:px = $X; $script:py = $Y }
 function Button([string]$B, [bool]$Down) {
     $d = if ($Down) { 'true' } else { 'false' }
     Qmp "{`"execute`":`"input-send-event`",`"arguments`":{`"events`":[{`"type`":`"btn`",`"data`":{`"down`":$d,`"button`":`"$B`"}}]}}"
 }
-function Click([int]$X, [int]$Y, [string]$B = 'left') { MoveTo $X $Y; Button $B $true; Start-Sleep -Milliseconds 60; Button $B $false; Start-Sleep -Milliseconds 250 }
-function DoubleClick([int]$X, [int]$Y) { MoveTo $X $Y; Button 'left' $true; Button 'left' $false; Button 'left' $true; Button 'left' $false; Start-Sleep -Milliseconds 300 }
+function Click([int]$X, [int]$Y, [string]$B = 'left') { MoveTo $X $Y; Button $B $true; Start-Sleep -Milliseconds 120; Button $B $false; Start-Sleep -Milliseconds 300 }
+function DoubleClick([int]$X, [int]$Y) {
+    MoveTo $X $Y
+    # Each transition must survive a USB polling interval under TCG load.
+    Button 'left' $true; Start-Sleep -Milliseconds 120; Button 'left' $false
+    Start-Sleep -Milliseconds 120
+    Button 'left' $true; Start-Sleep -Milliseconds 120; Button 'left' $false
+    Start-Sleep -Milliseconds 300
+}
 function Drag([int]$X1, [int]$Y1, [int]$X2, [int]$Y2) {
     MoveTo $X1 $Y1; Button 'left' $true; Start-Sleep -Milliseconds 100
     MoveTo $X2 $Y2; Start-Sleep -Milliseconds 100; Button 'left' $false; Start-Sleep -Milliseconds 400
@@ -102,19 +111,19 @@ function Window-Rect([string]$TitlePattern) {
 
 Push-Location $Root
 try {
+    $sessionDisk = Join-Path $testDir ('desktop-session-' + [Guid]::NewGuid().ToString('N') + '.img')
     if (-not $SkipBuild) {
         Write-Host '==> building the desktop image (init.args=desktop)'
-        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'init.args=tests,desktop' | Out-Null
+        & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline 'init.args=tests,desktop' -OutputImage $sessionDisk | Out-Null
+    } else {
+        $copyLock = Enter-BuildLock
+        try { Copy-Item -LiteralPath $DiskImage -Destination $sessionDisk }
+        finally { $copyLock.ReleaseMutex(); $copyLock.Dispose() }
     }
     if (Test-Path $log) { Remove-Item $log }
     $script:port = Get-Random -Minimum 20000 -Maximum 40000
-    $diskFile = 'build/osyx.img'
-    if ($RebuildWhileRunning) {
-        $sessionDisk = Join-Path $BuildDir 'desktop-isolation.img'
-        Copy-Item -LiteralPath $DiskImage -Destination $sessionDisk -Force
-        $diskFile = 'build/desktop-isolation.img'
-    }
-    $qargs = if ($Gpu) { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 -Gpu -GpuSize 1920x1080 -DiskFile $diskFile } else { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 -DiskFile $diskFile }
+    $diskFile = $sessionDisk
+    $qargs = if ($Gpu) { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 -CpuCount $CpuCount -Gpu -GpuSize 1920x1080 -DiskFile $diskFile } else { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 -CpuCount $CpuCount -DiskFile $diskFile }
     $script:qemu = Start-Qemu $qargs
     $ready = Wait-Log 'desktop: shell ready on a (\d+)x(\d+) screen' $TimeoutSec
     if (-not $ready) { Record 'desktop session starts' $false 'no "desktop: shell ready" in the log'; throw 'session did not start' }
@@ -313,6 +322,10 @@ try {
     foreach ($title in @('Test: Open UTF-16', 'Test: Save ANSI', 'Test: Replace file', 'Test: Select folder', 'Test: Cancel', 'Test: Small buffer')) {
         $opened = Wait-Log ('file-dialog: opened ' + [regex]::Escape($title)) 15
         Record ("WinAPI dialog opens: $title") ($null -ne $opened) ''
+        # The dialog logs before its first buffer is mapped and focused.
+        # Wait for the compositor before injecting the accepting key.
+        $dialogWindow = Window-Rect ([regex]::Escape($title))
+        if (-not $dialogWindow) { throw "dialog was not mapped: $title" }
         if ($title -eq 'Test: Open UTF-16') { Shot 'system-open-dialog' }
         if ($title -eq 'Test: Save ANSI') { Shot 'system-save-dialog' }
         if ($title -eq 'Test: Select folder') { Shot 'system-folder-dialog' }
@@ -343,11 +356,18 @@ try {
     if (-not $script:qemu.WaitForExit(15000)) { throw 'clean restart did not stop QEMU' }
     $persistedLog = Log-Text
     $restartLog = Join-Path $testDir "$prefix-restart.serial.log"
-    $restartArgs = if ($Gpu) { Get-QemuArgs -SerialLog $restartLog -Headless -QmpPort $script:port -MemoryMiB 1024 -DiskFile $diskFile -Gpu -GpuSize 1920x1080 } else { Get-QemuArgs -SerialLog $restartLog -Headless -QmpPort $script:port -MemoryMiB 1024 -DiskFile $diskFile }
+    $restartArgs = if ($Gpu) { Get-QemuArgs -SerialLog $restartLog -Headless -QmpPort $script:port -MemoryMiB 1024 -CpuCount $CpuCount -DiskFile $diskFile -Gpu -GpuSize 1920x1080 } else { Get-QemuArgs -SerialLog $restartLog -Headless -QmpPort $script:port -MemoryMiB 1024 -CpuCount $CpuCount -DiskFile $diskFile }
+    # QEMU creates (and truncates) this file only once it starts; until then a
+    # stale file from an earlier run would satisfy Wait-Log and the script would
+    # inject input during boot, before PRISM opens the seat (which drops events).
+    if (Test-Path -LiteralPath $restartLog) { Remove-Item -LiteralPath $restartLog }
     $script:qemu = Start-Qemu $restartArgs
     $log = $restartLog
     $restarted = Wait-Log 'desktop: 3 shortcut\(s\) in /home/user/Desktop' 30
     Record 'desktop shortcuts survive a clean restart on ext4' ($null -ne $restarted) ''
+    # The shortcut line precedes the mapped windows; only then does the seat
+    # accept pointer input.
+    if (-not (Wait-Log 'desktop: shell ready on a \d+x\d+ screen' 10)) { throw 'restarted session did not finish starting' }
     Start-Sleep -Seconds 2
     Home
     Click 184 162

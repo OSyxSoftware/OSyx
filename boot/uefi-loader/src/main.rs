@@ -262,6 +262,9 @@ fn boot(
 
     // ---- Stage 6: ExitBootServices ---------------------------------------
     let map_size = exit_boot_services(bs, image, map_buf, map_cap)?;
+    // Firmware IDT handlers are invalid now; an interrupt before the kernel
+    // installs its own IDT can triple-fault on hardware.
+    unsafe { asm!("cli", options(nomem, nostack)) };
     // From here on: no firmware calls, no allocation.
     // SAFETY: the descriptor array lives in our BOOTINFO region with room for
     // `max_entries` entries; the UEFI map buffer holds `map_size` bytes.
@@ -700,8 +703,18 @@ unsafe fn enter_kernel(pml4: u64, stack_top: u64, entry: u64, boot_info: u64, nx
         let efer = ((hi as u64) << 32 | lo as u64) | (1 << 11); // NXE
         asm!("wrmsr", in("ecx") IA32_EFER, in("eax") efer as u32, in("edx") (efer >> 32) as u32, options(nomem, nostack));
     }
+    // The kernel has no ENDBR or shadow-stack handoff; do not inherit CET
+    // left enabled by firmware. Reserved CR4 bits retain their current values.
+    asm!(
+        "mov rax, cr4",
+        "and rax, ~0x800000",
+        "mov cr4, rax",
+        out("rax") _,
+        options(nostack, preserves_flags)
+    );
     asm!(
         "cli",
+        "cld",
         "mov cr3, {pml4}",
         "mov rsp, {stack}",
         "xor ebp, ebp",

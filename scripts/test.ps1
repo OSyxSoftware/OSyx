@@ -28,7 +28,7 @@ $ExpectedFsChecks = 19
 # "[user] exec: ..." checks init runs (userspace/apps/src/exec_checks.rs).
 $ExpectedExecChecks = 13
 # "[user] ipc: ..." checks init runs (userspace/apps/src/ipc_checks.rs).
-$ExpectedIpcChecks = 15
+$ExpectedIpcChecks = 16
 $results = New-Object System.Collections.Generic.List[object]
 $testDir = Join-Path $BuildDir 'test'
 New-Item -ItemType Directory -Force $testDir | Out-Null
@@ -73,14 +73,22 @@ try {
     if (-not $SkipHost) {
         Write-Host '==> host unit tests'
         $out = ''
-        try { $out = (Invoke-Checked 'cargo test' { cargo test --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --exclude osyx-desktop --exclude prism-client }) -join "`n"; $ok = $true } catch { $ok = $false; $out += $_ }
+        $oldTemp = $env:TEMP; $oldTmp = $env:TMP
+        try {
+            # The host VFS tests need a writable Windows scratch directory.
+            $env:TEMP = $testDir; $env:TMP = $testDir
+            try { $out = (Invoke-Checked 'cargo test' { cargo test --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --exclude osyx-desktop --exclude prism-client --exclude osyx-web }) -join "`n"; $ok = $true } catch { $ok = $false; $out += $_ }
+        } finally {
+            $env:TEMP = $oldTemp; $env:TMP = $oldTmp
+        }
         $passed = ([regex]::Matches($out, 'test result: ok\. (\d+) passed') | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Sum).Sum
         Record 'host unit tests' $ok "$passed tests passed"
         Write-Host '==> clippy (host crates + freestanding targets)'
         $ok = $true
         try {
-            Invoke-Checked 'clippy host' { cargo clippy --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --exclude osyx-desktop --exclude prism-client --exclude osyx-nettools --exclude osyx-win32 --all-targets -- -D warnings } | Out-Null
-            Invoke-Checked 'clippy user' { cargo clippy -p osyx-apps -p osyx-desktop -p osyx-nettools -p osyx-win32 -p prism-client -p os-std -p os-sys --target x86_64-unknown-none --target-dir target/user -- -D warnings } | Out-Null
+            Invoke-Checked 'clippy host' { cargo clippy --workspace --exclude osyx-kernel --exclude osyx-uefi-loader --exclude osyx-apps --exclude osyx-desktop --exclude prism-client --exclude osyx-nettools --exclude osyx-win32 --exclude osyx-web --all-targets -- -D warnings } | Out-Null
+            $saved = $env:RUSTFLAGS; $env:RUSTFLAGS = '-C relocation-model=static -C code-model=small --cfg polyval_force_soft --cfg poly1305_force_soft --cfg aes_force_soft --cfg chacha20_force_soft --cfg curve25519_dalek_backend="serial"'
+            try { Invoke-Checked 'clippy user' { cargo clippy -p osyx-apps -p osyx-desktop -p osyx-nettools -p osyx-win32 -p osyx-web -p prism-client -p os-std -p os-sys --target x86_64-unknown-none --target-dir target/user -- -D warnings } | Out-Null } finally { $env:RUSTFLAGS = $saved }
             Invoke-Checked 'clippy loader' { cargo clippy -p osyx-uefi-loader --target x86_64-unknown-uefi -- -D warnings } | Out-Null
             Invoke-Checked 'clippy kernel' { cargo clippy -p osyx-kernel --target x86_64-unknown-none -- -D warnings } | Out-Null
         } catch { $ok = $false; Write-Host $_ }

@@ -24,11 +24,14 @@ members = [
     "storage/ext4",
     "storage/fat",
     "storage/part",
+    "storage/sevenz",
     "storage/tmpfs",
     "storage/vfs",
     "userspace/apps",
     "userspace/desktop",
+    "userspace/install",
     "userspace/nettools",
+    "userspace/web",
 ]
 # Host-testable crates only. The loader, kernel and user programs are freestanding and are
 # built with an explicit --target by scripts/build.ps1.
@@ -52,8 +55,10 @@ default-members = [
     "storage/ext4",
     "storage/fat",
     "storage/part",
+    "storage/sevenz",
     "storage/tmpfs",
     "storage/vfs",
+    "userspace/install",
 ]
 
 [workspace.package]

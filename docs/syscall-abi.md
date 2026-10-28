@@ -31,11 +31,11 @@ UTF-8). The inventory contains real PCI functions and attached HID inputs.
 | 2 | `map` | `len`, `prot` (R=1, W=2, X=4) | address of zeroed pages |
 | 3 | `unmap` | `addr`, `len` (must match one whole `map`) | 0 |
 | 4 | `sysinfo` | `out: *mut SystemInfo` (88 bytes) | 0 |
-| 5 | `clock` | `id` (0 = monotonic since boot, 1 = wall clock since 1970 UTC) | nanoseconds (10 ms resolution) |
+| 5 | `clock` | `id` (0 = monotonic since boot, 1 = wall clock since 1970 UTC) | nanoseconds (1 ms resolution) |
 | 6 | `spawn` | `args: *const ExecArgs` (48 bytes) | child pid |
 | 7 | `wait` | `pid` (0 = any child), `status: *mut i32` (may be null) | pid of the reaped child |
 | 8 | `yield` | — | 0 |
-| 9 | `sleep` | `ns` (rounded up to 10 ms ticks) | 0 |
+| 9 | `sleep` | `ns` (rounded up to 1 ms ticks) | 0 |
 | 10 | `thread_spawn` | `entry`, `stack_top` (16-byte aligned), `arg` (→ `rdi`), `fs_base` | thread id |
 | 11 | `thread_exit` | `code`, `done_word: *mut u32` (may be null) | does not return |
 | 12 | `futex_wait` | `addr` (4-byte aligned), `expected: u32`, `timeout_ns` (0 = none) | 0 |

@@ -35,7 +35,7 @@ pub mod tmpfs;
 use crate::devices::DeviceFile;
 use crate::kprintln;
 use crate::sync::IrqSpinLock;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -201,9 +201,116 @@ fn mount_at(canon: &str) -> Option<Arc<Mount>> {
     MOUNTS.lock().exact(canon).cloned()
 }
 
-fn root_node() -> Result<Node> {
+// ---- lookup cache ----------------------------------------------------------
+
+/// One resolved component: its node and the driver's stat that proved it.
+/// The stat is kept so descending does not stat the same directory again.
+struct WalkEntry {
+    node: Node,
+    st: FileStat,
+}
+
+struct Cached {
+    ino: u64,
+    st: FileStat,
+    /// Name as the driver stores it (differs from the query only for
+    /// case-insensitive lookups).
+    stored: String,
+    epoch: u64,
+    /// The driver reported this name as absent. Databases probe the same
+    /// journal names thousands of times per second, so the miss is cached
+    /// too; every operation that adds a name forgets it.
+    missing: bool,
+}
+
+enum Hit {
+    Node { ino: u64, st: FileStat, stored: String },
+    Missing,
+}
+
+const DCACHE_MAX: usize = 8192;
+
+/// Bumped by changes that can invalidate entries wholesale: mounts, or an
+/// inode's kind/permissions changing. Entry creation and removal forget the
+/// single affected name instead, because otherwise one file churn (SQLite
+/// journals) would invalidate every path in the tree on each operation.
+static DCACHE_EPOCH: AtomicU64 = AtomicU64::new(1);
+/// Keyed by (mount, directory, case-insensitive, requested name). The flag is
+/// part of the key because the two modes disagree in both directions: a
+/// case-sensitive miss is a case-insensitive hit, and a case-insensitive hit
+/// under a spelling that is not stored is a case-sensitive miss.
+static DCACHE: IrqSpinLock<BTreeMap<(u64, u64, bool, String), Cached>> = IrqSpinLock::new(BTreeMap::new());
+
+fn cache_get(key: &(u64, u64, bool, String)) -> Option<Hit> {
+    let t = DCACHE.lock();
+    let c = t.get(key)?;
+    if c.epoch != DCACHE_EPOCH.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(if c.missing {
+        Hit::Missing
+    } else {
+        Hit::Node { ino: c.ino, st: c.st, stored: c.stored.clone() }
+    })
+}
+
+fn cache_put(key: (u64, u64, bool, String), ino: u64, st: FileStat, stored: String, epoch: u64) {
+    if epoch != DCACHE_EPOCH.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut t = DCACHE.lock();
+    if t.len() >= DCACHE_MAX {
+        t.clear();
+    }
+    t.insert(key, Cached { ino, st, stored, epoch, missing: false });
+}
+
+fn cache_put_missing(key: (u64, u64, bool, String), name: String, epoch: u64) {
+    if epoch != DCACHE_EPOCH.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut t = DCACHE.lock();
+    if t.len() >= DCACHE_MAX {
+        t.clear();
+    }
+    t.insert(key, Cached { ino: 0, st: FileStat::default(), stored: name, epoch, missing: true });
+}
+
+/// Forgets `name` in `dir`: the only cache entries a create, unlink or
+/// rename can invalidate. An entry may be keyed by any spelling of the same
+/// stored name, in either mode, so all of them go.
+fn cache_forget(mount: u64, dir: u64, name: &str) {
+    let mut t = DCACHE.lock();
+    let lo = (mount, dir, false, String::new());
+    let hi = (mount, dir, true, String::from("\u{10ffff}"));
+    let stale: Vec<(u64, u64, bool, String)> =
+        t.range(lo..=hi).filter(|(_, c)| c.stored.eq_ignore_ascii_case(name)).map(|(k, _)| k.clone()).collect();
+    for k in stale {
+        t.remove(&k);
+    }
+}
+
+fn cache_invalidate() {
+    DCACHE_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The root of the mount holding `/`, with its stat cached: every walk
+/// descends through it and the driver stat would take the volume lock on
+/// each path resolution.
+fn root_entry() -> Result<WalkEntry> {
     let m = mount_at("/").ok_or(Errno::NotFound)?;
-    Ok(Node { ino: m.fs.root(), mount: m, path: String::from("/") })
+    let ino = m.fs.root();
+    let key = (m.id, ino, false, String::new());
+    let epoch = DCACHE_EPOCH.load(Ordering::Relaxed);
+    let st = match cache_get(&key) {
+        Some(Hit::Node { st, .. }) => st,
+        _ => {
+            let st = m.stat(ino)?;
+            cache_put(key, ino, st, String::new(), epoch);
+            st
+        }
+    };
+    Ok(WalkEntry { node: Node { ino, mount: m, path: String::from("/") }, st })
 }
 
 /// Resolves `path` to a node; `follow_last` decides whether a final
@@ -215,7 +322,7 @@ pub fn walk(cx: &Lookup, p: &str, follow_last: bool) -> Result<Node> {
         queue.extend(path::components(&cx.cwd).map(String::from));
     }
     queue.extend(path::components(p).map(String::from));
-    let mut stack = alloc::vec![root_node()?];
+    let mut stack = alloc::vec![root_entry()?];
     let mut links = 0;
     while let Some(c) = queue.pop_front() {
         match c.as_str() {
@@ -228,32 +335,58 @@ pub fn walk(cx: &Lookup, p: &str, follow_last: bool) -> Result<Node> {
             }
             _ => {}
         }
-        let cur = stack.last().expect("walk stack never empty");
-        let st = cur.stat()?;
-        if st.kind != KIND_DIR {
-            return Err(Errno::NotADirectory);
-        }
-        if !may(&st, &cx.cred, Access::EXEC) {
-            return Err(Errno::PermissionDenied);
-        }
-        // Case-insensitive lookups continue with the stored name, so mount
-        // points and later comparisons see the canonical spelling.
-        let (found, canon) = if cx.case_insensitive {
-            match cur.mount.fs.lookup_case_insensitive(cur.ino, &c) {
-                Ok((ino, stored)) => (Ok(ino), path::join(&cur.path, &stored)),
-                Err(e) => (Err(e), path::join(&cur.path, &c)),
+        let (mount, dir_ino) = {
+            let cur = stack.last().expect("walk stack never empty");
+            if cur.st.kind != KIND_DIR {
+                return Err(Errno::NotADirectory);
             }
-        } else {
-            (cur.mount.fs.lookup(cur.ino, &c), path::join(&cur.path, &c))
+            if !may(&cur.st, &cx.cred, Access::EXEC) {
+                return Err(Errno::PermissionDenied);
+            }
+            (cur.node.mount.clone(), cur.node.ino)
         };
-        let child = match (mount_at(&canon), found) {
-            (Some(m), Ok(_) | Err(Errno::NotFound)) => Node { ino: m.fs.root(), mount: m, path: canon },
-            (None, Ok(ino)) => Node { mount: cur.mount.clone(), ino, path: canon },
-            (_, Err(e)) => return Err(e),
+        let key = (mount.id, dir_ino, cx.case_insensitive, c);
+        let epoch = DCACHE_EPOCH.load(Ordering::Relaxed);
+        let (ino, stored, hit_st) = match cache_get(&key) {
+            Some(Hit::Node { ino, st, stored }) => (ino, stored, Some(st)),
+            Some(Hit::Missing) => return Err(Errno::NotFound),
+            None => {
+                // Case-insensitive lookups continue with the stored name, so
+                // mount points and later comparisons see the canonical
+                // spelling.
+                let found = if cx.case_insensitive {
+                    mount.fs.lookup_case_insensitive(dir_ino, &key.3)
+                } else {
+                    mount.fs.lookup(dir_ino, &key.3).map(|ino| (ino, key.3.clone()))
+                };
+                match found {
+                    Ok((ino, stored)) => (ino, stored, None),
+                    Err(Errno::NotFound) => {
+                        let name = key.3.clone();
+                        cache_put_missing(key, name, epoch);
+                        return Err(Errno::NotFound);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
         };
+        let canon = path::join(&stack.last().expect("walk stack never empty").node.path, &stored);
         let last = queue.is_empty();
+        let (child, cacheable) = match mount_at(&canon) {
+            Some(m) => (Node { ino: m.fs.root(), mount: m, path: canon }, false),
+            None => (Node { mount: mount.clone(), ino, path: canon }, true),
+        };
         if !last || follow_last {
-            let cst = child.stat()?;
+            let cst = match hit_st {
+                Some(st) => st,
+                None => {
+                    let st = child.stat()?;
+                    if cacheable {
+                        cache_put(key, ino, st, stored, epoch);
+                    }
+                    st
+                }
+            };
             if cst.kind == KIND_SYMLINK {
                 links += 1;
                 if links > MAX_SYMLINKS {
@@ -268,10 +401,12 @@ pub fn walk(cx: &Lookup, p: &str, follow_last: bool) -> Result<Node> {
                 }
                 continue;
             }
+            stack.push(WalkEntry { node: child, st: cst });
+        } else {
+            stack.push(WalkEntry { node: child, st: FileStat::default() });
         }
-        stack.push(child);
     }
-    Ok(stack.pop().expect("walk stack never empty"))
+    Ok(stack.pop().expect("walk stack never empty").node)
 }
 
 /// Resolves the directory that would contain `p`, and the final name.
@@ -333,6 +468,7 @@ pub fn mount_fs(at: &str, source: &str, flags: u64, fs: Arc<dyn Filesystem>) -> 
         fs,
     });
     MOUNTS.lock().insert(at, m.clone())?;
+    cache_invalidate();
     kprintln!(
         "vfs: {} {} mounted at {} ({}{})",
         m.fs.fs_type(),
@@ -364,6 +500,7 @@ pub fn unmount(cx: &Lookup, p: &str) -> Result<()> {
         t.remove(&at)?;
         m
     };
+    cache_invalidate();
     if let Err(e) = m.fs.unmount() {
         kprintln!("vfs: unmounting {} reported {:?}", m.path, e);
     }
@@ -415,7 +552,11 @@ pub fn mkdir(cx: &Lookup, p: &str, mode: u32) -> Result<()> {
         return Err(Errno::AlreadyExists);
     }
     check_dir_write(&dir, &cx.cred)?;
-    dir.mount.fs.create(dir.ino, &name, NewNode::Dir, mode & MODE_PERMS, &cx.cred).map(|_| ())
+    let r = dir.mount.fs.create(dir.ino, &name, NewNode::Dir, mode & MODE_PERMS, &cx.cred);
+    if r.is_ok() {
+        cache_forget(dir.mount.id, dir.ino, &name);
+    }
+    r.map(|_| ())
 }
 
 pub fn symlink(cx: &Lookup, target: &str, p: &str) -> Result<()> {
@@ -425,7 +566,11 @@ pub fn symlink(cx: &Lookup, target: &str, p: &str) -> Result<()> {
         return Err(Errno::AlreadyExists);
     }
     check_dir_write(&dir, &cx.cred)?;
-    dir.mount.fs.create(dir.ino, &name, NewNode::Symlink(target), 0o777, &cx.cred).map(|_| ())
+    let r = dir.mount.fs.create(dir.ino, &name, NewNode::Symlink(target), 0o777, &cx.cred);
+    if r.is_ok() {
+        cache_forget(dir.mount.id, dir.ino, &name);
+    }
+    r.map(|_| ())
 }
 
 pub fn readlink(cx: &Lookup, p: &str) -> Result<String> {
@@ -446,12 +591,16 @@ fn remove(cx: &Lookup, p: &str, dir_wanted: bool) -> Result<()> {
     if !perm::may_delete(&dst, &vst, &cx.cred) {
         return Err(Errno::PermissionDenied);
     }
-    match (dir_wanted, vst.kind == KIND_DIR) {
+    let r = match (dir_wanted, vst.kind == KIND_DIR) {
         (true, true) => dir.mount.fs.rmdir(dir.ino, &name),
         (true, false) => Err(Errno::NotADirectory),
         (false, true) => Err(Errno::IsADirectory),
         (false, false) => dir.mount.fs.unlink(dir.ino, &name),
+    };
+    if r.is_ok() {
+        cache_forget(dir.mount.id, dir.ino, &name);
     }
+    r
 }
 
 pub fn unlink(cx: &Lookup, p: &str) -> Result<()> {
@@ -488,7 +637,12 @@ pub fn rename(cx: &Lookup, from: &str, to: &str) -> Result<()> {
     if src.stat()?.kind == KIND_DIR && path::is_within(&path::join(&ddir.path, &dname), &src.path) {
         return Err(Errno::InvalidArgument);
     }
-    sdir.mount.fs.rename(sdir.ino, &sname, ddir.ino, &dname)
+    let r = sdir.mount.fs.rename(sdir.ino, &sname, ddir.ino, &dname);
+    if r.is_ok() {
+        cache_forget(sdir.mount.id, sdir.ino, &sname);
+        cache_forget(ddir.mount.id, ddir.ino, &dname);
+    }
+    r
 }
 
 pub fn chmod(cx: &Lookup, p: &str, mode: u32) -> Result<()> {
@@ -497,7 +651,9 @@ pub fn chmod(cx: &Lookup, p: &str, mode: u32) -> Result<()> {
     if !perm::may_chmod(&n.stat()?, &cx.cred) {
         return Err(Errno::PermissionDenied);
     }
-    n.mount.fs.set_mode(n.ino, mode & MODE_PERMS)
+    n.mount.fs.set_mode(n.ino, mode & MODE_PERMS)?;
+    cache_invalidate();
+    Ok(())
 }
 
 /// Resolves a new current directory; returns its canonical path.
@@ -576,6 +732,7 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
                 let (dir, name) = walk_parent(cx, p)?;
                 check_dir_write(&dir, &cx.cred)?;
                 let ino = dir.mount.fs.create(dir.ino, &name, NewNode::File, mode & MODE_PERMS, &cx.cred)?;
+                cache_forget(dir.mount.id, dir.ino, &name);
                 created = true;
                 Node { mount: dir.mount.clone(), ino, path: path::join(&dir.path, &name) }
             }
@@ -645,6 +802,50 @@ pub fn open_exec(cx: &Lookup, p: &str) -> Result<OpenFile> {
     Ok(OpenFile { kind: st.kind, node, pos: 0, read: true, write: false, append: false, listing: None, device: None })
 }
 
+// TEMP: write volume by file kind, to find what keeps the disk busy.
+static WRITE_CAT: [core::sync::atomic::AtomicU64; 8] = [const { core::sync::atomic::AtomicU64::new(0) }; 8];
+static LAST_IDB_WRITE: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+
+fn note_idb_write(offset: u64, len: usize) {
+    LAST_IDB_WRITE[0].store(crate::sched::current_tid(), core::sync::atomic::Ordering::Relaxed);
+    LAST_IDB_WRITE[1].store(offset, core::sync::atomic::Ordering::Relaxed);
+    LAST_IDB_WRITE[2].store(len as u64, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn last_idb_write() -> (u64, u64, u64) {
+    (
+        LAST_IDB_WRITE[0].load(core::sync::atomic::Ordering::Relaxed),
+        LAST_IDB_WRITE[1].load(core::sync::atomic::Ordering::Relaxed),
+        LAST_IDB_WRITE[2].load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+fn write_cat(path: &str) -> usize {
+    let p = path.as_bytes();
+    let has = |needle: &[u8]| p.windows(needle.len()).any(|w| w == needle);
+    if has(b"/idb/") {
+        0
+    } else if has(b"places.sqlite") {
+        1
+    } else if has(b"sessionstore") {
+        2
+    } else if has(b"cache2") {
+        3
+    } else if has(b"-journal") || has(b"-wal") {
+        4
+    } else {
+        5
+    }
+}
+
+pub fn write_cat_bytes() -> [u64; 8] {
+    let mut out = [0u64; 8];
+    for (o, c) in out.iter_mut().zip(WRITE_CAT.iter()) {
+        *o = c.load(core::sync::atomic::Ordering::Relaxed);
+    }
+    out
+}
+
 impl OpenFile {
     /// Mapped I/O does not move the file position or apply OPEN_APPEND.
     pub fn mapping_access(&self, writable: bool) -> Result<()> {
@@ -653,14 +854,38 @@ impl OpenFile {
         Ok(())
     }
 
-    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+    pub(crate) fn read_direct(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
         self.mapping_access(false)?;
         self.node.mount.fs.read(self.node.ino, offset, buf)
     }
 
     pub fn write_at(&self, offset: u64, data: &[u8]) -> Result<usize> {
         self.mapping_access(true)?;
-        self.node.mount.fs.write(self.node.ino, offset, data)
+        let n = self.node.mount.fs.write(self.node.ino, offset, data)?;
+        crate::exec::invalidate(self.cache_key());
+        crate::filecache::update_write(self.cache_key(), offset, &data[..n]);
+        crate::filecache::note_write(self.cache_key(), offset, &data[..n]);
+        let cat = write_cat(self.path());
+        if cat == 0 {
+            note_idb_write(offset, n);
+        }
+        WRITE_CAT[cat].fetch_add(n as u64, core::sync::atomic::Ordering::Relaxed);
+        Ok(n)
+    }
+
+    pub(crate) fn cache_key(&self) -> (u64, u64) {
+        (self.node.mount.id, self.node.ino)
+    }
+
+    /// True when [`read`](Self::read) can be served from the page cache: an
+    /// open regular file, not a device.
+    pub fn cache_readable(&self) -> bool {
+        self.read && self.device.is_none() && self.kind == osyx_abi::KIND_FILE
+    }
+
+    /// Current offset, without moving it.
+    pub fn position(&self) -> u64 {
+        self.pos
     }
 
     /// Canonical absolute path the file was opened under.
@@ -685,6 +910,16 @@ impl OpenFile {
         }
         match self.kind {
             KIND_DIR => Err(Errno::IsADirectory),
+            KIND_FILE if self.device.is_none() => {
+                let t0 = crate::interrupts::uptime_ms();
+                let r = crate::filecache::read(self.cache_key(), self.pos, buf, |off, b| self.node.mount.fs.read(self.node.ino, off, b));
+                let ms = crate::interrupts::uptime_ms().saturating_sub(t0);
+                if ms >= 40 {
+                    // TEMP I/O diagnostics: which read blocks its thread this long.
+                    crate::kprintln!("sloread: {} at {} len {} in {} ms (pid {} tid {})", self.path(), self.pos, buf.len(), ms, crate::sched::current_pid(), crate::sched::current_tid());
+                }
+                r
+            }
             _ => self.node.mount.fs.read(self.node.ino, self.pos, buf),
         }
     }
@@ -705,7 +940,18 @@ impl OpenFile {
         if self.append {
             self.pos = self.node.mount.fs.stat(self.node.ino)?.size;
         }
+        // The cached page is updated in place below; dropping it here would
+        // send the next read of this page back to a disk the writer keeps
+        // busy.
         let n = self.node.mount.fs.write(self.node.ino, self.pos, data)?;
+        crate::exec::invalidate(self.cache_key());
+        crate::filecache::update_write(self.cache_key(), self.pos, &data[..n]);
+        crate::filecache::note_write(self.cache_key(), self.pos, &data[..n]);
+        let cat = write_cat(self.path());
+        if cat == 0 {
+            note_idb_write(self.pos, n);
+        }
+        WRITE_CAT[cat].fetch_add(n as u64, core::sync::atomic::Ordering::Relaxed);
         self.pos += n as u64;
         Ok(n)
     }
@@ -745,7 +991,14 @@ impl OpenFile {
         }
         match self.kind {
             KIND_DIR => Err(Errno::IsADirectory),
-            _ => self.node.mount.fs.truncate(self.node.ino, len),
+            _ => {
+                let r = self.node.mount.fs.truncate(self.node.ino, len);
+                if r.is_ok() {
+                    crate::filecache::forget(self.cache_key());
+                    crate::exec::invalidate(self.cache_key());
+                }
+                r
+            }
         }
     }
 
@@ -756,6 +1009,7 @@ impl OpenFile {
         if self.node.mount.read_only() {
             return Ok(());
         }
+        WRITE_CAT[6].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         self.node.mount.fs.sync()
     }
 

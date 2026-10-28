@@ -69,6 +69,11 @@ pub fn frame_stats() -> (u64, u64) {
     (fb.free_frames(), fb.total_frames())
 }
 
+pub(crate) fn with_frame_allocator<R>(f: impl FnOnce(&mut FrameBitmap<'static>) -> R) -> R {
+    let mut g = FRAMES.lock();
+    f(g.as_mut().expect("frame allocator not initialised"))
+}
+
 /// Virtual window for device memory (PML4 slot 448), mapped uncached.
 const MMIO_BASE: u64 = 0xFFFF_E000_0000_0000;
 const MMIO_LIMIT: u64 = MMIO_BASE + (1 << 39);

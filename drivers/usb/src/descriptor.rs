@@ -28,7 +28,10 @@ pub const HID_SET_IDLE: u8 = 0x0A;
 pub const HID_SET_PROTOCOL: u8 = 0x0B;
 
 pub const CLASS_HID: u8 = 3;
+pub const CLASS_MASS_STORAGE: u8 = 8;
 pub const CLASS_HUB: u8 = 9;
+pub const MASS_STORAGE_SCSI: u8 = 6;
+pub const MASS_STORAGE_BOT: u8 = 0x50;
 pub const HID_SUBCLASS_BOOT: u8 = 1;
 pub const HID_PROTOCOL_KEYBOARD: u8 = 1;
 pub const HID_PROTOCOL_MOUSE: u8 = 2;
@@ -239,6 +242,16 @@ impl Interface {
     /// The first interrupt IN endpoint.
     pub fn interrupt_in(&self) -> Option<&EndpointDescriptor> {
         self.endpoints.iter().find(|e| e.is_in() && e.is_interrupt())
+    }
+
+    /// The first bulk IN endpoint.
+    pub fn bulk_in(&self) -> Option<&EndpointDescriptor> {
+        self.endpoints.iter().find(|e| e.is_in() && e.attributes & 3 == 2)
+    }
+
+    /// The first bulk OUT endpoint.
+    pub fn bulk_out(&self) -> Option<&EndpointDescriptor> {
+        self.endpoints.iter().find(|e| !e.is_in() && e.attributes & 3 == 2)
     }
 }
 

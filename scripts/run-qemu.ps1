@@ -2,28 +2,38 @@
 # build/serial.log (and is echoed here when -Follow is given).
 param(
     [string]$Cmdline = 'init.args=desktop',
-    [int]$MemoryMiB = 6144,
+    [int]$MemoryMiB = 8196,
     [switch]$NoBuild,
     [switch]$Headless,
     [switch]$Gdb,
     [switch]$Follow,
     [switch]$Gpu,
     [int]$QmpPort = 0,
-    [switch]$NoZen
+    [switch]$NoZen,
+    # Root filesystem size for a fresh session image. The old 1 GiB default
+    # left no room for application downloads.
+    [ValidateRange(512, 16384)][int]$RootMiB = 8192,
+    [ValidateRange(1,16)][int]$CpuCount = 4,
+    [ValidateSet('auto','whpx','tcg')][string]$Accel = 'auto'
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
-if (-not $NoBuild) { & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline $Cmdline -NoZen:$NoZen }
 # Each interactive VM owns its disk for its entire lifetime. Builds/tests
 # can replace build/osyx.img without changing this VM's filesystem blocks.
 $runDir = Join-Path $BuildDir 'run'
 New-Item -ItemType Directory -Force $runDir | Out-Null
 $runName = 'osyx-' + [guid]::NewGuid().ToString('N') + '.img'
 $runImage = Join-Path $runDir $runName
-Copy-Item -LiteralPath $DiskImage -Destination $runImage
+if (-not $NoBuild) {
+    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline $Cmdline -RootMiB $RootMiB -NoZen:$NoZen -OutputImage $runImage
+} else {
+    $copyLock = Enter-BuildLock
+    try { Copy-Item -LiteralPath $DiskImage -Destination $runImage }
+    finally { $copyLock.ReleaseMutex(); $copyLock.Dispose() }
+}
 Write-Host "Session disk (kept after exit): $runImage"
 $log = Join-Path $BuildDir 'serial.log'
 if (Test-Path $log) { Remove-Item $log }
-$qargs = Get-QemuArgs -SerialLog $log -Headless:$Headless -MemoryMiB $MemoryMiB -Gdb:$Gdb -Gpu:$Gpu -QmpPort $QmpPort -DiskFile ("build/run/$runName")
+$qargs = Get-QemuArgs -SerialLog $log -Headless:$Headless -MemoryMiB $MemoryMiB -Gdb:$Gdb -Gpu:$Gpu -QmpPort $QmpPort -DiskFile ("build/run/$runName") -CpuCount $CpuCount -Accel $Accel
 if ($Gdb) { Write-Host 'GDB stub on tcp::1234, CPU halted until a debugger continues it' }
 Write-Host "qemu $($qargs -join ' ')"
 $p = Start-Qemu $qargs

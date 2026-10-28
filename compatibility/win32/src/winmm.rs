@@ -1,8 +1,8 @@
 //! winmm's multimedia timer functions. timeGetTime is the monotonic clock
-//! in milliseconds. The OSyx kernel ticks at a fixed 100 Hz
-//! (kernel/src/arch/pic.rs, TIMER_HZ), so waits have 10 ms resolution:
-//! timeGetDevCaps reports that, timeBeginPeriod accepts the periods the
-//! kernel already provides and refuses finer ones with TIMERR_NOCANDO
+//! in milliseconds. The OSyx kernel ticks at a fixed 1 kHz
+//! (kernel/src/arch/pic.rs, TIMER_HZ), so waits have 1 ms resolution:
+//! timeGetDevCaps reports the 1 ms floor, timeBeginPeriod accepts periods
+//! the kernel already provides and refuses finer ones with TIMERR_NOCANDO
 //! instead of claiming a resolution OSyx does not have.
 #![allow(non_snake_case)]
 use alloc::{collections::BTreeMap, vec::Vec};
@@ -11,7 +11,7 @@ use os_std::sync::Mutex;
 const TIMERR_NOERROR: u32 = 0;
 const TIMERR_NOCANDO: u32 = 97;
 /// The kernel tick, in milliseconds.
-const PERIOD_MIN: u32 = 10;
+const PERIOD_MIN: u32 = 1;
 const PERIOD_MAX: u32 = 1_000_000;
 
 /// Outstanding timeBeginPeriod requests by period.

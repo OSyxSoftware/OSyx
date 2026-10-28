@@ -26,3 +26,5 @@ osyx-usb = { path = "../drivers/usb" }
 osyx-part = { path = "../storage/part" }
 osyx-tmpfs = { path = "../storage/tmpfs" }
 osyx-vfs = { path = "../storage/vfs" }
+# The live root (a boot module) is zlib-compressed; no_std with alloc only.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }

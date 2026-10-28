@@ -47,12 +47,12 @@ UEFI firmware (OVMF)
 | Framebuffer status screen | Implemented | QEMU screenshot |
 | User processes, ring 3, SYSCALL ABI v6 | Implemented | QEMU user tests |
 | ELF64 program loader: VFS lookup (`/bin`, `/usr/bin`), `spawn`, `execve`, argv/envp/auxv | Implemented (static `ET_EXEC`) | host tests of the start-up stack layout; in-kernel test; QEMU user tests |
-| Threads per process, futexes, FS-base TLS | Implemented (single CPU) | in-kernel + QEMU user tests |
-| Kernel threads, preemptive scheduler, FPU state | Implemented (single CPU) | in-kernel + QEMU user tests |
+| Threads per process, futexes, FS-base TLS | Implemented (SMP) | in-kernel + QEMU user tests |
+| Kernel threads, preemptive scheduler, FPU state | Implemented (SMP) | in-kernel + QEMU user tests |
 | spawn / wait / zombies / orphans | Implemented | QEMU user tests |
 | OSyx Std (convenience std) | Partially implemented | host tests + running on OSyx |
 | Genuine Rust `std` port | Planned | Not tested |
-| SMP | Planned | Not tested |
+| SMP | Implemented: MADT, INIT/SIPI, per-CPU state, parallel user threads, affinity, NMI TLB invalidation; coarse kernel entry lock | QEMU 2/4 CPUs; native SMP checks and Win32 regressions |
 | PCI enumeration (port I/O config space) | Implemented | in-kernel test, QEMU |
 | virtio-blk (modern virtio-pci, polled) + block layer | Implemented | in-kernel tests, QEMU |
 | GPT partitions (`storage/part`), GPT boot disk with ESP + root | Implemented | host tests incl. sgdisk; QEMU boot |

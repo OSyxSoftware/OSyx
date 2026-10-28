@@ -397,6 +397,13 @@ fn embedded_signature(file: &[u8]) -> Result<Vec<u8>, u32> {
     Err(CRYPT_E_NO_MATCH)
 }
 
+/// Whether a PE image's embedded Authenticode signature is structurally
+/// valid and names at least one signer and one certificate. This checks the
+/// encoding only: no digest, chain or trust evaluation.
+pub(crate) fn authenticode_has_signer(der: &[u8]) -> bool {
+    parse_signed(der).is_ok_and(|s| !s.signers.is_empty() && !s.certs.is_empty())
+}
+
 // ---- handles ---------------------------------------------------------------------------------
 
 struct Store {

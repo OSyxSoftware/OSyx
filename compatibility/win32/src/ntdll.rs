@@ -461,16 +461,17 @@ extern "win64" fn NtCreateThreadEx(
 }
 
 /// Timeouts: negative = relative, in 100 ns units; NULL = forever.
-fn timeout_ms(t: *const i64) -> Result<u32, NtStatus> {
+pub(crate) fn timeout_ms(t: *const i64) -> Result<u32, NtStatus> {
     if t.is_null() {
         return Ok(objects::INFINITE);
     }
     // SAFETY: the caller's LARGE_INTEGER.
     let v = unsafe { *t };
-    if v > 0 {
-        return Err(STATUS_NOT_SUPPORTED); // absolute times
-    }
-    Ok(((-v) as u64).div_ceil(10_000).min(objects::INFINITE as u64 - 1) as u32)
+    let units = if v > 0 {
+        let ns = os_sys::clock(osyx_abi::CLOCK_REALTIME).map_err(errno_to_status)? as i64;
+        (v as u64).saturating_sub(kernel32::filetime(ns))
+    } else { v.unsigned_abs() };
+    Ok(units.div_ceil(10_000).min(objects::INFINITE as u64 - 1) as u32)
 }
 
 extern "win64" fn NtWaitForSingleObject(h: u64, _alertable: u8, timeout: *const i64) -> NtStatus {
@@ -647,9 +648,9 @@ extern "win64" fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, r
                 teb::put(p, 56, 1u8);
             }
             _ => {
-                // Samples are 10 ms; kernel time includes idle time.
-                let idle = info.idle_ticks * 100_000;
-                let busy = info.ticks.saturating_sub(info.idle_ticks) * 100_000;
+                // Samples are 1 ms; kernel time includes idle time.
+                let idle = info.idle_ticks * 10_000;
+                let busy = info.ticks.saturating_sub(info.idle_ticks) * 10_000;
                 teb::put(p, 0, idle);
                 teb::put(p, 8, idle);
                 teb::put(p, 16, busy);
@@ -733,5 +734,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::sysext::ntdll_exports());
     exports.extend(crate::seh::ntdll_exports());
     exports.extend(crate::process::ntdll_exports());
+    exports.extend(crate::keyed::exports());
     exports
 }

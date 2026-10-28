@@ -22,6 +22,8 @@ pub struct TextField {
     dragging: bool,
     /// Longest accepted text (bytes).
     pub max_len: usize,
+    /// Shows every character as a bullet (passwords).
+    pub masked: bool,
 }
 
 const PAD: u32 = 10;
@@ -39,6 +41,25 @@ impl TextField {
             hovered: false,
             dragging: false,
             max_len: 1024,
+            masked: false,
+        }
+    }
+
+    /// The text as drawn: bullets when masked.
+    fn shown(&self, end: usize) -> String {
+        if self.masked {
+            self.text[..end].chars().map(|_| '*').collect()
+        } else {
+            String::from(&self.text[..end])
+        }
+    }
+
+    /// Byte index in `text` of the position at byte `i` of [`Self::shown`].
+    fn index_of_shown(&self, i: usize) -> usize {
+        if self.masked {
+            self.text.char_indices().nth(i).map_or(self.text.len(), |(b, _)| b)
+        } else {
+            i
         }
     }
 
@@ -142,20 +163,20 @@ impl TextField {
     /// Keeps the cursor inside the visible part of the field.
     fn ensure_visible(&mut self, fonts: &Fonts) {
         let w = self.inner().w;
-        let x = fonts.measure(self.font, &self.text[..self.cursor]);
+        let x = fonts.measure(self.font, &self.shown(self.cursor));
         if x < self.scroll {
             self.scroll = x;
         } else if x > self.scroll + w.saturating_sub(2) {
             self.scroll = x - w.saturating_sub(2);
         }
-        let total = fonts.measure(self.font, &self.text);
+        let total = fonts.measure(self.font, &self.shown(self.text.len()));
         if total < self.scroll + w {
             self.scroll = total.saturating_sub(w.saturating_sub(2));
         }
     }
 
     fn hit(&self, fonts: &Fonts, x: i32) -> usize {
-        fonts.hit(self.font, &self.text, x - self.inner().x + self.scroll as i32)
+        self.index_of_shown(fonts.hit(self.font, &self.shown(self.text.len()), x - self.inner().x + self.scroll as i32))
     }
 
     fn key(&mut self, k: &KeyEvent) -> Response {
@@ -295,13 +316,13 @@ impl TextField {
             p.text_in(self.font, inner, &self.placeholder, t.text_faint, Align::Left);
         } else {
             if let (true, Some((a, b))) = (focused, self.selection()) {
-                let sx = x0 + p.fonts.measure(self.font, &self.text[..a]) as i32;
-                let sw = p.fonts.measure(self.font, &self.text[a..b]);
+                let sx = x0 + p.fonts.measure(self.font, &self.shown(a)) as i32;
+                let sw = p.fonts.measure(self.font, &self.shown(b)).saturating_sub(sx as u32 - x0 as u32);
                 p.fill(Rect::new(sx, y, sw, lh), t.selection);
             }
-            p.text(self.font, x0, y, &self.text, t.text);
+            p.text(self.font, x0, y, &self.shown(self.text.len()), t.text);
             if focused {
-                let cx = x0 + p.fonts.measure(self.font, &self.text[..self.cursor]) as i32;
+                let cx = x0 + p.fonts.measure(self.font, &self.shown(self.cursor)) as i32;
                 p.fill(Rect::new(cx, y + 1, 2, lh.saturating_sub(2)), t.accent);
             }
         }

@@ -1,5 +1,5 @@
 //! Monotonic time ([`Instant`]) and wall-clock time ([`SystemTime`]). On
-//! OSyx the monotonic clock is the timer tick (10 ms) interpolated with the
+//! OSyx the monotonic clock is the timer tick (1 ms) interpolated with the
 //! TSC (sub-microsecond); the wall clock is the CMOS RTC read at boot plus
 //! the uptime.
 

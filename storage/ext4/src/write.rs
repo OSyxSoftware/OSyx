@@ -7,9 +7,10 @@
 //!   they are dropped and the in-memory superblock and group descriptors
 //!   are restored, so a failed call changes nothing on disk except data
 //!   blocks that remain unallocated.
-//! * File data goes straight to the device *before* the metadata that
-//!   makes it reachable is committed ("ordered" mode). Overwrites of
-//!   existing data blocks are in place, as in Linux's ordered mode.
+//! * File data is staged in memory and written out *before* the metadata
+//!   that makes it reachable is committed ("ordered" mode); reads see staged
+//!   blocks. Overwrites of existing data blocks are in place, as in Linux's
+//!   ordered mode.
 //! * Blocks freed by a transaction are not reused by the same transaction,
 //!   so a crash before the commit never finds new data in a block the old
 //!   metadata still uses.
@@ -29,6 +30,16 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+// Temporary I/O diagnostics.
+pub static WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// (calls, bytes) of file writes since mount.
+pub fn write_stats() -> (u64, u64) {
+    (WRITE_CALLS.load(Ordering::Relaxed), WRITE_BYTES.load(Ordering::Relaxed))
+}
 
 /// What [`Ext4::create`] makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,7 +55,23 @@ pub(crate) struct Tx {
     pub blocks: BTreeMap<u64, Vec<u8>>,
     pub dirty_groups: BTreeSet<u32>,
     pub freed: BTreeSet<u64>,
+    /// Original contents of blocks this operation has changed, for rollback.
+    undo: BTreeMap<u64, Option<Vec<u8>>>,
+    recording: bool,
 }
+
+/// Deferred metadata limit: file writes keep their data on disk immediately
+/// but collect metadata here, so a burst of small writes costs one journal
+/// transaction per few MiB instead of one per write. `sync` commits.
+const PENDING_LIMIT: usize = 1024;
+
+/// Staged file data limit, in blocks. Small or unaligned writes (SQLite WAL
+/// frames are 4120 bytes) would otherwise each cost a read-modify-write
+/// device round trip; staging them lets one flush write whole runs.
+const PENDING_DATA_LIMIT: usize = 2048;
+
+/// Largest staged run written in one device request.
+const PENDING_DATA_RUN: usize = 256;
 
 /// One extent in a flattened tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +149,7 @@ impl<D: BlockDevice> Ext4<D> {
         if self.read_only {
             return Ok(());
         }
+        self.flush_pending()?;
         let open: Vec<u32> = self.orphans.keys().copied().collect();
         if !open.is_empty() {
             // Files still open at shutdown: their space is reclaimed now.
@@ -167,6 +195,7 @@ impl<D: BlockDevice> Ext4<D> {
         if self.read_only {
             return Err(Error::ReadOnly);
         }
+        self.flush_pending()?;
         let snap = self.snapshot();
         self.tx = Tx::default();
         match f(self).and_then(|v| self.commit_tx().map(|_| v)) {
@@ -179,6 +208,104 @@ impl<D: BlockDevice> Ext4<D> {
                 Err(e)
             }
         }
+    }
+
+    /// Runs a file write against the pending transaction: no journal commit
+    /// unless it grows past [`PENDING_LIMIT`]. On error only this write's
+    /// metadata changes are rolled back.
+    fn write_op<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        let snap = self.snapshot();
+        let dirty_groups = self.tx.dirty_groups.clone();
+        let freed = self.tx.freed.clone();
+        self.tx.recording = true;
+        match f(self) {
+            Ok(v) => {
+                self.tx.recording = false;
+                self.tx.undo.clear();
+                if self.tx.blocks.len() >= PENDING_LIMIT {
+                    self.flush_pending()?;
+                }
+                Ok(v)
+            }
+            Err(e) => {
+                self.tx.recording = false;
+                let undo = core::mem::take(&mut self.tx.undo);
+                for (b, prev) in undo {
+                    match prev {
+                        Some(d) => {
+                            self.tx.blocks.insert(b, d);
+                        }
+                        None => {
+                            self.tx.blocks.remove(&b);
+                        }
+                    }
+                }
+                self.tx.dirty_groups = dirty_groups;
+                self.tx.freed = freed;
+                self.sb = snap.sb;
+                self.groups = snap.groups;
+                self.orphans = snap.orphans;
+                Err(e)
+            }
+        }
+    }
+
+    /// Stages file data in memory. Writes whole blocks; a partial block is
+    /// merged by the caller. Flushed by [`Ext4::flush_pending`] before the
+    /// metadata that references it is committed.
+    fn stage_data(&mut self, b: u64, data: &[u8]) -> Result<()> {
+        let bs = self.sb.block_size as usize;
+        if data.is_empty() || !data.len().is_multiple_of(bs) {
+            return Err(Error::InvalidInput("write length is not a block multiple"));
+        }
+        let n = (data.len() / bs) as u64;
+        if b.checked_add(n).is_none_or(|e| e > self.sb.blocks_count) {
+            return Err(Error::Corrupt("write beyond the end of the file system"));
+        }
+        for (i, d) in data.chunks(bs).enumerate() {
+            self.pending.insert(b + i as u64, d.to_vec());
+        }
+        if self.pending.len() >= PENDING_DATA_LIMIT {
+            self.write_back()?;
+        }
+        Ok(())
+    }
+
+    /// Writes staged file data as consecutive runs. Staged blocks stay on
+    /// error, so a failed device request is retried by the next flush.
+    fn write_back(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let keys: Vec<u64> = self.pending.keys().copied().collect();
+        let mut i = 0;
+        while i < keys.len() {
+            let start = keys[i];
+            let mut run = self.pending[&start].clone();
+            let mut j = i + 1;
+            while j < keys.len() && keys[j] == start + (j - i) as u64 && j - i < PENDING_DATA_RUN {
+                run.extend_from_slice(&self.pending[&keys[j]]);
+                j += 1;
+            }
+            self.write_blocks_raw(start, &run)?;
+            i = j;
+        }
+        for &b in &keys {
+            self.pending.remove(&b);
+        }
+        Ok(())
+    }
+
+    /// Commits metadata accumulated by file writes, if any.
+    pub(crate) fn flush_pending(&mut self) -> Result<()> {
+        self.write_back()?;
+        if self.tx.blocks.is_empty() && self.tx.dirty_groups.is_empty() && self.tx.freed.is_empty() {
+            return Ok(());
+        }
+        self.commit_tx()
     }
 
     fn commit_tx(&mut self) -> Result<()> {
@@ -201,6 +328,10 @@ impl<D: BlockDevice> Ext4<D> {
     }
 
     fn tx_put(&mut self, b: u64, data: Vec<u8>) {
+        if self.tx.recording {
+            let prev = self.tx.blocks.get(&b).cloned();
+            self.tx.undo.entry(b).or_insert(prev);
+        }
         self.tx.blocks.insert(b, data);
     }
 
@@ -410,6 +541,7 @@ impl<D: BlockDevice> Ext4<D> {
                 bm[i / 8] &= !(1 << (i % 8));
                 self.tx.freed.insert(x);
                 self.tx.blocks.remove(&x);
+                self.pending.remove(&x);
                 self.forget_cached(x);
             }
             let bmb = self.groups[g as usize].block_bitmap;
@@ -658,11 +790,13 @@ impl<D: BlockDevice> Ext4<D> {
         if data.is_empty() {
             return Ok(0);
         }
+        WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
+        WRITE_BYTES.fetch_add(data.len() as u64, Ordering::Relaxed);
         let end = offset.checked_add(data.len() as u64).ok_or(Error::FileTooLarge)?;
         if end > self.max_size() {
             return Err(Error::FileTooLarge);
         }
-        self.op(|fs| {
+        self.write_op(|fs| {
             let mut inode = fs.tx_inode(ino)?;
             if inode.file_type() != S_IFREG {
                 return Err(if inode.is_dir() { Error::IsADirectory } else { Error::InvalidInput("not a regular file") });
@@ -702,7 +836,7 @@ impl<D: BlockDevice> Ext4<D> {
                     let e = list[i];
                     let zeros = vec![0u8; bs as usize];
                     for k in 0..e.len {
-                        self.write_block_raw(e.phys + k, &zeros)?;
+                        self.stage_data(e.phys + k, &zeros)?;
                     }
                     list[i].uninit = false;
                     changed = true;
@@ -722,21 +856,36 @@ impl<D: BlockDevice> Ext4<D> {
                 }
             };
             let n = run.min(last + 1 - l);
-            for k in 0..n {
+            let mut k = 0;
+            while k < n {
                 let lb = l + k;
                 let bstart = lb * bs;
                 let from = offset.max(bstart);
                 let to = (offset + data.len() as u64).min(bstart + bs);
-                let src = &data[(from - offset) as usize..(to - offset) as usize];
                 if from == bstart && to == bstart + bs {
-                    self.write_block_raw(phys + k, src)?;
+                    // Extend over all following blocks this write covers
+                    // completely; one device request instead of one per block.
+                    let mut m = k + 1;
+                    while m < n {
+                        let nstart = (l + m) * bs;
+                        if offset <= nstart && nstart + bs <= offset + data.len() as u64 {
+                            m += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let start = (bstart - offset) as usize;
+                    self.stage_data(phys + k, &data[start..start + (m - k) as usize * bs as usize])?;
+                    k = m;
                 } else {
+                    let src = &data[(from - offset) as usize..(to - offset) as usize];
                     let mut blk = vec![0u8; bs as usize];
                     if !fresh.contains(&(phys + k)) {
                         self.read_blocks_raw(phys + k, &mut blk)?;
                     }
                     blk[(from - bstart) as usize..(to - bstart) as usize].copy_from_slice(src);
-                    self.write_block_raw(phys + k, &blk)?;
+                    self.stage_data(phys + k, &blk)?;
+                    k += 1;
                 }
             }
             l += n;
@@ -790,7 +939,7 @@ impl<D: BlockDevice> Ext4<D> {
                         let mut blk = vec![0u8; bs as usize];
                         fs.read_blocks_raw(phys, &mut blk)?;
                         blk[(size % bs) as usize..].fill(0);
-                        fs.write_block_raw(phys, &blk)?;
+                        fs.stage_data(phys, &blk)?;
                     }
                 }
             }
@@ -1356,6 +1505,7 @@ impl<D: BlockDevice> Ext4<D> {
     /// Writes everything (nothing is cached: each call commits) and
     /// flushes the device.
     pub fn sync(&mut self) -> Result<()> {
+        self.flush_pending()?;
         self.dev.flush()
     }
 
@@ -1363,6 +1513,9 @@ impl<D: BlockDevice> Ext4<D> {
     /// bitmaps, bitmap checksums, and a walk of the directory tree that
     /// checks link counts, allocation bits and that no block is used twice.
     pub fn check(&mut self) -> Result<String> {
+        // Pending file writes keep metadata in memory; journal it first so
+        // the checks see either a committed volume or nothing new.
+        self.flush_pending()?;
         let ipg = self.sb.inodes_per_group;
         let mut free_b = 0u64;
         let mut free_i = 0u64;

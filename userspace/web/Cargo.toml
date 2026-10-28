@@ -1,0 +1,31 @@
+[package]
+name = "osyx-web"
+description = "OSyx HTTPS client (rustls with the RustCrypto provider and the Mozilla root store) and the programs built on it: fetch and firstboot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fetch"
+path = "src/bin/fetch.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "firstboot"
+path = "src/bin/firstboot.rs"
+test = false
+bench = false
+
+[dependencies]
+os-std = { path = "../../runtime/os-std" }
+osyx-crypto = { path = "../../shared/crypto" }
+osyx-7z = { path = "../../storage/sevenz" }
+rustls = { version = "0.23", default-features = false, features = ["tls12"] }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc"] }
+webpki-roots = "1"
+# Randomness for TLS comes from the kernel's /dev/random (see lib.rs).
+getrandom = { version = "0.2", features = ["custom"] }
+# User programs are soft-float: no SSE/AVX code paths in the hash crates.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
+sha1 = { version = "0.10", default-features = false, features = ["force-soft"] }

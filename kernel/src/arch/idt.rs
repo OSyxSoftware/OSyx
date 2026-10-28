@@ -28,6 +28,10 @@ osyx_isr_table:
     .endr
 
 osyx_isr_common:
+    testb $3,24(%rsp)
+    jz 1f
+    swapgs
+1:
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -61,6 +65,10 @@ osyx_isr_common:
     popq %rcx
     popq %rbx
     popq %rax
+    testb $3,24(%rsp)
+    jz 2f
+    swapgs
+2:
     addq $16, %rsp
     iretq
     "#,
@@ -147,7 +155,13 @@ pub unsafe fn init() {
             _zero: 0,
         };
     }
-    let ptr = Pointer { limit: (size_of::<[Gate; 256]>() - 1) as u16, base: idt as u64 };
+    load();
+}
+
+/// # Safety
+/// The BSP built the shared IDT; this CPU already loaded its own GDT/TSS.
+pub unsafe fn load() {
+    let ptr = Pointer { limit: (size_of::<[Gate; 256]>() - 1) as u16, base: (&raw const IDT) as u64 };
     asm!("lidt [{}]", in(reg) &ptr, options(readonly, nostack, preserves_flags));
 }
 

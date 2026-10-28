@@ -46,7 +46,7 @@ supplies the platform parts:
 | `thread::{spawn, Builder, JoinHandle, current, Thread, ThreadId}` | Implemented; a panicking thread ends the process (panic = abort) | OSyx (join values, ids/names, detached reaping, faults and panics in threads) + host |
 | `thread_local!`, `thread::LocalKey` | Implemented on the FS base (own TLS, not ELF TLS) with per-thread destructors | OSyx + host |
 | `sync::{Mutex, Condvar}` (futex based), `Arc`, `Weak`, `atomic` | Implemented; never poisoned; the mutex is not fair | OSyx (contention under preemption, producer/consumer, timeouts) + host (8 parallel threads) |
-| `time::{Instant, Duration}` | Implemented (10 ms resolution) | OSyx + host |
+| `time::{Instant, Duration}` | Implemented (1 ms resolution) | OSyx + host |
 | `env::args` | Implemented | OSyx (tested with `init.args`) + host |
 | `env::{var, vars, set_var, remove_var}` | Implemented: the `envp` block from the start-up stack, kept in a locked process-wide copy that children inherit | OSyx (inheritance, `env_clear`, exact `envp` in children) + host |
 | `env::current_exe` | Implemented (`AT_EXECFN`: canonical path the kernel loaded) | OSyx + host |

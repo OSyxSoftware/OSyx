@@ -6,7 +6,7 @@ use super::cpu::{inb, outb};
 
 pub const IRQ_BASE: u8 = 32;
 pub const TIMER_VECTOR: u8 = IRQ_BASE;
-pub const TIMER_HZ: u32 = 100;
+pub const TIMER_HZ: u32 = 1000;
 
 const PIC1_CMD: u16 = 0x20;
 const PIC1_DATA: u16 = 0x21;

@@ -31,6 +31,7 @@ mod files;
 mod fls;
 mod iphlpapi;
 mod kernel32;
+mod keyed;
 mod loader;
 mod locale;
 mod mapping;
@@ -87,6 +88,11 @@ use os_std::prelude::*;
 /// `-v`: the module summary, every thread as it starts, and the loader's
 /// diagnostics. Set once in `main` before anything else runs.
 pub(crate) static VERBOSE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// `OSYX_WINRUN_EVENTS=1`: timestamped input, title and present events.
+pub(crate) static EVENTS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// `OSYX_WINRUN_COUNT=1`: per-2 s rates of the message-loop APIs and their
+/// call sites (diagnostics; off in normal runs).
+pub(crate) static COUNT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 os_std::entry!(main);
 
@@ -103,12 +109,29 @@ fn quote(a: &str) -> String {
 
 fn main() -> i32 {
     let mut args: Vec<String> = os_std::env::args().skip(1).collect();
-    if args.first().is_some_and(|a| a == "--exports") {
+    if args.iter().any(|a| a == "--exports") {
         loader::print_capabilities();
+        return 0;
+    }
+    if args.iter().any(|a| a == "--mathbench") {
+        let n = 200_000;
+        let [h, e, a] = ucrt::libm::bench_math(n);
+        println!("mathbench {n} calls: hypot={h}us exp2={e}us add={a}us");
         return 0;
     }
     let verbose = args.first().is_some_and(|a| a == "-v");
     VERBOSE.store(verbose, core::sync::atomic::Ordering::Relaxed);
+    EVENTS.store(
+        os_std::env::var("OSYX_WINRUN_EVENTS").is_ok_and(|v| v == "1"),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    COUNT.store(
+        os_std::env::var("OSYX_WINRUN_COUNT").is_ok_and(|v| v == "1"),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    if COUNT.load(core::sync::atomic::Ordering::Relaxed) {
+        user32::start_counter();
+    }
     if verbose && os_std::env::var("OSYX_WINRUN_TRACE").is_ok_and(|v| v == "1") {
         kernel32::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
@@ -225,6 +248,12 @@ fn main() -> i32 {
             );
         }
         println!("winrun: entry {:#x}, stack {:#x}..{:#x}", started.entry, started.stack_limit, started.stack_top);
+    }
+    if COUNT.load(core::sync::atomic::Ordering::Relaxed) {
+        // RIP samples name code by module and offset.
+        for (name, base, _, _, _) in loader::summary() {
+            eprintln!("winrun: cnt module {name} {base:#x}");
+        }
     }
     if started.entry == 0 {
         eprintln!("winrun: {win_exe} has no entry point");

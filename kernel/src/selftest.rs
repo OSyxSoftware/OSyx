@@ -1,4 +1,4 @@
-//! In-kernel self-tests, run on every boot. They exercise the real hardware
+//! In-kernel self-tests, enabled only by init.args=tests. They exercise the real hardware
 //! paths (page tables, CPU exceptions, timer interrupts) that host unit tests
 //! cannot reach. Results go to the serial log as `[test] <name> ... ok|FAILED`.
 
@@ -96,31 +96,34 @@ fn memory_map(boot: &BootData) -> TestResult {
 }
 
 fn frame_allocator() -> TestResult {
-    let (free_before, _) = mem::frame_stats();
-    let mut frames = Vec::new();
-    for i in 0..256u64 {
-        let f = mem::alloc_frame().ok_or("out of frames")?;
-        ensure!(f.is_multiple_of(PAGE_SIZE), "unaligned frame {f:#x}");
-        // SAFETY: freshly allocated frame, reachable through the HHDM.
-        unsafe { (phys_to_virt(f) as *mut u64).write(i ^ 0xA5A5_A5A5) };
-        frames.push(f);
-    }
-    for (i, &f) in frames.iter().enumerate() {
-        // SAFETY: as above.
-        let v = unsafe { (phys_to_virt(f) as *const u64).read() };
-        ensure!(v == i as u64 ^ 0xA5A5_A5A5, "frame {f:#x} content corrupted");
-    }
-    let mut sorted = frames.clone();
-    sorted.sort_unstable();
-    sorted.dedup();
-    ensure!(sorted.len() == frames.len(), "a frame was handed out twice");
-    for f in &frames {
-        mem::free_frame(*f).map_err(|e| format!("free {f:#x}: {e:?}"))?;
-    }
-    ensure!(mem::free_frame(frames[0]).is_err(), "double free not detected");
-    let (free_after, _) = mem::frame_stats();
-    ensure!(free_after == free_before, "leak: {free_before} free before, {free_after} after");
-    Ok(())
+    let mut frames = Vec::with_capacity(256);
+    let mut sorted = Vec::with_capacity(256);
+    mem::with_frame_allocator(|fb| {
+        let free_before = fb.free_frames();
+        for i in 0..256u64 {
+            let f = fb.alloc().ok_or("out of frames")?;
+            ensure!(f.is_multiple_of(PAGE_SIZE), "unaligned frame {f:#x}");
+            // SAFETY: freshly allocated frame, reachable through the HHDM.
+            unsafe { (phys_to_virt(f) as *mut u64).write(i ^ 0xA5A5_A5A5) };
+            frames.push(f);
+        }
+        for (i, &f) in frames.iter().enumerate() {
+            // SAFETY: as above.
+            let v = unsafe { (phys_to_virt(f) as *const u64).read() };
+            ensure!(v == i as u64 ^ 0xA5A5_A5A5, "frame {f:#x} content corrupted");
+        }
+        sorted.extend_from_slice(&frames);
+        sorted.sort_unstable();
+        sorted.dedup();
+        ensure!(sorted.len() == frames.len(), "a frame was handed out twice");
+        for f in &frames {
+            fb.free(*f).map_err(|e| format!("free {f:#x}: {e:?}"))?;
+        }
+        ensure!(fb.free(frames[0]).is_err(), "double free not detected");
+        let free_after = fb.free_frames();
+        ensure!(free_after == free_before, "leak: {free_before} free before, {free_after} after");
+        Ok(())
+    })
 }
 
 fn map_unmap() -> TestResult {
@@ -194,7 +197,7 @@ fn kernel_wx() -> TestResult {
 }
 
 fn heap_test() -> TestResult {
-    let before = heap::stats();
+    let before = heap::stats().used;
     {
         let b = Box::new(0xDEAD_BEEFu64);
         ensure!(*b == 0xDEAD_BEEF, "box content");
@@ -215,8 +218,18 @@ fn heap_test() -> TestResult {
         ensure!(big.iter().all(|&b| b == 0x5A), "large allocation content");
         ensure!(heap::stats().capacity > heap::HEAP_INITIAL as usize, "heap did not grow");
     }
-    let after = heap::stats();
-    ensure!(after.used == before.used, "leak: {} bytes used before, {} after", before.used, after.used);
+    // The counters cover the whole kernel heap, and background kernel threads
+    // on the other CPUs allocate from it too. A single sample can catch one of
+    // their short-lived blocks mid-use; let them drain before calling it a leak.
+    let mut after = heap::stats().used;
+    for _ in 0..20 {
+        if after <= before {
+            break;
+        }
+        sched::sleep_ticks(crate::arch::timer::ms_to_ticks(10));
+        after = after.min(heap::stats().used);
+    }
+    ensure!(after <= before, "leak: {} bytes used before, {} after", before, after);
     Ok(())
 }
 
@@ -231,6 +244,8 @@ fn breakpoint() -> TestResult {
 fn timer() -> TestResult {
     ensure!(cpu::interrupts_enabled(), "interrupts disabled");
     let start = interrupts::ticks();
+    let t0 = crate::arch::timer::tsc();
+    let khz = crate::arch::timer::tsc_khz();
     // Spin rather than halt: with no timer interrupt `hlt` would not return.
     let deadline = Deadline::after_ms(1000);
     while !deadline.expired() {
@@ -239,7 +254,13 @@ fn timer() -> TestResult {
         }
         core::hint::spin_loop();
     }
-    Err(format!("timer stuck at {} ticks", interrupts::ticks()))
+    Err(format!(
+        "timer stuck at {} ticks (start {}, tsc +{} khz, khz {})",
+        interrupts::ticks(),
+        start,
+        (crate::arch::timer::tsc().wrapping_sub(t0)) / khz.max(1),
+        khz
+    ))
 }
 
 fn user_copy() -> TestResult {
@@ -304,7 +325,7 @@ fn preemption() -> TestResult {
     let b = sched::spawn_kernel("spin-b", spinner, 1, 0);
     // kmain sleeps; the spinners never yield, so kmain only runs again (and
     // both spinners only make progress) if the timer preempts them.
-    sched::sleep_ticks(20);
+    sched::sleep_ticks(crate::arch::timer::ms_to_ticks(200));
     let (ca, cb) = (SPIN_COUNT[0].load(Ordering::Relaxed), SPIN_COUNT[1].load(Ordering::Relaxed));
     SPIN_STOP.store(true, Ordering::Relaxed);
     sched::join(a);

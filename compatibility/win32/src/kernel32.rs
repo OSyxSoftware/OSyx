@@ -419,7 +419,14 @@ pub fn create_file(name: &str, access: u32, share: u32, disposition: u32, flags:
     } else if disposition == OPEN_EXISTING || disposition == TRUNCATE_EXISTING {
         return Err(ERROR_FILE_NOT_FOUND);
     }
-    let st = if exists { Some(os_sys::stat(&p).map_err(errno_to_win32)?) } else { None };
+    let st = if exists {
+        Some({
+            path::note_stat(&p, "create");
+            os_sys::stat(&p).map_err(errno_to_win32)?
+        })
+    } else {
+        None
+    };
     let is_dir = st.is_some_and(|s| s.kind == osyx_abi::KIND_DIR);
     if is_dir && flags & FILE_FLAG_BACKUP_SEMANTICS == 0 {
         return Err(ERROR_ACCESS_DENIED);
@@ -577,6 +584,7 @@ pub fn write_handle(h: u64, buf: *const u8, n: u32, offset: Option<u64>) -> Resu
             } else if let Some(o) = offset {
                 os_sys::seek(f.fd, o as i64, osyx_abi::SEEK_SET).map_err(errno_to_win32)?;
             }
+            crate::path::note_write(&f.path, n as usize);
             os_sys::write_raw(f.fd, buf as usize, n as usize).map(|k| k as u32).map_err(errno_to_win32)
         }
         _ => Err(ERROR_INVALID_HANDLE),
@@ -881,11 +889,19 @@ extern "win64" fn GetFileInformationByHandle(h: u64, out: *mut u8) -> Bool {
 
 fn get_attributes(name: Option<String>) -> u32 {
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, INVALID_FILE_ATTRIBUTES) };
+    static ATTRS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let n = ATTRS.fetch_add(1, Ordering::Relaxed) + 1;
+    if n.is_multiple_of(200) && crate::EVENTS.load(Ordering::Relaxed) {
+        os_std::eprintln!("winrun: attributes n={n} tid={} path={name}", os_sys::gettid());
+    }
     match locate(&name) {
-        Ok((p, true)) => match os_sys::stat(&p) {
-            Ok(s) => attributes(&s),
-            Err(e) => fail(errno_to_win32(e), INVALID_FILE_ATTRIBUTES),
-        },
+        Ok((p, true)) => {
+            path::note_stat(&p, "attrs");
+            match os_sys::stat(&p) {
+                Ok(s) => attributes(&s),
+                Err(e) => fail(errno_to_win32(e), INVALID_FILE_ATTRIBUTES),
+            }
+        }
         Ok((_, false)) => fail(ERROR_FILE_NOT_FOUND, INVALID_FILE_ATTRIBUTES),
         Err(e) => fail(e, INVALID_FILE_ATTRIBUTES),
     }
@@ -1226,7 +1242,7 @@ extern "win64" fn DuplicateHandle(
     // (NSPR does exactly that to attach a thread).
     let mut o = match src {
         objects::CURRENT_THREAD => {
-            let tid = os_sys::gettid() as u32;
+            let tid = teb::current_tid() as u32;
             match objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)) {
                 Some(o) => o,
                 // A thread the runtime did not hand out a handle for (the
@@ -1295,7 +1311,7 @@ extern "win64" fn GetCurrentProcessId() -> u32 {
 }
 
 extern "win64" fn GetCurrentThreadId() -> u32 {
-    os_sys::gettid() as u32
+    teb::current_tid() as u32
 }
 
 /// Ends the process: DLL_PROCESS_DETACH notifications, then exit.
@@ -1388,7 +1404,7 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
             let t = teb::create_teb(stack + size as u64, stack, pid, tid);
             teb::install(t);
             me.teb.store(t, Ordering::SeqCst);
-            if crate::VERBOSE.load(Ordering::Relaxed) {
+            if crate::VERBOSE.load(Ordering::Relaxed) || crate::EVENTS.load(Ordering::Relaxed) {
                 // Which module starts this thread, for crash reports that
                 // name only the thread id.
                 let at = match loader::where_is(start) {
@@ -1479,7 +1495,7 @@ extern "win64" fn GetExitCodeThread(h: u64, code: *mut u32) -> Bool {
 pub(crate) extern "win64" fn GetThreadId(h: u64) -> u32 {
     match objects::get(h) {
         Some(Object::Thread(t)) => t.tid.load(Ordering::SeqCst),
-        _ if h == objects::CURRENT_THREAD => os_sys::gettid() as u32,
+        _ if h == objects::CURRENT_THREAD => teb::current_tid() as u32,
         _ => fail(ERROR_INVALID_HANDLE, 0),
     }
 }
@@ -1689,7 +1705,7 @@ extern "win64" fn InitializeCriticalSectionEx(cs: u64, _spin: u32, _flags: u32) 
 extern "win64" fn DeleteCriticalSection(_cs: u64) {}
 
 pub(crate) extern "win64" fn EnterCriticalSection(cs: u64) {
-    let me = os_sys::gettid();
+    let me = teb::current_tid();
     // SAFETY: the caller's CRITICAL_SECTION.
     unsafe {
         if teb::get::<u64>(cs, CS_OWNER) == me {
@@ -1711,7 +1727,7 @@ pub(crate) extern "win64" fn EnterCriticalSection(cs: u64) {
 }
 
 extern "win64" fn TryEnterCriticalSection(cs: u64) -> Bool {
-    let me = os_sys::gettid();
+    let me = teb::current_tid();
     // SAFETY: the caller's CRITICAL_SECTION.
     unsafe {
         if teb::get::<u64>(cs, CS_OWNER) == me {
@@ -1763,7 +1779,9 @@ pub(crate) extern "win64" fn AcquireSRWLockExclusive(l: u64) {
     loop {
         if w.compare_exchange(0, SRW_WRITER, Ordering::Acquire, Ordering::Relaxed).is_ok() { return; }
         let old = w.load(Ordering::Relaxed);
-        if old != 0 { let _ = os_sys::futex_wait(w.as_ptr(), old, 0); }
+        if old != 0 {
+            let _ = os_sys::futex_wait(w.as_ptr(), old, 0);
+        }
     }
 }
 
@@ -1789,7 +1807,9 @@ pub(crate) extern "win64" fn AcquireSRWLockShared(l: u64) {
     let w = srw_word(l);
     while TryAcquireSRWLockShared(l) == 0 {
         let old = w.load(Ordering::Relaxed);
-        if old & SRW_WRITER != 0 { let _ = os_sys::futex_wait(w.as_ptr(), old, 0); }
+        if old & SRW_WRITER != 0 {
+            let _ = os_sys::futex_wait(w.as_ptr(), old, 0);
+        }
     }
 }
 pub(crate) extern "win64" fn ReleaseSRWLockShared(l: u64) {
@@ -1918,7 +1938,7 @@ fn create_mutex(owned: bool, name: Option<String>) -> u64 {
         return objects::insert(o);
     }
     teb::set_last_error(ERROR_SUCCESS);
-    let owner = if owned { (os_sys::gettid() as u32, 1) } else { (0, 0) };
+    let owner = if owned { (teb::current_tid() as u32, 1) } else { (0, 0) };
     objects::insert(Object::Mutex(Arc::new(MutexObj { state: Mutex::new(owner), name })))
 }
 
@@ -1936,7 +1956,7 @@ extern "win64" fn CreateMutexW(attributes: u64, owned: Bool, name: *const u16) -
 
 extern "win64" fn ReleaseMutex(h: u64) -> Bool {
     let Some(Object::Mutex(m)) = objects::get(h) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
-    let me = os_sys::gettid() as u32;
+    let me = teb::current_tid() as u32;
     {
         let mut s = m.state.lock().unwrap();
         if s.0 != me {
@@ -2423,8 +2443,9 @@ extern "win64" fn GetSystemInfo(out: *mut u8) {
         teb::put(out as u64, 4, 4096u32);
         teb::put(out as u64, 8, 0x10000u64);
         teb::put(out as u64, 16, 0x7FFF_FFFE_FFFFu64);
-        teb::put(out as u64, 24, 1u64);
-        teb::put(out as u64, 32, 1u32);
+        let count = os_sys::cpu_info().map_or(1, |(count,_)| count);
+        teb::put(out as u64, 24, (1u64 << count)-1);
+        teb::put(out as u64, 32, count);
         teb::put(out as u64, 36, 8664u32); // PROCESSOR_AMD_X8664
         teb::put(out as u64, 40, 0x10000u32);
         teb::put(out as u64, 44, 6u16);

@@ -20,6 +20,7 @@
 
 pub mod dma;
 mod hid;
+mod storage;
 
 use crate::arch::timer::{self, Deadline};
 use crate::sync::IrqSpinLock;
@@ -32,9 +33,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use dma::{DmaError, DmaPage, DmaRing};
 use hid::{HidFunction, HidKind};
+use storage::StorageState;
 use osyx_usb::descriptor::{self, Configuration, DescriptorError, DeviceDescriptor, Interface, SetupPacket};
 use osyx_usb::hid::{parse_report_descriptor, BootKeyboard, MouseLayout};
 use osyx_usb::xhci::context::{self, ContextLayout, EndpointContext, EndpointType, SlotContext};
@@ -58,6 +60,9 @@ const MAX_ENDPOINT_ERRORS: u32 = 20;
 static WAKE: [WaitQueue; MAX_CONTROLLERS] = [const { WaitQueue::new() }; MAX_CONTROLLERS];
 static IRQS: [AtomicU64; MAX_CONTROLLERS] = [const { AtomicU64::new(0) }; MAX_CONTROLLERS];
 static CONTROLLERS: AtomicUsize = AtomicUsize::new(0);
+/// Set once a controller finished its first port sweep (and with it every
+/// storage setup); `wait_ready` uses it to know when disks are registered.
+static READY: [AtomicBool; MAX_CONTROLLERS] = [const { AtomicBool::new(false) }; MAX_CONTROLLERS];
 /// One status line per controller, for diagnostics and tests.
 static STATUS: IrqSpinLock<Vec<String>> = IrqSpinLock::new(Vec::new());
 
@@ -69,6 +74,8 @@ pub enum XhciError {
     Timeout(&'static str),
     Command(CompletionCode),
     Transfer(CompletionCode),
+    /// A SCSI command completed with a non-zero status byte.
+    Scsi(u8),
     Ring(RingError),
     Descriptor(DescriptorError),
     BadSlot,
@@ -85,6 +92,7 @@ impl fmt::Display for XhciError {
             XhciError::Timeout(s) => write!(f, "timeout: {s}"),
             XhciError::Command(c) => write!(f, "command failed: {c:?}"),
             XhciError::Transfer(c) => write!(f, "transfer failed: {c:?}"),
+            XhciError::Scsi(s) => write!(f, "SCSI command failed with status {s}"),
             XhciError::Ring(e) => write!(f, "ring: {e:?}"),
             XhciError::Descriptor(e) => write!(f, "malformed descriptor: {e:?}"),
             XhciError::BadSlot => write!(f, "controller returned an invalid slot id"),
@@ -178,6 +186,9 @@ fn controller_thread(index: u64, dev: u64) {
         Err(e) => {
             kprintln!("xhci{}: initialisation failed: {}", index, e);
             set_status(index, alloc::format!("xhci{index}: failed: {e}"));
+            // Nothing will ever enumerate on this controller; do not hold
+            // the boot back waiting for it.
+            READY[index].store(true, Ordering::Release);
         }
     }
 }
@@ -185,6 +196,27 @@ fn controller_thread(index: u64, dev: u64) {
 fn irq_handler(index: u64) {
     IRQS[index as usize].fetch_add(1, Ordering::Relaxed);
     WAKE[index as usize].wake_all();
+}
+
+/// Waits (bounded) until every controller has finished its first port
+/// sweep, i.e. every mass-storage disk that was attached at boot has been
+/// registered with the block layer.
+pub fn wait_ready(timeout_ms: u64) {
+    let deadline = Deadline::after_ms(timeout_ms);
+    let total = CONTROLLERS.load(Ordering::Relaxed).min(MAX_CONTROLLERS);
+    let done = |i: usize| READY[i].load(Ordering::Acquire);
+    if (0..total).all(done) {
+        return;
+    }
+    kprintln!("usb: waiting up to {} ms for devices to enumerate", timeout_ms);
+    while !(0..total).all(done) && !deadline.expired() {
+        timer::sleep_ms(5);
+    }
+    if (0..total).all(done) {
+        kprintln!("usb: enumeration complete");
+    } else {
+        kprintln!("usb: WARNING: not every controller finished enumeration; continuing");
+    }
 }
 
 /// Waits until `done()` with pauses of one tick, for at most `timeout_ms`
@@ -215,6 +247,18 @@ struct InterruptEndpoint {
     function: HidFunction,
 }
 
+/// A bulk endpoint (mass storage) with its transfer ring.
+struct BulkEndpoint {
+    dci: u8,
+    in_endpoint: bool,
+    ring: ProducerRing,
+    mem: DmaRing,
+    /// TRB of the transfer in flight.
+    pending: Option<u64>,
+    /// Completion of the transfer in flight: (TRB, code, residual).
+    last: Option<(u64, CompletionCode, u32)>,
+}
+
 /// An addressed USB device in a slot.
 struct Device {
     port: u8,
@@ -229,6 +273,8 @@ struct Device {
     /// Transfer events of the default control endpoint not consumed yet.
     ep0_events: Vec<Trb>,
     interrupt: Vec<InterruptEndpoint>,
+    bulk: Vec<BulkEndpoint>,
+    storage: Option<StorageState>,
     name: String,
 }
 
@@ -246,6 +292,8 @@ impl Device {
             buffer: DmaPage::new(ac64)?,
             ep0_events: Vec::new(),
             interrupt: Vec::new(),
+            bulk: Vec::new(),
+            storage: None,
             name: String::new(),
         })
     }
@@ -561,41 +609,54 @@ impl Xhci {
             dev.ep0_events.push(ev);
             return;
         }
-        let Some(i) = dev.interrupt.iter().position(|e| e.dci == dci) else { return };
-        let ep = &mut dev.interrupt[i];
-        let ptr = ev.param() & !0xF;
-        let _ = ep.ring.retire(ptr);
-        if ep.pending != Some(ptr) {
-            return;
-        }
-        ep.pending = None;
-        let code = ev.completion_code();
-        if code.is_ok() {
-            ep.errors = 0;
-            let len = (ep.len as u32).saturating_sub(ev.transfer_residual()) as usize;
-            let mut data = [0u8; 64];
-            ep.buffer.copy_out(&mut data[..len.min(64)]);
-            if let Err(e) = ep.function.report(&data[..len.min(64)]) {
-                if ep.function.bad_reports <= 3 {
-                    kprintln!("usb {}: ignored a malformed HID report ({:?}, {} bytes)", dev.name, e, len);
+        if let Some(i) = dev.interrupt.iter().position(|e| e.dci == dci) {
+            let ep = &mut dev.interrupt[i];
+            let ptr = ev.param() & !0xF;
+            let _ = ep.ring.retire(ptr);
+            if ep.pending != Some(ptr) {
+                return;
+            }
+            ep.pending = None;
+            let code = ev.completion_code();
+            if code.is_ok() {
+                ep.errors = 0;
+                let len = (ep.len as u32).saturating_sub(ev.transfer_residual()) as usize;
+                let mut data = [0u8; 64];
+                ep.buffer.copy_out(&mut data[..len.min(64)]);
+                if let Err(e) = ep.function.report(&data[..len.min(64)]) {
+                    if ep.function.bad_reports <= 3 {
+                        kprintln!("usb {}: ignored a malformed HID report ({:?}, {} bytes)", dev.name, e, len);
+                    }
+                }
+            } else {
+                ep.errors += 1;
+                if ep.errors <= 3 || ep.errors == MAX_ENDPOINT_ERRORS {
+                    kprintln!("usb {}: interrupt endpoint {} transfer error {:?} ({} in a row)", dev.name, dci, code, ep.errors);
+                }
+                if code.halts_endpoint() {
+                    let s = slot;
+                    self.recover_endpoint(s, dci);
                 }
             }
-        } else {
-            ep.errors += 1;
-            if ep.errors <= 3 || ep.errors == MAX_ENDPOINT_ERRORS {
-                kprintln!("usb {}: interrupt endpoint {} transfer error {:?} ({} in a row)", dev.name, dci, code, ep.errors);
-            }
-            if code.halts_endpoint() {
-                let s = slot;
-                self.recover_endpoint(s, dci);
+            let s = slot;
+            self.queue_interrupt(s, dci);
+            return;
+        }
+        // Bulk endpoints: hand the completion to the transfer in flight.
+        if let Some(ep) = dev.bulk.iter_mut().find(|e| e.dci == dci) {
+            let ptr = ev.param() & !0xF;
+            let _ = ep.ring.retire(ptr);
+            if ep.pending == Some(ptr) {
+                ep.pending = None;
+                ep.last = Some((ptr, ev.completion_code(), ev.transfer_residual()));
             }
         }
-        let s = slot;
-        self.queue_interrupt(s, dci);
     }
 
-    /// Blocks until an interrupt (or one tick when polling) or `deadline`.
-    fn wait_activity(&mut self, deadline_tick: u64) {
+    /// Blocks until an interrupt (or one tick when polling), a queued
+    /// storage request (only when `allow_storage`, because the controller
+    /// thread is the only one that may run them), or `deadline_tick`.
+    fn wait_activity(&mut self, deadline_tick: u64, allow_storage: bool) {
         let index = self.index;
         let seen = self.seen_irqs;
         if !timer::healthy() {
@@ -608,8 +669,9 @@ impl Xhci {
         let limit = if polling { (interrupts::ticks() + 1).min(deadline_tick) } else { deadline_tick };
         let events = &self.events;
         let mem = &self.event_mem;
-        let _ = block_on(&[&WAKE[index]], Some(limit), || {
-            (IRQS[index].load(Ordering::Relaxed) != seen || events.ready(mem)).then_some(())
+        let _ = block_on(&[&WAKE[index], &storage::WAKE], Some(limit), || {
+            let work = allow_storage && storage::has_work(index);
+            (IRQS[index].load(Ordering::Relaxed) != seen || work || events.ready(mem)).then_some(())
         });
         self.seen_irqs = IRQS[index].load(Ordering::Relaxed);
     }
@@ -633,7 +695,7 @@ impl Xhci {
                 self.abort_command();
                 return Err(XhciError::Timeout("command"));
             }
-            self.wait_activity(deadline.tick());
+            self.wait_activity(deadline.tick(), false);
         }
     }
 
@@ -700,7 +762,7 @@ impl Xhci {
             if deadline.expired() {
                 return Err(XhciError::Timeout("control transfer"));
             }
-            self.wait_activity(deadline.tick());
+            self.wait_activity(deadline.tick(), false);
         }
     }
 
@@ -727,6 +789,11 @@ impl Xhci {
         } else if let Some(ep) = dev.interrupt.iter_mut().find(|e| e.dci == dci) {
             ep.ring.reset_dequeue();
             ep.pending = None;
+            ep.ring.start()
+        } else if let Some(ep) = dev.bulk.iter_mut().find(|e| e.dci == dci) {
+            ep.ring.reset_dequeue();
+            ep.pending = None;
+            ep.last = None;
             ep.ring.start()
         } else {
             return;
@@ -940,14 +1007,25 @@ impl Xhci {
             mps
         );
         self.devices.get_mut(&slot).expect("device exists").name = alloc::format!("{}-{} ({})", self.index + 1, port, name);
-        // HID functions this driver supports.
+        // Functions this driver supports: HID and mass storage (SCSI,
+        // bulk-only transport).
         let hid: Vec<Interface> = cfg
             .default_interfaces()
             .filter(|i| i.class == descriptor::CLASS_HID && i.interrupt_in().is_some())
             .cloned()
             .collect();
-        if hid.is_empty() {
-            kprintln!("usb {}: no supported function (not HID); left unconfigured", self.devices[&slot].name);
+        let storage: Option<Interface> = cfg
+            .default_interfaces()
+            .find(|i| {
+                i.class == descriptor::CLASS_MASS_STORAGE
+                    && i.subclass == descriptor::MASS_STORAGE_SCSI
+                    && i.protocol == descriptor::MASS_STORAGE_BOT
+                    && i.bulk_in().is_some()
+                    && i.bulk_out().is_some()
+            })
+            .cloned();
+        if hid.is_empty() && storage.is_none() {
+            kprintln!("usb {}: no supported function (not HID or mass storage); left unconfigured", self.devices[&slot].name);
             return Ok(());
         }
         self.control_out(slot, SetupPacket::set_configuration(cfg.value), &[])?;
@@ -959,10 +1037,16 @@ impl Xhci {
                 Err(e) => kprintln!("usb {}: interface {}: {}", self.devices[&slot].name, iface.number, e),
             }
         }
-        if configured.is_empty() {
+        if configured.is_empty() && storage.is_none() {
             return Ok(());
         }
-        self.configure_endpoints(slot, configured)
+        self.configure_endpoints(slot, configured, storage.as_ref())?;
+        if storage.is_some() {
+            if let Err(e) = self.setup_storage(slot) {
+                kprintln!("usb {}: mass storage: {}", self.devices[&slot].name, e);
+            }
+        }
+        Ok(())
     }
 
     /// Prepares a HID interface: protocol, idle rate, report layout.
@@ -1031,9 +1115,9 @@ impl Xhci {
         Ok(Some(HidFunction { interface: iface.number, input_id: id, kind: HidKind::Mouse { layout, buttons: 0 }, reports: 0, bad_reports: 0 }))
     }
 
-    /// Configure Endpoint for every HID interrupt IN endpoint, then starts
-    /// their transfers.
-    fn configure_endpoints(&mut self, slot: u8, functions: Vec<(Interface, HidFunction)>) -> Result<()> {
+    /// Configure Endpoint for every HID interrupt IN endpoint and for the
+    /// mass-storage bulk endpoints, then starts the interrupt transfers.
+    fn configure_endpoints(&mut self, slot: u8, functions: Vec<(Interface, HidFunction)>, storage: Option<&Interface>) -> Result<()> {
         let l = self.layout;
         let ac64 = self.caps.ac64;
         let dev = self.devices.get_mut(&slot).ok_or(XhciError::BadSlot)?;
@@ -1084,17 +1168,54 @@ impl Xhci {
                 function,
             });
         }
+        let mut bulks = Vec::new();
+        if let Some(iface) = storage {
+            for (ep, ep_type) in [(iface.bulk_out(), EndpointType::BulkOut), (iface.bulk_in(), EndpointType::BulkIn)] {
+                let Some(ep) = ep else { continue };
+                let dci = osyx_usb::xhci::dci(ep.address);
+                let mem = DmaRing::new(ac64)?;
+                let ring = ProducerRing::new(&mem);
+                let (deq, dcs) = ring.start();
+                let max_packet = ep.max_packet.max(1);
+                let ctx = EndpointContext {
+                    ep_type,
+                    max_packet,
+                    max_burst: ep.max_burst,
+                    interval: 0,
+                    dequeue: deq,
+                    dcs,
+                    average_trb_length: max_packet,
+                    max_esit_payload: 0,
+                    error_count: 3,
+                };
+                dev.input.write_dwords(l.input_endpoint(dci), &ctx.encode());
+                add |= 1 << dci;
+                max_dci = max_dci.max(dci);
+                kprintln!(
+                    "usb {}: endpoint {:#04x} (DCI {}): bulk {}, {} bytes, max burst {}",
+                    dev.name,
+                    ep.address,
+                    dci,
+                    if ep.is_in() { "IN" } else { "OUT" },
+                    max_packet,
+                    ep.max_burst
+                );
+                bulks.push(BulkEndpoint { dci, in_endpoint: ep.is_in(), ring, mem, pending: None, last: None });
+            }
+        }
         dev.input.write_dwords(l.input_control(), &context::input_control(add, 0));
         let sc = SlotContext { route_string: 0, speed: dev.speed, context_entries: max_dci, root_port: dev.port, interrupter: 0 };
         dev.input.write_dwords(l.input_slot(), &sc.encode());
         let input = dev.input.phys();
         dev.interrupt = endpoints;
+        dev.bulk = bulks;
         if let Err(e) = self.command(Trb::configure_endpoint(input, slot, false)) {
             // The functions were registered with the input core: undo that.
             if let Some(dev) = self.devices.get_mut(&slot) {
                 for ep in dev.interrupt.drain(..) {
                     input::unregister(ep.function.input_id);
                 }
+                dev.bulk.clear();
             }
             return Err(e);
         }
@@ -1168,15 +1289,21 @@ impl Xhci {
                 self.pending_ports.push_back(p);
             }
         }
+        let mut announced = false;
         loop {
             self.pump();
+            self.service_storage();
             while let Some(p) = self.pending_ports.pop_front() {
                 self.port_changed(p);
                 self.pump();
             }
+            if !announced {
+                announced = true;
+                READY[self.index].store(true, Ordering::Release);
+            }
             self.update_leds();
             let deadline = interrupts::ticks() + timer::ms_to_ticks(1000);
-            self.wait_activity(deadline);
+            self.wait_activity(deadline, true);
         }
     }
 }

@@ -27,7 +27,7 @@ use os_std::prelude::*;
 use os_std::process::{Child, Command};
 use os_std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use os_std::time::{Duration, Instant};
-use os_std::{env, os, process, thread};
+use os_std::{env, fs, os, process, thread};
 
 #[path = "../exec_checks.rs"]
 mod exec_checks;
@@ -41,6 +41,8 @@ mod ipc_checks;
 mod net_checks;
 #[path = "../win_checks.rs"]
 mod win_checks;
+#[path = "../smp_checks.rs"]
+mod smp_checks;
 
 os_std::entry!(main);
 
@@ -50,6 +52,9 @@ fn main() -> i32 {
     println!("Hello from OSyx userspace!");
     let args: Vec<String> = env::args().collect();
     println!("args: {:?}", args);
+    if args.get(1).map(String::as_str) == Some("setup") {
+        return setup_session(&args[2..]);
+    }
     if args.get(1).map(String::as_str) != Some("tests") {
         return desktop_session();
     }
@@ -67,12 +72,29 @@ fn main() -> i32 {
             return 99;
         }
         Some("panic") => panic!("panic requested by command line"),
+        Some("poweroff") => {
+            let e = os_std::system::power_off();
+            eprintln!("power off failed: {e}");
+            return 1;
+        }
+        Some("reboot") => {
+            let e = os_std::system::reboot();
+            eprintln!("reboot failed: {e}");
+            return 1;
+        }
         Some("exit") => {
             let code = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             process::exit(code);
         }
         Some("desktop") => return desktop_session(),
-        Some("zen-probe") => return zen_probe(args.get(2).map(String::as_str), args.get(3).is_some_and(|s| s == "trace")),
+        Some("zen-probe") => {
+            let mode = args.get(3).map(String::as_str).unwrap_or("");
+            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", false);
+        }
+        Some("zen-installed") => {
+            let mode = args.get(3).map(String::as_str).unwrap_or("");
+            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", true);
+        }
         // `init winrun <program> [args...]`: one Windows program with no
         // sessions around it, for bring-up diagnostics.
         Some("winrun") => {
@@ -95,6 +117,12 @@ fn main() -> i32 {
             let mut t = Tests::default();
             win_checks::run_all(&mut t, port(2, 7101), port(3, 7102));
             println!("win checks: {} passed, {} failed", t.passed, t.failed);
+            return t.failed as i32;
+        }
+        Some("smp") => {
+            let mut t = Tests::default();
+            smp_checks::run(&mut t);
+            println!("smp checks: {} passed, {} failed",t.passed,t.failed);
             return t.failed as i32;
         }
         Some("crash-prep") => {
@@ -261,9 +289,24 @@ fn main() -> i32 {
         let taken = raw::map_ex(p as usize + GIB - 4096, 4096, PROT_READ, raw::MAP_FIXED) == Err(Errno::AlreadyExists);
         // SAFETY: the discarded page is only read again, as zeros.
         let discarded = unsafe { raw::discard(p.add(GIB / 2), 4096).is_ok() && p.add(GIB / 2).read() == 0 };
+        // SAFETY: all three pages are inside the mapping and are read as zeros.
+        let discarded_range = unsafe {
+            let q = p.add(GIB / 2 + 3 * 4096);
+            q.write(1);
+            q.add(4096).write(2);
+            q.add(8192).write(3);
+            raw::discard(q, 3 * 4096).is_ok() && q.read() == 0 && q.add(4096).read() == 0 && q.add(8192).read() == 0
+        };
         // SAFETY: no references into the region remain.
         let freed = unsafe { raw::unmap(p, GIB) }.is_ok();
-        cheap && touched && kernel && taken && discarded && freed
+        cheap && touched && kernel && taken && discarded && discarded_range && freed
+    });
+    t.check("memory: main stack demand-zero growth", || {
+        let mut stack = [0u8; 256 * 1024];
+        for page in stack.chunks_mut(4096) {
+            page[0] = 1;
+        }
+        core::hint::black_box(stack.as_slice()).iter().map(|&b| b as u64).sum::<u64>() == 64
     });
 
     process_checks(&mut t);
@@ -280,24 +323,38 @@ fn main() -> i32 {
 /// system, which starts the desktop shell) and restarts it if it fails. If
 /// it cannot be brought up, init exits and the kernel's status screen
 /// stays as the diagnostic fallback.
-fn zen_probe(url: Option<&str>, network_trace: bool) -> i32 {
+fn zen_probe(url: Option<&str>, network_trace: bool, mozlog: bool, events: bool, count: bool, installed: bool) -> i32 {
     println!("zen-probe: official /opt/zen/zen.exe via /bin/winrun; no substitute browser");
-    let _ = Command::new("/bin/winrun").arg("--exports").status();
-    let prism = Command::new("/system/bin/prism").spawn();
-    if prism.is_err() { println!("ZEN_PROBE_RESULT infrastructure=prism_start_failed"); return 1; }
-    thread::sleep(Duration::from_secs(2));
+    let mut prism_cmd = Command::new("/system/bin/prism");
+    // Trace only on request: serial output is slow and the compositor's
+    // per-frame logging costs more than a full frame at 1080p.
+    if network_trace { prism_cmd.env("OSYX_PRISM_TRACE", "1"); }
+    if events { prism_cmd.env("OSYX_PRISM_EVENTS", "1"); }
+    let prism = prism_cmd.spawn();
+    if let Err(e) = &prism { println!("ZEN_PROBE_RESULT infrastructure=prism_start_failed: {e}"); return 1; }
+    // Prism clients retry service lookup and wait for the HELLO response, so
+    // launching Zen immediately cannot race compositor startup.
     // OSyx has no Direct3D driver. Use Gecko's software WebRender path
     // explicitly instead of repeatedly probing unsupported DXGI devices.
     // Keep repeated boots of a diagnostic image independent, including
-    // window-placement preferences and incomplete startup caches.
+    // window-placement preferences and incomplete startup caches. Each run
+    // leaves a ~30 MiB browser cache behind, which would otherwise fill the
+    // 1 GiB root file system after a few dozen boots.
+    if let Ok(entries) = os_std::fs::read_dir("/home") {
+        for entry in entries {
+            if entry.file_name().starts_with("zen-probe-profile-") {
+                let _ = os_std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
     let stamp = os_std::time::SystemTime::now().duration_since(os_std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let profile = format!("/tmp/zen-probe-profile-{stamp}");
+    let profile = format!("/home/zen-probe-profile-{stamp}");
     println!("zen-probe: profile {profile}");
-    if os_std::fs::create_dir_all(&profile).and_then(|_| os_std::fs::write(
-        format!("{profile}/user.js"),
+    let mut prefs = String::from(
         r#"user_pref("gfx.webrender.software", true);
 user_pref("gfx.webrender.software.d3d11", false);
 user_pref("gfx.webrender.compositor", false);
+user_pref("layout.frame_rate", 60);
 user_pref("layers.acceleration.disabled", true);
 user_pref("layers.gpu-process.enabled", false);
 user_pref("layers.gpu-process.force-enabled", false);
@@ -307,42 +364,155 @@ user_pref("browser.startup.homepage_override.mstone", "ignore");
 user_pref("startup.homepage_welcome_url", "");
 user_pref("startup.homepage_welcome_url.additional", "");
 user_pref("browser.shell.checkDefaultBrowser", false);
-user_pref("devtools.console.stdout.chrome", true);
-user_pref("devtools.console.stdout.content", true);
+user_pref("fission.autostart", false);
+user_pref("fission.webContentIsolationStrategy", 0);
+user_pref("browser.tabs.remote.autostart", false);
+user_pref("browser.tabs.remote.autostart.2", false);
+user_pref("browser.tabs.remote.separatePrivilegedContentProcess", false);
+user_pref("browser.tabs.remote.separateFileUriProcess", false);
+user_pref("browser.tabs.remote.separatePrivilegedMozillaWebContentProcess", false);
+user_pref("dom.ipc.processCount", 1);
+user_pref("dom.ipc.processCount.webIsolated", 1);
+user_pref("dom.ipc.processCount.file", 1);
+user_pref("dom.ipc.processCount.privilegedabout", 1);
+user_pref("dom.ipc.processCount.privilegedmozilla", 1);
+user_pref("dom.ipc.processPrelaunch.enabled", false);
+user_pref("dom.ipc.keepProcessesAlive.web", 0);
+user_pref("dom.ipc.keepProcessesAlive.privilegedabout", 0);
+user_pref("toolkit.telemetry.enabled", false);
+user_pref("toolkit.telemetry.unified", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("app.normandy.enabled", false);
+user_pref("app.shield.optoutstudies.enabled", false);
+user_pref("browser.discovery.enabled", false);
+user_pref("browser.safebrowsing.malware.enabled", false);
+user_pref("browser.safebrowsing.phishing.enabled", false);
+user_pref("browser.safebrowsing.downloads.enabled", false);
+user_pref("browser.safebrowsing.downloads.remote.enabled", false);
+user_pref("media.gmp-manager.updateEnabled", false);
+user_pref("media.gmp-provider.enabled", false);
+user_pref("media.gmp-widevinecdm.enabled", false);
+user_pref("media.gmp-widevinecdm.visible", false);
+user_pref("media.gmp-gmpopenh264.enabled", false);
+user_pref("media.gmp-gmpopenh264.autoupdate", false);
+user_pref("app.update.enabled", false);
+user_pref("app.update.auto", false);
+user_pref("app.update.background.scheduling.enabled", false);
+user_pref("extensions.update.enabled", false);
+user_pref("extensions.getAddons.cache.enabled", false);
+user_pref("network.captive-portal-service.enabled", false);
+user_pref("network.connectivity-service.enabled", false);
 "#,
+    );
+    if network_trace {
+        prefs.push_str("user_pref(\"devtools.console.stdout.chrome\", true);\nuser_pref(\"devtools.console.stdout.content\", true);\n");
+    }
+    if os_std::fs::create_dir_all(&profile).and_then(|_| os_std::fs::write(
+        format!("{profile}/user.js"),
+        prefs,
     )).and_then(|_| os_std::fs::write(
         "/tmp/zen-probe-page.html",
-        "<!doctype html><meta charset=utf-8><title>OSyx Zen rendering test</title><style>body{margin:40px;background:#dbeafe;color:#172554;font:20px Lato,sans-serif}button{font:inherit;padding:16px}#box{width:240px;height:120px;background:#16a34a;margin:24px 0}</style><h1>Zen renders HTML</h1><p>This page is rendered by the unmodified browser.</p><div id=box></div><button onclick=\"document.title='OSyx click verified';this.textContent='Click verified';document.getElementById('box').style.background='#f97316'\">Verify click</button><p><a target=_blank href=https://example.com/>Open example.com over HTTPS</a></p>",
+        "<!doctype html><meta charset=utf-8><title>OSyx Zen rendering test</title><style>body{margin:40px;background:#dbeafe;color:#172554;font:20px Lato,sans-serif}button{font:inherit;padding:16px}#box{width:240px;height:120px;background:#16a34a;margin:24px 0}</style><h1>Zen renders HTML</h1><p>This page is rendered by the unmodified browser.</p><input id=inp autofocus oninput=\"document.title='INPUT:'+this.value\" style=\"font:20px Lato,sans-serif;padding:8px;width:320px;caret-color:transparent\"><div id=box></div><button onclick=\"document.title='OSyx click verified';this.textContent='Click verified';document.getElementById('box').style.background='#f97316'\">Verify click</button><p><a target=_blank href=https://example.com/>Open example.com over HTTPS</a></p><script>addEventListener('keydown',e=>{document.title='KD:'+(e.target.id||e.target.nodeName)+':'+e.key});addEventListener('keypress',e=>{document.title='KP:'+e.key})</script>",
     )).is_err() {
         println!("ZEN_PROBE_RESULT infrastructure=profile_creation_failed");
         if let Ok(p) = prism { let _ = os_std::system::kill(p.id()); let _ = p.wait(); }
         return 1;
     }
-    let mut zen = Command::new("/bin/winrun");
+    let mut zen = Command::new(if installed { "/system/bin/zen" } else { "/bin/winrun" });
     // The session runs as root, so Gecko's launcher would start the browser
     // with a de-elevated token, which OSyx cannot run: keep its own. The
     // probe has its own temporary profile with software-rendering prefs.
-    zen.args(["-v", "/opt/zen/zen.exe", "--no-remote", "-profile"]);
+    if !installed {
+        if network_trace { zen.arg("-v"); }
+        zen.args(["/opt/zen/zen.exe", "--no-remote", "-profile"]);
+    }
     let url = url.unwrap_or("file:///C:/tmp/zen-probe-page.html");
     println!("zen-probe: URL {url}");
-    zen.arg(&format!("C:{}", profile.replace('/', "\\"))).arg(url);
+    if events {
+        // TEMP clock-check: RDTSC fast clock vs kernel tick clock, once the
+        // windowed TSC rate has matured, while Zen is loading.
+        thread::spawn(|| {
+            thread::sleep(Duration::from_millis(8000));
+            let mut a = [0u64; 4];
+            let _ = raw::raw_syscall(raw::nr::TIME_CALIB, a.as_mut_ptr() as u64, 0, 0);
+            let t0 = Instant::now();
+            let r0 = unsafe { core::arch::x86_64::_rdtsc() };
+            let c0 = raw::raw_syscall(raw::nr::CLOCK, 0, 0, 0).unwrap_or(0);
+            thread::sleep(Duration::from_millis(2000));
+            let r1 = unsafe { core::arch::x86_64::_rdtsc() };
+            let fast = t0.elapsed().as_millis() as u64;
+            let c1 = raw::raw_syscall(raw::nr::CLOCK, 0, 0, 0).unwrap_or(0);
+            let mut b = [0u64; 4];
+            let _ = raw::raw_syscall(raw::nr::TIME_CALIB, b.as_mut_ptr() as u64, 0, 0);
+            let rd = r1.wrapping_sub(r0);
+            let kd = b[0].wrapping_sub(a[0]);
+            println!(
+                "clock-check: fast={fast}ms clock={}ms kern_dt={}ms per0={} per1={} tsc={} real_per={}",
+                (c1 - c0) / 1_000_000,
+                kd / 1_000_000,
+                a[2],
+                b[2],
+                rd,
+                if kd != 0 { (rd as u128 * 1_000_000 / kd as u128) as u64 } else { 0 },
+            );
+        });
+    }
+    if !installed { zen.arg(&format!("C:{}", profile.replace('/', "\\"))); }
+    zen.arg(url);
     // This bootstrap flag also reaches Gecko's command-line handler, which
     // still sees it as unknown and skips the following argument. Keep it
     // last so that the requested URL is not silently discarded.
-    zen.arg("-no-deelevate");
+    if !installed { zen.arg("-no-deelevate"); }
+    else if network_trace {
+        zen.env("OSYX_ZEN_TRACE", "1");
+    }
     // Gecko's Windows sandbox broker starts its children suspended and
     // patches their memory, which OSyx gives no process the right to do:
     // Mozilla's own switches start them unsandboxed instead.
-    // Every failing Windows API call goes to the serial log (bring-up).
-    zen.env("OSYX_WINRUN_TRACE", "1");
-    let log_modules = if network_trace {
-        "timestamp,sync,nsDocShell:5,DocLoader:5,nsStreamPump:5,nsSocketTransport:2,nsHostResolver:3,pipnss:4,nsHttp:5,nsChannelClassifier:5"
-    } else {
-        "timestamp,sync,DocLoader:5,pipnss:4"
-    };
-    zen.env("MOZ_LOG", log_modules);
+    if network_trace || mozlog {
+        if network_trace {
+            // Every failing Windows API call goes to the serial log (bring-up).
+            zen.env("OSYX_WINRUN_TRACE", "1");
+        }        let log_modules = if network_trace {
+            "timestamp,sync,nsDocShell:5,DocLoader:5,nsStreamPump:5,nsSocketTransport:2,nsHostResolver:3,pipnss:4,nsHttp:5,nsChannelClassifier:5"
+        } else {
+            "timestamp,sync,nsDocShell:5,DocLoader:5,nsHttp:5,PresShell:4,RefreshDriver:5,Vsync:5,Compositor:5"
+        };
+        zen.env("MOZ_LOG", log_modules);
+    }
+    if events || mozlog { zen.env("OSYX_WINRUN_EVENTS", "1"); }
+    if count { zen.env("OSYX_WINRUN_COUNT", "1"); }
     for kind in ["CONTENT", "GPU", "RDD", "SOCKET_PROCESS", "GMP", "UTILITY", "VR"] {
         zen.env(&format!("MOZ_DISABLE_{kind}_SANDBOX"), "1");
+    }
+    if count || network_trace {
+        // Diagnostic: which process uses the CPU during startup.
+        thread::spawn(|| {
+            let mut prev: Vec<(u64, u64)> = Vec::new();
+            let mut prev_ticks = 0u64;
+            loop {
+                thread::sleep(Duration::from_secs(2));
+                let Ok(list) = os_std::system::processes() else { continue };
+                let ticks = os_std::os::sysinfo().map(|s| s.ticks).unwrap_or(prev_ticks);
+                let dt = ticks.saturating_sub(prev_ticks).max(1);
+                let mut rows: Vec<(u64, String, u32, u64)> = Vec::new();
+                for p in &list {
+                    let before = prev.iter().find(|(pid, _)| *pid == p.pid).map(|(_, t)| *t).unwrap_or(p.cpu_ticks);
+                    let delta = p.cpu_ticks.saturating_sub(before);
+                    if delta > 0 {
+                        rows.push((delta * 100 / dt, os_std::system::process_name(p), p.threads, p.pid));
+                    }
+                }
+                rows.sort_by_key(|a| core::cmp::Reverse(a.0));
+                let mut line = String::from("cpuwatch:");
+                for (pct, name, threads, pid) in rows.iter().take(6) {
+                    line.push_str(&format!(" {name}[{pid}]={pct}%/{threads}t"));
+                }
+                println!("{line}");
+                prev = list.iter().map(|p| (p.pid, p.cpu_ticks)).collect();
+                prev_ticks = ticks;
+            }
+        });
     }
     let result = zen.status();
     println!("ZEN_PROBE_RESULT exit={:?}", result.as_ref().ok().and_then(|s| s.code()));
@@ -354,6 +524,17 @@ user_pref("devtools.console.stdout.content", true);
 
 fn desktop_session() -> i32 {
     const PRISM: &str = "/system/bin/prism";
+    // Tasks the installer left for the first start; they run beside the
+    // session (a download must not hold up the desktop).
+    if fs::metadata("/etc/osyx/firstboot.conf").is_ok() {
+        match Command::new("/bin/firstboot").spawn() {
+            Ok(c) => println!("init: first-boot tasks running (process {})", c.id()),
+            Err(e) => eprintln!("init: cannot start /bin/firstboot: {e}"),
+        }
+    }
+    if let Ok(h) = fs::read_to_string("/etc/hostname") {
+        println!("init: host name {}", h.trim());
+    }
     for attempt in 1..=3 {
         println!("starting the graphical session: {PRISM} (attempt {attempt})");
         match Command::new(PRISM).status() {
@@ -368,6 +549,22 @@ fn desktop_session() -> i32 {
     }
     eprintln!("the graphical session keeps failing; the kernel console stays");
     1
+}
+
+/// The live installation session: the desktop with OSyx Setup opened on
+/// it. `extra` goes to the installer (`--auto ...` in tests).
+fn setup_session(extra: &[String]) -> i32 {
+    const SETUP: &str = "/system/bin/setup";
+    let mut c = Command::new(SETUP);
+    c.arg("--wait-session");
+    for a in extra {
+        c.arg(a);
+    }
+    match c.spawn() {
+        Ok(child) => println!("init: started {SETUP} (process {})", child.id()),
+        Err(e) => eprintln!("init: cannot start {SETUP}: {e}"),
+    }
+    desktop_session()
 }
 
 fn worker(args: &[&str]) -> Command {

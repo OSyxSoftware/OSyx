@@ -1,0 +1,738 @@
+//! The OSyx installation engine, shared by the graphical installer and its
+//! host tests. It writes a complete, bootable OSyx system onto a whole disk:
+//!
+//! 1. a new GPT with an EFI system partition and an ext4 root partition of
+//!    type "Linux root (x86-64)" (the kernel's default root);
+//! 2. FAT32 on the ESP, ext4 (with a journal) on the root;
+//! 3. a copy of the running system's tree, then the host name, the user
+//!    account and the first-boot configuration;
+//! 4. the boot files last: an interrupted installation leaves a disk the
+//!    firmware does not boot instead of a half-written system that does.
+//!
+//! Everything goes through the existing storage crates (`osyx-part`,
+//! `osyx-fat`, `osyx-ext4`) on top of [`Disk`], so the same code runs on a
+//! raw `/dev/disks/*` node in OSyx and on a disk image in the host tests.
+//! Nothing here decides *which* disk to use; callers must have the user's
+//! explicit confirmation before calling [`install`].
+
+#![no_std]
+
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicI64, Ordering};
+use osyx_ext4::{Ext4, MountOptions, NewKind, ROOT_INO};
+use osyx_part::{Guid, NewPartition};
+
+pub const SECTOR: u64 = 512;
+const MIB: u64 = 1 << 20;
+/// Partitions start on 1 MiB boundaries.
+const ALIGN: u64 = MIB / SECTOR;
+pub const DEFAULT_ESP_MIB: u64 = 256;
+pub const MIN_ESP_MIB: u64 = 64;
+pub const MIN_ROOT_MIB: u64 = 512;
+/// The smallest disk the automatic layout accepts.
+pub const MIN_DISK_MIB: u64 = DEFAULT_ESP_MIB + MIN_ROOT_MIB + 2;
+/// Uid and gid of the desktop user (the session runs as this account).
+pub const USER_ID: u32 = 1000;
+/// Home of the desktop user; the desktop shell and applications use it.
+pub const USER_HOME: &str = "/home/user";
+const PASSWORD_ROUNDS: u32 = 100_000;
+/// Copy buffer for file contents.
+const CHUNK: usize = 256 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The disk or a file system on it failed.
+    Io(String),
+    /// The request does not fit the disk or is malformed.
+    Invalid(String),
+    /// Reading the system to copy failed.
+    Source(String),
+    /// The finished system did not pass the verification.
+    Verify(String),
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Error::Io(s) => write!(f, "disk error: {s}"),
+            Error::Invalid(s) => write!(f, "{s}"),
+            Error::Source(s) => write!(f, "cannot read the system to install: {s}"),
+            Error::Verify(s) => write!(f, "verification failed: {s}"),
+        }
+    }
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
+
+/// A whole disk of 512-byte sectors.
+pub trait Disk {
+    fn sectors(&self) -> u64;
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> core::result::Result<(), String>;
+    fn write(&mut self, lba: u64, buf: &[u8]) -> core::result::Result<(), String>;
+    fn flush(&mut self) -> core::result::Result<(), String>;
+}
+
+impl Disk for Vec<u8> {
+    fn sectors(&self) -> u64 {
+        self.len() as u64 / SECTOR
+    }
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> core::result::Result<(), String> {
+        let at = (lba * SECTOR) as usize;
+        buf.copy_from_slice(self.get(at..at + buf.len()).ok_or("read past the end")?);
+        Ok(())
+    }
+    fn write(&mut self, lba: u64, buf: &[u8]) -> core::result::Result<(), String> {
+        let at = (lba * SECTOR) as usize;
+        self.get_mut(at..at + buf.len()).ok_or("write past the end")?.copy_from_slice(buf);
+        Ok(())
+    }
+    fn flush(&mut self) -> core::result::Result<(), String> {
+        Ok(())
+    }
+}
+
+/// A partition of a [`Disk`] seen as a device of its own.
+pub struct Window<'a, D: Disk> {
+    disk: &'a mut D,
+    first: u64,
+    sectors: u64,
+}
+
+impl<'a, D: Disk> Window<'a, D> {
+    pub fn new(disk: &'a mut D, first: u64, sectors: u64) -> Self {
+        Window { disk, first, sectors }
+    }
+
+    fn check(&self, lba: u64, len: usize) -> bool {
+        lba.checked_add(len as u64 / SECTOR).is_some_and(|end| end <= self.sectors)
+    }
+}
+
+impl<D: Disk> osyx_ext4::BlockDevice for Window<'_, D> {
+    fn sector_count(&self) -> u64 {
+        self.sectors
+    }
+    fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> osyx_ext4::Result<()> {
+        if !self.check(lba, buf.len()) {
+            return Err(osyx_ext4::Error::Io);
+        }
+        self.disk.read(self.first + lba, buf).map_err(|_| osyx_ext4::Error::Io)
+    }
+    fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> osyx_ext4::Result<()> {
+        if !self.check(lba, buf.len()) {
+            return Err(osyx_ext4::Error::Io);
+        }
+        self.disk.write(self.first + lba, buf).map_err(|_| osyx_ext4::Error::Io)
+    }
+    fn flush(&mut self) -> osyx_ext4::Result<()> {
+        self.disk.flush().map_err(|_| osyx_ext4::Error::Io)
+    }
+}
+
+impl<D: Disk> osyx_fat::BlockDevice for Window<'_, D> {
+    fn sector_count(&self) -> u64 {
+        self.sectors
+    }
+    fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> osyx_fat::Result<()> {
+        if !self.check(lba, buf.len()) {
+            return Err(osyx_fat::FsError::Io);
+        }
+        self.disk.read(self.first + lba, buf).map_err(|_| osyx_fat::FsError::Io)
+    }
+    fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> osyx_fat::Result<()> {
+        if !self.check(lba, buf.len()) {
+            return Err(osyx_fat::FsError::Io);
+        }
+        self.disk.write(self.first + lba, buf).map_err(|_| osyx_fat::FsError::Io)
+    }
+    fn flush(&mut self) -> osyx_fat::Result<()> {
+        self.disk.flush().map_err(|_| osyx_fat::FsError::Io)
+    }
+}
+
+// ---- partitioning -----------------------------------------------------------------
+
+/// How the disk is divided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// A 256 MiB EFI system partition and the rest for the root.
+    Automatic,
+    /// Explicit sizes; `root_mib` 0 means "the rest of the disk". Space
+    /// after the root partition stays unallocated.
+    Manual { esp_mib: u64, root_mib: u64 },
+}
+
+/// Where the partitions go (sector numbers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Plan {
+    pub disk_sectors: u64,
+    pub esp_first: u64,
+    pub esp_sectors: u64,
+    pub root_first: u64,
+    pub root_sectors: u64,
+}
+
+impl Plan {
+    pub fn esp_mib(&self) -> u64 {
+        self.esp_sectors * SECTOR / MIB
+    }
+    pub fn root_mib(&self) -> u64 {
+        self.root_sectors * SECTOR / MIB
+    }
+}
+
+/// Plans `layout` on a disk of `disk_sectors` sectors.
+pub fn plan(disk_sectors: u64, layout: Layout) -> Result<Plan> {
+    // GPT: 34 sectors at the start (aligned up to 1 MiB) and 33 at the end.
+    let usable_end = disk_sectors.checked_sub(34).ok_or_else(|| Error::Invalid("the disk is too small".into()))?;
+    let (esp_mib, root_mib) = match layout {
+        Layout::Automatic => (DEFAULT_ESP_MIB, 0),
+        Layout::Manual { esp_mib, root_mib } => (esp_mib, root_mib),
+    };
+    if esp_mib < MIN_ESP_MIB {
+        return Err(Error::Invalid(format!("the EFI system partition needs at least {MIN_ESP_MIB} MiB")));
+    }
+    if root_mib != 0 && root_mib < MIN_ROOT_MIB {
+        return Err(Error::Invalid(format!("the system partition needs at least {MIN_ROOT_MIB} MiB")));
+    }
+    let esp_first = ALIGN;
+    let esp_sectors = esp_mib * MIB / SECTOR;
+    let root_first = esp_first + esp_sectors;
+    let room = usable_end.saturating_sub(root_first) / ALIGN * ALIGN;
+    let root_sectors = if root_mib == 0 { room } else { root_mib * MIB / SECTOR };
+    if root_sectors > room {
+        return Err(Error::Invalid(format!(
+            "the partitions need {} MiB but the disk has {} MiB",
+            esp_mib + root_mib + 2,
+            disk_sectors * SECTOR / MIB
+        )));
+    }
+    if root_sectors * SECTOR < MIN_ROOT_MIB * MIB {
+        return Err(Error::Invalid(format!("the disk is too small: OSyx needs at least {MIN_DISK_MIB} MiB")));
+    }
+    Ok(Plan { disk_sectors, esp_first, esp_sectors, root_first, root_sectors })
+}
+
+// ---- what to install ----------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Dir,
+    Symlink(String),
+}
+
+/// One entry of the system tree to copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceEntry {
+    pub name: String,
+    pub kind: Kind,
+    /// Permission bits (`0o7777`).
+    pub mode: u16,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
+}
+
+/// The running system (or a test tree) the installer copies.
+pub trait Source {
+    /// Entries of directory `path` (absolute, `/` separated).
+    fn list(&mut self, path: &str) -> core::result::Result<Vec<SourceEntry>, String>;
+    /// Reads file `path` at `offset`; 0 at the end.
+    fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> core::result::Result<usize, String>;
+    /// The EFI system partition files: (path below the ESP root, contents).
+    /// `EFI/BOOT/BOOTX64.EFI` and `EFI/OSYX/KERNEL.ELF` are required.
+    fn boot_files(&mut self) -> core::result::Result<Vec<(String, Vec<u8>)>, String>;
+}
+
+/// Top-level directories of the running system that hold mounts or
+/// run-time state: created empty (with their modes), never copied.
+pub const EMPTY_DIRS: &[&str] = &["/dev", "/tmp", "/run", "/mnt", "/boot", "/proc"];
+
+/// Choices made in the installer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Config {
+    pub hostname: String,
+    /// Login name of the desktop user.
+    pub user_name: String,
+    pub full_name: String,
+    /// `None`: an account without a password.
+    pub password: Option<String>,
+    /// Download and install Zen Browser on the first boot.
+    pub install_zen: bool,
+    /// Random bytes for GUIDs, the volume UUID and the password salt.
+    pub seed: [u8; 32],
+    /// Seconds since the Unix epoch (timestamps).
+    pub time: i64,
+    /// Paths of the source tree left out (for example the installer's own
+    /// payload), in addition to [`EMPTY_DIRS`].
+    pub skip: Vec<String>,
+    /// Kernel command line of the installed system (empty: none).
+    pub cmdline: String,
+}
+
+/// Checks the user-editable fields; returns a message for the user.
+pub fn validate(c: &Config) -> core::result::Result<(), String> {
+    let host = c.hostname.as_str();
+    if host.is_empty() || host.len() > 63 {
+        return Err("The computer name must have 1 to 63 characters.".into());
+    }
+    if !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') || host.starts_with('-') || host.ends_with('-') {
+        return Err("The computer name may contain letters, digits and '-' (not at the start or end).".into());
+    }
+    let user = c.user_name.as_str();
+    if user.is_empty() || user.len() > 32 {
+        return Err("The user name must have 1 to 32 characters.".into());
+    }
+    if !user.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        || !user.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        return Err("The user name must start with a lowercase letter and use a-z, 0-9, '-' or '_'.".into());
+    }
+    if user == "root" {
+        return Err("The user name 'root' is reserved.".into());
+    }
+    if c.full_name.contains(':') || c.full_name.contains('\n') {
+        return Err("The full name may not contain ':' or line breaks.".into());
+    }
+    if c.password.as_ref().is_some_and(|p| p.chars().count() < 4) {
+        return Err("The password must have at least 4 characters (or none).".into());
+    }
+    Ok(())
+}
+
+/// `sha256-iter$<rounds>$<salt hex>$<hash hex>`: the salted password hash
+/// stored in `/etc/shadow`.
+pub fn hash_password(password: &str, salt: &[u8; 16]) -> String {
+    let mut h = osyx_crypto::Sha256::new();
+    h.update(salt);
+    h.update(password.as_bytes());
+    let mut d = h.finish();
+    for _ in 1..PASSWORD_ROUNDS {
+        let mut h = osyx_crypto::Sha256::new();
+        h.update(&d);
+        h.update(salt);
+        h.update(password.as_bytes());
+        d = h.finish();
+    }
+    format!("sha256-iter${PASSWORD_ROUNDS}${}${}", hex(salt), hex(&d))
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+// ---- progress --------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    Partitioning,
+    FormatEsp,
+    FormatRoot,
+    Copying,
+    Configuring,
+    BootFiles,
+    Verifying,
+    Done,
+}
+
+impl Stage {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Stage::Partitioning => "Writing the partition table",
+            Stage::FormatEsp => "Formatting the EFI system partition (FAT32)",
+            Stage::FormatRoot => "Formatting the system partition (ext4)",
+            Stage::Copying => "Copying the system",
+            Stage::Configuring => "Configuring the computer name and user account",
+            Stage::BootFiles => "Installing the boot loader",
+            Stage::Verifying => "Verifying the installation",
+            Stage::Done => "Installation complete",
+        }
+    }
+}
+
+/// Reports progress (`fraction` of the whole job, 0..=1) and log lines.
+pub trait Progress {
+    fn stage(&mut self, stage: Stage, fraction: f32);
+    fn log(&mut self, line: &str);
+}
+
+/// What was installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    pub plan: Plan,
+    pub files: u64,
+    pub dirs: u64,
+    pub links: u64,
+    pub bytes: u64,
+}
+
+static CLOCK: AtomicI64 = AtomicI64::new(0);
+
+fn clock() -> (i64, u32) {
+    (CLOCK.load(Ordering::Relaxed), 0)
+}
+
+fn guid(seed: &[u8; 32], n: u8) -> Guid {
+    let mut h = osyx_crypto::Sha256::new();
+    h.update(seed);
+    h.update(&[n]);
+    let d = h.finish();
+    let mut g = [0u8; 16];
+    g.copy_from_slice(&d[..16]);
+    // RFC 4122 version 4, variant 1 (byte 7 and 8 of the mixed-endian GUID).
+    g[7] = (g[7] & 0x0F) | 0x40;
+    g[8] = (g[8] & 0x3F) | 0x80;
+    Guid(g)
+}
+
+fn ext4_err(what: &str, e: osyx_ext4::Error) -> Error {
+    Error::Io(format!("{what}: {e}"))
+}
+
+fn fat_err(what: &str, e: osyx_fat::FsError) -> Error {
+    Error::Io(format!("{what}: {e:?}"))
+}
+
+/// Installs OSyx on the whole of `disk` following `plan`. Everything on the
+/// disk is lost. The caller must have the user's explicit confirmation.
+pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, source: &mut S, config: &Config, progress: &mut P) -> Result<Report> {
+    validate(config).map_err(Error::Invalid)?;
+    if plan.disk_sectors != disk.sectors() {
+        return Err(Error::Invalid("the plan was made for a different disk size".into()));
+    }
+    CLOCK.store(config.time, Ordering::Relaxed);
+    // Fail before touching the disk if the boot files are missing.
+    let boot = source.boot_files().map_err(Error::Source)?;
+    for need in ["EFI/BOOT/BOOTX64.EFI", "EFI/OSYX/KERNEL.ELF"] {
+        if !boot.iter().any(|(p, _)| p == need) {
+            return Err(Error::Source(format!("{need} is missing")));
+        }
+    }
+
+    progress.stage(Stage::Partitioning, 0.0);
+    // Wipe the first MiB of each partition so stale signatures never show
+    // through, then the new table.
+    let zero = vec![0u8; MIB as usize];
+    for first in [plan.esp_first, plan.root_first] {
+        disk.write(first, &zero).map_err(Error::Io)?;
+    }
+    let parts = [
+        NewPartition { type_guid: osyx_part::TYPE_ESP, unique_guid: guid(&config.seed, 1), first_lba: plan.esp_first, sectors: plan.esp_sectors, name: "EFI system partition" },
+        NewPartition { type_guid: osyx_part::TYPE_ROOT_X86_64, unique_guid: guid(&config.seed, 2), first_lba: plan.root_first, sectors: plan.root_sectors, name: "OSyx" },
+    ];
+    let table = osyx_part::build(disk.sectors(), guid(&config.seed, 0), &parts).map_err(|e| Error::Invalid(format!("partition table: {e:?}")))?;
+    for (lba, data) in table {
+        disk.write(lba, &data).map_err(Error::Io)?;
+    }
+    disk.flush().map_err(Error::Io)?;
+    progress.log(&format!(
+        "GPT written: ESP {} MiB at sector {}, root {} MiB at sector {}",
+        plan.esp_mib(),
+        plan.esp_first,
+        plan.root_mib(),
+        plan.root_first
+    ));
+
+    progress.stage(Stage::FormatEsp, 0.02);
+    let serial = u32::from_le_bytes(config.seed[20..24].try_into().expect("4 bytes"));
+    osyx_fat::format(&mut Window::new(disk, plan.esp_first, plan.esp_sectors), "OSYX-ESP", serial)
+        .map_err(|e| fat_err("formatting the ESP", e))?;
+    progress.log("ESP formatted as FAT32");
+
+    progress.stage(Stage::FormatRoot, 0.04);
+    let mut uuid = [0u8; 16];
+    uuid.copy_from_slice(&guid(&config.seed, 3).0);
+    let opts = osyx_ext4::FormatOptions { label: "OSyx", uuid, time: config.time as u32 };
+    let f = osyx_ext4::format(&mut Window::new(disk, plan.root_first, plan.root_sectors), &opts).map_err(|e| ext4_err("formatting the root", e))?;
+    progress.log(&format!("root formatted as ext4: {} blocks, {} groups, {} inodes, journal {} blocks", f.blocks, f.groups, f.inodes, f.journal_blocks));
+
+    let mut report = Report { plan: *plan, files: 0, dirs: 0, links: 0, bytes: 0 };
+    {
+        let mut fs = Ext4::mount(Window::new(disk, plan.root_first, plan.root_sectors), MountOptions { read_only: false, clock: Some(clock) })
+            .map_err(|e| ext4_err("mounting the new root", e))?;
+        if let Some(why) = fs.write_refusal() {
+            return Err(Error::Io(format!("the new root is not writable: {why}")));
+        }
+        progress.stage(Stage::Copying, 0.06);
+        let total = estimate(source, "/", config).map_err(Error::Source)?.max(1);
+        progress.log(&format!("copying {} MiB of system files", total / MIB));
+        let mut copy = Copy { fs: &mut fs, source, config, report: &mut report, total, progress, buf: vec![0u8; CHUNK] };
+        copy.dir("/", ROOT_INO)?;
+        progress.stage(Stage::Configuring, 0.90);
+        configure(&mut fs, config)?;
+        fs.sync().map_err(|e| ext4_err("writing the root", e))?;
+        fs.unmount().map_err(|e| ext4_err("unmounting the root", e))?;
+    }
+    progress.log(&format!(
+        "copied {} files ({} MiB), {} directories, {} links",
+        report.files,
+        report.bytes / MIB,
+        report.dirs,
+        report.links
+    ));
+
+    progress.stage(Stage::BootFiles, 0.94);
+    {
+        let mut esp = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("mounting the ESP", e))?;
+        let mut files = boot;
+        if !config.cmdline.is_empty() {
+            files.retain(|(p, _)| p != "EFI/OSYX/CMDLINE.TXT");
+            files.push(("EFI/OSYX/CMDLINE.TXT".to_string(), config.cmdline.as_bytes().to_vec()));
+        }
+        // The loader itself goes last: only a complete ESP is bootable.
+        files.sort_by_key(|(p, _)| p == "EFI/BOOT/BOOTX64.EFI");
+        for (path, data) in &files {
+            fat_write(&mut esp, path, data)?;
+            progress.log(&format!("ESP: {path} ({} bytes)", data.len()));
+        }
+        esp.unmount().map_err(|e| fat_err("unmounting the ESP", e))?;
+    }
+    disk.flush().map_err(Error::Io)?;
+
+    progress.stage(Stage::Verifying, 0.97);
+    verify(disk, plan, config, &files_expected(source)?)?;
+    progress.log("verification passed");
+    progress.stage(Stage::Done, 1.0);
+    Ok(report)
+}
+
+fn files_expected<S: Source>(source: &mut S) -> Result<Vec<(String, u64)>> {
+    Ok(source.boot_files().map_err(Error::Source)?.into_iter().map(|(p, d)| (p, d.len() as u64)).collect())
+}
+
+fn join(dir: &str, name: &str) -> String {
+    if dir == "/" { format!("/{name}") } else { format!("{dir}/{name}") }
+}
+
+fn skipped(path: &str, config: &Config) -> bool {
+    config.skip.iter().any(|s| s == path)
+}
+
+/// Bytes of file data below `path` that will be copied.
+fn estimate<S: Source>(source: &mut S, path: &str, config: &Config) -> core::result::Result<u64, String> {
+    let mut sum = 0;
+    for e in source.list(path)? {
+        let p = join(path, &e.name);
+        if EMPTY_DIRS.contains(&p.as_str()) || skipped(&p, config) {
+            continue;
+        }
+        match e.kind {
+            Kind::File => sum += e.size,
+            Kind::Dir => sum += estimate(source, &p, config)?,
+            Kind::Symlink(_) => {}
+        }
+    }
+    Ok(sum)
+}
+
+struct Copy<'a, D: osyx_ext4::BlockDevice, S: Source, P: Progress> {
+    fs: &'a mut Ext4<D>,
+    source: &'a mut S,
+    config: &'a Config,
+    report: &'a mut Report,
+    total: u64,
+    progress: &'a mut P,
+    buf: Vec<u8>,
+}
+
+impl<D: osyx_ext4::BlockDevice, S: Source, P: Progress> Copy<'_, D, S, P> {
+    fn dir(&mut self, path: &str, ino: u32) -> Result<()> {
+        let mut entries = self.source.list(path).map_err(|e| Error::Source(format!("{path}: {e}")))?;
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        for e in entries {
+            let p = join(path, &e.name);
+            if skipped(&p, self.config) {
+                continue;
+            }
+            match &e.kind {
+                Kind::Dir => {
+                    let child = self.fs.create(ino, &e.name, NewKind::Dir, e.mode, e.uid, e.gid).map_err(|x| ext4_err(&p, x))?;
+                    self.report.dirs += 1;
+                    if !EMPTY_DIRS.contains(&p.as_str()) {
+                        self.dir(&p, child)?;
+                    }
+                }
+                Kind::Symlink(target) => {
+                    self.fs.create(ino, &e.name, NewKind::Symlink(target), 0o777, e.uid, e.gid).map_err(|x| ext4_err(&p, x))?;
+                    self.report.links += 1;
+                }
+                Kind::File => {
+                    let f = self.fs.create(ino, &e.name, NewKind::File, e.mode, e.uid, e.gid).map_err(|x| ext4_err(&p, x))?;
+                    let mut at = 0u64;
+                    loop {
+                        let n = self.source.read(&p, at, &mut self.buf).map_err(|x| Error::Source(format!("{p}: {x}")))?;
+                        if n == 0 {
+                            break;
+                        }
+                        let mut done = 0;
+                        while done < n {
+                            let w = self.fs.write(f, at + done as u64, &self.buf[done..n]).map_err(|x| ext4_err(&p, x))?;
+                            if w == 0 {
+                                return Err(Error::Io(format!("{p}: short write")));
+                            }
+                            done += w;
+                        }
+                        at += n as u64;
+                        let before = self.report.bytes;
+                        self.report.bytes += n as u64;
+                        // Report about every 4 MiB.
+                        if before >> 22 != self.report.bytes >> 22 {
+                            let frac = 0.06 + 0.84 * (self.report.bytes as f32 / self.total as f32).min(1.0);
+                            self.progress.stage(Stage::Copying, frac);
+                        }
+                    }
+                    if at != e.size {
+                        self.progress.log(&format!("note: {p} changed size while copying ({} -> {at})", e.size));
+                    }
+                    self.report.files += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Creates `path` (with parents) or returns the existing inode.
+fn ensure_dir<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, path: &str, mode: u16, uid: u32, gid: u32) -> Result<u32> {
+    let mut ino = ROOT_INO;
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        ino = match fs.lookup(ino, part) {
+            Ok(i) => i,
+            Err(osyx_ext4::Error::NotFound) => fs.create(ino, part, NewKind::Dir, mode, uid, gid).map_err(|e| ext4_err(path, e))?,
+            Err(e) => return Err(ext4_err(path, e)),
+        };
+    }
+    Ok(ino)
+}
+
+/// Writes (or replaces) a whole file.
+fn put_file<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, path: &str, data: &[u8], mode: u16, uid: u32, gid: u32) -> Result<()> {
+    let (dir, name) = path.rsplit_once('/').ok_or_else(|| Error::Invalid(format!("{path}: not absolute")))?;
+    let d = ensure_dir(fs, dir, 0o755, 0, 0)?;
+    if fs.lookup(d, name).is_ok() {
+        fs.unlink(d, name).map_err(|e| ext4_err(path, e))?;
+    }
+    let f = fs.create(d, name, NewKind::File, mode, uid, gid).map_err(|e| ext4_err(path, e))?;
+    let mut done = 0;
+    while done < data.len() {
+        let n = fs.write(f, done as u64, &data[done..]).map_err(|e| ext4_err(path, e))?;
+        done += n;
+    }
+    Ok(())
+}
+
+/// Host name, account, first-boot settings and the installation record.
+fn configure<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, c: &Config) -> Result<()> {
+    put_file(fs, "/etc/hostname", format!("{}\n", c.hostname).as_bytes(), 0o644, 0, 0)?;
+    let gecos = if c.full_name.is_empty() { c.user_name.clone() } else { c.full_name.clone() };
+    let passwd = format!("root:x:0:0:Administrator:/root:/bin/axis\n{}:x:{USER_ID}:{USER_ID}:{gecos}:{USER_HOME}:/bin/axis\n", c.user_name);
+    put_file(fs, "/etc/passwd", passwd.as_bytes(), 0o644, 0, 0)?;
+    put_file(fs, "/etc/group", format!("root:x:0:\n{}:x:{USER_ID}:\n", c.user_name).as_bytes(), 0o644, 0, 0)?;
+    let secret = match &c.password {
+        Some(p) => {
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&c.seed[..16]);
+            hash_password(p, &salt)
+        }
+        None => String::new(),
+    };
+    put_file(fs, "/etc/shadow", format!("root:!:\n{}:{secret}:\n", c.user_name).as_bytes(), 0o600, 0, 0)?;
+    ensure_dir(fs, USER_HOME, 0o755, USER_ID, USER_ID)?;
+    ensure_dir(fs, "/home/user/Desktop", 0o755, USER_ID, USER_ID)?;
+    ensure_dir(fs, "/var/log", 0o755, 0, 0)?;
+    ensure_dir(fs, "/etc/osyx", 0o755, 0, 0)?;
+    put_file(
+        fs,
+        "/etc/osyx/firstboot.conf",
+        format!("# Tasks for the first start of the installed system.\nzen={}\n", if c.install_zen { 1 } else { 0 }).as_bytes(),
+        0o644,
+        0,
+        0,
+    )?;
+    put_file(
+        fs,
+        "/etc/osyx/installed",
+        format!("installed={}\nhostname={}\nuser={}\n", c.time, c.hostname, c.user_name).as_bytes(),
+        0o644,
+        0,
+        0,
+    )?;
+    Ok(())
+}
+
+fn fat_write<D: osyx_fat::BlockDevice>(fs: &mut osyx_fat::FileSystem<D>, path: &str, data: &[u8]) -> Result<()> {
+    let mut at = String::new();
+    let parts: Vec<&str> = path.split('/').collect();
+    for dir in &parts[..parts.len() - 1] {
+        at.push('/');
+        at.push_str(dir);
+        match fs.create_dir(&at) {
+            Ok(()) | Err(osyx_fat::FsError::AlreadyExists) => {}
+            Err(e) => return Err(fat_err(&at, e)),
+        }
+    }
+    let full = format!("/{path}");
+    let mut f = fs
+        .open(&full, osyx_fat::OpenOptions { create: true, create_new: false, truncate: true })
+        .map_err(|e| fat_err(&full, e))?;
+    let mut done = 0;
+    while done < data.len() {
+        let n = fs.write(&mut f, done as u64, &data[done..]).map_err(|e| fat_err(&full, e))?;
+        if n == 0 {
+            return Err(Error::Io(format!("{full}: short write")));
+        }
+        done += n;
+    }
+    Ok(())
+}
+
+/// Reads the new system back: partition table, ESP files and sizes, root
+/// consistency and the configuration files.
+pub fn verify<D: Disk>(disk: &mut D, plan: &Plan, config: &Config, boot: &[(String, u64)]) -> Result<()> {
+    struct Reader<'a, D: Disk>(&'a mut D);
+    impl<D: Disk> osyx_part::SectorReader for Reader<'_, D> {
+        fn sectors(&self) -> u64 {
+            self.0.sectors()
+        }
+        fn read(&mut self, lba: u64, buf: &mut [u8]) -> core::result::Result<(), osyx_part::GptError> {
+            self.0.read(lba, buf).map_err(|_| osyx_part::GptError::Io)
+        }
+    }
+    let table = osyx_part::parse(&mut Reader(disk)).map_err(|e| Error::Verify(format!("partition table: {e:?}")))?;
+    let esp = table.partitions.iter().find(|p| p.type_guid == osyx_part::TYPE_ESP).ok_or_else(|| Error::Verify("no ESP".into()))?;
+    let root = table.partitions.iter().find(|p| p.type_guid == osyx_part::TYPE_ROOT_X86_64).ok_or_else(|| Error::Verify("no root partition".into()))?;
+    if (esp.first_lba, esp.sectors(), root.first_lba, root.sectors()) != (plan.esp_first, plan.esp_sectors, plan.root_first, plan.root_sectors) {
+        return Err(Error::Verify("partitions differ from the plan".into()));
+    }
+    {
+        let mut fs = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("ESP", e))?;
+        for (path, size) in boot {
+            if path == "EFI/OSYX/CMDLINE.TXT" && !config.cmdline.is_empty() {
+                continue;
+            }
+            let m = fs.metadata(&format!("/{path}")).map_err(|e| Error::Verify(format!("ESP {path}: {e:?}")))?;
+            if m.size as u64 != *size {
+                return Err(Error::Verify(format!("ESP {path}: {} bytes instead of {size}", m.size)));
+            }
+        }
+    }
+    let mut fs = Ext4::mount(Window::new(disk, plan.root_first, plan.root_sectors), MountOptions { read_only: true, clock: None })
+        .map_err(|e| ext4_err("root", e))?;
+    fs.check().map_err(|e| Error::Verify(format!("root consistency: {e}")))?;
+    for path in ["/etc/hostname", "/etc/passwd", "/etc/osyx/firstboot.conf", "/etc/osyx/installed"] {
+        fs.resolve(path).map_err(|e| Error::Verify(format!("{path}: {e}")))?;
+    }
+    let host = fs.resolve("/etc/hostname").map_err(|e| ext4_err("hostname", e))?;
+    let mut b = [0u8; 64];
+    let n = fs.read(host, 0, &mut b).map_err(|e| ext4_err("hostname", e))?;
+    if b[..n] != *format!("{}\n", config.hostname).as_bytes() {
+        return Err(Error::Verify("/etc/hostname has the wrong contents".into()));
+    }
+    Ok(())
+}

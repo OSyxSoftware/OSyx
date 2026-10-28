@@ -173,29 +173,78 @@ impl PipeObj {
     /// Reads up to `out.len()` bytes: (count, whether the message has more).
     fn read(&self, out: &mut [u8], epoch: u64) -> Result<(usize, bool), u32> {
         let chan = self.chan()?;
+        // TEMP: is the tens-of-thousands-per-second receive rate a spin on
+        // empty channels or real IPC traffic?
+        static R_CALLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        static R_DATA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        static R_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        static R_NOWAIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        static R_EMPTY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        static R_REST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let calls = R_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if calls.is_multiple_of(8192) {
+            let us = os_std::time::Instant::now().as_nanos_since_boot() / 1000;
+            os_std::eprintln!(
+                "winrun: piperead t={us} calls={} data={} bytes={} nowait={} empty={} rest={}",
+                calls,
+                R_DATA.load(core::sync::atomic::Ordering::Relaxed),
+                R_BYTES.load(core::sync::atomic::Ordering::Relaxed),
+                R_NOWAIT.load(core::sync::atomic::Ordering::Relaxed),
+                R_EMPTY.load(core::sync::atomic::Ordering::Relaxed),
+                R_REST.load(core::sync::atomic::Ordering::Relaxed),
+            );
+        }
         loop {
             {
                 let mut rest = self.rest.lock().unwrap();
                 if !rest.is_empty() {
+                    R_REST.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     let n = rest.len().min(out.len());
                     out[..n].copy_from_slice(&rest[..n]);
                     rest.drain(..n);
                     return Ok((n, self.read_message.load(Ordering::SeqCst) && !rest.is_empty()));
                 }
             }
-            let mut buf = alloc::vec![0u8; CHUNK];
+            // Keep the receive allocation in `rest` between messages. Put it
+            // back before waiting so nowait retries do not allocate either.
+            let mut buf = {
+                let mut rest = self.rest.lock().unwrap();
+                core::mem::take(&mut *rest)
+            };
+            buf.resize(CHUNK, 0);
             match os_sys::channel_recv(chan.0, &mut buf, &mut []) {
-                Ok((n, _)) => {
-                    if n == 0 && self.message_type {
-                        return Ok((0, false)); // an empty message
+                Ok((n, _)) if n == 0 && self.message_type => {
+                    R_EMPTY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    buf.clear();
+                    let mut rest = self.rest.lock().unwrap();
+                    if rest.is_empty() {
+                        *rest = buf;
                     }
+                    return Ok((0, false)); // an empty message
+                }
+                Ok((n, _)) => {
+                    R_DATA.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    R_BYTES.fetch_add(n as u64, core::sync::atomic::Ordering::Relaxed);
                     buf.truncate(n);
                     *self.rest.lock().unwrap() = buf;
                 }
-                Err(Errno::WouldBlock) if self.nowait.load(Ordering::SeqCst) => return Err(ERROR_NO_DATA),
-                Err(Errno::WouldBlock) => self.block(chan.0, osyx_abi::ipc::WAIT_READABLE, epoch)?,
-                Err(Errno::BrokenPipe) => return Err(ERROR_BROKEN_PIPE),
-                Err(e) => return Err(errno_to_win32(e)),
+                Err(e) => {
+                    buf.clear();
+                    let mut rest = self.rest.lock().unwrap();
+                    if rest.is_empty() {
+                        *rest = buf;
+                    }
+                    drop(rest);
+                    match e {
+                        Errno::WouldBlock if self.nowait.load(Ordering::SeqCst) => {
+                            R_NOWAIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            return Err(ERROR_NO_DATA);
+                        }
+                        Errno::WouldBlock => self.block(chan.0, osyx_abi::ipc::WAIT_READABLE, epoch)?,
+                        Errno::BrokenPipe => return Err(ERROR_BROKEN_PIPE),
+                        e => return Err(errno_to_win32(e)),
+                    }
+                }
             }
         }
     }
@@ -423,7 +472,16 @@ extern "win64" fn CreateNamedPipeW(
     }
     // SAFETY: a NUL-terminated name.
     let Some(win) = (unsafe { crate::path::wide_to_string(name) }) else { return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE) };
-    let Some(n) = pipe_name(&win).filter(|n| !n.is_empty() && !n.contains('\\')) else { return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE) };
+    // Windows' local app-container namespace is used by Mozilla audioipc.
+    // Keep LOCAL in the hashed service name so it stays distinct from a
+    // bare pipe with the same suffix, while rejecting other path nesting.
+    let Some(n) = pipe_name(&win).filter(|n| {
+        let suffix = if n.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("LOCAL\\")) { &n[6..] } else { n };
+        !suffix.is_empty() && !suffix.contains('\\')
+    }) else {
+        if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: invalid named pipe path {win:?}"); }
+        return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE);
+    };
     if open_mode & (PIPE_ACCESS_INBOUND | PIPE_ACCESS_OUTBOUND) == 0 || max_instances == 0 || max_instances > 255
         || pipe_mode & !(PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS) != 0
         || (pipe_mode & PIPE_READMODE_MESSAGE != 0 && pipe_mode & PIPE_TYPE_MESSAGE == 0)

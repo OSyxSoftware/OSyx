@@ -17,6 +17,22 @@ pub fn processes() -> Result<Vec<ProcInfo>> {
     Ok(buf)
 }
 
+/// (online logical CPU count, the CPU currently running this thread).
+pub fn cpu_info() -> Result<(u32,u32)> {
+    #[cfg(target_os="none")]
+    { os_sys::cpu_info().map_err(Error::from) }
+    #[cfg(not(target_os="none"))]
+    { Err(Error::new(crate::error::ErrorKind::Unsupported,"CPU information is available on OSyx")) }
+}
+
+/// Pins an owned thread (0 = the caller) to a mask of online logical CPUs.
+pub fn thread_affinity(tid:u64,mask:u64)->Result<u64> {
+    #[cfg(target_os="none")]
+    { os_sys::thread_affinity(tid,mask).map_err(Error::from) }
+    #[cfg(not(target_os="none"))]
+    { let _=(tid,mask); Err(Error::new(crate::error::ErrorKind::Unsupported,"Thread affinity is available on OSyx")) }
+}
+
 /// Every mounted volume, outermost first.
 pub fn mounts() -> Result<Vec<MountInfo>> {
     let mut buf = alloc::vec![MountInfo::default(); 64];

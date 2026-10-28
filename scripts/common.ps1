@@ -43,7 +43,27 @@ function Invoke-Checked([string]$What, [scriptblock]$Block) {
     if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" }
 }
 
-$Script:RootSizeMiB = 128
+$Script:RootSizeMiB = 256
+
+# The ESP, root image and cargo output belong to one workspace. Serialize
+# complete builds, including vendor extraction and copying files through WSL.
+function Enter-BuildLock {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant())) }
+    finally { $sha.Dispose() }
+    $name = 'Local\OSyx.Build.' + ([BitConverter]::ToString($digest) -replace '-', '')
+    $mutex = New-Object Threading.Mutex($false, $name)
+    try {
+        try { $owned = $mutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) {
+            Write-Host '==> another build is using this workspace; waiting for it to finish'
+            try { $owned = $mutex.WaitOne() }
+            catch [Threading.AbandonedMutexException] { $owned = $true }
+        }
+        return $mutex
+    } catch { $mutex.Dispose(); throw }
+}
 
 # Path of a Windows file as WSL sees it.
 function ConvertTo-WslPath([string]$Path) {
@@ -60,6 +80,36 @@ function New-RootImage([string]$BinDir) {
     $bin = ConvertTo-WslPath $BinDir
     $out = ConvertTo-WslPath $Script:RootImage
     Invoke-Checked 'root image' { wsl.exe -d Ubuntu-24.04 -u root -- bash $script $bin $out $Script:RootSizeMiB }
+}
+
+# Builds build/osyx-live.iso from the ESP files build.ps1 already made
+# (BOOTX64.EFI, KERNEL.ELF, CMDLINE.TXT) and `$BinDir`: the tree is packed
+# as the compressed live root (stripped, cpio + zlib), the ESP files go
+# into a FAT16 El Torito boot image and are also visible in ISO9660 for
+# UEFI-aware USB tools such as Rufus. There is no hybrid MBR.
+function New-LiveImage([string]$BinDir) {
+    $liveDir = Join-Path $BuildDir 'live'
+    $esp = Join-Path $liveDir 'esp'
+    if (Test-Path -LiteralPath $esp) { Remove-Item -LiteralPath $esp -Recurse -Force }
+    New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT'), (Join-Path $esp 'EFI\OSYX\BIN') | Out-Null
+    Copy-Item (Join-Path $EspDir 'EFI\BOOT\BOOTX64.EFI') (Join-Path $esp 'EFI\BOOT\BOOTX64.EFI') -Force
+    Copy-Item (Join-Path $EspDir 'EFI\OSYX\CMDLINE.TXT') (Join-Path $esp 'EFI\OSYX\CMDLINE.TXT') -Force
+    $kernel = ConvertTo-WslPath (Join-Path $EspDir 'EFI\OSYX\KERNEL.ELF')
+    $stripped = ConvertTo-WslPath (Join-Path $esp 'EFI\OSYX\KERNEL.ELF')
+    Invoke-Checked 'kernel strip' { wsl.exe -d Ubuntu-24.04 -u root -- bash -c "cp '$kernel' '$stripped' && strip --strip-all '$stripped'" }
+    $script = ConvertTo-WslPath (Join-Path $PSScriptRoot 'mkrootfs.sh')
+    $bin = ConvertTo-WslPath $BinDir
+    $archive = ConvertTo-WslPath (Join-Path $esp 'EFI\OSYX\BIN\rootfs.z')
+    Invoke-Checked 'live root' { wsl.exe -d Ubuntu-24.04 -u root -- bash $script $bin $archive 0 live }
+    $fat = Join-Path $liveDir 'esp.img'
+    Invoke-Checked 'live FAT16' { python (Join-Path $PSScriptRoot 'mkfat16.py') $fat $esp }
+    Invoke-Checked 'live ISO' { python (Join-Path $PSScriptRoot 'mkiso.py') (Join-Path $BuildDir 'osyx-live.iso') $fat $esp }
+    # The same ESP as a GPT disk image for USB sticks (written byte for
+    # byte): FAT32 EFI system partition only, the system runs from RAM.
+    $usbEsp = Join-Path $liveDir 'usb-esp.img'
+    $espMiB = [math]::Max(64, [int][math]::Ceiling(((Get-ChildItem $esp -Recurse -File | Measure-Object Length -Sum).Sum / 1MB) * 1.3) + 16)
+    Invoke-Checked 'USB ESP' { cargo run -q -p osyx-fat --example mkfat32 -- $usbEsp $espMiB OSYX-LIVE $esp }
+    Invoke-Checked 'USB image' { cargo run -q -p osyx-part --example mkdisk -- (Join-Path $BuildDir 'osyx-live-usb.img') ($espMiB + 2) "esp:$usbEsp" }
 }
 
 # Copies the root partition out of build/osyx.img into build/root.img.
@@ -117,29 +167,56 @@ function New-DiskImage {
     }
 }
 
+# WHPX gives near-native execution instead of TCG's interpreted one. It is
+# usable when QEMU was built with it and a hypervisor is already running
+# (Hyper-V / Windows Hypervisor Platform); anything else stays on TCG.
+$Script:Whpx = $null
+function Test-Whpx {
+    if ($null -ne $Script:Whpx) { return $Script:Whpx }
+    $Script:Whpx = $false
+    if ($Script:QemuBinary) {
+        try {
+            $help = & $Script:QemuBinary -accel help 2>&1 | Out-String
+            if ($help -match 'whpx') {
+                $Script:Whpx = [bool](Get-CimInstance Win32_ComputerSystem).HypervisorPresent
+            }
+        } catch { $Script:Whpx = $false }
+    }
+    return $Script:Whpx
+}
+
 # Returns the QEMU argument list for booting build/osyx.img.
-function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '', [switch]$Gpu, [string]$GpuSize = '', [string]$DiskFile = 'build/osyx.img') {
+function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '', [switch]$Gpu, [string]$GpuSize = '', [string]$DiskFile = 'build/osyx.img', [switch]$NoDisk, [string]$Cdrom = '', [ValidateRange(1,16)][int]$CpuCount = 1, [ValidateSet('auto','whpx','tcg')][string]$Accel = 'auto') {
     if (-not $Script:QemuBinary) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
     if (-not $Script:Ovmf) { throw 'OVMF (edk2-x86_64-code.fd) not found' }
+    $accelArgs = @()
+    $cpuModel = 'qemu64,+nx'
+    if ($Accel -eq 'whpx' -or ($Accel -eq 'auto' -and (Test-Whpx))) {
+        $accelArgs = @('-accel', 'whpx')
+        $cpuModel = 'host'
+    }
+    if ($NoRng) { $cpuModel += ',-rdseed,-rdrand' }
     # Fresh firmware variables every boot: stale boot entries for devices
     # that no longer exist would otherwise send OVMF to its shell.
     $firmwareDir = Join-Path $BuildDir 'qemu'
     New-Item -ItemType Directory -Force $firmwareDir | Out-Null
     $vars = Join-Path $firmwareDir ("OVMF_VARS-{0}.fd" -f [guid]::NewGuid().ToString('N'))
     Copy-Item $Script:Ovmf.Vars $vars -Force
-    $a = @(
+    $a = $accelArgs + @(
         # No PS/2 controller: keyboard and mouse input can only arrive over USB.
         '-machine', 'q35,i8042=off',
-        '-cpu', 'qemu64,+nx',
+        '-cpu', $cpuModel,
+        '-smp', "$CpuCount,sockets=1,cores=$CpuCount,threads=1",
         '-m', "$MemoryMiB",
         '-drive', "if=pflash,format=raw,unit=0,readonly=on,file=$($Script:Ovmf.Code -replace '\\','/')",
         '-drive', "if=pflash,format=raw,unit=1,file=$($vars -replace '\\','/')",
-        # Relative path: the drive-letter colon would be parsed as an option separator.
-        '-drive', "if=virtio,format=raw,file=$($DiskFile -replace '\\','/')",
         '-serial', "file:$($SerialLog -replace '\\','/')",
         '-device', 'isa-debug-exit,iobase=0xf4,iosize=0x04',
         '-no-reboot'
     )
+    # Relative path: the drive-letter colon would be parsed as an option separator.
+    if (-not $NoDisk) { $a += @('-drive', "if=virtio,format=raw,file=$($DiskFile -replace '\\','/')") }
+    if ($Cdrom) { $a += @('-cdrom', ($Cdrom -replace '\\','/'), '-boot', 'order=d') }
     if (-not $NoRng) { $a += @('-device', 'virtio-rng-pci') }
     # A virtio-net NIC on QEMU's user-mode network (DHCP 10.0.2.15, gateway
     # and host at 10.0.2.2, DNS 10.0.2.3); $HostFwd adds hostfwd rules.
@@ -182,6 +259,8 @@ function Invoke-Qmp([int]$Port, [string]$Json) {
     $client = New-Object System.Net.Sockets.TcpClient('127.0.0.1', $Port)
     try {
         $stream = $client.GetStream()
+        $stream.ReadTimeout = 15000
+        $stream.WriteTimeout = 15000
         $reader = New-Object System.IO.StreamReader($stream)
         $writer = New-Object System.IO.StreamWriter($stream)
         $writer.AutoFlush = $true

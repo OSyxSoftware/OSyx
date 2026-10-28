@@ -9,8 +9,8 @@
 //! Implemented:
 //! * all eleven states, active and passive open, simultaneous open and
 //!   close, TIME-WAIT for [`TIME_WAIT_MS`]
-//! * MSS option (sent on SYN, honoured from the peer); other options are
-//!   parsed and ignored, so window scaling is never in effect
+//! * MSS and window scale options (both sent on SYN, honoured from the
+//!   peer); other options are parsed and ignored
 //! * retransmission with RTO estimation (RFC 6298: SRTT/RTTVAR, Karn's
 //!   algorithm, exponential back-off, [`MAX_RETRIES`] then the connection
 //!   fails with [`TcpError::TimedOut`])
@@ -22,9 +22,9 @@
 //!   duplicates and old segments discarded with an ACK
 //! * RFC 5961 checks for RST and SYN in synchronised states (challenge ACK)
 //!
-//! Not implemented: window scaling, timestamps, SACK, urgent data (the URG
-//! flag is ignored), delayed ACKs (every data segment is acknowledged when
-//! the stack next flushes output), keep-alive.
+//! Not implemented: timestamps, SACK, urgent data (the URG flag is
+//! ignored), delayed ACKs (every data segment is acknowledged when the
+//! stack next flushes output), keep-alive.
 
 use crate::ipv4::PROTO_TCP;
 use crate::wire::{be16, be32, put16, put32, transport_checksum, Endpoint, Ipv4Addr};
@@ -42,9 +42,14 @@ pub const URG: u8 = 0x20;
 
 /// MSS assumed when the peer sends none (RFC 9293 3.7.1).
 pub const DEFAULT_MSS: u16 = 536;
-/// Bytes buffered in each direction.
+/// Bytes buffered in each direction. The receive buffer is larger than the
+/// 64 KiB a window field can express; the window scale option advertises it,
+/// so a busy application (a browser parsing a page) does not stall the peer.
 pub const SEND_BUFFER: usize = 64 * 1024;
-pub const RECV_BUFFER: usize = 64 * 1024;
+pub const RECV_BUFFER: usize = 256 * 1024;
+/// Window scale shift announced in our SYN (RFC 7323). A larger receive
+/// buffer needs a larger shift: the field is `window >> shift`.
+pub const WINDOW_SCALE: u8 = 8;
 pub const INITIAL_RTO_MS: u64 = 1_000;
 pub const MIN_RTO_MS: u64 = 200;
 pub const MAX_RTO_MS: u64 = 30_000;
@@ -83,6 +88,8 @@ pub struct Segment<'a> {
     pub flags: u8,
     pub window: u16,
     pub mss: Option<u16>,
+    /// Window scale shift from a SYN's WS option.
+    pub ws: Option<u8>,
     pub payload: &'a [u8],
 }
 
@@ -118,6 +125,7 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
         return Err(SegmentError::BadChecksum);
     }
     let mut mss = None;
+    let mut ws = None;
     let mut opts = &b[HEADER_LEN..off];
     while let Some(&kind) = opts.first() {
         match kind {
@@ -133,6 +141,11 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
                         return Err(SegmentError::BadOption);
                     }
                     mss = Some(be16(opts, 2));
+                } else if kind == 3 {
+                    if len != 3 {
+                        return Err(SegmentError::BadOption);
+                    }
+                    ws = Some(opts[2].min(14));
                 }
                 opts = &opts[len..];
             }
@@ -146,6 +159,7 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
         flags: b[13] & 0x3F,
         window: be16(b, 14),
         mss,
+        ws,
         payload: &b[off..],
     };
     if seg.src_port == 0 || seg.dst_port == 0 {
@@ -162,18 +176,38 @@ pub struct OutSegment {
     pub flags: u8,
     pub window: u16,
     pub mss: Option<u16>,
+    /// Window scale shift to announce in this segment's options (SYN only).
+    pub ws: Option<u8>,
     pub payload: Vec<u8>,
 }
 
 impl OutSegment {
     pub fn encode(&self, local: Endpoint, remote: Endpoint) -> Vec<u8> {
-        build(local, remote, self.seq, self.ack, self.flags, self.window, self.mss, &self.payload)
+        build(local, remote, self.seq, self.ack, self.flags, self.window, self.mss, self.ws, &self.payload)
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build(local: Endpoint, remote: Endpoint, seq: u32, ack: u32, flags: u8, window: u16, mss: Option<u16>, payload: &[u8]) -> Vec<u8> {
-    let opt_len = if mss.is_some() { 4 } else { 0 };
+pub fn build(
+    local: Endpoint,
+    remote: Endpoint,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    mss: Option<u16>,
+    ws: Option<u8>,
+    payload: &[u8],
+) -> Vec<u8> {
+    // MSS (4 bytes) + WS (3 bytes) + END (1 byte) always fits the 4-byte
+    // option alignment.
+    let opt_len = if mss.is_some() && ws.is_some() {
+        8
+    } else if mss.is_some() || ws.is_some() {
+        4
+    } else {
+        0
+    };
     let hl = HEADER_LEN + opt_len;
     let mut s = alloc::vec![0u8; hl + payload.len()];
     put16(&mut s, 0, local.port);
@@ -183,10 +217,21 @@ pub fn build(local: Endpoint, remote: Endpoint, seq: u32, ack: u32, flags: u8, w
     s[12] = ((hl / 4) as u8) << 4;
     s[13] = flags;
     put16(&mut s, 14, window);
+    let mut o = HEADER_LEN;
     if let Some(m) = mss {
-        s[20] = 2;
-        s[21] = 4;
-        put16(&mut s, 22, m);
+        s[o] = 2;
+        s[o + 1] = 4;
+        put16(&mut s, o + 2, m);
+        o += 4;
+    }
+    if let Some(shift) = ws {
+        s[o] = 3;
+        s[o + 1] = 3;
+        s[o + 2] = shift;
+        o += 3;
+        if mss.is_none() {
+            s[o] = 0;
+        }
     }
     s[hl..].copy_from_slice(payload);
     let c = transport_checksum(local.addr, remote.addr, PROTO_TCP, &s);
@@ -201,9 +246,9 @@ pub fn reset_for(seg: &Segment) -> Option<OutSegment> {
         return None;
     }
     Some(if seg.has(ACK) {
-        OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, payload: Vec::new() }
+        OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, payload: Vec::new() }
     } else {
-        OutSegment { seq: 0, ack: seg.seq.wrapping_add(seg.seq_len()), flags: RST | ACK, window: 0, mss: None, payload: Vec::new() }
+        OutSegment { seq: 0, ack: seg.seq.wrapping_add(seg.seq_len()), flags: RST | ACK, window: 0, mss: None, ws: None, payload: Vec::new() }
     })
 }
 
@@ -299,6 +344,10 @@ pub struct Tcb {
     /// Our MSS (from the interface MTU) and the peer's.
     our_mss: u16,
     peer_mss: u16,
+    /// Window scale shifts: ours (announced in the SYN) and the peer's
+    /// (applied to every window field it sends after the handshake).
+    our_scale: u8,
+    peer_scale: u8,
     srtt: Option<u64>,
     rttvar: u64,
     rto: u64,
@@ -346,6 +395,8 @@ impl Tcb {
             fin_received: false,
             our_mss,
             peer_mss: DEFAULT_MSS,
+            our_scale: WINDOW_SCALE,
+            peer_scale: 0,
             srtt: None,
             rttvar: 0,
             rto: INITIAL_RTO_MS,
@@ -379,6 +430,12 @@ impl Tcb {
         t.irs = syn.seq;
         t.rcv_nxt = syn.seq.wrapping_add(1);
         t.peer_mss = syn.mss.unwrap_or(DEFAULT_MSS).max(64);
+        t.peer_scale = syn.ws.unwrap_or(0);
+        // Scaling only takes effect when both sides offered WS.
+        if syn.ws.is_none() {
+            t.our_scale = 0;
+        }
+        // RFC 7323 2.2: the window in the SYN itself is not scaled.
         t.snd_wnd = syn.window as u32;
         t.snd_wl1 = syn.seq;
         t.init_cwnd();
@@ -448,9 +505,15 @@ impl Tcb {
     }
 
     fn adv_window(&mut self) -> u16 {
-        let w = self.rcv_wnd().min(u16::MAX as u32);
+        // `last_adv_wnd` stays in bytes; only the field is scaled.
+        let w = self.rcv_wnd();
         self.last_adv_wnd = w;
-        w as u16
+        (w >> self.our_scale).min(u16::MAX as u32) as u16
+    }
+
+    /// A window field received after the handshake, in bytes.
+    fn peer_window(&self, field: u16) -> u32 {
+        (field as u32) << self.peer_scale
     }
 
     /// Sequence number of our FIN (valid when `fin_queued`).
@@ -554,6 +617,7 @@ impl Tcb {
             flags: RST,
             window: 0,
             mss: None,
+            ws: None,
             payload: Vec::new(),
         });
         self.fail(TcpError::NotConnected);
@@ -563,6 +627,26 @@ impl Tcb {
 
     pub fn readable(&self) -> bool {
         !self.recv_buf.is_empty() || self.fin_received || self.error.is_some()
+    }
+
+    /// TEMP: flow-control snapshot for the periodic stats.
+    pub fn debug_line(&self) -> alloc::string::String {
+        alloc::format!(
+            ":{} rxq={} adv={} ws={}/{} sndw={} cwnd={} srtt={:?} in={} out={} ooo={} dup={} rt={}",
+            self.remote.port,
+            self.recv_buf.len(),
+            self.rcv_wnd(),
+            self.our_scale,
+            self.peer_scale,
+            self.snd_wnd,
+            self.cwnd,
+            self.srtt,
+            self.stats.bytes_in,
+            self.stats.bytes_out,
+            self.stats.out_of_order,
+            self.stats.duplicates,
+            self.stats.retransmits,
+        )
     }
 
     pub fn writable(&self) -> bool {
@@ -597,7 +681,7 @@ impl Tcb {
             // Not for this connection attempt; RFC 9293 answers with a
             // reset, which the stack sends for the caller.
             if !seg.has(RST) {
-                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, payload: Vec::new() });
+                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, payload: Vec::new() });
             }
             return;
         }
@@ -613,6 +697,10 @@ impl Tcb {
         self.irs = seg.seq;
         self.rcv_nxt = seg.seq.wrapping_add(1);
         self.peer_mss = seg.mss.unwrap_or(DEFAULT_MSS).max(64);
+        self.peer_scale = seg.ws.unwrap_or(0);
+        if seg.ws.is_none() {
+            self.our_scale = 0;
+        }
         self.init_cwnd();
         self.snd_wnd = seg.window as u32;
         self.snd_wl1 = seg.seq;
@@ -687,11 +775,11 @@ impl Tcb {
         if self.state == State::SynReceived {
             if seq_lt(self.snd_una, seg.ack) && seq_le(seg.ack, self.snd_max) {
                 self.set_state(State::Established);
-                self.snd_wnd = seg.window as u32;
+                self.snd_wnd = self.peer_window(seg.window);
                 self.snd_wl1 = seg.seq;
                 self.snd_wl2 = seg.ack;
             } else {
-                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, payload: Vec::new() });
+                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, payload: Vec::new() });
                 return;
             }
         }
@@ -707,7 +795,7 @@ impl Tcb {
     fn window_update(&mut self, seg: &Segment) {
         if seq_lt(self.snd_wl1, seg.seq) || (self.snd_wl1 == seg.seq && seq_le(self.snd_wl2, seg.ack)) {
             let old = self.snd_wnd;
-            self.snd_wnd = seg.window as u32;
+            self.snd_wnd = self.peer_window(seg.window);
             self.snd_wl1 = seg.seq;
             self.snd_wl2 = seg.ack;
             if old == 0 && self.snd_wnd > 0 {
@@ -789,7 +877,7 @@ impl Tcb {
         } else if seg.ack == self.snd_una
             && seg.payload.is_empty()
             && !seg.has(FIN)
-            && seg.window as u32 == self.snd_wnd
+            && self.peer_window(seg.window) == self.snd_wnd
             && self.snd_max != self.snd_una
         {
             self.dup_acks += 1;
@@ -983,10 +1071,17 @@ impl Tcb {
             self.rcv_nxt
         };
         let mss = (flags & SYN != 0).then_some(self.our_mss);
+        let ws = (flags & SYN != 0).then_some(self.our_scale);
         self.ack_pending = false;
         self.stats.segments_out += 1;
-        let window = self.adv_window();
-        OutSegment { seq, ack, flags, window, mss, payload }
+        // The SYN's own window is unscaled (RFC 7323 2.2).
+        let window = if flags & SYN != 0 {
+            self.last_adv_wnd = self.rcv_wnd();
+            self.last_adv_wnd.min(u16::MAX as u32) as u16
+        } else {
+            self.adv_window()
+        };
+        OutSegment { seq, ack, flags, window, mss, ws, payload }
     }
 
     /// Segments to transmit now (SYN, data, FIN, retransmissions, ACKs).

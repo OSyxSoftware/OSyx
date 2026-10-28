@@ -19,11 +19,13 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
+use os_std::ipc::{Mapping, OwnedHandle};
 use os_std::sync::Mutex;
+use os_std::time::Instant;
 use osyx_pe::PeFile;
 use osyx_pe_loader::apiset::{Schema, SchemaBuilder};
 use osyx_pe_loader::image::Protection;
-use osyx_pe_loader::link::{normalize, BuiltinModule, Host, Kind, LinkError, Linker, Source, Symbol};
+use osyx_pe_loader::link::{normalize, BuiltinModule, Host, Kind, LinkError, Linker, PeMapping, Source, Symbol};
 
 pub const DLL_PROCESS_DETACH: u32 = 0;
 pub const DLL_PROCESS_ATTACH: u32 = 1;
@@ -166,8 +168,8 @@ type TlsCallback = extern "win64" fn(u64, u32, u64);
 
 pub struct Builtin {
     pub name: &'static str,
-    by_name: BTreeMap<&'static str, u64>,
-    by_ordinal: BTreeMap<u16, u64>,
+    by_name: Vec<(&'static str, u64)>,
+    by_ordinal: Vec<(u16, u64)>,
     /// The HMODULE programs see: a page starting with "MZ".
     pub base: u64,
 }
@@ -176,19 +178,33 @@ struct BuiltinRef(Arc<Builtin>);
 
 impl BuiltinModule for BuiltinRef {
     fn by_name(&self, name: &str) -> Option<u64> {
-        self.0.by_name.get(name).copied()
+        let i = self.0.by_name.binary_search_by(|(n, _)| (*n).cmp(name)).ok()?;
+        Some(self.0.by_name[i].1)
     }
     fn by_ordinal(&self, o: u16) -> Option<u64> {
-        self.0.by_ordinal.get(&o).copied()
+        let i = self.0.by_ordinal.binary_search_by_key(&o, |(ordinal, _)| *ordinal).ok()?;
+        Some(self.0.by_ordinal[i].1)
     }
 }
 
-fn builtin(name: &'static str, exports: Vec<(&'static str, u64)>, ordinals: Vec<(u16, u64)>) -> Arc<Builtin> {
+fn builtin(name: &'static str, mut exports: Vec<(&'static str, u64)>, mut ordinals: Vec<(u16, u64)>) -> Arc<Builtin> {
+    exports.sort_by(|a, b| a.0.cmp(b.0));
+    exports.dedup_by(|next, previous| {
+        if next.0 != previous.0 { return false; }
+        previous.1 = next.1;
+        true
+    });
+    ordinals.sort_by_key(|(ordinal, _)| *ordinal);
+    ordinals.dedup_by(|next, previous| {
+        if next.0 != previous.0 { return false; }
+        previous.1 = next.1;
+        true
+    });
     let base = mem::alloc_pages(mem::PAGE, mem::Prot::ReadWrite).expect("memory for a module handle");
     // SAFETY: a fresh page.
     unsafe { core::ptr::copy_nonoverlapping(b"MZ".as_ptr(), base as *mut u8, 2) };
     let _ = mem::protect(base, mem::PAGE, mem::Prot::ReadOnly);
-    Arc::new(Builtin { name, by_name: exports.into_iter().collect(), by_ordinal: ordinals.into_iter().collect(), base })
+    Arc::new(Builtin { name, by_name: exports, by_ordinal: ordinals, base })
 }
 
 fn builtins() -> Vec<Arc<Builtin>> {
@@ -214,7 +230,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         // ole32's COM entry points live in combase on Windows.
         builtin("combase.dll", [crate::shlwapi::combase_exports(), crate::ole32::exports()].concat(), Vec::new()),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
-        builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports()].concat(), Vec::new()),
+        builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports()].concat(), crate::shell32::ordinals()),
         builtin("comdlg32.dll", crate::commdlg::exports(), Vec::new()),
         builtin("ole32.dll", crate::ole32::exports(), Vec::new()),
         builtin("winmm.dll", crate::winmm::exports(), Vec::new()),
@@ -237,6 +253,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("d3d11.dll", crate::dwmapi::d3d11_exports(), Vec::new()),
         builtin("dwrite.dll", crate::dwrite::exports(), Vec::new()),
         builtin("dnsapi.dll", crate::dwmapi::dnsapi_exports(), Vec::new()),
+        builtin("wininet.dll", crate::minordlls::wininet_exports(), Vec::new()),
+        builtin("wintrust.dll", crate::minordlls::wintrust_exports(), Vec::new()),
         builtin("dxgi.dll", crate::dwmapi::dxgi_exports(), Vec::new()),
         builtin("d3dcompiler_47.dll", crate::dwmapi::d3dcompiler_exports(), Vec::new()),
     ]
@@ -305,8 +323,8 @@ fn schema() -> Vec<u8> {
 /// dependency auditing. This does not claim full semantics for an API.
 pub fn print_capabilities() {
     for module in builtins() {
-        for name in module.by_name.keys() { os_std::println!("WIN_EXPORT {} {}", module.name, name); }
-        for ordinal in module.by_ordinal.keys() { os_std::println!("WIN_ORDINAL {} #{}", module.name, ordinal); }
+        for (name, _) in &module.by_name { os_std::println!("WIN_EXPORT {} {}", module.name, name); }
+        for (ordinal, _) in &module.by_ordinal { os_std::println!("WIN_ORDINAL {} #{}", module.name, ordinal); }
     }
     let ns = schema();
     if let Ok(s) = Schema::parse(&ns) {
@@ -325,6 +343,19 @@ struct Image {
     size: u64,
 }
 
+struct WritableImage {
+    base: u64,
+    size: usize,
+}
+
+impl AsMut<[u8]> for WritableImage {
+    fn as_mut(&mut self) -> &mut [u8] {
+        // SAFETY: `reserve` returns this mapping only for its live, writable
+        // reservation, and `commit` consumes it before changing protections.
+        unsafe { core::slice::from_raw_parts_mut(self.base as *mut u8, self.size) }
+    }
+}
+
 struct WinHost {
     builtins: Vec<Arc<Builtin>>,
     /// OSyx directories searched for DLL files.
@@ -332,11 +363,57 @@ struct WinHost {
     /// LoadLibrary with a path: (normalised name, OSyx path).
     explicit: Option<(String, String)>,
     images: Vec<Image>,
+    /// When each reservation was made, by base, to time image layout.
+    starts: Vec<(u64, Instant)>,
     /// OSyx paths of the DLL files loaded, by module name.
     paths: BTreeMap<String, String>,
 }
 
+struct FileView {
+    mapping: Mapping,
+    len: usize,
+}
+
+impl PeMapping for FileView {
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: the mapping outlives the returned slice and is read-only.
+        unsafe { core::slice::from_raw_parts(self.mapping.as_ptr(), self.len) }
+    }
+}
+
+fn map_pe(p: &str) -> Result<Option<FileView>, LinkError> {
+    let started = Instant::now();
+    let file = os_std::fs::File::open(p).map_err(|e| LinkError::Host(alloc::format!("{p}: {e}")))?;
+    let len = file.metadata().map_err(|e| LinkError::Host(alloc::format!("{p}: {e}")))?.len();
+    let section = match os_sys::filemap_create(file.handle(), len, false) {
+        Ok(h) => {
+            // SAFETY: a fresh section handle owned by this guard.
+            unsafe { OwnedHandle::from_raw(h) }
+        }
+        Err(os_sys::Errno::NotSupported) => return Ok(None),
+        Err(e) => return Err(LinkError::Host(alloc::format!("{p}: file mapping: {e:?}"))),
+    };
+    let elapsed = started.elapsed().as_millis();
+    if elapsed >= 50 {
+        os_std::eprintln!("winrun: mapped {p} ({} KiB) in {} ms", len >> 10, elapsed);
+    }
+    let ptr = match os_sys::filemap_map(section.raw(), 0, len, false) {
+        Ok(ptr) => ptr,
+        Err(os_sys::Errno::NotSupported) => return Ok(None),
+        Err(e) => return Err(LinkError::Host(alloc::format!("{p}: file mapping: {e:?}"))),
+    };
+    // SAFETY: this is a new mapping of `len` bytes with no other owner.
+    let mapping = unsafe { Mapping::from_raw(ptr, len as usize) };
+    Ok(Some(FileView { mapping, len: len as usize }))
+}
+
 impl WinHost {
+    /// The file a PE module was loaded from, opened again to identify it to
+    /// the kernel's shared image cache.
+    fn image_file(&self, name: &str) -> Option<os_std::fs::File> {
+        os_std::fs::File::open(self.paths.get(name)?).ok()
+    }
+
     /// The Windows path of a module (built-ins: the system directory).
     fn file_name(&self, name: &str) -> String {
         self.paths.get(name).map_or_else(|| alloc::format!("C:\\Windows\\OSyx\\{name}"), |p| path::to_windows(p))
@@ -344,6 +421,8 @@ impl WinHost {
 }
 
 impl Host for WinHost {
+    type Image = WritableImage;
+
     fn open(&mut self, name: &str) -> Result<Option<Source>, LinkError> {
         if let Some(b) = self.builtins.iter().find(|b| b.name == name) {
             return Ok(Some(Source::Builtin(Box::new(BuiltinRef(b.clone())))));
@@ -359,33 +438,46 @@ impl Host for WinHost {
         }
         for c in candidates {
             if let Ok((p, true)) = path::resolve(&c) {
-                return match os_std::fs::read(&p) {
-                    Ok(bytes) => {
-                        self.paths.insert(String::from(name), p);
-                        Ok(Some(Source::Pe(bytes)))
-                    }
-                    Err(e) => Err(LinkError::Host(alloc::format!("{p}: {e}"))),
+                let source = match map_pe(&p)? {
+                    Some(view) => Source::PeMapped(Box::new(view)),
+                    None => match os_std::fs::read(&p) {
+                        Ok(bytes) => Source::Pe(bytes),
+                        Err(e) => return Err(LinkError::Host(alloc::format!("{p}: {e}"))),
+                    },
                 };
+                self.paths.insert(String::from(name), p);
+                return Ok(Some(source));
             }
         }
         Ok(None)
     }
 
-    fn reserve(&mut self, size: u64, preferred: u64, fixed: bool) -> Result<u64, LinkError> {
+    fn reserve(&mut self, size: u64, preferred: u64, fixed: bool) -> Result<(u64, Self::Image), LinkError> {
         let base = if fixed {
             mem::alloc_fixed(preferred, size as usize, mem::Prot::ReadWrite)
         } else {
-            mem::alloc_pages(size as usize, mem::Prot::ReadWrite)
+            let at_preferred = if preferred == 0 {
+                None
+            } else {
+                mem::alloc_fixed(preferred, size as usize, mem::Prot::ReadWrite)
+            };
+            at_preferred.or_else(|| mem::alloc_pages(size as usize, mem::Prot::ReadWrite))
         };
         let base = base.ok_or(LinkError::NoMemory)?;
         self.images.push(Image { base, size });
-        Ok(base)
+        self.starts.push((base, Instant::now()));
+        Ok((base, WritableImage { base, size: size as usize }))
     }
 
-    fn commit(&mut self, base: u64, image: &[u8], prot: &[Protection]) -> Result<(), LinkError> {
-        // SAFETY: `base` is the writable mapping of `image.len()` bytes made
-        // by `reserve` for exactly this image.
-        unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), base as *mut u8, image.len()) };
+    fn commit(&mut self, base: u64, _image: Self::Image, prot: &[Protection]) -> Result<(), LinkError> {
+        if let Some(i) = self.starts.iter().position(|(b, _)| *b == base) {
+            let (_, started) = self.starts.remove(i);
+            let elapsed = started.elapsed().as_millis();
+            if elapsed >= 50 {
+                let size = self.images.iter().find(|i| i.base == base).map_or(0, |i| i.size);
+                os_std::eprintln!("winrun: image {} KiB laid out in {} ms", size >> 10, elapsed);
+            }
+        }
         for p in prot {
             let m = match (p.write, p.execute) {
                 (true, false) => mem::Prot::ReadWrite,
@@ -404,6 +496,51 @@ impl Host for WinHost {
     fn release(&mut self, base: u64, size: u64) {
         mem::free_pages(base, size as usize);
         self.images.retain(|image| image.base != base);
+    }
+
+    fn shared_base(&mut self, name: &str) -> Option<u64> {
+        let file = self.image_file(name)?;
+        os_sys::image_query(file.handle()).ok()
+    }
+
+    fn prepare(&mut self, name: &str, base: u64, image: &mut [u8]) -> bool {
+        let size = image.len() as u64;
+        if self.image_file(name).is_some_and(|f| os_sys::image_map(f.handle(), base, size).is_ok()) {
+            return true;
+        }
+        // Warm the destination in bounded runs: mapping the whole reservation
+        // in one syscall would hold the kernel entry lock for most of a
+        // second on a large image (xul.dll is ~170 MiB) and freeze every
+        // other process. A small run keeps each hold short while still
+        // avoiding one page fault per image page during layout.
+        const WARM_RUN: u64 = 2 * 1024 * 1024;
+        let mut at = 0;
+        while at < size {
+            let len = (size - at).min(WARM_RUN) as usize;
+            // SAFETY: `base + at` is inside the fresh writable reservation.
+            unsafe { let _ = os_sys::prefault((base + at) as *mut u8, len); };
+            at += len as u64;
+        }
+        false
+    }
+
+    fn publish(&mut self, name: &str, base: u64, image: &[u8]) {
+        if let Some(file) = self.image_file(name) {
+            // Not supported by older kernels, or already published: either
+            // way this process simply keeps its private copy.
+            let _ = os_sys::image_publish(file.handle(), base, image.len() as u64);
+        }
+    }
+
+    fn mark(&mut self) -> u64 {
+        Instant::now().as_nanos_since_boot()
+    }
+
+    fn note(&mut self, module: &str, phase: &str, mark: u64) {
+        let ns = Instant::now().as_nanos_since_boot().saturating_sub(mark);
+        if ns >= 20_000_000 {
+            os_std::eprintln!("winrun: {module} {phase} {} ms", ns / 1_000_000);
+        }
     }
 }
 
@@ -468,7 +605,7 @@ fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> 
         let full = l.linker.host.file_name(&m.name);
         let entry = if is_dll { m.entry() } else { 0 };
         l.state[i].ldr = teb::add_ldr_entry(base, m.entry(), size, &full, &m.name);
-        let Ok(pe) = PeFile::parse(file) else { continue };
+        let Ok(pe) = PeFile::parse(file.as_ref()) else { continue };
         if let Ok(Some(tls)) = pe.tls() {
             let index = l.tls.len() as u32;
             // SAFETY: the TLS directory lies in the mapped image (validated
@@ -657,11 +794,13 @@ pub fn start(exe_path: &str, command_line: &str, environment: &[String]) -> Resu
         search: alloc::vec![exe_dir.clone(), cwd.clone()],
         explicit: None,
         images: Vec::new(),
+        starts: Vec::new(),
         paths: BTreeMap::new(),
     };
     let mut linker = Linker::new(host, Some(schema));
-    let exe =
-        linker.load_executable(&exe_name, bytes.clone()).map_err(|e| alloc::format!("cannot load {exe_name}: {e}"))?;
+    // Known before loading so the image can be shared with other processes.
+    linker.host.paths.insert(normalize(&exe_name), String::from(exe_path));
+    let exe = linker.load_executable(&exe_name, bytes).map_err(|e| alloc::format!("cannot load {exe_name}: {e}"))?;
     let exe_module = linker.modules[exe].name.clone();
     linker.host.paths.insert(exe_module, String::from(exe_path));
     let image_base = linker.modules[exe].base;
@@ -820,7 +959,12 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
             l.linker.host.explicit = Some((n.clone(), p));
         }
         let importer = l.linker.modules[l.exe].name.clone();
+        let started = Instant::now();
         let r = l.linker.load_dll(&n, &importer);
+        let elapsed = started.elapsed().as_millis();
+        if elapsed >= 100 {
+            os_std::eprintln!("winrun: LoadLibrary({name}) took {elapsed} ms");
+        }
         l.linker.host.explicit = None;
         let i = r.map_err(|e| {
             // Preserve the dependency error before reducing it to a Win32

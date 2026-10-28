@@ -53,6 +53,7 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("shlwapi paths, environment folders, StrStrIW and IsOS", || run("shlpath.exe", &[]) == Some(0));
     t.check("security descriptors on sections and new directories", || run("secattr.exe", &[]) == Some(0));
     t.check("handle inheritance and DuplicateHandle between processes", || run("childproc.exe", &[]) == Some(0));
+    t.check("executable images shared copy-on-write between processes", || run("imageshare.exe", &[]) == Some(0));
     t.check("named pipes work as the unprivileged desktop user", || {
         Command::new("/system/bin/run-app").arg("/opt/wintests/pipes.exe").status().is_ok_and(|s|s.success())
     });

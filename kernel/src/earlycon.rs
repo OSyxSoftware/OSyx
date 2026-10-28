@@ -86,6 +86,38 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 const BACKGROUND: Color = splash::BG_BOTTOM;
 
+/// Leaves a small hardware-boot checkpoint without depending on the console.
+pub fn marker(info: &FramebufferInfo, hhdm_offset: u64, hhdm_size: u64, stage: u8) {
+    let rgb = match info.format {
+        PixelFormat::Rgb => true,
+        PixelFormat::Bgr => false,
+        _ => return,
+    };
+    let needed = info.stride as u64 * info.height as u64 * 4;
+    if info.base == 0 || info.width < 80 || info.height < 32 || info.stride < info.width
+        || info.base.checked_add(needed).is_none_or(|end| end > hhdm_size)
+    {
+        return;
+    }
+    let (left, color) = match stage {
+        1 => (0, 0x0020E040),
+        2 if active() => (0, 0x002080FF),
+        2 => (0, 0x00FFE040),
+        3 => (40, 0x0020E0E0),
+        4 => (80, 0x00E040E0),
+        5 => (120, 0x00FF8040),
+        6 => (160, 0x00FFFFFF),
+        _ => return,
+    };
+    let px = osyx_gfx::to_device(color, rgb);
+    let fb = (hhdm_offset + info.base) as *mut u32;
+    for y in 0..32u32 {
+        for x in 0..32u32 {
+            unsafe { fb.add((y * info.stride + left + x) as usize).write_volatile(px) };
+        }
+    }
+}
+
 /// Starts the console on the boot framebuffer. `hhdm_offset`/`hhdm_size`
 /// describe the boot loader's direct map, which is still the active one.
 /// Does nothing if there is no usable linear framebuffer.

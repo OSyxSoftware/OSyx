@@ -4,7 +4,7 @@
  * ERROR_MORE_DATA, cancellation and a broken pipe. */
 #include "common.h"
 
-static const WCHAR NAME[] = L"\\\\.\\pipe\\osyx-wintest-pipes";
+static const WCHAR NAME[] = L"\\\\.\\pipe\\LOCAL\\osyx-wintest-pipes";
 static const WCHAR MSGNAME[] = L"\\\\.\\pipe\\osyx-wintest-messages";
 
 static int is_client(void) {

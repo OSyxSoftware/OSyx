@@ -19,7 +19,7 @@ use core::time::Duration;
 
 pub use crate::tls::LocalKey;
 
-/// Blocks for at least `d` (OSyx timer resolution: 10 ms).
+/// Blocks for at least `d` (OSyx timer resolution: 1 ms).
 pub fn sleep(d: Duration) {
     let ns = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
     if ns > 0 {
@@ -218,6 +218,7 @@ unsafe impl<T> Send for SendPtr<T> {}
 
 /// Body of every spawned thread (runs on the new thread).
 fn thread_main(arg: usize) {
+    tls::init_current_tid();
     // SAFETY: `arg` was leaked by `Builder::spawn` for this thread.
     let f = unsafe { Box::from_raw(arg as *mut Box<dyn FnOnce() + Send>) };
     f();

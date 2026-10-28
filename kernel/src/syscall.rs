@@ -2,10 +2,9 @@
 //!
 //! Entry: the CPU loads CS/SS from STAR, saves the user RIP in RCX and RFLAGS
 //! in R11, and masks RFLAGS with FMASK (interrupts off). The stub switches to
-//! the process's kernel stack, saves a [`SyscallFrame`], re-enables
-//! interrupts and calls [`osyx_syscall_dispatch`]. Single CPU for now: the
-//! stack pointers live in globals; SMP will move them to per-CPU data
-//! reached through `swapgs`.
+//! the process's kernel stack and saves a [`SyscallFrame`]. The dispatcher takes
+//! the kernel entry lock before enabling interrupts. SWAPGS selects the
+//! current CPU's stack pointers; the inactive GS base preserves user TLS.
 
 use crate::arch::cpu;
 use crate::arch::gdt::{KERNEL_CS, USER_DS};
@@ -18,19 +17,15 @@ use core::arch::global_asm;
 use osyx_abi::{nr, Errno, SystemInfo};
 use osyx_vfs::Cred;
 
-#[no_mangle]
-static mut OSYX_SYSCALL_KERNEL_RSP: u64 = 0;
-#[no_mangle]
-static mut OSYX_SYSCALL_USER_RSP: u64 = 0;
-
 global_asm!(
     r#"
     .section .text
     .global osyx_syscall_entry
 osyx_syscall_entry:
-    mov [rip + OSYX_SYSCALL_USER_RSP], rsp
-    mov rsp, [rip + OSYX_SYSCALL_KERNEL_RSP]
-    push qword ptr [rip + OSYX_SYSCALL_USER_RSP]
+    swapgs
+    mov gs:[8], rsp
+    mov rsp, gs:[0]
+    push qword ptr gs:[8]
     push r11
     push rcx
     push rbp
@@ -47,7 +42,6 @@ osyx_syscall_entry:
     push rdi
     push rax
     mov rdi, rsp
-    sti
     call osyx_syscall_dispatch
     cli
     add rsp, 8
@@ -66,6 +60,7 @@ osyx_syscall_entry:
     pop rcx
     pop r11
     pop rsp
+    swapgs
     sysretq
     "#
 );
@@ -107,7 +102,10 @@ const IA32_FMASK: u32 = 0xC000_0084;
 pub unsafe fn init() {
     cpu::wrmsr(IA32_EFER, cpu::rdmsr(IA32_EFER) | 1); // SCE
                                                       // SYSCALL: CS = STAR[47:32], SS = +8.  SYSRET: CS = STAR[63:48] + 16, SS = +8.
-    let sysret_base = (USER_DS & !3) as u64 - 8;
+    // SYSRET derives both selectors by adding to STAR[63:48]; not every
+    // implementation forces RPL 3 on SS (WHPX on AMD loads 0x18 instead of
+    // 0x1B), so the base itself must carry the user RPL.
+    let sysret_base = USER_DS as u64 - 8;
     cpu::wrmsr(IA32_STAR, (sysret_base << 48) | ((KERNEL_CS as u64) << 32));
     cpu::wrmsr(IA32_LSTAR, osyx_syscall_entry as *const () as u64);
     // Clear IF, TF, DF, NT and AC on entry.
@@ -117,17 +115,152 @@ pub unsafe fn init() {
 /// # Safety
 /// `top` must be the top of the current process's kernel stack.
 pub unsafe fn set_kernel_stack(top: u64) {
-    OSYX_SYSCALL_KERNEL_RSP = top;
+    crate::smp::set_kernel_stack(top);
 }
 
 #[no_mangle]
 extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
+    crate::smp::note_last_syscall(crate::smp::cached_tid(), f.rip, f.rax);
+    // Read-only queries that touch nothing but scheduler state or atomics
+    // skip the global entry lock: user timers call CLOCK very frequently.
+    match f.rax {
+        nr::CLOCK => {
+            let tid = crate::smp::cached_tid();
+            crate::smp::note_syscall(f.rax);
+            crate::smp::note_pid_syscall(crate::smp::cached_pid(), f.rax);
+            crate::smp::note_tid_syscall(tid, f.rax);
+            crate::smp::note_callsite(tid, f.rip, f.rax);
+            return osyx_abi::encode(sys_clock(f.rdi));
+        }
+        nr::GETTID => {
+            crate::smp::note_syscall(f.rax);
+            return osyx_abi::encode(Ok(sched::current_tid()));
+        }
+        nr::CPU_INFO => {
+            crate::smp::note_syscall(f.rax);
+            return osyx_abi::encode(Ok(crate::smp::online() as u64 | (crate::smp::index() as u64) << 32));
+        }
+        nr::YIELD => {
+            // Yield touches only the scheduler, which has its own lock. A
+            // spinning user thread can call this tens of thousands of times
+            // per second; taking the entry lock here makes every spin bounce
+            // against the CPU doing real work.
+            let tid = crate::smp::cached_tid();
+            crate::smp::note_syscall(f.rax);
+            crate::smp::note_pid_syscall(crate::smp::cached_pid(), f.rax);
+            crate::smp::note_tid_syscall(tid, f.rax);
+            crate::smp::note_tid_futex(tid, f.rax);
+            cpu::enable_interrupts();
+            sched::yield_now();
+            return osyx_abi::encode(Ok(0));
+        }
+        // Futexes touch only their own wait table and the scheduler, both
+        // protected by private locks. Windows critical sections and SRW locks
+        // wake on every contended release, which makes this one of the hottest
+        // syscalls while a browser runs; routing it through the entry lock
+        // serialised both CPUs behind traffic that needs no global state.
+        nr::FUTEX_WAIT | nr::FUTEX_WAKE => {
+            let tid = crate::smp::cached_tid();
+            crate::smp::note_syscall(f.rax);
+            crate::smp::note_pid_syscall(crate::smp::cached_pid(), f.rax);
+            crate::smp::note_tid_syscall(tid, f.rax);
+            crate::smp::note_tid_futex(tid, f.rax);
+            crate::smp::note_callsite(tid, f.rip, f.rax);
+            cpu::enable_interrupts();
+            let r = if f.rax == nr::FUTEX_WAIT {
+                let timeout = (f.rdx != 0).then(|| ns_to_ticks(f.rdx));
+                crate::futex::wait(f.rdi, f.rsi as u32, timeout).map(|_| 0)
+            } else {
+                crate::futex::wake(f.rdi, f.rsi as u32)
+            };
+            return osyx_abi::encode(r);
+        }
+        // Wait objects own their readiness state and waitqueues. In particular,
+        // Winsock select() must not serialise both CPUs behind the entry lock
+        // while it only polls socket atomics or sleeps on their waitqueue.
+        nr::WAIT_HANDLES => {
+            let tid = crate::smp::cached_tid();
+            crate::smp::note_syscall(f.rax);
+            crate::smp::note_pid_syscall(crate::smp::cached_pid(), f.rax);
+            crate::smp::note_tid_syscall(tid, f.rax);
+            crate::smp::note_callsite(tid, f.rip, f.rax);
+            cpu::enable_interrupts();
+            let r = sys_objects::wait_handles(f.rdi, f.rsi, f.rdx);
+            if sched::current_kill_pending() {
+                process::finish_current_thread(0);
+            }
+            return osyx_abi::encode(r);
+        }
+        // A regular file read touches only per-file state: the handle table,
+        // the open file, the page cache and the volume have their own locks.
+        // Databases issue thousands of small reads per second and the entry
+        // lock was most of their cost; a miss can also wait on a busy disk
+        // for hundreds of milliseconds. Pipes, sockets and buffers that are
+        // not mapped yet stay on the normal path.
+        nr::READ => {
+            let r = read_cached(f.rdi, f.rsi, f.rdx).or_else(|| read_file(f.rdi, f.rsi, f.rdx));
+            if let Some(r) = r {
+                let tid = crate::smp::cached_tid();
+                crate::smp::note_syscall(f.rax);
+                crate::smp::note_pid_syscall(crate::smp::cached_pid(), f.rax);
+                crate::smp::note_tid_syscall(tid, f.rax);
+                crate::smp::note_callsite(tid, f.rip, f.rax);
+                cpu::enable_interrupts();
+                return osyx_abi::encode(r);
+            }
+        }
+        // Seeking except relative to the end only rewrites this file's own
+        // offset; SQLite seeks before every small read and write. Seeking to
+        // the end needs the file size from the file system, so it stays on
+        // the normal path.
+        nr::SEEK if f.rdx != osyx_abi::SEEK_END => {
+            let tid = crate::smp::cached_tid();
+            crate::smp::note_syscall(f.rax);
+            crate::smp::note_pid_syscall(crate::smp::cached_pid(), f.rax);
+            crate::smp::note_tid_syscall(tid, f.rax);
+            crate::smp::note_callsite(tid, f.rip, f.rax);
+            cpu::enable_interrupts();
+            return osyx_abi::encode(with_file(f.rdi, |o| o.seek(f.rsi as i64, f.rdx)));
+        }
+        _ => {}
+    }
+    crate::smp::note_pid_syscall(crate::smp::cached_pid(), f.rax);
+    crate::smp::note_tid_syscall(crate::smp::cached_tid(), f.rax);
+    if f.rax == nr::FUTEX_WAIT || f.rax == nr::FUTEX_WAKE || f.rax == nr::YIELD {
+        crate::smp::note_tid_futex(crate::smp::cached_tid(), f.rax);
+    }
+    crate::smp::note_callsite(crate::smp::cached_tid(), f.rip, f.rax);
+    // Bulk prefaulting maps and zeroes page runs with only its own locks
+    // (process table, paging, frames). Holding the entry lock for a whole run
+    // makes the other CPU spin and starve host I/O, so it re-enters in small
+    // chunks instead.
+    if f.rax == nr::PREFAULT {
+        crate::smp::note_syscall(f.rax);
+        cpu::enable_interrupts();
+        return osyx_abi::encode(if !crate::fixup::user_range_ok(f.rdi, f.rsi) {
+            Err(Errno::Fault)
+        } else {
+            process::prefault_write(f.rdi, f.rsi as usize);
+            Ok(0)
+        });
+    }
+    let _entry = crate::smp::KernelEntry::new_yielding();
+    crate::smp::set_lock_nr(f.rax);
+    cpu::enable_interrupts();
     let r = match f.rax {
         nr::EXIT => process::exit_current(f.rdi as i32),
         nr::WRITE => sys_write(f.rdi, f.rsi, f.rdx),
         nr::MAP => process::map_anonymous(f.rdi, f.rsi),
         nr::UNMAP => process::unmap_region(f.rdi, f.rsi).map(|_| 0),
         nr::SYSINFO => sys_sysinfo(f.rdi),
+        nr::CPU_INFO => Ok(crate::smp::online() as u64 | (crate::smp::index() as u64)<<32),
+        nr::THREAD_AFFINITY => sched::set_affinity(f.rdi,f.rsi),
+        nr::PROCESS_WRITE_BARRIER => {
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            crate::smp::flush_remote(0,true);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            Ok(0)
+        }
         nr::CLOCK => sys_clock(f.rdi),
         nr::SPAWN => ExecRequest::from_user(f.rdi)
             .and_then(|req| process::spawn(sched::current_pid(), &req).map_err(|e| e.errno())),
@@ -228,12 +361,16 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::FILEMAP_CREATE => sys_objects::filemap_create(f.rdi, f.rsi, f.rdx),
         nr::FILEMAP_MAP => sys_objects::filemap_map(f.rdi, f.rsi, f.rdx, f.r10),
         nr::FILEMAP_FLUSH => sys_objects::filemap_flush(f.rdi, f.rsi, f.rdx),
+        nr::IMAGE_MAP => sys_objects::image_map(f.rdi, f.rsi, f.rdx),
+        nr::IMAGE_PUBLISH => sys_objects::image_publish(f.rdi, f.rsi, f.rdx),
+        nr::IMAGE_QUERY => sys_objects::image_query(f.rdi),
         nr::SHM_SIZE => sys_objects::shm_size(f.rdi),
         nr::WAIT_HANDLES => sys_objects::wait_handles(f.rdi, f.rsi, f.rdx),
         nr::DISPLAY_INFO => sys_objects::display_info(f.rdi),
         nr::DISPLAY_ACQUIRE => sys_objects::display_acquire(),
         nr::DISPLAY_RELEASE => sys_objects::display_release(),
         nr::PROC_LIST => sys_objects::proc_list(f.rdi, f.rsi),
+        nr::PROC_INFO => sys_objects::proc_info(f.rdi, f.rsi),
         nr::DEVICE_LIST => sys_objects::device_list(f.rdi, f.rsi),
         nr::MOUNT_LIST => sys_objects::mount_list(f.rdi, f.rsi),
         nr::POWER => sys_objects::power(f.rdi),
@@ -260,6 +397,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::PROTECT => process::protect(f.rdi, f.rsi, f.rdx).map(|_| 0),
         nr::MAP_EX => process::map_ex(f.rdi, f.rsi, f.rdx, f.r10),
         nr::DISCARD => process::discard(f.rdi, f.rsi).map(|_| 0),
+        nr::TIME_CALIB => sys_time_calib(f.rdi),
         nr::DISPLAY_FLUSH => sys_objects::display_flush(f.rdi, f.rsi, f.rdx, f.r10),
         nr::DISPLAY_SET_MODE => sys_objects::display_set_mode(f.rdi, f.rsi),
         nr::FAULT_HANDLER => crate::user_fault::register(f.rdi),
@@ -287,7 +425,7 @@ fn ns_to_ticks(ns: u64) -> u64 {
 }
 
 /// Bounce buffer size for file data between user memory and the VFS.
-const FILE_CHUNK: usize = 64 * 1024;
+const FILE_CHUNK: usize = osyx_abi::MAX_READ;
 
 fn sys_write(fd: u64, buf: u64, len: u64) -> Result<u64, Errno> {
     if len > osyx_abi::MAX_WRITE as u64 {
@@ -345,6 +483,89 @@ fn put_user<T: Copy>(addr: u64, v: &T) -> Result<u64, Errno> {
     Ok(0)
 }
 
+/// True when every page of `[addr, addr + len)` is mapped, writable and
+/// accessible from user mode in the current address space, so writing to it
+/// cannot fault. A copy made without the entry lock must not fault: the fault
+/// handler takes the entry lock, and its holder may be waiting for a lock
+/// this thread holds.
+fn user_write_ready(addr: u64, len: usize) -> bool {
+    let page = crate::mem::PAGE_SIZE;
+    let end = addr + len as u64;
+    let mut at = addr & !(page - 1);
+    while at < end {
+        match crate::mem::paging::translate(at) {
+            Some(t) if t.writable && t.user => {}
+            _ => return false,
+        }
+        at += page;
+    }
+    true
+}
+
+/// Reads at the current position when the page cache already holds the data.
+/// `None` means the normal path must run (cache miss, pipe, socket, large
+/// request); `Some` is the result of the whole call.
+fn read_cached(handle: u64, buf: u64, len: u64) -> Option<Result<u64, Errno>> {
+    let len = len.min(osyx_abi::MAX_READ as u64) as usize;
+    if len == 0 || len > crate::mem::PAGE_SIZE as usize {
+        return None;
+    }
+    if !crate::fixup::user_range_ok(buf, len as u64) {
+        return None;
+    }
+    let Object::File(file) = process::get_object(handle).ok()? else { return None };
+    let mut f = file.lock();
+    if !f.cache_readable() || !user_write_ready(buf, len) {
+        return None;
+    }
+    // A destination page that is not mapped yet makes the copy fault; only
+    // the normal path can resolve that (it prefaults under the entry lock).
+    // Falling back also gets the page cache page out of the way for the
+    // file system, so a short cached page never looks like end of file.
+    let n = crate::filecache::read_cached_to_user(f.cache_key(), f.position(), buf, len)?.ok()?;
+    f.advance(n);
+    Some(Ok(n as u64))
+}
+
+/// Reads a regular file without the entry lock, including cache misses that
+/// go to the disk. The handle table, the open file, the page cache and the
+/// volume already have their own locks, and a fill that waits hundreds of
+/// milliseconds for a busy disk must not hold up every other syscall.
+/// `None` keeps pipes, sockets and buffers that would fault on the normal
+/// path.
+fn read_file(handle: u64, buf: u64, len: u64) -> Option<Result<u64, Errno>> {
+    let len = len.min(osyx_abi::MAX_READ as u64) as usize;
+    if len == 0 || !crate::fixup::user_range_ok(buf, len as u64) {
+        return None;
+    }
+    let Object::File(file) = process::get_object(handle).ok()? else { return None };
+    if !user_write_ready(buf, len) {
+        return None;
+    }
+    cpu::enable_interrupts();
+    let mut f = file.lock();
+    if !f.cache_readable() {
+        return None;
+    }
+    let mut k = alloc::vec![0u8; len.min(FILE_CHUNK)];
+    let mut done = 0;
+    while done < len {
+        let want = (len - done).min(k.len());
+        let read = f.read(&mut k[..want]);
+        let n = match read.and_then(|n| copy_to_user(buf + done as u64, &k[..n]).map(|_| n)) {
+            Ok(n) => n,
+            Err(e) if done == 0 => return Some(Err(e)),
+            Err(_) => break,
+        };
+        f.advance(n);
+        done += n;
+        if n < want {
+            break;
+        }
+    }
+    Some(Ok(done as u64))
+}
+
 /// Reads in chunks; after a chunk has been delivered, a later failure ends
 /// the call with the bytes delivered so far (like a short read).
 fn sys_read(handle: u64, buf: u64, len: u64) -> Result<u64, Errno> {
@@ -358,12 +579,14 @@ fn sys_read(handle: u64, buf: u64, len: u64) -> Result<u64, Errno> {
     if !crate::fixup::user_range_ok(buf, len as u64) {
         return Err(Errno::Fault);
     }
+    process::prefault_write(buf, len);
     with_file(handle, |o| {
         let mut k = alloc::vec![0u8; len.min(FILE_CHUNK)];
         let mut done = 0;
         while done < len {
             let want = (len - done).min(k.len());
-            let n = match o.read(&mut k[..want]).and_then(|n| copy_to_user(buf + done as u64, &k[..n]).map(|_| n)) {
+            let read = o.read(&mut k[..want]);
+            let n = match read.and_then(|n| copy_to_user(buf + done as u64, &k[..n]).map(|_| n)) {
                 Ok(n) => n,
                 Err(e) if done == 0 => return Err(e),
                 Err(_) => break,
@@ -411,6 +634,22 @@ fn sys_readdir(handle: u64, buf: u64, len: u64) -> Result<u64, Errno> {
         copy_to_user(buf, &k[..n])?;
         Ok(n as u64)
     })
+}
+
+/// A clock calibration pair, so a process can keep its own clocks from RDTSC.
+/// The TSC is read after the clocks: the pair then describes a moment no
+/// later than the TSC sample, and later samples never run behind it.
+fn sys_time_calib(out: u64) -> Result<u64, Errno> {
+    let mut v = [0u64; 4];
+    v[0] = interrupts::monotonic_ns();
+    v[3] = crate::time::now_ns().max(0) as u64;
+    v[1] = crate::arch::timer::tsc();
+    v[2] = interrupts::tsc_per_tick();
+    crate::fixup::copy_to_user(out, unsafe {
+        // SAFETY: the array is plain data of the given length.
+        core::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 8)
+    })?;
+    Ok(0)
 }
 
 fn sys_sysinfo(out: u64) -> Result<u64, Errno> {

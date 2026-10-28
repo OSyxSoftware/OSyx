@@ -4,6 +4,8 @@
 //! Build in debug mode so integer overflow panics are caught too.
 //!
 //! cargo run -p osyx-pe --example pe-sweep -- C:\Windows\System32
+// The thread_local! initializer is const already (clippy 1.99 false positive).
+#![allow(clippy::missing_const_for_thread_local)]
 
 use osyx_pe::{ImportEntry, PeError, PeFile};
 use std::cell::RefCell;

@@ -22,37 +22,101 @@ pub fn uptime_ms() -> u64 {
     ticks() * 1000 / timer::TIMER_HZ as u64
 }
 
-// High-resolution time: the TSC between timer ticks. The TSC rate is
-// measured against the PIT (first tick vs. the latest one), so no
-// assumption about invariant-TSC CPUIDs is needed; the result is clamped
-// to the tick interval and never runs backwards.
-static FIRST_TSC: AtomicU64 = AtomicU64::new(0);
+// High-resolution time: the TSC between timer ticks. The rate is measured
+// from the tick stream itself, and the result is clamped to the tick
+// interval and never runs backwards.
 static FIRST_TICK: AtomicU64 = AtomicU64::new(0);
 static LAST_TSC: AtomicU64 = AtomicU64::new(0);
 static LAST_TICK: AtomicU64 = AtomicU64::new(0);
 /// TSC counts per tick (0 until calibrated).
 static TSC_PER_TICK: AtomicU64 = AtomicU64::new(0);
 static LAST_NS: AtomicU64 = AtomicU64::new(0);
+/// Windowed rate measurement. Long interrupt-disabled stretches (lock spins,
+/// early boot) advance the TSC without ticks, so a cumulative average is
+/// useless; each window is measured on its own and the slowest recent window
+/// is kept. Contention can only inflate a window, never shrink it.
+const PER_WINDOW_TICKS: u64 = 500;
+const PER_SLOTS: usize = 16;
+static WIN_TSC: AtomicU64 = AtomicU64::new(0);
+static WIN_TICK: AtomicU64 = AtomicU64::new(0);
+static PER_RING: [AtomicU64; PER_SLOTS] = [const { AtomicU64::new(0) }; PER_SLOTS];
+static PER_NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn rdtsc() -> u64 {
     // SAFETY: RDTSC is available on every x86-64 CPU and has no side effects.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
-fn record_tick(now: u64) {
+/// TSC counts per tick for catching up lost ticks. Deliberately independent
+/// of the tick stream (boot calibration against the PIT only): deriving it
+/// from counted ticks would feed the correction back into its own estimate.
+fn per_tick_estimate() -> u64 {
+    let khz = crate::arch::timer::measured_tsc_khz();
+    if khz == 0 {
+        return 0;
+    }
+    khz * 1000 / crate::arch::timer::TIMER_HZ as u64
+}
+
+/// Returns the tick number for this interrupt, advanced by any ticks the
+/// interval lost. The kernel entry lock spins with interrupts disabled, so
+/// the local timer does not fire while a CPU waits for another one: without
+/// this correction the guest clock (and every user timeout scaled by it)
+/// runs at a fraction of wall time during contention.
+fn record_tick(now: u64) -> u64 {
     let tsc = rdtsc();
+    let mut now = now;
+    let per = per_tick_estimate();
+    let (prev_tick, prev_tsc) = (LAST_TICK.load(Ordering::Relaxed), LAST_TSC.load(Ordering::Relaxed));
+    if let Some(by_tsc) = tsc.wrapping_sub(prev_tsc).checked_div(per) {
+        if prev_tick != 0 {
+            let recorded = now.wrapping_sub(prev_tick);
+            if by_tsc > recorded {
+                let missed = (by_tsc - recorded).min(1000);
+                now = TICKS.fetch_add(missed, Ordering::Relaxed) + missed;
+            }
+        }
+    }
     if FIRST_TICK.load(Ordering::Relaxed) == 0 {
-        FIRST_TSC.store(tsc, Ordering::Relaxed);
         FIRST_TICK.store(now, Ordering::Relaxed);
+    }
+    let base = WIN_TICK.load(Ordering::Relaxed);
+    if base == 0 {
+        // Start measuring only once boot's interrupt-disabled stretches are
+        // behind us; they inflate every window that contains one.
+        if now >= 500 {
+            WIN_TICK.store(now, Ordering::Relaxed);
+            WIN_TSC.store(tsc, Ordering::Relaxed);
+        }
     } else {
-        let ticks = now - FIRST_TICK.load(Ordering::Relaxed);
-        if ticks >= 10 {
-            let per = tsc.wrapping_sub(FIRST_TSC.load(Ordering::Relaxed)) / ticks;
-            TSC_PER_TICK.store(per, Ordering::Relaxed);
+        let ticks = now.wrapping_sub(base);
+        if ticks >= PER_WINDOW_TICKS {
+            let per = tsc.wrapping_sub(WIN_TSC.load(Ordering::Relaxed)) / ticks;
+            WIN_TICK.store(now, Ordering::Relaxed);
+            WIN_TSC.store(tsc, Ordering::Relaxed);
+            let slot = (PER_NEXT.fetch_add(1, Ordering::Relaxed) as usize) % PER_SLOTS;
+            PER_RING[slot].store(per, Ordering::Relaxed);
+            let mut best = u64::MAX;
+            for p in PER_RING.iter() {
+                let v = p.load(Ordering::Relaxed);
+                if v != 0 && v < best {
+                    best = v;
+                }
+            }
+            if best != u64::MAX {
+                TSC_PER_TICK.store(best, Ordering::Relaxed);
+            }
         }
     }
     LAST_TSC.store(tsc, Ordering::Relaxed);
     LAST_TICK.store(now, Ordering::Relaxed);
+    now
+}
+
+/// TSC counts per timer tick (0 until calibrated). User space interpolates
+/// its own clocks with this rate; it is constant on an invariant-TSC CPU.
+pub fn tsc_per_tick() -> u64 {
+    TSC_PER_TICK.load(Ordering::Relaxed)
 }
 
 /// Nanoseconds since the timer was started, interpolated with the TSC
@@ -78,14 +142,33 @@ pub fn monotonic_ns() -> u64 {
 
 #[no_mangle]
 extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
+    if f.vector == 2 && crate::smp::handle_tlb_nmi() { return; }
     let from_user = f.cs & 3 == 3;
+    // Sample before taking the entry lock: while it is contended the handler
+    // spins with interrupts off, so samples after the acquire are rare.
+    if from_user && (f.vector == pic::TIMER_VECTOR as u64 || f.vector == timer::APIC_TIMER_VECTOR as u64) {
+        crate::smp::sample_user(f.rip, f.rsp);
+    }
+    let _entry = crate::smp::KernelEntry::new();
     // A not-present page in an anonymous region: give it its frame and
     // retry, whether user code or a kernel copy to/from user memory touched it.
+    // User code holds no kernel lock, so its fault may wait for the process
+    // table instead of reporting an access violation the process cannot fix.
     if f.vector == 14 && f.error_code & 1 == 0 {
         let (write, fetch) = (f.error_code & 2 != 0, f.error_code & 0x10 != 0);
-        if crate::process::demand_fault(cpu::read_cr2(), write, fetch) {
+        let va = cpu::read_cr2();
+        let mapped = if from_user {
+            crate::process::demand_fault_user(va, write, fetch)
+        } else {
+            crate::process::demand_fault(va, write, fetch)
+        };
+        if mapped {
             return;
         }
+    }
+    // A write to a read-only shared image page: copy it for this process.
+    if f.vector == 14 && f.error_code & 3 == 3 && crate::process::cow_fault(cpu::read_cr2(), from_user) {
+        return;
     }
     match f.vector {
         0..=31 if from_user => {
@@ -104,16 +187,16 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
         }
         0..=31 => fatal(f),
         v if v == pic::TIMER_VECTOR as u64 => {
-            let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-            record_tick(now);
+            let now = record_tick(TICKS.fetch_add(1, Ordering::Relaxed) + 1);
             // Acknowledge first: the scheduler may switch to another thread
             // before this handler returns.
             pic::end_of_interrupt(0);
             crate::sched::tick(now);
         }
         v if v == timer::APIC_TIMER_VECTOR as u64 => {
-            let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-            record_tick(now);
+            let now = if crate::smp::index() == 0 {
+                record_tick(TICKS.fetch_add(1, Ordering::Relaxed) + 1)
+            } else { ticks() };
             apic::eoi();
             crate::sched::tick(now);
         }

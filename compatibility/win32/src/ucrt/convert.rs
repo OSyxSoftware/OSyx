@@ -367,7 +367,19 @@ fn parse_float<T: Unit>(s: *const T, f32: bool) -> Parsed {
     Parsed { value: signed(v), len: k, range: v == 0.0 || v.is_infinite() }
 }
 
+// TEMP: how often libxul/ucrt clients parse floats.
+static STRTO_CALLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STRTO_WIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 fn strto_float<T: Unit>(s: *const T, end: *mut *const T, f32: bool) -> f64 {
+    let c = STRTO_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    if c.is_multiple_of(20_000) {
+        os_std::eprintln!(
+            "winrun: stcount n={c} f32={f32} wide={} tid={}",
+            STRTO_WIDE.load(core::sync::atomic::Ordering::Relaxed),
+            os_sys::gettid()
+        );
+    }
     set_end(end, s);
     validate!(!s.is_null(), EINVAL, 0.0);
     let p = parse_float(s, f32);
@@ -392,12 +404,15 @@ extern "win64" fn strtold_soft(s: *const u8, e: *mut *const u8) -> f64 {
     strto_float(s, e, false)
 }
 extern "win64" fn wcstod_soft(s: *const u16, e: *mut *const u16) -> f64 {
+    STRTO_WIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     strto_float(s, e, false)
 }
 extern "win64" fn wcstof_soft(s: *const u16, e: *mut *const u16) -> f32 {
+    STRTO_WIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     strto_float(s, e, true) as f32
 }
 extern "win64" fn wcstold_soft(s: *const u16, e: *mut *const u16) -> f64 {
+    STRTO_WIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     strto_float(s, e, false)
 }
 extern "win64" fn atof_soft(s: *const u8) -> f64 {

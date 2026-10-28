@@ -5,7 +5,7 @@
 use osyx_pe::PeFile;
 use osyx_pe_loader::apiset::{self, ApiSetError, Schema, SchemaBuilder};
 use osyx_pe_loader::image::{self, Protection};
-use osyx_pe_loader::link::{normalize, BuiltinModule, Host, LinkError, Linker, Source, Symbol};
+use osyx_pe_loader::link::{normalize, BuiltinModule, Host, LinkError, Linker, PeMapping, Source, Symbol};
 use std::collections::BTreeMap;
 
 const HELLO: &[u8] = include_bytes!("../../pe-parser/tests/fixtures/hello.exe");
@@ -116,6 +116,10 @@ fn kernel32() -> Fake {
     Fake(names.iter().map(|(n, a)| (n.to_string(), *a)).collect(), [(42u16, 0x7000_0042u64)].into_iter().collect())
 }
 
+/// Images offered by `publish`, shared by the "processes" of a test:
+/// name -> (base, laid out and relocated bytes).
+type SharedImages = std::rc::Rc<std::cell::RefCell<BTreeMap<String, (u64, Vec<u8>)>>>;
+
 #[derive(Default)]
 struct MemHost {
     next: u64,
@@ -123,9 +127,22 @@ struct MemHost {
     images: BTreeMap<u64, (Vec<u8>, Vec<Protection>)>,
     opened: Vec<String>,
     released: Vec<u64>,
+    map_files: bool,
+    shared: Option<SharedImages>,
+    reused: Vec<String>,
+}
+
+struct MappedFile(Vec<u8>);
+
+impl PeMapping for MappedFile {
+    fn bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 impl Host for MemHost {
+    type Image = Vec<u8>;
+
     fn release(&mut self, base: u64, _size: u64) {
         self.images.remove(&base);
         self.released.push(base);
@@ -135,19 +152,46 @@ impl Host for MemHost {
         if name == "kernel32.dll" {
             return Ok(Some(Source::Builtin(Box::new(kernel32()))));
         }
-        Ok(self.files.get(name).cloned().map(Source::Pe))
+        Ok(self.files.get(name).cloned().map(|bytes| {
+            if self.map_files {
+                Source::PeMapped(Box::new(MappedFile(bytes)))
+            } else {
+                Source::Pe(bytes)
+            }
+        }))
     }
-    fn reserve(&mut self, size: u64, preferred: u64, fixed: bool) -> Result<u64, LinkError> {
-        if fixed {
-            return Ok(preferred);
+    fn shared_base(&mut self, name: &str) -> Option<u64> {
+        self.shared.as_ref()?.borrow().get(name).map(|(base, _)| *base)
+    }
+    fn prepare(&mut self, name: &str, base: u64, image: &mut [u8]) -> bool {
+        let Some(shared) = &self.shared else { return false };
+        match shared.borrow().get(name) {
+            Some((b, bytes)) if *b == base && bytes.len() == image.len() => {
+                image.copy_from_slice(bytes);
+                self.reused.push(name.to_string());
+                true
+            }
+            _ => false,
         }
-        // Never the linked base: every image is relocated.
-        let base = 0x5_0000_0000 + self.next;
-        self.next += size.next_multiple_of(0x10000);
-        Ok(base)
     }
-    fn commit(&mut self, base: u64, image: &[u8], prot: &[Protection]) -> Result<(), LinkError> {
-        self.images.insert(base, (image.to_vec(), prot.to_vec()));
+    fn publish(&mut self, name: &str, base: u64, image: &[u8]) {
+        if let Some(shared) = &self.shared {
+            shared.borrow_mut().entry(name.to_string()).or_insert_with(|| (base, image.to_vec()));
+        }
+    }
+    fn reserve(&mut self, size: u64, preferred: u64, fixed: bool) -> Result<(u64, Self::Image), LinkError> {
+        let base = if fixed || self.shared.as_ref().is_some_and(|s| s.borrow().values().any(|(b, _)| *b == preferred)) {
+            preferred
+        } else {
+            // Never the linked base: every image is relocated.
+            let base = 0x5_0000_0000 + self.next;
+            self.next += size.next_multiple_of(0x10000);
+            base
+        };
+        Ok((base, vec![0; size as usize]))
+    }
+    fn commit(&mut self, base: u64, image: Self::Image, prot: &[Protection]) -> Result<(), LinkError> {
+        self.images.insert(base, (image, prot.to_vec()));
         Ok(())
     }
 }
@@ -221,6 +265,21 @@ fn sample_dll_relocations_exports_and_forwarders() {
     // Loading again finds the same module; a missing DLL is reported.
     assert_eq!(l.load_dll("SAMPLE.DLL", "x").unwrap(), dll);
     assert_eq!(l.load_dll("absent", "x.exe").unwrap_err(), LinkError::DllNotFound { name: "absent.dll".into(), importer: "x.exe".into() });
+}
+
+#[test]
+fn mapped_files_support_imports_exports_and_forwarders() {
+    let mut host = MemHost::default();
+    host.files.insert("sample.dll".into(), SAMPLE.to_vec());
+    host.map_files = true;
+    let mut l = Linker::new(host, None);
+    let dll = l.load_dll("sample.dll", "test.exe").unwrap();
+    assert!(matches!(l.modules[dll].kind, osyx_pe_loader::link::Kind::Pe { file: osyx_pe_loader::link::PeData::Mapped(_), .. }));
+    let base = l.modules[dll].base;
+    let exports = l.modules[dll].pe().unwrap().exports().unwrap().unwrap();
+    let osyx_pe::ExportTarget::Rva(add_rva) = exports.by_name("add_numbers").unwrap().unwrap().target else { panic!() };
+    assert_eq!(l.resolve(dll, Symbol::Name("add_numbers"), "t", 0).unwrap(), base + add_rva as u64);
+    assert_eq!(l.resolve(dll, Symbol::Name("forwarded_tick"), "t", 0).unwrap(), 0x7000_0040);
 }
 
 #[test]
@@ -347,4 +406,46 @@ fn layout_and_protections_match_the_sections() {
     let prot = image::protections(&pe).unwrap();
     let total: u32 = prot.iter().map(|p| p.size).sum();
     assert_eq!(total, pe.size_of_image().div_ceil(image::PAGE) * image::PAGE);
+}
+
+/// A second "process" places a DLL where the first one published it and
+/// takes the laid-out, relocated image from the host instead of building
+/// it; the committed image is identical. A host that cannot use that base
+/// still lays the image out itself.
+#[test]
+fn shared_images_skip_layout_at_the_published_base() {
+    let shared = std::rc::Rc::new(std::cell::RefCell::new(BTreeMap::new()));
+    let process = |next: u64| {
+        let mut host = MemHost { next, shared: Some(shared.clone()), ..MemHost::default() };
+        host.files.insert("sample.dll".into(), SAMPLE.to_vec());
+        let mut l = Linker::new(host, None);
+        l.load_dll("sample.dll", "test.exe").unwrap();
+        l
+    };
+    let first = process(0);
+    let a = first.modules.iter().position(|m| m.name == "sample.dll").unwrap();
+    assert!(first.host.reused.is_empty());
+    assert!(first.modules[a].relocations > 0);
+    let base = first.modules[a].base;
+    assert_eq!(shared.borrow()["sample.dll"].0, base, "published at its base before binding");
+
+    let second = process(0x100_0000);
+    let b = second.modules.iter().position(|m| m.name == "sample.dll").unwrap();
+    assert_eq!(second.host.reused, ["sample.dll"]);
+    assert_eq!(second.modules[b].base, base, "placed at the shared base");
+    assert_eq!(second.modules[b].relocations, 0, "no layout or relocation");
+    assert_eq!(second.modules[b].imports_bound, first.modules[a].imports_bound);
+    assert_eq!(second.host.images[&base], first.host.images[&base], "same bound image and protections");
+
+    // A published image that does not fit the reservation: built locally.
+    let mut host = MemHost { next: 0x200_0000, ..MemHost::default() };
+    host.files.insert("sample.dll".into(), SAMPLE.to_vec());
+    host.shared = Some(std::rc::Rc::new(std::cell::RefCell::new(BTreeMap::from([(
+        "sample.dll".to_string(),
+        (0x9_0000_0000u64, vec![0u8; 16]),
+    )]))));
+    let mut l = Linker::new(host, None);
+    let c = l.load_dll("sample.dll", "test.exe").unwrap();
+    assert!(l.host.reused.is_empty(), "size mismatch is never reused");
+    assert!(l.modules[c].relocations > 0);
 }

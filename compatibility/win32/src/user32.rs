@@ -187,6 +187,7 @@ enum Gdi {
 #[derive(Clone)]
 struct Dc {
     hwnd: u64,
+    made: Instant,
     paint: Rect,
     text: Color,
     bk: Color,
@@ -211,6 +212,8 @@ struct Dc {
 
 struct Gui {
     conn: Option<Connection>,
+    sync_cookie: u32,
+    sync_done: u32,
     classes: Vec<Class>,
     windows: BTreeMap<u64, Win>,
     /// PRISM window id → HWND.
@@ -227,6 +230,9 @@ struct Gui {
     gdi: BTreeMap<u64, Gdi>,
     dcs: BTreeMap<u64, Dc>,
     bitmaps: BTreeMap<u64, Bitmap>,
+    /// Pixel storage of deleted large bitmaps, reused so freshly created
+    /// DIB sections do not fault in new zero pages every frame.
+    bitmap_pool: Vec<Vec<u32>>,
     regions: BTreeMap<u64, Region>,
     next: u64,
     keys: [bool; 256],
@@ -243,7 +249,18 @@ struct Gui {
     icons: BTreeMap<u64, Icon>,
     /// The window that has the clipboard open (Some(0): opened without one).
     clipboard_open: Option<u64>,
+    /// The system clipboard as last reported by the compositor (registered
+    /// formats resolved to this process's ids).
+    clipboard: Vec<proto::ClipEntry>,
+    clipboard_seq: u32,
+    /// What SetClipboardData put there since EmptyClipboard; published to
+    /// the compositor when the clipboard is closed.
+    clipboard_own: Vec<proto::ClipEntry>,
+    /// HGLOBALs handed out by GetClipboardData for the current contents.
+    clipboard_handles: BTreeMap<u32, u64>,
+    /// Last pointer position in the window that received it, and on screen.
     pointer: (i32, i32),
+    screen_pointer: (i32, i32),
     last_click: (u64, u32, Instant),
     start: Instant,
     /// QS_* kinds queued since the thread last looked (GetQueueStatus'
@@ -299,6 +316,8 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             by_prism: BTreeMap::new(),
             queue: VecDeque::new(),
             pending_frames: BTreeMap::new(),
+            sync_cookie: 0,
+            sync_done: 0,
             timers: Vec::new(),
             quit: BTreeMap::new(),
             focus: 0,
@@ -306,6 +325,7 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             gdi,
             dcs: BTreeMap::new(),
             bitmaps: BTreeMap::new(),
+            bitmap_pool: Vec::new(),
             regions: BTreeMap::new(),
             next: 0x2_0000,
             keys: [false; 256],
@@ -315,7 +335,12 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             track_leave: Vec::new(),
             icons: BTreeMap::new(),
             clipboard_open: None,
+            clipboard: Vec::new(),
+            clipboard_seq: 0,
+            clipboard_own: Vec::new(),
+            clipboard_handles: BTreeMap::new(),
             pointer: (0, 0),
+            screen_pointer: (0, 0),
             last_click: (0, 0, Instant::now()),
             start: Instant::now(),
             fresh: BTreeMap::new(),
@@ -360,6 +385,36 @@ impl Gui {
         self.next
     }
 
+    /// Zeroed pixel storage for a bitmap. Deleted large buffers are reused so
+    /// their pages stay mapped: a fresh 1280x972 DIB faults in ~1200 pages on
+    /// first write, which costs more than the drawing itself.
+    fn take_bitmap_storage(&mut self, words: usize) -> Vec<u32> {
+        const MIN_WORDS: usize = 64 * 1024;
+        if words >= MIN_WORDS {
+            if let Some(i) = self.bitmap_pool.iter().position(|v| v.capacity() >= words) {
+                let mut v = self.bitmap_pool.swap_remove(i);
+                v.clear();
+                v.resize(words, 0);
+                return v;
+            }
+        }
+        alloc::vec![0; words]
+    }
+
+    fn recycle_bitmap_storage(&mut self, storage: Vec<u32>) {
+        const MIN_WORDS: usize = 64 * 1024;
+        // 48 MiB of pooled pixels at most.
+        const MAX_WORDS: usize = 12 * 1024 * 1024;
+        if storage.capacity() < MIN_WORDS {
+            return;
+        }
+        let pooled: usize = self.bitmap_pool.iter().map(|v| v.capacity()).sum();
+        if pooled + storage.capacity() > MAX_WORDS {
+            return;
+        }
+        self.bitmap_pool.push(storage);
+    }
+
     fn now_ms(&self) -> u32 {
         self.start.elapsed().as_millis() as u32
     }
@@ -371,7 +426,10 @@ impl Gui {
                 crate::kernel32::with_process(|p| p.exe_path.rsplit('/').next().unwrap_or("app").to_string())
             );
             match Connection::connect(&name, false) {
-                Ok(c) => self.conn = Some(c),
+                Ok(c) => {
+                    start_prism_waker(c.handle());
+                    self.conn = Some(c);
+                }
                 Err(e) => {
                     os_std::eprintln!("winrun: cannot reach PRISM (no desktop session?): {e}");
                     return Err(ERROR_NOT_SUPPORTED);
@@ -388,17 +446,23 @@ impl Gui {
 
     fn post(&mut self, hwnd: u64, msg: u32, wparam: u64, lparam: i64) {
         let time = self.now_ms();
-        let pt = self.pointer;
+        // MSG.pt is in screen coordinates, like GetMessagePos.
+        let pt = self.screen_pointer;
         let thread = self.owner(hwnd);
         self.queue.push_back(Msg { hwnd, msg, wparam, lparam, time, pt, thread });
         *self.fresh.entry(thread).or_insert(0) |= qs_kind(msg);
-        // Wake MsgWaitForMultipleObjects and GetMessage in other threads.
-        crate::objects::signal_all();
+        // Wake MsgWaitForMultipleObjects and GetMessage. Threads that are
+        // not sleeping see the queue on their next look, so a post storm from
+        // worker threads costs no futex wake when nobody waits. The posting
+        // thread itself cannot be asleep in a wait, so it is not woken.
+        if thread != teb::current_tid() && IDLE_WAITERS.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+            crate::objects::signal_all();
+        }
     }
 
     /// QS_* kinds of what get/peek would return now on the calling thread.
     fn status(&self) -> u32 {
-        let me = os_sys::gettid();
+        let me = teb::current_tid();
         let mut s = self.queue.iter().filter(|m| m.thread == me).fold(0, |s, m| s | qs_kind(m.msg));
         if self.quit.contains_key(&me) {
             s |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
@@ -416,11 +480,11 @@ impl Gui {
 
     /// The calling thread's QS_* kinds queued since it last looked.
     fn fresh_bits(&self) -> u32 {
-        self.fresh.get(&os_sys::gettid()).copied().unwrap_or(0)
+        self.fresh.get(&teb::current_tid()).copied().unwrap_or(0)
     }
 
     fn set_fresh(&mut self, bits: u32) {
-        self.fresh.insert(os_sys::gettid(), bits);
+        self.fresh.insert(teb::current_tid(), bits);
     }
 
     fn invalidate(&mut self, hwnd: u64, r: Option<Rect>, erase: bool) {
@@ -428,6 +492,9 @@ impl Gui {
             let full = Rect::new(0, 0, w.size.0, w.size.1);
             let r = r.unwrap_or(full).intersect(&full);
             if r.w == 0 || r.h == 0 { return; }
+            if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+                os_std::eprintln!("winrun: invalidate hwnd={hwnd:#x} {}x{} at ({},{})", r.w, r.h, r.x, r.y);
+            }
             w.invalid = Some(match w.invalid {
                 Some(o) => o.union(&r),
                 None => r,
@@ -438,6 +505,11 @@ impl Gui {
 
     /// Applies one PRISM event: window bookkeeping and queued messages.
     fn on_event(&mut self, ev: Event) {
+        if let Event::SyncDone { cookie } = ev { self.sync_done = cookie; return; }
+        if let Event::ClipboardChanged { seq, entries } = ev {
+            self.set_clipboard(seq, entries);
+            return;
+        }
         let target = match &ev {
             Event::Configure { window, .. }
             | Event::FocusChanged { window, .. }
@@ -448,6 +520,11 @@ impl Gui {
             _ => None,
         };
         let Some(hwnd) = target else { return };
+        if let Event::Configure { states, .. } = &ev {
+            let state = if states & proto::state::MINIMIZED != 0 { WS_MINIMIZE }
+                else if states & proto::state::MAXIMIZED != 0 { WS_MAXIMIZE } else { 0 };
+            if self.windows.get(&hwnd).is_some_and(|w| w.pending_state.is_some_and(|expected| expected != state)) { return; }
+        }
         if matches!(ev, Event::Key { .. } | Event::Pointer { .. } | Event::CloseRequest { .. }) && self.windows.get(&hwnd).is_some_and(|w| w.style & 0x08000000 != 0) { return; }
         if let Some(w) = self.windows.get_mut(&hwnd) {
             w.win.on_event(&ev);
@@ -457,7 +534,6 @@ impl Gui {
                 let Some(w) = self.windows.get_mut(&hwnd) else { return };
                 let next_state = if states & proto::state::MINIMIZED != 0 { WS_MINIMIZE }
                     else if states & proto::state::MAXIMIZED != 0 { WS_MAXIMIZE } else { 0 };
-                if w.pending_state.is_some_and(|expected| expected != next_state) { return; }
                 w.pending_state = None;
                 let previous_state = w.style & (WS_MINIMIZE | WS_MAXIMIZE);
                 w.style = (w.style & !(WS_MINIMIZE | WS_MAXIMIZE)) | next_state;
@@ -490,6 +566,10 @@ impl Gui {
                 if vk == 0 {
                     return;
                 }
+                {
+                    let us = Instant::now().as_nanos_since_boot() / 1000;
+                    os_std::eprintln!("winrun: t keyrecv {us} hwnd={hwnd:#x} vk={vk:#x} state={state}");
+                }
                 let down = state != proto::key_state::UP;
                 let repeat = state == proto::key_state::REPEAT;
                 if down && !repeat && !self.keys[vk as usize] {
@@ -510,6 +590,9 @@ impl Gui {
                     (false, true) => WM_SYSKEYUP,
                 };
                 self.post(hwnd, msg, vk as u64, lparam);
+                if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+                    os_std::eprintln!("winrun: key hwnd={hwnd:#x} vk={vk:#x} down={down} repeat={repeat} text={text:?}");
+                }
                 if down {
                     let ch = match vk {
                         0x08 => Some('\u{8}'),
@@ -523,7 +606,7 @@ impl Gui {
                     }
                 }
             }
-            Event::Pointer { kind, x, y, button, pressed, wheel_v, .. } => {
+            Event::Pointer { kind, x, y, screen_x, screen_y, button, pressed, wheel_v, .. } => {
                 self.last_input = crate::kernel32::tick_ms();
                 // A tracked window the pointer moves out of gets WM_MOUSELEAVE.
                 let leave: Vec<u64> = self.track_leave.iter().copied().filter(|&w| w != hwnd).collect();
@@ -532,7 +615,9 @@ impl Gui {
                     self.post(w, WM_MOUSELEAVE, 0, 0);
                 }
                 self.pointer = (x, y);
+                self.screen_pointer = (screen_x, screen_y);
                 let lp = (x as i64 & 0xFFFF) | ((y as i64 & 0xFFFF) << 16);
+                let screen_lp = (screen_x as i64 & 0xFFFF) | ((screen_y as i64 & 0xFFFF) << 16);
                 let mk = self.mouse_keys();
                 match kind {
                     proto::pointer::MOTION => self.post(hwnd, WM_MOUSEMOVE, mk, lp),
@@ -561,14 +646,56 @@ impl Gui {
                         }
                     }
                     proto::pointer::WHEEL if wheel_v != 0 => {
-                        // Windows reports 120 per detent, positive away from the user.
+                        // Windows reports 120 per detent, positive away from
+                        // the user, and the wheel's lParam is screen coordinates
+                        // (WM_MOUSEMOVE and the button messages use client ones).
                         let delta = (wheel_v * 120) as i16 as u16 as u64;
-                        self.post(hwnd, WM_MOUSEWHEEL, mk | delta << 16, lp);
+                        self.post(hwnd, WM_MOUSEWHEEL, mk | delta << 16, screen_lp);
                     }
                     _ => {}
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Adopts clipboard contents reported by the compositor, resolving
+    /// registered format names to this process's format ids.
+    fn set_clipboard(&mut self, seq: u32, entries: Vec<proto::ClipEntry>) {
+        self.clipboard_seq = seq;
+        self.clipboard = entries
+            .into_iter()
+            .map(|mut e| {
+                if let Some(name) = &e.name {
+                    e.format = registered_id(name);
+                }
+                e
+            })
+            .collect();
+        self.drop_clipboard_handles();
+    }
+
+    /// Replaces the system clipboard (local format ids; registered formats
+    /// carry their names so other processes map them to their own ids).
+    fn publish_clipboard(&mut self, entries: Vec<proto::ClipEntry>) {
+        self.clipboard = entries.clone();
+        self.drop_clipboard_handles();
+        let Some(c) = self.conn.as_mut() else { return };
+        let wire: Vec<proto::ClipEntry> = entries
+            .into_iter()
+            .map(|mut e| {
+                if e.format >= 0xC000 {
+                    e.name = registered_name(e.format);
+                }
+                e
+            })
+            .collect();
+        let _ = c.send(&proto::Request::ClipboardSet { entries: wire }, &[]);
+    }
+
+    fn drop_clipboard_handles(&mut self) {
+        for (_, h) in core::mem::take(&mut self.clipboard_handles) {
+            crate::kernel32::global_free(h);
         }
     }
 
@@ -594,6 +721,10 @@ impl Gui {
 
     /// Reads every pending PRISM event.
     fn pump(&mut self) {
+        static PUMPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        static KINDS: [core::sync::atomic::AtomicU64; 13] = [const { core::sync::atomic::AtomicU64::new(0) }; 13];
+        let n = PUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+        diag(|d| d.pump += 1);
         let mut evs = Vec::new();
         if let Some(c) = self.conn.as_mut() {
             while let Ok(Some(ev)) = c.poll() {
@@ -601,7 +732,31 @@ impl Gui {
             }
         }
         for ev in evs {
+            let k = match &ev {
+                Event::SyncDone { .. } => 0,
+                Event::Hello { .. } => 1,
+                Event::Configure { .. } => 2,
+                Event::FocusChanged { .. } => 3,
+                Event::Key { .. } => 4,
+                Event::Pointer { .. } => 5,
+                Event::CloseRequest { .. } => 6,
+                Event::BufferRelease { .. } => 7,
+                Event::FrameDone { .. } => 8,
+                Event::WindowList { .. } => 9,
+                Event::Notification { .. } => 10,
+                Event::Error { .. } => 11,
+                Event::ClipboardChanged { .. } => 12,
+            };
+            KINDS[k].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            diag(|d| {
+                d.pump_events += 1;
+                d.pump_kinds.add(k as u64 + 1);
+            });
             self.on_event(ev);
+        }
+        if n.is_multiple_of(20_000) && crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            let k: Vec<u64> = KINDS.iter().map(|c| c.load(core::sync::atomic::Ordering::Relaxed)).collect();
+            os_std::eprintln!("winrun: pump n={n} tid={} kinds={k:?}", os_sys::gettid());
         }
     }
 
@@ -615,11 +770,23 @@ impl Gui {
         self.pump();
     }
 
+    /// Complete earlier geometry requests before synchronous Win32 callbacks.
+    /// No window procedure is called while this GUI mutex is held.
+    fn synchronize(&mut self) {
+        self.sync_cookie = self.sync_cookie.wrapping_add(1);
+        let cookie = self.sync_cookie;
+        let Some(c) = self.conn.as_mut() else { return };
+        if c.send(&proto::Request::Sync { cookie }, &[]).is_err() { return; }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while self.sync_done != cookie && Instant::now() < deadline {
+            self.wait(Duration::from_millis(1));
+        }
+    }
+
     /// Next matching message on this thread. A filtered peek must leave
     /// unrelated work alone: Gecko uses paint-only nested message pumps.
     fn next_message(&mut self, filter: u64, min: u32, max: u32, kinds: u32, remove: bool) -> Option<Msg> {
-        self.pump();
-        let me = os_sys::gettid();
+        let me = teb::current_tid();
         let window_matches = |hwnd: u64| filter == 0 || if filter == u64::MAX { hwnd == 0 } else { hwnd == filter };
         let min = min & 0xffff;
         let max = max & 0xffff;
@@ -639,7 +806,7 @@ impl Gui {
                 wparam: code as u64,
                 lparam: 0,
                 time: self.now_ms(),
-                pt: self.pointer,
+                pt: self.screen_pointer,
                 thread: me,
             });
         }
@@ -649,25 +816,47 @@ impl Gui {
             .find(|(h, w)| w.thread == me && window_matches(**h) && message_matches(WM_PAINT) && w.visible && w.invalid.is_some() && w.win.is_configured())
             .map(|(h, _)| *h);
         if let Some(hwnd) = paint {
-            return Some(Msg { hwnd, msg: WM_PAINT, wparam: 0, lparam: 0, time: self.now_ms(), pt: self.pointer, thread: me });
+            if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+                let inv = self.windows.get(&hwnd).and_then(|w| w.invalid);
+                os_std::eprintln!("winrun: paint synth hwnd={hwnd:#x} invalid={inv:?}");
+            }
+            return Some(Msg { hwnd, msg: WM_PAINT, wparam: 0, lparam: 0, time: self.now_ms(), pt: self.screen_pointer, thread: me });
         }
         let now = Instant::now();
         let t = self.timers.iter_mut().find(|t| t.thread == me && window_matches(t.hwnd) && message_matches(WM_TIMER) && t.due <= now)?;
         t.due = now + Duration::from_millis(t.interval);
         let m = Msg { hwnd: t.hwnd, msg: WM_TIMER, wparam: t.id, lparam: t.proc_ as i64, time: 0, pt: (0, 0), thread: me };
-        let m = Msg { time: self.now_ms(), pt: self.pointer, ..m };
+        let interval = t.interval;
+        let m = Msg { time: self.now_ms(), pt: self.screen_pointer, ..m };
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            static FIRED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+            let n = FIRED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+            if n.is_multiple_of(500) {
+                os_std::eprintln!("winrun: timer fire n={n} hwnd={:#x} id={} interval={interval}", m.hwnd, m.wparam);
+            }
+        }
         // Once generated, a timer is a queued message. PM_NOREMOVE and
         // KillTimer must not silently consume it.
         if !remove { self.queue.push_back(m); }
         Some(m)
     }
 
-    fn next_timer_in(&self) -> Duration {
+    /// How long until the next timer that this peek could return fires.
+    /// Timers outside the caller's window/message filter must not shorten
+    /// the wait: a due but unreachable timer would otherwise busy-spin the
+    /// caller through zero timeouts.
+    fn next_timer_in(&self, filter: u64, lo: u32, hi: u32, kinds: u32) -> Duration {
         let now = Instant::now();
-        let me = os_sys::gettid();
+        let me = teb::current_tid();
+        let window_matches = |hwnd: u64| filter == 0 || if filter == u64::MAX { hwnd == 0 } else { hwnd == filter };
+        let lo = lo & 0xffff;
+        let hi = hi & 0xffff;
+        let message_matches = |msg: u32| {
+            ((lo == 0 && hi == 0) || (lo..=hi).contains(&msg)) && (kinds == 0 || qs_kind(msg) & kinds != 0)
+        };
         self.timers
             .iter()
-            .filter(|t| t.thread == me)
+            .filter(|t| t.thread == me && window_matches(t.hwnd) && message_matches(WM_TIMER))
             .map(|t| if t.due > now { t.due - now } else { Duration::ZERO })
             .min()
             .unwrap_or(Duration::from_millis(500))
@@ -718,12 +907,45 @@ fn vk_of(u: u16) -> u32 {
 }
 
 fn call(proc_: u64, hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
+    let wake = wake_msg();
+    let is_wake = wake != 0 && msg == wake;
+    if matches!(msg, WM_CHAR | WM_KEYDOWN | WM_KEYUP) {
+        let us = Instant::now().as_nanos_since_boot() / 1000;
+        os_std::eprintln!("winrun: t dispatch {us} msg={msg:#x} hwnd={hwnd:#x} w={w:#x}");
+    }
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && matches!(msg, WM_CHAR | WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_SETFOCUS | WM_KILLFOCUS | WM_ACTIVATE) {
+        os_std::eprintln!("winrun: call msg={msg:#x} hwnd={hwnd:#x} w={w:#x}");
+    }
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && msg == WM_CHAR {
+        os_std::eprintln!("winrun: wndproc char hwnd={hwnd:#x} c={:#x}", w);
+    }
     if proc_ == 0 {
         return DefWindowProcA(hwnd, msg, w, l);
     }
     // SAFETY: a window procedure registered by the program (or ours).
     let f: WndProc = unsafe { core::mem::transmute(proc_ as usize) };
-    f(hwnd, msg, w, l)
+    let t0 = Instant::now();
+    let r = f(hwnd, msg, w, l);
+    if is_wake {
+        let dur = Instant::now().duration_since(t0).as_micros() as u64;
+        diag(|d| {
+            d.wake_calls += 1;
+            d.wake_us += dur;
+            d.wake_dur.add(dur.min(50_000));
+        });
+        let events = crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed);
+        let slow_us = if events { 20_000 } else { 5_000 };
+        if dur >= slow_us && (events || crate::COUNT.load(core::sync::atomic::Ordering::Relaxed)) {
+            let us = Instant::now().as_nanos_since_boot() / 1000;
+            os_std::eprintln!("winrun: wake slow us={us} hwnd={hwnd:#x} dur_us={dur} tid={}", teb::current_tid());
+        }
+    }
+    if matches!(msg, WM_CHAR | WM_KEYDOWN | WM_KEYUP) {
+        let us = Instant::now().as_nanos_since_boot() / 1000;
+        let dur = Instant::now().duration_since(t0).as_micros();
+        os_std::eprintln!("winrun: t done {us} msg={msg:#x} hwnd={hwnd:#x} w={w:#x} dur_us={dur}");
+    }
+    r
 }
 
 fn wndproc_of(hwnd: u64) -> Option<u64> {
@@ -747,14 +969,23 @@ fn notify_window_pos(hwnd: u64, flags: u32, changing: bool) {
 /// PRISM events can arrive on the rendering thread. Deliver their frame
 /// callbacks only when the owner pumps messages, outside the GUI mutex.
 fn dispatch_pending_frames() {
-    let frames = with(|g| {
+    let (frames, dirty) = with(|g| {
         g.pump();
-        let me = os_sys::gettid();
+        let me = teb::current_tid();
         let frames: Vec<_> = g.pending_frames.iter().filter(|(h, _)| g.owner(**h) == me).map(|(&h, &flags)| (h, flags)).collect();
         for (h, _) in &frames { g.pending_frames.remove(h); }
-        frames
+        // Win32 blits land in the window surface without a paint cycle;
+        // winrun must commit them or PRISM keeps showing the previous frame.
+        let dirty: Vec<u64> = g
+            .windows
+            .iter()
+            .filter(|(_, w)| w.drawn.is_some() && w.visible && w.win.is_configured())
+            .map(|(&h, _)| h)
+            .collect();
+        (frames, dirty)
     });
     for (hwnd, flags) in frames { notify_window_pos(hwnd, flags, true); }
+    for hwnd in dirty { present(hwnd, None); }
 }
 
 // ---- classes and windows ------------------------------------------------------------
@@ -865,6 +1096,11 @@ fn create_window(
         let (cw, ch) = g.conn().map(|c| (c.screen_width, c.screen_height))?;
         let width = if w == CW_USEDEFAULT || w <= 0 { (cw * 2 / 3).max(320) } else { w as u32 };
         let height = if h == CW_USEDEFAULT || h <= 0 { (ch * 2 / 3).max(200) } else { h as u32 };
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            os_std::eprintln!(
+                "winrun: create {class:?} style={style:#x} at ({x},{y}) req={w}x{h} -> {width}x{height} screen={cw}x{ch}"
+            );
+        }
         let mut spec = WindowSpec::normal(&title, width, height);
         spec.flags |= proto::window_flags::HIDDEN;
         // Win32 message-only, tool, nonactivating and owned windows are
@@ -891,7 +1127,7 @@ fn create_window(
             hwnd,
             Win {
                 class: ci,
-                thread: os_sys::gettid(),
+                thread: teb::current_tid(),
                 wndproc,
                 title: title.clone(),
                 style,
@@ -1045,7 +1281,7 @@ extern "win64" fn ShowWindow(hwnd: u64, cmd: i32) -> Bool {
         if cmd == 9 { crate::exceptions::trace_current(); }
     }
     let r = with(|g| {
-        g.pump();
+        g.synchronize();
         let w = g.windows.get_mut(&hwnd)?;
         let was = w.visible;
         let previous_state = w.style & (WS_MINIMIZE | WS_MAXIMIZE);
@@ -1146,6 +1382,14 @@ extern "win64" fn UpdateWindow(hwnd: u64) -> Bool {
         match ready {
             None => return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE),
             Some((true, true)) => {
+                if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+                    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+                    let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 40 || n.is_multiple_of(600) {
+                        let inv = with(|g| g.windows.get(&hwnd).and_then(|w| w.invalid));
+                        os_std::eprintln!("winrun: updatewindow paint n={n} hwnd={hwnd:#x} invalid={inv:?}");
+                    }
+                }
                 if let Some(p) = wndproc_of(hwnd) {
                     call(p, hwnd, WM_PAINT, 0, 0);
                 }
@@ -1239,7 +1483,9 @@ extern "win64" fn AdjustWindowRectEx(r: *mut i32, _style: u32, _menu: Bool, _ex:
 }
 
 extern "win64" fn SetWindowPos(hwnd: u64, after: u64, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> Bool {
-    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed)
+        || crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed)
+    {
         os_std::eprintln!("winrun: SetWindowPos({hwnd:#x}, {x},{y}, {cx}x{cy}, flags {flags:#x})");
         static SMALL_RESIZES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
         if flags & 1 == 0 && cx <= 160 && cy <= 80 && SMALL_RESIZES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
@@ -1280,6 +1526,8 @@ extern "win64" fn SetWindowPos(hwnd: u64, after: u64, x: i32, y: i32, cx: i32, c
         );
         if resized { g.invalidate(hwnd, None, true); }
         if resized { g.queue.retain(|m| m.hwnd != hwnd || m.msg != WM_SIZE); }
+        g.synchronize();
+        g.queue.retain(|m| m.hwnd != hwnd || m.msg != WM_SIZE);
         g.pending_frames.remove(&hwnd);
         Some((resized, previous_pos != (px, py)))
     });
@@ -1302,6 +1550,9 @@ extern "win64" fn MoveWindow(hwnd: u64, x: i32, y: i32, w: i32, h: i32, repaint:
 }
 
 fn set_title(hwnd: u64, t: String) -> Bool {
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: title hwnd={hwnd:#x} text={t}");
+    }
     let ok = with(|g| {
         let w = g.windows.get_mut(&hwnd)?;
         w.title = t.clone();
@@ -1448,9 +1699,35 @@ const QS_SENDMESSAGE: u32 = 0x40;
 const QS_ALLPOSTMESSAGE: u32 = 0x100;
 const MWMO_WAITALL: u32 = 1;
 const MWMO_INPUTAVAILABLE: u32 = 4;
-/// How often an idle wait looks at PRISM, whose input does not wake
-/// object waiters.
-const PRISM_POLL: Duration = Duration::from_millis(10);
+
+/// Wakes object waiters when PRISM makes the connection readable. Without
+/// it every message loop has to poll the channel (a 10 ms timeout per idle
+/// wait, i.e. a permanent 100 Hz wake-up per waiting thread); with it an
+/// idle wait sleeps until input or a frame callback actually arrives.
+fn start_prism_waker(chan: u64) {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || loop {
+        let mut it = [os_std::ipc::item(chan, os_std::ipc::WAIT_READABLE)];
+        if os_std::ipc::wait(&mut it, None).is_err() {
+            return;
+        }
+        let read = it[0].revents & os_std::ipc::WAIT_READABLE != 0;
+        if read {
+            crate::objects::signal_all();
+        }
+        if !read || it[0].revents & os_std::ipc::WAIT_HANGUP != 0 {
+            return;
+        }
+        // The message loop drains the channel under the GUI lock; sleeping
+        // here keeps this thread from signalling in a tight loop while the
+        // loop is busy elsewhere.
+        os_std::thread::sleep(Duration::from_millis(1));
+    });
+}
 
 /// The QS_* kind of a queued message.
 fn qs_kind(msg: u32) -> u32 {
@@ -1462,11 +1739,243 @@ fn qs_kind(msg: u32) -> u32 {
     }
 }
 
+/// Threads about to sleep in `idle`; a post wakes them only when non-zero.
+static IDLE_WAITERS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Decrements [`IDLE_WAITERS`] however the caller leaves the wait.
+struct IdleGuard;
+impl Drop for IdleGuard {
+    fn drop(&mut self) {
+        IDLE_WAITERS.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Sleeps without the GUI lock until another thread posts or signals an
-/// object (after `seq`), `timeout` passes, or it is time to poll PRISM.
+/// object (after `seq`) or the timeout passes. The caller registered in
+/// [`IDLE_WAITERS`] while the GUI lock was held; the PRISM waker signals
+/// when input or a frame callback arrives.
+/// The caller registered in [`IDLE_WAITERS`] while the GUI lock was held.
 fn idle(seq: u32, timeout: Duration) {
-    let prism = with(|g| g.conn.is_some());
-    crate::objects::wait_for_change(seq, if prism { timeout.min(PRISM_POLL) } else { timeout });
+    let woken = crate::objects::wait_for_change(seq, timeout);
+    diag(|d| {
+        d.idle += 1;
+        if woken {
+            d.idle_woken += 1;
+        }
+    });
+}
+
+// ---- counting (`OSYX_WINRUN_COUNT=1`) ---------------------------------------------
+
+const HIST_SLOTS: usize = 12;
+
+/// A small key/count table. The least frequent key gives way once every
+/// slot is taken: only the hot keys matter for a diagnosis.
+#[derive(Clone, Copy)]
+struct Hist {
+    slots: [(u64, u64); HIST_SLOTS],
+}
+
+impl Hist {
+    const fn new() -> Hist {
+        Hist { slots: [(0, 0); HIST_SLOTS] }
+    }
+
+    fn add(&mut self, key: u64) {
+        if key == 0 {
+            return;
+        }
+        let mut least = 0;
+        for i in 0..HIST_SLOTS {
+            let (k, c) = self.slots[i];
+            if c == 0 {
+                self.slots[i] = (key, 1);
+                return;
+            }
+            if k == key {
+                self.slots[i].1 += 1;
+                return;
+            }
+            if c < self.slots[least].1 {
+                least = i;
+            }
+        }
+        self.slots[least] = (key, 1);
+    }
+
+    /// Entries that grew since `older`, hottest first.
+    fn delta(&self, older: &Hist) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        for (k, c) in self.slots {
+            let before = older.slots.iter().find(|(ok, _)| *ok == k).map_or(0, |(_, oc)| *oc);
+            if c > before {
+                out.push((k, c - before));
+            }
+        }
+        out.sort_by_key(|a| core::cmp::Reverse(a.1));
+        out
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Diag {
+    peek: u64,
+    peek_hit: u64,
+    getmsg: u64,
+    msgwait: u64,
+    msgwait_input: u64,
+    msgwait_timeout: u64,
+    qstatus: u64,
+    post: u64,
+    dispatch: u64,
+    idle: u64,
+    idle_woken: u64,
+    pump: u64,
+    pump_events: u64,
+    wake_calls: u64,
+    wake_us: u64,
+    wake_self: u64,
+    wake_tids: Hist,
+    wake_dur: Hist,
+    peek_msgs: Hist,
+    peek_flags: Hist,
+    post_msgs: Hist,
+    msgwait_masks: Hist,
+    peek_sites: Hist,
+    post_sites: Hist,
+    pump_kinds: Hist,
+}
+
+impl Diag {
+    const fn new() -> Diag {
+        Diag {
+            peek: 0,
+            peek_hit: 0,
+            getmsg: 0,
+            msgwait: 0,
+            msgwait_input: 0,
+            msgwait_timeout: 0,
+            qstatus: 0,
+            post: 0,
+            dispatch: 0,
+            idle: 0,
+            idle_woken: 0,
+            pump: 0,
+            pump_events: 0,
+            wake_calls: 0,
+            wake_us: 0,
+            wake_self: 0,
+            wake_tids: Hist::new(),
+            wake_dur: Hist::new(),
+            peek_msgs: Hist::new(),
+            peek_flags: Hist::new(),
+            post_msgs: Hist::new(),
+            msgwait_masks: Hist::new(),
+            peek_sites: Hist::new(),
+            post_sites: Hist::new(),
+            pump_kinds: Hist::new(),
+        }
+    }
+}
+
+static DIAG: Mutex<Diag> = Mutex::new(Diag::new());
+
+fn diag(f: impl FnOnce(&mut Diag)) {
+    if !crate::COUNT.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Ok(mut d) = DIAG.lock() {
+        f(&mut d);
+    }
+}
+
+/// Every 64th call records its caller: `loader::where_is` is not free.
+fn sample() -> bool {
+    static N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    N.fetch_add(1, core::sync::atomic::Ordering::Relaxed).is_multiple_of(64)
+}
+
+/// The first stack word that points into a loaded module is the return
+/// address of the caller (the prologue may have moved `rsp`).
+fn caller_site() -> u64 {
+    let mut sp: u64;
+    // SAFETY: reading this thread's own stack, which is mapped.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack)) };
+    for i in 0..128u64 {
+        // SAFETY: within the calling thread's stack, above `rsp`.
+        let v = unsafe { core::ptr::read_volatile((sp + i * 8) as *const u64) };
+        if crate::loader::where_is(v).is_some() {
+            return v;
+        }
+    }
+    0
+}
+
+fn site() -> u64 {
+    if crate::COUNT.load(core::sync::atomic::Ordering::Relaxed) && sample() { caller_site() } else { 0 }
+}
+
+fn print_hist(name: &str, h: &[(u64, u64)], module: bool) {
+    let mut s = String::new();
+    for &(k, c) in h.iter().take(6) {
+        if module {
+            match crate::loader::where_is(k) {
+                Some((m, o)) => s.push_str(&alloc::format!(" {m}+{o:#x}={c}")),
+                None => s.push_str(&alloc::format!(" {k:#x}={c}")),
+            }
+        } else {
+            s.push_str(&alloc::format!(" {k:#x}={c}"));
+        }
+    }
+    os_std::eprintln!("winrun: cnt {name}{s}");
+}
+
+/// Prints message-loop rates and their call sites every two seconds.
+pub(crate) fn start_counter() {
+    let _ = os_std::thread::Builder::new().stack_size(128 << 10).spawn(|| {
+        let mut prev = Diag::new();
+        let mut prev_signals = 0u64;
+        loop {
+            os_std::thread::sleep(Duration::from_secs(2));
+            let Ok(cur) = DIAG.lock().map(|d| *d) else { continue };
+            let signals = crate::objects::SIGNALS.load(core::sync::atomic::Ordering::Relaxed);
+            os_std::eprintln!(
+                "winrun: cnt t={}s peek={} hit={} getmsg={} msgwait={} inp={} to={} qstat={} post={} disp={} idle={} woken={} pump={} ev={} sig={}",
+                crate::kernel32::tick_ms() / 1000,
+                cur.peek - prev.peek,
+                cur.peek_hit - prev.peek_hit,
+                cur.getmsg - prev.getmsg,
+                cur.msgwait - prev.msgwait,
+                cur.msgwait_input - prev.msgwait_input,
+                cur.msgwait_timeout - prev.msgwait_timeout,
+                cur.qstatus - prev.qstatus,
+                cur.post - prev.post,
+                cur.dispatch - prev.dispatch,
+                cur.idle - prev.idle,
+                cur.idle_woken - prev.idle_woken,
+                cur.pump - prev.pump,
+                cur.pump_events - prev.pump_events,
+                signals - prev_signals,
+            );
+            print_hist("peek-msg", &cur.peek_msgs.delta(&prev.peek_msgs), false);
+            print_hist("post-msg", &cur.post_msgs.delta(&prev.post_msgs), false);
+            let wake_n = cur.wake_calls - prev.wake_calls;
+            let wake_us = (cur.wake_us - prev.wake_us) / wake_n.max(1);
+            os_std::eprintln!(
+                "winrun: cnt wake n={wake_n} self={} avg_us={wake_us}",
+                cur.wake_self - prev.wake_self
+            );
+            print_hist("wake-tid", &cur.wake_tids.delta(&prev.wake_tids), false);
+            print_hist("wake-dur", &cur.wake_dur.delta(&prev.wake_dur), false);
+            print_hist("peek-flags", &cur.peek_flags.delta(&prev.peek_flags), false);
+            print_hist("msgwait-mask", &cur.msgwait_masks.delta(&prev.msgwait_masks), false);
+            print_hist("pump-kind", &cur.pump_kinds.delta(&prev.pump_kinds), false);
+            print_hist("peek-site", &cur.peek_sites.delta(&prev.peek_sites), true);
+            print_hist("post-site", &cur.post_sites.delta(&prev.post_sites), true);
+            prev = cur;
+            prev_signals = signals;
+        }
+    });
 }
 
 /// MSG (48 bytes): hwnd, message @8, wParam @16, lParam @24, time @32, pt @36.
@@ -1493,7 +2002,7 @@ fn read_msg(p: *const u8) -> Msg {
             lparam: teb::get(p as u64, 24),
             time: teb::get(p as u64, 32),
             pt: (teb::get(p as u64, 36), teb::get(p as u64, 40)),
-            thread: os_sys::gettid(),
+            thread: teb::current_tid(),
         }
     }
 }
@@ -1502,6 +2011,8 @@ extern "win64" fn GetMessageA(msg: *mut u8, hwnd: u64, min: u32, max: u32) -> Bo
     if msg.is_null() {
         return fail(ERROR_INVALID_PARAMETER, -1);
     }
+    diag(|d| d.getmsg += 1);
+    static ITERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     loop {
         dispatch_pending_frames();
         let r = with(|g| {
@@ -1509,14 +2020,26 @@ extern "win64" fn GetMessageA(msg: *mut u8, hwnd: u64, min: u32, max: u32) -> Bo
             if let Some(m) = g.next_message(hwnd, min, max, 0, true) {
                 return Ok(m);
             }
-            Err((crate::objects::sequence(), g.next_timer_in()))
+            // Registered under the GUI lock, together with the sequence read:
+            // a post cannot slip in between and skip its wake.
+            IDLE_WAITERS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Err((crate::objects::sequence(), g.next_timer_in(hwnd, min, max, 0)))
         });
         match r {
             Ok(m) => {
+                if m.msg == WM_CHAR {
+                    let us = Instant::now().as_nanos_since_boot() / 1000;
+                    os_std::eprintln!("winrun: t getchar {us} hwnd={:#x} c={:#x} msgtime={} tid={}", m.hwnd, m.wparam, m.time, teb::current_tid());
+                }
                 write_msg(msg, &m);
                 return (m.msg != WM_QUIT) as Bool;
             }
             Err((seq, t)) => {
+                let _idle = IdleGuard;
+                let it = ITERS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if crate::COUNT.load(core::sync::atomic::Ordering::Relaxed) && it.is_multiple_of(10_000) {
+                    os_std::eprintln!("winrun: getmsg it={it} tid={} hwnd={hwnd:#x} range={min:#x}..{max:#x} wait={t:?}", teb::current_tid());
+                }
                 crate::winsta::note_idle();
                 idle(seq, t);
             }
@@ -1531,13 +2054,46 @@ extern "win64" fn GetMessageW(msg: *mut u8, hwnd: u64, min: u32, max: u32) -> Bo
 const PM_REMOVE: u32 = 1;
 
 extern "win64" fn PeekMessageA(msg: *mut u8, hwnd: u64, min: u32, max: u32, flags: u32) -> Bool {
+    let callsite = site();
     dispatch_pending_frames();
     let m = with(|g| {
         g.set_fresh(0);
         g.next_message(hwnd, min, max, flags >> 16, flags & PM_REMOVE != 0)
     });
+    diag(|d| {
+        d.peek += 1;
+        d.peek_flags.add(flags as u64);
+        if let Some(m) = &m {
+            d.peek_hit += 1;
+            d.peek_msgs.add(m.msg as u64);
+        }
+        d.peek_sites.add(callsite);
+    });
+    static PEEKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let pk = PEEKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    static LAST_MSGS: [core::sync::atomic::AtomicU32; 16] = [const { core::sync::atomic::AtomicU32::new(0) }; 16];
+    static LAST_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    if let Some(m) = &m {
+        let s = LAST_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        LAST_MSGS[s as usize % 16].store(m.msg, core::sync::atomic::Ordering::Relaxed);
+    }
+    if crate::COUNT.load(core::sync::atomic::Ordering::Relaxed) && pk.is_multiple_of(10_000) {
+        let mut ring = [0u32; 16];
+        for (i, slot) in LAST_MSGS.iter().enumerate() {
+            ring[i] = slot.load(core::sync::atomic::Ordering::Relaxed);
+        }
+        os_std::eprintln!(
+            "winrun: peek it={pk} tid={} flags={flags:#x} hwnd={hwnd:#x} -> {} last={ring:x?}",
+            teb::current_tid(),
+            m.as_ref().map_or(0, |m| m.msg)
+        );
+    }
     match m {
         Some(m) => {
+            if m.msg == WM_CHAR && flags & PM_REMOVE != 0 {
+                let us = Instant::now().as_nanos_since_boot() / 1000;
+                os_std::eprintln!("winrun: t peekchar {us} hwnd={:#x} c={:#x} flags={flags:#x} tid={}", m.hwnd, m.wparam, teb::current_tid());
+            }
             if !msg.is_null() {
                 write_msg(msg, &m);
             }
@@ -1559,9 +2115,15 @@ extern "win64" fn TranslateMessage(msg: *const u8) -> Bool {
     if m.msg != WM_KEYDOWN && m.msg != WM_SYSKEYDOWN {
         return FALSE;
     }
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+        let n = with(|g| g.chars.len());
+        os_std::eprintln!("winrun: translate vk={:#x} chars={n}", m.wparam);
+    }
     with(|g| {
         if let Some(i) = g.chars.iter().position(|(vk, _)| *vk as u64 == m.wparam) {
             let (_, c) = g.chars.remove(i).expect("found");
+            let us = Instant::now().as_nanos_since_boot() / 1000;
+            os_std::eprintln!("winrun: t translate {us} vk={:#x} c={:#x} tid={}", m.wparam, c as u32, teb::current_tid());
             let time = m.time;
             g.queue.push_front(Msg { hwnd: m.hwnd, msg: WM_CHAR, wparam: c as u64, lparam: m.lparam, time, pt: m.pt, thread: m.thread });
             TRUE
@@ -1575,14 +2137,36 @@ extern "win64" fn DispatchMessageA(msg: *const u8) -> i64 {
     if msg.is_null() {
         return 0;
     }
+    diag(|d| d.dispatch += 1);
     let m = read_msg(msg);
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+        static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+            os_std::eprintln!("winrun: dispatch enter msg={:#x} hwnd={:#x}", m.msg, m.hwnd);
+        }
+        if m.msg == 0xc001 {
+            static C1: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+            let n = C1.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+            if n.is_multiple_of(1000) {
+                os_std::eprintln!("winrun: dispatch c001 n={n} hwnd={:#x} w={:#x} tid={}", m.hwnd, m.wparam, teb::current_tid());
+            }
+        }
+    }
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && matches!(m.msg, WM_CHAR | WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP) {
+        os_std::eprintln!("winrun: dispatch msg={:#x} hwnd={:#x} w={:#x}", m.msg, m.hwnd, m.wparam);
+    }
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && m.msg == WM_CHAR {
+        os_std::eprintln!("winrun: char hwnd={:#x} c={:#x} ({})", m.hwnd, m.wparam, m.wparam as u8 as char);
+    }
     if m.msg == WM_TIMER && m.lparam != 0 {
         // SAFETY: a TIMERPROC passed to SetTimer.
         let f: TimerProc = unsafe { core::mem::transmute(m.lparam as usize) };
         f(m.hwnd, WM_TIMER, m.wparam, m.time);
         return 0;
     }
-    match wndproc_of(m.hwnd) {
+    let proc_ = wndproc_of(m.hwnd);
+
+    match proc_ {
         Some(p) => call(p, m.hwnd, m.msg, m.wparam, m.lparam),
         None => 0,
     }
@@ -1604,7 +2188,35 @@ extern "win64" fn SendMessageW(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
 }
 
 extern "win64" fn PostMessageA(hwnd: u64, msg: u32, w: u64, l: i64) -> Bool {
+    let callsite = site();
+    diag(|d| {
+        d.post += 1;
+        d.post_msgs.add(msg as u64);
+        d.post_sites.add(callsite);
+    });
     with(|g| {
+        static POSTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let n = POSTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+        let wake = wake_msg();
+        if wake != 0 && msg == wake {
+            let me = teb::current_tid();
+            let owner = g.windows.get(&hwnd).map(|w| w.thread);
+            diag(|d| {
+                d.wake_tids.add(me);
+                if owner == Some(me) {
+                    d.wake_self += 1;
+                }
+            });
+            if n.is_multiple_of(1000) && crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+                let class = g.windows.get(&hwnd).and_then(|w| g.classes.get(w.class)).map_or("?", |c| c.name.as_str());
+                let ra = caller_site();
+                let at = crate::loader::where_is(ra).map_or_else(|| alloc::format!("{ra:#x}"), |(m, o)| alloc::format!("{m}+{o:#x}"));
+                os_std::eprintln!("winrun: post n={n} msg={msg:#x} hwnd={hwnd:#x} class={class} w={w:#x} l={l:#x} tid={me} owner={owner:?} ra={at}");
+            }
+        } else if n.is_multiple_of(1000) && crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            let class = g.windows.get(&hwnd).and_then(|w| g.classes.get(w.class)).map_or("?", |c| c.name.as_str());
+            os_std::eprintln!("winrun: post n={n} msg={msg:#x} hwnd={hwnd:#x} class={class} w={w:#x} l={l:#x} tid={}", os_sys::gettid());
+        }
         if hwnd != 0 && !g.windows.contains_key(&hwnd) {
             return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
         }
@@ -1618,7 +2230,7 @@ extern "win64" fn PostMessageW(hwnd: u64, msg: u32, w: u64, l: i64) -> Bool {
 }
 
 extern "win64" fn PostQuitMessage(code: i32) {
-    with(|g| g.quit.insert(os_sys::gettid(), code));
+    with(|g| g.quit.insert(teb::current_tid(), code));
 }
 
 extern "win64" fn DefWindowProcA(hwnd: u64, msg: u32, _w: u64, l: i64) -> i64 {
@@ -1685,6 +2297,13 @@ extern "win64" fn SetTimer(hwnd: u64, id: u64, ms: u32, proc_: u64) -> u64 {
             return fail(ERROR_INVALID_WINDOW_HANDLE, 0);
         }
         let id = if hwnd == 0 { g.handle() } else { id };
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            static SETS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+            let n = SETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+            if n.is_multiple_of(200) {
+                os_std::eprintln!("winrun: settimer n={n} hwnd={hwnd:#x} id={id} ms={ms} tid={}", os_sys::gettid());
+            }
+        }
         let interval = (ms as u64).max(10);
         g.timers.retain(|t| !(t.hwnd == hwnd && t.id == id));
         let thread = g.owner(hwnd);
@@ -1954,7 +2573,7 @@ extern "win64" fn GetAsyncKeyState(vk: i32) -> i16 {
 }
 
 extern "win64" fn GetCursorPos(p: *mut i32) -> Bool {
-    let (x, y) = with(|g| g.pointer);
+    let (x, y) = with(|g| g.screen_pointer);
     if !p.is_null() {
         // SAFETY: the caller's POINT.
         unsafe {
@@ -2022,7 +2641,7 @@ extern "win64" fn MapWindowPoints(from: u64, to: u64, pts: *mut i32, n: u32) -> 
 }
 
 extern "win64" fn GetSystemMetrics(i: i32) -> i32 {
-    with(|g| {
+    let v = with(|g| {
         let (w, h) = g.conn().map(|c| (c.screen_width as i32, c.screen_height as i32)).unwrap_or((1024, 768));
         match i {
             0 | 16 | 78 => w, // SM_CXSCREEN, SM_CXFULLSCREEN, SM_CXVIRTUALSCREEN
@@ -2034,7 +2653,14 @@ extern "win64" fn GetSystemMetrics(i: i32) -> i32 {
             80 => 1,       // SM_CMONITORS
             _ => 0,
         }
-    })
+    });
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+        static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+            os_std::eprintln!("winrun: sysmetrics i={i} -> {v}");
+        }
+    }
+    v
 }
 
 /// The system-wide settings a program reads. OSyx has one configuration, so
@@ -2126,6 +2752,12 @@ fn system_parameters(action: u32, _param: u32, value: *mut u8, wide: bool) -> Bo
     }
     if action == SPI_GETWORKAREA {
         let (w, h) = with(|g| g.conn().map(|c| (c.screen_width as i32, c.screen_height as i32)).unwrap_or((1024, 768)));
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                os_std::eprintln!("winrun: workarea -> {w}x{h}");
+            }
+        }
         // SAFETY: the caller's RECT, 16 bytes.
         unsafe {
             teb::put(value as u64, 0, 0i32);
@@ -2269,16 +2901,28 @@ extern "win64" fn MessageBeep(_t: u32) -> Bool {
 
 /// Waits (bounded) until PRISM released the window's buffer.
 fn wait_drawable(hwnd: u64) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(2);
     loop {
         let ok = with(|g| {
             g.pump();
             g.windows.get(&hwnd).map(|w| w.win.can_draw())
         });
         match ok {
-            Some(true) => return true,
+            Some(true) => {
+                let waited = started.elapsed();
+                if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && waited > Duration::from_millis(30) {
+                    os_std::eprintln!("winrun: wait_drawable hwnd={hwnd:#x} took {} ms", waited.as_millis());
+                }
+                return true;
+            }
             Some(false) if Instant::now() < deadline => with(|g| g.wait(Duration::from_millis(5))),
-            _ => return false,
+            other => {
+                if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+                    os_std::eprintln!("winrun: wait_drawable hwnd={hwnd:#x} failed other={other:?} after {} ms", started.elapsed().as_millis());
+                }
+                return false;
+            }
         }
     }
 }
@@ -2289,6 +2933,7 @@ fn new_dc(g: &mut Gui, hwnd: u64, paint: Rect) -> u64 {
         h,
         Dc {
             hwnd,
+            made: Instant::now(),
             paint,
             text: rgb(0, 0, 0),
             bk: rgb(255, 255, 255),
@@ -2328,6 +2973,9 @@ extern "win64" fn BeginPaint(hwnd: u64, ps: *mut u8) -> u64 {
         Some((dc, paint, erase))
     });
     let Some((dc, paint, erase)) = r else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: beginpaint hwnd={hwnd:#x} {}x{} at ({},{})", paint.w, paint.h, paint.x, paint.y);
+    }
     if erase {
         if let Some(p) = wndproc_of(hwnd) {
             call(p, hwnd, WM_ERASEBKGND, dc, 0);
@@ -2345,18 +2993,83 @@ extern "win64" fn BeginPaint(hwnd: u64, ps: *mut u8) -> u64 {
     dc
 }
 
+/// Sampled hash of a surface rectangle for diagnosing which regions change.
+fn band_hash(s: &osyx_gfx::Surface<'_>, r: Rect) -> u32 {
+    let mut h = 2_166_136_261u32;
+    let x0 = r.x.max(0) as u32;
+    let x1 = (r.x + r.w as i32).max(0) as u32;
+    let y0 = r.y.max(0) as u32;
+    let y1 = (r.y + r.h as i32).max(0) as u32;
+    for y in (y0..y1.min(s.height())).step_by(5) {
+        let row = s.row(y);
+        let mut x = x0 as usize;
+        while x < (x1 as usize).min(row.len()) {
+            h ^= row[x];
+            h = h.wrapping_mul(16_777_619);
+            x += 16;
+        }
+    }
+    h
+}
+
+/// Sampled row hash for diagnosing which window bands actually change.
+fn band_hash_rows(s: &osyx_gfx::Surface<'_>, y0: u32, y1: u32) -> u32 {
+    band_hash(s, Rect::new(0, y0 as i32, s.width(), y1.saturating_sub(y0)))
+}
+
 fn present(hwnd: u64, r: Option<Rect>) {
     with(|g| {
         let Some(w) = g.windows.get_mut(&hwnd) else { return };
         let full = Rect::new(0, 0, w.size.0, w.size.1);
-        let damage = r.or(w.drawn.take()).unwrap_or(full).intersect(&full);
-        w.drawn = None;
+        // PRISM copies only the committed rects, so a paint present must also
+        // cover everything drawn through the DC outside its paint rectangle.
+        let damage = match (r, w.drawn.take()) {
+            (Some(a), Some(b)) => a.union(&b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => full,
+        }
+        .intersect(&full);
         if damage.w == 0 || damage.h == 0 {
             return;
         }
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            let (top, page, popup, url) = match w.win.surface() {
+                Ok(s) => (
+                    band_hash_rows(&s, 0, 170),
+                    band_hash_rows(&s, 170, 700),
+                    band_hash(&s, Rect::new(260, 290, 780, 320)),
+                    band_hash(&s, Rect::new(0, 40, 260, 120)),
+                ),
+                Err(_) => (0, 0, 0, 0),
+            };
+            os_std::eprintln!(
+                "winrun: present hwnd={hwnd:#x} damage={}x{} at ({},{}) top={top:08x} page={page:08x} popup={popup:08x} url={url:08x}",
+                damage.w,
+                damage.h,
+                damage.x,
+                damage.y
+            );
+        }
+        if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+            static FRAMES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            if FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+                if let Ok(surface) = w.win.surface() {
+                    os_std::eprintln!("winrun: window frame {hwnd:#x} damage={damage:?} size={:?} pixels={:x?}", surface.bounds(), &surface.pixels()[..surface.pixels().len().min(8)]);
+                }
+            }
+        }
         let rect = proto::Rect { x: damage.x, y: damage.y, w: damage.w, h: damage.h };
         let Some(c) = g.conn.as_mut() else { return };
-        let _ = g.windows.get_mut(&hwnd).map(|w| w.win.present(c, Some(rect)));
+        let t = Instant::now();
+        let r = g.windows.get_mut(&hwnd).map(|w| w.win.present(c, Some(rect)));
+        let us = t.elapsed().as_micros();
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && us >= 20_000 {
+            os_std::eprintln!("winrun: presentsess hwnd={hwnd:#x} tid={} us={us}", teb::current_tid());
+        }
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && r.as_ref().is_some_and(|r| r.is_err()) {
+            os_std::eprintln!("winrun: present hwnd={hwnd:#x} failed");
+        }
     });
 }
 
@@ -2366,7 +3079,20 @@ extern "win64" fn EndPaint(hwnd: u64, ps: *const u8) -> Bool {
     }
     // SAFETY: the caller's PAINTSTRUCT from BeginPaint.
     let dc: u64 = unsafe { teb::get(ps as u64, 0) };
-    let paint = with(|g| g.dcs.remove(&dc).map(|d| d.paint));
+    let paint = with(|g| g.dcs.remove(&dc).map(|d| {
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            let drawn = g.windows.get(&hwnd).and_then(|w| w.drawn);
+            os_std::eprintln!(
+                "winrun: dcsess endpaint hwnd={hwnd:#x} tid={} us={} paint={}x{} drawn={:?}",
+                teb::current_tid(),
+                d.made.elapsed().as_micros(),
+                d.paint.w,
+                d.paint.h,
+                drawn.map(|r| (r.x, r.y, r.w, r.h))
+            );
+        }
+        d.paint
+    }));
     present(hwnd, paint);
     TRUE
 }
@@ -2385,8 +3111,20 @@ extern "win64" fn GetDC(hwnd: u64) -> u64 {
 }
 
 extern "win64" fn ReleaseDC(hwnd: u64, dc: u64) -> i32 {
-    let had = with(|g| g.dcs.remove(&dc).is_some());
-    if had {
+    let info = with(|g| g.dcs.remove(&dc).map(|d| (d.made, d.paint)));
+    let had = info.is_some();
+    if let Some((made, paint)) = info {
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && hwnd != 0 {
+            let drawn = with(|g| g.windows.get(&hwnd).and_then(|w| w.drawn));
+            os_std::eprintln!(
+                "winrun: dcsess release hwnd={hwnd:#x} tid={} us={} paint={}x{} drawn={:?}",
+                teb::current_tid(),
+                made.elapsed().as_micros(),
+                paint.w,
+                paint.h,
+                drawn.map(|r| (r.x, r.y, r.w, r.h))
+            );
+        }
         present(hwnd, None);
     }
     had as i32
@@ -2842,7 +3580,9 @@ extern "win64" fn DeleteObject(obj: u64) -> Bool {
         if g.dcs.values().any(|d| d.bitmap == obj || d.saved.iter().any(|s| s.bitmap == obj)) {
             return false;
         }
-        g.bitmaps.remove(&obj);
+        if let Some(b) = g.bitmaps.remove(&obj) {
+            g.recycle_bitmap_storage(b.into_storage());
+        }
         g.regions.remove(&obj);
         g.gdi.remove(&obj).is_some()
     }) as Bool
@@ -3242,8 +3982,9 @@ extern "win64" fn ShowCursor(_show: Bool) -> i32 {
     0
 }
 
+/// PRISM owns the pointer, so this only updates what the cursor APIs report.
 extern "win64" fn SetCursorPos(x: i32, y: i32) -> Bool {
-    with(|g| g.pointer = (x, y));
+    with(|g| g.screen_pointer = (x, y));
     TRUE
 }
 
@@ -3256,7 +3997,7 @@ extern "win64" fn GetCursorInfo(out: *mut u8) -> Bool {
     if out.is_null() || unsafe { teb::get::<u32>(out as u64, 0) } < 20 {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let (x, y) = with(|g| g.pointer);
+    let (x, y) = with(|g| g.screen_pointer);
     // SAFETY: the caller's CURSORINFO of at least 20 bytes.
     unsafe {
         teb::put(out as u64, 4, 1u32); // CURSOR_SHOWING
@@ -3268,7 +4009,7 @@ extern "win64" fn GetCursorInfo(out: *mut u8) -> Bool {
 }
 
 extern "win64" fn GetMessagePos() -> u32 {
-    with(|g| ((g.pointer.1 as u32) << 16) | (g.pointer.0 as u32 & 0xffff))
+    with(|g| ((g.screen_pointer.1 as u32) << 16) | (g.screen_pointer.0 as u32 & 0xffff))
 }
 
 extern "win64" fn GetMessageTime() -> i32 {
@@ -3282,8 +4023,9 @@ extern "win64" fn GetMessageExtraInfo() -> i64 {
 /// High word: kinds of messages waiting; low word: kinds added since the
 /// last GetQueueStatus, GetMessage or PeekMessage.
 extern "win64" fn GetQueueStatus(flags: u32) -> u32 {
+    diag(|d| d.qstatus += 1);
+    dispatch_pending_frames();
     with(|g| {
-        g.pump();
         let now = g.status() & flags;
         let new = g.fresh_bits() & now;
         let left = g.fresh_bits() & !flags;
@@ -3297,6 +4039,10 @@ extern "win64" fn GetQueueStatus(flags: u32) -> u32 {
 /// count, as on Windows. Returns WAIT_OBJECT_0 + n for input.
 extern "win64" fn MsgWaitForMultipleObjectsEx(n: u32, hs: *const u64, ms: u32, mask: u32, flags: u32) -> u32 {
     use crate::objects::{INFINITE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    diag(|d| {
+        d.msgwait += 1;
+        d.msgwait_masks.add(mask as u64);
+    });
     if n > 63 || (n > 0 && hs.is_null()) {
         return fail(ERROR_INVALID_PARAMETER, WAIT_FAILED);
     }
@@ -3308,13 +4054,22 @@ extern "win64" fn MsgWaitForMultipleObjectsEx(n: u32, hs: *const u64, ms: u32, m
     };
     let all = flags & MWMO_WAITALL != 0;
     let deadline = (ms != INFINITE).then(|| Instant::now() + Duration::from_millis(ms as u64));
+    static ITERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     loop {
         dispatch_pending_frames();
-        let (seq, input, timer) = with(|g| {
-            g.pump();
+        let (seq, input, timer, st) = with(|g| {
             let have = if flags & MWMO_INPUTAVAILABLE != 0 { g.status() } else { g.fresh_bits() & g.status() };
-            (crate::objects::sequence(), have & mask != 0, g.next_timer_in())
+            IDLE_WAITERS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let seq = crate::objects::sequence();
+            (seq, have & mask != 0, g.next_timer_in(0, 0, 0, mask), have)
         });
+        let _idle = IdleGuard;
+        let it = ITERS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if crate::COUNT.load(core::sync::atomic::Ordering::Relaxed) && it.is_multiple_of(10_000) {
+            os_std::eprintln!(
+                "winrun: msgwait it={it} ms={ms} mask={mask:#x} flags={flags:#x} input={input} have={st:#x} timer={timer:?}"
+            );
+        }
         // With MWMO_WAITALL the objects count only together with input.
         if !list.is_empty() && (!all || input) {
             match crate::objects::wait(list, all, 0) {
@@ -3325,12 +4080,16 @@ extern "win64" fn MsgWaitForMultipleObjectsEx(n: u32, hs: *const u64, ms: u32, m
             }
         }
         if input && (!all || list.is_empty()) {
+            diag(|d| d.msgwait_input += 1);
             return WAIT_OBJECT_0 + n;
         }
         let left = match deadline {
             Some(d) => match d.checked_duration_since(Instant::now()) {
                 Some(l) if !l.is_zero() => l,
-                _ => return WAIT_TIMEOUT,
+                _ => {
+                    diag(|d| d.msgwait_timeout += 1);
+                    return WAIT_TIMEOUT;
+                }
             },
             None => Duration::from_secs(3600),
         };
@@ -3362,6 +4121,9 @@ extern "win64" fn CallNextHookEx(_hook: u64, _code: i32, _w: u64, _l: i64) -> i6
 }
 
 extern "win64" fn SetWinEventHook(_min: u32, _max: u32, _module: u64, _proc_: u64, _process: u32, _thread: u32, _flags: u32) -> u64 {
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: SetWinEventHook min={_min:#x} max={_max:#x} pid={_process} tid={_thread} flags={_flags:#x}");
+    }
     0 // no accessibility events are raised
 }
 
@@ -3557,6 +4319,12 @@ fn monitor_info(monitor: u64, out: *mut u8, wide: bool) -> Bool {
     let extended = if wide { 104 } else { 72 };
     if size != 40 && size != extended { return fail(ERROR_INVALID_PARAMETER, FALSE); }
     let s = screen_rect();
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+        static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+            os_std::eprintln!("winrun: monitorinfo size={size} rect={s:?}");
+        }
+    }
     // MONITORINFO: cbSize, rcMonitor, rcWork, dwFlags.
     // SAFETY: the caller's MONITORINFO of at least 40 bytes.
     unsafe {
@@ -3582,22 +4350,46 @@ extern "win64" fn GetMonitorInfoA(monitor: u64, out: *mut u8) -> Bool {
 /// Messages a program registers by name: the same name gets the same id for
 /// the life of the process, in the range Windows uses for them.
 static REGISTERED_MESSAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The id Gecko registered for `nsAppShell:EventID` (its message-loop wakeup).
+static WAKEUP_MSG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn wake_msg() -> u32 {
+    WAKEUP_MSG.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Id of the registered name `text`, registering it on first use.
+fn registered_id(text: &str) -> u32 {
+    const BASE: u32 = 0xC000;
+    let mut list = REGISTERED_MESSAGES.lock().unwrap();
+    let id = match list.iter().position(|n| n.eq_ignore_ascii_case(text)) {
+        Some(i) => BASE + i as u32,
+        None => {
+            let id = BASE + list.len() as u32;
+            if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+                os_std::eprintln!("winrun: register id={id:#x} name={text} tid={}", os_sys::gettid());
+            }
+            list.push(text.to_string());
+            id
+        }
+    };
+    if text.to_ascii_lowercase().contains("eventid") {
+        WAKEUP_MSG.store(id, core::sync::atomic::Ordering::Relaxed);
+    }
+    id
+}
+
+/// The registered name of `format`, if it is a registered one.
+fn registered_name(format: u32) -> Option<String> {
+    REGISTERED_MESSAGES.lock().unwrap().get(format.checked_sub(0xC000)? as usize).cloned()
+}
 
 extern "win64" fn RegisterWindowMessageW(name: *const u16) -> u32 {
-    const BASE: u32 = 0xC000;
     if name.is_null() {
         return 0;
     }
     // SAFETY: a NUL-terminated string from the caller.
     let Some(text) = (unsafe { path::wide_to_string(name) }) else { return 0 };
-    let mut list = REGISTERED_MESSAGES.lock().unwrap();
-    match list.iter().position(|n| n.eq_ignore_ascii_case(&text)) {
-        Some(i) => BASE + i as u32,
-        None => {
-            list.push(text);
-            BASE + (list.len() - 1) as u32
-        }
-    }
+    registered_id(&text)
 }
 
 // ---- window classes, enumeration and the small window API ----------------------------------
@@ -3807,8 +4599,26 @@ extern "win64" fn RegisterRawInputDevices(devices: *const u8, n: u32, size: u32)
 
 // ---- clipboard --------------------------------------------------------------------------
 //
-// The clipboard of this process: OLE (OleSetClipboard) is the only way
-// Gecko puts data on it, so through user32 it is always empty.
+// One system clipboard, owned by the compositor and broadcast to every
+// client; user32's classic API and ole32's data objects both go through it.
+// SetClipboardData copies the caller's HGLOBAL at once (all fixed blocks),
+// and CloseClipboard publishes the result.
+
+/// Registers a clipboard format name and returns its id (the same table as
+/// registered window messages, as on Windows).
+pub(crate) fn register_format(name: &str) -> u32 {
+    registered_id(name)
+}
+
+/// The system clipboard in this process's format ids.
+pub(crate) fn clipboard_contents() -> Vec<proto::ClipEntry> {
+    with(|g| g.clipboard.clone())
+}
+
+/// Replaces the system clipboard (data rendered from an OLE data object).
+pub(crate) fn publish_clipboard(entries: Vec<proto::ClipEntry>) {
+    with(|g| g.publish_clipboard(entries))
+}
 
 extern "win64" fn OpenClipboard(hwnd: u64) -> Bool {
     with(|g| match g.clipboard_open {
@@ -3822,8 +4632,27 @@ extern "win64" fn OpenClipboard(hwnd: u64) -> Bool {
 
 extern "win64" fn CloseClipboard() -> Bool {
     with(|g| match g.clipboard_open.take() {
-        Some(_) => TRUE,
+        Some(_) => {
+            if !g.clipboard_own.is_empty() {
+                let own = core::mem::take(&mut g.clipboard_own);
+                g.publish_clipboard(own);
+            }
+            TRUE
+        }
         None => fail(ERROR_CLIPBOARD_NOT_OPEN, FALSE),
+    })
+}
+
+/// Emptying the clipboard makes this process the owner: the system
+/// clipboard is cleared for everyone at once.
+extern "win64" fn EmptyClipboard() -> Bool {
+    with(|g| {
+        if g.clipboard_open.is_none() {
+            return fail(ERROR_CLIPBOARD_NOT_OPEN, FALSE);
+        }
+        g.clipboard_own.clear();
+        g.publish_clipboard(Vec::new());
+        TRUE
     })
 }
 
@@ -3831,18 +4660,73 @@ extern "win64" fn GetOpenClipboardWindow() -> u64 {
     with(|g| g.clipboard_open.unwrap_or(0))
 }
 
-extern "win64" fn GetClipboardData(_format: u32) -> u64 {
-    // Open: no data in any format. Closed: the clipboard must be opened first.
-    with(|g| if g.clipboard_open.is_some() { 0 } else { fail(ERROR_CLIPBOARD_NOT_OPEN, 0) })
+extern "win64" fn SetClipboardData(format: u32, h: u64) -> u64 {
+    with(|g| {
+        if g.clipboard_open.is_none() {
+            return fail(ERROR_CLIPBOARD_NOT_OPEN, 0);
+        }
+        if h == 0 {
+            return 0; // delayed rendering: the caller keeps ownership
+        }
+        let size = crate::kernel32::heap_size(h);
+        // SAFETY: an HGLOBAL from GlobalAlloc is a fixed block of `size` bytes.
+        let data = unsafe { core::slice::from_raw_parts(h as *const u8, size) }.to_vec();
+        let entry = proto::ClipEntry { format, name: None, data };
+        match g.clipboard_own.iter_mut().find(|e| e.format == format) {
+            Some(e) => *e = entry,
+            None => g.clipboard_own.push(entry),
+        }
+        h
+    })
 }
 
-extern "win64" fn IsClipboardFormatAvailable(_format: u32) -> Bool {
-    FALSE
+extern "win64" fn GetClipboardData(format: u32) -> u64 {
+    with(|g| {
+        if g.clipboard_open.is_none() {
+            return fail(ERROR_CLIPBOARD_NOT_OPEN, 0);
+        }
+        if let Some(&h) = g.clipboard_handles.get(&format) {
+            return h;
+        }
+        let data = g
+            .clipboard_own
+            .iter()
+            .chain(g.clipboard.iter())
+            .find(|e| e.format == format)
+            .map(|e| e.data.clone());
+        let Some(data) = data else { return 0 };
+        let Some(h) = crate::kernel32::heap_alloc(data.len().max(1), true) else {
+            return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+        };
+        // SAFETY: a fresh block of at least `data.len()` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), h as *mut u8, data.len()) };
+        g.clipboard_handles.insert(format, h);
+        h
+    })
 }
 
-/// Nothing ever changes the clipboard's contents through user32.
+/// The clipboard must be open to ask for its data.
+extern "win64" fn IsClipboardFormatAvailable(format: u32) -> Bool {
+    with(|g| g.clipboard_own.iter().chain(g.clipboard.iter()).any(|e| e.format == format) as Bool)
+}
+
 extern "win64" fn GetClipboardSequenceNumber() -> u32 {
-    0
+    with(|g| g.clipboard_seq)
+}
+
+extern "win64" fn EnumClipboardFormats(next: u32) -> u32 {
+    with(|g| {
+        let mut formats: Vec<u32> = Vec::new();
+        for e in g.clipboard_own.iter().chain(g.clipboard.iter()) {
+            if !formats.contains(&e.format) {
+                formats.push(e.format);
+            }
+        }
+        if next == 0 {
+            return formats.first().copied().unwrap_or(0);
+        }
+        formats.iter().position(|&f| f == next).and_then(|i| formats.get(i + 1)).copied().unwrap_or(0)
+    })
 }
 
 extern "win64" fn GetClipboardFormatNameW(format: u32, buf: *mut u16, n: i32) -> i32 {
@@ -3922,6 +4806,12 @@ extern "win64" fn GetUpdateRect(wnd: u64, rect: *mut u8, erase: Bool) -> Bool {
 }
 
 extern "win64" fn RedrawWindow(wnd: u64, _rect: *const u8, _rgn: u64, flags: u32) -> Bool {
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && (n < 40 || n.is_multiple_of(600)) {
+        let size = with(|g| g.windows.get(&wnd).map(|w| w.size));
+        os_std::eprintln!("winrun: redrawwindow n={n} hwnd={wnd:#x} flags={flags:#x} size={size:?}");
+    }
     if flags & 0x1 != 0 {
         // RDW_INVALIDATE: queue a paint for the whole window.
         with(|g| {
@@ -4084,6 +4974,9 @@ extern "win64" fn SendMessageTimeoutW(wnd: u64, msg: u32, wparam: u64, lparam: i
 }
 
 extern "win64" fn CallWindowProcW(proc_: u64, wnd: u64, msg: u32, wparam: u64, lparam: i64) -> i64 {
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && matches!(msg, WM_CHAR | WM_KEYDOWN | WM_KEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP) {
+        os_std::eprintln!("winrun: callwndproc msg={msg:#x} hwnd={wnd:#x} w={wparam:#x}");
+    }
     if proc_ == 0 {
         return 0;
     }
@@ -4228,10 +5121,13 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         LoadImageW,
         OpenClipboard,
         CloseClipboard,
+        EmptyClipboard,
         GetOpenClipboardWindow,
+        SetClipboardData,
         GetClipboardData,
         IsClipboardFormatAvailable,
         GetClipboardSequenceNumber,
+        EnumClipboardFormats,
         GetClipboardFormatNameW,
         EnumDisplayDevicesW,
         EnumDisplaySettingsExW,

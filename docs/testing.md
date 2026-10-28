@@ -4,7 +4,7 @@
 
 ```powershell
 .\scripts\check-env.ps1             # tool check, no changes to the system
-.\scripts\build.ps1 [-Cmdline '…'] [-NoInit] [-KeepRoot] [-DebugBuild]
+.\scripts\build.ps1 [-Cmdline '…'] [-NoInit] [-KeepRoot] [-DebugBuild] [-Live]
 .\scripts\run-qemu.ps1 [-Cmdline '…'] [-Gdb] [-Follow] [-Headless]
 .\scripts\test.ps1 [-SkipHost] [-SkipQemu]
 ```
@@ -15,6 +15,13 @@ virtio-blk (`vda`: ESP `vda1` FAT32 64 MiB, root `vda2` ext4 128 MiB), a
 virtio-rng device, COM1 to a log file and `isa-debug-exit` at port `0xf4`.
 Logs and screenshots go to `build/test/`. `-KeepRoot` reuses the root
 partition of the previous disk image (used after the power-cut boot).
+`-Live` builds `build/osyx-live.iso` instead of the GPT disk; boot it with
+`qemu ... -cdrom build/osyx-live.iso -boot order=d` and look for
+`storage: live root unpacked` in the serial log. The image is a plain
+optical disc (ISO9660, zeroed system area, no hybrid MBR), so it does not
+boot from a USB stick written byte-for-byte. The ESP tree is also visible
+as `/EFI/...` in ISO9660, allowing Rufus in ISO mode to extract it to a
+FAT-formatted UEFI USB drive.
 
 Host tools: `osyx-fat` `mkfat32`/`fatcheck`, `osyx-part` `mkdisk`, mtools
 from MSYS2, and e2fsprogs 1.47 / sgdisk in WSL Ubuntu 24.04 (`mke2fs -d`

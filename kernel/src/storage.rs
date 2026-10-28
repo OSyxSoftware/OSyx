@@ -18,7 +18,7 @@
 
 use crate::block::{self, BlockDev};
 use crate::vfs::{self, devfs::DevFs, tmpfs::TmpfsVolume, Filesystem, Lookup};
-use crate::{kprintln, modules, BootData};
+use crate::{kprintln, live, modules, BootData};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -26,7 +26,9 @@ use osyx_abi::{MOUNT_READ_ONLY, OPEN_CREATE, OPEN_TRUNCATE, OPEN_WRITE};
 
 const TMP_LIMIT: u64 = 64 << 20;
 const RUN_LIMIT: u64 = 8 << 20;
-const FALLBACK_ROOT_LIMIT: u64 = 16 << 20;
+// The live root unpacks into this tmpfs; the installed fallback (boot
+// modules only) uses a few MiB of it. tmpfs charges only what is stored.
+const FALLBACK_ROOT_LIMIT: u64 = 256 << 20;
 
 /// What ended up mounted, for the boot summary and tests.
 pub struct Summary {
@@ -98,9 +100,16 @@ pub fn mount_all(boot: &BootData) -> Summary {
     let disks = block::devices();
     let esp = disks.iter().find(|d| d.partition().is_some_and(|p| p.type_guid == osyx_part::TYPE_ESP)).cloned();
     let wanted_root = boot.option_value("root");
-    let root_dev = match wanted_root {
-        Some(name) => disks.iter().find(|d| d.name() == name).cloned(),
-        None => disks.iter().find(|d| d.partition().is_some_and(|p| p.type_guid == osyx_part::TYPE_ROOT_X86_64)).cloned(),
+    // A live boot keeps every disk untouched: the whole system comes from
+    // the compressed archive in \EFI\OSYX\BIN.
+    let root_dev = if boot.has_option("live") {
+        kprintln!("storage: live boot; disk roots ignored");
+        None
+    } else {
+        match wanted_root {
+            Some(name) => disks.iter().find(|d| d.name() == name).cloned(),
+            None => disks.iter().find(|d| d.partition().is_some_and(|p| p.type_guid == osyx_part::TYPE_ROOT_X86_64)).cloned(),
+        }
     };
     let root_ro = boot.has_option("ro");
     let mut used: Vec<String> = Vec::new();
@@ -125,7 +134,20 @@ pub fn mount_all(boot: &BootData) -> Summary {
         kprintln!("storage: no root file system; using a {} MiB tmpfs as /", FALLBACK_ROOT_LIMIT >> 20);
         let fs: Arc<dyn Filesystem> = Arc::new(TmpfsVolume::new(FALLBACK_ROOT_LIMIT, 0o755));
         vfs::mount_fs("/", "tmpfs", 0, fs).expect("mounting a fresh tmpfs at / cannot fail");
-        populate_fallback_root();
+        if live::present() {
+            match live::unpack() {
+                Ok(n) => {
+                    kprintln!("storage: live root unpacked ({} entries)", n);
+                    root = alloc::format!("tmpfs (live root, {n} entries)");
+                }
+                Err(e) => {
+                    kprintln!("storage: live root unusable: {e}");
+                    populate_fallback_root();
+                }
+            }
+        } else {
+            populate_fallback_root();
+        }
     }
     let mount_virtual = |at: &str, fs: Arc<dyn Filesystem>, src: &str| {
         if let Err(e) = vfs::mount_fs(at, src, 0, fs) {

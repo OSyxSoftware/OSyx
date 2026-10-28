@@ -238,10 +238,10 @@ fn tcp_segments_round_trip_with_options_and_reject_garbage() {
     use osyx_net::wire::Endpoint;
     let a = Endpoint::new(Ipv4Addr::new(10, 0, 0, 1), 40000);
     let b = Endpoint::new(Ipv4Addr::new(10, 0, 0, 2), 80);
-    let s = tcp::build(a, b, 1000, 0, tcp::SYN, 65535, Some(1460), &[]);
+    let s = tcp::build(a, b, 1000, 0, tcp::SYN, 65535, Some(1460), Some(7), &[]);
     let seg = tcp::parse(a.addr, b.addr, &s).unwrap();
-    assert_eq!((seg.seq, seg.flags, seg.mss, seg.window), (1000, tcp::SYN, Some(1460), 65535));
-    let d = tcp::build(a, b, 5, 9, tcp::ACK | tcp::PSH, 100, None, b"data");
+    assert_eq!((seg.seq, seg.flags, seg.mss, seg.window, seg.ws), (1000, tcp::SYN, Some(1460), 65535, Some(7)));
+    let d = tcp::build(a, b, 5, 9, tcp::ACK | tcp::PSH, 100, None, None, b"data");
     assert_eq!(tcp::parse(a.addr, b.addr, &d).unwrap().payload, b"data");
     let mut bad = d.clone();
     bad[22] ^= 1;

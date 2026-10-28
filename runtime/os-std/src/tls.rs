@@ -53,7 +53,23 @@ pub(crate) unsafe fn free_unused_tcb(tcb: *mut Tcb) {
 /// Installs the main thread's TCB (called once by the OSyx start-up code).
 #[cfg_attr(not(target_os = "none"), allow(dead_code))]
 pub(crate) fn init_main_thread() {
-    sys::set_tcb(new_tcb(Some(String::from("main"))) as usize);
+    let tcb = new_tcb(Some(String::from("main")));
+    sys::set_tcb(tcb as usize);
+    // Fills `fs:[8]` eagerly: `os_sys::gettid` reads the id from there. The
+    // TCB must be installed first, because reading `fs:` faults without it.
+    unsafe { (*tcb).tid = sys::current_tid() };
+}
+
+/// Fills the calling thread's cached id (a spawned thread does this once on
+/// entry, so later `gettid` calls need no system call).
+pub(crate) fn init_current_tid() {
+    let tcb = current();
+    // SAFETY: the current TCB is only accessed by its own thread.
+    unsafe {
+        if (*tcb).tid == 0 {
+            (*tcb).tid = sys::current_tid();
+        }
+    }
 }
 
 /// The current thread's TCB. On the host back end a TCB is created on first

@@ -113,7 +113,7 @@ extern "win64" fn QueryUnbiasedInterruptTimePrecise(out: *mut u64) {
 }
 
 /// Creation time is when winrun started the process. CPU time comes from
-/// the kernel's per-process scheduler samples (100 Hz); OSyx does not
+/// the kernel's per-process scheduler samples (1 kHz); OSyx does not
 /// separate kernel from user time, so it is all reported as user time.
 extern "win64" fn GetProcessTimes(process: u64, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32 {
     if process != objects::CURRENT_PROCESS {
@@ -122,19 +122,17 @@ extern "win64" fn GetProcessTimes(process: u64, creation: *mut u64, exit: *mut u
     if creation.is_null() || exit.is_null() || kernel.is_null() || user.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let mut list = alloc::vec![osyx_abi::ipc::ProcInfo::default(); 256];
-    let n = match os_sys::proc_list(&mut list) {
-        Ok(n) => n,
+    let info = match os_sys::proc_info(kernel32::pid()) {
+        Ok(info) => info,
+        Err(osyx_abi::Errno::NotFound) => return fail(ERROR_GEN_FAILURE, 0),
         Err(e) => return fail(errno_to_win32(e), 0),
     };
-    let me = kernel32::pid();
-    let Some(info) = list[..n].iter().find(|p| p.pid == me) else { return fail(ERROR_GEN_FAILURE, 0) };
     // SAFETY: the caller's FILETIMEs.
     unsafe {
         core::ptr::write_unaligned(creation, kernel32::filetime(START_NS.load(Ordering::Relaxed) as i64));
         core::ptr::write_unaligned(exit, 0);
         core::ptr::write_unaligned(kernel, 0);
-        core::ptr::write_unaligned(user, info.cpu_ticks * 100_000);
+        core::ptr::write_unaligned(user, info.cpu_ticks * 10_000);
     }
     1
 }
@@ -596,17 +594,16 @@ extern "win64" fn FormatMessageW(flags: u32, source: u64, id: u32, lang: u32, bu
 
 // ---- processors ---------------------------------------------------------------------
 //
-// OSyx schedules on one CPU (SystemInfo.ticks are "single CPU"); GetSystemInfo
-// reports one processor with affinity mask 1.
+// OSyx reports online logical CPUs and supports native thread affinity.
 
 extern "win64" fn GetCurrentProcessorNumber() -> u32 {
-    0
+    os_sys::cpu_info().map_or(0, |(_,cpu)|cpu)
 }
 
 /// With one CPU, a fence orders this thread's stores before any other
 /// thread runs; there are no other processors' write buffers.
 extern "win64" fn FlushProcessWriteBuffers() {
-    core::sync::atomic::fence(Ordering::SeqCst);
+    let _=os_sys::process_write_barrier();
 }
 
 /// CPUID leaf 4 (deterministic cache parameters): (level, type, ways,
@@ -657,16 +654,21 @@ extern "win64" fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, 
     };
     // GROUP_AFFINITY: mask 1 in group 0.
     let mut affinity = [0u8; 16];
-    affinity[0] = 1;
+    let count = os_sys::cpu_info().map_or(1, |(count,_)|count);
+    let mask = (1u64<<count)-1;
+    affinity[..8].copy_from_slice(&mask.to_le_bytes());
     let processor = |b: &mut Vec<u8>| {
         b.extend_from_slice(&[0u8; 22]); // Flags, EfficiencyClass, Reserved
         b.extend_from_slice(&1u16.to_le_bytes()); // GroupCount
         b.extend_from_slice(&affinity);
     };
     if all || relation == 0 {
-        let mut b = Vec::new();
-        processor(&mut b);
-        record(0, &b);
+        for cpu in 0..count {
+            let mut b = Vec::new();
+            processor(&mut b);
+            b[24..32].copy_from_slice(&(1u64<<cpu).to_le_bytes());
+            record(0, &b);
+        }
     }
     if all || relation == 1 {
         // NodeNumber 0, 18 reserved bytes, GroupCount 1, GroupMask.
@@ -699,10 +701,10 @@ extern "win64" fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, 
         b.extend_from_slice(&1u16.to_le_bytes()); // MaximumGroupCount
         b.extend_from_slice(&1u16.to_le_bytes()); // ActiveGroupCount
         b.extend_from_slice(&[0u8; 20]);
-        b.push(1); // MaximumProcessorCount
-        b.push(1); // ActiveProcessorCount
+        b.push(count as u8); // MaximumProcessorCount
+        b.push(count as u8); // ActiveProcessorCount
         b.extend_from_slice(&[0u8; 38]);
-        b.extend_from_slice(&1u64.to_le_bytes()); // ActiveProcessorMask
+        b.extend_from_slice(&mask.to_le_bytes()); // ActiveProcessorMask
         record(4, &b);
     }
     // SAFETY: the caller's in/out length and buffer of that length.
@@ -718,13 +720,12 @@ extern "win64" fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, 
 }
 
 extern "win64" fn SetThreadAffinityMask(thread: u64, mask: u64) -> u64 {
+    if mask==0 {return fail(ERROR_INVALID_PARAMETER,0);}
     if !(thread == objects::CURRENT_THREAD || matches!(objects::get(thread), Some(objects::Object::Thread(_)))) {
         return fail(ERROR_INVALID_HANDLE, 0);
     }
-    if mask & 1 == 0 {
-        return fail(ERROR_INVALID_PARAMETER, 0); // the only processor is #0
-    }
-    1 // previous mask
+    let tid=crate::kernel32::GetThreadId(thread);
+    os_sys::thread_affinity(tid as u64,mask).unwrap_or_else(|e| fail(crate::error::errno_to_win32(e),0))
 }
 
 // ---- process information ------------------------------------------------------------
@@ -997,6 +998,7 @@ extern "win64" fn NtQueryObject(h: u64, class: u32, buf: *mut u8, len: u32, ret:
                 objects::Object::File(_) | objects::Object::Console(_) | objects::Object::Null | objects::Object::Pipe(_) => "File",
                 objects::Object::Thread(_) => "Thread",
                 objects::Object::Event(_) => "Event",
+                objects::Object::KeyedEvent(_) => "KeyedEvent",
                 objects::Object::Timer(_) => "Timer",
                 objects::Object::Mutex(_) => "Mutant",
                 objects::Object::Semaphore(_) => "Semaphore",

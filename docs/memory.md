@@ -32,7 +32,49 @@ invalid frees.
   kernel image, and already-mapped pages.
 - Leaf permissions: writable only on request; NX unless executable (when the
   CPU supports NX). `CR0.WP` makes read-only pages read-only for the kernel too.
-- `destroy_address_space` frees every user-half leaf frame and page table.
+- `destroy_address_space` frees every user-half leaf frame and page table, so
+  frames owned by someone else (shared memory, file views, shared images) are
+  unmapped first.
+- `edit_range_in` rewrites or clears the present leaves of a range as a
+  callback decides, with one TLB shootdown for the whole range;
+  `replace_in` swaps the frame of one present leaf (copy-on-write).
+
+## Shared executable images (`kernel/src/image.rs`)
+
+Windows programs map large DLLs (Zen's `xul.dll` is about 170 MiB laid out).
+Without sharing, every process of a browser built its own relocated copy.
+Now the first process that loads a PE file at some base lays it out and
+relocates it in its own anonymous region, then calls `image_publish`: the
+region's frames move into an `ImageSection` and stay mapped read-only.
+A later process of the same user asks `image_query` for that base, reserves
+the same addresses and calls `image_map`, which maps the section's frames
+read-only instead of building a copy.
+
+- A write to such a page (import binding, `.data`, relocated pointers patched
+  at run time) is a protection fault; `process::cow_fault` gives the process
+  a private copy and retries. Kernel copies to user memory take the same path
+  (`CR0.WP`). A page is shared exactly while its entry points at the
+  section's frame; `protect` keeps such pages read-only even when the region
+  becomes writable.
+- Sections are keyed by volume, inode, size, modification time, base, page
+  count and user id. Writing or truncating the file drops its keys (mappings
+  keep their section). The kernel does not check the published bytes, so
+  images are only shared between processes of the same user.
+- The lookup table holds weak references: a section lives while some
+  process maps it. `unmap`, `discard`, `execve` and exit unmap shared frames
+  instead of freeing them; frame accounting at teardown stays exact.
+- Publishing logs `image: published …` with the live sections, the memory
+  they hold and how many maps reused one.
+
+Only images at the same base can be shared: a process whose address space
+already uses the published base builds a private copy. Child processes of
+the same program load their DLLs in the same order and in practice get the
+same bases (Zen: 29 of 29 maps reused). Fixed mappings no longer move the
+anonymous-mapping cursor; it skips over them instead. Untouched pages of a
+published image are filled with zeroed frames at publication.
+
+Placing DLLs at name-hashed slots high in the address space
+(`0x6000_0000_0000`) was tried and dropped: Zen then never showed its window.
 
 ## Heaps
 

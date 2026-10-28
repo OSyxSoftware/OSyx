@@ -118,6 +118,11 @@ extern "win64" fn DwmExtendFrameIntoClientArea(hwnd: u64, _margins: *const i32) 
 
 /// Waits for the next tick of the composition clock.
 extern "win64" fn DwmFlush() -> u32 {
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && (n < 20 || n.is_multiple_of(600)) {
+        os_std::eprintln!("winrun: dwmflush n={n}");
+    }
     let now = crate::kernel32::now_ns();
     let next = (now / REFRESH_NS + 1) * REFRESH_NS;
     os_std::thread::sleep(core::time::Duration::from_nanos(next - now));
@@ -127,11 +132,20 @@ extern "win64" fn DwmFlush() -> u32 {
 /// DWM_TIMING_INFO (292 bytes, packed): the refresh rate and period, the
 /// last vertical blank and the refresh count; frame statistics are zero.
 extern "win64" fn DwmGetCompositionTimingInfo(hwnd: u64, info: *mut u8) -> u32 {
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let log = crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && (n < 20 || n.is_multiple_of(600));
     if hwnd != 0 || info.is_null() {
+        if log {
+            os_std::eprintln!("winrun: dwmtiming n={n} hwnd={hwnd:#x} badarg");
+        }
         return E_INVALIDARG;
     }
     // SAFETY: the caller's structure starts with its size.
     let size = unsafe { teb::get::<u32>(info as u64, 0) };
+    if log {
+        os_std::eprintln!("winrun: dwmtiming n={n} hwnd={hwnd:#x} size={size}");
+    }
     if size != 292 {
         return DWM_E_BAD_TIMING_SIZE;
     }

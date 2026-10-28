@@ -1,4 +1,4 @@
-//! Threads and the preemptive round-robin scheduler (single CPU).
+//! Threads and the preemptive round-robin scheduler (SMP, one current/idle thread per CPU).
 //!
 //! * Every thread has its own 64 KiB kernel stack (the boot thread keeps the
 //!   loader's stack), a saved stack pointer and a 512-byte FXSAVE area.
@@ -31,9 +31,12 @@ use core::arch::global_asm;
 
 pub type Tid = u64;
 
-/// Timer ticks (10 ms each) a thread may run before it can be preempted.
-pub const TIME_SLICE_TICKS: u32 = 2;
+/// Timer ticks (1 ms each) a thread may run before it can be preempted.
+pub const TIME_SLICE_TICKS: u32 = 10;
 const KERNEL_STACK_SIZE: usize = 64 * 1024;
+// TEMP stack-overflow detector: the bottom words of every kernel stack keep a
+// pattern no frame reaches; an overflow reaches them first.
+const STACK_CANARY: u64 = 0xC0DE_5A5A_1234_5678;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -81,22 +84,45 @@ pub struct Thread {
     /// Set when the owning process is exiting: the thread ends at its next
     /// safe point (return to user mode or an interrupted blocking call).
     kill_pending: bool,
+    /// A wake-up arrived while the thread was still running, i.e. between its
+    /// condition check and marking itself blocked. The next block is skipped.
+    wake_pending: bool,
+    /// The thread is on its way off its CPU: it has marked itself blocked or
+    /// dead, or was preempted, but the switch is not complete. It must not be
+    /// queued (woken, timed out) until `after_switch`; otherwise another CPU
+    /// could run it while it still runs here.
+    leaving: bool,
+    /// This thread's kernel context held the kernel entry lock when it was
+    /// switched out. The CPU gives the lock up at every switch and takes it
+    /// back here before the thread continues, so a sleeping thread never
+    /// keeps other CPUs out of the kernel.
+    bkl: bool,
     cpu_ticks: u64,
+    affinity: u64,
+    /// TEMP deepest kernel-stack pointer seen at a switch-out.
+    low_rsp: u64,
+    /// TEMP one-shot flag for the overflow report.
+    stack_warned: bool,
 }
 
 const IA32_FS_BASE: u32 = 0xC000_0100;
-const IA32_GS_BASE: u32 = 0xC000_0101;
+const IA32_GS_BASE: u32 = crate::smp::USER_GS_BASE;
 
 struct Scheduler {
     threads: BTreeMap<Tid, Box<Thread>>,
     ready: VecDeque<Tid>,
-    current: Tid,
-    idle: Tid,
+    current: [Tid; crate::smp::MAX_CPUS],
+    idle: [Tid; crate::smp::MAX_CPUS],
     next_tid: Tid,
-    reap: Option<Tid>,
+    reap: [Option<Tid>; crate::smp::MAX_CPUS],
+    /// A thread switched out on that CPU, published to the ready queue by the
+    /// next thread only after the switch completes. Publishing it earlier
+    /// would let another CPU pick and run it while it is still running here.
+    publish: [Option<Tid>; crate::smp::MAX_CPUS],
     switches: u64,
     ticks: u64,
     idle_ticks: u64,
+    last_wake_tick: u64,
 }
 
 static SCHED: IrqSpinLock<Option<Scheduler>> = IrqSpinLock::new(None);
@@ -154,15 +180,22 @@ extern "C" fn osyx_thread_start(entry: u64, a: u64, b: u64) -> ! {
     exit_current()
 }
 
-fn idle_loop(_: u64, _: u64) {
+fn idle_loop(_: u64, _: u64) { secondary_idle(); }
+
+pub fn secondary_idle() -> ! {
     loop {
+        schedule();
+        crate::smp::osyx_kernel_leave();
         cpu::enable_and_halt();
+        crate::smp::enter_kernel();
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u64, fs_base: u64) -> Box<Thread> {
     let mut stack = alloc::vec![0u128; KERNEL_STACK_SIZE / 16];
+    stack[0] = STACK_CANARY as u128;
+    stack[1] = STACK_CANARY as u128;
     let top = stack.as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64;
     // Frame consumed by osyx_switch: rflags, r15, r14, r13, r12, rbx, rbp, ret.
     let frame: [u64; 8] = [0x2, 0, b, a, entry as *const () as u64, 0, 0, osyx_thread_trampoline as *const () as u64];
@@ -185,7 +218,13 @@ fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b
         fs_base,
         gs_base: 0,
         kill_pending: false,
+        wake_pending: false,
+        leaving: false,
+        bkl: false,
         cpu_ticks: 0,
+        affinity: u64::MAX,
+        low_rsp: top,
+        stack_warned: false,
     })
 }
 
@@ -208,7 +247,13 @@ pub fn init() {
         fs_base: 0,
         gs_base: 0,
         kill_pending: false,
+        wake_pending: false,
+        leaving: false,
+        bkl: false,
         cpu_ticks: 0,
+        affinity: u64::MAX,
+        low_rsp: 0,
+        stack_warned: false,
     });
     let idle = new_thread(2, "idle", 0, root, idle_loop, 0, 0, 0);
     let mut threads = BTreeMap::new();
@@ -217,14 +262,34 @@ pub fn init() {
     *SCHED.lock() = Some(Scheduler {
         threads,
         ready: VecDeque::with_capacity(64),
-        current: 1,
-        idle: 2,
+        current: { let mut a=[0;crate::smp::MAX_CPUS]; a[0]=1; a },
+        idle: { let mut a=[0;crate::smp::MAX_CPUS]; a[0]=2; a },
         next_tid: 3,
-        reap: None,
+        reap: [None;crate::smp::MAX_CPUS],
+        publish: [None;crate::smp::MAX_CPUS],
         switches: 0,
         ticks: 0,
         idle_ticks: 0,
+        last_wake_tick: u64::MAX,
     });
+    crate::smp::set_current(1, 0);
+}
+
+/// Adopts an AP's bootstrap stack as that CPU's permanent idle thread.
+pub fn init_secondary(top: u64) {
+    let index=crate::smp::index();
+    let mut guard=SCHED.lock();
+    let s=guard.as_mut().expect("scheduler initialized");
+    let tid=s.next_tid; s.next_tid+=1;
+    let t=Box::new(Thread {
+        tid,name:alloc::format!("idle/{index}"),pid:0,state:State::Running,rsp:0,
+        root:paging::kernel_root(),_kstack:Vec::new(),kstack_top:top,
+        fpu:FpuState::initial(),wake_at:None,joiners:Vec::new(),slice:TIME_SLICE_TICKS,
+        fs_base:0,gs_base:0,kill_pending:false,wake_pending:false,leaving:false,bkl:false,cpu_ticks:0,affinity:u64::MAX,low_rsp:top,stack_warned:false,
+    });
+    s.threads.insert(tid,t);s.current[index]=tid;s.idle[index]=tid;
+    crate::smp::set_current(tid, 0);
+    unsafe { gdt::set_kernel_stack(top);syscall::set_kernel_stack(top); }
 }
 
 /// Creates a ready thread running `entry(a, b)` with page table `root` and
@@ -250,20 +315,23 @@ type SwitchPlan = (*mut u64, u64, *mut FpuState, *const FpuState);
 
 impl Scheduler {
     fn pick_next(&mut self) -> Option<SwitchPlan> {
-        let cur = self.current;
+        let cur = self.current[crate::smp::index()];
         if let Some(t) = self.threads.get_mut(&cur) {
             if t.state == State::Running {
                 t.state = State::Ready;
-                if cur != self.idle {
-                    self.ready.push_back(cur);
-                }
             }
         }
+        let mut candidates = self.ready.len();
         let next = loop {
+            if candidates == 0 { break self.idle[crate::smp::index()]; }
+            candidates -= 1;
             match self.ready.pop_front() {
-                Some(n) if self.threads.get(&n).is_some_and(|t| t.state == State::Ready) => break n,
+                Some(n) if self.threads.get(&n).is_some_and(|t| t.state == State::Ready) => {
+                    if self.threads[&n].affinity & (1<<crate::smp::index()) != 0 { break n; }
+                    self.ready.push_back(n);
+                }
                 Some(_) => continue,
-                None => break self.idle,
+                None => break self.idle[crate::smp::index()],
             }
         };
         let nt = self.threads.get_mut(&next).expect("next thread exists");
@@ -272,15 +340,33 @@ impl Scheduler {
         if next == cur {
             return None;
         }
+        crate::smp::set_current(nt.tid, nt.pid);
         let (new_rsp, new_root, new_top, new_fs, new_gs) = (nt.rsp, nt.root, nt.kstack_top, nt.fs_base, nt.gs_base);
         let new_fpu: *const FpuState = &*nt.fpu;
         let old = self.threads.get_mut(&cur).expect("current thread exists");
-        if old.state == State::Dead {
-            self.reap = Some(cur);
+        // From here until `after_switch` the outgoing context is neither
+        // running nor runnable: it must not be queued even if it is woken,
+        // because its registers have not been saved yet.
+        let outgoing = if cur == self.idle[crate::smp::index()] { None } else { Some(cur) };
+        if outgoing.is_some() {
+            old.leaving = true;
         }
-        // SAFETY: IA32_FS_BASE and IA32_GS_BASE exist on every x86-64 CPU;
-        // the kernel uses neither FS nor GS (no swapgs), so the values only
-        // matter to each thread's user code.
+        self.publish[crate::smp::index()] = outgoing;
+        if old.state == State::Dead {
+            self.reap[crate::smp::index()] = Some(cur);
+        }
+        // Hand the kernel entry lock back: the thread keeps the right to
+        // re-acquire it when it resumes, but no CPU may hold it on behalf of
+        // a thread that is off-CPU (a blocked syscall would otherwise stall
+        // every other CPU for the whole wait).
+        old.bkl = crate::smp::owner_is_me();
+        if old.bkl {
+            // The scheduler lock is held here; waking parked waiters is left
+            // to `after_switch`, which runs with that lock dropped.
+            crate::smp::release_for_switch();
+        }
+        // FS is userspace TLS. The inactive GS base holds the thread's
+        // Windows TEB while the active kernel GS stays CPU-local.
         unsafe {
             old.fs_base = cpu::rdmsr(IA32_FS_BASE);
             cpu::wrmsr(IA32_FS_BASE, new_fs);
@@ -289,12 +375,13 @@ impl Scheduler {
         }
         let old_rsp: *mut u64 = &mut old.rsp;
         let old_fpu: *mut FpuState = &mut *old.fpu;
-        self.current = next;
+        self.current[crate::smp::index()] = next;
         self.switches += 1;
         if new_root != paging::current_root() {
             // SAFETY: every thread root maps the kernel half (shared PDPTs).
             unsafe { cpu::write_cr3(new_root) };
         }
+        crate::smp::set_root(new_root);
         if new_top != 0 {
             // SAFETY: the thread's kernel stack lives as long as the thread.
             unsafe {
@@ -328,11 +415,68 @@ pub fn schedule() {
     }
 }
 
-/// Runs on the new thread right after every switch: frees the thread that
-/// exited before it.
+/// Runs on the new thread right after every switch: the thread that was
+/// switched out is only now off its CPU, so it becomes runnable here, and a
+/// thread that exited before the switch is freed.
 fn after_switch() {
-    let dead = SCHED.lock().as_mut().and_then(|s| s.reap.take().and_then(|t| s.threads.remove(&t)));
+    let cpu = crate::smp::index();
+    let mut g = SCHED.lock();
+    let mut dead = None;
+    let mut reacquire = false;
+    if let Some(s) = g.as_mut() {
+        let Scheduler { threads, ready, publish, reap, current, .. } = s;
+        if let Some(t) = publish[cpu].take() {
+            let mut requeue = false;
+            if let Some(th) = threads.get_mut(&t) {
+                th.leaving = false;
+                th.low_rsp = th.low_rsp.min(th.rsp);
+                requeue = th.state == State::Ready;
+                if !th._kstack.is_empty() {
+                    let base = th._kstack.as_ptr() as u64;
+                    if th.low_rsp < base && !th.stack_warned {
+                        th.stack_warned = true;
+                        let low = th.low_rsp;
+                        let top = th.kstack_top;
+                        crate::kprintln!(
+                            "sched: stack overrun tid {} ({}) base={:#x} low={:#x} under={:#x}",
+                            th.tid,
+                            th.name,
+                            base,
+                            low,
+                            base - low
+                        );
+                        let mut a = low.max(base.saturating_sub(0x2000));
+                        let mut shown = 0;
+                        while a < top && shown < 10 {
+                            // SAFETY: `a` stays inside this thread's stack block.
+                            let w = unsafe { core::ptr::read_volatile(a as *const u64) };
+                            if (0xffff_ffff_8000_0000..0xffff_ffff_c000_0000).contains(&w) {
+                                crate::kprintln!("sched:   ra @{a:#x} = {w:#x}");
+                                shown += 1;
+                            }
+                            a += 8;
+                        }
+                    }
+                }
+            }
+            if requeue {
+                ready.push_back(t);
+            }
+        }
+        dead = reap[cpu].take().and_then(|t| threads.remove(&t));
+        reacquire = threads.get(&current[cpu]).is_some_and(|t| t.bkl);
+    }
+    drop(g);
     drop(dead);
+    if reacquire {
+        // The thread was executing kernel code under the entry lock when it
+        // was switched out; it must not continue without it.
+        crate::smp::enter_kernel();
+    } else if crate::smp::bkl_is_free() {
+        // It was released while switching (a blocked syscall, an idle CPU);
+        // hand it to the next parked syscall waiter.
+        crate::smp::wake_bkl_waiters();
+    }
 }
 
 /// Timer interrupt hook: wakes sleepers and preempts an expired time slice.
@@ -341,19 +485,55 @@ pub fn tick(now: u64) {
         let mut g = SCHED.lock();
         let Some(s) = g.as_mut() else { return };
         s.ticks = s.ticks.saturating_add(1);
-        if s.current == s.idle {
+        if s.current[crate::smp::index()] == s.idle[crate::smp::index()] {
             s.idle_ticks = s.idle_ticks.saturating_add(1);
         }
-        for (tid, t) in s.threads.iter_mut() {
-            if t.state == State::Blocked && t.wake_at.is_some_and(|w| w <= now) {
-                t.wake_at = None;
-                t.state = State::Ready;
-                s.ready.push_back(*tid);
+        // AP timers account/preempt their own CPU, but sleepers need one
+        // scan per global tick, not one full scan per CPU.
+        if s.last_wake_tick != now {
+            s.last_wake_tick = now;
+            let Scheduler { threads, ready, .. } = s;
+            for (tid, t) in threads.iter_mut() {
+                if t.state == State::Blocked && t.wake_at.is_some_and(|w| w <= now) {
+                    t.wake_at = None;
+                    t.state = State::Ready;
+                    if !t.leaving {
+                        ready.push_back(*tid);
+                    }
+                }
             }
         }
-        let idle = s.idle;
-        let cur = s.threads.get_mut(&s.current).expect("current thread exists");
+        let ci = crate::smp::index();
+        let idle = s.idle[ci];
+        let cur_tid = s.current[ci];
+        let cur = match s.threads.get_mut(&cur_tid) {
+            Some(cur) => cur,
+            None => panic!(
+                "current thread missing: cpu {ci}, current {cur_tid}, idle {idle}, threads {}, online {}",
+                s.threads.len(),
+                crate::smp::online()
+            ),
+        };
         cur.cpu_ticks = cur.cpu_ticks.saturating_add(1);
+        if !cur._kstack.is_empty() {
+            // SAFETY: the block is owned by this thread and alive right now.
+            let bottom = unsafe { core::ptr::read_volatile(cur._kstack.as_ptr()) } as u64;
+            if bottom != STACK_CANARY {
+                let base = cur._kstack.as_ptr() as u64;
+                let rsp: u64;
+                // SAFETY: reading the stack pointer has no side effects.
+                unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+                crate::kprintln!(
+                    "stack canary: tid {} ({}) base={:#x} top={:#x} rsp={:#x} low={:#x} canary={:#x}",
+                    cur.tid, cur.name, base, cur.kstack_top, rsp, cur.low_rsp, bottom
+                );
+                for i in 0..12u64 {
+                    let w = unsafe { core::ptr::read_volatile((base + i * 8) as *const u64) };
+                    crate::kprintln!("stack canary: +{:#x} = {:#x}", i * 8, w);
+                }
+                panic!("kernel stack overflow: tid {} ({})", cur.tid, cur.name);
+            }
+        }
         cur.slice = cur.slice.saturating_sub(1);
         (cur.slice == 0 || cur.tid == idle) && !s.ready.is_empty()
     };
@@ -370,11 +550,18 @@ pub fn cpu_ticks(tid: Tid) -> u64 {
     SCHED.lock().as_ref().and_then(|s| s.threads.get(&tid)).map_or(0, |t| t.cpu_ticks)
 }
 
+/// TEMP per-thread CPU ticks (tid, pid, ticks) for the 1 s stats line.
+pub fn thread_cpu() -> alloc::vec::Vec<(Tid, u64, u64)> {
+    let g = SCHED.lock();
+    let Some(s) = g.as_ref() else { return alloc::vec::Vec::new() };
+    s.threads.values().map(|t| (t.tid, t.pid, t.cpu_ticks)).collect()
+}
+
 /// From an interrupt handler: switches away from the idle thread if the
 /// handler made another thread ready (instead of halting until the next
 /// timer tick).
 pub fn preempt_if_idle() {
-    let resched = SCHED.lock().as_ref().is_some_and(|s| s.current == s.idle && !s.ready.is_empty());
+    let resched = SCHED.lock().as_ref().is_some_and(|s| s.current[crate::smp::index()] == s.idle[crate::smp::index()] && !s.ready.is_empty());
     if resched {
         schedule();
     }
@@ -395,9 +582,12 @@ pub fn sleep_ticks(ticks: u64) {
     {
         let mut g = SCHED.lock();
         let s = g.as_mut().expect("scheduler not initialised");
-        let t = s.threads.get_mut(&s.current).expect("current thread exists");
+        let t = s.threads.get_mut(&s.current[crate::smp::index()]).expect("current thread exists");
         t.wake_at = Some(interrupts::ticks() + ticks);
         t.state = State::Blocked;
+        // A waker must not queue this thread before its own CPU has saved
+        // its context (`after_switch` clears the flag).
+        t.leaving = true;
     }
     schedule();
     if were_enabled {
@@ -417,9 +607,18 @@ pub fn mark_current_blocked() {
 pub fn mark_current_blocked_until(deadline: Option<u64>) {
     let mut g = SCHED.lock();
     let s = g.as_mut().expect("scheduler not initialised");
-    let t = s.threads.get_mut(&s.current).expect("current thread exists");
+    let t = s.threads.get_mut(&s.current[crate::smp::index()]).expect("current thread exists");
+    if t.wake_pending {
+        // Another CPU woke us after the caller's last check. Stay runnable so
+        // `schedule` returns to the caller, which re-checks its condition.
+        t.wake_pending = false;
+        return;
+    }
     t.state = State::Blocked;
     t.wake_at = deadline;
+    // See `sleep_ticks`: the caller switches out next, and until that switch
+    // completes another CPU must not run this thread.
+    t.leaving = true;
 }
 
 /// Asks thread `tid` to end at its next safe point and wakes it if blocked
@@ -432,23 +631,27 @@ pub fn request_kill(tid: Tid) {
         if t.state == State::Blocked {
             t.state = State::Ready;
             t.wake_at = None;
-            s.ready.push_back(tid);
+            if !t.leaving {
+                s.ready.push_back(tid);
+            }
+        } else {
+            t.wake_pending = true;
         }
     }
 }
 
 /// True if the current thread has been asked to end.
 pub fn current_kill_pending() -> bool {
-    SCHED.lock().as_ref().is_some_and(|s| s.threads.get(&s.current).is_some_and(|t| t.kill_pending))
+    SCHED.lock().as_ref().is_some_and(|s| s.threads.get(&s.current[crate::smp::index()]).is_some_and(|t| t.kill_pending))
 }
 
 /// Sets the GS base of the current thread and loads it into the CPU.
 pub fn set_current_gs_base(value: u64) {
     let mut g = SCHED.lock();
     let s = g.as_mut().expect("scheduler not initialised");
-    let t = s.threads.get_mut(&s.current).expect("current thread exists");
+    let t = s.threads.get_mut(&s.current[crate::smp::index()]).expect("current thread exists");
     t.gs_base = value;
-    // SAFETY: see `pick_next`; the kernel does not use GS.
+    // SAFETY: inactive GS is the user TEB; active GS stays CPU-local.
     unsafe { cpu::wrmsr(IA32_GS_BASE, value) };
 }
 
@@ -456,7 +659,7 @@ pub fn set_current_gs_base(value: u64) {
 pub fn set_current_fs_base(value: u64) {
     let mut g = SCHED.lock();
     let s = g.as_mut().expect("scheduler not initialised");
-    let t = s.threads.get_mut(&s.current).expect("current thread exists");
+    let t = s.threads.get_mut(&s.current[crate::smp::index()]).expect("current thread exists");
     t.fs_base = value;
     // SAFETY: see `pick_next`; the kernel does not use FS.
     unsafe { cpu::wrmsr(IA32_FS_BASE, value) };
@@ -473,7 +676,7 @@ pub fn reset_current_fpu() {
 
 pub fn rename_current(name: &str) {
     let mut g = SCHED.lock();
-    if let Some(t) = g.as_mut().and_then(|s| s.threads.get_mut(&s.current)) {
+    if let Some(t) = g.as_mut().and_then(|s| s.threads.get_mut(&s.current[crate::smp::index()])) {
         t.name = name.to_string();
     }
 }
@@ -482,12 +685,24 @@ pub fn rename_current(name: &str) {
 pub fn wake(tid: Tid) {
     let mut g = SCHED.lock();
     let Some(s) = g.as_mut() else { return };
-    if let Some(t) = s.threads.get_mut(&tid) {
+    let Scheduler { threads, ready, .. } = s;
+    let mut queue = false;
+    if let Some(t) = threads.get_mut(&tid) {
         if t.state == State::Blocked {
             t.state = State::Ready;
             t.wake_at = None;
-            s.ready.push_back(tid);
+            // A thread whose context is still being saved is queued by
+            // `after_switch` on its old CPU; queueing it here would let
+            // another CPU run it before the switch completes.
+            queue = !t.leaving;
+        } else if !t.leaving {
+            // The thread may be about to block (it checked its condition, not
+            // yet marked itself blocked). Remember the wake for that block.
+            t.wake_pending = true;
         }
+    }
+    if queue {
+        ready.push_back(tid);
     }
 }
 
@@ -497,9 +712,10 @@ pub fn exit_current() -> ! {
     let joiners = {
         let mut g = SCHED.lock();
         let s = g.as_mut().expect("scheduler not initialised");
-        let t = s.threads.get_mut(&s.current).expect("current thread exists");
+        let t = s.threads.get_mut(&s.current[crate::smp::index()]).expect("current thread exists");
         assert!(t.kstack_top != 0, "the boot thread cannot exit");
         t.state = State::Dead;
+        t.leaving = true;
         core::mem::take(&mut t.joiners)
     };
     for j in joiners {
@@ -517,11 +733,13 @@ pub fn join(tid: Tid) {
         let waiting = {
             let mut g = SCHED.lock();
             let s = g.as_mut().expect("scheduler not initialised");
-            let me = s.current;
+            let me = s.current[crate::smp::index()];
             match s.threads.get_mut(&tid) {
                 Some(t) if t.state != State::Dead => {
                     t.joiners.push(me);
-                    s.threads.get_mut(&me).expect("current thread exists").state = State::Blocked;
+                    let j = s.threads.get_mut(&me).expect("current thread exists");
+                    j.state = State::Blocked;
+                    j.leaving = true;
                     true
                 }
                 _ => false,
@@ -540,19 +758,47 @@ pub fn join(tid: Tid) {
 }
 
 pub fn current_tid() -> Tid {
-    SCHED.lock().as_ref().map_or(1, |s| s.current)
+    let tid = crate::smp::cached_tid();
+    if tid != 0 {
+        return tid;
+    }
+    SCHED.lock().as_ref().map_or(1, |s| s.current[crate::smp::index()])
+}
+
+pub fn set_affinity(tid:Tid,mask:u64)->Result<u64,osyx_abi::Errno> {
+    let available=(1u64<<crate::smp::online())-1;
+    if mask & !available !=0 { return Err(osyx_abi::Errno::InvalidArgument); }
+    let me=current_tid();
+    let tid=if tid==0 {me}else{tid};
+    let pid=current_pid();
+    let old={
+        let mut guard=SCHED.lock();
+        let s=guard.as_mut().ok_or(osyx_abi::Errno::NotSupported)?;
+        let thread=s.threads.get_mut(&tid).ok_or(osyx_abi::Errno::NotFound)?;
+        if thread.pid!=pid {return Err(osyx_abi::Errno::PermissionDenied);}
+        let old=thread.affinity&available;
+        if mask==0 { return Ok(old); }
+        thread.affinity=mask;
+        old
+    };
+    if tid==me && mask & (1<<crate::smp::index())==0 { schedule(); }
+    Ok(old)
 }
 
 pub fn current_pid() -> u64 {
-    SCHED.lock().as_ref().and_then(|s| s.threads.get(&s.current).map(|t| t.pid)).unwrap_or(0)
+    if crate::smp::cached_tid() != 0 {
+        return crate::smp::cached_pid();
+    }
+    SCHED.lock().as_ref().and_then(|s| s.threads.get(&s.current[crate::smp::index()]).map(|t| t.pid)).unwrap_or(0)
 }
 
 /// Changes the page table root recorded for the current thread (used when a
 /// process leaves its address space on exit).
 pub fn set_current_root(root: u64) {
+    crate::smp::set_root(root);
     let mut g = SCHED.lock();
     if let Some(s) = g.as_mut() {
-        if let Some(t) = s.threads.get_mut(&s.current) {
+        if let Some(t) = s.threads.get_mut(&s.current[crate::smp::index()]) {
             t.root = root;
         }
     }
@@ -570,7 +816,17 @@ pub fn dump() {
     let g = SCHED.lock();
     let Some(s) = g.as_ref() else { return };
     for t in s.threads.values() {
-        crate::kprintln!("  thread {:3} {:<10} pid {:2} {:?}", t.tid, t.name, t.pid, t.state);
+        let (nr, rip) = crate::smp::last_syscall(t.tid);
+        crate::kprintln!(
+            "  thread {:3} {:<10} pid {:2} {:?} wake {:?} syscall {:#x}@{:#x}",
+            t.tid,
+            t.name,
+            t.pid,
+            t.state,
+            t.wake_at,
+            nr,
+            rip
+        );
     }
 }
 

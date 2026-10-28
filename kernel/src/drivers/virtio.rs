@@ -42,7 +42,10 @@ const USED_OFFSET: u64 = 2048;
 
 /// A request that takes longer than this is treated as a device failure.
 const TIMEOUT_MS: u64 = 5000;
-/// Checks of the used ring before a waiting request starts yielding.
+/// Checks of the used ring before a waiting request starts yielding. Every
+/// request runs under the global kernel lock, so a long spin here stalls
+/// unrelated threads (including the UI): yield early and let them run while
+/// the device finishes.
 const SPIN_POLLS: u32 = 1_000;
 
 // Common configuration register offsets.

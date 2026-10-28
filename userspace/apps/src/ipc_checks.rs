@@ -86,6 +86,26 @@ pub fn run(t: &mut Tests) {
             && b.as_deref() == Some(b"pong".as_slice())
             && conn.peer().ok() == Some((me, 0))
     });
+    t.check("ipc: raw receives without handle capacity preserve queued messages", || {
+        let Ok(server) = Listener::listen("init-raw-recv") else { return false };
+        let Ok(client) = Channel::connect("init-raw-recv") else { return false };
+        let Ok(Some(conn)) = server.accept() else { return false };
+        let mut buf = [0u8; 16];
+        let empty = os::raw::channel_recv(conn.handle(), &mut buf, &mut []) == Err(os::raw::Errno::WouldBlock);
+        let sent = client.send(b"raw", &[]).is_ok();
+        let mut tiny = [0u8; 2];
+        let too_small = os::raw::channel_recv(conn.handle(), &mut tiny, &mut []) == Err(os::raw::Errno::InvalidArgument);
+        let received = os::raw::channel_recv(conn.handle(), &mut buf, &mut []);
+        let raw_ok = received == Ok((3, 0)) && &buf[..3] == b"raw";
+        let Ok(shm) = SharedMemory::create(4096) else { return false };
+        let sent_handle = client.send(b"with handle", &[shm.handle()]).is_ok();
+        let refused = os::raw::channel_recv(conn.handle(), &mut buf, &mut []) == Err(os::raw::Errno::InvalidArgument);
+        let with_handle = conn.recv(&mut buf).ok().flatten();
+        let handle_ok = with_handle.as_ref().is_some_and(|(n, handles)| *n == 11 && handles.len() == 1);
+        drop(client);
+        let hangup = os::raw::channel_recv(conn.handle(), &mut buf, &mut []) == Err(os::raw::Errno::BrokenPipe);
+        empty && sent && too_small && raw_ok && sent_handle && refused && handle_ok && hangup
+    });
     t.check("ipc: a closed peer is reported as hang-up, then BrokenPipe", || {
         let Ok(server) = Listener::listen("init-hangup") else { return false };
         let Ok(client) = Channel::connect("init-hangup") else { return false };

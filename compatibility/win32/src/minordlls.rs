@@ -9,8 +9,10 @@
 //! Manager, and no WIC codecs.
 #![allow(non_snake_case)]
 use crate::{error::*, kernel32::fail, path, teb};
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
+use os_std::io::{Read as _, Seek as _, SeekFrom};
+use os_std::sync::Mutex;
 
 // ---- rpcrt4 ------------------------------------------------------------------------
 
@@ -323,4 +325,307 @@ extern "win64" fn GetScaleFactorForMonitor(monitor: u64, scale: *mut u32) -> u32
 
 pub fn shcore_exports() -> Vec<(&'static str, u64)> {
     export_table![GetDpiForMonitor, GetScaleFactorForMonitor]
+}
+
+// ---- wininet -----------------------------------------------------------------------------------
+
+/// Networking here is plain sockets over the emulated LAN, so the Internet
+/// connection is always up; Gecko only asks wininet whether it is.
+const INTERNET_CONNECTION_LAN: u32 = 0x02;
+const INTERNET_CONNECTION_CONFIGURED: u32 = 0x04;
+
+extern "win64" fn InternetGetConnectedState(flags: *mut u32, _reserved: u32) -> crate::kernel32::Bool {
+    if !flags.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *flags = INTERNET_CONNECTION_LAN | INTERNET_CONNECTION_CONFIGURED };
+    }
+    crate::kernel32::TRUE
+}
+
+extern "win64" fn InternetGetConnectedStateExW(
+    flags: *mut u32,
+    name: *mut u16,
+    name_len: u32,
+    _reserved: u32,
+) -> crate::kernel32::Bool {
+    if !flags.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *flags = INTERNET_CONNECTION_LAN | INTERNET_CONNECTION_CONFIGURED };
+    }
+    if !name.is_null() && name_len > 1 {
+        // SAFETY: room for name_len UTF-16 units, as the caller promises.
+        unsafe {
+            *name = b'L' as u16;
+            *name.add(1) = 0;
+        }
+    }
+    crate::kernel32::TRUE
+}
+
+extern "win64" fn InternetGetConnectedStateExA(
+    flags: *mut u32,
+    name: *mut u8,
+    name_len: u32,
+    _reserved: u32,
+) -> crate::kernel32::Bool {
+    if !flags.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *flags = INTERNET_CONNECTION_LAN | INTERNET_CONNECTION_CONFIGURED };
+    }
+    if !name.is_null() && name_len > 1 {
+        // SAFETY: room for name_len bytes, as the caller promises.
+        unsafe {
+            *name = b'L';
+            *name.add(1) = 0;
+        }
+    }
+    crate::kernel32::TRUE
+}
+
+extern "win64" fn InternetCheckConnectionW(_url: *const u16, _flags: u32, _reserved: u32) -> crate::kernel32::Bool {
+    crate::kernel32::TRUE
+}
+
+extern "win64" fn InternetAttemptConnect(_reserved: u32) -> u32 {
+    ERROR_SUCCESS
+}
+
+/// There is no WinINet session state to query; callers fall back to a
+/// direct connection.
+extern "win64" fn InternetQueryOptionW(_session: u64, _option: u32, _buffer: *mut u8, _len: *mut u32) -> crate::kernel32::Bool {
+    crate::kernel32::fail(ERROR_INVALID_PARAMETER, crate::kernel32::FALSE)
+}
+
+extern "win64" fn InternetSetOptionW(_session: u64, _option: u32, _buffer: *const u8, _len: u32) -> crate::kernel32::Bool {
+    crate::kernel32::TRUE
+}
+
+extern "win64" fn InternetCloseHandle(_session: u64) -> crate::kernel32::Bool {
+    crate::kernel32::TRUE
+}
+
+pub fn wininet_exports() -> Vec<(&'static str, u64)> {
+    export_table![
+        InternetGetConnectedState,
+        InternetGetConnectedStateExW,
+        InternetGetConnectedStateExA,
+        InternetCheckConnectionW,
+        InternetAttemptConnect,
+        InternetQueryOptionW,
+        InternetSetOptionW,
+        InternetCloseHandle,
+    ]
+}
+
+// ---- wintrust -----------------------------------------------------------------------
+
+// WINTRUST_DATA and WINTRUST_FILE_INFO field offsets, x86-64.
+const WTD_UNION_CHOICE: usize = 32;
+const WTD_FILE_INFO: usize = 40;
+const WTD_STATE_ACTION: usize = 48;
+const WTD_STATE_DATA: usize = 56;
+const WTD_MIN_CB: u32 = 64;
+const WTFI_PATH: usize = 8;
+const WTFI_MIN_CB: u32 = 24;
+
+const WTD_STATEACTION_VERIFY: u32 = 1;
+const WTD_STATEACTION_CLOSE: u32 = 2;
+const WTD_CHOICE_FILE: u32 = 1;
+
+/// WINTRUST_ACTION_GENERIC_VERIFY_V2, the only action OSyx implements.
+const WINTRUST_ACTION_GENERIC_VERIFY_V2: [u8; 16] =
+    [0x6b, 0xc5, 0xaa, 0x00, 0x44, 0xcd, 0xd0, 0x11, 0x8c, 0xc2, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee];
+
+const TRUST_E_SUBJECT_FORM_UNKNOWN: u32 = 0x800b_0003;
+const TRUST_E_NOSIGNATURE: u32 = 0x800b_0100;
+const TRUST_E_BAD_DIGEST: u32 = 0x8009_6010;
+const HRESULT_FILE_NOT_FOUND: u32 = 0x8007_0002;
+
+/// sizeof(CRYPT_PROVIDER_DATA); callers read csSigners at offset 120.
+const PROVIDER_DATA_SIZE: usize = 224;
+/// A PKCS#7 blob in a certificate table is a few tens of kilobytes.
+const SIGNATURE_MAX: u64 = 4 << 20;
+
+/// Live CRYPT_PROVIDER_DATA blocks, keyed by the handle returned to callers.
+static PROVIDER_STATES: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+enum PeSignature {
+    /// No Authenticode signature, or the file is not a PE image.
+    None,
+    /// A certificate table or PKCS#7 signature that cannot be decoded.
+    Malformed,
+    Signed,
+}
+
+fn read_at(f: &mut os_std::fs::File, at: u64, buf: &mut [u8]) -> bool {
+    f.seek(SeekFrom::Start(at)).is_ok() && f.read_exact(buf).is_ok()
+}
+
+/// Finds and decodes the PKCS#7 signature in the image's certificate table
+/// (data directory 4). The file is read in place: only the headers and the
+/// signature blob, never the whole image.
+fn pe_signature(f: &mut os_std::fs::File) -> PeSignature {
+    let mut dos = [0u8; 64];
+    if !read_at(f, 0, &mut dos) || &dos[..2] != b"MZ" {
+        return PeSignature::None;
+    }
+    let e_lfanew = u32::from_le_bytes([dos[0x3c], dos[0x3d], dos[0x3e], dos[0x3f]]) as u64;
+    let mut coff = [0u8; 24];
+    if !read_at(f, e_lfanew, &mut coff) || &coff[..4] != b"PE\0\0" {
+        return PeSignature::None;
+    }
+    let opt_size = u16::from_le_bytes([coff[20], coff[21]]) as u64;
+    let opt = e_lfanew + 24;
+    let mut magic = [0u8; 2];
+    if !read_at(f, opt, &mut magic) {
+        return PeSignature::None;
+    }
+    let dirs = match u16::from_le_bytes(magic) {
+        0x10b => 96,  // PE32
+        0x20b => 112, // PE32+
+        _ => return PeSignature::None,
+    };
+    let mut directory = [0u8; 8];
+    if opt_size < dirs + 5 * 8 || !read_at(f, opt + dirs + 4 * 8, &mut directory) {
+        return PeSignature::None;
+    }
+    let offset = u32::from_le_bytes([directory[0], directory[1], directory[2], directory[3]]) as u64;
+    let size = u32::from_le_bytes([directory[4], directory[5], directory[6], directory[7]]) as u64;
+    if size == 0 {
+        return PeSignature::None;
+    }
+    let Ok(meta) = f.metadata() else { return PeSignature::None };
+    if offset.checked_add(size).is_none_or(|end| end > meta.len() || offset < opt + opt_size || size < 8) {
+        return PeSignature::Malformed;
+    }
+    let mut at = 0;
+    while at + 8 <= size {
+        let mut header = [0u8; 8];
+        if !read_at(f, offset + at, &mut header) {
+            return PeSignature::Malformed;
+        }
+        let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as u64;
+        let kind = u16::from_le_bytes([header[6], header[7]]);
+        if len < 8 || at + len > size || len > SIGNATURE_MAX {
+            return PeSignature::Malformed;
+        }
+        if kind == 2 {
+            // WIN_CERT_TYPE_PKCS_SIGNED_DATA
+            let mut der = alloc::vec![0u8; (len - 8) as usize];
+            if !read_at(f, offset + at + 8, &mut der) {
+                return PeSignature::Malformed;
+            }
+            return if crate::crypt32::authenticode_has_signer(&der) {
+                PeSignature::Signed
+            } else {
+                PeSignature::Malformed
+            };
+        }
+        at += (len + 7) & !7;
+    }
+    PeSignature::None
+}
+
+/// Checks the WINTRUST_DATA of a WTD_STATEACTION_VERIFY call and, when the
+/// file carries a decodable Authenticode signature, records provider state.
+/// OSyx has no trust store: the signature's chain and digest are not
+/// evaluated, so this is a structural check, not a trust decision.
+fn verify_authenticode(wtd: *mut u8) -> Result<(), u32> {
+    let choice = unsafe { teb::get::<u32>(wtd as u64, WTD_UNION_CHOICE) };
+    if choice != WTD_CHOICE_FILE {
+        return Err(TRUST_E_SUBJECT_FORM_UNKNOWN);
+    }
+    let info = unsafe { teb::get::<u64>(wtd as u64, WTD_FILE_INFO) };
+    if info == 0 || unsafe { teb::get::<u32>(info, 0) } < WTFI_MIN_CB {
+        return Err(E_INVALIDARG);
+    }
+    let path_ptr = unsafe { teb::get::<u64>(info, WTFI_PATH) };
+    let Some(win) = (unsafe { path::wide_to_string(path_ptr as *const u16) }) else {
+        return Err(E_INVALIDARG);
+    };
+    let Ok(os) = path::to_osyx(&win, &crate::kernel32::cwd_win()) else {
+        return Err(HRESULT_FILE_NOT_FOUND);
+    };
+    let Ok(mut file) = os_std::fs::File::open(&os) else {
+        return Err(HRESULT_FILE_NOT_FOUND);
+    };
+    match pe_signature(&mut file) {
+        PeSignature::Signed => {
+            provider_state(wtd);
+            Ok(())
+        }
+        PeSignature::None => Err(TRUST_E_NOSIGNATURE),
+        PeSignature::Malformed => Err(TRUST_E_BAD_DIGEST),
+    }
+}
+
+/// Allocates and registers the zeroed CRYPT_PROVIDER_DATA handed back as
+/// hWVTStateData. csSigners stays 0, so callers skip chain processing but
+/// still close the state afterwards.
+fn provider_state(wtd: *mut u8) {
+    let block = Box::into_raw(Box::new([0u8; PROVIDER_DATA_SIZE]));
+    let at = block as u64;
+    // SAFETY: `block` is a live PROVIDER_DATA_SIZE-byte allocation and
+    // `wtd` points at a writable WINTRUST_DATA (cbStruct was checked).
+    unsafe {
+        teb::put::<u32>(at, 0, PROVIDER_DATA_SIZE as u32);
+        teb::put::<u64>(at, 8, wtd as u64); // pWintrustData
+        teb::put::<u64>(wtd as u64, WTD_STATE_DATA, at);
+    }
+    PROVIDER_STATES.lock().unwrap().push(at);
+}
+
+extern "win64" fn WinVerifyTrust(_hwnd: u64, action: *const u8, data: *mut u8) -> i32 {
+    if action.is_null() || data.is_null() {
+        return E_INVALIDARG as i32;
+    }
+    // SAFETY: per the API contract `action` is a GUID and `data` a
+    // WINTRUST_DATA; their cbStruct fields are checked below.
+    let act = unsafe { teb::get::<[u8; 16]>(action as u64, 0) };
+    if act != WINTRUST_ACTION_GENERIC_VERIFY_V2 {
+        return TRUST_E_SUBJECT_FORM_UNKNOWN as i32;
+    }
+    if unsafe { teb::get::<u32>(data as u64, 0) } < WTD_MIN_CB {
+        return E_INVALIDARG as i32;
+    }
+    let state_action = unsafe { teb::get::<u32>(data as u64, WTD_STATE_ACTION) };
+    let state = unsafe { teb::get::<u64>(data as u64, WTD_STATE_DATA) };
+    match state_action {
+        WTD_STATEACTION_CLOSE => {
+            if state != 0 {
+                let mut states = PROVIDER_STATES.lock().unwrap();
+                let Some(i) = states.iter().position(|&s| s == state) else {
+                    return E_INVALIDARG as i32;
+                };
+                states.remove(i);
+                drop(states);
+                // SAFETY: only blocks allocated by provider_state are registered.
+                drop(unsafe { Box::from_raw(state as *mut [u8; PROVIDER_DATA_SIZE]) });
+                // SAFETY: the state field was writable for the VERIFY call.
+                unsafe { teb::put::<u64>(data as u64, WTD_STATE_DATA, 0) };
+            }
+            0
+        }
+        WTD_STATEACTION_VERIFY => {
+            if state != 0 && PROVIDER_STATES.lock().unwrap().contains(&state) {
+                return 0; // an already verified state is reused as on Windows
+            }
+            match verify_authenticode(data) {
+                Ok(()) => 0,
+                Err(e) => e as i32,
+            }
+        }
+        _ => E_INVALIDARG as i32,
+    }
+}
+
+extern "win64" fn WTHelperProvDataFromStateData(state: u64) -> *mut u8 {
+    if state == 0 || !PROVIDER_STATES.lock().unwrap().contains(&state) {
+        return core::ptr::null_mut();
+    }
+    state as *mut u8
+}
+
+pub fn wintrust_exports() -> Vec<(&'static str, u64)> {
+    export_table![WinVerifyTrust, WTHelperProvDataFromStateData]
 }

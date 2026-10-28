@@ -5,8 +5,10 @@
 //! read-only devices and split transfers into what the driver accepts.
 
 use crate::pci;
+use crate::sched;
 use crate::sync::IrqSpinLock;
 use crate::{drivers, kprintln};
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -87,29 +89,81 @@ pub fn write(dev: &dyn BlockDev, lba: u64, buf: &[u8]) -> Result<(), BlockError>
     Ok(())
 }
 
+/// Progress of the boot-time partition scan. A whole disk registered after
+/// it finished (USB hot-plug) is scanned by its own kernel thread; one that
+/// appears while it runs is queued and scanned before it ends.
+struct ScanState {
+    started: bool,
+    done: bool,
+    pending: Vec<Arc<dyn BlockDev>>,
+}
+
+static SCAN: IrqSpinLock<ScanState> =
+    IrqSpinLock::new(ScanState { started: false, done: false, pending: Vec::new() });
+
 pub fn register(dev: Arc<dyn BlockDev>) {
-    DEVICES.lock().push(dev);
+    crate::devices::disk_added(&dev);
+    {
+        let mut devs = DEVICES.lock();
+        // A disk that is both in the boot scan's snapshot and in its
+        // pending queue must not register its partitions twice.
+        if dev.partition().is_some() && devs.iter().any(|d| d.name() == dev.name() && d.partition().is_some()) {
+            return;
+        }
+        devs.push(dev.clone());
+    }
+    if dev.partition().is_some() {
+        return;
+    }
+    // The state is read only after the disk is visible in `DEVICES`: a
+    // scan that starts after this point finds it in its snapshot, and one
+    // that started earlier sees it queued here.
+    let mut late = false;
+    {
+        let mut s = SCAN.lock();
+        if s.done {
+            late = true;
+        } else if s.started {
+            s.pending.push(dev.clone());
+        }
+    }
+    if late {
+        spawn_scan(dev);
+    }
 }
 
 pub fn devices() -> Vec<Arc<dyn BlockDev>> {
     DEVICES.lock().clone()
 }
 
-/// Starts a driver for every supported storage controller among `pci`
-/// and registers its disks as vda, vdb, ...
+/// Starts a driver for every supported storage controller among `pci`:
+/// virtio-blk (vda, vdb, ...), NVMe (nvme0n1, ...) and AHCI/SATA (sda, ...).
 pub fn probe(pci: &[pci::Device]) -> usize {
     let mut found = 0;
+    let mut virtio = 0;
     for d in pci {
-        if d.vendor != drivers::virtio::VENDOR || !drivers::virtio_blk::DEVICE_IDS.contains(&d.device) {
-            continue;
-        }
-        let name = format!("vd{}", (b'a' + found as u8) as char);
-        match drivers::virtio_blk::VirtioBlk::probe(d, name) {
-            Ok(dev) => {
-                register(Arc::new(dev));
-                found += 1;
+        if d.vendor == drivers::virtio::VENDOR && drivers::virtio_blk::DEVICE_IDS.contains(&d.device) {
+            let name = format!("vd{}", (b'a' + virtio as u8) as char);
+            match drivers::virtio_blk::VirtioBlk::probe(d, name) {
+                Ok(dev) => {
+                    register(Arc::new(dev));
+                    virtio += 1;
+                    found += 1;
+                }
+                Err(e) => kprintln!("virtio-blk at {}: not usable: {:?}", d.addr, e),
             }
-            Err(e) => kprintln!("virtio-blk at {}: not usable: {:?}", d.addr, e),
+        } else if d.class == 0x01 && d.subclass == 0x08 {
+            let disks = drivers::nvme::probe(d);
+            found += disks.len();
+            for disk in disks {
+                register(disk);
+            }
+        } else if d.class == 0x01 && d.subclass == 0x06 && d.prog_if == 0x01 {
+            let disks = drivers::ahci::probe(d);
+            found += disks.len();
+            for disk in disks {
+                register(disk);
+            }
         }
     }
     found
@@ -181,33 +235,64 @@ impl osyx_part::SectorReader for Reader<'_> {
     }
 }
 
-/// Reads the GPT of every whole disk and registers its partitions.
-pub fn scan_partitions() -> usize {
+/// Reads the GPT of one whole disk and registers its partitions.
+fn scan_disk(disk: &Arc<dyn BlockDev>) -> usize {
     let mut found = 0;
-    for disk in devices().into_iter().filter(|d| d.partition().is_none()) {
-        match osyx_part::parse(&mut Reader(&*disk)) {
-            Ok(t) => {
-                if t.used_backup {
-                    kprintln!("gpt {}: primary table damaged, using the backup", disk.name());
-                }
-                for p in t.partitions {
-                    let part = Partition {
-                        name: format!("{}{}", disk.name(), p.number),
-                        parent: disk.clone(),
-                        start: p.first_lba,
-                        sectors: p.sectors(),
-                        info: p,
-                    };
-                    kprintln!("gpt {}: {} {} MiB, {}", disk.name(), part.name, part.sectors >> 11, part.describe());
-                    register(Arc::new(part));
-                    found += 1;
-                }
+    match osyx_part::parse(&mut Reader(&**disk)) {
+        Ok(t) => {
+            if t.used_backup {
+                kprintln!("gpt {}: primary table damaged, using the backup", disk.name());
             }
-            Err(osyx_part::GptError::NotGpt) => {}
-            Err(e) => kprintln!("gpt {}: unusable partition table: {:?}", disk.name(), e),
+            for p in t.partitions {
+                let part = Partition {
+                    name: format!("{}{}", disk.name(), p.number),
+                    parent: disk.clone(),
+                    start: p.first_lba,
+                    sectors: p.sectors(),
+                    info: p,
+                };
+                kprintln!("gpt {}: {} {} MiB, {}", disk.name(), part.name, part.sectors >> 11, part.describe());
+                register(Arc::new(part));
+                found += 1;
+            }
         }
+        Err(osyx_part::GptError::NotGpt) => {}
+        Err(e) => kprintln!("gpt {}: unusable partition table: {:?}", disk.name(), e),
     }
     found
+}
+
+/// Reads the GPT of every whole disk and registers its partitions. Disks
+/// that appear while this runs are scanned here too; disks that appear
+/// later are scanned by their own thread from [`register`].
+pub fn scan_partitions() -> usize {
+    SCAN.lock().started = true;
+    let mut found = 0;
+    for disk in devices().into_iter().filter(|d| d.partition().is_none()) {
+        found += scan_disk(&disk);
+    }
+    let pending = {
+        let mut s = SCAN.lock();
+        s.done = true;
+        core::mem::take(&mut s.pending)
+    };
+    for disk in pending {
+        found += scan_disk(&disk);
+    }
+    found
+}
+
+/// Scans a disk that appeared after the boot-time scan.
+fn spawn_scan(disk: Arc<dyn BlockDev>) {
+    let arg = Box::into_raw(Box::new(disk)) as u64;
+    sched::spawn_kernel("disk-scan", scan_thread, arg, 0);
+}
+
+fn scan_thread(arg: u64, _: u64) {
+    // SAFETY: `arg` is the Box leaked by `spawn_scan` for this thread.
+    let disk = *unsafe { Box::from_raw(arg as *mut Arc<dyn BlockDev>) };
+    let found = scan_disk(&disk);
+    kprintln!("gpt {}: hot-plug scan found {} partition(s)", disk.name(), found);
 }
 
 /// Adapter that lets a file system driver use a registered disk.

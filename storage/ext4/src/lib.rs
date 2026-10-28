@@ -24,6 +24,7 @@ extern crate alloc;
 
 pub mod crc;
 pub mod dir;
+pub mod format;
 pub mod inode;
 mod map;
 pub mod journal;
@@ -36,8 +37,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub use dir::DirEntry;
+pub use format::{format, FormatOptions, Formatted};
 pub use inode::{Inode, Stat};
-pub use write::NewKind;
+pub use journal::commit_stats;
+pub use write::{write_stats, NewKind};
 
 pub const SECTOR: usize = 512;
 pub const ROOT_INO: u32 = 2;
@@ -496,6 +499,9 @@ pub struct Ext4<D: BlockDevice> {
     pub(crate) open_counts: BTreeMap<u32, u32>,
     /// Metadata changes of the operation in progress.
     pub(crate) tx: write::Tx,
+    /// File data blocks written since the last write-back: small or
+    /// unaligned writes would otherwise cost a device round trip each.
+    pub(crate) pending: BTreeMap<u64, Vec<u8>>,
     /// Blocks replayed from the journal at mount time.
     pub recovered_blocks: usize,
     /// Orphaned inodes freed at mount time.
@@ -547,7 +553,7 @@ impl<D: BlockDevice> Ext4<D> {
             sb,
             groups: Vec::new(),
             csum_seed,
-            cache: Cache { blocks: BTreeMap::new(), clock: 0, capacity: 256 },
+            cache: Cache { blocks: BTreeMap::new(), clock: 0, capacity: 4096 },
             read_only: true,
             write_refusal: None,
             journal: None,
@@ -555,6 +561,7 @@ impl<D: BlockDevice> Ext4<D> {
             orphans: BTreeMap::new(),
             open_counts: BTreeMap::new(),
             tx: write::Tx::default(),
+            pending: BTreeMap::new(),
             recovered_blocks: 0,
             orphans_freed: 0,
         };
@@ -648,7 +655,13 @@ impl<D: BlockDevice> Ext4<D> {
 
     /// (free blocks, free inodes) from the superblock counters.
     pub fn free_counts(&self) -> (u64, u32) {
-        (le32(&self.sb.raw, 12) as u64 | if self.sb.has_incompat(feature::INCOMPAT_64BIT) { (le32(&self.sb.raw, 0x158) as u64) << 32 } else { 0 }, le32(&self.sb.raw, 16))
+        // Sum the live group descriptors: file writes update them before
+        // their transaction is journaled, and the superblock copy follows
+        // only at commit.
+        (
+            self.groups.iter().map(|g| g.free_blocks as u64).sum(),
+            self.groups.iter().map(|g| g.free_inodes).sum(),
+        )
     }
 
     /// Location of group-descriptor block `i` (`meta_bg` aware).
@@ -755,14 +768,21 @@ impl<D: BlockDevice> Ext4<D> {
         if b.checked_add(n).is_none_or(|e| e > self.sb.blocks_count) {
             return Err(Error::Corrupt("data block beyond the end of the file system"));
         }
-        if let Some(j) = &self.journal {
-            if (b..b + n).any(|x| j.overlay.contains_key(&x)) {
-                for i in 0..n {
-                    let blk = self.read_block(b + i)?;
-                    out[(i * bs) as usize..((i + 1) * bs) as usize].copy_from_slice(&blk);
+        let overlay = self.journal.as_ref().is_some_and(|j| (b..b + n).any(|x| j.overlay.contains_key(&x)));
+        let staged = !self.pending.is_empty() && self.pending.range(b..b + n).next().is_some();
+        if overlay || staged {
+            for i in 0..n {
+                let blk = b + i;
+                let dst = &mut out[(i * bs) as usize..((i + 1) * bs) as usize];
+                match self.pending.get(&blk) {
+                    Some(d) => dst.copy_from_slice(d),
+                    None => {
+                        let data = self.read_block(blk)?;
+                        dst.copy_from_slice(&data);
+                    }
                 }
-                return Ok(());
             }
+            return Ok(());
         }
         self.dev.read_sectors(b * (bs / SECTOR as u64), out)
     }
@@ -770,16 +790,31 @@ impl<D: BlockDevice> Ext4<D> {
     /// Writes a block to the device directly (used for data blocks and by
     /// the journal checkpoint); keeps the cache coherent.
     pub(crate) fn write_block_raw(&mut self, b: u64, data: &[u8]) -> Result<()> {
+        self.write_blocks_raw(b, data)
+    }
+
+    /// Writes consecutive blocks in one device request. Callers pass whole
+    /// runs to keep the request count low; the block layer splits whatever
+    /// the device cannot take at once.
+    pub(crate) fn write_blocks_raw(&mut self, b: u64, data: &[u8]) -> Result<()> {
         if self.read_only {
             return Err(Error::ReadOnly);
         }
-        if b >= self.sb.blocks_count {
+        let bs = self.sb.block_size as usize;
+        if data.is_empty() || !data.len().is_multiple_of(bs) {
+            return Err(Error::InvalidInput("write length is not a block multiple"));
+        }
+        let n = (data.len() / bs) as u64;
+        if b.checked_add(n).is_none_or(|e| e > self.sb.blocks_count) {
             return Err(Error::Corrupt("write beyond the end of the file system"));
         }
-        let bs = self.sb.block_size as usize;
         self.dev.write_sectors(b * (bs / SECTOR) as u64, data)?;
-        if self.cache.blocks.contains_key(&b) {
-            self.cache.put(b, data.to_vec());
+        for i in 0..n {
+            let blk = b + i;
+            if self.cache.blocks.contains_key(&blk) {
+                let off = i as usize * bs;
+                self.cache.put(blk, data[off..off + bs].to_vec());
+            }
         }
         Ok(())
     }

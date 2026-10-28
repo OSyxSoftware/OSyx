@@ -59,7 +59,7 @@ extern "win64" fn FlsGetValue(index: u32) -> u64 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     crate::teb::set_last_error(ERROR_SUCCESS);
-    f.values.get(&os_sys::gettid()).and_then(|v| v.get(index as usize)).copied().unwrap_or(0)
+    f.values.get(&crate::teb::current_tid()).and_then(|v| v.get(index as usize)).copied().unwrap_or(0)
 }
 
 extern "win64" fn FlsSetValue(index: u32, value: u64) -> i32 {
@@ -67,7 +67,7 @@ extern "win64" fn FlsSetValue(index: u32, value: u64) -> i32 {
     if !in_range(index) {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let v = f.values.entry(os_sys::gettid()).or_default();
+    let v = f.values.entry(crate::teb::current_tid()).or_default();
     if v.len() <= index as usize {
         v.resize(index as usize + 1, 0);
     }
@@ -107,7 +107,7 @@ extern "win64" fn FlsFree(index: u32) -> i32 {
 pub fn thread_exit() {
     let work: Vec<(u64, u64)> = {
         let mut f = FLS.lock().unwrap();
-        let Some(values) = f.values.remove(&os_sys::gettid()) else { return };
+        let Some(values) = f.values.remove(&crate::teb::current_tid()) else { return };
         values
             .iter()
             .enumerate()

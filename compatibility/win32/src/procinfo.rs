@@ -32,7 +32,7 @@ fn is_process(h: u64) -> bool {
 
 // ---- threads ---------------------------------------------------------------------
 
-/// OSyx currently schedules all processes on logical processor zero.
+/// The process may use every online logical processor.
 extern "win64" fn GetProcessAffinityMask(h: u64, process: *mut u64, system: *mut u64) -> i32 {
     if !is_process(h) {
         return fail(ERROR_INVALID_HANDLE, 0);
@@ -42,8 +42,9 @@ extern "win64" fn GetProcessAffinityMask(h: u64, process: *mut u64, system: *mut
     }
     // SAFETY: the caller supplies two writable DWORD_PTR outputs.
     unsafe {
-        *process = 1;
-        *system = 1;
+        let count=os_sys::cpu_info().map_or(1, |(count,_)|count);
+        *process = (1u64<<count)-1;
+        *system = (1u64<<count)-1;
     }
     1
 }
@@ -112,7 +113,9 @@ extern "win64" fn GetThreadGroupAffinity(h: u64, out: *mut u8) -> i32 {
     // SAFETY: the caller's 16-byte GROUP_AFFINITY.
     unsafe {
         core::ptr::write_bytes(out, 0, 16);
-        teb::put(out as u64, 0, 1u64);
+        let tid=kernel32::GetThreadId(h);
+        let mask=os_sys::thread_affinity(tid as u64,0).unwrap_or(1);
+        teb::put(out as u64, 0, mask);
     }
     1
 }
@@ -126,7 +129,7 @@ extern "win64" fn SetThreadStackGuarantee(size: *mut u32) -> i32 {
     if size.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let me = os_sys::gettid();
+    let me = crate::teb::current_tid();
     let mut g = GUARANTEES.lock().unwrap();
     let old = g.get(&me).copied().unwrap_or(0);
     // SAFETY: the caller's in/out size.
@@ -148,9 +151,7 @@ extern "win64" fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32 {
     if session.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let mut list = alloc::vec![osyx_abi::ipc::ProcInfo::default(); 512];
-    let n = os_sys::proc_list(&mut list).unwrap_or(0);
-    if !list[..n].iter().any(|p| p.pid == pid as u64) {
+    if os_sys::proc_info(pid as u64).is_err() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's out pointer.
@@ -236,7 +237,9 @@ extern "win64" fn GetLogicalProcessorInformation(buf: *mut u8, len: *mut u32) ->
     if len.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let entries = [RELATION_PROCESSOR_CORE, RELATION_PROCESSOR_PACKAGE, RELATION_NUMA_NODE];
+    let count=os_sys::cpu_info().map_or(1, |(count,_)|count);
+    let mut entries=alloc::vec![(RELATION_PROCESSOR_PACKAGE,(1u64<<count)-1),(RELATION_NUMA_NODE,(1u64<<count)-1)];
+    for cpu in 0..count {entries.push((RELATION_PROCESSOR_CORE,1u64<<cpu));}
     let need = (entries.len() * 32) as u32;
     // SAFETY: the caller's in/out length and buffer.
     unsafe {
@@ -245,9 +248,9 @@ extern "win64" fn GetLogicalProcessorInformation(buf: *mut u8, len: *mut u32) ->
             return fail(ERROR_INSUFFICIENT_BUFFER, 0);
         }
         core::ptr::write_bytes(buf, 0, need as usize);
-        for (i, r) in entries.iter().enumerate() {
+        for (i, (r,mask)) in entries.iter().enumerate() {
             let e = buf as u64 + i as u64 * 32;
-            teb::put(e, 0, 1u64);
+            teb::put(e, 0, *mask);
             teb::put(e, 8, *r);
         }
         *len = need;
@@ -262,13 +265,19 @@ extern "win64" fn GetSystemCpuSetInformation(buf: *mut u8, len: u32, returned: *
     }
     // SAFETY: the caller's out pointer and buffer of `len` bytes.
     unsafe {
-        *returned = 32;
-        if buf.is_null() || len < 32 {
+        let count=os_sys::cpu_info().map_or(1, |(count,_)|count);
+        *returned = 32*count;
+        if buf.is_null() || len < 32*count {
             return fail(ERROR_INSUFFICIENT_BUFFER, 0);
         }
-        core::ptr::write_bytes(buf, 0, 32);
-        teb::put(buf as u64, 0, 32u32); // Size
-        teb::put(buf as u64, 8, 0x100u32); // Id
+        core::ptr::write_bytes(buf, 0, (32*count) as usize);
+        for cpu in 0..count {
+            let p=buf as u64+cpu as u64*32;
+            teb::put(p, 0, 32u32);
+            teb::put(p, 8, 0x100u32+cpu);
+            teb::put(p,14,cpu as u8);
+            teb::put(p,15,cpu as u8);
+        }
     }
     1
 }
@@ -387,12 +396,9 @@ extern "win64" fn GetCurrentApplicationUserModelId(len: *mut u32, _buf: *mut u16
 
 static PEAK_FRAMES: AtomicU64 = AtomicU64::new(0);
 
-/// The frames this process owns, from the kernel's process list.
+/// The frames this process owns, from its kernel process record.
 fn own_frames() -> Option<u64> {
-    let mut list = alloc::vec![osyx_abi::ipc::ProcInfo::default(); 512];
-    let n = os_sys::proc_list(&mut list).ok()?;
-    let me = kernel32::pid();
-    let f = list[..n].iter().find(|p| p.pid == me)?.frames;
+    let f = os_sys::proc_info(kernel32::pid()).ok()?.frames;
     PEAK_FRAMES.fetch_max(f, Ordering::Relaxed);
     Some(f)
 }

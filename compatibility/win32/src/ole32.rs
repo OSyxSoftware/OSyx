@@ -10,8 +10,10 @@
 //! out of it, so class activation reports every class as not registered.
 #![allow(non_snake_case)]
 use crate::kernel32;
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, string::{String, ToString}, vec::Vec};
+use core::sync::atomic::{AtomicU32, Ordering};
 use os_std::sync::Mutex;
+use prism_client::proto;
 
 const S_OK: u32 = 0;
 const S_FALSE: u32 = 1;
@@ -384,8 +386,9 @@ const E_FAIL: u32 = 0x8000_4005;
 
 /// HWND to its IDropTarget (one reference held).
 static DROP_TARGETS: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
-/// The IDataObject OleSetClipboard put on the clipboard (one reference).
-static CLIPBOARD: Mutex<u64> = Mutex::new(0);
+/// The IDataObject OleSetClipboard put on the system clipboard and the
+/// contents it published there (one reference).
+static CLIPBOARD: Mutex<(u64, Vec<proto::ClipEntry>)> = Mutex::new((0, Vec::new()));
 
 /// IUnknown::AddRef (slot 1) or Release (slot 2) of a COM object.
 fn com_call(obj: u64, slot: usize) -> u32 {
@@ -444,30 +447,47 @@ extern "win64" fn DoDragDrop(data: u64, source: u64, _ok: u32, effect: *mut u32)
     DRAGDROP_S_CANCEL
 }
 
+/// The data object's formats are rendered to bytes now: other processes get
+/// their clipboard contents through the compositor, which carries bytes, not
+/// a live object. Text comes first so it survives the payload cap.
 extern "win64" fn OleSetClipboard(data: u64) -> u32 {
     if data != 0 {
         com_call(data, 1);
     }
-    let old = core::mem::replace(&mut *CLIPBOARD.lock().unwrap(), data);
-    if old != 0 {
-        com_call(old, 2);
+    let entries = if data != 0 { render_entries(data) } else { Vec::new() };
+    let old = core::mem::replace(&mut *CLIPBOARD.lock().unwrap(), (data, entries.clone()));
+    if old.0 != 0 {
+        com_call(old.0, 2);
     }
+    crate::user32::publish_clipboard(entries);
     S_OK
 }
 
-/// The object this process put on the clipboard. With none, OSyx has no
-/// system data object to hand out.
+/// This process's object while it still owns the clipboard, otherwise one
+/// built from the system contents (data another process put there).
 extern "win64" fn OleGetClipboard(out: *mut u64) -> u32 {
     if out.is_null() {
         return E_INVALIDARG;
     }
-    let data = *CLIPBOARD.lock().unwrap();
-    if data != 0 {
+    let contents = crate::user32::clipboard_contents();
+    let (data, own) = {
+        let clip = CLIPBOARD.lock().unwrap();
+        (clip.0, clip.1.clone())
+    };
+    if data != 0 && own == contents {
         com_call(data, 1);
+        // SAFETY: the caller's out pointer.
+        unsafe { *out = data };
+        return S_OK;
+    }
+    if contents.is_empty() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *out = 0 };
+        return E_FAIL; // nothing on the clipboard
     }
     // SAFETY: the caller's out pointer.
-    unsafe { *out = data };
-    if data != 0 { S_OK } else { E_FAIL }
+    unsafe { *out = make_data_object(contents) };
+    S_OK
 }
 
 /// The data stays available after the flush, as rendered data would.
@@ -476,7 +496,7 @@ extern "win64" fn OleFlushClipboard() -> u32 {
 }
 
 extern "win64" fn OleIsCurrentClipboard(data: u64) -> u32 {
-    if data != 0 && data == *CLIPBOARD.lock().unwrap() { S_OK } else { S_FALSE }
+    if data != 0 && data == CLIPBOARD.lock().unwrap().0 { S_OK } else { S_FALSE }
 }
 
 const TYMED_HGLOBAL: u32 = 1;
@@ -503,6 +523,368 @@ extern "win64" fn ReleaseStgMedium(m: *mut u8) {
     }
     // SAFETY: as above.
     unsafe { core::ptr::write_bytes(m, 0, 24) };
+}
+
+// ---- data transfer ----------------------------------------------------------------------
+//
+// FORMATETC and STGMEDIUM in their x64 layout, and a small IDataObject that
+// serves the system clipboard's bytes to programs that paste through OLE
+// (Gecko does: it never uses the classic user32 clipboard API).
+
+const CF_TEXT: u32 = 1;
+const CF_UNICODETEXT: u32 = 13;
+const CF_HDROP: u32 = 15;
+const DVASPECT_CONTENT: u32 = 1;
+const DATADIR_GET: u32 = 1;
+const DATA_S_SAMEFORMATETC: u32 = 0x0004_0130;
+const DV_E_FORMATETC: u32 = 0x8004_0064;
+const DV_E_TYMED: u32 = 0x8004_0069;
+const OLE_E_ADVISENOTSUPPORTED: u32 = 0x8004_0003;
+const E_NOINTERFACE: u32 = 0x8000_4002;
+const E_NOTIMPL: u32 = 0x8000_4001;
+
+const IID_IUNKNOWN: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+/// {0000010E-0000-0000-C000-000000000046}
+const IID_IDATAOBJECT: [u8; 16] = [0x0E, 0x01, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+/// {00000103-0000-0000-C000-000000000046}
+const IID_IENUMFORMATECT: [u8; 16] = [0x03, 0x01, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct FormatEtc {
+    cf: u16,
+    ptd: u64,
+    aspect: u32,
+    lindex: i32,
+    tymed: u32,
+}
+
+#[repr(C)]
+struct StgMedium {
+    tymed: u32,
+    pad: u32,
+    handle: u64,
+    unk: u64,
+}
+
+fn format_etc(format: u32) -> FormatEtc {
+    FormatEtc { cf: format as u16, ptd: 0, aspect: DVASPECT_CONTENT, lindex: -1, tymed: TYMED_HGLOBAL }
+}
+
+/// Formats a copy publishes, text first so it survives the payload cap.
+const RENDER: [(u32, Option<&str>); 5] =
+    [(CF_UNICODETEXT, None), (CF_TEXT, None), (CF_HDROP, None), (0, Some("HTML Format")), (0, Some("text/html"))];
+
+/// One format of a program's data object as bytes (IDataObject::GetData,
+/// slot 3). Formats it cannot render come back as None.
+fn get_data(data: u64, format: u32) -> Option<Vec<u8>> {
+    let f = format_etc(format);
+    let mut m = StgMedium { tymed: 0, pad: 0, handle: 0, unk: 0 };
+    // SAFETY: the caller's IDataObject; the structs outlive the call.
+    let hr = unsafe {
+        let vtbl = *(data as *const *const u64);
+        let get: extern "win64" fn(u64, *const FormatEtc, *mut StgMedium) -> u32 = core::mem::transmute(*vtbl.add(3));
+        get(data, &f, &mut m)
+    };
+    if hr != S_OK || m.tymed != TYMED_HGLOBAL || m.handle == 0 {
+        ReleaseStgMedium(&mut m as *mut StgMedium as *mut u8);
+        return None;
+    }
+    let size = kernel32::heap_size(m.handle);
+    // SAFETY: an HGLOBAL is a fixed block of `size` bytes.
+    let bytes = unsafe { core::slice::from_raw_parts(m.handle as *const u8, size) }.to_vec();
+    ReleaseStgMedium(&mut m as *mut StgMedium as *mut u8);
+    if bytes.is_empty() { None } else { Some(bytes) }
+}
+
+fn render_entries(data: u64) -> Vec<proto::ClipEntry> {
+    let mut out: Vec<proto::ClipEntry> = Vec::new();
+    let mut used = 0usize;
+    for &(format, name) in &RENDER {
+        let format = name.map_or(format, crate::user32::register_format);
+        let Some(bytes) = get_data(data, format) else { continue };
+        if out.len() >= proto::MAX_CLIPBOARD || used + bytes.len() > proto::MAX_CLIPBOARD_BYTES {
+            continue;
+        }
+        used += bytes.len();
+        out.push(proto::ClipEntry { format, name: name.map(str::to_string), data: bytes });
+    }
+    out
+}
+
+/// IDataObject's vtable: IUnknown, then GetData, GetDataHere,
+/// QueryGetData, GetCanonicalFormatEtc, SetData, EnumFormatEtc, DAdvise,
+/// DUnadvise, EnumDAdvise.
+#[repr(C)]
+struct DataVtbl {
+    query_interface: extern "win64" fn(u64, *const [u8; 16], *mut u64) -> u32,
+    add_ref: extern "win64" fn(u64) -> u32,
+    release: extern "win64" fn(u64) -> u32,
+    get_data: extern "win64" fn(u64, *const FormatEtc, *mut StgMedium) -> u32,
+    get_data_here: extern "win64" fn(u64, *const FormatEtc, *mut StgMedium) -> u32,
+    query_get_data: extern "win64" fn(u64, *const FormatEtc) -> u32,
+    get_canonical: extern "win64" fn(u64, *const FormatEtc, *mut FormatEtc) -> u32,
+    set_data: extern "win64" fn(u64, *const FormatEtc, *mut StgMedium, i32) -> u32,
+    enum_format_etc: extern "win64" fn(u64, u32, *mut u64) -> u32,
+    d_advise: extern "win64" fn(u64, *const FormatEtc, u32, u64, *mut u32) -> u32,
+    d_unadvise: extern "win64" fn(u64, u32) -> u32,
+    enum_d_advise: extern "win64" fn(u64, *mut u64) -> u32,
+}
+
+/// The system clipboard's bytes as a data object.
+#[repr(C)]
+struct ClipData {
+    vtbl: &'static DataVtbl,
+    refs: AtomicU32,
+    entries: Vec<proto::ClipEntry>,
+}
+
+static DATA_VTBL: DataVtbl = DataVtbl {
+    query_interface: DataQueryInterface,
+    add_ref: DataAddRef,
+    release: DataRelease,
+    get_data: DataGetData,
+    get_data_here: DataNotImpl,
+    query_get_data: DataQueryGetData,
+    get_canonical: DataGetCanonical,
+    set_data: DataSetData,
+    enum_format_etc: DataEnumFormatEtc,
+    d_advise: DataDAdvise,
+    d_unadvise: DataDUnadvise,
+    enum_d_advise: DataEnumDAdvise,
+};
+
+/// A data object with one reference, handed out by OleGetClipboard.
+fn make_data_object(entries: Vec<proto::ClipEntry>) -> u64 {
+    Box::into_raw(Box::new(ClipData { vtbl: &DATA_VTBL, refs: AtomicU32::new(1), entries })) as u64
+}
+
+fn clip<'a>(this: u64) -> &'a ClipData {
+    // SAFETY: a ClipData made by `make_data_object`.
+    unsafe { &*(this as *const ClipData) }
+}
+
+fn entry(this: u64, want: u32) -> Option<Vec<u8>> {
+    clip(this).entries.iter().find(|e| e.format == want).map(|e| e.data.clone())
+}
+
+extern "win64" fn DataQueryInterface(this: u64, riid: *const [u8; 16], out: *mut u64) -> u32 {
+    if riid.is_null() || out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's IID and out pointer.
+    unsafe {
+        if *riid == IID_IUNKNOWN || *riid == IID_IDATAOBJECT {
+            DataAddRef(this);
+            *out = this;
+            return S_OK;
+        }
+        *out = 0;
+    }
+    E_NOINTERFACE
+}
+
+extern "win64" fn DataAddRef(this: u64) -> u32 {
+    clip(this).refs.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+extern "win64" fn DataRelease(this: u64) -> u32 {
+    let left = clip(this).refs.fetch_sub(1, Ordering::AcqRel) - 1;
+    if left == 0 {
+        // SAFETY: the last reference: the Box from `make_data_object`.
+        drop(unsafe { Box::from_raw(this as *mut ClipData) });
+    }
+    left
+}
+
+extern "win64" fn DataGetData(this: u64, f: *const FormatEtc, m: *mut StgMedium) -> u32 {
+    if f.is_null() || m.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's FORMATETC.
+    let (want, tymed) = unsafe { ((*f).cf as u32, (*f).tymed) };
+    let Some(data) = entry(this, want) else { return DV_E_FORMATETC };
+    if tymed & TYMED_HGLOBAL == 0 {
+        return DV_E_TYMED;
+    }
+    let Some(h) = kernel32::heap_alloc(data.len().max(1), true) else { return E_OUTOFMEMORY };
+    // SAFETY: a fresh block of at least `data.len()` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), h as *mut u8, data.len()) };
+    // SAFETY: the caller's STGMEDIUM; the block is ours to hand over.
+    unsafe { *m = StgMedium { tymed: TYMED_HGLOBAL, pad: 0, handle: h, unk: 0 } };
+    S_OK
+}
+
+extern "win64" fn DataQueryGetData(this: u64, f: *const FormatEtc) -> u32 {
+    if f.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's FORMATETC.
+    let want = unsafe { (*f).cf as u32 };
+    if entry(this, want).is_some() { S_OK } else { DV_E_FORMATETC }
+}
+
+extern "win64" fn DataGetCanonical(_this: u64, f: *const FormatEtc, out: *mut FormatEtc) -> u32 {
+    if f.is_null() || out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's FORMATETCs.
+    unsafe { *out = FormatEtc { ptd: 0, ..*f } };
+    DATA_S_SAMEFORMATETC
+}
+
+extern "win64" fn DataEnumFormatEtc(this: u64, dir: u32, out: *mut u64) -> u32 {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    if dir != DATADIR_GET {
+        // SAFETY: the caller's out pointer.
+        unsafe { *out = 0 };
+        return E_NOTIMPL;
+    }
+    let formats = clip(this).entries.iter().map(|e| format_etc(e.format)).collect();
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = make_format_enum(formats) };
+    S_OK
+}
+
+/// Writing into the clipboard object is not part of the contract here.
+extern "win64" fn DataSetData(_this: u64, _f: *const FormatEtc, _m: *mut StgMedium, _release: i32) -> u32 {
+    E_NOTIMPL
+}
+
+extern "win64" fn DataNotImpl(_this: u64, _f: *const FormatEtc, _m: *mut StgMedium) -> u32 {
+    E_NOTIMPL
+}
+
+extern "win64" fn DataDAdvise(_this: u64, _f: *const FormatEtc, _advf: u32, _sink: u64, _conn: *mut u32) -> u32 {
+    OLE_E_ADVISENOTSUPPORTED
+}
+
+extern "win64" fn DataDUnadvise(_this: u64, _conn: u32) -> u32 {
+    OLE_E_ADVISENOTSUPPORTED
+}
+
+extern "win64" fn DataEnumDAdvise(_this: u64, _out: *mut u64) -> u32 {
+    OLE_E_ADVISENOTSUPPORTED
+}
+
+/// IEnumFORMATETC: IUnknown, then Next, Skip, Reset, Clone.
+#[repr(C)]
+struct EnumVtbl {
+    query_interface: extern "win64" fn(u64, *const [u8; 16], *mut u64) -> u32,
+    add_ref: extern "win64" fn(u64) -> u32,
+    release: extern "win64" fn(u64) -> u32,
+    next: extern "win64" fn(u64, u32, *mut FormatEtc, *mut u32) -> u32,
+    skip: extern "win64" fn(u64, u32) -> u32,
+    reset: extern "win64" fn(u64) -> u32,
+    clone: extern "win64" fn(u64, *mut u64) -> u32,
+}
+
+#[repr(C)]
+struct FormatEnum {
+    vtbl: &'static EnumVtbl,
+    refs: AtomicU32,
+    formats: Vec<FormatEtc>,
+    pos: usize,
+}
+
+static ENUM_VTBL: EnumVtbl = EnumVtbl {
+    query_interface: EnumQueryInterface,
+    add_ref: EnumAddRef,
+    release: EnumRelease,
+    next: EnumNext,
+    skip: EnumSkip,
+    reset: EnumReset,
+    clone: EnumClone,
+};
+
+fn make_format_enum(formats: Vec<FormatEtc>) -> u64 {
+    Box::into_raw(Box::new(FormatEnum { vtbl: &ENUM_VTBL, refs: AtomicU32::new(1), formats, pos: 0 })) as u64
+}
+
+fn formats_mut<'a>(this: u64) -> &'a mut FormatEnum {
+    // SAFETY: a FormatEnum made by `make_format_enum`.
+    unsafe { &mut *(this as *mut FormatEnum) }
+}
+
+fn formats<'a>(this: u64) -> &'a FormatEnum {
+    // SAFETY: a FormatEnum made by `make_format_enum`.
+    unsafe { &*(this as *const FormatEnum) }
+}
+
+extern "win64" fn EnumQueryInterface(this: u64, riid: *const [u8; 16], out: *mut u64) -> u32 {
+    if riid.is_null() || out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's IID and out pointer.
+    unsafe {
+        if *riid == IID_IUNKNOWN || *riid == IID_IENUMFORMATECT {
+            EnumAddRef(this);
+            *out = this;
+            return S_OK;
+        }
+        *out = 0;
+    }
+    E_NOINTERFACE
+}
+
+extern "win64" fn EnumAddRef(this: u64) -> u32 {
+    formats(this).refs.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+extern "win64" fn EnumRelease(this: u64) -> u32 {
+    let left = formats(this).refs.fetch_sub(1, Ordering::AcqRel) - 1;
+    if left == 0 {
+        // SAFETY: the last reference: the Box from `make_format_enum`.
+        drop(unsafe { Box::from_raw(this as *mut FormatEnum) });
+    }
+    left
+}
+
+extern "win64" fn EnumNext(this: u64, count: u32, out: *mut FormatEtc, fetched: *mut u32) -> u32 {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    let e = formats_mut(this);
+    let left = e.formats.len().saturating_sub(e.pos);
+    let n = (count as usize).min(left);
+    for i in 0..n {
+        // SAFETY: the caller's array of `count` FORMATETCs.
+        unsafe { *out.add(i) = e.formats[e.pos + i] };
+    }
+    e.pos += n;
+    if !fetched.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *fetched = n as u32 };
+    }
+    if n as u32 == count { S_OK } else { S_FALSE }
+}
+
+extern "win64" fn EnumSkip(this: u64, count: u32) -> u32 {
+    let e = formats_mut(this);
+    let left = e.formats.len().saturating_sub(e.pos);
+    if count as usize > left {
+        e.pos = e.formats.len();
+        return S_FALSE;
+    }
+    e.pos += count as usize;
+    S_OK
+}
+
+extern "win64" fn EnumReset(this: u64) -> u32 {
+    formats_mut(this).pos = 0;
+    S_OK
+}
+
+extern "win64" fn EnumClone(this: u64, out: *mut u64) -> u32 {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    let e = formats(this);
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = Box::into_raw(Box::new(FormatEnum { vtbl: &ENUM_VTBL, refs: AtomicU32::new(1), formats: e.formats.clone(), pos: e.pos })) as u64 };
+    S_OK
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {

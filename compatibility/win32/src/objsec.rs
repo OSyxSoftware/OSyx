@@ -280,6 +280,7 @@ fn target(h: u64) -> Result<Target, u32> {
     let o = objects::get(h).ok_or(ERROR_INVALID_HANDLE)?;
     let (mapping, secured, (key, alive)) = match &o {
         Object::Event(a) => (EVENT, a.name.is_some(), weak(a)),
+        Object::KeyedEvent(a) => (EVENT, false, weak(a)),
         Object::Timer(a) => (EVENT, a.name.is_some(), weak(a)),
         Object::Mutex(a) => (MUTEX, a.name.is_some(), weak(a)),
         Object::Semaphore(a) => (EVENT, false, weak(a)), // OSyx semaphores have no names

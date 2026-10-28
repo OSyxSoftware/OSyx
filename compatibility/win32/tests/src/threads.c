@@ -56,6 +56,77 @@ typedef int(__cdecl *mul_fn)(int, int);
 typedef DWORD(WINAPI *tick_fn)(void);
 typedef DWORD(__cdecl *attach_fn)(void);
 
+typedef LONG (NTAPI *keyed_create_fn)(HANDLE *, ULONG, void *, ULONG);
+typedef LONG (NTAPI *keyed_op_fn)(HANDLE, ULONG_PTR, BOOLEAN, const LARGE_INTEGER *);
+static keyed_op_fn keyed_wait, keyed_release;
+struct keyed_job { HANDLE handle; ULONG_PTR key; int release; unsigned loops; };
+static DWORD WINAPI keyed_worker(LPVOID arg) {
+    struct keyed_job *job = arg;
+    LARGE_INTEGER timeout; timeout.QuadPart = -10000000;
+    for (unsigned n = 0; n < job->loops; n++) {
+        LONG status = (job->release ? keyed_release : keyed_wait)(job->handle, job->key, FALSE, &timeout);
+        if (status != 0) return (DWORD)status;
+    }
+    return 0;
+}
+static int keyed_join(HANDLE thread) {
+    DWORD status = 99;
+    int ok = thread && WaitForSingleObject(thread, 5000) == WAIT_OBJECT_0 && GetExitCodeThread(thread, &status) && status == 0;
+    if (thread) CloseHandle(thread);
+    return ok;
+}
+static void keyed_events(void) {
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    keyed_create_fn create = (keyed_create_fn)GetProcAddress(nt,"NtCreateKeyedEvent");
+    keyed_wait = (keyed_op_fn)GetProcAddress(nt,"NtWaitForKeyedEvent");
+    keyed_release = (keyed_op_fn)GetProcAddress(nt,"NtReleaseKeyedEvent");
+    check("NT keyed-event exports",create && keyed_wait && keyed_release);
+    if (!create || !keyed_wait || !keyed_release) return;
+    HANDLE h = NULL;
+    check("NtCreateKeyedEvent creates a closable object",create(&h,0x1f0003,NULL,0)==0 && h);
+    if (!h) return;
+    LARGE_INTEGER poll, timeout; poll.QuadPart=0; timeout.QuadPart=-10000000;
+    check("keyed wait without release times out",keyed_wait(h,0x1000,FALSE,&poll)==0x102);
+    check("keyed release is not a stored signal",keyed_release(h,0x1000,FALSE,&poll)==0x102);
+    LARGE_INTEGER absolute; absolute.QuadPart=1;
+    check("keyed events support an expired absolute deadline",keyed_wait(h,0x1000,FALSE,&absolute)==0x102);
+    FILETIME now; GetSystemTimeAsFileTime(&now);
+    absolute.QuadPart=(LONGLONG)(((ULONGLONG)now.dwHighDateTime<<32)|now.dwLowDateTime)+100000;
+    check("keyed events support a future absolute deadline",keyed_wait(h,0x1000,FALSE,&absolute)==0x102);
+    check("keyed events reject odd keys",keyed_wait(h,0x1001,FALSE,&poll)==(LONG)0xc000000d);
+    struct keyed_job job = {h,0x1000,0,1};
+    HANDLE worker = CreateThread(NULL,0,keyed_worker,&job,0,NULL);
+    Sleep(20);
+    LONG paired=keyed_release(h,job.key,FALSE,&timeout); int joined=keyed_join(worker);
+    check("release wakes exactly a matching keyed waiter",paired==0 && joined);
+    job.release=1;
+    worker=CreateThread(NULL,0,keyed_worker,&job,0,NULL);
+    Sleep(20);
+    paired=keyed_wait(h,job.key,FALSE,&timeout); joined=keyed_join(worker);
+    check("keyed release can arrive before its waiter",paired==0 && joined);
+    timeout.QuadPart=-100000;
+    check("a timed-out keyed waiter is removed",keyed_wait(h,0x2000,FALSE,&timeout)==0x102 && keyed_release(h,0x2000,FALSE,&poll)==0x102);
+    HANDLE duplicate=NULL;
+    check("DuplicateHandle preserves keyed-event identity",DuplicateHandle(GetCurrentProcess(),h,GetCurrentProcess(),&duplicate,0,FALSE,DUPLICATE_SAME_ACCESS));
+    job.handle=duplicate; job.release=0;
+    worker=CreateThread(NULL,0,keyed_worker,&job,0,NULL);
+    timeout.QuadPart=-10000000;
+    paired=keyed_release(h,job.key,FALSE,&timeout); joined=keyed_join(worker);
+    check("keyed-event duplicates rendezvous on the same object",paired==0 && joined);
+    if (duplicate) CloseHandle(duplicate);
+    struct keyed_job jobs[4]; HANDLE workers[4]; int ok=1;
+    for (unsigned i=0;i<4;i++) {
+        jobs[i]=(struct keyed_job){h,0x3000+2*i,0,128};
+        workers[i]=CreateThread(NULL,0,keyed_worker,&jobs[i],0,NULL);
+        ok &= workers[i]!=NULL;
+    }
+    for (unsigned n=0;n<128 && ok;n++) for (unsigned i=0;i<4 && ok;i++) ok &= keyed_release(h,jobs[i].key,FALSE,&timeout)==0;
+    for (unsigned i=0;i<4;i++) ok &= keyed_join(workers[i]);
+    check("four keyed waiters keep 512 rendezvous separate",ok);
+    check("CloseHandle releases a keyed event",CloseHandle(h));
+    check("closed keyed-event handle is rejected",keyed_wait(h,0x1000,FALSE,&poll)==(LONG)0xc0000008);
+}
+
 void __stdcall start(void) {
     /* NSPR attaches a thread by duplicating GetCurrentThread(), which is a
      * pseudo-handle rather than a handle: Windows allows that. */
@@ -161,6 +232,7 @@ void __stdcall start(void) {
     SetLastError(0);
     check("LoadLibraryA of a missing DLL fails", LoadLibraryA("nonexistent.dll") == NULL);
     check_eq("... with ERROR_MOD_NOT_FOUND", GetLastError(), ERROR_MOD_NOT_FOUND);
+    keyed_events();
     DeleteCriticalSection(&lock);
     finish("threads");
 }

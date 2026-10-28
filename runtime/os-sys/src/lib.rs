@@ -142,7 +142,7 @@ mod imp {
         syscall0(nr::YIELD);
     }
 
-    /// Blocks for at least `ns` nanoseconds (timer resolution: 10 ms).
+    /// Blocks for at least `ns` nanoseconds (timer resolution: 1 ms).
     pub fn sleep(ns: u64) {
         syscall1(nr::SLEEP, ns);
     }
@@ -176,8 +176,23 @@ mod imp {
         decode(syscall1(nr::SET_FS_BASE, base as u64)).map(|_| ())
     }
 
+    /// The calling thread's kernel id. OSyx Std stores it in its TCB at
+    /// `fs:[8]` (after the self pointer at `fs:[0]`); the system call is only
+    /// needed for threads whose TCB is missing or not filled in yet.
     pub fn gettid() -> u64 {
-        syscall0(nr::GETTID)
+        let mut t: u64;
+        // SAFETY: the runtime installs a TCB before any code can ask; a null
+        // FS base only occurs while a thread is being torn down.
+        unsafe {
+            asm!("mov {t}, fs:[0]", t = out(reg) t, options(nostack, readonly, preserves_flags));
+            if t != 0 {
+                asm!("mov {t}, fs:[8]", t = out(reg) t, options(nostack, readonly, preserves_flags));
+                if t != 0 {
+                    return t;
+                }
+            }
+        }
+        decode(syscall0(nr::GETTID)).unwrap_or(0)
     }
 
     /// Terminates the calling process.
@@ -212,6 +227,13 @@ mod imp {
         decode(syscall2(nr::UNMAP, addr as u64, len as u64)).map(|_| ())
     }
 
+    pub fn cpu_info() -> Result<(u32,u32),Errno> {
+        decode(syscall1(nr::CPU_INFO,0)).map(|value|(value as u32,(value>>32) as u32))
+    }
+
+    pub fn thread_affinity(tid:u64,mask:u64)->Result<u64,Errno> { decode(syscall2(nr::THREAD_AFFINITY,tid,mask)) }
+    pub fn process_write_barrier()->Result<(),Errno> { decode(syscall1(nr::PROCESS_WRITE_BARRIER,0)).map(|_|()) }
+
     pub fn sysinfo() -> Result<SystemInfo, Errno> {
         let mut info = SystemInfo::default();
         decode(syscall1(nr::SYSINFO, &mut info as *mut SystemInfo as u64))?;
@@ -223,8 +245,124 @@ mod imp {
         decode(syscall1(nr::SYSINFO, addr as u64)).map(|_| ())
     }
 
+    // ---- clocks ------------------------------------------------------------
+    //
+    // The kernel samples (monotonic_ns, tsc, tsc_per_tick, realtime_ns) once
+    // per process; every later clock read is a scaled RDTSC, which is far
+    // cheaper than the CLOCK system call. Gecko and NSPR read the clocks
+    // tens of thousands of times per second, so this is on the hot path.
+
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// 0 = not calibrated, 1 = calibration in progress, 2 = ready,
+    /// 3 = unsupported.
+    static CAL_STATE: AtomicU64 = AtomicU64::new(0);
+    static CAL_NS: AtomicU64 = AtomicU64::new(0);
+    static CAL_TSC: AtomicU64 = AtomicU64::new(0);
+    /// Nanoseconds per TSC count in 32.32 fixed point.
+    static CAL_STEP: AtomicU64 = AtomicU64::new(0);
+    /// `CLOCK_REALTIME - CLOCK_MONOTONIC` at calibration.
+    static CAL_RT_OFF: AtomicU64 = AtomicU64::new(0);
+    /// Monotonic guard: a vCPU migration must never make time run backwards.
+    static LAST_NS: AtomicU64 = AtomicU64::new(0);
+    /// One resync at a time: the threads of a process cross the boundary
+    /// together and must not all issue the system call.
+    static RESYNCING: AtomicU64 = AtomicU64::new(0);
+
+    /// Re-anchor and re-measure the rate once per second of local time. Any
+    /// error in the initial estimate (or in the TSC rate itself) can then
+    /// only grow for one second instead of for the life of the process.
+    const RESYNC_NS: u64 = 1_000_000_000;
+
+    #[inline]
+    fn rdtsc() -> u64 {
+        // SAFETY: RDTSC exists on every x86-64 and has no side effects.
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+
+    fn calibrate() {
+        if CAL_STATE.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return;
+        }
+        let mut v = [0u64; 4];
+        match decode(syscall1(nr::TIME_CALIB, v.as_mut_ptr() as u64)) {
+            Ok(_) if v[2] != 0 => {
+                CAL_NS.store(v[0], Ordering::Relaxed);
+                CAL_TSC.store(v[1], Ordering::Relaxed);
+                CAL_STEP.store(((1_000_000u128 << 32) / v[2] as u128) as u64, Ordering::Relaxed);
+                CAL_RT_OFF.store(v[3].wrapping_sub(v[0]), Ordering::Relaxed);
+                CAL_STATE.store(2, Ordering::Release);
+            }
+            // Not calibrated yet (very early boot): try again next time.
+            Ok(_) => CAL_STATE.store(0, Ordering::Release),
+            Err(_) => CAL_STATE.store(3, Ordering::Release),
+        }
+    }
+
+    fn resync() {
+        let tsc = rdtsc();
+        let Ok(now) = decode(syscall1(nr::CLOCK, osyx_abi::CLOCK_MONOTONIC)) else { return };
+        let (anchor_ns, anchor_tsc) =
+            (CAL_NS.load(Ordering::Relaxed), CAL_TSC.load(Ordering::Relaxed));
+        let ns = now.wrapping_sub(anchor_ns);
+        let counts = tsc.wrapping_sub(anchor_tsc);
+        if ns >= 10_000_000 && counts != 0 {
+            let step = ((ns as u128) << 32) / counts as u128;
+            let old = CAL_STEP.load(Ordering::Relaxed) as u128;
+            // A wild sample means the tick source stalled or the TSC jumped:
+            // keep the old rate and just re-anchor.
+            if old == 0 || (step * 4 >= old && step <= old * 4) {
+                CAL_STEP.store(step as u64, Ordering::Relaxed);
+            }
+        }
+        // Publish the rate before the anchor it belongs to.
+        CAL_TSC.store(tsc, Ordering::Relaxed);
+        CAL_NS.store(now, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn tsc_delta_ns() -> Option<u64> {
+        if CAL_STATE.load(Ordering::Acquire) != 2 {
+            return None;
+        }
+        let step = CAL_STEP.load(Ordering::Relaxed);
+        let delta = rdtsc().wrapping_sub(CAL_TSC.load(Ordering::Relaxed));
+        Some((((delta as u128) * step as u128) >> 32) as u64)
+    }
+
+    fn fast_clock(id: u64) -> Option<u64> {
+        if id != osyx_abi::CLOCK_REALTIME && id != osyx_abi::CLOCK_MONOTONIC {
+            return None;
+        }
+        let mut ns = CAL_NS.load(Ordering::Relaxed).wrapping_add(tsc_delta_ns()?);
+        if ns.wrapping_sub(CAL_NS.load(Ordering::Relaxed)) >= RESYNC_NS
+            && RESYNCING.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_ok()
+        {
+            resync();
+            RESYNCING.store(0, Ordering::Release);
+            ns = CAL_NS.load(Ordering::Relaxed).wrapping_add(tsc_delta_ns()?);
+        }
+        if id == osyx_abi::CLOCK_REALTIME {
+            return Some(ns.wrapping_add(CAL_RT_OFF.load(Ordering::Relaxed)));
+        }
+        let prev = LAST_NS.load(Ordering::Relaxed);
+        Some(if ns > prev {
+            LAST_NS.store(ns, Ordering::Relaxed);
+            ns
+        } else {
+            prev
+        })
+    }
+
     pub fn clock(id: u64) -> Result<u64, Errno> {
-        decode(syscall1(nr::CLOCK, id))
+        if let Some(ns) = fast_clock(id) {
+            return Ok(ns);
+        }
+        let r = decode(syscall1(nr::CLOCK, id));
+        if r.is_ok() && CAL_STATE.load(Ordering::Relaxed) == 0 {
+            calibrate();
+        }
+        r
     }
 
     /// Issues an arbitrary system call number (for ABI tests).
@@ -484,6 +622,22 @@ mod imp {
         decode(syscall3(nr::FILEMAP_FLUSH, section, offset, len)).map(|_| ())
     }
 
+    /// Maps the shared image of `file` published at `addr` into the
+    /// untouched anonymous mapping `[addr, addr + len)`.
+    pub fn image_map(file: u64, addr: u64, len: u64) -> Result<(), Errno> {
+        decode(syscall3(nr::IMAGE_MAP, file, addr, len)).map(|_| ())
+    }
+
+    /// Where a shared image of `file` lies, if one was published.
+    pub fn image_query(file: u64) -> Result<u64, Errno> {
+        decode(syscall1(nr::IMAGE_QUERY, file))
+    }
+
+    /// Shares the image of `file` laid out in the mapping `[addr, addr + len)`.
+    pub fn image_publish(file: u64, addr: u64, len: u64) -> Result<(), Errno> {
+        decode(syscall3(nr::IMAGE_PUBLISH, file, addr, len)).map(|_| ())
+    }
+
     /// Waits until an item is ready (`timeout_ns`: 0 polls, `u64::MAX`
     /// forever); returns how many are ready (their `revents` are set).
     pub fn wait_handles(items: &mut [WaitItem], timeout_ns: u64) -> Result<usize, Errno> {
@@ -542,6 +696,22 @@ mod imp {
     /// No live reference may rely on the old contents.
     pub unsafe fn discard(addr: *mut u8, len: usize) -> Result<(), Errno> {
         decode(syscall2(nr::DISCARD, addr as u64, len as u64)).map(|_| ())
+    }
+
+    /// Allocates writable anonymous pages before a bulk copy. The copy's
+    /// ordinary fault handling remains correct for pages left untouched.
+    ///
+    /// # Safety
+    /// The range must be valid for writes by the calling process.
+    pub unsafe fn prefault(addr: *mut u8, len: usize) -> Result<(), Errno> {
+        decode(syscall2(nr::PREFAULT, addr as u64, len as u64)).map(|_| ())
+    }
+
+    /// Returns the record for `pid`, or `NotFound` if it does not exist.
+    pub fn proc_info(pid: u64) -> Result<ProcInfo, Errno> {
+        let mut info = ProcInfo::default();
+        decode(syscall2(nr::PROC_INFO, pid, &mut info as *mut ProcInfo as u64))?;
+        Ok(info)
     }
 
     /// Fills `out` with process records; returns how many.

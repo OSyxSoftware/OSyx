@@ -88,6 +88,22 @@ pub fn current() -> u64 {
     t
 }
 
+/// The calling thread's Windows thread id (`ClientId.UniqueThread`).
+///
+/// Reading the TEB costs a couple of cycles where GETTID is a syscall, and
+/// Firefox's locks resolve their owner on every operation. Like
+/// [`current`], this is only safe on a thread running Windows code.
+#[inline]
+pub fn current_tid() -> u64 {
+    let t: u64;
+    // SAFETY: as [`current`]: gs:[0x30] (the TEB itself) is set.
+    unsafe {
+        core::arch::asm!("mov {}, gs:[{off}]", out(reg) t, off = const TEB_THREAD_ID,
+            options(nostack, readonly, preserves_flags))
+    };
+    t
+}
+
 pub fn last_error() -> u32 {
     // SAFETY: the TEB of the calling Windows thread.
     unsafe { get(current(), TEB_LAST_ERROR) }
@@ -136,7 +152,7 @@ pub fn create_peb(p: &ProcessInfo) -> u64 {
         put(peb, PEB_LDR, ldr);
         put(peb, PEB_PARAMETERS, params);
         put(peb, PEB_PROCESS_HEAP, p.heap);
-        put(peb, PEB_NUMBER_OF_PROCESSORS, 1u32);
+        put(peb, PEB_NUMBER_OF_PROCESSORS, os_sys::cpu_info().map_or(1, |(count,_)|count));
         // The Windows version OSyx's compatibility layer presents (10.0).
         put(peb, PEB_OS_MAJOR, 10u32);
         put(peb, PEB_OS_MINOR, 0u32);

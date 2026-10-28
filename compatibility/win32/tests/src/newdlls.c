@@ -8,6 +8,8 @@
 #include <cfgmgr32.h>
 #include <propsys.h>
 #include <propvarutil.h>
+#include <wintrust.h>
+#include "pkcs7_sample.h"
 
 /* Not declared by the MinGW headers. */
 int WINAPI VariantCompare(const VARIANT *, const VARIANT *);
@@ -25,6 +27,18 @@ static int wends(const WCHAR *s, const WCHAR *tail) {
     while (s[n]) n++;
     while (tail[t]) t++;
     return n >= t && wstr_eq(s + n - t, tail);
+}
+
+static void le16(BYTE *p, DWORD at, unsigned v) {
+    p[at] = (BYTE)v;
+    p[at + 1] = (BYTE)(v >> 8);
+}
+
+static void le32(BYTE *p, DWORD at, unsigned long v) {
+    p[at] = (BYTE)v;
+    p[at + 1] = (BYTE)(v >> 8);
+    p[at + 2] = (BYTE)(v >> 16);
+    p[at + 3] = (BYTE)(v >> 24);
 }
 
 typedef struct { USHORT Length, MaximumLength; PWSTR Buffer; } USTR;
@@ -147,6 +161,87 @@ void __stdcall start(void) {
     check("PathCchCanonicalize", canon && canon(p, MAX_PATH, L"C:\\a\\.\\b\\..\\c") == S_OK && wstr_eq(p, L"C:\\a\\c"));
     check("... not above the root", canon(p, MAX_PATH, L"C:\\..\\x") == S_OK && wstr_eq(p, L"C:\\x"));
     check("... too small a buffer", canon(p, 4, L"C:\\abc\\def") == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
+    /* wintrust: the delayed Authenticode check Firefox runs on a finished
+     * download; missing exports used to kill the browser. */
+    typedef LONG(WINAPI * VerifyTrust)(HWND, const GUID *, void *);
+    typedef void *(WINAPI * ProvData)(HANDLE);
+    HMODULE wt = LoadLibraryA("wintrust.dll");
+    VerifyTrust vt = (VerifyTrust)GetProcAddress(wt, "WinVerifyTrust");
+    ProvData prov = (ProvData)GetProcAddress(wt, "WTHelperProvDataFromStateData");
+    static const GUID generic_verify = {0x00aac56b, 0xcd44, 0x11d0, {0x8c, 0xc2, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee}};
+    check("wintrust WinVerifyTrust and WTHelperProvDataFromStateData exports", vt && prov);
+
+    WINTRUST_DATA wtd;
+    WINTRUST_FILE_INFO wfi;
+    memset(&wtd, 0, sizeof wtd);
+    memset(&wfi, 0, sizeof wfi);
+    wtd.cbStruct = sizeof wtd;
+    wtd.dwUnionChoice = WTD_CHOICE_FILE;
+    wtd.pFile = &wfi;
+    wtd.dwStateAction = WTD_STATEACTION_VERIFY;
+    wfi.cbStruct = sizeof wfi;
+    wfi.pcwszFilePath = L"C:\\tmp\\wintrust-missing.bin";
+    check("WinVerifyTrust without data", vt && vt(NULL, &generic_verify, NULL) == E_INVALIDARG);
+    check("... an unknown action", vt && vt(NULL, (const GUID *)&iid_property_store, &wtd) == TRUST_E_SUBJECT_FORM_UNKNOWN);
+    check("... a missing file", vt && vt(NULL, &generic_verify, &wtd) == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) && !wtd.hWVTStateData);
+
+    HANDLE uh = CreateFileA("C:\\tmp\\wintrust-unsigned.bin", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    DWORD uw = 0;
+    if (uh != INVALID_HANDLE_VALUE) {
+        WriteFile(uh, "unsigned", 8, &uw, NULL);
+        CloseHandle(uh);
+    }
+    wfi.pcwszFilePath = L"C:\\tmp\\wintrust-unsigned.bin";
+    check("... an unsigned file", uh != INVALID_HANDLE_VALUE && vt && vt(NULL, &generic_verify, &wtd) == TRUST_E_NOSIGNATURE &&
+                                      !wtd.hWVTStateData);
+    DeleteFileA("C:\\tmp\\wintrust-unsigned.bin");
+
+    /* A minimal PE32+ image whose certificate table wraps the PKCS#7
+     * fixture: the successful path Firefox takes, plus its state lifecycle. */
+    enum { PE_OFF = 0x80, OPT_OFF = PE_OFF + 24, CERT_OFF = 0x1a8 };
+    static BYTE signed_pe[4096];
+    DWORD cert_len = 8 + (DWORD)sizeof pkcs7_sample;
+    memset(signed_pe, 0, sizeof signed_pe);
+    signed_pe[0] = 'M';
+    signed_pe[1] = 'Z';
+    le32(signed_pe, 0x3c, PE_OFF);
+    signed_pe[PE_OFF] = 'P';
+    signed_pe[PE_OFF + 1] = 'E';
+    le16(signed_pe, PE_OFF + 4, 0x8664);
+    le16(signed_pe, PE_OFF + 20, 240);
+    le16(signed_pe, PE_OFF + 22, 0x22);
+    le16(signed_pe, OPT_OFF, 0x20b);
+    le32(signed_pe, OPT_OFF + 16, 0x1000);
+    le32(signed_pe, OPT_OFF + 32, 0x1000);
+    le32(signed_pe, OPT_OFF + 36, 0x200);
+    le32(signed_pe, OPT_OFF + 56, 0x1000);
+    le32(signed_pe, OPT_OFF + 60, 0x200);
+    le16(signed_pe, OPT_OFF + 68, 3);
+    le32(signed_pe, OPT_OFF + 108, 16);
+    le32(signed_pe, OPT_OFF + 112 + 4 * 8, CERT_OFF);
+    le32(signed_pe, OPT_OFF + 112 + 4 * 8 + 4, cert_len);
+    le32(signed_pe, CERT_OFF, cert_len);
+    le16(signed_pe, CERT_OFF + 4, 0x0200);
+    le16(signed_pe, CERT_OFF + 6, 2);
+    memcpy(signed_pe + CERT_OFF + 8, pkcs7_sample, sizeof pkcs7_sample);
+    HANDLE sh = CreateFileA("C:\\tmp\\wintrust-signed-pe.bin", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    DWORD sw = 0;
+    if (sh != INVALID_HANDLE_VALUE) {
+        WriteFile(sh, signed_pe, CERT_OFF + cert_len, &sw, NULL);
+        CloseHandle(sh);
+    }
+    wfi.pcwszFilePath = L"C:\\tmp\\wintrust-signed-pe.bin";
+    LONG sr = sh != INVALID_HANDLE_VALUE && vt ? vt(NULL, &generic_verify, &wtd) : -1;
+    void *pd = prov && wtd.hWVTStateData ? prov(wtd.hWVTStateData) : NULL;
+    check("... a signed PE is accepted", sr == 0 && wtd.hWVTStateData && pd);
+    check("... provider data has no signer chain", pd && *(DWORD *)((BYTE *)pd + 120) == 0);
+    HANDLE kept = wtd.hWVTStateData;
+    wtd.dwStateAction = WTD_STATEACTION_CLOSE;
+    check("... closing the state", vt && vt(NULL, &generic_verify, &wtd) == 0 && !wtd.hWVTStateData && prov(kept) == NULL);
+    DeleteFileA("C:\\tmp\\wintrust-signed-pe.bin");
+
+    check("WTHelperProvDataFromStateData(NULL)", prov && prov(NULL) == NULL);
+    check("... a state that was never issued", prov && prov((HANDLE)(ULONG_PTR)0x1234) == NULL);
     (void)wends;
     finish("newdlls");
 }

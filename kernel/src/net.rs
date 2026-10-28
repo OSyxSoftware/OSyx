@@ -14,6 +14,7 @@
 //! id, so dropping a handle never takes the stack lock).
 
 use crate::drivers::virtio_net::{self, VirtioNet};
+use crate::drivers::e1000::{self, E1000};
 use crate::fixup::{copy_from_user, copy_to_user, user_range_ok};
 use crate::object::Object;
 use crate::sync::{IrqSpinLock, KMutex};
@@ -29,7 +30,33 @@ use osyx_net::stack::{IcmpEvent, NetError, Resolve, Stack};
 use osyx_net::wire::{Endpoint, Ipv4Addr};
 
 static STACK: KMutex<Option<Stack>> = KMutex::new(None);
-static DEVICES: IrqSpinLock<Vec<(usize, Arc<VirtioNet>)>> = IrqSpinLock::new(Vec::new());
+trait NetDevice: Send + Sync {
+    fn link_up(&self) -> bool;
+    fn has_interrupts(&self) -> bool;
+    fn counters(&self) -> virtio_net::Counters;
+    fn receive(&self, frames: &mut Vec<Vec<u8>>);
+    fn transmit(&self, frames: &[Vec<u8>]) -> usize;
+    fn recover(&self) -> bool;
+    fn description(&self) -> String;
+}
+
+macro_rules! impl_net_device {
+    ($ty:ty, $kind:literal) => {
+        impl NetDevice for $ty {
+            fn link_up(&self) -> bool { self.link_up() }
+            fn has_interrupts(&self) -> bool { self.has_interrupts() }
+            fn counters(&self) -> virtio_net::Counters { self.counters() }
+            fn receive(&self, frames: &mut Vec<Vec<u8>>) { self.receive(frames) }
+            fn transmit(&self, frames: &[Vec<u8>]) -> usize { self.transmit(frames) }
+            fn recover(&self) -> bool { self.recover() }
+            fn description(&self) -> String { alloc::format!("{} ({} at {})", self.name, $kind, self.location) }
+        }
+    };
+}
+impl_net_device!(VirtioNet, "virtio-net");
+impl_net_device!(E1000, "e1000");
+type Devices = Vec<(usize, Arc<dyn NetDevice>)>;
+static DEVICES: IrqSpinLock<Devices> = IrqSpinLock::new(Vec::new());
 /// The network thread sleeps here; device interrupts wake it.
 static WAKE: WaitQueue = WaitQueue::new();
 static KICK: AtomicBool = AtomicBool::new(false);
@@ -85,7 +112,7 @@ fn transmit(frames: Vec<(usize, Vec<u8>)>) {
     if frames.is_empty() {
         return;
     }
-    let devs: Vec<(usize, Arc<VirtioNet>)> = DEVICES.lock().clone();
+    let devs = DEVICES.lock().clone();
     for (iface, dev) in devs {
         let mine: Vec<Vec<u8>> = frames.iter().filter(|(i, _)| *i == iface).map(|(_, f)| f.clone()).collect();
         if !mine.is_empty() {
@@ -137,6 +164,18 @@ pub fn init(devices: &[pci::Device], boot: &crate::BootData) -> usize {
             Err(e) => kprintln!("virtio-net at {}: probe failed: {:?}", d.addr, e),
         }
     }
+    for d in devices.iter().filter(|d| d.vendor == 0x8086 && e1000::DEVICE_IDS.contains(&d.device)) {
+        let name = alloc::format!("eth{}", found);
+        match E1000::probe(d, &name) {
+            Ok(dev) => {
+                let idx = stack.add_ethernet(&name, dev.mac, 1500);
+                stack.set_link(idx, dev.link_up());
+                DEVICES.lock().push((idx, Arc::new(dev)));
+                found += 1;
+            }
+            Err(e) => kprintln!("e1000 at {}: probe failed: {}", d.addr, e),
+        }
+    }
     let static_ip = boot.option_value("net.ip").and_then(parse_cidr);
     for i in 1..=found {
         match static_ip {
@@ -175,8 +214,12 @@ pub fn enabled() -> bool {
     ENABLED.load(Ordering::Acquire)
 }
 
+/// TEMP: TCP flow-control snapshot for the periodic stats.
+pub fn debug_lines() -> Vec<String> {
+    STACK.lock().as_ref().map(|s| s.tcp_snapshot()).unwrap_or_default()
+}
+
 fn net_thread(_: u64, _: u64) {
-    let tick_ms = 1000 / crate::arch::pic::TIMER_HZ as u64;
     let mut last_health = 0;
     loop {
         let (deadline_ms, polled) = {
@@ -189,14 +232,14 @@ fn net_thread(_: u64, _: u64) {
         // Sleep until the next timer, an interrupt, or at most a second.
         let mut wait_ms = deadline_ms.map_or(1000, |d| d.saturating_sub(now)).min(1000);
         if polled {
-            wait_ms = wait_ms.min(tick_ms);
+            wait_ms = wait_ms.min(1);
         }
         if wait_ms > 0 && !KICK.load(Ordering::Acquire) && CLOSING.lock().is_empty() {
-            let deadline = Some(interrupts::ticks() + wait_ms.div_ceil(tick_ms));
+            let deadline = Some(interrupts::ticks() + crate::arch::timer::ms_to_ticks(wait_ms));
             let _ = block_on(&[&WAKE], deadline, || KICK.load(Ordering::Acquire).then_some(()));
         }
         KICK.store(false, Ordering::Release);
-        let devs: Vec<(usize, Arc<VirtioNet>)> = DEVICES.lock().clone();
+        let devs = DEVICES.lock().clone();
         let mut rx: Vec<(usize, Vec<Vec<u8>>)> = Vec::new();
         let check_health = now_ms() >= last_health + 1000;
         for (iface, dev) in &devs {
@@ -731,7 +774,7 @@ fn put_records<T: Copy>(buf: u64, len: u64, items: &[T]) -> Result<u64, Errno> {
 }
 
 pub fn sys_query(kind: u64, buf: u64, len: u64) -> Result<u64, Errno> {
-    let interrupts = virtio_net::INTERRUPTS.load(Ordering::Relaxed);
+    let interrupts = virtio_net::INTERRUPTS.load(Ordering::Relaxed) + e1000::INTERRUPTS.load(Ordering::Relaxed);
     let irq_devs: Vec<usize> = DEVICES.lock().iter().filter(|(_, d)| d.has_interrupts()).map(|(i, _)| *i).collect();
     let r = with_stack(|s| -> Result<u64, Errno> {
         let now = s.now();
@@ -964,15 +1007,14 @@ pub fn log_summary() {
     for (_, d) in DEVICES.lock().iter() {
         let c = d.counters();
         kprintln!(
-            "net: {} (virtio-net at {}): {} frames in, {} out, {} rx errors, {} tx ring full, {} resets, {} interrupts",
-            d.name,
-            d.location,
+            "net: {}: {} frames in, {} out, {} rx errors, {} tx ring full, {} resets, {} interrupts",
+            d.description(),
             c.rx_frames,
             c.tx_frames,
             c.rx_errors,
             c.tx_full,
             c.resets,
-            virtio_net::INTERRUPTS.load(Ordering::Relaxed)
+            virtio_net::INTERRUPTS.load(Ordering::Relaxed) + e1000::INTERRUPTS.load(Ordering::Relaxed)
         );
     }
 }

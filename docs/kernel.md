@@ -14,7 +14,7 @@ as a static ELF at `0xFFFF_FFFF_8000_0000` with three W^X segments
 4. Frame allocator, paging state (NX, kernel root, pre-allocated upper-half
    PDPTs), removal of the boot identity map.
 5. Kernel heap; boot modules copied; bootloader memory reclaimed.
-6. PIC remapped (vectors 32–47), PIT at 100 Hz, interrupts enabled, SSE
+6. PIC remapped (vectors 32–47), PIT at 1 kHz, interrupts enabled, SSE
    enabled for user code, scheduler started (the boot flow becomes thread 1,
    `kmain`; thread 2 is `idle`).
 7. PCI enumeration; wall clock from the CMOS RTC (`time.rs`); virtio-blk
@@ -22,7 +22,12 @@ as a static ELF at `0xFFFF_FFFF_8000_0000` with three W^X segments
    seeded (`random.rs`); device nodes registered (`devices.rs`); the file
    system tree mounted: ext4 `/`, devfs, tmpfs `/tmp` `/run`, FAT32 `/boot`
    ([storage.md](storage.md)).
-8. Framebuffer status screen, self-tests, `/bin/init` from the root file
+8. Secondary CPUs discovered through ACPI MADT are started with INIT/SIPI.
+   Each gets CPU-local GS state, GDT/TSS, an idle thread and an APIC timer.
+   Kernel entries acquire a common lock with interrupts disabled; SYSCALL
+   enables interrupts only after acquiring it, so a waiter cannot migrate
+   while retaining another CPU's identity. User threads execute in parallel.
+9. Framebuffer status screen, self-tests when `init.args=tests`, `/bin/init` from the root file
    system spawned (`init=` picks another program, `init.args=a,b` adds
    arguments; environment `PATH=/bin:/usr/bin HOME=/ TERM=osyx`) and waited
    for, then `kmain` animates the status screen (sleeping between frames). With
@@ -50,6 +55,8 @@ thread is never preempted while holding a spinlock. A `KMutex` is never
 taken while a spinlock is held. Lock order (outer → inner):
 `KMutex (open file → volume → disk) → BLOCK/MOUNTS → process TABLE → FUTEX →
 KMutex state → SCHED → OUTPUT_TAIL → HEAP → PAGING → MMIO → FRAMES → PCI → SERIAL`.
+The SMP kernel entry lock precedes these locks. NMI TLB shootdowns do not
+acquire any lock and acknowledge invalidation before frames can be reused.
 The panic path may force-unlock SERIAL and only try-locks the display.
 
 ## Threads and scheduling (`sched.rs`)
@@ -58,7 +65,7 @@ The panic path may force-unlock SERIAL and only try-locks the display.
   stack), saved RSP, 512-byte FXSAVE area, state Ready/Running/Blocked/Dead.
 - `osyx_switch` saves callee-saved registers and RFLAGS and switches stacks;
   new threads start in a trampoline that calls `entry(a, b)`.
-- Round robin with a 20 ms time slice (2 ticks of the 100 Hz PIT). The timer
+- Round robin with a 10 ms time slice (ten ticks of the 1 kHz local APIC timer). The timer
   handler wakes sleepers and, when the slice is used up and another thread is
   ready, switches from inside the interrupt; the preempted thread resumes in
   that handler later. `idle` (`sti; hlt`) runs only when nothing is ready.
@@ -71,8 +78,11 @@ The panic path may force-unlock SERIAL and only try-locks the display.
   that returns to ring 3. Blocked threads are woken so they reach one.
 - `sleep_ticks`, `yield_now`, `join`, and a block/wake protocol whose
   "register wake-up, mark blocked, schedule" sequence runs with interrupts
-  disabled so wake-ups cannot be lost. A dead thread's stack is freed by the
-  next thread right after the switch.
+  disabled so wake-ups cannot be lost on one CPU. On SMP a waker may run
+  between the condition check and the registration: waiters re-check after
+  registering, and a wake that arrives just before the thread blocks is kept
+  as `wake_pending` so the next block is skipped and the condition re-checked.
+  A dead thread's stack is freed by the next thread right after the switch.
 
 ## Processes (`process.rs`)
 
@@ -163,9 +173,8 @@ Tests of volumes that are not mounted skip with a log line.
 
 ## Not implemented yet
 
-Thread priorities, SMP and per-CPU data via `swapgs` (the futex and
-block/wake protocols rely on disabling interrupts on a single CPU and must be
-revisited for SMP), shared memory between processes, local APIC/IOAPIC, ACPI
+Thread priorities, fine-grained parallel kernel execution (SMP currently
+serializes kernel entries while user threads run in parallel), local IOAPIC, ACPI AML
 parsing, PCIe ECAM, device interrupts/MSI-X, storage controllers other than
 virtio-blk, NTFS, keyboard input, XSAVE (AVX state), dynamically linked or
 position-independent (`ET_DYN`) programs, `#!` interpreter scripts,

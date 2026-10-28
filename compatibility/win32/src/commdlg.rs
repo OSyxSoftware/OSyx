@@ -243,6 +243,21 @@ fn pidl_path(p: u64) -> Option<String> {
     unsafe { bounded(p + 6, size - 6, false) }
 }
 
+/// The OSyx path of a PIDL this module made (shell32's SHOpenFolderAndSelectItems).
+pub(crate) fn pidl_file_path(p: u64) -> Option<String> {
+    pidl_path(p)
+}
+
+/// A new PIDL for `path`, owned by the caller (CoTaskMemFree / ILFree).
+pub(crate) fn allocate_pidl(path: &str) -> u64 {
+    make_pidl(path)
+}
+
+/// ILFree's address, for shell32's ordinal export table (#155).
+pub(crate) fn il_free_address() -> u64 {
+    ILFree as *const () as u64
+}
+
 fn browse(info: u64, wide: bool) -> u64 {
     if info == 0 {
         return 0;

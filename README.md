@@ -59,6 +59,7 @@ compatibility layer; an initial tested subset is implemented (see
 ```powershell
 .\scripts\check-env.ps1   # verify Rust targets, QEMU, OVMF
 .\scripts\build.ps1       # build loader, kernel, programs; GPT disk build\osyx.img (ESP + ext4 root)
+.\scripts\build.ps1 -Live # build\osyx-live.iso: compressed live system image (CD/DVD, runs in RAM)
 .\scripts\run-qemu.ps1    # boot in a QEMU window (serial log: build\serial.log)
 .\scripts\test.ps1        # host unit tests, clippy, QEMU boot/fault/user tests
 ```
@@ -67,9 +68,28 @@ The default image boots directly to the desktop and includes the pinned,
 unmodified Zen Browser Windows payload (downloaded and verified on the first
 build). Zen is installed under `/opt/zen`, launched through `/system/bin/zen`,
 and registered as the default web/HTML browser. Its persistent profile is in
-`/home/user/.config/zen/profile`. The root partition grows to 1 GiB; interactive
-QEMU runs default to 6 GiB RAM. Use `-NoZen` for a small development image.
-The boot artifact is the GPT disk `build/osyx.img`, not an ISO.
+`/home/user/.config/zen/profile`. Interactive images default to an 8 GiB root
+partition (`-RootMiB` overrides it); QEMU runs default to 8196 MiB RAM. Use
+`-NoZen` for a small development image.
+The launcher disables speculative content-process prelaunch and limits the
+content-process pools (two general workers, one per isolated site).
+The default boot artifact is the GPT disk `build/osyx.img`. `-Live` instead
+builds `build/osyx-live.iso` (about 10 MiB): the stripped kernel and userland
+as a zlib-compressed cpio root (`rootfs.z` boot module) in a FAT16 El Torito
+image. It is a plain optical-disc image — ISO9660 with a zeroed system area
+and no hybrid MBR — so it boots from CD/DVD or as a QEMU `-cdrom`, not from a
+USB stick written byte-for-byte. The live session runs entirely in RAM and
+touches no disk. The loader is unsigned, so Secure Boot must be off; firmware
+needs x86-64 UEFI and 512 MiB of RAM.
+
+Interactive QEMU runs use four physical cores by default (four logical CPUs,
+one thread per core; `-CpuCount 1..16`).
+The kernel discovers enabled CPUs through ACPI MADT, starts them with
+INIT/SIPI, schedules user threads across them and supports thread affinity.
+Each CPU has its own GDT/TSS, kernel stack pointers and APIC timer. Kernel
+entries currently use a coarse lock; user code runs in parallel, and NMI
+shootdowns invalidate remote TLBs before physical frames are reused. Use
+`smp=off` on the kernel command line to keep only the boot CPU.
 
 Desktop shortcuts live in `/home/user/Desktop`: right-click an application in
 the launcher and choose **Add to desktop**, double-click its icon to open it,
@@ -93,6 +113,8 @@ For the interactive desktop, run
 `powershell -ExecutionPolicy Bypass -File scripts/run-qemu.ps1`.
 Each interactive run uses its own image under `build/run/`; builds and tests
 can replace `build/osyx.img` without invalidating a running VM's filesystem.
+Builds in the same workspace wait for each other and use separate temporary
+root filesystem directories, so a test build cannot remove a Zen build's files.
 The session image is kept after exit. `-NoBuild` boots a private copy of the
 current base image, including that image's saved boot command line.
 

@@ -61,6 +61,7 @@ $programs = [ordered]@{
     'shlpath.exe' = @{ Src = @('shlpath.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshlwapi', '-lkernel32') }
     'secattr.exe' = @{ Src = @('secattr.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ladvapi32', '-lkernel32') }
     'childproc.exe' = @{ Src = @('childproc.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
+    'imageshare.exe' = @{ Src = @('imageshare.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'dwrite.exe' = @{ Src = @('dwrite.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ldwrite', '-lkernel32') }
     'shell.exe' = @{ Src = @('shell.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshell32', '-lole32', '-lkernel32') }
     'platform.exe' = @{ Src = @('platform.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshlwapi', '-lruntimeobject', '-lkernel32') }
@@ -91,7 +92,7 @@ foreach ($name in $programs.Keys) {
     $inputs = @($p.Src | ForEach-Object { Join-Path $src $_ }) + @("$src\common.h", (Join-Path $PSScriptRoot 'build-wintests.ps1'))
     if ($name -eq 'version.exe') { $inputs += $versionObj }
     if ($name -eq 'seh.exe') { $inputs += $sehObj }
-    if ($name -eq 'interop.exe') { $inputs += "$src\pkcs7_sample.h" }
+    if ($name -in 'interop.exe', 'newdlls.exe') { $inputs += "$src\pkcs7_sample.h" }
     if ($name -eq 'crt2.exe') { $inputs += "$src\crtmath_cases.h" }
     $target = Join-Path $out $name
     if (Stale $target $inputs) {

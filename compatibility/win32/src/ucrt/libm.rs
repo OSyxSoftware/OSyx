@@ -12,14 +12,55 @@
 //! are computed in double and rounded to float.
 
 use super::math::{
-    add, consts, copysign_soft, dd, div, error, exp_dd, fabs_soft, fmod_soft, is_int, ln_dd, mul, neg, quick_two_sum,
-    round_half_even, scalbn as scalb, scale, sqrt_soft, sub, trunc_f, two_prod, two_sum, Dd, DOMAIN, IND, OVERFLOW,
-    SING, UNDERFLOW,
+    add, consts, copysign_soft, dd, div, error, exp_dd, fabs_soft, fmod_soft, is_int, ln_dd,
+    mul, neg, quick_two_sum, round_half_even, scalbn as scalb, scale, sqrt_soft, sub, trunc_f, two_prod, two_sum, Dd,
+    DOMAIN, IND, OVERFLOW, SING, UNDERFLOW,
 };
 use super::*;
 
 const PI: Dd = Dd { hi: core::f64::consts::PI, lo: 1.224_646_799_147_353_2e-16 };
 const PI_2: Dd = Dd { hi: core::f64::consts::FRAC_PI_2, lo: 6.123_233_995_736_766e-17 };
+
+// TEMP call counters: which libm entry the graphics stack hammers.
+static LIBM_CALLS: [core::sync::atomic::AtomicU64; 22] = [const { core::sync::atomic::AtomicU64::new(0) }; 22];
+static LIBM_TRACE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Opt-in (`OSYX_LIBM_TRACE=1`): the per-call counters stay cheap and silent
+/// in normal runs.
+fn libm_trace() -> bool {
+    match LIBM_TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => {
+            let on = os_std::env::var("OSYX_LIBM_TRACE").is_ok_and(|v| v == "1");
+            LIBM_TRACE.store(if on { 2 } else { 1 }, core::sync::atomic::Ordering::Relaxed);
+            on
+        }
+        2 => true,
+        _ => false,
+    }
+}
+fn note_libm(i: usize) {
+    let c = LIBM_CALLS[i].fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    if c.is_multiple_of(20_000) && libm_trace() {
+        const NAMES: [&str; 22] = [
+            "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "expm1",
+            "log1p", "log2", "exp2", "cbrt", "atan2", "hypot", "fma", "remainder", "nextafter",
+        ];
+        // The stack above this frame holds return addresses; anything in the
+        // browser's own image range identifies the caller.
+        let rsp: u64;
+        // SAFETY: reading upwards stays inside this thread's mapped stack.
+        unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+        let mut caller = 0u64;
+        for j in 0..96u64 {
+            let w = unsafe { core::ptr::read_volatile((rsp + j * 8) as *const u64) };
+            if (0x100_0000_0000..0x8000_0000_0000).contains(&w) {
+                caller = w;
+                break;
+            }
+        }
+        os_std::eprintln!("winrun: libmcall {} n={c} caller={caller:#x} tid={}", NAMES[i], os_sys::gettid());
+    }
+}
 
 /// 2/pi as a binary fraction, 64 bits per word.
 const TWO_OVER_PI: [u64; 20] = [
@@ -161,7 +202,32 @@ fn round(d: Dd) -> f64 {
     d.hi + d.lo
 }
 
+// TEMP: throughput probe for the two entry points the graphics stack hammers.
+pub(crate) fn bench_math(iterations: u64) -> [u128; 3] {
+    let mut sink = 0.0f64;
+    let t = os_std::time::Instant::now();
+    for i in 0..iterations {
+        let x = (i % 1000) as f64 * 0.001;
+        sink += hypot_f(x, 1.0 - x);
+    }
+    let hypot_us = t.elapsed().as_micros();
+    let t = os_std::time::Instant::now();
+    for i in 0..iterations {
+        let x = (i % 4000) as f64 * 0.01 - 20.0;
+        sink += exp2_f(x);
+    }
+    let exp2_us = t.elapsed().as_micros();
+    let t = os_std::time::Instant::now();
+    for i in 0..iterations {
+        sink += (i % 7) as f64;
+    }
+    let add_us = t.elapsed().as_micros();
+    core::hint::black_box(sink);
+    [hypot_us, exp2_us, add_us]
+}
+
 fn sin_f(x: f64) -> f64 {
+    note_libm(0);
     if x == 0.0 || x.is_nan() {
         return x + x;
     }
@@ -172,6 +238,7 @@ fn sin_f(x: f64) -> f64 {
 }
 
 fn cos_f(x: f64) -> f64 {
+    note_libm(1);
     if x.is_nan() {
         return x + x;
     }
@@ -182,6 +249,7 @@ fn cos_f(x: f64) -> f64 {
 }
 
 fn tan_f(x: f64) -> f64 {
+    note_libm(2);
     if x == 0.0 || x.is_nan() {
         return x + x;
     }
@@ -226,6 +294,7 @@ fn atan_dd(t: Dd) -> Dd {
 }
 
 fn atan_f(x: f64) -> f64 {
+    note_libm(5);
     if x == 0.0 || x.is_nan() {
         return x + x;
     }
@@ -234,6 +303,7 @@ fn atan_f(x: f64) -> f64 {
 }
 
 fn atan2_f(y: f64, x: f64) -> f64 {
+    note_libm(17);
     if x.is_nan() || y.is_nan() {
         return x + y;
     }
@@ -281,6 +351,7 @@ fn atan2_f(y: f64, x: f64) -> f64 {
     copysign_soft(round(a), y)
 }
 fn asin_f(x: f64) -> f64 {
+    note_libm(3);
     if x.is_nan() || x == 0.0 {
         return x + x;
     }
@@ -296,6 +367,7 @@ fn asin_f(x: f64) -> f64 {
 }
 
 fn acos_f(x: f64) -> f64 {
+    note_libm(4);
     if x.is_nan() {
         return x + x;
     }
@@ -349,6 +421,7 @@ fn expm1_dd(x: Dd) -> Dd {
 }
 
 fn expm1_f(x: f64) -> f64 {
+    note_libm(12);
     if x == 0.0 || x.is_nan() {
         return x + x;
     }
@@ -370,6 +443,7 @@ fn expm1_f(x: f64) -> f64 {
 }
 
 fn log1p_f(x: f64) -> f64 {
+    note_libm(13);
     if x == 0.0 || x.is_nan() {
         return x + x;
     }
@@ -387,6 +461,7 @@ fn log1p_f(x: f64) -> f64 {
 }
 
 fn log2_f(x: f64) -> f64 {
+    note_libm(14);
     if x.is_nan() {
         return x;
     }
@@ -403,7 +478,35 @@ fn log2_f(x: f64) -> f64 {
     round(div(ln_dd(dd(x), ln2), ln2))
 }
 
+/// 2^r for |r| <= 1/2: degree-14 Taylor series in double, within 1.1 ulp.
+fn exp2_small(r: f64) -> f64 {
+    #[rustfmt::skip]
+    const C: [f64; 15] = [
+        1.0,
+        core::f64::consts::LN_2,
+        0.240_226_506_959_100_7,
+        0.055_504_108_664_821_57,
+        0.009_618_129_107_628_475,
+        0.001_333_355_814_642_844,
+        0.000_154_035_303_933_816_03,
+        0.000_015_252_733_804_059_833,
+        0.000_001_321_548_679_014_430_3,
+        1.017_808_600_923_969_5e-7,
+        7.054_911_620_801_119e-9,
+        4.445_538_271_870_809e-10,
+        2.567_843_599_348_819e-11,
+        1.369_148_885_390_412e-12,
+        6.778_726_354_822_54e-14,
+    ];
+    let mut p = C[14];
+    for k in (0..14).rev() {
+        p = p * r + C[k];
+    }
+    p
+}
+
 fn exp2_f(x: f64) -> f64 {
+    note_libm(15);
     if x.is_nan() {
         return x;
     }
@@ -419,8 +522,8 @@ fn exp2_f(x: f64) -> f64 {
     if is_int(x) {
         return scalb(1.0, x as i32);
     }
-    let (ln2, _, _) = consts();
-    let r = exp_dd(mul(dd(x), ln2), ln2);
+    let n = round_half_even(x);
+    let r = scalb(exp2_small(x - n), n as i32);
     if r == 0.0 {
         return error(UNDERFLOW, b"exp2\0", x, 0.0, r);
     }
@@ -428,6 +531,7 @@ fn exp2_f(x: f64) -> f64 {
 }
 
 fn cbrt_f(x: f64) -> f64 {
+    note_libm(16);
     if x == 0.0 || !x.is_finite() {
         return x + x;
     }
@@ -442,6 +546,7 @@ fn cbrt_f(x: f64) -> f64 {
 }
 
 fn hypot_f(x: f64, y: f64) -> f64 {
+    note_libm(18);
     if x.is_infinite() || y.is_infinite() {
         return f64::INFINITY;
     }
@@ -459,10 +564,16 @@ fn hypot_f(x: f64, y: f64) -> f64 {
     if b == 0.0 {
         return a;
     }
+    // Squares of values in [2^-350, 2^500) stay normal and their sum cannot
+    // overflow, so the scaling below only serves extreme magnitudes.
+    if (4.3601508761683463e-106..3.273390607896142e150).contains(&a) {
+        return sqrt_soft(a * a + b * b);
+    }
     let e = ((a.to_bits() >> 52) as i32).max(1) - 1023;
     let (sa, sb) = (scalb(a, -e), scalb(b, -e));
-    let s = sqrt_dd(add(two_prod(sa, sa), two_prod(sb, sb)));
-    let r = scalb(round(s), e);
+    // Both operands are in [1, 2), so the squares and their sum are exact in
+    // magnitude range; the double sqrt leaves the result within 2 ulp.
+    let r = scalb(sqrt_soft(sa * sa + sb * sb), e);
     if r.is_infinite() {
         return error(OVERFLOW, b"hypot\0", x, y, r);
     }
@@ -472,6 +583,7 @@ fn hypot_f(x: f64, y: f64) -> f64 {
 // ---- hyperbolic ---------------------------------------------------------------------------
 
 fn sinh_f(x: f64) -> f64 {
+    note_libm(6);
     if x == 0.0 || !x.is_finite() {
         return x + x;
     }
@@ -497,6 +609,7 @@ fn sinh_f(x: f64) -> f64 {
 }
 
 fn cosh_f(x: f64) -> f64 {
+    note_libm(7);
     if x.is_nan() {
         return x + x;
     }
@@ -522,6 +635,7 @@ fn cosh_f(x: f64) -> f64 {
 }
 
 fn tanh_f(x: f64) -> f64 {
+    note_libm(8);
     if x == 0.0 || x.is_nan() {
         return x + x;
     }
@@ -534,6 +648,7 @@ fn tanh_f(x: f64) -> f64 {
 }
 
 fn asinh_f(x: f64) -> f64 {
+    note_libm(9);
     if x == 0.0 || !x.is_finite() {
         return x + x;
     }
@@ -548,6 +663,7 @@ fn asinh_f(x: f64) -> f64 {
 }
 
 fn acosh_f(x: f64) -> f64 {
+    note_libm(10);
     if x.is_nan() {
         return x + x;
     }
@@ -570,6 +686,7 @@ fn acosh_f(x: f64) -> f64 {
 }
 
 fn atanh_f(x: f64) -> f64 {
+    note_libm(11);
     if x == 0.0 || x.is_nan() {
         return x + x;
     }
@@ -600,6 +717,7 @@ fn add_round_odd(a: f64, b: f64) -> f64 {
 }
 
 fn fma_f(x: f64, y: f64, z: f64) -> f64 {
+    note_libm(19);
     if !x.is_finite() || !y.is_finite() || !z.is_finite() || x == 0.0 || y == 0.0 {
         return x * y + z;
     }
@@ -626,6 +744,7 @@ fn fmaf_f(x: f32, y: f32, z: f32) -> f32 {
 }
 
 fn remainder_f(x: f64, y: f64) -> f64 {
+    note_libm(20);
     if x.is_nan() || y.is_nan() {
         return x + y;
     }
@@ -668,6 +787,7 @@ fn remainder_f(x: f64, y: f64) -> f64 {
 }
 
 fn next_after(x: f64, y: f64) -> f64 {
+    note_libm(21);
     if x.is_nan() || y.is_nan() {
         return x + y;
     }

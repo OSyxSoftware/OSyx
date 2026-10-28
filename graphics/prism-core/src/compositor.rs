@@ -350,6 +350,10 @@ pub struct Compositor {
     cascade: i32,
     now: u64,
     stats: Stats,
+    /// The system clipboard, shared by every client; `clipboard_seq` is 0
+    /// until something is put there.
+    clipboard: Vec<proto::ClipEntry>,
+    clipboard_seq: u32,
 }
 
 const DOUBLE_CLICK_MS: u64 = 400;
@@ -383,6 +387,8 @@ impl Compositor {
             shell_pid: None,
             cursor: Cursor::new(CursorShape::Arrow),
             cursor_overlay: false,
+            clipboard: Vec::new(),
+            clipboard_seq: 0,
             shadow: ShadowTables::new(theme::SHADOW, theme::RADIUS),
             popup_shadow: ShadowTables::new(12, theme::RADIUS),
             font: PropFont::parse(TITLE_FONT).expect("embedded title font"),
@@ -601,6 +607,8 @@ impl Compositor {
                     c,
                     Event::Hello { version, client_id: c, flags: granted, screen_width: self.screen.w, screen_height: self.screen.h },
                 );
+                let (seq, entries) = (self.clipboard_seq, self.clipboard.clone());
+                self.send(c, Event::ClipboardChanged { seq, entries });
                 if granted != 0 {
                     self.list_dirty = true;
                 }
@@ -714,6 +722,10 @@ impl Compositor {
                 self.set_geometry(id, x, y, width, height);
                 Ok(())
             }
+            Request::Sync { cookie } => {
+                self.send(c, Event::SyncDone { cookie });
+                Ok(())
+            }
             Request::SetWindowVisibility { window, visible, taskbar } => {
                 let id = self.local_window(c, window)?;
                 let w = self.windows.get_mut(&id).expect("window exists");
@@ -743,6 +755,17 @@ impl Compositor {
                     self.local_window(c, target)?
                 };
                 self.window_action(id, action);
+                Ok(())
+            }
+            Request::ClipboardSet { entries } => {
+                self.clipboard = entries;
+                self.clipboard_seq += 1;
+                let ev = Event::ClipboardChanged { seq: self.clipboard_seq, entries: self.clipboard.clone() };
+                let ids: Vec<ClientId> =
+                    self.clients.iter().filter(|(_, cl)| cl.version.is_some() && !cl.dead).map(|(id, _)| *id).collect();
+                for id in ids {
+                    self.outbox.push((id, ev.clone()));
+                }
                 Ok(())
             }
             Request::Notify { title, body } => {
@@ -1056,7 +1079,8 @@ impl Compositor {
                 let t = w.title_height();
                 let nw = if resizable { width.max(w.min_w).min(wa.w) } else { w.rect.w };
                 let nh = if resizable { height.max(w.min_h).min(wa.h.saturating_sub(t)) } else { w.rect.h };
-                w.rect = Rect::new(w.rect.x, w.rect.y, nw.max(1), nh.max(1));
+                let py = if y == -1 { w.rect.y } else if y >= 0 { y.max(t as i32) } else { y };
+                w.rect = Rect::new(if x == -1 { w.rect.x } else { x }, py, nw.max(1), nh.max(1));
             }
         }
         let (rw, rh, states) = (w.rect.w, w.rect.h, w.states(false));
@@ -1309,7 +1333,26 @@ impl Compositor {
         let w = &self.windows[&id];
         let (c, l) = (w.client, w.local);
         let (buttons, modifiers) = (self.buttons, self.modifiers);
-        self.send(c, Event::Pointer { window: l, kind, x, y, button, pressed, wheel_v: wheel.0, wheel_h: wheel.1, buttons, modifiers });
+        // Win32 code (Gecko's scroll targeting) needs the screen position:
+        // GetMessagePos and WM_MOUSEWHEEL work in screen coordinates.
+        let (screen_x, screen_y) = (self.ptr_x, self.ptr_y);
+        self.send(
+            c,
+            Event::Pointer {
+                window: l,
+                kind,
+                x,
+                y,
+                screen_x,
+                screen_y,
+                button,
+                pressed,
+                wheel_v: wheel.0,
+                wheel_h: wheel.1,
+                buttons,
+                modifiers,
+            },
+        );
     }
 
     fn pointer_motion(&mut self, dx: i32, dy: i32) {

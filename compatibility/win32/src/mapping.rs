@@ -17,6 +17,7 @@ use crate::{
 };
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use os_std::sync::Mutex;
+use os_std::time::Instant;
 
 pub const FILE_MAP_COPY: u32 = 0x1;
 pub const FILE_MAP_WRITE: u32 = 0x2;
@@ -116,8 +117,15 @@ fn create_section(file: Option<u64>, protect: u32, size: u64, name: Option<Strin
                 return Err(STATUS_SECTION_TOO_BIG);
             }
             let write = page == PAGE_READWRITE;
+            let started = Instant::now();
             match os_sys::filemap_create(f.fd, size, write) {
-                Ok(shm) => SectionObj { shm, file_mapping: true, size, writable: write, executable, file: Some(f), name },
+                Ok(shm) => {
+                    let elapsed = started.elapsed().as_millis();
+                    if elapsed >= 50 {
+                        os_std::eprintln!("winrun: section {} ({} KiB) in {} ms", f.path, size >> 10, elapsed);
+                    }
+                    SectionObj { shm, file_mapping: true, size, writable: write, executable, file: Some(f), name }
+                }
                 // Large immutable resources keep the existing snapshot path.
                 // Writable mappings require the coherent kernel backing.
                 Err(osyx_abi::Errno::NotSupported) if !write => SectionObj {

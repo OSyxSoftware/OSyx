@@ -6,6 +6,8 @@
 //! resumable user exception delivery (FAULT_HANDLER/FAULT_RETURN); an older
 //! kernel rejects these calls with NotSupported. Optional FILEMAP_CREATE,
 //! FILEMAP_MAP and FILEMAP_FLUSH calls add coherent local file sections.
+//! Optional IMAGE_MAP, IMAGE_PUBLISH and IMAGE_QUERY calls share laid-out executable
+//! images between processes copy-on-write.
 //! Existing call numbers and layouts stay unchanged.
 //!
 //! Version 9 adds what the Windows runtime and VirtIO-GPU need: a
@@ -311,6 +313,38 @@ pub mod nr {
     /// `filemap_flush(section, offset, len) -> 0`: writes the requested range
     /// to the file without changing the open file position.
     pub const FILEMAP_FLUSH: u64 = 82;
+    /// `cpu_info() -> online_count | current_cpu_index << 32`.
+    pub const CPU_INFO: u64 = 83;
+    /// `thread_affinity(tid, mask) -> previous_mask`; tid 0 is the caller,
+    /// mask 0 queries without changing it.
+    pub const THREAD_AFFINITY: u64 = 84;
+    /// `process_write_barrier() -> 0`: serialize stores on all online CPUs.
+    pub const PROCESS_WRITE_BARRIER: u64 = 85;
+    /// `prefault(addr, len) -> 0`: allocate writable anonymous destination
+    /// pages in batches before a bulk copy; faults still handle the rest.
+    pub const PREFAULT: u64 = 86;
+    /// `proc_info(pid, out: *mut ProcInfo) -> 0`: one process record;
+    /// `NotFound` if no process with `pid` exists.
+    pub const PROC_INFO: u64 = 87;
+    /// `time_calib(out: *mut [u64; 4]) -> 0`: writes
+    /// `[monotonic_ns, tsc, tsc_per_tick, realtime_ns]` sampled together, so
+    /// a process can compute both clocks from RDTSC without further calls.
+    /// `tsc_per_tick` is 0 until the kernel has calibrated the TSC.
+    pub const TIME_CALIB: u64 = 88;
+    /// `image_map(file, addr, len) -> 0`: maps the shared image of `file`
+    /// laid out at `addr` into the untouched anonymous mapping that is
+    /// exactly `[addr, addr + len)`, read-only with copy-on-write.
+    /// `NotFound` if no process of this user published one.
+    pub const IMAGE_MAP: u64 = 89;
+    /// `image_publish(file, addr, len) -> 0`: the image of `file` laid out
+    /// and relocated in the anonymous mapping `[addr, addr + len)` becomes
+    /// shareable by later `image_map` calls of the same user. Its pages
+    /// stay mapped read-only with copy-on-write. `AlreadyExists` if one is
+    /// published already (nothing changes then).
+    pub const IMAGE_PUBLISH: u64 = 90;
+    /// `image_query(file) -> addr`: where a published image of `file` for
+    /// this user lies; `NotFound` if there is none.
+    pub const IMAGE_QUERY: u64 = 91;
 }
 
 /// `map_ex` flags.
@@ -872,7 +906,7 @@ pub struct SystemInfo {
     pub pid: u64,
     /// NUL-padded UTF-8 kernel version.
     pub kernel_version: [u8; 16],
-    /// Scheduler timer samples since scheduler initialization (single CPU).
+    /// Scheduler timer samples summed across all online CPUs.
     pub ticks: u64,
     pub idle_ticks: u64,
     /// Successful physical block I/O, excluding partition wrapper duplicates.

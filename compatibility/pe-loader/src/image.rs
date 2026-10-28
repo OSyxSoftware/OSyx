@@ -1,8 +1,8 @@
 //! Turns a parsed PE32+ file into its in-memory image: headers and sections
 //! laid out at their RVAs (zero-filled tails), base relocations applied for
 //! the address it is loaded at, and the page protections each part needs.
-//! Nothing here touches real memory; the caller copies the image into the
-//! address space and applies the protections.
+//! Nothing here touches real memory; the caller supplies the destination and
+//! applies the protections.
 
 use alloc::vec::Vec;
 use osyx_pe::{PeFile, RelocationKind};
@@ -74,6 +74,15 @@ pub fn check(pe: &PeFile<'_>, want_dll: bool) -> Result<(), ImageError> {
 /// Lays the file out as it appears in memory (`size_of_image` bytes).
 pub fn layout(pe: &PeFile<'_>) -> Result<Vec<u8>, ImageError> {
     let mut img = alloc::vec![0u8; pe.size_of_image() as usize];
+    layout_into(pe, &mut img)?;
+    Ok(img)
+}
+
+/// Fills a zeroed image buffer, leaving section tails and unassigned pages zero.
+pub fn layout_into(pe: &PeFile<'_>, img: &mut [u8]) -> Result<(), ImageError> {
+    if img.len() < pe.size_of_image() as usize {
+        return Err(ImageError::TooLarge);
+    }
     let hdr = (pe.optional().size_of_headers as usize).min(pe.data().len()).min(img.len());
     img[..hdr].copy_from_slice(&pe.data()[..hdr]);
     for s in pe.sections() {
@@ -85,7 +94,7 @@ pub fn layout(pe: &PeFile<'_>) -> Result<Vec<u8>, ImageError> {
         let dst = s.virtual_address as usize;
         img.get_mut(dst..dst + n).ok_or(ImageError::TooLarge)?.copy_from_slice(src);
     }
-    Ok(img)
+    Ok(())
 }
 
 const IMAGE_FILE_RELOCS_STRIPPED: u16 = 0x0001;

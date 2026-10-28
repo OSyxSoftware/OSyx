@@ -38,27 +38,21 @@ struct Tss {
 #[repr(C, align(16))]
 struct Stack([u8; IST_STACK_SIZE]);
 
-static mut IST_STACKS: [Stack; 3] = [const { Stack([0; IST_STACK_SIZE]) }; 3];
-
-static mut TSS: Tss = Tss {
-    _reserved0: 0,
-    rsp: [0; 3],
-    _reserved1: 0,
-    ist: [0; 7],
-    _reserved2: 0,
-    _reserved3: 0,
-    iomap_base: size_of::<Tss>() as u16, // no I/O permission bitmap
-};
-
-static mut GDT: [u64; 7] = [
-    0,
-    0x00AF_9A00_0000_FFFF, // kernel code: present, DPL0, exec/read, long mode
-    0x00CF_9200_0000_FFFF, // kernel data: present, DPL0, read/write
-    0x00CF_F200_0000_FFFF, // user data:   present, DPL3, read/write
-    0x00AF_FA00_0000_FFFF, // user code:   present, DPL3, exec/read, long mode
-    0,                     // TSS low  (filled in by init)
-    0,                     // TSS high
-];
+struct CpuTables {
+    stacks: [Stack; 3],
+    tss: Tss,
+    gdt: [u64; 7],
+}
+impl CpuTables {
+    const fn new() -> Self {
+        Self {
+            stacks: [const { Stack([0; IST_STACK_SIZE]) }; 3],
+            tss: Tss { _reserved0: 0, rsp: [0;3], _reserved1: 0, ist: [0;7], _reserved2: 0, _reserved3: 0, iomap_base: size_of::<Tss>() as u16 },
+            gdt: [0,0x00AF_9A00_0000_FFFF,0x00CF_9200_0000_FFFF,0x00CF_F200_0000_FFFF,0x00AF_FA00_0000_FFFF,0,0],
+        }
+    }
+}
+static mut TABLES: [CpuTables;crate::smp::MAX_CPUS] = [const { CpuTables::new() };crate::smp::MAX_CPUS];
 
 /// Sets the stack the CPU switches to when an interrupt or exception arrives
 /// while running in ring 3 (TSS.RSP0).
@@ -67,7 +61,7 @@ static mut GDT: [u64; 7] = [
 /// `top` must be the 16-byte aligned top of a mapped kernel stack that stays
 /// valid while user code runs.
 pub unsafe fn set_kernel_stack(top: u64) {
-    let tss = &raw mut TSS;
+    let tss = &raw mut (*(&raw mut TABLES).cast::<CpuTables>().add(crate::smp::index())).tss;
     // The TSS is packed: write the field without creating a reference.
     core::ptr::addr_of_mut!((*tss).rsp).write_unaligned([top, 0, 0]);
 }
@@ -82,16 +76,21 @@ struct Pointer {
 ///
 /// # Safety
 /// Must be called once, on the boot CPU, before interrupts are enabled.
-pub unsafe fn init() {
-    let tss = &raw mut TSS;
-    let stacks = &raw const IST_STACKS;
+pub unsafe fn init() { init_cpu(0); }
+
+/// # Safety
+/// Each logical CPU calls this once with a distinct slot, interrupts off.
+pub unsafe fn init_cpu(index: usize) {
+    let state = (&raw mut TABLES).cast::<CpuTables>().add(index);
+    let tss = &raw mut (*state).tss;
+    let stacks = &raw const (*state).stacks;
     for (i, ist) in [IST_DOUBLE_FAULT, IST_NMI, IST_MACHINE_CHECK].iter().enumerate() {
         let top = addr_of!((*stacks)[i]) as u64 + IST_STACK_SIZE as u64;
         (*tss).ist[*ist as usize - 1] = top;
     }
     let base = tss as u64;
     let limit = (size_of::<Tss>() - 1) as u64;
-    let gdt = &raw mut GDT;
+    let gdt = &raw mut (*state).gdt;
     (*gdt)[5] = (limit & 0xFFFF)
         | ((base & 0xFF_FFFF) << 16)
         | (0x89 << 40) // present, 64-bit available TSS

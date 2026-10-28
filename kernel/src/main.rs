@@ -25,13 +25,16 @@ mod display;
 mod drivers;
 mod earlycon;
 mod exec;
+mod filecache;
 mod filemap;
 mod fixup;
 mod futex;
+mod image;
 mod input;
 mod interrupts;
 mod ipc;
 mod irq;
+mod live;
 mod mem;
 mod modules;
 mod net;
@@ -43,6 +46,7 @@ mod process;
 mod qemu;
 mod random;
 mod sched;
+mod smp;
 mod selftest;
 mod selftest_fs;
 mod serial;
@@ -96,6 +100,12 @@ impl BootData {
 
 static BOOT: BootCell<BootData> = BootCell::new();
 
+/// Whether the boot command line carries `opt`. Diagnostics opt in with
+/// `stats` so normal desktop boots do not pay for serial dumps.
+pub fn has_boot_option(opt: &str) -> bool {
+    BOOT.get().is_some_and(|b| b.has_option(opt))
+}
+
 /// Kernel entry, reached from the boot loader with the HHDM address of the
 /// BootInfo in RDI, interrupts disabled and a 128 KiB stack.
 ///
@@ -104,23 +114,36 @@ static BOOT: BootCell<BootData> = BootCell::new();
 #[no_mangle]
 #[link_section = ".text.entry"]
 pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
-    serial::init();
-    if !info.is_null() {
-        // SAFETY: as below; the framebuffer fields are only used once the
-        // header has been validated.
-        let raw = unsafe { info.read() };
-        if raw.validate().is_ok() && raw.has_framebuffer() {
-            earlycon::init(&raw.framebuffer, raw.hhdm_offset, raw.hhdm_size);
-        }
-    }
-    kprintln!("OSyx kernel {} (x86_64) starting", VERSION);
     if info.is_null() {
+        serial::init();
         kprintln!("FATAL: no BootInfo");
         cpu::halt_forever();
     }
-    // SAFETY: the boot loader passes a pointer to a BootInfo in mapped memory;
-    // the header is validated before any field is trusted.
+    // SAFETY: the loader passes a mapped BootInfo; validation precedes use of
+    // its pointers, including the framebuffer's physical address and HHDM.
     let raw = unsafe { info.read() };
+    let valid = raw.validate().is_ok();
+    let mark = |stage| {
+        if valid && raw.has_framebuffer() {
+            earlycon::marker(&raw.framebuffer, raw.hhdm_offset, raw.hhdm_size, stage);
+        }
+    };
+    mark(1);
+    if valid && raw.has_framebuffer() {
+        earlycon::init(&raw.framebuffer, raw.hhdm_offset, raw.hhdm_size);
+    }
+    mark(2);
+    serial::init();
+    mark(3);
+    // Do not enter firmware descriptors after ExitBootServices.
+    unsafe { arch::gdt::init() };
+    mark(4);
+    unsafe { smp::init_boot_cpu() };
+    mark(5);
+    unsafe { arch::idt::init() };
+    mark(6);
+    kprintln!("kernel entry reached");
+    kprintln!("OSyx kernel {} (x86_64) starting", VERSION);
     if let Err(e) = raw.validate() {
         kprintln!("FATAL: invalid BootInfo: {:?}", e);
         cpu::halt_forever();
@@ -137,11 +160,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     );
 
     // SAFETY: single CPU, interrupts disabled, called exactly once.
-    unsafe {
-        arch::gdt::init();
-        arch::idt::init();
-        syscall::init();
-    }
+    unsafe { syscall::init() };
     let cpuinfo = cpu::CpuInfo::detect();
     kprintln!("cpu: {}", cpuinfo);
     // SAFETY: CR0.WP makes read-only pages read-only for ring 0 too; SSE is
@@ -178,23 +197,29 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     cpu::enable_interrupts();
     arch::timer::verify();
     sched::init();
-    kprintln!("scheduler: round robin, {} ms time slice", sched::TIME_SLICE_TICKS * 10);
+    smp::start(boot);
+    kprintln!("scheduler: round robin, {} ms time slice", sched::TIME_SLICE_TICKS * 1000 / arch::timer::TIMER_HZ);
     let pci_devices = pci::enumerate();
     pci::log_devices(&pci_devices);
     match time::init() {
         Some(secs) => kprintln!("time: RTC says {} UTC", time::format_utc(secs)),
         None => kprintln!("time: RTC unreadable; timestamps count from boot"),
     }
-    let disks = block::probe(&pci_devices);
-    let partitions = block::scan_partitions();
+    block::probe(&pci_devices);
     random::init(&pci_devices);
-    devices::init();
-    // USB comes up in its own threads: input devices appear asynchronously
-    // and never hold up the boot.
+    // USB comes up in its own threads: input devices and USB disks appear
+    // asynchronously. Boot waits (bounded) only so a root filesystem on a
+    // USB disk is found before the partition scan.
     input::init(boot.has_option("input.log"));
     let nics = net::init(&pci_devices, boot);
     let usb_controllers = drivers::xhci::probe(&pci_devices);
     kprintln!("usb: {} xHCI controller(s), net: {} interface(s)", usb_controllers, nics);
+    if usb_controllers > 0 {
+        drivers::xhci::wait_ready(10_000);
+    }
+    let partitions = block::scan_partitions();
+    devices::init();
+    let disks = block::devices().len();
     let mounted = storage::mount_all(boot);
     kprintln!(
         "storage: {} PCI functions, {} disks, {} partitions, {} mounts, root: {}",
@@ -257,6 +282,9 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let mut line2 = Line::new();
     let init_name = boot.option_value("init").unwrap_or("init");
     ok &= run_init(boot, init_name, &mut line2);
+    // With init gone, retained read-only pages are cache, not live mappings.
+    exec::clear();
+    filecache::clear();
     log_subsystems();
     let color = if ok { osyx_gfx::splash::OK } else { osyx_gfx::splash::ERROR };
     let title = if ok { "OSyx kernel is running" } else { "OSyx: a check failed" };
@@ -372,16 +400,17 @@ fn parse_int(s: &str) -> Option<i32> {
 /// halts the CPU in between.
 fn idle(line1: Line, line2: Line, ok: bool) -> ! {
     let mut last = 0;
+    let hz = arch::timer::TIMER_HZ as u64;
     loop {
-        sched::sleep_ticks(4);
+        sched::sleep_ticks(arch::timer::ms_to_ticks(40));
         let t = interrupts::ticks();
-        display::spin((t * 4) as u32);
-        if t / 100 != last / 100 {
+        display::spin((t * 400 / hz) as u32);
+        if t / hz != last / hz {
             display::poll_hotplug();
         }
-        if t / 100 != last / 100 {
+        if t / hz != last / hz {
             let mut up = Line::new();
-            let _ = write!(up, "Uptime {} s", t / 100);
+            let _ = write!(up, "Uptime {} s", t / hz);
             let (title, color) = if ok {
                 ("OSyx kernel is running", osyx_gfx::splash::OK)
             } else {

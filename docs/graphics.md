@@ -185,7 +185,9 @@ own launcher entries. They draw through the same PRISM compositor.
 
 ## Known limitations
 
-* Software composition only, single CPU; full-window commits from the
+* Software composition uses one compositor thread; applications can run on
+  different CPUs. Cursor updates bypass the application frame limit and
+  copy only the old/new pointer rectangles. Full-window commits from the
   toolkit applications (damage is tracked by PRISM, clients report it but
   the toolkit apps redraw whole windows).
 * Popups and notifications are square (no per-pixel alpha in the toolkit

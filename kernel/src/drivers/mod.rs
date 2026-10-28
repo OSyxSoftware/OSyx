@@ -1,5 +1,8 @@
 //! Device drivers.
 
+pub mod ahci;
+pub mod e1000;
+pub mod nvme;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_gpu;

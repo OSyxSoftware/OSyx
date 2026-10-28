@@ -311,7 +311,7 @@ fn tcp_flow_control_stops_and_resumes_on_a_full_window() {
     let mut n = Net::new();
     let (c, s) = connect(&mut n, 6100);
     // The receiver does not read: the sender fills the window and stalls.
-    let data = pattern(200_000, 6);
+    let data = pattern(osyx_net::tcp::RECV_BUFFER + 100_000, 6);
     let mut sent = 0;
     n.run_until(5000, |n| {
         if let Ok(k) = n.a.tcp_send(c, &data[sent..]) {

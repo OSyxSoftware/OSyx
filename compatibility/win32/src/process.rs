@@ -356,9 +356,7 @@ extern "win64" fn OpenProcess(_access: u32, inherit: i32, pid: u32) -> u64 {
     if let Some(p) = CHILDREN.lock().unwrap().iter().find(|p| p.pid == pid as u64) {
         return objects::insert(Object::Process(p.clone()));
     }
-    let mut list = alloc::vec![osyx_abi::ipc::ProcInfo::default(); 256];
-    let n = os_sys::proc_list(&mut list).unwrap_or(0);
-    if !list[..n].iter().any(|p| p.pid == pid as u64) {
+    if os_sys::proc_info(pid as u64).is_err() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // Another process (a Windows child's parent, say): it can be waited
@@ -366,12 +364,10 @@ extern "win64" fn OpenProcess(_access: u32, inherit: i32, pid: u32) -> u64 {
     let p = Arc::new(ProcessObj { pid: pid as u64, child: false, done: AtomicBool::new(false), exit_code: AtomicU32::new(STILL_ACTIVE), jobbed: AtomicBool::new(false) });
     let watcher = p.clone();
     let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
-        // OSyx reports only a child's exit, so poll the process list.
+        // OSyx reports only a child's exit, so poll the process record.
         loop {
             os_std::thread::sleep(core::time::Duration::from_millis(250));
-            let mut list = alloc::vec![osyx_abi::ipc::ProcInfo::default(); 256];
-            let n = os_sys::proc_list(&mut list).unwrap_or(0);
-            if !list[..n].iter().any(|q| q.pid == watcher.pid) {
+            if os_sys::proc_info(watcher.pid) == Err(osyx_abi::Errno::NotFound) {
                 break;
             }
         }

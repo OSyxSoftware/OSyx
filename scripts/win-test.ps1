@@ -8,7 +8,8 @@
 # the exit codes. Evidence comes from the serial log.
 param(
     [switch]$SkipBuild,
-    [int]$TimeoutSec = 300
+    [int]$TimeoutSec = 300,
+    [ValidateRange(1,16)][int]$CpuCount = 1
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 $testDir = Join-Path $BuildDir 'test'
@@ -29,8 +30,13 @@ function Read-Shared([string]$Path) {
     try { return ((New-Object IO.StreamReader($fs)).ReadToEnd() -replace "`r", '') } finally { $fs.Close() }
 }
 
+$sessionDisk = Join-Path $testDir ('win-session-' + [Guid]::NewGuid().ToString('N') + '.img')
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline "init.args=tests,win,$tcpPort,$udpPort test.exit" | Out-Host
+    & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline "init.args=tests,win,$tcpPort,$udpPort test.exit" -OutputImage $sessionDisk | Out-Host
+} else {
+    $copyLock = Enter-BuildLock
+    try { Copy-Item -LiteralPath $DiskImage -Destination $sessionDisk }
+    finally { $copyLock.ReleaseMutex(); $copyLock.Dispose() }
 }
 foreach ($f in $log, $hostLog) { if (Test-Path $f) { Remove-Item $f } }
 $py = (Get-Command python).Source
@@ -38,7 +44,7 @@ $server = Start-Process -FilePath $py -ArgumentList @((Join-Path $PSScriptRoot '
 Start-Sleep -Milliseconds 800
 try {
     $port = Get-Random -Minimum 20000 -Maximum 40000
-    $qemu = Start-Qemu (Get-QemuArgs -SerialLog $log -Headless -MemoryMiB 1024 -QmpPort $port)
+    $qemu = Start-Qemu (Get-QemuArgs -SerialLog $log -Headless -MemoryMiB 1024 -QmpPort $port -CpuCount $CpuCount -DiskFile $sessionDisk)
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $shot = $false
     while (-not $qemu.HasExited -and (Get-Date) -lt $deadline) {
@@ -57,7 +63,7 @@ $t = Read-Shared $log
 foreach ($m in [regex]::Matches($t, '\[winrun:\d+\]\s+(ok|FAIL)\s+(.+)')) {
     Record ("win32: " + $m.Groups[2].Value.Trim()) ($m.Groups[1].Value -eq 'ok') ''
 }
-foreach ($p in 'hello', 'fileio', 'threads', 'winsock', 'wsock32', 'wsaext', 'k32ansi', 'k32xul', 'advapi', 'newdlls', 'pipes', 'gdi2', 'gui', 'sysadmin', 'version', 'synch', 'security', 'exceptions', 'mapping', 'runtime', 'seh', 'platform', 'shell', 'winmm', 'sandbox', 'ole2', 'msgwait', 'dwm', 'keyboard', 'input', 'shlpath', 'secattr', 'childproc', 'dwrite', 'interop', 'ucrt', 'crt2', 'crt3', 'crt4') {
+foreach ($p in 'hello', 'fileio', 'threads', 'winsock', 'wsock32', 'wsaext', 'k32ansi', 'k32xul', 'advapi', 'newdlls', 'pipes', 'gdi2', 'gui', 'sysadmin', 'version', 'synch', 'security', 'exceptions', 'mapping', 'runtime', 'seh', 'platform', 'shell', 'winmm', 'sandbox', 'ole2', 'msgwait', 'dwm', 'keyboard', 'input', 'shlpath', 'secattr', 'childproc', 'imageshare', 'dwrite', 'interop', 'ucrt', 'crt2', 'crt3', 'crt4') {
     $s = [regex]::Match($t, "\[winrun:\d+\] ${p}: (\d+) passed, (\d+) failed")
     Record "$p.exe summary" ($s.Success -and $s.Groups[2].Value -eq '0') $s.Value
 }

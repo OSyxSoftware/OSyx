@@ -20,6 +20,16 @@ use crate::{crc, feature, BlockDevice, Error, Ext4, Result};
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+// Temporary I/O diagnostics.
+pub static COMMITS: AtomicU64 = AtomicU64::new(0);
+pub static COMMIT_BLOCKS: AtomicU64 = AtomicU64::new(0);
+
+/// (transactions, metadata blocks) committed since mount.
+pub fn commit_stats() -> (u64, u64) {
+    (COMMITS.load(Ordering::Relaxed), COMMIT_BLOCKS.load(Ordering::Relaxed))
+}
 
 const JBD2_MAGIC: u32 = 0xC03B_3998;
 const BT_DESCRIPTOR: u32 = 1;
@@ -359,7 +369,36 @@ impl<D: BlockDevice> Ext4<D> {
             put_be32(&mut b, 0xFC, c);
         }
         self.write_block_raw(phys, &b)?;
-        self.dev.flush()
+        // No barrier here: the caller's next flush covers this write. Both
+        // possible on-disk states (log start set or clear) recover to the
+        // same tree, so the ordering is not load-bearing.
+        Ok(())
+    }
+
+    /// Writes blocks to the given physical locations, merging runs of
+    /// consecutive blocks into one device request. Journal layouts keep
+    /// transactions contiguous, so this turns most commits into one write.
+    fn write_runs(&mut self, phys: &[u64], blocks: &[&[u8]]) -> Result<()> {
+        debug_assert_eq!(phys.len(), blocks.len());
+        let bs = self.sb.block_size as usize;
+        let mut i = 0;
+        while i < phys.len() {
+            let mut j = i + 1;
+            while j < phys.len() && phys[j] == phys[j - 1] + 1 {
+                j += 1;
+            }
+            if j - i == 1 {
+                self.write_block_raw(phys[i], blocks[i])?;
+            } else {
+                let mut buf = Vec::with_capacity((j - i) * bs);
+                for d in &blocks[i..j] {
+                    buf.extend_from_slice(d);
+                }
+                self.write_blocks_raw(phys[i], &buf)?;
+            }
+            i = j;
+        }
+        Ok(())
     }
 
     /// Writes `blocks` (metadata block number -> new contents) as one
@@ -369,10 +408,12 @@ impl<D: BlockDevice> Ext4<D> {
         if blocks.is_empty() {
             return Ok(());
         }
+        COMMITS.fetch_add(1, Ordering::Relaxed);
+        COMMIT_BLOCKS.fetch_add(blocks.len() as u64, Ordering::Relaxed);
         if self.journal.is_none() {
-            for (&b, d) in blocks {
-                self.write_block_raw(b, d)?;
-            }
+            let phys: Vec<u64> = blocks.keys().copied().collect();
+            let data: Vec<&[u8]> = blocks.values().map(|d| d.as_slice()).collect();
+            self.write_runs(&phys, &data)?;
             return self.dev.flush();
         }
         let bs = self.sb.block_size as usize;
@@ -464,21 +505,26 @@ impl<D: BlockDevice> Ext4<D> {
             let j = self.journal.as_ref().expect("checked");
             (0..log.len()).map(|i| j.blocks[first as usize + i]).collect()
         };
-        for (p, data) in phys.iter().zip(&log) {
-            self.write_block_raw(*p, data)?;
-        }
-        self.dev.flush()?;
+        let log_refs: Vec<&[u8]> = log.iter().map(|d| d.as_slice()).collect();
+        self.write_runs(&phys, &log_refs)?;
+        // Point the journal at the new log before the barrier, so one flush
+        // makes both the transaction and its pointer durable. A flush per
+        // write of the journal superblock costs a device round trip and the
+        // guest makes tens of commits per second.
         self.write_journal_super(first)?;
+        self.dev.flush()?;
         // Checkpoint.
-        for (&b, d) in blocks {
-            self.write_block_raw(b, d)?;
-        }
+        let cphys: Vec<u64> = blocks.keys().copied().collect();
+        let cdata: Vec<&[u8]> = blocks.values().map(|d| d.as_slice()).collect();
+        self.write_runs(&cphys, &cdata)?;
         self.dev.flush()?;
         {
             let j = self.journal.as_mut().expect("checked");
             j.sequence = j.sequence.wrapping_add(1);
             j.committed += 1;
         }
+        // Clearing the tail needs no barrier: if it is lost the transaction
+        // is replayed once more, which leaves the same tree.
         self.write_journal_super(0)
     }
 

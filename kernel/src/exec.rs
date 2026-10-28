@@ -12,10 +12,31 @@
 //!   caller changes, so a failing `execve` leaves the old program running.
 
 use crate::fixup::copy_from_user;
+use crate::mem::{phys_to_virt, PAGE_SIZE};
+use crate::shm::SharedMemory;
+use crate::sync::KMutex;
 use crate::vfs::{self, Lookup};
+use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use osyx_abi::{Errno, ExecArgs, MAX_EXEC_ARGS, MAX_EXEC_STRINGS, MAX_PATH, PROGRAM_PATH};
+use osyx_elf::Segment;
+
+const MAX_CACHED_PAGES: usize = 16 * 1024;
+const MAX_CACHED_IMAGE_BYTES: usize = 64 << 20;
+struct PageCache {
+    images: BTreeMap<(u64, u64), BTreeMap<u64, Arc<SharedMemory>>>,
+    pages: usize,
+    generation: u64,
+}
+static SHARED_PAGES: KMutex<PageCache> =
+    KMutex::new(PageCache { images: BTreeMap::new(), pages: 0, generation: 0 });
+struct ImageCache {
+    images: BTreeMap<(u64, u64), Arc<Vec<u8>>>,
+    generation: u64,
+}
+static CACHED_IMAGES: KMutex<ImageCache> = KMutex::new(ImageCache { images: BTreeMap::new(), generation: 0 });
 
 /// Largest executable file accepted.
 pub const MAX_IMAGE: u64 = 64 << 20;
@@ -109,7 +130,85 @@ fn split_block(block: &[u8]) -> Result<Vec<String>, Errno> {
 pub struct Program {
     /// Canonical absolute path it was read from (`AT_EXECFN`).
     pub path: String,
-    pub image: Vec<u8>,
+    pub image: Arc<Vec<u8>>,
+    key: (u64, u64),
+}
+
+pub fn invalidate(key: (u64, u64)) {
+    crate::image::invalidate(key.0, key.1);
+    let mut cache = SHARED_PAGES.lock();
+    cache.generation += 1;
+    if let Some(pages) = cache.images.remove(&key) {
+        cache.pages -= pages.len();
+    }
+    drop(cache);
+    let mut cache = CACHED_IMAGES.lock();
+    cache.generation += 1;
+    cache.images.remove(&key);
+}
+
+pub fn clear() {
+    let mut cache = SHARED_PAGES.lock();
+    cache.generation += 1;
+    cache.images.clear();
+    cache.pages = 0;
+    drop(cache);
+    let mut cache = CACHED_IMAGES.lock();
+    cache.generation += 1;
+    cache.images.clear();
+}
+
+pub fn shared_pages(prog: &Program, seg: &Segment) -> Result<Vec<Arc<SharedMemory>>, Errno> {
+    let file = &prog.image[seg.file_offset as usize..(seg.file_offset + seg.file_size) as usize];
+    let count = ((seg.page_end() - seg.vaddr) / PAGE_SIZE) as usize;
+    let mut pages = Vec::with_capacity(count);
+    let mut misses = Vec::new();
+    let key = prog.key;
+    let generation = {
+        let cache = SHARED_PAGES.lock();
+        for index in 0..count {
+            let va = seg.vaddr + index as u64 * PAGE_SIZE;
+            if let Some(page) = cache.images.get(&key).and_then(|pages| pages.get(&va)) {
+                pages.push(Some(page.clone()));
+            } else {
+                misses.push((index, va));
+                pages.push(None);
+            }
+        }
+        cache.generation
+    };
+
+    for &(index, va) in &misses {
+        let page = SharedMemory::new(PAGE_SIZE)?;
+        let end = (va + PAGE_SIZE).min(seg.vaddr + file.len() as u64);
+        if end > va {
+            let offset = (va - seg.vaddr) as usize;
+            let src = &file[offset..offset + (end - va) as usize];
+            // SAFETY: the new page is exclusively owned and reachable via the HHDM.
+            unsafe {
+                core::ptr::copy_nonoverlapping(src.as_ptr(), phys_to_virt(page.frames()[0]) as *mut u8, src.len());
+            }
+        }
+        pages[index] = Some(page);
+    }
+
+    if !misses.is_empty() {
+        let mut cache = SHARED_PAGES.lock();
+        if cache.generation == generation {
+            for &(index, va) in &misses {
+                let cached = cache.images.get(&key).and_then(|pages| pages.get(&va)).cloned();
+                if let Some(cached) = cached {
+                    pages[index] = Some(cached);
+                } else if cache.pages < MAX_CACHED_PAGES {
+                    let page = pages[index].as_ref().expect("miss was filled").clone();
+                    cache.images.entry(key).or_default().insert(va, page);
+                    cache.pages += 1;
+                }
+            }
+        }
+    }
+
+    Ok(pages.into_iter().map(|page| page.expect("miss was filled")).collect())
 }
 
 /// Finds `name` as described in the module documentation and reads it.
@@ -131,17 +230,34 @@ pub fn load(cx: &Lookup, name: &str) -> Result<Program, Errno> {
 
 fn read_executable(cx: &Lookup, p: &str) -> Result<Program, Errno> {
     let mut f = vfs::open_exec(cx, p)?;
-    let size = f.stat()?.size;
+    let stat = f.stat()?;
+    let size = stat.size;
     if size > MAX_IMAGE {
         return Err(Errno::FileTooLarge);
     }
+    let key = (stat.dev, stat.ino);
+    let path = String::from(f.path());
+    let generation = {
+        let cache = CACHED_IMAGES.lock();
+        if let Some(image) = cache.images.get(&key).cloned() {
+            return Ok(Program { path, image, key });
+        }
+        cache.generation
+    };
     let mut head = [0u8; 64];
     let ranges = if read_at(&mut f, 0, &mut head)? == head.len() { load_ranges(&mut f, &head, size)? } else { None };
-    let image = match ranges {
+    let image = Arc::new(match ranges {
         Some(ranges) => read_ranges(&mut f, &ranges)?,
         None => read_whole(&mut f, size)?,
-    };
-    Ok(Program { path: String::from(f.path()), image })
+    });
+    let mut cache = CACHED_IMAGES.lock();
+    if cache.generation == generation {
+        let cached = cache.images.values().map(|image| image.len()).sum::<usize>();
+        if cached.saturating_add(image.len()) <= MAX_CACHED_IMAGE_BYTES {
+            cache.images.insert(key, image.clone());
+        }
+    }
+    Ok(Program { path, image, key })
 }
 
 /// Reads into `buf` from `offset`; returns the bytes read (short at the end

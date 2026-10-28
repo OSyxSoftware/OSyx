@@ -233,6 +233,52 @@ pub fn filemap_map(handle: u64, offset: u64, len: u64, writable: u64) -> Result<
     section.map(offset, len, writable != 0)
 }
 
+/// The shared-image key of `file` at `[addr, addr + len)` for the caller.
+fn image_key(file: u64, addr: u64, len: u64) -> Result<crate::image::Key, Errno> {
+    let Object::File(file) = process::get_object(file)? else { return Err(Errno::BadHandle) };
+    let st = file.lock().stat()?;
+    if st.kind != osyx_abi::KIND_FILE || len == 0 || !addr.is_multiple_of(crate::mem::PAGE_SIZE) {
+        return Err(Errno::InvalidArgument);
+    }
+    let (cred, _) = process::current_identity();
+    Ok(crate::image::Key {
+        dev: st.dev,
+        ino: st.ino,
+        size: st.size,
+        mtime_ns: st.mtime_ns,
+        base: addr,
+        pages: len.div_ceil(crate::mem::PAGE_SIZE),
+        uid: cred.uid,
+    })
+}
+
+pub fn image_map(file: u64, addr: u64, len: u64) -> Result<u64, Errno> {
+    let key = image_key(file, addr, len)?;
+    let section = crate::image::lookup(&key).ok_or(Errno::NotFound)?;
+    process::image_map(section).map(|_| 0)
+}
+
+pub fn image_query(file: u64) -> Result<u64, Errno> {
+    let key = image_key(file, 0, crate::mem::PAGE_SIZE)?;
+    crate::image::base_of(&key).ok_or(Errno::NotFound)
+}
+
+pub fn image_publish(file: u64, addr: u64, len: u64) -> Result<u64, Errno> {
+    let key = image_key(file, addr, len)?;
+    if crate::image::lookup(&key).is_some() {
+        return Err(Errno::AlreadyExists);
+    }
+    let section = process::image_publish(key)?;
+    crate::image::insert(&section);
+    let (live, frames, hits, published) = crate::image::stats();
+    crate::kprintln!(
+        "image: published {} KiB at {addr:#x} ({live} live, {} MiB, {hits} reuses, {published} published)",
+        len >> 10,
+        frames >> 8
+    );
+    Ok(0)
+}
+
 pub fn filemap_flush(handle: u64, offset: u64, len: u64) -> Result<u64, Errno> {
     let Object::FileMap(section) = process::get_object(handle)? else { return Err(Errno::BadHandle) };
     section.flush(offset, len).map(|_| 0)
@@ -309,6 +355,11 @@ pub fn display_release() -> Result<u64, Errno> {
     } else {
         Err(Errno::PermissionDenied)
     }
+}
+
+pub fn proc_info(pid: u64, out: u64) -> Result<u64, Errno> {
+    put_user(out, &process::info(pid)?)?;
+    Ok(0)
 }
 
 pub fn proc_list(buf: u64, len: u64) -> Result<u64, Errno> {

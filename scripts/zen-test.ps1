@@ -5,8 +5,9 @@
 # reruns when the release API cannot be reached.
 param([string]$Version = '1.23.4b', [switch]$SkipBuild, [switch]$SkipFetch, [int]$TimeoutSec = 90,
       [ValidateRange(1024, 16384)][int]$MemoryMiB = 6144,
+      [ValidateRange(1, 16)][int]$CpuCount = 4,
       [ValidatePattern('^(https?://|file:///)[^\s,]+$')][string]$ProbeUrl = 'file:///C:/tmp/zen-probe-page.html',
-      [switch]$NetworkTrace)
+      [switch]$NetworkTrace, [switch]$Installed)
 if ($SkipBuild -and ($PSBoundParameters.ContainsKey('ProbeUrl') -or $PSBoundParameters.ContainsKey('NetworkTrace'))) {
     throw '-ProbeUrl and -NetworkTrace are embedded at build time; omit -SkipBuild when changing them.'
 }
@@ -15,8 +16,8 @@ $evidenceDir = Join-Path $BuildDir 'zen'
 New-Item -ItemType Directory -Force $evidenceDir | Out-Null
 if (-not $SkipBuild) {
     if (-not $SkipFetch) { & (Join-Path $PSScriptRoot 'fetch-zen.ps1') -Version $Version }
-    $probeArgs = "zen-probe,$ProbeUrl" + $(if ($NetworkTrace) { ',trace' } else { '' })
-    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=tests,$probeArgs test.exit" -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
+    $probeArgs = $(if ($Installed) { 'zen-installed' } else { 'zen-probe' }) + ",$ProbeUrl" + $(if ($NetworkTrace) { ',trace' } else { '' })
+    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=tests,$probeArgs stats test.exit" -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
 }
 $log = Join-Path $evidenceDir 'qemu.serial.log'
 if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
@@ -27,7 +28,7 @@ foreach ($shot in 'qemu.png', 'qemu-mid.png') {
 $probeImage = Join-Path $evidenceDir 'qemu-probe.img'
 Copy-Item -LiteralPath $DiskImage -Destination $probeImage -Force
 $qmp = Get-Random -Minimum 20000 -Maximum 40000
-$vm = Start-Qemu (Get-QemuArgs -SerialLog $log -Headless -MemoryMiB $MemoryMiB -QmpPort $qmp -DiskFile 'build/zen/qemu-probe.img')
+$vm = Start-Qemu (Get-QemuArgs -SerialLog $log -Headless -MemoryMiB $MemoryMiB -CpuCount $CpuCount -QmpPort $qmp -DiskFile 'build/zen/qemu-probe.img')
 try {
     # A first look while the browser should be up, and one at the end.
     $midSec = [math]::Min(45, [int]($TimeoutSec / 2))

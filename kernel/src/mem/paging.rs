@@ -216,6 +216,10 @@ pub fn map_in(root: u64, va: u64, pa: u64, flags: Flags) -> Result<u64, MapError
         return Err(MapError::Unaligned);
     }
     let _g = PAGING.lock();
+    map_in_locked(root, va, pa, flags)
+}
+
+fn map_in_locked(root: u64, va: u64, pa: u64, flags: Flags) -> Result<u64, MapError> {
     let mut t = root;
     let mut tables = 0;
     for shift in [39u64, 30, 21] {
@@ -248,10 +252,39 @@ pub fn map_in(root: u64, va: u64, pa: u64, flags: Flags) -> Result<u64, MapError
         }
         *e = (pa & ADDR_MASK) | flags.bits();
     }
-    if root == current_root() || va >= USER_END {
-        cpu::invlpg(va);
-    }
+    // A previously non-present leaf has no old translation to invalidate.
     Ok(tables)
+}
+
+/// Maps anonymous zeroed pages throughout `[start, end)`, skipping pages that
+/// are already present. Allocation stops at the first failure and the caller
+/// owns the returned frame counts.
+pub fn map_zeroed_range_in(root: u64, start: u64, end: u64, flags: Flags) -> (u64, u64) {
+    if start >= end || check_virt(start, flags.user).is_err() || check_virt(end - PAGE_SIZE, flags.user).is_err() {
+        return (0, 0);
+    }
+    let _g = PAGING.lock();
+    let (mut mapped, mut tables) = (0, 0);
+    let mut va = start;
+    while va < end {
+        if translate_in_locked(root, va).is_some() {
+            va += PAGE_SIZE;
+            continue;
+        }
+        let Some(frame) = alloc_frame() else { break };
+        match map_in_locked(root, va, frame, flags) {
+            Ok(new_tables) => {
+                mapped += 1;
+                tables += new_tables;
+            }
+            Err(_) => {
+                let _ = free_frame(frame);
+                break;
+            }
+        }
+        va += PAGE_SIZE;
+    }
+    (mapped, tables)
 }
 
 /// Unmaps the 4 KiB page at `va` in `root` and returns the frame it pointed to
@@ -283,7 +316,135 @@ pub fn unmap_in(root: u64, va: u64, user: bool) -> Result<u64, MapError> {
     if root == current_root() || va >= USER_END {
         cpu::invlpg(va);
     }
+    crate::smp::flush_remote(root,va>=USER_END);
     Ok(val & ADDR_MASK)
+}
+
+/// Replaces the permission bits of the present 4 KiB pages in `[start, end)`
+/// without unmapping them: the frame address is kept and the new flags are
+/// written straight into the leaf entry. Absent pages keep their region
+/// protection for the first touch. Returns how many entries changed.
+///
+/// A loader protecting a large image this way avoids two page-table walks,
+/// a TLB shootdown and two lock acquisitions per page.
+pub fn reprotect_range_in(root: u64, start: u64, end: u64, flags: Flags) -> u64 {
+    if check_virt(start, flags.user).is_err() {
+        return 0;
+    }
+    edit_range_in(root, start, end, |_, _| Leaf::Flags(flags))
+}
+
+/// What [`edit_range_in`] does with one present leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leaf {
+    Keep,
+    /// Keep the frame under these permissions.
+    Flags(Flags),
+    /// Remove the entry; the caller keeps ownership of the frame.
+    Clear,
+}
+
+/// Visits the present 4 KiB user pages of `[start, end)` and rewrites or
+/// clears each leaf as `f(va, frame)` decides. Absent pages are skipped.
+/// Returns how many entries changed; one remote shootdown covers them all.
+pub fn edit_range_in(root: u64, start: u64, end: u64, mut f: impl FnMut(u64, u64) -> Leaf) -> u64 {
+    if start >= end || !start.is_multiple_of(PAGE_SIZE) || !end.is_multiple_of(PAGE_SIZE) {
+        return 0;
+    }
+    if check_virt(start, true).is_err() || check_virt(end - PAGE_SIZE, true).is_err() {
+        return 0;
+    }
+    let _g = PAGING.lock();
+    let local = root == current_root();
+    let mut changed = 0;
+    let mut va = start;
+    while va < end {
+        let mut t = root;
+        let mut present = true;
+        for shift in [39u64, 30, 21] {
+            // SAFETY: page table pages reachable through the HHDM.
+            let val = unsafe { *table(t).add(((va >> shift) & 511) as usize) };
+            if val & PRESENT == 0 || val & HUGE != 0 {
+                present = false;
+                // Skip the whole absent table instead of walking each page.
+                let span = 1u64 << shift;
+                if val & PRESENT == 0 {
+                    va = ((va & !(span - 1)) + span).max(va + PAGE_SIZE);
+                    break;
+                }
+                va += PAGE_SIZE;
+                break;
+            }
+            t = val & ADDR_MASK;
+        }
+        if !present {
+            continue;
+        }
+        // SAFETY: as above.
+        let e = unsafe { table(t).add(((va >> 12) & 511) as usize) };
+        // SAFETY: as above.
+        let val = unsafe { *e };
+        if val & PRESENT != 0 {
+            let fresh = match f(va, val & ADDR_MASK) {
+                Leaf::Keep => None,
+                // Frame bits and any PAT selection are part of the new
+                // flags; the hardware accessed/dirty bits may be cleared.
+                Leaf::Flags(flags) => Some((val & ADDR_MASK) | flags.bits()),
+                Leaf::Clear => Some(0),
+            };
+            if let Some(fresh) = fresh {
+                // SAFETY: as above.
+                unsafe { *e = fresh };
+                if local {
+                    cpu::invlpg(va);
+                }
+                changed += 1;
+            }
+        }
+        va += PAGE_SIZE;
+    }
+    if changed != 0 {
+        // One shootdown for the whole range instead of one per page.
+        crate::smp::flush_remote(root, false);
+    }
+    changed
+}
+
+/// Replaces the leaf at `va` (present, 4 KiB) with frame `pa` under `flags`
+/// in one step, so other threads never see the page absent. Returns the
+/// previous frame, which the caller owns afterwards.
+pub fn replace_in(root: u64, va: u64, pa: u64, flags: Flags) -> Result<u64, MapError> {
+    check_virt(va, flags.user)?;
+    if !pa.is_multiple_of(PAGE_SIZE) {
+        return Err(MapError::Unaligned);
+    }
+    let _g = PAGING.lock();
+    let mut t = root;
+    for shift in [39u64, 30, 21] {
+        // SAFETY: page table pages reachable through the HHDM.
+        let val = unsafe { *table(t).add(((va >> shift) & 511) as usize) };
+        if val & PRESENT == 0 {
+            return Err(MapError::NotMapped);
+        }
+        if val & HUGE != 0 {
+            return Err(MapError::HugePage);
+        }
+        t = val & ADDR_MASK;
+    }
+    // SAFETY: as above.
+    let e = unsafe { table(t).add(((va >> 12) & 511) as usize) };
+    // SAFETY: as above.
+    let old = unsafe { *e };
+    if old & PRESENT == 0 {
+        return Err(MapError::NotMapped);
+    }
+    // SAFETY: as above.
+    unsafe { *e = (pa & ADDR_MASK) | flags.bits() };
+    if root == current_root() {
+        cpu::invlpg(va);
+    }
+    crate::smp::flush_remote(root, false);
+    Ok(old & ADDR_MASK)
 }
 
 /// Walks the page tables of `root` (handling 2 MiB / 1 GiB pages).
@@ -292,6 +453,10 @@ pub fn translate_in(root: u64, va: u64) -> Option<Translation> {
         return None;
     }
     let _g = PAGING.lock();
+    translate_in_locked(root, va)
+}
+
+fn translate_in_locked(root: u64, va: u64) -> Option<Translation> {
     let mut t = root;
     let (mut writable, mut user, mut nx) = (true, true, false);
     for (level, shift) in [39u64, 30, 21, 12].into_iter().enumerate() {

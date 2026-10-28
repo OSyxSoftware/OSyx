@@ -51,9 +51,20 @@ struct ShmBuffer {
 
 impl PixelSource for ShmBuffer {
     fn words(&self) -> &[u32] {
+        if TRACE_BUFFERS.load(Ordering::Relaxed) && self.map.len() > 5 * 1024 * 1024 && self.map.len() < 7 * 1024 * 1024 {
+            static READS: os_std::sync::atomic::AtomicU32 = os_std::sync::atomic::AtomicU32::new(0);
+            if READS.fetch_add(1, Ordering::Relaxed) < 64 {
+                let pixel = unsafe { self.map.as_ptr().cast::<u32>().read_volatile() };
+                let samples: Vec<u32> = [8 * 1280 + 8, 100 * 1280 + 100, 500 * 1280 + 500].into_iter()
+                    .map(|i| unsafe { self.map.as_ptr().cast::<u32>().add(i).read_volatile() }).collect();
+                println!("prism: buffer snapshot size={} first={pixel:x} samples={samples:x?}", self.map.len());
+            }
+        }
         self.map.words()
     }
 }
+static TRACE_BUFFERS: AtomicBool = AtomicBool::new(false);
+static TRACE_EVENTS: AtomicBool = AtomicBool::new(false);
 
 struct Client {
     id: ClientId,
@@ -72,6 +83,8 @@ fn now_ms(start: Instant) -> u64 {
 }
 
 fn main() -> i32 {
+    TRACE_BUFFERS.store(env::var("OSYX_PRISM_TRACE").is_ok_and(|v| v == "1"), Ordering::Relaxed);
+    TRACE_EVENTS.store(env::var("OSYX_PRISM_EVENTS").is_ok_and(|v| v == "1"), Ordering::Relaxed);
     let args: Vec<String> = env::args().collect();
     let shell_program = args.get(1).cloned().unwrap_or_else(|| String::from("/system/bin/desktop"));
     let info = match system::display_info() {
@@ -309,6 +322,17 @@ impl Prism {
         };
         for chunk in buf[..n].as_chunks::<{ InputEvent::SIZE }>().0 {
             let Some(ev) = InputEvent::decode(chunk) else { continue };
+            if TRACE_EVENTS.load(Ordering::Relaxed)
+                && (ev.kind == osyx_input::kind::KEY || ev.kind == osyx_input::kind::BUTTON)
+            {
+                println!(
+                    "prism: t={now} input kind={} code={} value={} kernel_ms={}",
+                    ev.kind,
+                    ev.code,
+                    ev.value,
+                    ev.time_ns / 1_000_000
+                );
+            }
             match ev.kind {
                 osyx_input::kind::DEVICE => {
                     let what = if ev.code == osyx_input::DEVICE_ADDED { "added" } else { "removed" };
@@ -333,6 +357,27 @@ impl Prism {
             let id = self.clients[i].id;
             match self.clients[i].chan.recv(buf) {
                 Ok(Some((n, handles))) => {
+                    if TRACE_EVENTS.load(Ordering::Relaxed) {
+                        if let Ok((req, _)) = prism_proto::Request::decode(&buf[..n]) {
+                            match req {
+                                prism_proto::Request::Commit { surface } => {
+                                    println!("prism: t={now} commit client={id} surface={surface}");
+                                }
+                                prism_proto::Request::AttachBuffer { surface, buffer, width, height, .. } => {
+                                    println!(
+                                        "prism: t={now} attach client={id} surface={surface} buffer={buffer} {width}x{height}"
+                                    );
+                                }
+                                prism_proto::Request::SetTitle { window, .. } => {
+                                    println!("prism: t={now} title client={id} window={window}");
+                                }
+                                prism_proto::Request::Sync { cookie } => {
+                                    println!("prism: t={now} sync client={id} cookie={cookie}");
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     let buffer = match handles.into_iter().next() {
                         Some(h) => match SharedMemory::from_handle(h).and_then(|s| s.map(false).map(|m| (s, m))) {
                             Ok((shm, map)) => Some(Box::new(ShmBuffer { _shm: shm, map }) as Box<dyn PixelSource>),
@@ -366,10 +411,19 @@ impl Prism {
             }
         }
         let mut hung = Vec::new();
+        let start = self.start;
         for c in &mut self.clients {
             while let Some(m) = c.backlog.front() {
                 match c.chan.send(m, &[]) {
                     Ok(()) => {
+                        if TRACE_EVENTS.load(Ordering::Relaxed) && m.len() >= 2 {
+                            let op = u16::from_le_bytes([m[0], m[1]]);
+                            if op == prism_proto::opcode::KEY_EVENT
+                                || op == prism_proto::opcode::POINTER_EVENT
+                            {
+                                println!("prism: t={} sent client={} event={op:#x}", now_ms(start), c.id);
+                            }
+                        }
                         c.backlog.pop_front();
                         c.undelivered = 0;
                     }
@@ -439,8 +493,22 @@ impl Prism {
             let mut s = Surface::new(&mut self.back, w, h, w).expect("back buffer geometry");
             self.comp.render(&mut s, now)
         };
+        if TRACE_BUFFERS.load(Ordering::Relaxed) {
+            static FRAMES: os_std::sync::atomic::AtomicU32 = os_std::sync::atomic::AtomicU32::new(0);
+            if FRAMES.fetch_add(1, Ordering::Relaxed) < 128 {
+                for window in self.comp.snapshot().iter().filter(|s| s.title.contains("Zen")) {
+                    let x = (window.rect.x + 8).clamp(0, w as i32 - 1) as usize;
+                    let y = (window.rect.y + 8).clamp(0, h as i32 - 1) as usize;
+                    println!("prism: composed window {} pixel={:x}", window.id, self.back[y * w as usize + x]);
+                }
+            }
+        }
         for r in &rects {
             self.present(*r);
+        }
+        if TRACE_EVENTS.load(Ordering::Relaxed) && !rects.is_empty() {
+            let area: u64 = rects.iter().map(|r| r.w as u64 * r.h as u64).sum();
+            println!("prism: t={now} presented rects={} area={area}", rects.len());
         }
         if self.gpu {
             let t1 = Instant::now();
@@ -458,7 +526,10 @@ impl Prism {
             self.flush_time_us += t1.elapsed().as_micros() as u64;
         }
         self.last_frame = now;
-        self.paint_cursor(true);
+        // Rendering excludes the overlay, so only damage below the old cursor
+        // requires repainting it when its position and shape are unchanged.
+        let cursor_damaged = rects.iter().any(|r| !r.intersect(&self.cursor_area).is_empty());
+        self.paint_cursor(cursor_damaged);
         if !rects.is_empty() {
             self.frame_time_us += t0.elapsed().as_micros() as u64;
             self.frames_measured += 1;
@@ -474,10 +545,10 @@ impl Prism {
             return;
         }
         let old = self.cursor_area;
-        if !old.is_empty() {
+        let area = self.comp.cursor_area();
+        if old != area && !old.is_empty() {
             self.present(old);
         }
-        let area = self.comp.cursor_area();
         self.cursor_saved.clear();
         for y in area.y as u32..area.bottom() as u32 {
             let start = (y * self.width + area.x as u32) as usize;
@@ -495,10 +566,11 @@ impl Prism {
                 .copy_from_slice(&self.cursor_saved[row * area.w as usize..(row + 1) * area.w as usize]);
         }
         if self.gpu {
-            for rect in [old, area] {
-                if !rect.is_empty() {
-                    let _ = system::display_flush(rect.x as u32, rect.y as u32, rect.w, rect.h);
-                }
+            if old != area && !old.is_empty() {
+                let _ = system::display_flush(old.x as u32, old.y as u32, old.w, old.h);
+            }
+            if !area.is_empty() {
+                let _ = system::display_flush(area.x as u32, area.y as u32, area.w, area.h);
             }
         }
         self.cursor_stamp = Some(stamp);

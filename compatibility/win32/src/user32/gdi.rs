@@ -223,8 +223,20 @@ pub(super) struct Bitmap {
 }
 impl Bitmap {
     fn new(dib: Dib, section: bool) -> Self {
-        let storage = alloc::vec![0;dib.bytes().div_ceil(4)];
+        let words = dib.bytes().div_ceil(4);
+        Self::with_storage(dib, section, alloc::vec![0; words])
+    }
+    fn with_storage(dib: Dib, section: bool, mut storage: Vec<u32>) -> Self {
+        let words = dib.bytes().div_ceil(4);
+        if storage.len() < words {
+            storage.resize(words, 0);
+        } else {
+            storage.truncate(words);
+        }
         Self { dib, storage, section }
+    }
+    pub(super) fn into_storage(self) -> Vec<u32> {
+        self.storage
     }
     fn bits(&self) -> &[u8] {
         // SAFETY: owned word storage is large enough for the DIB.
@@ -313,7 +325,9 @@ extern "win64" fn CreateCompatibleBitmap(dc: u64, w: i32, h: i32) -> u64 {
         if w < 0 || h < 0 {
             return 0;
         }
-        insert_bitmap(g, Bitmap::new(dib, false))
+        let words = dib.bytes().div_ceil(4);
+        let storage = g.take_bitmap_storage(words);
+        insert_bitmap(g, Bitmap::with_storage(dib, false, storage))
     })
 }
 extern "win64" fn CreateBitmap(w: i32, h: i32, planes: u32, bpp: u32, bits: *const u8) -> u64 {
@@ -358,7 +372,9 @@ extern "win64" fn CreateDIBSection(
         return fail(ERROR_NOT_SUPPORTED, 0);
     }
     let Some(dib) = Dib::read(info, usage) else { return fail(ERROR_INVALID_PARAMETER, 0) };
-    let mut b = Bitmap::new(dib, true);
+    let words = dib.bytes().div_ceil(4);
+    let storage = with(|g| g.take_bitmap_storage(words));
+    let mut b = Bitmap::with_storage(dib, true, storage);
     // SAFETY: storage remains at this address until DeleteObject.
     unsafe {
         *out = b.storage.as_mut_ptr().cast();
@@ -566,25 +582,230 @@ pub(super) fn draw_dc<R>(
     })
 }
 
-fn snapshot(dc: u64) -> Option<(Vec<Color>, u32, u32)> {
+struct Snapshot {
+    pixels: Vec<Color>,
+    area: Rect,
+    width: u32,
+    height: u32,
+}
+impl Snapshot {
+    fn pixel(&self, x: i32, y: i32) -> Option<Color> {
+        let (x, y) = (x as i64 - self.area.x as i64, y as i64 - self.area.y as i64);
+        if x < 0 || y < 0 || x >= self.area.w as i64 || y >= self.area.h as i64 {
+            return None;
+        }
+        self.pixels.get((y as u32 * self.area.w + x as u32) as usize).copied()
+    }
+}
+
+/// Copies only the requested source rectangle. Taking the snapshot before the
+/// destination is changed preserves overlapping self-blits; PRISM rows retain
+/// their stride instead of being expanded into a full-surface temporary.
+fn snapshot(dc: u64, requested: Rect) -> Option<Snapshot> {
     with(|g| {
         let d = g.dcs.get(&dc)?;
         if d.memory {
             let b = g.bitmaps.get(&d.bitmap)?;
-            Some((b.pixels(), b.dib.w, b.dib.h))
+            let (width, height) = (b.dib.w, b.dib.h);
+            let area = requested.intersect(&Rect::new(0, 0, width, height));
+            let mut pixels = Vec::with_capacity(area.w as usize * area.h as usize);
+            for y in area.y as u32..area.bottom() as u32 {
+                pixels.extend((area.x as u32..area.right() as u32).map(|x| b.dib.pixel(b.bits(), x, y)));
+            }
+            Some(Snapshot { pixels, area, width, height })
         } else {
             let s = g.windows.get_mut(&d.hwnd)?.win.surface().ok()?;
-            Some((s.pixels().to_vec(), s.width(), s.height()))
+            let (width, height) = (s.width(), s.height());
+            let area = requested.intersect(&Rect::new(0, 0, width, height));
+            let mut pixels = Vec::with_capacity(area.w as usize * area.h as usize);
+            for y in area.y as u32..area.bottom() as u32 {
+                let start = y as usize * s.stride() as usize + area.x as usize;
+                pixels.extend_from_slice(&s.pixels()[start..start + area.w as usize]);
+            }
+            Some(Snapshot { pixels, area, width, height })
         }
     })
 }
+/// A source buffer as rows of pixels, top- or bottom-up.
+struct SrcView<'a> {
+    bits: &'a [Color],
+    w: u32,
+    h: u32,
+    stride: usize,
+    top: bool,
+}
+impl SrcView<'_> {
+    fn row(&self, y: usize) -> &[Color] {
+        let r = if self.top { y } else { self.h as usize - 1 - y };
+        &self.bits[r * self.stride..r * self.stride + self.w as usize]
+    }
+}
+
+/// The source owned either by a DIB or by a window surface.
+enum SrcHolder<'a> {
+    Bits { bits: &'a [Color], w: u32, h: u32, stride: usize, top: bool },
+    Surface(Surface<'a>),
+}
+impl SrcHolder<'_> {
+    fn view(&self) -> SrcView<'_> {
+        match self {
+            SrcHolder::Bits { bits, w, h, stride, top } => SrcView { bits, w: *w, h: *h, stride: *stride, top: *top },
+            SrcHolder::Surface(s) => SrcView {
+                bits: s.pixels(),
+                w: s.width(),
+                h: s.height(),
+                stride: s.stride() as usize,
+                top: true,
+            },
+        }
+    }
+}
+
+// Mirrors the BitBlt-style argument list of its callers.
+#[allow(clippy::too_many_arguments)]
+fn copy_rows_view(
+    src: &SrcView,
+    sx: usize,
+    sy: usize,
+    dst: &mut [Color],
+    dh: u32,
+    dtop: bool,
+    dstride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+) {
+    for row in 0..h {
+        let s = src.row(sy + row);
+        let drow = if dtop { y + row } else { dh as usize - 1 - y - row };
+        let d0 = drow * dstride + x;
+        dst[d0..d0 + w].copy_from_slice(&s[sx..sx + w]);
+    }
+}
+
+/// SRCCOPY with identical sources and destinations, row by row. Zen's software
+/// compositor blits the whole window every frame; the generic per-pixel path
+/// costs ~120 ms for a 1280x972 window. None: the general path must run.
+// Mirrors the BitBlt-style argument list of its callers.
+#[allow(clippy::too_many_arguments)]
+fn fast_blit(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i32) -> Option<Bool> {
+    with(|g| {
+        let d = g.dcs.get(&dst)?;
+        let t = d.transform;
+        if t.a != 1.0 || t.b != 0.0 || t.c != 0.0 || t.d != 1.0 || t.x != 0.0 || t.y != 0.0 {
+            return None;
+        }
+        let sd = g.dcs.get(&src)?;
+        let (src_memory, src_hwnd, src_bitmap) = (sd.memory, sd.hwnd, sd.bitmap);
+        let (dst_bitmap, dst_memory, dst_hwnd) = (d.bitmap, d.memory, d.hwnd);
+        if dst_memory && src_memory && src_bitmap == dst_bitmap {
+            return None;
+        }
+        if !dst_memory && !src_memory && src_hwnd == dst_hwnd {
+            return None;
+        }
+        if !src_memory && src_hwnd == 0 {
+            return None;
+        }
+        let paint = d.paint;
+        let clip = d.clip.clone();
+        let (sw, sh) = if src_memory {
+            let s = &g.bitmaps.get(&src_bitmap)?.dib;
+            if s.bpp != 32 || s.compression != 0 {
+                return None;
+            }
+            (s.w, s.h)
+        } else {
+            g.windows.get(&src_hwnd)?.size
+        };
+        let srect = Rect::new(sx, sy, w as u32, h as u32).intersect(&Rect::new(0, 0, sw, sh));
+        if srect.is_empty() {
+            return Some(TRUE);
+        }
+        let dx0 = x + (srect.x - sx);
+        let dy0 = y + (srect.y - sy);
+        let drect = Rect::new(dx0, dy0, srect.w, srect.h);
+        let (dw, dh) = if dst_memory {
+            let b = g.bitmaps.get(&dst_bitmap)?;
+            if b.dib.bpp != 32 || b.dib.compression != 0 {
+                return None;
+            }
+            (b.dib.w, b.dib.h)
+        } else {
+            g.windows.get(&dst_hwnd)?.size
+        };
+        let full = Rect::new(0, 0, dw, dh).intersect(&paint);
+        let clips = clip.unwrap_or_else(|| Region::from_rect(full));
+        let mut touched = Rect::EMPTY;
+        for c in &clips.0 {
+            let part = drect.intersect(c).intersect(&full);
+            if part.is_empty() {
+                continue;
+            }
+            let sxi = (srect.x + (part.x - dx0)) as usize;
+            let syi = (srect.y + (part.y - dy0)) as usize;
+            let (px, py, pw, ph) = (part.x as usize, part.y as usize, part.w as usize, part.h as usize);
+            if dst_memory {
+                let mut db = g.bitmaps.remove(&dst_bitmap)?;
+                {
+                    let holder = if src_memory {
+                        let b = g.bitmaps.get(&src_bitmap)?;
+                        SrcHolder::Bits {
+                            bits: &b.storage,
+                            w: b.dib.w,
+                            h: b.dib.h,
+                            stride: b.dib.stride / 4,
+                            top: b.dib.top,
+                        }
+                    } else {
+                        let win = g.windows.get_mut(&src_hwnd)?;
+                        SrcHolder::Surface(win.win.surface().ok()?)
+                    };
+                    let dtop = db.dib.top;
+                    let dstride = db.dib.stride / 4;
+                    copy_rows_view(&holder.view(), sxi, syi, &mut db.storage, dh, dtop, dstride, px, py, pw, ph);
+                }
+                g.bitmaps.insert(dst_bitmap, db);
+            } else {
+                let b = g.bitmaps.get(&src_bitmap)?;
+                let view =
+                    SrcView { bits: &b.storage, w: b.dib.w, h: b.dib.h, stride: b.dib.stride / 4, top: b.dib.top };
+                let win = g.windows.get_mut(&dst_hwnd)?;
+                let mut surface = win.win.surface().ok()?;
+                for row in 0..ph {
+                    let s = view.row(syi + row);
+                    if (py + row) as u32 >= surface.height() {
+                        break;
+                    }
+                    let drow = surface.row_mut((py + row) as u32);
+                    let Some(d) = drow.get_mut(px..px + pw) else { continue };
+                    d.copy_from_slice(&s[sxi..sxi + pw]);
+                }
+            }
+            touched = touched.union(&part);
+        }
+        if let Some(win) = g.windows.get_mut(&dst_hwnd) {
+            if !touched.is_empty() {
+                win.drawn = Some(win.drawn.map(|r| r.union(&touched)).unwrap_or(touched));
+            }
+        }
+        Some(TRUE)
+    })
+}
+
 extern "win64" fn BitBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i32, rop: u32) -> Bool {
     if !matches!(rop & !0x40000000, 0xcc0020 | 0x42 | 0xff0062) || w < 0 || h < 0 {
         return fail(ERROR_NOT_SUPPORTED, FALSE);
     }
     let rop = rop & !0x40000000;
+    if rop == 0xcc0020 {
+        if let Some(ok) = fast_blit(dst, x, y, w, h, src, sx, sy) {
+            return ok;
+        }
+    }
     let source = if rop == 0xcc0020 {
-        let Some(s) = snapshot(src) else { return FALSE };
+        let Some(s) = snapshot(src, Rect::new(sx, sy, w as u32, h as u32)) else { return FALSE };
         Some(s)
     } else {
         None
@@ -592,8 +813,9 @@ extern "win64" fn BitBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx:
     if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) && with(|g| g.dcs.get(&dst).is_some_and(|d| !d.memory && d.hwnd != 0)) {
         static TRACE_BLITS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         if TRACE_BLITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-            if let Some((pixels, sw, sh)) = &source {
-                os_std::eprintln!("winrun: GDI present: dc {dst:#x}, dst ({x},{y}) {w}x{h}, source {src:#x} {sw}x{sh} at ({sx},{sy}), first pixels {:x?}", &pixels[..pixels.len().min(8)]);
+            if let Some(source) = &source {
+                let (sw, sh) = (source.width, source.height);
+                os_std::eprintln!("winrun: GDI present: dc {dst:#x}, dst ({x},{y}) {w}x{h}, source {src:#x} {sw}x{sh} at ({sx},{sy}), first pixels {:x?}", &source.pixels[..source.pixels.len().min(8)]);
             }
         }
     }
@@ -602,12 +824,10 @@ extern "win64" fn BitBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx:
         let r = Rect::new(x, y, w as u32, h as u32).intersect(&clip);
         for dy in r.y..r.y + r.h as i32 {
             for dx in r.x..r.x + r.w as i32 {
-                let c = if let Some((p, sw, sh)) = &source {
+                let c = if let Some(source) = &source {
                     let (px, py) = (sx + dx - x, sy + dy - y);
-                    if px < 0 || py < 0 || px >= *sw as i32 || py >= *sh as i32 {
-                        continue;
-                    }
-                    p[(py as u32 * sw + px as u32) as usize]
+                    let Some(c) = source.pixel(px, py) else { continue };
+                    c
                 } else if rop == 0x42 {
                     rgb(0, 0, 0)
                 } else {
@@ -679,12 +899,8 @@ extern "win64" fn GetPixel(dc: u64, x: i32, y: i32) -> u32 {
         Some((x, y))
     });
     let Some((x, y)) = point else { return GDI_ERROR };
-    let Some((p, w, h)) = snapshot(dc) else { return GDI_ERROR };
-    if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
-        GDI_ERROR
-    } else {
-        to_colorref(p[(y as u32 * w + x as u32) as usize])
-    }
+    let Some(p) = snapshot(dc, Rect::new(x, y, 1, 1)) else { return GDI_ERROR };
+    p.pixel(x, y).map(to_colorref).unwrap_or(GDI_ERROR)
 }
 
 /// Nonoverlapping rectangles. Boolean operations split at the input edges;

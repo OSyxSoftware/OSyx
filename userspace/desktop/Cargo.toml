@@ -50,3 +50,5 @@ osyx-ui = { path = "../../graphics/ui" }
 prism-client = { path = "../../graphics/prism-client" }
 prism-core = { path = "../../graphics/prism-core" }
 prism-proto = { path = "../../graphics/prism-proto" }
+osyx-install = { path = "../install" }
+osyx-crypto = { path = "../../shared/crypto" }

@@ -25,15 +25,45 @@ const T_OUT: u32 = 1;
 const T_FLUSH: u32 = 4;
 const S_OK: u8 = 0;
 
-/// DMA pages per request: 64 KiB, 128 sectors.
-const DATA_PAGES: usize = 16;
+/// Largest DMA run per request: 1 MiB. The queue size caps it; probes with a
+/// smaller queue use fewer pages.
+const MAX_DATA_PAGES: usize = 256;
 const PAGE: usize = PAGE_SIZE as usize;
+
+// TEMP per-request timing.
+static OPS: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+static OP_CYCLES: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+static OP_MAX: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+static OP_BYTES: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+static OP_WAIT: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+
+fn slot(dir: Dir) -> usize {
+    match dir {
+        Dir::Read => 0,
+        Dir::Write => 1,
+        Dir::Flush => 2,
+    }
+}
+
+/// (calls, total TSC cycles, max cycles, bytes, queue-wait cycles) per
+/// direction: read, write, flush.
+pub fn request_stats() -> [(u64, u64, u64, u64, u64); 3] {
+    core::array::from_fn(|i| {
+        let l = |a: &core::sync::atomic::AtomicU64| a.load(core::sync::atomic::Ordering::Relaxed);
+        (l(&OPS[i]), l(&OP_CYCLES[i]), l(&OP_MAX[i]), l(&OP_BYTES[i]), l(&OP_WAIT[i]))
+    })
+}
 
 struct Inner {
     queue: Virtqueue,
     /// Request header at offset 0, status byte at offset 16.
     header: u64,
-    data: [u64; DATA_PAGES],
+    data: [u64; MAX_DATA_PAGES],
+    /// Descriptor chain template: header, data pages, status. Kept off the
+    /// stack because the request path runs on deep write-back stacks.
+    chain: alloc::boxed::Box<[Buffer]>,
+    /// DMA pages actually used by one request.
+    pages: usize,
     /// Set after a timeout: the device may still own the buffers.
     failed: bool,
 }
@@ -44,6 +74,7 @@ pub struct VirtioBlk {
     capacity: u64,
     read_only: bool,
     can_flush: bool,
+    data_pages: usize,
     inner: KMutex<Inner>,
     _transport: Transport,
 }
@@ -60,14 +91,21 @@ impl VirtioBlk {
         let t = Transport::new(dev)?;
         let features = t.negotiate(F_RO | F_FLUSH)?;
         let queue = t.setup_queue(0)?;
-        if (queue.size() as usize) < DATA_PAGES + 2 {
+        let data_pages = (queue.size() as usize).saturating_sub(2).min(MAX_DATA_PAGES);
+        if data_pages < 2 {
             return Err(VirtioError::NoQueue);
         }
         let header = alloc_frame().ok_or(VirtioError::OutOfMemory)?;
-        let mut data = [0u64; DATA_PAGES];
-        for d in data.iter_mut() {
+        let mut data = [0u64; MAX_DATA_PAGES];
+        for d in data.iter_mut().take(data_pages) {
             *d = alloc_frame().ok_or(VirtioError::OutOfMemory)?;
         }
+        let mut chain = alloc::vec::Vec::with_capacity(data_pages + 2);
+        chain.push(Buffer { phys: header, len: 16, device_writes: false });
+        for &page in &data[..data_pages] {
+            chain.push(Buffer { phys: page, len: PAGE as u32, device_writes: false });
+        }
+        chain.push(Buffer { phys: header + 16, len: 1, device_writes: true });
         t.driver_ok();
         let capacity = t.device_config_u64(0);
         crate::kprintln!(
@@ -88,14 +126,24 @@ impl VirtioBlk {
             capacity,
             read_only: features & F_RO != 0,
             can_flush: features & F_FLUSH != 0,
-            inner: KMutex::new(Inner { queue, header, data, failed: false }),
+            data_pages,
+            inner: KMutex::new(Inner {
+                queue,
+                header,
+                data,
+                chain: chain.into_boxed_slice(),
+                pages: data_pages,
+                failed: false,
+            }),
             _transport: t,
         })
     }
 
     /// Runs one request. `len` bytes of data are staged in the DMA pages.
     fn request(&self, dir: Dir, lba: u64, len: usize, stage: impl FnOnce(&[u64]), fetch: impl FnOnce(&[u64])) -> Result<(), BlockError> {
+        let t0 = crate::arch::timer::tsc();
         let mut g = self.inner.lock();
+        let t1 = crate::arch::timer::tsc();
         if g.failed {
             return Err(BlockError::Io);
         }
@@ -114,17 +162,22 @@ impl VirtioBlk {
             core::ptr::write_volatile((hv + 16) as *mut u8, 0xFF);
         }
         let pages = len.div_ceil(PAGE);
-        stage(&g.data[..pages]);
-        let mut chain = [Buffer { phys: 0, len: 0, device_writes: false }; DATA_PAGES + 2];
-        chain[0] = Buffer { phys: g.header, len: 16, device_writes: false };
+        if pages > g.pages {
+            return Err(BlockError::InvalidRequest);
+        }
+        let inner = &mut *g;
+        stage(&inner.data[..pages]);
+        let header = inner.header;
+        let chain = &mut inner.chain[..pages + 2];
+        chain[0] = Buffer { phys: header, len: 16, device_writes: false };
         for i in 0..pages {
             let n = (len - i * PAGE).min(PAGE) as u32;
-            chain[1 + i] = Buffer { phys: g.data[i], len: n, device_writes: dir == Dir::Read };
+            chain[1 + i] = Buffer { phys: inner.data[i], len: n, device_writes: dir == Dir::Read };
         }
-        chain[1 + pages] = Buffer { phys: g.header + 16, len: 1, device_writes: true };
-        if let Err(e) = g.queue.run(&chain[..pages + 2]) {
+        chain[1 + pages] = Buffer { phys: header + 16, len: 1, device_writes: true };
+        if let Err(e) = inner.queue.run(chain) {
             crate::kprintln!("virtio-blk {}: request failed: {:?}; disk disabled", self.name, e);
-            g.failed = true;
+            inner.failed = true;
             return Err(BlockError::Io);
         }
         // SAFETY: the device has returned the chain.
@@ -132,7 +185,14 @@ impl VirtioBlk {
         if status != S_OK {
             return Err(BlockError::Io);
         }
-        fetch(&g.data[..pages]);
+        fetch(&inner.data[..pages]);
+        let dt = crate::arch::timer::tsc().wrapping_sub(t0);
+        let s = slot(dir);
+        OPS[s].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        OP_CYCLES[s].fetch_add(dt, core::sync::atomic::Ordering::Relaxed);
+        OP_MAX[s].fetch_max(dt, core::sync::atomic::Ordering::Relaxed);
+        OP_BYTES[s].fetch_add(len as u64, core::sync::atomic::Ordering::Relaxed);
+        OP_WAIT[s].fetch_add(t1.wrapping_sub(t0), core::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 }
@@ -169,7 +229,7 @@ impl BlockDev for VirtioBlk {
     }
 
     fn max_sectors(&self) -> usize {
-        DATA_PAGES * PAGE / SECTOR_SIZE
+        self.data_pages * PAGE / SECTOR_SIZE
     }
 
     fn read_blocks(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {

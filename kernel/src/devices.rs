@@ -61,6 +61,10 @@ static NODES: IrqSpinLock<Vec<Arc<DeviceNode>>> = IrqSpinLock::new(Vec::new());
 /// devfs directories use small inode numbers; device nodes start here.
 pub const FIRST_NODE_INO: u64 = 1 << 32;
 static NEXT_INO: AtomicU64 = AtomicU64::new(FIRST_NODE_INO);
+/// Set once `init` has registered the built-in nodes; from then on disks
+/// that register later (USB hotplug) get their node immediately.
+static DISKS_WATCHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static NEXT_DISK_MINOR: AtomicU64 = AtomicU64::new(0);
 
 /// Adds `/dev/<path>`. Fails with `AlreadyExists` if the name (or a
 /// directory of that name) is taken.
@@ -263,6 +267,25 @@ const fn dev(major: u32, minor: u32) -> u32 {
     major << 8 | minor
 }
 
+fn add_disk(b: Arc<dyn BlockDev>) {
+    let minor = NEXT_DISK_MINOR.fetch_add(1, Ordering::Relaxed) as u32;
+    let path = alloc::format!("disks/{}", b.name());
+    match register(&path, DeviceKind::Block(b), 0o600, dev(8, minor)) {
+        Ok(_) => {}
+        Err(Errno::AlreadyExists) => {}
+        Err(e) => crate::kprintln!("devices: cannot register {path}: {e:?}"),
+    }
+}
+
+/// Called by the block layer for every disk it registers: devices that
+/// appear after `init` (USB mass storage on hotplug) still get a node.
+pub fn disk_added(b: &Arc<dyn BlockDev>) {
+    if DISKS_WATCHED.load(Ordering::Acquire) {
+        add_disk(b.clone());
+        crate::kprintln!("devfs: /dev/disks/{}", b.name());
+    }
+}
+
 /// Registers the built-in devices and one node per block device.
 pub fn init() {
     let builtin: [(&str, Arc<dyn CharDevice>, u32, u32); 3] = [
@@ -277,10 +300,8 @@ pub fn init() {
     if crate::random::is_seeded() {
         register("random", DeviceKind::Char(Arc::new(Random)), 0o444, dev(1, 8)).expect("unique");
     }
-    for (i, b) in block::devices().into_iter().enumerate() {
-        let path = alloc::format!("disks/{}", b.name());
-        if let Err(e) = register(&path, DeviceKind::Block(b), 0o600, dev(8, i as u32)) {
-            crate::kprintln!("devices: cannot register {path}: {e:?}");
-        }
+    DISKS_WATCHED.store(true, Ordering::Release);
+    for b in block::devices() {
+        add_disk(b);
     }
 }

@@ -15,6 +15,30 @@ const W: u32 = 800;
 const H: u32 = 600;
 
 #[test]
+fn sync_ack_follows_geometry_events_on_its_connection() {
+    let mut h = Harness::new();
+    let c = h.client(7);
+    h.create(c, 1, Role::Normal, window_flags::RESIZABLE, (20, 30, 320, 200));
+    h.send(c, Request::SetGeometry { window: 1, x: 20, y: 30, width: 360, height: 260 });
+    h.send(c, Request::Sync { cookie: 42 });
+    let events = h.events_for(c);
+    let resized = events.iter().position(|event| matches!(event, Event::Configure { width: 360, height: 260, .. })).unwrap();
+    let ack = events.iter().position(|event| matches!(event, Event::SyncDone { cookie: 42 })).unwrap();
+    assert!(resized < ack);
+}
+
+#[test]
+fn geometry_can_move_a_normal_window_offscreen_without_losing_its_size() {
+    let mut h = Harness::new();
+    let c = h.client(7);
+    h.create(c, 1, Role::Normal, window_flags::RESIZABLE, (20, 30, 320, 200));
+    h.send(c, Request::SetGeometry { window: 1, x: 100_000_000, y: 1_000_000_000, width: 320, height: 200 });
+    let windows = h.c.snapshot();
+    let window = windows.iter().find(|window| window.client == c).unwrap();
+    assert_eq!(window.rect, Rect::new(100_000_000, 1_000_000_000, 320, 200));
+}
+
+#[test]
 fn cursor_overlay_moves_without_recomposing_and_matches_composed_pixels() {
     let mut regular = Harness::new();
     let mut overlay = Harness::new();
@@ -163,7 +187,14 @@ fn hello_must_come_first_and_versions_must_match() {
     assert_eq!(h.c.handle(c, &bad, None, 0).map_err(|e| e.code), Err(proto::error::BAD_VERSION));
     let c = h.client(12);
     let ev = h.events_for(c);
-    assert_eq!(ev, [Event::Hello { version: 1, client_id: c, flags: 0, screen_width: W, screen_height: H }]);
+    assert_eq!(
+        ev,
+        [
+            Event::Hello { version: 1, client_id: c, flags: 0, screen_width: W, screen_height: H },
+            Event::ClipboardChanged { seq: 0, entries: Vec::new() }
+        ],
+        "a new client learns the (empty) clipboard with its hello"
+    );
     assert_eq!(h.c.handle(c, &hello(0), None, 0).map_err(|e| e.code), Err(proto::error::MALFORMED), "duplicate hello");
 }
 
@@ -458,11 +489,19 @@ fn pointer_events_use_local_coordinates_and_capture_while_dragging() {
     let ev = h.events_for(a);
     assert!(ev.iter().any(|e| matches!(e, Event::Pointer { kind: proto::pointer::BUTTON, pressed: false, .. })));
     assert!(ev.iter().any(|e| matches!(e, Event::Pointer { kind: proto::pointer::LEAVE, .. })), "leave after the grab ends outside");
-    // Wheel goes to the window under the pointer.
+    // Wheel goes to the window under the pointer, carrying both coordinate
+    // spaces: Win32 wheel messages report the screen position.
     h.move_to(r.x + 5, r.y + 5);
     h.events();
     h.input(kind::WHEEL, 0, -2, 1, 0);
-    assert!(h.events_for(a).iter().any(|e| matches!(e, Event::Pointer { kind: proto::pointer::WHEEL, wheel_v: -2, wheel_h: 1, .. })));
+    assert!(
+        h.events_for(a).iter().any(|e| matches!(
+            e,
+            Event::Pointer { kind: proto::pointer::WHEEL, wheel_v: -2, wheel_h: 1, x: 5, y: 5, screen_x, screen_y, .. }
+                if (*screen_x, *screen_y) == (r.x + 5, r.y + 5)
+        )),
+        "wheel keeps client and screen positions"
+    );
     // The pointer is clamped to the screen.
     h.input(kind::MOTION, 0, -10_000, 10_000, 0);
     assert_eq!(h.c.pointer(), (0, H as i32 - 1));
@@ -782,3 +821,29 @@ fn render_damage_is_bounded_and_idle_when_nothing_changes() {
     assert!(px > 0 && px < 40 * 40, "{rects:?}");
 }
 
+
+#[test]
+fn the_clipboard_is_shared_by_every_client() {
+    let mut h = Harness::new();
+    let a = h.client(2);
+    let b = h.client(3);
+    h.events();
+    let entries = vec![
+        proto::ClipEntry { format: 13, name: None, data: vec![b'h', b'i'] },
+        proto::ClipEntry { format: 0xC001, name: Some("HTML Format".to_string()), data: b"<b>hi</b>".to_vec() },
+    ];
+    h.send(a, Request::ClipboardSet { entries: entries.clone() });
+    let ev = h.events();
+    for (who, c) in [("the owner", a), ("every other client", b)] {
+        let got: Vec<Event> = ev.iter().filter(|(id, _)| *id == c).map(|(_, e)| e.clone()).collect();
+        assert_eq!(got, vec![Event::ClipboardChanged { seq: 1, entries: entries.clone() }], "{who} hears the copy");
+    }
+    // A client that connects later is told the contents with its hello.
+    let late = h.client(4);
+    assert!(h.events_for(late).contains(&Event::ClipboardChanged { seq: 1, entries }), "a new client starts with the clipboard it missed");
+    // Contents over the protocol's caps do not decode, disconnecting the
+    // offender like every other malformed request.
+    let big = vec![proto::ClipEntry { format: 13, name: None, data: vec![0; proto::MAX_CLIPBOARD_BYTES + 1] }];
+    assert_eq!(h.try_send(b, Request::ClipboardSet { entries: big }, None), Err(proto::error::MALFORMED));
+    assert!(h.c.is_dead(b));
+}

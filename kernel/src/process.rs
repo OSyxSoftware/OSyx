@@ -23,6 +23,7 @@
 
 use crate::arch::cpu;
 use crate::exec::{self, ExecRequest, Program};
+use crate::image::{self, ImageSection};
 use crate::kprintln;
 use crate::mem::paging::{self, Flags, MapError};
 use crate::mem::{alloc_frame, free_frame, phys_to_virt, PAGE_SIZE};
@@ -104,6 +105,7 @@ impl ExecError {
 struct Space {
     root: u64,
     frames: u64,
+    program_shared: BTreeMap<u64, (Arc<SharedMemory>, u64)>,
 }
 
 /// An anonymous mapping. Its pages get frames on first access; until then
@@ -112,13 +114,22 @@ struct Region {
     pages: u64,
     /// Page index where a run starts -> `PROT_*` of the run (to the next key).
     prot: BTreeMap<u64, u64>,
+    /// A shared executable image behind the region (page `i` of the region
+    /// is page `i` of the image). A page whose entry points at the image's
+    /// frame is shared and mapped read-only; a write copies it first.
+    image: Option<Arc<ImageSection>>,
 }
 
 impl Region {
     fn new(pages: u64, prot: u64) -> Region {
         let mut runs = BTreeMap::new();
         runs.insert(0, prot);
-        Region { pages, prot: runs }
+        Region { pages, prot: runs, image: None }
+    }
+
+    /// Whether `frame` at page `page` of the region is the shared image frame.
+    fn shares(&self, page: u64, frame: u64) -> bool {
+        self.image.as_ref().is_some_and(|i| i.frame(page) == Some(frame))
     }
 
     fn prot_at(&self, page: u64) -> u64 {
@@ -141,7 +152,7 @@ impl Region {
 
 impl Space {
     fn new() -> Result<Space, MapError> {
-        Ok(Space { root: paging::new_address_space()?, frames: 1 })
+        Ok(Space { root: paging::new_address_space()?, frames: 1, program_shared: BTreeMap::new() })
     }
 
     fn map_zeroed(&mut self, va: u64, flags: Flags) -> Result<u64, MapError> {
@@ -158,8 +169,15 @@ impl Space {
         }
     }
 
-    /// Maps the ELF segments, the stack and the start-up data; returns
-    /// (entry, initial rsp).
+    fn map_shared(&mut self, va: u64, page: Arc<SharedMemory>, flags: Flags) -> Result<(), MapError> {
+        let tables = paging::map_in(self.root, va, page.frames()[0], flags)?;
+        self.frames += tables;
+        self.program_shared.insert(va, (page, 1));
+        Ok(())
+    }
+
+    /// Maps the ELF segments and the start-up stack pages; the remaining
+    /// stack pages are demand-zero. Returns (entry, initial rsp).
     fn populate(
         &mut self,
         elf: &ElfImage,
@@ -172,23 +190,25 @@ impl Space {
             let flags = Flags::user(seg.writable(), seg.executable());
             let mut va = seg.vaddr;
             while va < seg.page_end() {
-                let frame = self.map_zeroed(va, flags).map_err(ExecError::Map)?;
-                // Copy the part of the file image that falls into this page.
-                let start = va.max(seg.vaddr);
-                let end = (va + PAGE_SIZE).min(seg.vaddr + file.len() as u64);
-                if end > start {
-                    let src = &file[(start - seg.vaddr) as usize..(end - seg.vaddr) as usize];
-                    // SAFETY: the frame was just allocated and is reachable via the HHDM.
-                    unsafe {
-                        let dst = (phys_to_virt(frame) + (start - va)) as *mut u8;
-                        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+                if seg.writable() {
+                    let frame = self.map_zeroed(va, flags).map_err(ExecError::Map)?;
+                    let end = (va + PAGE_SIZE).min(seg.vaddr + file.len() as u64);
+                    if end > va {
+                        let offset = (va - seg.vaddr) as usize;
+                        let src = &file[offset..offset + (end - va) as usize];
+                        // SAFETY: the frame was just allocated and is reachable via the HHDM.
+                        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), phys_to_virt(frame) as *mut u8, src.len()) };
                     }
+                } else {
+                    let pages = exec::shared_pages(prog, seg).map_err(|_| ExecError::Map(MapError::OutOfMemory))?;
+                    for page in pages {
+                        self.map_shared(va, page, flags).map_err(ExecError::Map)?;
+                        va += PAGE_SIZE;
+                    }
+                    continue;
                 }
                 va += PAGE_SIZE;
             }
-        }
-        for i in 0..STACK_PAGES {
-            self.map_zeroed(STACK_TOP - (i + 1) * PAGE_SIZE, Flags::user(true, false)).map_err(ExecError::Map)?;
         }
         let (uid, gid) = (cred.uid as u64, cred.gid as u64);
         let mut aux = Vec::with_capacity(11);
@@ -222,6 +242,11 @@ impl Space {
         }
         let mut bytes = alloc::vec![0u8; size];
         let sp = image.build(STACK_TOP, &mut bytes).ok_or(ExecError::ArgsTooLarge)?;
+        let mut va = sp & !(PAGE_SIZE - 1);
+        while va < STACK_TOP {
+            self.map_zeroed(va, Flags::user(true, false)).map_err(ExecError::Map)?;
+            va += PAGE_SIZE;
+        }
         self.poke(sp, &bytes).map_err(ExecError::Map)?;
         Ok((elf.entry(), sp))
     }
@@ -245,6 +270,7 @@ impl Space {
     /// # Safety
     /// The space must not be active on any CPU.
     unsafe fn release(&mut self) -> (u64, u64) {
+        unmap_shared_from(self.root, core::mem::take(&mut self.program_shared));
         // SAFETY: forwarded caller contract; the frames belong to us.
         let freed = unsafe { paging::destroy_address_space(self.root) };
         let owned = self.frames;
@@ -294,6 +320,7 @@ pub struct Process {
     /// The frames belong to the object; they are unmapped (never freed)
     /// before the address space is destroyed.
     shared: BTreeMap<u64, (Arc<SharedMemory>, u64)>,
+    program_shared: BTreeMap<u64, (Arc<SharedMemory>, u64)>,
     next_map: u64,
     mapped_pages: u64,
     line: Vec<u8>,
@@ -333,6 +360,13 @@ global_asm!(
     .global osyx_iret_to_user
 osyx_iret_to_user:
     cli
+    push rdi
+    push rsi
+    push rdx
+    call osyx_kernel_leave
+    pop rdx
+    pop rsi
+    pop rdi
     push 0x1B           // SS  = USER_DS
     push rsi            // RSP
     push 0x202          // RFLAGS: IF set
@@ -353,6 +387,7 @@ osyx_iret_to_user:
     xor r13d, r13d
     xor r14d, r14d
     xor r15d, r15d
+    swapgs
     iretq
     "#
 );
@@ -399,7 +434,8 @@ fn report_release(pid: Pid, name: &str, what: &str, (owned, freed): (u64, u64)) 
 }
 
 impl Process {
-    fn new(parent: Pid, name: &str, cred: Cred, cwd: String, space: Space) -> Process {
+    fn new(parent: Pid, name: &str, cred: Cred, cwd: String, mut space: Space) -> Process {
+        let program_shared = core::mem::take(&mut space.program_shared);
         Process {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
             name: name.to_string(),
@@ -409,6 +445,7 @@ impl Process {
             space,
             regions: BTreeMap::new(),
             shared: BTreeMap::new(),
+            program_shared,
             next_map: MAP_BASE,
             mapped_pages: 0,
             line: Vec::new(),
@@ -429,6 +466,8 @@ impl Process {
 
     /// Releases the address space and checks the frame accounting.
     fn release_memory(&mut self) {
+        unmap_images_from(self.space.root, core::mem::take(&mut self.regions));
+        unmap_shared_from(self.space.root, core::mem::take(&mut self.program_shared));
         self.unmap_shared();
         // SAFETY: the address space is not active (the caller switched to the
         // kernel root or never activated it).
@@ -446,6 +485,28 @@ impl Process {
         tail.push_back(line);
         self.line.clear();
     }
+}
+
+/// Removes the page entries that point at shared image frames (the frames
+/// belong to their sections, not to the address space).
+fn unmap_images_from(root: u64, regions: BTreeMap<u64, Region>) {
+    for (start, r) in regions {
+        if r.image.is_some() {
+            unmap_image_pages(root, start, &r, 0, r.pages);
+        }
+    }
+}
+
+/// Clears the shared image entries among pages `first..last` of `r` (at
+/// `start`); private pages stay mapped.
+fn unmap_image_pages(root: u64, start: u64, r: &Region, first: u64, last: u64) {
+    paging::edit_range_in(root, start + first * PAGE_SIZE, start + last * PAGE_SIZE, |va, frame| {
+        if r.shares((va - start) / PAGE_SIZE, frame) {
+            paging::Leaf::Clear
+        } else {
+            paging::Leaf::Keep
+        }
+    });
 }
 
 fn unmap_shared_from(root: u64, shared: BTreeMap<u64, (Arc<SharedMemory>, u64)>) {
@@ -484,6 +545,9 @@ pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 
         }
     }
     let pid = p.pid;
+    if p.name == "winrun" && !req.argv.iter().any(|a| a == "-contentproc") {
+        crate::smp::set_sample_pid(pid);
+    }
     const LOGGED_ARGS: usize = 8;
     let more = match req.argv.len() {
         n if n > LOGGED_ARGS => alloc::format!(" and {} more", n - LOGGED_ARGS),
@@ -565,16 +629,18 @@ pub fn exec_current(req: ExecRequest) -> ExecError {
         } else {
             let p = t.procs.get_mut(&pid).expect("current process exists");
             core::mem::swap(&mut p.space, &mut space);
-            p.regions.clear();
+            let old_regions = core::mem::take(&mut p.regions);
+            let new_program_shared = core::mem::take(&mut p.space.program_shared);
+            let old_program_shared = core::mem::replace(&mut p.program_shared, new_program_shared);
             let old_shared = core::mem::take(&mut p.shared);
             p.next_map = MAP_BASE;
             p.mapped_pages = 0;
             p.name = name.clone();
             kprintln!("process {} ({}): exec {}, entry {:#x}", pid, name, path, entry);
-            Some((p.space.root, old_shared))
+            Some((p.space.root, old_shared, old_program_shared, old_regions))
         }
     };
-    let Some((root, old_shared)) = old else {
+    let Some((root, old_shared, old_program_shared, old_regions)) = old else {
         cpu::enable_interrupts();
         // SAFETY: the new space was never activated.
         unsafe { space.release() };
@@ -590,6 +656,8 @@ pub fn exec_current(req: ExecRequest) -> ExecError {
     sched::reset_current_fpu();
     crate::user_fault::clear_process(pid);
     unmap_shared_from(space.root, old_shared);
+    unmap_shared_from(space.root, old_program_shared);
+    unmap_images_from(space.root, old_regions);
     // SAFETY: the old space is no longer active anywhere.
     let r = unsafe { space.release() };
     report_release(pid, &name, "old image ", r);
@@ -811,7 +879,7 @@ pub fn map_shared(shm: Arc<SharedMemory>, writable: bool) -> Result<u64, Errno> 
     if p.mapped_pages + pages > MAP_LIMIT_PAGES {
         return Err(Errno::NoMemory);
     }
-    let base = p.next_map;
+    let base = free_run(p, p.next_map, pages, PAGE_SIZE).ok_or(Errno::NoMemory)?;
     let mut flags = Flags::user(writable, false);
     flags.write_combining = shm.write_combining;
     for (i, &frame) in shm.frames().iter().enumerate() {
@@ -855,27 +923,30 @@ pub fn kill(pid: Pid) -> Result<(), Errno> {
     Ok(())
 }
 
+fn make_info(p: &Process) -> osyx_abi::ipc::ProcInfo {
+    let mut info = osyx_abi::ipc::ProcInfo {
+        pid: p.pid,
+        parent: p.parent,
+        uid: p.cred.uid,
+        gid: p.cred.gid,
+        threads: p.threads.len() as u32,
+        state: if p.life == Life::Running { osyx_abi::ipc::PROC_RUNNING } else { osyx_abi::ipc::PROC_ZOMBIE },
+        frames: p.space.frames,
+        name: [0; 32],
+        cpu_ticks: p.exited_cpu_ticks.saturating_add(p.threads.iter().map(|&tid| sched::cpu_ticks(tid)).sum()),
+    };
+    osyx_abi::ipc::fill_field(&mut info.name, &p.name);
+    info
+}
+
+/// The record for one process (for `proc_info`).
+pub fn info(pid: Pid) -> Result<osyx_abi::ipc::ProcInfo, Errno> {
+    TABLE.lock().procs.get(&pid).map(make_info).ok_or(Errno::NotFound)
+}
+
 /// One record per process (for `proc_list`).
 pub fn list() -> Vec<osyx_abi::ipc::ProcInfo> {
-    let t = TABLE.lock();
-    t.procs
-        .values()
-        .map(|p| {
-            let mut info = osyx_abi::ipc::ProcInfo {
-                pid: p.pid,
-                parent: p.parent,
-                uid: p.cred.uid,
-                gid: p.cred.gid,
-                threads: p.threads.len() as u32,
-                state: if p.life == Life::Running { osyx_abi::ipc::PROC_RUNNING } else { osyx_abi::ipc::PROC_ZOMBIE },
-                frames: p.space.frames,
-                name: [0; 32],
-                cpu_ticks: p.exited_cpu_ticks.saturating_add(p.threads.iter().map(|&tid| sched::cpu_ticks(tid)).sum()),
-            };
-            osyx_abi::ipc::fill_field(&mut info.name, &p.name);
-            info
-        })
-        .collect()
+    TABLE.lock().procs.values().map(make_info).collect()
 }
 
 /// Removes a handle. A system call still using the file keeps it alive
@@ -959,18 +1030,40 @@ pub fn map_ex(addr: u64, len: u64, prot: u64, mflags: u64) -> Result<u64, Errno>
             return Err(Errno::AlreadyExists);
         }
         addr
-    } else if mflags & MAP_ALIGN_64K != 0 {
-        p.next_map.next_multiple_of(0x10000)
     } else {
-        p.next_map
+        let align = if mflags & MAP_ALIGN_64K != 0 { 0x10000 } else { PAGE_SIZE };
+        let base = free_run(p, p.next_map, pages, align).ok_or(Errno::NoMemory)?;
+        // Leave a guard page. Fixed regions never move the cursor, so a
+        // loader can keep images at the same far addresses in every process.
+        p.next_map = base + (pages + 1) * PAGE_SIZE;
+        base
     };
     // No frames yet: each page is filled with zeros on first access
     // (`demand_fault`).
     p.regions.insert(base, Region::new(pages, prot));
     p.mapped_pages += pages;
-    // Leave a guard page; a fixed region below the cursor does not move it.
-    p.next_map = p.next_map.max(base + (pages + 1) * PAGE_SIZE);
     Ok(base)
+}
+
+/// The first address at or above `from`, aligned to `align`, where `pages`
+/// pages and the guard page after them overlap no region or shared mapping
+/// (fixed mappings may lie above the cursor).
+fn free_run(p: &Process, from: u64, pages: u64, align: u64) -> Option<u64> {
+    let mut at = from.next_multiple_of(align);
+    loop {
+        let end = at.checked_add((pages + 1) * PAGE_SIZE)?;
+        if end > STACK_LIMIT {
+            return None;
+        }
+        // Mappings do not overlap, so only the last one starting before
+        // `end` can reach into the run.
+        let region = p.regions.range(..end).next_back().map(|(&b, r)| b + (r.pages + 1) * PAGE_SIZE);
+        let shared = p.shared.range(..end).next_back().map(|(&b, s)| b + (s.1 + 1) * PAGE_SIZE);
+        match region.into_iter().chain(shared).filter(|&e| e > at).max() {
+            Some(e) => at = e.next_multiple_of(align),
+            None => return Some(at),
+        }
+    }
 }
 
 /// `protect` back end: new protection for whole pages that all lie in one
@@ -990,23 +1083,31 @@ pub fn protect(addr: u64, len: u64, prot: u64) -> Result<(), Errno> {
     if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE {
         return Err(Errno::InvalidArgument);
     }
-    for i in 0..pages {
-        let va = addr + i * PAGE_SIZE;
-        // A page already touched keeps its frame under the new flags; the
-        // others get them when first touched.
-        if paging::translate_in(root, va).is_some() {
-            let frame = paging::unmap_in(root, va, true).map_err(|_| Errno::Fault)?;
-            paging::map_in(root, va, frame, flags).map_err(|_| Errno::Fault)?;
-        }
-    }
+    // A page already touched keeps its frame under the new flags; the others
+    // get them when first touched. Rewriting the leaf entries in one pass
+    // avoids a page-table walk and a TLB shootdown per page, which matters
+    // when a loader protects a whole image section.
     let first = (addr - start) / PAGE_SIZE;
+    if r.image.is_some() && flags.writable {
+        let shared = Flags { writable: false, ..flags };
+        paging::edit_range_in(root, addr, addr + pages * PAGE_SIZE, |va, frame| {
+            paging::Leaf::Flags(if r.shares((va - start) / PAGE_SIZE, frame) { shared } else { flags })
+        });
+    } else {
+        paging::reprotect_range_in(root, addr, addr + pages * PAGE_SIZE, flags);
+    }
     r.set_prot(first, first + pages, prot);
     Ok(())
 }
 
-/// Frees the frames of the touched pages in `addr..addr + pages` (the
-/// untouched ones have none).
-fn release_frames(space: &mut Space, addr: u64, pages: u64) {
+/// Frees the frames of the touched pages in `addr..addr + pages` of region
+/// `r` at `start` (the untouched ones have none; shared image frames are
+/// only unmapped).
+fn release_frames(space: &mut Space, start: u64, r: &Region, addr: u64, pages: u64) {
+    if r.image.is_some() {
+        let first = (addr - start) / PAGE_SIZE;
+        unmap_image_pages(space.root, start, r, first, first + pages);
+    }
     for i in 0..pages {
         let va = addr + i * PAGE_SIZE;
         if paging::translate_in(space.root, va).is_some() {
@@ -1032,41 +1133,164 @@ pub fn discard(addr: u64, len: u64) -> Result<(), Errno> {
     if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE {
         return Err(Errno::InvalidArgument);
     }
-    release_frames(&mut p.space, addr, pages);
+    release_frames(&mut p.space, start, r, addr, pages);
     Ok(())
 }
 
+/// Pages mapped per chunk of a bulk prefault: each chunk takes the process
+/// table only for the pages it maps, so a long run never waits on the entry
+/// lock it does not need.
+const PREFAULT_CHUNK_PAGES: u64 = 256;
+
+/// TEMP prefault diagnostics: pages requested, chunks whose pages were
+/// mapped, chunks skipped because the process table was busy, and TSC cycles
+/// spent inside prefault_write.
+pub static PF_STATS: [core::sync::atomic::AtomicU64; 4] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 4];
+
+pub fn prefault_stats() -> [u64; 4] {
+    PF_STATS.each_ref().map(|a| a.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// Allocates the anonymous destination pages of a bulk copy without taking
+/// one user page-fault round trip per page. Invalid addresses and allocation
+/// failures are left for the copy's usual fault handling. Locks only what it
+/// touches (process table, paging, frames): the run is private to the calling
+/// process, and the entry lock is what made an image prefault wait most of a
+/// second behind other CPUs' disk work.
+pub fn prefault_write(addr: u64, len: usize) {
+    if len < PAGE_SIZE as usize {
+        return;
+    }
+    let t0 = unsafe { core::arch::x86_64::_rdtsc() };
+    let end = (addr + len as u64).next_multiple_of(PAGE_SIZE);
+    let mut page = addr & !(PAGE_SIZE - 1);
+    let (mut chunks, mut skipped) = (0u64, 0u64);
+    PF_STATS[0].fetch_add((end - page) / PAGE_SIZE, core::sync::atomic::Ordering::Relaxed);
+    while page < end {
+        let stop = end.min(page + PREFAULT_CHUNK_PAGES * PAGE_SIZE);
+        let next = prefault_range(page, stop);
+        if next == stop { chunks += 1 } else { skipped += 1 };
+        page = next;
+    }
+    PF_STATS[1].fetch_add(chunks, core::sync::atomic::Ordering::Relaxed);
+    PF_STATS[2].fetch_add(skipped, core::sync::atomic::Ordering::Relaxed);
+    let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+    PF_STATS[3].fetch_add(t1.wrapping_sub(t0), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Maps the writable anonymous pages of `[page, end)` and returns the address
+/// to continue from (`end` if the process table is busy).
+fn prefault_range(mut page: u64, end: u64) -> u64 {
+    let pid = sched::current_pid();
+    let Some(mut t) = TABLE.try_lock() else { return end };
+    let Some(p) = t.procs.get_mut(&pid) else { return end };
+    while page < end {
+        let Some((&start, r)) = p.regions.range(..=page).next_back() else {
+            page += PAGE_SIZE;
+            continue;
+        };
+        if page >= start + r.pages * PAGE_SIZE {
+            page += PAGE_SIZE;
+            continue;
+        }
+        let prot = r.prot_at((page - start) / PAGE_SIZE);
+        let Ok(flags) = prot_flags(prot) else {
+            page += PAGE_SIZE;
+            continue;
+        };
+        if !flags.writable {
+            page += PAGE_SIZE;
+            continue;
+        }
+        let mut run_end = page + PAGE_SIZE;
+        while run_end < end {
+            let Some((&next_start, next)) = p.regions.range(..=run_end).next_back() else { break };
+            if run_end >= next_start + next.pages * PAGE_SIZE
+                || prot_flags(next.prot_at((run_end - next_start) / PAGE_SIZE)) != Ok(flags)
+            {
+                break;
+            }
+            run_end += PAGE_SIZE;
+        }
+        let (mapped, tables) = paging::map_zeroed_range_in(p.space.root, page, run_end, flags);
+        p.space.frames += mapped + tables;
+        page = run_end;
+    }
+    page
+}
+
+/// Pages mapped per fault when the following pages of the same run are
+/// mapped too: sequential copies (image layout, reads) then take one trap
+/// per 64 KiB instead of one per page.
+const FAULT_AROUND_PAGES: u64 = 16;
+
 /// A page fault on a not-present page at `va`: if it lies in an anonymous
-/// region of the current process, maps a zeroed frame there and returns
-/// true (the access is retried). False for any other address, an access
-/// the region's protection forbids, a busy process table (the faulting
+/// region or the main stack of the current process, maps zeroed frames there
+/// and returns true (the access is retried). False for any other address, an
+/// access the mapping's protection forbids, a busy process table (the faulting
 /// code holds it) or exhausted memory: the fault then takes its usual path.
 pub fn demand_fault(va: u64, write: bool, fetch: bool) -> bool {
+    demand_fault_in(va, write, fetch, false)
+}
+
+/// [`demand_fault`] for a fault raised by user code. User code cannot hold the
+/// process table, so waiting for a busy one is safe — and necessary: another
+/// CPU entering the kernel must not turn a first touch of heap or stack into
+/// an access violation in the process.
+pub fn demand_fault_user(va: u64, write: bool, fetch: bool) -> bool {
+    demand_fault_in(va, write, fetch, true)
+}
+
+fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> bool {
     if !(paging::USER_START..osyx_abi::USER_END).contains(&va) {
         return false;
     }
     let pid = sched::current_pid();
-    let Some(mut t) = TABLE.try_lock() else { return false };
+    let mut t = if wait {
+        TABLE.lock()
+    } else {
+        match TABLE.try_lock() {
+            Some(t) => t,
+            None => return false,
+        }
+    };
     let Some(p) = t.procs.get_mut(&pid) else { return false };
     let page = va & !(PAGE_SIZE - 1);
-    let Some((&start, r)) = p.regions.range(..=page).next_back() else { return false };
-    if page >= start + r.pages * PAGE_SIZE {
-        return false;
-    }
-    let prot = r.prot_at((page - start) / PAGE_SIZE);
-    let Ok(flags) = prot_flags(prot) else { return false };
-    if (write && !flags.writable) || (fetch && !flags.executable) {
-        return false;
-    }
+    let around = page + FAULT_AROUND_PAGES * PAGE_SIZE;
+    let (flags, run_end) = if (STACK_TOP - STACK_PAGES * PAGE_SIZE..STACK_TOP).contains(&page) {
+        if fetch {
+            return false;
+        }
+        (Flags::user(true, false), around.min(STACK_TOP))
+    } else {
+        let Some((&start, r)) = p.regions.range(..=page).next_back() else { return false };
+        let region_end = start + r.pages * PAGE_SIZE;
+        if page >= region_end {
+            return false;
+        }
+        let prot = r.prot_at((page - start) / PAGE_SIZE);
+        let Ok(flags) = prot_flags(prot) else { return false };
+        if (write && !flags.writable) || (fetch && !flags.executable) {
+            return false;
+        }
+        // Only pages with the same protection may be mapped in one run.
+        let mut end = page + PAGE_SIZE;
+        while end < region_end && end < around && prot_flags(r.prot_at((end - start) / PAGE_SIZE)) == Ok(flags) {
+            end += PAGE_SIZE;
+        }
+        (flags, end)
+    };
     if paging::translate_in(p.space.root, page).is_some() {
         return true; // mapped meanwhile: retry
     }
-    match p.space.map_zeroed(page, flags) {
-        Ok(_) => true,
-        Err(_) => {
-            kprintln!("process {pid}: out of memory on first access to {page:#x}");
-            false
-        }
+    let (mapped, tables) = paging::map_zeroed_range_in(p.space.root, page, run_end, flags);
+    p.space.frames += mapped + tables;
+    if mapped != 0 {
+        true
+    } else {
+        kprintln!("process {pid}: out of memory on first access to {page:#x}");
+        false
     }
 }
 
@@ -1093,9 +1317,175 @@ pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
     if len.div_ceil(PAGE_SIZE) != pages {
         return Err(Errno::InvalidArgument);
     }
-    release_frames(&mut p.space, addr, pages);
-    p.regions.remove(&addr);
+    let r = p.regions.remove(&addr).expect("checked above");
+    release_frames(&mut p.space, addr, &r, addr, pages);
     p.mapped_pages -= pages;
+    Ok(())
+}
+
+/// A write to a present read-only page at `va`: if the page is a shared
+/// image frame in a region the process may write, it gets a private copy and
+/// the access is retried. False for every other protection fault. `wait`
+/// as in [`demand_fault_user`]: kernel copies must not wait for a process
+/// table they might hold.
+pub fn cow_fault(va: u64, wait: bool) -> bool {
+    if !(paging::USER_START..osyx_abi::USER_END).contains(&va) {
+        return false;
+    }
+    let pid = sched::current_pid();
+    let mut t = if wait {
+        TABLE.lock()
+    } else {
+        match TABLE.try_lock() {
+            Some(t) => t,
+            None => return false,
+        }
+    };
+    let Some(p) = t.procs.get_mut(&pid) else { return false };
+    let page = va & !(PAGE_SIZE - 1);
+    let Some((&start, r)) = p.regions.range(..=page).next_back() else { return false };
+    if r.image.is_none() || page >= start + r.pages * PAGE_SIZE {
+        return false;
+    }
+    let index = (page - start) / PAGE_SIZE;
+    let Ok(flags) = prot_flags(r.prot_at(index)) else { return false };
+    if !flags.writable {
+        return false;
+    }
+    let Some(now) = paging::translate_in(p.space.root, page) else {
+        return true; // unmapped meanwhile: the retry takes the demand path
+    };
+    if now.writable {
+        return true; // another thread copied it already
+    }
+    let shared = now.phys & !(PAGE_SIZE - 1);
+    if !r.shares(index, shared) {
+        return false;
+    }
+    let Some(frame) = alloc_frame() else {
+        kprintln!("process {pid}: out of memory copying image page {page:#x}");
+        return false;
+    };
+    // SAFETY: `frame` is fresh and `shared` is kept alive by the region's
+    // section; both are RAM pages reachable through the HHDM.
+    unsafe {
+        core::ptr::copy_nonoverlapping(phys_to_virt(shared) as *const u8, phys_to_virt(frame) as *mut u8, PAGE_SIZE as usize)
+    };
+    match paging::replace_in(p.space.root, page, frame, flags) {
+        Ok(_) => {
+            p.space.frames += 1;
+            true
+        }
+        Err(_) => {
+            let _ = free_frame(frame);
+            false
+        }
+    }
+}
+
+/// The region `[addr, addr + len)` exactly, if it is an anonymous mapping
+/// of the current process without an image yet.
+fn image_region(regions: &mut BTreeMap<u64, Region>, addr: u64, len: u64) -> Result<&mut Region, Errno> {
+    let r = regions.get_mut(&addr).ok_or(Errno::InvalidArgument)?;
+    if len == 0 || len.div_ceil(PAGE_SIZE) != r.pages {
+        return Err(Errno::InvalidArgument);
+    }
+    if r.image.is_some() {
+        return Err(Errno::AlreadyExists);
+    }
+    Ok(r)
+}
+
+/// `image_publish` back end: the image laid out in the region at `addr`
+/// becomes section `key`. Its pages move into the section (untouched ones
+/// become zeroed frames) and stay mapped read-only in this process.
+pub fn image_publish(key: image::Key) -> Result<Arc<ImageSection>, Errno> {
+    let (addr, len) = (key.base, key.pages * PAGE_SIZE);
+    let pid = sched::current_pid();
+    let mut t = TABLE.lock();
+    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let root = p.space.root;
+    let r = image_region(&mut p.regions, addr, len)?;
+    let pages = r.pages;
+    let (free, _) = crate::mem::frame_stats();
+    if pages + 4096 > free {
+        return Err(Errno::NoMemory);
+    }
+    // Collect the frames under read-only entries in one pass (one shootdown).
+    let mut frames = alloc::vec![0u64; pages as usize];
+    let mut moved = 0u64;
+    paging::edit_range_in(root, addr, addr + len, |va, frame| {
+        frames[((va - addr) / PAGE_SIZE) as usize] = frame;
+        moved += 1;
+        let prot = prot_flags(r.prot_at((va - addr) / PAGE_SIZE)).unwrap_or(Flags::user(false, false));
+        paging::Leaf::Flags(Flags { writable: false, ..prot })
+    });
+    // Pages never touched read zeros: give them zeroed frames too.
+    let (mut tables, mut added) = (0, 0);
+    for (i, f) in frames.iter_mut().enumerate() {
+        if *f != 0 {
+            continue;
+        }
+        let va = addr + i as u64 * PAGE_SIZE;
+        let prot = prot_flags(r.prot_at(i as u64)).unwrap_or(Flags::user(false, false));
+        let Some(new) = alloc_frame() else { break };
+        match paging::map_in(root, va, new, Flags { writable: false, ..prot }) {
+            Ok(n) => {
+                *f = new;
+                tables += n;
+                added += 1;
+            }
+            Err(_) => {
+                let _ = free_frame(new);
+                break;
+            }
+        }
+    }
+    p.space.frames += tables + added;
+    if frames.contains(&0) {
+        // Out of memory: every page stays an ordinary private page.
+        paging::edit_range_in(root, addr, addr + len, |va, _| {
+            paging::Leaf::Flags(prot_flags(r.prot_at((va - addr) / PAGE_SIZE)).unwrap_or(Flags::user(false, false)))
+        });
+        return Err(Errno::NoMemory);
+    }
+    let section = ImageSection::new(key, frames);
+    r.image = Some(section.clone());
+    // The frames now belong to the section; the page tables stay ours.
+    p.space.frames -= moved + added;
+    Ok(section)
+}
+
+/// `image_map` back end: maps `section` into the untouched region at its
+/// base, every page read-only (writes copy).
+pub fn image_map(section: Arc<ImageSection>) -> Result<(), Errno> {
+    let key = *section.key();
+    let (addr, len) = (key.base, key.pages * PAGE_SIZE);
+    let pid = sched::current_pid();
+    let mut t = TABLE.lock();
+    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let root = p.space.root;
+    let r = image_region(&mut p.regions, addr, len)?;
+    if (0..r.pages).any(|i| paging::translate_in(root, addr + i * PAGE_SIZE).is_some()) {
+        return Err(Errno::Busy);
+    }
+    let mut tables = 0;
+    for (i, &frame) in section.frames().iter().enumerate() {
+        let va = addr + i as u64 * PAGE_SIZE;
+        let prot = prot_flags(r.prot_at(i as u64)).unwrap_or(Flags::user(false, false));
+        match paging::map_in(root, va, frame, Flags { writable: false, ..prot }) {
+            Ok(n) => tables += n,
+            Err(_) => {
+                for j in 0..i as u64 {
+                    let _ = paging::unmap_in(root, addr + j * PAGE_SIZE, true);
+                }
+                p.space.frames += tables;
+                return Err(Errno::NoMemory);
+            }
+        }
+    }
+    p.space.frames += tables;
+    r.image = Some(section);
     Ok(())
 }
 

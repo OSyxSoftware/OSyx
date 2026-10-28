@@ -1,6 +1,6 @@
 //! Tick source selection, calibration and tick-independent deadlines.
 //!
-//! The scheduler tick (100 Hz) comes from the local APIC timer when there
+//! The scheduler tick (1 kHz) comes from the local APIC timer when there
 //! is a local APIC, and from the PIT through the 8259 PIC and LINT0
 //! ("virtual wire") otherwise. Modern boards often break the PIT path
 //! (the PIT clock gated off, ExtINT not routed), so the APIC timer is the
@@ -18,7 +18,7 @@
 
 use super::{apic, pic};
 use crate::{interrupts, kprintln, mem};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 /// Vector of the local APIC timer (above the MSI range of `crate::irq`).
 pub const APIC_TIMER_VECTOR: u8 = 0xF0;
@@ -42,6 +42,11 @@ const SOURCE_APIC: u8 = 2;
 static SOURCE: AtomicU8 = AtomicU8::new(SOURCE_NONE);
 static TSC_KHZ: AtomicU64 = AtomicU64::new(0);
 static HEALTHY: AtomicBool = AtomicBool::new(false);
+static SECONDARY_COUNT: AtomicU32 = AtomicU32::new(0);
+
+pub fn secondary_available()->bool { SECONDARY_COUNT.load(Ordering::Relaxed)!=0 }
+pub fn start_secondary() { apic::timer_start_periodic(APIC_TIMER_VECTOR,SECONDARY_COUNT.load(Ordering::Relaxed)); }
+pub fn spin_ms(ms:u64) { let end=tsc().saturating_add(tsc_khz().saturating_mul(ms));while tsc()<end {core::hint::spin_loop();} }
 
 #[derive(Clone, Copy)]
 enum Reference {
@@ -146,6 +151,11 @@ pub fn tsc_khz() -> u64 {
     }
 }
 
+/// The measured TSC rate, or 0 when only the fallback guess is available.
+pub fn measured_tsc_khz() -> u64 {
+    TSC_KHZ.load(Ordering::Relaxed)
+}
+
 /// TSC frequency reported by CPUID leaf 0x15 (crystal ratio) or 0x16
 /// (base frequency), in kHz.
 fn cpuid_tsc_khz() -> Option<u64> {
@@ -230,6 +240,7 @@ pub fn init(force: Option<&str>, calib: Option<&str>) {
     if use_apic && force != Some("pit") && (1..=u32::MAX as u64).contains(&apic_per_tick) {
         pic::disable_timer_irq();
         apic::timer_start_periodic(APIC_TIMER_VECTOR, apic_per_tick as u32);
+        SECONDARY_COUNT.store(apic_per_tick as u32,Ordering::Relaxed);
         SOURCE.store(SOURCE_APIC, Ordering::Relaxed);
     } else {
         start_pit();
@@ -237,6 +248,7 @@ pub fn init(force: Option<&str>, calib: Option<&str>) {
 }
 
 fn start_pit() {
+    SECONDARY_COUNT.store(0,Ordering::Relaxed);
     apic::timer_stop();
     pic::enable_timer_irq();
     SOURCE.store(SOURCE_PIT, Ordering::Relaxed);

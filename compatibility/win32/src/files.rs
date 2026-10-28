@@ -28,6 +28,7 @@ fn name(p: *const u16) -> Option<String> {
 fn stat_of(win: &str) -> Result<(String, osyx_abi::FileStat), u32> {
     match kernel32::locate(win)? {
         (p, true) => {
+            path::note_stat(&p, "stat_of");
             let st = os_sys::stat(&p).map_err(errno_to_win32)?;
             Ok((p, st))
         }

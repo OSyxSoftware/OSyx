@@ -12,6 +12,57 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use os_std::fs;
 
+/// TEMP: histogram of file writes, dumped every 1000 calls.
+pub fn note_write(path: &str, n: usize) {
+    if !crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    static N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    static W: os_std::sync::Mutex<Vec<(String, u64, u64)>> = os_std::sync::Mutex::new(Vec::new());
+    let k = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    let mut list = W.lock().unwrap();
+    match list.iter_mut().find(|(p, _, _)| p == path) {
+        Some(e) => {
+            e.1 += 1;
+            e.2 += n as u64;
+        }
+        None => list.push((String::from(path), 1, n as u64)),
+    }
+    if k.is_multiple_of(1000) {
+        list.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+        let mut s = String::new();
+        for (p, c, b) in list.iter().take(8) {
+            core::fmt::Write::write_fmt(&mut s, format_args!(" {}x{c}/{b}B", p)).ok();
+        }
+        os_std::eprintln!("winrun: write top n={k} tid={}{s}", os_sys::gettid());
+        list.clear();
+    }
+}
+
+/// TEMP: logs every 1000th stat/lstat the shims perform, with its caller tag.
+pub fn note_stat(path: &str, what: &str) {
+    if !crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    static N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    static STATS: os_std::sync::Mutex<Vec<(String, u64)>> = os_std::sync::Mutex::new(Vec::new());
+    let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    let mut list = STATS.lock().unwrap();
+    match list.iter_mut().find(|(p, _)| p == path) {
+        Some(e) => e.1 += 1,
+        None => list.push((String::from(path), 1)),
+    }
+    if n.is_multiple_of(1000) {
+        list.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+        let mut s = String::new();
+        for (p, c) in list.iter().take(8) {
+            core::fmt::Write::write_fmt(&mut s, format_args!(" {}x{c}", p)).ok();
+        }
+        os_std::eprintln!("winrun: stat top n={n} what={what} tid={}{s}", os_sys::gettid());
+        list.clear();
+    }
+}
+
 /// Longest path accepted (Windows `MAX_PATH` does not apply with `\\?\`).
 pub const MAX_PATH_CHARS: usize = 4096;
 
@@ -111,15 +162,28 @@ pub fn resolve(path: &str) -> Result<(String, bool), u32> {
     for (i, comp) in comps.iter().enumerate() {
         let last = i + 1 == comps.len();
         let exact = join(&cur, comp);
-        let found = if fs::symlink_metadata(&exact).is_ok() {
-            Some(exact)
-        } else {
-            find_ci(&cur, comp).map(|n| join(&cur, &n))
+        note_stat(&exact, "resolve");
+        let found = match fs::symlink_metadata(&exact) {
+            Ok(m) => Some((exact, Some(m))),
+            Err(_) => find_ci(&cur, comp).map(|n| {
+                let p = join(&cur, &n);
+                let m = fs::symlink_metadata(&p).ok();
+                (p, m)
+            }),
         };
         match found {
-            Some(p) => {
-                if !last && !fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false) {
-                    return Err(ERROR_PATH_NOT_FOUND);
+            Some((p, m)) => {
+                if !last {
+                    // A link still has to be followed; a plain non-directory
+                    // is rejected without a second syscall.
+                    let is_dir = match m {
+                        Some(m) if m.is_dir() => true,
+                        Some(m) if !m.is_symlink() => false,
+                        _ => fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false),
+                    };
+                    if !is_dir {
+                        return Err(ERROR_PATH_NOT_FOUND);
+                    }
                 }
                 cur = p;
             }

@@ -29,6 +29,15 @@ osyx_probe_write_u8:
 4:  mov eax, 1
     ret
 
+    .global osyx_probe_read_u64
+osyx_probe_read_u64:
+    xor eax, eax
+7:  mov rcx, qword ptr [rdi]
+    mov qword ptr [rsi], rcx
+    ret
+8:  mov eax, 1
+    ret
+
     .global osyx_copy_bytes
 osyx_copy_bytes:
     mov rcx, rdx
@@ -43,6 +52,7 @@ osyx_copy_bytes:
     .quad 1b, 2b
     .quad 3b, 4b
     .quad 5b, 6b
+    .quad 7b, 8b
     .popsection
     "#
 );
@@ -55,6 +65,7 @@ struct Fixup {
 
 extern "C" {
     fn osyx_probe_read_u8(addr: u64, out: *mut u8) -> u32;
+    fn osyx_probe_read_u64(addr: u64, out: *mut u64) -> u32;
     fn osyx_probe_write_u8(addr: u64, value: u8) -> u32;
     fn osyx_copy_bytes(dst: *mut u8, src: *const u8, len: usize) -> u32;
     static __fixup_start: Fixup;
@@ -81,6 +92,18 @@ pub fn probe_read_u8(addr: u64) -> Result<u8, Fault> {
     let mut v = 0u8;
     // SAFETY: the routine either completes or is redirected by the fixup.
     let r = unsafe { osyx_probe_read_u8(addr, &mut v) };
+    if r == 0 {
+        Ok(v)
+    } else {
+        Err(Fault)
+    }
+}
+
+/// Reads a little-endian u64 from an arbitrary (possibly unmapped) address.
+pub fn probe_read_u64(addr: u64) -> Result<u64, Fault> {
+    let mut v = 0u64;
+    // SAFETY: the routine either completes or is redirected by the fixup.
+    let r = unsafe { osyx_probe_read_u64(addr, &mut v) };
     if r == 0 {
         Ok(v)
     } else {

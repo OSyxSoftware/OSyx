@@ -465,7 +465,7 @@ extern "win64" fn _getpid() -> i32 {
 }
 
 extern "win64" fn __threadid() -> u32 {
-    os_sys::gettid() as u32
+    crate::teb::current_tid() as u32
 }
 
 extern "win64" fn __threadhandle() -> u64 {
@@ -784,6 +784,14 @@ extern "win64" fn _beginthreadex(
     if let Err(e) = crate::security::validate_attributes(security) {
         dosmaperr(e);
         return 0;
+    }
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        static STARTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let n = STARTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 128 || n.is_multiple_of(1024) {
+            let at = crate::loader::where_is(func);
+            os_std::eprintln!("winrun: _beginthreadex #{} callback={func:#x} module={at:?}", n + 1);
+        }
     }
     let start = Box::into_raw(Box::new(Start { func, arg })) as u64;
     let size = if stack == 0 { kernel32::DEFAULT_STACK } else { stack as usize };
