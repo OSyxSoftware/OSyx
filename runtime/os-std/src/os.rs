@@ -26,6 +26,11 @@ pub fn setuid(uid: u32, gid: u32) -> Result<()> {
     sys::fs::setuid(uid, gid)
 }
 
+/// Sets the real-time clock to `unix_ns` nanoseconds since 1970 (root only).
+pub fn set_time(unix_ns: u64) -> Result<()> {
+    sys::fs::set_time(unix_ns)
+}
+
 /// Capacity and type of the volume holding `path`.
 pub fn statfs(path: &str) -> Result<osyx_abi::FsStat> {
     sys::fs::statfs(path)

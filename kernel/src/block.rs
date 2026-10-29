@@ -293,6 +293,7 @@ fn scan_thread(arg: u64, _: u64) {
     let disk = *unsafe { Box::from_raw(arg as *mut Arc<dyn BlockDev>) };
     let found = scan_disk(&disk);
     kprintln!("gpt {}: hot-plug scan found {} partition(s)", disk.name(), found);
+    crate::storage::mount_hotplugged(disk.name());
 }
 
 /// Adapter that lets a file system driver use a registered disk.

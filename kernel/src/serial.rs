@@ -111,18 +111,23 @@ fn snapshot(text: &mut alloc::vec::Vec<u8>) -> u64 {
 /// Log bytes already on the stick; also serialises the writers of the copy.
 static ON_STICK: KMutex<u64> = KMutex::new(u64::MAX);
 
-/// Live boot: writes the log to the stick's EFI partition now, from the
-/// calling thread, so the log of a real machine can be read on another
-/// computer (`osyx-kernel.log` in the stick's root folder). Called before
+/// Writes the log to the live stick's EFI partition (`osyx-kernel.log` in
+/// its root folder, readable on another computer) or, on an installed
+/// system, to `/var/log/osyx-kernel.log`, now, from the calling thread. Called before
 /// steps that can hang a real machine (driver attach, firmware start), so
 /// the copy ends just before them; the klog thread refreshes it as well.
 pub fn sync_log_file() {
     use osyx_abi::{OPEN_CREATE, OPEN_TRUNCATE, OPEN_WRITE};
     let mut on_stick = ON_STICK.lock();
     let cx = crate::vfs::Lookup::kernel();
-    if crate::vfs::stat(&cx, "/boot/EFI/OSYX/BIN/rootfs.z").is_err() {
+    // The live stick's EFI partition, or the installed system's /var/log.
+    let path = if crate::vfs::stat(&cx, "/boot/EFI/OSYX/BIN/rootfs.z").is_ok() {
+        "/boot/osyx-kernel.log"
+    } else if crate::vfs::stat(&cx, "/etc/osyx/installed").is_ok() && crate::vfs::stat(&cx, "/var/log").is_ok() {
+        "/var/log/osyx-kernel.log"
+    } else {
         return;
-    }
+    };
     // Full capacity up front: `snapshot` must not allocate under the log
     // lock (the allocator can log).
     let mut text = alloc::vec::Vec::with_capacity(LOG_MAX);
@@ -130,7 +135,7 @@ pub fn sync_log_file() {
     if written == *on_stick {
         return;
     }
-    if let Ok(mut f) = crate::vfs::open(&cx, "/boot/osyx-kernel.log", OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0o644) {
+    if let Ok(mut f) = crate::vfs::open(&cx, path, OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0o644) {
         if f.write(&text).is_ok() && f.sync().is_ok() {
             *on_stick = written;
         }

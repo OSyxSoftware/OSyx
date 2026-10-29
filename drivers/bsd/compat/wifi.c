@@ -99,6 +99,18 @@ int osyx_bsd_wifi_join(struct ifnet *ifp, const uint8_t *ssid, size_t ssid_len, 
 		if (e != 0 && e != ENETRESET)
 			return e;
 	}
+	/*
+	 * The driver restarts a running interface for the new settings
+	 * (ENETRESET); one that a failed attempt left stopped is started here.
+	 */
+	if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) != (IFF_UP | IFF_RUNNING)) {
+		ifp->if_flags |= IFF_UP;
+		memset(&ifr, 0, sizeof(ifr));
+		strlcpy(ifr.ifr_name, ifp->if_xname, sizeof(ifr.ifr_name));
+		e = ifp->if_ioctl(ifp, SIOCSIFFLAGS, (caddr_t)&ifr);
+		if (e != 0)
+			return e;
+	}
 	return 0;
 }
 
@@ -145,8 +157,10 @@ size_t osyx_bsd_wifi_status(struct ifnet *ifp, char *buf, size_t cap)
 		put_essid(buf, cap, &len, ni->ni_essid, ni->ni_esslen);
 		len += snprintf(buf + len, cap - len, "\nbssid %s\nchannel %u\nrssi %u\n", ether_sprintf(ni->ni_bssid),
 		    ieee80211_chan2ieee(ic, ni->ni_chan), ni->ni_rssi);
-		/* "keys no" while associated: the WPA handshake has not finished. */
-		len += snprintf(buf + len, cap - len, "keys %s\n", ni->ni_port_valid ? "yes" : "no");
+		/* "keys no" while associated: the WPA handshake has not finished
+		 * (an open network needs none). */
+		int keys = ni->ni_port_valid || !(ic->ic_flags & IEEE80211_F_RSNON);
+		len += snprintf(buf + len, cap - len, "keys %s\n", keys ? "yes" : "no");
 	}
 	RBT_FOREACH(ni, ieee80211_tree, &ic->ic_tree) {
 		if (len + 80 >= cap)

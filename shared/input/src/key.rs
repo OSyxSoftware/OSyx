@@ -77,6 +77,10 @@ pub const KP_0: u16 = 0x62;
 pub const KP_PERIOD: u16 = 0x63;
 pub const NON_US_BACKSLASH: u16 = 0x64;
 pub const MENU: u16 = 0x65;
+/// Volume keys (keyboard page; laptops send them as E0-prefixed PS/2 codes).
+pub const MUTE: u16 = 0x7F;
+pub const VOLUME_UP: u16 = 0x80;
+pub const VOLUME_DOWN: u16 = 0x81;
 pub const LEFT_CTRL: u16 = 0xE0;
 pub const LEFT_SHIFT: u16 = 0xE1;
 pub const LEFT_ALT: u16 = 0xE2;

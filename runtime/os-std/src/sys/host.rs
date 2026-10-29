@@ -310,6 +310,10 @@ pub mod fs {
     pub fn setuid(_uid: u32, _gid: u32) -> Result<()> {
         Err(Error::unsupported("identities are only available on OSyx"))
     }
+
+    pub fn set_time(_unix_ns: u64) -> Result<()> {
+        Err(Error::unsupported("setting the clock is only available on OSyx"))
+    }
 }
 // Threads, futexes and TLS are emulated with the host's std so the OSyx Std
 // synchronisation code can be tested with real, parallel host threads.

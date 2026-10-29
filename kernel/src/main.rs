@@ -238,6 +238,10 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let nics = net::init(&pci_devices, boot);
     kprintln!("net: {} interface(s)", nics);
     vfs::start_writeback();
+    // Compressed memory for cold pages; `swap.off` turns it off.
+    if !boot.has_option("swap.off") {
+        process::start_swap();
+    }
     kprintln!(
         "storage: {} PCI functions, {} disks, {} partitions, {} mounts, root: {}",
         pci_devices.len(),
@@ -311,6 +315,8 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
         trigger_fault(kind);
     }
     if testing && boot.has_option("test.exit") {
+        let (pages, bytes, out, input) = process::swap_stats();
+        kprintln!("swap: stats pages={pages} bytes={bytes} out={out} in={input}");
         if boot.has_option("test.power-cut") {
             // Simulated power loss: no unmount, no flush of anything pending.
             kprintln!("test.power-cut: stopping without unmounting");

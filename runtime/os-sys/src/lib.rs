@@ -511,6 +511,11 @@ mod imp {
         decode(syscall2(nr::SETUID, uid as u64, gid as u64)).map(|_| ())
     }
 
+    /// Sets the real-time clock (root only).
+    pub fn set_time(unix_ns: u64) -> Result<(), Errno> {
+        decode(syscall1(nr::SET_TIME, unix_ns)).map(|_| ())
+    }
+
     pub fn statfs(path: &str) -> Result<osyx_abi::FsStat, Errno> {
         let mut st = osyx_abi::FsStat::default();
         decode(syscall3(nr::STATFS, path.as_ptr() as u64, path.len() as u64, &mut st as *mut osyx_abi::FsStat as u64))?;

@@ -112,8 +112,20 @@ pub fn decompress(src: &[u8], dst: &mut [u8; PAGE]) -> Result<(), LzError> {
             if off == 0 || off > out || out + n > PAGE {
                 return Err(LzError::Corrupt);
             }
-            for k in 0..n {
-                dst[out + k] = dst[out + k - off];
+            if off == 1 {
+                let value = dst[out - 1];
+                dst[out..out + n].fill(value);
+            } else {
+                // Copy a non-overlapping seed, then double the already
+                // produced pattern until the match is complete.
+                let seed = off.min(n);
+                dst.copy_within(out - off..out - off + seed, out);
+                let mut copied = seed;
+                while copied < n {
+                    let chunk = copied.min(n - copied);
+                    dst.copy_within(out..out + chunk, out + copied);
+                    copied += chunk;
+                }
             }
             out += n;
         }
@@ -157,6 +169,17 @@ mod tests {
             q[i] = i as u8;
         }
         roundtrip(&q);
+    }
+
+    #[test]
+    fn overlapping_matches_reproduce_patterns() {
+        for period in 1..=150 {
+            let mut page = [0u8; PAGE];
+            for (i, byte) in page.iter_mut().enumerate() {
+                *byte = ((i % period) * 37) as u8;
+            }
+            roundtrip(&page);
+        }
     }
 
     #[test]

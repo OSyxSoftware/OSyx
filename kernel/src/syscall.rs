@@ -345,6 +345,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             Ok(c.uid as u64 | (c.gid as u64) << 32)
         }
         nr::SETUID => process::set_current_cred(Cred { uid: f.rdi as u32, gid: f.rsi as u32 }).map(|_| 0),
+        nr::SET_TIME => sys_set_time(f.rdi),
         nr::STATFS => user_path(f.rdi, f.rsi)
             .and_then(|p| vfs::statfs(&Lookup::current(), &p))
             .and_then(|st| put_user(f.rdx, &st)),
@@ -686,6 +687,20 @@ fn sys_clock(id: u64) -> Result<u64, Errno> {
         osyx_abi::CLOCK_REALTIME => Ok(crate::time::now_ns().max(0) as u64),
         _ => Err(Errno::InvalidArgument),
     }
+}
+
+/// Sets the real-time clock (root only; 2020..2200 accepted).
+fn sys_set_time(unix_ns: u64) -> Result<u64, Errno> {
+    if !process::current_identity().0.is_root() {
+        return Err(Errno::PermissionDenied);
+    }
+    const SEC: u64 = 1_000_000_000;
+    if !(1_577_836_800 * SEC..7_258_118_400 * SEC).contains(&unix_ns) {
+        return Err(Errno::InvalidArgument);
+    }
+    let off = crate::time::set_now_ns(unix_ns as i64);
+    crate::kprintln!("time: set to {} UTC (the clock was off by {} ms)", crate::time::format_utc((unix_ns / SEC) as i64), off / 1_000_000);
+    Ok(0)
 }
 
 /// Returns only on failure; on success the new program is running.

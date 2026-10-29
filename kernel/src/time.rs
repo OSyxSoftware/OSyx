@@ -73,6 +73,14 @@ pub fn init() -> Option<i64> {
     Some(secs)
 }
 
+/// Sets the real-time clock to `ns` since 1970-01-01 UTC (network time);
+/// returns how far the old clock was off, in nanoseconds.
+pub fn set_now_ns(ns: i64) -> i64 {
+    let uptime = crate::interrupts::uptime_ms() as i64 * 1_000_000;
+    let old = BOOT_EPOCH_NS.swap(ns - uptime, Ordering::Relaxed);
+    ns - (old + uptime)
+}
+
 /// Nanoseconds since 1970-01-01 UTC (uptime only if the RTC was unusable).
 pub fn now_ns() -> i64 {
     BOOT_EPOCH_NS.load(Ordering::Relaxed) + crate::interrupts::uptime_ms() as i64 * 1_000_000

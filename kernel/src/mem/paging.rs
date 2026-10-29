@@ -415,8 +415,9 @@ pub const ACCESSED: u64 = 1 << 5;
 
 /// Visits the present 4 KiB user pages of `[start, end)` for page aging:
 /// `f(va, frame, accessed, writable)` sees each one and returns false to
-/// stop. The accessed bit is cleared as it is read, without a TLB flush
-/// (a stale translation only makes a page look used once more).
+/// stop. The accessed bit is cleared as it is read, without a TLB flush:
+/// until the caller flushes, a CPU that still caches the translation does
+/// not set the bit again, so a page in use can look unused.
 pub fn age_range_in(root: u64, start: u64, end: u64, mut f: impl FnMut(u64, u64, bool, bool) -> bool) {
     if start >= end || check_virt(start, true).is_err() || check_virt(end - PAGE_SIZE, true).is_err() {
         return;
@@ -447,13 +448,12 @@ pub fn age_range_in(root: u64, start: u64, end: u64, mut f: impl FnMut(u64, u64,
         }
         // SAFETY: as above.
         let e = unsafe { table(t).add(((va >> 12) & 511) as usize) };
-        // SAFETY: as above.
-        let val = unsafe { *e };
+        // Hardware may set accessed or dirty concurrently. Clear accessed
+        // atomically so a software write cannot erase a hardware update.
+        // SAFETY: page-table entries are naturally aligned u64 values.
+        let entry = unsafe { &*(e as *const core::sync::atomic::AtomicU64) };
+        let val = entry.fetch_and(!ACCESSED, core::sync::atomic::Ordering::Relaxed);
         if val & PRESENT != 0 {
-            if val & ACCESSED != 0 {
-                // SAFETY: as above; only the accessed bit changes.
-                unsafe { *e = val & !ACCESSED };
-            }
             if !f(va, val & ADDR_MASK, val & ACCESSED != 0, val & WRITABLE != 0) {
                 return;
             }

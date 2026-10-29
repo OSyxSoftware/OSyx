@@ -2,8 +2,8 @@
 //! beside the desktop session whenever `/etc/osyx/firstboot.conf` exists.
 //! It finishes the tasks the installer recorded there and keeps state in
 //! `/etc/osyx/firstboot.state`: a task that failed (no network, a failed
-//! download or installation) is retried on the next start; one that
-//! finished never runs again. Everything is logged to
+//! download or installation) is retried every minute while the system
+//! runs, and on the next start; one that finished never runs again. Everything is logged to
 //! `/var/log/osyx-firstboot.log`.
 //!
 //! `zen=1`: Zen Browser. The official Windows installer of a release OSyx
@@ -40,6 +40,8 @@ const DOWNLOAD_TRIES: u32 = 3;
 /// Firstboot starts with the session, before the user has joined a Wi-Fi
 /// network: it waits this long (checking every 5 s) for a connection.
 const NETWORK_WAIT_SECS: u64 = 300;
+/// Pause before the next attempt after a failed one.
+const RETRY_SECS: u64 = 60;
 
 struct Log(Option<fs::File>);
 
@@ -67,18 +69,24 @@ fn main() -> i32 {
     let state = fs::read_to_string(STATE).unwrap_or_default();
     let attempts: u32 = setting(&state, "zen.attempts").and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut new_state = String::new();
-    let mut pending = 0;
     if setting(&conf, "zen").as_deref() == Some("1") && setting(&state, "zen").as_deref() != Some("done") {
-        log.line(&format!("Zen Browser {ZEN_VERSION}: attempt {}", attempts + 1));
-        match zen_task(&mut log) {
-            Ok(()) => {
-                log.line("Zen Browser: installed");
-                new_state.push_str("zen=done\n");
-            }
-            Err(e) => {
-                log.line(&format!("Zen Browser: not installed: {e}; retrying on the next start"));
-                new_state.push_str(&format!("zen=pending\nzen.attempts={}\nzen.error={e}\n", attempts + 1));
-                pending += 1;
+        // Keeps trying while the system runs (the network may come up long
+        // after the session starts); the state survives a restart.
+        let mut attempt = attempts + 1;
+        loop {
+            log.line(&format!("Zen Browser {ZEN_VERSION}: attempt {attempt}"));
+            match zen_task(&mut log) {
+                Ok(()) => {
+                    log.line("Zen Browser: installed");
+                    new_state.push_str("zen=done\n");
+                    break;
+                }
+                Err(e) => {
+                    log.line(&format!("Zen Browser: not installed: {e}; trying again in {RETRY_SECS} s"));
+                    let _ = fs::write(STATE, format!("zen=pending\nzen.attempts={attempt}\nzen.error={e}\n").as_bytes());
+                    thread::sleep(Duration::from_secs(RETRY_SECS));
+                    attempt += 1;
+                }
             }
         }
     } else {
@@ -87,8 +95,8 @@ fn main() -> i32 {
     if let Err(e) = fs::write(STATE, new_state.as_bytes()) {
         log.line(&format!("cannot record the state in {STATE}: {e}"));
     }
-    println!("FIRSTBOOT_RESULT {}", if pending == 0 { "ok" } else { "pending" });
-    pending
+    println!("FIRSTBOOT_RESULT ok");
+    0
 }
 
 /// The installer in the cache, downloading it when it is missing or wrong.

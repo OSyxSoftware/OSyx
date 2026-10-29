@@ -83,3 +83,26 @@ Placing DLLs at name-hashed slots high in the address space
   maps more frames when an allocation does not fit.
 - User: the same algorithm in OSyx Std, growing through the `map` system call
   in chunks of at least 256 KiB.
+
+## Compressed memory
+
+OSyx can reclaim cold, writable private anonymous pages into compressed
+kernel memory. This is a RAM-backed mechanism, not Linux's zram block
+device. Shared mappings, image sections, and read-only pages are excluded.
+All-zero pages need no compressed payload. Other pages are retained only if
+they compress to at most three quarters of a page; compressed payloads are
+limited to 256 MiB (metadata and allocator overhead are additional).
+The `swap.off` boot option disables the worker.
+
+The worker ages bounded windows and keeps a cursor in each region so that
+incompressible pages cannot indefinitely hide later pages. It invalidates
+cached translations after aging and removes a mapping before compressing.
+A later access restores the page. When a user fault has no frame, it wakes
+the worker and waits for a bounded time; exhaustion can still fail a fault.
+
+Run `scripts/swap-test.ps1` to build a diagnostic disk and boot a 192 MiB,
+two-CPU QEMU guest. The test fills anonymous pages with nonzero markers,
+checks them after reclaim, and requires nonzero eviction and restore counts
+and zero remaining compressed pages after exit. It does not establish Zen
+browser functionality or cover every SMP and memory-exhaustion scenario.
+The script replaces `build/osyx.img` with its diagnostic image.

@@ -132,6 +132,10 @@ struct WifiState {
     keys: bool,
     /// "wrong-password" when the handshake failed.
     error: Option<String>,
+    /// Joins the kernel has applied (the state belongs to the last one).
+    join: u64,
+    /// Saved networks (the kernel keeps their passphrases).
+    known: Vec<String>,
     /// (RSSI, SSID, security) of the networks seen, strongest first.
     networks: Vec<(u32, String, String)>,
 }
@@ -150,6 +154,10 @@ impl WifiState {
                 w.keys = s == "yes";
             } else if let Some(s) = line.strip_prefix("error ") {
                 w.error = Some(String::from(s));
+            } else if let Some(s) = line.strip_prefix("join ") {
+                w.join = s.parse().unwrap_or(0);
+            } else if let Some(s) = line.strip_prefix("known\t") {
+                w.known.push(String::from(s));
             } else if f.len() >= 5 && f[0] == "net" && !w.networks.iter().any(|n| n.1 == f[1]) {
                 w.networks.push((f[2].parse().unwrap_or(0), String::from(f[1]), String::from(f[4])));
             }
@@ -332,9 +340,10 @@ struct Shell {
     shortcuts: Vec<AppEntry>,
     selected_shortcut: Option<usize>,
     shortcut_scan: u64,
-    /// Wi-Fi network being joined and when (ms): watched until it connects
-    /// or the kernel reports a wrong password.
-    wifi_joining: Option<(String, u64)>,
+    /// Wi-Fi network being joined, when (ms) and the kernel's join count
+    /// before it: watched until the kernel applied this join and it
+    /// connects or reports a wrong password.
+    wifi_joining: Option<(String, u64, u64)>,
     wifi_checked: u64,
     /// When `/run/update.status` was last read (ms), and whether an
     /// installed system update was announced.
@@ -580,6 +589,12 @@ impl Shell {
             // Super and Super+key shortcuts reach the panel wherever the
             // focus is. Super alone opens the launcher when released.
             if window == self.panel.id {
+                if matches!(usage, key::MUTE | key::VOLUME_UP | key::VOLUME_DOWN) {
+                    if s != proto::key_state::UP {
+                        self.volume_key(usage);
+                    }
+                    return;
+                }
                 let gui = usage == key::LEFT_GUI || usage == key::RIGHT_GUI;
                 if gui && s == proto::key_state::DOWN {
                     self.super_used = false;
@@ -856,6 +871,7 @@ impl Shell {
         let mut radio_note: Option<(&str, Option<String>)> = None;
         let mut wifi_open: Option<WifiState> = None;
         let mut wifi_join: Option<(String, String)> = None;
+        let mut wifi_forget: Option<String> = None;
         match &mut p.kind {
             PopupKind::Launcher { search, list, shown, list_focus } => {
                 if let Ui::PointerDown { x, y, button: button::RIGHT, .. } = ui {
@@ -957,7 +973,8 @@ impl Shell {
                     match list.event(&ui, true) {
                         Response::Activated(i) => {
                             if let Some((_, ssid, sec)) = state.networks.get(i) {
-                                if sec == "open" {
+                                // A saved network joins with the passphrase the kernel keeps.
+                                if sec == "open" || state.known.contains(ssid) {
                                     wifi_join = Some((ssid.clone(), String::new()));
                                 } else {
                                     let mut f = TextField::new("");
@@ -979,6 +996,12 @@ impl Shell {
                     if let Ui::Key(k) = ui {
                         if k.down && k.key == key::ESCAPE {
                             close = true;
+                        }
+                        if k.down && k.key == key::DELETE {
+                            let picked = list.selected().and_then(|i| state.networks.get(i)).map(|n| n.1.clone());
+                            if let Some(ssid) = picked.filter(|s| state.known.contains(s)) {
+                                wifi_forget = Some(ssid);
+                            }
                         }
                     }
                 }
@@ -1037,6 +1060,7 @@ impl Shell {
             || quick.is_some()
             || wifi_open.is_some()
             || wifi_join.is_some()
+            || wifi_forget.is_some()
         {
             self.close_popup();
         }
@@ -1044,14 +1068,22 @@ impl Shell {
             self.open_wifi(w);
         }
         if let Some((ssid, pass)) = wifi_join {
+            let joins_before = WifiState::read().map_or(0, |w| w.join);
             // The kernel rereads this file and joins (bsd::wifi_housekeeping).
             match os_std::fs::write("/etc/osyx/wifi.conf", format!("ssid={ssid}\npsk={pass}\n")) {
                 Ok(()) => {
                     println!("desktop: joining Wi-Fi network {ssid}");
                     self.show_note("Wi-Fi", &format!("Joining {ssid}..."));
-                    self.wifi_joining = Some((String::from(&ssid[..]), self.now()));
+                    self.wifi_joining = Some((String::from(&ssid[..]), self.now(), joins_before));
                 }
                 Err(e) => self.show_note("Wi-Fi", &format!("Cannot save the network: {e}")),
+            }
+        }
+        if let Some(ssid) = wifi_forget {
+            // The kernel drops the saved network and its passphrase.
+            match os_std::fs::write("/etc/osyx/wifi.conf", format!("forget={ssid}\n")) {
+                Ok(()) => self.show_note("Wi-Fi", &format!("{ssid} forgotten")),
+                Err(e) => self.show_note("Wi-Fi", &format!("Cannot forget the network: {e}")),
             }
         }
         match radio_note {
@@ -1352,10 +1384,10 @@ impl Shell {
     }
 
     fn open_wifi(&mut self, state: WifiState) {
-        let mut list = ListView::new(vec![Column::new("Network", 0, Align::Left), Column::new("Security", 90, Align::Right)]);
+        let mut list = ListView::new(vec![Column::new("Network", 0, Align::Left), Column::new("Security", 120, Align::Right)]);
         list.show_header = false;
         list.row_height = 40;
-        list.rect = Rect::new(8, 84, QUICK_PANEL_W - 16, QUICK_PANEL_H - 84 - 16);
+        list.rect = Rect::new(8, 84, QUICK_PANEL_W - 16, QUICK_PANEL_H - 84 - 40);
         let items = state
             .networks
             .iter()
@@ -1365,7 +1397,8 @@ impl Shell {
                     "wep" => "WEP",
                     _ => "WPA2",
                 };
-                ListItem::new(Some(Icon::Wifi), &[ssid, sec])
+                let sec = if state.known.contains(ssid) { format!("{sec}, saved") } else { String::from(sec) };
+                ListItem::new(Some(Icon::Wifi), &[ssid, &sec])
             })
             .collect();
         list.set_items(items);
@@ -1408,6 +1441,27 @@ impl Shell {
         self.open_popup(x, y, w, h, PopupKind::Confirm { dialog });
     }
 
+    /// Volume Up/Down (5 % steps) and Mute keys: the kernel mixer, and one
+    /// notification showing the level (replaced on every press).
+    fn volume_key(&mut self, usage: u16) {
+        let Some(mut s) = Sound::read() else { return };
+        match usage {
+            key::MUTE => s.muted = !s.muted,
+            key::VOLUME_UP => {
+                s.volume = (s.volume + 5).min(100);
+                s.muted = false;
+            }
+            _ => s.volume = s.volume.saturating_sub(5),
+        }
+        s.apply();
+        if let Some(i) = self.notes.iter().position(|n| n.title == "Volume") {
+            let old = self.notes.remove(i);
+            let _ = old.win.destroy(&mut self.conn);
+        }
+        let level = if s.muted { String::from("Muted") } else { format!("{} %", s.volume) };
+        self.show_note("Volume", &level);
+    }
+
     /// Announces a system update that /bin/osyx-update installed.
     fn check_update(&mut self) {
         let Ok(text) = os_std::fs::read_to_string("/run/update.status") else { return };
@@ -1422,10 +1476,15 @@ impl Shell {
     /// Tells the user how joining the chosen Wi-Fi network ended: connected,
     /// or a wrong password (the kernel's WPA handshake watch).
     fn check_wifi_join(&mut self) {
-        let Some((ssid, since)) = self.wifi_joining.clone() else { return };
+        let Some((ssid, since, joins_before)) = self.wifi_joining.clone() else { return };
         let Some(w) = WifiState::read() else { return };
-        // The kernel applies wifi.conf within ~2 s; older states are stale.
-        if self.now().saturating_sub(since) < 3000 {
+        // Until the kernel has applied this join, the state is the previous
+        // attempt's (a wrong password among it).
+        if w.join <= joins_before {
+            if self.now().saturating_sub(since) > 60_000 {
+                self.show_note("Wi-Fi", &format!("Could not connect to {ssid}."));
+                self.wifi_joining = None;
+            }
             return;
         }
         if w.error.as_deref() == Some("wrong-password") {
@@ -1834,7 +1893,11 @@ fn draw_wifi(p: &mut Painter, state: &WifiState, list: &ListView, pass: Option<&
         None if state.networks.is_empty() => {
             p.text_in(FontKind::Ui, list.rect, "No networks seen yet. Scanning...", t.text_faint, Align::Center);
         }
-        None => list.draw(p, true),
+        None => {
+            list.draw(p, true);
+            let hint = if state.known.is_empty() { "Enter to join" } else { "Enter to join, Delete to forget a saved network" };
+            p.text(FontKind::Ui, 20, (QUICK_PANEL_H - 44) as i32, hint, t.text_faint);
+        }
     }
 }
 

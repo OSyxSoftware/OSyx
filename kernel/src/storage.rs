@@ -50,6 +50,34 @@ fn probe_fs(disk: &Arc<dyn BlockDev>) -> Option<&'static str> {
     None
 }
 
+/// Mounts the recognisable volumes of a disk that appeared after boot (a
+/// USB stick) at `/mnt/<device>`, like the volumes found at boot.
+pub fn mount_hotplugged(disk: &str) {
+    let candidates: Vec<Arc<dyn BlockDev>> = block::devices()
+        .into_iter()
+        .filter(|d| d.name().starts_with(disk))
+        .filter(|d| {
+            // A partitioned disk itself holds no file system.
+            d.partition().is_some() || !block::devices().iter().any(|p| p.partition().is_some() && p.name().starts_with(d.name()))
+        })
+        .collect();
+    for d in candidates {
+        let name = String::from(d.name());
+        if vfs::mounts().iter().any(|m| m.fs.backing_device().is_some_and(|b| b == name)) {
+            continue;
+        }
+        let Some(fstype) = probe_fs(&d) else { continue };
+        let at = alloc::format!("/mnt/{name}");
+        if vfs::mkdir(&Lookup::kernel(), &at, 0o755).is_err() && vfs::stat(&Lookup::kernel(), &at).is_err() {
+            continue;
+        }
+        let ro = d.read_only();
+        if try_mount(fstype, d, &at, ro) {
+            kprintln!("storage: {name} ({fstype}) mounted at {at}");
+        }
+    }
+}
+
 fn try_mount(fstype: &str, disk: Arc<dyn BlockDev>, at: &str, read_only: bool) -> bool {
     let name = String::from(disk.name());
     match vfs::mount_disk(fstype, disk, read_only) {

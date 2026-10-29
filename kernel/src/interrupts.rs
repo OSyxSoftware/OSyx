@@ -175,11 +175,15 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     if f.vector == pic::TIMER_VECTOR as u64 || f.vector == timer::APIC_TIMER_VECTOR as u64 {
         catch_up_ticks();
     }
-    let _entry = crate::smp::KernelEntry::new();
-    // A not-present page in an anonymous region: give it its frame and
-    // retry, whether user code or a kernel copy to/from user memory touched it.
-    // User code holds no kernel lock, so its fault may wait for the process
-    // table instead of reporting an access violation the process cannot fix.
+    // A not-present page in an anonymous region: give it its frame (zeroed,
+    // or restored from compressed memory) and retry, whether user code or a
+    // kernel copy to/from user memory touched it. User code holds no kernel
+    // lock, so its fault may wait for the process table instead of reporting
+    // an access violation the process cannot fix. Both faults need only the
+    // process table, paging and frame locks, so they are resolved before the
+    // entry lock: a browser starting up takes hundreds of thousands of them,
+    // and a lock-free read or futex copy must not queue behind other CPUs'
+    // system calls for one.
     if f.vector == 14 && f.error_code & 1 == 0 {
         let (write, fetch) = (f.error_code & 2 != 0, f.error_code & 0x10 != 0);
         let va = cpu::read_cr2();
@@ -196,6 +200,7 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     if f.vector == 14 && f.error_code & 3 == 3 && crate::process::cow_fault(cpu::read_cr2(), from_user) {
         return;
     }
+    let _entry = crate::smp::KernelEntry::new();
     match f.vector {
         0..=31 if from_user => {
             if !crate::user_fault::deliver(f) {kill_process(f);}

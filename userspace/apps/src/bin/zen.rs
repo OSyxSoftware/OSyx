@@ -68,6 +68,26 @@ user_pref("extensions.update.enabled", false);
 user_pref("extensions.getAddons.cache.enabled", false);
 user_pref("network.captive-portal-service.enabled", false);
 user_pref("network.connectivity-service.enabled", false);
+user_pref("browser.sessionhistory.max_total_viewers", 0);
+user_pref("browser.sessionhistory.max_entries", 20);
+user_pref("browser.sessionstore.max_tabs_undo", 3);
+user_pref("browser.sessionstore.interval", 60000);
+user_pref("browser.cache.memory.capacity", 16384);
+user_pref("browser.cache.memory.max_entry_size", 2048);
+user_pref("media.memory_cache_max_size", 16384);
+user_pref("image.mem.surfacecache.max_size_kb", 65536);
+user_pref("browser.tabs.unloadOnLowMemory", true);
+user_pref("network.prefetch-next", false);
+user_pref("network.dns.disablePrefetch", true);
+user_pref("network.predictor.enabled", false);
+user_pref("browser.urlbar.speculativeConnect.enabled", false);
+user_pref("browser.places.speculativeConnect.enabled", false);
+user_pref("extensions.pocket.enabled", false);
+user_pref("browser.newtabpage.activity-stream.feeds.topsites", false);
+user_pref("browser.newtabpage.activity-stream.feeds.section.topstories", false);
+user_pref("gfx.canvas.accelerated", false);
+user_pref("toolkit.cosmeticAnimations.enabled", false);
+user_pref("ui.prefersReducedMotion", 1);
 "#;
 
 fn main() -> i32 {

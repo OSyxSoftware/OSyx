@@ -12,6 +12,7 @@
 //! * `fault`:       dereference an unmapped address (the kernel must kill us)
 //! * `panic`:       panic (OSyx Std must report it and exit with 101)
 //! * `exit,<code>`: exit with `<code>`
+//! * `swap-stress`: exercise compressible anonymous pages under memory pressure
 //! * `crash-prep`:  leave an open, removed file on / for the power-cut test
 //! * `net,<tcp>,<udp>`: network checks against the host's echo servers on
 //!   10.0.2.2 (see `net_checks.rs`); exit status = failed checks
@@ -99,6 +100,7 @@ fn main() -> i32 {
             process::exit(code);
         }
         Some("desktop") => return desktop_session(),
+        Some("swap-stress") => return swap_stress(),
         Some("zen-probe") => {
             let mode = args.get(3).map(String::as_str).unwrap_or("");
             return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", false);
@@ -331,6 +333,44 @@ fn main() -> i32 {
     t.failed as i32
 }
 
+/// Diagnostic mode for a small VM: fill enough private memory to cross the
+/// reclaim watermark, allow aging, then verify every page after it may have
+/// been evicted and restored. The serial swap counters prove reclaim ran.
+fn swap_stress() -> i32 {
+    const PAGE: usize = 4096;
+    let free = os::sysinfo().map_or(0, |i| i.free_memory as usize);
+    let bytes = free.saturating_sub(24 << 20).min(256 << 20) / PAGE * PAGE;
+    if bytes < 16 << 20 {
+        eprintln!("swap-stress: insufficient free memory");
+        return 1;
+    }
+    let Ok(p) = raw::map(bytes, PROT_READ | PROT_WRITE) else { return 1 };
+    println!("swap-stress: filling {} pages", bytes / PAGE);
+    for i in 0..bytes / PAGE {
+        // SAFETY: each address belongs to the writable mapping.
+        unsafe {
+            p.add(i * PAGE).write_volatile((i % 251 + 1) as u8);
+            p.add(i * PAGE + PAGE - 1).write_volatile((i % 239 + 1) as u8);
+        }
+    }
+    thread::sleep(Duration::from_secs(3));
+    for i in 0..bytes / PAGE {
+        // SAFETY: the mapping is still live; reads may fault pages back in.
+        let valid = unsafe {
+            p.add(i * PAGE).read_volatile() == (i % 251 + 1) as u8
+                && p.add(i * PAGE + PAGE - 1).read_volatile() == (i % 239 + 1) as u8
+        };
+        if !valid {
+            eprintln!("swap-stress: data mismatch at page {i}");
+            return 1;
+        }
+    }
+    // SAFETY: no references into the region remain.
+    if unsafe { raw::unmap(p, bytes) }.is_err() { return 1; }
+    println!("swap-stress: verified {} pages", bytes / PAGE);
+    0
+}
+
 /// `init desktop`: runs the graphical session (PRISM from the root file
 /// system, which starts the desktop shell) and restarts it if it fails. If
 /// it cannot be brought up, init exits and the kernel's status screen
@@ -543,6 +583,11 @@ fn desktop_session() -> i32 {
             Ok(c) => println!("init: first-boot tasks running (process {})", c.id()),
             Err(e) => eprintln!("init: cannot start /bin/firstboot: {e}"),
         }
+    }
+    // Network time: the clock is set once a network is up.
+    match Command::new("/bin/timesync").arg("--daemon").spawn() {
+        Ok(c) => println!("init: network time kept by process {}", c.id()),
+        Err(e) => eprintln!("init: cannot start /bin/timesync: {e}"),
     }
     // System updates of an installed system (checks once a day).
     if fs::metadata("/etc/osyx/installed").is_ok() {

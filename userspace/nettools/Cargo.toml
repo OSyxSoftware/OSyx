@@ -1,6 +1,6 @@
 [package]
 name = "osyx-nettools"
-description = "OSyx network commands: ping, net, netstat, dns and nc"
+description = "OSyx network commands: ping, net, netstat, dns, nc and timesync"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -32,6 +32,12 @@ bench = false
 [[bin]]
 name = "nc"
 path = "src/bin/nc.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "timesync"
+path = "src/bin/timesync.rs"
 test = false
 bench = false
 

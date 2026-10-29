@@ -1713,9 +1713,10 @@ impl Compositor {
             osyx_input::KEY_REPEAT => proto::key_state::REPEAT,
             _ => proto::key_state::DOWN,
         };
-        // The Super key and Super+key shortcuts belong to the shell, whoever
-        // has focus.
-        if usage == key::LEFT_GUI || usage == key::RIGHT_GUI || mods & (modifier::LEFT_GUI | modifier::RIGHT_GUI) != 0 {
+        // The Super key, Super+key shortcuts and the volume keys belong to
+        // the shell, whoever has focus.
+        let shell_key = matches!(usage, key::LEFT_GUI | key::RIGHT_GUI | key::MUTE | key::VOLUME_UP | key::VOLUME_DOWN);
+        if shell_key || mods & (modifier::LEFT_GUI | modifier::RIGHT_GUI) != 0 {
             if let Some((c, l)) = self.shell_panel() {
                 self.send(c, Event::Key { window: l, usage, state, modifiers: mods, text: None });
             }

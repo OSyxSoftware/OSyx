@@ -121,13 +121,15 @@ struct Region {
     /// Pages moved to compressed memory: page index -> compressed bytes
     /// (empty: an all-zero page). Restored on the next access.
     swapped: BTreeMap<u64, alloc::boxed::Box<[u8]>>,
+    /// Next page to inspect during compressed-memory reclaim.
+    reclaim_cursor: u64,
 }
 
 impl Region {
     fn new(pages: u64, prot: u64) -> Region {
         let mut runs = BTreeMap::new();
         runs.insert(0, prot);
-        Region { pages, prot: runs, image: None, swapped: BTreeMap::new() }
+        Region { pages, prot: runs, image: None, swapped: BTreeMap::new(), reclaim_cursor: 0 }
     }
 
     /// Whether `frame` at page `page` of the region is the shared image frame.
@@ -494,6 +496,9 @@ impl Process {
 /// belong to their sections, not to the address space).
 fn unmap_images_from(root: u64, regions: BTreeMap<u64, Region>) {
     for (start, r) in regions {
+        for d in r.swapped.values() {
+            swap_stats_remove(d.len());
+        }
         if r.image.is_some() {
             unmap_image_pages(root, start, &r, 0, r.pages);
         }
@@ -1242,7 +1247,7 @@ const FAULT_AROUND_PAGES: u64 = 16;
 /// access the mapping's protection forbids, a busy process table (the faulting
 /// code holds it) or exhausted memory: the fault then takes its usual path.
 pub fn demand_fault(va: u64, write: bool, fetch: bool) -> bool {
-    demand_fault_in(va, write, fetch, false)
+    demand_fault_in(va, write, fetch, false) == Demand::Mapped
 }
 
 /// [`demand_fault`] for a fault raised by user code. User code cannot hold the
@@ -1250,23 +1255,71 @@ pub fn demand_fault(va: u64, write: bool, fetch: bool) -> bool {
 /// CPU entering the kernel must not turn a first touch of heap or stack into
 /// an access violation in the process.
 pub fn demand_fault_user(va: u64, write: bool, fetch: bool) -> bool {
-    // Compressed reclaim is still under development and must not run until
-    // its lifecycle and concurrent access paths have been validated.
-    demand_fault_in(va, write, fetch, true)
+    // Only user faults may sleep: a kernel fault can hold locks needed by
+    // reclaim. Bound the wait in case no pages can be reclaimed.
+    for _ in 0..1000 {
+        match demand_fault_in(va, write, fetch, true) {
+            Demand::Mapped => return true,
+            Demand::Refused => return false,
+            Demand::NoMemory => {
+                let worker = SWAP_THREAD.load(Ordering::Acquire);
+                if worker == 0 {
+                    return false;
+                }
+                sched::wake(worker);
+                sched::sleep_ticks(crate::arch::timer::ms_to_ticks(1));
+            }
+        }
+    }
+    false
+}
+
+/// How long a fault in a kernel copy waits for a busy process table. The
+/// copy may run on behalf of the holder itself, so it must not wait without
+/// bound; every other holder (a fault on another CPU, the swap thread, a
+/// bulk prefault) releases it within a few milliseconds.
+const KERNEL_FAULT_WAIT_MS: u64 = 20;
+
+/// The process table for a fault in a kernel copy (see
+/// [`KERNEL_FAULT_WAIT_MS`]); `None` when it stayed busy.
+fn lock_table_briefly() -> Option<crate::sync::IrqGuard<'static, Table>> {
+    if let Some(t) = TABLE.try_lock() {
+        return Some(t);
+    }
+    let deadline = crate::arch::timer::Deadline::after_ms(KERNEL_FAULT_WAIT_MS);
+    loop {
+        core::hint::spin_loop();
+        if let Some(t) = TABLE.try_lock() {
+            return Some(t);
+        }
+        if deadline.expired() {
+            return None;
+        }
+    }
 }
 
 // ---- compressed memory ------------------------------------------------------------------
 
-/// Below this many free frames the swap thread starts compressing.
-const SWAP_LOW_FRAMES: u64 = 8192;
-/// It stops once this many are free again.
-const SWAP_HIGH_FRAMES: u64 = 16384;
+/// The swap thread starts compressing when free memory falls below
+/// 1/`SWAP_LOW_DIVISOR` of all memory (at least `SWAP_MIN_LOW_FRAMES`)
+/// and stops at twice that.
+const SWAP_LOW_DIVISOR: u64 = 16;
+const SWAP_MIN_LOW_FRAMES: u64 = 8192;
 /// Pages examined per process table hold.
 const SWAP_BATCH: u64 = 64;
+/// Bound a single scan, including pages that are hot or incompressible.
+const SWAP_SCAN_PAGES: u64 = 256;
+/// Continue aging a bounded number of windows even if none yielded a page.
+const SWAP_EMPTY_SCANS: u32 = 16;
 /// Pages compressed to at most this many bytes are kept; others stay.
 const SWAP_MAX_COMPRESSED: usize = (PAGE_SIZE as usize) * 3 / 4;
+/// Compressed pages live on the kernel heap (at most 1 GiB, shared with
+/// everything else): beyond this many bytes only all-zero pages, which
+/// take no space, are still moved out.
+const SWAP_MAX_BYTES: u64 = 256 << 20;
 
 static SWAPPED_PAGES: AtomicU64 = AtomicU64::new(0);
+static SWAP_THREAD: AtomicU64 = AtomicU64::new(0);
 static SWAPPED_BYTES: AtomicU64 = AtomicU64::new(0);
 static SWAP_OUT: AtomicU64 = AtomicU64::new(0);
 static SWAP_IN: AtomicU64 = AtomicU64::new(0);
@@ -1319,25 +1372,56 @@ pub fn reclaim(want: u64) -> u64 {
                 break;
             }
             let r = &p.regions[&start];
-            let mut cold = Vec::new();
-            paging::age_range_in(root, start, start + r.pages * PAGE_SIZE, |va, _frame, accessed, writable| {
+            let scan_start = start + r.reclaim_cursor * PAGE_SIZE;
+            let scan_end = (scan_start + SWAP_SCAN_PAGES * PAGE_SIZE).min(start + r.pages * PAGE_SIZE);
+            // Reserved up front: the visit holds the paging lock, and a heap
+            // that had to grow inside it would take that lock again.
+            let mut cold = Vec::with_capacity(SWAP_BATCH as usize);
+            let mut aged = false;
+            let mut next = scan_end;
+            paging::age_range_in(root, scan_start, scan_end, |va, frame, accessed, writable| {
+                aged |= accessed;
                 if !accessed && writable {
-                    cold.push(va);
+                    cold.push((va, frame));
                 }
-                (cold.len() as u64) < SWAP_BATCH
+                if cold.len() as u64 >= SWAP_BATCH {
+                    next = va + PAGE_SIZE;
+                    false
+                } else {
+                    true
+                }
             });
-            for va in cold {
+            let r = p.regions.get_mut(&start).expect("region exists");
+            r.reclaim_cursor = if next >= start + r.pages * PAGE_SIZE { 0 } else { (next - start) / PAGE_SIZE };
+            if aged {
+                // Cached translations would not set the cleared bits again:
+                // every page used from now on must look used to the next scan.
+                crate::smp::flush_remote(root, false);
+            }
+            for (va, _frame) in cold {
                 if done >= want {
                     break;
                 }
+                let full = SWAPPED_BYTES.load(Ordering::Relaxed) >= SWAP_MAX_BYTES;
                 let Ok(frame) = paging::unmap_in(root, va, true) else { continue };
                 // SAFETY: the frame is no longer mapped anywhere; it stays
                 // owned by this address space until freed below.
                 let page = unsafe { &*(phys_to_virt(frame) as *const [u8; PAGE_SIZE as usize]) };
                 let stored: Option<alloc::boxed::Box<[u8]>> = if page.iter().all(|&b| b == 0) {
                     Some(alloc::boxed::Box::new([]))
+                } else if full {
+                    None
                 } else {
-                    osyx_mm::lz::compress(page, &mut buf).map(|n| buf[..n].into())
+                    osyx_mm::lz::compress(page, &mut buf).and_then(|n| {
+                        if n as u64 > SWAP_MAX_BYTES.saturating_sub(SWAPPED_BYTES.load(Ordering::Relaxed)) {
+                            return None;
+                        }
+                        // A heap that cannot grow keeps the page as it is.
+                        let mut data = Vec::new();
+                        data.try_reserve_exact(n).ok()?;
+                        data.extend_from_slice(&buf[..n]);
+                        Some(data.into_boxed_slice())
+                    })
                 };
                 let r = p.regions.get_mut(&start).expect("region exists");
                 match stored {
@@ -1351,9 +1435,12 @@ pub fn reclaim(want: u64) -> u64 {
                         done += 1;
                     }
                     None => {
-                        // Does not compress: put it back unchanged.
+                        // Not worth keeping compressed: put it back unchanged.
+                        // Its page table is still there, so this cannot fail
+                        // for lack of memory.
                         let flags = prot_flags(r.prot_at((va - start) / PAGE_SIZE)).unwrap_or(Flags::user(true, false));
                         if paging::map_in(root, va, frame, flags).is_err() {
+                            kprintln!("swap: cannot put back {va:#x} of process {pid}; its contents are lost");
                             let _ = free_frame(frame);
                             p.space.frames -= 1;
                         }
@@ -1365,100 +1452,172 @@ pub fn reclaim(want: u64) -> u64 {
     done
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreError {
+    NotCompressed,
+    NoMemory,
+    Corrupt,
+    Map(MapError),
+}
+
+/// Brings page `index` of region `r` (at `start`) back from compressed
+/// memory and maps it under `flags`; returns the page tables added. The
+/// compressed copy stays when this fails.
+fn restore_page(root: u64, start: u64, r: &mut Region, index: u64, flags: Flags) -> Result<u64, RestoreError> {
+    let data = r.swapped.get(&index).ok_or(RestoreError::NotCompressed)?;
+    let frame = alloc_frame().ok_or(RestoreError::NoMemory)?;
+    if !data.is_empty() {
+        // SAFETY: a fresh frame owned here, reachable through the HHDM.
+        let dst = unsafe { &mut *(phys_to_virt(frame) as *mut [u8; PAGE_SIZE as usize]) };
+        if osyx_mm::lz::decompress(data, dst).is_err() {
+            let _ = free_frame(frame);
+            return Err(RestoreError::Corrupt);
+        }
+    }
+    match paging::map_in(root, start + index * PAGE_SIZE, frame, flags) {
+        Ok(tables) => {
+            let len = r.swapped.remove(&index).map_or(0, |d| d.len());
+            swap_stats_remove(len);
+            SWAP_IN.fetch_add(1, Ordering::Relaxed);
+            Ok(tables)
+        }
+        Err(MapError::OutOfMemory) => {
+            let _ = free_frame(frame);
+            Err(RestoreError::NoMemory)
+        }
+        Err(e) => {
+            let _ = free_frame(frame);
+            Err(RestoreError::Map(e))
+        }
+    }
+}
+
+/// Restores every compressed page of `r` (at `start`) under its region
+/// protection, counting the frames in `frames`. Code that reads a region's
+/// frames through the page tables, not by user accesses that fault, must
+/// call this first.
+fn restore_swapped(root: u64, frames: &mut u64, start: u64, r: &mut Region) -> Result<(), Errno> {
+    let pages: Vec<u64> = r.swapped.keys().copied().collect();
+    for index in pages {
+        let flags = prot_flags(r.prot_at(index)).unwrap_or(Flags::user(false, false));
+        let tables = restore_page(root, start, r, index, flags).map_err(|_| Errno::NoMemory)?;
+        *frames += 1 + tables;
+    }
+    Ok(())
+}
+
 /// Starts the thread that keeps free memory above the low watermark by
 /// compressing cold pages.
 pub fn start_swap() {
-    sched::spawn_kernel("swap", swap_thread, 0, 0);
+    let tid = sched::spawn_kernel("swap", swap_thread, 0, 0);
+    SWAP_THREAD.store(tid, Ordering::Release);
 }
 
 fn swap_thread(_: u64, _: u64) {
     let mut reported = 0u64;
+    let (_, total) = crate::mem::frame_stats();
+    let low = (total / SWAP_LOW_DIVISOR).max(SWAP_MIN_LOW_FRAMES);
+    let high = low * 2;
+    kprintln!("swap: compressing cold pages below {} MiB free (up to {} MiB of compressed data)", low >> 8, SWAP_MAX_BYTES >> 20);
     loop {
-        sched::sleep_ticks(crate::arch::timer::ms_to_ticks(200));
+        // Use the scheduler's remembered wake-up so a request arriving just
+        // before the worker blocks cannot be lost.
+        let enabled = crate::arch::cpu::interrupts_enabled();
+        crate::arch::cpu::disable_interrupts();
+        let deadline = crate::interrupts::ticks() + crate::arch::timer::ms_to_ticks(200);
+        sched::mark_current_blocked_until(Some(deadline));
+        sched::schedule();
+        if enabled {
+            crate::arch::cpu::enable_interrupts();
+        }
         let (free, _) = crate::mem::frame_stats();
-        if free >= SWAP_LOW_FRAMES {
+        if free >= low {
             continue;
         }
         let mut freed = 0;
-        while crate::mem::frame_stats().0 < SWAP_HIGH_FRAMES {
+        let mut empty_scans = 0;
+        while crate::mem::frame_stats().0 < high {
             let n = reclaim(SWAP_BATCH);
+            // Give the entry lock and the CPU back between batches.
+            sched::yield_now();
             if n == 0 {
-                break;
+                empty_scans += 1;
+                if empty_scans >= SWAP_EMPTY_SCANS {
+                    break;
+                }
+            } else {
+                empty_scans = 0;
             }
             freed += n;
         }
         let (pages, bytes, _, _) = swap_stats();
-        if freed > 0 && pages >> 12 != reported >> 12 {
+        if freed > 0 && (reported == 0 || pages >> 12 != reported >> 12) {
             reported = pages;
             kprintln!("swap: {} pages ({} MiB) in {} KiB of compressed memory", pages, pages >> 8, bytes >> 10);
         }
     }
 }
 
-fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> bool {
+/// Outcome of [`demand_fault_in`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Demand {
+    /// The page is there now: retry the access.
+    Mapped,
+    /// No free frame; reclaim may make one.
+    NoMemory,
+    /// Not a page this process may have (or the table stayed busy).
+    Refused,
+}
+
+fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> Demand {
     if !(paging::USER_START..osyx_abi::USER_END).contains(&va) {
-        return false;
+        return Demand::Refused;
     }
     let pid = sched::current_pid();
     let mut t = if wait {
         TABLE.lock()
     } else {
-        match TABLE.try_lock() {
+        match lock_table_briefly() {
             Some(t) => t,
-            None => return false,
+            None => return Demand::Refused,
         }
     };
-    let Some(p) = t.procs.get_mut(&pid) else { return false };
+    let Some(p) = t.procs.get_mut(&pid) else { return Demand::Refused };
     let page = va & !(PAGE_SIZE - 1);
     let around = page + FAULT_AROUND_PAGES * PAGE_SIZE;
     let (flags, run_end) = if (STACK_TOP - STACK_PAGES * PAGE_SIZE..STACK_TOP).contains(&page) {
         if fetch {
-            return false;
+            return Demand::Refused;
         }
         (Flags::user(true, false), around.min(STACK_TOP))
     } else {
         let root = p.space.root;
-        let Some((&start, r)) = p.regions.range_mut(..=page).next_back() else { return false };
+        let Some((&start, r)) = p.regions.range_mut(..=page).next_back() else { return Demand::Refused };
         let region_end = start + r.pages * PAGE_SIZE;
         if page >= region_end {
-            return false;
+            return Demand::Refused;
         }
         let prot = r.prot_at((page - start) / PAGE_SIZE);
-        let Ok(flags) = prot_flags(prot) else { return false };
+        let Ok(flags) = prot_flags(prot) else { return Demand::Refused };
         if (write && !flags.writable) || (fetch && !flags.executable) {
-            return false;
+            return Demand::Refused;
         }
         let index = (page - start) / PAGE_SIZE;
-        if let Some(data) = r.swapped.get(&index) {
+        if r.swapped.contains_key(&index) {
             if paging::translate_in(root, page).is_some() {
-                return true;
+                return Demand::Mapped;
             }
-            let Some(frame) = alloc_frame() else {
-                kprintln!("process {pid}: out of memory restoring {page:#x} from compressed memory");
-                return false;
-            };
-            if !data.is_empty() {
-                // SAFETY: a fresh frame owned here, reachable through the HHDM.
-                let dst = unsafe { &mut *(phys_to_virt(frame) as *mut [u8; PAGE_SIZE as usize]) };
-                if osyx_mm::lz::decompress(data, dst).is_err() {
-                    kprintln!("process {pid}: compressed page {page:#x} is corrupt");
-                    let _ = free_frame(frame);
-                    return false;
-                }
-            }
-            match paging::map_in(root, page, frame, flags) {
+            return match restore_page(root, start, r, index, flags) {
                 Ok(tables) => {
-                    let len = r.swapped.remove(&index).map_or(0, |d| d.len());
-                    swap_stats_remove(len);
-                    SWAP_IN.fetch_add(1, Ordering::Relaxed);
                     p.space.frames += 1 + tables;
-                    return true;
+                    Demand::Mapped
                 }
-                Err(_) => {
-                    let _ = free_frame(frame);
-                    return false;
+                Err(RestoreError::NoMemory) => Demand::NoMemory,
+                Err(e) => {
+                    kprintln!("process {pid}: cannot restore {page:#x} from compressed memory: {e:?}");
+                    Demand::Refused
                 }
-            }
+            };
         }
         // Only pages with the same protection may be mapped in one run, and
         // never over a page that lives in compressed memory.
@@ -1473,15 +1632,14 @@ fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> bool {
         (flags, end)
     };
     if paging::translate_in(p.space.root, page).is_some() {
-        return true; // mapped meanwhile: retry
+        return Demand::Mapped; // mapped meanwhile: retry
     }
     let (mapped, tables) = paging::map_zeroed_range_in(p.space.root, page, run_end, flags);
     p.space.frames += mapped + tables;
     if mapped != 0 {
-        true
+        Demand::Mapped
     } else {
-        kprintln!("process {pid}: out of memory on first access to {page:#x}");
-        false
+        Demand::NoMemory
     }
 }
 
@@ -1510,6 +1668,9 @@ pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
     }
     let r = p.regions.remove(&addr).expect("checked above");
     release_frames(&mut p.space, addr, &r, addr, pages);
+    for d in r.swapped.values() {
+        swap_stats_remove(d.len());
+    }
     p.mapped_pages -= pages;
     Ok(())
 }
@@ -1527,7 +1688,7 @@ pub fn cow_fault(va: u64, wait: bool) -> bool {
     let mut t = if wait {
         TABLE.lock()
     } else {
-        match TABLE.try_lock() {
+        match lock_table_briefly() {
             Some(t) => t,
             None => return false,
         }
@@ -1602,6 +1763,9 @@ pub fn image_publish(key: image::Key) -> Result<Arc<ImageSection>, Errno> {
     if pages + 4096 > free {
         return Err(Errno::NoMemory);
     }
+    // Pages of the laid-out image may have gone to compressed memory; the
+    // section is built from the page tables, so they must be back first.
+    restore_swapped(root, &mut p.space.frames, addr, r)?;
     // Collect the frames under read-only entries in one pass (one shootdown).
     let mut frames = alloc::vec![0u64; pages as usize];
     let mut moved = 0u64;

@@ -6,8 +6,9 @@
 //! other files shown in a text (or hex) viewer. A row dragged onto a folder
 //! row or a place (Home, Desktop, a volume) moves the file or folder there.
 //! Tool bar and keys: Back (Alt+Left), Up (Backspace), Home, New folder
-//! (Ctrl+N), Rename (F2), Delete (Del), Properties (Ctrl+I), Refresh (F5),
-//! hidden files (Ctrl+H).
+//! (Ctrl+N), Rename (F2), Delete (Del: moves to the Trash; in the Trash it
+//! deletes permanently), Restore from the Trash, Properties (Ctrl+I),
+//! Refresh (F5, also picks up USB sticks plugged in), hidden files (Ctrl+H).
 
 #![no_std]
 #![no_main]
@@ -38,7 +39,24 @@ const PREVIEW_LIMIT: usize = 256 * 1024;
 const D_NEW: u32 = 1;
 const D_RENAME: u32 = 2;
 const D_DELETE: u32 = 3;
+/// The desktop user's trash (freedesktop.org layout): deleted files in
+/// `files/`, where each came from in `info/<name>.trashinfo`.
+const TRASH: &str = "/home/user/.local/share/Trash";
+const TRASH_FILES: &str = "/home/user/.local/share/Trash/files";
 const D_INFO: u32 = 4;
+/// Home, Desktop, Trash and Root come before the mounted volumes.
+const BUILTIN_PLACES: usize = 4;
+
+/// Mounted volumes other than `/` for the side bar.
+fn volume_places() -> Vec<(String, String, Icon)> {
+    let Ok(mounts) = system::mounts() else { return Vec::new() };
+    mounts
+        .iter()
+        .map(|m| (system::field_str(&m.path), system::field_str(&m.fstype)))
+        .filter(|(path, _)| *path != "/")
+        .map(|(path, fstype)| (format!("{path} ({fstype})"), String::from(path), Icon::Drive))
+        .collect()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
@@ -48,17 +66,19 @@ enum Tool {
     NewFolder,
     Rename,
     Delete,
+    Restore,
     Info,
     Refresh,
 }
 
-const TOOLS: [(Tool, Icon, &str); 8] = [
+const TOOLS: [(Tool, Icon, &str); 9] = [
     (Tool::Back, Icon::Up, "Back"),
     (Tool::Up, Icon::Up, "Up one level"),
     (Tool::Home, Icon::Home, "Home folder"),
     (Tool::NewFolder, Icon::NewFolder, "New folder"),
     (Tool::Rename, Icon::Rename, "Rename"),
-    (Tool::Delete, Icon::Trash, "Delete"),
+    (Tool::Delete, Icon::Trash, "Move to Trash (in the Trash: delete permanently)"),
+    (Tool::Restore, Icon::Restart, "Restore from the Trash"),
     (Tool::Info, Icon::Info, "Properties"),
     (Tool::Refresh, Icon::Refresh, "Refresh"),
 ];
@@ -155,16 +175,12 @@ fn main() -> i32 {
     let mut places = vec![
         (String::from("Home"), String::from(USER_HOME), Icon::Home),
         (String::from("Desktop"), String::from(common::DESKTOP_DIR), Icon::Apps),
+        (String::from("Trash"), String::from(TRASH_FILES), Icon::Trash),
         (String::from("Root (ext4)"), String::from("/"), Icon::Drive),
     ];
-    if let Ok(mounts) = system::mounts() {
-        for m in mounts {
-            let path = system::field_str(&m.path);
-            if path != "/" {
-                places.push((format!("{} ({})", path, system::field_str(&m.fstype)), String::from(path), Icon::Drive));
-            }
-        }
-    }
+    let _ = fs::create_dir_all(TRASH_FILES);
+    let _ = fs::create_dir_all(format!("{TRASH}/info"));
+    places.extend(volume_places());
     let mut f = Files {
         cwd: String::new(),
         back: Vec::new(),
@@ -284,6 +300,9 @@ impl Files {
         let sel = self.list.selected();
         self.navigate(&cwd, false);
         self.list.select(sel);
+        // Volumes mounted meanwhile (a USB stick plugged in).
+        self.places.truncate(BUILTIN_PLACES);
+        self.places.extend(volume_places());
     }
 
     fn selected(&self) -> Option<&Entry> {
@@ -433,6 +452,46 @@ impl Files {
         self.layout_inner(w, h);
     }
 
+    fn in_trash(&self) -> bool {
+        self.cwd == TRASH_FILES || self.cwd.starts_with(&format!("{TRASH_FILES}/"))
+    }
+
+    /// Moves `name` (in the current folder) into the Trash under a free
+    /// name, recording where it came from. Fails across volumes (the Trash
+    /// is on the root file system).
+    fn move_to_trash(&self, name: &str) -> Result<String, String> {
+        let from = join(&self.cwd, name);
+        let _ = fs::create_dir_all(TRASH_FILES);
+        let _ = fs::create_dir_all(format!("{TRASH}/info"));
+        let free = |n: &str| fs::symlink_metadata(join(TRASH_FILES, n)).is_err() && fs::metadata(format!("{TRASH}/info/{n}.trashinfo")).is_err();
+        let trashed = (1..).map(|i| if i == 1 { String::from(name) } else { format!("{name}.{i}") }).find(|n| free(n)).unwrap_or_default();
+        fs::rename(&from, join(TRASH_FILES, &trashed)).map_err(|e| format!("{e}"))?;
+        let when = os_std::time::SystemTime::now()
+            .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
+            .map_or(String::new(), |d| self.tz.local(d.as_secs() as i64).iso());
+        let info = format!("[Trash Info]\nPath={from}\nDeletionDate={when}\n");
+        if let Err(e) = fs::write(format!("{TRASH}/info/{trashed}.trashinfo"), info.as_bytes()) {
+            // Without its record the file could not be restored: put it back.
+            let _ = fs::rename(join(TRASH_FILES, &trashed), &from);
+            return Err(format!("{e}"));
+        }
+        Ok(format!("Moved {name} to the Trash"))
+    }
+
+    /// Puts `name` from the Trash back where it was deleted from.
+    fn restore_from_trash(&self, name: &str) -> Result<String, String> {
+        let info_path = format!("{TRASH}/info/{name}.trashinfo");
+        let info = fs::read_to_string(&info_path).map_err(|_| format!("{name}: where it came from is unknown"))?;
+        let to = info.lines().find_map(|l| l.strip_prefix("Path=")).map(String::from).ok_or_else(|| format!("{name}: where it came from is unknown"))?;
+        if fs::symlink_metadata(&to).is_ok() {
+            return Err(format!("{to} exists already; rename it first"));
+        }
+        let _ = fs::create_dir_all(&parent(&to));
+        fs::rename(join(TRASH_FILES, name), &to).map_err(|e| format!("Cannot restore {to}: {e}"))?;
+        let _ = fs::remove_file(&info_path);
+        Ok(format!("Restored {to}"))
+    }
+
     fn tool(&mut self, t: Tool, cx: &mut Ctx) {
         match t {
             Tool::Back => {
@@ -475,9 +534,25 @@ impl Files {
             }
             Tool::Delete => {
                 if let Some(e) = self.selected() {
+                    let name = e.name.clone();
+                    // Outside the Trash a delete is a move into it.
+                    let reason = if self.in_trash() {
+                        String::new()
+                    } else {
+                        match self.move_to_trash(&name) {
+                            Ok(msg) => {
+                                println!("files: {msg}");
+                                self.refresh();
+                                self.set_status(msg, false);
+                                return;
+                            }
+                            Err(why) => format!(" It cannot go to the Trash ({why})."),
+                        }
+                    };
+                    let Some(e) = self.selected() else { return };
                     let what = if e.is_dir() { "the folder" } else { "the file" };
                     let msg = format!(
-                        "Delete {what} \"{}\"? This cannot be undone.{}",
+                        "Delete {what} \"{}\" permanently? This cannot be undone.{}{reason}",
                         e.name,
                         if e.is_dir() { " Everything inside it is deleted too." } else { "" }
                     );
@@ -487,6 +562,17 @@ impl Files {
                         &msg,
                         &[("Cancel", ButtonStyle::Secondary), ("Delete", ButtonStyle::Danger)],
                     ));
+                }
+            }
+            Tool::Restore => {
+                if let Some(name) = self.selected().map(|e| e.name.clone()) {
+                    let (msg, err) = match self.restore_from_trash(&name) {
+                        Ok(m) => (m, false),
+                        Err(m) => (m, true),
+                    };
+                    println!("files: {msg}");
+                    self.refresh();
+                    self.set_status(msg, err);
                 }
             }
             Tool::Info => {
@@ -571,6 +657,9 @@ impl Files {
                         Ok(_) => fs::remove_file(&p),
                         Err(e) => Err(e),
                     };
+                    if r.is_ok() && self.in_trash() {
+                        let _ = fs::remove_file(format!("{TRASH}/info/{name}.trashinfo"));
+                    }
                     r.map(|_| format!("Deleted {p}")).map_err(|e| format!("Cannot delete {p}: {e}"))
                 }
                 None => return,
@@ -592,10 +681,11 @@ impl Files {
         let (rest, _status) = split_bottom(rest, STATUS);
         let (side, main) = split_left(rest, SIDEBAR);
         let mut x = 10;
+        let (in_trash, selected) = (self.in_trash(), self.list.selected().is_some());
         for (i, (t, b)) in self.tools.iter_mut().enumerate() {
             if i == 3 {
                 // Path field between navigation and file operations.
-                let right_tools = 5 * 40 + 10;
+                let right_tools = 6 * 40 + 10;
                 let pw = (w as i32 - x - right_tools - 10).max(80) as u32;
                 self.path.rect = Rect::new(x + 4, 9, pw, TOOLBAR - 18);
                 x += pw as i32 + 14;
@@ -604,7 +694,8 @@ impl Files {
             b.enabled = match t {
                 Tool::Back => !self.back.is_empty(),
                 Tool::Up => self.cwd != "/",
-                Tool::Rename | Tool::Delete | Tool::Info => self.list.selected().is_some(),
+                Tool::Rename | Tool::Delete | Tool::Info => selected,
+                Tool::Restore => in_trash && selected,
                 _ => true,
             };
             x += 40;

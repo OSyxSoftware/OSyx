@@ -7,7 +7,8 @@
 //! kernel rejects these calls with NotSupported. Optional FILEMAP_CREATE,
 //! FILEMAP_MAP and FILEMAP_FLUSH calls add coherent local file sections.
 //! Optional IMAGE_MAP, IMAGE_PUBLISH and IMAGE_QUERY calls share laid-out executable
-//! images between processes copy-on-write.
+//! images between processes copy-on-write. Optional SET_TIME sets the
+//! real-time clock (network time).
 //! Existing call numbers and layouts stay unchanged.
 //!
 //! Version 9 adds what the Windows runtime and VirtIO-GPU need: a
@@ -345,6 +346,9 @@ pub mod nr {
     /// `image_query(file) -> addr`: where a published image of `file` for
     /// this user lies; `NotFound` if there is none.
     pub const IMAGE_QUERY: u64 = 91;
+    /// `set_time(unix_ns: u64) -> 0`: sets the real-time clock
+    /// (`CLOCK_REALTIME`); root only.
+    pub const SET_TIME: u64 = 92;
 }
 
 /// `map_ex` flags.

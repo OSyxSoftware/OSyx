@@ -198,6 +198,10 @@ pub mod fs {
     pub fn setuid(uid: u32, gid: u32) -> Result<()> {
         os_sys::setuid(uid, gid).map_err(Error::from)
     }
+
+    pub fn set_time(unix_ns: u64) -> Result<()> {
+        os_sys::set_time(unix_ns).map_err(Error::from)
+    }
 }
 // ---- threads, futexes, TLS --------------------------------------------------
 

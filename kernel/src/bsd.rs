@@ -57,6 +57,12 @@ extern "C" {
 
 const WIFI_CONF: &str = "/etc/osyx/wifi.conf";
 const WIFI_STATUS: &str = "/run/wifi.status";
+/// Networks that connected once: `ssid<TAB>passphrase` lines, most recent
+/// first. Written by the kernel only, readable by root only.
+const WIFI_KNOWN: &str = "/etc/osyx/wifi-known.conf";
+/// The Wi-Fi firmware is loaded and the interface started.
+#[cfg(osyx_bsd)]
+static WIFI_READY: AtomicBool = AtomicBool::new(false);
 
 /// One interface of a C driver.
 pub struct BsdNic {
@@ -212,6 +218,8 @@ pub fn after_mount() {
                 kprintln!("bsd: {}: Wi-Fi up, scanning", nic.name);
             }
         }
+        // Joins (wifi.conf, saved networks) wait for the firmware.
+        WIFI_READY.store(true, Ordering::Release);
     }
     // /dev/audio and the status file need devfs and /run.
     crate::audio::init();
@@ -222,6 +230,7 @@ fn service_thread(_: u64, _: u64) {
     let mut last_conf: Option<(i64, u64)> = None;
     let mut last_state = String::new();
     let mut watch = JoinWatch::default();
+    let mut memory = WifiMemory::default();
     let mut media: Vec<(u64, u64)> = Vec::new();
     let mut next_wifi = 0;
     loop {
@@ -233,7 +242,7 @@ fn service_thread(_: u64, _: u64) {
         let now = interrupts::ticks();
         if now >= next_wifi {
             next_wifi = now + crate::arch::timer::ms_to_ticks(2000);
-            wifi_housekeeping(&mut last_conf, &mut last_state, &mut watch);
+            wifi_housekeeping(&mut last_conf, &mut last_state, &mut watch, &mut memory);
             log_wired_media(&mut media);
         }
         crate::arch::timer::sleep_ms(1);
@@ -289,13 +298,109 @@ struct JoinWatch {
     /// while they change, to tell a silent data path from a quiet one.
     counters: [u64; 4],
     rounds: u32,
+    /// Joins applied so far: `/run/wifi.status` says "join N", so the
+    /// desktop can tell the outcome of its own attempt from an older one.
+    joins: u64,
 }
 
-/// Applies a changed `/etc/osyx/wifi.conf` and refreshes `/run/wifi.status`;
-/// changes of the association state go to the kernel log.
+/// Saved networks and the attempt in progress (across joins).
 #[cfg(osyx_bsd)]
-fn wifi_housekeeping(last_conf: &mut Option<(i64, u64)>, last_state: &mut String, watch: &mut JoinWatch) {
+#[derive(Default)]
+struct WifiMemory {
+    /// (SSID, passphrase; empty for an open network), most recent first.
+    known: Vec<(String, String)>,
+    loaded: bool,
+    /// The network of the current attempt and its passphrase.
+    target: Option<(String, String)>,
+    /// The current attempt connected and is saved.
+    saved: bool,
+    /// When the last join started (ticks; 0: none yet).
+    last_join: u64,
+    /// Saved networks tried automatically since the last connection.
+    tried: Vec<String>,
+    /// Saved networks whose passphrase the access point rejected.
+    rejected: Vec<String>,
+}
+
+/// How long an attempt may take before a saved network is tried instead.
+#[cfg(osyx_bsd)]
+const AUTO_JOIN_AFTER_MS: u64 = 30_000;
+
+#[cfg(osyx_bsd)]
+impl WifiMemory {
+    fn load(&mut self) {
+        if self.loaded {
+            return;
+        }
+        self.loaded = true;
+        let Some(data) = read_file(WIFI_KNOWN) else { return };
+        for line in String::from_utf8_lossy(&data).lines() {
+            if let Some((ssid, pass)) = line.split_once('\t') {
+                if !ssid.is_empty() && !self.known.iter().any(|k| k.0 == ssid) {
+                    self.known.push((String::from(ssid), String::from(pass)));
+                }
+            }
+        }
+    }
+
+    fn save(&self) {
+        use osyx_abi::{OPEN_CREATE, OPEN_TRUNCATE, OPEN_WRITE};
+        let mut text = String::new();
+        for (ssid, pass) in &self.known {
+            text.push_str(ssid);
+            text.push('\t');
+            text.push_str(pass);
+            text.push('\n');
+        }
+        let cx = crate::vfs::Lookup::kernel();
+        match crate::vfs::open(&cx, WIFI_KNOWN, OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0o600) {
+            Ok(mut f) => {
+                if f.write(text.as_bytes()).is_err() || f.sync().is_err() {
+                    kprintln!("bsd: cannot write {WIFI_KNOWN}");
+                }
+            }
+            Err(e) => kprintln!("bsd: cannot write {WIFI_KNOWN}: {e:?}"),
+        }
+    }
+
+    fn passphrase(&self, ssid: &str) -> Option<&str> {
+        self.known.iter().find(|k| k.0 == ssid).map(|k| k.1.as_str())
+    }
+}
+
+/// Starts joining `ssid` (an empty passphrase: an open network).
+#[cfg(osyx_bsd)]
+fn wifi_join(nic: &BsdNic, ssid: &str, pass: &str, watch: &mut JoinWatch, memory: &mut WifiMemory, why: &str) {
+    let mut p = pass.as_bytes().to_vec();
+    p.push(0);
+    let e = {
+        let _g = BIG_LOCK.lock();
+        // SAFETY: an attached ifnet; the strings outlive the call; the lock is held.
+        unsafe { osyx_bsd_wifi_join(nic.ifp as *mut c_void, ssid.as_ptr(), ssid.len(), p.as_ptr()) }
+    };
+    p.fill(0);
+    *watch = JoinWatch { joins: watch.joins + 1, ..JoinWatch::default() };
+    memory.target = Some((String::from(ssid), String::from(pass)));
+    memory.saved = false;
+    memory.last_join = interrupts::ticks().max(1);
+    match e {
+        0 => kprintln!("bsd: {}: joining \"{}\" ({why})", nic.name, ssid),
+        e => kprintln!("bsd: {}: cannot join \"{}\" (error {})", nic.name, ssid, e),
+    }
+}
+
+/// Applies a changed `/etc/osyx/wifi.conf` (`ssid=` and `psk=` to join, a
+/// saved network's passphrase when `psk=` is left out; `forget=` to drop a
+/// saved network), saves networks that connect, joins the strongest saved
+/// network in range when nothing is connected, and refreshes
+/// `/run/wifi.status`; changes of the association state go to the log.
+#[cfg(osyx_bsd)]
+fn wifi_housekeeping(last_conf: &mut Option<(i64, u64)>, last_state: &mut String, watch: &mut JoinWatch, memory: &mut WifiMemory) {
     let Some(nic) = NICS.lock().iter().find(|n| n.wireless.load(Ordering::Relaxed)).cloned() else { return };
+    if !WIFI_READY.load(Ordering::Acquire) {
+        return;
+    }
+    memory.load();
     let cx = crate::vfs::Lookup::kernel();
     let stamp = crate::vfs::stat(&cx, WIFI_CONF).ok().map(|s| (s.mtime_ns, s.size));
     if stamp.is_some() && stamp != *last_conf {
@@ -303,18 +408,19 @@ fn wifi_housekeeping(last_conf: &mut Option<(i64, u64)>, last_state: &mut String
         if let Some(text) = read_file(WIFI_CONF) {
             let text = String::from_utf8_lossy(&text);
             let field = |k: &str| text.lines().find_map(|l| l.trim().strip_prefix(k).map(String::from));
-            if let Some(ssid) = field("ssid=") {
-                let mut pass = field("psk=").unwrap_or_default().into_bytes();
-                pass.push(0);
-                let _g = BIG_LOCK.lock();
-                // SAFETY: an attached ifnet; the strings outlive the call; the lock is held.
-                let e = unsafe { osyx_bsd_wifi_join(nic.ifp as *mut c_void, ssid.as_ptr(), ssid.len(), pass.as_ptr()) };
-                pass.fill(0);
-                *watch = JoinWatch::default();
-                match e {
-                    0 => kprintln!("bsd: {}: joining \"{}\"", nic.name, ssid),
-                    e => kprintln!("bsd: {}: cannot join \"{}\" (error {})", nic.name, ssid, e),
-                }
+            if let Some(gone) = field("forget=") {
+                memory.known.retain(|k| k.0 != gone);
+                memory.rejected.retain(|r| *r != gone);
+                memory.save();
+                kprintln!("bsd: {}: forgot \"{}\"", nic.name, gone);
+            }
+            if let Some(ssid) = field("ssid=").filter(|s| !s.is_empty()) {
+                let pass = match field("psk=").filter(|p| !p.is_empty()) {
+                    Some(p) => p,
+                    None => String::from(memory.passphrase(&ssid).unwrap_or("")),
+                };
+                memory.rejected.retain(|r| *r != ssid);
+                wifi_join(&nic, &ssid, &pass, watch, memory, "requested");
             }
         }
     }
@@ -348,9 +454,62 @@ fn wifi_housekeeping(last_conf: &mut Option<(i64, u64)>, last_state: &mut String
         },
         None => {}
     }
+    let connected = text.lines().any(|l| l == "keys yes");
+    let current_ssid = text.lines().find_map(|l| l.strip_prefix("ssid ")).map(String::from);
+    // In range: (SSID, RSSI) of the scan results.
+    let seen: Vec<(String, u32)> = text
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            (f.len() >= 5 && f[0] == "net").then(|| (String::from(f[1]), f[2].parse().unwrap_or(0)))
+        })
+        .collect();
     drop(text);
+    // A network that connected is saved (most recent first).
+    if connected && !memory.saved {
+        if let Some((ssid, pass)) = memory.target.clone().filter(|t| current_ssid.as_deref() == Some(t.0.as_str())) {
+            memory.known.retain(|k| k.0 != ssid);
+            memory.known.insert(0, (ssid.clone(), pass));
+            memory.save();
+            memory.saved = true;
+            memory.tried.clear();
+            kprintln!("bsd: {}: \"{}\" saved", nic.name, ssid);
+        }
+    }
+    if watch.wrong_password {
+        if let Some((ssid, _)) = &memory.target {
+            if !memory.rejected.contains(ssid) {
+                memory.rejected.push(ssid.clone());
+            }
+        }
+    }
+    // Nothing connected for a while: the strongest saved network in range
+    // that was not tried yet (all tried: start over).
+    let idle = memory.last_join == 0 || now.saturating_sub(memory.last_join) >= crate::arch::timer::ms_to_ticks(AUTO_JOIN_AFTER_MS);
+    if !connected && idle {
+        let best = |memory: &WifiMemory, tried: &[String]| {
+            seen.iter()
+                .filter(|(s, _)| memory.passphrase(s).is_some() && !memory.rejected.contains(s) && !tried.contains(s))
+                .max_by_key(|(_, rssi)| *rssi)
+                .map(|(s, _)| s.clone())
+        };
+        let mut pick = best(memory, &memory.tried);
+        if pick.is_none() && !memory.tried.is_empty() {
+            memory.tried.clear();
+            pick = best(memory, &[]);
+        }
+        if let Some(ssid) = pick {
+            let pass = String::from(memory.passphrase(&ssid).unwrap_or(""));
+            memory.tried.push(ssid.clone());
+            wifi_join(&nic, &ssid, &pass, watch, memory, "saved network");
+        }
+    }
+    buf.extend_from_slice(alloc::format!("join {}\n", watch.joins).as_bytes());
     if watch.wrong_password {
         buf.extend_from_slice(b"error wrong-password\n");
+    }
+    for (ssid, _) in &memory.known {
+        buf.extend_from_slice(alloc::format!("known\t{ssid}\n").as_bytes());
     }
     write_file(WIFI_STATUS, &buf);
     watch.rounds += 1;

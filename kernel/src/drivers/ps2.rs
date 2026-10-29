@@ -365,6 +365,9 @@ fn set1_extended(code: u8) -> u16 {
     match code {
         0x1C => 0x58, // keypad Enter
         0x1D => 0xE4, // right Ctrl
+        0x20 => 0x7F, // Mute
+        0x2E => 0x81, // Volume Down
+        0x30 => 0x80, // Volume Up
         0x35 => 0x54, // keypad /
         0x37 => 0x46, // Print Screen
         0x38 => 0xE6, // right Alt (AltGr)
