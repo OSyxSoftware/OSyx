@@ -21,7 +21,7 @@ foreach ($count in $CpuCounts) {
         if (-not $finished) { $vm.Kill(); $vm.WaitForExit() }
         $text = [IO.File]::ReadAllText($log)
         $seen = @([regex]::Matches($text, 'SMP_CPU logical=(\d+) apic=(\d+) online=(\d+)'))
-        $ok = $finished -and $vm.ExitCode -eq 33 -and $text -match 'smp checks: 5 passed, 0 failed' -and $seen.Count -eq $count -and $text -notmatch 'KERNEL PANIC'
+        $ok = $finished -and $vm.ExitCode -eq 33 -and $text -match 'smp checks: 6 passed, 0 failed' -and $seen.Count -eq $count -and $text -notmatch 'KERNEL PANIC'
         if (-not $ok) { $failed++; Write-Host "[FAIL] SMP with $count CPUs: $log" }
         else { Write-Host "[PASS] SMP with $count CPUs: distinct APICs, affinity, atomics, syscall contention, TLB invalidation" }
     } finally {

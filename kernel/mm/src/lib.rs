@@ -7,6 +7,7 @@
 #![no_std]
 
 pub mod frames;
+pub mod adaptive;
 pub mod heap;
 pub mod lz;
 

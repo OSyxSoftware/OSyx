@@ -32,6 +32,7 @@ use osyx_net::wire::{Endpoint, Ipv4Addr};
 
 static STACK: KMutex<Option<Stack>> = KMutex::new(None);
 trait NetDevice: Send + Sync {
+    fn is_wireless(&self) -> bool { false }
     fn link_up(&self) -> bool;
     fn has_interrupts(&self) -> bool;
     fn counters(&self) -> virtio_net::Counters;
@@ -57,7 +58,16 @@ macro_rules! impl_net_device {
 impl_net_device!(VirtioNet, "virtio-net");
 impl_net_device!(E1000, "e1000");
 impl_net_device!(Rtl8168, "rtl8168");
-impl_net_device!(crate::bsd::BsdNic, "openbsd");
+impl NetDevice for crate::bsd::BsdNic {
+    fn is_wireless(&self) -> bool { self.is_wireless() }
+    fn link_up(&self) -> bool { self.link_up() }
+    fn has_interrupts(&self) -> bool { self.has_interrupts() }
+    fn counters(&self) -> virtio_net::Counters { self.counters() }
+    fn receive(&self, frames: &mut Vec<Vec<u8>>) { self.receive(frames) }
+    fn transmit(&self, frames: &[Vec<u8>]) -> usize { self.transmit(frames) }
+    fn recover(&self) -> bool { self.recover() }
+    fn description(&self) -> String { alloc::format!("{} (openbsd at {})", self.name, self.location) }
+}
 type Devices = Vec<(usize, Arc<dyn NetDevice>)>;
 static DEVICES: IrqSpinLock<Devices> = IrqSpinLock::new(Vec::new());
 /// The network thread sleeps here; device interrupts wake it.
@@ -806,6 +816,7 @@ fn put_records<T: Copy>(buf: u64, len: u64, items: &[T]) -> Result<u64, Errno> {
 pub fn sys_query(kind: u64, buf: u64, len: u64) -> Result<u64, Errno> {
     let interrupts = virtio_net::INTERRUPTS.load(Ordering::Relaxed) + e1000::INTERRUPTS.load(Ordering::Relaxed) + rtl8168::INTERRUPTS.load(Ordering::Relaxed);
     let irq_devs: Vec<usize> = DEVICES.lock().iter().filter(|(_, d)| d.has_interrupts()).map(|(i, _)| *i).collect();
+    let wireless_devs: Vec<usize> = DEVICES.lock().iter().filter(|(_, d)| d.is_wireless()).map(|(i, _)| *i).collect();
     let r = with_stack(|s| -> Result<u64, Errno> {
         let now = s.now();
         match kind {
@@ -821,7 +832,8 @@ pub fn sys_query(kind: u64, buf: u64, len: u64) -> Result<u64, Errno> {
                         r.flags = abi::IFF_UP
                             | if f.link_up { abi::IFF_LINK } else { 0 }
                             | if f.kind == osyx_net::stack::IfaceKind::Loopback { abi::IFF_LOOPBACK } else { 0 }
-                            | if irq_devs.contains(&i) { abi::IFF_INTERRUPTS } else { 0 };
+                            | if irq_devs.contains(&i) { abi::IFF_INTERRUPTS } else { 0 }
+                            | if wireless_devs.contains(&i) { abi::IFF_WIRELESS } else { 0 };
                         if let Some((a, p)) = f.addr {
                             r.addr = a.0;
                             r.prefix = p;

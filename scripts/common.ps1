@@ -124,11 +124,34 @@ function New-LiveImage([string]$BinDir) {
 
 # Copies the root partition out of build/osyx.img into build/root.img.
 function Save-RootPartition {
-    $offset = (1 + $Script:EspSizeMiB) * 1MB
-    $len = (Get-Item $Script:RootImage).Length
     $src = [IO.File]::OpenRead($Script:DiskImage)
-    $dst = [IO.File]::Create($Script:RootImage)
+    $dst = $null
     try {
+        # Read the existing GPT instead of using the unrelated size of the
+        # previous build/root.img. The latter can silently truncate a root
+        # when switching between test images and a Zen installation.
+        $reader = [IO.BinaryReader]::new($src)
+        [void]$src.Seek(512, 'Begin')
+        if ([Text.Encoding]::ASCII.GetString($reader.ReadBytes(8)) -ne 'EFI PART') { throw 'disk has no GPT header' }
+        [void]$src.Seek(512 + 72, 'Begin')
+        $entriesLba = $reader.ReadUInt64(); $entryCount = $reader.ReadUInt32(); $entrySize = $reader.ReadUInt32()
+        if ($entrySize -lt 128 -or $entrySize -gt 4096 -or $entryCount -gt 16384) { throw 'invalid GPT partition table' }
+        $rootType = [Guid]'4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709'
+        $offset = $null; $len = $null
+        for ($i = 0; $i -lt $entryCount; $i++) {
+            $entryOffset = [long]$entriesLba * 512 + [long]$i * $entrySize
+            if ($entryOffset -lt 0 -or $entryOffset + $entrySize -gt $src.Length) { throw 'GPT entry outside disk' }
+            [void]$src.Seek($entryOffset, 'Begin')
+            $kind = [Guid]::new($reader.ReadBytes(16))
+            if ($kind -ne $rootType) { continue }
+            [void]$src.Seek($entryOffset + 32, 'Begin')
+            $first = $reader.ReadUInt64(); $last = $reader.ReadUInt64()
+            if ($last -lt $first -or $last -ge [uint64]($src.Length / 512)) { throw 'invalid GPT root extent' }
+            if ($null -ne $offset) { throw 'more than one OSyx root partition' }
+            $offset = [long]$first * 512; $len = [long]($last - $first + 1) * 512
+        }
+        if ($null -eq $offset) { throw 'OSyx root partition not found in GPT' }
+        $dst = [IO.File]::Create($Script:RootImage)
         [void]$src.Seek($offset, 'Begin')
         $buf = New-Object byte[] (4MB)
         $left = $len
@@ -138,7 +161,7 @@ function Save-RootPartition {
             $dst.Write($buf, 0, $n)
             $left -= $n
         }
-    } finally { $src.Close(); $dst.Close() }
+    } finally { $src.Close(); if ($null -ne $dst) { $dst.Close() } }
 }
 
 # Packs build/esp into a FAT32 image and assembles build/osyx.img: GPT with

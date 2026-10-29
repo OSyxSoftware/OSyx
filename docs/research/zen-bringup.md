@@ -1032,3 +1032,66 @@ attempts 1–4 report. Full Win32 regression remains 2111/0; native wsock32 is
 
 References: Mozilla's [PollableEvent.cpp](https://github.com/mozilla-firefox/firefox/blob/main/netwerk/base/PollableEvent.cpp),
 Microsoft's [accept](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-accept).
+
+### Futex startup fix and YouTube check
+
+After adding a registration recheck for SMP futex waits, a 4 GiB QEMU
+guest displayed the local HTML probe, executed its JavaScript button, and
+opened example.com in a second tab. Evidence: `build/zen/futex-startup.serial.log`,
+`zen-futex-after.png`, `zen-futex-click.png`, and `zen-futex-https.png`.
+This differs from the previous 4 GiB attempt, which stalled before the
+browser window, but one run alone does not establish causality or reliability.
+
+With the installed launcher, the updated kernel, 6 GiB RAM and four CPUs,
+the requested YouTube watch page displayed its title and player. After a
+manual click, the player advanced from 0:00 to 0:41 of 1:28; see
+`build/zen/youtube-check-playback.png` and `youtube-target.serial.log`.
+Audio output was not verified, and the guest's Firefox sandbox is disabled.
+No test was performed on the physical ThinkPad, and one video is not a
+general compatibility claim for other sites.
+
+### Overlapped pipe operations without per-operation threads
+
+`pipes.rs` used to start one helper thread for every overlapped
+`ReadFile`/`WriteFile`/`ConnectNamedPipe`. In the YouTube probe (6 GiB, four
+CPUs, `-Count`) the busiest Zen process issued about 16 000 such operations
+in three minutes; the last thread id reached 24 763 and 32 137 in two runs.
+
+Now an overlapped read with data already buffered or in the channel, and a
+write that fits one channel message, complete at once: TRUE with the byte
+count, the event signaled and a completion packet queued, as Windows does.
+Only operations that must wait go to a helper-thread pool, whose idle
+workers exit after 10 s. Reads and writes are serialized per direction, and
+an operation never completes inline while an earlier one of its direction is
+still queued, so byte order is kept. Serializing reads also fixes a hang:
+with two pending reads, the first could take both bytes into `rest` while
+the second kept waiting on the empty channel (new check in
+`tests/src/pipes.c`).
+
+Same probe afterwards: 13 312 inline completions against roughly 2 000
+queued operations in the busiest process; the last thread id was 55. The
+window title of the video appeared after 47.5 s (old code: 43.6 s and
+60.2 s; network time through QEMU user networking varies widely, so this
+is not a measured speed-up of page loading). Win32 suite: 2188 passed.
+Evidence: `build/zen/pipe-before.serial.log`, `pipe-base2.serial.log`,
+`pipe-fast.serial.log`.
+
+### Kernel entry lock: attribution and lock-free IPC
+
+Hold time of the entry lock (BKL) used to be charged to the last system
+call of the CPU, also when an interrupt took the lock; slots 0x78-0x7b now
+count the timer, other IRQs, exceptions and kernel code resumed after a
+switch. With `stats` on, the timer slot held the lock for 0.9-1.2 s of
+every ~2 s of the YouTube probe, `WRITE` (console) for ~0.25 s, and channel
+calls very little.
+
+`CHANNEL_SEND`/`CHANNEL_RECV` without handles and `WAIT_HANDLES` on
+channels, pipes, listeners and sockets now run without the entry lock: the
+channel, wait queues, handle table and scheduler already have spinlocks.
+SMP 2/4 CPUs pass, Win32 2188/0.
+
+`scripts/zen-test.ps1 -NoStats` leaves the once-a-second kernel statistics
+out. Without them and with lock-free IPC, the Zen window appeared after
+14.3 s and the video's title after 31.0 s (one run; with stats 44-60 s).
+The two changes were not measured separately. Evidence:
+`build/zen/bkl-attr.serial.log`, `lockfree-nostats.serial.log` and `.png`.

@@ -120,7 +120,8 @@ struct Region {
     image: Option<Arc<ImageSection>>,
     /// Pages moved to compressed memory: page index -> compressed bytes
     /// (empty: an all-zero page). Restored on the next access.
-    swapped: BTreeMap<u64, alloc::boxed::Box<[u8]>>,
+    swapped: BTreeMap<u64, SwappedPage>,
+    refault_guard: osyx_mm::adaptive::RefaultGuard,
     /// Next page to inspect during compressed-memory reclaim.
     reclaim_cursor: u64,
 }
@@ -129,7 +130,7 @@ impl Region {
     fn new(pages: u64, prot: u64) -> Region {
         let mut runs = BTreeMap::new();
         runs.insert(0, prot);
-        Region { pages, prot: runs, image: None, swapped: BTreeMap::new(), reclaim_cursor: 0 }
+        Region { pages, prot: runs, image: None, swapped: BTreeMap::new(), reclaim_cursor: 0, refault_guard: Default::default() }
     }
 
     /// Whether `frame` at page `page` of the region is the shared image frame.
@@ -153,6 +154,11 @@ impl Region {
             self.prot.entry(last).or_insert(after);
         }
     }
+}
+
+struct SwappedPage {
+    data: alloc::boxed::Box<[u8]>,
+    evicted_at: u64,
 }
 
 impl Space {
@@ -482,14 +488,19 @@ impl Process {
 
     fn flush_line(&mut self) {
         let line = String::from_utf8_lossy(&self.line).into_owned();
-        kprintln!("[{}:{}] {}", self.name, self.pid, line);
-        let mut tail = OUTPUT_TAIL.lock();
-        if tail.len() == OUTPUT_TAIL_LINES {
-            tail.pop_front();
-        }
-        tail.push_back(line);
         self.line.clear();
+        emit_line(&self.name, self.pid, line);
     }
+}
+
+/// Logs one line of a process's console output and keeps it in the tail.
+fn emit_line(name: &str, pid: Pid, line: String) {
+    kprintln!("[{}:{}] {}", name, pid, line);
+    let mut tail = OUTPUT_TAIL.lock();
+    if tail.len() == OUTPUT_TAIL_LINES {
+        tail.pop_front();
+    }
+    tail.push_back(line);
 }
 
 /// Removes the page entries that point at shared image frames (the frames
@@ -497,7 +508,7 @@ impl Process {
 fn unmap_images_from(root: u64, regions: BTreeMap<u64, Region>) {
     for (start, r) in regions {
         for d in r.swapped.values() {
-            swap_stats_remove(d.len());
+            swap_stats_remove(d.data.len());
         }
         if r.image.is_some() {
             unmap_image_pages(root, start, &r, 0, r.pages);
@@ -978,14 +989,27 @@ pub fn count() -> usize {
 /// `write` back end: line-buffered output to the kernel log.
 pub fn write_output(bytes: &[u8]) {
     let pid = sched::current_pid();
-    let mut t = TABLE.lock();
-    let Some(p) = t.procs.get_mut(&pid) else { return };
-    for &b in bytes {
-        if b == b'\n' {
-            p.flush_line();
-        } else if p.line.len() < 4096 {
-            p.line.push(b);
+    // Lines are printed after the process table is unlocked: the serial
+    // port is slow, and every handle lookup and page fault needs the table.
+    let mut done = Vec::new();
+    let name = {
+        let mut t = TABLE.lock();
+        let Some(p) = t.procs.get_mut(&pid) else { return };
+        for &b in bytes {
+            if b == b'\n' {
+                done.push(String::from_utf8_lossy(&p.line).into_owned());
+                p.line.clear();
+            } else if p.line.len() < 4096 {
+                p.line.push(b);
+            }
         }
+        if done.is_empty() {
+            return;
+        }
+        p.name.clone()
+    };
+    for line in done {
+        emit_line(&name, pid, line);
     }
 }
 
@@ -1146,7 +1170,7 @@ pub fn discard(addr: u64, len: u64) -> Result<(), Errno> {
     let gone: Vec<u64> = r.swapped.range(first..first + pages).map(|(&k, _)| k).collect();
     for k in gone {
         if let Some(d) = r.swapped.remove(&k) {
-            swap_stats_remove(d.len());
+            swap_stats_remove(d.data.len());
         }
     }
     Ok(())
@@ -1323,6 +1347,8 @@ static SWAP_THREAD: AtomicU64 = AtomicU64::new(0);
 static SWAPPED_BYTES: AtomicU64 = AtomicU64::new(0);
 static SWAP_OUT: AtomicU64 = AtomicU64::new(0);
 static SWAP_IN: AtomicU64 = AtomicU64::new(0);
+static SWAP_QUICK_REFAULTS: AtomicU64 = AtomicU64::new(0);
+static SWAP_PROTECTED_SCANS: AtomicU64 = AtomicU64::new(0);
 /// Next process the reclaim scan starts with (round robin).
 static SWAP_CURSOR: AtomicU64 = AtomicU64::new(0);
 
@@ -1342,6 +1368,10 @@ pub fn swap_stats() -> (u64, u64, u64, u64) {
     )
 }
 
+pub fn swap_adaptive_stats() -> (u64, u64) {
+    (SWAP_QUICK_REFAULTS.load(Ordering::Relaxed), SWAP_PROTECTED_SCANS.load(Ordering::Relaxed))
+}
+
 /// Compresses up to `want` cold (not recently accessed) writable private
 /// pages of user processes and frees their frames; returns how many.
 /// Shared memory, file views and image sections are never touched. A page
@@ -1354,6 +1384,8 @@ pub fn reclaim(want: u64) -> u64 {
         return 0;
     }
     let first = SWAP_CURSOR.fetch_add(1, Ordering::Relaxed) as usize % pids.len();
+    let (free, total) = crate::mem::frame_stats();
+    let emergency = free < (total / SWAP_LOW_DIVISOR).max(SWAP_MIN_LOW_FRAMES) / 2;
     let mut buf = alloc::vec![0u8; SWAP_MAX_COMPRESSED];
     for k in 0..pids.len() {
         if done >= want {
@@ -1372,6 +1404,10 @@ pub fn reclaim(want: u64) -> u64 {
                 break;
             }
             let r = &p.regions[&start];
+            if r.refault_guard.protects(crate::interrupts::ticks(), emergency) {
+                SWAP_PROTECTED_SCANS.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             let scan_start = start + r.reclaim_cursor * PAGE_SIZE;
             let scan_end = (scan_start + SWAP_SCAN_PAGES * PAGE_SIZE).min(start + r.pages * PAGE_SIZE);
             // Reserved up front: the visit holds the paging lock, and a heap
@@ -1429,7 +1465,7 @@ pub fn reclaim(want: u64) -> u64 {
                         SWAPPED_PAGES.fetch_add(1, Ordering::Relaxed);
                         SWAPPED_BYTES.fetch_add(data.len() as u64, Ordering::Relaxed);
                         SWAP_OUT.fetch_add(1, Ordering::Relaxed);
-                        r.swapped.insert((va - start) / PAGE_SIZE, data);
+                        r.swapped.insert((va - start) / PAGE_SIZE, SwappedPage { data, evicted_at: crate::interrupts::ticks() });
                         let _ = free_frame(frame);
                         p.space.frames -= 1;
                         done += 1;
@@ -1466,17 +1502,22 @@ enum RestoreError {
 fn restore_page(root: u64, start: u64, r: &mut Region, index: u64, flags: Flags) -> Result<u64, RestoreError> {
     let data = r.swapped.get(&index).ok_or(RestoreError::NotCompressed)?;
     let frame = alloc_frame().ok_or(RestoreError::NoMemory)?;
-    if !data.is_empty() {
+    if !data.data.is_empty() {
         // SAFETY: a fresh frame owned here, reachable through the HHDM.
         let dst = unsafe { &mut *(phys_to_virt(frame) as *mut [u8; PAGE_SIZE as usize]) };
-        if osyx_mm::lz::decompress(data, dst).is_err() {
+        if osyx_mm::lz::decompress(&data.data, dst).is_err() {
             let _ = free_frame(frame);
             return Err(RestoreError::Corrupt);
         }
     }
     match paging::map_in(root, start + index * PAGE_SIZE, frame, flags) {
         Ok(tables) => {
-            let len = r.swapped.remove(&index).map_or(0, |d| d.len());
+            let page = r.swapped.remove(&index).expect("compressed page exists");
+            let len = page.data.len();
+            let now = crate::interrupts::ticks();
+            if r.refault_guard.restored(page.evicted_at, now, crate::arch::timer::ms_to_ticks(2000), 8, crate::arch::timer::ms_to_ticks(2000)) {
+                SWAP_QUICK_REFAULTS.fetch_add(1, Ordering::Relaxed);
+            }
             swap_stats_remove(len);
             SWAP_IN.fetch_add(1, Ordering::Relaxed);
             Ok(tables)
@@ -1669,7 +1710,7 @@ pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
     let r = p.regions.remove(&addr).expect("checked above");
     release_frames(&mut p.space, addr, &r, addr, pages);
     for d in r.swapped.values() {
-        swap_stats_remove(d.len());
+        swap_stats_remove(d.data.len());
     }
     p.mapped_pages -= pages;
     Ok(())

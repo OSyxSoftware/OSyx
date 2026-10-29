@@ -76,6 +76,10 @@ pub struct BsdNic {
 }
 
 impl BsdNic {
+    pub fn is_wireless(&self) -> bool {
+        self.wireless.load(Ordering::Acquire)
+    }
+
     pub fn mac_address(&self) -> MacAddr {
         #[cfg(osyx_bsd)]
         {

@@ -465,6 +465,29 @@ pub fn set_lock_nr(nr: u64) {
     note_syscall(nr);
 }
 
+/// Hold-time slots past the syscall numbers, for lock holders that are not
+/// system calls (see [`set_hold_kind`]).
+pub const HOLD_TIMER: u64 = 120;
+pub const HOLD_IRQ: u64 = 121;
+pub const HOLD_EXCEPTION: u64 = 122;
+pub const HOLD_RESUMED: u64 = 123;
+
+static LOCK_FREE_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts a system call completed without the entry lock.
+pub fn note_lock_free(_nr: u64) {
+    LOCK_FREE_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn lock_free_calls() -> u64 {
+    LOCK_FREE_CALLS.load(Ordering::Relaxed)
+}
+
+/// Attributes the current hold of the entry lock to `kind` (a HOLD_* slot).
+pub fn set_hold_kind(kind: u64) {
+    HOLD_NR[index()].store(kind, Ordering::Relaxed);
+}
+
 pub fn enter_kernel() -> bool {
     // A waiter must not migrate after reading its CPU index. In particular,
     // SYSCALL may enable interrupts only after this lock has been acquired.
@@ -629,6 +652,11 @@ impl KernelEntry {
     pub fn new_yielding() -> Self {
         Self(enter_kernel_yielding())
     }
+
+    /// True if this entry took the lock (it was not already held here).
+    pub fn acquired(&self) -> bool {
+        self.0
+    }
 }
 impl Drop for KernelEntry {
     fn drop(&mut self) {
@@ -673,6 +701,10 @@ pub fn flush_remote(root: u64, kernel_mapping: bool) {
     }
     let were_enabled = cpu::interrupts_enabled();
     cpu::disable_interrupts();
+    // The page table stores before this call must be visible before the
+    // roots are read (x86 may order a later load before an earlier store);
+    // pairs with `set_root` preceding the CR3 load in the scheduler.
+    core::sync::atomic::fence(Ordering::SeqCst);
     let me = index();
     for (i, local) in CPUS.iter().enumerate() {
         if i != me

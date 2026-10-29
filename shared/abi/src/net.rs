@@ -92,6 +92,8 @@ pub const IFF_UP: u16 = 1;
 pub const IFF_LINK: u16 = 2;
 pub const IFF_LOOPBACK: u16 = 4;
 pub const IFF_INTERRUPTS: u16 = 8;
+/// Interface is wireless, even if it carries Ethernet frames.
+pub const IFF_WIRELESS: u16 = 16;
 
 /// `NetIface::method` / `NetConfig::method`
 pub const CONFIG_NONE: u8 = 0;
@@ -128,6 +130,28 @@ pub struct NetIface {
     pub tx_dropped: u64,
     /// Seconds until the DHCP lease expires (0 without one).
     pub lease_left: u64,
+}
+
+/// Select a wired interface, preferring one with an address or active link.
+pub fn preferred_ethernet(ifaces: &[NetIface]) -> Option<NetIface> {
+    ifaces.iter().filter(|i| i.flags & (IFF_LOOPBACK | IFF_WIRELESS) == 0)
+        .max_by_key(|i| (i.flags & IFF_LINK != 0 && i.addr != [0; 4], i.flags & IFF_LINK != 0, core::cmp::Reverse(i.index)))
+        .copied()
+}
+
+#[cfg(test)]
+mod ethernet_selection_tests {
+    use super::*;
+
+    #[test]
+    fn prefers_connected_wired_adapter_over_wifi_and_disconnected_ports() {
+        let wifi = NetIface { index: 1, flags: IFF_WIRELESS | IFF_LINK, addr: [10, 0, 0, 2], ..Default::default() };
+        let unplugged = NetIface { index: 2, ..Default::default() };
+        let wired = NetIface { index: 3, flags: IFF_LINK, addr: [10, 0, 0, 3], ..Default::default() };
+        assert_eq!(preferred_ethernet(&[wifi, unplugged, wired]).unwrap().index, 3);
+        assert_eq!(preferred_ethernet(&[wifi, unplugged]).unwrap().index, 2);
+        assert!(preferred_ethernet(&[wifi]).is_none());
+    }
 }
 
 #[repr(C)]

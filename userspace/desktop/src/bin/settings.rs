@@ -170,7 +170,7 @@ impl Settings {
     }
 
     fn net_iface() -> Option<osyx_abi::net::NetIface> {
-        os_std::net::interfaces().ok()?.into_iter().find(|i| i.flags & osyx_abi::net::IFF_LOOPBACK == 0)
+        os_std::net::preferred_ethernet(&os_std::net::interfaces().ok()?)
     }
 }
 

@@ -4,8 +4,8 @@
 //! memory: then it is (shared memory object, offset), so processes that map
 //! the same object wait and wake on the same word. `wait` reads the word,
 //! compares and registers the
-//! caller in one interrupts-disabled section (single CPU), so a `wake` that
-//! follows the user's store cannot be missed. Waiters are woken in FIFO order.
+//! caller, then rechecks the word after registration so a concurrent wake
+//! on another CPU cannot be lost. Waiters are woken in FIFO order.
 //! A waiter that is still registered when it resumes was woken by its
 //! timeout or by a kill request, not by `wake`.
 
@@ -15,6 +15,7 @@ use crate::sched::{self, Tid};
 use crate::sync::IrqSpinLock;
 use crate::{interrupts, process::Pid};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use osyx_abi::Errno;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -38,6 +39,26 @@ fn key_of(pid: Pid, addr: u64) -> Key {
 }
 
 static WAITERS: IrqSpinLock<Vec<Waiter>> = IrqSpinLock::new(Vec::new());
+// The sequence catches a wake between the initial read and registration,
+// including when the word did not change. Sharding limits spurious retries
+// caused by unrelated futexes; collisions remain safe because the ABI
+// explicitly permits spurious returns.
+const WAKE_BUCKETS: usize = 1024;
+static WAKE_SEQUENCES: [AtomicU64; WAKE_BUCKETS] = [const { AtomicU64::new(0) }; WAKE_BUCKETS];
+static SEQUENCE_RETRIES: AtomicU64 = AtomicU64::new(0);
+
+fn wake_sequence(key: Key) -> &'static AtomicU64 {
+    let mut x = match key {
+        Key::Private(pid, addr) => addr.rotate_left(17) ^ pid,
+        Key::Shared(obj, off) => (obj as u64).rotate_left(17) ^ off ^ 0x9e37_79b9_7f4a_7c15,
+    };
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    &WAKE_SEQUENCES[x as usize % WAKE_BUCKETS]
+}
 
 fn check_addr(addr: u64) -> Result<(), Errno> {
     if !addr.is_multiple_of(4) {
@@ -59,6 +80,8 @@ pub fn wait(addr: u64, expected: u32, timeout_ticks: Option<u64>) -> Result<(), 
     let were_enabled = cpu::interrupts_enabled();
     cpu::disable_interrupts();
     let result = (|| {
+        let wake_seq = wake_sequence(key);
+        let sequence = wake_seq.load(Ordering::Acquire);
         let mut word = [0u8; 4];
         copy_from_user(&mut word, addr)?;
         if u32::from_le_bytes(word) != expected {
@@ -68,19 +91,40 @@ pub fn wait(addr: u64, expected: u32, timeout_ticks: Option<u64>) -> Result<(), 
             return Err(Errno::Interrupted);
         }
         WAITERS.lock().push(Waiter { pid, key, tid });
-        sched::mark_current_blocked_until(timeout_ticks.map(|t| interrupts::ticks() + t.max(1)));
-        sched::schedule();
-        // Still registered => not woken by `wake`.
-        let mut w = WAITERS.lock();
-        if let Some(i) = w.iter().position(|x| x.tid == tid) {
-            w.remove(i);
-            drop(w);
-            if sched::current_kill_pending() {
-                return Err(Errno::Interrupted);
+        // A different CPU may have changed the word and issued its wake
+        // between our first read and registration. Recheck without holding
+        // WAITERS: a user-memory fault may need the outer process-table lock.
+        let rechecked = copy_from_user(&mut word, addr);
+        if rechecked.is_err() || u32::from_le_bytes(word) != expected {
+            let mut waiters = WAITERS.lock();
+            if let Some(i) = waiters.iter().position(|x| x.tid == tid) {
+                waiters.remove(i);
             }
-            return Err(Errno::TimedOut);
+            return rechecked.and(Err(Errno::WouldBlock));
         }
-        Ok(())
+        if wake_seq.load(Ordering::Acquire) != sequence {
+            SEQUENCE_RETRIES.fetch_add(1, Ordering::Relaxed);
+            let mut waiters = WAITERS.lock();
+            if let Some(i) = waiters.iter().position(|x| x.tid == tid) {
+                waiters.remove(i);
+            }
+            return Ok(());
+        }
+        let deadline = timeout_ticks.map(|t| interrupts::ticks().saturating_add(t.max(1)));
+        loop {
+            sched::mark_current_blocked_until(deadline);
+            sched::schedule();
+            let mut w = WAITERS.lock();
+            let Some(i) = w.iter().position(|x| x.tid == tid) else { return Ok(()); };
+            // A stale scheduler wake can leave this waiter registered. It is
+            // not a timeout, especially for an infinite wait: block again.
+            if sched::current_kill_pending() || deadline.is_some_and(|d| interrupts::ticks() >= d) {
+                w.remove(i);
+                drop(w);
+                return Err(if sched::current_kill_pending() { Errno::Interrupted } else { Errno::TimedOut });
+            }
+            drop(w);
+        }
     })();
     if were_enabled {
         cpu::enable_interrupts();
@@ -100,6 +144,7 @@ fn wake_key(key: Key, count: u32) -> u64 {
     let mut woken: Vec<Tid> = Vec::new();
     {
         let mut w = WAITERS.lock();
+        wake_sequence(key).fetch_add(1, Ordering::Release);
         let mut i = 0;
         while i < w.len() && woken.len() < count as usize {
             if w[i].key == key {
@@ -129,6 +174,7 @@ pub fn dump_waiters() {
     if !line.is_empty() {
         crate::kprintln!("futexwait:{line}");
     }
+    crate::kprintln!("futex: wake-sequence retries={}", SEQUENCE_RETRIES.load(Ordering::Relaxed));
 }
 
 /// Drops every registration of process `pid` (called when it is torn down).

@@ -377,11 +377,16 @@ impl Scheduler {
         let old_fpu: *mut FpuState = &mut *old.fpu;
         self.current[crate::smp::index()] = next;
         self.switches += 1;
+        // Publish the root before loading it: a CPU changing that address
+        // space's mappings sends its TLB shootdown to every CPU whose recorded
+        // root matches, and must not miss this one while it already uses the
+        // root (speculative TLB fills included). The CR3 load is serializing,
+        // so the store is visible before any translation through it.
+        crate::smp::set_root(new_root);
         if new_root != paging::current_root() {
             // SAFETY: every thread root maps the kernel half (shared PDPTs).
             unsafe { cpu::write_cr3(new_root) };
         }
-        crate::smp::set_root(new_root);
         if new_top != 0 {
             // SAFETY: the thread's kernel stack lives as long as the thread.
             unsafe {
@@ -471,7 +476,9 @@ fn after_switch() {
     if reacquire {
         // The thread was executing kernel code under the entry lock when it
         // was switched out; it must not continue without it.
-        crate::smp::enter_kernel();
+        if crate::smp::enter_kernel() {
+            crate::smp::set_hold_kind(crate::smp::HOLD_RESUMED);
+        }
     } else if crate::smp::bkl_is_free() {
         // It was released while switching (a blocked syscall, an idle CPU);
         // hand it to the next parked syscall waiter.

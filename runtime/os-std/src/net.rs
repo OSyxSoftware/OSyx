@@ -20,10 +20,11 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
 pub use os_sys::net::{
-    ctl, query, NetArp, NetConfig, NetDnsEntry, NetIface, NetRoute, NetSocket, NetStats, SockAddr, CONFIG_DHCP, CONFIG_DOWN,
-    CONFIG_NONE, CONFIG_STATIC, DHCP_PHASE_NAMES, IFF_INTERRUPTS, IFF_LINK, IFF_LOOPBACK, IFF_UP, NET_STAT_NAMES, TCP_STATE_NAMES,
+    ctl, query, preferred_ethernet, NetArp, NetConfig, NetDnsEntry, NetIface, NetRoute, NetSocket, NetStats, SockAddr, CONFIG_DHCP, CONFIG_DOWN,
+    CONFIG_NONE, CONFIG_STATIC, DHCP_PHASE_NAMES, IFF_INTERRUPTS, IFF_LINK, IFF_LOOPBACK, IFF_UP, IFF_WIRELESS, NET_STAT_NAMES, TCP_STATE_NAMES,
 };
 use os_sys::net::{MAX_RESOLVE, MSG_DONTWAIT, SOCK_DGRAM, SOCK_PING, SOCK_STREAM};
+
 
 /// An IPv4 address.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

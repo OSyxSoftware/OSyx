@@ -407,7 +407,8 @@ pub fn ext4_root() -> TestResult {
         return Ok(());
     };
     let cx = root();
-    ensure!(read_file(&cx, "/etc/osyx-release") == Ok(b"OSyx 0.1.0\n".to_vec()), "/etc/osyx-release");
+    let release = format!("OSyx {}\n", include_str!("../../VERSION").trim());
+    ensure!(read_file(&cx, "/etc/osyx-release") == Ok(release.into_bytes()), "/etc/osyx-release");
     let st = vfs::stat(&cx, "/osyx-seed/secret").map_err(|x| e("stat secret", x))?;
     ensure!((st.mode, st.uid, st.kind) == (0o600, 0, KIND_FILE), "ext4 ownership and mode {st:?}");
     ensure!(vfs::open(&user(1000), "/osyx-seed/secret", OPEN_READ, 0).err() == Some(Errno::PermissionDenied), "ext4 permissions");

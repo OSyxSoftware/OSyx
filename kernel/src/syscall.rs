@@ -244,6 +244,19 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             Ok(0)
         });
     }
+    // Channel messages without handles and waits on channels, pipes,
+    // listeners and sockets only take the spinlocks of those objects, the
+    // handle table and the scheduler. IPC-heavy programs (a browser's
+    // processes talk through channels all the time) must not queue every
+    // message behind other CPUs' system calls.
+    if let Some(r) = lock_free_ipc(f) {
+        crate::smp::note_syscall(f.rax);
+        if sched::current_kill_pending() {
+            let _entry = crate::smp::KernelEntry::new_yielding();
+            process::finish_current_thread(0);
+        }
+        return osyx_abi::encode(r);
+    }
     let _entry = crate::smp::KernelEntry::new_yielding();
     crate::smp::set_lock_nr(f.rax);
     cpu::enable_interrupts();
@@ -411,6 +424,34 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         process::finish_current_thread(0);
     }
     osyx_abi::encode(r)
+}
+
+/// The IPC system calls that run without the entry lock, with interrupts
+/// enabled; `None` sends the call down the normal path.
+fn lock_free_ipc(f: &SyscallFrame) -> Option<Result<u64, Errno>> {
+    let r = match f.rax {
+        nr::CHANNEL_SEND => sys_objects::channel_send_unlocked(f.rdi, f.rsi),
+        nr::CHANNEL_RECV => sys_objects::channel_recv_unlocked(f.rdi, f.rsi),
+        nr::WAIT_HANDLES => sys_objects::wait_handles_unlocked(f.rdi, f.rsi, f.rdx),
+        nr::WRITE => write_unlocked(f.rdi, f.rsi, f.rdx),
+        _ => return None,
+    };
+    if r.is_some() {
+        crate::smp::note_lock_free(f.rax);
+    }
+    r
+}
+
+/// `write` to a pipe or to the console (standard output or error without a
+/// handle), which only take the pipe's and the process table's spinlocks
+/// and the serial port's; files and sockets take the normal path.
+fn write_unlocked(fd: u64, buf: u64, len: u64) -> Option<Result<u64, Errno>> {
+    let object = process::get_object(fd);
+    if !matches!(object, Ok(Object::Pipe(_))) && (object.is_ok() || (fd != osyx_abi::STDOUT && fd != osyx_abi::STDERR)) {
+        return None;
+    }
+    cpu::enable_interrupts();
+    Some(sys_write(fd, buf, len))
 }
 
 /// Nanoseconds to timer ticks, rounded up, plus one tick for ns > 0: the

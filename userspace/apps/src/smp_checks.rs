@@ -10,6 +10,10 @@ static READY: AtomicU32 = AtomicU32::new(0);
 static COUNT: AtomicU64 = AtomicU64::new(0);
 static REQUEST: AtomicU32 = AtomicU32::new(0);
 static ACK: AtomicU32 = AtomicU32::new(0);
+static FUTEX_WORD: AtomicU32 = AtomicU32::new(0);
+static FUTEX_READY: AtomicU32 = AtomicU32::new(0);
+static FUTEX_DONE: AtomicU32 = AtomicU32::new(0);
+static FUTEX_NEXT: AtomicU32 = AtomicU32::new(0);
 
 fn wait(value: &AtomicU32, want: u32) -> bool {
     let deadline = Instant::now();
@@ -80,6 +84,32 @@ pub fn run(t: &mut Tests) {
     if cpus < 2 {
         return;
     }
+    t.check("SMP: futex wake racing with registration", || {
+        const ROUNDS: u32 = 1000;
+        let worker = thread::spawn(|| {
+            if system::thread_affinity(0, 2).is_err() { return false; }
+            for n in 1..=ROUNDS {
+                FUTEX_READY.store(n, Ordering::Release);
+                while FUTEX_WORD.load(Ordering::Acquire) == 0 {
+                    let result = raw::futex_wait(FUTEX_WORD.as_ptr(), 0, 200_000_000);
+                    if result == Err(raw::Errno::TimedOut) && FUTEX_WORD.load(Ordering::Acquire) == 0 { return false; }
+                }
+                FUTEX_DONE.store(n, Ordering::Release);
+                if !wait(&FUTEX_NEXT, n) { return false; }
+            }
+            true
+        });
+        let mut ok = true;
+        for n in 1..=ROUNDS {
+            if !wait(&FUTEX_READY, n) { ok = false; break; }
+            FUTEX_WORD.store(1, Ordering::Release);
+            raw::futex_wake(FUTEX_WORD.as_ptr(), 1);
+            if !wait(&FUTEX_DONE, n) { ok = false; break; }
+            FUTEX_WORD.store(0, Ordering::Release);
+            FUTEX_NEXT.store(n, Ordering::Release);
+        }
+        ok && worker.join().unwrap_or(false)
+    });
     t.check("SMP: cross-CPU TLB invalidation before physical-frame reuse", || {
         let Ok(page) = raw::map(4096, raw::PROT_READ | raw::PROT_WRITE) else {
             return false;

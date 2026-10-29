@@ -437,7 +437,7 @@ fn writeback_worker(_: u64, _: u64) {
                 core::fmt::Write::write_fmt(&mut line, format_args!(" {:#x}={d}ms", i)).ok();
             }
         }
-        crate::kprintln!("holdtime:{line}");
+        crate::kprintln!("holdtime:{line} lockfree={}", crate::smp::lock_free_calls());
         // TEMP per-process attribution of CLOCK / CHANNEL_RECV pollers.
         let pids = crate::smp::pid_counters();
         let mut line = alloc::string::String::new();

@@ -317,6 +317,8 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     if testing && boot.has_option("test.exit") {
         let (pages, bytes, out, input) = process::swap_stats();
         kprintln!("swap: stats pages={pages} bytes={bytes} out={out} in={input}");
+        let (refaults, protected) = process::swap_adaptive_stats();
+        kprintln!("swap: adaptive quick_refaults={refaults} protected_scans={protected}");
         if boot.has_option("test.power-cut") {
             // Simulated power loss: no unmount, no flush of anything pending.
             kprintln!("test.power-cut: stopping without unmounting");

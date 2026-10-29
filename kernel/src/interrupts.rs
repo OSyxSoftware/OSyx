@@ -200,7 +200,41 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     if f.vector == 14 && f.error_code & 3 == 3 && crate::process::cow_fault(cpu::read_cr2(), from_user) {
         return;
     }
+    // The timer only needs the tick counters (atomics) and the scheduler's
+    // own lock. Taking the entry lock here made every CPU's tick wait for
+    // other CPUs' system calls, and a thread preempted in user mode then had
+    // to win the lock back (spinning, interrupts off) just to return to user
+    // mode. A preempted kernel path that holds the lock keeps it across the
+    // switch as before (`pick_next` records ownership per thread).
+    if f.vector == pic::TIMER_VECTOR as u64 || f.vector == timer::APIC_TIMER_VECTOR as u64 {
+        let now = if f.vector == pic::TIMER_VECTOR as u64 || crate::smp::index() == 0 {
+            record_tick(TICKS.fetch_add(1, Ordering::Relaxed) + 1)
+        } else {
+            ticks()
+        };
+        // Acknowledge first: the scheduler may switch to another thread
+        // before this handler returns.
+        if f.vector == pic::TIMER_VECTOR as u64 {
+            pic::end_of_interrupt(0);
+        } else {
+            apic::eoi();
+        }
+        crate::sched::tick(now);
+        if from_user && crate::sched::current_kill_pending() {
+            let _entry = crate::smp::KernelEntry::new();
+            crate::smp::set_hold_kind(crate::smp::HOLD_TIMER);
+            crate::process::finish_current_thread(0);
+        }
+        return;
+    }
     let _entry = crate::smp::KernelEntry::new();
+    if _entry.acquired() {
+        crate::smp::set_hold_kind(if f.vector < 32 {
+            crate::smp::HOLD_EXCEPTION
+        } else {
+            crate::smp::HOLD_IRQ
+        });
+    }
     match f.vector {
         0..=31 if from_user => {
             if !crate::user_fault::deliver(f) {kill_process(f);}
@@ -217,20 +251,6 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
             fatal(f);
         }
         0..=31 => fatal(f),
-        v if v == pic::TIMER_VECTOR as u64 => {
-            let now = record_tick(TICKS.fetch_add(1, Ordering::Relaxed) + 1);
-            // Acknowledge first: the scheduler may switch to another thread
-            // before this handler returns.
-            pic::end_of_interrupt(0);
-            crate::sched::tick(now);
-        }
-        v if v == timer::APIC_TIMER_VECTOR as u64 => {
-            let now = if crate::smp::index() == 0 {
-                record_tick(TICKS.fetch_add(1, Ordering::Relaxed) + 1)
-            } else { ticks() };
-            apic::eoi();
-            crate::sched::tick(now);
-        }
         v @ 33..=47 => {
             let irq = (v - pic::IRQ_BASE as u64) as u8;
             if pic::is_spurious(irq) {

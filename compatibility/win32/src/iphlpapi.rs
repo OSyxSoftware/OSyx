@@ -62,7 +62,7 @@ extern "win64" fn GetAdaptersInfo(out: u64, len: *mut u32) -> u32 {
             teb::put(p, 404, 6u32);
             core::ptr::copy_nonoverlapping(i.mac.as_ptr(), (p + 408) as *mut u8, 6);
             teb::put(p, 416, i.index as u32);
-            teb::put(p, 420, 6u32); // Ethernet
+            teb::put(p, 420, if i.flags & net::IFF_WIRELESS != 0 { 71u32 } else { 6u32 });
             teb::put(p, 424, u32::from(i.method == net::CONFIG_DHCP));
         }
         out_a(net::field(&i.name), (p + 12) as *mut u8, 260);
@@ -104,7 +104,7 @@ extern "win64" fn GetIfTable(out: u64, len: *mut u32, ordered: i32) -> u32 {
         out_w(name, p as *mut u16, 256);
         unsafe {
             teb::put(p, 512, i.index as u32);
-            teb::put(p, 516, if loopback { 24u32 } else { 6u32 });
+            teb::put(p, 516, if loopback { 24u32 } else if i.flags & net::IFF_WIRELESS != 0 { 71u32 } else { 6u32 });
             teb::put(p, 520, i.mtu);
             // Link speed is not provided by OSyx: leave it unknown (zero).
             if !loopback {

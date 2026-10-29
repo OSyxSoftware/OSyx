@@ -99,6 +99,34 @@ void __stdcall start(void) {
         cl = CreateFileW(NAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
         GetOverlappedResult(srv, &oc2, &bytes, TRUE);
     }
+    /* Exercise repeated overlapped operations and two simultaneous reads.
+     * Suppress completion-port packets so this stress does not fill it. */
+    HANDLE ev1 = CreateEventW(NULL, TRUE, FALSE, NULL), ev2 = CreateEventW(NULL, TRUE, FALSE, NULL);
+    int stress_ok = ev1 && ev2 && cl != INVALID_HANDLE_VALUE;
+    for (int i = 0; stress_ok && i < 256; i++) {
+        OVERLAPPED a = {0}, b = {0};
+        char x = 0, y = 0;
+        a.hEvent = (HANDLE)((ULONG_PTR)ev1 | 1); b.hEvent = (HANDLE)((ULONG_PTR)ev2 | 1);
+        BOOL ar = ReadFile(srv, &x, 1, NULL, &a);
+        if (!ar && GetLastError() != ERROR_IO_PENDING) { stress_ok = 0; break; }
+        BOOL br = ReadFile(srv, &y, 1, NULL, &b);
+        if (!br && GetLastError() != ERROR_IO_PENDING) {
+            CancelIoEx(srv, &a); GetOverlappedResult(srv, &a, &bytes, TRUE);
+            stress_ok = 0; break;
+        }
+        DWORD sent = 0, got_a = 0, got_b = 0;
+        if (!WriteFile(cl, "xy", 2, &sent, NULL) || sent != 2) {
+            CancelIoEx(srv, &a); CancelIoEx(srv, &b);
+            GetOverlappedResult(srv, &a, &bytes, TRUE); GetOverlappedResult(srv, &b, &bytes, TRUE);
+            stress_ok = 0; break;
+        }
+        BOOL aok = GetOverlappedResult(srv, &a, &got_a, TRUE);
+        BOOL bok = GetOverlappedResult(srv, &b, &got_b, TRUE);
+        stress_ok = aok && bok && got_a == 1 && got_b == 1 &&
+                    ((x == 'x' && y == 'y') || (x == 'y' && y == 'x'));
+    }
+    check("repeated and concurrent overlapped pipe reads", stress_ok);
+    CloseHandle(ev1); CloseHandle(ev2);
     OVERLAPPED ox = {0};
     ox.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     r = ReadFile(srv, buf, sizeof buf, NULL, &ox);

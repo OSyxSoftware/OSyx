@@ -351,6 +351,11 @@ fn stop_wait(w: &Wait) {
 }
 
 extern "win64" fn SetThreadpoolWait(wait: u64, handle: u64, timeout: *const i64) {
+    static ARMS: AtomicU64 = AtomicU64::new(0);
+    if crate::COUNT.load(Ordering::Relaxed) {
+        let count = ARMS.fetch_add(1, Ordering::Relaxed) + 1;
+        if count.is_multiple_of(1024) { os_std::eprintln!("winrun: threadpool wait arms={count}"); }
+    }
     // SAFETY: a PTP_WAIT from CreateThreadpoolWait.
     let w = unsafe { borrow::<Wait>(wait) };
     stop_wait(&w);

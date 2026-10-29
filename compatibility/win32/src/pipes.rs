@@ -19,7 +19,7 @@ use crate::{
     objects::{self, Object},
     teb,
 };
-use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::{BTreeMap, VecDeque}, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use os_std::sync::Mutex;
 use osyx_abi::Errno;
@@ -54,6 +54,8 @@ const PIPE_REJECT_REMOTE_CLIENTS: u32 = 0x8;
 
 const CHUNK: usize = osyx_abi::ipc::MAX_MESSAGE;
 const SLICE_NS: u64 = 50_000_000;
+/// Internal result of `try_read` / `try_write`: the operation must wait.
+const WOULD_BLOCK: u32 = ERROR_IO_PENDING;
 
 /// A kernel handle closed with its last user.
 struct Fd(u64);
@@ -81,6 +83,17 @@ pub struct PipeObj {
     chan: Mutex<Option<Arc<Fd>>>,
     /// The unread rest of the message last received.
     rest: Mutex<Vec<u8>>,
+    /// Serializes reads: a reader that received more than it returned leaves
+    /// the rest in `rest`, where a reader already waiting on the channel
+    /// would not see it.
+    reading: Mutex<()>,
+    /// Serializes writes, so a write completed inline cannot overtake one
+    /// still waiting for channel space.
+    writing: Mutex<()>,
+    /// Overlapped reads and writes handed to helper threads and not yet
+    /// done. Later operations then take the same path to keep their order.
+    reads_queued: AtomicU32,
+    writes_queued: AtomicU32,
     /// The completion port and key this handle is associated with.
     port: Mutex<Option<(u64, u64)>>,
     /// Bumped by CancelIo; pending operations started earlier abort.
@@ -172,6 +185,16 @@ impl PipeObj {
 
     /// Reads up to `out.len()` bytes: (count, whether the message has more).
     fn read(&self, out: &mut [u8], epoch: u64) -> Result<(usize, bool), u32> {
+        self.read_mode(out, epoch, true)
+    }
+
+    /// Like `read`, but fails with WOULD_BLOCK instead of waiting for data or
+    /// for another reader.
+    fn try_read(&self, out: &mut [u8]) -> Result<(usize, bool), u32> {
+        self.read_mode(out, self.cancel.load(Ordering::SeqCst), false)
+    }
+
+    fn read_mode(&self, out: &mut [u8], epoch: u64, wait: bool) -> Result<(usize, bool), u32> {
         let chan = self.chan()?;
         // TEMP: is the tens-of-thousands-per-second receive rate a spin on
         // empty channels or real IPC traffic?
@@ -193,6 +216,17 @@ impl PipeObj {
                 R_EMPTY.load(core::sync::atomic::Ordering::Relaxed),
                 R_REST.load(core::sync::atomic::Ordering::Relaxed),
             );
+        }
+        let _reading = if wait {
+            self.reading.lock().unwrap()
+        } else {
+            match self.reading.try_lock() {
+                Ok(g) => g,
+                Err(_) => return Err(WOULD_BLOCK),
+            }
+        };
+        if self.cancel.load(Ordering::SeqCst) != epoch {
+            return Err(ERROR_OPERATION_ABORTED);
         }
         loop {
             {
@@ -240,6 +274,7 @@ impl PipeObj {
                             R_NOWAIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             return Err(ERROR_NO_DATA);
                         }
+                        Errno::WouldBlock if !wait => return Err(WOULD_BLOCK),
                         Errno::WouldBlock => self.block(chan.0, osyx_abi::ipc::WAIT_READABLE, epoch)?,
                         Errno::BrokenPipe => return Err(ERROR_BROKEN_PIPE),
                         e => return Err(errno_to_win32(e)),
@@ -249,11 +284,33 @@ impl PipeObj {
         }
     }
 
+    /// Sends `data` in one channel message without waiting, or fails with
+    /// WOULD_BLOCK (also for data that needs several messages, which must not
+    /// be sent partly here).
+    fn try_write(&self, data: &[u8]) -> Result<usize, u32> {
+        let chan = self.chan()?;
+        if data.len() > CHUNK {
+            return Err(WOULD_BLOCK);
+        }
+        if data.is_empty() && !self.message_type {
+            return Ok(0);
+        }
+        // An earlier write still waiting keeps the byte order.
+        let Ok(_writing) = self.writing.try_lock() else { return Err(WOULD_BLOCK) };
+        match os_sys::channel_send(chan.0, data, &[]) {
+            Ok(()) => Ok(data.len()),
+            Err(Errno::WouldBlock) => Err(WOULD_BLOCK),
+            Err(Errno::BrokenPipe) => Err(ERROR_NO_DATA),
+            Err(e) => Err(errno_to_win32(e)),
+        }
+    }
+
     fn write(&self, data: &[u8], epoch: u64) -> Result<usize, u32> {
         let chan = self.chan()?;
         if self.message_type && data.len() > CHUNK {
             return Err(ERROR_NOT_SUPPORTED); // a message must fit one channel message
         }
+        let _writing = self.writing.lock().unwrap();
         let chunks: Vec<&[u8]> = if data.is_empty() { alloc::vec![data] } else { data.chunks(CHUNK).collect() };
         if data.is_empty() && !self.message_type {
             return Ok(0);
@@ -298,9 +355,89 @@ pub fn error_of(status: u64) -> u32 {
     }
 }
 
+type PipeJob = Box<dyn FnOnce() + Send>;
+
+struct PipeWorkers {
+    jobs: VecDeque<PipeJob>,
+    idle: usize,
+    starting: usize,
+}
+
+static PIPE_WORKERS: Mutex<PipeWorkers> = Mutex::new(PipeWorkers { jobs: VecDeque::new(), idle: 0, starting: 0 });
+static PIPE_WORK_WAKE: AtomicU32 = AtomicU32::new(0);
+static PIPE_WORKER_STARTS: AtomicU64 = AtomicU64::new(0);
+
+/// Queue an operation without limiting concurrency: an operation may block
+/// indefinitely while its peer needs a different operation to make progress.
+/// Idle workers remain available for a short time to handle bursts.
+fn submit_pipe_job(job: PipeJob) -> Result<(), ()> {
+    let mut pool = PIPE_WORKERS.lock().unwrap();
+    pool.jobs.push_back(job);
+    if pool.jobs.len() > pool.idle + pool.starting {
+        pool.starting += 1;
+        if os_std::thread::Builder::new().stack_size(64 << 10).spawn(pipe_worker).is_err() {
+            pool.starting -= 1;
+            // The mutex prevents another worker from taking this job.
+            pool.jobs.pop_back();
+            return Err(());
+        }
+        if crate::COUNT.load(Ordering::Relaxed) { PIPE_WORKER_STARTS.fetch_add(1, Ordering::Relaxed); }
+    }
+    drop(pool);
+    PIPE_WORK_WAKE.fetch_add(1, Ordering::Release);
+    os_sys::futex_wake(PIPE_WORK_WAKE.as_ptr(), 1);
+    Ok(())
+}
+
+fn pipe_worker() {
+    let mut starting = true;
+    loop {
+        let mut pool = PIPE_WORKERS.lock().unwrap();
+        if starting {
+            pool.starting -= 1;
+            starting = false;
+        }
+        if let Some(job) = pool.jobs.pop_front() {
+            drop(pool);
+            job();
+            continue;
+        }
+        pool.idle += 1;
+        let seq = PIPE_WORK_WAKE.load(Ordering::Acquire);
+        drop(pool);
+        let result = os_sys::futex_wait(PIPE_WORK_WAKE.as_ptr(), seq, 10_000_000_000);
+        let mut pool = PIPE_WORKERS.lock().unwrap();
+        pool.idle -= 1;
+        if result == Err(Errno::TimedOut) && pool.jobs.is_empty() {
+            return;
+        }
+    }
+}
+
+fn reads_queued(p: &PipeObj) -> &AtomicU32 {
+    &p.reads_queued
+}
+
+fn writes_queued(p: &PipeObj) -> &AtomicU32 {
+    &p.writes_queued
+}
+
 /// Runs `op` for an overlapped request: pending now, completed from a
-/// helper thread. `op` returns (status, bytes).
-fn start(p: Arc<PipeObj>, ov: u64, op: impl FnOnce(&PipeObj, u64) -> (u64, u32) + Send + 'static) -> i32 {
+/// helper thread. `op` returns (status, bytes). `queued` selects the
+/// counter of queued operations of this direction, if any.
+fn start(
+    p: Arc<PipeObj>,
+    ov: u64,
+    queued: Option<fn(&PipeObj) -> &AtomicU32>,
+    op: impl FnOnce(&PipeObj, u64) -> (u64, u32) + Send + 'static,
+) -> i32 {
+    static STARTS: AtomicU64 = AtomicU64::new(0);
+    if crate::COUNT.load(Ordering::Relaxed) {
+        let count = STARTS.fetch_add(1, Ordering::Relaxed) + 1;
+        if count.is_multiple_of(1024) {
+            os_std::eprintln!("winrun: overlapped pipe starts={count} workers={}", PIPE_WORKER_STARTS.load(Ordering::Relaxed));
+        }
+    }
     let epoch = p.cancel.load(Ordering::SeqCst);
     // SAFETY: the caller's OVERLAPPED, which must stay valid until the
     // operation completes (the Windows contract).
@@ -313,29 +450,65 @@ fn start(p: Arc<PipeObj>, ov: u64, op: impl FnOnce(&PipeObj, u64) -> (u64, u32) 
         kernel32::reset_event(event & !1);
     }
     p.pending.fetch_add(1, Ordering::SeqCst);
+    if let Some(q) = queued {
+        q(&p).fetch_add(1, Ordering::SeqCst);
+    }
     let worker = p.clone();
-    let spawned = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
+    let spawned = submit_pipe_job(Box::new(move || {
         let (status, bytes) = op(&worker, epoch);
-        // SAFETY: as above.
-        unsafe {
-            teb::put(ov, 8, bytes as u64);
-            teb::put(ov, 0, status);
+        if let Some(q) = queued {
+            q(&worker).fetch_sub(1, Ordering::SeqCst);
         }
         worker.pending.fetch_sub(1, Ordering::SeqCst);
-        if event & !1 != 0 {
-            kernel32::set_event(event & !1);
-        }
-        if event & 1 == 0 {
-            if let Some((port, key)) = *worker.port.lock().unwrap() {
-                crate::threadpool::post(port, bytes, key, ov, if status == 0 { 0 } else { error_of(status) });
-            }
-        }
-    });
+        complete(&worker, ov, event, status, bytes);
+    }));
     if spawned.is_err() {
+        if let Some(q) = queued {
+            q(&p).fetch_sub(1, Ordering::SeqCst);
+        }
         p.pending.fetch_sub(1, Ordering::SeqCst);
         return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
     }
     fail(ERROR_IO_PENDING, 0)
+}
+
+/// Records an overlapped result, signals its event and queues its
+/// completion packet (unless the event's low bit suppresses it).
+fn complete(p: &PipeObj, ov: u64, event: u64, status: u64, bytes: u32) {
+    // SAFETY: the caller's OVERLAPPED, valid until the operation completes.
+    unsafe {
+        teb::put(ov, 8, bytes as u64);
+        teb::put(ov, 0, status);
+    }
+    if event & !1 != 0 {
+        kernel32::set_event(event & !1);
+    }
+    if event & 1 == 0 {
+        if let Some((port, key)) = *p.port.lock().unwrap() {
+            crate::threadpool::post(port, bytes, key, ov, if status == 0 { 0 } else { error_of(status) });
+        }
+    }
+}
+
+/// An overlapped operation that completed at once, as Windows reports it:
+/// TRUE (or ERROR_MORE_DATA) with the byte count, the event signaled and a
+/// completion packet queued. No helper thread is involved.
+fn complete_now(p: &PipeObj, ov: u64, done: *mut u32, status: u64, bytes: u32) -> i32 {
+    static FAST: AtomicU64 = AtomicU64::new(0);
+    if crate::COUNT.load(Ordering::Relaxed) {
+        let count = FAST.fetch_add(1, Ordering::Relaxed) + 1;
+        if count.is_multiple_of(1024) {
+            os_std::eprintln!("winrun: overlapped pipe inline completions={count}");
+        }
+    }
+    // SAFETY: the caller's OVERLAPPED.
+    let event: u64 = unsafe { teb::get(ov, 24) };
+    if !done.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *done = bytes };
+    }
+    complete(p, ov, event, status, bytes);
+    if status == 0 { 1 } else { fail(ERROR_MORE_DATA, 0) }
 }
 
 /// Synchronous results: TRUE, or FALSE with the error; ERROR_MORE_DATA
@@ -359,7 +532,17 @@ fn finish(r: Result<(usize, bool), u32>, done: *mut u32) -> i32 {
 pub fn read_file(p: Arc<PipeObj>, buf: *mut u8, n: u32, done: *mut u32, ov: u64) -> i32 {
     if p.overlapped && ov != 0 {
         let (b, len) = (buf as u64, n as usize);
-        return start(p, ov, move |p, epoch| {
+        if p.reads_queued.load(Ordering::SeqCst) == 0 {
+            // SAFETY: the caller's buffer of `n` bytes.
+            let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+            // Errors take the pending path, which reports them as before.
+            match p.try_read(out) {
+                Ok((k, false)) => return complete_now(&p, ov, done, 0, k as u32),
+                Ok((k, true)) => return complete_now(&p, ov, done, STATUS_BUFFER_OVERFLOW, k as u32),
+                Err(_) => {}
+            }
+        }
+        return start(p, ov, Some(reads_queued), move |p, epoch| {
             // SAFETY: the caller's buffer, valid until completion.
             let out = unsafe { core::slice::from_raw_parts_mut(b as *mut u8, len) };
             match p.read(out, epoch) {
@@ -379,7 +562,14 @@ pub fn read_file(p: Arc<PipeObj>, buf: *mut u8, n: u32, done: *mut u32, ov: u64)
 pub fn write_file(p: Arc<PipeObj>, buf: *const u8, n: u32, done: *mut u32, ov: u64) -> i32 {
     if p.overlapped && ov != 0 {
         let (b, len) = (buf as u64, n as usize);
-        return start(p, ov, move |p, epoch| {
+        if p.writes_queued.load(Ordering::SeqCst) == 0 {
+            // SAFETY: the caller's buffer of `n` bytes.
+            let data = unsafe { core::slice::from_raw_parts(buf, len) };
+            if let Ok(k) = p.try_write(data) {
+                return complete_now(&p, ov, done, 0, k as u32);
+            }
+        }
+        return start(p, ov, Some(writes_queued), move |p, epoch| {
             // SAFETY: the caller's buffer, valid until completion.
             let data = unsafe { core::slice::from_raw_parts(b as *const u8, len) };
             match p.write(data, epoch) {
@@ -439,6 +629,10 @@ pub fn open_client(name: &str, flags: u32) -> Result<u64, u32> {
         listener: None,
         chan: Mutex::new(Some(Arc::new(Fd(c)))),
         rest: Mutex::new(Vec::new()),
+        reading: Mutex::new(()),
+        writing: Mutex::new(()),
+        reads_queued: AtomicU32::new(0),
+        writes_queued: AtomicU32::new(0),
         port: Mutex::new(None),
         cancel: AtomicU64::new(0),
         pending: AtomicU32::new(0),
@@ -517,6 +711,10 @@ extern "win64" fn CreateNamedPipeW(
         listener: Some(listener),
         chan: Mutex::new(None),
         rest: Mutex::new(Vec::new()),
+        reading: Mutex::new(()),
+        writing: Mutex::new(()),
+        reads_queued: AtomicU32::new(0),
+        writes_queued: AtomicU32::new(0),
         port: Mutex::new(None),
         cancel: AtomicU64::new(0),
         pending: AtomicU32::new(0),
@@ -542,7 +740,7 @@ extern "win64" fn ConnectNamedPipe(h: u64, ov: u64) -> i32 {
         return fail(ERROR_PIPE_LISTENING, 0);
     }
     if p.overlapped && ov != 0 {
-        return start(p, ov, |p, epoch| match p.connect(epoch, true) {
+        return start(p, ov, None, |p, epoch| match p.connect(epoch, true) {
             Ok(()) | Err(ERROR_PIPE_CONNECTED) => (0, 0),
             Err(e) => (status_of(e), 0),
         });
@@ -630,7 +828,7 @@ extern "win64" fn TransactNamedPipe(h: u64, input: *const u8, in_len: u32, outpu
         p.read(out, epoch)
     };
     if p.overlapped && ov != 0 {
-        return start(p, ov, move |p, epoch| match op(p, epoch) {
+        return start(p, ov, None, move |p, epoch| match op(p, epoch) {
             Ok((k, false)) => (0, k as u32),
             Ok((k, true)) => (STATUS_BUFFER_OVERFLOW, k as u32),
             Err(e) => (status_of(e), 0),
@@ -742,6 +940,10 @@ pub(crate) fn relay_in(pid: u64, id: u32, flags: u32) -> Result<Object, u32> {
         listener: None,
         chan: Mutex::new(Some(Arc::new(Fd(c)))),
         rest: Mutex::new(Vec::new()),
+        reading: Mutex::new(()),
+        writing: Mutex::new(()),
+        reads_queued: AtomicU32::new(0),
+        writes_queued: AtomicU32::new(0),
         port: Mutex::new(None),
         cancel: AtomicU64::new(0),
         pending: AtomicU32::new(0),

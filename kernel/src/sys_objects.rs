@@ -151,6 +151,91 @@ fn channel(handle: u64) -> Result<Arc<ipc::Endpoint>, Errno> {
     }
 }
 
+/// `channel_send` without the entry lock, for messages without handles
+/// (`None` otherwise, before anything happened). The channel, the handle
+/// table and the wait queues have their own spinlocks; user copies happen
+/// while none of them is held.
+pub fn channel_send_unlocked(handle: u64, msg: u64) -> Option<Result<u64, Errno>> {
+    crate::arch::cpu::enable_interrupts();
+    let m: ChannelMsg = match get_user(msg) {
+        Ok(m) => m,
+        Err(_) => return None,
+    };
+    if m.handle_count != 0 {
+        return None;
+    }
+    Some((|| {
+        let c = channel(handle)?;
+        if m.len > MAX_MESSAGE as u64 {
+            return Err(Errno::InvalidArgument);
+        }
+        let mut data = alloc::vec![0u8; m.len as usize];
+        copy_from_user(&mut data, m.data)?;
+        c.send(data, Vec::new()).map(|_| 0)
+    })())
+}
+
+/// `channel_recv` for a caller that accepts no handles, without the entry
+/// lock (`None` for other callers).
+pub fn channel_recv_unlocked(handle: u64, msg: u64) -> Option<Result<u64, Errno>> {
+    crate::arch::cpu::enable_interrupts();
+    let m: ChannelMsg = match get_user(msg) {
+        Ok(m) => m,
+        Err(_) => return None,
+    };
+    if m.handle_count != 0 {
+        return None;
+    }
+    Some((|| {
+        let c = channel(handle)?;
+        let cap = (m.len as usize).min(MAX_MESSAGE);
+        if !user_range_ok(m.data, cap as u64) {
+            return Err(Errno::Fault);
+        }
+        let received = c.recv(cap, 0)?;
+        copy_to_user(m.data, &received.data)?;
+        Ok(received.data.len() as u64)
+    })())
+}
+
+/// `wait_handles` without the entry lock when every object polls under its
+/// own spinlocks (devices take the normal path).
+pub fn wait_handles_unlocked(items_ptr: u64, count: u64, timeout_ns: u64) -> Option<Result<u64, Errno>> {
+    if count == 0 || count > MAX_WAIT_ITEMS as u64 {
+        return None;
+    }
+    crate::arch::cpu::enable_interrupts();
+    let mut items = alloc::vec![WaitItem::default(); count as usize];
+    // SAFETY: plain repr(C) array.
+    let bytes = unsafe { core::slice::from_raw_parts_mut(items.as_mut_ptr() as *mut u8, items.len() * 16) };
+    copy_from_user(bytes, items_ptr).ok()?;
+    let mut waitables = Vec::with_capacity(items.len());
+    for it in &items {
+        let w = process::get_object(it.handle).ok()?.waitable();
+        if matches!(w, object::Waitable::Device(_)) {
+            return None;
+        }
+        waitables.push((w, it.events));
+    }
+    Some(finish_wait(items, items_ptr, &waitables, timeout_ns))
+}
+
+fn finish_wait(mut items: Vec<WaitItem>, items_ptr: u64, waitables: &[(object::Waitable, u32)], timeout_ns: u64) -> Result<u64, Errno> {
+    let deadline = if timeout_ns == 0 { Some(0) } else { crate::waitq::deadline_after_ns(timeout_ns) };
+    let revents = object::wait_any(waitables, deadline)?;
+    let mut ready = 0;
+    for (it, r) in items.iter_mut().zip(revents) {
+        it.revents = r;
+        if r != 0 {
+            ready += 1;
+        }
+    }
+    // SAFETY: plain repr(C) array.
+    let bytes = unsafe { core::slice::from_raw_parts(items.as_ptr() as *const u8, items.len() * 16) };
+    copy_to_user(items_ptr, bytes)?;
+    Ok(ready)
+}
+
 pub fn channel_send(handle: u64, msg: u64) -> Result<u64, Errno> {
     let c = channel(handle)?;
     let m: ChannelMsg = get_user(msg)?;
@@ -296,19 +381,7 @@ pub fn wait_handles(items_ptr: u64, count: u64, timeout_ns: u64) -> Result<u64, 
     for it in &items {
         waitables.push((process::get_object(it.handle)?.waitable(), it.events));
     }
-    let deadline = if timeout_ns == 0 { Some(0) } else { crate::waitq::deadline_after_ns(timeout_ns) };
-    let revents = object::wait_any(&waitables, deadline)?;
-    let mut ready = 0;
-    for (it, r) in items.iter_mut().zip(revents) {
-        it.revents = r;
-        if r != 0 {
-            ready += 1;
-        }
-    }
-    // SAFETY: as above.
-    let bytes = unsafe { core::slice::from_raw_parts(items.as_ptr() as *const u8, items.len() * 16) };
-    copy_to_user(items_ptr, bytes)?;
-    Ok(ready)
+    finish_wait(items, items_ptr, &waitables, timeout_ns)
 }
 
 pub fn display_info(out: u64) -> Result<u64, Errno> {

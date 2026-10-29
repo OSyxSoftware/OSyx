@@ -301,6 +301,44 @@ fn apply(c: &Context, n: &mut NativeContext) {
         }
     }
 }
+/// Readable bytes at `addr`, at most `max`, if the memory is committed.
+fn readable(addr: u64, max: usize) -> Option<&'static [u8]> {
+    let info = crate::mem::virtual_query(addr)?;
+    if info.state != crate::mem::MEM_COMMIT || info.protect == 0 || info.protect == 1 {
+        return None;
+    }
+    let len = ((info.base + info.size - addr) as usize).min(max);
+    // SAFETY: committed, accessible memory of at least `len` bytes.
+    Some(unsafe { core::slice::from_raw_parts(addr as *const u8, len) })
+}
+
+/// After a Rust panic in a Windows program, the stack still holds pointers
+/// to `core::panic::Location` values (file name, line, column). Prints the
+/// ones found in the top of the stack, which name the panicking source line.
+fn print_rust_locations(rsp: u64) {
+    let Some(stack) = readable(rsp, 16 << 10) else { return };
+    let mut shown = 0;
+    let (words, _) = stack.as_chunks::<8>();
+    for word in words {
+        let p = u64::from_le_bytes(*word);
+        let Some(loc) = readable(p, 24).filter(|l| l.len() == 24) else { continue };
+        let file = u64::from_le_bytes(loc[0..8].try_into().unwrap());
+        let len = u64::from_le_bytes(loc[8..16].try_into().unwrap()) as usize;
+        let line = u32::from_le_bytes(loc[16..20].try_into().unwrap());
+        if !(4..300).contains(&len) {
+            continue;
+        }
+        let Some(name) = readable(file, len).filter(|n| n.len() == len) else { continue };
+        if name.ends_with(b".rs") && name.iter().all(|&b| (0x20..0x7f).contains(&b)) {
+            os_std::eprintln!("winrun: ... rust location {}:{line}", core::str::from_utf8(name).unwrap_or(""));
+            shown += 1;
+            if shown == 6 {
+                break;
+            }
+        }
+    }
+}
+
 /// Every register of `c` into the native frame (RtlRestoreContext).
 pub(crate) fn apply_all(c: &Context, n: &mut NativeContext) {
     let mut full = *c;
@@ -381,6 +419,20 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         os_sys::gettid()
     );
     crate::kernel32::print_failures();
+    if record.code == 0x8000_0003 {
+        // MOZ_CRASH-style helpers pass the reason text in R8 before int3.
+        let r8 = context.regs[8];
+        if let Some(info) = crate::mem::virtual_query(r8).filter(|i| i.state == crate::mem::MEM_COMMIT && i.protect != 0 && i.protect != 1) {
+            let len = ((info.base + info.size - r8) as usize).min(256);
+            // SAFETY: committed, accessible memory of at least `len` bytes.
+            let bytes = unsafe { core::slice::from_raw_parts(r8 as *const u8, len) };
+            let text = bytes.split(|&b| b == 0).next().unwrap_or(&[]);
+            if !text.is_empty() && text.iter().all(|&b| (0x20..0x7f).contains(&b)) {
+                os_std::eprintln!("winrun: ... reason in r8: {}", core::str::from_utf8(text).unwrap_or(""));
+            }
+        }
+        print_rust_locations(context.regs[4]);
+    }
     if record.code == 0xc000_0005 && record.count >= 2 {
         // EXCEPTION_ACCESS_VIOLATION: [0] read/write/execute, [1] the address.
         let kind = match record.info[0] {

@@ -99,6 +99,12 @@ incompressible pages cannot indefinitely hide later pages. It invalidates
 cached translations after aging and removes a mapping before compressing.
 A later access restores the page. When a user fault has no frame, it wakes
 the worker and waits for a bounded time; exhaustion can still fail a fault.
+Adaptive reclaim counts pages restored within two seconds of eviction. Eight
+such refaults in two seconds protect their anonymous region from further
+scans for two seconds. Under severe pressure (less than half the low
+watermark), that protection is overridden to allow reclaim to make progress.
+The test-exit log reports quick refaults and protected scans; these are
+diagnostic counts rather than a measure of application latency.
 
 Run `scripts/swap-test.ps1` to build a diagnostic disk and boot a 192 MiB,
 two-CPU QEMU guest. The test fills anonymous pages with nonzero markers,

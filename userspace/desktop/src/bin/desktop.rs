@@ -203,7 +203,7 @@ impl NetSummary {
     fn read() -> NetSummary {
         let Some(i) = os_std::net::interfaces()
             .ok()
-            .and_then(|v| v.into_iter().find(|i| i.flags & os_std::net::IFF_LOOPBACK == 0))
+            .and_then(|v| os_std::net::preferred_ethernet(&v))
         else {
             return NetSummary { present: false, connected: false, detail: String::from("No adapter") };
         };

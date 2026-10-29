@@ -7,17 +7,22 @@ param([string]$Version = '1.23.4b', [switch]$SkipBuild, [switch]$SkipFetch, [int
       [ValidateRange(1024, 16384)][int]$MemoryMiB = 6144,
       [ValidateRange(1, 16)][int]$CpuCount = 4,
       [ValidatePattern('^(https?://|file:///)[^\s,]+$')][string]$ProbeUrl = 'file:///C:/tmp/zen-probe-page.html',
-      [switch]$NetworkTrace, [switch]$Installed)
-if ($SkipBuild -and ($PSBoundParameters.ContainsKey('ProbeUrl') -or $PSBoundParameters.ContainsKey('NetworkTrace'))) {
-    throw '-ProbeUrl and -NetworkTrace are embedded at build time; omit -SkipBuild when changing them.'
+      [switch]$NetworkTrace, [switch]$Count, [switch]$Installed,
+      # Leaves out the kernel's once-a-second statistics, which cost real
+      # time on the serial port; use it to measure speed.
+      [switch]$NoStats)
+if ($NetworkTrace -and $Count) { throw 'Choose either -NetworkTrace or -Count.' }
+if ($SkipBuild -and ($PSBoundParameters.ContainsKey('ProbeUrl') -or $PSBoundParameters.ContainsKey('NetworkTrace') -or $PSBoundParameters.ContainsKey('Count'))) {
+    throw '-ProbeUrl, -NetworkTrace and -Count are embedded at build time; omit -SkipBuild when changing them.'
 }
 . (Join-Path $PSScriptRoot 'common.ps1')
 $evidenceDir = Join-Path $BuildDir 'zen'
 New-Item -ItemType Directory -Force $evidenceDir | Out-Null
 if (-not $SkipBuild) {
     if (-not $SkipFetch) { & (Join-Path $PSScriptRoot 'fetch-zen.ps1') -Version $Version }
-    $probeArgs = $(if ($Installed) { 'zen-installed' } else { 'zen-probe' }) + ",$ProbeUrl" + $(if ($NetworkTrace) { ',trace' } else { '' })
-    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=tests,$probeArgs stats test.exit" -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
+    $probeArgs = $(if ($Installed) { 'zen-installed' } else { 'zen-probe' }) + ",$ProbeUrl" + $(if ($NetworkTrace) { ',trace' } elseif ($Count) { ',count' } else { '' })
+    $statsArg = $(if ($NoStats) { '' } else { ' stats' })
+    & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=tests,$probeArgs$statsArg test.exit" -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
 }
 $log = Join-Path $evidenceDir 'qemu.serial.log'
 if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }
