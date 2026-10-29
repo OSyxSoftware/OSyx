@@ -118,13 +118,16 @@ struct Region {
     /// is page `i` of the image). A page whose entry points at the image's
     /// frame is shared and mapped read-only; a write copies it first.
     image: Option<Arc<ImageSection>>,
+    /// Pages moved to compressed memory: page index -> compressed bytes
+    /// (empty: an all-zero page). Restored on the next access.
+    swapped: BTreeMap<u64, alloc::boxed::Box<[u8]>>,
 }
 
 impl Region {
     fn new(pages: u64, prot: u64) -> Region {
         let mut runs = BTreeMap::new();
         runs.insert(0, prot);
-        Region { pages, prot: runs, image: None }
+        Region { pages, prot: runs, image: None, swapped: BTreeMap::new() }
     }
 
     /// Whether `frame` at page `page` of the region is the shared image frame.
@@ -1129,11 +1132,18 @@ pub fn discard(addr: u64, len: u64) -> Result<(), Errno> {
     let pid = sched::current_pid();
     let mut t = TABLE.lock();
     let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
-    let (&start, r) = p.regions.range(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
+    let (&start, r) = p.regions.range_mut(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
     if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE {
         return Err(Errno::InvalidArgument);
     }
     release_frames(&mut p.space, start, r, addr, pages);
+    let first = (addr - start) / PAGE_SIZE;
+    let gone: Vec<u64> = r.swapped.range(first..first + pages).map(|(&k, _)| k).collect();
+    for k in gone {
+        if let Some(d) = r.swapped.remove(&k) {
+            swap_stats_remove(d.len());
+        }
+    }
     Ok(())
 }
 
@@ -1199,7 +1209,7 @@ fn prefault_range(mut page: u64, end: u64) -> u64 {
             page += PAGE_SIZE;
             continue;
         };
-        if !flags.writable {
+        if !flags.writable || r.swapped.contains_key(&((page - start) / PAGE_SIZE)) {
             page += PAGE_SIZE;
             continue;
         }
@@ -1208,6 +1218,7 @@ fn prefault_range(mut page: u64, end: u64) -> u64 {
             let Some((&next_start, next)) = p.regions.range(..=run_end).next_back() else { break };
             if run_end >= next_start + next.pages * PAGE_SIZE
                 || prot_flags(next.prot_at((run_end - next_start) / PAGE_SIZE)) != Ok(flags)
+                || next.swapped.contains_key(&((run_end - next_start) / PAGE_SIZE))
             {
                 break;
             }
@@ -1239,7 +1250,149 @@ pub fn demand_fault(va: u64, write: bool, fetch: bool) -> bool {
 /// CPU entering the kernel must not turn a first touch of heap or stack into
 /// an access violation in the process.
 pub fn demand_fault_user(va: u64, write: bool, fetch: bool) -> bool {
+    // Compressed reclaim is still under development and must not run until
+    // its lifecycle and concurrent access paths have been validated.
     demand_fault_in(va, write, fetch, true)
+}
+
+// ---- compressed memory ------------------------------------------------------------------
+
+/// Below this many free frames the swap thread starts compressing.
+const SWAP_LOW_FRAMES: u64 = 8192;
+/// It stops once this many are free again.
+const SWAP_HIGH_FRAMES: u64 = 16384;
+/// Pages examined per process table hold.
+const SWAP_BATCH: u64 = 64;
+/// Pages compressed to at most this many bytes are kept; others stay.
+const SWAP_MAX_COMPRESSED: usize = (PAGE_SIZE as usize) * 3 / 4;
+
+static SWAPPED_PAGES: AtomicU64 = AtomicU64::new(0);
+static SWAPPED_BYTES: AtomicU64 = AtomicU64::new(0);
+static SWAP_OUT: AtomicU64 = AtomicU64::new(0);
+static SWAP_IN: AtomicU64 = AtomicU64::new(0);
+/// Next process the reclaim scan starts with (round robin).
+static SWAP_CURSOR: AtomicU64 = AtomicU64::new(0);
+
+fn swap_stats_remove(len: usize) {
+    SWAPPED_PAGES.fetch_sub(1, Ordering::Relaxed);
+    SWAPPED_BYTES.fetch_sub(len as u64, Ordering::Relaxed);
+}
+
+/// (pages in compressed memory, bytes they use, pages compressed, pages
+/// restored) since boot.
+pub fn swap_stats() -> (u64, u64, u64, u64) {
+    (
+        SWAPPED_PAGES.load(Ordering::Relaxed),
+        SWAPPED_BYTES.load(Ordering::Relaxed),
+        SWAP_OUT.load(Ordering::Relaxed),
+        SWAP_IN.load(Ordering::Relaxed),
+    )
+}
+
+/// Compresses up to `want` cold (not recently accessed) writable private
+/// pages of user processes and frees their frames; returns how many.
+/// Shared memory, file views and image sections are never touched. A page
+/// is unmapped before it is read, so no thread can change it unseen; its
+/// next access faults and `demand_fault` restores it.
+pub fn reclaim(want: u64) -> u64 {
+    let mut done = 0u64;
+    let pids: Vec<Pid> = TABLE.lock().procs.keys().copied().collect();
+    if pids.is_empty() {
+        return 0;
+    }
+    let first = SWAP_CURSOR.fetch_add(1, Ordering::Relaxed) as usize % pids.len();
+    let mut buf = alloc::vec![0u8; SWAP_MAX_COMPRESSED];
+    for k in 0..pids.len() {
+        if done >= want {
+            break;
+        }
+        let pid = pids[(first + k) % pids.len()];
+        let mut t = TABLE.lock();
+        let Some(p) = t.procs.get_mut(&pid) else { continue };
+        if !matches!(p.life, Life::Running) {
+            continue;
+        }
+        let root = p.space.root;
+        let starts: Vec<u64> = p.regions.iter().filter(|(_, r)| r.image.is_none()).map(|(&s, _)| s).collect();
+        for start in starts {
+            if done >= want {
+                break;
+            }
+            let r = &p.regions[&start];
+            let mut cold = Vec::new();
+            paging::age_range_in(root, start, start + r.pages * PAGE_SIZE, |va, _frame, accessed, writable| {
+                if !accessed && writable {
+                    cold.push(va);
+                }
+                (cold.len() as u64) < SWAP_BATCH
+            });
+            for va in cold {
+                if done >= want {
+                    break;
+                }
+                let Ok(frame) = paging::unmap_in(root, va, true) else { continue };
+                // SAFETY: the frame is no longer mapped anywhere; it stays
+                // owned by this address space until freed below.
+                let page = unsafe { &*(phys_to_virt(frame) as *const [u8; PAGE_SIZE as usize]) };
+                let stored: Option<alloc::boxed::Box<[u8]>> = if page.iter().all(|&b| b == 0) {
+                    Some(alloc::boxed::Box::new([]))
+                } else {
+                    osyx_mm::lz::compress(page, &mut buf).map(|n| buf[..n].into())
+                };
+                let r = p.regions.get_mut(&start).expect("region exists");
+                match stored {
+                    Some(data) => {
+                        SWAPPED_PAGES.fetch_add(1, Ordering::Relaxed);
+                        SWAPPED_BYTES.fetch_add(data.len() as u64, Ordering::Relaxed);
+                        SWAP_OUT.fetch_add(1, Ordering::Relaxed);
+                        r.swapped.insert((va - start) / PAGE_SIZE, data);
+                        let _ = free_frame(frame);
+                        p.space.frames -= 1;
+                        done += 1;
+                    }
+                    None => {
+                        // Does not compress: put it back unchanged.
+                        let flags = prot_flags(r.prot_at((va - start) / PAGE_SIZE)).unwrap_or(Flags::user(true, false));
+                        if paging::map_in(root, va, frame, flags).is_err() {
+                            let _ = free_frame(frame);
+                            p.space.frames -= 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    done
+}
+
+/// Starts the thread that keeps free memory above the low watermark by
+/// compressing cold pages.
+pub fn start_swap() {
+    sched::spawn_kernel("swap", swap_thread, 0, 0);
+}
+
+fn swap_thread(_: u64, _: u64) {
+    let mut reported = 0u64;
+    loop {
+        sched::sleep_ticks(crate::arch::timer::ms_to_ticks(200));
+        let (free, _) = crate::mem::frame_stats();
+        if free >= SWAP_LOW_FRAMES {
+            continue;
+        }
+        let mut freed = 0;
+        while crate::mem::frame_stats().0 < SWAP_HIGH_FRAMES {
+            let n = reclaim(SWAP_BATCH);
+            if n == 0 {
+                break;
+            }
+            freed += n;
+        }
+        let (pages, bytes, _, _) = swap_stats();
+        if freed > 0 && pages >> 12 != reported >> 12 {
+            reported = pages;
+            kprintln!("swap: {} pages ({} MiB) in {} KiB of compressed memory", pages, pages >> 8, bytes >> 10);
+        }
+    }
 }
 
 fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> bool {
@@ -1264,7 +1417,8 @@ fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> bool {
         }
         (Flags::user(true, false), around.min(STACK_TOP))
     } else {
-        let Some((&start, r)) = p.regions.range(..=page).next_back() else { return false };
+        let root = p.space.root;
+        let Some((&start, r)) = p.regions.range_mut(..=page).next_back() else { return false };
         let region_end = start + r.pages * PAGE_SIZE;
         if page >= region_end {
             return false;
@@ -1274,9 +1428,46 @@ fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> bool {
         if (write && !flags.writable) || (fetch && !flags.executable) {
             return false;
         }
-        // Only pages with the same protection may be mapped in one run.
+        let index = (page - start) / PAGE_SIZE;
+        if let Some(data) = r.swapped.get(&index) {
+            if paging::translate_in(root, page).is_some() {
+                return true;
+            }
+            let Some(frame) = alloc_frame() else {
+                kprintln!("process {pid}: out of memory restoring {page:#x} from compressed memory");
+                return false;
+            };
+            if !data.is_empty() {
+                // SAFETY: a fresh frame owned here, reachable through the HHDM.
+                let dst = unsafe { &mut *(phys_to_virt(frame) as *mut [u8; PAGE_SIZE as usize]) };
+                if osyx_mm::lz::decompress(data, dst).is_err() {
+                    kprintln!("process {pid}: compressed page {page:#x} is corrupt");
+                    let _ = free_frame(frame);
+                    return false;
+                }
+            }
+            match paging::map_in(root, page, frame, flags) {
+                Ok(tables) => {
+                    let len = r.swapped.remove(&index).map_or(0, |d| d.len());
+                    swap_stats_remove(len);
+                    SWAP_IN.fetch_add(1, Ordering::Relaxed);
+                    p.space.frames += 1 + tables;
+                    return true;
+                }
+                Err(_) => {
+                    let _ = free_frame(frame);
+                    return false;
+                }
+            }
+        }
+        // Only pages with the same protection may be mapped in one run, and
+        // never over a page that lives in compressed memory.
         let mut end = page + PAGE_SIZE;
-        while end < region_end && end < around && prot_flags(r.prot_at((end - start) / PAGE_SIZE)) == Ok(flags) {
+        while end < region_end
+            && end < around
+            && prot_flags(r.prot_at((end - start) / PAGE_SIZE)) == Ok(flags)
+            && !r.swapped.contains_key(&((end - start) / PAGE_SIZE))
+        {
             end += PAGE_SIZE;
         }
         (flags, end)

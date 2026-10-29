@@ -498,6 +498,7 @@ version = "0.1.0"
 name = "osyx-desktop"
 version = "0.1.0"
 dependencies = [
+ "miniz_oxide",
  "os-std",
  "osyx-abi",
  "osyx-crypto",
@@ -559,6 +560,7 @@ dependencies = [
  "osyx-tmpfs",
  "osyx-usb",
  "osyx-vfs",
+ "osyx-wireless",
 ]
 
 [[package]]
@@ -620,6 +622,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "osyx-update"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom",
+ "sha2",
+]
+
+[[package]]
 name = "osyx-usb"
 version = "0.1.0"
 
@@ -638,6 +649,7 @@ dependencies = [
  "os-std",
  "osyx-7z",
  "osyx-crypto",
+ "osyx-update",
  "rustls",
  "rustls-rustcrypto",
  "sha1",
@@ -659,6 +671,16 @@ dependencies = [
  "osyx-pe-loader",
  "osyx-ui",
  "prism-client",
+]
+
+[[package]]
+name = "osyx-wireless"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "hmac",
+ "pbkdf2",
+ "sha1",
 ]
 
 [[package]]
@@ -690,6 +712,16 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
+ "hmac",
+]
 
 [[package]]
 name = "pem-rfc7468"

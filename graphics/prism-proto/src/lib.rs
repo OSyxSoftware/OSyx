@@ -121,6 +121,9 @@ pub enum Role {
     Popup = 3,
     /// A notification bubble (shell only): above panels, never focused.
     Notification = 4,
+    /// The lock screen (shell only): full screen above everything; while
+    /// one exists every key goes to it, whatever has the focus.
+    Lock = 5,
 }
 
 impl Role {
@@ -131,13 +134,14 @@ impl Role {
             2 => Role::Panel,
             3 => Role::Popup,
             4 => Role::Notification,
+            5 => Role::Lock,
             _ => return None,
         })
     }
 
     /// Roles only the shell may create.
     pub fn shell_only(self) -> bool {
-        matches!(self, Role::Desktop | Role::Panel | Role::Notification)
+        matches!(self, Role::Desktop | Role::Panel | Role::Notification | Role::Lock)
     }
 }
 

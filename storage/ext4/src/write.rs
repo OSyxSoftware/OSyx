@@ -1502,7 +1502,13 @@ impl<D: BlockDevice> Ext4<D> {
         Ok(bm[i / 8] & (1 << (i % 8)) != 0)
     }
 
-    /// Writes everything (nothing is cached: each call commits) and
+    /// Whether file data or metadata changes are held in memory, not yet
+    /// written to the device (see [`Ext4::sync`]).
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty() || !self.tx.blocks.is_empty() || !self.tx.dirty_groups.is_empty() || !self.tx.freed.is_empty()
+    }
+
+    /// Writes the staged file data and commits the pending metadata, then
     /// flushes the device.
     pub fn sync(&mut self) -> Result<()> {
         self.flush_pending()?;

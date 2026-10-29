@@ -14,9 +14,11 @@
 
 ## Safety
 
-- Disks the running system uses are refused by the kernel (`Busy` when a
-  volume on them is mounted); the live medium's ESP is mounted at `/boot`,
-  so it cannot be chosen. Disks under 770 MiB are not offered.
+- The disk OSyx runs from (`/` or `/boot`) cannot be chosen. A live boot
+  mounts at `/boot` only the ESP holding `\EFI\OSYX\BIN\rootfs.z`, not the
+  internal disk's ESP; other volumes go to `/mnt/<device>`, and a disk
+  whose volumes are only mounted there can be chosen: Setup unmounts them
+  before writing. Disks under 770 MiB are not offered.
 - Unattended mode (`setup --auto --disk X --confirm-erase X`) refuses to
   run unless both names match; the QEMU test uses it on an image file.
 - The boot loader is copied last: an interrupted installation is not

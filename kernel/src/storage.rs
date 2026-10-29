@@ -6,7 +6,7 @@
 //! | Mount point | File system | Source |
 //! |---|---|---|
 //! | `/` | ext4 | GPT partition of type "Linux root (x86-64)", or `root=<dev>` |
-//! | `/boot` | FAT32 | the EFI system partition |
+//! | `/boot` | FAT32 | the EFI system partition OSyx started from |
 //! | `/dev` | devfs | the device registry |
 //! | `/tmp` | tmpfs | RAM, mode 1777 |
 //! | `/run` | tmpfs | RAM, mode 0755 |
@@ -67,6 +67,55 @@ fn try_mount(fstype: &str, disk: Arc<dyn BlockDev>, at: &str, read_only: bool) -
     }
 }
 
+/// The whole disk a partition belongs to: `vda2` -> `vda`,
+/// `nvme0n1p2` -> `nvme0n1`.
+fn disk_of(partition: &str) -> &str {
+    let base = partition.trim_end_matches(|c: char| c.is_ascii_digit());
+    match base.strip_suffix('p') {
+        Some(d) if d.ends_with(|c: char| c.is_ascii_digit()) => d,
+        _ => base,
+    }
+}
+
+/// Mounts at `/boot` the EFI system partition OSyx started from. A machine
+/// often has several (the internal disk's, the live stick's): taking the
+/// first one found would mount another system's ESP and make its disk look
+/// busy to Setup. Installed systems use the ESP on the root's disk; a live
+/// boot uses the ESP holding the live archive and leaves the others alone.
+fn mount_boot(esps: &[Arc<dyn BlockDev>], root: Option<&str>, live: bool, used: &mut Vec<String>) {
+    let cx = Lookup::kernel();
+    for dev in esps {
+        let name = String::from(dev.name());
+        if let Some(root) = root {
+            if disk_of(&name) != disk_of(root) {
+                continue;
+            }
+        }
+        if probe_fs(dev) != Some("fat32") {
+            kprintln!("storage: EFI system partition {name} is not a FAT32 volume");
+            continue;
+        }
+        if !try_mount("fat32", dev.clone(), "/boot", false) {
+            continue;
+        }
+        if live && vfs::stat(&cx, "/boot/EFI/OSYX/BIN/rootfs.z").is_err() {
+            kprintln!("storage: {name} is not the live medium's EFI partition; not mounted");
+            if let Err(e) = vfs::unmount(&cx, "/boot") {
+                kprintln!("storage: cannot unmount {name} from /boot: {e:?}");
+                used.push(name);
+                return;
+            }
+            continue;
+        }
+        used.push(name);
+        return;
+    }
+    if root.is_some() {
+        // No ESP beside the root: fall back to any, as before.
+        mount_boot(esps, None, live, used);
+    }
+}
+
 /// Creates the standard mount points on a fresh fallback root and installs
 /// the boot modules as programs in `/bin`.
 fn populate_fallback_root() {
@@ -98,7 +147,8 @@ fn populate_fallback_root() {
 
 pub fn mount_all(boot: &BootData) -> Summary {
     let disks = block::devices();
-    let esp = disks.iter().find(|d| d.partition().is_some_and(|p| p.type_guid == osyx_part::TYPE_ESP)).cloned();
+    let esps: Vec<Arc<dyn BlockDev>> =
+        disks.iter().filter(|d| d.partition().is_some_and(|p| p.type_guid == osyx_part::TYPE_ESP)).cloned().collect();
     let wanted_root = boot.option_value("root");
     // A live boot keeps every disk untouched: the whole system comes from
     // the compressed archive in \EFI\OSYX\BIN.
@@ -157,14 +207,8 @@ pub fn mount_all(boot: &BootData) -> Summary {
     mount_virtual("/dev", Arc::new(DevFs::new()), "devfs");
     mount_virtual("/tmp", Arc::new(TmpfsVolume::new(TMP_LIMIT, 0o1777)), "tmpfs");
     mount_virtual("/run", Arc::new(TmpfsVolume::new(RUN_LIMIT, 0o755)), "tmpfs");
-    if let Some(dev) = esp {
-        let name = String::from(dev.name());
-        if probe_fs(&dev) == Some("fat32") && try_mount("fat32", dev, "/boot", false) {
-            used.push(name);
-        } else {
-            kprintln!("storage: EFI system partition {name} is not a FAT32 volume");
-        }
-    }
+    let root_name = if have_root { used.first().cloned() } else { None };
+    mount_boot(&esps, root_name.as_deref(), boot.has_option("live"), &mut used);
     // Remaining recognisable volumes go to /mnt/<device>.
     for d in disks {
         let name = String::from(d.name());

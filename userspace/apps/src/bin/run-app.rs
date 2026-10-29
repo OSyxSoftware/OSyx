@@ -8,7 +8,9 @@ os_std::entry!(main);
 
 fn main() -> i32 {
     let Some(program) = env::args().nth(1) else { return 2 };
-    if os::getuid().0 == 0 && os::setuid(1000, 1000).is_err() {
+    // The desktop user (uid 1000) in the administrators group (gid 27,
+    // "sudo"), which may change the system settings.
+    if os::getuid().0 == 0 && os::setuid(1000, 27).is_err() {
         return 1;
     }
     env::set_var("HOME", "/home/user");

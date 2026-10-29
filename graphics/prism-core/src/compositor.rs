@@ -200,6 +200,7 @@ impl Window {
             Role::Panel => 2,
             Role::Popup => 3,
             Role::Notification => 4,
+            Role::Lock => 5,
         }
     }
 
@@ -354,6 +355,8 @@ pub struct Compositor {
     /// until something is put there.
     clipboard: Vec<proto::ClipEntry>,
     clipboard_seq: u32,
+    /// PrintScreen was pressed; the platform saves the next frame.
+    screenshot_requested: bool,
 }
 
 const DOUBLE_CLICK_MS: u64 = 400;
@@ -394,6 +397,7 @@ impl Compositor {
             font: PropFont::parse(TITLE_FONT).expect("embedded title font"),
             last_title_click: None,
             alt_tab: None,
+            screenshot_requested: false,
             cascade: 0,
             now: 0,
             stats: Stats::default(),
@@ -849,7 +853,7 @@ impl Compositor {
         let t = if decorated { theme::TITLE_HEIGHT } else { 0 };
         let (mut w, mut h) = (width.min(self.screen.w), height.min(self.screen.h));
         let rect = match role {
-            Role::Desktop => self.screen,
+            Role::Desktop | Role::Lock => self.screen,
             Role::Panel | Role::Notification => Rect::new(x, y, w, h),
             Role::Popup => {
                 let origin = parent_id.and_then(|p| self.windows.get(&p)).map_or((0, 0), |p| (p.rect.x, p.rect.y));
@@ -1066,7 +1070,7 @@ impl Compositor {
         let parent_origin = w.parent.and_then(|p| self.windows.get(&p)).map(|p| (p.rect.x, p.rect.y));
         let w = self.windows.get_mut(&id).expect("window exists");
         match role {
-            Role::Desktop => return,
+            Role::Desktop | Role::Lock => return,
             Role::Panel | Role::Notification => w.rect = Rect::new(x, y, width.min(screen.w), height.min(screen.h)),
             Role::Popup => {
                 let (ox, oy) = parent_origin.unwrap_or((0, 0));
@@ -1584,7 +1588,7 @@ impl Compositor {
                 self.raise(id);
                 self.set_focus(Some(id));
             }
-            Role::Desktop => self.set_focus(Some(id)),
+            Role::Desktop | Role::Lock => self.set_focus(Some(id)),
             Role::Panel | Role::Notification => {}
         }
         let w = &self.windows[&id];
@@ -1643,9 +1647,47 @@ impl Compositor {
             .map(|w| (w.client, w.local))
     }
 
+    /// True once per PrintScreen press.
+    pub fn take_screenshot_request(&mut self) -> bool {
+        core::mem::take(&mut self.screenshot_requested)
+    }
+
+    /// A notification from PRISM itself (process id 0) to the shell.
+    pub fn notify_shell(&mut self, title: &str, body: &str) {
+        let shells: Vec<ClientId> = self.clients.iter().filter(|(_, cl)| cl.shell).map(|(id, _)| *id).collect();
+        for s in shells {
+            self.send(s, Event::Notification { from_pid: 0, title: String::from(title), body: String::from(body) });
+        }
+    }
+
+    /// The lock screen window, if the shell has one up.
+    fn lock_window(&self) -> Option<(ClientId, u32)> {
+        self.windows.values().find(|w| w.role == Role::Lock).map(|w| (w.client, w.local))
+    }
+
     fn key(&mut self, usage: u16, value: i32) {
         let down = value == osyx_input::KEY_DOWN;
         let mods = self.modifiers;
+        // While locked, every key (shortcuts included) goes to the lock screen.
+        if let Some((c, l)) = self.lock_window() {
+            let state = match value {
+                osyx_input::KEY_UP => proto::key_state::UP,
+                osyx_input::KEY_REPEAT => proto::key_state::REPEAT,
+                _ => proto::key_state::DOWN,
+            };
+            let text = if state != proto::key_state::UP { self.cfg.layout.translate(usage, mods) } else { None };
+            self.send(c, Event::Key { window: l, usage, state, modifiers: mods, text });
+            return;
+        }
+        // PrintScreen belongs to PRISM, whoever has focus.
+        if usage == key::PRINT_SCREEN {
+            if down {
+                self.screenshot_requested = true;
+                // A frame follows even when nothing else changed.
+                self.damage.add(Rect::new(self.screen.x, self.screen.y, 1, 1), self.screen);
+            }
+            return;
+        }
         // Alt+Tab cycles through normal windows while Alt is held.
         if down && usage == key::TAB && mods & modifier::LEFT_ALT != 0 {
             let candidates: Vec<WindowId> = self.mru.clone();
@@ -1671,8 +1713,9 @@ impl Compositor {
             osyx_input::KEY_REPEAT => proto::key_state::REPEAT,
             _ => proto::key_state::DOWN,
         };
-        // The Super key belongs to the shell (launcher), whoever has focus.
-        if usage == key::LEFT_GUI || usage == key::RIGHT_GUI {
+        // The Super key and Super+key shortcuts belong to the shell, whoever
+        // has focus.
+        if usage == key::LEFT_GUI || usage == key::RIGHT_GUI || mods & (modifier::LEFT_GUI | modifier::RIGHT_GUI) != 0 {
             if let Some((c, l)) = self.shell_panel() {
                 self.send(c, Event::Key { window: l, usage, state, modifiers: mods, text: None });
             }

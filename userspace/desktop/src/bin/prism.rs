@@ -22,6 +22,9 @@
 #![no_std]
 #![no_main]
 
+#[path = "../screenshot.rs"]
+mod screenshot;
+
 use os_std::fs::File;
 use os_std::ipc::{self, Channel, Listener, Mapping, SharedMemory, WaitItem, WAIT_HANGUP, WAIT_READABLE};
 use os_std::prelude::*;
@@ -280,6 +283,9 @@ impl Prism {
             self.log_window_changes(now);
             if self.comp.next_frame_in(now).is_some() && now.saturating_sub(self.last_frame) >= FRAME_MS {
                 self.frame(now);
+                if self.comp.take_screenshot_request() {
+                    self.save_screenshot();
+                }
                 self.deliver();
             }
             self.paint_cursor(false);
@@ -483,6 +489,33 @@ impl Prism {
             self.start_shell();
         } else {
             eprintln!("prism: the desktop shell keeps failing; not restarting it");
+        }
+    }
+
+    /// Saves the composed screen as a PNG in the desktop user's Pictures
+    /// folder and tells the shell where it went.
+    fn save_screenshot(&mut self) {
+        let t0 = Instant::now();
+        let (w, h) = (self.width, self.height);
+        let png = screenshot::encode_png(&self.back, w, h);
+        let secs = os_std::time::SystemTime::now()
+            .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let (days, rem) = (secs / 86_400, secs % 86_400);
+        let (y, m, d) = screenshot::civil_from_days(days as i64);
+        let dir = "/home/user/Pictures";
+        let name = format!("Screenshot {y:04}-{m:02}-{d:02} {:02}.{:02}.{:02} UTC.png", rem / 3600, rem / 60 % 60, rem % 60);
+        let path = format!("{dir}/{name}");
+        let result = fs::create_dir_all(dir).and_then(|_| fs::write(&path, &png));
+        match result {
+            Ok(()) => {
+                println!("prism: screenshot {w}x{h} saved to {path} ({} bytes, {} ms)", png.len(), t0.elapsed().as_millis());
+                self.comp.notify_shell("Screenshot saved", &format!("Pictures/{name}"));
+            }
+            Err(e) => {
+                eprintln!("prism: cannot save the screenshot to {path}: {e}");
+                self.comp.notify_shell("Screenshot failed", &format!("{e}"));
+            }
         }
     }
 

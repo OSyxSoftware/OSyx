@@ -13,6 +13,7 @@
 #![allow(clippy::result_large_err)]
 
 mod efi;
+mod fault;
 mod paging;
 mod screen;
 mod serial;
@@ -42,7 +43,7 @@ const STAGES: u32 = 6;
 const LOADER_VERSION: u32 = 0x00_01_00; // 0.1.0 as major << 16 | minor << 8 | patch
 const GIB: u64 = 1 << 30;
 
-// BootInfo region layout (one page-aligned OSYX_BOOTINFO allocation).
+// BootInfo region layout (one page-aligned LoaderData allocation).
 const CMDLINE_OFFSET: u64 = 256;
 const MAP_OFFSET: u64 = CMDLINE_OFFSET + CMDLINE_MAX as u64;
 
@@ -157,7 +158,7 @@ fn boot(
         Err(e) => fail!(Status::LOAD_ERROR, "Kernel image is invalid", "{}: {}", KERNEL_PATH, e.describe()),
     };
     let span = kernel.virt_span();
-    let kphys = alloc_pages(bs, memtype::OSYX_KERNEL, span / PAGE_SIZE)?;
+    let kphys = alloc_pages(bs, memtype::LOADER_DATA, span / PAGE_SIZE)?;
     // SAFETY: `kphys` is a fresh, identity-mapped allocation of `span` bytes;
     // segment ranges were validated to lie inside [virt_base, virt_base+span).
     unsafe {
@@ -192,19 +193,28 @@ fn boot(
     let hhdm_size = phys_top.max(4 * GIB).div_ceil(GIB) * GIB;
 
     let table_pages = paging::tables_needed(hhdm_size, span);
-    let table_pool = alloc_pages(bs, memtype::OSYX_KERNEL_DATA, table_pages)?;
+    let table_pool = alloc_pages(bs, memtype::LOADER_DATA, table_pages)?;
     // SAFETY: `table_pool` holds `table_pages` freshly allocated pages.
     let mut tables = unsafe { TableBuilder::new(table_pool, table_pages, nx) }.map_err(paging_err)?;
     tables.map_physical(hhdm_size).map_err(paging_err)?;
     tables.map_kernel(&kernel, kphys).map_err(paging_err)?;
     log!("page tables: {} pages, HHDM {:#x} covers {} GiB, NX {}", tables.used(), HHDM_OFFSET, hhdm_size / GIB, nx);
 
-    let stack = alloc_pages(bs, memtype::OSYX_KERNEL_DATA, STACK_PAGES)?;
+    let stack = alloc_pages(bs, memtype::LOADER_DATA, STACK_PAGES)?;
     let stack_top = HHDM_OFFSET + stack + STACK_PAGES * PAGE_SIZE;
 
-    let max_entries = map_cap / desc_size + 16;
+    // Every allocation is plain LoaderData: some firmware misbehaves in
+    // ExitBootServices when the map holds OS-defined types (0x8000_0000+).
+    // The kernel's own ranges are labelled in the converted map instead.
+    let claims = [
+        Claim { start: kphys, pages: span / PAGE_SIZE, kind: MemoryKind::KernelImage },
+        Claim { start: table_pool, pages: table_pages, kind: MemoryKind::KernelData },
+        Claim { start: stack, pages: STACK_PAGES, kind: MemoryKind::KernelData },
+    ];
+    // +2 descriptors per claim for the pieces split off around it.
+    let max_entries = map_cap / desc_size + 16 + 2 * claims.len();
     let region_bytes = MAP_OFFSET + max_entries as u64 * core::mem::size_of::<MemoryDescriptor>() as u64;
-    let region = alloc_pages(bs, memtype::OSYX_BOOTINFO, region_bytes.div_ceil(PAGE_SIZE))?;
+    let region = alloc_pages(bs, memtype::LOADER_DATA, region_bytes.div_ceil(PAGE_SIZE))?;
     // SAFETY: fresh allocation of at least `region_bytes` bytes.
     unsafe { core::ptr::write_bytes(region as *mut u8, 0, region_bytes as usize) };
     let cmd = cmdline.as_slice();
@@ -258,22 +268,32 @@ fn boot(
     let info_ptr = region as *mut BootInfo;
     // SAFETY: region is 8-byte (page) aligned and large enough.
     unsafe { info_ptr.write(info) };
-    stage(screen, 5, "Starting kernel");
+    stage(screen, 5, "Exiting boot services");
 
     // ---- Stage 6: ExitBootServices ---------------------------------------
-    let map_size = exit_boot_services(bs, image, map_buf, map_cap)?;
+    let map_size = exit_boot_services(bs, image, map_buf, map_cap, screen)?;
+    if opts.ebs_test {
+        log!("boot.ebstest: ExitBootServices returned; resetting");
+        reset();
+    }
     // Firmware IDT handlers are invalid now; an interrupt before the kernel
     // installs its own IDT can triple-fault on hardware.
     unsafe { asm!("cli", options(nomem, nostack)) };
+    // Report faults on screen until the kernel loads its own IDT.
+    // SAFETY: boot services are gone and IF is clear; the screen lives in
+    // efi_main's frame, which is never left.
+    unsafe { fault::install(screen.as_mut(), kernel.virt_base(), span) };
+    mark(screen, 7, MARK_DONE);
     // From here on: no firmware calls, no allocation.
     // SAFETY: the descriptor array lives in our BOOTINFO region with room for
     // `max_entries` entries; the UEFI map buffer holds `map_size` bytes.
     let count = unsafe {
         let out = core::slice::from_raw_parts_mut((region + MAP_OFFSET) as *mut MemoryDescriptor, max_entries);
-        convert_memory_map(map_buf, map_size, desc_size, out)
+        convert_memory_map(map_buf, map_size, desc_size, &claims, out)
     };
     // SAFETY: info_ptr written above.
     unsafe { (*info_ptr).memory_map.count = count as u64 };
+    mark(screen, 8, MARK_DONE);
     if let Some(s) = screen.as_mut() {
         s.handoff();
     }
@@ -304,15 +324,19 @@ fn check_cpu() -> Result<bool, BootError> {
 struct Options {
     fast: bool,
     mode: Option<(u32, u32)>,
+    /// Diagnostic: reset the machine right after ExitBootServices succeeds.
+    ebs_test: bool,
 }
 
 impl Options {
     fn parse(cmdline: &[u8]) -> Options {
         let text = core::str::from_utf8(cmdline).unwrap_or("");
-        let mut o = Options { fast: false, mode: None };
+        let mut o = Options { fast: false, mode: None, ebs_test: false };
         for word in text.split_ascii_whitespace() {
             if word == "boot.fast" {
                 o.fast = true;
+            } else if word == "boot.ebstest" {
+                o.ebs_test = true;
             } else if let Some(m) = word.strip_prefix("boot.mode=") {
                 if let Some((w, h)) = m.split_once('x') {
                     if let (Ok(w), Ok(h)) = (w.parse(), h.parse()) {
@@ -366,7 +390,7 @@ fn load_modules(bs: &BootServices, root: *mut File) -> Result<(u64, u64), BootEr
         log!("no {BIN_PATH} directory; kernel starts without user programs");
         return Ok((0, 0));
     };
-    let table = alloc_pages(bs, memtype::OSYX_BOOTINFO, 1)?;
+    let table = alloc_pages(bs, memtype::LOADER_DATA, 1)?;
     // SAFETY: fresh page; MAX_MODULES entries of 48 bytes fit in 4 KiB.
     let modules = unsafe {
         core::ptr::write_bytes(table as *mut u8, 0, PAGE_SIZE as usize);
@@ -429,7 +453,7 @@ fn load_modules(bs: &BootServices, root: *mut File) -> Result<(u64, u64), BootEr
             }
             Err(st) => fail!(st, "Boot modules not readable", "cannot query size of {} ({})", name_str, st.name()),
         };
-        let phys = alloc_pages(bs, memtype::OSYX_BOOTINFO, fsize.div_ceil(PAGE_SIZE))?;
+        let phys = alloc_pages(bs, memtype::LOADER_DATA, fsize.div_ceil(PAGE_SIZE))?;
         // SAFETY: fresh allocation of at least `fsize` bytes, identity mapped.
         let buf = unsafe { core::slice::from_raw_parts_mut(phys as *mut u8, fsize as usize) };
         if let Err(st) = read_exact(f, buf) {
@@ -582,19 +606,66 @@ fn highest_ram_address(bs: &BootServices, buf: *mut u8, cap: usize) -> Result<u6
 }
 
 /// Gets the final memory map and exits boot services. Returns the map size.
-fn exit_boot_services(bs: &BootServices, image: Handle, buf: *mut u8, cap: usize) -> Result<usize, BootError> {
+// Diagnostic squares in the top-right corner around ExitBootServices (slot 0
+// is the rightmost): on machines without a serial port they show which
+// firmware call never returned. The kernel draws its own in the top left.
+const MARK_CALL: u32 = 0x00FFC020;
+const MARK_DONE: u32 = 0x0020E040;
+const MARK_FAIL: u32 = 0x00FF3030;
+
+fn mark(screen: &mut Option<Screen>, slot: u32, rgb: u32) {
+    if let Some(s) = screen.as_mut() {
+        s.marker(slot, rgb);
+    }
+}
+
+/// Resets the machine without firmware help: the PCI reset register, then
+/// the keyboard controller, then a triple fault.
+fn reset() -> ! {
+    // SAFETY: port writes that request a platform reset; nothing runs after.
+    unsafe {
+        serial::outb(0xCF9, 0x02);
+        serial::outb(0xCF9, 0x06);
+        for _ in 0..1_000_000 {
+            core::hint::spin_loop();
+        }
+        serial::outb(0x64, 0xFE);
+        for _ in 0..1_000_000 {
+            core::hint::spin_loop();
+        }
+        let null_idt = [0u8; 10];
+        asm!("lidt [{}]", "int3", in(reg) null_idt.as_ptr(), options(noreturn));
+    }
+}
+
+/// Slots: 0 final GetMemoryMap, then per attempt n: 1+2n ExitBootServices
+/// called, 2+2n its result (green success, red failure).
+fn exit_boot_services(
+    bs: &BootServices,
+    image: Handle,
+    buf: *mut u8,
+    cap: usize,
+    screen: &mut Option<Screen>,
+) -> Result<usize, BootError> {
     for attempt in 0..3 {
         let (mut size, mut key, mut dsize, mut ver) = (cap, 0usize, 0usize, 0u32);
+        mark(screen, 0, MARK_CALL);
         // SAFETY: `buf` holds `cap` bytes.
         let st = unsafe { (bs.get_memory_map)(&mut size, buf as *mut _, &mut key, &mut dsize, &mut ver) };
         if st.is_error() {
             fail!(st, "Memory map unavailable", "final GetMemoryMap failed ({})", st.name());
         }
+        mark(screen, 0, MARK_DONE);
+        // Drawing touches only the framebuffer, so `key` stays current.
+        mark(screen, 1 + 2 * attempt, MARK_CALL);
         // SAFETY: `key` belongs to the map just retrieved; no allocation in between.
         let st = unsafe { (bs.exit_boot_services)(image, key) };
         if !st.is_error() {
+            mark(screen, 2 + 2 * attempt, MARK_DONE);
             return Ok(size);
         }
+        mark(screen, 2 + 2 * attempt, MARK_FAIL);
+        log!("ExitBootServices attempt {} failed ({})", attempt + 1, st.name());
         // The map changed between the two calls (e.g. a timer event allocated); retry.
         if attempt == 2 {
             fail!(st, "Cannot exit boot services", "ExitBootServices failed ({})", st.name());
@@ -606,9 +677,7 @@ fn exit_boot_services(bs: &BootServices, image: Handle, buf: *mut u8, cap: usize
 fn kind_of(ty: u32) -> MemoryKind {
     match ty {
         memtype::CONVENTIONAL | memtype::BOOT_SERVICES_CODE | memtype::BOOT_SERVICES_DATA => MemoryKind::Usable,
-        memtype::LOADER_CODE | memtype::LOADER_DATA | memtype::OSYX_BOOTINFO => MemoryKind::BootloaderReclaimable,
-        memtype::OSYX_KERNEL => MemoryKind::KernelImage,
-        memtype::OSYX_KERNEL_DATA => MemoryKind::KernelData,
+        memtype::LOADER_CODE | memtype::LOADER_DATA => MemoryKind::BootloaderReclaimable,
         memtype::ACPI_RECLAIM => MemoryKind::AcpiReclaimable,
         memtype::ACPI_NVS => MemoryKind::AcpiNvs,
         memtype::MMIO | memtype::MMIO_PORT_SPACE => MemoryKind::Mmio,
@@ -617,12 +686,26 @@ fn kind_of(ty: u32) -> MemoryKind {
     }
 }
 
-/// Converts the UEFI map to sorted, merged OSyx descriptors. Allocation free;
-/// safe to call after ExitBootServices.
+/// A loader allocation the kernel keeps, labelled in the converted map.
+struct Claim {
+    start: u64,
+    pages: u64,
+    kind: MemoryKind,
+}
+
+/// Converts the UEFI map to sorted, merged OSyx descriptors, relabelling the
+/// `claims` (which lie inside LoaderData ranges). Allocation free; safe to
+/// call after ExitBootServices.
 ///
 /// # Safety
 /// `src` must hold `size` bytes of descriptors of stride `dsize`.
-unsafe fn convert_memory_map(src: *const u8, size: usize, dsize: usize, out: &mut [MemoryDescriptor]) -> usize {
+unsafe fn convert_memory_map(
+    src: *const u8,
+    size: usize,
+    dsize: usize,
+    claims: &[Claim],
+    out: &mut [MemoryDescriptor],
+) -> usize {
     let mut n = 0;
     for i in 0..size / dsize {
         let d = &*(src.add(i * dsize) as *const efi::MemoryDescriptor);
@@ -636,6 +719,18 @@ unsafe fn convert_memory_map(src: *const u8, size: usize, dsize: usize, out: &mu
             _reserved: 0,
         };
         n += 1;
+    }
+    for c in claims {
+        let end = c.start + c.pages * PAGE_SIZE;
+        let Some(i) = out[..n].iter().position(|d| d.phys_start <= c.start && end <= d.end()) else { continue };
+        let d = out[i];
+        out[i] = MemoryDescriptor { phys_start: c.start, page_count: c.pages, kind: c.kind, _reserved: 0 };
+        for (s, e) in [(d.phys_start, c.start), (end, d.end())] {
+            if s < e && n < out.len() {
+                out[n] = MemoryDescriptor { phys_start: s, page_count: (e - s) / PAGE_SIZE, kind: d.kind, _reserved: 0 };
+                n += 1;
+            }
+        }
     }
     // Insertion sort: the map has at most a few hundred entries and is usually
     // already sorted, which makes this linear in practice.

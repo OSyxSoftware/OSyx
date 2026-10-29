@@ -58,6 +58,29 @@ fn per_tick_estimate() -> u64 {
     khz * 1000 / crate::arch::timer::TIMER_HZ as u64
 }
 
+/// Advances the tick count from the TSC when CPU 0 has stopped counting.
+/// CPU 0 counts ticks only once it holds the kernel entry lock, so while
+/// another CPU keeps that lock the clock would stand still, and with it
+/// every deadline the holder waits for. Each CPU's timer interrupt calls
+/// this before taking the lock. Ticks are raised (never counted twice) to
+/// what the TSC says passed since CPU 0's last tick, and only when they
+/// are more than a tick behind, so normal counting is left alone. Another
+/// CPU's TSC can lag CPU 0's slightly: a reading before CPU 0's last tick
+/// changes nothing, and one call advances at most a second.
+fn catch_up_ticks() {
+    let per = per_tick_estimate();
+    let (tick, tsc) = (LAST_TICK.load(Ordering::Relaxed), LAST_TSC.load(Ordering::Relaxed));
+    if per == 0 || tick == 0 {
+        return;
+    }
+    let Some(elapsed) = rdtsc().checked_sub(tsc) else { return };
+    let now = ticks();
+    let target = (tick + elapsed / per).min(now + timer::TIMER_HZ as u64);
+    if target > now + 1 {
+        TICKS.fetch_max(target, Ordering::Relaxed);
+    }
+}
+
 /// Returns the tick number for this interrupt, advanced by any ticks the
 /// interval lost. The kernel entry lock spins with interrupts disabled, so
 /// the local timer does not fire while a CPU waits for another one: without
@@ -148,6 +171,9 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     // spins with interrupts off, so samples after the acquire are rare.
     if from_user && (f.vector == pic::TIMER_VECTOR as u64 || f.vector == timer::APIC_TIMER_VECTOR as u64) {
         crate::smp::sample_user(f.rip, f.rsp);
+    }
+    if f.vector == pic::TIMER_VECTOR as u64 || f.vector == timer::APIC_TIMER_VECTOR as u64 {
+        catch_up_ticks();
     }
     let _entry = crate::smp::KernelEntry::new();
     // A not-present page in an anonymous region: give it its frame and

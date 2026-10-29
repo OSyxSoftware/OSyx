@@ -72,6 +72,18 @@ fn main() -> i32 {
             return 99;
         }
         Some("panic") => panic!("panic requested by command line"),
+        // Writes a file without fsync and waits: the write-back test cuts
+        // the power afterwards and reads the disk.
+        Some("dirty") => {
+            let data = "written without fsync\n".repeat(1000);
+            match fs::write("/home/user/writeback.txt", data.as_bytes()) {
+                Ok(()) => println!("WRITEBACK_WRITTEN {} bytes", data.len()),
+                Err(e) => println!("WRITEBACK_FAILED {e}"),
+            }
+            loop {
+                thread::sleep(Duration::from_secs(60));
+            }
+        }
         Some("poweroff") => {
             let e = os_std::system::power_off();
             eprintln!("power off failed: {e}");
@@ -530,6 +542,13 @@ fn desktop_session() -> i32 {
         match Command::new("/bin/firstboot").spawn() {
             Ok(c) => println!("init: first-boot tasks running (process {})", c.id()),
             Err(e) => eprintln!("init: cannot start /bin/firstboot: {e}"),
+        }
+    }
+    // System updates of an installed system (checks once a day).
+    if fs::metadata("/etc/osyx/installed").is_ok() {
+        match Command::new("/bin/osyx-update").arg("--daemon").spawn() {
+            Ok(c) => println!("init: system updates checked by process {}", c.id()),
+            Err(e) => eprintln!("init: cannot start /bin/osyx-update: {e}"),
         }
     }
     if let Ok(h) = fs::read_to_string("/etc/hostname") {

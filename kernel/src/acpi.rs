@@ -98,6 +98,23 @@ pub fn hpet() -> Option<u64> {
     (t[40] == 0 && base != 0).then_some(base)
 }
 
+/// PCIe configuration windows (ECAM) from the MCFG, `[start, end)`: memory
+/// that PCI BARs and bridge windows must not be placed in.
+pub fn ecam_ranges() -> alloc::vec::Vec<(u64, u64)> {
+    let mut out = alloc::vec::Vec::new();
+    let Some((pa, len)) = find(b"MCFG") else { return out };
+    // 36-byte header, 8 reserved bytes, then 16-byte allocation entries.
+    for i in 0..len.saturating_sub(44) / 16 {
+        let Some(e) = read::<16>(pa + 44 + 16 * i as u64) else { break };
+        let base = u64_at(&e, 0);
+        let (first, last) = (e[10] as u64, e[11] as u64);
+        if base != 0 && first <= last {
+            out.push((base + (first << 20), base + ((last + 1) << 20)));
+        }
+    }
+    out
+}
+
 /// How to reach S5 and reset the machine, from the FADT and the DSDT.
 pub struct Power {
     pub pm1a_cnt: u16,

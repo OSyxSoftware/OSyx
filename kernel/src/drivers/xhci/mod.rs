@@ -18,6 +18,7 @@
 //! Every wait has a timeout, and an unresponsive controller or device is
 //! reported and abandoned instead of hanging the kernel.
 
+mod bt;
 pub mod dma;
 mod hid;
 mod storage;
@@ -52,6 +53,12 @@ const RESET_TIMEOUT_MS: u64 = 1000;
 /// How long the firmware gets to release the controller (Linux waits 1 s).
 const HANDOFF_TIMEOUT_MS: u64 = 1000;
 const PORT_RESET_TIMEOUT_MS: u64 = 500;
+/// Enumeration attempts per connect. Real devices often fail the first
+/// transfers after a reset with a transaction error; Linux and Windows reset
+/// the port and try again.
+const ATTACH_ATTEMPTS: u32 = 3;
+/// Connect debounce before the first port reset (USB 2.0 7.1.7.3: 100 ms).
+const DEBOUNCE_MS: u64 = 100;
 /// Interrupt moderation interval, in 250 ns units (40 us).
 const IMOD_INTERVAL: u32 = 160;
 /// Consecutive transfer errors after which an endpoint is given up.
@@ -198,6 +205,13 @@ fn irq_handler(index: u64) {
     WAKE[index as usize].wake_all();
 }
 
+/// Wakes a controller thread (work was queued for it).
+pub fn wake(index: usize) {
+    if let Some(w) = WAKE.get(index) {
+        w.wake_all();
+    }
+}
+
 /// Waits (bounded) until every controller has finished its first port
 /// sweep, i.e. every mass-storage disk that was attached at boot has been
 /// registered with the block layer.
@@ -275,10 +289,76 @@ struct Device {
     interrupt: Vec<InterruptEndpoint>,
     bulk: Vec<BulkEndpoint>,
     storage: Option<StorageState>,
+    /// Set when the device is a Bluetooth controller.
+    bt: Option<bt::BtState>,
     name: String,
+    /// Route string (hub ports below the root port, 4 bits per tier).
+    route: u32,
+    /// Hubs between the root port and this device.
+    depth: u8,
+    /// Transaction translator (hub slot, hub port) serving a low/full-speed
+    /// device behind a high-speed hub; (0, 0) when none.
+    tt: (u8, u8),
+    /// Set when the device is a hub.
+    hub: Option<Hub>,
+}
+
+/// A USB 2.0 (or 1.1) hub: its ports and the slots of their devices.
+struct Hub {
+    ports: u8,
+    mtt: bool,
+    ttt: u8,
+    /// Hub port -> slot of the device on it.
+    children: BTreeMap<u8, u8>,
+}
+
+/// Hub class requests and port features (USB 2.0 chapter 11).
+mod hubreq {
+    use osyx_usb::descriptor::SetupPacket;
+    pub const PORT_RESET: u16 = 4;
+    pub const PORT_POWER: u16 = 8;
+    pub const C_PORT_CONNECTION: u16 = 16;
+    pub const C_PORT_ENABLE: u16 = 17;
+    pub const C_PORT_RESET: u16 = 20;
+    pub const CONNECTION: u16 = 1 << 0;
+    pub const ENABLE: u16 = 1 << 1;
+    pub const LOW_SPEED: u16 = 1 << 9;
+    pub const HIGH_SPEED: u16 = 1 << 10;
+    pub const CHANGE_CONNECTION: u16 = 1 << 0;
+    pub const CHANGE_RESET: u16 = 1 << 4;
+
+    pub fn hub_descriptor() -> SetupPacket {
+        SetupPacket { request_type: 0xA0, request: 6, value: 0x2900, index: 0, length: 9 }
+    }
+    pub fn port_status(port: u8) -> SetupPacket {
+        SetupPacket { request_type: 0xA3, request: 0, value: 0, index: port as u16, length: 4 }
+    }
+    pub fn set_port(port: u8, feature: u16) -> SetupPacket {
+        SetupPacket { request_type: 0x23, request: 3, value: feature, index: port as u16, length: 0 }
+    }
+    pub fn clear_port(port: u8, feature: u16) -> SetupPacket {
+        SetupPacket { request_type: 0x23, request: 1, value: feature, index: port as u16, length: 0 }
+    }
 }
 
 impl Device {
+    /// The Slot Context of this device with `entries` endpoint contexts.
+    fn slot_context(&self, entries: u8) -> SlotContext {
+        let (ports, mtt, ttt) = self.hub.as_ref().map_or((0, false, 0), |h| (h.ports, h.mtt, h.ttt));
+        SlotContext {
+            route_string: self.route,
+            speed: self.speed,
+            context_entries: entries,
+            root_port: self.port,
+            interrupter: 0,
+            hub_ports: ports,
+            mtt,
+            ttt,
+            tt_slot: self.tt.0,
+            tt_port: self.tt.1,
+        }
+    }
+
     fn new(port: u8, speed: Speed, ac64: bool) -> Result<Device> {
         let ep0_mem = DmaRing::new(ac64)?;
         Ok(Device {
@@ -294,7 +374,12 @@ impl Device {
             interrupt: Vec::new(),
             bulk: Vec::new(),
             storage: None,
+            bt: None,
             name: String::new(),
+            route: 0,
+            depth: 0,
+            tt: (0, 0),
+            hub: None,
         })
     }
 }
@@ -609,6 +694,10 @@ impl Xhci {
             dev.ep0_events.push(ev);
             return;
         }
+        if dev.bt.as_ref().is_some_and(|b| b.owns(dci)) {
+            self.bt_transfer_event(slot, ev);
+            return;
+        }
         if let Some(i) = dev.interrupt.iter().position(|e| e.dci == dci) {
             let ep = &mut dev.interrupt[i];
             let ptr = ev.param() & !0xF;
@@ -670,7 +759,7 @@ impl Xhci {
         let events = &self.events;
         let mem = &self.event_mem;
         let _ = block_on(&[&WAKE[index], &storage::WAKE], Some(limit), || {
-            let work = allow_storage && storage::has_work(index);
+            let work = allow_storage && (storage::has_work(index) || crate::bluetooth::has_tx(index));
             (IRQS[index].load(Ordering::Relaxed) != seen || work || events.ready(mem)).then_some(())
         });
         self.seen_irqs = IRQS[index].load(Ordering::Relaxed);
@@ -732,7 +821,14 @@ impl Xhci {
             }
             trbs.push(Trb::status_stage(dir_in, len > 0));
             dev.ep0_events.clear();
-            (dev.ep0.push_td(&mut dev.ep0_mem, &trbs)?, len > 0)
+            // Each stage is its own TD (xHCI 4.11.2.2): chaining Setup into
+            // Data sets a reserved bit, which real controllers answer with a
+            // USB Transaction Error. The doorbell follows the last stage.
+            let mut last = 0;
+            for trb in &trbs {
+                last = dev.ep0.push_td(&mut dev.ep0_mem, core::slice::from_ref(trb))?;
+            }
+            (last, len > 0)
         };
         self.ring_doorbell(slot, 1);
         let deadline = Deadline::after_ms(TRANSFER_TIMEOUT_MS);
@@ -869,8 +965,30 @@ impl Xhci {
     }
 
     fn attach(&mut self, port: u8) -> Result<()> {
+        timer::sleep_ms(DEBOUNCE_MS);
+        let mut attempt = 1;
+        loop {
+            match self.attach_once(port, attempt > 1) {
+                Ok(()) => return Ok(()),
+                Err(XhciError::PortGone) => return Err(XhciError::PortGone),
+                Err(e) if attempt == ATTACH_ATTEMPTS => return Err(e),
+                Err(e) => {
+                    kprintln!("usb: port {}: attempt {} failed: {}; resetting the port again", port, attempt, e);
+                    if let Some(slot) = self.ports.get(&port).copied() {
+                        self.release_slot(port, slot);
+                    }
+                    timer::sleep_ms(DEBOUNCE_MS);
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// One reset-address-enumerate pass. `force_reset` also resets a USB 3
+    /// port that is already enabled.
+    fn attach_once(&mut self, port: u8, force_reset: bool) -> Result<()> {
         let usb3 = self.port_is_usb3(port);
-        if !usb3 || self.portsc(port) & portsc::PED == 0 {
+        if force_reset || !usb3 || self.portsc(port) & portsc::PED == 0 {
             self.reset_port(port)?;
         }
         let v = self.portsc(port);
@@ -902,7 +1020,7 @@ impl Xhci {
         let dev = self.devices.get_mut(&slot).ok_or(XhciError::BadSlot)?;
         dev.input.zero();
         dev.input.write_dwords(l.input_control(), &context::input_control(0b11, 0));
-        let sc = SlotContext { route_string: 0, speed: dev.speed, context_entries: 1, root_port: dev.port, interrupter: 0 };
+        let sc = dev.slot_context(1);
         dev.input.write_dwords(l.input_slot(), &sc.encode());
         let (deq, dcs) = dev.ep0.start();
         let ep0 = EndpointContext {
@@ -924,6 +1042,8 @@ impl Xhci {
         dev.output.read_dwords(l.device_slot(), &mut out);
         let st = context::SlotState::decode(&out);
         kprintln!("usb: port {}: slot {} addressed, USB address {}", dev.port, slot, st.device_address);
+        // SET_ADDRESS recovery (USB 2.0 9.2.6.3 allows 2 ms; Linux gives 10).
+        timer::sleep_ms(10);
         Ok(())
     }
 
@@ -1006,7 +1126,15 @@ impl Xhci {
             cfg.interfaces.len(),
             mps
         );
-        self.devices.get_mut(&slot).expect("device exists").name = alloc::format!("{}-{} ({})", self.index + 1, port, name);
+        let route = self.devices[&slot].route;
+        self.devices.get_mut(&slot).expect("device exists").name = if route == 0 {
+            alloc::format!("{}-{} ({})", self.index + 1, port, name)
+        } else {
+            alloc::format!("{}-{}.{:x} ({})", self.index + 1, port, route, name)
+        };
+        if desc.class == descriptor::CLASS_HUB {
+            return self.setup_hub(slot, cfg.value);
+        }
         // Functions this driver supports: HID and mass storage (SCSI,
         // bulk-only transport).
         let hid: Vec<Interface> = cfg
@@ -1024,8 +1152,22 @@ impl Xhci {
                     && i.bulk_out().is_some()
             })
             .cloned();
+        // Bluetooth controllers (interface 0 of class E0/01/01).
+        if let Some(iface) = cfg.default_interfaces().find(|i| (i.class, i.subclass, i.protocol) == bt::CLASS && i.number == 0).cloned() {
+            let devname = self.devices[&slot].name.clone();
+            crate::wireless::usb_device(desc.vendor, desc.product, bt::CLASS, &devname);
+            return self.setup_bt(slot, cfg.value, &iface, desc.vendor, desc.product);
+        }
         if hid.is_empty() && storage.is_none() {
-            kprintln!("usb {}: no supported function (not HID or mass storage); left unconfigured", self.devices[&slot].name);
+            // Class 0 devices name their function in the interfaces.
+            let class = match (desc.class, cfg.default_interfaces().next()) {
+                (0, Some(i)) => (i.class, i.subclass, i.protocol),
+                _ => (desc.class, desc.subclass, desc.protocol),
+            };
+            let devname = self.devices[&slot].name.clone();
+            if !crate::wireless::usb_device(desc.vendor, desc.product, class, &devname) {
+                kprintln!("usb {}: no supported function (not HID or mass storage); left unconfigured", devname);
+            }
             return Ok(());
         }
         self.control_out(slot, SetupPacket::set_configuration(cfg.value), &[])?;
@@ -1204,7 +1346,7 @@ impl Xhci {
             }
         }
         dev.input.write_dwords(l.input_control(), &context::input_control(add, 0));
-        let sc = SlotContext { route_string: 0, speed: dev.speed, context_entries: max_dci, root_port: dev.port, interrupter: 0 };
+        let sc = dev.slot_context(max_dci);
         dev.input.write_dwords(l.input_slot(), &sc.encode());
         let input = dev.input.phys();
         dev.interrupt = endpoints;
@@ -1237,7 +1379,25 @@ impl Xhci {
     /// controller stops every endpoint) and only then frees the memory the
     /// controller used.
     fn release_slot(&mut self, port: u8, slot: u8) {
+        self.release_device(slot);
+        self.ports.remove(&port);
+        kprintln!("usb: port {}: slot {} released", port, slot);
+    }
+
+    /// Releases a device and, for a hub, every device behind it first.
+    fn release_device(&mut self, slot: u8) {
+        let children: Vec<u8> = self.devices.get(&slot).and_then(|d| d.hub.as_ref()).map_or(Vec::new(), |h| h.children.values().copied().collect());
+        for child in children {
+            if let Some(name) = self.devices.get(&child).map(|d| d.name.clone()) {
+                kprintln!("usb {}: gone with its hub", name);
+            }
+            self.release_device(child);
+        }
         if let Some(dev) = self.devices.get_mut(&slot) {
+            crate::wireless::usb_gone(&dev.name);
+            if let Some(bt) = &dev.bt {
+                crate::bluetooth::unregister(bt.unit());
+            }
             for ep in &dev.interrupt {
                 input::unregister(ep.function.input_id);
             }
@@ -1252,8 +1412,178 @@ impl Xhci {
         }
         self.dcbaa.write64(slot as usize * 8, 0);
         self.devices.remove(&slot);
-        self.ports.remove(&port);
-        kprintln!("usb: port {}: slot {} released", port, slot);
+    }
+
+    // ---- hubs -----------------------------------------------------------------------------
+
+    /// Configures a hub, powers its ports and attaches what is connected.
+    fn setup_hub(&mut self, slot: u8, config: u8) -> Result<()> {
+        if self.devices[&slot].depth >= 5 {
+            return Err(XhciError::Unsupported("more than five tiers of hubs"));
+        }
+        if self.devices[&slot].speed.is_superspeed() {
+            return Err(XhciError::Unsupported("SuperSpeed hubs (their USB 2.0 half is used instead)"));
+        }
+        self.control_out(slot, SetupPacket::set_configuration(config), &[])?;
+        let mut d = [0u8; 9];
+        let n = self.control_in(slot, hubreq::hub_descriptor(), &mut d)?;
+        if n < 7 || d[1] != 0x29 {
+            return Err(XhciError::Unsupported("hub descriptor"));
+        }
+        let ports = d[2].min(15);
+        let characteristics = u16::from_le_bytes([d[3], d[4]]);
+        let power_on_ms = d[5] as u64 * 2;
+        // A high-speed hub with one TT per port reports protocol 2.
+        let mtt = self.devices[&slot].speed == Speed::High && self.interface_protocol(slot) == 2;
+        let ttt = ((characteristics >> 5) & 3) as u8;
+        let dev = self.devices.get_mut(&slot).ok_or(XhciError::BadSlot)?;
+        dev.hub = Some(Hub { ports, mtt, ttt, children: BTreeMap::new() });
+        // Tell the controller it is a hub (Configure Endpoint, slot only).
+        let l = self.layout;
+        dev.input.zero();
+        dev.input.write_dwords(l.input_control(), &context::input_control(1, 0));
+        let sc = dev.slot_context(1);
+        dev.input.write_dwords(l.input_slot(), &sc.encode());
+        let input = dev.input.phys();
+        let name = dev.name.clone();
+        self.command(Trb::configure_endpoint(input, slot, false))?;
+        kprintln!("usb {}: hub with {} ports{}", name, ports, if mtt { ", one TT per port" } else { "" });
+        for p in 1..=ports {
+            self.control_out(slot, hubreq::set_port(p, hubreq::PORT_POWER), &[])?;
+        }
+        timer::sleep_ms(power_on_ms.max(20) + 100);
+        for p in 1..=ports {
+            self.hub_port_changed(slot, p, true);
+        }
+        Ok(())
+    }
+
+    /// bInterfaceProtocol of the hub's interface (1 single TT, 2 multi TT).
+    fn interface_protocol(&mut self, slot: u8) -> u8 {
+        let mut c = [0u8; 18];
+        match self.control_in(slot, SetupPacket::get_descriptor(descriptor::DESC_CONFIGURATION, 0, 0, 18), &mut c) {
+            Ok(n) if n >= 18 => c[16],
+            _ => 0,
+        }
+    }
+
+    fn hub_port_status(&mut self, slot: u8, port: u8) -> Option<(u16, u16)> {
+        let mut st = [0u8; 4];
+        match self.control_in(slot, hubreq::port_status(port), &mut st) {
+            Ok(4) => Some((u16::from_le_bytes([st[0], st[1]]), u16::from_le_bytes([st[2], st[3]]))),
+            _ => None,
+        }
+    }
+
+    /// Handles a connect or disconnect on a hub port (`initial`: the first
+    /// scan after the hub was configured, where nothing is attached yet).
+    fn hub_port_changed(&mut self, hub_slot: u8, port: u8, initial: bool) {
+        let Some((status, change)) = self.hub_port_status(hub_slot, port) else { return };
+        if !initial && change & hubreq::CHANGE_CONNECTION == 0 {
+            return;
+        }
+        if change & hubreq::CHANGE_CONNECTION != 0 {
+            let _ = self.control_out(hub_slot, hubreq::clear_port(port, hubreq::C_PORT_CONNECTION), &[]);
+        }
+        let existing = self.devices.get(&hub_slot).and_then(|d| d.hub.as_ref()).and_then(|h| h.children.get(&port).copied());
+        if let Some(child) = existing {
+            if let Some(name) = self.devices.get(&child).map(|d| d.name.clone()) {
+                kprintln!("usb {}: disconnected from its hub", name);
+            }
+            self.release_device(child);
+            if let Some(h) = self.devices.get_mut(&hub_slot).and_then(|d| d.hub.as_mut()) {
+                h.children.remove(&port);
+            }
+        }
+        if status & hubreq::CONNECTION == 0 {
+            return;
+        }
+        for attempt in 1..=ATTACH_ATTEMPTS {
+            let Err(e) = self.attach_behind_hub(hub_slot, port) else { break };
+            let hub = self.devices.get(&hub_slot).map_or(String::new(), |d| d.name.clone());
+            if matches!(e, XhciError::PortGone) || attempt == ATTACH_ATTEMPTS {
+                kprintln!("usb {}: port {}: device not usable: {}", hub, port, e);
+                break;
+            }
+            kprintln!("usb {}: port {}: attempt {} failed: {}; resetting the port again", hub, port, attempt, e);
+        }
+    }
+
+    fn attach_behind_hub(&mut self, hub_slot: u8, port: u8) -> Result<()> {
+        // Debounce, reset, wait for the reset to finish.
+        timer::sleep_ms(100);
+        self.control_out(hub_slot, hubreq::set_port(port, hubreq::PORT_RESET), &[])?;
+        let mut status = 0;
+        let mut done = false;
+        for _ in 0..50 {
+            timer::sleep_ms(10);
+            if let Some((s, c)) = self.hub_port_status(hub_slot, port) {
+                status = s;
+                if c & hubreq::CHANGE_RESET != 0 {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        let _ = self.control_out(hub_slot, hubreq::clear_port(port, hubreq::C_PORT_RESET), &[]);
+        let _ = self.control_out(hub_slot, hubreq::clear_port(port, hubreq::C_PORT_ENABLE), &[]);
+        if !done {
+            return Err(XhciError::Timeout("hub port reset"));
+        }
+        if status & hubreq::CONNECTION == 0 {
+            return Err(XhciError::PortGone);
+        }
+        if status & hubreq::ENABLE == 0 {
+            return Err(XhciError::Unsupported("hub port not enabled after reset"));
+        }
+        timer::sleep_ms(10);
+        let speed = if status & hubreq::LOW_SPEED != 0 {
+            Speed::Low
+        } else if status & hubreq::HIGH_SPEED != 0 {
+            Speed::High
+        } else {
+            Speed::Full
+        };
+        let hub = &self.devices[&hub_slot];
+        let (root, route, depth) = (hub.port, hub.route | ((port as u32 & 0xF) << (4 * hub.depth)), hub.depth + 1);
+        // The nearest high-speed hub translates for low/full-speed devices.
+        let tt = if hub.speed == Speed::High && matches!(speed, Speed::Low | Speed::Full) { (hub_slot, port) } else { hub.tt };
+        let hub_name = hub.name.clone();
+        kprintln!("usb {}: port {}: {} device connected", hub_name, port, speed.name());
+        let ev = self.command(Trb::enable_slot(0))?;
+        let slot = ev.slot_id();
+        if slot == 0 || slot > self.max_slots {
+            return Err(XhciError::BadSlot);
+        }
+        let mut dev = Device::new(root, speed, self.caps.ac64)?;
+        dev.route = route;
+        dev.depth = depth;
+        dev.tt = tt;
+        self.dcbaa.write64(slot as usize * 8, dev.output.phys());
+        self.devices.insert(slot, dev);
+        if let Some(h) = self.devices.get_mut(&hub_slot).and_then(|d| d.hub.as_mut()) {
+            h.children.insert(port, slot);
+        }
+        let result = self.address_device(slot).and_then(|_| self.enumerate(slot));
+        if result.is_err() {
+            self.release_device(slot);
+            if let Some(h) = self.devices.get_mut(&hub_slot).and_then(|d| d.hub.as_mut()) {
+                h.children.remove(&port);
+            }
+        }
+        result
+    }
+
+    /// Looks for connects and disconnects on every hub's ports.
+    fn scan_hubs(&mut self) {
+        let hubs: Vec<(u8, u8)> = self.devices.iter().filter_map(|(s, d)| d.hub.as_ref().map(|h| (*s, h.ports))).collect();
+        for (slot, ports) in hubs {
+            for p in 1..=ports {
+                if self.devices.contains_key(&slot) {
+                    self.hub_port_changed(slot, p, false);
+                }
+            }
+        }
     }
 
     /// Applies the keyboard LED state of the input core (Caps/Num Lock).
@@ -1293,6 +1623,7 @@ impl Xhci {
         loop {
             self.pump();
             self.service_storage();
+            self.service_bt();
             while let Some(p) = self.pending_ports.pop_front() {
                 self.port_changed(p);
                 self.pump();
@@ -1302,6 +1633,7 @@ impl Xhci {
                 READY[self.index].store(true, Ordering::Release);
             }
             self.update_leds();
+            self.scan_hubs();
             let deadline = interrupts::ticks() + timer::ms_to_ticks(1000);
             self.wait_activity(deadline, true);
         }

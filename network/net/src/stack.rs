@@ -443,12 +443,20 @@ impl Stack {
     }
 
     pub fn set_link(&mut self, iface: usize, up: bool) {
+        let mut restart = false;
         if let Some(i) = self.ifaces.get_mut(iface) {
             if i.link_up != up {
                 i.link_up = up;
+                // A link that comes (back) up without a lease asks at once
+                // instead of waiting out the backoff of the attempts made
+                // while it was down (Wi-Fi joins long after boot).
+                restart = up && i.dhcp.as_ref().is_some_and(|d| d.lease().is_none());
                 let line = alloc::format!("{}: link {}", i.name, if up { "up" } else { "down" });
                 self.logf(line);
             }
+        }
+        if restart {
+            let _ = self.enable_dhcp(iface);
         }
     }
 

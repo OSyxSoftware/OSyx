@@ -17,7 +17,10 @@ param(
     # Build the compressed live ISO (system in RAM, no root partition).
     [switch]$Live,
     # Capture this exact build before another build can replace osyx.img.
-    [string]$OutputImage = ''
+    [string]$OutputImage = '',
+    # With -Live: also pack the installed system tree as a tar for
+    # scripts/release.ps1 (system updates).
+    [string]$ReleaseTar = ''
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 $buildLock = Enter-BuildLock
@@ -31,6 +34,10 @@ if ($Live) {
     if ($NoInit) { throw '-Live needs its programs in the live root' }
     if ($KeepRoot) { throw '-Live does not build a disk image' }
     if ($OutputImage) { throw '-Live writes build/osyx-live.iso' }
+} elseif ($ReleaseTar) {
+    throw '-ReleaseTar needs -Live (an update carries what Setup installs)'
+}
+if ($Live) {
     if (-not $PSBoundParameters.ContainsKey('Cmdline')) { $Cmdline = 'init.args=desktop live' }
     $NoZen = $true
 }
@@ -64,7 +71,7 @@ if (-not $NoZen -and -not $NoInit -and -not $KeepRoot) {
     # Program -> directory on the root file system. The graphical session
     # (PRISM, the desktop shell and its applications) lives in /system/bin.
     $installDirs = [ordered]@{
-        init = 'bin'; worker = 'bin'; probe = 'usr/bin'; axis = 'bin'; firstboot = 'bin'; fetch = 'bin'
+        init = 'bin'; worker = 'bin'; probe = 'usr/bin'; axis = 'bin'; firstboot = 'bin'; fetch = 'bin'; get = 'bin'; 'osyx-update' = 'bin'
         prism = 'system/bin'; desktop = 'system/bin'; terminal = 'system/bin'; files = 'system/bin'; sysinfo = 'system/bin'
         ping = 'bin'; net = 'bin'; netstat = 'bin'; dns = 'bin'; nc = 'bin'
         winrun = 'bin'
@@ -172,6 +179,7 @@ if (-not $NoZen -and -not $NoInit -and -not $KeepRoot) {
             Copy-Item (Join-Path $EspDir 'EFI\OSYX\KERNEL.ELF') (Join-Path $payload 'EFI\OSYX\KERNEL.ELF')
             Write-Host '==> packing the compressed live root, the ISO and the USB image (WSL)'
             New-LiveImage $stage
+            if ($ReleaseTar) { New-ReleaseTar $stage $ReleaseTar }
         } else {
             Write-Host '==> building ext4 root file system (mke2fs in WSL)'
             New-RootImage $stage

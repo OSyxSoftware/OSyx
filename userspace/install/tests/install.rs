@@ -145,7 +145,11 @@ fn installs_a_bootable_system_on_a_whole_disk() {
     let sh = fs.resolve("/bin/sh").unwrap();
     assert_eq!(fs.readlink(sh).unwrap(), "axis");
     let passwd = String::from_utf8(read_file(&mut fs, "/etc/passwd")).unwrap();
-    assert!(passwd.contains("ada:x:1000:1000:Ada Lovelace:/home/user:/bin/axis"), "{passwd}");
+    assert!(passwd.contains("ada:x:1000:27:Ada Lovelace:/home/user:/bin/axis"), "{passwd}");
+    assert!(String::from_utf8(read_file(&mut fs, "/etc/group")).unwrap().contains("sudo:x:27:ada\n"));
+    let host = fs.resolve("/etc/hostname").unwrap();
+    let host = fs.stat(host).unwrap();
+    assert_eq!((host.gid, host.mode & 0o777), (27, 0o664), "administrators may rename the computer");
     let shadow = String::from_utf8(read_file(&mut fs, "/etc/shadow")).unwrap();
     let mut salt = [0u8; 16];
     salt.copy_from_slice(&config().seed[..16]);

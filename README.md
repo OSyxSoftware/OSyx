@@ -1,144 +1,124 @@
+<div align="center">
+
 # OSyx
 
-OSyx is a new x86-64 operating system written from scratch, primarily in Rust:
-its own graphical UEFI boot manager, its own kernel, and its own user-space
-standard library (OSyx Std). The long-term goal is native execution of
-unmodified Windows PE32+ applications through an independently developed NT
-compatibility layer; an initial tested subset is implemented (see
-[docs/roadmap.md](docs/roadmap.md)).
+**A new x86-64 operating system, written from scratch in Rust.**
 
-## What works today (tested in QEMU + OVMF)
+Its own UEFI boot manager, kernel, file systems, network stack, compositor
+and desktop, and a compatibility layer that runs Windows PE32+ programs.
 
-- `BOOTX64.EFI`: graphical boot screen (logo, progress bar tied to real boot
-  stages, animated spinner), ELF64 kernel validation, page tables, BootInfo,
-  ExitBootServices, kernel hand-off; clear error screen for bad kernels.
-- Kernel: GDT/TSS/IDT, exception diagnostics, bitmap frame allocator,
-  4-level paging with W^X/NX, growable heap, preemptive round-robin scheduler
-  with kernel threads and per-thread FPU/SSE and FS state, framebuffer status
-  screen, 25 in-kernel self-tests.
-- Storage ([docs/storage.md](docs/storage.md)): GPT boot disk; a native,
-  journalled **ext4** driver as `/` (crash recovery and orphan handling
-  tested by cutting power at every write), the EFI partition as FAT32
-  `/boot`, tmpfs `/tmp` and `/run`, devfs `/dev` (null, zero, a
-  ChaCha20-based `random`, console, root-only disks); a VFS with mounts,
-  symbolic links, current directories, Unix permissions and per-process
-  handles. What OSyx writes is verified on the host with e2fsck, debugfs
-  and mtools.
-- User space: static ELF64 programs loaded from the file system
-  (`/bin/init` starts the system; names are searched in `/bin` and
-  `/usr/bin`), `spawn` and `execve` with argv, environment and a System V
-  auxiliary vector; multi-threaded ring 3 processes with wait, zombies and
-  orphans, futexes and FS-base TLS, SYSCALL/SYSRET ABI v6 with pointer
-  validation, and Rust programs built on OSyx Std (`println!`, collections,
-  heap, time, args, environment variables, `process::Command` incl. `exec`,
-  `thread::spawn`, `thread_local!`, `Mutex`, `Condvar`, `fs`,
-  `env::current_dir`, `SystemTime`, panics): `init` runs 69 checks using
-  `worker` and `probe` children.
+![OSyx desktop](docs/screenshots/desktop.jpg)
 
-- Windows compatibility: `/bin/winrun` loads PE32+ programs and DLLs with
-  relocations, imports, forwarding, API sets, PEB/TEB and TLS. Original
-  implementations of a subset of ntdll, kernel32, user32/gdi32, Winsock,
-  SetupAPI and IP Helper run console, file, thread and GUI tests on OSyx.
-  Four small applications (`textedit.exe`, `diskutil.exe`, `devmgr.exe`,
-  `netcenter.exe`) are installed in `/opt/apps`; the launcher runs them
-  through winrun. See [docs/windows-compatibility.md](docs/windows-compatibility.md).
-- Native networking: VirtIO-Net, Ethernet/ARP/IPv4/ICMP, DHCP, DNS, UDP/TCP,
-  ring-3 sockets and tools (`net`, `netstat`, `ping`, `dns`, `nc`).
-- Native graphics: VirtIO-GPU 2D scanout and damage flushing through PRISM,
-  with GOP framebuffer fallback; native Task Manager and Settings alongside
-  the existing desktop applications. Composition remains in software.
-- Windows 11 research
-  ([API sets and forwarding](docs/research/windows11-apiset-and-forwarding.md));
-  a bounds-checked, zero-copy PE32+ parser
-  (headers, sections, imports, exports with forwarders, relocations, TLS,
-  exception data), tested on local fixtures, malformed and mutated inputs,
-  and swept without a single panic over the 4 372 files of `System32`.
+</div>
 
-## Quick start (Windows 11 host)
+## Screenshots
+
+| | |
+|:---:|:---:|
+| ![Launcher](docs/screenshots/launcher.jpg) | ![AXIS Terminal](docs/screenshots/terminal.jpg) |
+| **Launcher and Files** | **AXIS Terminal** |
+| ![Settings](docs/screenshots/settings.jpg) | ![Task Manager](docs/screenshots/task-manager.jpg) |
+| **Settings** | **Task Manager** |
+| ![A Windows program](docs/screenshots/windows-app.jpg) | ![OSyx Setup](docs/screenshots/installer.jpg) |
+| **A Windows program (Text Editor, PE32+)** | **OSyx Setup** |
+
+## What it is
+
+- **Boot**: OSyx Boot Manager, a graphical UEFI application that validates
+  and starts the kernel.
+- **Kernel**: SMP (ACPI MADT, APIC), 4-level paging with W^X, preemptive
+  scheduler, ring 3 processes and threads, futexes, a system call ABI with
+  pointer validation; 26 in-kernel self-tests.
+- **Storage**: a native journalled **ext4** driver as `/`, FAT32, tmpfs,
+  devfs, GPT, NVMe, AHCI, VirtIO and USB mass storage.
+- **Network**: Ethernet, ARP, IPv4, ICMP, DHCP, DNS, UDP and TCP with
+  ring-3 sockets; HTTPS (rustls) for downloads and updates; Wi-Fi with WPA2.
+- **Desktop**: PRISM, a compositor running as an ordinary process, with a
+  panel, launcher, quick settings, notifications, desktop shortcuts and
+  native applications (Files, AXIS Terminal, Settings, Task Manager, System
+  Information, OSyx Setup).
+- **Windows programs**: `winrun` loads PE32+ programs and DLLs with
+  original implementations of a subset of ntdll, kernel32, user32/gdi32,
+  comdlg32, Winsock and more. The Zen Browser (Windows build) runs on it.
+- **Drivers** written for OSyx, plus OpenBSD drivers through a small
+  compatibility layer: `re(4)` (Realtek Ethernet), `iwm(4)` (Intel Wi-Fi)
+  with net80211, `azalia(4)` (HD Audio).
+
+Real hardware it is tested on: Lenovo ThinkPad T495 (AMD Ryzen, Intel
+Wireless-AC 9260, Realtek Ethernet, Realtek ALC257). Everything else runs
+in QEMU with OVMF in the automated tests.
+
+## Try it
+
+1. Download `osyx-<version>-live-usb.img` from
+   [Releases](https://github.com/v3nn7/OSyx/releases) and write it to a USB
+   stick (Rufus, balenaEtcher or `dd`; this erases the stick).
+2. Boot the computer from the stick (x86-64 UEFI, Secure Boot off, at least 512 MiB of RAM).
+   The live system runs entirely in RAM and touches no disk.
+3. To install, connect to the Internet (Wi-Fi in quick settings, or a
+   cable) and open **Install OSyx** on the desktop. Setup erases the disk
+   you choose.
+
+## Updates
+
+Installed systems keep themselves up to date. `/bin/osyx-update` checks the
+latest [release](https://github.com/v3nn7/OSyx/releases) once a day,
+verifies its Ed25519 signature against the key built into the system and
+installs the new programs, kernel and boot loader; your settings and files
+in `/etc`, `/home` and `/var` stay as they are. A notification asks for a
+restart when an update is installed. The previous kernel stays as
+`KERNEL.OLD` on the EFI partition.
+
+Publishing a release (maintainers):
 
 ```powershell
-.\scripts\check-env.ps1   # verify Rust targets, QEMU, OVMF
-.\scripts\build.ps1       # build loader, kernel, programs; GPT disk build\osyx.img (ESP + ext4 root)
-.\scripts\build.ps1 -Live # build\osyx-live.iso: compressed live system image (CD/DVD, runs in RAM)
-.\scripts\run-qemu.ps1    # boot in a QEMU window (serial log: build\serial.log)
-.\scripts\test.ps1        # host unit tests, clippy, QEMU boot/fault/user tests
+.\scripts\release.ps1 -Version 0.2.0   # signed update + live images in build\release
 ```
 
-The default image boots directly to the desktop and includes the pinned,
-unmodified Zen Browser Windows payload (downloaded and verified on the first
-build). Zen is installed under `/opt/zen`, launched through `/system/bin/zen`,
-and registered as the default web/HTML browser. Its persistent profile is in
-`/home/user/.config/zen/profile`. Interactive images default to an 8 GiB root
-partition (`-RootMiB` overrides it); QEMU runs default to 8196 MiB RAM. Use
-`-NoZen` for a small development image.
-The launcher disables speculative content-process prelaunch and limits the
-content-process pools (two general workers, one per isolated site).
-The default boot artifact is the GPT disk `build/osyx.img`. `-Live` instead
-builds `build/osyx-live.iso` (about 10 MiB): the stripped kernel and userland
-as a zlib-compressed cpio root (`rootfs.z` boot module) in a FAT16 El Torito
-image. It is a plain optical-disc image — ISO9660 with a zeroed system area
-and no hybrid MBR — so it boots from CD/DVD or as a QEMU `-cdrom`, not from a
-USB stick written byte-for-byte. The live session runs entirely in RAM and
-touches no disk. The loader is unsigned, so Secure Boot must be off; firmware
-needs x86-64 UEFI and 512 MiB of RAM.
+## Build
 
-Interactive QEMU runs use four physical cores by default (four logical CPUs,
-one thread per core; `-CpuCount 1..16`).
-The kernel discovers enabled CPUs through ACPI MADT, starts them with
-INIT/SIPI, schedules user threads across them and supports thread affinity.
-Each CPU has its own GDT/TSS, kernel stack pointers and APIC timer. Kernel
-entries currently use a coarse lock; user code runs in parallel, and NMI
-shootdowns invalidate remote TLBs before physical frames are reused. Use
-`smp=off` on the kernel command line to keep only the boot CPU.
+On a Windows 11 host with Rust, MSYS2 (QEMU, OVMF, clang) and WSL
+(Ubuntu 24.04 with e2fsprogs):
 
-Desktop shortcuts live in `/home/user/Desktop`: right-click an application in
-the launcher and choose **Add to desktop**, double-click its icon to open it,
-and drag it to move it on the grid. Positions are saved across boots; dropping
-on an occupied cell swaps the icons. **Remove shortcut** removes only the link.
+```powershell
+.\scripts\check-env.ps1          # verify Rust targets, QEMU, OVMF
+.\scripts\build.ps1 -Live        # live USB image and ISO (build\osyx-live-usb.img)
+.\scripts\run-qemu.ps1           # build and boot the desktop in a QEMU window
+.\scripts\test.ps1               # host unit tests and QEMU tests
+.\scripts\net-test.ps1           # network tests in QEMU
+```
 
-The Text Editor uses OSyx system file dialogs through `GetOpenFileNameW` and
-`GetSaveFileNameW` (Ctrl+O, Ctrl+S and Ctrl+Shift+S). The common-dialog DLL also
-exports the ANSI variants and `CommDlgExtendedError`; folder selection uses
-`SHBrowseForFolderA/W` and `SHGetPathFromIDListA/W/Ex`. These are filesystem
-dialogs with filters, filename validation, default extensions, new folders,
-overwrite confirmation and cancellation. Custom hooks/templates, multiple
-selection and modern COM `IFileDialog` are not implemented.
+Only image files under `build/` are written; no host disk is touched.
 
-Kernel and userspace checks run only with `init.args=tests` (submodes such as
-`init.args=tests,win,7111,7112` select a suite). Without that gate, even
-`test.exit` / `test.fault` do not run diagnostics. Test images explicitly use
-`-NoZen` and omit the browser; release images omit the Windows test fixtures.
-
-For the interactive desktop, run
-`powershell -ExecutionPolicy Bypass -File scripts/run-qemu.ps1`.
-Each interactive run uses its own image under `build/run/`; builds and tests
-can replace `build/osyx.img` without invalidating a running VM's filesystem.
-Builds in the same workspace wait for each other and use separate temporary
-root filesystem directories, so a test build cannot remove a Zen build's files.
-The session image is kept after exit. `-NoBuild` boots a private copy of the
-current base image, including that image's saved boot command line.
-
-Building the ext4 root image and checking it needs WSL (Ubuntu 24.04) with
-e2fsprogs; MSYS2 provides QEMU, OVMF and mtools. Only image files under
-`build/` are written; no host disk or partition is touched.
-
-## Layout
+## Source tree
 
 | Path | Contents |
 |---|---|
-| `boot/uefi-loader` | OSyx Boot Manager (UEFI application) |
-| `boot/gfx` | integer-only 2D renderer, fonts, splash layers (shared with kernel) |
-| `boot/elf` | bounds-checked ELF64 validation (kernel and user policies) |
-| `boot/assets` | generated logo/font assets (`scripts/gen-assets.py`) |
-| `kernel` | the kernel; `kernel/mm` holds host-tested memory algorithms |
-| `compatibility/pe-parser`, `compatibility/pe-loader`, `compatibility/win32` | PE parser/linker and winrun; tests and Windows application sources |
-| `storage/ext4` | ext4 driver (`osyx-ext4`), e2fsprogs-made test images |
-| `storage/fat` | FAT32 driver (`osyx-fat`), `mkfat32` / `fatcheck` tools |
-| `storage/vfs`, `storage/tmpfs`, `storage/part` | VFS building blocks, tmpfs, GPT (`mkdisk`) |
-| `shared/crypto` | ChaCha20 DRBG and SHA-256 for `/dev/random` |
-| `shared/bootinfo`, `shared/abi` | boot protocol and system call ABI |
-| `runtime/os-sys`, `runtime/os-std` | raw system calls, OSyx Std |
-| `userspace/apps` | user programs `init`, `worker` (`/bin`) and `probe` (`/usr/bin`) |
-| `docs` | design and status documentation |
+| `boot/` | UEFI boot manager, ELF validation, boot graphics |
+| `kernel/` | the kernel and its drivers |
+| `drivers/bsd/` | OpenBSD drivers and their compatibility layer |
+| `storage/` | ext4, FAT32, VFS, tmpfs, GPT, 7-Zip reader |
+| `network/` | the network stack |
+| `graphics/` | PRISM compositor, protocol, UI toolkit |
+| `compatibility/` | PE parser and loader, Win32 subsystem (`winrun`) |
+| `runtime/` | system calls and OSyx Std |
+| `userspace/` | init, desktop and applications, Setup, HTTPS tools, updates |
+| `shared/` | boot protocol, system call ABI, crypto, input, update manifest |
+| `docs/` | design documentation; [overview](docs/overview.md), [architecture](docs/architecture.md) |
 
-Documentation starts at [docs/architecture.md](docs/architecture.md).
+## License
+
+OSyx is free software under the GNU General Public License, version 3 or
+later (`GPL-3.0-or-later`, see [LICENSE](LICENSE)).
+
+**Additional permission (GPL-3.0 section 7).** Some OpenBSD files in
+`drivers/bsd/openbsd` (for example the Realtek Ethernet driver `re.c`)
+carry the original four-clause BSD licence. As an additional permission,
+the copyright holders of OSyx allow you to combine OSyx with those files
+and to distribute the combination, provided those files keep their own
+licence and notices.
+
+Third-party parts keep their own licences: the OpenBSD and NetBSD sources in
+`drivers/bsd` (ISC and BSD, notices in each file), Intel device firmware in
+`drivers/bsd/firmware` (`LICENCE.iwlwifi_firmware`, `LICENCE.ibt_firmware`),
+the bundled fonts (SIL OFL) and the Rust crates from crates.io.

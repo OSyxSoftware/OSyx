@@ -1,0 +1,17 @@
+[package]
+name = "osyx-wireless"
+description = "Hardware-independent Wi-Fi and Bluetooth building blocks: chip identification, WPA2-PSK key handshake, firmware file parsing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["wpa"]
+# The WPA2 supplicant (user space); the kernel only needs chip ids.
+wpa = ["dep:sha1", "dep:hmac", "dep:pbkdf2", "dep:aes"]
+
+[dependencies]
+sha1 = { version = "0.10", default-features = false, features = ["force-soft"], optional = true }
+hmac = { version = "0.12", default-features = false, optional = true }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"], optional = true }
+aes = { version = "0.8", default-features = false, optional = true }

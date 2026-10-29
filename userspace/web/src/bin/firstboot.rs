@@ -37,6 +37,9 @@ const ZEN_CACHE: &str = "/var/cache/osyx/zen.installer.exe";
 const ZEN_DIR: &str = "/opt/zen";
 /// Attempts within one start before giving up until the next start.
 const DOWNLOAD_TRIES: u32 = 3;
+/// Firstboot starts with the session, before the user has joined a Wi-Fi
+/// network: it waits this long (checking every 5 s) for a connection.
+const NETWORK_WAIT_SECS: u64 = 300;
 
 struct Log(Option<fs::File>);
 
@@ -125,8 +128,33 @@ fn zen_installer(log: &mut Log) -> Result<(), String> {
     Err(format!("download failed: {last}"))
 }
 
+/// Waits until github.com resolves (a network with DNS is up).
+fn wait_for_network(log: &mut Log) -> Result<(), String> {
+    let mut waited = 0;
+    loop {
+        match os_std::net::lookup_host("github.com") {
+            Ok(_) => {
+                if waited > 0 {
+                    log.line(&format!("network up after {waited} s"));
+                }
+                return Ok(());
+            }
+            Err(e) if waited >= NETWORK_WAIT_SECS => {
+                return Err(format!("no network: cannot resolve github.com ({e})"));
+            }
+            Err(_) => {
+                if waited == 0 {
+                    log.line(&format!("waiting up to {NETWORK_WAIT_SECS} s for a network connection (Wi-Fi or a cable)"));
+                }
+                thread::sleep(Duration::from_secs(5));
+                waited += 5;
+            }
+        }
+    }
+}
+
 fn zen_task(log: &mut Log) -> Result<(), String> {
-    os_std::net::lookup_host("github.com").map_err(|e| format!("no network: cannot resolve github.com ({e})"))?;
+    wait_for_network(log)?;
     zen_installer(log)?;
     if fs::metadata(format!("{ZEN_DIR}/zen.exe")).is_err() {
         unpack(log)?;

@@ -8,6 +8,7 @@
 
 pub mod frames;
 pub mod heap;
+pub mod lz;
 
 pub const PAGE_SIZE: u64 = 4096;
 

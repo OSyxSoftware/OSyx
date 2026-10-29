@@ -3,7 +3,8 @@
 //! crashes, PRISM keeps every application window and starts it again.
 //!
 //! It provides the desktop background, the task bar (launcher, running
-//! windows with the active one marked, clock, power button), the
+//! windows with the active one marked, quick settings, clock, power
+//! button), the
 //! application launcher (applications installed on the root file system
 //! under `/system/share/applications`), the desktop context menu,
 //! notification bubbles and the shut down / restart dialog.
@@ -23,7 +24,7 @@ use osyx_gfx::{rgb, Color, Rect, Surface};
 use osyx_input::{button, key};
 use osyx_ui::layout::{contains, inset};
 use osyx_ui::time::Tz;
-use osyx_ui::widget::{Button, ButtonStyle, Column, Dialog, ListItem, ListView, Menu, MenuItem, TextField};
+use osyx_ui::widget::{Button, ButtonStyle, Checkbox, Column, Dialog, ListItem, ListView, Menu, MenuItem, TextField};
 use osyx_ui::{icon, Align, Event as Ui, FontKind, Fonts, Icon, Painter, Response, Theme};
 use prism_client::ui::Adapter;
 use prism_client::{proto, Action, Connection, Event, Role, Window, WindowSpec};
@@ -39,6 +40,13 @@ const MAX_NOTES: usize = 4;
 const LAUNCHER_W: u32 = 380;
 const LAUNCHER_H: u32 = 470;
 const CLOCK_W: u32 = 132;
+/// Quick settings button (network and sound icons) and its panel.
+const QUICK_W: u32 = 64;
+const QUICK_PANEL_W: u32 = 360;
+const QUICK_PANEL_H: u32 = 316;
+/// Opened by the network tile; the Win32 Network Center.
+const NETWORK_APP: &str = "/opt/apps/netcenter.exe";
+const SETTINGS_APP: &str = "/system/bin/settings";
 /// Procedural backgrounds after the default image.
 const WALLPAPERS: usize = 4;
 /// The default wallpaper on the root file system (OSXI, converted from PNG at build time).
@@ -59,6 +67,187 @@ enum PopupKind {
     Launcher { search: TextField, list: ListView, shown: Vec<usize>, list_focus: bool },
     Menu { menu: Menu, purpose: MenuPurpose },
     Confirm { dialog: Dialog },
+    Quick { net: NetSummary, radios: Radios, sound: Option<Sound>, dragging: bool, hover: Option<QuickItem> },
+    /// The Wi-Fi network picker; `pass` is the password prompt for a
+    /// secured network, with its "Show password" box.
+    Wifi { state: WifiState, list: ListView, pass: Option<(String, TextField, Checkbox)>, message: String },
+}
+
+/// The sound card and volume from the kernel's `/run/audio.status`.
+#[derive(Clone)]
+struct Sound {
+    device: String,
+    volume: u32,
+    muted: bool,
+}
+
+impl Sound {
+    fn read() -> Option<Sound> {
+        let text = os_std::fs::read_to_string("/run/audio.status").ok()?;
+        let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(k).map(str::trim));
+        Some(Sound {
+            device: String::from(field("device=")?),
+            volume: field("volume=").and_then(|v| v.parse().ok()).unwrap_or(0),
+            muted: field("mute=") == Some("1"),
+        })
+    }
+
+    /// Sends the volume and mute state to the kernel mixer.
+    fn apply(&self) {
+        use os_std::io::Write;
+        let line = format!("volume={}\nmute={}\n", self.volume, self.muted as u8);
+        match os_std::fs::OpenOptions::new().write(true).open("/dev/mixer") {
+            Ok(mut f) => {
+                let _ = f.write_all(line.as_bytes());
+            }
+            Err(e) => eprintln!("desktop: /dev/mixer: {e}"),
+        }
+    }
+}
+
+/// Volume slider geometry in the quick settings panel.
+const VOLUME_Y: i32 = 170;
+fn volume_track() -> Rect {
+    Rect::new(54, VOLUME_Y + 38, QUICK_PANEL_W - 54 - 24, 6)
+}
+fn volume_at(x: i32) -> u32 {
+    let t = volume_track();
+    ((x - t.x).clamp(0, t.w as i32) * 100 / t.w as i32) as u32
+}
+
+/// Wi-Fi and Bluetooth hardware the kernel identified (no drivers yet).
+#[derive(Clone, Default)]
+struct Radios {
+    wifi: Option<String>,
+    bluetooth: Option<String>,
+    /// From the kernel's `/run/wifi.status` when a Wi-Fi driver runs.
+    wifi_state: Option<WifiState>,
+}
+
+#[derive(Clone, Default)]
+struct WifiState {
+    state: String,
+    ssid: Option<String>,
+    /// The WPA handshake finished (or the network is open).
+    keys: bool,
+    /// "wrong-password" when the handshake failed.
+    error: Option<String>,
+    /// (RSSI, SSID, security) of the networks seen, strongest first.
+    networks: Vec<(u32, String, String)>,
+}
+
+impl WifiState {
+    fn read() -> Option<WifiState> {
+        let text = os_std::fs::read_to_string("/run/wifi.status").ok()?;
+        let mut w = WifiState::default();
+        for line in text.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            if let Some(s) = line.strip_prefix("state ") {
+                w.state = String::from(s);
+            } else if let Some(s) = line.strip_prefix("ssid ") {
+                w.ssid = Some(String::from(s));
+            } else if let Some(s) = line.strip_prefix("keys ") {
+                w.keys = s == "yes";
+            } else if let Some(s) = line.strip_prefix("error ") {
+                w.error = Some(String::from(s));
+            } else if f.len() >= 5 && f[0] == "net" && !w.networks.iter().any(|n| n.1 == f[1]) {
+                w.networks.push((f[2].parse().unwrap_or(0), String::from(f[1]), String::from(f[4])));
+            }
+        }
+        w.networks.sort_by_key(|n| core::cmp::Reverse(n.0));
+        Some(w)
+    }
+}
+
+impl Radios {
+    fn read() -> Radios {
+        let field = |b: &[u8]| {
+            let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+            String::from(core::str::from_utf8(&b[..n]).unwrap_or(""))
+        };
+        let mut r = Radios::default();
+        for d in system::devices().unwrap_or_default() {
+            match field(&d.class).as_str() {
+                "Wireless" if r.wifi.is_none() => r.wifi = Some(field(&d.description)),
+                "Bluetooth" if r.bluetooth.is_none() => r.bluetooth = Some(field(&d.description)),
+                _ => {}
+            }
+        }
+        r.wifi_state = WifiState::read();
+        r
+    }
+}
+
+/// "Intel Wi-Fi 6 AX200" -> "AX200", "Intel AX200 Bluetooth" -> "AX200".
+fn chip_short(name: &str) -> &str {
+    name.trim_end_matches(" Bluetooth").rsplit(' ').next().unwrap_or(name)
+}
+
+/// What the quick settings panel shows about the first network adapter.
+#[derive(Clone)]
+struct NetSummary {
+    present: bool,
+    connected: bool,
+    detail: String,
+}
+
+impl NetSummary {
+    fn read() -> NetSummary {
+        let Some(i) = os_std::net::interfaces()
+            .ok()
+            .and_then(|v| v.into_iter().find(|i| i.flags & os_std::net::IFF_LOOPBACK == 0))
+        else {
+            return NetSummary { present: false, connected: false, detail: String::from("No adapter") };
+        };
+        let link = i.flags & os_std::net::IFF_LINK != 0;
+        let connected = link && i.addr != [0; 4];
+        let detail = if connected {
+            format!("{}.{}.{}.{}", i.addr[0], i.addr[1], i.addr[2], i.addr[3])
+        } else if link {
+            String::from("No address yet")
+        } else {
+            String::from("Cable unplugged")
+        };
+        NetSummary { present: true, connected, detail }
+    }
+}
+
+/// Clickable parts of the quick settings panel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum QuickItem {
+    Network,
+    Wifi,
+    Bluetooth,
+    Settings,
+    /// The volume slider (track with some room around it).
+    Volume,
+    /// The speaker icon: mute toggle.
+    Mute,
+}
+
+impl QuickItem {
+    const ALL: [QuickItem; 6] =
+        [QuickItem::Network, QuickItem::Wifi, QuickItem::Bluetooth, QuickItem::Settings, QuickItem::Volume, QuickItem::Mute];
+
+    fn rect(self) -> Rect {
+        let tile_w = (QUICK_PANEL_W - 40 - 2 * 10) / 3;
+        let tile = |i: i32| Rect::new(20 + i * (tile_w as i32 + 10), 56, tile_w, 92);
+        match self {
+            QuickItem::Network => tile(0),
+            QuickItem::Wifi => tile(1),
+            QuickItem::Bluetooth => tile(2),
+            QuickItem::Settings => Rect::new((QUICK_PANEL_W - 20 - 150) as i32, (QUICK_PANEL_H - 52) as i32, 150, 36),
+            QuickItem::Volume => {
+                let t = volume_track();
+                Rect::new(t.x - 10, t.y - 12, t.w + 20, 30)
+            }
+            QuickItem::Mute => Rect::new(14, VOLUME_Y + 24, 34, 34),
+        }
+    }
+
+    fn at(x: i32, y: i32) -> Option<QuickItem> {
+        Self::ALL.into_iter().find(|i| contains(&i.rect(), x, y))
+    }
 }
 
 struct Popup {
@@ -73,6 +262,7 @@ impl Popup {
         match &self.kind {
             PopupKind::Launcher { .. } => PopupTag::Launcher,
             PopupKind::Menu { purpose: MenuPurpose::Power, .. } => PopupTag::PowerMenu,
+            PopupKind::Quick { .. } => PopupTag::Quick,
             _ => PopupTag::Other,
         }
     }
@@ -82,6 +272,7 @@ impl Popup {
 enum PopupTag {
     Launcher,
     PowerMenu,
+    Quick,
     Other,
 }
 
@@ -104,6 +295,7 @@ enum PanelAction {
     Power,
     Task(usize),
     Clock,
+    Quick,
 }
 
 /// Exits of the shell's children, collected by the reaper thread.
@@ -129,6 +321,7 @@ struct Shell {
     windows: Vec<WindowInfo>,
     clock: (String, String),
     clock_hover: bool,
+    quick_hover: bool,
     tz: Tz,
     popup: Option<Popup>,
     /// When PRISM last closed a popup (a click on the popup's own toggle
@@ -139,10 +332,54 @@ struct Shell {
     shortcuts: Vec<AppEntry>,
     selected_shortcut: Option<usize>,
     shortcut_scan: u64,
+    /// Wi-Fi network being joined and when (ms): watched until it connects
+    /// or the kernel reports a wrong password.
+    wifi_joining: Option<(String, u64)>,
+    wifi_checked: u64,
+    /// When `/run/update.status` was last read (ms), and whether an
+    /// installed system update was announced.
+    update_checked: u64,
+    update_announced: bool,
     shortcut_cells: Vec<usize>,
     icon_drag: Option<IconDrag>,
     /// (pid, application name) of programs started from the shell.
     children: Vec<(u64, String)>,
+    lock: Option<LockScreen>,
+    /// A key was pressed while Super was held (no launcher on release).
+    super_used: bool,
+}
+
+/// The lock screen: a full-screen window above everything with a
+/// password field; the password is the desktop user's from /etc/shadow.
+struct LockScreen {
+    win: Window,
+    field: TextField,
+    message: String,
+    last_failure: u64,
+}
+
+/// Whether `entered` is the desktop user's password. Without a password
+/// (live system, or none set at installation) any input unlocks.
+fn password_ok(entered: &str) -> bool {
+    let Ok(shadow) = os_std::fs::read_to_string("/etc/shadow") else { return true };
+    let secret = shadow.lines().find_map(|l| {
+        let mut f = l.split(':');
+        let (name, secret) = (f.next()?, f.next()?);
+        (name != "root").then(|| String::from(secret))
+    });
+    let Some(secret) = secret.filter(|s| !s.is_empty()) else { return true };
+    let parts: Vec<&str> = secret.split('$').collect();
+    if parts.len() != 4 || parts[0] != "sha256-iter" || parts[2].len() != 32 {
+        return false;
+    }
+    let mut salt = [0u8; 16];
+    for (i, b) in salt.iter_mut().enumerate() {
+        match u8::from_str_radix(&parts[2][i * 2..i * 2 + 2], 16) {
+            Ok(v) => *b = v,
+            Err(_) => return false,
+        }
+    }
+    osyx_install::hash_password(entered, &salt) == secret
 }
 
 fn main() -> i32 {
@@ -193,6 +430,7 @@ fn main() -> i32 {
         windows: Vec::new(),
         clock: (String::new(), String::new()),
         clock_hover: false,
+        quick_hover: false,
         tz: system_tz(),
         popup: None,
         popup_closed: None,
@@ -201,9 +439,15 @@ fn main() -> i32 {
         shortcuts: common::load_apps_from(common::DESKTOP_DIR),
         selected_shortcut: None,
         shortcut_scan: 0,
+        wifi_joining: None,
+        wifi_checked: 0,
+        update_checked: 0,
+        update_announced: false,
         shortcut_cells: Vec::new(),
         icon_drag: None,
         children: Vec::new(),
+        lock: None,
+        super_used: false,
     };
     let t0 = Instant::now();
     if shell.image.is_none() {
@@ -269,6 +513,14 @@ impl Shell {
             if self.now().saturating_sub(self.shortcut_scan) >= 2000 {
                 self.refresh_shortcuts();
             }
+            if self.wifi_joining.is_some() && self.now().saturating_sub(self.wifi_checked) >= 1000 {
+                self.wifi_checked = self.now();
+                self.check_wifi_join();
+            }
+            if !self.update_announced && self.now().saturating_sub(self.update_checked) >= 5000 {
+                self.update_checked = self.now();
+                self.check_update();
+            }
             if let Err(e) = self.redraw() {
                 eprintln!("desktop: drawing failed: {e}");
             }
@@ -313,6 +565,9 @@ impl Shell {
         for n in &mut self.notes {
             n.win.on_event(&ev);
         }
+        if let Some(l) = &mut self.lock {
+            l.win.on_event(&ev);
+        }
         if let Event::CloseRequest { window } = ev {
             if self.popup.as_ref().is_some_and(|p| p.win.id == window) {
                 let tag = self.popup.as_ref().map_or(PopupTag::Other, Popup::tag);
@@ -322,10 +577,19 @@ impl Shell {
             return;
         }
         if let Event::Key { window, usage, state: s, .. } = ev {
-            // The Super key reaches the panel wherever the focus is.
+            // Super and Super+key shortcuts reach the panel wherever the
+            // focus is. Super alone opens the launcher when released.
             if window == self.panel.id {
-                if (usage == key::LEFT_GUI || usage == key::RIGHT_GUI) && s == proto::key_state::DOWN {
-                    self.toggle_launcher();
+                let gui = usage == key::LEFT_GUI || usage == key::RIGHT_GUI;
+                if gui && s == proto::key_state::DOWN {
+                    self.super_used = false;
+                } else if gui && s == proto::key_state::UP {
+                    if !self.super_used {
+                        self.toggle_launcher();
+                    }
+                } else if s == proto::key_state::DOWN {
+                    self.super_used = true;
+                    self.super_shortcut(usage);
                 }
                 return;
             }
@@ -337,12 +601,69 @@ impl Shell {
             self.panel_input(ui);
         } else if self.popup.as_ref().is_some_and(|p| p.win.id == win) {
             self.popup_input(ui);
+        } else if self.lock.as_ref().is_some_and(|l| l.win.id == win) {
+            self.lock_input(ui);
         } else if let Some(i) = self.notes.iter().position(|n| n.win.id == win) {
             if matches!(ui, Ui::PointerDown { .. }) {
                 let n = self.notes.remove(i);
                 let _ = n.win.destroy(&mut self.conn);
                 self.restack_notes();
             }
+        }
+    }
+
+    /// Super+key shortcuts.
+    fn super_shortcut(&mut self, usage: u16) {
+        if usage == key::L {
+            self.lock_screen();
+        }
+    }
+
+    fn lock_screen(&mut self) {
+        if self.lock.is_some() {
+            return;
+        }
+        self.close_popup();
+        match self.conn.create_window(WindowSpec::with_role(Role::Lock, 0, 0, self.w, self.h)) {
+            Ok(win) => {
+                let mut field = TextField::new("");
+                field.masked = true;
+                field.placeholder = String::from("Password");
+                let fw = 320;
+                field.rect = Rect::new((self.w as i32 - fw) / 2, self.h as i32 / 2 + 40, fw as u32, 40);
+                println!("desktop: screen locked");
+                self.lock = Some(LockScreen { win, field, message: String::new(), last_failure: 0 });
+            }
+            Err(e) => eprintln!("desktop: cannot lock the screen: {e}"),
+        }
+    }
+
+    fn lock_input(&mut self, ui: Ui) {
+        let fonts = self.fonts;
+        let now = self.now();
+        let Some(l) = &mut self.lock else { return };
+        match l.field.event(&ui, true, &fonts) {
+            Response::Submitted => {
+                // One attempt per second against guessing.
+                if now.saturating_sub(l.last_failure) < 1000 {
+                    return;
+                }
+                if password_ok(l.field.text()) {
+                    let l = self.lock.take().expect("locked");
+                    let _ = l.win.destroy(&mut self.conn);
+                    println!("desktop: screen unlocked");
+                    self.desktop.dirty = true;
+                    self.panel.dirty = true;
+                } else {
+                    println!("desktop: wrong password on the lock screen");
+                    l.last_failure = self.start.elapsed().as_millis() as u64;
+                    l.message = String::from("Wrong password. Try again.");
+                    l.field.set_text("");
+                    l.win.dirty = true;
+                }
+            }
+            r if r.needs_redraw() => l.win.dirty = true,
+            _ => {}
         }
     }
 
@@ -461,29 +782,39 @@ impl Shell {
             }
         }
         let clock = self.clock_rect();
+        let quick = self.quick_rect();
         match ui {
             Ui::PointerMove { x, y } => {
                 let h = contains(&clock, x, y);
                 redraw |= h != self.clock_hover;
                 self.clock_hover = h;
+                let q = contains(&quick, x, y);
+                redraw |= q != self.quick_hover;
+                self.quick_hover = q;
             }
             Ui::PointerLeave => {
-                redraw |= self.clock_hover;
+                redraw |= self.clock_hover || self.quick_hover;
                 self.clock_hover = false;
+                self.quick_hover = false;
             }
             Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && contains(&clock, x, y) => {
                 action = Some(PanelAction::Clock)
+            }
+            Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && contains(&quick, x, y) => {
+                action = Some(PanelAction::Quick)
             }
             _ => {}
         }
         self.panel.dirty |= redraw;
         match action {
             Some(PanelAction::Launcher) => self.toggle_launcher(),
+            Some(PanelAction::Quick) => self.toggle_quick(),
             Some(PanelAction::Power) => {
                 if self.recently_closed(PopupTag::PowerMenu) {
                     return;
                 }
                 let items = vec![
+                    MenuItem::new("Lock", Some(Icon::Lock)),
                     MenuItem::new("Restart", Some(Icon::Restart)),
                     MenuItem::new("Shut down", Some(Icon::Power)).danger(),
                 ];
@@ -521,6 +852,10 @@ impl Shell {
         let mut confirm = None;
         let mut close = false;
         let mut app_menu = None;
+        let mut quick = None;
+        let mut radio_note: Option<(&str, Option<String>)> = None;
+        let mut wifi_open: Option<WifiState> = None;
+        let mut wifi_join: Option<(String, String)> = None;
         match &mut p.kind {
             PopupKind::Launcher { search, list, shown, list_focus } => {
                 if let Ui::PointerDown { x, y, button: button::RIGHT, .. } = ui {
@@ -590,9 +925,147 @@ impl Shell {
                 r if r.needs_redraw() => p.win.dirty = true,
                 _ => {}
             },
+            PopupKind::Wifi { state, list, pass, message } => {
+                if let Some((ssid, field, show)) = pass {
+                    let toggled = show.event(&ui, false);
+                    if matches!(toggled, Response::Changed) {
+                        // The password stays readable while the box is ticked.
+                        field.masked = !show.checked;
+                    }
+                    if toggled.needs_redraw() {
+                        p.win.dirty = true;
+                    }
+                    match field.event(&ui, true, &fonts) {
+                        Response::Submitted => {
+                            let pw = String::from(field.text());
+                            if (8..=63).contains(&pw.len()) {
+                                wifi_join = Some((ssid.clone(), pw));
+                            } else {
+                                *message = String::from("A WPA password has 8 to 63 characters.");
+                                p.win.dirty = true;
+                            }
+                        }
+                        Response::Cancelled => {
+                            *pass = None;
+                            message.clear();
+                            p.win.dirty = true;
+                        }
+                        r if r.needs_redraw() => p.win.dirty = true,
+                        _ => {}
+                    }
+                } else {
+                    match list.event(&ui, true) {
+                        Response::Activated(i) => {
+                            if let Some((_, ssid, sec)) = state.networks.get(i) {
+                                if sec == "open" {
+                                    wifi_join = Some((ssid.clone(), String::new()));
+                                } else {
+                                    let mut f = TextField::new("");
+                                    f.masked = true;
+                                    f.placeholder = String::from("Password");
+                                    f.rect = Rect::new(20, (QUICK_PANEL_H - 120) as i32, QUICK_PANEL_W - 40, 36);
+                                    let mut show = Checkbox::new("Show password", false);
+                                    show.rect = Rect::new(20, f.rect.bottom() as i32 + 36, QUICK_PANEL_W - 40, 24);
+                                    *pass = Some((ssid.clone(), f, show));
+                                    message.clear();
+                                    p.win.dirty = true;
+                                }
+                            }
+                        }
+                        Response::Cancelled => close = true,
+                        r if r.needs_redraw() => p.win.dirty = true,
+                        _ => {}
+                    }
+                    if let Ui::Key(k) = ui {
+                        if k.down && k.key == key::ESCAPE {
+                            close = true;
+                        }
+                    }
+                }
+            }
+            PopupKind::Quick { net, radios, sound, dragging, hover } => match ui {
+                Ui::PointerMove { x, y } => {
+                    let h = QuickItem::at(x, y);
+                    p.win.dirty |= h != *hover;
+                    *hover = h;
+                    if let (true, Some(s)) = (*dragging, sound.as_mut()) {
+                        let v = volume_at(x);
+                        if v != s.volume {
+                            s.volume = v;
+                            s.muted = false;
+                            s.apply();
+                            p.win.dirty = true;
+                        }
+                    }
+                }
+                Ui::PointerUp { .. } => *dragging = false,
+                Ui::PointerLeave => {
+                    p.win.dirty |= hover.is_some();
+                    *hover = None;
+                }
+                Ui::PointerDown { x, y, button: button::LEFT, .. } => match QuickItem::at(x, y) {
+                    Some(QuickItem::Network) if net.present => quick = Some(QuickItem::Network),
+                    Some(QuickItem::Wifi) if radios.wifi_state.is_some() => wifi_open = radios.wifi_state.clone(),
+                    Some(QuickItem::Volume) if sound.is_some() => {
+                        let s = sound.as_mut().expect("checked");
+                        s.volume = volume_at(x);
+                        s.muted = false;
+                        s.apply();
+                        *dragging = true;
+                        p.win.dirty = true;
+                    }
+                    Some(QuickItem::Mute) if sound.is_some() => {
+                        let s = sound.as_mut().expect("checked");
+                        s.muted = !s.muted;
+                        s.apply();
+                        p.win.dirty = true;
+                    }
+                    Some(QuickItem::Wifi) => radio_note = Some(("Wi-Fi", radios.wifi.clone())),
+                    Some(QuickItem::Bluetooth) => radio_note = Some(("Bluetooth", radios.bluetooth.clone())),
+                    Some(QuickItem::Settings) => quick = Some(QuickItem::Settings),
+                    _ => {}
+                },
+                Ui::Key(k) if k.down && k.key == key::ESCAPE => close = true,
+                _ => {}
+            },
         }
-        if close || launch.is_some() || pick.is_some() || confirm.is_some() || app_menu.is_some() {
+        if close
+            || launch.is_some()
+            || pick.is_some()
+            || confirm.is_some()
+            || app_menu.is_some()
+            || quick.is_some()
+            || wifi_open.is_some()
+            || wifi_join.is_some()
+        {
             self.close_popup();
+        }
+        if let Some(w) = wifi_open {
+            self.open_wifi(w);
+        }
+        if let Some((ssid, pass)) = wifi_join {
+            // The kernel rereads this file and joins (bsd::wifi_housekeeping).
+            match os_std::fs::write("/etc/osyx/wifi.conf", format!("ssid={ssid}\npsk={pass}\n")) {
+                Ok(()) => {
+                    println!("desktop: joining Wi-Fi network {ssid}");
+                    self.show_note("Wi-Fi", &format!("Joining {ssid}..."));
+                    self.wifi_joining = Some((String::from(&ssid[..]), self.now()));
+                }
+                Err(e) => self.show_note("Wi-Fi", &format!("Cannot save the network: {e}")),
+            }
+        }
+        match radio_note {
+            Some((what, Some(chip))) => self.show_note(
+                what,
+                &format!("{chip} found, but its driver did not start, so it cannot be switched on. The reason is in AXIS Terminal: dmesg {}", if what == "Wi-Fi" { "bsd" } else { "bluetooth" }),
+            ),
+            Some((what, None)) => self.show_note(what, &format!("No {what} adapter was found in this computer.")),
+            None => {}
+        }
+        match quick {
+            Some(QuickItem::Network) => self.launch("Network Center", NETWORK_APP),
+            Some(QuickItem::Settings) => self.launch("Settings", SETTINGS_APP),
+            _ => {}
         }
         if let Some(i) = launch {
             let app = self.apps[i].clone();
@@ -641,13 +1114,14 @@ impl Shell {
                 let body = format!("Kernel {version}, PRISM compositor, AXIS shell. Many surfaces. One vision.");
                 self.show_note("OSyx", &body);
             }
-            (MenuPurpose::Power, 0) => self.confirm(
+            (MenuPurpose::Power, 0) => self.lock_screen(),
+            (MenuPurpose::Power, 1) => self.confirm(
                 CONFIRM_REBOOT,
                 "Restart OSyx?",
                 "All applications will be closed and the computer restarts.",
                 "Restart",
             ),
-            (MenuPurpose::Power, 1) => self.confirm(
+            (MenuPurpose::Power, 2) => self.confirm(
                 CONFIRM_OFF,
                 "Shut down OSyx?",
                 "All applications will be closed, file systems unmounted and the computer switched off.",
@@ -665,6 +1139,11 @@ impl Shell {
         self.show_note("Power", &format!("The system refused: {e}"));
     }
 
+    /// System programs that need root (Setup writes whole disks) and are
+    /// started without run-app's drop to the desktop user. Matched exactly,
+    /// so a user-edited shortcut can start them but cannot add arguments.
+    const PRIVILEGED: &'static [&'static str] = &["/system/bin/setup"];
+
     fn launch(&mut self, name: &str, exec: &str) {
         if exec == "/system/bin/zen" && self.children.iter().any(|(_, n)| n == name) {
             if let Some(window) = self.windows.iter().find(|w| w.title.contains("Zen")) {
@@ -674,8 +1153,13 @@ impl Shell {
             }
             return;
         }
-        let mut command = Command::new("/system/bin/run-app");
-        command.arg(exec);
+        let command = if Self::PRIVILEGED.contains(&exec) {
+            Command::new(exec)
+        } else {
+            let mut c = Command::new("/system/bin/run-app");
+            c.arg(exec);
+            c
+        };
         match command.spawn() {
             Ok(child) => {
                 println!("desktop: launched {} ({}) as process {}", name, exec, child.id());
@@ -867,6 +1351,52 @@ impl Shell {
         self.panel.dirty = true;
     }
 
+    fn open_wifi(&mut self, state: WifiState) {
+        let mut list = ListView::new(vec![Column::new("Network", 0, Align::Left), Column::new("Security", 90, Align::Right)]);
+        list.show_header = false;
+        list.row_height = 40;
+        list.rect = Rect::new(8, 84, QUICK_PANEL_W - 16, QUICK_PANEL_H - 84 - 16);
+        let items = state
+            .networks
+            .iter()
+            .map(|(_, ssid, sec)| {
+                let sec = match sec.as_str() {
+                    "open" => "Open",
+                    "wep" => "WEP",
+                    _ => "WPA2",
+                };
+                ListItem::new(Some(Icon::Wifi), &[ssid, sec])
+            })
+            .collect();
+        list.set_items(items);
+        let x = self.w as i32 - QUICK_PANEL_W as i32 - 8;
+        let y = (self.h - PANEL_H) as i32 - QUICK_PANEL_H as i32 - 8;
+        println!("desktop: Wi-Fi picker opened ({} networks)", state.networks.len());
+        self.open_popup(x, y, QUICK_PANEL_W, QUICK_PANEL_H, PopupKind::Wifi { state, list, pass: None, message: String::new() });
+    }
+
+    fn toggle_quick(&mut self) {
+        if self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Quick) {
+            self.close_popup();
+            return;
+        }
+        if self.recently_closed(PopupTag::Quick) {
+            return;
+        }
+        let net = NetSummary::read();
+        let radios = Radios::read();
+        let sound = Sound::read();
+        let x = self.w as i32 - QUICK_PANEL_W as i32 - 8;
+        let y = (self.h - PANEL_H) as i32 - QUICK_PANEL_H as i32 - 8;
+        println!(
+            "desktop: quick settings opened (network: {}, sound: {})",
+            net.detail,
+            sound.as_ref().map_or("none", |s| s.device.as_str())
+        );
+        self.open_popup(x, y, QUICK_PANEL_W, QUICK_PANEL_H, PopupKind::Quick { net, radios, sound, dragging: false, hover: None });
+        self.panel.dirty = true;
+    }
+
     fn confirm(&mut self, tag: u32, title: &str, message: &str, action: &str) {
         let mut dialog =
             Dialog::new(tag, title, message, &[("Cancel", ButtonStyle::Secondary), (action, ButtonStyle::Danger)]);
@@ -876,6 +1406,39 @@ impl Shell {
         let x = (self.w as i32 - w as i32) / 2;
         let y = (self.h as i32 - h as i32) / 2;
         self.open_popup(x, y, w, h, PopupKind::Confirm { dialog });
+    }
+
+    /// Announces a system update that /bin/osyx-update installed.
+    fn check_update(&mut self) {
+        let Ok(text) = os_std::fs::read_to_string("/run/update.status") else { return };
+        if text.lines().any(|l| l == "state installed") {
+            let version = text.lines().find_map(|l| l.strip_prefix("version ")).unwrap_or("");
+            println!("desktop: system update {version} installed");
+            self.show_note("System update", &format!("OSyx {version} is installed. Restart the computer to finish."));
+            self.update_announced = true;
+        }
+    }
+
+    /// Tells the user how joining the chosen Wi-Fi network ended: connected,
+    /// or a wrong password (the kernel's WPA handshake watch).
+    fn check_wifi_join(&mut self) {
+        let Some((ssid, since)) = self.wifi_joining.clone() else { return };
+        let Some(w) = WifiState::read() else { return };
+        // The kernel applies wifi.conf within ~2 s; older states are stale.
+        if self.now().saturating_sub(since) < 3000 {
+            return;
+        }
+        if w.error.as_deref() == Some("wrong-password") {
+            println!("desktop: wrong Wi-Fi password for {ssid}");
+            self.show_note("Wi-Fi: wrong password", &format!("{ssid} did not accept the password. Open Wi-Fi in Quick Settings and try again."));
+            self.wifi_joining = None;
+        } else if w.keys && w.ssid.as_deref() == Some(ssid.as_str()) {
+            self.show_note("Wi-Fi", &format!("Connected to {ssid}"));
+            self.wifi_joining = None;
+        } else if self.now().saturating_sub(since) > 60_000 {
+            self.show_note("Wi-Fi", &format!("Could not connect to {ssid}."));
+            self.wifi_joining = None;
+        }
     }
 
     // ---- notifications -----------------------------------------------------
@@ -924,9 +1487,14 @@ impl Shell {
 
     // ---- panel ---------------------------------------------------------------
 
-    fn clock_rect(&self) -> Rect {
+    fn quick_rect(&self) -> Rect {
         let r = self.power_btn.rect;
-        Rect::new(r.x - 12 - CLOCK_W as i32, 6, CLOCK_W, PANEL_H - 12)
+        Rect::new(r.x - 12 - QUICK_W as i32, 8, QUICK_W, PANEL_H - 16)
+    }
+
+    fn clock_rect(&self) -> Rect {
+        let r = self.quick_rect();
+        Rect::new(r.x - 4 - CLOCK_W as i32, 6, CLOCK_W, PANEL_H - 12)
     }
 
     fn update_clock(&mut self) {
@@ -1017,6 +1585,11 @@ impl Shell {
         }
         if self.panel.dirty && self.panel.can_draw() {
             let clock = self.clock_rect();
+            let quick = (
+                self.quick_rect(),
+                self.quick_hover,
+                self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Quick),
+            );
             let mut s = self.panel.surface()?;
             let mut p = Painter::new(&mut s, &theme, &fonts);
             draw_panel(
@@ -1027,6 +1600,7 @@ impl Shell {
                 &self.clock,
                 clock,
                 self.clock_hover,
+                quick,
                 self.windows.is_empty(),
             );
             self.panel.present(&mut self.conn, None)?;
@@ -1047,8 +1621,45 @@ impl Shell {
                 n.win.present(&mut self.conn, None)?;
             }
         }
+        if let Some(l) = &mut self.lock {
+            if l.win.dirty && l.win.can_draw() && (l.win.width, l.win.height) == (self.w, self.h) {
+                let mut s = l.win.surface()?;
+                for y in 0..self.h {
+                    let row = &self.wallpaper[(y * self.w) as usize..][..self.w as usize];
+                    s.row_mut(y).copy_from_slice(row);
+                }
+                let mut p = Painter::new(&mut s, &theme, &fonts);
+                draw_lock(&mut p, &l.field, &l.message, &self.clock);
+                l.win.present(&mut self.conn, None)?;
+            }
+        }
         Ok(())
     }
+}
+
+fn draw_lock(p: &mut Painter, field: &TextField, message: &str, clock: &(String, String)) {
+    let t = *p.theme;
+    let full = p.s.bounds();
+    p.blend(full, rgb(4, 8, 18), 150);
+    let cx = full.w as i32 / 2;
+    let cy = full.h as i32 / 2;
+    let big = p.fonts.line_height(FontKind::Display);
+    p.text_in(FontKind::Display, Rect::new(0, cy - 150, full.w, big), &clock.0, rgb(245, 248, 255), Align::Center);
+    let lh = p.fonts.line_height(FontKind::Large);
+    p.text_in(FontKind::Large, Rect::new(0, cy - 150 + big as i32 + 4, full.w, lh), &clock.1, rgb(210, 220, 240), Align::Center);
+    icon::draw(p, Icon::Lock, Rect::new(cx - 14, cy - 10, 28, 28), rgb(230, 236, 250));
+    let r = field.rect;
+    let card = Rect::new(r.x - 6, r.y - 6, r.w + 12, r.h + 12);
+    p.rounded(card, t.radius, rgb(10, 14, 24), 200);
+    field.draw(p, true);
+    let ul = p.fonts.line_height(FontKind::Ui);
+    let below = field.rect.bottom() as i32 + 14;
+    let (msg, color) = if message.is_empty() {
+        ("Type your password and press Enter", rgb(190, 200, 220))
+    } else {
+        (message, t.danger)
+    };
+    p.text_in(FontKind::Ui, Rect::new(0, below, full.w, ul), msg, color, Align::Center);
 }
 
 fn task_icon(title: &str) -> Icon {
@@ -1099,6 +1710,7 @@ fn draw_panel(
     clock: &(String, String),
     clock_rect: Rect,
     clock_hover: bool,
+    (quick_rect, quick_hover, quick_open): (Rect, bool, bool),
     empty: bool,
 ) {
     let t = *p.theme;
@@ -1127,8 +1739,103 @@ fn draw_panel(
     p.text_in(FontKind::Bold, top, &clock.0, t.text, Align::Right);
     let bottom = Rect::new(clock_rect.x, clock_rect.y + 2 + lh as i32, clock_rect.w - 10, lh);
     p.text_in(FontKind::Ui, bottom, &clock.1, t.text_dim, Align::Right);
-    p.vline(clock_rect.right() as i32 + 5, 12, full.h - 24, PANEL_LINE);
+    if quick_hover || quick_open {
+        p.rounded(quick_rect, t.radius_small, if quick_open { t.selection } else { t.raised }, 255);
+    }
+    let icon_y = quick_rect.y + (quick_rect.h as i32 - 20) / 2;
+    icon::draw(p, Icon::Network, Rect::new(quick_rect.x + 10, icon_y, 20, 20), t.text);
+    icon::draw(p, Icon::Volume, Rect::new(quick_rect.x + 36, icon_y, 20, 20), t.text);
+    p.vline(quick_rect.right() as i32 + 5, 12, full.h - 24, PANEL_LINE);
     power.draw(p, false);
+}
+
+/// Controls without a working driver are shown but disabled (naming the
+/// chip when the kernel identified one) rather than pretending to work.
+fn draw_quick(p: &mut Painter, net: &NetSummary, radios: &Radios, sound: Option<&Sound>, hover: Option<QuickItem>) {
+    let t = *p.theme;
+    p.text(FontKind::Large, 20, 16, "Quick settings", t.text);
+    // A found chip without a driver is named but stays off.
+    let wifi_detail = match &radios.wifi_state {
+        Some(w) => w.ssid.clone().unwrap_or_else(|| w.state.clone()),
+        None => String::from(radios.wifi.as_deref().map_or("No adapter", chip_short)),
+    };
+    let wifi_on = radios.wifi_state.as_ref().is_some_and(|w| w.ssid.is_some());
+    let bt = radios.bluetooth.as_deref().map_or("No adapter", chip_short);
+    let tiles = [
+        (QuickItem::Network, Icon::Network, "Ethernet", net.detail.as_str(), net.present, net.connected),
+        (QuickItem::Wifi, Icon::Wifi, "Wi-Fi", wifi_detail.as_str(), radios.wifi_state.is_some(), wifi_on),
+        (QuickItem::Bluetooth, Icon::Bluetooth, "Bluetooth", bt, false, false),
+    ];
+    let lh = p.fonts.line_height(FontKind::Bold);
+    for (item, ic, title, detail, enabled, on) in tiles {
+        let r = item.rect();
+        let hovered = hover == Some(item);
+        let (bg, fg, sub) = match (enabled, on) {
+            (true, true) => (if hovered { t.accent_hover } else { t.accent }, t.on_accent, t.on_accent),
+            (true, false) => (if hovered { t.selection } else { t.raised }, t.text, t.text_dim),
+            _ => (t.window, t.text_faint, t.text_faint),
+        };
+        p.rounded(r, t.radius, bg, 255);
+        icon::draw(p, ic, Rect::new(r.x + 12, r.y + 12, 26, 26), fg);
+        p.text_in(FontKind::Bold, Rect::new(r.x + 12, r.y + 46, r.w - 20, lh), title, fg, Align::Left);
+        p.text_in(FontKind::Ui, Rect::new(r.x + 12, r.y + 46 + lh as i32, r.w - 16, lh), detail, sub, Align::Left);
+    }
+    // Volume: a working slider with a sound driver, a disabled one without.
+    let y = VOLUME_Y;
+    let track = volume_track();
+    p.rounded(track, 3, t.raised, 255);
+    match sound {
+        Some(s) => {
+            let shown = if s.muted { 0 } else { s.volume };
+            p.text(FontKind::Bold, 20, y, &format!("Volume  {}%", shown), t.text);
+            let mute_bg = if hover == Some(QuickItem::Mute) { t.selection } else { t.surface };
+            p.rounded(QuickItem::Mute.rect(), t.radius_small, mute_bg, 255);
+            icon::draw(p, Icon::Volume, Rect::new(20, y + 30, 22, 22), if s.muted { t.text_faint } else { t.text });
+            let knob = track.x + (track.w * shown / 100) as i32;
+            p.rounded(Rect::new(track.x, track.y, (knob - track.x).max(0) as u32, track.h), 3, t.accent, 255);
+            p.disc(knob, track.y + 3, 8, if hover == Some(QuickItem::Volume) { t.accent_hover } else { t.accent }, 255);
+            let detail = if s.muted { format!("{} (muted)", s.device) } else { s.device.clone() };
+            p.text(FontKind::Ui, 54, y + 52, &detail, t.text_dim);
+        }
+        None => {
+            p.text(FontKind::Bold, 20, y, "Volume", t.text_dim);
+            icon::draw(p, Icon::Volume, Rect::new(20, y + 30, 22, 22), t.text_faint);
+            p.disc(track.x, track.y + 3, 8, t.text_faint, 255);
+            p.text(FontKind::Ui, 54, y + 52, "No sound device found", t.text_faint);
+        }
+    }
+    // Footer.
+    let fy = (QUICK_PANEL_H - 64) as i32;
+    p.hline(12, fy, QUICK_PANEL_W - 24, t.border);
+    let s = QuickItem::Settings.rect();
+    p.rounded(s, t.radius_small, if hover == Some(QuickItem::Settings) { t.selection } else { t.raised }, 255);
+    icon::draw(p, Icon::Settings, Rect::new(s.x + 12, s.y + 8, 20, 20), t.text);
+    p.text_in(FontKind::Ui, Rect::new(s.x + 40, s.y, s.w - 48, s.h), "All settings", t.text, Align::Left);
+}
+
+fn draw_wifi(p: &mut Painter, state: &WifiState, list: &ListView, pass: Option<&(String, TextField, Checkbox)>, message: &str) {
+    let t = *p.theme;
+    p.text(FontKind::Large, 20, 16, "Wi-Fi", t.text);
+    let status = match &state.ssid {
+        Some(s) => format!("Connected to {s}"),
+        None => format!("Not connected ({})", state.state),
+    };
+    p.text(FontKind::Ui, 20, 52, &status, t.text_dim);
+    match pass {
+        Some((ssid, field, show)) => {
+            show.draw(p, false);
+            let lh = p.fonts.line_height(FontKind::Bold);
+            let top = field.rect.y - 2 * lh as i32 - 12;
+            p.text(FontKind::Bold, 20, top, &format!("Password for {ssid}"), t.text);
+            field.draw(p, true);
+            let (msg, color) = if message.is_empty() { ("Enter to join, Esc to go back", t.text_faint) } else { (message, t.danger) };
+            p.text(FontKind::Ui, 20, field.rect.bottom() as i32 + 10, msg, color);
+        }
+        None if state.networks.is_empty() => {
+            p.text_in(FontKind::Ui, list.rect, "No networks seen yet. Scanning...", t.text_faint, Align::Center);
+        }
+        None => list.draw(p, true),
+    }
 }
 
 fn draw_popup(p: &mut Painter, kind: &PopupKind, apps: &[AppEntry]) {
@@ -1158,6 +1865,8 @@ fn draw_popup(p: &mut Painter, kind: &PopupKind, apps: &[AppEntry]) {
         }
         PopupKind::Menu { menu, .. } => menu.draw(p),
         PopupKind::Confirm { dialog } => dialog.draw(p),
+        PopupKind::Quick { net, radios, sound, hover, .. } => draw_quick(p, net, radios, sound.as_ref(), *hover),
+        PopupKind::Wifi { state, list, pass, message } => draw_wifi(p, state, list, pass.as_ref(), message),
     }
     // A one pixel frame (popups are square; PRISM adds the shadow).
     p.fill(Rect::new(0, 0, full.w, 1), t.border);

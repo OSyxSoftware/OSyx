@@ -1,13 +1,15 @@
 #!/bin/bash
 # Builds the ext4 root file system image of OSyx with e2fsprogs.
-#   mkrootfs.sh <program dir> <output image> <size MiB> [live]
+#   mkrootfs.sh <program dir> <output image> <size MiB> [live|tar]
 # <program dir> holds bin/, usr/bin/ and system/bin/ (any may be empty): the
 # user programs installed as /bin/*, /usr/bin/* and /system/bin/* (mode 0755).
 # /system also holds the desktop's application entries; /etc the time zone
 # and keyboard layout; /home/user a few documents to look at.
 # With "live" the same tree is stripped and packed as the compressed live
 # root module (mklivefs.py) instead of an ext4 image; the test seed is
-# left out because it does not fit (and is not needed) in RAM.
+# left out because it does not fit (and is not needed) in RAM. With "tar"
+# the stripped tree is written as a ustar archive (system updates,
+# scripts/release.ps1).
 # Runs as root inside WSL so that files belong to root (uid 0) in the image.
 # Only a staging directory under /tmp and the output file are written.
 set -euo pipefail
@@ -19,13 +21,25 @@ R="$STAGE/root"
 mkdir -p "$R"/{boot,dev,tmp,run,mnt,bin,usr/bin,etc/osyx,var/log,home/user,osyx-seed,system/bin,system/share/applications}
 chmod 1777 "$R/tmp"
 chmod 0755 "$R"/{boot,dev,run,mnt,bin,usr,usr/bin,etc,etc/osyx,var,var/log,home,osyx-seed,system,system/bin,system/share,system/share/applications}
-printf 'OSyx 0.1.0\n' > "$R/etc/osyx-release"
+# The system version (VERSION, raised by scripts/release.ps1) and where
+# installed systems look for updates.
+VERSION="$(tr -d ' \r\n' < "$HERE/../VERSION" 2>/dev/null || true)"
+printf 'OSyx %s\n' "${VERSION:-0.1.0}" > "$R/etc/osyx-release"
+if [ -f "$HERE/update.conf" ]; then
+    install -m 0644 "$HERE/update.conf" "$R/etc/osyx/update.conf"
+fi
 printf 'osyx\n' > "$R/etc/hostname"
 for d in bin usr/bin system/bin; do
     if [ -d "$BIN/$d" ]; then
         find "$BIN/$d" -maxdepth 1 -type f -exec install -m 0755 -t "$R/$d/" {} +
     fi
 done
+# Device firmware (iwm Wi-Fi, Intel Bluetooth), with the licences.
+if [ -d "$HERE/../drivers/bsd/firmware" ]; then
+    mkdir -p "$R/etc/firmware"
+    find "$HERE/../drivers/bsd/firmware" -maxdepth 1 -type f -exec install -m 0644 -t "$R/etc/firmware/" {} +
+    chmod 0755 "$R/etc/firmware"
+fi
 # Desktop wallpapers (OSXI images converted by build.ps1).
 if [ -d "$BIN/opt/zen" ]; then
     mkdir -p "$R/opt/zen"
@@ -124,8 +138,8 @@ print("Hello from", name, "- the answer is", answer)
 uname
 EOF
 chmod 0644 "$R/home/user/Documents/Welcome.txt" "$R/home/user/Scripts/hello.ax"
-# Contents init checks (userspace/apps/src/fs_checks.rs); installed only.
-if [ "$MODE" != live ]; then
+# Contents init checks (userspace/apps/src/fs_checks.rs); test images only.
+if [ "$MODE" = image ]; then
     printf 'Hello from the OSyx root file system!\n' > "$R/osyx-seed/hello.txt"
     python3 -c "import sys; sys.stdout.buffer.write(bytes((i*11+3)%253 for i in range(300000)))" > "$R/osyx-seed/pattern.bin"
     ln -s hello.txt "$R/osyx-seed/link"
@@ -138,15 +152,30 @@ else
 fi
 chown -R 0:0 "$R"
 chown -R 1000:1000 "$R/home/user"
+# The Wi-Fi network to join (read by the kernel): owned by the desktop
+# user, who sets it with `wifi connect`; private because it holds the key.
+: > "$R/etc/osyx/wifi.conf"
+chown 1000:1000 "$R/etc/osyx/wifi.conf"
+chmod 0600 "$R/etc/osyx/wifi.conf"
+# System settings (Settings app): writable by the administrators group
+# (gid 27, "sudo"), the desktop user's primary group.
+chgrp 27 "$R/etc/osyx" "$R/etc/TZ" "$R/etc/hostname" "$R/etc/osyx/keyboard"
+chmod 0775 "$R/etc/osyx"
+chmod 0664 "$R/etc/TZ" "$R/etc/hostname" "$R/etc/osyx/keyboard"
 chmod 0750 "$R/home/user"
-if [ "$MODE" = live ]; then
+if [ "$MODE" = live ] || [ "$MODE" = tar ]; then
     # Debug symbols only bloat the RAM root; the programs were validated
     # before installation, and strip keeps the loader's PT_LOAD segments.
     while IFS= read -r -d '' f; do
         if [ "$(od -An -N4 -tx1 "$f" | tr -d ' \n')" = 7f454c46 ]; then strip --strip-all "$f"; fi
     done < <(find "$R" -type f -print0)
     rm -f "$OUT"
-    python3 "$HERE/mklivefs.py" "$R" "$OUT"
+    if [ "$MODE" = tar ]; then
+        tar --format=ustar --numeric-owner -C "$R" -cf "$OUT" .
+        echo "$OUT: $(find "$R" -type f | wc -l) files"
+    else
+        python3 "$HERE/mklivefs.py" "$R" "$OUT"
+    fi
     exit 0
 fi
 rm -f "$OUT"

@@ -113,6 +113,12 @@ pub trait Filesystem: Send + Sync {
     fn sync(&self) -> Result<()> {
         Ok(())
     }
+    /// Periodic write-back (`now_ms`: uptime): writes what has been held in
+    /// memory for longer than the volume allows; never waits for a busy
+    /// volume. True if something was written.
+    fn writeback(&self, _now_ms: u64) -> Result<bool> {
+        Ok(false)
+    }
     fn usage(&self) -> FsUsage;
     /// Last call before the driver is dropped: flush and leave the volume
     /// clean.
@@ -506,6 +512,28 @@ pub fn unmount(cx: &Lookup, p: &str) -> Result<()> {
     }
     kprintln!("vfs: {} unmounted from {}", m.fs.fs_type(), m.path);
     Ok(())
+}
+
+/// Starts the write-back thread: once a second it lets every volume write
+/// what it has held in memory for too long (ext4: 5 s), so data written
+/// without `fsync` reaches the disk within seconds instead of only at the
+/// next sync, a full buffer or unmount.
+pub fn start_writeback() {
+    crate::sched::spawn_kernel("writeback", writeback_thread, 0, 0);
+}
+
+fn writeback_thread(_: u64, _: u64) {
+    loop {
+        crate::sched::sleep_ticks(crate::arch::timer::ms_to_ticks(1000));
+        let now = crate::interrupts::uptime_ms();
+        for m in mounts() {
+            match m.fs.writeback(now) {
+                Ok(true) => crate::kprintln!("writeback: {} ({}) written", m.path, m.source),
+                Ok(false) => {}
+                Err(e) => crate::kprintln!("writeback: {} ({}): {:?}", m.path, m.source, e),
+            }
+        }
+    }
 }
 
 /// Every mount, outermost first.

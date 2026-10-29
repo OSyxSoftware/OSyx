@@ -58,11 +58,16 @@ typical PC still lacks:
 - **Root disk drivers**: only virtio-blk exists. On real hardware no disk
   is found and init runs from the ESP boot modules (fallback root). NVMe
   (most PCs since ~2018) and AHCI/SATA are the next storage drivers.
-- **Network**: only VirtIO-Net; Intel e1000e/igc or Realtek r8169 would be
-  the first physical NICs.
+- **Network**: VirtIO-Net, Intel e1000/e1000e (older ids) and the Realtek
+  r8169 family (RTL8111/8168, 8101, 8169; generic bring-up without the
+  per-chip PHY tables, untested on hardware so far). No Intel igc/I219
+  yet; Wi-Fi and Bluetooth chips are only identified (`devices`).
 - **Display**: the GOP framebuffer works anywhere; there is no native
   modesetting for Intel/AMD/NVIDIA GPUs (VirtIO-GPU only under QEMU).
 - **SMP**: enabled logical CPUs are discovered through MADT and started with INIT/SIPI. User threads run in parallel (up to 16 CPUs); kernel entry remains serialized pending a finer-grained locking audit.
 - **USB**: root-port devices only (no hubs); keyboards behind a hub or a
   USB-C dock are not seen.
+- **Laptop input**: the i8042 PS/2 keyboard and PS/2 touchpad (as a
+  mouse with wheel) are polled at 1 kHz; I2C-HID touchpads and native
+  touchpad protocols (Synaptics, ELAN gestures) are not supported.
 - **Power**: no ACPI S-states or AML; shutdown on real hardware only halts.

@@ -130,6 +130,32 @@ impl<'a> FrameBitmap<'a> {
         None
     }
 
+    /// Allocates `count` physically contiguous frames whose first frame is
+    /// a multiple of `align` bytes and whose last byte lies below `limit`
+    /// (devices with 32-bit DMA). Returns the first frame's address.
+    pub fn alloc_contiguous(&mut self, count: u64, align: u64, limit: u64) -> Option<u64> {
+        if count == 0 {
+            return None;
+        }
+        let step = (align / PAGE_SIZE).max(1);
+        let end = self.frames.min(limit / PAGE_SIZE);
+        let mut f = align_up(LOW_MEMORY_LIMIT / PAGE_SIZE, step);
+        while f + count <= end {
+            match (f..f + count).find(|&g| self.test(g)) {
+                // Restart after the used frame, at the next aligned slot.
+                Some(used) => f = align_up(used + 1, step),
+                None => {
+                    for g in f..f + count {
+                        self.set(g);
+                    }
+                    self.free -= count;
+                    return Some(f * PAGE_SIZE);
+                }
+            }
+        }
+        None
+    }
+
     pub fn free(&mut self, phys: u64) -> Result<(), FrameError> {
         if !phys.is_multiple_of(PAGE_SIZE) {
             return Err(FrameError::Unaligned(phys));
@@ -226,6 +252,32 @@ mod tests {
         assert_eq!(fb.free(f), Err(FrameError::NotAllocated(f)), "double free");
         assert_eq!(fb.free(0x1000), Err(FrameError::OutOfRange(0x1000)));
         assert_eq!(fb.free(0x4000_0000), Err(FrameError::OutOfRange(0x4000_0000)));
+    }
+
+    #[test]
+    fn contiguous_runs_respect_holes_alignment_and_limit() {
+        let map = sample_map();
+        let p = plan(&map).unwrap();
+        let mut storage = vec![0u64; (p.bytes / 8) as usize];
+        let mut fb = FrameBitmap::new(&mut storage, &p, &map);
+        let free = fb.free_frames();
+        // 64 KiB aligned to 64 KiB: the first 1 MiB frame holds the bitmap.
+        let a = fb.alloc_contiguous(16, 0x1_0000, u64::MAX).unwrap();
+        assert_eq!(a % 0x1_0000, 0);
+        assert!(a >= 0x11_0000 && !(0x20_0000..0x21_0000).contains(&a));
+        for f in 0..16 {
+            assert!(!fb.is_free(a + f * PAGE_SIZE));
+        }
+        assert_eq!(fb.free_frames(), free - 16);
+        // A run cannot cross the kernel image hole.
+        // 220 frames fit only after the first run, below the kernel image.
+        let b = fb.alloc_contiguous(220, PAGE_SIZE, u64::MAX).unwrap();
+        assert!(b >= a + 16 * PAGE_SIZE && b + 220 * PAGE_SIZE <= 0x20_0000);
+        assert!(fb.alloc_contiguous(300, PAGE_SIZE, u64::MAX).is_none());
+        assert!(fb.alloc_contiguous(1, PAGE_SIZE, 0x10_0000).is_none(), "nothing below 1 MiB");
+        for f in 0..16 {
+            fb.free(a + f * PAGE_SIZE).unwrap();
+        }
     }
 
     #[test]

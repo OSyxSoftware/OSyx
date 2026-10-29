@@ -59,6 +59,15 @@ pub fn alloc_frame() -> Option<u64> {
     Some(pa)
 }
 
+/// Allocates `count` zeroed, physically contiguous frames aligned to
+/// `align` bytes, all below `limit` (DMA buffers of devices).
+pub fn alloc_frames_contiguous(count: u64, align: u64, limit: u64) -> Option<u64> {
+    let pa = FRAMES.lock().as_mut()?.alloc_contiguous(count, align, limit)?;
+    // SAFETY: the frames were just allocated and are reachable via the HHDM.
+    unsafe { core::ptr::write_bytes(phys_to_virt(pa) as *mut u8, 0, (count * PAGE_SIZE) as usize) };
+    Some(pa)
+}
+
 pub fn free_frame(pa: u64) -> Result<(), FrameError> {
     FRAMES.lock().as_mut().expect("frame allocator not initialised").free(pa)
 }

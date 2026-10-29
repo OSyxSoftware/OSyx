@@ -167,13 +167,16 @@ pub fn run_app(name: &str, spec: WindowSpec, app: &mut dyn App) -> i32 {
 
 /// Applications run as the desktop user, not as root.
 pub const USER_UID: u32 = 1000;
+/// The administrators group ("sudo"), the desktop user's primary group: it
+/// may change the system settings.
+pub const ADMIN_GID: u32 = 27;
 pub const USER_HOME: &str = "/home/user";
 
 /// Drops root privileges (programs started by the shell run as root until
 /// they call this) and sets the user's environment.
 pub fn become_user() {
     if os::getuid().0 == 0 {
-        if let Err(e) = os::setuid(USER_UID, USER_UID) {
+        if let Err(e) = os::setuid(USER_UID, ADMIN_GID) {
             eprintln!("cannot drop privileges: {e}");
         }
     }

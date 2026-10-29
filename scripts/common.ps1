@@ -82,6 +82,16 @@ function New-RootImage([string]$BinDir) {
     Invoke-Checked 'root image' { wsl.exe -d Ubuntu-24.04 -u root -- bash $script $bin $out $Script:RootSizeMiB }
 }
 
+# Packs the system tree a live build installs (stripped, as Setup copies it)
+# as a ustar archive for scripts/release.ps1.
+function New-ReleaseTar([string]$BinDir, [string]$Output) {
+    $script = ConvertTo-WslPath (Join-Path $PSScriptRoot 'mkrootfs.sh')
+    $bin = ConvertTo-WslPath $BinDir
+    New-Item -ItemType Directory -Force (Split-Path -Parent $Output) | Out-Null
+    $out = ConvertTo-WslPath ([IO.Path]::GetFullPath($Output))
+    Invoke-Checked 'release tar' { wsl.exe -d Ubuntu-24.04 -u root -- bash $script $bin $out 0 tar }
+}
+
 # Builds build/osyx-live.iso from the ESP files build.ps1 already made
 # (BOOTX64.EFI, KERNEL.ELF, CMDLINE.TXT) and `$BinDir`: the tree is packed
 # as the compressed live root (stripped, cpio + zlib), the ESP files go
@@ -186,7 +196,7 @@ function Test-Whpx {
 }
 
 # Returns the QEMU argument list for booting build/osyx.img.
-function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '', [switch]$Gpu, [string]$GpuSize = '', [string]$DiskFile = 'build/osyx.img', [switch]$NoDisk, [string]$Cdrom = '', [ValidateRange(1,16)][int]$CpuCount = 1, [ValidateSet('auto','whpx','tcg')][string]$Accel = 'auto') {
+function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '', [switch]$Gpu, [string]$GpuSize = '', [string]$DiskFile = 'build/osyx.img', [switch]$NoDisk, [string]$Cdrom = '', [ValidateRange(1,16)][int]$CpuCount = 1, [ValidateSet('auto','whpx','tcg')][string]$Accel = 'auto', [string]$Nic = 'virtio-net-pci') {
     if (-not $Script:QemuBinary) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
     if (-not $Script:Ovmf) { throw 'OVMF (edk2-x86_64-code.fd) not found' }
     $accelArgs = @()
@@ -225,7 +235,7 @@ function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 5
     } else {
         $nd = 'user,id=n0'
         if ($HostFwd) { $nd += ',' + $HostFwd }
-        $a += @('-netdev', $nd, '-device', 'virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56')
+        $a += @('-netdev', $nd, '-device', "$Nic,netdev=n0,mac=52:54:00:12:34:56")
     }
     # USB input through the native xHCI driver (no PS/2 driver exists, so
     # the keyboard and mouse can only reach OSyx this way).

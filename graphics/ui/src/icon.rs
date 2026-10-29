@@ -27,7 +27,20 @@ pub enum Icon {
     Link,
     Device,
     Browser,
+    Network,
+    Wifi,
+    Bluetooth,
+    Volume,
+    Settings,
+    Lock,
 }
+
+/// Unit directions (x, y in 1/100, y down) every 15 degrees from straight
+/// right (index 0) through straight up (6) to straight left (12).
+const DIRS: [(i32, i32); 13] = [
+    (100, 0), (97, -26), (87, -50), (71, -71), (50, -87), (26, -97), (0, -100),
+    (-26, -97), (-50, -87), (-71, -71), (-87, -50), (-97, -26), (-100, 0),
+];
 
 const FOLDER_BACK: Color = rgb(58, 104, 196);
 const FOLDER_FRONT: Color = rgb(86, 142, 240);
@@ -164,5 +177,76 @@ pub fn draw(p: &mut Painter, icon: Icon, r: Rect, c: Color) {
             p.fill(sub(16, 66, 68, 10), c);
             p.disc(x0 + s / 2, y0 + px(84), (s / 10).max(1) as u32, c, 255);
         }
+        Icon::Network => {
+            // Three linked boxes: one above, two below.
+            let boxes = [(38, 10, 24, 22), (8, 66, 24, 22), (68, 66, 24, 22)];
+            for (bx, by, bw, bh) in boxes {
+                p.segment(pt(bx, by), pt(bx + bw, by), stroke, c, 255);
+                p.segment(pt(bx + bw, by), pt(bx + bw, by + bh), stroke, c, 255);
+                p.segment(pt(bx + bw, by + bh), pt(bx, by + bh), stroke, c, 255);
+                p.segment(pt(bx, by + bh), pt(bx, by), stroke, c, 255);
+            }
+            p.segment(pt(50, 32), pt(50, 50), stroke, c, 255);
+            p.segment(pt(20, 50), pt(80, 50), stroke, c, 255);
+            p.segment(pt(20, 50), pt(20, 66), stroke, c, 255);
+            p.segment(pt(80, 50), pt(80, 66), stroke, c, 255);
+        }
+        Icon::Wifi => {
+            for r in [24, 46, 68] {
+                arc(p, pt(50, 84), s * r / 100, 3, 9, stroke, c);
+            }
+            p.disc(x0 + s / 2, y0 + px(82), (s / 12).max(1) as u32, c, 255);
+        }
+        Icon::Bluetooth => {
+            p.segment(pt(48, 8), pt(48, 92), stroke, c, 255);
+            p.segment(pt(48, 8), pt(72, 30), stroke, c, 255);
+            p.segment(pt(72, 30), pt(26, 70), stroke, c, 255);
+            p.segment(pt(26, 30), pt(72, 70), stroke, c, 255);
+            p.segment(pt(72, 70), pt(48, 92), stroke, c, 255);
+        }
+        Icon::Volume => {
+            p.segment(pt(10, 38), pt(26, 38), stroke, c, 255);
+            p.segment(pt(26, 38), pt(48, 18), stroke, c, 255);
+            p.segment(pt(48, 18), pt(48, 82), stroke, c, 255);
+            p.segment(pt(48, 82), pt(26, 62), stroke, c, 255);
+            p.segment(pt(26, 62), pt(10, 62), stroke, c, 255);
+            p.segment(pt(10, 62), pt(10, 38), stroke, c, 255);
+            for r in [18, 34] {
+                arc_right(p, pt(54, 50), s * r / 100, stroke, c);
+            }
+        }
+        Icon::Lock => {
+            // Padlock: shackle (an open-bottom ring) over a rounded body.
+            p.ring(x0 + s / 2, y0 + px(40), (s * 24 / 100) as u32, (s / 10).max(1) as u32, c, 255, false);
+            p.rounded(sub(18, 42, 64, 48), (s / 10) as u32, c, 255);
+        }
+        Icon::Settings => {
+            p.ring(x0 + s / 2, y0 + s / 2, (s * 30 / 100) as u32, (s / 10).max(1) as u32, c, 255, false);
+            let all = [(100, 0), (71, 71), (0, 100), (-71, 71), (-100, 0), (-71, -71), (0, -100), (71, -71)];
+            for (dx, dy) in all {
+                let a = pt(50 + 30 * dx / 100, 50 + 30 * dy / 100);
+                let b = pt(50 + 44 * dx / 100, 50 + 44 * dy / 100);
+                p.segment(a, b, stroke * 3 / 2, c, 255);
+            }
+        }
+    }
+}
+
+/// Polyline arc of radius `r` pixels around `centre` (1/256 px) through
+/// `DIRS[from..=to]`.
+fn arc(p: &mut Painter, centre: (i32, i32), r: i32, from: usize, to: usize, width: i32, c: Color) {
+    let at = |(dx, dy): (i32, i32)| (centre.0 + r * dx * 256 / 100, centre.1 + r * dy * 256 / 100);
+    for i in from..to {
+        p.segment(at(DIRS[i]), at(DIRS[i + 1]), width, c, 255);
+    }
+}
+
+/// The right-facing half of `arc` from 45 degrees up to 45 degrees down
+/// (sound waves).
+fn arc_right(p: &mut Painter, centre: (i32, i32), r: i32, width: i32, c: Color) {
+    let at = |(dx, dy): (i32, i32)| (centre.0 + r * dx * 256 / 100, centre.1 + r * dy * 256 / 100);
+    let pts: [(i32, i32); 7] = [(71, -71), (87, -50), (97, -26), (100, 0), (97, 26), (87, 50), (71, 71)];
+    for w in pts.windows(2) {
+        p.segment(at(w[0]), at(w[1]), width, c, 255);
     }
 }

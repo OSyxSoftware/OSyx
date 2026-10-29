@@ -371,13 +371,16 @@ pub fn device_list(buf: u64, len: u64) -> Result<u64, Errno> {
     let mut list = Vec::new();
     for d in crate::pci::enumerate() {
         let mut info = DeviceInfo::default();
-        fill_field(
-            &mut info.description,
-            &alloc::format!("PCI {:04x}:{:04x} {}", d.vendor, d.device, crate::pci::class_name(d.class, d.subclass)),
-        );
+        let wifi = crate::wireless::pci_name(&d);
+        let description = match &wifi {
+            Some(name) => name.clone(),
+            None => alloc::format!("PCI {:04x}:{:04x} {}", d.vendor, d.device, crate::pci::class_name(d.class, d.subclass)),
+        };
+        fill_field(&mut info.description, &description);
         fill_field(
             &mut info.class,
             match d.class {
+                _ if wifi.is_some() => "Wireless",
                 1 => "Storage",
                 2 => "Net",
                 3 => "Display",
@@ -387,6 +390,14 @@ pub fn device_list(buf: u64, len: u64) -> Result<u64, Errno> {
         );
         fill_field(&mut info.hardware_id, &alloc::format!("PCI\\VEN_{:04X}&DEV_{:04X}", d.vendor, d.device));
         fill_field(&mut info.location, &alloc::format!("PCI {}", d.addr));
+        list.push(info);
+    }
+    for b in crate::wireless::bluetooth() {
+        let mut info = DeviceInfo::default();
+        fill_field(&mut info.description, &b.name);
+        fill_field(&mut info.class, "Bluetooth");
+        fill_field(&mut info.hardware_id, &b.hardware_id);
+        fill_field(&mut info.location, &alloc::format!("USB {}", b.location));
         list.push(info);
     }
     for (id, name, class, _) in crate::input::devices() {

@@ -36,8 +36,12 @@ pub const MIN_ESP_MIB: u64 = 64;
 pub const MIN_ROOT_MIB: u64 = 512;
 /// The smallest disk the automatic layout accepts.
 pub const MIN_DISK_MIB: u64 = DEFAULT_ESP_MIB + MIN_ROOT_MIB + 2;
-/// Uid and gid of the desktop user (the session runs as this account).
+/// Uid of the desktop user (the session runs as this account).
 pub const USER_ID: u32 = 1000;
+/// The administrators group ("sudo"): the desktop user's primary group.
+/// Its members may change the system settings (`/etc/osyx`, `/etc/TZ`,
+/// `/etc/hostname`).
+pub const ADMIN_GID: u32 = 27;
 /// Home of the desktop user; the desktop shell and applications use it.
 pub const USER_HOME: &str = "/home/user";
 const PASSWORD_ROUNDS: u32 = 100_000;
@@ -629,11 +633,11 @@ fn put_file<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, path: &str, data: &[u8]
 
 /// Host name, account, first-boot settings and the installation record.
 fn configure<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, c: &Config) -> Result<()> {
-    put_file(fs, "/etc/hostname", format!("{}\n", c.hostname).as_bytes(), 0o644, 0, 0)?;
+    put_file(fs, "/etc/hostname", format!("{}\n", c.hostname).as_bytes(), 0o664, 0, ADMIN_GID)?;
     let gecos = if c.full_name.is_empty() { c.user_name.clone() } else { c.full_name.clone() };
-    let passwd = format!("root:x:0:0:Administrator:/root:/bin/axis\n{}:x:{USER_ID}:{USER_ID}:{gecos}:{USER_HOME}:/bin/axis\n", c.user_name);
+    let passwd = format!("root:x:0:0:Administrator:/root:/bin/axis\n{}:x:{USER_ID}:{ADMIN_GID}:{gecos}:{USER_HOME}:/bin/axis\n", c.user_name);
     put_file(fs, "/etc/passwd", passwd.as_bytes(), 0o644, 0, 0)?;
-    put_file(fs, "/etc/group", format!("root:x:0:\n{}:x:{USER_ID}:\n", c.user_name).as_bytes(), 0o644, 0, 0)?;
+    put_file(fs, "/etc/group", format!("root:x:0:\nsudo:x:{ADMIN_GID}:{}\n", c.user_name).as_bytes(), 0o644, 0, 0)?;
     let secret = match &c.password {
         Some(p) => {
             let mut salt = [0u8; 16];

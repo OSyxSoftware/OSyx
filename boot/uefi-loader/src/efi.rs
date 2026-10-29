@@ -128,10 +128,6 @@ pub mod memtype {
     pub const MMIO_PORT_SPACE: u32 = 12;
     pub const PAL_CODE: u32 = 13;
     pub const PERSISTENT: u32 = 14;
-    // OS-defined types (0x8000_0000..=0xFFFF_FFFF) used by the OSyx loader.
-    pub const OSYX_KERNEL: u32 = 0x8000_0001;
-    pub const OSYX_BOOTINFO: u32 = 0x8000_0002;
-    pub const OSYX_KERNEL_DATA: u32 = 0x8000_0003;
 }
 
 #[repr(C)]

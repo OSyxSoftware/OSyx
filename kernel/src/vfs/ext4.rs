@@ -62,7 +62,12 @@ pub struct Ext4Volume {
     device: String,
     label: String,
     read_only: bool,
+    /// Uptime (ms) when write-back first saw unwritten changes; 0 = clean.
+    dirty_since: core::sync::atomic::AtomicU64,
 }
+
+/// How long file data and metadata may stay only in memory.
+pub const DIRTY_EXPIRE_MS: u64 = 5000;
 
 impl Ext4Volume {
     /// Mounts the volume; a writable mount is refused (`Unsupported`) when
@@ -85,7 +90,7 @@ impl Ext4Volume {
             );
         }
         let label = fs.label();
-        Ok(Ext4Volume { fs: KMutex::new(fs), device, label, read_only })
+        Ok(Ext4Volume { fs: KMutex::new(fs), device, label, read_only, dirty_since: core::sync::atomic::AtomicU64::new(0) })
     }
 
     fn ino(n: u64) -> Result<u32> {
@@ -222,6 +227,29 @@ impl Filesystem for Ext4Volume {
             return Ok(());
         }
         self.fs.lock().sync().map_err(errno)
+    }
+
+    fn writeback(&self, now_ms: u64) -> Result<bool> {
+        use core::sync::atomic::Ordering;
+        if self.read_only {
+            return Ok(false);
+        }
+        let Some(mut fs) = self.fs.try_lock() else { return Ok(false) };
+        if !fs.has_pending() {
+            self.dirty_since.store(0, Ordering::Relaxed);
+            return Ok(false);
+        }
+        let since = self.dirty_since.load(Ordering::Relaxed);
+        if since == 0 {
+            self.dirty_since.store(now_ms.max(1), Ordering::Relaxed);
+            return Ok(false);
+        }
+        if now_ms.saturating_sub(since) < DIRTY_EXPIRE_MS {
+            return Ok(false);
+        }
+        let r = fs.sync().map_err(errno);
+        self.dirty_since.store(0, Ordering::Relaxed);
+        r.map(|_| true)
     }
 
     fn unmount(&self) -> Result<()> {

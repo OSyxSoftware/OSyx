@@ -15,6 +15,7 @@
 
 use crate::drivers::virtio_net::{self, VirtioNet};
 use crate::drivers::e1000::{self, E1000};
+use crate::drivers::rtl8168::{self, Rtl8168};
 use crate::fixup::{copy_from_user, copy_to_user, user_range_ok};
 use crate::object::Object;
 use crate::sync::{IrqSpinLock, KMutex};
@@ -55,6 +56,8 @@ macro_rules! impl_net_device {
 }
 impl_net_device!(VirtioNet, "virtio-net");
 impl_net_device!(E1000, "e1000");
+impl_net_device!(Rtl8168, "rtl8168");
+impl_net_device!(crate::bsd::BsdNic, "openbsd");
 type Devices = Vec<(usize, Arc<dyn NetDevice>)>;
 static DEVICES: IrqSpinLock<Devices> = IrqSpinLock::new(Vec::new());
 /// The network thread sleeps here; device interrupts wake it.
@@ -146,6 +149,7 @@ fn refresh_readiness(s: &Stack) {
 pub fn init(devices: &[pci::Device], boot: &crate::BootData) -> usize {
     if boot.has_option("net=off") {
         kprintln!("net: disabled on the command line");
+        crate::bsd::after_mount();
         return 0;
     }
     let mut seed = [0u8; 8];
@@ -174,6 +178,32 @@ pub fn init(devices: &[pci::Device], boot: &crate::BootData) -> usize {
                 found += 1;
             }
             Err(e) => kprintln!("e1000 at {}: probe failed: {}", d.addr, e),
+        }
+    }
+    // OpenBSD drivers (re, rl) first: the native rtl8168 driver only takes
+    // what they left.
+    let bsd = crate::bsd::probe(devices);
+    // iwm reads its firmware and obtains its real MAC during mountroot.
+    // Do this before creating network interfaces and DHCP clients.
+    crate::bsd::after_mount();
+    for nic in &bsd {
+        let name = alloc::format!("eth{}", found);
+        kprintln!("net: {} is {} (OpenBSD driver) at {}", name, nic.name, nic.location);
+        let idx = stack.add_ethernet(&name, nic.mac_address(), 1500);
+        stack.set_link(idx, nic.link_up());
+        DEVICES.lock().push((idx, nic.clone()));
+        found += 1;
+    }
+    for d in devices.iter().filter(|d| rtl8168::supports(d) && !bsd.iter().any(|n| n.location == d.addr)) {
+        let name = alloc::format!("eth{}", found);
+        match Rtl8168::probe(d, &name) {
+            Ok(dev) => {
+                let idx = stack.add_ethernet(&name, dev.mac, 1500);
+                stack.set_link(idx, dev.link_up());
+                DEVICES.lock().push((idx, Arc::new(dev)));
+                found += 1;
+            }
+            Err(e) => kprintln!("rtl8168 at {}: probe failed: {}", d.addr, e),
         }
     }
     let static_ip = boot.option_value("net.ip").and_then(parse_cidr);
@@ -774,7 +804,7 @@ fn put_records<T: Copy>(buf: u64, len: u64, items: &[T]) -> Result<u64, Errno> {
 }
 
 pub fn sys_query(kind: u64, buf: u64, len: u64) -> Result<u64, Errno> {
-    let interrupts = virtio_net::INTERRUPTS.load(Ordering::Relaxed) + e1000::INTERRUPTS.load(Ordering::Relaxed);
+    let interrupts = virtio_net::INTERRUPTS.load(Ordering::Relaxed) + e1000::INTERRUPTS.load(Ordering::Relaxed) + rtl8168::INTERRUPTS.load(Ordering::Relaxed);
     let irq_devs: Vec<usize> = DEVICES.lock().iter().filter(|(_, d)| d.has_interrupts()).map(|(i, _)| *i).collect();
     let r = with_stack(|s| -> Result<u64, Errno> {
         let now = s.now();
@@ -1014,7 +1044,7 @@ pub fn log_summary() {
             c.rx_errors,
             c.tx_full,
             c.resets,
-            virtio_net::INTERRUPTS.load(Ordering::Relaxed) + e1000::INTERRUPTS.load(Ordering::Relaxed)
+            virtio_net::INTERRUPTS.load(Ordering::Relaxed) + e1000::INTERRUPTS.load(Ordering::Relaxed) + rtl8168::INTERRUPTS.load(Ordering::Relaxed)
         );
     }
 }

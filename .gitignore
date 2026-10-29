@@ -1,3 +1,28 @@
 /target/
 /build/
 *.ppm
+
+# Logs, scratch and backup copies
+*.log
+*.bak
+*.bak-*
+*.orig
+*.tmp
+*.swp
+*~
+/scripts/*.hardfloat
+
+# Disk and boot images; the ext4 test images are made by
+# storage/ext4/tests/gen-fixtures.sh
+/*.img
+/*.iso
+/storage/ext4/tests/fixtures/*.img
+
+# Python, editors and OS files
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

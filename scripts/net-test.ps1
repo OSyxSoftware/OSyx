@@ -9,6 +9,15 @@
 # guest's serial log and the host server's own log.
 param(
     [switch]$SkipBuild,
+    # The guest's network adapter: VirtIO-Net, an Intel e1000 / e1000e, or a
+    # Realtek 8139 (OpenBSD rl(4) through the BSD driver layer).
+    [ValidateSet('virtio', 'e1000', 'e1000e', 'rtl8139')][string]$Nic = 'virtio',
+    # Guest CPUs: BSD drivers sleep while other CPUs take timer interrupts.
+    [ValidateRange(1, 16)][int]$Cpus = 1,
+    # The NIC sits behind a PCIe root port and OSyx clears its BARs and the
+    # port's window at boot (pci.unassign), as laptop firmware leaves a
+    # Wi-Fi card: the kernel must assign them itself.
+    [switch]$UnassignedBar,
     [int]$TimeoutSec = 240
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -42,7 +51,9 @@ function Wait-Log([string]$Pattern, [int]$Seconds) {
 }
 
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline "init.args=tests,net,$tcpPort,$udpPort test.exit" | Out-Host
+    $cmdline = "init.args=tests,net,$tcpPort,$udpPort test.exit"
+    if ($UnassignedBar) { $cmdline += ' pci.unassign=01:00.0' }
+    & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -Cmdline $cmdline | Out-Host
 }
 foreach ($f in $log, $hostLog) { if (Test-Path $f) { Remove-Item $f } }
 
@@ -50,7 +61,10 @@ $py = (Get-Command python).Source
 $server = Start-Process -FilePath $py -ArgumentList @((Join-Path $PSScriptRoot 'net-host.py'), $tcpPort, $udpPort, $hostLog) -PassThru -WindowStyle Hidden
 Start-Sleep -Milliseconds 800
 try {
-    $qargs = Get-QemuArgs -SerialLog $log -Headless -MemoryMiB 512 -HostFwd "hostfwd=tcp:127.0.0.1:$fwdPort-:7"
+    $nicDevice = @{ virtio = 'virtio-net-pci'; e1000 = 'e1000'; e1000e = 'e1000e'; rtl8139 = 'rtl8139' }[$Nic]
+    if ($UnassignedBar) { $nicDevice += ',bus=rp1' }
+    $qargs = Get-QemuArgs -SerialLog $log -Headless -MemoryMiB 512 -HostFwd "hostfwd=tcp:127.0.0.1:$fwdPort-:7" -Nic $nicDevice -CpuCount $Cpus
+    if ($UnassignedBar) { $qargs = @('-device', 'pcie-root-port,id=rp1,chassis=1,slot=1') + $qargs }
     $script:qemu = Start-Qemu $qargs
 
     # The host connects to the guest's server twice while it listens.
@@ -89,8 +103,21 @@ $text = Read-Shared $log
 $hostText = Read-Shared $hostLog
 Copy-Item $log (Join-Path $testDir 'net-last.serial.log') -Force
 
-$m = [regex]::Match($text, 'virtio-net eth0: \S+ at (\S+), MAC (\S+), MTU (\d+), link (\w+).*?(MSI-X vector 0x[0-9a-f]+|polled)')
-Record 'VirtIO-Net initialised' ($m.Success -and $m.Groups[4].Value -eq 'up') $m.Value
+if ($UnassignedBar) {
+    $m = [regex]::Match($text, 'pci 01:00\.0: BAR\d was unassigned; assigned (0x[0-9a-f]+)-0x[0-9a-f]+ behind bridge \S+')
+    $w = [regex]::Match($text, 'pci \S+: memory window opened at [^\n]*')
+    Record 'kernel assigned the cleared BAR and bridge window' ($m.Success -and $w.Success) "$($w.Value) | $($m.Value)"
+}
+if ($Nic -eq 'virtio') {
+    $m = [regex]::Match($text, 'virtio-net eth0: \S+ at (\S+), MAC (\S+), MTU (\d+), link (\w+).*?(MSI-X vector 0x[0-9a-f]+|polled)')
+    Record 'VirtIO-Net initialised' ($m.Success -and $m.Groups[4].Value -eq 'up') $m.Value
+} elseif ($Nic -eq 'rtl8139') {
+    $m = [regex]::Match($text, 'net: eth0 is (\w+) \(OpenBSD driver\) at \S+')
+    Record 'Realtek 8139 attached through the OpenBSD layer' $m.Success $m.Value
+} else {
+    $m = [regex]::Match($text, 'e1000 eth0: [0-9a-f]{4} at \S+, MAC 52:54:00:12:34:56, link (\w+)')
+    Record "Intel $Nic initialised" ($m.Success -and $m.Groups[1].Value -eq 'up') $m.Value
+}
 $m = [regex]::Match($text, 'net: eth0: DHCP lease (\S+) from (\S+), router (\S+), DNS \[([^\]]*)\]')
 Record 'DHCP lease from QEMU' ($m.Success -and $m.Groups[1].Value -eq '10.0.2.15/24') $m.Value
 foreach ($chk in [regex]::Matches($text, '\[user\] (net: [^\n]*?) \.\.\. (ok|FAILED)')) {
@@ -107,8 +134,11 @@ Record 'host server saw the guest''s UDP datagrams' ($udp -ge 5) "$udp datagrams
 $m = [regex]::Match($text, 'net checks: (\d+) passed, (\d+) failed')
 Record 'guest net checks summary' ($m.Success -and $m.Groups[2].Value -eq '0') $m.Value
 $m = [regex]::Match($text, 'irq: vector (0x[0-9a-f]+) fired (\d+) times')
-$m2 = [regex]::Match($text, 'net: eth0 \(virtio-net at [^)]*\): (\d+) frames in, (\d+) out, (\d+) rx errors[^\n]*?(\d+) interrupts')
-Record 'NIC frames and interrupts counted' ($m2.Success -and [int]$m2.Groups[1].Value -gt 0 -and [int]$m2.Groups[4].Value -gt 0) $m2.Value
+$m2 = [regex]::Match($text, 'net: \w+ \((?:virtio-net|e1000|openbsd) at [^)]*\): (\d+) frames in, (\d+) out, (\d+) rx errors[^\n]*?(\d+) interrupts')
+# The 82540EM (QEMU e1000) has no MSI and the OpenBSD layer polls its
+# devices: those take no interrupts.
+$needIrq = $Nic -notin 'e1000', 'rtl8139'
+Record 'NIC frames and interrupts counted' ($m2.Success -and [int]$m2.Groups[1].Value -gt 0 -and (-not $needIrq -or [int]$m2.Groups[4].Value -gt 0)) $m2.Value
 Record 'no kernel panic' (-not ($text -match 'KERNEL PANIC')) ''
 Record 'kernel exited cleanly' ($text -match 'test.exit: leaving QEMU \(success\)') ''
 

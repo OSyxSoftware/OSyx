@@ -2,8 +2,10 @@
 //! system. A step list on the left (Welcome, Disk, Account, Options,
 //! Summary, Install, Finish) and one page per step, in the style of
 //! Calamares. The work is done by `osyx-install` on the raw disk node
-//! (`/dev/disks/<name>`); disks the running system uses (the live medium,
-//! mounted volumes) are refused by the kernel and shown as unavailable.
+//! (`/dev/disks/<name>`). The disk the running system uses (`/` or
+//! `/boot`, i.e. the live medium) is shown as unavailable; other disks
+//! whose volumes are merely mounted (below `/mnt`) can be chosen, and
+//! Setup unmounts those volumes before it writes.
 //!
 //! Nothing is written before the user confirms, in a separate dialog, that
 //! the named disk will be erased. `--auto` runs the same pages without
@@ -68,6 +70,45 @@ struct DiskInfo {
     partitions: usize,
     /// Why it cannot be used, if it cannot.
     blocked: Option<String>,
+    /// Mount points of its volumes, unmounted before installing.
+    mounted: Vec<String>,
+}
+
+fn c_str(b: &[u8]) -> &str {
+    let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+    core::str::from_utf8(&b[..n]).unwrap_or("")
+}
+
+/// Mount points of the volumes on `disk` (the disk itself or one of its
+/// partitions), innermost first.
+fn mounts_of(disk: &str) -> Vec<String> {
+    let prefix = format!("/dev/disks/{disk}");
+    let mut v: Vec<String> = system::mounts()
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| {
+            let src = c_str(&m.source);
+            src == prefix || src.strip_prefix(prefix.as_str()).is_some_and(|r| {
+                let r = r.trim_start_matches('p');
+                !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+        .map(|m| String::from(c_str(&m.path)))
+        .collect();
+    v.sort_by_key(|p| core::cmp::Reverse(p.len()));
+    v
+}
+
+/// Unmounts every volume of `disk` so its raw node can be opened for writing.
+fn release_disk(disk: &str) -> Result<(), String> {
+    for at in mounts_of(disk) {
+        if at == "/" || at == "/boot" {
+            return Err(format!("{disk} holds the running system ({at})"));
+        }
+        os::unmount(&at).map_err(|e| format!("cannot unmount {at}: {e} (close programs that use it)"))?;
+        println!("setup: unmounted {at} from {disk}");
+    }
+    Ok(())
 }
 
 /// Whole disks below `/dev/disks` (partition nodes are named after their
@@ -92,16 +133,26 @@ fn scan_disks() -> Vec<DiskInfo> {
         let path = format!("/dev/disks/{n}");
         let bytes = fs::metadata(&path).map_or(0, |m| m.len());
         let partitions = names.iter().filter(|p| is_part_of(p, n)).count();
+        let mut mounted = Vec::new();
         let blocked = if bytes < osyx_install::MIN_DISK_MIB << 20 {
             Some(format!("too small (OSyx needs {} MiB)", osyx_install::MIN_DISK_MIB))
         } else {
             match fs::OpenOptions::new().read(true).write(true).open(&path) {
                 Ok(_) => None,
-                Err(e) if e.kind() == os_std::error::ErrorKind::ResourceBusy => Some(String::from("in use by the running system")),
+                Err(e) if e.kind() == os_std::error::ErrorKind::ResourceBusy => {
+                    mounted = mounts_of(n);
+                    if mounted.iter().any(|m| m == "/" || m == "/boot") {
+                        Some(String::from("OSyx is running from this disk"))
+                    } else if mounted.is_empty() {
+                        Some(String::from("in use by the running system"))
+                    } else {
+                        None
+                    }
+                }
                 Err(e) => Some(format!("cannot be opened: {e}")),
             }
         };
-        disks.push(DiskInfo { name: n.clone(), bytes, partitions, blocked });
+        disks.push(DiskInfo { name: n.clone(), bytes, partitions, blocked, mounted });
     }
     disks
 }
@@ -256,7 +307,8 @@ fn start_job(disk: String, plan: Plan, config: Config) -> Arc<Mutex<JobState>> {
         let file = fs::File::create(LOG).ok();
         let mut rep = Reporter { state: shared.clone(), file };
         rep.log(&format!("OSyx Setup: installing on /dev/disks/{disk} for host {}", config.hostname));
-        let result = RawDisk::open(&disk)
+        let result = release_disk(&disk)
+            .and_then(|_| RawDisk::open(&disk))
             .map_err(osyx_install::Error::Io)
             .and_then(|mut d| osyx_install::install(&mut d, &plan, &mut LiveSource, &config, &mut rep));
         let outcome = match result {
@@ -354,7 +406,18 @@ impl Setup {
 
     /// Checks the current page before moving on; returns a message.
     fn check_page(&self) -> Result<(), String> {
+        /// A network interface with an IPv4 address (a DHCP lease implies a
+        /// working link; Wi-Fi does not always report its link flag).
+        fn online() -> bool {
+            os_std::net::interfaces()
+                .is_ok_and(|v| v.iter().any(|i| i.flags & os_std::net::IFF_LOOPBACK == 0 && i.addr != [0; 4]))
+        }
         match self.step {
+            // The installed system downloads its applications (Zen Browser)
+            // on its first start. Unattended runs (QEMU tests) are offline.
+            Step::Welcome if self.auto.is_none() && !online() => Err(String::from(
+                "Connect to the Internet first (Wi-Fi or a cable): the installed system downloads its applications.",
+            )),
             Step::Disk => self.plan().map(|_| ()),
             Step::Account => {
                 if self.password.text() != self.password2.text() {
@@ -667,7 +730,11 @@ impl App for Setup {
                     p.text(FontKind::Bold, r.x + 50, r.y + 6, &format!("/dev/disks/{}", d.name), if d.blocked.is_some() { t.text_faint } else { t.text });
                     let info = format!("{}  ·  {} partition(s)", human_size(d.bytes), d.partitions);
                     p.text(FontKind::Ui, r.x + 50, r.y + 24, &info, t.text_dim);
-                    let status = d.blocked.clone().unwrap_or_else(|| String::from("available"));
+                    let status = match (&d.blocked, d.mounted.first()) {
+                        (Some(why), _) => why.clone(),
+                        (None, Some(at)) => format!("available (mounted at {at}; will be unmounted)"),
+                        (None, None) => String::from("available"),
+                    };
                     p.text_in(FontKind::Ui, Rect::new(r.x, r.y + 14, r.w - 16, 20), &status, if d.blocked.is_some() { osyx_gfx::rgb(240, 150, 90) } else { osyx_gfx::rgb(110, 200, 130) }, Align::Right);
                 }
                 let [auto, manual] = self.mode_rows();

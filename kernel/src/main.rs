@@ -19,7 +19,10 @@ extern crate alloc;
 
 mod acpi;
 mod arch;
+mod audio;
 mod block;
+mod bluetooth;
+mod bsd;
 mod devices;
 mod display;
 mod drivers;
@@ -59,6 +62,7 @@ mod user_fault;
 mod time;
 mod vfs;
 mod waitq;
+mod wireless;
 
 use alloc::vec::Vec;
 use arch::cpu;
@@ -201,6 +205,13 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     kprintln!("scheduler: round robin, {} ms time slice", sched::TIME_SLICE_TICKS * 1000 / arch::timer::TIMER_HZ);
     let pci_devices = pci::enumerate();
     pci::log_devices(&pci_devices);
+    if let Some(location) = boot.option_value("pci.unassign") {
+        pci::unassign(&pci_devices, location);
+    }
+    let firmware_memory: Vec<(u64, u64)> =
+        boot.memory_map().iter().map(|r| (r.phys_start, r.phys_start + r.page_count * 4096)).collect();
+    pci::assign_bars(&pci_devices, &firmware_memory);
+    wireless::scan_pci(&pci_devices);
     match time::init() {
         Some(secs) => kprintln!("time: RTC says {} UTC", time::format_utc(secs)),
         None => kprintln!("time: RTC unreadable; timestamps count from boot"),
@@ -211,16 +222,22 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     // asynchronously. Boot waits (bounded) only so a root filesystem on a
     // USB disk is found before the partition scan.
     input::init(boot.has_option("input.log"));
-    let nics = net::init(&pci_devices, boot);
     let usb_controllers = drivers::xhci::probe(&pci_devices);
-    kprintln!("usb: {} xHCI controller(s), net: {} interface(s)", usb_controllers, nics);
+    kprintln!("usb: {} xHCI controller(s)", usb_controllers);
     if usb_controllers > 0 {
         drivers::xhci::wait_ready(10_000);
     }
+    // After the xHCI handoff, which ends USB legacy emulation of ports 0x60/0x64.
+    drivers::ps2::start();
     let partitions = block::scan_partitions();
     devices::init();
     let disks = block::devices().len();
     let mounted = storage::mount_all(boot);
+    bluetooth::after_mount();
+    serial::start_log_file();
+    let nics = net::init(&pci_devices, boot);
+    kprintln!("net: {} interface(s)", nics);
+    vfs::start_writeback();
     kprintln!(
         "storage: {} PCI functions, {} disks, {} partitions, {} mounts, root: {}",
         pci_devices.len(),

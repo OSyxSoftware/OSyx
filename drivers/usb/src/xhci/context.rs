@@ -123,14 +123,28 @@ pub struct SlotContext {
     pub context_entries: u8,
     pub root_port: u8,
     pub interrupter: u16,
+    /// Downstream ports when the device is a hub (0: not a hub).
+    pub hub_ports: u8,
+    /// Hub with one transaction translator per port.
+    pub mtt: bool,
+    /// Hub TT think time (0..=3, in units of 8 FS bit times).
+    pub ttt: u8,
+    /// For a low/full-speed device behind a high-speed hub: that hub's slot
+    /// and the hub port it hangs off (0 otherwise).
+    pub tt_slot: u8,
+    pub tt_port: u8,
 }
 
 impl SlotContext {
     pub fn encode(&self) -> [u32; 8] {
         let mut d = [0u32; 8];
-        d[0] = (self.route_string & 0xF_FFFF) | ((self.speed.psi() as u32) << 20) | ((self.context_entries as u32 & 0x1F) << 27);
-        d[1] = (self.root_port as u32) << 16;
-        d[2] = ((self.interrupter as u32) & 0x3FF) << 22;
+        d[0] = (self.route_string & 0xF_FFFF)
+            | ((self.speed.psi() as u32) << 20)
+            | ((self.mtt as u32) << 25)
+            | (((self.hub_ports != 0) as u32) << 26)
+            | ((self.context_entries as u32 & 0x1F) << 27);
+        d[1] = ((self.root_port as u32) << 16) | ((self.hub_ports as u32) << 24);
+        d[2] = (self.tt_slot as u32) | ((self.tt_port as u32) << 8) | (((self.ttt & 3) as u32) << 16) | (((self.interrupter as u32) & 0x3FF) << 22);
         d
     }
 }
@@ -235,10 +249,21 @@ mod tests {
 
     #[test]
     fn slot_context_encoding() {
-        let s = SlotContext { route_string: 0, speed: Speed::Full, context_entries: 1, root_port: 3, interrupter: 0 };
+        let s = SlotContext { route_string: 0, speed: Speed::Full, context_entries: 1, root_port: 3, interrupter: 0, hub_ports: 0, mtt: false, ttt: 0, tt_slot: 0, tt_port: 0 };
         let d = s.encode();
         assert_eq!(d[0], (1 << 20) | (1 << 27));
         assert_eq!(d[1], 3 << 16);
+        // A low-speed device on port 2 of a hub that is on port 4 of a
+        // high-speed hub in slot 5, both behind root port 1.
+        let dev = SlotContext { route_string: 0x24, speed: Speed::Low, context_entries: 1, root_port: 1, interrupter: 0, hub_ports: 0, mtt: false, ttt: 0, tt_slot: 5, tt_port: 4 };
+        let d = dev.encode();
+        assert_eq!(d[0], 0x24 | (2 << 20) | (1 << 27));
+        assert_eq!(d[2], 5 | (4 << 8));
+        let hub = SlotContext { route_string: 3, speed: Speed::High, context_entries: 1, root_port: 2, interrupter: 0, hub_ports: 7, mtt: true, ttt: 1, tt_slot: 0, tt_port: 0 };
+        let d = hub.encode();
+        assert_eq!(d[0], 3 | (3 << 20) | (1 << 25) | (1 << 26) | (1 << 27));
+        assert_eq!(d[1], (2 << 16) | (7 << 24));
+        assert_eq!(d[2], 1 << 16);
         let out = SlotState::decode(&[3 << 27, 0, 0, (2 << 27) | 5, 0, 0, 0, 0]);
         assert_eq!(out, SlotState { device_address: 5, state: 2, context_entries: 3 });
     }

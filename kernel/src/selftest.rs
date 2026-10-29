@@ -37,7 +37,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 25] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 26] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -63,6 +63,7 @@ pub fn run(boot: &BootData) -> Summary {
         ("ext4 root through the VFS", &crate::selftest_fs::ext4_root),
         ("concurrent writers (tmpfs, FAT32, ext4)", &crate::selftest_fs::concurrent),
         ("program loader: search path, permissions, bad images", &crate::selftest_fs::program_loader),
+        ("kernel file reads: whole device firmware", &firmware_read),
     ];
     let mut s = Summary { passed: 0, failed: 0 };
     for (name, t) in tests.iter() {
@@ -197,39 +198,60 @@ fn kernel_wx() -> TestResult {
 }
 
 fn heap_test() -> TestResult {
-    let before = heap::stats().used;
-    {
-        let b = Box::new(0xDEAD_BEEFu64);
-        ensure!(*b == 0xDEAD_BEEF, "box content");
-        let v: Vec<u64> = (0..100_000).collect();
-        ensure!(v.iter().sum::<u64>() == 4_999_950_000, "vec sum");
-        let s = format!("{}-{:x}-{:?}", "OSyx", 0xC0FFEEu32, [1, 2, 3]);
-        ensure!(s == "OSyx-c0ffee-[1, 2, 3]", "format produced {s:?}");
-        let mut m = BTreeMap::new();
-        for i in 0..2000u32 {
-            m.insert(i.wrapping_mul(2_654_435_761), i);
-        }
-        for i in (0..2000u32).step_by(2) {
-            m.remove(&i.wrapping_mul(2_654_435_761));
-        }
-        ensure!(m.len() == 1000, "btreemap len {}", m.len());
-        // Larger than the initial heap: forces on-demand growth.
-        let big = alloc::vec![0x5Au8; 8 << 20];
-        ensure!(big.iter().all(|&b| b == 0x5A), "large allocation content");
-        ensure!(heap::stats().capacity > heap::HEAP_INITIAL as usize, "heap did not grow");
-    }
     // The counters cover the whole kernel heap, and background kernel threads
-    // on the other CPUs allocate from it too. A single sample can catch one of
-    // their short-lived blocks mid-use; let them drain before calling it a leak.
-    let mut after = heap::stats().used;
-    for _ in 0..20 {
-        if after <= before {
-            break;
+    // (network, klog, writeback, USB) allocate from it too: a short-lived
+    // block can be caught mid-use, and a thread can keep a few bytes for good
+    // (an ARP entry after the DHCP lease). Retry the workload with a fresh
+    // baseline; a leak in the workload itself grows the heap on every round.
+    let mut last = (0, 0);
+    for _ in 0..3 {
+        let before = heap::stats().used;
+        heap_workload()?;
+        let mut after = heap::stats().used;
+        for _ in 0..20 {
+            if after <= before {
+                return Ok(());
+            }
+            sched::sleep_ticks(crate::arch::timer::ms_to_ticks(10));
+            after = after.min(heap::stats().used);
         }
-        sched::sleep_ticks(crate::arch::timer::ms_to_ticks(10));
-        after = after.min(heap::stats().used);
+        last = (before, after);
     }
-    ensure!(after <= before, "leak: {} bytes used before, {} after", before, after);
+    Err(format!("leak: {} bytes used before, {} after (3 rounds)", last.0, last.1))
+}
+
+fn heap_workload() -> TestResult {
+    let b = Box::new(0xDEAD_BEEFu64);
+    ensure!(*b == 0xDEAD_BEEF, "box content");
+    let v: Vec<u64> = (0..100_000).collect();
+    ensure!(v.iter().sum::<u64>() == 4_999_950_000, "vec sum");
+    let s = format!("{}-{:x}-{:?}", "OSyx", 0xC0FFEEu32, [1, 2, 3]);
+    ensure!(s == "OSyx-c0ffee-[1, 2, 3]", "format produced {s:?}");
+    let mut m = BTreeMap::new();
+    for i in 0..2000u32 {
+        m.insert(i.wrapping_mul(2_654_435_761), i);
+    }
+    for i in (0..2000u32).step_by(2) {
+        m.remove(&i.wrapping_mul(2_654_435_761));
+    }
+    ensure!(m.len() == 1000, "btreemap len {}", m.len());
+    // Larger than the initial heap: forces on-demand growth.
+    let big = alloc::vec![0x5Au8; 8 << 20];
+    ensure!(big.iter().all(|&b| b == 0x5A), "large allocation content");
+    ensure!(heap::stats().capacity > heap::HEAP_INITIAL as usize, "heap did not grow");
+    Ok(())
+}
+
+/// `bsd::read_file` (iwm and Bluetooth firmware, wifi.conf) must return the
+/// whole file once: `File::read` does not move the position by itself.
+fn firmware_read() -> TestResult {
+    let p = "/etc/firmware/iwm-9260-46";
+    let cx = crate::vfs::Lookup::kernel();
+    let Ok(st) = crate::vfs::stat(&cx, p) else {
+        return Ok(()); // a root without firmware
+    };
+    let data = crate::bsd::read_file(p).ok_or_else(|| format!("{p}: read failed"))?;
+    ensure!(data.len() as u64 == st.size, "{p}: read {} bytes, the file has {}", data.len(), st.size);
     Ok(())
 }
 
@@ -446,6 +468,13 @@ fn pci_scan() -> TestResult {
         // The capability walk must terminate and stay inside config space.
         ensure!(d.capabilities().iter().all(|&(off, _)| off >= 0x40), "{}: capability below 0x40", d.addr);
     }
+    // BAR placement for functions the firmware left unassigned.
+    use crate::pci::first_fit;
+    let used = [(0xD000_0000, 0xD010_0000), (0xD020_0000, 0xD030_0000), (0xD010_0000, 0xD010_4000)];
+    ensure!(first_fit(0xD000_0000, 0xD040_0000, 0x4000, 0x4000, &used) == Some(0xD010_4000), "first fit after the ranges it overlaps");
+    ensure!(first_fit(0xD000_0000, 0xD040_0000, 0x10_0000, 0x10_0000, &used) == Some(0xD030_0000), "first aligned gap");
+    ensure!(first_fit(0xD000_0000, 0xD030_0000, 0x10_0000, 0x10_0000, &used).is_none(), "full window");
+    ensure!(first_fit(0xD000_1000, 0xD000_8000, 0x4000, 0x4000, &[]) == Some(0xD000_4000), "aligned start");
     Ok(())
 }
 

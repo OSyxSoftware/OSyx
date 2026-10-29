@@ -190,6 +190,20 @@ impl Screen {
         self.present(r);
     }
 
+    /// Paints diagnostic square `slot` (counted from the right edge) straight
+    /// into the framebuffer. Firmware free, so usable around ExitBootServices.
+    pub fn marker(&mut self, slot: u32, rgb: u32) {
+        let (size, gap) = (20u32, 28u32);
+        let Some(x0) = self.width.checked_sub(gap * (slot + 1)) else { return };
+        let px = osyx_gfx::to_device(rgb, self.rgb);
+        for y in 8..8 + size {
+            for x in x0..x0 + size {
+                // SAFETY: (x, y) lies inside the visible mode, so inside the framebuffer.
+                unsafe { self.fb.add((y * self.stride + x) as usize).write_volatile(px) };
+            }
+        }
+    }
+
     /// Final frame drawn after ExitBootServices: no firmware calls allowed.
     pub fn handoff(&mut self) {
         let (l, a) = (self.layout, self.assets);
@@ -200,7 +214,7 @@ impl Screen {
                 &bg,
                 &l,
                 &a,
-                "Starting kernel",
+                "Entering kernel",
                 splash::TEXT,
             ))
         };

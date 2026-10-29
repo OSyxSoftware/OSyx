@@ -288,6 +288,10 @@ impl Shell {
                 println!("Built-in commands:");
                 println!("  cd pwd ls cat echo mkdir rmdir rm touch mv cp stat");
                 println!("  ps kill mounts df free uptime uname whoami env history clear help exit");
+                println!("  devices [WORD]  (alias lsdev): hardware, e.g. `devices wireless`, `devices bluetooth`");
+                println!("  wifi [status|scan|connect SSID [PASSWORD]|disconnect]: Wi-Fi");
+                println!("  volume [0-100|mute|unmute], beep [HZ [MS]], play FILE.wav: sound");
+                println!("  dmesg [WORD]: kernel log (only lines containing WORD), e.g. `dmesg iwm`");
                 println!("Statements: name = expr   print(expr, ...)   $name in commands, $? = last status");
                 println!("Network: ping HOST, net list|info|configure, dns lookup NAME, netstat [-a|-s], nc");
                 println!("Other words run programs from /bin, /usr/bin and /system/bin.");
@@ -341,6 +345,12 @@ impl Shell {
                 Err(_) => Err(os_std::error::Error::new(os_std::error::ErrorKind::InvalidInput, "not a process id")),
             }),
             "mounts" | "df" => cmd_mounts(),
+            "devices" | "lsdev" => cmd_devices(args),
+            "wifi" => cmd_wifi(args),
+            "volume" => cmd_volume(args),
+            "dmesg" => cmd_dmesg(args),
+            "beep" => cmd_beep(args),
+            "play" => cmd_play(args),
             "free" => os::sysinfo().map(|i| {
                 println!("total {} KiB, free {} KiB, used {} KiB", i.total_memory / 1024, i.free_memory / 1024, (i.total_memory - i.free_memory) / 1024);
                 0
@@ -532,6 +542,238 @@ fn cmd_mounts() -> os_std::error::Result<i32> {
         let path = system::field_str(&m.path);
         let (size, free) = os::statfs(path).map_or((0, 0), |s| (s.total_blocks * s.block_size, s.free_blocks * s.block_size));
         println!("{:<14} {:<8} {:>7} KiB {:>7} KiB  {}", path, system::field_str(&m.fstype), size / 1024, free / 1024, system::field_str(&m.source));
+    }
+    Ok(0)
+}
+
+/// Wi-Fi through the kernel's OpenBSD net80211 layer: it reads the
+/// network to join from `/etc/osyx/wifi.conf` and reports the state and
+/// scan results in `/run/wifi.status`.
+fn cmd_wifi(args: &[&str]) -> os_std::error::Result<i32> {
+    const CONF: &str = "/etc/osyx/wifi.conf";
+    const STATUS: &str = "/run/wifi.status";
+    match args {
+        ["connect", ssid] | ["connect", ssid, _] => {
+            let pass = args.get(2).copied().unwrap_or("");
+            if !pass.is_empty() && !(8..=63).contains(&pass.len()) {
+                eprintln!("wifi: a WPA password has 8 to 63 characters");
+                return Ok(2);
+            }
+            fs::write(CONF, format!("ssid={ssid}\npsk={pass}\n"))?;
+            println!("wifi: joining \"{ssid}\" (see `wifi status` in a few seconds)");
+            Ok(0)
+        }
+        ["disconnect"] => {
+            fs::write(CONF, "ssid=\n")?;
+            println!("wifi: disconnected");
+            Ok(0)
+        }
+        [] | ["status"] | ["scan"] => {
+            let Ok(text) = fs::read_to_string(STATUS) else {
+                println!("wifi: no Wi-Fi adapter with a driver (see `devices wireless`)");
+                return Ok(1);
+            };
+            let mut nets: Vec<(u32, String)> = Vec::new();
+            for line in text.lines() {
+                let f: Vec<&str> = line.split('\t').collect();
+                if f.first() == Some(&"net") && f.len() >= 5 {
+                    let rssi = f[2].parse().unwrap_or(0);
+                    nets.push((rssi, format!("{:<32} {:>4} {:>4}  {}", f[1], f[2], f[3], f[4])));
+                } else if args.first() != Some(&"scan") {
+                    println!("{line}");
+                }
+            }
+            nets.sort_by_key(|n| core::cmp::Reverse(n.0));
+            nets.dedup_by(|a, b| a.1 == b.1);
+            println!("{:<32} {:>4} {:>4}  SECURITY", "NETWORK", "RSSI", "CHAN");
+            for (_, n) in &nets {
+                println!("{n}");
+            }
+            if nets.is_empty() {
+                println!("(no networks seen yet)");
+            }
+            Ok(0)
+        }
+        _ => {
+            eprintln!("usage: wifi [status|scan|connect SSID [PASSWORD]|disconnect]");
+            Ok(2)
+        }
+    }
+}
+
+/// The kernel log (`/run/kernel.log`, refreshed every two seconds); with
+/// words only the lines containing one of them (any case).
+fn cmd_dmesg(args: &[&str]) -> os_std::error::Result<i32> {
+    let text = fs::read_to_string("/run/kernel.log")?;
+    let words: Vec<String> = args.iter().map(|w| w.to_lowercase()).collect();
+    for line in text.lines() {
+        let lower = line.to_lowercase();
+        if words.is_empty() || words.iter().any(|w| lower.contains(w.as_str())) {
+            println!("{line}");
+        }
+    }
+    Ok(0)
+}
+
+// ---- sound: /dev/audio takes 48 kHz signed 16-bit stereo -------------------------
+
+const AUDIO_RATE: u32 = 48_000;
+
+fn cmd_volume(args: &[&str]) -> os_std::error::Result<i32> {
+    let line = match args {
+        [] => {
+            match fs::read_to_string("/run/audio.status") {
+                Ok(t) => print!("{t}"),
+                Err(_) => println!("volume: no sound card with a driver (see `devices audio`)"),
+            }
+            return Ok(0);
+        }
+        ["mute"] => String::from("mute=1"),
+        ["unmute"] => String::from("mute=0"),
+        [n] if n.parse::<u32>().is_ok_and(|v| v <= 100) => format!("volume={n}
+mute=0"),
+        _ => {
+            eprintln!("usage: volume [0-100|mute|unmute]");
+            return Ok(2);
+        }
+    };
+    let mut f = fs::OpenOptions::new().write(true).open("/dev/mixer")?;
+    f.write_all(line.as_bytes())?;
+    Ok(0)
+}
+
+/// cos(x) for |x| <= pi (Taylor series; enough for tone generation).
+fn cos(x: f64) -> f64 {
+    let (x2, mut term, mut sum) = (x * x, 1.0, 1.0);
+    for k in 1..12 {
+        term *= -x2 / ((2 * k - 1) * (2 * k)) as f64;
+        sum += term;
+    }
+    sum
+}
+
+fn cmd_beep(args: &[&str]) -> os_std::error::Result<i32> {
+    let hz: f64 = args.first().and_then(|a| a.parse().ok()).unwrap_or(880.0);
+    let ms: u32 = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(300);
+    if !(20.0..=20_000.0).contains(&hz) || ms > 10_000 {
+        eprintln!("usage: beep [HZ (20-20000) [MS (up to 10000)]]");
+        return Ok(2);
+    }
+    // A sine from the recurrence y[n] = 2cos(w) y[n-1] - y[n-2].
+    let w = 2.0 * core::f64::consts::PI * hz / AUDIO_RATE as f64;
+    let c = 2.0 * cos(w);
+    let (mut y1, mut y2) = (0.0f64, -cos(core::f64::consts::FRAC_PI_2 - w));
+    let frames = AUDIO_RATE as usize * ms as usize / 1000;
+    let fade = (AUDIO_RATE as usize / 200).min(frames / 2).max(1);
+    let mut pcm = Vec::with_capacity(frames * 4);
+    for n in 0..frames {
+        let y = c * y1 - y2;
+        y2 = y1;
+        y1 = y;
+        let env = n.min(frames - 1 - n).min(fade) as f64 / fade as f64;
+        let s = (y * env * 12_000.0) as i16;
+        pcm.extend_from_slice(&s.to_le_bytes());
+        pcm.extend_from_slice(&s.to_le_bytes());
+    }
+    play_pcm(&pcm)
+}
+
+fn play_pcm(pcm: &[u8]) -> os_std::error::Result<i32> {
+    let mut f = match fs::OpenOptions::new().write(true).open("/dev/audio") {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("sound: /dev/audio: {e} (see `devices audio`)");
+            return Ok(1);
+        }
+    };
+    f.write_all(pcm)?;
+    Ok(0)
+}
+
+/// Plays an uncompressed WAV file (8/16-bit PCM, mono or stereo, any
+/// rate: converted to 48 kHz stereo).
+fn cmd_play(args: &[&str]) -> os_std::error::Result<i32> {
+    let [path] = args else {
+        eprintln!("usage: play FILE.wav");
+        return Ok(2);
+    };
+    let data = fs::read(path)?;
+    let pcm = match wav_to_pcm(&data) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("play: {path}: {e}");
+            return Ok(1);
+        }
+    };
+    println!("play: {} s", pcm.len() / 4 / AUDIO_RATE as usize);
+    play_pcm(&pcm)
+}
+
+fn wav_to_pcm(d: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if d.len() < 12 || &d[0..4] != b"RIFF" || &d[8..12] != b"WAVE" {
+        return Err("not a WAV file");
+    }
+    let u16_at = |i: usize| u16::from_le_bytes([d[i], d[i + 1]]);
+    let u32_at = |i: usize| u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
+    let (mut fmt, mut body) = (None, None);
+    let mut i = 12;
+    while i + 8 <= d.len() {
+        let len = u32_at(i + 4) as usize;
+        let end = (i + 8 + len).min(d.len());
+        match &d[i..i + 4] {
+            b"fmt " if len >= 16 => fmt = Some((u16_at(i + 8), u16_at(i + 10), u32_at(i + 12), u16_at(i + 22))),
+            b"data" => body = Some(&d[i + 8..end]),
+            _ => {}
+        }
+        i = i + 8 + len + (len & 1);
+    }
+    let (Some((format, channels, rate, bits)), Some(body)) = (fmt, body) else { return Err("no fmt or data chunk") };
+    if format != 1 && format != 0xfffe {
+        return Err("only uncompressed PCM is supported");
+    }
+    if !(1..=2).contains(&channels) || !(bits == 8 || bits == 16) || rate == 0 {
+        return Err("only 8/16-bit mono or stereo is supported");
+    }
+    let step = (channels * bits / 8) as usize;
+    let sample = |f: usize, ch: usize| -> i32 {
+        let o = f * step + ch.min(channels as usize - 1) * (bits as usize / 8);
+        if bits == 8 { (body[o] as i32 - 128) << 8 } else { i16::from_le_bytes([body[o], body[o + 1]]) as i32 }
+    };
+    let frames = body.len() / step;
+    let out_frames = (frames as u64 * AUDIO_RATE as u64 / rate as u64) as usize;
+    let mut out = Vec::with_capacity(out_frames * 4);
+    for n in 0..out_frames {
+        // Linear interpolation between the two nearest source frames.
+        let pos = n as u64 * rate as u64;
+        let (f, frac) = ((pos / AUDIO_RATE as u64) as usize, (pos % AUDIO_RATE as u64) as i32);
+        let g = (f + 1).min(frames - 1);
+        for ch in 0..2 {
+            let (a, b) = (sample(f, ch), sample(g, ch));
+            let s = a + (b - a) * frac / AUDIO_RATE as i32;
+            out.extend_from_slice(&(s as i16).to_le_bytes());
+        }
+    }
+    Ok(out)
+}
+
+/// The kernel's device list; with arguments only the lines containing one
+/// of the words (any case), e.g. `devices wireless bluetooth`.
+fn cmd_devices(args: &[&str]) -> os_std::error::Result<i32> {
+    let words: Vec<String> = args.iter().map(|a| a.to_lowercase()).collect();
+    let mut shown = 0;
+    println!("{:<10} {:<36} {:<28} LOCATION", "CLASS", "DEVICE", "HARDWARE ID");
+    for d in system::devices()? {
+        let (class, desc) = (system::field_str(&d.class), system::field_str(&d.description));
+        let (id, loc) = (system::field_str(&d.hardware_id), system::field_str(&d.location));
+        let line = format!("{class:<10} {desc:<36} {id:<28} {loc}");
+        let lower = line.to_lowercase();
+        if words.is_empty() || words.iter().any(|w| lower.contains(w.as_str())) {
+            println!("{line}");
+            shown += 1;
+        }
+    }
+    if shown == 0 {
+        println!("(nothing matches)");
     }
     Ok(0)
 }

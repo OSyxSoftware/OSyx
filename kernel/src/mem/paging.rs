@@ -410,6 +410,58 @@ pub fn edit_range_in(root: u64, start: u64, end: u64, mut f: impl FnMut(u64, u64
     changed
 }
 
+/// Accessed bit of a page table entry (set by the CPU on any access).
+pub const ACCESSED: u64 = 1 << 5;
+
+/// Visits the present 4 KiB user pages of `[start, end)` for page aging:
+/// `f(va, frame, accessed, writable)` sees each one and returns false to
+/// stop. The accessed bit is cleared as it is read, without a TLB flush
+/// (a stale translation only makes a page look used once more).
+pub fn age_range_in(root: u64, start: u64, end: u64, mut f: impl FnMut(u64, u64, bool, bool) -> bool) {
+    if start >= end || check_virt(start, true).is_err() || check_virt(end - PAGE_SIZE, true).is_err() {
+        return;
+    }
+    let _g = PAGING.lock();
+    let mut va = start;
+    while va < end {
+        let mut t = root;
+        let mut present = true;
+        for shift in [39u64, 30, 21] {
+            // SAFETY: page table pages reachable through the HHDM.
+            let val = unsafe { *table(t).add(((va >> shift) & 511) as usize) };
+            if val & PRESENT == 0 {
+                let span = 1u64 << shift;
+                va = ((va & !(span - 1)) + span).max(va + PAGE_SIZE);
+                present = false;
+                break;
+            }
+            if val & HUGE != 0 {
+                va += PAGE_SIZE;
+                present = false;
+                break;
+            }
+            t = val & ADDR_MASK;
+        }
+        if !present {
+            continue;
+        }
+        // SAFETY: as above.
+        let e = unsafe { table(t).add(((va >> 12) & 511) as usize) };
+        // SAFETY: as above.
+        let val = unsafe { *e };
+        if val & PRESENT != 0 {
+            if val & ACCESSED != 0 {
+                // SAFETY: as above; only the accessed bit changes.
+                unsafe { *e = val & !ACCESSED };
+            }
+            if !f(va, val & ADDR_MASK, val & ACCESSED != 0, val & WRITABLE != 0) {
+                return;
+            }
+        }
+        va += PAGE_SIZE;
+    }
+}
+
 /// Replaces the leaf at `va` (present, 4 KiB) with frame `pa` under `flags`
 /// in one step, so other threads never see the page absent. Returns the
 /// previous frame, which the caller owns afterwards.
