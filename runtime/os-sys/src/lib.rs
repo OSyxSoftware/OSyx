@@ -516,6 +516,12 @@ mod imp {
         decode(syscall1(nr::SET_TIME, unix_ns)).map(|_| ())
     }
 
+    /// Firmware access for the ACPI service (root only); see
+    /// `osyx_abi::firmware` for the operations.
+    pub fn firmware(op: u64, a: u64, b: u64, c: u64, d: u64) -> Result<u64, Errno> {
+        decode(syscall5(nr::FIRMWARE, op, a, b, c, d))
+    }
+
     pub fn statfs(path: &str) -> Result<osyx_abi::FsStat, Errno> {
         let mut st = osyx_abi::FsStat::default();
         decode(syscall3(nr::STATFS, path.as_ptr() as u64, path.len() as u64, &mut st as *mut osyx_abi::FsStat as u64))?;

@@ -416,6 +416,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::DISPLAY_SET_MODE => sys_objects::display_set_mode(f.rdi, f.rsi),
         nr::FAULT_HANDLER => crate::user_fault::register(f.rdi),
         nr::FAULT_RETURN => crate::user_fault::resume(f.rdi),
+        nr::FIRMWARE => crate::firmware::syscall(f.rdi, f.rsi, f.rdx, f.r10, f.r8),
         _ => Err(Errno::NotSupported),
     };
     // Safe point: a thread whose process is exiting ends here instead of
@@ -434,6 +435,18 @@ fn lock_free_ipc(f: &SyscallFrame) -> Option<Result<u64, Errno>> {
         nr::CHANNEL_RECV => sys_objects::channel_recv_unlocked(f.rdi, f.rsi),
         nr::WAIT_HANDLES => sys_objects::wait_handles_unlocked(f.rdi, f.rsi, f.rdx),
         nr::WRITE => write_unlocked(f.rdi, f.rsi, f.rdx),
+        // Futexes have their own waiter lock and recheck the word after
+        // registering, so a wake on another CPU cannot be lost; user copies
+        // happen without that lock held.
+        nr::FUTEX_WAIT => {
+            let timeout = (f.rdx != 0).then(|| ns_to_ticks(f.rdx));
+            cpu::enable_interrupts();
+            Some(crate::futex::wait(f.rdi, f.rsi as u32, timeout).map(|_| 0))
+        }
+        nr::FUTEX_WAKE => {
+            cpu::enable_interrupts();
+            Some(crate::futex::wake(f.rdi, f.rsi as u32))
+        }
         _ => return None,
     };
     if r.is_some() {

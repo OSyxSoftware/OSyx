@@ -22,6 +22,22 @@ pub unsafe fn inb(port: u16) -> u8 {
 /// # Safety
 /// See [`outb`].
 #[inline]
+pub unsafe fn outw(port: u16, v: u16) {
+    asm!("out dx, ax", in("dx") port, in("ax") v, options(nomem, nostack, preserves_flags));
+}
+
+/// # Safety
+/// See [`outb`].
+#[inline]
+pub unsafe fn inw(port: u16) -> u16 {
+    let v: u16;
+    asm!("in ax, dx", out("ax") v, in("dx") port, options(nomem, nostack, preserves_flags));
+    v
+}
+
+/// # Safety
+/// See [`outb`].
+#[inline]
 pub unsafe fn outl(port: u16, v: u32) {
     asm!("out dx, eax", in("dx") port, in("eax") v, options(nomem, nostack, preserves_flags));
 }

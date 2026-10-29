@@ -34,6 +34,7 @@ members = [
     "userspace/install",
     "userspace/nettools",
     "userspace/web",
+    "third_party/aml",
 ]
 # Host-testable crates only. The loader, kernel and user programs are freestanding and are
 # built with an explicit --target by scripts/build.ps1.

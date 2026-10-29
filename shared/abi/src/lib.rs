@@ -349,7 +349,31 @@ pub mod nr {
     /// `set_time(unix_ns: u64) -> 0`: sets the real-time clock
     /// (`CLOCK_REALTIME`); root only.
     pub const SET_TIME: u64 = 92;
+    /// `firmware(op, a, b, c, d) -> value`: firmware access for the ACPI
+    /// service; root only. See [`crate::firmware`].
+    pub const FIRMWARE: u64 = 93;
 }
+
+/// Operations of `nr::FIRMWARE`.
+pub mod firmware {
+    /// `(sig, n, buf, len) -> table length`: copies the `n`-th ACPI table
+    /// with little-endian signature `sig` ("DSDT", "SSDT", ...).
+    pub const TABLE: u64 = 1;
+    /// `(port, width, value, write) -> value read`: I/O port access
+    /// (width 1, 2 or 4); ports of kernel devices are refused.
+    pub const PORT: u64 = 2;
+    /// `(phys, width, value, write) -> value read`: aligned physical memory
+    /// access (width 1, 2, 4 or 8) outside the kernel's RAM.
+    pub const PHYS: u64 = 3;
+    /// `(bus << 16 | device << 8 | function, offset, width | 0x100 to
+    /// write, value) -> value read`: PCI configuration, segment 0.
+    pub const PCI: u64 = 4;
+}
+
+/// Battery state published by the ACPI service in [`BATTERY_STATUS_PATH`]
+/// as one line: `percent charging ac` (`percent` 0-100, `charging` and
+/// `ac` 0 or 1), or `none` when the machine reports no battery.
+pub const BATTERY_STATUS_PATH: &str = "/run/battery";
 
 /// `map_ex` flags.
 pub const MAP_FIXED: u64 = 1;

@@ -87,6 +87,9 @@ pub struct PipeObj {
     /// the rest in `rest`, where a reader already waiting on the channel
     /// would not see it.
     reading: Mutex<()>,
+    /// Receive buffer for reads smaller than a channel message (CHUNK bytes
+    /// once used).
+    scratch: Mutex<Vec<u8>>,
     /// Serializes writes, so a write completed inline cannot overtake one
     /// still waiting for channel space.
     writing: Mutex<()>,
@@ -239,36 +242,41 @@ impl PipeObj {
                     return Ok((n, self.read_message.load(Ordering::SeqCst) && !rest.is_empty()));
                 }
             }
-            // Keep the receive allocation in `rest` between messages. Put it
-            // back before waiting so nowait retries do not allocate either.
-            let mut buf = {
-                let mut rest = self.rest.lock().unwrap();
-                core::mem::take(&mut *rest)
+            // A caller buffer that holds any message receives it directly.
+            // Otherwise the message lands in the pipe's receive buffer, which
+            // stays allocated and initialized between reads (no 64 KiB clear
+            // per read), and only what does not fit the caller goes to `rest`.
+            let direct = out.len() >= CHUNK;
+            let mut scratch = self.scratch.lock().unwrap();
+            if !direct && scratch.len() < CHUNK {
+                scratch.resize(CHUNK, 0);
+            }
+            let received = if direct {
+                os_sys::channel_recv(chan.0, out, &mut [])
+            } else {
+                os_sys::channel_recv(chan.0, &mut scratch, &mut [])
             };
-            buf.resize(CHUNK, 0);
-            match os_sys::channel_recv(chan.0, &mut buf, &mut []) {
-                Ok((n, _)) if n == 0 && self.message_type => {
+            match received {
+                Ok((0, _)) if self.message_type => {
                     R_EMPTY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    buf.clear();
-                    let mut rest = self.rest.lock().unwrap();
-                    if rest.is_empty() {
-                        *rest = buf;
-                    }
                     return Ok((0, false)); // an empty message
                 }
+                Ok((0, _)) => {} // nothing for a byte-mode reader: receive again
                 Ok((n, _)) => {
                     R_DATA.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     R_BYTES.fetch_add(n as u64, core::sync::atomic::Ordering::Relaxed);
-                    buf.truncate(n);
-                    *self.rest.lock().unwrap() = buf;
+                    if direct {
+                        return Ok((n, false));
+                    }
+                    let k = n.min(out.len());
+                    out[..k].copy_from_slice(&scratch[..k]);
+                    if k < n {
+                        self.rest.lock().unwrap().extend_from_slice(&scratch[k..n]);
+                    }
+                    return Ok((k, self.read_message.load(Ordering::SeqCst) && k < n));
                 }
                 Err(e) => {
-                    buf.clear();
-                    let mut rest = self.rest.lock().unwrap();
-                    if rest.is_empty() {
-                        *rest = buf;
-                    }
-                    drop(rest);
+                    drop(scratch);
                     match e {
                         Errno::WouldBlock if self.nowait.load(Ordering::SeqCst) => {
                             R_NOWAIT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -630,6 +638,7 @@ pub fn open_client(name: &str, flags: u32) -> Result<u64, u32> {
         chan: Mutex::new(Some(Arc::new(Fd(c)))),
         rest: Mutex::new(Vec::new()),
         reading: Mutex::new(()),
+        scratch: Mutex::new(Vec::new()),
         writing: Mutex::new(()),
         reads_queued: AtomicU32::new(0),
         writes_queued: AtomicU32::new(0),
@@ -712,6 +721,7 @@ extern "win64" fn CreateNamedPipeW(
         chan: Mutex::new(None),
         rest: Mutex::new(Vec::new()),
         reading: Mutex::new(()),
+        scratch: Mutex::new(Vec::new()),
         writing: Mutex::new(()),
         reads_queued: AtomicU32::new(0),
         writes_queued: AtomicU32::new(0),
@@ -941,6 +951,7 @@ pub(crate) fn relay_in(pid: u64, id: u32, flags: u32) -> Result<Object, u32> {
         chan: Mutex::new(Some(Arc::new(Fd(c)))),
         rest: Mutex::new(Vec::new()),
         reading: Mutex::new(()),
+        scratch: Mutex::new(Vec::new()),
         writing: Mutex::new(()),
         reads_queued: AtomicU32::new(0),
         writes_queued: AtomicU32::new(0),

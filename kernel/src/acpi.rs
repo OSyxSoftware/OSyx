@@ -46,6 +46,29 @@ fn checked_table(pa: u64) -> Option<(u64, usize)> {
 /// Finds the table with signature `sig` through the XSDT (or the RSDT).
 /// Returns its physical address and length.
 pub fn find(sig: &[u8; 4]) -> Option<(u64, usize)> {
+    find_nth(sig, 0)
+}
+
+/// The DSDT, which the FADT points to (it is not listed in the XSDT).
+pub fn dsdt() -> Option<(u64, usize)> {
+    let (pa, len) = find(b"FACP")?;
+    let x_dsdt = if len >= 148 { u64::from_le_bytes(read(pa + 140)?) } else { 0 };
+    let dsdt = if x_dsdt != 0 { x_dsdt } else { u32::from_le_bytes(read(pa + 40)?) as u64 };
+    checked_table(dsdt)
+}
+
+/// The table bytes of the `n`-th table with signature `sig` (`DSDT` for the
+/// DSDT), for the firmware interface of `crate::firmware`.
+pub fn table_bytes(sig: &[u8; 4], n: usize) -> Option<&'static [u8]> {
+    let (pa, len) = if sig == b"DSDT" { if n == 0 { dsdt()? } else { return None } } else { find_nth(sig, n)? };
+    // SAFETY: checked tables lie in firmware memory inside the HHDM.
+    Some(unsafe { core::slice::from_raw_parts(mem::phys_to_virt(pa) as *const u8, len) })
+}
+
+/// Like [`find`], for the `n`-th table with that signature (there may be
+/// several SSDTs).
+pub fn find_nth(sig: &[u8; 4], n: usize) -> Option<(u64, usize)> {
+    let mut seen = 0;
     let rsdp: [u8; 36] = read(RSDP.load(Ordering::Relaxed))?;
     if &rsdp[..8] != b"RSD PTR " {
         return None;
@@ -58,7 +81,10 @@ pub fn find(sig: &[u8; 4]) -> Option<(u64, usize)> {
         let Some(s) = read::<4>(pa) else { continue };
         if &s == sig {
             if let Some(t) = checked_table(pa) {
-                return Some(t);
+                if seen == n {
+                    return Some(t);
+                }
+                seen += 1;
             }
         }
     }

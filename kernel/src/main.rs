@@ -19,6 +19,7 @@ extern crate alloc;
 
 mod acpi;
 mod arch;
+mod firmware;
 mod audio;
 mod block;
 mod bluetooth;
@@ -208,6 +209,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     if let Some(location) = boot.option_value("pci.unassign") {
         pci::unassign(&pci_devices, location);
     }
+    firmware::init(boot.memory_map());
     let firmware_memory: Vec<(u64, u64)> =
         boot.memory_map().iter().map(|r| (r.phys_start, r.phys_start + r.page_count * 4096)).collect();
     pci::assign_bars(&pci_devices, &firmware_memory);

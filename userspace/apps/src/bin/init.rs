@@ -100,6 +100,19 @@ fn main() -> i32 {
             process::exit(code);
         }
         Some("desktop") => return desktop_session(),
+        // QEMU has no battery: after batteryd has reported none, publish a
+        // charging battery at 73 %, then a discharging one at 12 %, so the
+        // taskbar indicator can be checked.
+        Some("battery-demo") => {
+            thread::spawn(|| {
+                for (delay, state) in [(10, "73 1 1\n"), (8, "12 0 0\n")] {
+                    thread::sleep(Duration::from_secs(delay));
+                    let _ = fs::write(osyx_abi::BATTERY_STATUS_PATH, state);
+                    println!("BATTERY_DEMO {}", state.trim_end());
+                }
+            });
+            return desktop_session();
+        }
         Some("swap-stress") => return swap_stress(),
         Some("zen-probe") => {
             let mode = args.get(3).map(String::as_str).unwrap_or("");
@@ -583,6 +596,11 @@ fn desktop_session() -> i32 {
             Ok(c) => println!("init: first-boot tasks running (process {})", c.id()),
             Err(e) => eprintln!("init: cannot start /bin/firstboot: {e}"),
         }
+    }
+    // Battery and AC state for the taskbar (ACPI; runs as root).
+    match Command::new("/bin/batteryd").spawn() {
+        Ok(c) => println!("init: battery state kept by process {}", c.id()),
+        Err(e) => eprintln!("init: cannot start /bin/batteryd: {e}"),
     }
     // Network time: the clock is set once a network is up.
     match Command::new("/bin/timesync").arg("--daemon").spawn() {

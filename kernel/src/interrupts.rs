@@ -166,6 +166,13 @@ pub fn monotonic_ns() -> u64 {
 #[no_mangle]
 extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     if f.vector == 2 && crate::smp::handle_tlb_nmi() { return; }
+    crate::smp::leave_tickless();
+    if f.vector == crate::smp::RESCHED_VECTOR as u64 {
+        // Work was queued for this idle CPU; nothing else to do here.
+        apic::eoi();
+        crate::sched::preempt_if_idle();
+        return;
+    }
     let from_user = f.cs & 3 == 3;
     // Sample before taking the entry lock: while it is contended the handler
     // spins with interrupts off, so samples after the acquire are rare.

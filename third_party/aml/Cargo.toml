@@ -1,0 +1,23 @@
+# Vendored from crates.io aml 0.16.4 (https://github.com/rust-osdev/acpi),
+# MIT OR Apache-2.0, by Isaac Woods and contributors. OSyx changes: the
+# EmbeddedControl region goes to the handler, and unsupported region spaces
+# report an error instead of panicking. See OSYX-CHANGES.md.
+[package]
+edition = "2018"
+name = "aml"
+version = "0.16.4"
+authors = ["Isaac Woods"]
+description = "Library for parsing AML"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rust-osdev/acpi"
+
+[lib]
+test = false
+
+[dependencies]
+bit_field = "0.10"
+bitvec = { version = "1.0.1", default-features = false, features = ["alloc", "atomic"] }
+byteorder = { version = "1", default-features = false }
+log = "0.4"
+spinning_top = "0.2.4"

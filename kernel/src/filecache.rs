@@ -20,6 +20,9 @@ struct Entry {
     bytes: usize,
     /// Page expected next by a sequential reader; a miss there reads ahead.
     next: u64,
+    /// Pages the next sequential miss reads: doubles while the reader stays
+    /// sequential, back to the start after a random access.
+    window: u64,
 }
 
 struct Cache {
@@ -331,33 +334,40 @@ pub(crate) fn peek(key: Key, index: u64) -> Option<Page> {
     page
 }
 
-/// Pages fetched in one file system read when a reader is sequential. Kept
-/// small: the read runs under the global kernel lock, and a 1 MiB run behind
-/// a busy disk occasionally took 300 ms, freezing every other thread. Small
-/// runs still hit most sequential reads (32 pages) at a bounded worst case.
-const READAHEAD_PAGES: u64 = 32;
+/// Read-ahead window for sequential readers, in pages: it starts small and
+/// doubles with every sequential miss. Regular file reads run without the
+/// kernel entry lock now, so a long run only delays its own reader; the cap
+/// still bounds that delay behind a busy disk (512 KiB).
+const READAHEAD_START: u64 = 8;
+const READAHEAD_MAX: u64 = 128;
 
 pub(crate) fn page(key: Key, index: u64, fill: &impl Fn(u64, &mut [u8]) -> Result<usize, Errno>) -> Result<Option<Page>, Errno> {
-    let (generation, sequential) = {
+    let (generation, want) = {
         let mut c = CACHE.lock();
         c.clock += 1;
         let clock = c.clock;
         let generation = c.generation;
-        let sequential = match c.entries.get_mut(&key) {
+        let want = match c.entries.get_mut(&key) {
             Some(e) => {
                 e.used = clock;
                 if let Some((p, len)) = e.pages.get(&index) {
                     FC_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     return Ok(Some((p.clone(), *len)));
                 }
-                index == e.next
+                if index == e.next {
+                    e.window = (e.window * 2).clamp(READAHEAD_START, READAHEAD_MAX);
+                    e.window
+                } else {
+                    e.window = READAHEAD_START;
+                    1
+                }
             }
-            None => true,
+            None => READAHEAD_START,
         };
-        (generation, sequential)
+        // Under the entry lock a long read would hold up every other CPU.
+        (generation, if crate::smp::owner_is_me() { want.min(32) } else { want })
     };
     FC_MISSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let want = if sequential { READAHEAD_PAGES } else { 1 };
     let mut buf = alloc::vec![0u8; (want * mem::PAGE_SIZE) as usize];
     let started = crate::interrupts::uptime_ms();
     let mut len = 0;
@@ -399,7 +409,7 @@ pub(crate) fn page(key: Key, index: u64, fill: &impl Fn(u64, &mut [u8]) -> Resul
         c.clock += 1;
         let clock = c.clock;
         let added = {
-            let e = c.entries.entry(key).or_insert_with(|| Entry { pages: BTreeMap::new(), used: clock, bytes: 0, next: index });
+            let e = c.entries.entry(key).or_insert_with(|| Entry { pages: BTreeMap::new(), used: clock, bytes: 0, next: index, window: READAHEAD_START });
             e.used = clock;
             let mut added = 0;
             for (i, shm, n) in &fresh {

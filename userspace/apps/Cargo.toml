@@ -25,6 +25,15 @@ bench = false
 
 [dependencies]
 os-std = { path = "../../runtime/os-std" }
+os-sys = { path = "../../runtime/os-sys" }
+osyx-abi = { path = "../../shared/abi" }
+aml = { path = "../../third_party/aml" }
+
+[[bin]]
+name = "batteryd"
+path = "src/bin/batteryd.rs"
+test = false
+bench = false
 
 [[bin]]
 name = "zen"

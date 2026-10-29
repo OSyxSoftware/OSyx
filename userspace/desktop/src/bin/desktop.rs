@@ -73,6 +73,27 @@ enum PopupKind {
     Wifi { state: WifiState, list: ListView, pass: Option<(String, TextField, Checkbox)>, message: String },
 }
 
+/// Battery indicator width on the panel.
+const BATTERY_W: u32 = 78;
+
+/// The battery state `batteryd` publishes (`percent charging ac`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Battery {
+    percent: u32,
+    charging: bool,
+    ac: bool,
+}
+
+impl Battery {
+    fn read() -> Option<Battery> {
+        let text = os_std::fs::read_to_string(osyx_abi::BATTERY_STATUS_PATH).ok()?;
+        let mut f = text.split_whitespace();
+        let percent = f.next()?.parse().ok()?;
+        let flag = |s: Option<&str>| s == Some("1");
+        Some(Battery { percent, charging: flag(f.next()), ac: flag(f.next()) })
+    }
+}
+
 /// The sound card and volume from the kernel's `/run/audio.status`.
 #[derive(Clone)]
 struct Sound {
@@ -349,6 +370,10 @@ struct Shell {
     /// installed system update was announced.
     update_checked: u64,
     update_announced: bool,
+    /// The battery from `/run/battery` (None without one) and when it was
+    /// last read (ms).
+    battery: Option<Battery>,
+    battery_checked: u64,
     shortcut_cells: Vec<usize>,
     icon_drag: Option<IconDrag>,
     /// (pid, application name) of programs started from the shell.
@@ -452,6 +477,8 @@ fn main() -> i32 {
         wifi_checked: 0,
         update_checked: 0,
         update_announced: false,
+        battery: None,
+        battery_checked: 0,
         shortcut_cells: Vec::new(),
         icon_drag: None,
         children: Vec::new(),
@@ -517,6 +544,10 @@ impl Shell {
                 }
             }
             self.update_clock();
+            if self.now().saturating_sub(self.battery_checked) >= 2000 {
+                self.battery_checked = self.now();
+                self.update_battery();
+            }
             self.expire_notes();
             self.collect_exits();
             if self.now().saturating_sub(self.shortcut_scan) >= 2000 {
@@ -1551,9 +1582,29 @@ impl Shell {
         Rect::new(r.x - 12 - QUICK_W as i32, 8, QUICK_W, PANEL_H - 16)
     }
 
-    fn clock_rect(&self) -> Rect {
+    /// The battery indicator left of quick settings, when there is a battery.
+    fn battery_rect(&self) -> Option<Rect> {
+        self.battery?;
         let r = self.quick_rect();
+        Some(Rect::new(r.x - 4 - BATTERY_W as i32, 8, BATTERY_W, PANEL_H - 16))
+    }
+
+    fn clock_rect(&self) -> Rect {
+        let r = self.battery_rect().unwrap_or(self.quick_rect());
         Rect::new(r.x - 4 - CLOCK_W as i32, 6, CLOCK_W, PANEL_H - 12)
+    }
+
+    fn update_battery(&mut self) {
+        let b = Battery::read();
+        if b != self.battery {
+            let appeared = b.is_some() != self.battery.is_some();
+            self.battery = b;
+            if appeared {
+                // The clock moves, and with it the room for task buttons.
+                self.layout_panel();
+            }
+            self.panel.dirty = true;
+        }
     }
 
     fn update_clock(&mut self) {
@@ -1649,6 +1700,7 @@ impl Shell {
                 self.quick_hover,
                 self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Quick),
             );
+            let battery = self.battery_rect().zip(self.battery);
             let mut s = self.panel.surface()?;
             let mut p = Painter::new(&mut s, &theme, &fonts);
             draw_panel(
@@ -1660,6 +1712,7 @@ impl Shell {
                 clock,
                 self.clock_hover,
                 quick,
+                battery,
                 self.windows.is_empty(),
             );
             self.panel.present(&mut self.conn, None)?;
@@ -1770,6 +1823,7 @@ fn draw_panel(
     clock_rect: Rect,
     clock_hover: bool,
     (quick_rect, quick_hover, quick_open): (Rect, bool, bool),
+    battery: Option<(Rect, Battery)>,
     empty: bool,
 ) {
     let t = *p.theme;
@@ -1804,8 +1858,54 @@ fn draw_panel(
     let icon_y = quick_rect.y + (quick_rect.h as i32 - 20) / 2;
     icon::draw(p, Icon::Network, Rect::new(quick_rect.x + 10, icon_y, 20, 20), t.text);
     icon::draw(p, Icon::Volume, Rect::new(quick_rect.x + 36, icon_y, 20, 20), t.text);
+    if let Some((r, b)) = battery {
+        draw_battery(p, r, b);
+    }
     p.vline(quick_rect.right() as i32 + 5, 12, full.h - 24, PANEL_LINE);
     power.draw(p, false);
+}
+
+/// Battery cell with its charge level, a lightning bolt while charging, and
+/// the percentage beside it.
+fn draw_battery(p: &mut Painter, r: Rect, b: Battery) {
+    let t = *p.theme;
+    let (body_w, body_h) = (26u32, 14u32);
+    let x = r.x + 4;
+    let y = r.y + (r.h as i32 - body_h as i32) / 2;
+    let level = if b.charging {
+        rgb(80, 200, 120)
+    } else if b.percent <= 15 {
+        rgb(232, 72, 72)
+    } else {
+        t.text
+    };
+    // Outline (two pixels) and the terminal nub on the right.
+    for i in 0..2 {
+        p.hline(x, y + i, body_w, t.text);
+        p.hline(x, y + body_h as i32 - 1 - i, body_w, t.text);
+        p.vline(x + i, y, body_h, t.text);
+        p.vline(x + body_w as i32 - 1 - i, y, body_h, t.text);
+    }
+    p.fill(Rect::new(x + body_w as i32, y + 4, 3, body_h - 8), t.text);
+    // Charge level inside a one-pixel gap.
+    let inner_w = body_w - 6;
+    let filled = (inner_w * b.percent.min(100)).div_ceil(100).max(u32::from(b.percent > 0));
+    p.fill(Rect::new(x + 3, y + 3, filled, body_h - 6), level);
+    if b.charging {
+        // A bolt across the cell: down-left stroke, short bar, down-left stroke.
+        let (cx, cy) = (x + body_w as i32 / 2, y + body_h as i32 / 2);
+        for dx in 0..2 {
+            p.line(cx + 3 + dx, y - 3, cx - 2 + dx, cy + 1, PANEL_BG);
+            p.line(cx - 2 + dx, cy, cx + 3 + dx, cy, PANEL_BG);
+            p.line(cx + 2 + dx, cy - 1, cx - 3 + dx, y + body_h as i32 + 2, PANEL_BG);
+        }
+        p.line(cx + 4, y - 2, cx - 1, cy, rgb(255, 214, 64));
+        p.line(cx - 1, cy, cx + 4, cy, rgb(255, 214, 64));
+        p.line(cx + 3, cy, cx - 2, y + body_h as i32 + 1, rgb(255, 214, 64));
+    }
+    let text = format!("{}%", b.percent.min(100));
+    let tr = Rect::new(x + body_w as i32 + 7, r.y, r.w.saturating_sub(body_w + 11), r.h);
+    p.text_in(FontKind::Ui, tr, &text, if b.percent <= 15 && !b.charging { level } else { t.text }, Align::Left);
 }
 
 /// Controls without a working driver are shown but disabled (naming the

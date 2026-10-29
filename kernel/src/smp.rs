@@ -53,6 +53,38 @@ impl CpuLocal {
     }
 }
 static CPUS: [CpuLocal; MAX_CPUS] = [const { CpuLocal::new() }; MAX_CPUS];
+
+/// Vector of the reschedule IPI that wakes an idle CPU whose timer is off.
+pub const RESCHED_VECTOR: u8 = 0xF1;
+/// Idle application processors halt with their timer stopped; this marks
+/// one in that state, so whoever gives it work must send it an IPI.
+static TICKLESS: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
+/// Marks this CPU as halting without its timer.
+pub fn set_tickless(on: bool) {
+    TICKLESS[index()].store(on, Ordering::SeqCst);
+}
+
+/// Restarts this CPU's timer if it halted without it. Runs first in every
+/// interrupt: a handler may switch to a thread, which must be preemptible.
+pub fn leave_tickless() -> bool {
+    let cpu = index();
+    if cpu != 0 && TICKLESS[cpu].swap(false, Ordering::SeqCst) {
+        crate::arch::timer::start_secondary();
+        true
+    } else {
+        false
+    }
+}
+
+/// Wakes CPU `cpu` if it halts without its timer. Called with the scheduler
+/// lock held after queueing work there; see `sched::idle_without_tick`.
+pub fn kick(cpu: usize) {
+    if cpu != index() && cpu < MAX_CPUS && TICKLESS[cpu].load(Ordering::SeqCst) {
+        // Fixed delivery, level assert (ICR bit 14), physical destination.
+        let _ = apic::send_ipi(CPUS[cpu].apic.load(Ordering::Relaxed), 0x4000 | RESCHED_VECTOR as u32);
+    }
+}
 static READY: AtomicBool = AtomicBool::new(false);
 static ONLINE: AtomicU32 = AtomicU32::new(1);
 // zero = free, otherwise the owning CPU's index + 1. The lock follows a
