@@ -870,6 +870,7 @@ impl Files {
             return;
         };
         let (mut done, mut failure) = (0usize, None);
+        let mut processed = 0usize;
         for p in &paths {
             let name = p.rsplit('/').next().unwrap_or(p);
             let source_is_dir = fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
@@ -878,6 +879,7 @@ impl Files {
                 break;
             }
             if cut && parent(p) == self.cwd.trim_end_matches('/') {
+                processed += 1;
                 continue;
             }
             let cwd = self.cwd.clone();
@@ -889,17 +891,27 @@ impl Files {
                 fileops::copy_tree(p, &to).map(|_| ())
             };
             match r {
-                Ok(()) => done += 1,
+                Ok(()) => { done += 1; processed += 1; }
                 Err(e) => {
                     failure = Some(format!("Cannot {} {name}: {e}", if cut { "move" } else { "copy" }));
                     break;
                 }
             }
         }
-        if cut && failure.is_none() {
-            self.clipboard = None;
-            cx.file_clipboard = None;
-            cx.clipboard_entries = Some(Vec::new());
+        if cut {
+            let remaining = &paths[processed..];
+            if remaining.is_empty() {
+                self.clipboard = None;
+                cx.file_clipboard = None;
+                cx.clipboard_entries = Some(Vec::new());
+            } else if processed > 0 {
+                let remaining = remaining.to_vec();
+                if let Some(entry) = prism_client::proto::clipboard_files_entry(&remaining, true) {
+                    self.clipboard = Some((remaining.clone(), true));
+                    cx.file_clipboard = Some((remaining, true));
+                    cx.clipboard_entries = Some(vec![entry]);
+                }
+            }
         }
         let r = match failure {
             Some(f) => Err(f),
