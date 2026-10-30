@@ -6,6 +6,29 @@ use osyx_ext4::{Ext4, MountOptions};
 use osyx_install::*;
 use std::collections::BTreeMap;
 
+#[test]
+fn partition_window_rejects_out_of_bounds_and_unaligned_io() {
+    let mut disk = vec![0u8; 4 * SECTOR as usize];
+    {
+        let mut window = Window::new(&mut disk, 1, 1);
+        assert!(osyx_fat::BlockDevice::write_sectors(&mut window, 0, &[1; 512]).is_ok());
+        assert!(osyx_fat::BlockDevice::write_sectors(&mut window, 0, &[2; 513]).is_err());
+        assert!(osyx_ext4::BlockDevice::write_sectors(&mut window, 1, &[3; 1]).is_err());
+        assert!(osyx_ext4::BlockDevice::read_sectors(&mut window, u64::MAX, &mut [0; 512]).is_err());
+    }
+    assert!(disk[1024..].iter().all(|&b| b == 0));
+    let mut invalid = Window::new(&mut disk, u64::MAX, 2);
+    assert!(osyx_fat::BlockDevice::read_sectors(&mut invalid, 1, &mut [0; 512]).is_err());
+}
+
+#[test]
+fn plan_rejects_overflowing_partition_sizes() {
+    assert!(plan(u64::MAX, Layout::Manual { esp_mib: u64::MAX, root_mib: 0 }).is_err());
+    assert!(plan(u64::MAX, Layout::Manual { esp_mib: 256, root_mib: u64::MAX }).is_err());
+    let p = plan(u64::MAX, Layout::Automatic).unwrap();
+    assert_eq!(p.root_mib(), p.root_sectors / (1024 * 1024 / SECTOR));
+}
+
 /// A tree in memory: path -> entry, plus file contents.
 struct MemSource {
     entries: BTreeMap<String, SourceEntry>,

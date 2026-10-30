@@ -113,7 +113,9 @@ impl<'a, D: Disk> Window<'a, D> {
     }
 
     fn check(&self, lba: u64, len: usize) -> bool {
-        lba.checked_add(len as u64 / SECTOR).is_some_and(|end| end <= self.sectors)
+        len.is_multiple_of(SECTOR as usize)
+            && self.first.checked_add(self.sectors).is_some_and(|end| end <= self.disk.sectors())
+            && lba.checked_add(len as u64 / SECTOR).is_some_and(|end| end <= self.sectors)
     }
 }
 
@@ -183,10 +185,10 @@ pub struct Plan {
 
 impl Plan {
     pub fn esp_mib(&self) -> u64 {
-        self.esp_sectors * SECTOR / MIB
+        self.esp_sectors / ALIGN
     }
     pub fn root_mib(&self) -> u64 {
-        self.root_sectors * SECTOR / MIB
+        self.root_sectors / ALIGN
     }
 }
 
@@ -205,18 +207,19 @@ pub fn plan(disk_sectors: u64, layout: Layout) -> Result<Plan> {
         return Err(Error::Invalid(format!("the system partition needs at least {MIN_ROOT_MIB} MiB")));
     }
     let esp_first = ALIGN;
-    let esp_sectors = esp_mib * MIB / SECTOR;
-    let root_first = esp_first + esp_sectors;
+    let too_large = || Error::Invalid("partition size is too large".into());
+    let esp_sectors = esp_mib.checked_mul(ALIGN).ok_or_else(too_large)?;
+    let root_first = esp_first.checked_add(esp_sectors).ok_or_else(too_large)?;
     let room = usable_end.saturating_sub(root_first) / ALIGN * ALIGN;
-    let root_sectors = if root_mib == 0 { room } else { root_mib * MIB / SECTOR };
+    let root_sectors = if root_mib == 0 { room } else { root_mib.checked_mul(ALIGN).ok_or_else(too_large)? };
     if root_sectors > room {
         return Err(Error::Invalid(format!(
             "the partitions need {} MiB but the disk has {} MiB",
-            esp_mib + root_mib + 2,
-            disk_sectors * SECTOR / MIB
+            esp_mib.saturating_add(root_mib).saturating_add(2),
+            disk_sectors / ALIGN
         )));
     }
-    if root_sectors * SECTOR < MIN_ROOT_MIB * MIB {
+    if root_sectors < MIN_ROOT_MIB * ALIGN {
         return Err(Error::Invalid(format!("the disk is too small: OSyx needs at least {MIN_DISK_MIB} MiB")));
     }
     Ok(Plan { disk_sectors, esp_first, esp_sectors, root_first, root_sectors })
