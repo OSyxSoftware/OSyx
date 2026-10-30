@@ -143,7 +143,6 @@ pub fn offer(handles: &[u64]) -> Result<Option<String>, u32> {
 /// Queue inherited objects on an explicitly granted channel before starting
 /// the child. File-backed sections and pipe relays need broker support that a
 /// restricted child does not yet have, so fail rather than offer them.
-#[allow(dead_code)] // The restricted CreateProcess path is not enabled yet.
 pub fn offer_on_channel(handles: &[u64], channel: u64) -> Result<(), u32> {
     for &handle in handles {
         match objects::get(handle) {

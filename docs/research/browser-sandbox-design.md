@@ -14,10 +14,13 @@ connection, not necessarily the child. Other handle and IPC paths remain
 unreviewed. This is not a browser sandbox.
 Installation and inheritance need adversarial runtime and concurrency tests.
 
-Winrun can decode inherited page-file sections and events from the granted
-channel. Its restricted `CreateProcess` path is not connected yet; file-backed
-sections and pipe relays are refused by the new channel offer path. The
-direct channel stays open after inheritance for later broker messages.
+Winrun has an experimental, opt-in `CreateProcess` path for `/opt/zen/zen.exe`
+with `-contentproc`, enabled only by `OSYX_EXPERIMENTAL_CONTENT_SANDBOX=1`.
+Its provisional read-only paths and syscall list have not been tested with
+Gecko. The path fails closed when requested handles are unsupported. Winrun
+can decode inherited page-file sections and events from the granted channel;
+file-backed sections and pipe relays are refused. The channel stays open
+after inheritance, but no Gecko broker protocol is implemented.
 
 A deny-by-default syscall allowlist is checked before the dispatcher's fast
 paths and inherited by children. The set of calls Gecko needs and the handling

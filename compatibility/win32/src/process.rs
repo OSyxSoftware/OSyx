@@ -35,6 +35,27 @@ pub struct ProcessObj {
 
 static CHILDREN: Mutex<Vec<Arc<ProcessObj>>> = Mutex::new(Vec::new());
 
+/// Experimental deny-by-default profile. It is not a validated Gecko policy.
+fn spawn_content_candidate(path: &str, argv: &[u8], env: &[u8], channel: u64) -> Result<u64, osyx_abi::Errno> {
+    use osyx_abi::{nr, sandbox::{PathRule, PATH_EXEC, PATH_READ}};
+    let prefixes = ["/bin", "/opt/zen", "/system", "/Windows", "/usr", "/etc"];
+    let rules: Vec<PathRule> = prefixes.iter().map(|p| PathRule {
+        path: p.as_ptr() as u64, path_len: p.len() as u64, access: PATH_READ | PATH_EXEC,
+    }).collect();
+    let calls = [
+        nr::EXIT, nr::WRITE, nr::MAP, nr::UNMAP, nr::SYSINFO, nr::CLOCK, nr::YIELD, nr::SLEEP,
+        nr::THREAD_SPAWN, nr::THREAD_EXIT, nr::FUTEX_WAIT, nr::FUTEX_WAKE, nr::SET_FS_BASE, nr::GETTID,
+        nr::OPEN, nr::CLOSE, nr::READ, nr::SEEK, nr::FSTAT, nr::STAT, nr::READDIR, nr::GETCWD,
+        nr::CHDIR, nr::READLINK, nr::LSTAT, nr::GETUID, nr::STATFS, nr::CHANNEL_SEND, nr::CHANNEL_RECV,
+        nr::CHANNEL_PEER, nr::SHM_CREATE, nr::SHM_MAP, nr::SHM_SIZE, nr::WAIT_HANDLES,
+        nr::SET_GS_BASE, nr::PROTECT, nr::MAP_EX, nr::FAULT_HANDLER, nr::FAULT_RETURN, nr::DISCARD,
+        nr::FILEMAP_CREATE, nr::FILEMAP_MAP, nr::CPU_INFO, nr::THREAD_AFFINITY, nr::PROCESS_WRITE_BARRIER,
+        nr::PREFAULT, nr::TIME_CALIB, nr::IMAGE_MAP, nr::IMAGE_QUERY, nr::THREAD_PRIORITY,
+        nr::FUTEX_WAIT_OWNED, nr::SET_FS32_BASE,
+    ];
+    os_sys::spawn_restricted_with_broker(path, argv, env, &rules, &calls, channel)
+}
+
 pub fn exit_code(p: &ProcessObj) -> u32 {
     if p.done.load(Ordering::SeqCst) { p.exit_code.load(Ordering::SeqCst) } else { STILL_ACTIVE }
 }
@@ -274,6 +295,9 @@ pub(crate) extern "win64" fn CreateProcessW(
     let Some(program) = app.clone().or_else(|| args.first().cloned()) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let Some(exe) = find_program(&program) else { return fail(ERROR_FILE_NOT_FOUND, 0) };
     let rest: Vec<String> = if app.is_some() { args.iter().skip(1).cloned().collect() } else { args.into_iter().skip(1).collect() };
+    let restricted = exe.eq_ignore_ascii_case("/opt/zen/zen.exe")
+        && rest.iter().any(|arg| arg.eq_ignore_ascii_case("-contentproc"))
+        && os_std::env::var("OSYX_EXPERIMENTAL_CONTENT_SANDBOX").is_ok_and(|v| v == "1");
     let mut environment: Vec<String> =
         if env != 0 { environment_block(env, flags & CREATE_UNICODE_ENVIRONMENT != 0) } else { kernel32::env_vars().into_iter().map(|(k, v)| format!("{k}={v}")).collect() };
     // SAFETY: as above.
@@ -286,10 +310,30 @@ pub(crate) extern "win64" fn CreateProcessW(
     if let Some(i) = environment.iter().position(|e| e.starts_with(crate::inherit::ENV) && e[crate::inherit::ENV.len()..].starts_with('=')) {
         environment.remove(i);
     }
-    match crate::inherit::offer(&inherited) {
-        Ok(Some(entry)) => environment.push(entry),
-        Ok(None) => {}
-        Err(e) => return fail(e, 0),
+    let mut broker = None;
+    let mut child_channel = None;
+    if restricted {
+        if si_flags & STARTF_USESTDHANDLES != 0 {
+            return fail(ERROR_NOT_SUPPORTED, 0);
+        }
+        let (parent_end, child_end) = match os_sys::channel_pair() {
+            Ok(pair) => pair,
+            Err(e) => return fail(errno_to_win32(e), 0),
+        };
+        if let Err(e) = crate::inherit::offer_on_channel(&inherited, parent_end) {
+            let _ = os_sys::close(parent_end);
+            let _ = os_sys::close(child_end);
+            return fail(e, 0);
+        }
+        broker = Some(parent_end);
+        child_channel = Some(child_end);
+        environment.push(format!("{}={}", crate::inherit::ENV, crate::inherit::DIRECT_CHANNEL));
+    } else {
+        match crate::inherit::offer(&inherited) {
+            Ok(Some(entry)) => environment.push(entry),
+            Ok(None) => {}
+            Err(e) => return fail(e, 0),
+        }
     }
     let (path, argv): (String, Vec<String>) = if is_pe(&exe) {
         let mut a = alloc::vec![String::from("/bin/winrun")];
@@ -315,24 +359,38 @@ pub(crate) extern "win64" fn CreateProcessW(
     // Console streams are kernel handles 0-2 only when our own stdio was
     // redirected; otherwise they are passed as HANDLE_NONE (inherit).
     let console = streams.map(|(h, console)| if console { os_sys::HANDLE_NONE } else { h });
-    let spawned = match os_sys::spawn_stdio(&path, &argv, &environment, stdio) {
-        Err(osyx_abi::Errno::BadHandle) if console != stdio => os_sys::spawn_stdio(&path, &argv, &environment, console),
-        r => r,
+    let spawned = match child_channel {
+        Some(channel) => {
+            let result = spawn_content_candidate(&path, &argv, &environment, channel);
+            let _ = os_sys::close(channel);
+            result
+        }
+        None => match os_sys::spawn_stdio(&path, &argv, &environment, stdio) {
+            Err(osyx_abi::Errno::BadHandle) if console != stdio => os_sys::spawn_stdio(&path, &argv, &environment, console),
+            r => r,
+        },
     };
     let pid = match spawned {
         Ok(p) => p,
-        Err(e) => return fail(errno_to_win32(e), 0),
+        Err(e) => {
+            if let Some(channel) = broker { let _ = os_sys::close(channel); }
+            return fail(errno_to_win32(e), 0);
+        }
     };
     let p = Arc::new(ProcessObj { pid, child: true, done: AtomicBool::new(false), exit_code: AtomicU32::new(STILL_ACTIVE), jobbed: AtomicBool::new(false) });
     CHILDREN.lock().unwrap().push(p.clone());
     let watcher = p.clone();
-    let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
+    let watching = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
         if let Ok((_, status)) = os_sys::wait(watcher.pid) {
             watcher.exit_code.store(status as u32, Ordering::SeqCst);
         }
         watcher.done.store(true, Ordering::SeqCst);
         objects::signal_all();
+        if let Some(channel) = broker { let _ = os_sys::close(channel); }
     });
+    if watching.is_err() {
+        if let Some(channel) = broker { let _ = os_sys::close(channel); }
+    }
     let hp = objects::insert(Object::Process(p.clone()));
     let ht = objects::insert(Object::Process(p));
     // SAFETY: the caller's PROCESS_INFORMATION.
