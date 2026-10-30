@@ -4701,12 +4701,8 @@ extern "win64" fn GetClipboardData(format: u32) -> u64 {
         if let Some(&h) = g.clipboard_handles.get(&format) {
             return h;
         }
-        let data = g
-            .clipboard_own
-            .iter()
-            .chain(g.clipboard.iter())
-            .find(|e| e.format == format)
-            .map(|e| e.data.clone());
+        let entries: Vec<_> = g.clipboard_own.iter().chain(g.clipboard.iter()).cloned().collect();
+        let data = proto::clipboard_text_format(&entries, format);
         let Some(data) = data else { return 0 };
         let Some(h) = crate::kernel32::heap_alloc(data.len().max(1), true) else {
             return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
@@ -4720,7 +4716,10 @@ extern "win64" fn GetClipboardData(format: u32) -> u64 {
 
 /// The clipboard must be open to ask for its data.
 extern "win64" fn IsClipboardFormatAvailable(format: u32) -> Bool {
-    with(|g| g.clipboard_own.iter().chain(g.clipboard.iter()).any(|e| e.format == format) as Bool)
+    with(|g| {
+        let entries: Vec<_> = g.clipboard_own.iter().chain(g.clipboard.iter()).cloned().collect();
+        proto::clipboard_text_format(&entries, format).is_some() as Bool
+    })
 }
 
 extern "win64" fn GetClipboardSequenceNumber() -> u32 {
@@ -4733,6 +4732,12 @@ extern "win64" fn EnumClipboardFormats(next: u32) -> u32 {
         for e in g.clipboard_own.iter().chain(g.clipboard.iter()) {
             if !formats.contains(&e.format) {
                 formats.push(e.format);
+            }
+        }
+        let entries: Vec<_> = g.clipboard_own.iter().chain(g.clipboard.iter()).cloned().collect();
+        for format in [1, proto::CLIP_UNICODE_TEXT] {
+            if !formats.contains(&format) && proto::clipboard_text_format(&entries, format).is_some() {
+                formats.push(format);
             }
         }
         if next == 0 {

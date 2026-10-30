@@ -284,6 +284,24 @@ pub fn clipboard_text(entries: &[ClipEntry]) -> Option<String> {
     Some(String::from_utf8_lossy(&entry.data[..end]).into_owned())
 }
 
+/// Return a text format, synthesizing it from the other text format if needed.
+/// OSyx Win32 uses UTF-8 for its ANSI code page.
+pub fn clipboard_text_format(entries: &[ClipEntry], format: u32) -> Option<Vec<u8>> {
+    if let Some(entry) = entries.iter().find(|entry| entry.format == format) {
+        return Some(entry.data.clone());
+    }
+    let text = clipboard_text(entries)?;
+    match format {
+        CLIP_UNICODE_TEXT => Some(clipboard_text_entry(&text).data),
+        1 => {
+            let mut data = text.into_bytes();
+            data.push(0);
+            Some(data)
+        }
+        _ => None,
+    }
+}
+
 /// Client -> compositor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -1132,6 +1150,10 @@ mod tests {
         assert_eq!(clipboard_text(&[malformed]), None);
         let ansi = ClipEntry { format: 1, name: None, data: b"test\0ignored".to_vec() };
         assert_eq!(clipboard_text(&[ansi]).as_deref(), Some("test"));
+        let unicode = clipboard_text_entry("Zażółć");
+        assert_eq!(clipboard_text_format(&[unicode], 1), Some("Zażółć\0".as_bytes().to_vec()));
+        let ansi = ClipEntry { format: 1, name: None, data: b"test\0".to_vec() };
+        assert_eq!(clipboard_text_format(&[ansi], CLIP_UNICODE_TEXT), Some(clipboard_text_entry("test").data));
     }
 
     #[test]
