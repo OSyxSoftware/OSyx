@@ -36,6 +36,8 @@ pub const MAGIC: &str = "osyx-update 1";
 pub const MANIFEST: &str = "manifest.txt";
 pub const SIGNATURE: &str = "manifest.sig";
 pub const PAYLOAD: &str = "payload.bin";
+/// Suffix used for files staged beside update targets.
+pub const STAGED_SUFFIX: &str = ".osyx-new";
 
 /// Preserve custom update servers while following the repository transfer.
 pub fn update_url(url: &str) -> &str {
@@ -170,6 +172,9 @@ impl Manifest {
                     if files.iter().any(|e| e.path == path) {
                         return Err(format!("manifest line {}: {path} listed twice", n + 2));
                     }
+                    if files.iter().any(|e| e.path.strip_suffix(STAGED_SUFFIX) == Some(path) || path.strip_suffix(STAGED_SUFFIX) == Some(e.path.as_str())) {
+                        return Err(format!("manifest line {}: {path} conflicts with a staged file", n + 2));
+                    }
                     files.push(Entry { path: path.to_string(), size, mode, sha256 });
                 }
                 Some("") if line.is_empty() => {}
@@ -257,6 +262,16 @@ mod tests {
             files: vec![entry("bin/a", u64::MAX), entry("bin/b", 1)],
         };
         assert!(Manifest::parse(&m.to_text()).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_staging_path_collisions_in_either_order() {
+        for files in [vec![entry("bin/a", 1), entry("bin/a.osyx-new", 1)], vec![entry("bin/a.osyx-new", 1), entry("bin/a", 1)]] {
+            let manifest = Manifest { version: "1.0".to_string(), payload_size: 2, payload_sha256: [0; 32], files };
+            assert!(Manifest::parse(&manifest.to_text()).is_err());
+        }
+        let manifest = Manifest { version: "1.0".to_string(), payload_size: 2, payload_sha256: [0; 32], files: vec![entry("bin/a", 1), entry("bin/b.osyx-new", 1)] };
+        assert!(Manifest::parse(&manifest.to_text()).is_ok());
     }
 
     #[test]

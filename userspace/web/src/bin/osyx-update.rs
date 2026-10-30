@@ -40,7 +40,7 @@ const NETWORK_WAIT_SECS: u64 = 300;
 const CHECK_INTERVAL_SECS: u64 = 24 * 3600;
 const MANIFEST_MAX: usize = 4 << 20;
 /// Suffix of a file written next to its target before the update commits.
-const STAGED: &str = ".osyx-new";
+const STAGED: &str = osyx_update::STAGED_SUFFIX;
 
 struct Log(Option<fs::File>);
 
