@@ -728,6 +728,10 @@ extern "win64" fn RegEnumKeyExW(
     ERROR_SUCCESS
 }
 
+extern "win64" fn RegEnumKeyW(hkey: u64, index: u32, name: *mut u16, mut name_len: u32) -> u32 {
+    RegEnumKeyExW(hkey, index, name, &mut name_len, core::ptr::null(), core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut())
+}
+
 /// Values in name order (Windows keeps insertion order; neither is
 /// documented).
 #[allow(clippy::too_many_arguments)]
@@ -1028,6 +1032,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RegDisablePredefinedCache,
         RegDisablePredefinedCacheEx,
         RegEnumKeyExW,
+        RegEnumKeyW,
         RegEnumValueW,
         RegQueryInfoKeyW,
         RegDeleteTreeW,

@@ -46,6 +46,7 @@ __declspec(dllimport) long __stdcall RegQueryValueExW(HKEY key, const WCHAR *nam
                                                       void *data, DWORD *size);
 __declspec(dllimport) long __stdcall RegCloseKey(HKEY key);
 __declspec(dllimport) long __stdcall RegDeleteKeyW(HKEY key, const WCHAR *sub);
+__declspec(dllimport) long __stdcall RegEnumKeyW(HKEY key, DWORD index, WCHAR *name, DWORD size);
 
 typedef struct {
     DWORD cb;
@@ -164,6 +165,12 @@ void __stdcall start(void) {
     check("RegSetValueExW", e == 0 && RegSetValueExW(key, L"value", 0, REG_DWORD, &value, sizeof value) == 0);
     check("RegQueryValueExW", e == 0 && RegQueryValueExW(key, L"value", 0, &type, &got, &size) == 0 && type == REG_DWORD &&
                                   got == value && size == 4);
+    HKEY child = 0;
+    long child_result = RegCreateKeyExW(key, L"Child", 0, 0, 0, KEY_ALL_ACCESS, 0, &child, 0);
+    check("RegEnumKeyW enumerates subkey", child_result == 0 && RegEnumKeyW(key, 0, buf, 64) == 0 && wide_eq(buf, "Child"));
+    check("RegEnumKeyW rejects short buffer", RegEnumKeyW(key, 0, buf, 2) != 0);
+    if (child) RegCloseKey(child);
+    RegDeleteKeyW(key, L"Child");
     check("RegCloseKey", e == 0 && RegCloseKey(key) == 0);
     RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\OSyx\\api32");
 

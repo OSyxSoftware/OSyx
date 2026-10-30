@@ -202,7 +202,7 @@ fn main() -> i32 {
     // A Windows profile always has these folders (created at first logon);
     // programs read them without asking for creation.
     if os_sys::stat(if home.is_empty() { "/" } else { home }).is_ok() {
-        for d in ["AppData", "AppData/Roaming", "AppData/Local", "AppData/LocalLow", "AppData/Local/Temp"] {
+        for d in ["AppData", "AppData/Roaming", "AppData/Local", "AppData/LocalLow", "AppData/Local/Temp", "AppData/Local/Microsoft", "AppData/Local/Microsoft/Windows", "AppData/Local/Microsoft/Windows/INetCache", "AppData/Local/Microsoft/Windows/INetCookies", "AppData/Local/Microsoft/Windows/History"] {
             let _ = os_sys::mkdir(&format!("{home}/{d}"), 0o755);
         }
     }

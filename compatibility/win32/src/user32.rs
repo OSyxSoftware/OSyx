@@ -3467,6 +3467,24 @@ extern "win64" fn CreateSolidBrush(c: u32) -> u64 {
     })
 }
 
+extern "win64" fn CreateBrushIndirect(logbrush: *const u32) -> u64 {
+    if logbrush.is_null() {
+        return 0;
+    }
+    // SAFETY: LOGBRUSH starts with the style and COLORREF fields in both ABIs.
+    let (style, color) = unsafe { (logbrush.read_unaligned(), logbrush.add(1).read_unaligned()) };
+    let brush = match style {
+        0 => Gdi::Brush(colorref(color)),
+        1 => Gdi::NullBrush,
+        _ => return 0,
+    };
+    with(|g| {
+        let h = g.handle();
+        g.gdi.insert(h, brush);
+        h
+    })
+}
+
 extern "win64" fn CreatePen(style: i32, width: i32, c: u32) -> u64 {
     with(|g| {
         let h = g.handle();
@@ -5366,6 +5384,7 @@ pub fn gdi_exports() -> Vec<(&'static str, u64)> {
         SetBkColor,
         SetBkMode,
         CreateSolidBrush,
+        CreateBrushIndirect,
         CreatePen,
         CreateFontA,
         CreateFontW,
