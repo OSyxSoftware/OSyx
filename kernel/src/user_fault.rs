@@ -54,6 +54,12 @@ osyx_fault_resume:
 1:  fxrstor64 [rsi]
 2:
     mov rsp,rdi
+    // IRET does not reload DS/ES. Compatibility-mode continuations need the
+    // flat ring-3 data selector (64-bit code runs with a null DS, and the
+    // handler may leave it that way); 64-bit continuations accept it too.
+    mov cx,0x1B
+    mov ds,cx
+    mov es,cx
     pop r15
     pop r14
     pop r13

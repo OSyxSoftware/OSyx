@@ -170,6 +170,12 @@ osyx_wow64_gate:
     push 0x202                      // RFLAGS: IF set, everything else clear
     push 0x3B                       // CS: USER_CS32 (D=1, L=0)
     push r9                         // RIP
+    // IRET does not reload DS/ES, and 64-bit code runs with a null DS, which
+    // compatibility mode rejects on the first data access. Load the flat
+    // ring-3 data selector at CPL 3.
+    mov ecx, 0x1B
+    mov ds, cx
+    mov es, cx
     iretq
 
     .balign 16
@@ -186,6 +192,10 @@ osyx_wow64_enter32:
     push 0x202                      // RFLAGS
     push 0x3B                       // CS: compatibility mode
     push rdi                        // entry point
+    // 64-bit code runs with a null DS; compatibility mode faults on it.
+    mov ecx, 0x1B
+    mov ds, cx
+    mov es, cx
     iretq
 
     // osyx_win64_invoke(f: u64, args: *const u64, n: u32) -> u64

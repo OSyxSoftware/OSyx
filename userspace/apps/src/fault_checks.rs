@@ -11,6 +11,7 @@ use os_std::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 static CALLBACKS: AtomicU32 = AtomicU32::new(0);
+static REJECTED: AtomicU32 = AtomicU32::new(0);
 static GOOD: AtomicU32 = AtomicU32::new(0);
 static NESTED: AtomicBool = AtomicBool::new(false);
 static AVX_FAULT: AtomicBool = AtomicBool::new(false);
@@ -110,8 +111,12 @@ extern "C" fn entry(p: *mut Context) -> ! {
     let bad_mxcsr = unsafe { os_sys::fault_return(c) } == Err(Errno::InvalidArgument);
     c.fx[24..28].copy_from_slice(&mxcsr.to_le_bytes());
     CALLBACKS.fetch_add(1, Ordering::SeqCst);
-    if saved && bad_ip && bad_stack && bad_mxcsr {
-        GOOD.fetch_add(1, Ordering::SeqCst);
+    if bad_ip && bad_stack && bad_mxcsr {
+        REJECTED.fetch_add(1, Ordering::SeqCst);
+        // Only a register probe loads the marker values checked by `saved`.
+        if saved {
+            GOOD.fetch_add(1, Ordering::SeqCst);
+        }
     }
     c.rip = original + 2;
     c.rflags |= 0x27000;
@@ -179,7 +184,11 @@ pub fn run() -> i32 {    let mut passed = 0;
     );
     check("register user CPU exception handler", unsafe { os_sys::fault_handler(entry as *const () as u64) }.is_ok());
     check("UD2 resumes with caller registers SSE and safe flags", unsafe { osyx_fault_register_probe() } == 1);
-    if avx_enabled() {
+    let avx = avx_enabled();
+    // One delivery for the register probe on this thread, one for each
+    // helper thread, and one more for the AVX probe when it runs.
+    let deliveries = 3 + avx as u32;
+    if avx {
         AVX_GOOD.store(false, Ordering::SeqCst);
         AVX_FAULT.store(true, Ordering::SeqCst);
         let restored = unsafe { osyx_fault_avx_probe() } == 1;
@@ -194,10 +203,18 @@ pub fn run() -> i32 {    let mut passed = 0;
     let a = os_std::thread::spawn(|| unsafe { osyx_fault_register_probe() });
     let b = os_std::thread::spawn(|| unsafe { osyx_fault_register_probe() });
     check("independent threads resume their own contexts", a.join() == Ok(1) && b.join() == Ok(1));
-    check(
-        "all contexts rejected kernel RIP RSP and invalid MXCSR",
-        CALLBACKS.load(Ordering::SeqCst) == 3 && GOOD.load(Ordering::SeqCst) == 3,
+    let (callbacks, rejected, good) = (
+        CALLBACKS.load(Ordering::SeqCst),
+        REJECTED.load(Ordering::SeqCst),
+        GOOD.load(Ordering::SeqCst),
     );
+    // Register markers: this thread's probe and the two helper threads.
+    let register_probes = 3;
+    if callbacks != deliveries || rejected != deliveries || good != register_probes {
+        println!("native fault: {callbacks} callbacks ({deliveries} expected), {rejected} rejected all three, {good} register markers");
+    }
+    check("all contexts rejected kernel RIP RSP and invalid MXCSR", callbacks == deliveries && rejected == deliveries);
+    check("register and SSE markers preserved in the register probes", good == register_probes);
     for mode in ["fault-no-handler", "fault-exec-reset", "fault-nested", "fault-bad-stack"] {
         let status = Command::new("worker").arg(mode).status().ok().and_then(|s| s.exception());
         check(mode, status == Some(6));

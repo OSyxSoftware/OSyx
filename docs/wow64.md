@@ -73,7 +73,7 @@ the symbol, never a null thunk. PE32+ images never call the hook.
 | 1 | `osyx-pe` parses PE32 (`PeFile::parse_any`, `is_pe32`): headers, 4-byte import thunks, TLS directory and callbacks; `pe32-imports` example | Done (host tested on a real installer) |
 | 2 | Loader support in `osyx-pe-loader`: HIGHLOW relocations, 32-bit image layout below 4 GiB, imports written as 32-bit stubs | Done in the crate: `relocate` applies HIGHLOW under the 4 GiB limit, `reserve_below` places images, `write_thunk` writes 4-byte slots, `import_thunk` maps built-ins to bridge stubs; `compatibility/pe-loader/tests/pe32.rs` passes, and `winrun`'s `WinHost` implements the hook (`reserve_below` not yet exercised on OSyx) |
 | 3 | Kernel: 32-bit user code segment and per-thread FS descriptor, switched on context switch | Done: GDT entries 7/8 built by `osyx_abi::wow64` and installed per CPU, `Thread::fs32_base` restored on every switch, syscall 96 sets the calling thread's base; the four `shared/abi/src/wow64.rs` host tests pass and the milestone 4 bridge enters ring 3 with CS32 on QEMU |
-| 4 | Bridge for a console program (`GetStdHandle`, `WriteFile`, `ExitProcess`...) and a 32-bit test program in `compatibility/win32/tests` | Done in QEMU: `winrun` reserves the arena at `0x2000_0000`, binds the three imports to 12-byte stubs, enters `hello32.exe` through a five-slot `iretq` into CS32, the guest prints `hello32: 32-bit code ran` through `WriteFile` and `ExitProcess(7)` reaches `init` (`init.args=tests,winrun,/opt/wintests/hello32.exe`). Inside the full `win-test.ps1` suite the same program still faults at its first import call; tracked as an open failure below |
+| 4 | Bridge for a console program (`GetStdHandle`, `WriteFile`, `ExitProcess`...) and a 32-bit test program in `compatibility/win32/tests` | Done: `winrun` reserves the arena at `0x2000_0000`, binds the three imports to 12-byte stubs, enters `hello32.exe` through a five-slot `iretq` into CS32, the guest prints `hello32: 32-bit code ran` through `WriteFile` and `ExitProcess(7)` reaches `init`; `win-test.ps1` passes with it (2200 passed, 0 failed) |
 | 5 | The 166 imports of SteamSetup.exe: kernel32, advapi32, then user32/gdi32/comctl32 with callbacks | Not started |
 | 6 | 32-bit SEH, WOW64-style file system and registry views | Not started |
 
@@ -101,11 +101,26 @@ handler: the kernel masks the frame's RSP to 32 bits, remembers the thread's
 FS32 base, enters the handler with CS64 and the 64-bit FS, and restores the
 TEB base in FS before the continuation `iretq` returns to CS32.
 
-Open failure: inside `win-test.ps1` the same `hello32.exe` faults at its
-first import call (`0x401005`, `GetStdHandle` through the IAT) although the
-standalone `init winrun` path succeeds with identical binaries; the four
-`init win` checks around native fault delivery and SEH also fail in that
-suite and are being investigated.
+Two defects surfaced only inside `win-test.ps1` (hardware virtualization,
+`-Accel auto`), both fixed on this branch:
+
+* **Null DS after `sysret`.** A 64-bit return to user mode leaves DS/ES null.
+  QEMU TCG tolerates the null selector, WHPX does not, and the first
+  compatibility-mode data access (`GetStdHandle` through the IAT) faulted with
+  `#GP(0)` at `0x401005`. The gate, `osyx_wow64_enter32` and the kernel's
+  `osyx_fault_resume` now load DS/ES with the flat ring-3 data selector before
+  every `iretq` into CS32.
+* **Oversized `RaiseException` frame.** The raise entry built its captured
+  `NativeContext` in a 720-byte frame while the bridge copies the full
+  1024-byte context; called from a shallow stack, that copy ran off the top of
+  the stack (`exceptions.exe`, `seh.exe`). The thunk reserves 1088 bytes and
+  overlays FXSAVE at the `fx` offset of the context.
+
+`hello32.exe` prints its marker and exits 7 in the suite, and
+The test run reported `windows test: 2200 passed, 0 failed`. Its serial log
+also reports one separate kernel self-test failure, `FAT32 /boot through the
+VFS: contextual Unicode miss invalidated on create`; whether it also occurs on
+`main` has not yet been verified.
 
 ## Kernel support (milestone 3)
 
