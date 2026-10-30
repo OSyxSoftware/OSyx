@@ -1,0 +1,11 @@
+LIBRARY user32.dll
+EXPORTS
+    RegisterClassW
+    GetClassInfoW
+    CallWindowProcW
+    CharPrevW
+    CharNextA
+    CharNextW
+    PeekMessageW
+    DispatchMessageW
+    PostQuitMessage

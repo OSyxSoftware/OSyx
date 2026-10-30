@@ -931,6 +931,12 @@ fn call(proc_: u64, hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
     if proc_ == 0 {
         return DefWindowProcA(hwnd, msg, w, l);
     }
+    if crate::wow64::is_active()
+        && proc_ != DefWindowProcA as *const () as usize as u64
+        && proc_ != DefWindowProcW as *const () as usize as u64
+    {
+        return crate::wow64::call32(proc_ as u32, &[hwnd as u32, msg, w as u32, l as u32]) as i32 as i64;
+    }
     // SAFETY: a window procedure registered by the program (or ours).
     let f: WndProc = unsafe { core::mem::transmute(proc_ as usize) };
     let t0 = Instant::now();
@@ -1007,8 +1013,13 @@ fn register_class(wc: *const u8, wide: bool) -> u16 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's WNDCLASS.
-    let (style, proc_, bg, name_p): (u32, u64, u64, u64) =
-        unsafe { (teb::get(wc as u64, 0), teb::get(wc as u64, 8), teb::get(wc as u64, 48), teb::get(wc as u64, 64)) };
+    let (style, proc_, bg, name_p): (u32, u64, u64, u64) = unsafe {
+        if crate::wow64::is_active() {
+            (teb::get(wc as u64, 0), teb::get::<u32>(wc as u64, 4) as u64, teb::get::<u32>(wc as u64, 28) as u64, teb::get::<u32>(wc as u64, 36) as u64)
+        } else {
+            (teb::get(wc as u64, 0), teb::get(wc as u64, 8), teb::get(wc as u64, 48), teb::get(wc as u64, 64))
+        }
+    };
     // SAFETY: a NUL-terminated class name.
     let name = unsafe {
         if wide {
@@ -1991,6 +2002,16 @@ pub(crate) fn start_counter() {
 fn write_msg(p: *mut u8, m: &Msg) {
     // SAFETY: the caller's MSG.
     unsafe {
+        if crate::wow64::is_active() {
+            teb::put(p as u64, 0, m.hwnd as u32);
+            teb::put(p as u64, 4, m.msg);
+            teb::put(p as u64, 8, m.wparam as u32);
+            teb::put(p as u64, 12, m.lparam as u32);
+            teb::put(p as u64, 16, m.time);
+            teb::put(p as u64, 20, m.pt.0);
+            teb::put(p as u64, 24, m.pt.1);
+            return;
+        }
         teb::put(p as u64, 0, m.hwnd);
         teb::put(p as u64, 8, m.msg);
         teb::put(p as u64, 16, m.wparam);
@@ -2004,6 +2025,17 @@ fn write_msg(p: *mut u8, m: &Msg) {
 fn read_msg(p: *const u8) -> Msg {
     // SAFETY: the caller's MSG.
     unsafe {
+        if crate::wow64::is_active() {
+            return Msg {
+                hwnd: teb::get::<u32>(p as u64, 0) as u64,
+                msg: teb::get(p as u64, 4),
+                wparam: teb::get::<u32>(p as u64, 8) as u64,
+                lparam: teb::get::<i32>(p as u64, 12) as i64,
+                time: teb::get(p as u64, 16),
+                pt: (teb::get(p as u64, 20), teb::get(p as u64, 24)),
+                thread: teb::current_tid(),
+            };
+        }
         Msg {
             hwnd: teb::get(p as u64, 0),
             msg: teb::get(p as u64, 8),
@@ -2172,6 +2204,10 @@ extern "win64" fn DispatchMessageA(msg: *const u8) -> i64 {
         return 0;
     }
     if m.msg == WM_TIMER && m.lparam != 0 {
+        if crate::wow64::is_active() {
+            crate::wow64::call32(m.lparam as u32, &[m.hwnd as u32, WM_TIMER, m.wparam as u32, m.time]);
+            return 0;
+        }
         // SAFETY: a TIMERPROC passed to SetTimer.
         let f: TimerProc = unsafe { core::mem::transmute(m.lparam as usize) };
         f(m.hwnd, WM_TIMER, m.wparam, m.time);
@@ -2997,11 +3033,17 @@ extern "win64" fn BeginPaint(hwnd: u64, ps: *mut u8) -> u64 {
     if !ps.is_null() {
         // SAFETY: the caller's PAINTSTRUCT.
         unsafe {
-            core::ptr::write_bytes(ps, 0, 72);
-            teb::put(ps as u64, 0, dc);
-            teb::put(ps as u64, 8, erase as i32);
+            if crate::wow64::is_active() {
+                core::ptr::write_bytes(ps, 0, 64);
+                teb::put(ps as u64, 0, dc as u32);
+                teb::put(ps as u64, 4, erase as i32);
+            } else {
+                core::ptr::write_bytes(ps, 0, 72);
+                teb::put(ps as u64, 0, dc);
+                teb::put(ps as u64, 8, erase as i32);
+            }
         }
-        write_rect((ps as usize + 12) as *mut i32, paint);
+        write_rect((ps as usize + if crate::wow64::is_active() { 8 } else { 12 }) as *mut i32, paint);
     }
     dc
 }
@@ -3091,7 +3133,7 @@ extern "win64" fn EndPaint(hwnd: u64, ps: *const u8) -> Bool {
         return FALSE;
     }
     // SAFETY: the caller's PAINTSTRUCT from BeginPaint.
-    let dc: u64 = unsafe { teb::get(ps as u64, 0) };
+    let dc: u64 = unsafe { if crate::wow64::is_active() { teb::get::<u32>(ps as u64, 0) as u64 } else { teb::get(ps as u64, 0) } };
     let paint = with(|g| g.dcs.remove(&dc).map(|d| {
         if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
             let drawn = g.windows.get(&hwnd).and_then(|w| w.drawn);
@@ -4459,6 +4501,13 @@ extern "win64" fn GetClassInfoW(_inst: u64, name: *const u16, out: *mut u8) -> B
     // left null: the names live in this runtime, not in the caller's memory.
     // SAFETY: the caller's WNDCLASSW.
     unsafe {
+        if crate::wow64::is_active() {
+            core::ptr::write_bytes(out, 0, 40);
+            teb::put(out as u64, 0, style);
+            teb::put(out as u64, 4, wndproc as u32);
+            teb::put(out as u64, 28, background as u32);
+            return TRUE;
+        }
         core::ptr::write_bytes(out, 0, 72);
         teb::put(out as u64, 0, style);
         teb::put(out as u64, 8, wndproc);
@@ -4959,6 +5008,18 @@ extern "win64" fn CharLowerW(s: *mut u16) -> *mut u16 {
     s
 }
 
+extern "win64" fn CharPrevW(start: *const u16, current: *const u16) -> *const u16 {
+    if (current as usize) > (start as usize) { current.wrapping_sub(1) } else { start }
+}
+
+extern "win64" fn CharNextA(p: *const u8) -> *const u8 {
+    if p.is_null() || unsafe { *p } == 0 { p } else { p.wrapping_add(1) }
+}
+
+extern "win64" fn CharNextW(p: *const u16) -> *const u16 {
+    if p.is_null() || unsafe { *p } == 0 { p } else { p.wrapping_add(1) }
+}
+
 extern "win64" fn IsGUIThread(_convert: Bool) -> Bool {
     TRUE // winrun's threads are user-interface threads
 }
@@ -5035,9 +5096,7 @@ extern "win64" fn CallWindowProcW(proc_: u64, wnd: u64, msg: u32, wparam: u64, l
     if proc_ == 0 {
         return 0;
     }
-    // SAFETY: a caller-supplied window procedure of the Windows x64 ABI.
-    let f: extern "win64" fn(u64, u32, u64, i64) -> i64 = unsafe { core::mem::transmute(proc_ as usize) };
-    f(wnd, msg, wparam, lparam)
+    call(proc_, wnd, msg, wparam, lparam)
 }
 
 /// OSyx has one screen described by MonitorFromWindow/GetMonitorInfo; the
@@ -5268,6 +5327,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetWindowPlacement,
         SetWindowPlacement,
         CharLowerW,
+        CharPrevW,
+        CharNextA,
+        CharNextW,
         IsGUIThread,
         GetGUIThreadInfo,
         SetSysColors,

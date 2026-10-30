@@ -48,6 +48,31 @@ __declspec(dllimport) long __stdcall RegCloseKey(HKEY key);
 __declspec(dllimport) long __stdcall RegDeleteKeyW(HKEY key, const WCHAR *sub);
 __declspec(dllimport) long __stdcall RegEnumKeyW(HKEY key, DWORD index, WCHAR *name, DWORD size);
 
+typedef long (__stdcall *WNDPROC)(HANDLE, DWORD, DWORD, long);
+typedef struct {
+    DWORD style;
+    WNDPROC proc;
+    int cls_extra, wnd_extra;
+    HANDLE instance, icon, cursor, background;
+    const WCHAR *menu, *name;
+} WNDCLASS32;
+_Static_assert(sizeof(WNDCLASS32) == 40, "32-bit WNDCLASSW");
+__declspec(dllimport) unsigned short __stdcall RegisterClassW(const WNDCLASS32 *wc);
+__declspec(dllimport) BOOL __stdcall GetClassInfoW(HANDLE instance, const WCHAR *name, WNDCLASS32 *wc);
+__declspec(dllimport) long __stdcall CallWindowProcW(WNDPROC proc, HANDLE hwnd, DWORD msg, DWORD w, long l);
+__declspec(dllimport) const WCHAR *__stdcall CharPrevW(const WCHAR *start, const WCHAR *current);
+__declspec(dllimport) const WCHAR *__stdcall CharNextW(const WCHAR *p);
+__declspec(dllimport) const char *__stdcall CharNextA(const char *p);
+typedef struct { HANDLE hwnd; DWORD message, wparam; long lparam; DWORD time; long x, y; } MSG32;
+_Static_assert(sizeof(MSG32) == 28, "32-bit MSG");
+__declspec(dllimport) BOOL __stdcall PeekMessageW(MSG32 *msg, HANDLE hwnd, DWORD min, DWORD max, DWORD flags);
+__declspec(dllimport) long __stdcall DispatchMessageW(const MSG32 *msg);
+__declspec(dllimport) void __stdcall PostQuitMessage(int code);
+
+static long __stdcall test_wndproc(HANDLE hwnd, DWORD msg, DWORD w, long l) {
+    return hwnd == (HANDLE)7 && msg == 8 && w == 9 && l == -10 ? -42 : 0;
+}
+
 typedef struct {
     DWORD cb;
     WCHAR *reserved, *desktop, *title;
@@ -107,6 +132,24 @@ static int wide_eq(const WCHAR *a, const char *b) {
 
 void __stdcall start(void) {
     out = GetStdHandle(STD_OUTPUT_HANDLE);
+
+    static const WCHAR class_name[] = L"OSyxApi32Test";
+    WNDCLASS32 wc = { 3, test_wndproc, 0, 0, 0, 0, 0, (HANDLE)17, 0, class_name };
+    struct { WNDCLASS32 wc; DWORD guard; } info = { { 0 }, 0xfeedbeef };
+    check("RegisterClassW 32-bit layout", RegisterClassW(&wc) != 0);
+    check("GetClassInfoW 32-bit layout", GetClassInfoW(0, class_name, &info.wc) && info.wc.style == 3 &&
+          info.wc.proc == test_wndproc && info.wc.background == (HANDLE)17 && info.guard == 0xfeedbeef);
+    check("CallWindowProcW invokes 32-bit callback", CallWindowProcW(test_wndproc, (HANDLE)7, 8, 9, -10) == -42);
+    const WCHAR *wide_text = L"ab";
+    const char *ansi_text = "a";
+    check("CharPrevW bounds", CharPrevW(wide_text, wide_text) == wide_text && CharPrevW(wide_text, wide_text + 2) == wide_text + 1);
+    check("CharNextW terminator", CharNextW(wide_text) == wide_text + 1 && CharNextW(wide_text + 2) == wide_text + 2);
+    check("CharNextA terminator", CharNextA(ansi_text) == ansi_text + 1 && CharNextA(ansi_text + 1) == ansi_text + 1);
+    struct { MSG32 msg; DWORD guard; } message = { { 0 }, 0x1234abcd };
+    PostQuitMessage(37);
+    check("PeekMessageW writes 32-bit MSG", PeekMessageW(&message.msg, 0, 0, 0, 1) && message.msg.message == 0x12 &&
+          message.msg.wparam == 37 && message.guard == 0x1234abcd);
+    check("DispatchMessageW reads 32-bit MSG", DispatchMessageW(&message.msg) == 0);
 
     check("lstrcmpiA ignores case", lstrcmpiA("Steam", "sTEAM") == 0 && lstrcmpiA("a", "b") < 0);
     check("MulDiv rounds and rejects /0", MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(1, 1, 0) == -1);
