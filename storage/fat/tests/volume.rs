@@ -396,6 +396,23 @@ fn rejects_directory_without_first_cluster() {
 }
 
 #[test]
+fn rejects_invalid_parent_directory_cluster() {
+    let mut fs = fresh(64 * MIB);
+    fs.create_dir("/child").unwrap();
+    write_file(&mut fs, "/protected", b"keep");
+    let cluster = fs.metadata("/child").unwrap().first_cluster;
+    let g = *fs.geometry();
+    let mut image = fs.unmount().unwrap();
+    let child = (g.data_start + (cluster - 2) * g.sectors_per_cluster) as usize * 512;
+    assert_eq!(&image[child + 32..child + 43], b"..         ");
+    image[child + 32 + 26..child + 32 + 28].copy_from_slice(&1u16.to_le_bytes());
+    let mut fs = FileSystem::mount(image).unwrap();
+    assert!(matches!(fs.metadata("/child/../protected"), Err(FsError::Corrupt(_))));
+    assert!(matches!(fs.create_dir("/child/../new"), Err(FsError::Corrupt(_))));
+    assert_eq!(read_file(&mut fs, "/protected"), b"keep");
+}
+
+#[test]
 fn block_device_bounds() {
     let mut img = vec![0u8; 4096];
     let mut buf = [0u8; 512];

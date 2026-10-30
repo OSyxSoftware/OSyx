@@ -70,10 +70,11 @@ impl<D: BlockDevice> FileSystem<D> {
                 Node::Item(_) => return Err(FsError::NotADirectory),
             };
             let found = self.find(dir, part)?.ok_or(FsError::NotFound)?;
-            if found.is_dir() && !found.is_dot() && !self.geo.is_valid_cluster(found.first_cluster) {
+            let root_parent = found.short == *b"..         " && found.first_cluster == 0;
+            if found.is_dir() && !root_parent && !self.geo.is_valid_cluster(found.first_cluster) {
                 return Err(FsError::Corrupt("directory starts at an invalid cluster"));
             }
-            node = if found.is_dot() && found.first_cluster == 0 { Node::Root } else { Node::Item(found) };
+            node = if root_parent { Node::Root } else { Node::Item(found) };
         }
         Ok(node)
     }
