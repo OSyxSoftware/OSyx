@@ -401,6 +401,14 @@ impl Client {
             return (None, None);
         }
         if matches!(m.msg_type, ACK | NAK) {
+            if m.msg_type == ACK && matches!(self.phase, Phase::Renewing | Phase::Rebinding) {
+                let Some(lease) = &self.lease else { return (None, None) };
+                if (!m.yiaddr.is_unspecified() && m.yiaddr != lease.addr)
+                    || (!m.ciaddr.is_unspecified() && m.ciaddr != lease.addr)
+                {
+                    return (None, None);
+                }
+            }
             match self.phase {
                 Phase::Requesting => {
                     let Some((addr, server)) = self.offer else { return (None, None) };

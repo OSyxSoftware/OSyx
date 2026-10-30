@@ -371,8 +371,13 @@ fn dhcp_ignores_replies_from_unselected_server() {
     let Some(dhcp::Event::Bound(lease)) = event else { panic!("expected selected server ACK") };
     let renew = dhcp::Message::parse(&client.poll(lease.t1).0.unwrap().payload).unwrap();
     assert_eq!(client.input(&reply(dhcp::NAK, renew.xid, other, address), lease.t1 + 1), (None, None));
+    assert_eq!(client.input(&reply(dhcp::ACK, renew.xid, selected, other), lease.t1 + 1), (None, None));
+    let mut wrong_ciaddr = reply(dhcp::ACK, renew.xid, selected, address);
+    wrong_ciaddr[12..16].copy_from_slice(&other.0);
+    assert_eq!(client.input(&wrong_ciaddr, lease.t1 + 1), (None, None));
     assert_eq!(client.phase(), dhcp::Phase::Renewing);
     let rebind = dhcp::Message::parse(&client.poll(lease.t2).0.unwrap().payload).unwrap();
+    assert_eq!(client.input(&reply(dhcp::ACK, rebind.xid, other, Ipv4Addr::BROADCAST), lease.t2 + 1), (None, None));
     let (_, event) = client.input(&reply(dhcp::ACK, rebind.xid, other, address), lease.t2 + 1);
     assert!(matches!(event, Some(dhcp::Event::Renewed(_))));
 }
