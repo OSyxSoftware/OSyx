@@ -23,26 +23,70 @@ Status of the milestones from the project brief.
 | 9 | Native networking | Implemented (VirtIO-Net and IPv4 stack; see network/net) |
 | 10 | VirtIO-GPU display backend | Implemented (2D scanout/damage/cursor; software composition) |
 | 11 | Task Manager, Settings and four PE32+ desktop utilities | Implemented initial versions |
+| 12 | Unmodified Windows browser (Zen) on OSyx | Runs and plays YouTube in QEMU; software rendering, Gecko sandbox off (see research/zen-bringup.md, research/performance-profile.md) |
+| 13 | Signed system updates and live image | Done (`/bin/osyx-update`, GitHub releases, `scripts/release.ps1`) |
+| 14 | Battery indicator (ACPI/EC) | Initial version; unverified on most hardware |
+| 15 | Kernel profiler and flame graphs | Done (`prof=N`, `scripts/flamegraph.py`) |
 
 ## Next steps (in order)
 
-1. **Real-hardware coverage**: expand testing of NVMe, AHCI, physical NICs and Wi-Fi across more machines.
-2. **Windows compatibility expansion**: cross-process sharing/object names,
-   child controls, true inaccessible reserved pages, SEH, delay imports,
-   process creation and the runtime dependencies of larger applications.
-3. **Windows 11 research with REA**: continue from
-   `research/windows11-apiset-and-forwarding.md`, maintaining explicit
-   supported/unsupported boundaries and executable regression programs.
-4. **Storage follow-ups**: ext4 htree insertion and deeper extent trees, a
-   page cache with delayed writes (and demand-paged program images), FAT
-   timestamps, interrupt-driven virtio.
-5. **SMP follow-ups**: audit kernel paths for finer-grained parallel execution,
-   then replace the common kernel entry lock and add load balancing policies.
-6. **More OSyx Std**: `RwLock`, `Once`/`OnceLock`, `mpsc`; then the
-   genuine `std` port ([rust-std.md](rust-std.md)).
-7. **Desktop follow-ups**: per-pixel alpha in the toolkit, damage-based
-   client redraws and report-protocol keyboards, AXIS pipelines
-   and blocks (see [graphics.md](graphics.md)).
+Planned work, roughly by priority. Items marked (in progress) have a branch.
+
+### Near term
+
+1. **USB storage for users** (in progress): automatic mount of USB mass
+   storage under `/media/<label>`, safe eject (flush, unmount, refuse when
+   busy), surprise removal without kernel panics, and a desktop panel that
+   lists USB disks (label, size, file system, usage) with an Eject button.
+2. **Settings that work** (in progress): every control in the Settings app
+   must change and persist its value; add a system update button (current
+   version, check for updates, progress and errors) on top of
+   `/bin/osyx-update`.
+3. **Battery detection** (in progress): reliable charge, charging state, time
+   estimate, no-battery and multiple-battery cases, tolerance of EC errors;
+   verify on real ThinkPads.
+4. **File formats and multiple files in Files**: open more kinds of files
+   (images, text and source, archives such as 7z/zip/tar, audio, video, PDF)
+   with a built-in viewer or a registered application per type, an "Open
+   with" choice, and multi-selection (copy, move, delete, compress several
+   files at once). Today Files opens text, HTML and common image types
+   through `/bin/open` and the browser.
+5. **Release hygiene**: run the Win32, SMP, desktop and Zen suites for every
+   release; CodSpeed benchmarks for the host-testable crates on every PR.
+
+### Performance (see research/performance-profile.md)
+
+6. Split the global process table lock (handle tables, mappings, page
+   faults) and the kernel entry lock.
+7. Demand-paged file views (a browser archive of 177 MiB is read completely
+   when mapped), virtio-blk with several requests in flight, async readahead.
+8. Software WebRender: fewer full-frame copies, damage-based presents in
+   PRISM.
+9. **GPU acceleration**: today only 2D scan-out (VirtIO-GPU). Next: XSAVE/AVX
+   state, then a 3D path (VirtIO-GPU virgl or a native driver) behind a
+   Direct3D/OpenGL layer for the Windows compatibility code.
+
+### Security
+
+10. Enable a sandbox for browser content processes: Gecko's own sandbox
+    needs restricted tokens, job objects and a broker; an OSyx-native
+    alternative is per-process file system views and syscall filters.
+
+### Longer term
+
+11. **Real-hardware coverage**: NVMe, AHCI, physical NICs and Wi-Fi on more
+    machines; I2C-HID touchpads.
+12. **Windows compatibility expansion**: cross-process sharing and object
+    names, child controls, SEH, delay imports, process creation and the
+    runtime dependencies of larger applications; Windows 11 API-set research
+    with REA (`research/windows11-apiset-and-forwarding.md`).
+13. **Storage**: ext4 htree insertion and deeper extent trees, page cache with
+    delayed writes, FAT timestamps, interrupt-driven virtio.
+14. **SMP**: finer-grained kernel locking, load balancing policies.
+15. **OSyx Std**: `RwLock`, `Once`/`OnceLock`, `mpsc`; then the genuine `std`
+    port ([rust-std.md](rust-std.md)).
+16. **Desktop**: per-pixel alpha in the toolkit, report-protocol keyboards,
+    AXIS pipelines and blocks (see [graphics.md](graphics.md)).
 
 ## Real hardware: current scope and limits
 
