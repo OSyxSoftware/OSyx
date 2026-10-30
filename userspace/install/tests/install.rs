@@ -45,11 +45,13 @@ struct MemSource {
     boot_calls: usize,
     empty_boot: Option<String>,
     oversize_at: Option<String>,
+    extra_boot: Option<String>,
+    lower_cmdline: bool,
 }
 
 impl MemSource {
     fn new() -> MemSource {
-        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0, empty_boot: None, oversize_at: None };
+        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0, empty_boot: None, oversize_at: None, extra_boot: None, lower_cmdline: false };
         for (d, mode, uid) in [("/bin", 0o755, 0), ("/etc", 0o755, 0), ("/etc/osyx", 0o755, 0), ("/dev", 0o755, 0), ("/tmp", 0o1777, 0), ("/home", 0o755, 0), ("/home/user", 0o755, 1000), ("/system", 0o755, 0), ("/system/share", 0o755, 0), ("/system/share/osyx-setup", 0o755, 0)] {
             s.dir(d, mode, uid);
         }
@@ -110,6 +112,8 @@ impl Source for MemSource {
                 if name == path { data.clear(); }
             }
         }
+        if let Some(path) = &self.extra_boot { files.push((path.clone(), vec![1])); }
+        if self.lower_cmdline { files[2].0 = "efi/osyx/cmdline.txt".into(); }
         Ok(files)
     }
 }
@@ -177,6 +181,13 @@ fn invalid_plan_never_writes_disk() {
         let mut disk = GuardDisk { writes: 0 };
         let mut source = MemSource::new();
         source.empty_boot = Some(path.into());
+        assert!(matches!(install(&mut disk, &good, &mut source, &config(), &mut Log::default()), Err(Error::Source(_))));
+        assert_eq!(disk.writes, 0);
+    }
+    for path in ["EFI/BOOT/../BOOT/BOOTX64.EFI", "efi/osyx/kernel.elf", "/EFI/extra", "EFI\\extra", "EFI//extra"] {
+        let mut disk = GuardDisk { writes: 0 };
+        let mut source = MemSource::new();
+        source.extra_boot = Some(path.into());
         assert!(matches!(install(&mut disk, &good, &mut source, &config(), &mut Log::default()), Err(Error::Source(_))));
         assert_eq!(disk.writes, 0);
     }
@@ -255,7 +266,9 @@ fn manual_layout_and_kernel_command_line() {
     c.cmdline = "init.args=desktop".into();
     c.password = None;
     c.install_zen = false;
-    install(&mut disk, &plan, &mut MemSource::new(), &c, &mut Log::default()).unwrap();
+    let mut source = MemSource::new();
+    source.lower_cmdline = true;
+    install(&mut disk, &plan, &mut source, &c, &mut Log::default()).unwrap();
     let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
     let mut f = esp.open("/EFI/OSYX/CMDLINE.TXT", osyx_fat::OpenOptions::default()).unwrap();
     let mut b = [0u8; 64];

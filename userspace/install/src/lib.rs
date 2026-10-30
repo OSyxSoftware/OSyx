@@ -437,6 +437,16 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     CLOCK.store(config.time, Ordering::Relaxed);
     // Fail before touching the disk if the boot files are missing.
     let boot = source.boot_files().map_err(Error::Source)?;
+    for (index, (path, _)) in boot.iter().enumerate() {
+        if path.contains('\\') || path.chars().any(char::is_control)
+            || path.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err(Error::Source(format!("invalid boot file path: {path}")));
+        }
+        if boot[..index].iter().any(|(other, _)| other.to_lowercase() == path.to_lowercase()) {
+            return Err(Error::Source(format!("duplicate boot file path: {path}")));
+        }
+    }
     if boot.iter().filter(|(p, _)| p.eq_ignore_ascii_case(LOADER)).count() != 1
         || boot.iter().any(|(p, _)| p.eq_ignore_ascii_case(LOADER_TEMP) || (p.eq_ignore_ascii_case(LOADER) && p != LOADER))
     {
@@ -511,7 +521,7 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
         let mut esp = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("mounting the ESP", e))?;
         let mut files = boot;
         if !config.cmdline.is_empty() {
-            files.retain(|(p, _)| p != "EFI/OSYX/CMDLINE.TXT");
+            files.retain(|(p, _)| !p.eq_ignore_ascii_case("EFI/OSYX/CMDLINE.TXT"));
             files.push(("EFI/OSYX/CMDLINE.TXT".to_string(), config.cmdline.as_bytes().to_vec()));
         }
         // The loader itself goes last: only a complete ESP is bootable.
