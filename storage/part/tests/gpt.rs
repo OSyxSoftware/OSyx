@@ -198,3 +198,59 @@ fn interoperates_with_sgdisk() {
     assert_eq!(t.partitions[1].type_guid, TYPE_ROOT_X86_64);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn mbr_disk(entries: &[(u8, u8, u32, u32)], sectors: usize) -> Mem {
+    let mut img = vec![0u8; sectors * SECTOR];
+    for (i, &(flag, kind, first, count)) in entries.iter().enumerate() {
+        let e = &mut img[446 + i * 16..446 + (i + 1) * 16];
+        e[0] = flag;
+        e[4] = kind;
+        e[8..12].copy_from_slice(&first.to_le_bytes());
+        e[12..16].copy_from_slice(&count.to_le_bytes());
+    }
+    img[510] = 0x55;
+    img[511] = 0xAA;
+    Mem(img)
+}
+
+#[test]
+fn mbr_primary_entries() {
+    let mut d = mbr_disk(&[(0x80, 0x07, 2048, 4096), (0, 0x83, 8192, 1024), (0, 0, 0, 0), (0, 0x0F, 9300, 100)], 16384);
+    let e = parse_mbr(&mut d).unwrap();
+    assert_eq!(e.len(), 2, "empty slot and extended container are left out");
+    assert_eq!((e[0].number, e[0].kind, e[0].bootable, e[0].first_lba, e[0].sectors), (1, 0x07, true, 2048, 4096));
+    assert_eq!((e[1].number, e[1].kind, e[1].bootable), (2, 0x83, false));
+}
+
+#[test]
+fn mbr_rejects_garbage() {
+    // Overlapping, bad boot flag, beyond the disk.
+    let mut d = mbr_disk(&[(0, 0x07, 2048, 4096), (0, 0x0C, 3000, 100), (0x40, 0x07, 6500, 100), (0, 0x07, 7990, 100)], 8000);
+    let e = parse_mbr(&mut d).unwrap();
+    assert_eq!(e.len(), 1);
+    assert_eq!(e[0].number, 1);
+    let mut none = Mem(vec![0u8; 8 * SECTOR]);
+    assert_eq!(parse_mbr(&mut none), Err(GptError::NotGpt));
+}
+
+#[test]
+fn volume_boot_record_is_not_an_mbr() {
+    // A FAT32 boot sector has the 0x55AA signature too.
+    let mut d = Mem(vec![0u8; 64 * SECTOR]);
+    d.0[0] = 0xEB;
+    d.0[11..13].copy_from_slice(&512u16.to_le_bytes());
+    d.0[13] = 8;
+    d.0[510] = 0x55;
+    d.0[511] = 0xAA;
+    d.0[446 + 4] = 0x0C;
+    d.0[446 + 8] = 1;
+    d.0[446 + 12] = 4;
+    assert_eq!(parse_mbr(&mut d), Err(GptError::NotGpt));
+    // exFAT: zeros where the BIOS parameter block would be.
+    let mut x = Mem(vec![0u8; 64 * SECTOR]);
+    x.0[0] = 0xEB;
+    x.0[3..11].copy_from_slice(b"EXFAT   ");
+    x.0[510] = 0x55;
+    x.0[511] = 0xAA;
+    assert_eq!(parse_mbr(&mut x), Err(GptError::NotGpt));
+}

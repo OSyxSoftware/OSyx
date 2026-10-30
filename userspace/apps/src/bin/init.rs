@@ -16,6 +16,8 @@
 //! * `crash-prep`:  leave an open, removed file on / for the power-cut test
 //! * `net,<tcp>,<udp>`: network checks against the host's echo servers on
 //!   10.0.2.2 (see `net_checks.rs`); exit status = failed checks
+//! * `media`:      USB stick automount / eject / unplug checks (see
+//!   `media_checks.rs`); exit status = failed checks
 //! * `win,<tcp>,<udp>`: Windows PE32+ programs under /bin/winrun (see
 //!   `win_checks.rs`); exit status = failed checks
 
@@ -38,6 +40,8 @@ mod fpu;
 mod fs_checks;
 #[path = "../ipc_checks.rs"]
 mod ipc_checks;
+#[path = "../media_checks.rs"]
+mod media_checks;
 #[path = "../net_checks.rs"]
 mod net_checks;
 #[path = "../win_checks.rs"]
@@ -104,13 +108,38 @@ fn main() -> i32 {
         Some("desktop") => return desktop_session(),
         // QEMU has no battery: after batteryd has reported none, publish a
         // charging battery at 73 %, then a discharging one at 12 %, so the
-        // taskbar indicator can be checked.
+        // taskbar indicator and its details can be checked.
         Some("battery-demo") => {
+            use osyx_abi::battery::{State, Status};
             thread::spawn(|| {
-                for (delay, state) in [(10, "73 1 1\n"), (8, "12 0 0\n")] {
+                let charging = Status {
+                    state: State::Charging,
+                    percent: 73,
+                    ac: true,
+                    batteries: 1,
+                    minutes_to_full: Some(35),
+                    energy_mwh: Some(35_000),
+                    capacity_mwh: Some(48_000),
+                    design_mwh: Some(57_000),
+                    rate_mw: Some(22_000),
+                    voltage_mv: Some(12_100),
+                    ..Status::NONE
+                };
+                let discharging = Status {
+                    state: State::Discharging,
+                    percent: 12,
+                    ac: false,
+                    minutes_to_full: None,
+                    minutes_to_empty: Some(40),
+                    energy_mwh: Some(5_800),
+                    rate_mw: Some(8_700),
+                    ..charging
+                };
+                for (delay, state) in [(10, charging), (8, discharging)] {
                     thread::sleep(Duration::from_secs(delay));
-                    let _ = fs::write(osyx_abi::BATTERY_STATUS_PATH, state);
-                    println!("BATTERY_DEMO {}", state.trim_end());
+                    let text = state.to_string();
+                    let _ = fs::write(osyx_abi::BATTERY_STATUS_PATH, &text);
+                    println!("BATTERY_DEMO {}", text.trim_end().replace('\n', " | "));
                 }
             });
             return desktop_session();
@@ -134,6 +163,8 @@ fn main() -> i32 {
             }
             return c.status().ok().and_then(|s| s.code()).unwrap_or(1);
         }
+        // USB stick scenario driven by scripts/usb-storage-test.ps1.
+        Some("media") => return media_checks::run(),
         Some("net") => {
             let port = |i: usize, d: u16| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
             let mut t = Tests::default();

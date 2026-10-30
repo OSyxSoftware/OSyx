@@ -420,3 +420,15 @@ fn block_device_bounds() {
     assert!(img.read_sectors(8, &mut buf).is_err());
     assert!(img.write_sectors(u64::MAX, &buf).is_err());
 }
+
+#[test]
+fn root_directory_label_wins_over_the_boot_sector() {
+    // Windows stores a label it sets only in the root directory entry.
+    let mut img = vec![0u8; 64 * MIB];
+    format(&mut img, "NO NAME", 1).unwrap();
+    let fs = FileSystem::mount(img.clone()).unwrap();
+    let root = fs.geometry().data_start as usize * 512;
+    assert_eq!(fs.label(), "NO NAME");
+    img[root..root + 11].copy_from_slice(b"PENDRIVE   ");
+    assert_eq!(FileSystem::mount(img).unwrap().label(), "PENDRIVE");
+}

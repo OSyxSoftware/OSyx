@@ -40,6 +40,7 @@ mod ipc;
 mod irq;
 mod live;
 mod mem;
+mod media;
 mod modules;
 mod net;
 mod object;

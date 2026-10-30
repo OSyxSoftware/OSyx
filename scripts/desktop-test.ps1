@@ -140,9 +140,21 @@ try {
         finally { $copyLock.ReleaseMutex(); $copyLock.Dispose() }
     }
     if (Test-Path $log) { Remove-Item $log }
+    # A USB stick (FAT32 in an MBR partition, label PENDRIVE) that the test
+    # plugs in while the session runs.
+    $stickImg = Join-Path $testDir "$prefix-stick.img"
+    $stickVol = Join-Path $testDir "$prefix-stick-volume.img"
+    $stickSrc = Join-Path $testDir "$prefix-stick-src"
+    if (Test-Path $stickSrc) { Remove-Item $stickSrc -Recurse -Force }
+    New-Item -ItemType Directory -Force $stickSrc | Out-Null
+    [IO.File]::WriteAllText((Join-Path $stickSrc 'HELLO.TXT'), "Hello from the stick`n")
+    Invoke-Checked 'stick volume' { cargo run -q -p osyx-fat --example mkfat32 -- $stickVol 64 PENDRIVE $stickSrc }
+    Invoke-Checked 'stick MBR' { python (Join-Path $PSScriptRoot 'mkusbmbr.py') $stickImg $stickVol 0c }
+    $stickRel = ($stickImg.Substring($Root.Length + 1)).Replace([string][char]92, '/')
     $script:port = Get-Random -Minimum 20000 -Maximum 40000
     $diskFile = $sessionDisk
     $qargs = if ($Gpu) { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 -CpuCount $CpuCount -Gpu -GpuSize 1920x1080 -DiskFile $diskFile } else { Get-QemuArgs -SerialLog $log -Headless -QmpPort $script:port -MemoryMiB 1024 -CpuCount $CpuCount -DiskFile $diskFile }
+    $qargs += @('-blockdev', "driver=file,node-name=stickfile,filename=$stickRel", '-blockdev', 'driver=raw,node-name=stick0,file=stickfile')
     $script:qemu = Start-Qemu $qargs
     $ready = Wait-Log 'desktop: shell ready on a (\d+)x(\d+) screen' $TimeoutSec
     if (-not $ready) { Record 'desktop session starts' $false 'no "desktop: shell ready" in the log'; throw 'session did not start' }
@@ -390,6 +402,7 @@ try {
     # QEMU creates (and truncates) this file only once it starts; until then a
     # stale file from an earlier run would satisfy Wait-Log and the script would
     # inject input during boot, before PRISM opens the seat (which drops events).
+    $restartArgs += @('-blockdev', "driver=file,node-name=stickfile,filename=$stickRel", '-blockdev', 'driver=raw,node-name=stick0,file=stickfile')
     if (Test-Path -LiteralPath $restartLog) { Remove-Item -LiteralPath $restartLog }
     $script:qemu = Start-Qemu $restartArgs
     $log = $restartLog
@@ -410,12 +423,77 @@ try {
     $lastSettings = if ($allSettings.Count -gt 0) { $allSettings[$allSettings.Count - 1] } else { $null }
     Record 'saved grid position launches the shortcut after reboot' (([regex]::Matches((Log-Text), 'desktop: launched Settings')).Count -gt $before) ''
     if ($lastSettings) {
+        # Settings must react to the pointer and keyboard and really save
+        # (it runs as the desktop user; the files are group-writable).
+        $sx = [int]$lastSettings.Groups[2].Value; $sy = [int]$lastSettings.Groups[3].Value
+        Click ($sx + 60) ($sy + 64 + 40 + 18)
+        Click ($sx + 256 + 20 + 3 * 52 + 20) ($sy + 16 + 80 + 20)
+        $acc = Wait-Log 'settings: saved /etc/osyx/accent=Red' 8
+        Click ($sx + 400) ($sy + 216 + 2 * 40 + 18)
+        $wall = Wait-Log 'settings: saved /etc/osyx/wallpaper=2' 8
+        Click ($sx + 60) ($sy + 64 + 18)
+        Click ($sx + 400) ($sy + 145)
+        TypeText 'testhost'
+        Click ($sx + 292 + 360 + 12 + 50) ($sy + 145)
+        $host2 = Wait-Log 'settings: saved /etc/hostname=\w*testhost' 8
+        Shot 'settings'
+        Record 'Settings: accent, background and host name controls react and save' ($null -ne $acc -and $null -ne $wall -and $null -ne $host2) "accent=$($null -ne $acc) wallpaper=$($null -ne $wall) hostname=$($null -ne $host2)"
         Click ([int]$lastSettings.Groups[2].Value + [int]$lastSettings.Groups[4].Value - 20) ([int]$lastSettings.Groups[3].Value - 17)
     }
     Click 184 162 'right'
     Click 210 (162 + 6 + 32 + 16)
     Record 'Remove shortcut deletes the desktop link' ($null -ne (Wait-Log 'desktop: shortcut removed: Settings')) ''
     Shot 'shortcuts-final'
+
+    # USB stick: plugged in while the session runs. The kernel mounts it at
+    # /media/PENDRIVE, the shell announces it and lists it behind a button
+    # in the task bar; Open shows it in Files, Eject removes it safely, and
+    # pulling it out without ejecting is reported.
+    $drivesBtnX = $sw - 150; $drivesBtnY = $sh - 26
+    Qmp '{"execute":"device_add","arguments":{"driver":"usb-storage","bus":"xhci.0","drive":"stick0","id":"stickdev"}}'
+    $mounted = Wait-Log 'media: usb\d+p\d \(fat32\) mounted at /media/PENDRIVE' 30
+    Record 'USB stick plugged in is mounted at /media/PENDRIVE' ($null -ne $mounted) ''
+    $note = Wait-Log 'desktop: drive connected: PENDRIVE connected' 15
+    Record 'shell announces the USB stick' ($null -ne $note) ''
+    Start-Sleep -Seconds 1
+    $popups = Popup-Count
+    Click $drivesBtnX $drivesBtnY
+    $opened = Wait-Log 'desktop: drives list opened \(1 disks\)' 10
+    $pop = Wait-Popup $popups
+    Shot 'drives'
+    Record 'task bar drives button opens the list of USB drives' ($null -ne $opened -and $null -ne $pop) $(if ($pop) { "$($pop.W)x$($pop.H) at ($($pop.X), $($pop.Y))" } else { '' })
+    if ($pop) {
+        # The volume row (after the 52 px header and the 58 px disk row) has the Open button.
+        Click ($pop.X + 346) ($pop.Y + 52 + 58 + 31)
+        $files2 = Wait-Log 'desktop: file manager opened on /media/PENDRIVE as process' 10
+        $listed2 = Wait-Log 'files: listed /media/PENDRIVE \((\d+) entries\)' 15
+        Record 'Open shows the stick in Files' ($null -ne $files2 -and $null -ne $listed2) $(if ($listed2) { $listed2.Value } else { '' })
+        Shot 'drives-files'
+        $popups = Popup-Count
+        Click $drivesBtnX $drivesBtnY
+        $pop = Wait-Popup $popups
+        if ($pop) {
+            # The disk row's Eject button.
+            Click ($pop.X + 346) ($pop.Y + 52 + 29)
+            $ej = Wait-Log 'media: usb\d+ ejected: it is safe to remove it' 20
+            $safe = Wait-Log 'desktop: drive ejected' 10
+            Record 'Eject button ejects the stick safely' ($null -ne $ej -and $null -ne $safe) ''
+            Shot 'drives-ejected'
+        } else {
+            Record 'Eject button ejects the stick safely' $false 'the list did not open again'
+        }
+    }
+    Qmp '{"execute":"device_del","arguments":{"id":"stickdev"}}'
+    $gone = Wait-Log 'media: usb\d+ unplugged after eject' 20
+    Record 'unplugging the ejected stick cleans up' ($null -ne $gone) ''
+    Start-Sleep -Seconds 1
+    Qmp '{"execute":"device_add","arguments":{"driver":"usb-storage","bus":"xhci.0","drive":"stick0","id":"stickdev"}}'
+    $again = Wait-Log 'media: usb\d+p\d \(fat32\) mounted at /media/PENDRIVE' 30
+    Start-Sleep -Seconds 2
+    Qmp '{"execute":"device_del","arguments":{"id":"stickdev"}}'
+    $yank = Wait-Log 'desktop: drive removed without ejecting: PENDRIVE' 20
+    Record 'pulling the stick out without ejecting is detected and reported' ($null -ne $again -and $null -ne $yank -and (Log-Text) -match 'media: usb\d+ was removed while mounted') ''
+    Shot 'drives-yanked'
 
     # USB hot-unplug of the keyboard while the session runs.
     Qmp '{"execute":"device_del","arguments":{"id":"kbd"}}'

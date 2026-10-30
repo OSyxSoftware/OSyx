@@ -33,6 +33,8 @@ const RELEASE: &str = "/etc/osyx-release";
 const INSTALLED: &str = "/etc/osyx/installed";
 const CACHE: &str = "/var/cache/osyx/update";
 const STATUS: &str = "/run/update.status";
+/// A request from Settings: `check` (report only) or `install`.
+const REQUEST: &str = "/etc/osyx/update.request";
 const LOG: &str = "/var/log/osyx-update.log";
 /// The installed system's EFI system partition (mounted by the kernel).
 const ESP: &str = "/boot";
@@ -275,8 +277,9 @@ fn main() -> i32 {
     }
     let _ = fs::create_dir_all("/var/log");
     let mut log = Log(fs::OpenOptions::new().append(true).create(true).open(LOG).ok());
+    let mut request_check_only = false;
     loop {
-        let code = match run_once(&mut log, check_only) {
+        let code = match run_once(&mut log, check_only || request_check_only) {
             Ok("installed") if daemon => return 0, // the next check after the restart
             Ok(_) => 0,
             Err(e) => {
@@ -286,9 +289,21 @@ fn main() -> i32 {
                 1
             }
         };
+        request_check_only = false;
         if !daemon {
             return code;
         }
-        thread::sleep(Duration::from_secs(CHECK_INTERVAL_SECS));
+        // Sleep until the next daily check, or until Settings asks.
+        let mut waited = 0;
+        while waited < CHECK_INTERVAL_SECS {
+            thread::sleep(Duration::from_secs(2));
+            waited += 2;
+            if let Ok(request) = fs::read_to_string(REQUEST) {
+                let _ = fs::remove_file(REQUEST);
+                log.line(&format!("requested from Settings: {}", request.trim()));
+                request_check_only = request.trim() == "check";
+                break;
+            }
+        }
     }
 }
