@@ -268,6 +268,17 @@ fn rename_and_move() {
 }
 
 #[test]
+fn directory_cannot_replace_file() {
+    let mut fs = fresh(64 * MIB);
+    fs.create_dir("/directory").unwrap();
+    write_file(&mut fs, "/file", b"keep this data");
+    assert_eq!(fs.rename("/directory", "/file"), Err(FsError::NotADirectory));
+    assert!(fs.metadata("/directory").unwrap().is_dir);
+    assert_eq!(read_file(&mut fs, "/file"), b"keep this data");
+    check(&mut fs);
+}
+
+#[test]
 fn full_volume_reports_no_space_and_stays_consistent() {
     let mut fs = fresh(34 * MIB);
     let chunk = pattern(MIB, 1);

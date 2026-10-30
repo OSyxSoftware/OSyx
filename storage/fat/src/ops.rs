@@ -225,6 +225,8 @@ impl<D: BlockDevice> FileSystem<D> {
                 // Same entry (e.g. a case change): rewrite the name below.
             } else if existing.is_dir() {
                 return Err(FsError::AlreadyExists);
+            } else if it.is_dir() {
+                return Err(FsError::NotADirectory);
             } else {
                 self.remove_entries(&existing)?;
                 self.free_chain(existing.first_cluster)?;
