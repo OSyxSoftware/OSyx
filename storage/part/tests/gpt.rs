@@ -108,6 +108,12 @@ fn build_rejects_overlaps_and_invalid_lengths() {
 }
 
 #[test]
+fn build_rejects_unused_partition_type() {
+    let p = NewPartition { type_guid: Guid([0; 16]), unique_guid: Guid([1; 16]), first_lba: 2048, sectors: 100, name: "missing" };
+    assert_eq!(build(1 << 14, Guid([9; 16]), &[p]), Err(GptError::Corrupt("partition type is zero")));
+}
+
+#[test]
 fn rejects_usable_range_covering_backup_header() {
     let (mut d, _) = disk(8);
     let backup = d.sectors() - 1;

@@ -275,6 +275,9 @@ pub fn build(disk_sectors: u64, disk_guid: Guid, parts: &[NewPartition<'_>]) -> 
     let mut array = vec![0u8; ENTRY_COUNT * ENTRY_SIZE];
     let mut ranges = Vec::with_capacity(parts.len());
     for (i, p) in parts.iter().enumerate() {
+        if p.type_guid.is_zero() {
+            return Err(GptError::Corrupt("partition type is zero"));
+        }
         let end = p.sectors.checked_sub(1).and_then(|n| p.first_lba.checked_add(n)).ok_or(GptError::Corrupt("partition outside the usable range"))?;
         if p.first_lba < first || end > last {
             return Err(GptError::Corrupt("partition outside the usable range"));
