@@ -339,6 +339,10 @@ pub fn clipboard_hdrop(entries: &[ClipEntry]) -> Option<Vec<u8>> {
     data[0..4].copy_from_slice(&20u32.to_le_bytes());
     data[16..20].copy_from_slice(&1u32.to_le_bytes());
     for path in paths {
+        // Windows would reinterpret these names or path components.
+        if path.split('/').any(|part| part == "." || part == ".."
+            || part.contains(['\\', ':', '<', '>', '"', '|', '?', '*'])
+            || part.ends_with(['.', ' '])) { return None; }
         for c in "C:".chars().chain(path.chars().map(|c| if c == '/' { '\\' } else { c })) {
             let mut units = [0u16; 2];
             for u in c.encode_utf16(&mut units) {
@@ -1249,9 +1253,14 @@ mod tests {
         assert_eq!(clipboard_files(&[windows.clone()]), Some((paths.clone(), false)));
         let effect = ClipEntry { format: 0xc001, name: Some(String::from("Preferred DropEffect")), data: 2u32.to_le_bytes().to_vec() };
         assert_eq!(clipboard_files(&[windows, effect]), Some((paths.clone(), true)));
-        let mut invalid = clipboard_hdrop(&[clipboard_files_entry(&[String::from("/../secret")], false).unwrap()]).unwrap();
-        let invalid = ClipEntry { format: 15, name: None, data: core::mem::take(&mut invalid) };
+        let mut invalid = alloc::vec![0u8; 20];
+        invalid[0..4].copy_from_slice(&20u32.to_le_bytes());
+        invalid[16..20].copy_from_slice(&1u32.to_le_bytes());
+        for u in "C:\\..\\secret\0\0".encode_utf16() { invalid.extend_from_slice(&u.to_le_bytes()); }
+        let invalid = ClipEntry { format: 15, name: None, data: invalid };
         assert_eq!(clipboard_files(&[invalid]), None);
+        let invalid = clipboard_files_entry(&[String::from("/tmp/a\\b")], false).unwrap();
+        assert!(clipboard_hdrop(&[invalid]).is_none());
         assert_eq!(clipboard_files(&[entry.clone()]), Some((paths, true)));
         let mut broken = entry;
         broken.data.pop();
