@@ -72,6 +72,8 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
    writable sections stay eagerly loaded for coherent write-back; virtio-blk
    keeps up to four chains in flight; read-ahead windows run on a background
    kernel thread while the reader gets the first pages immediately.
+   writable sections stay eagerly loaded for coherent write-back. Still
+   open: virtio-blk has one request in flight and readahead is synchronous.
 8. Software WebRender: fewer full-frame copies, damage-based presents in
    PRISM. Done: PRISM renders and presents only damaged rectangles; Gecko
    already runs it with software WebRender. Still open: the Win32
