@@ -47,6 +47,8 @@ pub const USER_HOME: &str = "/home/user";
 const PASSWORD_ROUNDS: u32 = 100_000;
 /// Copy buffer for file contents.
 const CHUNK: usize = 256 * 1024;
+/// Maximum command-line size accepted by the UEFI loader.
+const CMDLINE_MAX: usize = 4096;
 const LOADER: &str = "EFI/BOOT/BOOTX64.EFI";
 const LOADER_TEMP: &str = "EFI/BOOT/OSYX.TMP";
 
@@ -317,6 +319,9 @@ pub fn validate(c: &Config) -> core::result::Result<(), String> {
     if c.password.as_ref().is_some_and(|p| p.chars().count() < 4) {
         return Err("The password must have at least 4 characters (or none).".into());
     }
+    if c.cmdline.len() > CMDLINE_MAX {
+        return Err("The kernel command line must not exceed 4096 bytes.".into());
+    }
     Ok(())
 }
 
@@ -456,6 +461,9 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
         if !boot.iter().any(|(p, data)| p == need && !data.is_empty()) {
             return Err(Error::Source(format!("{need} is missing or empty")));
         }
+    }
+    if config.cmdline.is_empty() && boot.iter().any(|(path, data)| path.eq_ignore_ascii_case("EFI/OSYX/CMDLINE.TXT") && data.len() > CMDLINE_MAX) {
+        return Err(Error::Source("the boot command line exceeds 4096 bytes".into()));
     }
     let total = estimate(source, "/", config).map_err(Error::Source)?.max(1);
 

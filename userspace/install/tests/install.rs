@@ -48,11 +48,12 @@ struct MemSource {
     extra_boot: Option<String>,
     lower_cmdline: bool,
     fail_list: bool,
+    long_cmdline: bool,
 }
 
 impl MemSource {
     fn new() -> MemSource {
-        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0, empty_boot: None, oversize_at: None, extra_boot: None, lower_cmdline: false, fail_list: false };
+        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0, empty_boot: None, oversize_at: None, extra_boot: None, lower_cmdline: false, fail_list: false, long_cmdline: false };
         for (d, mode, uid) in [("/bin", 0o755, 0), ("/etc", 0o755, 0), ("/etc/osyx", 0o755, 0), ("/dev", 0o755, 0), ("/tmp", 0o1777, 0), ("/home", 0o755, 0), ("/home/user", 0o755, 1000), ("/system", 0o755, 0), ("/system/share", 0o755, 0), ("/system/share/osyx-setup", 0o755, 0)] {
             s.dir(d, mode, uid);
         }
@@ -116,6 +117,7 @@ impl Source for MemSource {
         }
         if let Some(path) = &self.extra_boot { files.push((path.clone(), vec![1])); }
         if self.lower_cmdline { files[2].0 = "efi/osyx/cmdline.txt".into(); }
+        if self.long_cmdline { files[2].1 = vec![b'x'; 4097]; }
         Ok(files)
     }
 }
@@ -204,6 +206,11 @@ fn invalid_plan_never_writes_disk() {
         assert!(matches!(install(&mut disk, &good, &mut source, &config(), &mut Log::default()), Err(Error::Source(_))));
         assert_eq!(disk.writes, 0);
     }
+    let mut disk = GuardDisk { writes: 0 };
+    let mut source = MemSource::new();
+    source.long_cmdline = true;
+    assert!(matches!(install(&mut disk, &good, &mut source, &config(), &mut Log::default()), Err(Error::Source(_))));
+    assert_eq!(disk.writes, 0);
 }
 
 fn keep(name: &str, img: &[u8]) {
@@ -302,6 +309,9 @@ fn plans_and_settings_are_checked() {
     assert!(plan(1 << 21, Layout::Manual { esp_mib: 256, root_mib: 900 }).is_err(), "1 GiB disk cannot hold 1156 MiB");
     let ok = config();
     assert_eq!(validate(&ok), Ok(()));
+    assert!(validate(&Config { cmdline: "x".repeat(4096), ..ok.clone() }).is_ok());
+    assert!(validate(&Config { cmdline: "x".repeat(4097), ..ok.clone() }).is_err());
+    assert!(validate(&Config { cmdline: "ą".repeat(2049), ..ok.clone() }).is_err());
     for bad in [
         Config { hostname: "".into(), ..ok.clone() },
         Config { hostname: "-x".into(), ..ok.clone() },
