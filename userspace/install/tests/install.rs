@@ -43,11 +43,12 @@ struct MemSource {
     data: BTreeMap<String, Vec<u8>>,
     fail_at: Option<String>,
     boot_calls: usize,
+    empty_boot: Option<String>,
 }
 
 impl MemSource {
     fn new() -> MemSource {
-        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0 };
+        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0, empty_boot: None };
         for (d, mode, uid) in [("/bin", 0o755, 0), ("/etc", 0o755, 0), ("/etc/osyx", 0o755, 0), ("/dev", 0o755, 0), ("/tmp", 0o1777, 0), ("/home", 0o755, 0), ("/home/user", 0o755, 1000), ("/system", 0o755, 0), ("/system/share", 0o755, 0), ("/system/share/osyx-setup", 0o755, 0)] {
             s.dir(d, mode, uid);
         }
@@ -95,11 +96,17 @@ impl Source for MemSource {
     fn boot_files(&mut self) -> std::result::Result<Vec<(String, Vec<u8>)>, String> {
         self.boot_calls += 1;
         if self.boot_calls > 1 { return Err("boot files requested twice".into()); }
-        Ok(vec![
+        let mut files = vec![
             ("EFI/BOOT/BOOTX64.EFI".into(), pattern(150_000, 7)),
             ("EFI/OSYX/KERNEL.ELF".into(), self.data["/system/share/osyx-setup/KERNEL.ELF"].clone()),
             ("EFI/OSYX/CMDLINE.TXT".into(), b"live".to_vec()),
-        ])
+        ];
+        if let Some(path) = &self.empty_boot {
+            for (name, data) in &mut files {
+                if name == path { data.clear(); }
+            }
+        }
+        Ok(files)
     }
 }
 
@@ -160,6 +167,13 @@ fn invalid_plan_never_writes_disk() {
     for p in cases {
         let mut disk = GuardDisk { writes: 0 };
         assert!(matches!(install(&mut disk, &p, &mut MemSource::new(), &config(), &mut Log::default()), Err(Error::Invalid(_))));
+        assert_eq!(disk.writes, 0);
+    }
+    for path in ["EFI/BOOT/BOOTX64.EFI", "EFI/OSYX/KERNEL.ELF"] {
+        let mut disk = GuardDisk { writes: 0 };
+        let mut source = MemSource::new();
+        source.empty_boot = Some(path.into());
+        assert!(matches!(install(&mut disk, &good, &mut source, &config(), &mut Log::default()), Err(Error::Source(_))));
         assert_eq!(disk.writes, 0);
     }
 }

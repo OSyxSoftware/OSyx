@@ -443,8 +443,8 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
         return Err(Error::Source("boot files contain a reserved loader path".into()));
     }
     for need in ["EFI/BOOT/BOOTX64.EFI", "EFI/OSYX/KERNEL.ELF"] {
-        if !boot.iter().any(|(p, _)| p == need) {
-            return Err(Error::Source(format!("{need} is missing")));
+        if !boot.iter().any(|(p, data)| p == need && !data.is_empty()) {
+            return Err(Error::Source(format!("{need} is missing or empty")));
         }
     }
 
