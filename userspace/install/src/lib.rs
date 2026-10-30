@@ -724,7 +724,7 @@ fn fat_write<D: osyx_fat::BlockDevice>(fs: &mut osyx_fat::FileSystem<D>, path: &
     }
     let full = format!("/{path}");
     let mut f = fs
-        .open(&full, osyx_fat::OpenOptions { create: true, create_new: false, truncate: true })
+        .open(&full, osyx_fat::OpenOptions { create: true, create_new: true, truncate: false })
         .map_err(|e| fat_err(&full, e))?;
     let mut done = 0;
     while done < data.len() {
@@ -735,6 +735,24 @@ fn fat_write<D: osyx_fat::BlockDevice>(fs: &mut osyx_fat::FileSystem<D>, path: &
         done += n;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::*;
+
+    #[test]
+    fn boot_write_refuses_short_name_alias() {
+        let mut image = vec![0; 64 * 1024 * 1024];
+        osyx_fat::format(&mut image, "TEST", 1).unwrap();
+        let mut fs = osyx_fat::FileSystem::mount(image).unwrap();
+        fat_write(&mut fs, "EFI/long filename.txt", b"original").unwrap();
+        assert!(fat_write(&mut fs, "EFI/LONGFI~1.TXT", b"replacement").is_err());
+        let mut file = fs.open("/EFI/long filename.txt", osyx_fat::OpenOptions::default()).unwrap();
+        let mut data = [0; 8];
+        assert_eq!(fs.read(&mut file, 0, &mut data).unwrap(), 8);
+        assert_eq!(&data, b"original");
+    }
 }
 
 /// Reads the new system back: partition table, ESP files and sizes, root
