@@ -390,6 +390,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             .and_then(|st| put_user(f.rdx, &st)),
         nr::PIPE => sys_objects::pipe(f.rdi),
         nr::SPAWN_STDIO => sys_objects::spawn_stdio(f.rdi, f.rsi),
+        nr::SPAWN_RESTRICTED => sys_objects::spawn_restricted(f.rdi, f.rsi),
         nr::CHANNEL_LISTEN => sys_objects::channel_listen(f.rdi, f.rsi),
         nr::CHANNEL_CONNECT => sys_objects::channel_connect(f.rdi, f.rsi),
         nr::CHANNEL_ACCEPT => sys_objects::channel_accept(f.rdi),

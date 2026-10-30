@@ -380,6 +380,8 @@ pub mod nr {
     /// [`SET_FS_BASE`] again; 0 restores the thread's 64-bit base. `base`
     /// must be page-aligned, below 4 GiB and (unless 0) in the user half.
     pub const SET_FS32_BASE: u64 = 96;
+    /// `spawn_restricted(exec: *const ExecArgs, policy: *const sandbox::SpawnPolicy)`.
+    pub const SPAWN_RESTRICTED: u64 = 97;
 }
 
 /// Thread priorities (`nr::THREAD_PRIORITY`).

@@ -69,6 +69,41 @@ pub fn spawn_stdio(args: u64, stdio: u64) -> Result<u64, Errno> {
     process::spawn_with_stdio(sched::current_pid(), &req, objs).map_err(|e| e.errno())
 }
 
+pub fn spawn_restricted(args: u64, policy: u64) -> Result<u64, Errno> {
+    use osyx_abi::sandbox::{PathRule, SpawnPolicy, SyscallPolicy, MAX_PATH_RULES, MAX_SYSCALL_RULES, PATH_EXEC, PATH_READ, PATH_WRITE};
+    use osyx_vfs::{sandbox::PathPolicy, Access};
+    if process::current_path_restricted() {
+        return Err(Errno::PermissionDenied);
+    }
+    let p: SpawnPolicy = get_user(policy)?;
+    if p.path_count > MAX_PATH_RULES || p.syscall_count > MAX_SYSCALL_RULES {
+        return Err(Errno::InvalidArgument);
+    }
+    let mut rules = Vec::with_capacity(p.path_count as usize);
+    for i in 0..p.path_count {
+        let offset = i.checked_mul(core::mem::size_of::<PathRule>() as u64).ok_or(Errno::InvalidArgument)?;
+        let rule: PathRule = get_user(p.paths.checked_add(offset).ok_or(Errno::Fault)?)?;
+        if rule.path_len == 0 || rule.path_len > osyx_abi::MAX_PATH as u64 || rule.access == 0 || rule.access & !(PATH_READ | PATH_WRITE | PATH_EXEC) != 0 {
+            return Err(Errno::InvalidArgument);
+        }
+        let mut bytes = alloc::vec![0u8; rule.path_len as usize];
+        copy_from_user(&mut bytes, rule.path)?;
+        let path = alloc::string::String::from_utf8(bytes).map_err(|_| Errno::InvalidArgument)?;
+        let access = Access { read: rule.access & PATH_READ != 0, write: rule.access & PATH_WRITE != 0, exec: rule.access & PATH_EXEC != 0 };
+        rules.push((path, access));
+    }
+    let borrowed: Vec<_> = rules.iter().map(|(path, access)| (path.as_str(), *access)).collect();
+    let paths = Arc::new(PathPolicy::new(&borrowed)?);
+    let mut allowed = alloc::vec![0u64; p.syscall_count as usize];
+    if !allowed.is_empty() {
+        // SAFETY: u64 is padding-free and every bit pattern is valid.
+        let bytes = unsafe { core::slice::from_raw_parts_mut(allowed.as_mut_ptr() as *mut u8, allowed.len() * 8) };
+        copy_from_user(bytes, p.syscalls)?;
+    }
+    let req = ExecRequest::from_user(args)?;
+    process::spawn_restricted(sched::current_pid(), &req, paths, Arc::new(SyscallPolicy::new(&allowed))).map_err(|e| e.errno())
+}
+
 /// Reads standard input (handle 0) when it was redirected.
 pub fn read_stdio(handle: u64, buf: u64, len: u64) -> Result<u64, Errno> {
     let o = process::get_object(handle)?;

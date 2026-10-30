@@ -56,6 +56,25 @@ fn main() -> i32 {
     let args: Vec<String> = env::args().collect();
     let pid = process::id().unwrap_or(0);
     match args.get(1).map(String::as_str) {
+        Some("sandbox-broker") => {
+            use osyx_abi::sandbox::{PathRule, SpawnPolicy, MAX_PATH_RULES, PATH_EXEC, PATH_READ};
+            let invalid = SpawnPolicy { path_count: MAX_PATH_RULES + 1, ..SpawnPolicy::default() };
+            if os_std::os::raw::raw_syscall(osyx_abi::nr::SPAWN_RESTRICTED, 0, &invalid as *const _ as u64, 0)
+                != Err(osyx_abi::Errno::InvalidArgument) {
+                return 23;
+            }
+            let path = "/bin";
+            let rules = [PathRule { path: path.as_ptr() as u64, path_len: path.len() as u64, access: PATH_READ | PATH_EXEC }];
+            let calls: Vec<u64> = (0..256).filter(|n| *n != osyx_abi::nr::CPU_INFO).collect();
+            let pid = match os_sys::spawn_restricted("/bin/worker", b"worker\0sandbox\0", b"", &rules, &calls) {
+                Ok(pid) => pid,
+                Err(_) => return 20,
+            };
+            return match os_sys::wait(pid) {
+                Ok((_, status)) => status,
+                Err(_) => 21,
+            };
+        }
         Some("sandbox") | Some("sandbox-child") | Some("sandbox-exec") => {
             use os_std::os::raw;
             if raw::raw_syscall(raw::nr::CPU_INFO, 0, 0, 0) != Err(raw::Errno::PermissionDenied) {
@@ -73,6 +92,9 @@ fn main() -> i32 {
             if raw::raw_syscall(raw::nr::CHANNEL_LISTEN, 0, 0, 0) != Err(raw::Errno::PermissionDenied)
                 || raw::raw_syscall(raw::nr::CHANNEL_CONNECT, 0, 0, 0) != Err(raw::Errno::PermissionDenied) {
                 return 18;
+            }
+            if raw::raw_syscall(raw::nr::SPAWN_RESTRICTED, 0, 0, 0) != Err(raw::Errno::PermissionDenied) {
+                return 22;
             }
             let file = match raw::open("/bin/worker", raw::OPEN_READ, 0) {
                 Ok(file) => file,

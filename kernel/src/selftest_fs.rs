@@ -581,6 +581,10 @@ pub fn restricted_process() -> TestResult {
     let pid = process::spawn_kernel_restricted(&req, paths, syscalls).map_err(|err| format!("spawn: {err}"))?;
     let (_, status) = process::wait(process::KERNEL_PID, pid).map_err(|err| e("wait", err))?;
     ensure!(status == 0, "restricted worker exited with status {status}");
+    let broker = ExecRequest::new("/bin/worker", &["worker", "sandbox-broker"], &[]).map_err(|err| e("broker request", err))?;
+    let pid = process::spawn(process::KERNEL_PID, &broker).map_err(|err| format!("broker spawn: {err}"))?;
+    let (_, status) = process::wait(process::KERNEL_PID, pid).map_err(|err| e("broker wait", err))?;
+    ensure!(status == 0, "broker test exited with status {status}");
     Ok(())
 }
 

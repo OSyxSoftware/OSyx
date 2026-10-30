@@ -6,6 +6,31 @@
 
 use alloc::vec::Vec;
 
+pub const MAX_PATH_RULES: u64 = 64;
+pub const MAX_SYSCALL_RULES: u64 = 256;
+pub const PATH_READ: u64 = 1;
+pub const PATH_WRITE: u64 = 2;
+pub const PATH_EXEC: u64 = 4;
+
+/// A canonical absolute UTF-8 subtree and its access bits.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PathRule {
+    pub path: u64,
+    pub path_len: u64,
+    pub access: u64,
+}
+
+/// Pointer/count pairs. The kernel copies each array and path before spawn.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpawnPolicy {
+    pub paths: u64,
+    pub path_count: u64,
+    pub syscalls: u64,
+    pub syscall_count: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SyscallPolicy {
     allowed: Vec<u64>,

@@ -3,7 +3,7 @@
 Status: design only. Gecko content processes are not currently sandboxed.
 
 The VFS has experimental path checks when an explicit lookup policy is
-supplied. A kernel-only test hook creates a process with both policies before
+supplied. An unrestricted parent can request both policies for a child before
 loading its image; descendants inherit them. Restricted children cannot inherit
 file stdio handles, receive file-backed sections over IPC, or publish shared
 images. They cannot connect to or register global IPC services, and may kill
@@ -12,9 +12,8 @@ other handle and IPC paths remain unreviewed. This is not a browser sandbox.
 Installation and inheritance need adversarial runtime and concurrency tests.
 
 A deny-by-default syscall allowlist is checked before the dispatcher's fast
-paths and inherited by children. Only the kernel test hook can assign a
-filter. The set of calls Gecko needs and the handling of arguments and handles
-have not been validated.
+paths and inherited by children. The set of calls Gecko needs and the handling
+of arguments and handles have not been validated.
 
 OSyx must enforce the boundary in the kernel, independently of the Win32
 compatibility process. A command-line flag or environment variable alone is

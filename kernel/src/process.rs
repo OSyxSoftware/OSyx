@@ -680,6 +680,12 @@ pub(crate) fn spawn_kernel_restricted(
     spawn_impl(KERNEL_PID, req, [None, None, None], Some((paths, syscalls)))
 }
 
+/// An unrestricted parent may choose restrictions for its new child.
+/// A restricted parent cannot replace or widen its inherited policy.
+pub(crate) fn spawn_restricted(parent: Pid, req: &ExecRequest, paths: Arc<PathPolicy>, syscalls: Arc<SyscallPolicy>) -> Result<Pid, ExecError> {
+    spawn_impl(parent, req, [None, None, None], Some((paths, syscalls)))
+}
+
 fn spawn_impl(
     parent: Pid,
     req: &ExecRequest,
@@ -698,9 +704,8 @@ fn spawn_impl(
         }
     };
     if let Some((paths, syscalls)) = restrictions {
-        // Policy replacement is only allowed for a kernel-owned child. A
-        // restricted process can never replace its inherited restrictions.
-        if parent != KERNEL_PID || cx.path_policy.is_some() || syscall_policy.is_some() {
+        // A restricted process can never replace its inherited restrictions.
+        if cx.path_policy.is_some() || syscall_policy.is_some() {
             return Err(ExecError::Load(Errno::PermissionDenied));
         }
         cx.path_policy = Some(paths);

@@ -639,6 +639,20 @@ mod imp {
         decode(syscall2(nr::SPAWN_STDIO, &a as *const osyx_abi::ExecArgs as u64, stdio.as_ptr() as u64))
     }
 
+    /// Starts a child with experimental path and syscall policies. This does
+    /// not yet provide a complete security boundary.
+    /// The caller must keep each path referenced by `paths` alive for the call.
+    pub fn spawn_restricted(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64]) -> Result<u64, Errno> {
+        let a = exec_args(path, argv, envp);
+        let policy = osyx_abi::sandbox::SpawnPolicy {
+            paths: paths.as_ptr() as u64,
+            path_count: paths.len() as u64,
+            syscalls: syscalls.as_ptr() as u64,
+            syscall_count: syscalls.len() as u64,
+        };
+        decode(syscall2(nr::SPAWN_RESTRICTED, &a as *const _ as u64, &policy as *const _ as u64))
+    }
+
     pub fn channel_listen(name: &str) -> Result<u64, Errno> {
         decode(syscall2(nr::CHANNEL_LISTEN, name.as_ptr() as u64, name.len() as u64))
     }
