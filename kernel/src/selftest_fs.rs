@@ -31,7 +31,7 @@ fn root() -> Lookup {
 }
 
 fn user(uid: u32) -> Lookup {
-    Lookup { cred: Cred { uid, gid: uid }, cwd: String::from("/"), case_insensitive: false }
+    Lookup { cred: Cred { uid, gid: uid }, cwd: String::from("/"), case_insensitive: false, path_policy: None }
 }
 
 fn create(cx: &Lookup, p: &str, mode: u32) -> Result<OpenFile, Errno> {
@@ -520,6 +520,37 @@ pub fn concurrent() -> TestResult {
         }
     }
     Ok(())
+}
+
+/// Checks path rules on opens without claiming a complete sandbox.
+pub fn restricted_opens() -> TestResult {
+    use osyx_vfs::{sandbox::PathPolicy, Access};
+    let root = root();
+    let dir = "/tmp/kst-sandbox";
+    remove_tree(dir);
+    vfs::mkdir(&root, dir, 0o755).map_err(|err| e("mkdir", err))?;
+    let result = (|| -> TestResult {
+        let inside = format!("{dir}/inside");
+        let outside = "/tmp/kst-sandbox-outside";
+        write_file(&root, &inside, b"inside").map_err(|err| e("write inside", err))?;
+        write_file(&root, outside, b"outside").map_err(|err| e("write outside", err))?;
+        vfs::symlink(&root, outside, &format!("{dir}/escape")).map_err(|err| e("symlink", err))?;
+        let policy = PathPolicy::new(&[(dir, Access::READ)]).map_err(|err| e("policy", err))?;
+        let restricted = Lookup { path_policy: Some(Arc::new(policy)), ..root.clone() };
+        ensure!(read_file(&restricted, &inside).is_ok(), "allowed file denied");
+        ensure!(matches!(vfs::open(&restricted, outside, OPEN_READ, 0), Err(Errno::PermissionDenied)), "outside file allowed");
+        ensure!(matches!(vfs::open(&restricted, &format!("{dir}/escape"), OPEN_READ, 0), Err(Errno::PermissionDenied)), "symlink escape allowed");
+        ensure!(matches!(vfs::open(&restricted, &inside, OPEN_WRITE, 0), Err(Errno::PermissionDenied)), "write allowed");
+        ensure!(matches!(vfs::open_exec(&restricted, &inside), Err(Errno::PermissionDenied)), "execute allowed");
+        let new = format!("{dir}/new");
+        ensure!(matches!(create(&restricted, &new, 0o644), Err(Errno::PermissionDenied)), "create allowed");
+        ensure!(matches!(vfs::stat(&root, &new), Err(Errno::NotFound)), "denied create left a file");
+        let _ = vfs::unlink(&root, outside);
+        Ok(())
+    })();
+    let _ = vfs::unlink(&root, "/tmp/kst-sandbox-outside");
+    remove_tree(dir);
+    result
 }
 
 /// The program loader's lookup and refusals (`spawn` / `execve`), without

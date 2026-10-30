@@ -658,7 +658,7 @@ pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 
     let cx = {
         let t = TABLE.lock();
         match t.procs.get(&parent) {
-            Some(p) => Lookup { cred: p.cred, cwd: p.cwd.clone(), case_insensitive: false },
+            Some(p) => Lookup { cred: p.cred, cwd: p.cwd.clone(), case_insensitive: false, path_policy: None },
             None => Lookup::kernel(),
         }
     };

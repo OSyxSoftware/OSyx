@@ -44,6 +44,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use osyx_abi::*;
 use osyx_vfs::path::{self, split_last, validate, validate_name};
 use osyx_vfs::perm::{self, may};
+use osyx_vfs::sandbox::PathPolicy;
 use osyx_vfs::{Access, Cred, DirEntry, FsUsage, MountTable, NewNode};
 
 pub type Result<T> = core::result::Result<T, Errno>;
@@ -176,17 +177,27 @@ pub struct Lookup {
     /// Canonical absolute current directory.
     pub cwd: String,
     pub case_insensitive: bool,
+    /// Experimental path checks for open and executable loading. Other VFS
+    /// operations and pre-existing handles are not yet restricted.
+    pub path_policy: Option<Arc<PathPolicy>>,
 }
 
 impl Lookup {
     pub fn kernel() -> Lookup {
-        Lookup { cred: Cred::ROOT, cwd: String::from("/"), case_insensitive: false }
+        Lookup { cred: Cred::ROOT, cwd: String::from("/"), case_insensitive: false, path_policy: None }
     }
 
     /// The calling process's credentials and current directory.
     pub fn current() -> Lookup {
         let (cred, cwd) = crate::process::current_identity();
-        Lookup { cred, cwd, case_insensitive: false }
+        Lookup { cred, cwd, case_insensitive: false, path_policy: None }
+    }
+
+    fn check_path(&self, path: &str, access: Access) -> Result<()> {
+        if self.path_policy.as_ref().is_some_and(|policy| !policy.allows(path, access)) {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(())
     }
 }
 
@@ -803,6 +814,7 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
             Ok(n) => n,
             Err(Errno::NotFound) => {
                 let (dir, name) = walk_parent(cx, p)?;
+                cx.check_path(&path::join(&dir.path, &name), Access { read: flags & OPEN_READ != 0, write, exec: false })?;
                 check_dir_write(&dir, &cx.cred)?;
                 let ino = dir.mount.fs.create(dir.ino, &name, NewNode::File, mode & MODE_PERMS, &cx.cred)?;
                 cache_forget(dir.mount.id, dir.ino, &name);
@@ -814,6 +826,7 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
     } else {
         walk(cx, p, follow)?
     };
+    cx.check_path(&node.path, Access { read: flags & OPEN_READ != 0, write, exec: false })?;
     let st = node.stat()?;
     if st.kind == KIND_SYMLINK {
         return Err(Errno::Loop);
@@ -867,6 +880,7 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
 /// execute permission, not read permission (root: any execute bit).
 pub fn open_exec(cx: &Lookup, p: &str) -> Result<OpenFile> {
     let node = walk(cx, p, true)?;
+    cx.check_path(&node.path, Access::EXEC)?;
     let st = node.stat()?;
     if st.kind != KIND_FILE || !may(&st, &cx.cred, Access::EXEC) {
         return Err(Errno::PermissionDenied);
