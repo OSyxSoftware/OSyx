@@ -62,7 +62,8 @@ UEFI firmware (OVMF)
 | VFS: driver interface, mounts, symlinks, cwd, permissions, uid/gid | Implemented | in-kernel + QEMU user tests |
 | `/dev/random` (ChaCha20 DRBG, virtio-rng / RDRAND seeded) | Implemented | test vectors; QEMU with and without an entropy source |
 | Early boot screen, x2APIC, calibrated LAPIC timer, ACPI PM/HPET references, xHCI firmware handoff | Implemented | QEMU; physical machines still require testing |
-| AHCI, NVMe and physical NIC drivers | Implemented; hardware support varies | QEMU and selected real hardware; see README |
+| AHCI and NVMe storage drivers | Implemented; hardware support varies | Default QEMU suite uses virtio-blk; broader controller coverage is needed |
+| Physical NIC drivers | Implemented; hardware support varies | RTL8139 via `scripts/net-test.ps1 -Nic rtl8139`; selected hardware listed in README |
 | C++23 components | Planned (no current need) | Not tested |
 | PE32+ parser | Implemented (headers, sections, imports, exports, relocations, TLS, exception data) | host: fixtures, malformed, fuzz-style robustness; System32 sweep |
 | PE32+ loader | Implemented initial subset | host linker/image tests and QEMU execution |
