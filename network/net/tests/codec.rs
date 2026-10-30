@@ -328,10 +328,26 @@ fn dhcp_client_walks_through_the_lease_states() {
     let renew = dhcp::Message::parse(&tx.payload).unwrap();
     let (_, ev) = c.input(&offer(dhcp::ACK, renew.xid), lease.t1 + 5);
     assert!(matches!(ev, Some(dhcp::Event::Renewed(_))));
+    // A renewal ACK may omit yiaddr and network options; retain the lease.
+    let renewed = c.lease().unwrap().clone();
+    let (tx, _) = c.poll(renewed.t1);
+    let xid = dhcp::Message::parse(&tx.unwrap().payload).unwrap().xid;
+    let mut minimal = offer(dhcp::ACK, xid);
+    minimal[16..20].fill(0);
+    // Keep just message type, server ID and lease.
+    minimal.truncate(240);
+    minimal.extend_from_slice(&[53, 1, dhcp::ACK, 54, 4]);
+    minimal.extend_from_slice(&server.0);
+    minimal.extend_from_slice(&[51, 4, 0, 0, 0, 120, 255]);
+    let (_, event) = c.input(&minimal, renewed.t1 + 1);
+    let Some(dhcp::Event::Renewed(updated)) = event else { panic!("renewal failed: {event:?}") };
+    assert_eq!((updated.addr, updated.prefix, updated.router, updated.dns),
+        (renewed.addr, renewed.prefix, renewed.router, renewed.dns));
     // Without answers the lease runs out.
     let l = c.lease().unwrap().clone();
     let (tx, _) = c.poll(l.t2);
     assert_eq!(tx.unwrap().dst, Ipv4Addr::BROADCAST, "rebinding broadcasts");
+    assert!(c.next_deadline().unwrap() > l.t2, "rebinding must not spin on the elapsed T2");
     let (_, ev) = c.poll(l.expires());
     assert_eq!(ev, Some(dhcp::Event::Lost));
     assert!(c.lease().is_none());
