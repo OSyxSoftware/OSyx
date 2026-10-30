@@ -275,7 +275,10 @@ pub fn clipboard_files_entry(paths: &[String], cut: bool) -> Option<ClipEntry> {
 
 /// Decode a complete file selection; reject malformed or relative paths.
 pub fn clipboard_files(entries: &[ClipEntry]) -> Option<(Vec<String>, bool)> {
-    let data = &entries.iter().find(|entry| entry.name.as_deref() == Some(CLIP_FILES_NAME))?.data;
+    let Some(entry) = entries.iter().find(|entry| entry.name.as_deref() == Some(CLIP_FILES_NAME)) else {
+        return clipboard_hdrop_files(entries);
+    };
+    let data = &entry.data;
     if data.len() < 3 || data.len() > MAX_CLIPBOARD_BYTES || data[0] > 1 { return None; }
     let count = u16::from_le_bytes([data[1], data[2]]) as usize;
     if count == 0 { return None; }
@@ -293,6 +296,40 @@ pub fn clipboard_files(entries: &[ClipEntry]) -> Option<(Vec<String>, bool)> {
     }
     if at != data.len() { return None; }
     Some((paths, data[0] != 0))
+}
+
+/// Decode local C: paths from a Windows CF_HDROP clipboard entry.
+fn clipboard_hdrop_files(entries: &[ClipEntry]) -> Option<(Vec<String>, bool)> {
+    let data = &entries.iter().find(|e| e.format == 15)?.data;
+    if data.len() < 20 || data.len() > MAX_CLIPBOARD_BYTES { return None; }
+    let offset = u32::from_le_bytes(data.get(0..4)?.try_into().ok()?) as usize;
+    if offset < 20 { return None; }
+    let wide = u32::from_le_bytes(data.get(16..20)?.try_into().ok()?) != 0;
+    let bytes = data.get(offset..)?;
+    let units: Vec<u16> = if wide {
+        if bytes.len() % 2 != 0 { return None; }
+        bytes.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect()
+    } else {
+        core::str::from_utf8(bytes).ok()?.encode_utf16().collect()
+    };
+    let mut paths = Vec::new();
+    let mut at = 0;
+    loop {
+        let end = units[at..].iter().position(|u| *u == 0)? + at;
+        if end == at { break; }
+        let win = String::from_utf16(&units[at..end]).ok()?;
+        let raw = win.as_bytes();
+        if raw.len() < 3 || !raw[0].eq_ignore_ascii_case(&b'c') || raw[1] != b':' || raw[2] != b'\\' { return None; }
+        let path = win[2..].replace('\\', "/");
+        if path.split('/').any(|part| part == "." || part == "..") { return None; }
+        paths.push(path);
+        at = end + 1;
+        if at >= units.len() { return None; }
+    }
+    if paths.is_empty() { return None; }
+    let cut = entries.iter().find(|e| e.name.as_deref() == Some("Preferred DropEffect"))
+        .and_then(|e| e.data.get(..4)).is_some_and(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) == 2);
+    Some((paths, cut))
 }
 
 /// Convert native file paths to a wide Windows CF_HDROP payload.
@@ -1208,6 +1245,13 @@ mod tests {
         assert_eq!(&hdrop[16..20], &1u32.to_le_bytes());
         let units: Vec<u16> = hdrop[20..].chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
         assert_eq!(units, "C:\\home\\user\\a\nb\0C:\\tmp\\ż\0\0".encode_utf16().collect::<Vec<_>>());
+        let windows = ClipEntry { format: 15, name: None, data: hdrop };
+        assert_eq!(clipboard_files(&[windows.clone()]), Some((paths.clone(), false)));
+        let effect = ClipEntry { format: 0xc001, name: Some(String::from("Preferred DropEffect")), data: 2u32.to_le_bytes().to_vec() };
+        assert_eq!(clipboard_files(&[windows, effect]), Some((paths.clone(), true)));
+        let mut invalid = clipboard_hdrop(&[clipboard_files_entry(&[String::from("/../secret")], false).unwrap()]).unwrap();
+        let invalid = ClipEntry { format: 15, name: None, data: core::mem::take(&mut invalid) };
+        assert_eq!(clipboard_files(&[invalid]), None);
         assert_eq!(clipboard_files(&[entry.clone()]), Some((paths, true)));
         let mut broken = entry;
         broken.data.pop();
