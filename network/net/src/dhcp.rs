@@ -400,6 +400,23 @@ impl Client {
         if m.op != 2 || m.xid != self.xid || m.chaddr != self.mac {
             return (None, None);
         }
+        if matches!(m.msg_type, ACK | NAK) {
+            match self.phase {
+                Phase::Requesting => {
+                    let Some((addr, server)) = self.offer else { return (None, None) };
+                    if m.server_id != Some(server) || (m.msg_type == ACK && m.yiaddr != addr) {
+                        return (None, None);
+                    }
+                }
+                Phase::Renewing => {
+                    let Some(lease) = &self.lease else { return (None, None) };
+                    if m.server_id.is_some_and(|server| server != lease.server) {
+                        return (None, None);
+                    }
+                }
+                _ => {}
+            }
+        }
         match (self.phase, m.msg_type) {
             (Phase::Selecting, OFFER) => {
                 let Some(server) = m.server_id else { return (None, None) };

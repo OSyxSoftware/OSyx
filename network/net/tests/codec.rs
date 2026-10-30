@@ -353,6 +353,30 @@ fn dhcp_client_walks_through_the_lease_states() {
     assert!(c.lease().is_none());
 }
 
+#[test]
+fn dhcp_ignores_replies_from_unselected_server() {
+    let mac = MacAddr([0x52, 0x54, 0, 0, 0, 9]);
+    let mut client = dhcp::Client::new(mac, 7, "osyx");
+    let xid = dhcp::Message::parse(&client.poll(0).0.unwrap().payload).unwrap().xid;
+    let selected = Ipv4Addr::new(10, 0, 2, 2);
+    let other = Ipv4Addr::new(10, 0, 2, 3);
+    let address = Ipv4Addr::new(10, 0, 2, 15);
+    let reply = |kind, xid, server, addr| dhcp::build_reply(kind, xid, mac, addr, server, Ipv4Addr::new(255, 255, 255, 0), server, server, 120);
+    client.input(&reply(dhcp::OFFER, xid, selected, address), 10);
+    for bad in [reply(dhcp::ACK, xid, other, address), reply(dhcp::NAK, xid, other, address), reply(dhcp::ACK, xid, selected, other)] {
+        assert_eq!(client.input(&bad, 20), (None, None));
+        assert_eq!(client.phase(), dhcp::Phase::Requesting);
+    }
+    let (_, event) = client.input(&reply(dhcp::ACK, xid, selected, address), 21);
+    let Some(dhcp::Event::Bound(lease)) = event else { panic!("expected selected server ACK") };
+    let renew = dhcp::Message::parse(&client.poll(lease.t1).0.unwrap().payload).unwrap();
+    assert_eq!(client.input(&reply(dhcp::NAK, renew.xid, other, address), lease.t1 + 1), (None, None));
+    assert_eq!(client.phase(), dhcp::Phase::Renewing);
+    let rebind = dhcp::Message::parse(&client.poll(lease.t2).0.unwrap().payload).unwrap();
+    let (_, event) = client.input(&reply(dhcp::ACK, rebind.xid, other, address), lease.t2 + 1);
+    assert!(matches!(event, Some(dhcp::Event::Renewed(_))));
+}
+
 fn dns_response(id: u16, name: &str, answers: &[(&str, u16, &[u8])], rcode: u8, tc: bool) -> Vec<u8> {
     let mut m = dns::build_query(id, name, dns::TYPE_A);
     m[2] = 0x81 | if tc { 0x02 } else { 0 };
