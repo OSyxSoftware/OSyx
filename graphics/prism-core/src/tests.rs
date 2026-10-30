@@ -864,6 +864,23 @@ fn unicode_clipboard_text_is_shared_between_clients() {
 }
 
 #[test]
+fn file_clipboard_is_shared_between_clients() {
+    let mut h = Harness::new();
+    let source = h.client(31);
+    let target = h.client(32);
+    h.events();
+    let paths = vec![String::from("/home/user/ż.txt")];
+    let entry = proto::clipboard_files_entry(&paths, true).unwrap();
+    h.send(source, Request::ClipboardSet { entries: vec![entry] });
+    let events = h.events_for(target);
+    let entries = events.iter().find_map(|e| match e {
+        Event::ClipboardChanged { entries, .. } => Some(entries),
+        _ => None,
+    }).expect("target receives file clipboard");
+    assert_eq!(proto::clipboard_files(entries), Some((paths, true)));
+}
+
+#[test]
 fn file_drag_delivers_only_to_the_window_at_release() {
     let mut h = Harness::new();
     let source = h.client(21);

@@ -254,6 +254,46 @@ pub struct ClipEntry {
 
 /// Win32 CF_UNICODETEXT, also used by native clients for shared text.
 pub const CLIP_UNICODE_TEXT: u32 = 13;
+/// Registered clipboard format for absolute OSyx file paths.
+pub const CLIP_FILES_NAME: &str = "application/x-osyx-files";
+
+/// Encode a file selection without relying on delimiters in file names.
+pub fn clipboard_files_entry(paths: &[String], cut: bool) -> Option<ClipEntry> {
+    if paths.is_empty() || paths.len() > u16::MAX as usize { return None; }
+    let mut data = Vec::new();
+    data.push(u8::from(cut));
+    data.extend_from_slice(&(paths.len() as u16).to_le_bytes());
+    for path in paths {
+        if !path.starts_with('/') || path.contains('\0') { return None; }
+        let len = u32::try_from(path.len()).ok()?;
+        if data.len().checked_add(4 + path.len())? > MAX_CLIPBOARD_BYTES { return None; }
+        data.extend_from_slice(&len.to_le_bytes());
+        data.extend_from_slice(path.as_bytes());
+    }
+    Some(ClipEntry { format: 0xc000, name: Some(String::from(CLIP_FILES_NAME)), data })
+}
+
+/// Decode a complete file selection; reject malformed or relative paths.
+pub fn clipboard_files(entries: &[ClipEntry]) -> Option<(Vec<String>, bool)> {
+    let data = &entries.iter().find(|entry| entry.name.as_deref() == Some(CLIP_FILES_NAME))?.data;
+    if data.len() < 3 || data.len() > MAX_CLIPBOARD_BYTES || data[0] > 1 { return None; }
+    let count = u16::from_le_bytes([data[1], data[2]]) as usize;
+    if count == 0 { return None; }
+    let mut at = 3usize;
+    let mut paths = Vec::new();
+    for _ in 0..count {
+        let b = data.get(at..at.checked_add(4)?)?;
+        let len = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        at += 4;
+        let end = at.checked_add(len)?;
+        let path = core::str::from_utf8(data.get(at..end)?).ok()?;
+        if !path.starts_with('/') || path.contains('\0') { return None; }
+        paths.push(String::from(path));
+        at = end;
+    }
+    if at != data.len() { return None; }
+    Some((paths, data[0] != 0))
+}
 
 /// Encode text as a NUL-terminated UTF-16LE clipboard entry.
 pub fn clipboard_text_entry(text: &str) -> ClipEntry {
@@ -1137,6 +1177,17 @@ mod tests {
         let n = m.len();
         m[n - 4..].copy_from_slice(&0xD800u32.to_le_bytes());
         assert_eq!(Event::decode(&m), Err(ProtoError::BadValue));
+    }
+
+    #[test]
+    fn file_clipboard_round_trips_and_rejects_bad_paths() {
+        let paths = vec![String::from("/home/user/a\nb"), String::from("/tmp/ż")];
+        let entry = clipboard_files_entry(&paths, true).unwrap();
+        assert_eq!(clipboard_files(&[entry.clone()]), Some((paths, true)));
+        let mut broken = entry;
+        broken.data.pop();
+        assert_eq!(clipboard_files(&[broken]), None);
+        assert!(clipboard_files_entry(&[String::from("relative")], false).is_none());
     }
 
     #[test]

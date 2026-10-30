@@ -847,18 +847,24 @@ impl Files {
         self.set_status(msg, err);
     }
 
-    fn copy_selection(&mut self, cut: bool) {
+    fn copy_selection(&mut self, cut: bool, cx: &mut Ctx) {
         let paths = self.chosen_paths();
         if paths.is_empty() {
             return;
         }
         let n = paths.len();
-        self.clipboard = Some((paths, cut));
+        let Some(entry) = prism_client::proto::clipboard_files_entry(&paths, cut) else {
+            self.set_status(String::from("Selection is too large for the clipboard"), true);
+            return;
+        };
+        self.clipboard = Some((paths.clone(), cut));
+        cx.file_clipboard = Some((paths, cut));
+        cx.clipboard_entries = Some(vec![entry]);
         self.set_status(format!("{} {n} item(s): paste with Ctrl+V", if cut { "Cut" } else { "Copied" }), false);
         println!("files: {} {n} item(s)", if cut { "cut" } else { "copied" });
     }
 
-    fn paste(&mut self) {
+    fn paste(&mut self, cx: &mut Ctx) {
         let Some((paths, cut)) = self.clipboard.clone() else {
             self.set_status(String::from("Nothing to paste"), true);
             return;
@@ -892,6 +898,8 @@ impl Files {
         }
         if cut && failure.is_none() {
             self.clipboard = None;
+            cx.file_clipboard = None;
+            cx.clipboard_entries = Some(Vec::new());
         }
         let r = match failure {
             Some(f) => Err(f),
@@ -1102,9 +1110,9 @@ impl Files {
                     self.set_status(format!("{ext} files now open with the chosen program"), false);
                 }
             }
-            Act::Copy => self.copy_selection(false),
-            Act::Cut => self.copy_selection(true),
-            Act::Paste => self.paste(),
+            Act::Copy => self.copy_selection(false, cx),
+            Act::Cut => self.copy_selection(true, cx),
+            Act::Paste => self.paste(cx),
             Act::Trash => self.trash_selection(),
             Act::Pack => self.pack_selection(),
             Act::Extract => self.extract_selection(),
@@ -1134,6 +1142,7 @@ impl App for Files {
 
     fn event(&mut self, ev: Ui, cx: &mut Ctx) -> bool {
         let fonts = cx.fonts;
+        self.clipboard = cx.file_clipboard.clone();
         if let Ui::Key(k) = ev {
             self.mods = k.mods;
         }
@@ -1283,15 +1292,15 @@ impl App for Files {
                         return true;
                     }
                     key::C if k.ctrl() && !self.path_focus => {
-                        self.copy_selection(false);
+                        self.copy_selection(false, cx);
                         return true;
                     }
                     key::X if k.ctrl() && !self.path_focus => {
-                        self.copy_selection(true);
+                        self.copy_selection(true, cx);
                         return true;
                     }
                     key::V if k.ctrl() && !self.path_focus => {
-                        self.paste();
+                        self.paste(cx);
                         return true;
                     }
                     key::P if k.ctrl() => {
