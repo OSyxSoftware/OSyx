@@ -1,9 +1,10 @@
 //! Initialization files: GetPrivateProfileStringW and
 //! WritePrivateProfileStringW (kernel32). Section and key names compare
 //! case-insensitively; a file name without a directory lives in
-//! C:\Windows, as on Windows. Files are read as UTF-16 (with a BOM) or
-//! UTF-8/ANSI, and written back in the encoding they had (UTF-8 for new
-//! files).
+//! C:\Windows, as on Windows. Files are read as UTF-16 (with a BOM), UTF-8
+//! or ANSI (Latin-1), and written back in the encoding they had (UTF-8
+//! for new files). Values in matching single or double quotes are
+//! returned without them.
 
 #![allow(non_snake_case)] // Win32 API names
 
@@ -13,6 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_MORE_DATA: u32 = 234;
 
@@ -20,7 +22,17 @@ struct Ini {
     /// (section, [(key, value)]), in file order; lines that are neither
     /// are kept as keys without `=` so writing preserves them.
     sections: Vec<(String, Vec<(String, Option<String>)>)>,
-    utf16: bool,
+    encoding: Encoding,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Encoding {
+    Utf16,
+    /// UTF-8, with the byte order mark the file had.
+    Utf8 { bom: bool },
+    /// Bytes that are not UTF-8: one character per byte (Latin-1), so a
+    /// rewrite keeps every byte of the other lines.
+    Ansi,
 }
 
 fn file_path(name: &str) -> Result<String, u32> {
@@ -29,14 +41,17 @@ fn file_path(name: &str) -> Result<String, u32> {
 }
 
 fn parse(bytes: &[u8]) -> Ini {
-    let (text, utf16) = if bytes.starts_with(&[0xFF, 0xFE]) {
+    let (text, encoding) = if bytes.starts_with(&[0xFF, 0xFE]) {
         let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        (String::from_utf16_lossy(&units), true)
+        (String::from_utf16_lossy(&units), Encoding::Utf16)
     } else {
-        let b = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+        let (b, bom) = match bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+            Some(rest) => (rest, true),
+            None => (bytes, false),
+        };
         match core::str::from_utf8(b) {
-            Ok(t) => (String::from(t), false),
-            Err(_) => (b.iter().map(|&c| c as char).collect(), false),
+            Ok(t) => (String::from(t), Encoding::Utf8 { bom }),
+            Err(_) => (b.iter().map(|&c| c as char).collect(), Encoding::Ansi),
         }
     };
     let mut sections: Vec<(String, Vec<(String, Option<String>)>)> = alloc::vec![(String::new(), Vec::new())];
@@ -50,7 +65,7 @@ fn parse(bytes: &[u8]) -> Ini {
             sections.last_mut().expect("one section").1.push((String::from(t), None));
         }
     }
-    Ini { sections, utf16 }
+    Ini { sections, encoding }
 }
 
 fn render(ini: &Ini) -> Vec<u8> {
@@ -66,14 +81,33 @@ fn render(ini: &Ini) -> Vec<u8> {
             }
         }
     }
-    if ini.utf16 {
-        let mut out = alloc::vec![0xFF, 0xFE];
-        for u in text.encode_utf16() {
-            out.extend_from_slice(&u.to_le_bytes());
+    match ini.encoding {
+        Encoding::Utf16 => {
+            let mut out = alloc::vec![0xFF, 0xFE];
+            for u in text.encode_utf16() {
+                out.extend_from_slice(&u.to_le_bytes());
+            }
+            out
         }
-        out
+        Encoding::Utf8 { bom } => {
+            let mut out = if bom { alloc::vec![0xEF, 0xBB, 0xBF] } else { Vec::new() };
+            out.extend_from_slice(text.as_bytes());
+            out
+        }
+        // A character the code page cannot hold becomes '?', as
+        // WideCharToMultiByte's default character does.
+        Encoding::Ansi => text.chars().map(|c| u8::try_from(c as u32).unwrap_or(b'?')).collect(),
+    }
+}
+
+/// A value as GetPrivateProfileString returns it: without one pair of
+/// matching enclosing quotes.
+fn unquote(v: &str) -> &str {
+    let b = v.as_bytes();
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+        &v[1..v.len() - 1]
     } else {
-        text.into_bytes()
+        v
     }
 }
 
@@ -134,7 +168,12 @@ pub extern "win64" fn GetPrivateProfileStringW(
     let ini = file_path(&file).ok().and_then(|p| os_std::fs::read(&p).ok()).map(|b| parse(&b));
     let Some(ini) = ini else {
         crate::teb::set_last_error(ERROR_FILE_NOT_FOUND);
-        return put(buf, size, &[default], false);
+        // Section and key lists of a missing file are empty; only a value
+        // lookup falls back to the default.
+        return match (&section, &key) {
+            (Some(_), Some(_)) => put(buf, size, &[default], false),
+            _ => put(buf, size, &[], true),
+        };
     };
     match (section, key) {
         (None, _) => put(buf, size, &ini.sections.iter().skip(1).map(|(n, _)| n.clone()).collect::<Vec<_>>(), true),
@@ -144,7 +183,7 @@ pub extern "win64" fn GetPrivateProfileStringW(
         }
         (Some(s), Some(k)) => {
             let value = find(&ini, &s).and_then(|e| e.iter().find(|(n, v)| v.is_some() && n.eq_ignore_ascii_case(&k))).and_then(|(_, v)| v.clone());
-            put(buf, size, &[value.unwrap_or(default)], false)
+            put(buf, size, &[value.map_or(default, |v| String::from(unquote(&v)))], false)
         }
     }
 }
@@ -158,7 +197,16 @@ pub extern "win64" fn WritePrivateProfileStringW(section: *const u16, key: *cons
         Ok(p) => p,
         Err(e) => return fail(e, 0),
     };
-    let mut ini = os_std::fs::read(&path).map(|b| parse(&b)).unwrap_or(Ini { sections: alloc::vec![(String::new(), Vec::new())], utf16: false });
+    // Only a missing file starts empty: any other read error must not
+    // let the write below replace a file whose entries were not read.
+    let mut ini = match os_std::fs::read(&path) {
+        Ok(b) => parse(&b),
+        Err(e) if e.kind() == os_std::error::ErrorKind::NotFound => {
+            Ini { sections: alloc::vec![(String::new(), Vec::new())], encoding: Encoding::Utf8 { bom: false } }
+        }
+        Err(e) if e.kind() == os_std::error::ErrorKind::PermissionDenied => return fail(ERROR_ACCESS_DENIED, 0),
+        Err(_) => return fail(ERROR_FILE_NOT_FOUND, 0),
+    };
     let at = ini.sections.iter().skip(1).position(|(n, _)| n.eq_ignore_ascii_case(&section)).map(|i| i + 1);
     match (key, at) {
         // No key: the whole section goes.
