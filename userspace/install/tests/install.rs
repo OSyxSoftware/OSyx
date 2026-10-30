@@ -343,6 +343,12 @@ fn an_interrupted_installation_is_not_bootable() {
     let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
     assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err());
     drop(esp);
+    let mut truncated = MemSource::new();
+    truncated.data.get_mut("/bin/init").unwrap().truncate(1);
+    assert!(matches!(install(&mut disk, &plan, &mut truncated, &config(), &mut Log::default()), Err(Error::Source(_))));
+    let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
+    assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err());
+    drop(esp);
     struct FailLoader<'a> { disk: &'a mut Vec<u8>, fail: bool }
     impl Disk for FailLoader<'_> {
         fn sectors(&self) -> u64 { self.disk.sectors() }

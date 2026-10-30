@@ -650,7 +650,7 @@ impl<D: osyx_ext4::BlockDevice, S: Source, P: Progress> Copy<'_, D, S, P> {
                         }
                     }
                     if at != e.size {
-                        self.progress.log(&format!("note: {p} changed size while copying ({} -> {at})", e.size));
+                        return Err(Error::Source(format!("{p} changed size while copying ({} -> {at})", e.size)));
                     }
                     self.report.files += 1;
                 }
