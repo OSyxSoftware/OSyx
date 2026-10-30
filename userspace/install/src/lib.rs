@@ -774,39 +774,6 @@ fn verify_boot_contents<D: osyx_fat::BlockDevice>(fs: &mut osyx_fat::FileSystem<
     Ok(())
 }
 
-#[cfg(test)]
-mod boot_tests {
-    use super::*;
-
-    #[test]
-    fn boot_write_refuses_short_name_alias() {
-        let mut image = vec![0; 64 * 1024 * 1024];
-        osyx_fat::format(&mut image, "TEST", 1).unwrap();
-        let mut fs = osyx_fat::FileSystem::mount(image).unwrap();
-        fat_write(&mut fs, "EFI/long filename.txt", b"original").unwrap();
-        assert!(fat_write(&mut fs, "EFI/LONGFI~1.TXT", b"replacement").is_err());
-        let mut file = fs.open("/EFI/long filename.txt", osyx_fat::OpenOptions::default()).unwrap();
-        let mut data = [0; 8];
-        assert_eq!(fs.read(&mut file, 0, &mut data).unwrap(), 8);
-        assert_eq!(&data, b"original");
-    }
-
-    #[test]
-    fn boot_verification_detects_same_size_corruption() {
-        let mut image = vec![0; 64 * 1024 * 1024];
-        osyx_fat::format(&mut image, "TEST", 1).unwrap();
-        let mut fs = osyx_fat::FileSystem::mount(image).unwrap();
-        fat_write(&mut fs, "EFI/test.bin", b"original").unwrap();
-        let mut hash = osyx_crypto::Sha256::new();
-        hash.update(b"original");
-        let expected = vec![(String::from("EFI/test.bin"), hash.finish())];
-        verify_boot_contents(&mut fs, &expected).unwrap();
-        let mut file = fs.open("/EFI/test.bin", osyx_fat::OpenOptions::default()).unwrap();
-        fs.write(&mut file, 0, b"altered!").unwrap();
-        assert!(matches!(verify_boot_contents(&mut fs, &expected), Err(Error::Verify(_))));
-    }
-}
-
 /// Reads the new system back: partition table, ESP files and sizes, root
 /// consistency and the configuration files.
 pub fn verify<D: Disk>(disk: &mut D, plan: &Plan, config: &Config, boot: &[(String, u64)]) -> Result<()> {
@@ -847,4 +814,37 @@ pub fn verify<D: Disk>(disk: &mut D, plan: &Plan, config: &Config, boot: &[(Stri
         return Err(Error::Verify("/etc/hostname has the wrong contents".into()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::*;
+
+    #[test]
+    fn boot_write_refuses_short_name_alias() {
+        let mut image = vec![0; 64 * 1024 * 1024];
+        osyx_fat::format(&mut image, "TEST", 1).unwrap();
+        let mut fs = osyx_fat::FileSystem::mount(image).unwrap();
+        fat_write(&mut fs, "EFI/long filename.txt", b"original").unwrap();
+        assert!(fat_write(&mut fs, "EFI/LONGFI~1.TXT", b"replacement").is_err());
+        let mut file = fs.open("/EFI/long filename.txt", osyx_fat::OpenOptions::default()).unwrap();
+        let mut data = [0; 8];
+        assert_eq!(fs.read(&mut file, 0, &mut data).unwrap(), 8);
+        assert_eq!(&data, b"original");
+    }
+
+    #[test]
+    fn boot_verification_detects_same_size_corruption() {
+        let mut image = vec![0; 64 * 1024 * 1024];
+        osyx_fat::format(&mut image, "TEST", 1).unwrap();
+        let mut fs = osyx_fat::FileSystem::mount(image).unwrap();
+        fat_write(&mut fs, "EFI/test.bin", b"original").unwrap();
+        let mut hash = osyx_crypto::Sha256::new();
+        hash.update(b"original");
+        let expected = vec![(String::from("EFI/test.bin"), hash.finish())];
+        verify_boot_contents(&mut fs, &expected).unwrap();
+        let mut file = fs.open("/EFI/test.bin", osyx_fat::OpenOptions::default()).unwrap();
+        fs.write(&mut file, 0, b"altered!").unwrap();
+        assert!(matches!(verify_boot_contents(&mut fs, &expected), Err(Error::Verify(_))));
+    }
 }
