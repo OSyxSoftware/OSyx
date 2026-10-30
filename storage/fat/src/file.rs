@@ -39,9 +39,9 @@ impl<D: BlockDevice> FileSystem<D> {
             return Err(FsError::NotFound);
         }
         let first = (crate::le16(&e, 20) as u32) << 16 | crate::le16(&e, 26) as u32;
-        if first != f.first_cluster {
-            f.cursor = None;
-        }
+        // Another handle may have truncated and regrown the chain while the
+        // first cluster and size stayed unchanged. Cached links are then stale.
+        f.cursor = None;
         f.first_cluster = first;
         f.size = crate::le32(&e, 28);
         f.is_dir = e[11] & ATTR_DIRECTORY != 0;

@@ -279,6 +279,23 @@ fn directory_cannot_replace_file() {
 }
 
 #[test]
+fn cached_cluster_is_invalidated_after_another_handle_rewrites_chain() {
+    let mut fs = fresh(64 * MIB);
+    write_file(&mut fs, "/data", &vec![1; 1536]);
+    let mut reader = fs.open("/data", OpenOptions::default()).unwrap();
+    let mut writer = fs.open("/data", OpenOptions::default()).unwrap();
+    let mut byte = [0];
+    fs.read(&mut reader, 1024, &mut byte).unwrap();
+    fs.truncate(&mut writer, 512).unwrap();
+    write_file(&mut fs, "/other", &vec![9; 1024]);
+    fs.truncate(&mut writer, 1536).unwrap();
+    fs.read(&mut reader, 1024, &mut byte).unwrap();
+    assert_eq!(byte, [0]);
+    assert_eq!(read_file(&mut fs, "/other"), vec![9; 1024]);
+    check(&mut fs);
+}
+
+#[test]
 fn full_volume_reports_no_space_and_stays_consistent() {
     let mut fs = fresh(34 * MIB);
     let chunk = pattern(MIB, 1);
