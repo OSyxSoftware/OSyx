@@ -205,6 +205,15 @@ impl Lookup {
         }
         Ok(())
     }
+
+    fn check_metadata(&self, path: &str) -> Result<()> {
+        if self.path_policy.as_ref().is_some_and(|policy| {
+            !policy.allows(path, Access::READ) && !policy.may_inspect_ancestor(path)
+        }) {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(())
+    }
 }
 
 /// A resolved node: its volume, number and canonical absolute path.
@@ -638,13 +647,13 @@ pub fn shutdown() {
 
 pub fn stat(cx: &Lookup, p: &str) -> Result<FileStat> {
     let n = walk(cx, p, true)?;
-    cx.check_path(&n.path, Access::READ)?;
+    cx.check_metadata(&n.path)?;
     n.stat()
 }
 
 pub fn lstat(cx: &Lookup, p: &str) -> Result<FileStat> {
     let n = walk(cx, p, false)?;
-    cx.check_path(&n.path, Access::READ)?;
+    cx.check_metadata(&n.path)?;
     n.stat()
 }
 

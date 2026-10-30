@@ -57,6 +57,16 @@ impl PathPolicy {
                     && (path::is_within(prefix, resolved_dir) || path::is_within(resolved_dir, prefix))
             })
     }
+
+    /// Metadata of an ancestor is needed for component-by-component lookup.
+    /// This does not authorize opening or listing that directory.
+    pub fn may_inspect_ancestor(&self, resolved: &str) -> bool {
+        canonical(resolved).is_ok()
+            && self.rules.iter().any(|(prefix, access)| {
+                (access.read || access.write || access.exec)
+                    && prefix != resolved && path::is_within(prefix, resolved)
+            })
+    }
 }
 
 fn canonical(p: &str) -> Result<()> {
@@ -81,6 +91,9 @@ mod tests {
         assert!(!policy.allows("/app/database", Access::READ));
         assert!(!policy.allows("/app/data/file", Access::WRITE));
         assert!(policy.may_traverse("/app"));
+        assert!(policy.may_inspect_ancestor("/app"));
+        assert!(!policy.may_inspect_ancestor("/app/data"));
+        assert!(!policy.may_inspect_ancestor("/other"));
         assert!(!policy.allows("/app", Access::READ));
         assert!(!policy.may_traverse("/other"));
     }

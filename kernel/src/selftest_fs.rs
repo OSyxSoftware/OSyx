@@ -538,6 +538,8 @@ pub fn restricted_opens() -> TestResult {
         let policy = PathPolicy::new(&[(dir, Access::READ)]).map_err(|err| e("policy", err))?;
         let restricted = Lookup { path_policy: Some(Arc::new(policy)), ..root.clone() };
         ensure!(read_file(&restricted, &inside).is_ok(), "allowed file denied");
+        ensure!(vfs::stat(&restricted, "/tmp").is_ok(), "allowed ancestor metadata denied");
+        ensure!(matches!(vfs::open(&restricted, "/tmp", OPEN_READ | OPEN_DIRECTORY, 0), Err(Errno::PermissionDenied)), "ancestor listing allowed");
         ensure!(matches!(vfs::open(&restricted, outside, OPEN_READ, 0), Err(Errno::PermissionDenied)), "outside file allowed");
         ensure!(matches!(vfs::open(&restricted, &format!("{dir}/escape"), OPEN_READ, 0), Err(Errno::PermissionDenied)), "symlink escape allowed");
         ensure!(matches!(vfs::open(&restricted, &inside, OPEN_WRITE, 0), Err(Errno::PermissionDenied)), "write allowed");
@@ -586,6 +588,48 @@ pub fn restricted_process() -> TestResult {
     let (_, status) = process::wait(process::KERNEL_PID, pid).map_err(|err| e("broker wait", err))?;
     ensure!(status == 0, "broker test exited with status {status}");
     Ok(())
+}
+
+/// Run only in an explicitly requested test boot with a fixture, never replace
+/// an installed browser. The caller supplies winrun and sandboxpe modules.
+pub fn restricted_winrun() -> TestResult {
+    use crate::{exec::ExecRequest, process};
+    let cx = root();
+    let image = read_file(&cx, "/bin/sandboxpe").map_err(|err| e("read PE fixture", err))?;
+    if vfs::stat(&cx, "/opt/zen/zen.exe").is_ok() {
+        return Err(String::from("refusing to replace an installed browser"));
+    }
+    let opt_created = vfs::mkdir(&cx, "/opt", 0o755).is_ok();
+    let zen_created = vfs::mkdir(&cx, "/opt/zen", 0o755).is_ok();
+    let mut fixture_created = false;
+    let mut secret_created = false;
+    let result = (|| -> TestResult {
+        // Exclusive creation protects an existing browser even if it appears
+        // after the check above.
+        let mut file = vfs::open(&cx, "/opt/zen/zen.exe", OPEN_WRITE | OPEN_CREATE | OPEN_EXCLUSIVE, 0o755).map_err(|err| e("create PE fixture", err))?;
+        fixture_created = true;
+        let mut done = 0;
+        while done < image.len() {
+            let n = file.write(&image[done..]).map_err(|err| e("write PE fixture", err))?;
+            if n == 0 { return Err(String::from("short write of PE fixture")); }
+            done += n;
+        }
+        drop(file);
+        let mut secret = vfs::open(&cx, "/tmp/sandbox-winrun-secret", OPEN_WRITE | OPEN_CREATE | OPEN_EXCLUSIVE, 0o600).map_err(|err| e("create secret", err))?;
+        secret_created = true;
+        secret.write(b"private").map_err(|err| e("write secret", err))?;
+        drop(secret);
+        let req = ExecRequest::new("/bin/winrun", &["winrun", "/opt/zen/zen.exe"], &["OSYX_EXPERIMENTAL_CONTENT_SANDBOX=1"]).map_err(|err| e("request", err))?;
+        let pid = process::spawn(process::KERNEL_PID, &req).map_err(|err| format!("winrun spawn: {err}"))?;
+        let (_, status) = process::wait(process::KERNEL_PID, pid).map_err(|err| e("winrun wait", err))?;
+        ensure!(status == 0, "Winrun PE fixture exited with status {status}");
+        Ok(())
+    })();
+    if fixture_created { let _ = vfs::unlink(&cx, "/opt/zen/zen.exe"); }
+    if secret_created { let _ = vfs::unlink(&cx, "/tmp/sandbox-winrun-secret"); }
+    if zen_created { let _ = vfs::rmdir(&cx, "/opt/zen"); }
+    if opt_created { let _ = vfs::rmdir(&cx, "/opt"); }
+    result
 }
 
 /// The program loader's lookup and refusals (`spawn` / `execve`), without

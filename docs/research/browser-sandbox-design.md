@@ -53,7 +53,9 @@ not an authority to enter or leave the sandbox.
 
 Run `scripts/sandbox-test.ps1` to boot the sandbox-specific kernel tests with
 an existing `build/esp` loader and a temporary FAT directory. This targeted
-test does not replace the full system suite or a Gecko test.
+test does not replace the full system suite or a Gecko test. Add `-Winrun` to
+build a small PE fixture and verify that a restricted Windows child cannot
+read a file that its parent can read. This needs the MSVC Rust target.
 
 Test direct and indirect file access, symlink and rename escapes, `exec` and
 child inheritance, pre-opened and transferred objects, and access to other
