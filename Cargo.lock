@@ -897,8 +897,10 @@ version = "0.1.0"
 dependencies = [
  "miniz_oxide",
  "os-std",
+ "osyx-7z",
  "osyx-abi",
  "osyx-crypto",
+ "osyx-filekit",
  "osyx-gfx",
  "osyx-input",
  "osyx-install",
@@ -919,6 +921,13 @@ version = "0.1.0"
 [[package]]
 name = "osyx-fat"
 version = "0.1.0"
+
+[[package]]
+name = "osyx-filekit"
+version = "0.1.0"
+dependencies = [
+ "miniz_oxide",
+]
 
 [[package]]
 name = "osyx-gfx"

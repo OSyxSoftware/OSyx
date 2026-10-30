@@ -183,6 +183,60 @@ try {
     $listed = Wait-Log 'files: listed /home/user \((\d+) entries\)'
     Record 'context menu launches Files; it lists the real ext4 home' ($null -ne $files -and $null -ne $listed) $(if ($listed) { $listed.Value } else { '' })
 
+    # Files: several files at once. Ctrl+click marks rows, Ctrl+A marks all,
+    # Pack writes one tar archive of the selection and Extract here unpacks
+    # an archive found in the selection (see userspace/desktop/src/bin/files.rs).
+    if ($files -and $listed -and [int]$listed.Groups[1].Value -ge 2) {
+        function CtrlClick([int]$X, [int]$Y) {
+            Qmp '{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":true,"key":{"type":"qcode","data":"ctrl"}}}]}}'
+            Start-Sleep -Milliseconds 150
+            Click $X $Y
+            Qmp '{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":false,"key":{"type":"qcode","data":"ctrl"}}}]}}'
+            Start-Sleep -Milliseconds 200
+        }
+        $rowX = $files.X + 190 + 120; $rowY = $files.Y + 52 + 28 + 15
+        Click $rowX $rowY
+        CtrlClick $rowX ($rowY + 30)
+        $two = Wait-Log 'files: 2 items selected' 8
+        Record 'Files: Ctrl+click marks a second row' ($null -ne $two) ''
+        Keys @('ctrl', 'a')
+        $all = Wait-Log 'files: \d+ items selected' 8
+        Keys @('ctrl', 'c')
+        $copied = Wait-Log 'files: copied (\d+) item\(s\)' 8
+        Record 'Files: Ctrl+A and Ctrl+C copy the whole selection' ($null -ne $all -and $null -ne $copied) $(if ($copied) { $copied.Value } else { '' })
+        # Work in a new folder, so the home folder the later steps use keeps its contents.
+        Keys @('ctrl', 'n')
+        Start-Sleep -Milliseconds 400
+        1..12 | ForEach-Object { Keys @('backspace') }
+        TypeText 'zz-multi'
+        Keys @('ret')
+        $made2 = Wait-Log 'files: Created folder /home/user/zz-multi' 8
+        Click ($files.X + 400) ($files.Y + 26)
+        # The path field holds the current folder: clear it first.
+        1..30 | ForEach-Object { Keys @('backspace') }
+        TypeText "/home/user/zz-multi`n"
+        $in = Wait-Log 'files: listed /home/user/zz-multi \(0 entries\)' 8
+        Keys @('ctrl', 'v')
+        $pasted = Wait-Log 'files: pasted: Pasted (\d+) item\(s\)' 15
+        Record 'Files: Ctrl+V pastes the copied items into another folder' ($null -ne $made2 -and $null -ne $in -and $null -ne $pasted) $(if ($pasted) { $pasted.Value } else { '' })
+        Keys @('ctrl', 'a')
+        Keys @('ctrl', 'p')
+        $packed = Wait-Log 'files: Packed (\d+) item\(s\) into archive\.tar' 20
+        Record 'Files: Ctrl+P packs the selection into one tar archive' ($null -ne $packed) $(if ($packed) { $packed.Value } else { '' })
+        Keys @('ctrl', 'a')
+        Keys @('ctrl', 'e')
+        $unpacked = Wait-Log 'files: extracted archive\.tar into archive \((\d+) files\)' 20
+        Record 'Files: Ctrl+E extracts the archive found in the selection' ($null -ne $unpacked) $(if ($unpacked) { $unpacked.Value } else { '' })
+        Shot 'files-multi'
+        # Back to the home folder, where the later steps expect Files to be.
+        Click ($files.X + 400) ($files.Y + 26)
+        1..40 | ForEach-Object { Keys @('backspace') }
+        $before = ([regex]::Matches((Log-Text), 'files: listed /home/user \(')).Count
+        TypeText "/home/user`n"
+        $deadline = (Get-Date).AddSeconds(8)
+        while ((Get-Date) -lt $deadline -and ([regex]::Matches((Log-Text), 'files: listed /home/user \(')).Count -le $before) { Start-Sleep -Milliseconds 200 }
+    }
+
     # Keyboard: Super opens the launcher, typed text filters, Enter starts.
     Keys @('meta_l')
     $l = Wait-Log 'desktop: launcher opened'

@@ -31,6 +31,7 @@ members = [
     "storage/vfs",
     "userspace/apps",
     "userspace/desktop",
+    "userspace/filekit",
     "userspace/install",
     "userspace/nettools",
     "userspace/web",
@@ -63,6 +64,7 @@ default-members = [
     "storage/sevenz",
     "storage/tmpfs",
     "storage/vfs",
+    "userspace/filekit",
     "userspace/install",
 ]
 
