@@ -643,6 +643,9 @@ int pci_mapreg_map(struct pci_attach_args *pa, int reg, pcireg_t type, int flags
 	(void)flags;
 	pcitag_t tag = pa->pa_tag;
 	pcireg_t low = osyx_bsd_pci_read(tag, reg);
+	/* Do not treat a different memory BAR type as the requested BAR. */
+	if (_PCI_MAPREG_TYPEBITS(low) != _PCI_MAPREG_TYPEBITS(type))
+		return EINVAL;
 	pcireg_t cmd = osyx_bsd_pci_read(tag, PCI_COMMAND_STATUS_REG);
 	osyx_bsd_pci_write(tag, PCI_COMMAND_STATUS_REG, cmd & ~(PCI_COMMAND_IO_ENABLE | PCI_COMMAND_MEM_ENABLE));
 	osyx_bsd_pci_write(tag, reg, 0xffffffff);
