@@ -525,6 +525,7 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
 
     progress.stage(Stage::BootFiles, 0.94);
     let mut expected_boot = Vec::new();
+    let mut boot_hashes = Vec::new();
     {
         let mut esp = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("mounting the ESP", e))?;
         let mut files = boot;
@@ -543,6 +544,9 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
                 fat_write(&mut esp, path, data)?;
             }
             expected_boot.push((path.clone(), data.len() as u64));
+            let mut hash = osyx_crypto::Sha256::new();
+            hash.update(data);
+            boot_hashes.push((path.clone(), hash.finish()));
             progress.log(&format!("ESP: {path} ({} bytes)", data.len()));
         }
         esp.unmount().map_err(|e| fat_err("unmounting the ESP", e))?;
@@ -551,6 +555,10 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
 
     progress.stage(Stage::Verifying, 0.97);
     verify(disk, plan, config, &expected_boot)?;
+    {
+        let mut esp = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("ESP", e))?;
+        verify_boot_contents(&mut esp, &boot_hashes)?;
+    }
     progress.log("verification passed");
     progress.stage(Stage::Done, 1.0);
     Ok(report)
@@ -746,6 +754,26 @@ fn fat_write<D: osyx_fat::BlockDevice>(fs: &mut osyx_fat::FileSystem<D>, path: &
     Ok(())
 }
 
+fn verify_boot_contents<D: osyx_fat::BlockDevice>(fs: &mut osyx_fat::FileSystem<D>, expected: &[(String, [u8; 32])]) -> Result<()> {
+    let mut buf = vec![0u8; 64 * 1024];
+    for (path, digest) in expected {
+        let mut file = fs.open(&format!("/{path}"), osyx_fat::OpenOptions::default())
+            .map_err(|e| Error::Verify(format!("ESP {path}: {e:?}")))?;
+        let mut hash = osyx_crypto::Sha256::new();
+        let mut offset = 0u64;
+        loop {
+            let n = fs.read(&mut file, offset, &mut buf).map_err(|e| Error::Verify(format!("ESP {path}: {e:?}")))?;
+            if n == 0 { break; }
+            hash.update(&buf[..n]);
+            offset += n as u64;
+        }
+        if hash.finish() != *digest {
+            return Err(Error::Verify(format!("ESP {path}: contents differ from source")));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod boot_tests {
     use super::*;
@@ -761,6 +789,21 @@ mod boot_tests {
         let mut data = [0; 8];
         assert_eq!(fs.read(&mut file, 0, &mut data).unwrap(), 8);
         assert_eq!(&data, b"original");
+    }
+
+    #[test]
+    fn boot_verification_detects_same_size_corruption() {
+        let mut image = vec![0; 64 * 1024 * 1024];
+        osyx_fat::format(&mut image, "TEST", 1).unwrap();
+        let mut fs = osyx_fat::FileSystem::mount(image).unwrap();
+        fat_write(&mut fs, "EFI/test.bin", b"original").unwrap();
+        let mut hash = osyx_crypto::Sha256::new();
+        hash.update(b"original");
+        let expected = vec![(String::from("EFI/test.bin"), hash.finish())];
+        verify_boot_contents(&mut fs, &expected).unwrap();
+        let mut file = fs.open("/EFI/test.bin", osyx_fat::OpenOptions::default()).unwrap();
+        fs.write(&mut file, 0, b"altered!").unwrap();
+        assert!(matches!(verify_boot_contents(&mut fs, &expected), Err(Error::Verify(_))));
     }
 }
 
