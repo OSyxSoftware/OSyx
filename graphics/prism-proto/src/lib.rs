@@ -356,6 +356,13 @@ pub fn clipboard_hdrop(entries: &[ClipEntry]) -> Option<Vec<u8>> {
     Some(data)
 }
 
+/// Preferred Windows drop effect for a native file selection.
+pub fn clipboard_file_effect(entries: &[ClipEntry]) -> Option<Vec<u8>> {
+    let native = entries.iter().find(|e| e.name.as_deref() == Some(CLIP_FILES_NAME))?;
+    let (_, cut) = clipboard_files(core::slice::from_ref(native))?;
+    Some((if cut { 2u32 } else { 1u32 }).to_le_bytes().to_vec())
+}
+
 /// Encode text as a NUL-terminated UTF-16LE clipboard entry.
 pub fn clipboard_text_entry(text: &str) -> ClipEntry {
     let mut data = Vec::new();
@@ -1244,6 +1251,8 @@ mod tests {
     fn file_clipboard_round_trips_and_rejects_bad_paths() {
         let paths = vec![String::from("/home/user/a\nb"), String::from("/tmp/ż")];
         let entry = clipboard_files_entry(&paths, true).unwrap();
+        assert_eq!(clipboard_file_effect(&[entry.clone()]), Some(2u32.to_le_bytes().to_vec()));
+        assert_eq!(clipboard_file_effect(&[clipboard_files_entry(&paths, false).unwrap()]), Some(1u32.to_le_bytes().to_vec()));
         let hdrop = clipboard_hdrop(&[entry.clone()]).unwrap();
         assert_eq!(&hdrop[..4], &20u32.to_le_bytes());
         assert_eq!(&hdrop[16..20], &1u32.to_le_bytes());

@@ -4632,6 +4632,11 @@ pub(crate) fn clipboard_contents() -> Vec<proto::ClipEntry> {
                 entries.push(proto::ClipEntry { format: 15, name: None, data });
             }
         }
+        if !entries.iter().any(|e| e.name.as_deref() == Some("Preferred DropEffect")) {
+            if let Some(data) = proto::clipboard_file_effect(&entries) {
+                entries.push(proto::ClipEntry { format: register_format("Preferred DropEffect"), name: None, data });
+            }
+        }
         entries
     })
 }
@@ -4711,7 +4716,8 @@ extern "win64" fn GetClipboardData(format: u32) -> u64 {
         }
         let entries: Vec<_> = g.clipboard_own.iter().chain(g.clipboard.iter()).cloned().collect();
         let data = proto::clipboard_text_format(&entries, format)
-            .or_else(|| (format == 15).then(|| proto::clipboard_hdrop(&entries)).flatten());
+            .or_else(|| (format == 15).then(|| proto::clipboard_hdrop(&entries)).flatten())
+            .or_else(|| (format == register_format("Preferred DropEffect")).then(|| proto::clipboard_file_effect(&entries)).flatten());
         let Some(data) = data else { return 0 };
         let Some(h) = crate::kernel32::heap_alloc(data.len().max(1), true) else {
             return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
@@ -4728,7 +4734,8 @@ extern "win64" fn IsClipboardFormatAvailable(format: u32) -> Bool {
     with(|g| {
         let entries: Vec<_> = g.clipboard_own.iter().chain(g.clipboard.iter()).cloned().collect();
         (proto::clipboard_text_format(&entries, format).is_some()
-            || (format == 15 && proto::clipboard_hdrop(&entries).is_some())) as Bool
+            || (format == 15 && proto::clipboard_hdrop(&entries).is_some())
+            || (format == register_format("Preferred DropEffect") && proto::clipboard_file_effect(&entries).is_some())) as Bool
     })
 }
 
@@ -4745,9 +4752,10 @@ extern "win64" fn EnumClipboardFormats(next: u32) -> u32 {
             }
         }
         let entries: Vec<_> = g.clipboard_own.iter().chain(g.clipboard.iter()).cloned().collect();
-        for format in [1, proto::CLIP_UNICODE_TEXT, 15] {
+        for format in [1, proto::CLIP_UNICODE_TEXT, 15, register_format("Preferred DropEffect")] {
             if !formats.contains(&format) && (proto::clipboard_text_format(&entries, format).is_some()
-                || (format == 15 && proto::clipboard_hdrop(&entries).is_some())) {
+                || (format == 15 && proto::clipboard_hdrop(&entries).is_some())
+                || (format == register_format("Preferred DropEffect") && proto::clipboard_file_effect(&entries).is_some())) {
                 formats.push(format);
             }
         }
