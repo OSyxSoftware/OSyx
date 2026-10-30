@@ -4,7 +4,7 @@
 //! and sends the frames it returns; the keys it reports go to the chip,
 //! which does the CCMP encryption itself.
 
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::Aes128;
 use alloc::vec::Vec;
 use hmac::{Hmac, Mac};
