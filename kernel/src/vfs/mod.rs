@@ -189,8 +189,7 @@ impl Lookup {
 
     /// The calling process's credentials and current directory.
     pub fn current() -> Lookup {
-        let (cred, cwd) = crate::process::current_identity();
-        Lookup { cred, cwd, case_insensitive: false, path_policy: None }
+        crate::process::current_lookup()
     }
 
     fn check_path(&self, path: &str, access: Access) -> Result<()> {

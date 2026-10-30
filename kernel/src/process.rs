@@ -41,6 +41,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use osyx_abi::{auxv, startup, wow64, Errno};
 use osyx_elf::{AddressRange, ElfError, ElfImage};
 use osyx_vfs::Cred;
+use osyx_vfs::sandbox::PathPolicy;
 
 pub type Pid = u64;
 /// Parent id of processes started (or adopted) by the kernel.
@@ -361,6 +362,8 @@ pub struct Process {
     cred: Cred,
     /// Canonical absolute current directory (inherited by children).
     cwd: String,
+    /// Inherited unchanged by descendants and retained across exec.
+    path_policy: Option<Arc<PathPolicy>>,
 }
 
 /// An open file shared by the handle table and in-flight system calls.
@@ -542,7 +545,7 @@ fn report_release(pid: Pid, name: &str, what: &str, (owned, freed): (u64, u64)) 
 }
 
 impl Process {
-    fn new(parent: Pid, name: &str, cred: Cred, cwd: String, mut space: Space) -> Process {
+    fn new(parent: Pid, name: &str, cx: Lookup, mut space: Space) -> Process {
         let program_shared = core::mem::take(&mut space.program_shared);
         Process {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
@@ -560,9 +563,14 @@ impl Process {
             threads: Vec::new(),
             exited_cpu_ticks: 0,
             exit_status: None,
-            cred,
-            cwd,
+            cred: cx.cred,
+            cwd: cx.cwd,
+            path_policy: cx.path_policy,
         }
+    }
+
+    fn lookup(&self) -> Lookup {
+        Lookup { cred: self.cred, cwd: self.cwd.clone(), case_insensitive: false, path_policy: self.path_policy.clone() }
     }
 
     /// Removes every shared memory mapping (the frames stay with their
@@ -658,12 +666,13 @@ pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 
     let cx = {
         let t = TABLE.lock();
         match t.procs.get(&parent) {
-            Some(p) => Lookup { cred: p.cred, cwd: p.cwd.clone(), case_insensitive: false, path_policy: None },
-            None => Lookup::kernel(),
+            Some(p) => p.lookup(),
+            None if parent == KERNEL_PID => Lookup::kernel(),
+            None => return Err(ExecError::Load(Errno::NotFound)),
         }
     };
     let (space, entry, rsp, path) = build_image(&cx, req)?;
-    let mut p = Process::new(parent, req.name(), cx.cred, cx.cwd, space);
+    let mut p = Process::new(parent, req.name(), cx, space);
     let pid = p.pid;
     {
         let mut handles = HANDLES.lock();
@@ -2133,6 +2142,19 @@ pub fn current_identity() -> (Cred, String) {
     let pid = sched::current_pid();
     let t = TABLE.lock();
     t.procs.get(&pid).map_or((Cred::ROOT, String::from("/")), |p| (p.cred, p.cwd.clone()))
+}
+
+/// Takes one snapshot of the current process's identity and path policy.
+/// Kernel threads use the unrestricted kernel lookup. A missing non-kernel
+/// process receives a deny-all policy rather than losing its restrictions.
+pub fn current_lookup() -> Lookup {
+    let pid = sched::current_pid();
+    let t = TABLE.lock();
+    match t.procs.get(&pid) {
+        Some(p) => p.lookup(),
+        None if pid == KERNEL_PID => Lookup::kernel(),
+        None => Lookup { path_policy: Some(Arc::new(PathPolicy::default())), ..Lookup::kernel() },
+    }
 }
 
 pub fn set_current_cwd(cwd: String) -> Result<(), Errno> {
