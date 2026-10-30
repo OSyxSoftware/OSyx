@@ -79,6 +79,15 @@ pub fn spawn_restricted(args: u64, policy: u64) -> Result<u64, Errno> {
     if p.path_count > MAX_PATH_RULES || p.syscall_count > MAX_SYSCALL_RULES {
         return Err(Errno::InvalidArgument);
     }
+    let broker = if p.broker_handle == HANDLE_NONE {
+        None
+    } else {
+        let object = process::get_object(p.broker_handle)?;
+        if !matches!(object, Object::Channel(_)) {
+            return Err(Errno::InvalidArgument);
+        }
+        Some(object)
+    };
     let mut rules = Vec::with_capacity(p.path_count as usize);
     for i in 0..p.path_count {
         let offset = i.checked_mul(core::mem::size_of::<PathRule>() as u64).ok_or(Errno::InvalidArgument)?;
@@ -101,7 +110,7 @@ pub fn spawn_restricted(args: u64, policy: u64) -> Result<u64, Errno> {
         copy_from_user(bytes, p.syscalls)?;
     }
     let req = ExecRequest::from_user(args)?;
-    process::spawn_restricted(sched::current_pid(), &req, paths, Arc::new(SyscallPolicy::new(&allowed))).map_err(|e| e.errno())
+    process::spawn_restricted(sched::current_pid(), &req, paths, Arc::new(SyscallPolicy::new(&allowed)), broker).map_err(|e| e.errno())
 }
 
 /// Reads standard input (handle 0) when it was redirected.

@@ -23,12 +23,20 @@ pub struct PathRule {
 
 /// Pointer/count pairs. The kernel copies each array and path before spawn.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct SpawnPolicy {
     pub paths: u64,
     pub path_count: u64,
     pub syscalls: u64,
     pub syscall_count: u64,
+    /// Optional channel capability installed as handle 3 in the child.
+    pub broker_handle: u64,
+}
+
+impl Default for SpawnPolicy {
+    fn default() -> Self {
+        Self { paths: 0, path_count: 0, syscalls: 0, syscall_count: 0, broker_handle: crate::HANDLE_NONE }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -51,7 +59,14 @@ impl SyscallPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::SyscallPolicy;
+    use super::{PathRule, SpawnPolicy, SyscallPolicy};
+
+    #[test]
+    fn spawn_policy_layout_and_default_broker() {
+        assert_eq!(core::mem::size_of::<PathRule>(), 24);
+        assert_eq!(core::mem::size_of::<SpawnPolicy>(), 40);
+        assert_eq!(SpawnPolicy::default().broker_handle, crate::HANDLE_NONE);
+    }
 
     #[test]
     fn deny_by_default_and_support_full_syscall_number_range() {

@@ -70,10 +70,28 @@ fn main() -> i32 {
                 Ok(pid) => pid,
                 Err(_) => return 20,
             };
-            return match os_sys::wait(pid) {
-                Ok((_, status)) => status,
-                Err(_) => 21,
+            if !matches!(os_sys::wait(pid), Ok((_, 0))) { return 21; }
+            let listener = match os_sys::channel_listen("sandbox.selftest.broker") { Ok(h) => h, Err(_) => return 24 };
+            let peer = match os_sys::channel_connect("sandbox.selftest.broker") { Ok(h) => h, Err(_) => return 25 };
+            let endpoint = match os_sys::channel_accept(listener) { Ok(h) => h, Err(_) => return 26 };
+            if os_sys::channel_send(peer, b"request", &[]).is_err() { return 27; }
+            let pid = match os_sys::spawn_restricted_with_broker("/bin/worker", b"worker\0sandbox-channel\0", b"", &rules, &calls, endpoint) {
+                Ok(pid) => pid,
+                Err(_) => return 28,
             };
+            let _ = os_sys::close(endpoint);
+            if !matches!(os_sys::wait(pid), Ok((_, 0))) { return 29; }
+            let mut reply = [0u8; 16];
+            if !matches!(os_sys::channel_recv(peer, &mut reply, &mut []), Ok((5, 0))) || &reply[..5] != b"reply" { return 30; }
+            let _ = os_sys::close(peer);
+            let _ = os_sys::close(listener);
+            return 0;
+        }
+        Some("sandbox-channel") => {
+            let mut request = [0u8; 16];
+            if !matches!(os_sys::channel_recv(3, &mut request, &mut []), Ok((7, 0))) || &request[..7] != b"request" { return 31; }
+            if os_sys::channel_send(3, b"reply", &[]).is_err() { return 32; }
+            0
         }
         Some("sandbox") | Some("sandbox-child") | Some("sandbox-exec") => {
             use os_std::os::raw;

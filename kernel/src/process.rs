@@ -665,7 +665,7 @@ pub fn spawn(parent: Pid, req: &ExecRequest) -> Result<Pid, ExecError> {
 
 /// [`spawn`] with the child's handles 0, 1 and 2 set to `stdio`.
 pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 3]) -> Result<Pid, ExecError> {
-    spawn_impl(parent, req, stdio, None)
+    spawn_impl(parent, req, stdio, None, None)
 }
 
 /// Starts a kernel-owned child with both restrictions installed before image
@@ -677,13 +677,13 @@ pub(crate) fn spawn_kernel_restricted(
     paths: Arc<PathPolicy>,
     syscalls: Arc<SyscallPolicy>,
 ) -> Result<Pid, ExecError> {
-    spawn_impl(KERNEL_PID, req, [None, None, None], Some((paths, syscalls)))
+    spawn_impl(KERNEL_PID, req, [None, None, None], Some((paths, syscalls)), None)
 }
 
 /// An unrestricted parent may choose restrictions for its new child.
 /// A restricted parent cannot replace or widen its inherited policy.
-pub(crate) fn spawn_restricted(parent: Pid, req: &ExecRequest, paths: Arc<PathPolicy>, syscalls: Arc<SyscallPolicy>) -> Result<Pid, ExecError> {
-    spawn_impl(parent, req, [None, None, None], Some((paths, syscalls)))
+pub(crate) fn spawn_restricted(parent: Pid, req: &ExecRequest, paths: Arc<PathPolicy>, syscalls: Arc<SyscallPolicy>, broker: Option<Object>) -> Result<Pid, ExecError> {
+    spawn_impl(parent, req, [None, None, None], Some((paths, syscalls)), broker)
 }
 
 fn spawn_impl(
@@ -691,6 +691,7 @@ fn spawn_impl(
     req: &ExecRequest,
     stdio: [Option<Object>; 3],
     restrictions: Option<(Arc<PathPolicy>, Arc<SyscallPolicy>)>,
+    broker: Option<Object>,
 ) -> Result<Pid, ExecError> {
     if TABLE.lock().procs.len() >= MAX_PROCESSES {
         return Err(ExecError::TooManyProcesses);
@@ -716,6 +717,9 @@ fn spawn_impl(
     if cx.path_policy.is_some() && stdio.iter().flatten().any(|o| !matches!(o, Object::Pipe(_))) {
         return Err(ExecError::Load(Errno::PermissionDenied));
     }
+    if broker.as_ref().is_some_and(|o| !matches!(o, Object::Channel(_))) {
+        return Err(ExecError::Load(Errno::InvalidArgument));
+    }
     let (space, entry, rsp, path) = build_image(&cx, req)?;
     let mut p = Process::new(parent, req.name(), cx, syscall_policy, space);
     if p.syscall_policy.is_some() {
@@ -729,6 +733,9 @@ fn spawn_impl(
             if let Some(o) = o {
                 table.insert(i as u64, o);
             }
+        }
+        if let Some(channel) = broker {
+            table.insert(osyx_abi::FIRST_FILE_HANDLE, channel);
         }
     }
     if p.name == "winrun" && !req.argv.iter().any(|a| a == "-contentproc") {

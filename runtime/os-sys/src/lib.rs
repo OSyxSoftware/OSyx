@@ -643,12 +643,18 @@ mod imp {
     /// not yet provide a complete security boundary.
     /// The caller must keep each path referenced by `paths` alive for the call.
     pub fn spawn_restricted(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64]) -> Result<u64, Errno> {
+        spawn_restricted_with_broker(path, argv, envp, paths, syscalls, osyx_abi::HANDLE_NONE)
+    }
+
+    /// As `spawn_restricted`, granting one existing channel as child handle 3.
+    pub fn spawn_restricted_with_broker(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64) -> Result<u64, Errno> {
         let a = exec_args(path, argv, envp);
         let policy = osyx_abi::sandbox::SpawnPolicy {
             paths: paths.as_ptr() as u64,
             path_count: paths.len() as u64,
             syscalls: syscalls.as_ptr() as u64,
             syscall_count: syscalls.len() as u64,
+            broker_handle: broker,
         };
         decode(syscall2(nr::SPAWN_RESTRICTED, &a as *const _ as u64, &policy as *const _ as u64))
     }
