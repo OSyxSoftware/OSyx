@@ -45,6 +45,9 @@ impl<D: BlockDevice> FileSystem<D> {
         f.first_cluster = first;
         f.size = crate::le32(&e, 28);
         f.is_dir = e[11] & ATTR_DIRECTORY != 0;
+        if !f.is_dir && f.size != 0 && f.first_cluster == 0 {
+            return Err(FsError::Corrupt("nonempty file has no first cluster"));
+        }
         if f.first_cluster != 0 && !self.geo.is_valid_cluster(f.first_cluster) {
             return Err(FsError::Corrupt("file starts at an invalid cluster"));
         }

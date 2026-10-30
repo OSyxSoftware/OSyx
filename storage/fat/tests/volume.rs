@@ -355,6 +355,26 @@ fn rejects_corrupted_volumes() {
 }
 
 #[test]
+fn rejects_nonempty_file_without_first_cluster() {
+    let mut fs = fresh(64 * MIB);
+    write_file(&mut fs, "/broken.bin", b"data");
+    let g = *fs.geometry();
+    let mut image = fs.unmount().unwrap();
+    let root = (g.data_start + (g.root_cluster - 2) * g.sectors_per_cluster) as usize * 512;
+    let entry = image[root..root + g.cluster_bytes() as usize]
+        .chunks_exact(32)
+        .position(|entry| &entry[..11] == b"BROKEN  BIN")
+        .unwrap();
+    let entry = root + entry * 32;
+    image[entry + 20..entry + 22].fill(0);
+    image[entry + 26..entry + 28].fill(0);
+    let mut fs = FileSystem::mount(image).unwrap();
+    let mut file = fs.open("/broken.bin", OpenOptions::default()).unwrap();
+    assert!(matches!(fs.read(&mut file, 0, &mut [0; 1]), Err(FsError::Corrupt(_))));
+    assert!(matches!(fs.write(&mut file, 0, b"x"), Err(FsError::Corrupt(_))));
+}
+
+#[test]
 fn block_device_bounds() {
     let mut img = vec![0u8; 4096];
     let mut buf = [0u8; 512];
