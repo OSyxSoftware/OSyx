@@ -1071,6 +1071,14 @@ pub fn get_module_handle(name: Option<&str>) -> Option<u64> {
 
 /// `GetModuleFileName` of a module handle (None = the program).
 pub fn module_file_name(h: Option<u64>, exe_path: &str) -> Option<String> {
+    // A 32-bit program keeps its linker out of LOADER: the program itself
+    // is the one module whose name is known, and no other handle exists.
+    if with_loaded(|_| ()).is_none() {
+        return match h {
+            None => Some(path::to_windows(exe_path)),
+            Some(_) => None,
+        };
+    }
     with(|l| {
         let i = match h {
             None => l.exe,

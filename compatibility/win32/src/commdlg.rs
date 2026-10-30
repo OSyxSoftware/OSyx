@@ -302,7 +302,7 @@ fn browse(info: u64, wide: bool) -> u64 {
     }
     pidl
 }
-extern "win64" fn SHBrowseForFolderW(info: u64) -> u64 {
+pub(crate) extern "win64" fn SHBrowseForFolderW(info: u64) -> u64 {
     browse(info, true)
 }
 extern "win64" fn SHBrowseForFolderA(info: u64) -> u64 {

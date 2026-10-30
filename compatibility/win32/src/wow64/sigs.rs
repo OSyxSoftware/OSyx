@@ -8,7 +8,7 @@
 //!
 //! Not listed on purpose, so a program importing them fails to load with
 //! the name: functions whose structures differ between 32 and 64 bits
-//! (MSG, PAINTSTRUCT, WNDCLASSW, SHFILEINFOW, STARTUPINFOW, BROWSEINFOW),
+//! (MSG, PAINTSTRUCT, WNDCLASSW, SHFILEINFOW, BROWSEINFOW),
 //! that call back into 32-bit code (window and thread procedures), that
 //! return 64-bit code addresses (GetProcAddress) or load modules
 //! (LoadLibraryExW), and variadic ones (wsprintf). CreateThread is listed:
@@ -28,6 +28,9 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(ExitProcess, [Uint], Void),
     // Bound to wow64::CreateThread32: the start routine is 32-bit code.
     sig!(CreateThread, [Handle, Uint, Uint, Uint, Uint, Ptr], U32),
+    // Bound to wow64::CreateProcessW32: STARTUPINFOW and PROCESS_INFORMATION
+    // have 4-byte handles on 32-bit callers.
+    sig!(CreateProcessW, [Ptr, Ptr, Ptr, Ptr, Int, Uint, Ptr, Ptr, Ptr, Ptr], U32),
     sig!(GetExitCodeThread, [Handle, Ptr], U32),
     sig!(AdjustTokenPrivileges, [Handle, Int, Ptr, Uint, Ptr, Ptr], U32),
     sig!(CloseClipboard, [], U32),

@@ -47,6 +47,27 @@ __declspec(dllimport) long __stdcall RegQueryValueExW(HKEY key, const WCHAR *nam
 __declspec(dllimport) long __stdcall RegCloseKey(HKEY key);
 __declspec(dllimport) long __stdcall RegDeleteKeyW(HKEY key, const WCHAR *sub);
 
+typedef struct {
+    DWORD cb;
+    WCHAR *reserved, *desktop, *title;
+    DWORD x, y, xsize, ysize, xchars, ychars, fill, flags;
+    unsigned short show, cb_reserved2;
+    unsigned char *reserved2;
+    HANDLE std_in, std_out, std_err;
+} STARTUPINFOW;
+typedef struct {
+    HANDLE hProcess, hThread;
+    DWORD dwProcessId, dwThreadId;
+} PROCESS_INFORMATION;
+_Static_assert(sizeof(STARTUPINFOW) == 68, "32-bit STARTUPINFOW");
+_Static_assert(sizeof(PROCESS_INFORMATION) == 16, "32-bit PROCESS_INFORMATION");
+
+__declspec(dllimport) BOOL __stdcall CreateProcessW(const WCHAR *app, WCHAR *cmdline, void *psa, void *tsa, BOOL inherit,
+                                                    DWORD flags, void *env, const WCHAR *cwd, STARTUPINFOW *si,
+                                                    PROCESS_INFORMATION *pi);
+__declspec(dllimport) DWORD __stdcall WaitForSingleObject(HANDLE h, DWORD ms);
+__declspec(dllimport) BOOL __stdcall GetExitCodeProcess(HANDLE process, DWORD *code);
+
 static HANDLE out;
 static int failed;
 
@@ -145,6 +166,30 @@ void __stdcall start(void) {
                                   got == value && size == 4);
     check("RegCloseKey", e == 0 && RegCloseKey(key) == 0);
     RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\OSyx\\api32");
+
+    /* CreateProcessW: the 32-bit STARTUPINFOW (68 bytes) and
+     * PROCESS_INFORMATION (16 bytes, 4-byte handles) are converted; the
+     * child is hello32.exe from this program's directory, which exits 7. */
+    {
+        STARTUPINFOW si;
+        PROCESS_INFORMATION pi;
+        WCHAR cmdline[] = L"hello32.exe";
+        for (int i = 0; i < (int)sizeof si; i++) ((char *)&si)[i] = 0;
+        for (int i = 0; i < (int)sizeof pi; i++) ((char *)&pi)[i] = 0;
+        si.cb = sizeof si;
+        BOOL made = CreateProcessW(0, cmdline, 0, 0, 0, 0, 0, 0, &si, &pi);
+        check("CreateProcessW starts a 32-bit child", made && pi.hProcess && pi.hThread && pi.dwProcessId);
+        DWORD code = 0;
+        if (made) {
+            WaitForSingleObject(pi.hProcess, 20000);
+            GetExitCodeProcess(pi.hProcess, &code);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        check(with_hex(line, "GetExitCodeProcess returns the child's exit code", code), made && code == 7);
+        BOOL missing = CreateProcessW(L"no-such-program32.exe", 0, 0, 0, 0, 0, 0, 0, &si, &pi);
+        check("CreateProcessW reports a missing program", !missing);
+    }
 
     say(failed ? "api32: summary FAIL" : "api32: summary ok", "");
     ExitProcess(failed);

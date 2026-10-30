@@ -1,4 +1,4 @@
-//! The 32-bit (PE32) API bridge.
+﻿//! The 32-bit (PE32) API bridge.
 //!
 //! A PE32 program runs in IA-32e compatibility mode in the same process as
 //! `winrun`. Every import is bound to a 12-byte stub in low memory; the stub
@@ -622,10 +622,86 @@ extern "win64" fn thread32_main(arg: u64) -> u32 {
     call32(start, &[param])
 }
 
+/// Whether this process runs a 32-bit program (the bridge is live): host
+/// code that reads caller structures with pointer-sized fields must then
+/// use the 32-bit layout.
+pub(crate) fn is_active() -> bool {
+    !ACTIVE.load(Ordering::Relaxed).is_null()
+}
+
+/// STARTUPINFOW of a 32-bit caller (68 bytes) as the host's 64-bit layout
+/// (104 bytes): dwFlags moves to 60 and the three handles, sign-extended,
+/// to 80, 88 and 96. The string and reserved pointers are not read by the
+/// host's `CreateProcessW`, so they stay zero.
+fn startupinfo_to64(si: *const u8) -> Option<[u8; 104]> {
+    // SAFETY: the caller's STARTUPINFOW; cb says how much of it exists.
+    unsafe {
+        let rd = |at: usize| core::ptr::read_unaligned(si.add(at).cast::<u32>());
+        if rd(0) < 68 {
+            return None;
+        }
+        let mut out = [0u8; 104];
+        out[0..4].copy_from_slice(&104u32.to_le_bytes());
+        out[60..64].copy_from_slice(&rd(44).to_le_bytes());
+        out[64..66].copy_from_slice(&core::ptr::read_unaligned(si.add(48).cast::<u16>()).to_le_bytes());
+        for (i, at) in [56, 60, 64].into_iter().enumerate() {
+            out[80 + 8 * i..88 + 8 * i].copy_from_slice(&(rd(at) as i32 as i64 as u64).to_le_bytes());
+        }
+        Some(out)
+    }
+}
+
+/// CreateProcessW for 32-bit callers: the STARTUPINFOW and
+/// PROCESS_INFORMATION differ in layout (4-byte handles), everything else
+/// is a pointer or integer the signature widens.
+#[allow(non_snake_case, clippy::too_many_arguments)] // the Win32 name
+extern "win64" fn CreateProcessW32(
+    app: *const u16,
+    cmdline: *mut u16,
+    psa: u64,
+    tsa: u64,
+    inherit: i32,
+    flags: u32,
+    env: u64,
+    cwd: *const u16,
+    startup: *const u8,
+    info: *mut u32,
+) -> i32 {
+    const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
+    if startup.is_null() || info.is_null() || flags & EXTENDED_STARTUPINFO_PRESENT != 0 {
+        return crate::kernel32::fail(if flags & EXTENDED_STARTUPINFO_PRESENT != 0 { crate::error::ERROR_NOT_SUPPORTED } else { crate::error::ERROR_INVALID_PARAMETER }, 0);
+    }
+    let Some(si) = startupinfo_to64(startup) else {
+        return crate::kernel32::fail(crate::error::ERROR_INVALID_PARAMETER, 0);
+    };
+    let mut pi = [0u64; 3];
+    let r = crate::process::CreateProcessW(app, cmdline, psa, tsa, inherit, flags, env, cwd, si.as_ptr(), pi.as_mut_ptr());
+    if r != 0 {
+        // Handles are small table indices; a value that does not fit would
+        // be silently truncated, so refuse it instead.
+        if pi[0] > u32::MAX as u64 || pi[1] > u32::MAX as u64 {
+            let _ = crate::kernel32::CloseHandle(pi[0]);
+            let _ = crate::kernel32::CloseHandle(pi[1]);
+            return crate::kernel32::fail(crate::error::ERROR_NOT_ENOUGH_MEMORY, 0);
+        }
+        // PROCESS_INFORMATION (16 bytes): hProcess, hThread, dwProcessId, dwThreadId.
+        // SAFETY: the caller's 16-byte PROCESS_INFORMATION.
+        unsafe {
+            let ids = pi[2];
+            core::ptr::write_unaligned(info, pi[0] as u32);
+            core::ptr::write_unaligned(info.add(1), pi[1] as u32);
+            core::ptr::write_unaligned(info.add(2), ids as u32);
+            core::ptr::write_unaligned(info.add(3), (ids >> 32) as u32);
+        }
+    }
+    r
+}
+
 /// Host functions that replace the built-in one for 32-bit callers.
 fn host_override(symbol: &str) -> Option<u64> {
     match symbol {
         "CreateThread" => Some(CreateThread32 as *const () as u64),
+        "CreateProcessW" => Some(CreateProcessW32 as *const () as u64),
         _ => None,
     }
 }
