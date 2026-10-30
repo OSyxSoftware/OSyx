@@ -32,3 +32,18 @@ fn cff_custom_font_rasterizes_visible_glyphs() {
 fn malformed_font_is_rejected() {
     assert!(osyx_font::outline(b"not a font", 0, 1).is_none());
 }
+
+#[test]
+fn cff2_default_instance_rasterizes_visible_glyph() {
+    let bytes = include_bytes!("fixtures/SourceSansVariable-Roman.otf");
+    let face = ttf::Face::parse(Arc::new(bytes.to_vec()), 0).expect("parse CFF2 OpenType");
+    assert!(face.table(b"CFF2").is_some());
+    assert!(face.has_outlines());
+    let glyph = face.glyph_index('A' as u32);
+    assert_ne!(glyph, 0);
+    let scale = 20 * 256 * 65536 / i64::from(face.units_per_em);
+    let transform = raster::Xform { a: scale, b: 0, c: 0, d: -scale, dx: 0, dy: 20 * 256 };
+    let lines = raster::flatten(&face.outline(glyph), &transform);
+    let bounds = raster::bounds(&lines).expect("visible bounds");
+    assert!(raster::coverage(&lines, bounds).iter().any(|&pixel| pixel != 0));
+}

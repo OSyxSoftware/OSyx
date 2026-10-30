@@ -6,4 +6,4 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ttf-parser = { version = "0.25.1", default-features = false, features = ["no-std-float"] }
+ttf-parser = { version = "0.25.1", default-features = false, features = ["no-std-float", "variable-fonts"] }

@@ -107,7 +107,7 @@ impl Face {
     }
 
     pub fn has_outlines(&self) -> bool {
-        self.has_glyf() || self.table(b"CFF ").is_some()
+        self.has_glyf() || self.table(b"CFF ").is_some() || self.table(b"CFF2").is_some()
     }
 
     pub fn table(&self, t: &[u8; 4]) -> Option<&[u8]> {
