@@ -33,6 +33,7 @@ mod eventlog;
 mod exceptions;
 mod files;
 mod fls;
+mod ini;
 mod iphlpapi;
 mod kernel32;
 mod keyed;
@@ -235,6 +236,13 @@ fn main() -> i32 {
             env.push((String::from(k), String::from(v)));
         }
     }
+    // A 32-bit program reads pointers the runtime hands out (command line,
+    // environment, heap blocks): from here on all memory the runtime maps
+    // must be below 4 GiB, above the program, the bridge arena and winrun.
+    let pe32_bytes = os_std::fs::read(&exe).ok().filter(|b| PeFile::parse_any(b).is_ok_and(|pe| pe.is_pe32()));
+    if pe32_bytes.is_some() {
+        os_sys::set_low_map(0x5000_0000);
+    }
     let env_strings: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     kernel32::init_process(&exe, &cmd, env);
     winsta::clear_markers();
@@ -243,18 +251,16 @@ fn main() -> i32 {
     // 0x400000, must stay below 4 GiB and is entered in compatibility mode
     // through the bridge. Read the file to tell the widths apart; the PE32+
     // path below reads it again exactly as before.
-    if let Ok(bytes) = os_std::fs::read(&exe) {
-        if PeFile::parse_any(&bytes).is_ok_and(|pe| pe.is_pe32()) {
-            let mut args = args.clone();
-            if let Some(a) = args.first_mut() {
-                *a = exe.clone();
-            }
-            if let Err(e) = loader::run_pe32(bytes, &args, &cmd, &env_strings) {
-                eprintln!("winrun: {e}");
-                return 126;
-            }
-            return 0;
+    if let Some(bytes) = pe32_bytes {
+        let mut args = args.clone();
+        if let Some(a) = args.first_mut() {
+            *a = exe.clone();
         }
+        if let Err(e) = loader::run_pe32(bytes, &args, &cmd, &env_strings) {
+            eprintln!("winrun: {e}");
+            return 126;
+        }
+        return 0;
     }
     let started = match loader::start(&exe, &cmd, &env_strings) {
         Ok(s) => s,
