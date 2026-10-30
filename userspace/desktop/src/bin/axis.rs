@@ -14,8 +14,10 @@
 //! ```
 //!
 //! Programs inherit the shell's standard streams, so their output appears
-//! in the terminal. Not implemented yet: pipelines, redirection, blocks
-//! (`if` / `for`), job control.
+//! in the terminal. `<`, `>` and `>>` redirect standard input/output of a
+//! command (built-ins included) and `|` connects programs into a pipeline.
+//! Not implemented yet: built-ins in a pipeline, blocks (`if` / `for`), job
+//! control.
 
 #![no_std]
 #![no_main]
@@ -25,7 +27,8 @@ use os_std::os::raw::HANDLE_NONE;
 use os_std::prelude::*;
 use os_std::process::{Command, ExitStatus};
 use os_std::time::Instant;
-use os_std::{env, io, os, system};
+use os_std::{env, io, ipc, os, system};
+use osyx_shell::{parse, Stage};
 
 os_std::entry!(main);
 
@@ -153,19 +156,19 @@ impl Shell {
             }
             return Flow::Continue;
         }
-        let words = match self.words(line) {
-            Ok(w) => w,
+        let stages = match parse(line) {
+            Ok(s) => s,
             Err(e) => {
                 self.fail(&e);
                 return Flow::Continue;
             }
         };
-        let Some((cmd, args)) = words.split_first() else { return Flow::Continue };
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.last = match self.builtin(cmd, &args) {
-            Some(Ok(code)) => code,
-            Some(Err(Exit)) => return Flow::Exit,
-            None => self.external(cmd, &args),
+        if stages.is_empty() {
+            return Flow::Continue;
+        }
+        self.last = match self.pipeline(&stages) {
+            Ok(code) => code,
+            Err(Exit) => return Flow::Exit,
         };
         Flow::Continue
     }
@@ -293,6 +296,7 @@ impl Shell {
                 println!("  volume [0-100|mute|unmute], beep [HZ [MS]], play FILE.wav: sound");
                 println!("  dmesg [WORD]: kernel log (only lines containing WORD), e.g. `dmesg iwm`");
                 println!("Statements: name = expr   print(expr, ...)   $name in commands, $? = last status");
+                println!("Redirection: cmd < in, cmd > out, cmd >> out; programs: cmd | cmd | ...");
                 println!("Network: ping HOST, net list|info|configure, dns lookup NAME, netstat [-a|-s], nc");
                 println!("Other words run programs from /bin, /usr/bin and /system/bin.");
                 Ok(0)
@@ -399,13 +403,15 @@ impl Shell {
         }))
     }
 
+    fn program(&self, cmd: &str) -> Option<String> {
+        if cmd.contains('/') {
+            return Some(String::from(cmd));
+        }
+        SEARCH.iter().map(|d| format!("{d}/{cmd}")).find(|p| fs::metadata(p).is_ok_and(|m| m.is_file()))
+    }
+
     fn external(&mut self, cmd: &str, args: &[&str]) -> i32 {
-        let path = if cmd.contains('/') {
-            Some(String::from(cmd))
-        } else {
-            SEARCH.iter().map(|d| format!("{d}/{cmd}")).find(|p| fs::metadata(p).is_ok_and(|m| m.is_file()))
-        };
-        let Some(path) = path else {
+        let Some(path) = self.program(cmd) else {
             eprintln!("axis: {cmd}: command not found (try `help`)");
             return 127;
         };
@@ -423,6 +429,234 @@ impl Shell {
             }
         }
     }
+
+    // ---- pipelines and redirections -------------------------------------------
+
+    /// Runs a parsed line: one command with redirections, or a pipeline.
+    fn pipeline(&mut self, stages: &[Stage]) -> Result<i32, Exit> {
+        let mut cmds = Vec::with_capacity(stages.len());
+        for st in stages {
+            match self.words(&st.command) {
+                Ok(w) if !w.is_empty() => cmds.push(w),
+                Ok(_) => {
+                    self.fail("missing command");
+                    return Ok(2);
+                }
+                Err(e) => {
+                    self.fail(&e);
+                    return Ok(2);
+                }
+            }
+        }
+        if stages.len() == 1 {
+            return self.command(&stages[0], &cmds[0]);
+        }
+        for words in &cmds {
+            if is_builtin(&words[0]) {
+                self.fail(&format!("{}: built-in commands cannot be used in a pipeline", words[0]));
+                return Ok(2);
+            }
+        }
+        self.pipe(stages, &cmds)
+    }
+
+    /// Expands a redirection target to its single path word.
+    fn target(&self, raw: &str) -> Result<String, String> {
+        let mut words = self.words(raw)?;
+        if words.len() != 1 {
+            return Err(String::from("redirection target must be a single word"));
+        }
+        Ok(words.pop().unwrap())
+    }
+
+    fn input(&self, st: &Stage) -> Result<Option<File>, String> {
+        match &st.stdin {
+            None => Ok(None),
+            Some(raw) => {
+                let path = self.target(raw)?;
+                File::open(&path).map(Some).map_err(|e| format!("{path}: {e}"))
+            }
+        }
+    }
+
+    fn output(&self, st: &Stage) -> Result<Option<File>, String> {
+        match &st.stdout {
+            Some(r) => {
+                let path = self.target(&r.path)?;
+                let f = if r.append {
+                    File::options().write(true).append(true).create(true).open(&path)
+                } else {
+                    File::create(&path)
+                };
+                f.map(Some).map_err(|e| format!("{path}: {e}"))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// One command of a line, with its redirections.
+    fn command(&mut self, st: &Stage, words: &[String]) -> Result<i32, Exit> {
+        let cmd = words[0].as_str();
+        let args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+        let input = match self.input(st) {
+            Ok(f) => f,
+            Err(e) => {
+                self.fail(&e);
+                return Ok(2);
+            }
+        };
+        let output = match self.output(st) {
+            Ok(f) => f,
+            Err(e) => {
+                self.fail(&e);
+                return Ok(2);
+            }
+        };
+        if is_builtin(cmd) {
+            // Built-ins read and print through `os_std::io`, so a temporary
+            // redirect gives them the same file the programs would get.
+            io::redirect_stdin(input.as_ref().map(File::handle));
+            io::redirect_stdout(output.as_ref().map(File::handle));
+            let r = self.builtin(cmd, &args);
+            io::redirect_stdin(None);
+            io::redirect_stdout(None);
+            return match r {
+                Some(Ok(code)) => Ok(code),
+                Some(Err(Exit)) => Err(Exit),
+                None => Ok(127),
+            };
+        }
+        let Some(path) = self.program(cmd) else {
+            eprintln!("axis: {cmd}: command not found (try `help`)");
+            return Ok(127);
+        };
+        if input.is_none() && output.is_none() {
+            return Ok(self.external(cmd, &args));
+        }
+        let mut c = Command::new(&path);
+        c.arg0(cmd).args(&args);
+        let stdio = [input.as_ref().map_or(osyx_abi::STDIN, File::handle), output.as_ref().map_or(osyx_abi::STDOUT, File::handle), osyx_abi::STDERR];
+        match c.spawn_stdio(stdio).and_then(|ch| ch.wait()) {
+            Ok(st) => Ok(report(cmd, st)),
+            Err(e) => {
+                eprintln!("axis: {cmd}: {e}");
+                Ok(126)
+            }
+        }
+    }
+
+    /// Every stage after the first reads the previous stage's pipe.
+    fn pipe(&mut self, stages: &[Stage], cmds: &[Vec<String>]) -> Result<i32, Exit> {
+        let mut inputs = Vec::with_capacity(stages.len());
+        let mut outputs = Vec::with_capacity(stages.len());
+        for st in stages {
+            match (self.input(st), self.output(st)) {
+                (Ok(i), Ok(o)) => {
+                    inputs.push(i);
+                    outputs.push(o);
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    self.fail(&e);
+                    return Ok(2);
+                }
+            }
+        }
+        let mut paths = Vec::with_capacity(stages.len());
+        for words in cmds {
+            let Some(p) = self.program(&words[0]) else {
+                eprintln!("axis: {}: command not found (try `help`)", words[0]);
+                return Ok(127);
+            };
+            paths.push(p);
+        }
+        let mut links = Vec::with_capacity(stages.len() - 1);
+        for _ in 1..stages.len() {
+            match ipc::pipe() {
+                Ok(p) => links.push(p),
+                Err(e) => {
+                    self.fail(&format!("pipe: {e}"));
+                    return Ok(2);
+                }
+            }
+        }
+        let mut children = Vec::with_capacity(stages.len());
+        for (i, words) in cmds.iter().enumerate() {
+            let stdin = inputs[i].as_ref().map_or_else(|| if i > 0 { links[i - 1].0.handle() } else { osyx_abi::STDIN }, File::handle);
+            let stdout = outputs[i]
+                .as_ref()
+                .map_or_else(|| if i + 1 < cmds.len() { links[i].1.handle() } else { osyx_abi::STDOUT }, File::handle);
+            let mut c = Command::new(&paths[i]);
+            c.arg0(&words[0]).args(&words[1..]);
+            match c.spawn_stdio([stdin, stdout, osyx_abi::STDERR]) {
+                Ok(ch) => children.push(ch),
+                Err(e) => {
+                    eprintln!("axis: {}: {e}", words[0]);
+                    drop(links);
+                    drop(inputs);
+                    drop(outputs);
+                    for ch in children {
+                        let _ = ch.wait();
+                    }
+                    return Ok(126);
+                }
+            }
+        }
+        // Our copies of the pipe ends would keep readers waiting for end of
+        // data; the children hold their own.
+        drop(links);
+        drop(inputs);
+        drop(outputs);
+        let mut status = 0;
+        for (i, ch) in children.into_iter().enumerate() {
+            status = match ch.wait() {
+                Ok(st) => report(&cmds[i][0], st),
+                Err(e) => {
+                    eprintln!("axis: {}: {e}", cmds[i][0]);
+                    126
+                }
+            };
+        }
+        Ok(status)
+    }
+}
+
+/// Commands AXIS answers itself instead of running a program.
+fn is_builtin(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "exit"
+            | "help"
+            | "pwd"
+            | "cd"
+            | "echo"
+            | "ls"
+            | "cat"
+            | "mkdir"
+            | "rmdir"
+            | "rm"
+            | "touch"
+            | "mv"
+            | "cp"
+            | "stat"
+            | "ps"
+            | "kill"
+            | "mounts"
+            | "df"
+            | "devices"
+            | "lsdev"
+            | "wifi"
+            | "volume"
+            | "dmesg"
+            | "beep"
+            | "play"
+            | "free"
+            | "uptime"
+            | "uname"
+            | "whoami"
+            | "env"
+            | "history"
+            | "clear"
+    )
 }
 
 struct Exit;
@@ -515,6 +749,18 @@ fn mode_string(mode: u32, dir: bool) -> String {
 }
 
 fn cmd_cat(args: &[&str]) -> os_std::error::Result<i32> {
+    if args.is_empty() {
+        let mut input = io::stdin();
+        let mut output = io::stdout();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = io::Read::read(&mut input, &mut buf)?;
+            if n == 0 {
+                return Ok(0);
+            }
+            io::Write::write_all(&mut output, &buf[..n])?;
+        }
+    }
     each(args, |a| {
         let data = fs::read(a)?;
         let text = String::from_utf8_lossy(&data);

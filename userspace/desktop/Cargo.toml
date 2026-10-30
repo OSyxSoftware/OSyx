@@ -53,5 +53,6 @@ prism-proto = { path = "../../graphics/prism-proto" }
 osyx-install = { path = "../install" }
 osyx-crypto = { path = "../../shared/crypto" }
 osyx-filekit = { path = "../filekit" }
+osyx-shell = { path = "../shell" }
 osyx-7z = { path = "../../storage/sevenz" }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }

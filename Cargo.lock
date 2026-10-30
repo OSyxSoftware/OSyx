@@ -982,6 +982,7 @@ dependencies = [
  "osyx-gfx",
  "osyx-input",
  "osyx-install",
+ "osyx-shell",
  "osyx-ui",
  "prism-client",
  "prism-core",
@@ -1101,6 +1102,10 @@ version = "0.1.0"
 dependencies = [
  "osyx-pe",
 ]
+
+[[package]]
+name = "osyx-shell"
+version = "0.1.0"
 
 [[package]]
 name = "osyx-tmpfs"

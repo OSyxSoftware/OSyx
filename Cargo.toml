@@ -37,6 +37,7 @@ members = [
     "userspace/filekit",
     "userspace/install",
     "userspace/nettools",
+    "userspace/shell",
     "userspace/web",
     "third_party/aml",
 ]
@@ -70,6 +71,7 @@ default-members = [
     "storage/tmpfs",
     "storage/vfs",
     "userspace/filekit",
+    "userspace/shell",
     "userspace/battery",
     "userspace/install",
 ]

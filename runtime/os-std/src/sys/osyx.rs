@@ -21,6 +21,10 @@ pub fn read_stdin(buf: &mut [u8]) -> Result<usize> {
     os_sys::read(osyx_abi::STDIN, buf).map_err(Error::from)
 }
 
+pub fn read_handle(handle: u64, buf: &mut [u8]) -> Result<usize> {
+    os_sys::read(handle, buf).map_err(Error::from)
+}
+
 pub fn exit(code: i32) -> ! {
     os_sys::exit(code)
 }

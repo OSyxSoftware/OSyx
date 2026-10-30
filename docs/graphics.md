@@ -158,8 +158,11 @@ AXIS is a first, small version of the shell: built-in commands on
 `os_std::fs` (`ls cat cd mkdir rm mv cp stat ps kill mounts free uptime …`),
 Python-style `name = expr` and `print(...)`, `$name` expansion, and every
 other word runs a program from `/bin`, `/usr/bin`, `/system/bin` with the
-terminal's pipes as its standard streams. Pipelines, redirection, blocks and
-job control are not implemented yet.
+terminal's pipes as its standard streams. `<`, `>` and `>>` redirect the
+standard input and output of a command — built-ins included, using
+`os_std::io::redirect_stdin`/`redirect_stdout` — and `|` connects programs
+into a pipeline. Still open: built-ins inside a pipeline, blocks (`if` /
+`for`) and job control.
 
 ## Boot
 
