@@ -22,6 +22,14 @@ fn partition_window_rejects_out_of_bounds_and_unaligned_io() {
 }
 
 #[test]
+fn memory_disk_rejects_overflowing_sector_offsets() {
+    let mut disk = vec![0u8; 512];
+    assert!(Disk::read(&mut disk, u64::MAX, &mut [0; 512]).is_err());
+    assert!(Disk::write(&mut disk, u64::MAX, &[1; 512]).is_err());
+    assert!(disk.iter().all(|&b| b == 0));
+}
+
+#[test]
 fn plan_rejects_overflowing_partition_sizes() {
     assert!(plan(u64::MAX, Layout::Manual { esp_mib: u64::MAX, root_mib: 0 }).is_err());
     assert!(plan(u64::MAX, Layout::Manual { esp_mib: 256, root_mib: u64::MAX }).is_err());

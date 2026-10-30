@@ -86,18 +86,23 @@ impl Disk for Vec<u8> {
         self.len() as u64 / SECTOR
     }
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> core::result::Result<(), String> {
-        let at = (lba * SECTOR) as usize;
-        buf.copy_from_slice(self.get(at..at + buf.len()).ok_or("read past the end")?);
+        let range = disk_range(lba, buf.len()).ok_or("read past the end")?;
+        buf.copy_from_slice(self.get(range).ok_or("read past the end")?);
         Ok(())
     }
     fn write(&mut self, lba: u64, buf: &[u8]) -> core::result::Result<(), String> {
-        let at = (lba * SECTOR) as usize;
-        self.get_mut(at..at + buf.len()).ok_or("write past the end")?.copy_from_slice(buf);
+        let range = disk_range(lba, buf.len()).ok_or("write past the end")?;
+        self.get_mut(range).ok_or("write past the end")?.copy_from_slice(buf);
         Ok(())
     }
     fn flush(&mut self) -> core::result::Result<(), String> {
         Ok(())
     }
+}
+
+fn disk_range(lba: u64, len: usize) -> Option<core::ops::Range<usize>> {
+    let start = usize::try_from(lba.checked_mul(SECTOR)?).ok()?;
+    Some(start..start.checked_add(len)?)
 }
 
 /// A partition of a [`Disk`] seen as a device of its own.
