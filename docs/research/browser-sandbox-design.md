@@ -4,9 +4,11 @@ Status: design only. Gecko content processes are not currently sandboxed.
 
 The VFS has experimental path checks when an explicit lookup policy is
 supplied. A kernel-only test hook creates a process with both policies before
-loading its image; descendants inherit them. Open handles and IPC are not
-confined, so this is not a browser sandbox. Installation and inheritance
-need adversarial runtime and concurrency tests.
+loading its image; descendants inherit them. Restricted children cannot inherit
+file stdio handles, receive file-backed sections over IPC, or publish shared
+images. Other handle and IPC paths remain unreviewed, so this is not a browser
+sandbox. Installation and inheritance need adversarial runtime and concurrency
+tests.
 
 A deny-by-default syscall allowlist is checked before the dispatcher's fast
 paths and inherited by children. Only the kernel test hook can assign a

@@ -270,6 +270,11 @@ pub fn channel_recv(handle: u64, msg: u64) -> Result<u64, Errno> {
         return Err(Errno::Fault);
     }
     let received = c.recv(cap, max_objects)?;
+    // A transferred file section can bypass the receiver's path policy.
+    // Reject the whole message until a broker can validate such grants.
+    if process::current_path_restricted() && received.objects.iter().any(|o| matches!(o, Object::FileMap(_) | Object::File(_))) {
+        return Err(Errno::PermissionDenied);
+    }
     let len = received.data.len();
     copy_to_user(m.data, &received.data)?;
     let handles = if received.objects.is_empty() { Vec::new() } else { process::add_objects(received.objects)? };
@@ -349,6 +354,11 @@ pub fn image_query(file: u64) -> Result<u64, Errno> {
 }
 
 pub fn image_publish(file: u64, addr: u64, len: u64) -> Result<u64, Errno> {
+    // Image cache is shared by uid and its published bytes are not verified.
+    // A restricted process must not poison images used by its broker.
+    if process::current_path_restricted() {
+        return Err(Errno::PermissionDenied);
+    }
     let key = image_key(file, addr, len)?;
     if crate::image::lookup(&key).is_some() {
         return Err(Errno::AlreadyExists);

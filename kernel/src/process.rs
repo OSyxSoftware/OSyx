@@ -706,6 +706,11 @@ fn spawn_impl(
         cx.path_policy = Some(paths);
         syscall_policy = Some(syscalls);
     }
+    // File handles can outlive a rename or originate outside the child's
+    // view. Pipes remain available for explicit parent-child communication.
+    if cx.path_policy.is_some() && stdio.iter().flatten().any(|o| !matches!(o, Object::Pipe(_))) {
+        return Err(ExecError::Load(Errno::PermissionDenied));
+    }
     let (space, entry, rsp, path) = build_image(&cx, req)?;
     let mut p = Process::new(parent, req.name(), cx, syscall_policy, space);
     if p.syscall_policy.is_some() {
@@ -2205,6 +2210,16 @@ pub fn syscall_allowed(number: u64) -> bool {
     match t.procs.get(&pid) {
         Some(p) => p.syscall_policy.as_ref().is_none_or(|policy| policy.allows(number)),
         None => pid == KERNEL_PID,
+    }
+}
+
+/// Missing non-kernel processes fail closed.
+pub fn current_path_restricted() -> bool {
+    let pid = sched::current_pid();
+    let t = TABLE.lock();
+    match t.procs.get(&pid) {
+        Some(p) => p.path_policy.is_some(),
+        None => pid != KERNEL_PID,
     }
 }
 

@@ -67,6 +67,19 @@ fn main() -> i32 {
             if raw::raw_syscall(raw::nr::GETTID, 0, 0, 0).is_err() {
                 return 12;
             }
+            let file = match raw::open("/bin/worker", raw::OPEN_READ, 0) {
+                Ok(file) => file,
+                Err(_) => return 14,
+            };
+            if raw::raw_syscall(raw::nr::IMAGE_PUBLISH, file, 0, 0) != Err(raw::Errno::PermissionDenied) {
+                return 15;
+            }
+            let result = Command::new("/bin/worker").arg("exit").arg("0")
+                .spawn_stdio([file, raw::HANDLE_NONE, raw::HANDLE_NONE]);
+            if !matches!(result, Err(ref error) if error.kind() == os_std::error::ErrorKind::PermissionDenied) {
+                return 16;
+            }
+            let _ = raw::close(file);
             if args[1] == "sandbox" {
                 return match Command::new("/bin/worker").arg("sandbox-child").status() {
                     Ok(status) => status.raw(),
