@@ -321,7 +321,9 @@ fn clipboard_hdrop_files(entries: &[ClipEntry]) -> Option<(Vec<String>, bool)> {
         let raw = win.as_bytes();
         if raw.len() < 3 || !raw[0].eq_ignore_ascii_case(&b'c') || raw[1] != b':' || raw[2] != b'\\' { return None; }
         let path = win[2..].replace('\\', "/");
-        if path.split('/').any(|part| part == "." || part == "..") { return None; }
+        if path.split('/').any(|part| part == "." || part == ".."
+            || part.contains([':', '<', '>', '"', '|', '?', '*'])
+            || part.ends_with(['.', ' '])) { return None; }
         paths.push(path);
         at = end + 1;
         if at >= units.len() { return None; }
@@ -1268,6 +1270,11 @@ mod tests {
         for u in "C:\\..\\secret\0\0".encode_utf16() { invalid.extend_from_slice(&u.to_le_bytes()); }
         let invalid = ClipEntry { format: 15, name: None, data: invalid };
         assert_eq!(clipboard_files(&[invalid]), None);
+        let mut invalid = alloc::vec![0u8; 20];
+        invalid[0..4].copy_from_slice(&20u32.to_le_bytes());
+        invalid[16..20].copy_from_slice(&1u32.to_le_bytes());
+        for u in "C:\\name:stream\0\0".encode_utf16() { invalid.extend_from_slice(&u.to_le_bytes()); }
+        assert_eq!(clipboard_files(&[ClipEntry { format: 15, name: None, data: invalid }]), None);
         let invalid = clipboard_files_entry(&[String::from("/tmp/a\\b")], false).unwrap();
         assert!(clipboard_hdrop(&[invalid]).is_none());
         assert_eq!(clipboard_files(&[entry.clone()]), Some((paths, true)));
