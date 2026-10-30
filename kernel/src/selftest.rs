@@ -37,7 +37,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 28] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 29] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -59,6 +59,7 @@ pub fn run(boot: &BootData) -> Summary {
         ("VFS on tmpfs: files and directories", &crate::selftest_fs::tmpfs_files),
         ("VFS: symlinks, cwd and permissions", &crate::selftest_fs::links_cwd_perms),
         ("VFS: restricted opens", &crate::selftest_fs::restricted_opens),
+        ("restricted process: syscall and filesystem inheritance", &crate::selftest_fs::restricted_process),
         ("VFS: mount, unmount and limits", &crate::selftest_fs::mount_unmount),
         ("devfs devices and /dev/random", &crate::selftest_fs::devfs),
         ("FAT32 /boot through the VFS", &crate::selftest_fs::fat_boot),

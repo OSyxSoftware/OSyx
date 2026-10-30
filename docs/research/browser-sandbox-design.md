@@ -3,15 +3,15 @@
 Status: design only. Gecko content processes are not currently sandboxed.
 
 The VFS has experimental path checks when an explicit lookup policy is
-supplied. Process lookups and descendants retain an assigned policy, but no
-process can currently receive one. Open handles and system calls remain
-unrestricted, so these checks are not a sandbox. Policy installation and
-inheritance need adversarial runtime and concurrency tests.
+supplied. A kernel-only test hook creates a process with both policies before
+loading its image; descendants inherit them. Open handles and IPC are not
+confined, so this is not a browser sandbox. Installation and inheritance
+need adversarial runtime and concurrency tests.
 
 A deny-by-default syscall allowlist is checked before the dispatcher's fast
-paths and inherited by children. No process currently receives a filter;
-the set of calls Gecko needs and the handling of arguments and handles have
-not been validated.
+paths and inherited by children. Only the kernel test hook can assign a
+filter. The set of calls Gecko needs and the handling of arguments and handles
+have not been validated.
 
 OSyx must enforce the boundary in the kernel, independently of the Win32
 compatibility process. A command-line flag or environment variable alone is

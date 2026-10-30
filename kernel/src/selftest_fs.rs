@@ -566,6 +566,24 @@ pub fn restricted_opens() -> TestResult {
     result
 }
 
+/// Exercise kernel-installed restrictions in a real process and its child.
+pub fn restricted_process() -> TestResult {
+    use crate::{exec::ExecRequest, process};
+    use osyx_abi::{nr, sandbox::SyscallPolicy};
+    use osyx_vfs::{sandbox::PathPolicy, Access};
+    let req = ExecRequest::new("/bin/worker", &["worker", "sandbox"], &[]).map_err(|err| e("request", err))?;
+    let denied_paths = Arc::new(PathPolicy::default());
+    let allowed: Vec<u64> = (0..256).filter(|n| *n != nr::CPU_INFO).collect();
+    let syscalls = Arc::new(SyscallPolicy::new(&allowed));
+    ensure!(matches!(process::spawn_kernel_restricted(&req, denied_paths, syscalls.clone()), Err(process::ExecError::Load(Errno::PermissionDenied))), "executable loaded without permission");
+    let access = Access { read: true, write: false, exec: true };
+    let paths = Arc::new(PathPolicy::new(&[("/bin", access)]).map_err(|err| e("policy", err))?);
+    let pid = process::spawn_kernel_restricted(&req, paths, syscalls).map_err(|err| format!("spawn: {err}"))?;
+    let (_, status) = process::wait(process::KERNEL_PID, pid).map_err(|err| e("wait", err))?;
+    ensure!(status == 0, "restricted worker exited with status {status}");
+    Ok(())
+}
+
 /// The program loader's lookup and refusals (`spawn` / `execve`), without
 /// running anything: search path, permissions, non-ELF files, limits.
 pub fn program_loader() -> TestResult {

@@ -665,10 +665,31 @@ pub fn spawn(parent: Pid, req: &ExecRequest) -> Result<Pid, ExecError> {
 
 /// [`spawn`] with the child's handles 0, 1 and 2 set to `stdio`.
 pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 3]) -> Result<Pid, ExecError> {
+    spawn_impl(parent, req, stdio, None)
+}
+
+/// Starts a kernel-owned child with both restrictions installed before image
+/// loading and before the first user instruction. This is an internal testing
+/// hook, not a userspace API or a complete browser sandbox. No handles are
+/// inherited; syscall and path rules must be supplied together.
+pub(crate) fn spawn_kernel_restricted(
+    req: &ExecRequest,
+    paths: Arc<PathPolicy>,
+    syscalls: Arc<SyscallPolicy>,
+) -> Result<Pid, ExecError> {
+    spawn_impl(KERNEL_PID, req, [None, None, None], Some((paths, syscalls)))
+}
+
+fn spawn_impl(
+    parent: Pid,
+    req: &ExecRequest,
+    stdio: [Option<Object>; 3],
+    restrictions: Option<(Arc<PathPolicy>, Arc<SyscallPolicy>)>,
+) -> Result<Pid, ExecError> {
     if TABLE.lock().procs.len() >= MAX_PROCESSES {
         return Err(ExecError::TooManyProcesses);
     }
-    let (cx, syscall_policy) = {
+    let (mut cx, mut syscall_policy) = {
         let t = TABLE.lock();
         match t.procs.get(&parent) {
             Some(p) => (p.lookup(), p.syscall_policy.clone()),
@@ -676,6 +697,15 @@ pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 
             None => return Err(ExecError::Load(Errno::NotFound)),
         }
     };
+    if let Some((paths, syscalls)) = restrictions {
+        // Policy replacement is only allowed for a kernel-owned child. A
+        // restricted process can never replace its inherited restrictions.
+        if parent != KERNEL_PID || cx.path_policy.is_some() || syscall_policy.is_some() {
+            return Err(ExecError::Load(Errno::PermissionDenied));
+        }
+        cx.path_policy = Some(paths);
+        syscall_policy = Some(syscalls);
+    }
     let (space, entry, rsp, path) = build_image(&cx, req)?;
     let mut p = Process::new(parent, req.name(), cx, syscall_policy, space);
     if p.syscall_policy.is_some() {

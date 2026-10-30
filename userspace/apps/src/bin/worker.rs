@@ -56,6 +56,25 @@ fn main() -> i32 {
     let args: Vec<String> = env::args().collect();
     let pid = process::id().unwrap_or(0);
     match args.get(1).map(String::as_str) {
+        Some("sandbox") | Some("sandbox-child") => {
+            use os_std::os::raw;
+            if raw::raw_syscall(raw::nr::CPU_INFO, 0, 0, 0) != Err(raw::Errno::PermissionDenied) {
+                return 10;
+            }
+            if raw::open("/tmp/sandbox-secret", raw::OPEN_READ, 0) != Err(raw::Errno::PermissionDenied) {
+                return 11;
+            }
+            if raw::raw_syscall(raw::nr::GETTID, 0, 0, 0).is_err() {
+                return 12;
+            }
+            if args[1] == "sandbox" {
+                return match Command::new("/bin/worker").arg("sandbox-child").status() {
+                    Ok(status) => status.raw(),
+                    Err(_) => 13,
+                };
+            }
+            0
+        }
         Some("exit") => arg_num(&args, 2) as i32,
         Some("spin") => {
             let ms = arg_num(&args, 2);
