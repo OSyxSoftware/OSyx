@@ -32,3 +32,10 @@ Auto-Clarity: plain prose for security warnings, irreversible actions, step orde
 Boundaries: code, comments, commits, PRs, docs written normal; existing comments kept unless asked.
 Floor: code, commands, paths, numbers and error strings verbatim; never drop not/never/no/only.
 <!-- caveman-end -->
+
+Pull request labels:
+- Every pull request you open must carry labels. Add them at creation or immediately after: `gh pr edit <number> --add-label <label>`.
+- Exactly one type label: `bug`, `enhancement`, `documentation`, `dependencies`, `ci`, `security` or `testing`.
+- Every area label that matches the change: `wifi`, `network`, `storage`, `installer`, `update`, `desktop`, `kernel` or `drivers`.
+- Create a missing label first: `gh label create <name> --color <hex> --description <text>`.
+- Never leave a pull request without labels.
