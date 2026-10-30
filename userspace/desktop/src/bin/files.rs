@@ -847,23 +847,30 @@ impl Files {
         self.set_status(msg, err);
     }
 
-    fn copy_selection(&mut self, cut: bool) {
+    fn copy_selection(&mut self, cut: bool, cx: &mut Ctx) {
         let paths = self.chosen_paths();
         if paths.is_empty() {
             return;
         }
         let n = paths.len();
-        self.clipboard = Some((paths, cut));
+        let Some(entry) = prism_client::proto::clipboard_files_entry(&paths, cut) else {
+            self.set_status(String::from("Selection is too large for the clipboard"), true);
+            return;
+        };
+        self.clipboard = Some((paths.clone(), cut));
+        cx.file_clipboard = Some((paths, cut));
+        cx.clipboard_entries = Some(vec![entry]);
         self.set_status(format!("{} {n} item(s): paste with Ctrl+V", if cut { "Cut" } else { "Copied" }), false);
         println!("files: {} {n} item(s)", if cut { "cut" } else { "copied" });
     }
 
-    fn paste(&mut self) {
+    fn paste(&mut self, cx: &mut Ctx) {
         let Some((paths, cut)) = self.clipboard.clone() else {
             self.set_status(String::from("Nothing to paste"), true);
             return;
         };
         let (mut done, mut failure) = (0usize, None);
+        let mut processed = 0usize;
         for p in &paths {
             let name = p.rsplit('/').next().unwrap_or(p);
             let source_is_dir = fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
@@ -872,6 +879,7 @@ impl Files {
                 break;
             }
             if cut && parent(p) == self.cwd.trim_end_matches('/') {
+                processed += 1;
                 continue;
             }
             let cwd = self.cwd.clone();
@@ -883,15 +891,27 @@ impl Files {
                 fileops::copy_tree(p, &to).map(|_| ())
             };
             match r {
-                Ok(()) => done += 1,
+                Ok(()) => { done += 1; processed += 1; }
                 Err(e) => {
                     failure = Some(format!("Cannot {} {name}: {e}", if cut { "move" } else { "copy" }));
                     break;
                 }
             }
         }
-        if cut && failure.is_none() {
-            self.clipboard = None;
+        if cut {
+            let remaining = &paths[processed..];
+            if remaining.is_empty() {
+                self.clipboard = None;
+                cx.file_clipboard = None;
+                cx.clipboard_entries = Some(Vec::new());
+            } else if processed > 0 {
+                let remaining = remaining.to_vec();
+                if let Some(entry) = prism_client::proto::clipboard_files_entry(&remaining, true) {
+                    self.clipboard = Some((remaining.clone(), true));
+                    cx.file_clipboard = Some((remaining, true));
+                    cx.clipboard_entries = Some(vec![entry]);
+                }
+            }
         }
         let r = match failure {
             Some(f) => Err(f),
@@ -1102,9 +1122,9 @@ impl Files {
                     self.set_status(format!("{ext} files now open with the chosen program"), false);
                 }
             }
-            Act::Copy => self.copy_selection(false),
-            Act::Cut => self.copy_selection(true),
-            Act::Paste => self.paste(),
+            Act::Copy => self.copy_selection(false, cx),
+            Act::Cut => self.copy_selection(true, cx),
+            Act::Paste => self.paste(cx),
             Act::Trash => self.trash_selection(),
             Act::Pack => self.pack_selection(),
             Act::Extract => self.extract_selection(),
@@ -1134,6 +1154,7 @@ impl App for Files {
 
     fn event(&mut self, ev: Ui, cx: &mut Ctx) -> bool {
         let fonts = cx.fonts;
+        self.clipboard = cx.file_clipboard.clone();
         if let Ui::Key(k) = ev {
             self.mods = k.mods;
         }
@@ -1156,7 +1177,7 @@ impl App for Files {
         }
         // A dialog is modal.
         if let Some(d) = &mut self.dialog {
-            let r = d.event(&ev, &fonts);
+            let r = d.event_with_clipboard(&ev, &fonts, &mut cx.clipboard);
             match r {
                 Response::Activated(b) => {
                     let (tag, input) = (d.tag, String::from(d.input_text()));
@@ -1283,15 +1304,15 @@ impl App for Files {
                         return true;
                     }
                     key::C if k.ctrl() && !self.path_focus => {
-                        self.copy_selection(false);
+                        self.copy_selection(false, cx);
                         return true;
                     }
                     key::X if k.ctrl() && !self.path_focus => {
-                        self.copy_selection(true);
+                        self.copy_selection(true, cx);
                         return true;
                     }
                     key::V if k.ctrl() && !self.path_focus => {
-                        self.paste();
+                        self.paste(cx);
                         return true;
                     }
                     key::P if k.ctrl() => {
@@ -1318,7 +1339,7 @@ impl App for Files {
             }
         }
         // Path field.
-        match self.path.event(&ev, self.path_focus, &fonts) {
+        match self.path.event_with_clipboard(&ev, self.path_focus, &fonts, &mut cx.clipboard) {
             Response::Submitted => {
                 let target = String::from(self.path.text().trim());
                 if self.navigate(&target, true) {

@@ -849,6 +849,38 @@ fn the_clipboard_is_shared_by_every_client() {
 }
 
 #[test]
+fn unicode_clipboard_text_is_shared_between_clients() {
+    let mut h = Harness::new();
+    let native = h.client(11);
+    let windows = h.client(12);
+    h.events();
+    h.send(native, Request::ClipboardSet { entries: vec![proto::clipboard_text_entry("Zażółć 🌍")] });
+    let received = h.events_for(windows);
+    let entries = received.iter().find_map(|e| match e {
+        Event::ClipboardChanged { entries, .. } => Some(entries),
+        _ => None,
+    }).expect("Windows client receives clipboard change");
+    assert_eq!(proto::clipboard_text(entries).as_deref(), Some("Zażółć 🌍"));
+}
+
+#[test]
+fn file_clipboard_is_shared_between_clients() {
+    let mut h = Harness::new();
+    let source = h.client(31);
+    let target = h.client(32);
+    h.events();
+    let paths = vec![String::from("/home/user/ż.txt")];
+    let entry = proto::clipboard_files_entry(&paths, true).unwrap();
+    h.send(source, Request::ClipboardSet { entries: vec![entry] });
+    let events = h.events_for(target);
+    let entries = events.iter().find_map(|e| match e {
+        Event::ClipboardChanged { entries, .. } => Some(entries),
+        _ => None,
+    }).expect("target receives file clipboard");
+    assert_eq!(proto::clipboard_files(entries), Some((paths, true)));
+}
+
+#[test]
 fn file_drag_delivers_only_to_the_window_at_release() {
     let mut h = Harness::new();
     let source = h.client(21);
