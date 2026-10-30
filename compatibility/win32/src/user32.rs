@@ -8,8 +8,7 @@
 //! WM_MOUSEMOVE / WM_xBUTTONDOWN/UP / WM_MOUSEWHEEL) plus the program's own
 //! posted messages, timers and WM_PAINT for invalid areas. GDI draws with
 //! OSyx's software renderer into the surface; EndPaint/ReleaseDC present
-//! the damaged rectangle to PRISM. Child windows (controls) are not
-//! implemented: CreateWindowEx with WS_CHILD fails with ERROR_NOT_SUPPORTED.
+//! the damaged rectangle to PRISM.
 //!
 //! Window procedures are never called while the GUI lock is held.
 
@@ -31,6 +30,7 @@ use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
 mod gdi;
 mod keyboard;
+mod dialog_template;
 pub(crate) mod dialogs;
 use gdi::{Bitmap, GdiPath, Region, Xform};
 
@@ -113,10 +113,15 @@ struct WindowPos {
     padding: u32,
 }
 
+#[repr(C)]
+struct WindowPos32 { hwnd: u32, after: u32, x: i32, y: i32, cx: i32, cy: i32, flags: u32 }
+
 struct Class {
     name: String,
     wndproc: u64,
     background: u64,
+    icon: u64,
+    cursor: u64,
     style: u32,
 }
 
@@ -129,6 +134,9 @@ struct Win {
     style: u32,
     ex_style: u32,
     owner: u64,
+    control_id: u64,
+    check_state: u32,
+    system_menu: u64,
     win: Window,
     pos: (i32, i32),
     size: (u32, u32),
@@ -146,6 +154,8 @@ struct Win {
     user_data: i64,
     /// Rectangle drawn since the last present (BeginPaint/GetDC).
     drawn: Option<Rect>,
+    /// SetProp/GetProp/RemoveProp, keyed by lower-case name or `#atom`.
+    props: BTreeMap<String, u64>,
 }
 
 /// ICONINFO: icon or cursor, hotspot, and its own mask and colour bitmaps.
@@ -154,6 +164,28 @@ struct Icon {
     hotspot: (u32, u32),
     mask: u64,
     color: u64,
+}
+
+struct ImageList {
+    width: u32,
+    height: u32,
+    count: u32,
+    bitmaps: Vec<(u64, u32)>,
+}
+
+struct MenuItem {
+    id: u64,
+    flags: u32,
+    text: Option<String>,
+}
+
+struct Menu { items: Vec<MenuItem> }
+
+struct DialogState {
+    proc_: u64,
+    result: Option<i64>,
+    modal: bool,
+    thread: u64,
 }
 
 struct Timer {
@@ -231,6 +263,9 @@ struct Gui {
     gdi: BTreeMap<u64, Gdi>,
     dcs: BTreeMap<u64, Dc>,
     bitmaps: BTreeMap<u64, Bitmap>,
+    image_lists: BTreeMap<u64, ImageList>,
+    menus: BTreeMap<u64, Menu>,
+    dialogs: BTreeMap<u64, DialogState>,
     /// Pixel storage of deleted large bitmaps, reused so freshly created
     /// DIB sections do not fault in new zero pages every frame.
     bitmap_pool: Vec<Vec<u32>>,
@@ -326,6 +361,9 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             gdi,
             dcs: BTreeMap::new(),
             bitmaps: BTreeMap::new(),
+            image_lists: BTreeMap::new(),
+            menus: BTreeMap::new(),
+            dialogs: BTreeMap::new(),
             bitmap_pool: Vec::new(),
             regions: BTreeMap::new(),
             next: 0x2_0000,
@@ -934,6 +972,7 @@ fn call(proc_: u64, hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
     if crate::wow64::is_active()
         && proc_ != DefWindowProcA as *const () as usize as u64
         && proc_ != DefWindowProcW as *const () as usize as u64
+        && proc_ != DialogWndProc as *const () as usize as u64
     {
         return crate::wow64::call32(proc_ as u32, &[hwnd as u32, msg, w as u32, l as u32]) as i32 as i64;
     }
@@ -963,6 +1002,20 @@ fn call(proc_: u64, hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
     r
 }
 
+/// A built-in procedure must be callable through a PE32 gate, not its
+/// 64-bit implementation address.
+fn guest_wndproc(proc_: u64) -> u64 {
+    if !crate::wow64::is_active() { return proc_; }
+    let symbol = if proc_ == DefWindowProcW as *const () as u64 { Some("DefWindowProcW") }
+        else if proc_ == DefWindowProcA as *const () as u64 { Some("DefWindowProcA") }
+        else if proc_ == DialogWndProc as *const () as u64 { Some("DialogWndProc") }
+        else { None };
+    match symbol {
+        Some(name) => crate::wow64::import_active(name, proc_).map_or_else(|| fail(ERROR_NOT_ENOUGH_MEMORY, 0), u64::from),
+        None => proc_,
+    }
+}
+
 fn wndproc_of(hwnd: u64) -> Option<u64> {
     with(|g| g.windows.get(&hwnd).map(|w| w.wndproc))
 }
@@ -976,9 +1029,20 @@ fn current_window_pos(hwnd: u64, flags: u32) -> Option<WindowPos> {
 fn notify_window_pos(hwnd: u64, flags: u32, changing: bool) {
     let Some(mut position) = current_window_pos(hwnd, flags) else { return };
     let Some(proc) = wndproc_of(hwnd) else { return };
-    let pointer = (&mut position as *mut WindowPos) as i64;
-    if changing { call(proc, hwnd, WM_WINDOWPOSCHANGING, 0, pointer); }
-    if is_window(hwnd) { call(proc, hwnd, WM_WINDOWPOSCHANGED, 0, pointer); }
+    if changing { call_window_pos(proc, hwnd, WM_WINDOWPOSCHANGING, &mut position); }
+    if is_window(hwnd) { call_window_pos(proc, hwnd, WM_WINDOWPOSCHANGED, &mut position); }
+}
+
+fn call_window_pos(proc_: u64, hwnd: u64, msg: u32, pos: &mut WindowPos) {
+    if crate::wow64::is_active() {
+        let mut guest = WindowPos32 { hwnd: pos.hwnd as u32, after: pos.after as u32, x: pos.x, y: pos.y,
+            cx: pos.cx, cy: pos.cy, flags: pos.flags };
+        call(proc_, hwnd, msg, 0, (&mut guest as *mut WindowPos32) as i64);
+        pos.after = guest.after as i32 as i64 as u64;
+        pos.x = guest.x; pos.y = guest.y; pos.cx = guest.cx; pos.cy = guest.cy; pos.flags = guest.flags;
+    } else {
+        call(proc_, hwnd, msg, 0, (pos as *mut WindowPos) as i64);
+    }
 }
 
 /// PRISM events can arrive on the rendering thread. Deliver their frame
@@ -1013,11 +1077,12 @@ fn register_class(wc: *const u8, wide: bool) -> u16 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's WNDCLASS.
-    let (style, proc_, bg, name_p): (u32, u64, u64, u64) = unsafe {
+    let (style, proc_, bg, icon, cursor, name_p): (u32, u64, u64, u64, u64, u64) = unsafe {
         if crate::wow64::is_active() {
-            (teb::get(wc as u64, 0), teb::get::<u32>(wc as u64, 4) as u64, teb::get::<u32>(wc as u64, 28) as u64, teb::get::<u32>(wc as u64, 36) as u64)
+            (teb::get(wc as u64, 0), teb::get::<u32>(wc as u64, 4) as u64, teb::get::<u32>(wc as u64, 28) as u64,
+             teb::get::<u32>(wc as u64, 20) as u64, teb::get::<u32>(wc as u64, 24) as u64, teb::get::<u32>(wc as u64, 36) as u64)
         } else {
-            (teb::get(wc as u64, 0), teb::get(wc as u64, 8), teb::get(wc as u64, 48), teb::get(wc as u64, 64))
+            (teb::get(wc as u64, 0), teb::get(wc as u64, 8), teb::get(wc as u64, 48), teb::get(wc as u64, 32), teb::get(wc as u64, 40), teb::get(wc as u64, 64))
         }
     };
     // SAFETY: a NUL-terminated class name.
@@ -1033,8 +1098,54 @@ fn register_class(wc: *const u8, wide: bool) -> u16 {
         if g.classes.iter().any(|c| c.name.eq_ignore_ascii_case(&name)) {
             return fail(ERROR_CLASS_ALREADY_EXISTS, 0);
         }
-        g.classes.push(Class { name, wndproc: proc_, background: bg, style });
+        g.classes.push(Class { name, wndproc: proc_, background: bg, icon, cursor, style });
         0xC000 + g.classes.len() as u16
+    })
+}
+
+pub(crate) fn register_common_controls() {
+    with(|g| {
+        for name in ["msctls_progress32", "SysListView32"] {
+            if !g.classes.iter().any(|c| c.name.eq_ignore_ascii_case(name)) {
+                g.classes.push(Class { name: String::from(name), wndproc: DefWindowProcW as *const () as u64,
+                    background: 0, icon: 0, cursor: 0, style: 0 });
+            }
+        }
+    });
+}
+
+pub(crate) fn image_list_create(cx: i32, cy: i32, initial: i32, grow: i32) -> u64 {
+    if cx <= 0 || cy <= 0 || initial < 0 || grow < 0 { return 0; }
+    with(|g| {
+        let handle = g.handle();
+        g.image_lists.insert(handle, ImageList { width: cx as u32, height: cy as u32, count: 0, bitmaps: Vec::new() });
+        handle
+    })
+}
+
+pub(crate) fn image_list_add_masked(list: u64, bitmap: u64, mask: u32) -> i32 {
+    with(|g| {
+        let Some(images) = g.image_lists.get(&list) else { return -1 };
+        let (width, height, old_count) = (images.width, images.height, images.count);
+        let Some((bw, bh)) = gdi::bitmap_size(g, bitmap) else { return -1 };
+        if bw < width || bh < height || bw % width != 0 { return -1; }
+        let Some(count) = old_count.checked_add(bw / width).filter(|c| *c <= i32::MAX as u32) else { return -1 };
+        let Some(copy) = gdi::duplicate_bitmap(g, bitmap) else { return -1 };
+        let images = g.image_lists.get_mut(&list).expect("image list remains present");
+        images.bitmaps.push((copy, mask));
+        images.count = count;
+        old_count as i32
+    })
+}
+
+pub(crate) fn image_list_destroy(list: u64) -> i32 {
+    with(|g| {
+        let Some(images) = g.image_lists.remove(&list) else { return 0 };
+        for (bitmap, _) in images.bitmaps {
+            g.gdi.remove(&bitmap);
+            g.bitmaps.remove(&bitmap);
+        }
+        1
     })
 }
 
@@ -1101,16 +1212,22 @@ fn create_window(
     w: i32,
     h: i32,
     parent: u64,
+    menu: u64,
+    instance: u64,
     param: u64,
     class_p: u64,
     title_p: u64,
 ) -> u64 {
     let Some(class) = class else { return fail(ERROR_CANNOT_FIND_WND_CLASS, 0) };
-    if style & WS_CHILD != 0 || parent != 0 && style & WS_CHILD != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0); // controls / child windows
-    }
     let title = title.unwrap_or_default();
     let created = with(|g| -> Result<u64, u32> {
+        if style & WS_CHILD != 0 && !g.windows.contains_key(&parent) {
+            return Err(ERROR_INVALID_WINDOW_HANDLE);
+        }
+        if ["BUTTON", "STATIC", "EDIT"].iter().any(|n| class.eq_ignore_ascii_case(n))
+            && !g.classes.iter().any(|c| c.name.eq_ignore_ascii_case(&class)) {
+            g.classes.push(Class { name: class.clone(), wndproc: DefWindowProcW as *const () as u64, background: 0, icon: 0, cursor: 0, style: 0 });
+        }
         let ci =
             g.classes.iter().position(|c| c.name.eq_ignore_ascii_case(&class)).ok_or(ERROR_CANNOT_FIND_WND_CLASS)?;
         let (cw, ch) = g.conn().map(|c| (c.screen_width, c.screen_height))?;
@@ -1133,8 +1250,8 @@ fn create_window(
             spec.flags |= proto::window_flags::SKIP_TASKBAR;
         }
         spec.parent = g.windows.get(&parent).map_or(0, |w| w.win.id);
-        spec.min_width = 120;
-        spec.min_height = 80;
+        spec.min_width = if style & WS_CHILD != 0 { 1 } else { 120 };
+        spec.min_height = if style & WS_CHILD != 0 { 1 } else { 80 };
         if x != CW_USEDEFAULT {
             spec.x = x;
             spec.y = y;
@@ -1153,6 +1270,9 @@ fn create_window(
                 style,
                 ex_style,
                 owner: parent,
+                control_id: if style & WS_CHILD != 0 { menu } else { 0 },
+                check_state: 0,
+                system_menu: 0,
                 win,
                 pos: (x.max(0), y.max(0)),
                 size: (width, height),
@@ -1165,6 +1285,7 @@ fn create_window(
                 erase: true,
                 user_data: 0,
                 drawn: None,
+                props: BTreeMap::new(),
             },
         );
         Ok(hwnd)
@@ -1178,16 +1299,26 @@ fn create_window(
     // CREATESTRUCT (80 bytes) for WM_NCCREATE / WM_CREATE.
     let mut cs = [0u8; 80];
     let put = |cs: &mut [u8; 80], off: usize, v: &[u8]| cs[off..off + v.len()].copy_from_slice(v);
-    put(&mut cs, 0, &param.to_le_bytes());
-    put(&mut cs, 24, &parent.to_le_bytes());
-    put(&mut cs, 32, &h.to_le_bytes());
-    put(&mut cs, 36, &w.to_le_bytes());
-    put(&mut cs, 40, &y.to_le_bytes());
-    put(&mut cs, 44, &x.to_le_bytes());
-    put(&mut cs, 48, &style.to_le_bytes());
-    put(&mut cs, 56, &title_p.to_le_bytes());
-    put(&mut cs, 64, &class_p.to_le_bytes());
-    put(&mut cs, 72, &ex_style.to_le_bytes());
+    if crate::wow64::is_active() {
+        for (off, value) in [(0, param as u32), (4, instance as u32), (8, menu as u32), (12, parent as u32),
+            (16, h as u32), (20, w as u32), (24, y as u32), (28, x as u32), (32, style),
+            (36, title_p as u32), (40, class_p as u32), (44, ex_style)] {
+            put(&mut cs, off, &value.to_le_bytes());
+        }
+    } else {
+        put(&mut cs, 0, &param.to_le_bytes());
+        put(&mut cs, 8, &instance.to_le_bytes());
+        put(&mut cs, 16, &menu.to_le_bytes());
+        put(&mut cs, 24, &parent.to_le_bytes());
+        put(&mut cs, 32, &h.to_le_bytes());
+        put(&mut cs, 36, &w.to_le_bytes());
+        put(&mut cs, 40, &y.to_le_bytes());
+        put(&mut cs, 44, &x.to_le_bytes());
+        put(&mut cs, 48, &style.to_le_bytes());
+        put(&mut cs, 56, &title_p.to_le_bytes());
+        put(&mut cs, 64, &class_p.to_le_bytes());
+        put(&mut cs, 72, &ex_style.to_le_bytes());
+    }
     let csp = cs.as_ptr() as i64;
     if call(wndproc, hwnd, WM_NCCREATE, 0, csp) == 0 || call(wndproc, hwnd, WM_CREATE, 0, csp) == -1 {
         destroy(hwnd, false);
@@ -1210,13 +1341,13 @@ extern "win64" fn CreateWindowExA(
     w: i32,
     h: i32,
     parent: u64,
-    _menu: u64,
-    _inst: u64,
+    menu: u64,
+    inst: u64,
     param: u64,
 ) -> u64 {
     // SAFETY: NUL-terminated title (or NULL).
     let t = unsafe { path::ansi_to_string(title) };
-    create_window(ex, class_name(class as u64, false), t, style, x, y, w, h, parent, param, class as u64, title as u64)
+    create_window(ex, class_name(class as u64, false), t, style, x, y, w, h, parent, menu, inst, param, class as u64, title as u64)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1230,13 +1361,13 @@ extern "win64" fn CreateWindowExW(
     w: i32,
     h: i32,
     parent: u64,
-    _menu: u64,
-    _inst: u64,
+    menu: u64,
+    inst: u64,
     param: u64,
 ) -> u64 {
     // SAFETY: NUL-terminated title (or NULL).
     let t = unsafe { path::wide_to_string(title) };
-    create_window(ex, class_name(class as u64, true), t, style, x, y, w, h, parent, param, class as u64, title as u64)
+    create_window(ex, class_name(class as u64, true), t, style, x, y, w, h, parent, menu, inst, param, class as u64, title as u64)
 }
 
 fn destroy(hwnd: u64, notify: bool) -> bool {
@@ -1249,10 +1380,15 @@ fn destroy(hwnd: u64, notify: bool) -> bool {
     }
     with(|g| {
         if let Some(w) = g.windows.remove(&hwnd) {
+            if w.system_menu != 0 { destroy_menu(g, w.system_menu); }
             g.by_prism.remove(&w.win.id);
             if let Some(c) = g.conn.as_mut() {
                 let _ = w.win.destroy(c);
             }
+        }
+        if let Some(d) = g.dialogs.get_mut(&hwnd) {
+            if d.modal { if d.result.is_none() { d.result = Some(-1); } }
+            else { g.dialogs.remove(&hwnd); }
         }
         g.timers.retain(|t| t.hwnd != hwnd);
         g.queue.retain(|m| m.hwnd != hwnd);
@@ -1514,7 +1650,7 @@ extern "win64" fn SetWindowPos(hwnd: u64, after: u64, x: i32, y: i32, cx: i32, c
     }
     let Some(proc) = wndproc_of(hwnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
     let mut position = WindowPos { hwnd, after, x, y, cx, cy, flags, padding: 0 };
-    if flags & 0x400 == 0 { call(proc, hwnd, WM_WINDOWPOSCHANGING, 0, (&mut position as *mut WindowPos) as i64); }
+    if flags & 0x400 == 0 { call_window_pos(proc, hwnd, WM_WINDOWPOSCHANGING, &mut position); }
     let WindowPos { x, y, cx, cy, flags, .. } = position;
     let r = with(|g| {
         let w = g.windows.get_mut(&hwnd)?;
@@ -1647,6 +1783,27 @@ extern "win64" fn wvsprintfA(out: *mut u8, fmt: *const u8, args: *const u64) -> 
     n as i32
 }
 
+/// Reads only the i386 stack arguments actually consumed by the format.
+pub(crate) fn wsprintf32(wide_format: bool, out: u32, fmt: u32, args: *const u32) -> i32 {
+    if out == 0 || fmt == 0 { return fail(ERROR_INVALID_PARAMETER, 0); }
+    if wide_format {
+        let Some(format) = wide(fmt as *const u16) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+        let units: Vec<u16> = format.encode_utf16().collect();
+        let Some(text) = crate::ucrt::printf::win32_wide32(&units, args) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+        let n = text.len().min(1023);
+        // SAFETY: wsprintf requires space for the formatted output.
+        unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), out as *mut u16, n); *(out as *mut u16).add(n) = 0; }
+        n as i32
+    } else {
+        let Some(format) = (unsafe { path::ansi_to_string(fmt as *const u8) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+        let Some(text) = crate::ucrt::printf::win32_narrow32(format.as_bytes(), args) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+        let n = text.len().min(1023);
+        // SAFETY: wsprintf requires space for the formatted output.
+        unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), out as *mut u8, n); *(out as *mut u8).add(n) = 0; }
+        n as i32
+    }
+}
+
 #[unsafe(naked)]
 extern "win64" fn wsprintfW() {
     core::arch::naked_asm!("mov [rsp+24], r8", "mov [rsp+32], r9", "lea r8, [rsp+24]", "jmp {target}", target = sym wvsprintfW)
@@ -1670,7 +1827,7 @@ extern "win64" fn GetWindowLongPtrA(hwnd: u64, idx: i32) -> i64 {
             -20 => w.ex_style as i64, // GWL_EXSTYLE
             -8 => w.owner as i64, // GWLP_HWNDPARENT
             GWLP_USERDATA => w.user_data,
-            -12 => 0, // GWLP_ID: no child controls
+            -12 => w.control_id as i64,
             _ => {
                 if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
                     os_std::eprintln!("winrun: GetWindowLongPtr({hwnd:#x}, {idx}) unsupported index");
@@ -1691,6 +1848,7 @@ extern "win64" fn SetWindowLongPtrA(hwnd: u64, idx: i32, v: i64) -> i64 {
                 core::mem::replace(&mut w.style, v as u32) as i64
             }
             -20 => core::mem::replace(&mut w.ex_style, v as u32) as i64,
+            -12 => core::mem::replace(&mut w.control_id, v as u64) as i64,
             GWLP_USERDATA => core::mem::replace(&mut w.user_data, v),
             _ => fail(ERROR_INVALID_PARAMETER, 0),
         }
@@ -1705,6 +1863,16 @@ extern "win64" fn GetWindowLongA(hwnd: u64, idx: i32) -> i32 {
 
 extern "win64" fn SetWindowLongA(hwnd: u64, idx: i32, v: i32) -> i32 {
     SetWindowLongPtrA(hwnd, idx, v as i64) as i32
+}
+
+extern "win64" fn GetWindowLongW(hwnd: u64, idx: i32) -> i32 {
+    let value = GetWindowLongPtrA(hwnd, idx);
+    if idx == GWLP_WNDPROC { guest_wndproc(value as u64) as i32 } else { value as i32 }
+}
+
+extern "win64" fn SetWindowLongW(hwnd: u64, idx: i32, value: i32) -> i32 {
+    let old = SetWindowLongPtrA(hwnd, idx, value as i64);
+    if idx == GWLP_WNDPROC { guest_wndproc(old as u64) as i32 } else { old as i32 }
 }
 
 // ---- messages -------------------------------------------------------------------------
@@ -2236,6 +2404,130 @@ extern "win64" fn SendMessageW(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
     SendMessageA(hwnd, msg, w, l)
 }
 
+extern "win64" fn GetDlgItem(dialog: u64, id: i32) -> u64 {
+    with(|g| {
+        if !g.windows.contains_key(&dialog) { return fail(ERROR_INVALID_WINDOW_HANDLE, 0); }
+        g.windows.iter().find_map(|(&h, w)| (w.owner == dialog && w.style & WS_CHILD != 0 && w.control_id == id as u32 as u64).then_some(h))
+            .unwrap_or_else(|| fail(1421, 0)) // ERROR_CONTROL_ID_NOT_FOUND
+    })
+}
+
+extern "win64" fn SetDlgItemTextW(dialog: u64, id: i32, text: *const u16) -> Bool {
+    let item = GetDlgItem(dialog, id);
+    if item == 0 { FALSE } else { SetWindowTextW(item, text) }
+}
+
+extern "win64" fn GetDlgItemTextW(dialog: u64, id: i32, buf: *mut u16, max: i32) -> u32 {
+    let item = GetDlgItem(dialog, id);
+    if item == 0 { 0 } else { GetWindowTextW(item, buf, max) as u32 }
+}
+
+extern "win64" fn CheckDlgButton(dialog: u64, id: i32, check: u32) -> Bool {
+    let item = GetDlgItem(dialog, id);
+    if item == 0 { return FALSE; }
+    SendMessageW(item, 0x00F1, check as u64, 0);
+    TRUE
+}
+
+extern "win64" fn DialogWndProc(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
+    let state = with(|g| g.dialogs.get(&hwnd).map(|d| (d.proc_, d.modal)));
+    if let Some((proc_, modal)) = state {
+        if proc_ != 0 {
+            let handled = call(proc_, hwnd, msg, w, l);
+            if handled != 0 || !is_window(hwnd) { return handled; }
+        }
+        if msg == WM_CLOSE && modal { EndDialog(hwnd, 2); return 1; }
+    }
+    DefWindowProcW(hwnd, msg, w, l)
+}
+
+fn create_dialog(module: u64, name: u64, owner: u64, proc_: u64, param: u64, modal: bool) -> Result<u64, u32> {
+    if proc_ == 0 { return Err(ERROR_INVALID_PARAMETER); }
+    if owner != 0 && !is_window(owner) { return Err(ERROR_INVALID_WINDOW_HANDLE); }
+    let raw = crate::loader::numeric_resource(module, 5, name)?;
+    let spec = dialog_template::parse(&raw)?;
+    let internal = "OSyxDialog";
+    with(|g| {
+        if !g.classes.iter().any(|c| c.name == internal) {
+            g.classes.push(Class { name: String::from(internal), wndproc: DialogWndProc as *const () as u64,
+                background: 0, icon: 0, cursor: 0, style: 0 });
+        }
+    });
+    let class_units: Vec<u16> = internal.encode_utf16().chain(core::iter::once(0)).collect();
+    let title_units: Vec<u16> = spec.title.encode_utf16().chain(core::iter::once(0)).collect();
+    let scale = |v: i16| (v as i32) * 2;
+    let hwnd = create_window(spec.ex, Some(String::from(internal)), Some(spec.title), spec.style & !WS_VISIBLE,
+        scale(spec.x), scale(spec.y), scale(spec.w), scale(spec.h), owner, 0, module, 0,
+        class_units.as_ptr() as u64, title_units.as_ptr() as u64);
+    if hwnd == 0 { return Err(teb::last_error()); }
+    let was_enabled = modal && owner != 0 && IsWindowEnabled(owner) != 0;
+    if was_enabled { EnableWindow(owner, FALSE); }
+    with(|g| { g.dialogs.insert(hwnd, DialogState { proc_, result: None, modal, thread: teb::current_tid() }); });
+    for control in spec.controls {
+        let class: Vec<u16> = control.class.encode_utf16().chain(core::iter::once(0)).collect();
+        let title: Vec<u16> = control.title.encode_utf16().chain(core::iter::once(0)).collect();
+        let data = if control.data.is_empty() { 0 } else { control.data.as_ptr() as u64 };
+        let child = create_window(control.ex, Some(control.class), Some(control.title), control.style | WS_CHILD,
+            scale(control.x), scale(control.y), scale(control.w), scale(control.h), hwnd, control.id as u64, module,
+            data, class.as_ptr() as u64, title.as_ptr() as u64);
+        if child == 0 {
+            let err = teb::last_error();
+            destroy(hwnd, true);
+            with(|g| { g.dialogs.remove(&hwnd); });
+            if was_enabled { EnableWindow(owner, TRUE); }
+            return Err(err);
+        }
+    }
+    call(proc_, hwnd, 0x0110, 0, param as i64); // WM_INITDIALOG
+    if is_window(hwnd) && (modal || spec.style & WS_VISIBLE != 0) { ShowWindow(hwnd, 1); }
+    Ok(hwnd)
+}
+
+extern "win64" fn CreateDialogParamW(module: u64, name: u64, owner: u64, proc_: u64, param: u64) -> u64 {
+    create_dialog(module, name, owner, proc_, param, false).unwrap_or_else(|e| fail(e, 0))
+}
+
+extern "win64" fn DialogBoxParamW(module: u64, name: u64, owner: u64, proc_: u64, param: u64) -> i64 {
+    let was_enabled = owner != 0 && IsWindowEnabled(owner) != 0;
+    let hwnd = match create_dialog(module, name, owner, proc_, param, true) {
+        Ok(h) => h,
+        Err(e) => return fail(e, -1),
+    };
+    let result = loop {
+        let result = with(|g| g.dialogs.get(&hwnd).and_then(|d| d.result));
+        if let Some(result) = result { break result; }
+        let mut message = [0u8; 48];
+        let status = GetMessageW(message.as_mut_ptr(), 0, 0, 0);
+        if status <= 0 {
+            if status == 0 { PostQuitMessage(read_msg(message.as_ptr()).wparam as i32); }
+            if is_window(hwnd) { destroy(hwnd, true); }
+            break -1;
+        }
+        DispatchMessageW(message.as_ptr());
+    };
+    with(|g| { g.dialogs.remove(&hwnd); });
+    if was_enabled && is_window(owner) { EnableWindow(owner, TRUE); }
+    result
+}
+
+extern "win64" fn EndDialog(hwnd: u64, result: i64) -> Bool {
+    let Some((modal, thread)) = with(|g| {
+        let dialog = g.dialogs.get_mut(&hwnd)?;
+        dialog.result = Some(result);
+        Some((dialog.modal, dialog.thread))
+    }) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+    if is_window(hwnd) { ShowWindow(hwnd, 0); destroy(hwnd, true); }
+    if modal && thread != teb::current_tid() {
+        with(|g| {
+            let time = g.now_ms();
+            let pt = g.screen_pointer;
+            g.queue.push_back(Msg { hwnd: 0, msg: 0, wparam: 0, lparam: 0, time, pt, thread });
+        });
+        crate::objects::signal_all();
+    }
+    TRUE
+}
+
 extern "win64" fn PostMessageA(hwnd: u64, msg: u32, w: u64, l: i64) -> Bool {
     let callsite = site();
     diag(|d| {
@@ -2284,9 +2576,14 @@ extern "win64" fn PostQuitMessage(code: i32) {
 
 extern "win64" fn DefWindowProcA(hwnd: u64, msg: u32, _w: u64, l: i64) -> i64 {
     match msg {
+        0x00F0 => with(|g| g.windows.get(&hwnd).map_or(0, |w| w.check_state as i64)), // BM_GETCHECK
+        0x00F1 => { // BM_SETCHECK
+            with(|g| { if let Some(w) = g.windows.get_mut(&hwnd) { w.check_state = (_w as u32).min(2); } });
+            0
+        }
         WM_WINDOWPOSCHANGED if l != 0 => {
             // SAFETY: this message supplies a WINDOWPOS during the callback.
-            let flags = unsafe { teb::get::<u32>(l as u64, 32) };
+            let flags = unsafe { teb::get::<u32>(l as u64, if crate::wow64::is_active() { 24 } else { 32 }) };
             if let Some((kind, pos, size)) = with(|g| g.windows.get(&hwnd).map(|w| (
                 if w.style & WS_MINIMIZE != 0 { 1 } else if w.style & WS_MAXIMIZE != 0 { 2 } else { 0 }, w.pos, w.size))) {
                 if let Some(proc) = wndproc_of(hwnd) {
@@ -2907,7 +3204,37 @@ const LR_LOADFROMFILE: u32 = 0x10;
 
 /// System icons and cursors by ordinal; images from resources or files
 /// are not supported (OSyx has no image resources to give).
+const IMAGE_BITMAP: u32 = 0;
+const RT_BITMAP: u16 = 2;
+
+/// A DIB bitmap from a `.bmp` file (LR_LOADFROMFILE) or an RT_BITMAP
+/// resource of a loaded module. Only numeric resource names and
+/// uncompressed DIBs are supported; anything else fails with the reason.
+fn load_bitmap(inst: u64, name: u64, flags: u32) -> u64 {
+    let data = if flags & LR_LOADFROMFILE != 0 {
+        let Some(file) = wide(name as *const u16) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+        let bytes = crate::kernel32::locate(&file).map_err(|e| e as u32).and_then(|(p, _)| os_std::fs::read(&p).map_err(|_| ERROR_FILE_NOT_FOUND));
+        match bytes {
+            Ok(b) if b.len() > 14 && &b[..2] == b"BM" => b[14..].to_vec(),
+            Ok(_) => return fail(ERROR_INVALID_PARAMETER, 0),
+            Err(e) => return fail(e, 0),
+        }
+    } else {
+        match crate::loader::numeric_resource(inst, RT_BITMAP, name) {
+            Ok(d) => d,
+            Err(e) => return fail(if name >= 0x10000 { ERROR_CALL_NOT_IMPLEMENTED } else { e }, 0),
+        }
+    };
+    match with(|g| gdi::resource_bitmap(g, &data)) {
+        Some(h) => h,
+        None => fail(ERROR_INVALID_PARAMETER, 0),
+    }
+}
+
 extern "win64" fn LoadImageW(inst: u64, name: u64, kind: u32, _w: i32, _h: i32, flags: u32) -> u64 {
+    if kind == IMAGE_BITMAP {
+        return load_bitmap(inst, name, flags);
+    }
     if inst == 0 && name < 0x10000 && flags & LR_LOADFROMFILE == 0 && matches!(kind, IMAGE_ICON | IMAGE_CURSOR) {
         return LoadCursorA(0, name);
     }
@@ -2915,7 +3242,7 @@ extern "win64" fn LoadImageW(inst: u64, name: u64, kind: u32, _w: i32, _h: i32, 
 }
 
 extern "win64" fn LoadBitmapW(inst: u64, name: u64) -> u64 {
-    LoadImageW(inst, name, 0, 0, 0, 0)
+    load_bitmap(inst, name, 0)
 }
 
 extern "win64" fn LoadCursorW(inst: u64, id: u64) -> u64 {
@@ -3245,6 +3572,39 @@ extern "win64" fn FrameRect(dc: u64, r: *const i32, brush: u64) -> i32 {
         (1, r)
     })
     .unwrap_or(0)
+}
+
+/// A dotted one-pixel frame in the text colour of the DC.
+extern "win64" fn DrawFocusRect(dc: u64, r: *const i32) -> Bool {
+    let Some(r) = read_rect(r) else { return FALSE };
+    draw(dc, |s, d, _, clip| {
+        let c = d.text;
+        let mut dot = |x: i32, y: i32| {
+            if (x + y) & 1 == 0 {
+                s.fill_rect(Rect::new(x, y, 1, 1).intersect(&clip), c);
+            }
+        };
+        for x in r.x..r.x + r.w as i32 {
+            dot(x, r.y);
+            dot(x, r.y + r.h as i32 - 1);
+        }
+        for y in r.y..r.y + r.h as i32 {
+            dot(r.x, y);
+            dot(r.x + r.w as i32 - 1, y);
+        }
+        (1, r)
+    })
+    .map_or(FALSE, |_| TRUE)
+}
+
+/// Keyboard navigation (TAB, arrows, mnemonics) of dialog boxes is not
+/// implemented: no message is consumed, so the caller dispatches every
+/// message itself. Only the window handle is validated.
+extern "win64" fn IsDialogMessageW(dialog: u64, msg: *const u8) -> Bool {
+    if msg.is_null() || with(|g| !g.windows.contains_key(&dialog)) {
+        return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
+    }
+    FALSE
 }
 
 // ---- fonts and text -----------------------------------------------------------------
@@ -4244,16 +4604,50 @@ extern "win64" fn UnhookWindowsHookEx(_hook: u64) -> Bool {
     TRUE
 }
 
-extern "win64" fn GetPropW(_wnd: u64, _name: *const u16) -> u64 {
-    0
+/// Property key: an atom (`#n`) or a case-insensitive name.
+fn prop_key(name: *const u16) -> Option<String> {
+    if (name as usize) < 0x10000 {
+        return (!name.is_null()).then(|| alloc::format!("#{}", name as usize));
+    }
+    wide(name).map(|n| n.to_lowercase())
 }
 
-extern "win64" fn SetPropW(_wnd: u64, _name: *const u16, _data: u64) -> Bool {
+extern "win64" fn GetPropW(wnd: u64, name: *const u16) -> u64 {
+    let Some(key) = prop_key(name) else { return 0 };
+    with(|g| g.windows.get(&wnd).and_then(|w| w.props.get(&key).copied()).unwrap_or(0))
+}
+
+extern "win64" fn SetPropW(wnd: u64, name: *const u16, data: u64) -> Bool {
+    let Some(key) = prop_key(name) else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
+    with(|g| match g.windows.get_mut(&wnd) {
+        Some(w) => {
+            w.props.insert(key, data);
+            TRUE
+        }
+        None => fail(ERROR_INVALID_WINDOW_HANDLE, FALSE),
+    })
+}
+
+extern "win64" fn RemovePropW(wnd: u64, name: *const u16) -> u64 {
+    let Some(key) = prop_key(name) else { return 0 };
+    with(|g| g.windows.get_mut(&wnd).and_then(|w| w.props.remove(&key)).unwrap_or(0))
+}
+
+/// Dialog units to pixels with the base units of the system font
+/// (GetDialogBaseUnits): x = average character width, y = line height.
+extern "win64" fn MapDialogRect(dialog: u64, rect: *mut i32) -> Bool {
+    if rect.is_null() || with(|g| !g.windows.contains_key(&dialog)) {
+        return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
+    }
+    let (bx, by) = (measure(FontKind::Sans, "x") as i32, line_height(FontKind::Sans) as i32);
+    // SAFETY: the caller's RECT.
+    unsafe {
+        for i in 0..4 {
+            let (base, unit) = if i % 2 == 0 { (bx, 4) } else { (by, 8) };
+            *rect.add(i) = (*rect.add(i) * base + unit / 2) / unit;
+        }
+    }
     TRUE
-}
-
-extern "win64" fn RemovePropW(_wnd: u64, _name: *const u16) -> u64 {
-    0
 }
 
 extern "win64" fn GetParent(wnd: u64) -> u64 {
@@ -4523,9 +4917,9 @@ extern "win64" fn GetClassInfoW(_inst: u64, name: *const u16, out: *mut u8) -> B
         g.classes
             .iter()
             .find(|c| c.name.eq_ignore_ascii_case(&want))
-            .map(|c| (c.wndproc, c.background, c.style))
+            .map(|c| (c.wndproc, c.background, c.icon, c.cursor, c.style))
     });
-    let Some((wndproc, background, style)) = found else { return fail(ERROR_CANNOT_FIND_WND_CLASS, FALSE) };
+    let Some((wndproc, background, icon, cursor, style)) = found else { return fail(ERROR_CANNOT_FIND_WND_CLASS, FALSE) };
     // WNDCLASSW (72 bytes): style, wndproc, cbClsExtra, cbWndExtra, instance,
     // icon, cursor, background, menu name, class name. The string pointers are
     // left null: the names live in this runtime, not in the caller's memory.
@@ -4534,13 +4928,17 @@ extern "win64" fn GetClassInfoW(_inst: u64, name: *const u16, out: *mut u8) -> B
         if crate::wow64::is_active() {
             core::ptr::write_bytes(out, 0, 40);
             teb::put(out as u64, 0, style);
-            teb::put(out as u64, 4, wndproc as u32);
+            teb::put(out as u64, 4, guest_wndproc(wndproc) as u32);
+            teb::put(out as u64, 20, icon as u32);
+            teb::put(out as u64, 24, cursor as u32);
             teb::put(out as u64, 28, background as u32);
             return TRUE;
         }
         core::ptr::write_bytes(out, 0, 72);
         teb::put(out as u64, 0, style);
         teb::put(out as u64, 8, wndproc);
+        teb::put(out as u64, 32, icon);
+        teb::put(out as u64, 40, cursor);
         teb::put(out as u64, 48, background);
     }
     TRUE
@@ -4572,12 +4970,42 @@ extern "win64" fn UnregisterClassW(name: *const u16, _inst: u64) -> Bool {
     TRUE // the class table lives as long as the process
 }
 
-extern "win64" fn GetClassLongPtrW(_wnd: u64, _index: i32) -> u64 {
-    0
+extern "win64" fn GetClassLongPtrW(wnd: u64, index: i32) -> u64 {
+    with(|g| {
+        let Some(w) = g.windows.get(&wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
+        let class = &g.classes[w.class];
+        match index {
+            -24 => class.wndproc,
+            -14 => class.icon,
+            -12 => class.cursor,
+            -10 => class.background,
+            _ => fail(ERROR_INVALID_PARAMETER, 0),
+        }
+    })
 }
 
-extern "win64" fn SetClassLongPtrW(_wnd: u64, _index: i32, _value: u64) -> u64 {
-    0
+extern "win64" fn SetClassLongPtrW(wnd: u64, index: i32, value: u64) -> u64 {
+    with(|g| {
+        let Some(w) = g.windows.get(&wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
+        let ci = w.class;
+        let class = &mut g.classes[ci];
+        match index {
+            -24 => {
+                let old = core::mem::replace(&mut class.wndproc, value);
+                for window in g.windows.values_mut().filter(|w| w.class == ci && w.wndproc == old) { window.wndproc = value; }
+                old
+            }
+            -14 => core::mem::replace(&mut class.icon, value),
+            -12 => core::mem::replace(&mut class.cursor, value),
+            -10 => core::mem::replace(&mut class.background, value),
+            _ => fail(ERROR_INVALID_PARAMETER, 0),
+        }
+    })
+}
+
+extern "win64" fn SetClassLongW(wnd: u64, index: i32, value: u32) -> u32 {
+    let old = SetClassLongPtrW(wnd, index, value as u64);
+    if index == -24 { guest_wndproc(old) as u32 } else { old as u32 }
 }
 
 extern "win64" fn GetClassWord(_wnd: u64, _index: i32) -> u16 {
@@ -4893,6 +5321,14 @@ extern "win64" fn EnumThreadWindows(thread: u32, proc_: u64, param: u64) -> Bool
     if list.is_empty() {
         return FALSE;
     }
+    if crate::wow64::is_active() {
+        for h in list {
+            if crate::wow64::call32(proc_ as u32, &[h as u32, param as u32]) == 0 {
+                break;
+            }
+        }
+        return TRUE;
+    }
     // SAFETY: a caller-supplied WNDENUMPROC of the Windows x64 ABI.
     let f: extern "win64" fn(u64, i64) -> i32 = unsafe { core::mem::transmute(proc_ as usize) };
     for h in list {
@@ -4969,8 +5405,108 @@ extern "win64" fn GetMenu(_wnd: u64) -> u64 {
     0 // no window here has a menu bar
 }
 
-extern "win64" fn GetSystemMenu(_wnd: u64, _revert: Bool) -> u64 {
-    0
+extern "win64" fn CreatePopupMenu() -> u64 {
+    with(|g| {
+        let menu = g.handle();
+        g.menus.insert(menu, Menu { items: Vec::new() });
+        menu
+    })
+}
+
+extern "win64" fn AppendMenuW(menu: u64, flags: u32, id: u64, item: *const u16) -> Bool {
+    const MF_POPUP: u32 = 0x10;
+    const MF_BITMAP: u32 = 0x4;
+    const MF_OWNERDRAW: u32 = 0x100;
+    const MF_SEPARATOR: u32 = 0x800;
+    if flags & (MF_BITMAP | MF_OWNERDRAW) != 0 { return fail(ERROR_NOT_SUPPORTED, FALSE); }
+    let text = if flags & MF_SEPARATOR != 0 { None } else {
+        match wide(item) { Some(s) => Some(s), None => return fail(ERROR_INVALID_PARAMETER, FALSE) }
+    };
+    with(|g| {
+        if flags & MF_POPUP != 0 && (id == menu || !g.menus.contains_key(&id) || menu_contains(g, id, menu, 0) ||
+            g.menus.values().any(|m| m.items.iter().any(|item| item.flags & MF_POPUP != 0 && item.id == id))) {
+            return fail(ERROR_INVALID_PARAMETER, FALSE);
+        }
+        let Some(m) = g.menus.get_mut(&menu) else { return fail(1401, FALSE) }; // ERROR_INVALID_MENU_HANDLE
+        m.items.push(MenuItem { id, flags, text });
+        TRUE
+    })
+}
+
+fn menu_contains(g: &Gui, root: u64, target: u64, depth: u32) -> bool {
+    if root == target { return true; }
+    if depth >= 64 { return true; }
+    g.menus.get(&root).is_some_and(|m| m.items.iter().any(|i| i.flags & 0x10 != 0 && menu_contains(g, i.id, target, depth + 1)))
+}
+
+fn menu_item(g: &Gui, menu: u64, id: u32, by_position: bool, depth: u32) -> Option<(u64, usize)> {
+    if depth > 64 { return None; }
+    let m = g.menus.get(&menu)?;
+    if by_position { return ((id as usize) < m.items.len()).then_some((menu, id as usize)); }
+    for (index, item) in m.items.iter().enumerate() {
+        if item.flags & 0x10 == 0 && item.id == id as u64 { return Some((menu, index)); }
+        if item.flags & 0x10 != 0 {
+            if let Some(found) = menu_item(g, item.id, id, false, depth + 1) { return Some(found); }
+        }
+    }
+    None
+}
+
+extern "win64" fn EnableMenuItem(menu: u64, id: u32, enable: u32) -> u32 {
+    with(|g| {
+        let Some((handle, index)) = menu_item(g, menu, id, enable & 0x400 != 0, 0) else { return u32::MAX };
+        let item = &mut g.menus.get_mut(&handle).expect("located menu").items[index];
+        let old = item.flags & 3;
+        item.flags = (item.flags & !3) | (enable & 3);
+        old
+    })
+}
+
+extern "win64" fn DestroyMenu(menu: u64) -> Bool {
+    with(|g| if destroy_menu(g, menu) { TRUE } else { fail(1401, FALSE) })
+}
+
+extern "win64" fn ExitWindowsEx(flags: u32, _reason: u32) -> Bool {
+    const FORCE_FLAGS: u32 = 0x4 | 0x10;
+    let action = flags & !FORCE_FLAGS;
+    if action == 0 { return fail(ERROR_NOT_SUPPORTED, FALSE); } // no session logoff service
+    let command = match action {
+        1 | 8 => osyx_abi::ipc::POWER_OFF,
+        2 => osyx_abi::ipc::POWER_REBOOT,
+        _ => return fail(ERROR_INVALID_PARAMETER, FALSE),
+    };
+    const SE_SHUTDOWN_PRIVILEGE: u32 = 19;
+    if !crate::tokens::effective_data().privileges.iter().any(|(id, flags)|
+        *id == SE_SHUTDOWN_PRIVILEGE && *flags & crate::tokens::SE_PRIVILEGE_ENABLED != 0) {
+        return fail(1314, FALSE); // ERROR_PRIVILEGE_NOT_HELD
+    }
+    // A successful native power request does not return.
+    fail(crate::error::errno_to_win32(os_sys::power(command)), FALSE)
+}
+
+fn destroy_menu(g: &mut Gui, menu: u64) -> bool {
+    let Some(m) = g.menus.remove(&menu) else { return false };
+    for item in m.items { if item.flags & 0x10 != 0 { destroy_menu(g, item.id); } }
+    true
+}
+
+extern "win64" fn GetSystemMenu(wnd: u64, revert: Bool) -> u64 {
+    with(|g| {
+        let Some(w) = g.windows.get(&wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
+        let old = w.system_menu;
+        if revert != 0 {
+            if old != 0 { destroy_menu(g, old); }
+            if let Some(w) = g.windows.get_mut(&wnd) { w.system_menu = 0; }
+            return 0;
+        }
+        if old != 0 && g.menus.contains_key(&old) { return old; }
+        let menu = g.handle();
+        let entries = [(0xF120, "Restore"), (0xF010, "Move"), (0xF000, "Size"), (0xF020, "Minimize"), (0xF030, "Maximize"), (0xF060, "Close")];
+        let items = entries.iter().map(|(id, text)| MenuItem { id: *id, flags: 0, text: Some(String::from(*text)) }).collect();
+        g.menus.insert(menu, Menu { items });
+        g.windows.get_mut(&wnd).expect("window exists").system_menu = menu;
+        menu
+    })
 }
 
 extern "win64" fn SetMenuItemInfoW(_menu: u64, _item: u32, _by_pos: Bool, _info: *const u8) -> Bool {
@@ -5197,6 +5733,13 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         SetWindowTextW,
         GetWindowTextA,
         GetWindowTextW,
+        GetDlgItem,
+        SetDlgItemTextW,
+        GetDlgItemTextW,
+        CheckDlgButton,
+        CreateDialogParamW,
+        DialogBoxParamW,
+        EndDialog,
         GetWindowTextLengthA,
         wsprintfA,
         wsprintfW,
@@ -5315,6 +5858,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetPropW,
         SetPropW,
         RemovePropW,
+        MapDialogRect,
+        IsDialogMessageW,
         GetParent,
         GetAncestor,
         IsChild,
@@ -5342,6 +5887,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         UnregisterClassW,
         GetClassLongPtrW,
         SetClassLongPtrW,
+        SetClassLongW,
         GetClassWord,
         FindWindowW,
         FindWindowExW,
@@ -5351,6 +5897,11 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         AnimateWindow,
         FlashWindowEx,
         GetMenu,
+        CreatePopupMenu,
+        AppendMenuW,
+        EnableMenuItem,
+        DestroyMenu,
+        ExitWindowsEx,
         GetSystemMenu,
         SetMenuItemInfoW,
         TrackPopupMenu,
@@ -5392,6 +5943,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ReleaseDC,
         FillRect,
         FrameRect,
+        DrawFocusRect,
         DrawTextA,
         DrawTextW,
         MessageBoxA,
@@ -5402,8 +5954,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     .chain([
         ("GetWindowLongPtrW", GetWindowLongPtrA as *const () as usize as u64),
         ("SetWindowLongPtrW", SetWindowLongPtrA as *const () as usize as u64),
-        ("GetWindowLongW", GetWindowLongA as *const () as usize as u64),
-        ("SetWindowLongW", SetWindowLongA as *const () as usize as u64),
+        ("GetWindowLongW", GetWindowLongW as *const () as usize as u64),
+        ("SetWindowLongW", SetWindowLongW as *const () as usize as u64),
     ])
     .collect()
 }

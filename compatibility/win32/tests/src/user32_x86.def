@@ -11,3 +11,25 @@ EXPORTS
     PostQuitMessage
     MessageBoxIndirectW
     LoadBitmapW
+    CreateWindowExW
+    DestroyWindow
+    GetDlgItem
+    SetDlgItemTextW
+    GetDlgItemTextW
+    CheckDlgButton
+    SendMessageW
+    BeginPaint
+    EndPaint
+    SetClassLongW
+    SetWindowLongW
+    wsprintfW
+    wsprintfA
+    CreatePopupMenu
+    AppendMenuW
+    EnableMenuItem
+    DestroyMenu
+    ExitWindowsEx
+    CreateDialogParamW
+    DialogBoxParamW
+    EndDialog
+    PostMessageW

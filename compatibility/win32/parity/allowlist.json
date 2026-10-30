@@ -1,0 +1,7 @@
+{
+  "comment": "Functions whose constant result is the correct Windows behaviour on OSyx, each with the reason. The scanner counts them as implemented and lists them in the report; a function not named here that returns a constant is reported as a stub.",
+  "entries": {
+    "IsDebuggerPresent": "OSyx has no debugger interface for Win32 processes, so no process is ever being debugged and FALSE is the exact answer",
+    "GdiFlush": "drawing reaches PRISM in order already (see the comment at the function), so there is no batch to flush"
+  }
+}

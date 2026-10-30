@@ -9,7 +9,9 @@
 param(
     [switch]$SkipBuild,
     [int]$TimeoutSec = 300,
-    [ValidateRange(1,16)][int]$CpuCount = 1
+    [ValidateRange(1,16)][int]$CpuCount = 1,
+    # Also run the Win Parity Check on this run's log (scripts/win-parity.ps1).
+    [switch]$Parity
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 $testDir = Join-Path $BuildDir 'test'
@@ -91,4 +93,5 @@ Record 'no kernel panic' ($t -notmatch 'KERNEL PANIC') ''
 $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
 $failed = @($results | Where-Object Result -eq 'FAIL').Count
 Write-Host ("windows test: {0} passed, {1} failed" -f ($results.Count - $failed), $failed)
+if ($Parity) { & (Join-Path $PSScriptRoot 'win-parity.ps1') -TestsLog $log | Out-Host }
 exit $failed

@@ -64,6 +64,46 @@ unsafe fn write_string(pointer: u64, capacity: usize, text: &str, wide: bool) ->
     true
 }
 
+/// OPENFILENAME of a 32-bit caller (76 bytes, or 88 with the Windows 2000
+/// fields) widened into the 136-byte x64 layout and copied back.
+fn dialog32(ofn: u64, wide: bool, save: bool) -> i32 {
+    set_error(0);
+    if ofn == 0 {
+        set_error(2);
+        return 0;
+    }
+    // SAFETY: the caller's OPENFILENAME; its size is checked first.
+    let size = unsafe { teb::get::<u32>(ofn, 0) };
+    if size != 76 && size != 88 {
+        set_error(1);
+        return 0;
+    }
+    #[repr(align(8))]
+    struct Native([u8; 136]);
+    let mut native = Native([0; 136]);
+    let n = native.0.as_mut_ptr() as u64;
+    // SAFETY: both structures are large enough for the offsets used.
+    unsafe {
+        teb::put(n, 0, 136u32);
+        teb::put(n, 8, teb::get::<i32>(ofn, 4) as i64 as u64);
+        for (from, to) in [(12, 24), (28, 48), (36, 64), (44, 80), (48, 88), (60, 104)] {
+            teb::put(n, to, teb::get::<u32>(ofn, from) as u64);
+        }
+        for (from, to) in [(24, 44), (32, 56), (40, 72), (52, 96)] {
+            teb::put(n, to, teb::get::<u32>(ofn, from));
+        }
+    }
+    let result = dialog(n, wide, save);
+    // SAFETY: as above.
+    unsafe {
+        teb::put(ofn, 24, teb::get::<u32>(n, 44));
+        teb::put(ofn, 52, teb::get::<u32>(n, 96));
+        teb::put(ofn, 56, teb::get::<u16>(n, 100));
+        teb::put(ofn, 58, teb::get::<u16>(n, 102));
+    }
+    result
+}
+
 fn dialog(ofn: u64, wide: bool, save: bool) -> i32 {
     set_error(0);
     if ofn == 0 {
@@ -199,15 +239,27 @@ fn dialog(ofn: u64, wide: bool, save: bool) -> i32 {
 }
 
 extern "win64" fn GetOpenFileNameW(ofn: u64) -> i32 {
+    if crate::wow64::is_active() {
+        return dialog32(ofn, true, false);
+    }
     dialog(ofn, true, false)
 }
 extern "win64" fn GetOpenFileNameA(ofn: u64) -> i32 {
+    if crate::wow64::is_active() {
+        return dialog32(ofn, false, false);
+    }
     dialog(ofn, false, false)
 }
 extern "win64" fn GetSaveFileNameW(ofn: u64) -> i32 {
+    if crate::wow64::is_active() {
+        return dialog32(ofn, true, true);
+    }
     dialog(ofn, true, true)
 }
 extern "win64" fn GetSaveFileNameA(ofn: u64) -> i32 {
+    if crate::wow64::is_active() {
+        return dialog32(ofn, false, true);
+    }
     dialog(ofn, false, true)
 }
 

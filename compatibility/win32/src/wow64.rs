@@ -39,6 +39,7 @@ use crate::mem::{self, Prot, PAGE};
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicPtr, Ordering};
+use os_std::sync::Mutex;
 use osyx_abi::wow64::{ENTRY_RFLAGS, USER_CS, USER_CS32, USER_DS};
 
 // The ABI constants and the literals in the assembly below must not drift.
@@ -123,7 +124,9 @@ mod sigs;
 use sigs::SIGNATURES;
 
 /// One bound import, indexed by the stub's `mov eax, index`.
+#[derive(Clone, Copy)]
 struct Entry {
+    name: &'static str,
     host: u64,
     args: &'static [ArgKind],
     ret: RetKind,
@@ -397,7 +400,7 @@ pub struct Bridge {
     teb: u32,
     /// Initial 32-bit stack pointer.
     stack_top: u32,
-    entries: Vec<Entry>,
+    entries: Mutex<Vec<Entry>>,
 }
 
 impl Bridge {
@@ -433,12 +436,27 @@ impl Bridge {
             core::ptr::write_unaligned(p.add(5).cast::<u16>(), USER_CS);
         }
 
+        // All gates are written before the page becomes executable. Later
+        // imports only publish an entry, so they never change RX memory.
+        let gate = osyx_wow64_gate as *const () as usize;
+        assert!(gate != 0 && gate < 1usize << 32, "wow64: gate is not below 4 GiB");
+        for index in 0..MAX_IMPORTS {
+            let p = (STUB_PAGE + index as u32 * STUB_SIZE) as *mut u8;
+            unsafe {
+                *p = 0xB8;
+                core::ptr::write_unaligned(p.add(1).cast::<u32>(), index as u32);
+                *p.add(5) = 0xEA;
+                core::ptr::write_unaligned(p.add(6).cast::<u32>(), gate as u32);
+                core::ptr::write_unaligned(p.add(10).cast::<u16>(), USER_CS);
+            }
+        }
+
         // OSyx cannot map a page with no access; a read-only page is the
         // guard: a stack overflow writing into it faults.
         mem::protect(GUARD32 as u64, PAGE, Prot::ReadOnly)
             .map_err(|_| "wow64: cannot make the 32-bit stack guard page read-only")?;
 
-        Ok(Bridge { teb: TEB32, stack_top: STACK_TOP, entries: Vec::new() })
+        Ok(Bridge { teb: TEB32, stack_top: STACK_TOP, entries: Mutex::new(Vec::new()) })
     }
 
     /// `(limit, base)` of the 32-bit stack: the lowest valid address and the
@@ -449,30 +467,19 @@ impl Bridge {
 
     /// Returns the 32-bit address of a stub for `symbol`, whose 64-bit
     /// implementation is at `host`, or `None` when no signature is known.
-    pub fn import(&mut self, symbol: &str, host: u64) -> Option<u32> {
+    pub fn import(&self, symbol: &str, host: u64) -> Option<u32> {
         let signature = SIGNATURES.iter().find(|s| s.name == symbol)?;
         let host = host_override(symbol).unwrap_or(host);
         assert!(signature.args.len() <= MAX_ARG_SLOTS, "wow64: import signature has too many arguments");
-        assert!(self.entries.len() < MAX_IMPORTS, "wow64: too many imports for the stub page");
-        let gate = osyx_wow64_gate as *const () as usize;
-        assert!(gate != 0 && gate < 1usize << 32, "wow64: gate is not below 4 GiB");
-
-        let index = self.entries.len() as u32;
-        let stub = STUB_PAGE + index * STUB_SIZE;
-        assert!(stub + STUB_SIZE <= STUB_PAGE + PAGE as u32, "wow64: import stubs overflow their page");
-
-        // mov eax, index; jmp far USER_CS:gate
-        // SAFETY: the stub page is writable until `enter` protects it, and
-        // 64 stubs of 12 bytes fit well inside the page.
-        unsafe {
-            let p = stub as *mut u8;
-            *p = 0xB8;
-            core::ptr::write_unaligned(p.add(1).cast::<u32>(), index);
-            *p.add(5) = 0xEA;
-            core::ptr::write_unaligned(p.add(6).cast::<u32>(), gate as u32);
-            core::ptr::write_unaligned(p.add(10).cast::<u16>(), USER_CS);
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(index) = entries.iter().position(|e| e.name == signature.name && e.host == host) {
+            return Some(STUB_PAGE + index as u32 * STUB_SIZE);
         }
-        self.entries.push(Entry {
+        if entries.len() >= MAX_IMPORTS { return None; }
+        let index = entries.len() as u32;
+        let stub = STUB_PAGE + index * STUB_SIZE;
+        entries.push(Entry {
+            name: signature.name,
             host,
             args: signature.args,
             ret: signature.ret,
@@ -485,16 +492,21 @@ impl Bridge {
         Some(stub)
     }
 
-    /// Enters `entry` in compatibility mode. Never returns normally.
-    pub fn enter(&mut self, entry: u32) -> ! {
+    /// Prepares the gate and main thread before delivering DLL callbacks.
+    pub fn prepare(&mut self) -> Result<(), &'static str> {
         if let Err(e) = mem::protect(STUB_PAGE as u64, PAGE, Prot::ExecuteRead) {
             os_std::eprintln!("winrun: wow64: cannot make import stubs executable: {e:?}");
-            os_std::process::exit(126);
+            return Err("wow64: cannot make import stubs executable");
         }
-        ACTIVE.store(self as *mut Bridge, Ordering::Relaxed);
+        ACTIVE.store(self as *mut Bridge, Ordering::Release);
         // The main thread's Ctx: the static gate stack and the arena TEB32.
         let host_top = core::ptr::addr_of_mut!(BRIDGE_STACK) as u64 + BRIDGE_STACK_SIZE as u64;
         install_ctx(self.stack_top as u64, host_top, self.teb as u64);
+        Ok(())
+    }
+
+    /// Enters `entry` in compatibility mode. Never returns normally.
+    pub fn enter(&mut self, entry: u32) -> ! {
         if crate::VERBOSE.load(Ordering::Relaxed) {
             os_std::eprintln!("winrun: wow64 enter {entry:#x}, rsp {:#x}, teb {:#x}", self.stack_top, self.teb);
         }
@@ -509,6 +521,10 @@ impl Bridge {
         // IRETQ frame targets DPL-3 selectors from CPL 3.
         unsafe { osyx_wow64_enter32(entry, self.stack_top) }
     }
+}
+
+pub(crate) fn clear_active() {
+    ACTIVE.store(core::ptr::null_mut(), Ordering::Release);
 }
 
 /// The Rust half of the gate. Called with the Win64 ABI on the bridge
@@ -707,10 +723,18 @@ fn host_override(symbol: &str) -> Option<u64> {
 }
 
 fn dispatch(bridge: &Bridge, index: u32, args: *const u32) -> (u64, u32, u32) {
-    let Some(entry) = bridge.entries.get(index as usize) else {
+    let Some(entry) = bridge.entries.lock().unwrap().get(index as usize).copied() else {
         os_std::eprintln!("winrun: wow64: bad import index {index}");
         os_std::process::exit(0xC000_0005u32 as i32);
     };
+
+    if entry.name == "wsprintfW" || entry.name == "wsprintfA" {
+        // SAFETY: the cdecl call supplies destination and format in its first
+        // two slots; the formatter consumes additional stack slots as needed.
+        let (out, fmt, rest) = unsafe { (*args, *args.add(1), args.add(2)) };
+        let result = crate::user32::wsprintf32(entry.name == "wsprintfW", out, fmt, rest);
+        return (result as u32 as u64, 0, 0);
+    }
 
     let mut values = [0u64; MAX_ARG_SLOTS];
     // Host-side temporaries for OutWide arguments: (guest address, value).
@@ -760,6 +784,14 @@ fn dispatch(bridge: &Bridge, index: u32, args: *const u32) -> (u64, u32, u32) {
         _ => 0,
     };
     (result, high, cleanup)
+}
+
+/// Resolve an additional gate after entry without making code writable.
+pub(crate) fn import_active(symbol: &str, host: u64) -> Option<u32> {
+    let bridge = ACTIVE.load(Ordering::Acquire);
+    if bridge.is_null() { return None; }
+    // SAFETY: the active bridge lives until process exit.
+    unsafe { &*bridge }.import(symbol, host)
 }
 
 /// Writes a 32-bit field of the fresh TEB.

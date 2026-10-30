@@ -508,6 +508,96 @@ pub(crate) extern "win64" fn SHGetFileInfoW(p: *const u16, input: u32, info: *mu
     sh_get_file_info(p, input, info, cb, flags)
 }
 
+fn fileop_error(e: os_std::error::Error) -> u32 {
+    e.raw_os_error().map_or(31, crate::error::errno_to_win32)
+}
+
+/// Reads a double-NUL-terminated list with bounded length and entry count.
+unsafe fn fileop_paths(ptr: *const u16) -> Result<Vec<String>, u32> {
+    if ptr.is_null() { return Err(87); }
+    let mut paths = Vec::new();
+    let mut start = 0usize;
+    for at in 0..65536usize {
+        let c = unsafe { core::ptr::read_unaligned(ptr.add(at)) };
+        if c != 0 { continue; }
+        if at == start { return Ok(paths); }
+        if at - start > path::MAX_PATH_CHARS || paths.len() >= 1024 { return Err(206); }
+        let units = unsafe { core::slice::from_raw_parts(ptr.add(start), at - start) };
+        let name = String::from_utf16(units).map_err(|_| 123u32)?;
+        paths.push(name);
+        start = at + 1;
+    }
+    Err(206)
+}
+
+fn copy_tree(src: &str, dst: &str, depth: u32) -> Result<(), u32> {
+    use os_std::fs;
+    if depth > 128 { return Err(206); }
+    let meta = fs::symlink_metadata(src).map_err(fileop_error)?;
+    if meta.is_symlink() { return Err(50); }
+    if !meta.is_dir() { fs::copy(src, dst).map_err(fileop_error)?; return Ok(()); }
+    fs::create_dir_all(dst).map_err(fileop_error)?;
+    for item in fs::read_dir(src).map_err(fileop_error)? {
+        let name = item.file_name();
+        copy_tree(&format!("{src}/{name}"), &format!("{dst}/{name}"), depth + 1)?;
+    }
+    Ok(())
+}
+
+extern "win64" fn SHFileOperationW(op: *mut u8) -> i32 {
+    use os_std::fs;
+    if op.is_null() { return 87; }
+    let is32 = crate::wow64::is_active();
+    let base = op as u64;
+    // SAFETY: the caller supplies a SHFILEOPSTRUCTW for its ABI.
+    let (function, from, to, flags) = unsafe {
+        if is32 {
+            (crate::teb::get::<u32>(base, 4), crate::teb::get::<u32>(base, 8) as u64,
+             crate::teb::get::<u32>(base, 12) as u64, crate::teb::get::<u16>(base, 16))
+        } else {
+            (crate::teb::get::<u32>(base, 8), crate::teb::get::<u64>(base, 16),
+             crate::teb::get::<u64>(base, 24), crate::teb::get::<u16>(base, 32))
+        }
+    };
+    let aborted = if is32 { 20 } else { 36 };
+    unsafe { crate::teb::put(base, aborted, 0u32) };
+    let result = (|| -> Result<(), u32> {
+        if !matches!(function, 1..=4) { return Err(87); }
+        // Recycle bin, wildcard expansion and rename-on-collision are not
+        // implemented; never silently perform a different operation.
+        if flags & (0x0040 | 0x0008 | 0x0080) != 0 { return Err(50); }
+        let sources = unsafe { fileop_paths(from as *const u16) }?;
+        if sources.is_empty() { return Err(87); }
+        let destinations = if function == 3 { Vec::new() } else { unsafe { fileop_paths(to as *const u16) }? };
+        if function != 3 && (destinations.is_empty() || flags & 1 != 0 && destinations.len() != sources.len()) { return Err(87); }
+        for (index, source) in sources.iter().enumerate() {
+            let (src, exists) = kernel32::locate(source)?;
+            if !exists { return Err(2); }
+            if src == "/" { return Err(5); }
+            let metadata = fs::symlink_metadata(&src).map_err(fileop_error)?;
+            if function == 3 {
+                if metadata.is_dir() && !metadata.is_symlink() { fs::remove_dir_all(&src) } else { fs::remove_file(&src) }.map_err(fileop_error)?;
+                continue;
+            }
+            let dst_win = if flags & 1 != 0 { &destinations[index] } else { &destinations[0] };
+            let (mut dst, dst_exists) = kernel32::locate(dst_win)?;
+            if dst_exists && fs::metadata(&dst).map_err(fileop_error)?.is_dir() {
+                let name = src.rsplit('/').next().ok_or(87u32)?;
+                dst = format!("{}/{name}", dst.trim_end_matches('/'));
+            }
+            if dst == src || metadata.is_dir() && dst.starts_with(&format!("{src}/")) { return Err(87); }
+            if let Ok(target) = fs::symlink_metadata(&dst) {
+                if target.is_symlink() { return Err(50); }
+                if target.dev() == metadata.dev() && target.ino() == metadata.ino() { return Err(87); }
+            }
+            if function == 2 { copy_tree(&src, &dst, 0)?; }
+            else { fs::rename(&src, &dst).map_err(fileop_error)?; }
+        }
+        Ok(())
+    })();
+    match result { Ok(()) => 0, Err(e) => { unsafe { crate::teb::put(base, aborted, 1u32) }; e as i32 } }
+}
+
 extern "win64" fn SHGetFileInfoA(p: *const u8, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
     // SAFETY: NUL-terminated ANSI path; the wide copy lives for this call.
     let Some(wide) = (unsafe { path::ansi_to_wide(p) }) else { return 0 };
@@ -873,17 +963,23 @@ extern "win64" fn ILCreateFromPathA(path: *const u8) -> u64 {
 
 /// Functions xul.dll delay-imports by number; the numbers are the Windows
 /// shell32 ordinals (155 ILFree, 190 ILCreateFromPathW).
+extern "win64" fn IsUserAnAdmin() -> i32 {
+    crate::accounts::is_admin() as i32
+}
+
 pub fn ordinals() -> Vec<(u16, u64)> {
-    alloc::vec![(155, crate::commdlg::il_free_address()), (190, ILCreateFromPathW as *const () as u64)]
+    alloc::vec![(155, crate::commdlg::il_free_address()), (190, ILCreateFromPathW as *const () as u64), (680, IsUserAnAdmin as *const () as u64)]
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        IsUserAnAdmin,
         SHGetKnownFolderPath,
         SHGetFolderPathW,
         SHGetSpecialFolderPathA,
         SHGetSpecialFolderLocation,
         SHGetFileInfoW,
+        SHFileOperationW,
         SHGetFileInfoA,
         SHGetStockIconInfo,
         SHQueryUserNotificationState,
