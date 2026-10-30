@@ -52,7 +52,9 @@ supplies the platform parts:
 | `env::current_exe` | Implemented (`AT_EXECFN`: canonical path the kernel loaded) | OSyx + host |
 | `os::{sysinfo, kernel_version, heap_stats, aux_value, raw}` | Implemented | OSyx |
 | `rt`: `_start` (argv, envp and auxv located with `osyx_abi::startup`), `entry!`, `Termination`, panic → status 101 | Implemented | OSyx (tested) |
-| `net`, `fs::hard_link`, `fs::canonicalize` | Planned | — |
+| `fs::canonicalize` | Implemented: symbolic links, `.` and `..`, at most 40 links | OSyx + host (lexical cases; the host has no symbolic links) |
+| `net`: `TcpStream`, `TcpListener`, `UdpSocket`, `PingSocket`, `lookup_host`, interfaces | Implemented on the native TCP/IP stack | OSyx (`net_checks` in `init`); no host tests |
+| `fs::hard_link` | Planned: needs a link system call | — |
 
 On the host back end, futexes are emulated (per-address wake generations on
 a global `std` condition variable) and threads are real host threads, so the
