@@ -4,6 +4,8 @@
 
 **A new x86-64 operating system, written from scratch in Rust.**
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/v3nn7/OSyx?utm_source=badge)
+
 Its own UEFI boot manager, kernel, file systems, network stack, compositor
 and desktop, and a compatibility layer that runs Windows PE32+ programs.
 
