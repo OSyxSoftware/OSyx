@@ -58,8 +58,10 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 
 6. Split the global process table lock (handle tables, mappings, page
    faults) and the kernel entry lock.
-7. Demand-paged file views (a browser archive of 177 MiB is read completely
-   when mapped), virtio-blk with several requests in flight, async readahead.
+7. **Done**: demand-paged read-only file views (the 177 MiB browser
+   archive is no longer read completely when mapped), virtio-blk keeps up to
+   four requests in flight, and read-ahead windows run on a background kernel
+   thread.
 8. Software WebRender: fewer full-frame copies, damage-based presents in
    PRISM.
 9. **GPU acceleration**: today only 2D scan-out (VirtIO-GPU). Next: XSAVE/AVX

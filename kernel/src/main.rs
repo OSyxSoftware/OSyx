@@ -248,6 +248,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let nics = net::init(&pci_devices, boot);
     kprintln!("net: {} interface(s)", nics);
     vfs::start_writeback();
+    filecache::start_readahead();
     // Compressed memory for cold pages; `swap.off` turns it off.
     if !boot.has_option("swap.off") {
         process::start_swap();
