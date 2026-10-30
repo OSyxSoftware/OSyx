@@ -263,6 +263,11 @@ fn browse(info: u64, wide: bool) -> u64 {
         return 0;
     }
     let (owner, root, display, title, callback) = unsafe {
+        if crate::wow64::is_active() {
+            (teb::get::<u32>(info, 0) as u64, teb::get::<u32>(info, 4) as u64,
+             teb::get::<u32>(info, 8) as u64, string(teb::get::<u32>(info, 12) as u64, wide),
+             teb::get::<u32>(info, 20) as u64)
+        } else {
         (
             teb::get::<u64>(info, 0),
             teb::get::<u64>(info, 8),
@@ -270,6 +275,7 @@ fn browse(info: u64, wide: bool) -> u64 {
             string(teb::get::<u64>(info, 24), wide),
             teb::get::<u64>(info, 40),
         )
+        }
     };
     // Callback/window-message customization is not silently ignored.
     if callback != 0 || root != 0 && pidl_path(root).is_none() {
@@ -297,7 +303,7 @@ fn browse(info: u64, wide: bool) -> u64 {
     if pidl != 0 {
         unsafe {
             write_string(display, 260, selection.path.rsplit('/').next().unwrap_or("C:"), wide);
-            teb::put(info, 56, 0i32);
+            teb::put(info, if crate::wow64::is_active() { 28 } else { 56 }, 0i32);
         }
     }
     pidl

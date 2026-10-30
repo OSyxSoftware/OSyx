@@ -128,6 +128,8 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(ReleaseDC, [Handle, Handle], U32),
     sig!(RemoveDirectoryW, [Ptr], U32),
     sig!(SHGetPathFromIDListW, [Handle, Handle], U32),
+    sig!(SHBrowseForFolderW, [Ptr], Handle),
+    sig!(SHGetFileInfoW, [Ptr, Uint, Ptr, Uint, Uint], Handle),
     sig!(SHGetSpecialFolderLocation, [Handle, Uint, OutWide], U32),
     sig!(ScreenToClient, [Handle, Ptr], U32),
     sig!(SearchPathW, [Ptr, Ptr, Ptr, Uint, Ptr, Ptr], U32),

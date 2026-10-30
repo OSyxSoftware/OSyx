@@ -68,6 +68,9 @@ _Static_assert(sizeof(MSG32) == 28, "32-bit MSG");
 __declspec(dllimport) BOOL __stdcall PeekMessageW(MSG32 *msg, HANDLE hwnd, DWORD min, DWORD max, DWORD flags);
 __declspec(dllimport) long __stdcall DispatchMessageW(const MSG32 *msg);
 __declspec(dllimport) void __stdcall PostQuitMessage(int code);
+typedef struct { HANDLE icon; int index; DWORD attributes; WCHAR display[260], kind[80]; } SHFILEINFO32;
+_Static_assert(sizeof(SHFILEINFO32) == 692, "32-bit SHFILEINFOW");
+__declspec(dllimport) DWORD __stdcall SHGetFileInfoW(const WCHAR *path, DWORD attrs, SHFILEINFO32 *info, DWORD size, DWORD flags);
 
 static long __stdcall test_wndproc(HANDLE hwnd, DWORD msg, DWORD w, long l) {
     return hwnd == (HANDLE)7 && msg == 8 && w == 9 && l == -10 ? -42 : 0;
@@ -150,6 +153,11 @@ void __stdcall start(void) {
     check("PeekMessageW writes 32-bit MSG", PeekMessageW(&message.msg, 0, 0, 0, 1) && message.msg.message == 0x12 &&
           message.msg.wparam == 37 && message.guard == 0x1234abcd);
     check("DispatchMessageW reads 32-bit MSG", DispatchMessageW(&message.msg) == 0);
+    struct { SHFILEINFO32 info; DWORD guard; } fileinfo;
+    fileinfo.guard = 0xdeadbeef;
+    check("SHGetFileInfoW 32-bit layout", SHGetFileInfoW(L"C:\\test.txt", 0x80, &fileinfo.info, sizeof fileinfo.info,
+          0x10 | 0x200 | 0x400) != 0 && wide_eq(fileinfo.info.display, "test.txt") &&
+          wide_eq(fileinfo.info.kind, "Text Document") && fileinfo.guard == 0xdeadbeef);
 
     check("lstrcmpiA ignores case", lstrcmpiA("Steam", "sTEAM") == 0 && lstrcmpiA("a", "b") < 0);
     check("MulDiv rounds and rejects /0", MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(1, 1, 0) == -1);

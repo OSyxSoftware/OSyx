@@ -492,6 +492,19 @@ fn sh_get_file_info(path: *const u16, input: u32, info: *mut u8, cb: u32, flags:
 }
 
 pub(crate) extern "win64" fn SHGetFileInfoW(p: *const u16, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
+    if crate::wow64::is_active() {
+        if flags != SHGFI_EXETYPE && (info.is_null() || cb < 692) { return 0; }
+        let mut host = [0u64; 87];
+        let result = sh_get_file_info(p, input, host.as_mut_ptr().cast(), SHFILEINFO_SIZE, flags);
+        if !info.is_null() && cb >= 692 {
+            // SAFETY: the guest provided a 692-byte SHFILEINFOW buffer.
+            unsafe {
+                core::ptr::write_unaligned(info.cast::<u32>(), host[0] as u32);
+                core::ptr::copy_nonoverlapping(host.as_ptr().cast::<u8>().add(8), info.add(4), 688);
+            }
+        }
+        return result;
+    }
     sh_get_file_info(p, input, info, cb, flags)
 }
 
