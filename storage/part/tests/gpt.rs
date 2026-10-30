@@ -86,6 +86,36 @@ fn build_rejects_overlaps_and_invalid_lengths() {
     assert!(build(1 << 14, Guid([9; 16]), &[part(2148, 20), part(2048, 100)]).is_ok());
 }
 
+#[test]
+fn rejects_usable_range_covering_backup_header() {
+    let (mut d, _) = disk(8);
+    let backup = d.sectors() - 1;
+    let h = &mut d.0[SECTOR..2 * SECTOR];
+    h[48..56].copy_from_slice(&backup.to_le_bytes());
+    h[16..20].fill(0);
+    let crc = crc32(&h[..92]);
+    h[16..20].copy_from_slice(&crc.to_le_bytes());
+    assert!(parse(&mut d).unwrap().used_backup);
+}
+
+#[test]
+fn rejects_partition_array_covering_backup_header() {
+    let (mut d, _) = disk(8);
+    let backup = d.sectors() - 1;
+    let offset = backup as usize * SECTOR;
+    d.0[offset + 32..offset + 40].copy_from_slice(&2048u64.to_le_bytes());
+    d.0[offset + 40..offset + 48].copy_from_slice(&2048u64.to_le_bytes());
+    let array_crc = crc32(&d.0[offset..offset + 128]);
+    let h = &mut d.0[SECTOR..2 * SECTOR];
+    h[72..80].copy_from_slice(&backup.to_le_bytes());
+    h[80..84].copy_from_slice(&1u32.to_le_bytes());
+    h[88..92].copy_from_slice(&array_crc.to_le_bytes());
+    h[16..20].fill(0);
+    let crc = crc32(&h[..92]);
+    h[16..20].copy_from_slice(&crc.to_le_bytes());
+    assert!(matches!(parse(&mut d), Err(GptError::Corrupt(_))));
+}
+
 /// Flips every byte of the primary header and array one at a time: parsing
 /// must never panic, and must either succeed via the backup or fail cleanly.
 #[test]

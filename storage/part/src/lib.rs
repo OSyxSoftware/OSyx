@@ -180,12 +180,12 @@ fn read_header<R: SectorReader>(r: &mut R, lba: u64) -> Result<Table, GptError> 
     if esize < ENTRY_SIZE || !esize.is_multiple_of(8) || esize > SECTOR * 8 || count == 0 || count > MAX_ENTRIES {
         return Err(GptError::Corrupt("bad partition entry geometry"));
     }
-    if first < 2 || last >= disk || first > last {
+    if first < 2 || last >= disk - 1 || first > last {
         return Err(GptError::Corrupt("usable range outside the disk"));
     }
     let bytes = count as usize * esize;
     let array_sectors = bytes.div_ceil(SECTOR) as u64;
-    if entries_lba < 2 || entries_lba.checked_add(array_sectors).is_none_or(|e| e > disk) {
+    if entries_lba < 2 || entries_lba.checked_add(array_sectors).is_none_or(|e| e > disk - 1) {
         return Err(GptError::Corrupt("partition array outside the disk"));
     }
     // The array must not overlap the usable area.
