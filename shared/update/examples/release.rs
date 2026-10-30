@@ -22,7 +22,12 @@ const SETUP_ESP: &str = "system/share/osyx-setup/esp/";
 const SETUP_DIR: &str = "system/share/osyx-setup/";
 
 fn octal(field: &[u8]) -> Result<u64, String> {
-    let s: String = field.iter().skip_while(|&&b| b == b' ').take_while(|&&b| b != 0 && b != b' ').map(|&b| b as char).collect();
+    let start = field.iter().position(|&b| b != b' ').unwrap_or(field.len());
+    let end = field[start..].iter().position(|&b| b == 0 || b == b' ').map_or(field.len(), |i| start + i);
+    if field[end..].iter().any(|&b| b != 0 && b != b' ') {
+        return Err(String::from("bad octal field padding"));
+    }
+    let s: String = field[start..end].iter().map(|&b| b as char).collect();
     let s = s.trim();
     if s.is_empty() {
         return Ok(0);
@@ -180,6 +185,14 @@ mod tests {
         header[148..156].fill(b' ');
         let sum: u64 = header[..512].iter().map(|&b| b as u64).sum();
         header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    }
+
+    #[test]
+    fn octal_rejects_non_padding_after_terminator() {
+        assert_eq!(octal(b"  0017\0 ").unwrap(), 15);
+        assert_eq!(octal(b"        ").unwrap(), 0);
+        assert!(octal(b"1 7\0").is_err());
+        assert!(octal(b"1\0x ").is_err());
     }
 
     #[test]
