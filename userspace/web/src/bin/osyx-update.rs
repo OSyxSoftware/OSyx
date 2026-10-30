@@ -138,11 +138,14 @@ fn file_sha256(path: &str) -> Option<[u8; 32]> {
 fn install(log: &mut Log, m: &Manifest, payload: &str) -> Result<usize, String> {
     let mut src = fs::File::open(payload).map_err(|e| format!("{payload}: {e}"))?;
     let mut staged: Vec<(String, bool)> = Vec::new();
+    let mut temporary: Vec<String> = Vec::new();
     let mut buf = vec![0u8; 256 * 1024];
     let result = (|| -> Result<(), String> {
         for e in &m.files {
             let to = target(&e.path);
-            let unchanged = file_sha256(&to) == Some(e.sha256);
+            let esp = e.path.starts_with(osyx_update::ESP_PREFIX);
+            let mode_matches = esp || fs::metadata(&to).is_ok_and(|m| m.permissions().mode() == e.mode);
+            let unchanged = mode_matches && file_sha256(&to) == Some(e.sha256);
             let tmp = format!("{to}{STAGED}");
             let mut out = if unchanged {
                 None
@@ -150,7 +153,9 @@ fn install(log: &mut Log, m: &Manifest, payload: &str) -> Result<usize, String> 
                 if let Some((dir, _)) = to.rsplit_once('/') {
                     fs::create_dir_all(dir).map_err(|err| format!("{dir}: {err}"))?;
                 }
-                Some(fs::File::create(&tmp).map_err(|err| format!("{tmp}: {err}"))?)
+                let file = fs::File::create(&tmp).map_err(|err| format!("{tmp}: {err}"))?;
+                temporary.push(tmp.clone());
+                Some(file)
             };
             let mut h = Sha256::new();
             let mut left = e.size;
@@ -172,7 +177,6 @@ fn install(log: &mut Log, m: &Manifest, payload: &str) -> Result<usize, String> 
             if let Some(f) = out {
                 f.sync_all().map_err(|err| format!("{tmp}: {err}"))?;
                 drop(f);
-                let esp = e.path.starts_with(osyx_update::ESP_PREFIX);
                 if !esp {
                     fs::set_permissions(&tmp, fs::Permissions::from_mode(e.mode)).map_err(|err| format!("{tmp}: {err}"))?;
                 }
@@ -182,8 +186,8 @@ fn install(log: &mut Log, m: &Manifest, payload: &str) -> Result<usize, String> 
         Ok(())
     })();
     if let Err(e) = result {
-        for (to, _) in &staged {
-            let _ = fs::remove_file(format!("{to}{STAGED}"));
+        for path in &temporary {
+            let _ = fs::remove_file(path);
         }
         return Err(e);
     }
