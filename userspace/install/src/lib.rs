@@ -599,6 +599,9 @@ impl<D: osyx_ext4::BlockDevice, S: Source, P: Progress> Copy<'_, D, S, P> {
                     let mut at = 0u64;
                     loop {
                         let n = self.source.read(&p, at, &mut self.buf).map_err(|x| Error::Source(format!("{p}: {x}")))?;
+                        if n > self.buf.len() {
+                            return Err(Error::Source(format!("{p}: read returned more bytes than the buffer")));
+                        }
                         if n == 0 {
                             break;
                         }

@@ -44,11 +44,12 @@ struct MemSource {
     fail_at: Option<String>,
     boot_calls: usize,
     empty_boot: Option<String>,
+    oversize_at: Option<String>,
 }
 
 impl MemSource {
     fn new() -> MemSource {
-        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0, empty_boot: None };
+        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0, empty_boot: None, oversize_at: None };
         for (d, mode, uid) in [("/bin", 0o755, 0), ("/etc", 0o755, 0), ("/etc/osyx", 0o755, 0), ("/dev", 0o755, 0), ("/tmp", 0o1777, 0), ("/home", 0o755, 0), ("/home/user", 0o755, 1000), ("/system", 0o755, 0), ("/system/share", 0o755, 0), ("/system/share/osyx-setup", 0o755, 0)] {
             s.dir(d, mode, uid);
         }
@@ -84,6 +85,9 @@ impl Source for MemSource {
             .collect())
     }
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> std::result::Result<usize, String> {
+        if self.oversize_at.as_deref() == Some(path) {
+            return Ok(buf.len() + 1);
+        }
         if self.fail_at.as_deref() == Some(path) {
             return Err("simulated read error".into());
         }
@@ -296,6 +300,12 @@ fn an_interrupted_installation_is_not_bootable() {
     let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
     assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err(), "no boot loader on an incomplete disk");
     // A second attempt on the same disk starts over and succeeds.
+    drop(esp);
+    let mut bad_source = MemSource::new();
+    bad_source.oversize_at = Some("/etc/hostname".into());
+    assert!(matches!(install(&mut disk, &plan, &mut bad_source, &config(), &mut Log::default()), Err(Error::Source(_))));
+    let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
+    assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err());
     drop(esp);
     struct FailLoader<'a> { disk: &'a mut Vec<u8>, fail: bool }
     impl Disk for FailLoader<'_> {
