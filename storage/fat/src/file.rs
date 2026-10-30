@@ -61,7 +61,13 @@ impl<D: BlockDevice> FileSystem<D> {
     pub fn stat(&mut self, f: &mut FileRef) -> Result<crate::Metadata> {
         self.refresh(f)?;
         let e = self.read_entry(f.entry)?;
-        Ok(crate::Metadata { is_dir: f.is_dir, size: f.size, attributes: e[11], first_cluster: f.first_cluster })
+        Ok(crate::Metadata {
+            is_dir: f.is_dir,
+            size: f.size,
+            attributes: e[11],
+            first_cluster: f.first_cluster,
+            mtime: crate::dos_to_unix(crate::le16(&e, 24), crate::le16(&e, 22)),
+        })
     }
 
     /// Cluster number `index` of the file, using the cursor cache.
@@ -277,6 +283,25 @@ mod tests {
     use super::*;
     use crate::{format, OpenOptions};
     use alloc::vec;
+
+    #[test]
+    fn created_and_written_files_carry_the_clock() {
+        let mut image = vec![0; 64 * 1024 * 1024];
+        format(&mut image, "TEST", 1).unwrap();
+        let mut fs = FileSystem::mount(image).unwrap();
+        // 2025-06-15 12:34:56 UTC.
+        fs.set_time(1_749_990_896);
+        let mut file = fs.open("/stamped", OpenOptions { create: true, ..Default::default() }).unwrap();
+        assert_eq!(fs.stat(&mut file).unwrap().mtime, 1_749_990_896);
+        fs.write(&mut file, 0, b"data").unwrap();
+        assert_eq!(fs.stat(&mut file).unwrap().mtime, 1_749_990_896);
+        let md = fs.metadata("/stamped").unwrap();
+        assert_eq!(md.mtime, 1_749_990_896);
+        // Before 1980 the driver clamps to the DOS epoch.
+        fs.set_time(0);
+        let mut old = fs.open("/old", OpenOptions { create: true, ..Default::default() }).unwrap();
+        assert_eq!(fs.stat(&mut old).unwrap().mtime, 315_532_800);
+    }
 
     #[test]
     fn sequential_reads_keep_cursor_until_fat_changes() {

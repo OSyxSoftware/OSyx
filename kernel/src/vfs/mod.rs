@@ -985,7 +985,14 @@ impl OpenFile {
             KIND_DIR => Err(Errno::IsADirectory),
             KIND_FILE if self.device.is_none() => {
                 let t0 = crate::interrupts::uptime_ms();
-                let r = crate::filecache::read(self.cache_key(), self.pos, buf, |off, b| self.node.mount.fs.read(self.node.ino, off, b));
+                let source = crate::filecache::Source { fs: self.node.mount.fs.clone(), ino: self.node.ino };
+                let r = crate::filecache::read(
+                    self.cache_key(),
+                    self.pos,
+                    buf,
+                    |off, b| self.node.mount.fs.read(self.node.ino, off, b),
+                    Some(&source),
+                );
                 let ms = crate::interrupts::uptime_ms().saturating_sub(t0);
                 if ms >= 40 {
                     // TEMP I/O diagnostics: which read blocks its thread this long.

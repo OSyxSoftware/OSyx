@@ -144,6 +144,8 @@ impl FatVolume {
             return Err(Errno::ReadOnly);
         }
         let mut s = self.state.lock();
+        // Entries touched by this change carry the current time.
+        s.fs.set_time(crate::time::now_ns().div_euclid(1_000_000_000));
         let r = f(&mut s);
         let flushed = s.flush();
         let v = r?;
@@ -161,13 +163,16 @@ fn stat_of(ino: u64, md: &osyx_fat::Metadata, cluster: u64, owner: (u32, u32)) -
         (KIND_FILE, 0o644)
     };
     let size = if md.is_dir { 0 } else { md.size as u64 };
+    // DOS times have 2-second resolution; an entry written without a clock
+    // keeps the FAT epoch.
+    let mtime_ns = if md.mtime == 0 { FAT_EPOCH_NS } else { md.mtime as i64 * 1_000_000_000 };
     FileStat {
         size,
         ino,
         blocks: size.div_ceil(cluster) * (cluster / 512),
-        atime_ns: FAT_EPOCH_NS,
-        mtime_ns: FAT_EPOCH_NS,
-        ctime_ns: FAT_EPOCH_NS,
+        atime_ns: mtime_ns,
+        mtime_ns,
+        ctime_ns: mtime_ns,
         kind,
         mode,
         nlink: if md.is_dir { 2 } else { 1 },

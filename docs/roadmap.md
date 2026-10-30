@@ -1,6 +1,7 @@
 # Roadmap
 
-Status of the milestones from the project brief.
+Status of the milestones from the project brief. Audited against the code
+on 2026-10-30.
 
 | # | Milestone | Status |
 |---|---|---|
@@ -25,7 +26,7 @@ Status of the milestones from the project brief.
 | 11 | Task Manager, Settings and four PE32+ desktop utilities | Implemented initial versions |
 | 12 | Unmodified Windows browser (Zen) on OSyx | Runs and plays YouTube in QEMU; software rendering, Gecko sandbox off (see research/zen-bringup.md, research/performance-profile.md) |
 | 13 | Signed system updates and live image | Done (`/bin/osyx-update`, GitHub releases, `scripts/release.ps1`) |
-| 14 | Battery indicator (ACPI/EC) | Initial version; unverified on most hardware |
+| 14 | Battery indicator (ACPI/EC) | Done in code (multi-battery, hotplug, EC tolerance, AML tests); unverified on most hardware |
 | 15 | Kernel profiler and flame graphs | Done (`prof=N`, `scripts/flamegraph.py`) |
 
 ## Next steps (in order)
@@ -34,25 +35,29 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 
 ### Near term
 
-1. **USB storage for users** (in progress): automatic mount of USB mass
-   storage under `/media/<label>`, safe eject (flush, unmount, refuse when
-   busy), surprise removal without kernel panics, and a desktop panel that
-   lists USB disks (label, size, file system, usage) with an Eject button.
-2. **Settings that work** (in progress): every control in the Settings app
-   must change and persist its value; add a system update button (current
-   version, check for updates, progress and errors) on top of
-   `/bin/osyx-update`.
-3. **Battery detection** (in progress): reliable charge, charging state, time
-   estimate, no-battery and multiple-battery cases, tolerance of EC errors;
-   verify on real ThinkPads.
-4. **File formats and multiple files in Files**: open more kinds of files
-   (images, text and source, archives such as 7z/zip/tar, audio, video, PDF)
-   with a built-in viewer or a registered application per type, an "Open
-   with" choice, and multi-selection (copy, move, delete, compress several
-   files at once). Today Files opens text, HTML and common image types
-   through `/bin/open` and the browser.
-5. **Release hygiene**: run the Win32, SMP, desktop and Zen suites for every
-   release; CodSpeed benchmarks for the host-testable crates on every PR.
+1. **USB storage for users**: done. Removable disks are mounted under
+   `/media/<label>` on hot-plug (`kernel/src/media.rs`), eject flushes and
+   unmounts and refuses when busy, surprise removal keeps the kernel alive,
+   and the desktop panel lists disks with size, file system, usage and an
+   Eject button (`userspace/desktop/src/drives.rs`).
+2. **Settings that work**: done. Accent, wallpaper, keyboard layout, time
+   zone, host name and IPv4 configuration are written and read back by the
+   applications; About has Check for updates and Install update on top of
+   `/bin/osyx-update` (`userspace/desktop/src/bin/settings.rs`).
+3. **Battery detection**: done in code. Multiple batteries are aggregated,
+   ACPI hotplug is followed, unknown or implausible EC values are filtered,
+   and the AML tests cover two batteries, a missing battery and wild values
+   (`userspace/battery/`, `tests/acpi.rs`). Still open: verification on real
+   ThinkPads.
+4. **File formats and multiple files in Files**: partly done. Multi-selection
+   (copy, move, delete, pack into tar), Extract here for tar/tar.gz/zip/7z/gz,
+   a viewer and hex viewer, and "Open with" with per-extension choices are
+   implemented (`userspace/desktop/src/bin/files.rs`,
+   `userspace/filekit/src/openwith.rs`). Still open: built-in audio, video
+   and PDF viewers (today those kinds need a registered application).
+5. **Release hygiene**: partly done. CodSpeed benchmarks run on every pull
+   request. Still open: the release workflow runs only the host tests and
+   target checks, not the Win32, SMP, desktop and Zen QEMU suites.
 
 ### Performance (see research/performance-profile.md)
 
@@ -64,6 +69,9 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 7. Demand-paged file views, virtio-blk with several requests in flight,
    async readahead. Done: a read-only section loads 256 KiB runs on the
    first touch instead of reading the whole 177 MiB archive at map time;
+   writable sections stay eagerly loaded for coherent write-back; virtio-blk
+   keeps up to four chains in flight; read-ahead windows run on a background
+   kernel thread while the reader gets the first pages immediately.
    writable sections stay eagerly loaded for coherent write-back. Still
    open: virtio-blk has one request in flight and readahead is synchronous.
 8. Software WebRender: fewer full-frame copies, damage-based presents in
@@ -83,19 +91,24 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 
 ### Longer term
 
-11. **Real-hardware coverage**: NVMe, AHCI, physical NICs and Wi-Fi on more
-    machines; I2C-HID touchpads.
+11. **Real-hardware coverage**: NVMe, AHCI, physical NICs, Wi-Fi and I2C-HID
+    drivers exist; the open work is verification and fixes on more machines
+    and firmware. I2C-HID touchpads are not supported yet.
 12. **Windows compatibility expansion**: cross-process sharing and object
     names, child controls, SEH, delay imports, process creation and the
     runtime dependencies of larger applications; Windows 11 API-set research
     with REA (`research/windows11-apiset-and-forwarding.md`).
 13. **Storage**: ext4 htree insertion and deeper extent trees, page cache with
-    delayed writes, FAT timestamps, interrupt-driven virtio.
-14. **SMP**: finer-grained kernel locking, load balancing policies.
+    delayed writes, interrupt-driven virtio (queues are polled). Done: FAT
+    entries are stamped with the wall clock on create and write, and `stat`
+    reports the stored time (2-second DOS resolution).
+14. **SMP**: finer-grained kernel locking (still one kernel entry lock and
+    `TABLE` for mappings and page faults) and load balancing policies.
 15. **OSyx Std**: `RwLock`, `Once`/`OnceLock`, `mpsc`; then the genuine `std`
     port ([rust-std.md](rust-std.md)).
-16. **Desktop**: per-pixel alpha in the toolkit, report-protocol keyboards,
-    AXIS pipelines and blocks (see [graphics.md](graphics.md)).
+16. **Desktop**: per-pixel alpha (ARGB8888 windows) and raw-report keyboards
+    are implemented; still open: AXIS pipelines, redirection and blocks (see
+    [graphics.md](graphics.md)).
 
 ## Real hardware: current scope and limits
 
