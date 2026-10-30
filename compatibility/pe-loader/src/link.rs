@@ -99,12 +99,12 @@ pub trait Host {
     /// yet. A host may offer it to later [`Host::prepare`] calls.
     fn publish(&mut self, _name: &str, _base: u64, _image: &[u8]) {}
 
-    // TEMP load-phase timing: hosts that keep a clock return a mark and
-    // report how long the phase that started at it took.
+    // TEMP load-phase timing: hosts that keep a clock return marks and
+    // report how long the phase between two marks took.
     fn mark(&mut self) -> u64 {
         0
     }
-    fn note(&mut self, _module: &str, _phase: &str, _mark: u64) {}
+    fn note(&mut self, _module: &str, _phase: &str, _start: u64, _end: u64) {}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -399,11 +399,13 @@ impl<'s, H: Host> Linker<'s, H> {
         }
         let m4 = self.host.mark();
         self.host.commit(base, img, &prot)?;
-        self.host.note(&name, "reserve", m0);
-        self.host.note(&name, "layout", m1);
-        self.host.note(&name, "relocate", m2);
-        self.host.note(&name, "imports", m3);
-        self.host.note(&name, "commit", m4);
+        let m5 = self.host.mark();
+        // Each phase on its own; "imports" includes loading the dependencies.
+        self.host.note(&name, "reserve", m0, m1);
+        self.host.note(&name, if shared { "shared map" } else { "layout" }, m1, m2);
+        self.host.note(&name, "relocate", m2, m3);
+        self.host.note(&name, "imports", m3, m4);
+        self.host.note(&name, "commit", m4, m5);
         let m = &mut self.modules[idx];
         m.imports_bound = bound;
         m.state = State::Ready;

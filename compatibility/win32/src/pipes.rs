@@ -208,7 +208,7 @@ impl PipeObj {
         static R_EMPTY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         static R_REST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         let calls = R_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if calls.is_multiple_of(8192) {
+        if calls.is_multiple_of(8192) && crate::COUNT.load(Ordering::Relaxed) {
             let us = os_std::time::Instant::now().as_nanos_since_boot() / 1000;
             os_std::eprintln!(
                 "winrun: piperead t={us} calls={} data={} bytes={} nowait={} empty={} rest={}",

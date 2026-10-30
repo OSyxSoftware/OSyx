@@ -536,8 +536,8 @@ impl Host for WinHost {
         Instant::now().as_nanos_since_boot()
     }
 
-    fn note(&mut self, module: &str, phase: &str, mark: u64) {
-        let ns = Instant::now().as_nanos_since_boot().saturating_sub(mark);
+    fn note(&mut self, module: &str, phase: &str, start: u64, end: u64) {
+        let ns = end.saturating_sub(start);
         if ns >= 20_000_000 {
             os_std::eprintln!("winrun: {module} {phase} {} ms", ns / 1_000_000);
         }

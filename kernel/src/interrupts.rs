@@ -234,6 +234,18 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
         }
         return;
     }
+    // Device MSIs: their handlers only take spinlocks and wake a driver
+    // thread (see `irq`), so a packet interrupt does not wait for, or hold
+    // up, other CPUs' system calls.
+    if (crate::irq::FIRST as u64..=crate::irq::LAST as u64).contains(&f.vector) {
+        crate::irq::dispatch(f.vector as u8);
+        if from_user && crate::sched::current_kill_pending() {
+            let _entry = crate::smp::KernelEntry::new();
+            crate::smp::set_hold_kind(crate::smp::HOLD_IRQ);
+            crate::process::finish_current_thread(0);
+        }
+        return;
+    }
     let _entry = crate::smp::KernelEntry::new();
     if _entry.acquired() {
         crate::smp::set_hold_kind(if f.vector < 32 {
