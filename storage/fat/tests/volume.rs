@@ -375,6 +375,27 @@ fn rejects_nonempty_file_without_first_cluster() {
 }
 
 #[test]
+fn rejects_directory_without_first_cluster() {
+    let mut fs = fresh(64 * MIB);
+    fs.create_dir("/broken").unwrap();
+    write_file(&mut fs, "/protected", b"keep");
+    let g = *fs.geometry();
+    let mut image = fs.unmount().unwrap();
+    let root = (g.data_start + (g.root_cluster - 2) * g.sectors_per_cluster) as usize * 512;
+    let entry = image[root..root + g.cluster_bytes() as usize]
+        .chunks_exact(32)
+        .position(|entry| &entry[..11] == b"BROKEN     ")
+        .unwrap();
+    let entry = root + entry * 32;
+    image[entry + 20..entry + 22].fill(0);
+    image[entry + 26..entry + 28].fill(0);
+    let mut fs = FileSystem::mount(image).unwrap();
+    assert!(matches!(fs.read_dir("/broken"), Err(FsError::Corrupt(_))));
+    assert!(matches!(fs.remove_file("/broken/protected"), Err(FsError::Corrupt(_))));
+    assert_eq!(read_file(&mut fs, "/protected"), b"keep");
+}
+
+#[test]
 fn block_device_bounds() {
     let mut img = vec![0u8; 4096];
     let mut buf = [0u8; 512];
