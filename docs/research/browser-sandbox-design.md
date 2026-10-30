@@ -6,9 +6,10 @@ The VFS has experimental path checks when an explicit lookup policy is
 supplied. A kernel-only test hook creates a process with both policies before
 loading its image; descendants inherit them. Restricted children cannot inherit
 file stdio handles, receive file-backed sections over IPC, or publish shared
-images. Other handle and IPC paths remain unreviewed, so this is not a browser
-sandbox. Installation and inheritance need adversarial runtime and concurrency
-tests.
+images. They cannot connect to or register global IPC services, and may kill
+only themselves or direct children. Explicit broker grants are not implemented;
+other handle and IPC paths remain unreviewed. This is not a browser sandbox.
+Installation and inheritance need adversarial runtime and concurrency tests.
 
 A deny-by-default syscall allowlist is checked before the dispatcher's fast
 paths and inherited by children. Only the kernel test hook can assign a

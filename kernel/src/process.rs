@@ -1141,6 +1141,12 @@ pub fn kill(pid: Pid) -> Result<(), Errno> {
     let (my_cred, _) = current_identity();
     let threads: Vec<Tid> = {
         let mut t = TABLE.lock();
+        // A restricted process may terminate itself or its direct children,
+        // never its broker or another process with the same uid.
+        let restricted = t.procs.get(&me).is_none_or(|p| p.path_policy.is_some());
+        if restricted && pid != me && !t.procs.get(&pid).is_some_and(|p| p.parent == me) {
+            return Err(Errno::PermissionDenied);
+        }
         let p = t.procs.get_mut(&pid).ok_or(Errno::NotFound)?;
         if !my_cred.is_root() && p.cred.uid != my_cred.uid {
             return Err(Errno::PermissionDenied);

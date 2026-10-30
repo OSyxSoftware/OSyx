@@ -56,7 +56,7 @@ fn main() -> i32 {
     let args: Vec<String> = env::args().collect();
     let pid = process::id().unwrap_or(0);
     match args.get(1).map(String::as_str) {
-        Some("sandbox") | Some("sandbox-child") => {
+        Some("sandbox") | Some("sandbox-child") | Some("sandbox-exec") => {
             use os_std::os::raw;
             if raw::raw_syscall(raw::nr::CPU_INFO, 0, 0, 0) != Err(raw::Errno::PermissionDenied) {
                 return 10;
@@ -66,6 +66,13 @@ fn main() -> i32 {
             }
             if raw::raw_syscall(raw::nr::GETTID, 0, 0, 0).is_err() {
                 return 12;
+            }
+            if raw::raw_syscall(raw::nr::KILL, u64::MAX, 0, 0) != Err(raw::Errno::PermissionDenied) {
+                return 17;
+            }
+            if raw::raw_syscall(raw::nr::CHANNEL_LISTEN, 0, 0, 0) != Err(raw::Errno::PermissionDenied)
+                || raw::raw_syscall(raw::nr::CHANNEL_CONNECT, 0, 0, 0) != Err(raw::Errno::PermissionDenied) {
+                return 18;
             }
             let file = match raw::open("/bin/worker", raw::OPEN_READ, 0) {
                 Ok(file) => file,
@@ -85,6 +92,10 @@ fn main() -> i32 {
                     Ok(status) => status.raw(),
                     Err(_) => 13,
                 };
+            }
+            if args[1] == "sandbox-child" {
+                let _ = Command::new("/bin/worker").arg("sandbox-exec").exec();
+                return 19;
             }
             0
         }

@@ -118,6 +118,9 @@ fn user_name(ptr: u64, len: u64) -> Result<alloc::string::String, Errno> {
 }
 
 pub fn channel_listen(name: u64, len: u64) -> Result<u64, Errno> {
+    if process::current_path_restricted() {
+        return Err(Errno::PermissionDenied);
+    }
     let name = user_name(name, len)?;
     let (cred, _) = process::current_identity();
     // System-wide services stay privileged. Applications may create
@@ -132,6 +135,11 @@ pub fn channel_listen(name: u64, len: u64) -> Result<u64, Errno> {
 }
 
 pub fn channel_connect(name: u64, len: u64) -> Result<u64, Errno> {
+    // Global services share the caller's uid and may expose privileged
+    // operations. Only an explicit broker grant can safely open them.
+    if process::current_path_restricted() {
+        return Err(Errno::PermissionDenied);
+    }
     let name = user_name(name, len)?;
     let (cred, _) = process::current_identity();
     let ep = ipc::connect(&name, sched::current_pid(), cred.uid)?;
