@@ -4611,6 +4611,198 @@ extern "win64" fn RegisterRawInputDevices(devices: *const u8, n: u32, size: u32)
 }
 
 // ---- clipboard --------------------------------------------------------------------------
+
+extern "win64" fn GetRawInputDeviceList(_list: *mut u8, num_devices: *mut u32, size: u32) -> u32 {
+    if num_devices.is_null() || size != 16 {
+        return fail(ERROR_INVALID_PARAMETER, u32::MAX);
+    }
+    unsafe { *num_devices = 0 };
+    0
+}
+
+extern "win64" fn GetRawInputDeviceInfoA(_device: u64, _cmd: u32, _data: *mut u8, _size: *mut u32) -> u32 {
+    fail(ERROR_INVALID_HANDLE, u32::MAX)
+}
+
+extern "win64" fn GetRawInputDeviceInfoW(_device: u64, _cmd: u32, _data: *mut u8, _size: *mut u32) -> u32 {
+    fail(ERROR_INVALID_HANDLE, u32::MAX)
+}
+
+extern "win64" fn GetRawInputData(_raw_input: u64, _cmd: u32, _data: *mut u8, _size: *mut u32, size_header: u32) -> u32 {
+    fail(if size_header != 24 { ERROR_INVALID_PARAMETER } else { ERROR_INVALID_HANDLE }, u32::MAX)
+}
+
+extern "win64" fn GetTouchInputInfo(_handle: u64, _inputs: u32, _data: *mut u8, _size: i32) -> Bool {
+    fail(ERROR_INVALID_HANDLE, FALSE)
+}
+
+extern "win64" fn CloseTouchInputHandle(_handle: u64) -> Bool {
+    fail(ERROR_INVALID_HANDLE, FALSE)
+}
+
+extern "win64" fn GetGestureInfo(_handle: u64, _info: *mut u8) -> Bool {
+    fail(ERROR_INVALID_HANDLE, FALSE)
+}
+
+extern "win64" fn CloseGestureInfoHandle(_handle: u64) -> Bool {
+    fail(ERROR_INVALID_HANDLE, FALSE)
+}
+
+extern "win64" fn GetPointerType(_pointer_id: u32, _pointer_type: *mut u32) -> Bool {
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
+extern "win64" fn GetPointerFrameTouchInfo(_pointer_id: u32, _pointer_count: *mut u32, _touch_info: *mut u8) -> Bool {
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
+extern "win64" fn CreateSyntheticPointerDevice(_pointer_type: u32, _max_count: u32, _mode: u32) -> u64 {
+    fail(ERROR_NOT_SUPPORTED, 0)
+}
+
+extern "win64" fn InjectSyntheticPointerInput(_device: u64, _pointer_info: *const u8, _count: u32) -> Bool {
+    fail(ERROR_INVALID_HANDLE, FALSE)
+}
+
+extern "win64" fn GetDlgItem(dlg: u64, _id: i32) -> u64 {
+    if !is_window(dlg) {
+        return fail(ERROR_INVALID_WINDOW_HANDLE, 0);
+    }
+    fail(1421, 0) // ERROR_CONTROL_ID_NOT_FOUND
+}
+
+extern "win64" fn GetLayeredWindowAttributes(hwnd: u64, cr_key: *mut u32, alpha: *mut u8, flags: *mut u32) -> Bool {
+    if !is_window(hwnd) {
+        return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
+    }
+    unsafe {
+        if !cr_key.is_null() {
+            *cr_key = 0;
+        }
+        if !alpha.is_null() {
+            *alpha = 255;
+        }
+        if !flags.is_null() {
+            *flags = 2; // LWA_ALPHA
+        }
+    }
+    TRUE
+}
+
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn UpdateLayeredWindow(
+    hwnd: u64,
+    _hdc_dst: u64,
+    ppt_dst: *const i32,
+    psize: *const i32,
+    hdc_src: u64,
+    ppt_src: *const i32,
+    _cr_key: u32,
+    _pblend: *const u8,
+    _flags: u32,
+) -> Bool {
+    let Some((cur_pos, cur_size)) = with(|g| g.windows.get(&hwnd).map(|w| (w.pos, w.size))) else {
+        return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
+    };
+    let (x, y) = if ppt_dst.is_null() {
+        cur_pos
+    } else {
+        unsafe { (*ppt_dst, *ppt_dst.add(1)) }
+    };
+    let (w, h) = if psize.is_null() {
+        (cur_size.0 as i32, cur_size.1 as i32)
+    } else {
+        unsafe { (*psize, *psize.add(1)) }
+    };
+    if w < 0 || h < 0 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if (x, y) != cur_pos || (w as u32, h as u32) != cur_size {
+        SetWindowPos(hwnd, 0, x, y, w, h, 0x14);
+    }
+    if hdc_src != 0 && w > 0 && h > 0 {
+        let (sx, sy) = if ppt_src.is_null() {
+            (0, 0)
+        } else {
+            unsafe { (*ppt_src, *ppt_src.add(1)) }
+        };
+        let dst = GetDC(hwnd);
+        if dst != 0 {
+            gdi::BitBlt(dst, 0, 0, w, h, hdc_src, sx, sy, 0x00CC_0020);
+            ReleaseDC(hwnd, dst);
+        }
+    }
+    TRUE
+}
+
+extern "win64" fn PrintWindow(hwnd: u64, hdc_blt: u64, _flags: u32) -> Bool {
+    let Some((w, h)) = with(|g| g.windows.get(&hwnd).map(|w| w.size)) else {
+        return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
+    };
+    if hdc_blt == 0 {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    let src = GetDC(hwnd);
+    if src == 0 {
+        return FALSE;
+    }
+    let ok = gdi::BitBlt(hdc_blt, 0, 0, w as i32, h as i32, src, 0, 0, 0x00CC_0020);
+    ReleaseDC(hwnd, src);
+    ok
+}
+
+/// INPUT on x64 is 40 bytes: type (u32) at +0, union at +8.
+extern "win64" fn SendInput(count: u32, inputs: *const u8, size: i32) -> u32 {
+    if count == 0 || inputs.is_null() || size != 40 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    with(|g| {
+        let target = g.focus;
+        for i in 0..count as usize {
+            let p = unsafe { inputs.add(i * 40) as u64 };
+            let kind = unsafe { teb::get::<u32>(p, 0) };
+            if kind == 1 {
+                // INPUT_KEYBOARD: wVk (u16) @8, wScan (u16) @10, dwFlags (u32) @12
+                let vk = unsafe { teb::get::<u16>(p, 8) } as usize;
+                let scan = unsafe { teb::get::<u16>(p, 10) } as u32;
+                let flags = unsafe { teb::get::<u32>(p, 12) };
+                let up = flags & 2 != 0;
+                if flags & 4 != 0 {
+                    // KEYEVENTF_UNICODE
+                    if !up && target != 0 {
+                        g.post(target, WM_CHAR, scan as u64, 1);
+                    }
+                } else {
+                    if vk < 256 {
+                        g.keys[vk] = !up;
+                        if !up {
+                            g.toggles[vk] = !g.toggles[vk];
+                        }
+                    }
+                    if target != 0 {
+                        let msg = if up { WM_KEYUP } else { WM_KEYDOWN };
+                        let lparam = 1i64 | ((scan as i64 & 0xff) << 16) | if up { 3i64 << 30 } else { 0 };
+                        g.post(target, msg, vk as u64, lparam);
+                    }
+                }
+            }
+        }
+    });
+    count
+}
+
+extern "win64" fn BroadcastSystemMessageW(_flags: u32, _recipients: *mut u32, msg: u32, wparam: u64, lparam: i64) -> i32 {
+    if msg == 0 {
+        return fail(ERROR_INVALID_PARAMETER, -1);
+    }
+    with(|g| {
+        let hwnds: Vec<u64> = g.windows.keys().copied().collect();
+        for hwnd in hwnds {
+            g.post(hwnd, msg, wparam, lparam);
+        }
+    });
+    1
+}
 //
 // One system clipboard, owned by the compositor and broadcast to every
 // client; user32's classic API and ole32's data objects both go through it.
@@ -5173,6 +5365,24 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RegisterTouchWindow,
         SetGestureConfig,
         RegisterRawInputDevices,
+        GetRawInputDeviceList,
+        GetRawInputDeviceInfoA,
+        GetRawInputDeviceInfoW,
+        GetRawInputData,
+        GetTouchInputInfo,
+        CloseTouchInputHandle,
+        GetGestureInfo,
+        CloseGestureInfoHandle,
+        GetPointerType,
+        GetPointerFrameTouchInfo,
+        CreateSyntheticPointerDevice,
+        InjectSyntheticPointerInput,
+        GetDlgItem,
+        GetLayeredWindowAttributes,
+        UpdateLayeredWindow,
+        PrintWindow,
+        SendInput,
+        BroadcastSystemMessageW,
         RegisterClipboardFormatW,
         TrackMouseEvent,
         GetLastInputInfo,
