@@ -412,7 +412,7 @@ impl Client {
             match self.phase {
                 Phase::Requesting => {
                     let Some((addr, server)) = self.offer else { return (None, None) };
-                    if m.server_id != Some(server) || (m.msg_type == ACK && m.yiaddr != addr) {
+                    if m.server_id.is_some_and(|id| id != server) || (m.msg_type == ACK && m.yiaddr != addr) {
                         return (None, None);
                     }
                 }

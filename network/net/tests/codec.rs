@@ -383,6 +383,28 @@ fn dhcp_ignores_replies_from_unselected_server() {
 }
 
 #[test]
+fn dhcp_accepts_replies_without_server_identifier() {
+    let mac = MacAddr([0x52, 0x54, 0, 0, 0, 9]);
+    let server = Ipv4Addr::new(10, 0, 2, 2);
+    let address = Ipv4Addr::new(10, 0, 2, 15);
+    for kind in [dhcp::ACK, dhcp::NAK] {
+        let mut client = dhcp::Client::new(mac, 7, "osyx");
+        let xid = dhcp::Message::parse(&client.poll(0).0.unwrap().payload).unwrap().xid;
+        let reply = |kind| dhcp::build_reply(kind, xid, mac, address, server, Ipv4Addr::new(255, 255, 255, 0), server, server, 120);
+        client.input(&reply(dhcp::OFFER), 10);
+        let mut reply = reply(kind);
+        reply.drain(243..249);
+        assert_eq!(dhcp::Message::parse(&reply).unwrap().server_id, None);
+        let (_, event) = client.input(&reply, 20);
+        if kind == dhcp::ACK {
+            assert!(matches!(event, Some(dhcp::Event::Bound(_))));
+        } else {
+            assert_eq!((event, client.phase()), (None, dhcp::Phase::Init));
+        }
+    }
+}
+
+#[test]
 fn dhcp_uses_ordered_lease_timers() {
     let mac = MacAddr([0x52, 0x54, 0, 0, 0, 9]);
     let server = Ipv4Addr::new(10, 0, 2, 2);
