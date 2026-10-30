@@ -153,6 +153,23 @@ fn main() -> i32 {
             let mode = args.get(3).map(String::as_str).unwrap_or("");
             return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", true, mode == "prof");
         }
+        // `init tests winapp <program> [args...]`: PRISM and then one Windows
+        // GUI program (an installer, for instance) with winrun's verbose log.
+        Some("winapp") => {
+            if let Err(e) = Command::new("/system/bin/prism").spawn() {
+                println!("winapp: PRISM did not start: {e}");
+                return 1;
+            }
+            thread::sleep(Duration::from_secs(2));
+            let mut c = Command::new("/bin/winrun");
+            c.arg("-v");
+            for a in &args[2..] {
+                c.arg(a);
+            }
+            let code = c.status().ok().and_then(|s| s.code()).unwrap_or(1);
+            println!("winapp: exit status {code}");
+            return code;
+        }
         // `init winrun <program> [args...]`: one Windows program with no
         // sessions around it, for bring-up diagnostics.
         Some("winrun") => {

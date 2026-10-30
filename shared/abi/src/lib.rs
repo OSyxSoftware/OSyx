@@ -1,4 +1,7 @@
-//! OSyx system call ABI, version 11.
+//! OSyx system call ABI, version 13.
+//!
+//! Version 13 adds SET_FS32_BASE: the FS base that 32-bit compatibility-mode
+//! code uses (see [`wow64`]). 64-bit code keeps using SET_FS_BASE.
 //!
 //! Version 11 adds DISCARD for demand-zero anonymous memory.
 //!
@@ -51,8 +54,9 @@ pub mod battery;
 pub mod ipc;
 pub mod media;
 pub mod net;
+pub mod wow64;
 
-pub const ABI_VERSION: u32 = 12;
+pub const ABI_VERSION: u32 = 13;
 pub mod fault;
 
 /// Highest user virtual address + 1 (the canonical lower half).
@@ -367,6 +371,14 @@ pub mod nr {
     /// the caller's process (0: unknown), which inherits the caller's
     /// priority while it waits.
     pub const FUTEX_WAIT_OWNED: u64 = 95;
+    /// `set_fs32_base(base: u64) -> 0`: FS base for 32-bit compatibility-mode
+    /// code, which reads its TEB at `fs:[0x18]`. The kernel stores it in the
+    /// thread's 32-bit FS data descriptor, switched in with the thread on
+    /// every context switch. IA-32e keeps one hidden FS base, so a non-zero
+    /// base also replaces what 64-bit code sees until it calls
+    /// [`SET_FS_BASE`] again; 0 restores the thread's 64-bit base. `base`
+    /// must be page-aligned, below 4 GiB and (unless 0) in the user half.
+    pub const SET_FS32_BASE: u64 = 96;
 }
 
 /// Thread priorities (`nr::THREAD_PRIORITY`).

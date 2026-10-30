@@ -85,7 +85,9 @@ global_asm!(
 .global osyx_windows_raise_entry
 osyx_windows_raise_entry:
     pushfq
-    sub rsp,720
+    // 32 bytes of scratch below the Context, the 1024-byte Context itself
+    // (osyx_windows_raise_captured copies all of it), 16-byte aligned.
+    sub rsp,1088
     mov [rsp+32],rax
     mov [rsp+40],rbx
     mov [rsp+48],rcx
@@ -101,22 +103,21 @@ osyx_windows_raise_entry:
     mov [rsp+136],r13
     mov [rsp+144],r14
     mov [rsp+152],r15
-    lea rax,[rsp+736]
+    lea rax,[rsp+1104]
     mov [rsp+88],rax
-    mov rax,[rsp+728]
+    mov rax,[rsp+1096]
     mov [rsp+160],rax
-    mov rax,[rsp+720]
+    mov rax,[rsp+1088]
     mov [rsp+168],rax
-    xor eax,eax
-    mov [rsp+176],rax
-    mov [rsp+184],rax
-    mov [rsp+192],rax
-    mov [rsp+200],rax
+    // Exception selectors, x87/SSE/AVX state: clear the tail of the Context,
+    // then overlay FXSAVE at fx (Context+192). XSTATE_BV stays 0, so XRSTOR
+    // restores only the legacy components.
     cld
-    lea rdi,[rsp+208]
-    mov ecx,64
+    lea rdi,[rsp+176]
+    xor eax,eax
+    mov ecx,110
     rep stosq
-    fxsave64 [rsp+208]
+    fxsave64 [rsp+224]
     lea rcx,[rsp+32]
     call osyx_windows_raise_captured
     ud2
