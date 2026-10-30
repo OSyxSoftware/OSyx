@@ -349,22 +349,33 @@ fn an_interrupted_installation_is_not_bootable() {
     let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
     assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err());
     drop(esp);
-    struct FailLoader<'a> { disk: &'a mut Vec<u8>, fail: bool }
+    struct FailLoader<'a> { disk: &'a mut Vec<u8>, fail: bool, corrupt: bool }
     impl Disk for FailLoader<'_> {
         fn sectors(&self) -> u64 { self.disk.sectors() }
         fn read(&mut self, lba: u64, buf: &mut [u8]) -> std::result::Result<(), String> { Disk::read(self.disk, lba, buf) }
         fn write(&mut self, lba: u64, buf: &[u8]) -> std::result::Result<(), String> {
             if self.fail && buf.len() == 512 && buf == pattern(512, 7) {
                 self.fail = false;
+                if self.corrupt {
+                    let mut changed = buf.to_vec();
+                    changed[0] ^= 1;
+                    return Disk::write(self.disk, lba, &changed);
+                }
                 return Err("injected boot loader write error".into());
             }
             Disk::write(self.disk, lba, buf)
         }
         fn flush(&mut self) -> std::result::Result<(), String> { Ok(()) }
     }
-    let mut failing = FailLoader { disk: &mut disk, fail: true };
+    let mut failing = FailLoader { disk: &mut disk, fail: true, corrupt: false };
     assert!(install(&mut failing, &plan, &mut MemSource::new(), &config(), &mut Log::default()).is_err());
     assert!(!failing.fail, "the loader write must have been interrupted");
+    let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
+    assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err());
+    drop(esp);
+    let mut corrupting = FailLoader { disk: &mut disk, fail: true, corrupt: true };
+    assert!(matches!(install(&mut corrupting, &plan, &mut MemSource::new(), &config(), &mut Log::default()), Err(Error::Verify(_))));
+    assert!(!corrupting.fail, "the loader write must have been corrupted");
     let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
     assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err());
     drop(esp);

@@ -533,20 +533,15 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
             files.retain(|(p, _)| !p.eq_ignore_ascii_case("EFI/OSYX/CMDLINE.TXT"));
             files.push(("EFI/OSYX/CMDLINE.TXT".to_string(), config.cmdline.as_bytes().to_vec()));
         }
-        // The loader itself goes last: only a complete ESP is bootable.
+        // Keep the loader under a temporary name until verification succeeds.
         files.sort_by_key(|(p, _)| p == "EFI/BOOT/BOOTX64.EFI");
         for (path, data) in &files {
-            if path == LOADER {
-                fat_write(&mut esp, LOADER_TEMP, data)?;
-                esp.flush().map_err(|e| fat_err("flushing the boot loader", e))?;
-                esp.rename(LOADER_TEMP, LOADER).map_err(|e| fat_err("publishing the boot loader", e))?;
-            } else {
-                fat_write(&mut esp, path, data)?;
-            }
-            expected_boot.push((path.clone(), data.len() as u64));
+            let written_path = if path == LOADER { LOADER_TEMP } else { path.as_str() };
+            fat_write(&mut esp, written_path, data)?;
+            expected_boot.push((written_path.to_string(), data.len() as u64));
             let mut hash = osyx_crypto::Sha256::new();
             hash.update(data);
-            boot_hashes.push((path.clone(), hash.finish()));
+            boot_hashes.push((written_path.to_string(), hash.finish()));
             progress.log(&format!("ESP: {path} ({} bytes)", data.len()));
         }
         esp.unmount().map_err(|e| fat_err("unmounting the ESP", e))?;
@@ -558,7 +553,10 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     {
         let mut esp = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("ESP", e))?;
         verify_boot_contents(&mut esp, &boot_hashes)?;
+        esp.rename(LOADER_TEMP, LOADER).map_err(|e| fat_err("publishing the boot loader", e))?;
+        esp.unmount().map_err(|e| fat_err("unmounting the ESP", e))?;
     }
+    disk.flush().map_err(Error::Io)?;
     progress.log("verification passed");
     progress.stage(Stage::Done, 1.0);
     Ok(report)
