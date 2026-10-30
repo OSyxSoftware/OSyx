@@ -29,6 +29,8 @@ use os_std::os::raw::{self, Errno, PROT_EXEC, PROT_READ, PROT_WRITE};
 use os_std::prelude::*;
 use os_std::process::{Child, Command};
 use os_std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use os_std::mpsc;
+use os_std::sync::{Once, OnceLock, RwLock};
 use os_std::time::{Duration, Instant};
 use os_std::{env, fs, os, process, thread};
 
@@ -908,6 +910,93 @@ fn thread_checks(t: &mut Tests) {
         let start = Instant::now();
         let (_g, r) = cv.wait_timeout(m.lock().unwrap(), Duration::from_millis(30)).unwrap();
         r.timed_out() && start.elapsed() >= Duration::from_millis(30)
+    });
+    t.check("RwLock: readers share, writers exclude", || {
+        // The pair must never be seen half-updated: a writer between the two
+        // stores would be caught by a concurrent reader.
+        let lock = Arc::new(RwLock::new((0u64, 0u64)));
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let lock = lock.clone();
+                thread::spawn(move || {
+                    for _ in 0..4_000 {
+                        let g = lock.read().unwrap();
+                        if g.0 != g.1 {
+                            return false;
+                        }
+                        core::hint::spin_loop();
+                    }
+                    true
+                })
+            })
+            .collect();
+        let writer = {
+            let lock = lock.clone();
+            thread::spawn(move || {
+                for _ in 0..1_000 {
+                    let mut g = lock.write().unwrap();
+                    g.0 += 1;
+                    core::hint::spin_loop();
+                    g.1 += 1;
+                }
+            })
+        };
+        let readers_ok = readers.into_iter().all(|h| h.join().unwrap_or(false));
+        readers_ok && writer.join().is_ok() && *lock.read().unwrap() == (1_000, 1_000)
+    });
+    t.check("Once / OnceLock: initialise exactly once", || {
+        let once = Arc::new(Once::new());
+        let runs = Arc::new(AtomicU32::new(0));
+        let cell = Arc::new(OnceLock::<u64>::new());
+        let hs: Vec<_> = (0..4u64)
+            .map(|i| {
+                let once = once.clone();
+                let runs = runs.clone();
+                let cell = cell.clone();
+                thread::spawn(move || {
+                    once.call_once(|| {
+                        runs.fetch_add(1, Ordering::Relaxed);
+                    });
+                    *cell.get_or_init(|| i * 10)
+                })
+            })
+            .collect();
+        let values: Vec<u64> = hs.into_iter().filter_map(|h| h.join().ok()).collect();
+        let expected = cell.get().copied();
+        runs.load(Ordering::Relaxed) == 1
+            && values.len() == 4
+            && values.iter().all(|v| Some(*v) == expected)
+    });
+    t.check("mpsc: 4 senders, bounded try_send, timeout", || {
+        let (tx, rx) = mpsc::channel::<u64>();
+        let hs: Vec<_> = (0..4u64)
+            .map(|i| {
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    for j in 0..100 {
+                        tx.send(i * 100 + j).unwrap();
+                    }
+                })
+            })
+            .collect();
+        drop(tx);
+        let mut sum = 0;
+        while let Ok(v) = rx.recv() {
+            sum += v;
+        }
+        for h in hs {
+            h.join().unwrap();
+        }
+        let full_ok = {
+            let (stx, srx) = mpsc::sync_channel::<u8>(1);
+            stx.try_send(1).is_ok()
+                && matches!(stx.try_send(2), Err(mpsc::TrySendError::Full(2)))
+                && srx.recv() == Ok(1)
+        };
+        let (ktx, krx) = mpsc::channel::<u8>();
+        let timeout_ok = krx.recv_timeout(Duration::from_millis(10)) == Err(mpsc::RecvTimeoutError::Timeout);
+        drop(ktx);
+        sum == 100 * (0..4u64).sum::<u64>() * 100 + 4 * (0..100u64).sum::<u64>() && full_ok && timeout_ok
     });
     t.check("futex: value mismatch and timeout", || {
         let word = AtomicU32::new(0);
