@@ -1,0 +1,8 @@
+; advapi32 import stubs for the 32-bit test fixtures (see kernel32_x86.def).
+LIBRARY advapi32.dll
+EXPORTS
+    RegCreateKeyExW
+    RegSetValueExW
+    RegQueryValueExW
+    RegCloseKey
+    RegDeleteKeyW
