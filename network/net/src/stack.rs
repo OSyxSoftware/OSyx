@@ -669,6 +669,24 @@ impl Stack {
         self.send_ip_packets(Ipv4Addr::BROADCAST, packets, Some(iface))
     }
 
+    /// Sends a DHCP renewal using only routes belonging to its interface.
+    fn send_dhcp_unicast(&mut self, iface: usize, src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Result<(), NetError> {
+        let route = self.routes.iter()
+            .filter(|r| r.iface == iface && self.ifaces[iface].link_up && dst.in_subnet(r.dest, r.prefix))
+            .max_by_key(|r| r.prefix)
+            .ok_or(NetError::NoRoute)?;
+        let hop = route.gateway.unwrap_or(dst);
+        let mtu = self.ifaces[iface].mtu;
+        self.ident = self.ident.wrapping_add(1);
+        let packets = ipv4::build(src, dst, PROTO_UDP, ipv4::DEFAULT_TTL, self.ident, payload, mtu, false)
+            .ok_or(NetError::MessageTooLong)?;
+        self.stats.ip_out += packets.len() as u64;
+        for packet in packets {
+            self.send_packet_on(iface, hop, packet, false);
+        }
+        Ok(())
+    }
+
     fn send_icmp_error(&mut self, kind: u8, code: u8, original: &[u8], to: Ipv4Addr, from: Ipv4Addr) {
         if to.is_unspecified() || to.is_broadcast() || to.is_multicast() {
             return;
@@ -1009,7 +1027,7 @@ impl Stack {
             let r = if t.dst.is_broadcast() {
                 self.send_broadcast(iface, t.src, PROTO_UDP, &dgram)
             } else {
-                self.send_ip(t.src, t.dst, PROTO_UDP, &dgram, false)
+                self.send_dhcp_unicast(iface, t.src, t.dst, &dgram)
             };
             let _ = r;
         }
