@@ -63,7 +63,13 @@ fn tar_files(data: &[u8]) -> Result<Vec<(String, u32, Vec<u8>)>, String> {
         } else if kind != b'5' && kind != b'2' {
             return Err(format!("{name}: unsupported archive entry type {:?} (use --format=ustar)", kind as char));
         }
-        at = body + size.div_ceil(512) * 512;
+        at = body.checked_add(size.div_ceil(512).checked_mul(512).ok_or("archive size overflow")?).ok_or("archive size overflow")?;
+        if at > data.len() {
+            return Err(format!("{name}: archive padding truncated"));
+        }
+    }
+    if at < data.len() && data.len() - at < 512 {
+        return Err(String::from("archive header truncated"));
     }
     Ok(out)
 }
@@ -158,5 +164,21 @@ fn main() {
     if let Err(e) = r {
         eprintln!("release: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_truncated_header_and_padding() {
+        assert!(tar_files(&[1; 100]).is_err());
+        let mut archive = vec![0; 513];
+        archive[..4].copy_from_slice(b"test");
+        archive[124..126].copy_from_slice(b"1\0");
+        assert!(tar_files(&archive).is_err());
+        archive.resize(1024, 0);
+        assert_eq!(tar_files(&archive).unwrap().len(), 1);
     }
 }
