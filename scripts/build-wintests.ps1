@@ -110,6 +110,7 @@ Remove-Item "$out\*.lib" -ErrorAction SilentlyContinue
 $pe32Programs = [ordered]@{
     'hello32.exe' = @{ Src = @('hello32.c'); Libs = @() }
     'api32.exe' = @{ Src = @('api32.c'); Libs = @('advapi32') }
+    'thread32.exe' = @{ Src = @('thread32.c'); Libs = @() }
 }
 $pe32Common = @('--target=i686-pc-windows-gnu', '-nostdlib', '-ffreestanding', '-O2', '-Wall', '-Werror')
 if ($pe32Programs.Count -gt 0) {

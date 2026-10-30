@@ -11,7 +11,8 @@
 //! (MSG, PAINTSTRUCT, WNDCLASSW, SHFILEINFOW, STARTUPINFOW, BROWSEINFOW),
 //! that call back into 32-bit code (window and thread procedures), that
 //! return 64-bit code addresses (GetProcAddress) or load modules
-//! (LoadLibraryExW), and variadic ones (wsprintf).
+//! (LoadLibraryExW), and variadic ones (wsprintf). CreateThread is listed:
+//! its 32-bit start routine runs through `wow64::CreateThread32`.
 
 use super::{ArgKind, RetKind, Signature};
 
@@ -25,6 +26,9 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(GetStdHandle, [Uint], Handle),
     sig!(WriteFile, [Handle, Ptr, Uint, Ptr, Ptr], I32),
     sig!(ExitProcess, [Uint], Void),
+    // Bound to wow64::CreateThread32: the start routine is 32-bit code.
+    sig!(CreateThread, [Handle, Uint, Uint, Uint, Uint, Ptr], U32),
+    sig!(GetExitCodeThread, [Handle, Ptr], U32),
     sig!(AdjustTokenPrivileges, [Handle, Int, Ptr, Uint, Ptr, Ptr], U32),
     sig!(CloseClipboard, [], U32),
     sig!(CloseHandle, [Handle], U32),
