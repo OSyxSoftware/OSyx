@@ -72,7 +72,7 @@ impl State {
     }
 
     fn ino_for(&mut self, path: &str) -> u64 {
-        let key = path.to_lowercase();
+        let key = osyx_vfs::path::fold_case(path);
         if let Some(&i) = self.by_path.get(&key) {
             return i;
         }
@@ -84,7 +84,7 @@ impl State {
     }
 
     fn forget(&mut self, path: &str) {
-        if let Some(i) = self.by_path.remove(&path.to_lowercase()) {
+        if let Some(i) = self.by_path.remove(&osyx_vfs::path::fold_case(path)) {
             self.paths.remove(&i);
             self.files.remove(&i);
         }
@@ -96,8 +96,8 @@ impl State {
         if list.iter().any(|e| e.name == name) {
             return Ok(name.to_string());
         }
-        let lower = name.to_lowercase();
-        list.into_iter().map(|e| e.name).find(|n| n.to_lowercase() == lower).ok_or(Errno::NotFound)
+        let lower = osyx_vfs::path::fold_case(name);
+        list.into_iter().map(|e| e.name).find(|n| osyx_vfs::path::fold_case(n) == lower).ok_or(Errno::NotFound)
     }
 
     fn file(&mut self, ino: u64) -> Result<&mut FileRef> {
@@ -316,15 +316,17 @@ impl Filesystem for FatVolume {
             let sp = s.path(sdir)?;
             let from = join(&sp, &s.actual_name(&sp, sname)?);
             let to = join(&s.path(ddir)?, dname);
-            if from.to_lowercase() != to.to_lowercase() {
-                if let Some(&victim) = s.by_path.get(&to.to_lowercase()) {
+            let from_key = osyx_vfs::path::fold_case(&from);
+            let to_key = osyx_vfs::path::fold_case(&to);
+            if from_key != to_key {
+                if let Some(&victim) = s.by_path.get(&to_key) {
                     if s.is_open(victim) {
                         return Err(Errno::Busy);
                     }
                 }
             }
             s.fs.rename(&from, &to).map_err(fs_errno)?;
-            if from.to_lowercase() != to.to_lowercase() {
+            if from_key != to_key {
                 s.forget(&to);
             }
             // Move every known node at or below `from` to its new path; their
@@ -337,8 +339,8 @@ impl Filesystem for FatVolume {
                 .collect();
             for (i, old) in moved {
                 let new = alloc::format!("{}{}", to, &old[from.len()..]);
-                s.by_path.remove(&old.to_lowercase());
-                s.by_path.insert(new.to_lowercase(), i);
+                s.by_path.remove(&osyx_vfs::path::fold_case(&old));
+                s.by_path.insert(osyx_vfs::path::fold_case(&new), i);
                 s.paths.insert(i, new);
                 s.files.remove(&i);
             }
