@@ -26,6 +26,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use osyx_abi::ipc::MAX_MESSAGE_HANDLES;
 
 pub const ENV: &str = "OSYX_WINRUN_INHERIT";
+/// The restricted child receives its broker channel as kernel handle 3.
+pub const DIRECT_CHANNEL: &str = "channel:3";
 
 const KIND_SECTION: u32 = 1;
 /// A connected pipe: `size` is the relaying process's pid and relay id.
@@ -138,10 +140,43 @@ pub fn offer(handles: &[u64]) -> Result<Option<String>, u32> {
     Ok(Some(alloc::format!("{ENV}={name}")))
 }
 
+/// Queue inherited objects on an explicitly granted channel before starting
+/// the child. File-backed sections and pipe relays need broker support that a
+/// restricted child does not yet have, so fail rather than offer them.
+#[allow(dead_code)] // The restricted CreateProcess path is not enabled yet.
+pub fn offer_on_channel(handles: &[u64], channel: u64) -> Result<(), u32> {
+    for &handle in handles {
+        match objects::get(handle) {
+            Some(Object::Pipe(_)) => return Err(ERROR_NOT_SUPPORTED),
+            Some(Object::Section(s)) if s.file_mapping => return Err(ERROR_NOT_SUPPORTED),
+            _ => {}
+        }
+    }
+    let items = handles.iter().map(|&h| item(h)).collect::<Result<Vec<_>, _>>()?;
+    if items.iter().any(|i| i.kind == KIND_PIPE || (i.kind == KIND_SECTION && i.flags & SECTION_FILE != 0)) {
+        return Err(ERROR_NOT_SUPPORTED);
+    }
+    let mut records = Vec::with_capacity(items.len() * RECORD);
+    for i in &items {
+        records.extend_from_slice(&record(i));
+    }
+    let kernel: Vec<u64> = items.iter().filter_map(|i| i.kernel).collect();
+    os_sys::channel_send(channel, &records, &[]).map_err(errno_to_win32)?;
+    for chunk in kernel.chunks(MAX_MESSAGE_HANDLES) {
+        os_sys::channel_send(channel, &[], chunk).map_err(errno_to_win32)?;
+    }
+    Ok(())
+}
+
 /// Takes the handles the parent offered (named by `name`), at their values.
 /// Runs before winrun opens any handle of its own.
 pub fn receive(name: &str) -> Result<usize, String> {
-    let c = os_sys::channel_connect(name).map_err(|e| alloc::format!("connect {name}: {e:?}"))?;
+    let direct = name == DIRECT_CHANNEL;
+    let c = if direct {
+        osyx_abi::FIRST_FILE_HANDLE
+    } else {
+        os_sys::channel_connect(name).map_err(|e| alloc::format!("connect {name}: {e:?}"))?
+    };
     let recv = |buf: &mut [u8], handles: &mut [u64]| -> Result<(usize, usize), String> {
         loop {
             match os_sys::channel_recv(c, buf, handles) {
@@ -155,6 +190,10 @@ pub fn receive(name: &str) -> Result<usize, String> {
     };
     let mut buf = alloc::vec![0u8; osyx_abi::ipc::MAX_MESSAGE];
     let (n, _) = recv(&mut buf, &mut [])?;
+    if n % RECORD != 0 {
+        let _ = os_sys::close(c);
+        return Err(String::from("invalid inherited object records"));
+    }
     let records: Vec<&[u8]> = buf[..n].chunks(RECORD).collect();
     let wanted = records.iter().filter(|r| has_kernel(r)).count();
     let mut kernel = Vec::with_capacity(wanted);
@@ -164,9 +203,15 @@ pub fn receive(name: &str) -> Result<usize, String> {
         if k == 0 {
             return Err(String::from("the parent sent fewer objects than records"));
         }
+        if kernel.len() + k > wanted {
+            for h in &hs[..k] { let _ = os_sys::close(*h); }
+            return Err(String::from("the parent sent more objects than records"));
+        }
         kernel.extend_from_slice(&hs[..k]);
     }
-    let _ = os_sys::close(c);
+    if !direct {
+        let _ = os_sys::close(c);
+    }
     let mut kernel = kernel.into_iter();
     for r in &records {
         let k = if has_kernel(r) { kernel.next() } else { None };
