@@ -104,7 +104,8 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
     reports the stored time (2-second DOS resolution).
 14. **SMP**: finer-grained kernel locking (still one kernel entry lock and
     `TABLE` for mappings and page faults) and load balancing policies.
-15. **OSyx Std**: `RwLock`, `Once`/`OnceLock`, `mpsc`; then the genuine `std`
+15. **OSyx Std**: `thread`, futex-based `Mutex`, `Condvar`, `RwLock`,
+    `Once`/`OnceLock` and `mpsc` are implemented; next is the genuine `std`
     port ([rust-std.md](rust-std.md)).
 16. **Desktop**: per-pixel alpha (ARGB8888 windows) and raw-report keyboards
     are implemented; still open: AXIS pipelines, redirection and blocks (see
