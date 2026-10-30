@@ -292,7 +292,7 @@ fn cache_forget(mount: u64, dir: u64, name: &str) {
     let hi = (mount, dir, true, String::from("\u{10ffff}"));
     let stale: Vec<(u64, u64, bool, String)> =
         t.range(lo..=hi)
-            .filter(|(_, c)| c.stored.to_lowercase() == name.to_lowercase())
+            .filter(|(_, c)| path::fold_case(&c.stored) == path::fold_case(name))
             .map(|(k, _)| k.clone())
             .collect();
     for k in stale {
