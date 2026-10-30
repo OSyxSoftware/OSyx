@@ -33,6 +33,7 @@ supplies the platform parts:
 |---|---|---|
 | `print!`/`println!`/`eprint!`/`eprintln!`, `io::Write`, `stdout`/`stderr` | Implemented | OSyx (tested), host back end (tested) |
 | `io::{Read, Seek, SeekFrom}` (`read_exact`, `read_to_end`, `read_to_string`, `rewind`) | Implemented | OSyx (through `fs`) + host |
+| `io::{BufRead, BufReader}` (`fill_buf`, `consume`, `read_until`, `read_line`) | Implemented | OSyx + host |
 | `fs::{File, OpenOptions, Metadata, FileType, Permissions, DirEntry, ReadDir}`, `read`, `read_to_string`, `write`, `copy`, `read_dir`, `metadata`, `symlink_metadata`, `exists`, `create_dir(_all)`, `remove_file`, `remove_dir(_all)`, `rename`, `symlink`, `read_link`, `set_permissions`; `OpenOptions::mode`, `case_insensitive` | Implemented on ext4 `/`, FAT32 `/boot`, tmpfs `/tmp` `/run`, devfs `/dev` | OSyx (19 checks in `init`; files verified on the host with mtools, e2fsck and debugfs) + host (mapped below a temp directory; no symlinks or owners there) |
 | `env::{current_dir, set_current_dir}` (relative paths everywhere) | Implemented; children inherit the directory | OSyx + host |
 | `time::SystemTime`, `UNIX_EPOCH`, `Metadata::{modified, accessed, changed}` | Implemented (RTC wall clock) | OSyx + host |
