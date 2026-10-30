@@ -108,19 +108,24 @@ Remove-Item "$out\*.lib" -ErrorAction SilentlyContinue
 # references onto the plain import names. Compile and link run through clang
 # --target=i686-pc-windows-gnu with lld; lld-link is required for /lib.
 $pe32Programs = [ordered]@{
-    'hello32.exe' = @{ Src = @('hello32.c') }
+    'hello32.exe' = @{ Src = @('hello32.c'); Libs = @() }
+    'api32.exe' = @{ Src = @('api32.c'); Libs = @('advapi32') }
 }
 $pe32Common = @('--target=i686-pc-windows-gnu', '-nostdlib', '-ffreestanding', '-O2', '-Wall', '-Werror')
 if ($pe32Programs.Count -gt 0) {
     if (-not $lldLink) {
         throw 'lld-link not found (C:\msys64\ucrt64\bin\lld-link.exe): the i686 toolchain is needed to build hello32.exe'
     }
-    $kernel32x86 = Join-Path $out 'kernel32_x86.lib'
-    if (Stale $kernel32x86 @("$src\kernel32_x86.def", (Join-Path $PSScriptRoot 'build-wintests.ps1'))) {
-        Invoke-Checked 'kernel32 x86 import library' {
-            & $lldLink /lib "/def:$src\kernel32_x86.def" /machine:x86 /out:$kernel32x86
+    # One import library per <dll>_x86.def.
+    foreach ($dll in 'kernel32', 'advapi32') {
+        $lib = Join-Path $out "${dll}_x86.lib"
+        if (Stale $lib @("$src\${dll}_x86.def", (Join-Path $PSScriptRoot 'build-wintests.ps1'))) {
+            Invoke-Checked "$dll x86 import library" {
+                & $lldLink /lib "/def:$src\${dll}_x86.def" /machine:x86 /out:$lib
+            }
         }
     }
+    $kernel32x86 = Join-Path $out 'kernel32_x86.lib'
     foreach ($name in $pe32Programs.Keys) {
         $p = $pe32Programs[$name]
         $objects = @()
@@ -133,11 +138,12 @@ if ($pe32Programs.Count -gt 0) {
             }
         }
         $target = Join-Path $out $name
-        $inputs = $objects + @($kernel32x86, "$src\kernel32_x86.def", (Join-Path $PSScriptRoot 'build-wintests.ps1'))
+        $libs = @($kernel32x86) + @($p.Libs | Where-Object { $_ } | ForEach-Object { Join-Path $out "${_}_x86.lib" })
+        $inputs = $objects + $libs + @("$src\kernel32_x86.def", (Join-Path $PSScriptRoot 'build-wintests.ps1'))
         if (Stale $target $inputs) {
             Invoke-Checked $name {
                 & $clang '-fuse-ld=lld' @pe32Common '-Wl,--subsystem,console' '-Wl,-e,start' `
-                    '-Wl,--no-insert-timestamp' '-Wl,--build-id=none' @objects $kernel32x86 -o $target
+                    '-Wl,--no-insert-timestamp' '-Wl,--build-id=none' @objects @libs -o $target
             }
         }
     }

@@ -69,10 +69,16 @@ enum ArgKind {
     Uint,
     /// Signed 32-bit value: sign-extend.
     Int,
-    /// HANDLE: `0xFFFF_FFFF` is `INVALID_HANDLE_VALUE` in 64 bits.
+    /// HANDLE / HKEY / HWND: sign-extended, as WoW64 widens handles, so
+    /// `INVALID_HANDLE_VALUE`, pseudo-handles (-1, -2) and the predefined
+    /// registry keys (`(LONG)0x8000000x`) keep their 64-bit values.
     Handle,
     /// 64-bit value: join this slot (low) and the next (high).
     U64,
+    /// Pointer to a pointer-sized output (HKEY, HANDLE, PIDL, DWORD_PTR):
+    /// the host writes 8 bytes into a temporary, the 32-bit caller gets
+    /// its low 4 bytes. A null pointer stays null.
+    OutWide,
 }
 
 /// How the 64-bit result reaches 32-bit code.
@@ -95,18 +101,8 @@ struct Signature {
     is_cdecl: bool,
 }
 
-/// The signatures the bridge knows. A symbol that is absent fails at load
-/// time (`import` returns `None`), never at run time.
-static SIGNATURES: &[Signature] = &[
-    Signature { name: "GetStdHandle", args: &[ArgKind::Uint], ret: RetKind::Handle, is_cdecl: false },
-    Signature {
-        name: "WriteFile",
-        args: &[ArgKind::Handle, ArgKind::Ptr, ArgKind::Uint, ArgKind::Ptr, ArgKind::Ptr],
-        ret: RetKind::I32,
-        is_cdecl: false,
-    },
-    Signature { name: "ExitProcess", args: &[ArgKind::Uint], ret: RetKind::Void, is_cdecl: false },
-];
+mod sigs;
+use sigs::SIGNATURES;
 
 /// One bound import, indexed by the stub's `mov eax, index`.
 struct Entry {
@@ -420,6 +416,9 @@ fn dispatch(bridge: &Bridge, index: u32, args: *const u32) -> (u64, u32, u32) {
     };
 
     let mut values = [0u64; MAX_ARG_SLOTS];
+    // Host-side temporaries for OutWide arguments: (guest address, value).
+    let mut wide = [(0u32, 0u64); MAX_ARG_SLOTS];
+    let mut nwide = 0;
     let mut guest_slot = 0usize;
     let mut out = 0usize;
     for &kind in entry.args {
@@ -428,16 +427,21 @@ fn dispatch(bridge: &Bridge, index: u32, args: *const u32) -> (u64, u32, u32) {
         let word = |at: usize| unsafe { core::ptr::read_unaligned(args.add(at)) };
         values[out] = match kind {
             ArgKind::Ptr | ArgKind::Uint => word(guest_slot) as u64,
-            ArgKind::Int => (word(guest_slot) as i32) as i64 as u64,
-            ArgKind::Handle => match word(guest_slot) {
-                0xFFFF_FFFF => u64::MAX,
-                value => value as u64,
-            },
+            ArgKind::Int | ArgKind::Handle => (word(guest_slot) as i32) as i64 as u64,
             ArgKind::U64 => {
                 let low = word(guest_slot) as u64;
                 let high = word(guest_slot + 1) as u64;
                 low | high << 32
             }
+            ArgKind::OutWide => match word(guest_slot) {
+                0 => 0,
+                guest => {
+                    // SAFETY: the guest passes a pointer to its 4-byte slot.
+                    wide[nwide] = (guest, unsafe { core::ptr::read_unaligned(guest as *const u32) } as u64);
+                    nwide += 1;
+                    &mut wide[nwide - 1].1 as *mut u64 as u64
+                }
+            },
         };
         out += 1;
         guest_slot += match kind {
@@ -450,6 +454,10 @@ fn dispatch(bridge: &Bridge, index: u32, args: *const u32) -> (u64, u32, u32) {
     // SAFETY: `entry.host` is a Win64 function with the signature recorded
     // in SIGNATURES; `values` has one 64-bit slot per argument.
     let result = unsafe { osyx_win64_invoke(entry.host, values.as_ptr(), out as u32) };
+    for &(guest, value) in &wide[..nwide] {
+        // SAFETY: as above; the 32-bit slot receives the low half.
+        unsafe { core::ptr::write_unaligned(guest as *mut u32, value as u32) };
+    }
     let high = match entry.ret {
         RetKind::I64 => (result >> 32) as u32,
         _ => 0,
