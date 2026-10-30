@@ -233,7 +233,60 @@ mod imp {
 
     /// Maps `len` bytes (rounded up to pages) of zeroed memory.
     pub fn map(len: usize, prot: u64) -> Result<*mut u8, Errno> {
+        if let Some(p) = map_low(len, prot, 4096) {
+            return p;
+        }
         decode(syscall2(nr::MAP, len as u64, prot)).map(|a| a as *mut u8)
+    }
+
+    /// Next address [`map`] and [`map_ex`] try in low mode; 0 = off.
+    static LOW_NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    /// End (exclusive) of the low window.
+    /// Below 2 GiB, so sign-extended LPARAM-style values keep pointers intact.
+    const LOW_END: u64 = 0x8000_0000;
+
+    /// From now on, memory placed by [`map`] and [`map_ex`] without
+    /// `MAP_FIXED` lies in `[start, 2 GiB)`: a process running 32-bit code
+    /// (WoW64) hands pointers to it, so its heap must be addressable there.
+    pub fn set_low_map(start: usize) {
+        LOW_NEXT.store(start as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether [`set_low_map`] is in effect.
+    pub fn low_map() -> bool {
+        LOW_NEXT.load(core::sync::atomic::Ordering::Relaxed) != 0
+    }
+
+    /// Low mode: the first free run at or above the cursor, found with
+    /// `MAP_FIXED` (the kernel refuses any address already in use).
+    fn map_low(len: usize, prot: u64, align: u64) -> Option<Result<*mut u8, Errno>> {
+        use core::sync::atomic::Ordering;
+        let start = LOW_NEXT.load(Ordering::Relaxed);
+        if start == 0 {
+            return None;
+        }
+        let size = (len as u64).next_multiple_of(4096);
+        let mut at = start.next_multiple_of(align);
+        let mut wrapped = false;
+        loop {
+            if at + size > LOW_END {
+                if wrapped {
+                    return Some(Err(Errno::NoMemory));
+                }
+                wrapped = true;
+                at = 0x5000_0000u64.next_multiple_of(align);
+                continue;
+            }
+            match decode(syscall4(nr::MAP_EX, at, size, prot, osyx_abi::MAP_FIXED)) {
+                Ok(a) => {
+                    // Leave a page free after each run, as the kernel does.
+                    LOW_NEXT.store(a + size + 4096, Ordering::Relaxed);
+                    return Some(Ok(a as *mut u8));
+                }
+                Err(Errno::AlreadyExists) => at = (at + 0x10000).next_multiple_of(align),
+                Err(e) => return Some(Err(e)),
+            }
+        }
     }
 
     /// Unmaps a region returned by [`map`] (the whole region, same length).
@@ -718,6 +771,12 @@ mod imp {
     /// Anonymous zeroed memory, optionally at a fixed address
     /// (`MAP_FIXED`) or 64 KiB aligned (`MAP_ALIGN_64K`).
     pub fn map_ex(addr: usize, len: usize, prot: u64, flags: u64) -> Result<*mut u8, Errno> {
+        if flags & osyx_abi::MAP_FIXED == 0 {
+            let align = if flags & osyx_abi::MAP_ALIGN_64K != 0 { 0x10000 } else { 4096 };
+            if let Some(p) = map_low(len, prot, align) {
+                return p;
+            }
+        }
         decode(syscall4(nr::MAP_EX, addr as u64, len as u64, prot, flags)).map(|a| a as *mut u8)
     }
 
