@@ -130,6 +130,29 @@ fn config() -> Config {
     }
 }
 
+#[test]
+fn invalid_plan_never_writes_disk() {
+    struct GuardDisk { writes: usize }
+    impl Disk for GuardDisk {
+        fn sectors(&self) -> u64 { 2_000_000 }
+        fn read(&mut self, _: u64, _: &mut [u8]) -> std::result::Result<(), String> { Err("unexpected read".into()) }
+        fn write(&mut self, _: u64, _: &[u8]) -> std::result::Result<(), String> { self.writes += 1; Err("unexpected write".into()) }
+        fn flush(&mut self) -> std::result::Result<(), String> { Err("unexpected flush".into()) }
+    }
+    let good = plan(2_000_000, Layout::Automatic).unwrap();
+    let cases = [
+        Plan { esp_first: 0, ..good },
+        Plan { root_first: good.esp_first, ..good },
+        Plan { root_first: u64::MAX, ..good },
+        Plan { root_sectors: 0, ..good },
+    ];
+    for p in cases {
+        let mut disk = GuardDisk { writes: 0 };
+        assert!(matches!(install(&mut disk, &p, &mut MemSource::new(), &config(), &mut Log::default()), Err(Error::Invalid(_))));
+        assert_eq!(disk.writes, 0);
+    }
+}
+
 fn keep(name: &str, img: &[u8]) {
     if let Ok(dir) = std::env::var("OSYX_TEST_IMAGES") {
         std::fs::write(std::path::Path::new(&dir).join(name), img).unwrap();

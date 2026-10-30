@@ -413,6 +413,20 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     if plan.disk_sectors != disk.sectors() {
         return Err(Error::Invalid("the plan was made for a different disk size".into()));
     }
+    let invalid_plan = || Error::Invalid("invalid partition plan".into());
+    let esp_end = plan.esp_first.checked_add(plan.esp_sectors).ok_or_else(invalid_plan)?;
+    let root_end = plan.root_first.checked_add(plan.root_sectors).ok_or_else(invalid_plan)?;
+    let usable_end = disk.sectors().checked_sub(33).ok_or_else(invalid_plan)?;
+    if plan.esp_first < ALIGN || plan.esp_sectors < MIN_ESP_MIB * ALIGN
+        || plan.root_sectors < MIN_ROOT_MIB * ALIGN || plan.root_first < esp_end || root_end > usable_end
+    {
+        return Err(invalid_plan());
+    }
+    let parts = [
+        NewPartition { type_guid: osyx_part::TYPE_ESP, unique_guid: guid(&config.seed, 1), first_lba: plan.esp_first, sectors: plan.esp_sectors, name: "EFI system partition" },
+        NewPartition { type_guid: osyx_part::TYPE_ROOT_X86_64, unique_guid: guid(&config.seed, 2), first_lba: plan.root_first, sectors: plan.root_sectors, name: "OSyx" },
+    ];
+    let table = osyx_part::build(disk.sectors(), guid(&config.seed, 0), &parts).map_err(|e| Error::Invalid(format!("partition table: {e:?}")))?;
     CLOCK.store(config.time, Ordering::Relaxed);
     // Fail before touching the disk if the boot files are missing.
     let boot = source.boot_files().map_err(Error::Source)?;
@@ -429,11 +443,6 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     for first in [plan.esp_first, plan.root_first] {
         disk.write(first, &zero).map_err(Error::Io)?;
     }
-    let parts = [
-        NewPartition { type_guid: osyx_part::TYPE_ESP, unique_guid: guid(&config.seed, 1), first_lba: plan.esp_first, sectors: plan.esp_sectors, name: "EFI system partition" },
-        NewPartition { type_guid: osyx_part::TYPE_ROOT_X86_64, unique_guid: guid(&config.seed, 2), first_lba: plan.root_first, sectors: plan.root_sectors, name: "OSyx" },
-    ];
-    let table = osyx_part::build(disk.sectors(), guid(&config.seed, 0), &parts).map_err(|e| Error::Invalid(format!("partition table: {e:?}")))?;
     for (lba, data) in table {
         disk.write(lba, &data).map_err(Error::Io)?;
     }
