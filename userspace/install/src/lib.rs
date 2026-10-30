@@ -494,6 +494,7 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     ));
 
     progress.stage(Stage::BootFiles, 0.94);
+    let mut expected_boot = Vec::new();
     {
         let mut esp = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("mounting the ESP", e))?;
         let mut files = boot;
@@ -505,6 +506,7 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
         files.sort_by_key(|(p, _)| p == "EFI/BOOT/BOOTX64.EFI");
         for (path, data) in &files {
             fat_write(&mut esp, path, data)?;
+            expected_boot.push((path.clone(), data.len() as u64));
             progress.log(&format!("ESP: {path} ({} bytes)", data.len()));
         }
         esp.unmount().map_err(|e| fat_err("unmounting the ESP", e))?;
@@ -512,14 +514,10 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     disk.flush().map_err(Error::Io)?;
 
     progress.stage(Stage::Verifying, 0.97);
-    verify(disk, plan, config, &files_expected(source)?)?;
+    verify(disk, plan, config, &expected_boot)?;
     progress.log("verification passed");
     progress.stage(Stage::Done, 1.0);
     Ok(report)
-}
-
-fn files_expected<S: Source>(source: &mut S) -> Result<Vec<(String, u64)>> {
-    Ok(source.boot_files().map_err(Error::Source)?.into_iter().map(|(p, d)| (p, d.len() as u64)).collect())
 }
 
 fn join(dir: &str, name: &str) -> String {
@@ -729,9 +727,6 @@ pub fn verify<D: Disk>(disk: &mut D, plan: &Plan, config: &Config, boot: &[(Stri
     {
         let mut fs = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("ESP", e))?;
         for (path, size) in boot {
-            if path == "EFI/OSYX/CMDLINE.TXT" && !config.cmdline.is_empty() {
-                continue;
-            }
             let m = fs.metadata(&format!("/{path}")).map_err(|e| Error::Verify(format!("ESP {path}: {e:?}")))?;
             if m.size as u64 != *size {
                 return Err(Error::Verify(format!("ESP {path}: {} bytes instead of {size}", m.size)));

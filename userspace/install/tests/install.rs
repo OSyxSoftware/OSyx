@@ -34,11 +34,12 @@ struct MemSource {
     entries: BTreeMap<String, SourceEntry>,
     data: BTreeMap<String, Vec<u8>>,
     fail_at: Option<String>,
+    boot_calls: usize,
 }
 
 impl MemSource {
     fn new() -> MemSource {
-        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None };
+        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0 };
         for (d, mode, uid) in [("/bin", 0o755, 0), ("/etc", 0o755, 0), ("/etc/osyx", 0o755, 0), ("/dev", 0o755, 0), ("/tmp", 0o1777, 0), ("/home", 0o755, 0), ("/home/user", 0o755, 1000), ("/system", 0o755, 0), ("/system/share", 0o755, 0), ("/system/share/osyx-setup", 0o755, 0)] {
             s.dir(d, mode, uid);
         }
@@ -84,6 +85,8 @@ impl Source for MemSource {
         Ok(n)
     }
     fn boot_files(&mut self) -> std::result::Result<Vec<(String, Vec<u8>)>, String> {
+        self.boot_calls += 1;
+        if self.boot_calls > 1 { return Err("boot files requested twice".into()); }
         Ok(vec![
             ("EFI/BOOT/BOOTX64.EFI".into(), pattern(150_000, 7)),
             ("EFI/OSYX/KERNEL.ELF".into(), self.data["/system/share/osyx-setup/KERNEL.ELF"].clone()),
@@ -232,6 +235,10 @@ fn manual_layout_and_kernel_command_line() {
     let mut b = [0u8; 64];
     let n = esp.read(&mut f, 0, &mut b).unwrap();
     assert_eq!(&b[..n], b"init.args=desktop");
+    esp.remove_file("/EFI/OSYX/CMDLINE.TXT").unwrap();
+    esp.unmount().unwrap();
+    let expected = [("EFI/OSYX/CMDLINE.TXT".to_string(), c.cmdline.len() as u64)];
+    assert!(matches!(verify(&mut disk, &plan, &c, &expected), Err(Error::Verify(_))));
 }
 
 #[test]
