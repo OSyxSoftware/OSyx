@@ -27,8 +27,12 @@ pub struct Token {
 /// never silently ignore them while reporting successful object creation.
 /// SECURITY_ATTRIBUTES' bInheritHandle (false without attributes).
 pub fn inherit_flag(p: u64) -> bool {
-    // SAFETY: the caller's SECURITY_ATTRIBUTES (24 bytes).
-    p != 0 && unsafe { rd::<i32>(p as *const u8, 16) } != 0
+    if p == 0 {
+        return false;
+    }
+    let at = if crate::wow64::is_active() { 8 } else { 16 };
+    // SAFETY: the caller's SECURITY_ATTRIBUTES (12 bytes on 32-bit, 24 on 64-bit).
+    unsafe { rd::<i32>(p as *const u8, at) != 0 }
 }
 
 /// Like `validate_attributes` for objects whose handles can be inherited
@@ -38,24 +42,26 @@ pub fn validate_inheritable(p: u64) -> Result<bool, u32> {
         return Ok(false);
     }
     let q = p as *const u8;
-    if unsafe { rd::<u32>(q, 0) } != 24 {
-        return Err(ERROR_INVALID_PARAMETER);
-    }
-    if unsafe { rd::<u64>(q, 8) } != 0 {
-        return Err(ERROR_NOT_SUPPORTED);
+    if crate::wow64::is_active() {
+        if unsafe { rd::<u32>(q, 0) } != 12 {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        if unsafe { rd::<u32>(q, 4) } != 0 {
+            return Err(ERROR_NOT_SUPPORTED);
+        }
+    } else {
+        if unsafe { rd::<u32>(q, 0) } != 24 {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        if unsafe { rd::<u64>(q, 8) } != 0 {
+            return Err(ERROR_NOT_SUPPORTED);
+        }
     }
     Ok(inherit_flag(p))
 }
 
 pub fn validate_attributes(p: u64) -> Result<(), u32> {
-    if p == 0 {
-        return Ok(());
-    }
-    let p = p as *const u8;
-    if unsafe { rd::<u32>(p, 0) } != 24 {
-        return Err(ERROR_INVALID_PARAMETER);
-    }
-    if unsafe { rd::<u64>(p, 8) } != 0 || unsafe { rd::<i32>(p, 16) } != 0 {
+    if validate_inheritable(p)? {
         return Err(ERROR_NOT_SUPPORTED);
     }
     Ok(())

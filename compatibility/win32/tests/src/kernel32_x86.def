@@ -25,6 +25,8 @@ EXPORTS
     ReadFile
     CloseHandle
     CreateThread
+    CreateProcessW
+    GetExitCodeProcess
     WaitForSingleObject
     GetExitCodeThread
     Sleep

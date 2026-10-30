@@ -437,11 +437,13 @@ fn exetype(name: &str) -> u64 {
 /// renders a fallback for a NULL icon). PIDLs belong to the shell namespace,
 /// which exists only for the file dialogs' own PIDLs; return 0 for those.
 fn sh_get_file_info(path: *const u16, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
-    if flags & SHGFI_PIDL != 0 || path.is_null() || info.is_null() || cb < SHFILEINFO_SIZE {
+    if flags & SHGFI_PIDL != 0 || path.is_null() || (flags != SHGFI_EXETYPE && (info.is_null() || cb < SHFILEINFO_SIZE)) {
         return 0;
     }
-    // SAFETY: the caller's struct; its size was checked above.
-    unsafe { core::ptr::write_bytes(info, 0, SHFILEINFO_SIZE as usize) };
+    if !info.is_null() && cb >= SHFILEINFO_SIZE {
+        // SAFETY: the caller's struct; its size was checked above.
+        unsafe { core::ptr::write_bytes(info, 0, SHFILEINFO_SIZE as usize) };
+    }
     // SAFETY: NUL-terminated path from the caller.
     let Some(win) = (unsafe { path::wide_to_string(path) }) else { return 0 };
     if win.is_empty() {
@@ -486,7 +488,7 @@ fn sh_get_file_info(path: *const u16, input: u32, info: *mut u8, cb: u32, flags:
     1
 }
 
-extern "win64" fn SHGetFileInfoW(p: *const u16, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
+pub(crate) extern "win64" fn SHGetFileInfoW(p: *const u16, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
     sh_get_file_info(p, input, info, cb, flags)
 }
 

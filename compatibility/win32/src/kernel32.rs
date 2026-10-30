@@ -1178,7 +1178,7 @@ extern "win64" fn GetTempFileNameW(dir: *const u16, prefix: *const u16, unique: 
 
 // ---- handles ------------------------------------------------------------------------
 
-extern "win64" fn CloseHandle(h: u64) -> Bool {
+pub(crate) extern "win64" fn CloseHandle(h: u64) -> Bool {
     if h == objects::CURRENT_PROCESS || h == objects::CURRENT_THREAD {
         return TRUE;
     }
