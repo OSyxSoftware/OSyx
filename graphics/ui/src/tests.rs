@@ -143,6 +143,25 @@ fn text_field_editing() {
 }
 
 #[test]
+fn text_field_clipboard_shortcuts_preserve_unicode_and_masked_text() {
+    let fonts = Fonts::load();
+    let mut clipboard = crate::Clipboard::default();
+    let mut field = TextField::new("Zażółć 🌍");
+    field.select_all();
+    field.event_with_clipboard(&key_down(key::C, Some('c'), modifier::LEFT_CTRL), true, &fonts, &mut clipboard);
+    assert_eq!(clipboard.text(), Some("Zażółć 🌍"));
+    field.event_with_clipboard(&key_down(key::X, Some('x'), modifier::LEFT_CTRL), true, &fonts, &mut clipboard);
+    assert_eq!(field.text(), "");
+    field.event_with_clipboard(&key_down(key::V, Some('v'), modifier::LEFT_CTRL), true, &fonts, &mut clipboard);
+    assert_eq!(field.text(), "Zażółć 🌍");
+    field.masked = true;
+    field.select_all();
+    clipboard.receive(Some("safe".into()));
+    field.event_with_clipboard(&key_down(key::C, Some('c'), modifier::LEFT_CTRL), true, &fonts, &mut clipboard);
+    assert_eq!(clipboard.text(), Some("safe"));
+}
+
+#[test]
 fn text_field_click_places_the_cursor() {
     let fonts = Fonts::load();
     let mut f = TextField::new("hello world");

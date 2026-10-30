@@ -290,7 +290,7 @@ impl App for Settings {
         let mut redraw = false;
         match self.section {
             Section::General => {
-                let typed = self.hostname.event(&ev, cx.focused && self.focus == 0, &cx.fonts);
+                let typed = self.hostname.event_with_clipboard(&ev, cx.focused && self.focus == 0, &cx.fonts, &mut cx.clipboard);
                 redraw |= typed.needs_redraw();
                 let activated = matches!(self.save_host.event(&ev, cx.focused), Response::Activated(_));
                 if activated || typed == Response::Submitted {
@@ -327,8 +327,8 @@ impl App for Settings {
                 }
             }
             Section::Network => {
-                redraw |= self.addr.event(&ev, cx.focused && self.focus == 1, &cx.fonts).needs_redraw();
-                redraw |= self.gateway.event(&ev, cx.focused && self.focus == 2, &cx.fonts).needs_redraw();
+                redraw |= self.addr.event_with_clipboard(&ev, cx.focused && self.focus == 1, &cx.fonts, &mut cx.clipboard).needs_redraw();
+                redraw |= self.gateway.event_with_clipboard(&ev, cx.focused && self.focus == 2, &cx.fonts, &mut cx.clipboard).needs_redraw();
                 if matches!(self.dhcp.event(&ev, cx.focused), Response::Activated(_)) {
                     self.status = match self.configure_network(true) {
                         Ok(()) => String::from("DHCP requested"),

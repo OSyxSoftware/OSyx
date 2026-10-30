@@ -16,6 +16,7 @@ use prism_client::{Connection, Event, WindowSpec};
 pub struct Ctx {
     pub fonts: Fonts,
     pub theme: Theme,
+    pub clipboard: osyx_ui::Clipboard,
     /// The window has keyboard focus.
     pub focused: bool,
     /// Set to leave the event loop (the window is destroyed).
@@ -76,6 +77,7 @@ pub fn run_app(name: &str, spec: WindowSpec, app: &mut dyn App) -> i32 {
     let mut cx = Ctx {
         fonts: Fonts::load(),
         theme: configured_theme(),
+        clipboard: osyx_ui::Clipboard::default(),
         focused: false,
         quit: false,
         title: None,
@@ -107,6 +109,9 @@ pub fn run_app(name: &str, spec: WindowSpec, app: &mut dyn App) -> i32 {
             };
             win.on_event(&ev);
             match &ev {
+                Event::ClipboardChanged { entries, .. } => {
+                    cx.clipboard.receive(prism_client::proto::clipboard_text(entries));
+                }
                 Event::FocusChanged { focused, .. } => {
                     cx.focused = *focused;
                     win.dirty = true;
@@ -130,6 +135,10 @@ pub fn run_app(name: &str, spec: WindowSpec, app: &mut dyn App) -> i32 {
             if let Some((_, ui)) = adapter.translate(&ev) {
                 if app.event(ui, &mut cx) {
                     win.dirty = true;
+                }
+                if let Some(text) = cx.clipboard.take_changed() {
+                    let entry = prism_client::proto::clipboard_text_entry(text);
+                    let _ = conn.send(&prism_client::Request::ClipboardSet { entries: vec![entry] }, &[]);
                 }
                 if let Some(path) = cx.drag_file.take() {
                     let _ = conn.send(&prism_client::Request::FileDrag { window: win.id, path }, &[]);

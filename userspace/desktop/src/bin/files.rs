@@ -1156,7 +1156,7 @@ impl App for Files {
         }
         // A dialog is modal.
         if let Some(d) = &mut self.dialog {
-            let r = d.event(&ev, &fonts);
+            let r = d.event_with_clipboard(&ev, &fonts, &mut cx.clipboard);
             match r {
                 Response::Activated(b) => {
                     let (tag, input) = (d.tag, String::from(d.input_text()));
@@ -1318,7 +1318,7 @@ impl App for Files {
             }
         }
         // Path field.
-        match self.path.event(&ev, self.path_focus, &fonts) {
+        match self.path.event_with_clipboard(&ev, self.path_focus, &fonts, &mut cx.clipboard) {
             Response::Submitted => {
                 let target = String::from(self.path.text().trim());
                 if self.navigate(&target, true) {

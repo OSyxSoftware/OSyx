@@ -252,6 +252,38 @@ pub struct ClipEntry {
     pub data: Vec<u8>,
 }
 
+/// Win32 CF_UNICODETEXT, also used by native clients for shared text.
+pub const CLIP_UNICODE_TEXT: u32 = 13;
+
+/// Encode text as a NUL-terminated UTF-16LE clipboard entry.
+pub fn clipboard_text_entry(text: &str) -> ClipEntry {
+    let mut data = Vec::new();
+    for ch in text.chars() {
+        if ch == '\0' { break; }
+        let mut units = [0u16; 2];
+        let units = ch.encode_utf16(&mut units);
+        if data.len() + units.len() * 2 + 2 > MAX_CLIPBOARD_BYTES { break; }
+        for unit in units { data.extend_from_slice(&unit.to_le_bytes()); }
+    }
+    data.extend_from_slice(&[0, 0]);
+    ClipEntry { format: CLIP_UNICODE_TEXT, name: None, data }
+}
+
+/// Decode the first CF_UNICODETEXT entry, ignoring any bytes after NUL.
+pub fn clipboard_text(entries: &[ClipEntry]) -> Option<String> {
+    if let Some(entry) = entries.iter().find(|e| e.format == CLIP_UNICODE_TEXT) {
+        if entry.data.len() % 2 != 0 { return None; }
+        let units: Vec<u16> = entry.data.chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .take_while(|u| *u != 0).collect();
+        return Some(String::from_utf16_lossy(&units));
+    }
+    // OSyx's Windows ANSI code page is UTF-8.
+    let entry = entries.iter().find(|e| e.format == 1)?;
+    let end = entry.data.iter().position(|b| *b == 0).unwrap_or(entry.data.len());
+    Some(String::from_utf8_lossy(&entry.data[..end]).into_owned())
+}
+
 /// Client -> compositor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -1087,6 +1119,19 @@ mod tests {
         let n = m.len();
         m[n - 4..].copy_from_slice(&0xD800u32.to_le_bytes());
         assert_eq!(Event::decode(&m), Err(ProtoError::BadValue));
+    }
+
+    #[test]
+    fn unicode_clipboard_text_round_trips_and_is_bounded() {
+        let entry = clipboard_text_entry("Zażółć 🌍");
+        assert_eq!(clipboard_text(&[entry]), Some(String::from("Zażółć 🌍")));
+        let entry = clipboard_text_entry(&"🌍".repeat(MAX_CLIPBOARD_BYTES));
+        assert!(entry.data.len() <= MAX_CLIPBOARD_BYTES);
+        assert!(clipboard_text(&[entry]).unwrap().chars().all(|c| c == '🌍'));
+        let malformed = ClipEntry { format: CLIP_UNICODE_TEXT, name: None, data: vec![1] };
+        assert_eq!(clipboard_text(&[malformed]), None);
+        let ansi = ClipEntry { format: 1, name: None, data: b"test\0ignored".to_vec() };
+        assert_eq!(clipboard_text(&[ansi]).as_deref(), Some("test"));
     }
 
     #[test]
