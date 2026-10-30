@@ -254,6 +254,15 @@ pub fn load_apps_from(path: &str) -> Vec<AppEntry> {
     apps
 }
 
+/// The text of every installed application's `.app` file (for readers of
+/// keys `AppEntry` does not keep, such as `Handles=`).
+pub fn load_app_texts() -> Vec<String> {
+    let Ok(dir) = fs::read_dir(APP_DIR) else { return Vec::new() };
+    let mut names: Vec<String> = dir.map(|e| String::from(e.file_name())).filter(|n| n.ends_with(".app")).collect();
+    names.sort();
+    names.iter().filter_map(|n| fs::read_to_string(format!("{APP_DIR}/{n}")).ok()).collect()
+}
+
 pub fn load_app(path: &str) -> Option<AppEntry> {
     let text = fs::read_to_string(path).ok()?;
     let mut e = AppEntry {

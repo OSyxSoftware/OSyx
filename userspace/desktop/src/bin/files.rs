@@ -9,10 +9,22 @@
 //! (Ctrl+N), Rename (F2), Delete (Del: moves to the Trash; in the Trash it
 //! deletes permanently), Restore from the Trash, Properties (Ctrl+I),
 //! Refresh (F5, also picks up USB sticks plugged in), hidden files (Ctrl+H).
+//!
+//! Several files at once: Ctrl+click toggles a row, Shift+click (or
+//! Shift+arrows) selects a range, a rubber band dragged over empty space
+//! selects the rows it touches, Ctrl+A selects all. Copy (Ctrl+C), Cut
+//! (Ctrl+X) and Paste (Ctrl+V), Delete, Pack into a tar archive (Ctrl+P),
+//! Extract here (Ctrl+E: tar, tar.gz, zip, 7z, gz) and dragging act on the
+//! whole selection. The context menu (right click) has "Open with": a file
+//! opens with the program the user chose for its type, else with what
+//! `/system/share/applications/*.app` registers (`Handles=`), else by itself
+//! (text viewer, hex viewer, default browser for images and pages).
 
 #![no_std]
 #![no_main]
 
+#[path = "../fileops.rs"]
+mod fileops;
 #[path = "../shell_common.rs"]
 mod common;
 
@@ -22,11 +34,13 @@ use os_std::prelude::*;
 use os_std::process::Command;
 use os_std::time::{Duration, Instant};
 use os_std::{env, system, thread};
+use osyx_filekit::openwith::{self, Builtin, Choices, Handler, Target};
+use osyx_filekit::{classify, select, Kind};
 use osyx_gfx::Rect;
-use osyx_input::{button, key};
+use osyx_input::{button, key, modifier};
 use osyx_ui::layout::{contains, inset, split_bottom, split_left, split_top};
 use osyx_ui::time::Tz;
-use osyx_ui::widget::{Button, ButtonStyle, Checkbox, Column, Dialog, ListItem, ListView, ScrollView, TextField};
+use osyx_ui::widget::{Button, ButtonStyle, Checkbox, Column, Dialog, ListItem, ListView, Menu, MenuItem, ScrollView, TextField};
 use osyx_ui::{icon, Align, Event as Ui, FontKind, Icon, Painter, Response};
 use prism_client::WindowSpec;
 
@@ -124,15 +138,14 @@ impl Entry {
             ("Device", Icon::Device)
         } else if self.is_program() || is_win_program(&self.name) {
             ("Program", Icon::Program)
-        } else if [".txt", ".md", ".rs", ".ax", ".toml", ".conf", ".app", ".log", ".sh", ".py"]
-            .iter()
-            .any(|e| self.name.ends_with(e))
-            || !self.name.contains('.')
-        {
-            ("Text document", Icon::TextFile)
         } else {
-            ("File", Icon::File)
+            let k = classify(&self.name);
+            (k.label(), if k.viewable() && k != Kind::Other { Icon::TextFile } else { Icon::File })
         }
+    }
+
+    fn file_kind(&self) -> Kind {
+        classify(&self.name)
     }
 }
 
@@ -171,6 +184,58 @@ struct Files {
     tz: Tz,
     size: (u32, u32),
     hint: Option<&'static str>,
+    /// Modifier keys as of the last key event (pointer events carry none).
+    mods: u32,
+    /// Where a Shift range starts.
+    anchor: Option<usize>,
+    /// Copied or cut paths and whether they are to be moved.
+    clipboard: Option<(Vec<String>, bool)>,
+    /// Applications registered for file types, the user's choices, and
+    /// whether a default browser exists.
+    handlers: Vec<Handler>,
+    choices: Choices,
+    browser: bool,
+    menu: Option<ContextMenu>,
+    band: Option<Band>,
+    /// Names a pending delete dialog is about.
+    delete_names: Vec<String>,
+}
+
+const CHOICES_FILE: &str = "/home/user/.config/osyx/openwith.conf";
+
+/// What a context menu item does.
+#[derive(Clone, Debug)]
+enum Act {
+    Open,
+    With(Target),
+    Default(Target),
+    Copy,
+    Cut,
+    Paste,
+    Trash,
+    Pack,
+    Extract,
+    Rename,
+    Info,
+    NewFolder,
+}
+
+struct ContextMenu {
+    menu: Menu,
+    acts: Vec<Act>,
+}
+
+/// A rubber band being dragged over the list.
+struct Band {
+    start: (i32, i32),
+    pointer: (i32, i32),
+    /// `list.content_y` of the start, so scrolling keeps the band anchored.
+    start_content: i32,
+    moved: bool,
+}
+
+fn load_handlers() -> Vec<Handler> {
+    common::load_app_texts().iter().filter_map(|t| Handler::parse(t)).collect()
 }
 
 fn main() -> i32 {
@@ -212,6 +277,15 @@ fn main() -> i32 {
         tz: system_tz(),
         size: (0, 0),
         hint: None,
+        mods: 0,
+        anchor: None,
+        clipboard: None,
+        handlers: load_handlers(),
+        choices: Choices::parse(&fs::read_to_string(CHOICES_FILE).unwrap_or_default()),
+        browser: fs::read_to_string("/etc/osyx/default-browser").is_ok_and(|b| b.trim().starts_with('/')),
+        menu: None,
+        band: None,
+        delete_names: Vec::new(),
     };
     f.navigate(&start, false);
     let spec = WindowSpec::normal(&format!("Files — {}", f.cwd), 860, 540);
@@ -380,11 +454,7 @@ impl Files {
             if self.navigate(&path, true) {
                 cx.title = Some(format!("Files — {}", self.cwd));
             }
-        } else if e.is_program()
-            || is_win_program(&e.name)
-            || e.name.ends_with(".app")
-            || [".html", ".htm", ".xhtml", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"].iter().any(|ext| e.name.to_ascii_lowercase().ends_with(ext))
-        {
+        } else if e.is_program() || is_win_program(&e.name) || e.name.ends_with(".app") {
             let shortcut = if e.name.ends_with(".app") { common::load_app(&path) } else { None };
             let command = if let Some(app) = &shortcut {
                 let windows = is_win_program(&app.exec);
@@ -400,31 +470,67 @@ impl Files {
                     c.arg(&path);
                 }
                 c
-            } else if e.name.ends_with(".app") {
+            } else {
                 self.set_status(format!("Invalid application shortcut: {path}"), true);
                 return;
-            } else {
-                let mut c = Command::new("/bin/open");
-                c.arg(&path);
-                c
             };
-            match command.spawn() {
-                Ok(child) => {
-                    let pid = child.id();
-                    self.set_status(format!("Started {} as process {pid}", e.name), false);
-                    println!("files: started program {path} as process {pid}");
-                    thread::spawn(move || {
-                        let _ = child.wait();
-                    });
-                }
-                Err(err) => self.set_status(format!("Cannot start {path}: {err}"), true),
-            }
+            self.spawn(command, &e.name.clone(), &path);
         } else {
-            self.preview(path);
+            let (name, kind) = (e.name.clone(), e.file_kind());
+            match openwith::default_target(&name, kind, &self.handlers, &self.choices, self.browser) {
+                Some(t) => self.run_target(&path, &t),
+                None => {
+                    let what = osyx_filekit::kind::extension(&name).map_or(String::from("this kind of file"), |x| format!(".{x} files"));
+                    self.set_status(
+                        format!("No application is registered for {what}: add Handles=... to an application's .app file, or use Open with > Hex viewer"),
+                        true,
+                    );
+                }
+            }
         }
     }
 
-    fn preview(&mut self, path: String) {
+    fn spawn(&mut self, mut command: Command, name: &str, path: &str) {
+        match command.spawn() {
+            Ok(child) => {
+                let pid = child.id();
+                self.set_status(format!("Started {name} as process {pid}"), false);
+                println!("files: started program {path} as process {pid}");
+                thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(err) => self.set_status(format!("Cannot start {path}: {err}"), true),
+        }
+    }
+
+    /// Opens `path` the way `target` says.
+    fn run_target(&mut self, path: &str, target: &Target) {
+        match target {
+            Target::Builtin(Builtin::Viewer) => self.preview(String::from(path), false),
+            Target::Builtin(Builtin::Hex) => self.preview(String::from(path), true),
+            Target::Builtin(Builtin::Browser) => {
+                let mut c = Command::new("/bin/open");
+                c.arg(path);
+                let name = path.rsplit('/').next().unwrap_or(path).to_string();
+                self.spawn(c, &name, path);
+            }
+            Target::Builtin(Builtin::Extract) => self.extract_paths(&[String::from(path)]),
+            Target::Exec(exec) => {
+                let windows = is_win_program(exec);
+                let mut c = Command::new(if windows { "/bin/winrun" } else { exec });
+                if windows {
+                    c.arg(exec);
+                }
+                c.arg(path);
+                println!("files: opening {path} with {exec}");
+                let name = path.rsplit('/').next().unwrap_or(path).to_string();
+                self.spawn(c, &name, path);
+            }
+        }
+    }
+
+    fn preview(&mut self, path: String, force_hex: bool) {
         let data = match fs::read(&path) {
             Ok(d) => d,
             Err(e) => {
@@ -433,7 +539,7 @@ impl Files {
             }
         };
         let shown = &data[..data.len().min(PREVIEW_LIMIT)];
-        let text = core::str::from_utf8(shown).ok().filter(|t| !t.contains('\0'));
+        let text = core::str::from_utf8(shown).ok().filter(|t| !t.contains('\0') && !force_hex);
         let (lines, hex) = match text {
             Some(t) => (t.lines().map(|l| l.replace('\t', "    ")).collect::<Vec<_>>(), false),
             None => {
@@ -544,38 +650,7 @@ impl Files {
                     );
                 }
             }
-            Tool::Delete => {
-                if let Some(e) = self.selected() {
-                    let name = e.name.clone();
-                    // Outside the Trash a delete is a move into it.
-                    let reason = if self.in_trash() {
-                        String::new()
-                    } else {
-                        match self.move_to_trash(&name) {
-                            Ok(msg) => {
-                                println!("files: {msg}");
-                                self.refresh();
-                                self.set_status(msg, false);
-                                return;
-                            }
-                            Err(why) => format!(" It cannot go to the Trash ({why})."),
-                        }
-                    };
-                    let Some(e) = self.selected() else { return };
-                    let what = if e.is_dir() { "the folder" } else { "the file" };
-                    let msg = format!(
-                        "Delete {what} \"{}\" permanently? This cannot be undone.{}{reason}",
-                        e.name,
-                        if e.is_dir() { " Everything inside it is deleted too." } else { "" }
-                    );
-                    self.dialog = Some(Dialog::new(
-                        D_DELETE,
-                        "Delete",
-                        &msg,
-                        &[("Cancel", ButtonStyle::Secondary), ("Delete", ButtonStyle::Danger)],
-                    ));
-                }
-            }
+            Tool::Delete => self.trash_selection(),
             Tool::Restore => {
                 if let Some(name) = self.selected().map(|e| e.name.clone()) {
                     let (msg, err) = match self.restore_from_trash(&name) {
@@ -661,21 +736,27 @@ impl Files {
                 }
                 None => return,
             },
-            D_DELETE => match sel {
-                Some(name) => {
-                    let p = join(&self.cwd, &name);
-                    let r = match fs::symlink_metadata(&p) {
-                        Ok(m) if m.is_dir() => fs::remove_dir_all(&p),
-                        Ok(_) => fs::remove_file(&p),
-                        Err(e) => Err(e),
-                    };
-                    if r.is_ok() && self.in_trash() {
-                        let _ = fs::remove_file(format!("{TRASH}/info/{name}.trashinfo"));
+            D_DELETE => {
+                let names = core::mem::take(&mut self.delete_names);
+                let mut failed = None;
+                for name in &names {
+                    let p = join(&self.cwd, name);
+                    match remove_any(&p) {
+                        Ok(()) if self.in_trash() => {
+                            let _ = fs::remove_file(format!("{TRASH}/info/{name}.trashinfo"));
+                        }
+                        Ok(()) => {}
+                        Err(e) => {
+                            failed = Some(format!("Cannot delete {p}: {e}"));
+                            break;
+                        }
                     }
-                    r.map(|_| format!("Deleted {p}")).map_err(|e| format!("Cannot delete {p}: {e}"))
                 }
-                None => return,
-            },
+                match failed {
+                    Some(f) => Err(f),
+                    None => Ok(format!("Deleted {} item(s)", names.len())),
+                }
+            }
             _ => return,
         };
         let (msg, err) = match result {
@@ -706,7 +787,7 @@ impl Files {
             b.enabled = match t {
                 Tool::Back => !self.back.is_empty(),
                 Tool::Up => self.cwd != "/",
-                Tool::Rename | Tool::Delete | Tool::Info => selected,
+                Tool::Rename | Tool::Delete | Tool::Info => selected || !self.list.marked().is_empty(),
                 Tool::Restore => in_trash && selected,
                 _ => true,
             };
@@ -736,6 +817,315 @@ impl Files {
     }
 }
 
+/// Selection, clipboard, pack and extract, and the context menu.
+impl Files {
+    /// Names of the marked rows, or of the selected row.
+    fn chosen_names(&self) -> Vec<String> {
+        self.list.chosen().into_iter().filter_map(|i| self.entries.get(i)).map(|e| e.name.clone()).collect()
+    }
+
+    fn chosen_paths(&self) -> Vec<String> {
+        self.chosen_names().iter().map(|n| join(&self.cwd, n)).collect()
+    }
+
+    fn describe_selection(&mut self) {
+        let chosen = self.list.chosen();
+        if chosen.len() > 1 {
+            let bytes: u64 = chosen.iter().filter_map(|&i| self.entries.get(i)).filter_map(|e| e.meta.as_ref()).filter(|m| !m.is_dir()).map(|m| m.len()).sum();
+            self.set_status(format!("{} items selected ({})", chosen.len(), human_size(bytes)), false);
+            println!("files: {} items selected", chosen.len());
+        }
+    }
+
+    fn note_result(&mut self, r: Result<String, String>) {
+        let (msg, err) = match r {
+            Ok(m) => (m, false),
+            Err(m) => (m, true),
+        };
+        println!("files: {msg}");
+        self.refresh();
+        self.set_status(msg, err);
+    }
+
+    fn copy_selection(&mut self, cut: bool) {
+        let paths = self.chosen_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let n = paths.len();
+        self.clipboard = Some((paths, cut));
+        self.set_status(format!("{} {n} item(s): paste with Ctrl+V", if cut { "Cut" } else { "Copied" }), false);
+        println!("files: {} {n} item(s)", if cut { "cut" } else { "copied" });
+    }
+
+    fn paste(&mut self) {
+        let Some((paths, cut)) = self.clipboard.clone() else {
+            self.set_status(String::from("Nothing to paste"), true);
+            return;
+        };
+        let (mut done, mut failure) = (0usize, None);
+        for p in &paths {
+            let name = p.rsplit('/').next().unwrap_or(p);
+            let source_is_dir = fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+            if source_is_dir && select::is_inside(&self.cwd, p) {
+                failure = Some(format!("Cannot put the folder {name} into itself"));
+                break;
+            }
+            if cut && parent(p) == self.cwd.trim_end_matches('/') {
+                continue;
+            }
+            let cwd = self.cwd.clone();
+            let free = select::free_name(name, |n| fs::symlink_metadata(join(&cwd, n)).is_ok());
+            let to = join(&cwd, &free);
+            let r = if cut {
+                fs::rename(p, &to).map_err(|e| e.to_string()).or_else(|_| fileops::copy_tree(p, &to).and_then(|_| remove_any(p)))
+            } else {
+                fileops::copy_tree(p, &to).map(|_| ())
+            };
+            match r {
+                Ok(()) => done += 1,
+                Err(e) => {
+                    failure = Some(format!("Cannot {} {name}: {e}", if cut { "move" } else { "copy" }));
+                    break;
+                }
+            }
+        }
+        if cut && failure.is_none() {
+            self.clipboard = None;
+        }
+        let r = match failure {
+            Some(f) => Err(f),
+            None => Ok(format!("{} {done} item(s)", if cut { "Moved" } else { "Pasted" })),
+        };
+        if let Ok(m) = &r {
+            println!("files: pasted: {m}");
+        }
+        self.note_result(r);
+    }
+
+    fn trash_selection(&mut self) {
+        let names = self.chosen_names();
+        if names.is_empty() {
+            return;
+        }
+        if !self.in_trash() {
+            let mut why = None;
+            let mut done = 0;
+            for n in &names {
+                match self.move_to_trash(n) {
+                    Ok(_) => done += 1,
+                    Err(w) => {
+                        why = Some(w);
+                        break;
+                    }
+                }
+            }
+            match why {
+                None => {
+                    self.note_result(Ok(format!("Moved {} item(s) to the Trash", names.len())));
+                    return;
+                }
+                Some(w) => {
+                    self.delete_names = names[done..].to_vec();
+                    self.refresh();
+                    self.ask_delete(&format!(" They cannot go to the Trash ({w})."));
+                    return;
+                }
+            }
+        }
+        self.delete_names = names;
+        self.ask_delete("");
+    }
+
+    fn ask_delete(&mut self, reason: &str) {
+        let n = self.delete_names.len();
+        let what = match (n, self.delete_names.first()) {
+            (1, Some(name)) => format!("\"{name}\""),
+            _ => format!("{n} items"),
+        };
+        let msg = format!("Delete {what} permanently? This cannot be undone. Folders are deleted with everything inside them.{reason}");
+        self.dialog = Some(Dialog::new(D_DELETE, "Delete", &msg, &[("Cancel", ButtonStyle::Secondary), ("Delete", ButtonStyle::Danger)]));
+    }
+
+    fn pack_selection(&mut self) {
+        let names = self.chosen_names();
+        if names.is_empty() {
+            return;
+        }
+        let base = if names.len() == 1 { names[0].clone() } else { String::from("archive") };
+        let cwd = self.cwd.clone();
+        let out_name = select::free_name(&format!("{base}.tar"), |n| fs::symlink_metadata(join(&cwd, n)).is_ok());
+        let out = join(&cwd, &out_name);
+        let r = fileops::pack(&cwd, &names, &out).map(|n| format!("Packed {n} item(s) into {out_name}"));
+        self.note_result(r);
+    }
+
+    fn extract_paths(&mut self, paths: &[String]) {
+        let (mut done, mut failure) = (0usize, None);
+        for p in paths {
+            let name = p.rsplit('/').next().unwrap_or(p);
+            // A folder named after the archive, next to it.
+            let stem = ["tar.gz", "tgz", "tar", "zip", "7z", "gz"]
+                .iter()
+                .find_map(|ext| name.to_ascii_lowercase().strip_suffix(&format!(".{ext}")).map(|s| s.len()))
+                .map_or(name, |len| &name[..len]);
+            let dir = parent(p);
+            let free = select::free_name(stem, |n| fs::symlink_metadata(join(&dir, n)).is_ok());
+            match fileops::extract(p, &join(&dir, &free)) {
+                Ok(n) => {
+                    println!("files: extracted {name} into {free} ({n} files)");
+                    done += n;
+                }
+                Err(e) => {
+                    failure = Some(format!("Cannot extract {name}: {e}"));
+                    break;
+                }
+            }
+        }
+        let r = match failure {
+            Some(f) => Err(f),
+            None => Ok(format!("Extracted {done} file(s)")),
+        };
+        self.note_result(r);
+    }
+
+    fn extract_selection(&mut self) {
+        let paths: Vec<String> = self
+            .chosen_names()
+            .into_iter()
+            .filter(|n| fileops::is_archive(n))
+            .map(|n| join(&self.cwd, &n))
+            .collect();
+        if paths.is_empty() {
+            self.set_status(String::from("Select an archive (tar, tar.gz, zip, 7z, gz) to extract"), true);
+            return;
+        }
+        self.extract_paths(&paths);
+    }
+
+    fn save_choices(&mut self) {
+        let _ = fs::create_dir_all("/home/user/.config/osyx");
+        if let Err(e) = fs::write(CHOICES_FILE, self.choices.render().as_bytes()) {
+            self.set_status(format!("Cannot save the choice: {e}"), true);
+        }
+    }
+
+    fn open_context_menu(&mut self, x: i32, y: i32, fonts: &osyx_ui::Fonts) {
+        let mut items: Vec<MenuItem> = Vec::new();
+        let mut acts: Vec<Act> = Vec::new();
+        let mut add = |items: &mut Vec<MenuItem>, acts: &mut Vec<Act>, item: MenuItem, act: Act| {
+            items.push(item);
+            acts.push(act);
+        };
+        let chosen = self.chosen_names();
+        let has_clip = self.clipboard.is_some();
+        if let [name] = chosen.as_slice() {
+            let entry = self.entries.iter().find(|e| &e.name == name);
+            let is_dir = entry.is_some_and(|e| e.is_dir());
+            add(&mut items, &mut acts, MenuItem::new("Open", Some(Icon::Folder)), Act::Open);
+            if !is_dir {
+                let kind = classify(name);
+                let list = openwith::candidates(name, kind, &self.handlers, self.browser);
+                let current = openwith::default_target(name, kind, &self.handlers, &self.choices, self.browser);
+                for (n, c) in list.iter().enumerate() {
+                    let mut item = MenuItem::new(&format!("Open with {}", c.label), None);
+                    if n == 0 {
+                        item = item.separated();
+                    }
+                    add(&mut items, &mut acts, item, Act::With(c.target.clone()));
+                }
+                let ext = osyx_filekit::kind::extension(name).map_or(String::from("this type"), |x| format!(".{x}"));
+                for c in list.iter().filter(|c| Some(&c.target) != current.as_ref()).take(3) {
+                    add(&mut items, &mut acts, MenuItem::new(&format!("Always open {ext} with {}", c.label), None), Act::Default(c.target.clone()));
+                }
+            }
+        } else if chosen.len() > 1 {
+            let mut head = MenuItem::new(&format!("{} items selected", chosen.len()), None);
+            head.enabled = false;
+            add(&mut items, &mut acts, head, Act::Open);
+        }
+        if !chosen.is_empty() {
+            add(&mut items, &mut acts, MenuItem::new("Copy", None).hint("Ctrl+C").separated(), Act::Copy);
+            add(&mut items, &mut acts, MenuItem::new("Cut", None).hint("Ctrl+X"), Act::Cut);
+        }
+        let mut paste = MenuItem::new("Paste", None).hint("Ctrl+V");
+        paste.enabled = has_clip;
+        if chosen.is_empty() {
+            paste = paste.separated();
+        }
+        add(&mut items, &mut acts, paste, Act::Paste);
+        if !chosen.is_empty() {
+            add(&mut items, &mut acts, MenuItem::new("Pack into a tar archive", None).hint("Ctrl+P").separated(), Act::Pack);
+            if chosen.iter().any(|n| fileops::is_archive(n)) {
+                add(&mut items, &mut acts, MenuItem::new("Extract here", None).hint("Ctrl+E"), Act::Extract);
+            }
+            if chosen.len() == 1 {
+                add(&mut items, &mut acts, MenuItem::new("Rename", Some(Icon::Rename)).hint("F2").separated(), Act::Rename);
+            }
+            add(&mut items, &mut acts, MenuItem::new("Move to Trash", Some(Icon::Trash)).hint("Del").danger(), Act::Trash);
+            if chosen.len() == 1 {
+                add(&mut items, &mut acts, MenuItem::new("Properties", Some(Icon::Info)).hint("Ctrl+I"), Act::Info);
+            }
+        } else {
+            add(&mut items, &mut acts, MenuItem::new("New folder", Some(Icon::NewFolder)).hint("Ctrl+N"), Act::NewFolder);
+        }
+        let mut menu = Menu::new(items);
+        let (w, h) = menu.size(fonts);
+        let (sw, sh) = self.size;
+        let mx = x.min(sw as i32 - w as i32 - 4).max(4);
+        let my = y.min(sh as i32 - h as i32 - 4).max(4);
+        menu.rect = Rect::new(mx, my, w, h);
+        self.menu = Some(ContextMenu { menu, acts });
+    }
+
+    fn do_act(&mut self, act: Act, cx: &mut Ctx) {
+        let first = self.list.chosen().first().copied();
+        match act {
+            Act::Open => {
+                if let Some(i) = first {
+                    self.open(i, cx);
+                }
+            }
+            Act::With(t) => {
+                if let Some(name) = self.chosen_names().first() {
+                    let path = join(&self.cwd, name);
+                    self.run_target(&path, &t);
+                }
+            }
+            Act::Default(t) => {
+                if let Some(name) = self.chosen_names().first().cloned() {
+                    let kind = classify(&name);
+                    self.choices.set(&name, kind, t.clone());
+                    self.save_choices();
+                    let ext = osyx_filekit::kind::extension(&name).map_or(String::from("this type"), |x| format!(".{x}"));
+                    println!("files: default for {ext} set");
+                    self.set_status(format!("{ext} files now open with the chosen program"), false);
+                }
+            }
+            Act::Copy => self.copy_selection(false),
+            Act::Cut => self.copy_selection(true),
+            Act::Paste => self.paste(),
+            Act::Trash => self.trash_selection(),
+            Act::Pack => self.pack_selection(),
+            Act::Extract => self.extract_selection(),
+            Act::Rename => self.tool(Tool::Rename, cx),
+            Act::Info => self.tool(Tool::Info, cx),
+            Act::NewFolder => self.tool(Tool::NewFolder, cx),
+        }
+        let (w, h) = self.size;
+        self.layout_inner(w, h);
+    }
+}
+
+fn remove_any(p: &str) -> Result<(), String> {
+    match fs::symlink_metadata(p) {
+        Ok(m) if m.is_dir() => fs::remove_dir_all(p),
+        Ok(_) => fs::remove_file(p),
+        Err(e) => Err(e),
+    }
+    .map_err(|e| e.to_string())
+}
+
 impl App for Files {
     fn layout(&mut self, w: u32, h: u32, _cx: &mut Ctx) {
         self.size = (w, h);
@@ -744,6 +1134,26 @@ impl App for Files {
 
     fn event(&mut self, ev: Ui, cx: &mut Ctx) -> bool {
         let fonts = cx.fonts;
+        if let Ui::Key(k) = ev {
+            self.mods = k.mods;
+        }
+        // The context menu takes everything while it is open.
+        if let Some(cm) = &mut self.menu {
+            match cm.menu.event(&ev) {
+                Response::Activated(i) => {
+                    let act = self.menu.take().and_then(|m| m.acts.get(i).cloned());
+                    if let Some(a) = act {
+                        self.do_act(a, cx);
+                    }
+                    return true;
+                }
+                Response::Cancelled => {
+                    self.menu = None;
+                    return true;
+                }
+                r => return r.needs_redraw() || !matches!(ev, Ui::PointerMove { .. }),
+            }
+        }
         // A dialog is modal.
         if let Some(d) = &mut self.dialog {
             let r = d.event(&ev, &fonts);
@@ -808,6 +1218,16 @@ impl App for Files {
         // entry when it is released over a folder row or a place.
         match ev {
             Ui::PointerMove { x, y } => {
+                if let Some(b) = &mut self.band {
+                    b.pointer = (x, y);
+                    if (x - b.start.0).abs().max((y - b.start.1).abs()) > 4 {
+                        b.moved = true;
+                    }
+                    let (y0, y1) = (b.start_content, self.list.content_y(y));
+                    let rows = select::rows_in_band(y0, y1, self.list.row_height, self.entries.len());
+                    self.list.set_marked(&rows);
+                    return true;
+                }
                 if let Some(d) = &mut self.drag {
                     d.pointer = (x, y);
                     if (x - d.start.0).abs().max((y - d.start.1).abs()) > 5 {
@@ -816,10 +1236,23 @@ impl App for Files {
                 }
             }
             Ui::PointerUp { x, y, button: b } if b == button::LEFT => {
+                if self.band.take().is_some() {
+                    self.describe_selection();
+                    return true;
+                }
                 if let Some(d) = self.drag.take() {
+                    if !d.moved && self.list.marked().len() > 1 && self.mods & (modifier::CTRL | modifier::SHIFT) == 0 {
+                        // A plain click inside a multi-selection selects that row only.
+                        self.list.clear_marks();
+                        self.list.select(Some(d.index));
+                        return true;
+                    }
                     if d.moved {
                         if let Some((target, label)) = self.drop_folder(x, y, d.index) {
-                            self.move_entry(d.index, &target, &label);
+                            let indexes: Vec<usize> = if self.list.is_marked(d.index) { self.list.marked() } else { vec![d.index] };
+                            for i in indexes.into_iter().rev() {
+                                self.move_entry(i, &target, &label);
+                            }
                             let (w, h) = self.size;
                             self.layout_inner(w, h);
                         } else if let Some(entry) = self.entries.get(d.index) {
@@ -844,6 +1277,31 @@ impl App for Files {
                     0x3B if !self.path_focus => Some(Tool::Rename), // F2
                     0x3E => Some(Tool::Refresh),                    // F5
                     key::DELETE if !self.path_focus => Some(Tool::Delete),
+                    key::A if k.ctrl() && !self.path_focus => {
+                        self.list.mark_all();
+                        self.describe_selection();
+                        return true;
+                    }
+                    key::C if k.ctrl() && !self.path_focus => {
+                        self.copy_selection(false);
+                        return true;
+                    }
+                    key::X if k.ctrl() && !self.path_focus => {
+                        self.copy_selection(true);
+                        return true;
+                    }
+                    key::V if k.ctrl() && !self.path_focus => {
+                        self.paste();
+                        return true;
+                    }
+                    key::P if k.ctrl() => {
+                        self.pack_selection();
+                        return true;
+                    }
+                    key::E if k.ctrl() => {
+                        self.extract_selection();
+                        return true;
+                    }
                     key::N if k.ctrl() => Some(Tool::NewFolder),
                     key::I if k.ctrl() => Some(Tool::Info),
                     key::H if k.ctrl() => {
@@ -938,12 +1396,67 @@ impl App for Files {
             self.refresh();
             return true;
         }
-        // A left press on a row is a possible drag (the list also selects it).
+        // Right click: the context menu (the row under the pointer joins the
+        // selection unless it is already part of it).
+        if let Ui::PointerDown { x, y, button: b, .. } = ev {
+            if b == button::RIGHT && self.preview.is_none() && contains(&self.list.rect, x, y) {
+                match self.list.row_at(x, y) {
+                    Some(i) => {
+                        if !self.list.is_marked(i) {
+                            self.list.clear_marks();
+                            self.list.select(Some(i));
+                        }
+                    }
+                    None => {
+                        self.list.clear_marks();
+                        self.list.select(None);
+                    }
+                }
+                self.open_context_menu(x, y, &fonts);
+                return true;
+            }
+        }
+        // A left press on a row: Ctrl toggles it, Shift selects a range,
+        // otherwise it is a possible drag (the list also selects it).
         if let Ui::PointerDown { x, y, button: b, clicks } = ev {
             if b == button::LEFT && clicks == 1 && self.preview.is_none() {
-                if let Some(i) = self.list.row_at(x, y) {
-                    cx.drag_file = self.entries.get(i).map(|entry| join(&self.cwd, &entry.name));
-                    self.drag = Some(FileDrag { index: i, start: (x, y), pointer: (x, y), moved: false });
+                match self.list.row_at(x, y) {
+                    Some(i) => {
+                        let (ctrl, shift) = (self.mods & modifier::CTRL != 0, self.mods & modifier::SHIFT != 0);
+                        if ctrl {
+                            if self.list.marked().is_empty() {
+                                if let Some(sel) = self.list.selected() {
+                                    self.list.toggle_mark(sel);
+                                }
+                            }
+                            self.list.toggle_mark(i);
+                            self.list.select(Some(i));
+                            self.anchor = Some(i);
+                            self.describe_selection();
+                            return true;
+                        }
+                        if shift {
+                            let from = self.anchor.or(self.list.selected()).unwrap_or(i);
+                            self.list.set_marked(&select::range(from, i));
+                            self.list.select(Some(i));
+                            self.describe_selection();
+                            return true;
+                        }
+                        if !self.list.is_marked(i) {
+                            self.list.clear_marks();
+                        }
+                        self.anchor = Some(i);
+                        cx.drag_file = self.entries.get(i).map(|entry| join(&self.cwd, &entry.name));
+                        self.drag = Some(FileDrag { index: i, start: (x, y), pointer: (x, y), moved: false });
+                    }
+                    None if self.list.in_body(x, y) && !self.entries.is_empty() => {
+                        // Empty space: a rubber band.
+                        if self.mods & (modifier::CTRL | modifier::SHIFT) == 0 {
+                            self.list.clear_marks();
+                        }
+                        self.band = Some(Band { start: (x, y), pointer: (x, y), start_content: self.list.content_y(y), moved: false });
+                    }
+                    None => {}
                 }
             }
         }
@@ -958,6 +1471,21 @@ impl App for Files {
             Response::Changed => {
                 let (w, h) = self.size;
                 self.layout_inner(w, h);
+                if let Ui::Key(k) = ev {
+                    // Arrow keys: Shift extends the range from the anchor, plain keys drop it.
+                    if k.shift() {
+                        if let (Some(a), Some(c)) = (self.anchor.or(self.list.selected()), self.list.selected()) {
+                            self.list.set_marked(&select::range(a, c));
+                        }
+                    } else {
+                        self.list.clear_marks();
+                        self.anchor = self.list.selected();
+                    }
+                }
+                if self.list.marked().len() > 1 {
+                    self.describe_selection();
+                    return true;
+                }
                 if let Some(e) = self.selected() {
                     let detail = e
                         .meta
@@ -1086,6 +1614,16 @@ impl App for Files {
                 }
             }
         }
+        if let Some(b) = &self.band {
+            if b.moved {
+                let r = Rect::new(b.start.0.min(b.pointer.0), b.start.1.min(b.pointer.1), (b.start.0 - b.pointer.0).unsigned_abs(), (b.start.1 - b.pointer.1).unsigned_abs());
+                p.blend(r, t.accent, 40);
+                p.hline(r.x, r.y, r.w, t.accent);
+                p.hline(r.x, r.bottom() as i32 - 1, r.w, t.accent);
+                p.vline(r.x, r.y, r.h, t.accent);
+                p.vline(r.right() as i32 - 1, r.y, r.h, t.accent);
+            }
+        }
         // Status bar.
         p.fill(status, t.surface);
         p.hline(0, status.y, w, t.border);
@@ -1094,6 +1632,9 @@ impl App for Files {
         p.text_in(FontKind::Ui, Rect::new(14, status.y, w - 28, status.h), &msg, c, Align::Left);
         if let Some(d) = &self.dialog {
             d.draw(p);
+        }
+        if let Some(m) = &self.menu {
+            m.menu.draw(p);
         }
     }
 }

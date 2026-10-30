@@ -400,3 +400,29 @@ fn posix_time_zones() {
         assert!(Tz::parse(bad).is_none(), "{bad:?} must be rejected");
     }
 }
+
+#[test]
+fn list_marks_for_multi_selection() {
+    use crate::widget::{Column, ListItem, ListView};
+    let mut l = ListView::new(vec![Column::new("Name", 0, Align::Left)]);
+    l.set_items((0..5).map(|i| ListItem::new(None, &[&alloc::format!("row {i}")])).collect());
+    assert!(l.marked().is_empty());
+    l.select(Some(1));
+    assert_eq!(l.chosen(), [1], "without marks the selected row is chosen");
+    l.toggle_mark(3);
+    l.toggle_mark(4);
+    assert_eq!(l.marked(), [3, 4]);
+    assert_eq!(l.chosen(), [3, 4]);
+    l.toggle_mark(3);
+    assert_eq!(l.marked(), [4]);
+    l.set_marked(&[0, 2, 9]);
+    assert_eq!(l.marked(), [0, 2], "rows past the end are ignored");
+    l.mark_all();
+    assert_eq!(l.marked().len(), 5);
+    l.clear_marks();
+    assert!(l.marked().is_empty());
+    // New items reset the marks.
+    l.mark_all();
+    l.set_items(vec![ListItem::new(None, &["only"])]);
+    assert!(l.marked().is_empty());
+}
