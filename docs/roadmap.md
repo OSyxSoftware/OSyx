@@ -57,13 +57,22 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 ### Performance (see research/performance-profile.md)
 
 6. Split the global process table lock (handle tables, mappings, page
-   faults) and the kernel entry lock.
-7. Demand-paged file views (a browser archive of 177 MiB is read completely
-   when mapped), virtio-blk with several requests in flight, async readahead.
+   faults) and the kernel entry lock. Done: handle tables have their own
+   lock (`HANDLES`), so channel, wait and futex lookups no longer queue
+   behind mappings and page faults. Still open: mappings and page faults
+   share `TABLE`, and `smp::enter_kernel` serialises all system calls.
+7. Demand-paged file views, virtio-blk with several requests in flight,
+   async readahead. Done: a read-only section loads 256 KiB runs on the
+   first touch instead of reading the whole 177 MiB archive at map time;
+   writable sections stay eagerly loaded for coherent write-back. Still
+   open: virtio-blk has one request in flight and readahead is synchronous.
 8. Software WebRender: fewer full-frame copies, damage-based presents in
-   PRISM.
-9. **GPU acceleration**: today only 2D scan-out (VirtIO-GPU). Next: XSAVE/AVX
-   state, then a 3D path (VirtIO-GPU virgl or a native driver) behind a
+   PRISM. Done: PRISM renders and presents only damaged rectangles; Gecko
+   already runs it with software WebRender. Still open: the Win32
+   compatibility path (`winrun`, `vcruntime140`) still copies whole frames.
+9. **GPU acceleration**: 2D scan-out (VirtIO-GPU) only. Done: full
+   XSAVE/AVX state (XCR0, per-thread AVX state, TCG boot path). Still open:
+   a 3D path (VirtIO-GPU virgl or a native driver) behind a
    Direct3D/OpenGL layer for the Windows compatibility code.
 
 ### Security
