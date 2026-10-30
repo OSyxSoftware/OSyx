@@ -29,6 +29,9 @@ jobs:
           -p osyx-net -p osyx-update -p prism-proto -p prism-core -p osyx-ui
           -p osyx-gfx -p osyx-font -p osyx-elf -p osyx-pe -p osyx-pe-loader
 
+      - name: Test wireless WPA support
+        run: cargo test --locked -p osyx-wireless --features wpa
+
   freestanding:
     name: Check OS targets
     runs-on: ubuntu-latest
