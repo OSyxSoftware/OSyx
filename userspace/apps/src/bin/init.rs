@@ -44,6 +44,8 @@ mod net_checks;
 mod win_checks;
 #[path = "../smp_checks.rs"]
 mod smp_checks;
+#[path = "../prio_checks.rs"]
+mod prio_checks;
 
 os_std::entry!(main);
 
@@ -116,11 +118,11 @@ fn main() -> i32 {
         Some("swap-stress") => return swap_stress(),
         Some("zen-probe") => {
             let mode = args.get(3).map(String::as_str).unwrap_or("");
-            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", false);
+            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", false, mode == "prof");
         }
         Some("zen-installed") => {
             let mode = args.get(3).map(String::as_str).unwrap_or("");
-            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", true);
+            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", true, mode == "prof");
         }
         // `init winrun <program> [args...]`: one Windows program with no
         // sessions around it, for bring-up diagnostics.
@@ -149,6 +151,7 @@ fn main() -> i32 {
         Some("smp") => {
             let mut t = Tests::default();
             smp_checks::run(&mut t);
+            prio_checks::run(&mut t);
             println!("smp checks: {} passed, {} failed",t.passed,t.failed);
             return t.failed as i32;
         }
@@ -388,7 +391,7 @@ fn swap_stress() -> i32 {
 /// system, which starts the desktop shell) and restarts it if it fails. If
 /// it cannot be brought up, init exits and the kernel's status screen
 /// stays as the diagnostic fallback.
-fn zen_probe(url: Option<&str>, network_trace: bool, mozlog: bool, events: bool, count: bool, installed: bool) -> i32 {
+fn zen_probe(url: Option<&str>, network_trace: bool, mozlog: bool, events: bool, count: bool, installed: bool, prof: bool) -> i32 {
     println!("zen-probe: official /opt/zen/zen.exe via /bin/winrun; no substitute browser");
     let mut prism_cmd = Command::new("/system/bin/prism");
     // Trace only on request: serial output is slow and the compositor's
@@ -547,6 +550,8 @@ user_pref("network.connectivity-service.enabled", false);
     }
     if events || mozlog { zen.env("OSYX_WINRUN_EVENTS", "1"); }
     if count { zen.env("OSYX_WINRUN_COUNT", "1"); }
+    // Module bases for the kernel profiler's user-mode samples.
+    if prof { zen.env("OSYX_WINRUN_MODULES", "1"); }
     for kind in ["CONTENT", "GPU", "RDD", "SOCKET_PROCESS", "GMP", "UTILITY", "VR"] {
         zen.env(&format!("MOZ_DISABLE_{kind}_SANDBOX"), "1");
     }

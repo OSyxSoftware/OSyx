@@ -354,6 +354,10 @@ pub fn futex_wait(word: &AtomicU32, expected: u32, timeout: Option<core::time::D
     }
 }
 
+pub fn futex_wait_owned(word: &AtomicU32, expected: u32, _owner: u64) {
+    futex_wait(word, expected, None);
+}
+
 /// Only uses `word` as a key (never dereferences it), like the kernel.
 pub fn futex_wake(word: *const AtomicU32, _count: u32) {
     let mut map = FUTEX.lock().unwrap_or_else(|e| e.into_inner());

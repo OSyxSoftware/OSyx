@@ -352,6 +352,35 @@ pub mod nr {
     /// `firmware(op, a, b, c, d) -> value`: firmware access for the ACPI
     /// service; root only. See [`crate::firmware`].
     pub const FIRMWARE: u64 = 93;
+    /// `thread_priority(tid, priority) -> previous`: scheduling priority of
+    /// a thread of the caller's process (tid 0 = the caller), one of
+    /// [`crate::priority`]; `priority::QUERY` only reads it. Raising a
+    /// thread above `NORMAL` keeps it time-sliced: waiting threads age
+    /// towards it, so none starves.
+    pub const THREAD_PRIORITY: u64 = 94;
+    /// `futex_wait_owned(addr: *const u32, expected: u32, timeout_ns: u64,
+    /// owner: tid) -> 0`: `futex_wait` on a lock held by thread `owner` of
+    /// the caller's process (0: unknown), which inherits the caller's
+    /// priority while it waits.
+    pub const FUTEX_WAIT_OWNED: u64 = 95;
+}
+
+/// Thread priorities (`nr::THREAD_PRIORITY`).
+pub mod priority {
+    pub const IDLE: u64 = 0;
+    pub const LOW: u64 = 1;
+    pub const BELOW_NORMAL: u64 = 2;
+    pub const NORMAL: u64 = 3;
+    pub const ABOVE_NORMAL: u64 = 4;
+    pub const HIGH: u64 = 5;
+    pub const REALTIME: u64 = 6;
+    /// Reads the priority without changing it.
+    pub const QUERY: u64 = u64::MAX;
+    /// Reads the scheduler's view without changing anything: the own
+    /// priority in bits 0..8, the effective one (boost and inheritance
+    /// applied) in 8..16, the boost in 16..24 and the inherited priority
+    /// in 24..32.
+    pub const INFO: u64 = u64::MAX - 1;
 }
 
 /// Operations of `nr::FIRMWARE`.

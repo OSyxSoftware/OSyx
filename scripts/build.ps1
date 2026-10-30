@@ -56,7 +56,13 @@ if (-not $NoZen -and -not $NoInit -and -not $KeepRoot) {
     Write-Host '==> building boot loader (x86_64-unknown-uefi)'
     Invoke-Checked 'loader build' { cargo build -p osyx-uefi-loader --target x86_64-unknown-uefi @profileArgs }
     Write-Host '==> building kernel (x86_64-unknown-none)'
-    Invoke-Checked 'kernel build' { cargo build -p osyx-kernel --target x86_64-unknown-none @profileArgs }
+    # OSYX_FRAME_POINTERS=1 keeps the frame-pointer chain the kernel profiler
+    # (`prof=<seconds>`, see kernel/src/prof.rs) walks; normal builds omit it.
+    $kernelFlags = $env:RUSTFLAGS
+    if ($env:OSYX_FRAME_POINTERS -eq '1') { $env:RUSTFLAGS = '-C relocation-model=static -C force-frame-pointers=yes' }
+    try {
+        Invoke-Checked 'kernel build' { cargo build -p osyx-kernel --target x86_64-unknown-none @profileArgs }
+    } finally { $env:RUSTFLAGS = $kernelFlags }
 
     # User programs use the small code model at low addresses; a separate
     # target dir keeps their flags from invalidating the kernel build cache.

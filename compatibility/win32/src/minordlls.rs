@@ -629,3 +629,69 @@ extern "win64" fn WTHelperProvDataFromStateData(state: u64) -> *mut u8 {
 pub fn wintrust_exports() -> Vec<(&'static str, u64)> {
     export_table![WinVerifyTrust, WTHelperProvDataFromStateData]
 }
+
+// ---- avrt ----------------------------------------------------------------------------
+
+/// Pseudo handle for a thread's multimedia class registration.
+const AVRT_HANDLE: u64 = 0xA7A7;
+
+/// avrt.dll (MMCSS). Windows always has it, and audio code (cubeb's WASAPI
+/// backend) calls it from its audio thread; without it a function pointer
+/// stayed null there. OSyx has no multimedia scheduling classes, so
+/// registering succeeds without changing the thread's priority.
+pub fn avrt_exports() -> Vec<(&'static str, u64)> {
+    export_table![
+        AvSetMmThreadCharacteristicsW,
+        AvSetMmThreadCharacteristicsA,
+        AvSetMmMaxThreadCharacteristicsW,
+        AvSetMmMaxThreadCharacteristicsA,
+        AvRevertMmThreadCharacteristics,
+        AvSetMmThreadPriority,
+    ]
+}
+
+/// MMCSS task names that ask for audio-grade scheduling; others ("Games",
+/// "Capture", ...) get above-normal priority.
+fn avrt_level(task: &str) -> u64 {
+    match task.to_ascii_lowercase().as_str() {
+        "pro audio" | "audio" | "playback" | "window manager" => osyx_abi::priority::REALTIME,
+        _ => osyx_abi::priority::ABOVE_NORMAL,
+    }
+}
+
+fn avrt_register(task: Option<String>, task_index: *mut u32) -> u64 {
+    let level = task.as_deref().map_or(osyx_abi::priority::ABOVE_NORMAL, avrt_level);
+    let _ = os_sys::thread_priority(0, level);
+    if !task_index.is_null() {
+        // SAFETY: the caller's task index out parameter.
+        unsafe { *task_index = 1 };
+    }
+    AVRT_HANDLE
+}
+
+extern "win64" fn AvSetMmThreadCharacteristicsW(task: *const u16, task_index: *mut u32) -> u64 {
+    avrt_register(unsafe { path::wide_to_string(task) }, task_index)
+}
+
+extern "win64" fn AvSetMmThreadCharacteristicsA(task: *const u8, task_index: *mut u32) -> u64 {
+    avrt_register(unsafe { path::ansi_to_string(task) }, task_index)
+}
+
+extern "win64" fn AvSetMmMaxThreadCharacteristicsW(first: *const u16, _second: *const u16, task_index: *mut u32) -> u64 {
+    avrt_register(unsafe { path::wide_to_string(first) }, task_index)
+}
+
+extern "win64" fn AvSetMmMaxThreadCharacteristicsA(first: *const u8, _second: *const u8, task_index: *mut u32) -> u64 {
+    avrt_register(unsafe { path::ansi_to_string(first) }, task_index)
+}
+
+extern "win64" fn AvRevertMmThreadCharacteristics(handle: u64) -> i32 {
+    if handle == AVRT_HANDLE {
+        let _ = os_sys::thread_priority(0, osyx_abi::priority::NORMAL);
+        1
+    } else { fail(ERROR_INVALID_HANDLE, 0) }
+}
+
+extern "win64" fn AvSetMmThreadPriority(handle: u64, _priority: i32) -> i32 {
+    if handle == AVRT_HANDLE { 1 } else { fail(ERROR_INVALID_HANDLE, 0) }
+}

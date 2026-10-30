@@ -121,6 +121,7 @@ pub unsafe fn set_kernel_stack(top: u64) {
 #[no_mangle]
 extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
     crate::smp::note_last_syscall(crate::smp::cached_tid(), f.rip, f.rax);
+    crate::prof::note_syscall(crate::smp::cached_tid(), f.rax);
     // Read-only queries that touch nothing but scheduler state or atomics
     // skip the global entry lock: user timers call CLOCK very frequently.
     match f.rax {
@@ -159,7 +160,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         // wake on every contended release, which makes this one of the hottest
         // syscalls while a browser runs; routing it through the entry lock
         // serialised both CPUs behind traffic that needs no global state.
-        nr::FUTEX_WAIT | nr::FUTEX_WAKE => {
+        nr::FUTEX_WAIT | nr::FUTEX_WAIT_OWNED | nr::FUTEX_WAKE => {
             let tid = crate::smp::cached_tid();
             crate::smp::note_syscall(f.rax);
             crate::smp::note_pid_syscall(crate::smp::cached_pid(), f.rax);
@@ -167,9 +168,10 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             crate::smp::note_tid_futex(tid, f.rax);
             crate::smp::note_callsite(tid, f.rip, f.rax);
             cpu::enable_interrupts();
-            let r = if f.rax == nr::FUTEX_WAIT {
+            let r = if f.rax != nr::FUTEX_WAKE {
                 let timeout = (f.rdx != 0).then(|| ns_to_ticks(f.rdx));
-                crate::futex::wait(f.rdi, f.rsi as u32, timeout).map(|_| 0)
+                let owner = if f.rax == nr::FUTEX_WAIT_OWNED { f.r10 } else { 0 };
+                crate::futex::wait_owned(f.rdi, f.rsi as u32, timeout, owner).map(|_| 0)
             } else {
                 crate::futex::wake(f.rdi, f.rsi as u32)
             };
@@ -226,7 +228,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
     }
     crate::smp::note_pid_syscall(crate::smp::cached_pid(), f.rax);
     crate::smp::note_tid_syscall(crate::smp::cached_tid(), f.rax);
-    if f.rax == nr::FUTEX_WAIT || f.rax == nr::FUTEX_WAKE || f.rax == nr::YIELD {
+    if f.rax == nr::FUTEX_WAIT || f.rax == nr::FUTEX_WAIT_OWNED || f.rax == nr::FUTEX_WAKE || f.rax == nr::YIELD {
         crate::smp::note_tid_futex(crate::smp::cached_tid(), f.rax);
     }
     crate::smp::note_callsite(crate::smp::cached_tid(), f.rip, f.rax);
@@ -268,6 +270,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::SYSINFO => sys_sysinfo(f.rdi),
         nr::CPU_INFO => Ok(crate::smp::online() as u64 | (crate::smp::index() as u64)<<32),
         nr::THREAD_AFFINITY => sched::set_affinity(f.rdi,f.rsi),
+        nr::THREAD_PRIORITY => sched::set_priority(f.rdi, f.rsi),
         nr::PROCESS_WRITE_BARRIER => {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             crate::smp::flush_remote(0,true);
@@ -292,6 +295,10 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::FUTEX_WAIT => {
             let timeout = (f.rdx != 0).then(|| ns_to_ticks(f.rdx));
             crate::futex::wait(f.rdi, f.rsi as u32, timeout).map(|_| 0)
+        }
+        nr::FUTEX_WAIT_OWNED => {
+            let timeout = (f.rdx != 0).then(|| ns_to_ticks(f.rdx));
+            crate::futex::wait_owned(f.rdi, f.rsi as u32, timeout, f.r10).map(|_| 0)
         }
         nr::FUTEX_WAKE => crate::futex::wake(f.rdi, f.rsi as u32),
         nr::SET_FS_BASE => {

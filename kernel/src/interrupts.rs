@@ -226,6 +226,7 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
         } else {
             apic::eoi();
         }
+        crate::prof::sample(f, now);
         crate::sched::tick(now);
         if from_user && crate::sched::current_kill_pending() {
             let _entry = crate::smp::KernelEntry::new();

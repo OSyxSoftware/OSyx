@@ -27,6 +27,14 @@ fn wait(value: &AtomicU32, want: u32) -> bool {
 }
 
 pub fn run(t: &mut Tests) {
+    t.check("SMP: thread priorities can be set, read back and are range-checked", || {
+        use system::priority as p;
+        let before = system::thread_priority(0, p::HIGH);
+        let now = system::thread_priority(0, p::QUERY);
+        let invalid = system::thread_priority(0, p::REALTIME + 1).is_err();
+        let restored = system::thread_priority(0, p::NORMAL);
+        before.ok() == Some(p::NORMAL) && now.ok() == Some(p::HIGH) && invalid && restored.ok() == Some(p::HIGH)
+    });
     let (cpus, _) = system::cpu_info().unwrap_or((1, 0));
     t.check("SMP: more than one logical CPU is online", || cpus >= 2);
     let mut workers = Vec::new();

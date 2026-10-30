@@ -74,7 +74,8 @@ impl EventQueue {
             e.seq = s.seq;
             s.events.push_back(e);
         }
-        self.waitq.wake_all();
+        // Whoever reads input (the compositor, a terminal) is interactive.
+        self.waitq.wake_all_boosted(crate::sched::INPUT_BOOST);
     }
 
     fn close(&self) {

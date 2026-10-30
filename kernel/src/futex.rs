@@ -8,6 +8,11 @@
 //! on another CPU cannot be lost. Waiters are woken in FIFO order.
 //! A waiter that is still registered when it resumes was woken by its
 //! timeout or by a kill request, not by `wake`.
+//!
+//! Priority inheritance: a waiter may name the thread that holds the lock
+//! the word guards ([`wait_owned`]). While it waits, that thread runs at
+//! least at the waiter's priority, so a low-priority holder preempted by
+//! medium-priority work cannot keep a high-priority waiter blocked.
 
 use crate::arch::cpu;
 use crate::fixup::{copy_from_user, user_range_ok};
@@ -29,6 +34,10 @@ struct Waiter {
     pid: Pid,
     key: Key,
     tid: Tid,
+    /// Thread holding the lock (0: not named), and the priority this waiter
+    /// lends it.
+    owner: Tid,
+    lends: u8,
 }
 
 fn key_of(pid: Pid, addr: u64) -> Key {
@@ -72,9 +81,32 @@ fn check_addr(addr: u64) -> Result<(), Errno> {
 
 /// Blocks while `*addr == expected`, for at most `timeout_ticks` (if given).
 pub fn wait(addr: u64, expected: u32, timeout_ticks: Option<u64>) -> Result<(), Errno> {
+    wait_owned(addr, expected, timeout_ticks, 0)
+}
+
+/// Like [`wait`]; `owner` (0: unknown) is the thread of the caller's process
+/// that holds the lock, and inherits the caller's priority while it waits.
+pub fn wait_owned(addr: u64, expected: u32, timeout_ticks: Option<u64>, owner: Tid) -> Result<(), Errno> {
     check_addr(addr)?;
     let pid = sched::current_pid();
     let tid = sched::current_tid();
+    let owner = if owner == tid { 0 } else { owner };
+    let lends = if owner != 0 { sched::effective_priority(tid) } else { 0 };
+    let result = wait_registered(addr, expected, timeout_ticks, pid, tid, owner, lends);
+    if owner != 0 {
+        lend_to(owner, pid);
+    }
+    result
+}
+
+/// Recomputes the priority `owner` inherits from the waiters still naming it.
+fn lend_to(owner: Tid, pid: Pid) {
+    let level = WAITERS.lock().iter().filter(|w| w.owner == owner).map(|w| w.lends).max().unwrap_or(0);
+    sched::set_inherited(owner, pid, level);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wait_registered(addr: u64, expected: u32, timeout_ticks: Option<u64>, pid: Pid, tid: Tid, owner: Tid, lends: u8) -> Result<(), Errno> {
     // Looked up before interrupts go off: it takes the process table lock.
     let key = key_of(pid, addr);
     let were_enabled = cpu::interrupts_enabled();
@@ -90,7 +122,7 @@ pub fn wait(addr: u64, expected: u32, timeout_ticks: Option<u64>) -> Result<(), 
         if sched::current_kill_pending() {
             return Err(Errno::Interrupted);
         }
-        WAITERS.lock().push(Waiter { pid, key, tid });
+        WAITERS.lock().push(Waiter { pid, key, tid, owner, lends });
         // A different CPU may have changed the word and issued its wake
         // between our first read and registration. Recheck without holding
         // WAITERS: a user-memory fault may need the outer process-table lock.
@@ -111,6 +143,11 @@ pub fn wait(addr: u64, expected: u32, timeout_ticks: Option<u64>) -> Result<(), 
             return Ok(());
         }
         let deadline = timeout_ticks.map(|t| interrupts::ticks().saturating_add(t.max(1)));
+        if owner != 0 {
+            // Before blocking: the scheduler lock is innermost, so this is
+            // safe with interrupts off.
+            lend_to(owner, pid);
+        }
         loop {
             sched::mark_current_blocked_until(deadline);
             sched::schedule();
@@ -142,17 +179,27 @@ pub fn wake(addr: u64, count: u32) -> Result<u64, Errno> {
 /// Wakes up to `count` waiters on `key` (FIFO).
 fn wake_key(key: Key, count: u32) -> u64 {
     let mut woken: Vec<Tid> = Vec::new();
+    // Owners the woken waiters lent priority to: the lock was just released,
+    // so what they lent ends now, not when each waiter gets to run.
+    let mut owners: Vec<(Tid, Pid)> = Vec::new();
     {
         let mut w = WAITERS.lock();
         wake_sequence(key).fetch_add(1, Ordering::Release);
         let mut i = 0;
         while i < w.len() && woken.len() < count as usize {
             if w[i].key == key {
-                woken.push(w.remove(i).tid);
+                let x = w.remove(i);
+                if x.owner != 0 && !owners.contains(&(x.owner, x.pid)) {
+                    owners.push((x.owner, x.pid));
+                }
+                woken.push(x.tid);
             } else {
                 i += 1;
             }
         }
+    }
+    for &(owner, pid) in &owners {
+        lend_to(owner, pid);
     }
     for &t in &woken {
         sched::wake(t);

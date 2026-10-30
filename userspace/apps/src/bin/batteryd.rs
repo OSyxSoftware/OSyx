@@ -1,4 +1,4 @@
-﻿//! batteryd: battery and AC adapter state from ACPI, for the taskbar.
+//! batteryd: battery and AC adapter state from ACPI, for the taskbar.
 //!
 //! Loads the DSDT and SSDTs into the AML interpreter (`third_party/aml`) and
 //! evaluates the firmware's own methods: `_BST` and `_BIF`/`_BIX` of every
@@ -285,6 +285,7 @@ fn write_status(text: &str) {
 }
 
 fn main() -> i32 {
+    let _ = os_std::system::thread_priority(0, os_std::system::priority::BELOW_NORMAL);
     let ec = ec_ports();
     let mut ctx = AmlContext::new(Box::new(Firmware { ec: Some(ec) }), DebugVerbosity::None);
     let Some(dsdt) = table(b"DSDT", 0) else {

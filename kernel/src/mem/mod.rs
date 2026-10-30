@@ -59,6 +59,14 @@ pub fn alloc_frame() -> Option<u64> {
     Some(pa)
 }
 
+/// Allocates a physical frame without clearing it. The caller must write
+/// every byte before anything else can read the frame (file data copied in
+/// full: clearing a page just to overwrite it doubled the cost of reading a
+/// 180 MiB browser archive).
+pub fn alloc_frame_dirty() -> Option<u64> {
+    FRAMES.lock().as_mut()?.alloc()
+}
+
 /// Allocates `count` zeroed, physically contiguous frames aligned to
 /// `align` bytes, all below `limit` (DMA buffers of devices).
 pub fn alloc_frames_contiguous(count: u64, align: u64, limit: u64) -> Option<u64> {

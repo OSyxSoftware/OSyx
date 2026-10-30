@@ -7,7 +7,7 @@
 //! frame. Device memory (the framebuffer) uses the same mapping machinery
 //! but its frames are never freed.
 
-use crate::mem::{alloc_frame, free_frame, PAGE_SIZE};
+use crate::mem::{alloc_frame, alloc_frame_dirty, free_frame, phys_to_virt, PAGE_SIZE};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -54,6 +54,27 @@ impl SharedMemory {
         }
         SHARED_FRAMES.fetch_add(pages, Ordering::Relaxed);
         Ok(Arc::new(SharedMemory { frames, size, owned: true, write_combining: false, _owner: None, identity: None }))
+    }
+
+    /// One page holding `data` (at most a page); the rest of the page is zero.
+    /// Unlike [`SharedMemory::new`] the frame is not cleared first, so a
+    /// full page of file data is written once, not twice.
+    pub fn page_from(data: &[u8]) -> Result<Arc<SharedMemory>, Errno> {
+        debug_assert!(data.len() <= PAGE_SIZE as usize);
+        let (free, _) = crate::mem::frame_stats();
+        if 1 + 4096 > free {
+            return Err(Errno::NoMemory);
+        }
+        let frame = alloc_frame_dirty().ok_or(Errno::NoMemory)?;
+        // SAFETY: an exclusive newly allocated frame reachable via the HHDM;
+        // every byte of it is written here.
+        unsafe {
+            let page = phys_to_virt(frame) as *mut u8;
+            core::ptr::copy_nonoverlapping(data.as_ptr(), page, data.len());
+            core::ptr::write_bytes(page.add(data.len()), 0, PAGE_SIZE as usize - data.len());
+        }
+        SHARED_FRAMES.fetch_add(1, Ordering::Relaxed);
+        Ok(Arc::new(SharedMemory { frames: alloc::vec![frame], size: PAGE_SIZE, owned: true, write_combining: false, _owner: None, identity: None }))
     }
 
     /// Physical memory of a device (page aligned).

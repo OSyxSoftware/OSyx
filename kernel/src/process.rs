@@ -472,6 +472,7 @@ impl Process {
     /// Removes every shared memory mapping (the frames stay with their
     /// objects; page tables stay with the address space).
     fn unmap_shared(&mut self) {
+        shared_keys_clear(self.pid);
         unmap_shared_from(self.space.root, core::mem::take(&mut self.shared));
     }
 
@@ -652,6 +653,7 @@ pub fn exec_current(req: ExecRequest) -> ExecError {
             let new_program_shared = core::mem::take(&mut p.space.program_shared);
             let old_program_shared = core::mem::replace(&mut p.program_shared, new_program_shared);
             let old_shared = core::mem::take(&mut p.shared);
+            shared_keys_clear(pid);
             p.next_map = MAP_BASE;
             p.mapped_pages = 0;
             p.name = name.clone();
@@ -882,10 +884,34 @@ pub fn get_object(h: u64) -> Result<Object, Errno> {
 /// the futex key processes sharing that memory agree on.
 pub fn shared_key(addr: u64) -> Option<(usize, u64)> {
     let pid = sched::current_pid();
-    let t = TABLE.lock();
-    let p = t.procs.get(&pid)?;
-    let (&base, (shm, pages)) = p.shared.range(..=addr).next_back()?;
-    (addr < base + pages * PAGE_SIZE).then(|| shm.key(addr - base))
+    let index = SHARED_KEYS.lock();
+    let (&(_, base), &(object, offset, pages)) = index.range((pid, 0)..=(pid, addr)).next_back()?;
+    (addr < base + pages * PAGE_SIZE).then(|| (object, offset + (addr - base)))
+}
+
+/// Every process's shared mappings as (pid, base) -> (object, offset of the
+/// base in it, pages): a copy of `Process::shared` for the futex fast path.
+/// Futex wait and wake run on every contended Windows lock, and looking the
+/// word up under the process table lock made them queue behind page faults
+/// and mappings of all CPUs (the table lock was the top kernel cost in a
+/// Zen profile). Lock order: the process table, then this index.
+static SHARED_KEYS: IrqSpinLock<BTreeMap<(Pid, u64), (usize, u64, u64)>> = IrqSpinLock::new(BTreeMap::new());
+
+fn shared_keys_add(pid: Pid, base: u64, shm: &SharedMemory, pages: u64) {
+    let (object, offset) = shm.key(0);
+    SHARED_KEYS.lock().insert((pid, base), (object, offset, pages));
+}
+
+fn shared_keys_remove(pid: Pid, base: u64) {
+    SHARED_KEYS.lock().remove(&(pid, base));
+}
+
+fn shared_keys_clear(pid: Pid) {
+    let mut index = SHARED_KEYS.lock();
+    let bases: Vec<u64> = index.range((pid, 0)..=(pid, u64::MAX)).map(|(&(_, b), _)| b).collect();
+    for b in bases {
+        index.remove(&(pid, b));
+    }
 }
 
 /// Maps all of `shm` into the current process (read-only unless
@@ -912,6 +938,7 @@ pub fn map_shared(shm: Arc<SharedMemory>, writable: bool) -> Result<u64, Errno> 
             }
         }
     }
+    shared_keys_add(pid, base, &shm, pages);
     p.shared.insert(base, (shm, pages));
     p.mapped_pages += pages;
     p.next_map = base + (pages + 1) * PAGE_SIZE; // leave a guard page
@@ -1696,6 +1723,7 @@ pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
         }
         let pages = *pages;
         let entry = p.shared.remove(&addr).expect("checked above");
+        shared_keys_remove(pid, addr);
         p.mapped_pages -= pages;
         let root = p.space.root;
         let mut one = BTreeMap::new();

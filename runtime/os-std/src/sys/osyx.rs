@@ -286,6 +286,12 @@ pub fn futex_wait(word: &AtomicU32, expected: u32, timeout: Option<core::time::D
     !matches!(os_sys::futex_wait(word.as_ptr(), expected, ns), Err(osyx_abi::Errno::TimedOut))
 }
 
+/// Like [`futex_wait`] without a timeout, on a lock held by thread `owner`
+/// (0: unknown), which inherits the caller's priority while it waits.
+pub fn futex_wait_owned(word: &AtomicU32, expected: u32, owner: u64) {
+    let _ = os_sys::futex_wait_owned(word.as_ptr(), expected, 0, owner);
+}
+
 pub fn futex_wake(word: *const AtomicU32, count: u32) {
     os_sys::futex_wake(word as *const u32, count);
 }

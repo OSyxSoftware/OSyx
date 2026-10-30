@@ -47,6 +47,7 @@ mod pci;
 mod pipe;
 mod power;
 mod process;
+mod prof;
 mod qemu;
 mod random;
 mod sched;
@@ -109,6 +110,11 @@ static BOOT: BootCell<BootData> = BootCell::new();
 /// `stats` so normal desktop boots do not pay for serial dumps.
 pub fn has_boot_option(opt: &str) -> bool {
     BOOT.get().is_some_and(|b| b.has_option(opt))
+}
+
+/// The value of a `key=value` boot option.
+pub fn boot_option_value(key: &str) -> Option<&'static str> {
+    BOOT.get().and_then(|b| b.option_value(key))
 }
 
 /// Kernel entry, reached from the boot loader with the HHDM address of the
@@ -203,6 +209,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     arch::timer::verify();
     sched::init();
     smp::start(boot);
+    prof::init();
     kprintln!("scheduler: round robin, {} ms time slice", sched::TIME_SLICE_TICKS * 1000 / arch::timer::TIMER_HZ);
     let pci_devices = pci::enumerate();
     pci::log_devices(&pci_devices);

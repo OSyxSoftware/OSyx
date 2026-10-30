@@ -86,6 +86,8 @@ fn now_ms(start: Instant) -> u64 {
 }
 
 fn main() -> i32 {
+    // The compositor and input path answer first; threads it starts inherit it.
+    let _ = os_std::system::thread_priority(0, os_std::system::priority::HIGH);
     TRACE_BUFFERS.store(env::var("OSYX_PRISM_TRACE").is_ok_and(|v| v == "1"), Ordering::Relaxed);
     TRACE_EVENTS.store(env::var("OSYX_PRISM_EVENTS").is_ok_and(|v| v == "1"), Ordering::Relaxed);
     let args: Vec<String> = env::args().collect();

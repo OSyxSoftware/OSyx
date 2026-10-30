@@ -103,6 +103,16 @@ pub struct Thread {
     /// The CPU this thread last ran on: it is queued there again while its
     /// caches are warm, unless another allowed CPU is idle.
     last_cpu: usize,
+    /// Scheduling priority (`osyx_abi::priority`, IDLE 0 .. REALTIME 6).
+    priority: u8,
+    /// Temporary levels on top of `priority` after a wait ended by an event
+    /// (input, IPC, a released lock); one level drops per used time slice.
+    boost: u8,
+    /// Priority lent by threads waiting on a lock this thread holds
+    /// (priority inheritance, see `futex`); 0 when none waits.
+    inherited: u8,
+    /// Tick at which it was last queued, for aging (see `score`).
+    queued_at: u64,
     /// TEMP deepest kernel-stack pointer seen at a switch-out.
     low_rsp: u64,
     /// TEMP one-shot flag for the overflow report.
@@ -268,6 +278,10 @@ fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b
         cpu_ticks: 0,
         affinity: u64::MAX,
         last_cpu: crate::smp::index(),
+        priority: NORMAL,
+        boost: 0,
+        inherited: 0,
+        queued_at: 0,
         low_rsp: top,
         stack_warned: false,
     })
@@ -298,6 +312,10 @@ pub fn init() {
         cpu_ticks: 0,
         affinity: u64::MAX,
         last_cpu: 0,
+        priority: NORMAL,
+        boost: 0,
+        inherited: 0,
+        queued_at: 0,
         low_rsp: 0,
         stack_warned: false,
     });
@@ -332,7 +350,7 @@ pub fn init_secondary(top: u64) {
         tid,name:alloc::format!("idle/{index}"),pid:0,state:State::Running,rsp:0,
         root:paging::kernel_root(),_kstack:Vec::new(),kstack_top:top,
         fpu:FpuState::initial(),wake_at:None,joiners:Vec::new(),slice:TIME_SLICE_TICKS,
-        fs_base:0,gs_base:0,kill_pending:false,wake_pending:false,leaving:false,bkl:false,cpu_ticks:0,affinity:u64::MAX,last_cpu:index,low_rsp:top,stack_warned:false,
+        fs_base:0,gs_base:0,kill_pending:false,wake_pending:false,leaving:false,bkl:false,cpu_ticks:0,affinity:u64::MAX,last_cpu:index,priority:NORMAL,boost:0,inherited:0,queued_at:0,low_rsp:top,stack_warned:false,
     });
     s.threads.insert(tid,t);s.current[index]=tid;s.idle[index]=tid;
     crate::smp::set_current(tid, 0);
@@ -340,14 +358,20 @@ pub fn init_secondary(top: u64) {
 }
 
 /// Creates a ready thread running `entry(a, b)` with page table `root` and
-/// FS base `fs_base`.
+/// FS base `fs_base`. A thread of the caller's own process starts with the
+/// caller's priority.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u64, fs_base: u64) -> Tid {
     let mut g = SCHED.lock();
     let s = g.as_mut().expect("scheduler not initialised");
     let tid = s.next_tid;
     s.next_tid += 1;
-    let t = new_thread(tid, name, pid, root, entry, a, b, fs_base);
+    let mut t = new_thread(tid, name, pid, root, entry, a, b, fs_base);
+    if let Some(parent) = s.threads.get(&s.current[crate::smp::index()]) {
+        if parent.pid == pid && pid != 0 {
+            t.priority = parent.priority;
+        }
+    }
     s.threads.insert(tid, t);
     s.enqueue(tid);
     tid
@@ -360,12 +384,49 @@ pub fn spawn_kernel(name: &str, entry: Entry, a: u64, b: u64) -> Tid {
 
 type SwitchPlan = (*mut u64, u64, *mut FpuState, *const FpuState);
 
+/// `osyx_abi::priority::NORMAL`.
+const NORMAL: u8 = 3;
+const MAX_PRIORITY: u8 = 6;
+/// A queued thread gains one priority level per this many ticks it waits,
+/// so a busy high-priority thread cannot starve the others.
+const AGING_TICKS: u64 = 20;
+
+/// A boost never lifts a thread above HIGH; REALTIME stays reserved for
+/// threads that asked for it.
+const BOOST_CEILING: u8 = 5;
+/// Levels a thread gains when an event ends its wait.
+pub const WAKE_BOOST: u8 = 1;
+/// Levels for a thread woken by user input (keyboard, mouse).
+pub const INPUT_BOOST: u8 = 2;
+
+/// The priority the scheduler uses: the thread's own, raised by a boost (up
+/// to `BOOST_CEILING`) and by priority lent to it by waiters.
+fn effective(t: &Thread) -> u8 {
+    let boosted = (t.priority + t.boost).min(BOOST_CEILING.max(t.priority));
+    boosted.max(t.inherited)
+}
+
+/// Effective priority of a queued thread: its own plus its waiting time.
+fn score(t: &Thread, now: u64) -> u64 {
+    let aged = now.saturating_sub(t.queued_at) / AGING_TICKS;
+    effective(t) as u64 + aged.min(MAX_PRIORITY as u64)
+}
+
 impl Scheduler {
     /// Queues ready thread `tid`: on the CPU it last ran on if that CPU is
     /// idle, else on another idle CPU it may run on, else on its last CPU.
+    /// A thread of higher priority than the one running there ends that
+    /// one's time slice, so it runs at that CPU's next tick at the latest.
     fn enqueue(&mut self, tid: Tid) {
         let online = crate::smp::online().clamp(1, crate::smp::MAX_CPUS);
-        let (affinity, last) = self.threads.get(&tid).map_or((u64::MAX, 0), |t| (t.affinity, t.last_cpu));
+        let now = interrupts::ticks();
+        let (affinity, last, priority) = match self.threads.get_mut(&tid) {
+            Some(t) => {
+                t.queued_at = now;
+                (t.affinity, t.last_cpu, effective(t))
+            }
+            None => (u64::MAX, 0, NORMAL),
+        };
         let allowed = |c: usize| c < online && affinity & (1 << c) != 0;
         let idle_now = |c: usize| self.idle[c] != 0 && self.current[c] == self.idle[c] && self.ready[c].is_empty();
         let cpu = if allowed(last) && idle_now(last) {
@@ -378,33 +439,71 @@ impl Scheduler {
             (0..online).find(|&c| allowed(c)).unwrap_or(0)
         };
         self.ready[cpu].push_back(tid);
+        let running = self.current[cpu];
+        if running != self.idle[cpu] {
+            if let Some(r) = self.threads.get_mut(&running) {
+                if effective(r) < priority {
+                    r.slice = 0;
+                }
+            }
+        }
         crate::smp::kick(cpu);
     }
 
-    /// The next thread for CPU `me` from its own queue, or else the oldest
-    /// thread it may run from the longest other queue.
-    fn take_ready(&mut self, me: usize) -> Option<Tid> {
-        while let Some(n) = self.ready[me].pop_front() {
-            match self.threads.get(&n) {
-                Some(t) if t.state == State::Ready && t.affinity & (1 << me) != 0 => return Some(n),
-                // Its affinity changed after it was queued here.
-                Some(t) if t.state == State::Ready => self.enqueue(n),
-                _ => {}
+    /// Position and score of the best thread CPU `me` may take from queue
+    /// `q` (highest score; the oldest among equals).
+    fn best_in(&self, q: usize, me: usize, now: u64) -> Option<(usize, u64)> {
+        let mut best: Option<(usize, u64)> = None;
+        for (i, n) in self.ready[q].iter().enumerate() {
+            if let Some(t) = self.threads.get(n).filter(|t| t.state == State::Ready && t.affinity & (1 << me) != 0) {
+                let sc = score(t, now);
+                if best.is_none_or(|(_, b)| sc > b) {
+                    best = Some((i, sc));
+                }
             }
+        }
+        best
+    }
+
+    /// The next thread for CPU `me`: the best of its own queue, or else the
+    /// best it may run from the longest other queue. Only a thread scoring
+    /// at least `at_least` is taken.
+    fn take_ready(&mut self, me: usize, at_least: u64) -> Option<Tid> {
+        // Drop entries that are no longer runnable; move threads whose
+        // affinity changed after they were queued here.
+        let mut moved = Vec::new();
+        {
+            let Scheduler { ready, threads, .. } = self;
+            ready[me].retain(|n| match threads.get(n) {
+                Some(t) if t.state == State::Ready && t.affinity & (1 << me) != 0 => true,
+                Some(t) if t.state == State::Ready => {
+                    moved.push(*n);
+                    false
+                }
+                _ => false,
+            });
+        }
+        for n in moved {
+            self.enqueue(n);
+        }
+        let now = interrupts::ticks();
+        if let Some((pos, sc)) = self.best_in(me, me, now) {
+            return if sc >= at_least { self.ready[me].remove(pos) } else { None };
         }
         let online = crate::smp::online().clamp(1, crate::smp::MAX_CPUS);
-        let mut best: Option<(usize, usize, usize)> = None; // (queue length, cpu, position)
+        let mut victim: Option<(usize, usize, usize)> = None; // (queue length, cpu, position)
         for c in (0..online).filter(|&c| c != me) {
-            let q = &self.ready[c];
-            if q.len() <= best.map_or(0, |b| b.0) {
+            let len = self.ready[c].len();
+            if len <= victim.map_or(0, |v| v.0) {
                 continue;
             }
-            let runnable = |n: &Tid| self.threads.get(n).is_some_and(|t| t.state == State::Ready && t.affinity & (1 << me) != 0);
-            if let Some(pos) = q.iter().position(runnable) {
-                best = Some((q.len(), c, pos));
+            if let Some((pos, sc)) = self.best_in(c, me, now) {
+                if sc >= at_least {
+                    victim = Some((len, c, pos));
+                }
             }
         }
-        let (_, c, pos) = best?;
+        let (_, c, pos) = victim?;
         self.ready[c].remove(pos)
     }
 
@@ -416,17 +515,21 @@ impl Scheduler {
         let me = crate::smp::index();
         let cur = self.current[me];
         let mut still_runnable = false;
+        let mut keep_above = 0;
         if let Some(t) = self.threads.get_mut(&cur) {
             if t.state == State::Running {
                 t.state = State::Ready;
                 // Not if its affinity no longer includes this CPU: then it
                 // is queued where it may run once the switch completes.
                 still_runnable = cur != self.idle[me] && t.affinity & (1 << me) != 0;
+                // A runnable thread yields only to one scoring at least its
+                // own priority (equals take turns).
+                keep_above = if still_runnable { effective(t) as u64 } else { 0 };
             }
         }
         // With nothing else to run, a thread that is still runnable keeps
         // the CPU instead of going through the idle thread.
-        let next = self.take_ready(me).unwrap_or(if still_runnable { cur } else { self.idle[me] });
+        let next = self.take_ready(me, keep_above).unwrap_or(if still_runnable { cur } else { self.idle[me] });
         let nt = self.threads.get_mut(&next).expect("next thread exists");
         nt.last_cpu = me;
         nt.state = State::Running;
@@ -652,12 +755,29 @@ pub fn tick(now: u64) {
             }
         }
         cur.slice = cur.slice.saturating_sub(1);
+        if cur.slice == 0 && cur.boost > 0 {
+            cur.boost -= 1;
+        }
         let expired = cur.slice == 0 || cur.tid == idle;
         // A busy CPU switches for its own queue; an idle one also steals.
         expired && (!s.ready[ci].is_empty() || (cur_tid == idle && s.any_ready()))
     };
     if resched {
         schedule();
+    }
+}
+
+/// Profiler: visits every switched-out thread (blocked or waiting for a CPU)
+/// with its saved kernel stack pointer and the top of that stack.
+pub fn prof_threads(mut f: impl FnMut(Tid, u64, State, u64, u64)) {
+    let g = SCHED.lock();
+    let Some(s) = g.as_ref() else { return };
+    for t in s.threads.values() {
+        if t.leaving || !matches!(t.state, State::Blocked | State::Ready) || s.idle.contains(&t.tid) {
+            continue;
+        }
+        let hi = if t.kstack_top != 0 { t.kstack_top } else { t.rsp + 64 * 1024 };
+        f(t.tid, t.pid, t.state, t.rsp, hi);
     }
 }
 
@@ -820,11 +940,19 @@ pub fn rename_current(name: &str) {
 
 /// Makes a blocked thread ready again (no effect on other states).
 pub fn wake(tid: Tid) {
+    wake_boosted(tid, WAKE_BOOST);
+}
+
+/// Like [`wake`], and the thread runs `levels` above its priority for its
+/// next time slices (dynamic priority boost).
+pub fn wake_boosted(tid: Tid, levels: u8) {
     let mut g = SCHED.lock();
     let Some(s) = g.as_mut() else { return };
     let mut queue = false;
     if let Some(t) = s.threads.get_mut(&tid) {
         if t.state == State::Blocked {
+            // Only a wait that ends gains the boost, not a running thread.
+            t.boost = t.boost.max(levels);
             t.state = State::Ready;
             t.wake_at = None;
             // A thread whose context is still being saved is queued by
@@ -919,6 +1047,63 @@ pub fn set_affinity(tid:Tid,mask:u64)->Result<u64,osyx_abi::Errno> {
     };
     if tid==me && mask & (1<<crate::smp::index())==0 { schedule(); }
     Ok(old)
+}
+
+/// Sets (or with `priority::QUERY` reads) the priority of a thread of the
+/// caller's process (tid 0 = the caller); returns the previous one.
+pub fn set_priority(tid: Tid, priority: u64) -> Result<u64, osyx_abi::Errno> {
+    let me = current_tid();
+    let tid = if tid == 0 { me } else { tid };
+    let pid = current_pid();
+    let mut guard = SCHED.lock();
+    let s = guard.as_mut().ok_or(osyx_abi::Errno::NotSupported)?;
+    let t = s.threads.get_mut(&tid).ok_or(osyx_abi::Errno::NotFound)?;
+    if t.pid != pid {
+        return Err(osyx_abi::Errno::PermissionDenied);
+    }
+    let old = t.priority as u64;
+    if priority == osyx_abi::priority::INFO {
+        return Ok(old | (effective(t) as u64) << 8 | (t.boost as u64) << 16 | (t.inherited as u64) << 24);
+    }
+    if priority != osyx_abi::priority::QUERY {
+        if priority > MAX_PRIORITY as u64 {
+            return Err(osyx_abi::Errno::InvalidArgument);
+        }
+        t.priority = priority as u8;
+    }
+    Ok(old)
+}
+
+/// Current effective priority of thread `tid` (0 if it does not exist).
+pub fn effective_priority(tid: Tid) -> u8 {
+    SCHED.lock().as_ref().and_then(|s| s.threads.get(&tid)).map_or(0, |t| effective(t))
+}
+
+/// Lends priority `level` to thread `tid` of process `pid` (0 takes it
+/// back); a thread of another process is left alone. If that raises it
+/// above the thread running on the CPU it is queued for, that thread's
+/// time slice ends.
+pub fn set_inherited(tid: Tid, pid: u64, level: u8) {
+    let mut g = SCHED.lock();
+    let Some(s) = g.as_mut() else { return };
+    let Some(t) = s.threads.get_mut(&tid).filter(|t| t.pid == pid) else { return };
+    t.inherited = level.min(MAX_PRIORITY);
+    let now = effective(t);
+    if t.state != State::Ready {
+        return;
+    }
+    let online = crate::smp::online().clamp(1, crate::smp::MAX_CPUS);
+    if let Some(cpu) = (0..online).find(|&c| s.ready[c].contains(&tid)) {
+        let running = s.current[cpu];
+        if running != s.idle[cpu] {
+            if let Some(r) = s.threads.get_mut(&running) {
+                if effective(r) < now {
+                    r.slice = 0;
+                    crate::smp::kick(cpu);
+                }
+            }
+        }
+    }
 }
 
 pub fn current_pid() -> u64 {

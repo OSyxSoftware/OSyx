@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Packs a staged OSyx root tree into the live root boot module.
 
-Format: b"OSYXLR1\\0" + u64le(uncompressed size) + zlib(cpio newc archive).
-The kernel (kernel/src/live.rs) inflates it and replays the archive into
-the tmpfs root. Run inside WSL as root, on an ext4 tree, so ownership and
-modes are the ones chown/chmod left in the tree.
+Format: b"OSYXLR2\\0" + u64le(uncompressed size) + Zstandard frame of the
+cpio newc archive (`zstd -19`, needs the zstd command), or with --zlib the
+older b"OSYXLR1\\0" + u64le + zlib stream. The kernel (kernel/src/live.rs)
+reads either and replays the archive into the tmpfs root. Run inside WSL as
+root, on an ext4 tree, so ownership and modes are the ones chown/chmod left
+in the tree.
 
-    mklivefs.py <root dir> <output .z>
+    mklivefs.py [--zlib] <root dir> <output .z>
 """
 import os
 import stat
 import struct
+import subprocess
 import sys
 import zlib
 
@@ -85,19 +88,34 @@ def pack(root):
     return bytes(archive), count, skipped
 
 
+def zstd(data):
+    """Zstandard level 19 with all cores; the frame records its content size."""
+    try:
+        run = subprocess.run(["zstd", "-19", "-T0", "-q", "-c"], input=data, stdout=subprocess.PIPE, check=True)
+    except FileNotFoundError:
+        sys.exit("mklivefs.py: the zstd command is missing (apt-get install zstd), or pass --zlib")
+    return run.stdout
+
+
 def main():
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    use_zlib = "--zlib" in args
+    args = [a for a in args if a != "--zlib"]
+    if len(args) != 2:
         sys.exit(__doc__)
-    root, out = sys.argv[1], sys.argv[2]
+    root, out = args
     archive, count, skipped = pack(root)
-    blob = zlib.compress(archive, 9)
+    if use_zlib:
+        magic, kind, blob = b"OSYXLR1\0", "zlib", zlib.compress(archive, 9)
+    else:
+        magic, kind, blob = b"OSYXLR2\0", "zstd", zstd(archive)
     with open(out, "wb") as f:
-        f.write(b"OSYXLR1\0")
+        f.write(magic)
         f.write(struct.pack("<Q", len(archive)))
         f.write(blob)
     print(
-        "%s: %d entries (%d skipped), cpio %d bytes, zlib %d bytes (%.1f%%), module %d bytes"
-        % (out, count, skipped, len(archive), len(blob), 100.0 * len(blob) / len(archive), len(blob) + 16)
+        "%s: %d entries (%d skipped), cpio %d bytes, %s %d bytes (%.1f%%), module %d bytes"
+        % (out, count, skipped, len(archive), kind, len(blob), 100.0 * len(blob) / len(archive), len(blob) + 16)
     )
 
 

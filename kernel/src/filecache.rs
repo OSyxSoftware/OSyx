@@ -388,17 +388,11 @@ pub(crate) fn page(key: Key, index: u64, fill: &impl Fn(u64, &mut [u8]) -> Resul
     let count = len.div_ceil(mem::PAGE_SIZE as usize);
     let mut fresh: Vec<(u64, Arc<SharedMemory>, usize)> = Vec::with_capacity(count);
     for k in 0..count {
-        let shm = SharedMemory::new(mem::PAGE_SIZE)?;
         let start = k * mem::PAGE_SIZE as usize;
         let n = (len - start).min(mem::PAGE_SIZE as usize);
-        // SAFETY: a freshly allocated, exclusively owned RAM page.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                buf[start..].as_ptr(),
-                mem::phys_to_virt(shm.frames()[0]) as *mut u8,
-                n,
-            );
-        }
+        // The page is filled from `buf` once; clearing it first was the top
+        // kernel cost of reading a browser's files (see `SharedMemory::page_from`).
+        let shm = SharedMemory::page_from(&buf[start..start + n])?;
         fresh.push((index + k as u64, shm, n));
     }
     let mut c = CACHE.lock();

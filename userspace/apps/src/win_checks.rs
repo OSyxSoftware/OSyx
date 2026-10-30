@@ -74,6 +74,7 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
             .env("WIN_EXPECT_UID", "1000").status().is_ok_and(|s|s.success())
     });
     t.check("Windows shared locks, once initialization, condition variables and modules", || run("synch.exe", &[]) == Some(0));
+    t.check("critical sections pass priority inheritance and survive contention", || run("prio.exe", &[]) == Some(0));
     t.check("threads, synchronisation, TLS, virtual memory, DLL loading (target D)", || {
         run("threads.exe", &[]) == Some(0)
     });

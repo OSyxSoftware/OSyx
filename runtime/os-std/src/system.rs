@@ -25,6 +25,23 @@ pub fn cpu_info() -> Result<(u32,u32)> {
     { Err(Error::new(crate::error::ErrorKind::Unsupported,"CPU information is available on OSyx")) }
 }
 
+/// Priority levels for [`thread_priority`].
+pub use osyx_abi::priority;
+
+/// Sets the scheduling priority (`osyx_abi::priority`) of an owned thread
+/// (0 = the caller); returns the previous one.
+pub fn thread_priority(tid: u64, priority: u64) -> Result<u64> {
+    #[cfg(target_os = "none")]
+    {
+        os_sys::thread_priority(tid, priority).map_err(Error::from)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (tid, priority);
+        Err(Error::new(crate::error::ErrorKind::Unsupported, "Thread priorities are available on OSyx"))
+    }
+}
+
 /// Pins an owned thread (0 = the caller) to a mask of online logical CPUs.
 pub fn thread_affinity(tid:u64,mask:u64)->Result<u64> {
     #[cfg(target_os="none")]

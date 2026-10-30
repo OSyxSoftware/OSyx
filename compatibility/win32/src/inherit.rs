@@ -33,6 +33,15 @@ const KIND_PIPE: u32 = 2;
 /// An event: its shared state page; flags say whether it resets manually.
 const KIND_EVENT: u32 = 3;
 const EVENT_MANUAL: u32 = 1;
+/// A regular file, only for DuplicateHandle: the other process opens the
+/// same path again (`flags` bit 0 read, bit 1 write; the path follows the
+/// record). A file offset is not shared, which Gecko's read-only extension
+/// and cache descriptors do not need.
+const KIND_FILE: u32 = 4;
+const FILE_READ: u32 = 1;
+const FILE_WRITE: u32 = 2;
+/// Longest path a duplicated file may carry.
+const MAX_PATH_BYTES: usize = 4096;
 const SECTION_WRITABLE: u32 = 1;
 const SECTION_EXECUTABLE: u32 = 2;
 const SECTION_FILE: u32 = 4;
@@ -162,7 +171,7 @@ pub fn receive(name: &str) -> Result<usize, String> {
     for r in &records {
         let k = if has_kernel(r) { kernel.next() } else { None };
         let handle = u64::from_le_bytes(r[0..8].try_into().unwrap());
-        let Some(o) = object(r, k) else { return Err(alloc::format!("unknown inherited object for {handle:#x}")) };
+        let Some(o) = object(r, k, &[]) else { return Err(alloc::format!("unknown inherited object for {handle:#x}")) };
         if !objects::insert_at(handle, o) {
             return Err(alloc::format!("handle {handle:#x} is already taken"));
         }
@@ -198,17 +207,38 @@ fn record(i: &Item) -> [u8; RECORD] {
     r
 }
 
+/// The record of a regular file for DuplicateHandle, and its path.
+fn file_item(h: u64) -> Result<Option<(Item, String)>, u32> {
+    let Some(Object::File(f)) = objects::get(h) else { return Ok(None) };
+    if f.is_dir || f.key.0 == objects::PIPE_DEV || f.path.is_empty() || f.path.len() > MAX_PATH_BYTES {
+        return Ok(None);
+    }
+    if f.delete_on_close.load(Ordering::Relaxed) || f.append {
+        return Err(ERROR_NOT_SUPPORTED);
+    }
+    let flags = if f.access.0 { FILE_READ } else { 0 } | if f.access.1 { FILE_WRITE } else { 0 };
+    Ok(Some((Item { handle: h, kernel: None, kind: KIND_FILE, flags, size: f.path.len() as u64 }, f.path.clone())))
+}
+
 /// Whether a record's object comes with a kernel object.
 fn has_kernel(r: &[u8]) -> bool {
     matches!(u32::from_le_bytes(r[8..12].try_into().unwrap()), KIND_SECTION | KIND_EVENT)
 }
 
 /// The object a record and its kernel object describe.
-fn object(r: &[u8], kernel: Option<u64>) -> Option<Object> {
+fn object(r: &[u8], kernel: Option<u64>, extra: &[u8]) -> Option<Object> {
     let half = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
     let size = u64::from_le_bytes(r[16..24].try_into().unwrap());
     match half(8) {
         KIND_PIPE => crate::pipes::relay_in(size >> 32, size as u32, half(12)).ok(),
+        KIND_FILE => {
+            let path = core::str::from_utf8(extra.get(..size as usize)?).ok()?;
+            let flags = half(12);
+            let access = if flags & FILE_WRITE != 0 { objects::GENERIC_READ | objects::GENERIC_WRITE } else { objects::GENERIC_READ };
+            let share = objects::FILE_SHARE_READ | objects::FILE_SHARE_WRITE | objects::FILE_SHARE_DELETE;
+            let (h, _) = crate::kernel32::create_file(&crate::path::to_windows(path), access, share, crate::kernel32::OPEN_EXISTING, 0).ok()?;
+            objects::get(h)
+        }
         KIND_EVENT => crate::objects::EventObj::from_shared(kernel?, half(12) & EVENT_MANUAL != 0).map(Object::Event),
         KIND_SECTION => Some(Object::Section(Arc::new(SectionObj {
             shm: kernel?,
@@ -237,13 +267,13 @@ fn recv_wait(c: u64, buf: &mut [u8], handles: &mut [u64]) -> Result<(usize, usiz
 
 /// Answers one request on connection `c`.
 fn serve(c: u64) {
-    let mut buf = [0u8; 4 + RECORD + 4];
+    let mut buf = alloc::vec![0u8; 4 + RECORD + MAX_PATH_BYTES];
     let mut hs = [0u64; 1];
     let Ok((n, k)) = recv_wait(c, &mut buf, &mut hs) else { return };
     let op = if n >= 4 { u32::from_le_bytes(buf[0..4].try_into().unwrap()) } else { 0 };
     match op {
         PUT if n >= 4 + RECORD && k == has_kernel(&buf[4..4 + RECORD]) as usize => {
-            let h = match object(&buf[4..4 + RECORD], (k == 1).then_some(hs[0])) {
+            let h = match object(&buf[4..4 + RECORD], (k == 1).then_some(hs[0]), &buf[4 + RECORD..n]) {
                 Some(o) => objects::insert(o),
                 None => {
                     if k == 1 {
@@ -257,9 +287,18 @@ fn serve(c: u64) {
         TAKE if n >= 4 + 8 + 4 => {
             let h = u64::from_le_bytes(buf[4..12].try_into().unwrap());
             let close = u32::from_le_bytes(buf[12..16].try_into().unwrap()) != 0;
-            match item(h) {
-                Ok(i) => {
-                    let _ = os_sys::channel_send(c, &record(&i), i.kernel.as_slice());
+            let reply = match file_item(h) {
+                Ok(Some((i, path))) => {
+                    let mut msg = record(&i).to_vec();
+                    msg.extend_from_slice(path.as_bytes());
+                    Ok((msg, None))
+                }
+                Ok(None) => item(h).map(|i| (record(&i).to_vec(), i.kernel)),
+                Err(e) => Err(e),
+            };
+            match reply {
+                Ok((msg, kernel)) => {
+                    let _ = os_sys::channel_send(c, &msg, kernel.as_slice());
                     if close {
                         objects::close(h);
                     }
@@ -301,11 +340,18 @@ fn connect(pid: u64) -> Result<u64, u32> {
 
 /// DuplicateHandle of `h` from this process into process `pid`.
 pub fn put(pid: u64, h: u64) -> Result<u64, u32> {
-    let i = item(h)?;
+    let file = file_item(h)?;
+    let i = match &file {
+        Some((i, _)) => Item { handle: i.handle, kernel: None, kind: i.kind, flags: i.flags, size: i.size },
+        None => item(h)?,
+    };
     let c = connect(pid)?;
     let mut msg = Vec::with_capacity(4 + RECORD);
     msg.extend_from_slice(&PUT.to_le_bytes());
     msg.extend_from_slice(&record(&i));
+    if let Some((_, path)) = &file {
+        msg.extend_from_slice(path.as_bytes());
+    }
     let r = os_sys::channel_send(c, &msg, i.kernel.as_slice()).map_err(errno_to_win32).and_then(|()| {
         let mut out = [0u8; 8];
         let (n, _) = recv_wait(c, &mut out, &mut [])?;
@@ -324,13 +370,13 @@ pub fn take(pid: u64, h: u64, close_source: bool) -> Result<u64, u32> {
     msg.extend_from_slice(&h.to_le_bytes());
     msg.extend_from_slice(&(close_source as u32).to_le_bytes());
     let r = os_sys::channel_send(c, &msg, &[]).map_err(errno_to_win32).and_then(|()| {
-        let mut buf = [0u8; RECORD];
+        let mut buf = alloc::vec![0u8; RECORD + MAX_PATH_BYTES];
         let mut hs = [0u64; 1];
         let (n, k) = recv_wait(c, &mut buf, &mut hs)?;
         if n == 4 {
             return Err(u32::from_le_bytes(buf[0..4].try_into().unwrap()));
         }
-        match (n == RECORD && k == has_kernel(&buf) as usize).then(|| object(&buf, (k == 1).then_some(hs[0]))).flatten() {
+        match (n >= RECORD && k == has_kernel(&buf) as usize).then(|| object(&buf[..RECORD], (k == 1).then_some(hs[0]), &buf[RECORD..n])).flatten() {
             Some(o) => Ok(objects::insert(o)),
             None => Err(ERROR_NOT_SUPPORTED),
         }

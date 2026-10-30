@@ -51,6 +51,25 @@ function Wait-Log([string]$Pattern, [int]$Seconds = 15) {
 
 function Qmp([string]$Json) { Invoke-Qmp $script:port $Json | Out-Null }
 
+# Shell popups (menus, confirmations) as PRISM maps them.
+$popupPattern = 'window \d+ "popup" mapped at \((-?\d+), (-?\d+)\) (\d+)x(\d+)'
+function Popup-Count { [regex]::Matches((Log-Text), $popupPattern).Count }
+# Waits for a popup mapped after `$Before` popups; returns its rectangle.
+function Wait-Popup([int]$Before, [int]$Seconds = 10) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $all = [regex]::Matches((Log-Text), $popupPattern)
+        if ($all.Count -gt $Before) {
+            $m = $all[$Before]
+            Start-Sleep -Milliseconds 300
+            return [pscustomobject]@{ X = [int]$m.Groups[1].Value; Y = [int]$m.Groups[2].Value; W = [int]$m.Groups[3].Value; H = [int]$m.Groups[4].Value }
+        }
+        if ($script:qemu.HasExited) { return $null }
+        Start-Sleep -Milliseconds 200
+    }
+    return $null
+}
+
 # ---- USB mouse --------------------------------------------------------------
 function MovePtr([int]$Dx, [int]$Dy) {
     # Relative HID reports carry at most 127 per axis: send small steps.
@@ -138,8 +157,10 @@ try {
     $t = Log-Text
 
     Record 'xHCI: USB keyboard and mouse enumerated (no PS/2)' ($t -match 'xhci0: running \(MSI-X interrupts\)' -and $t -match '"QEMU USB Keyboard" \(keyboard\) attached' -and $t -match '"QEMU USB Mouse" \(mouse\) attached') ''
-    Record 'PRISM in ring 3 from ext4 owns the display' ($t -match 'process 2 \(prism\): /system/bin/prism spawned by 1' -and $t -match 'display: process 2 owns the display' -and $t -match 'prism: compositor running') ([regex]::Match($t, 'prism: display \S+').Value)
-    Record 'desktop shell is a separate process and PRISM client' ($t -match '\(desktop\): /system/bin/desktop spawned by 2' -and $t -match 'prism: client 1 connected \(process 3' -and $t -match 'window 1 "" created \(Desktop' -and $t -match 'window 2 "" created \(Panel') "${sw}x$sh"
+    $prismPid = [regex]::Match($t, 'process (\d+) \(prism\): /system/bin/prism spawned by 1').Groups[1].Value
+    $desktopPid = [regex]::Match($t, "process (\d+) \(desktop\): /system/bin/desktop spawned by $prismPid,").Groups[1].Value
+    Record 'PRISM in ring 3 from ext4 owns the display' ($prismPid -and $t -match "display: process $prismPid owns the display" -and $t -match 'prism: compositor running') ([regex]::Match($t, 'prism: display \S+').Value)
+    Record 'desktop shell is a separate process and PRISM client' ($desktopPid -and $t -match "prism: client 1 connected \(process $desktopPid," -and $t -match 'window 1 "" created \(Desktop' -and $t -match 'window 2 "" created \(Panel') "${sw}x$sh"
     Shot 'start'
     Record 'desktop loads persistent Terminal and Files shortcuts' ($t -match 'desktop: 2 shortcut\(s\) in /home/user/Desktop') ''
     if ($Gpu) {
@@ -351,8 +372,17 @@ try {
     # Close the terminal so the new cell is visible and the desktop owns focus.
     if ($term) { Click ($term.X + 160 + $term.W + 120 - 20) ($term.Y + 90 - 17) }
     # A clean restart flushes ext4, then the same image restores the layout.
+    # The menu and the confirmation take input only once PRISM maps their
+    # popups. The menu starts with no item selected, so 'down' would pick
+    # Lock: click Restart (the second 32 px row below the 6 px padding).
+    $popups = Popup-Count
     Click ($sw - 28) ($sh - 26)
-    Keys @('down'); Keys @('ret'); Start-Sleep -Milliseconds 300; Keys @('ret')
+    $menu = Wait-Popup $popups
+    if (-not $menu) { throw 'Power menu did not open' }
+    $popups = Popup-Count
+    Click ($menu.X + 60) ($menu.Y + 6 + 32 + 16)
+    if (-not (Wait-Popup $popups)) { throw 'restart confirmation did not open' }
+    Keys @('ret')
     if (-not $script:qemu.WaitForExit(15000)) { throw 'clean restart did not stop QEMU' }
     $persistedLog = Log-Text
     $restartLog = Join-Path $testDir "$prefix-restart.serial.log"

@@ -246,6 +246,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("bcryptprimitives.dll", crate::minordlls::bcryptprimitives_exports(), Vec::new()),
         builtin("shcore.dll", crate::minordlls::shcore_exports(), Vec::new()),
         builtin("uxtheme.dll", crate::minordlls::uxtheme_exports(), Vec::new()),
+        builtin("avrt.dll", crate::minordlls::avrt_exports(), Vec::new()),
         builtin("propsys.dll", crate::propsys::exports(), Vec::new()),
         builtin("dwmapi.dll", crate::dwmapi::exports(), Vec::new()),
         builtin("imm32.dll", crate::dwmapi::imm32_exports(), Vec::new()),
@@ -505,6 +506,10 @@ impl Host for WinHost {
 
     fn prepare(&mut self, name: &str, base: u64, image: &mut [u8]) -> bool {
         let size = image.len() as u64;
+        // `prof` runs: where each module sits, for the profiler's user samples.
+        if os_std::env::var("OSYX_WINRUN_MODULES").is_ok_and(|v| v == "1") {
+            os_std::eprintln!("winrun: module {name} base={base:#x} size={size:#x}");
+        }
         if self.image_file(name).is_some_and(|f| os_sys::image_map(f.handle(), base, size).is_ok()) {
             return true;
         }

@@ -374,7 +374,7 @@ extern "win64" fn WriteConsoleW(h: u64, buf: *const u16, n: u32, written: *mut u
 
 const CREATE_NEW: u32 = 1;
 const CREATE_ALWAYS: u32 = 2;
-const OPEN_EXISTING: u32 = 3;
+pub(crate) const OPEN_EXISTING: u32 = 3;
 const OPEN_ALWAYS: u32 = 4;
 const TRUNCATE_EXISTING: u32 = 5;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -1500,9 +1500,9 @@ pub(crate) extern "win64" fn GetThreadId(h: u64) -> u32 {
     }
 }
 
-/// Thread priorities of the calling process, by thread id. The OSyx
-/// scheduler has no priority levels: a priority is a scheduling hint, kept
-/// so GetThreadPriority reports what was set.
+/// Thread priorities of the calling process, by thread id, as set (so
+/// GetThreadPriority reports exactly that). Each also goes to the OSyx
+/// scheduler through [`apply_priority`].
 static PRIORITIES: Mutex<alloc::collections::BTreeMap<u32, i32>> = Mutex::new(alloc::collections::BTreeMap::new());
 const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x10000;
 const THREAD_MODE_BACKGROUND_END: i32 = 0x20000;
@@ -1515,11 +1515,41 @@ extern "win64" fn SetThreadPriority(h: u64, priority: i32) -> Bool {
     match priority {
         -15 | -2..=2 | 15 => {
             PRIORITIES.lock().unwrap().insert(tid, priority);
+            apply_priority(tid as u64, priority);
             TRUE
         }
-        THREAD_MODE_BACKGROUND_BEGIN | THREAD_MODE_BACKGROUND_END if h == objects::CURRENT_THREAD => TRUE,
+        THREAD_MODE_BACKGROUND_BEGIN | THREAD_MODE_BACKGROUND_END if h == objects::CURRENT_THREAD => {
+            let level = if priority == THREAD_MODE_BACKGROUND_BEGIN { osyx_abi::priority::LOW } else { osyx_abi::priority::NORMAL };
+            let _ = os_sys::thread_priority(tid as u64, level);
+            TRUE
+        }
         _ => fail(ERROR_INVALID_PARAMETER, FALSE),
     }
+}
+
+/// Gives the OSyx scheduler the level of a Windows thread priority:
+/// IDLE, LOWEST, BELOW_NORMAL, NORMAL, ABOVE_NORMAL, HIGHEST, TIME_CRITICAL
+/// map one to one onto `osyx_abi::priority`.
+pub(crate) fn apply_priority(tid: u64, priority: i32) {
+    use osyx_abi::priority as p;
+    let level = match priority {
+        -15 => p::IDLE,
+        -2 => p::LOW,
+        -1 => p::BELOW_NORMAL,
+        0 => p::NORMAL,
+        1 => p::ABOVE_NORMAL,
+        2 => p::HIGH,
+        _ => p::REALTIME,
+    };
+    let _ = os_sys::thread_priority(tid, level);
+}
+
+/// OSyx extension (not a Windows API): the scheduler's view of thread
+/// `tid` of this process, `osyx_abi::priority::INFO` (own priority, the
+/// effective one, boost and inherited priority, one byte each); 0 if there
+/// is no such thread. Tests look it up with GetProcAddress.
+extern "win64" fn OsyxThreadPriorityInfo(tid: u32) -> u64 {
+    os_sys::thread_priority(tid as u64, osyx_abi::priority::INFO).unwrap_or(0)
 }
 
 extern "win64" fn GetThreadPriority(h: u64) -> i32 {
@@ -1716,7 +1746,11 @@ pub(crate) extern "win64" fn EnterCriticalSection(cs: u64) {
     let w = cs_word(cs);
     if w.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
         while w.swap(2, Ordering::Acquire) != 0 {
-            let _ = os_sys::futex_wait(w.as_ptr(), 2, 0);
+            // The holder (an OSyx thread id, as in the TEB) inherits this
+            // thread's priority while it waits.
+            // SAFETY: as above.
+            let owner = unsafe { teb::get::<u64>(cs, CS_OWNER) };
+            let _ = os_sys::futex_wait_owned(w.as_ptr(), 2, 0, owner);
         }
     }
     // SAFETY: as above; we own the section now.
@@ -2957,6 +2991,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CreateSemaphoreA,
         OpenSemaphoreA,
         SetThreadPriority,
+        OsyxThreadPriorityInfo,
         GetThreadPriority,
         CreateSemaphoreW,
         ReleaseSemaphore,

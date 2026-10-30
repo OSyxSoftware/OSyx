@@ -43,6 +43,8 @@ mod sys;
 
 pub mod env;
 pub mod error;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+mod fastfloat;
 pub mod fs;
 pub mod io;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

@@ -10,7 +10,7 @@ use core::cell::UnsafeCell;
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use core::time::Duration;
 
 pub use alloc::sync::{Arc, Weak};
@@ -50,8 +50,11 @@ const CONTENDED: u32 = 2;
 
 /// A mutual exclusion lock. Uncontended lock/unlock are a single atomic
 /// operation; waiters sleep in the kernel (`futex_wait`) instead of spinning.
+/// The holder's thread id is recorded so that a waiter can lend it its
+/// priority (priority inheritance).
 pub struct Mutex<T: ?Sized> {
     futex: AtomicU32,
+    owner: AtomicU64,
     data: UnsafeCell<T>,
 }
 
@@ -70,7 +73,7 @@ unsafe impl<T: ?Sized + Sync> Sync for MutexGuard<'_, T> {}
 
 impl<T> Mutex<T> {
     pub const fn new(value: T) -> Mutex<T> {
-        Mutex { futex: AtomicU32::new(UNLOCKED), data: UnsafeCell::new(value) }
+        Mutex { futex: AtomicU32::new(UNLOCKED), owner: AtomicU64::new(0), data: UnsafeCell::new(value) }
     }
 
     pub fn into_inner(self) -> LockResult<T> {
@@ -80,6 +83,11 @@ impl<T> Mutex<T> {
 
 impl<T: ?Sized> Mutex<T> {
     fn raw_lock(&self) {
+        self.acquire();
+        self.owner.store(sys::current_tid(), Ordering::Relaxed);
+    }
+
+    fn acquire(&self) {
         if self.futex.compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed).is_ok() {
             return;
         }
@@ -94,11 +102,14 @@ impl<T: ?Sized> Mutex<T> {
         }
         // Mark the lock contended so the holder wakes someone on unlock.
         while self.futex.swap(CONTENDED, Ordering::Acquire) != UNLOCKED {
-            sys::futex_wait(&self.futex, CONTENDED, None);
+            // The recorded holder may already be stale; the kernel only lends
+            // priority to a thread of this process while this wait lasts.
+            sys::futex_wait_owned(&self.futex, CONTENDED, self.owner.load(Ordering::Relaxed));
         }
     }
 
     fn raw_unlock(&self) {
+        self.owner.store(0, Ordering::Relaxed);
         if self.futex.swap(UNLOCKED, Ordering::Release) == CONTENDED {
             sys::futex_wake(&self.futex, 1);
         }
@@ -111,7 +122,10 @@ impl<T: ?Sized> Mutex<T> {
 
     pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, T>> {
         match self.futex.compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed) {
-            Ok(_) => Ok(MutexGuard { lock: self, _not_send: PhantomData }),
+            Ok(_) => {
+                self.owner.store(sys::current_tid(), Ordering::Relaxed);
+                Ok(MutexGuard { lock: self, _not_send: PhantomData })
+            }
             Err(_) => Err(TryLockError::WouldBlock),
         }
     }

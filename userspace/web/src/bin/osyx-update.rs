@@ -265,6 +265,7 @@ fn run_once(log: &mut Log, check_only: bool) -> Result<&'static str, String> {
 }
 
 fn main() -> i32 {
+    let _ = os_std::system::thread_priority(0, os_std::system::priority::LOW);
     let args: Vec<String> = env::args().collect();
     let daemon = args.iter().any(|a| a == "--daemon");
     let check_only = args.iter().any(|a| a == "--check");

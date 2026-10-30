@@ -10,7 +10,10 @@ param([string]$Version = '1.23.4b', [switch]$SkipBuild, [switch]$SkipFetch, [int
       [switch]$NetworkTrace, [switch]$Count, [switch]$Installed,
       # Leaves out the kernel's once-a-second statistics, which cost real
       # time on the serial port; use it to measure speed.
-      [switch]$NoStats)
+      [switch]$NoStats,
+      # Kernel sampling profiler for this many guest seconds (kernel/src/prof.rs);
+      # the build keeps frame pointers. scripts/flamegraph.py renders the log.
+      [ValidateRange(0, 600)][int]$Prof = 0)
 if ($NetworkTrace -and $Count) { throw 'Choose either -NetworkTrace or -Count.' }
 if ($SkipBuild -and ($PSBoundParameters.ContainsKey('ProbeUrl') -or $PSBoundParameters.ContainsKey('NetworkTrace') -or $PSBoundParameters.ContainsKey('Count'))) {
     throw '-ProbeUrl, -NetworkTrace and -Count are embedded at build time; omit -SkipBuild when changing them.'
@@ -20,8 +23,9 @@ $evidenceDir = Join-Path $BuildDir 'zen'
 New-Item -ItemType Directory -Force $evidenceDir | Out-Null
 if (-not $SkipBuild) {
     if (-not $SkipFetch) { & (Join-Path $PSScriptRoot 'fetch-zen.ps1') -Version $Version }
-    $probeArgs = $(if ($Installed) { 'zen-installed' } else { 'zen-probe' }) + ",$ProbeUrl" + $(if ($NetworkTrace) { ',trace' } elseif ($Count) { ',count' } else { '' })
-    $statsArg = $(if ($NoStats) { '' } else { ' stats' })
+    $probeArgs = $(if ($Installed) { 'zen-installed' } else { 'zen-probe' }) + ",$ProbeUrl" + $(if ($NetworkTrace) { ',trace' } elseif ($Count) { ',count' } elseif ($Prof) { ',prof' } else { '' })
+    $statsArg = $(if ($NoStats) { '' } else { ' stats' }) + $(if ($Prof) { " prof=$Prof" } else { '' })
+    if ($Prof) { $env:OSYX_FRAME_POINTERS = '1' }
     & (Join-Path $PSScriptRoot 'build.ps1') -Cmdline "init.args=tests,$probeArgs$statsArg test.exit" -RootMiB 1024 -ZenDirectory (Join-Path $evidenceDir "$Version/core")
 }
 $log = Join-Path $evidenceDir 'qemu.serial.log'

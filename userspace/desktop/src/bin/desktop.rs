@@ -417,6 +417,8 @@ fn password_ok(entered: &str) -> bool {
 }
 
 fn main() -> i32 {
+    // The shell (taskbar, launcher) stays responsive under application load.
+    let _ = os_std::system::thread_priority(0, os_std::system::priority::ABOVE_NORMAL);
     let mut conn = match Connection::connect("desktop", true) {
         Ok(c) => c,
         Err(e) => {

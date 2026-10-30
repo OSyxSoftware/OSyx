@@ -167,6 +167,12 @@ mod imp {
         decode(syscall3(nr::FUTEX_WAIT, word as u64, expected as u64, timeout_ns)).map(|_| ())
     }
 
+    /// Like [`futex_wait`]; `owner` (0: unknown) holds the lock and inherits
+    /// the caller's priority while it waits.
+    pub fn futex_wait_owned(word: *const u32, expected: u32, timeout_ns: u64, owner: u64) -> Result<(), Errno> {
+        decode(syscall4(nr::FUTEX_WAIT_OWNED, word as u64, expected as u64, timeout_ns, owner)).map(|_| ())
+    }
+
     /// Wakes up to `count` waiters on `word`; returns how many were woken.
     pub fn futex_wake(word: *const u32, count: u32) -> u64 {
         decode(syscall2(nr::FUTEX_WAKE, word as u64, count as u64)).unwrap_or(0)
@@ -232,6 +238,10 @@ mod imp {
     }
 
     pub fn thread_affinity(tid:u64,mask:u64)->Result<u64,Errno> { decode(syscall2(nr::THREAD_AFFINITY,tid,mask)) }
+    /// Sets (or with `priority::QUERY` reads) a thread's priority; tid 0 is the caller.
+    pub fn thread_priority(tid: u64, priority: u64) -> Result<u64, Errno> {
+        decode(syscall2(nr::THREAD_PRIORITY, tid, priority))
+    }
     pub fn process_write_barrier()->Result<(),Errno> { decode(syscall1(nr::PROCESS_WRITE_BARRIER,0)).map(|_|()) }
 
     pub fn sysinfo() -> Result<SystemInfo, Errno> {

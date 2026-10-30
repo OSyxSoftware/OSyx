@@ -1,7 +1,8 @@
 //! Live root: when `rootfs.z` is among the boot modules, its contents are
-//! the system image. The file is an "OSYXLR1" header (uncompressed size,
-//! little endian u64) followed by a zlib stream that inflates to a cpio
-//! "newc" archive; [`unpack`] replays that archive into the tmpfs that
+//! the system image. The file is an "OSYXLR2" header (uncompressed size,
+//! little endian u64) followed by a Zstandard frame ("OSYXLR1": a zlib
+//! stream) that decompresses to a cpio "newc" archive; [`unpack`] replays
+//! that archive into the tmpfs that
 //! serves as `/` when no root partition is used.
 
 use crate::vfs::{self, Lookup};
@@ -15,6 +16,8 @@ use osyx_vfs::Cred;
 /// lower-cases module names).
 pub const ARCHIVE: &str = "rootfs.z";
 const MAGIC: &[u8; 8] = b"OSYXLR1\0";
+/// The same with a Zstandard frame instead of the zlib stream.
+const MAGIC_ZSTD: &[u8; 8] = b"OSYXLR2\0";
 const HEADER_LEN: usize = 16;
 /// Decompression bound; a live root larger than this is rejected before
 /// any memory is committed.
@@ -43,18 +46,28 @@ pub fn present() -> bool {
 /// Returns the number of archive entries applied.
 pub fn unpack() -> Result<usize, &'static str> {
     let (_, data) = modules::all().iter().find(|(name, _)| name == ARCHIVE).ok_or("no rootfs.z module")?;
-    if data.len() < HEADER_LEN + 6 || &data[..8] != MAGIC {
-        return Err("rootfs.z has no OSYXLR1 header");
+    if data.len() < HEADER_LEN + 6 || (&data[..8] != MAGIC && &data[..8] != MAGIC_ZSTD) {
+        return Err("rootfs.z has no OSYXLR1/OSYXLR2 header");
     }
     let declared = u64::from_le_bytes(data[8..16].try_into().map_err(|_| "truncated header")?);
     if declared == 0 || declared > MAX_ROOT {
         return Err("rootfs.z declares an implausible size");
     }
-    let raw = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&data[HEADER_LEN..], declared as usize)
-        .map_err(|e| {
-            kprintln!("live: inflate failed: {:?}", e.status);
+    let started = crate::interrupts::uptime_ms();
+    let raw = if &data[..8] == MAGIC_ZSTD {
+        let mut out = Vec::with_capacity(declared as usize);
+        ruzstd::decoding::FrameDecoder::new().decode_all_to_vec(&data[HEADER_LEN..], &mut out).map_err(|e| {
+            kprintln!("live: zstd failed: {e:?}");
             "rootfs.z does not decompress"
         })?;
+        out
+    } else {
+        miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&data[HEADER_LEN..], declared as usize).map_err(|e| {
+            kprintln!("live: inflate failed: {:?}", e.status);
+            "rootfs.z does not decompress"
+        })?
+    };
+    kprintln!("live: decompressed in {} ms", crate::interrupts::uptime_ms().saturating_sub(started));
     if raw.len() as u64 != declared {
         return Err("rootfs.z inflated to an unexpected size");
     }

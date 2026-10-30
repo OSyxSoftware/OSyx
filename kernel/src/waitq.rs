@@ -37,9 +37,14 @@ impl WaitQueue {
     /// Wakes every waiter (they re-check their condition). Usable from
     /// interrupt handlers: it only takes spinlocks.
     pub fn wake_all(&self) {
+        self.wake_all_boosted(sched::WAKE_BOOST);
+    }
+
+    /// Like [`wake_all`](Self::wake_all), with a priority boost of `levels`.
+    pub fn wake_all_boosted(&self, levels: u8) {
         let waiters = core::mem::take(&mut *self.waiters.lock());
         for t in waiters {
-            sched::wake(t);
+            sched::wake_boosted(t, levels);
         }
     }
 

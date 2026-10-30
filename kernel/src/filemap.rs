@@ -138,19 +138,9 @@ impl Backing {
             scratch.resize(bytes, 0);
             read_run(&source, offset, &mut scratch)?;
             for k in 0..pages {
-                let page = SharedMemory::new(mem::PAGE_SIZE)?;
                 let start = k * mem::PAGE_SIZE as usize;
                 let count = (bytes - start).min(mem::PAGE_SIZE as usize);
-                // SAFETY: an exclusive newly allocated RAM page; `count` bytes
-                // are written and the rest stays zeroed.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        scratch[start..].as_ptr(),
-                        mem::phys_to_virt(page.frames()[0]) as *mut u8,
-                        count,
-                    );
-                }
-                extra.push(page);
+                extra.push(SharedMemory::page_from(&scratch[start..start + count])?);
             }
             index += pages;
         }

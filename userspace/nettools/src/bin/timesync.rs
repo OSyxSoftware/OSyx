@@ -86,6 +86,7 @@ fn sync(server: &str) -> Result<String, String> {
 }
 
 fn main() -> i32 {
+    let _ = os_std::system::thread_priority(0, os_std::system::priority::LOW);
     let args: Vec<String> = os_std::env::args().skip(1).collect();
     let daemon = args.iter().any(|a| a == "--daemon");
     let server = args.iter().find(|a| !a.starts_with("--")).map_or(DEFAULT_SERVER, |s| s.as_str());

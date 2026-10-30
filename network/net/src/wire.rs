@@ -172,19 +172,47 @@ pub fn ip_at(b: &[u8], off: usize) -> Ipv4Addr {
 }
 
 /// One's-complement sum of `data` (16-bit big-endian words) added to `acc`.
-pub fn sum(mut acc: u32, data: &[u8]) -> u32 {
-    let (words, rest) = data.as_chunks::<2>();
-    for c in words {
-        acc += u16::from_be_bytes([c[0], c[1]]) as u32;
-        // Fold early so long inputs cannot overflow.
-        if acc > 0xFFFF_0000 {
-            acc = (acc & 0xFFFF) + (acc >> 16);
+///
+/// One's-complement addition does not depend on byte order (RFC 1071,
+/// section 2B), so the data is added as native-endian 64-bit words, four
+/// independent sums at a time, with the carry of every addition kept
+/// (end-around), and the 16-bit result is byte-swapped once at the end on a
+/// little-endian CPU. That is several times faster than adding 16-bit words
+/// one by one, and the checksum is computed for every packet sent or
+/// received. A trailing odd byte counts as the high byte of a last word,
+/// as before.
+pub fn sum(acc: u32, data: &[u8]) -> u32 {
+    #[inline(always)]
+    fn add(total: u64, word: u64) -> u64 {
+        let (s, carry) = total.overflowing_add(word);
+        s + carry as u64
+    }
+    let (blocks, rest) = data.as_chunks::<32>();
+    let mut t = [0u64; 4];
+    for b in blocks {
+        for (lane, w) in t.iter_mut().zip(b.as_chunks::<8>().0) {
+            *lane = add(*lane, u64::from_ne_bytes(*w));
         }
     }
-    if let [last] = rest {
-        acc += (*last as u32) << 8;
+    let mut total = add(add(t[0], t[1]), add(t[2], t[3]));
+    let (words, tail) = rest.as_chunks::<8>();
+    for w in words {
+        total = add(total, u64::from_ne_bytes(*w));
     }
-    acc
+    if !tail.is_empty() {
+        // Zero padding is the same as the missing low byte of a last word.
+        let mut last = [0u8; 8];
+        last[..tail.len()].copy_from_slice(tail);
+        total = add(total, u64::from_ne_bytes(last));
+    }
+    // 64 -> 32 -> 16 bits, keeping carries.
+    let wide = (total & 0xFFFF_FFFF) + (total >> 32);
+    let wide = (wide & 0xFFFF_FFFF) + (wide >> 32);
+    let mut folded = (wide & 0xFFFF) + (wide >> 16);
+    folded = (folded & 0xFFFF) + (folded >> 16);
+    let words16 = if cfg!(target_endian = "little") { (folded as u16).swap_bytes() } else { folded as u16 };
+    let both = acc as u64 + words16 as u64;
+    ((both & 0xFFFF_FFFF) + (both >> 32)) as u32
 }
 
 /// Folds a running sum into the final 16-bit checksum.
@@ -210,4 +238,47 @@ pub fn pseudo_header(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, len: usize) -> 
 /// Checksum of a transport segment including its pseudo header.
 pub fn transport_checksum(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, segment: &[u8]) -> u16 {
     fold(sum(pseudo_header(src, dst, protocol, segment.len()), segment))
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use std::vec;
+    use std::vec::Vec;
+
+    /// The straightforward 16-bit word loop the fast `sum` replaced.
+    fn sum_reference(mut acc: u32, data: &[u8]) -> u32 {
+        let (words, rest) = data.as_chunks::<2>();
+        for c in words {
+            acc += u16::from_be_bytes([c[0], c[1]]) as u32;
+            if acc > 0xFFFF_0000 {
+                acc = (acc & 0xFFFF) + (acc >> 16);
+            }
+        }
+        if let [last] = rest {
+            acc += (*last as u32) << 8;
+        }
+        acc
+    }
+
+    #[test]
+    fn fast_sum_matches_the_word_loop() {
+        // Every length around the 8- and 32-byte block edges, several
+        // starting sums, and data that carries a lot (0xFF bytes).
+        let mut seed = 0x1234_5678u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 24) as u8
+        };
+        for len in (0..140).chain([255, 256, 1499, 1500, 1501, 4096, 65535]) {
+            let random: Vec<u8> = (0..len).map(|_| next()).collect();
+            let ones = vec![0xFFu8; len];
+            for data in [&random, &ones] {
+                for acc in [0u32, 1, 0xFFFF, 0x1_2345, 0xFFFE_0000] {
+                    assert_eq!(fold(sum(acc, data)), fold(sum_reference(acc, data)), "len {len} acc {acc:#x}");
+                }
+            }
+        }
+    }
 }
