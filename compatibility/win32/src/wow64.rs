@@ -24,11 +24,21 @@
 //! before `iretq` into the guest sets it to the TEB, and `bridge_dispatch`
 //! clears it before calling any Rust or Win32 implementation (which may use
 //! `os_std`'s FS-based TLS).
+//!
+//! Each thread that runs 32-bit code has a [`Ctx`], found by the gate at
+//! TEB64 offset 0x100 (`WOW32Reserved` on Windows) through `gs`. The gate
+//! keeps the per-call state (the caller's ESP) on its own 64-bit frame and
+//! builds that frame below `Ctx::stack_top`, so the two directions nest:
+//! a host function may call back into 32-bit code ([`call32`]: window
+//! procedures, thread start routines), and that code may call imports
+//! again. A callback returns through a 32-bit stub that far-jumps to
+//! `osyx_wow64_callback_return`, which restores the 64-bit stack saved in
+//! `Ctx::landing_rsp`.
 
 use crate::mem::{self, Prot, PAGE};
 use alloc::vec::Vec;
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, Ordering};
 use osyx_abi::wow64::{ENTRY_RFLAGS, USER_CS, USER_CS32, USER_DS};
 
 // The ABI constants and the literals in the assembly below must not drift.
@@ -38,8 +48,10 @@ const ARENA_BASE: u32 = 0x2000_0000;
 const ARENA_SIZE: usize = 4 << 20; // stubs, TEB, PEB, guard and a 1 MiB stack
 const STUB_PAGE: u32 = ARENA_BASE;
 const STUB_SIZE: u32 = 12;
+/// The callback return stub: the last 16 bytes of the stub page.
+const RET_STUB: u32 = STUB_PAGE + PAGE as u32 - 16;
 /// Stubs that fit in one page (SteamSetup needs 166 imports).
-const MAX_IMPORTS: usize = PAGE / STUB_SIZE as usize;
+const MAX_IMPORTS: usize = (PAGE - 16) / STUB_SIZE as usize;
 const TEB32: u32 = ARENA_BASE + PAGE as u32;
 const PEB32: u32 = TEB32 + PAGE as u32;
 const GUARD32: u32 = PEB32 + PAGE as u32;
@@ -57,6 +69,12 @@ const TEB_THREAD_ID: u32 = 0x24;
 const TEB_PEB: u32 = 0x30;
 
 const BRIDGE_STACK_SIZE: usize = 64 * 1024;
+/// 64-bit stack of each additional 32-bit thread's gate and host code.
+const THREAD_HOST_STACK: usize = 256 * 1024;
+/// 32-bit stack of an additional thread.
+const THREAD_STACK32: usize = 1 << 20;
+/// TEB64 offset of the thread's [`Ctx`].
+const TEB64_CTX: u64 = 0x100;
 const MAX_ARG_SLOTS: usize = 16;
 
 /// How one 32-bit stack slot becomes a 64-bit Win64 argument.
@@ -115,16 +133,38 @@ struct Entry {
 /// The bridge whose stubs are live; set once, just before `iretq`.
 static ACTIVE: AtomicPtr<Bridge> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Where the gate was entered from: the 32-bit RSP with the return address
-/// on top. Written and read by the gate; dispatch does not touch it.
-static SAVED_RSP: AtomicU64 = AtomicU64::new(0);
-/// Stack bytes the gate must remove before returning (stdcall arguments).
-static RESULT_CLEANUP: AtomicU32 = AtomicU32::new(0);
-/// High 32 bits of an I64 result, for EDX.
-static RESULT_HIGH: AtomicU32 = AtomicU32::new(0);
+/// Per-thread bridge state; the gate and the callback landing use the
+/// offsets in the comments, keep them in sync with the assembly.
+#[repr(C)]
+pub(crate) struct Ctx {
+    /// 0: the 32-bit stack pointer of the innermost gate entry; a callback
+    /// builds its frame below it.
+    esp: u64,
+    /// 8: EDX for an I64 result.
+    result_high: u32,
+    /// 12: stdcall bytes the gate removes.
+    cleanup: u32,
+    /// 16: where the next gate entry puts its 64-bit frame.
+    stack_top: u64,
+    /// 24: the thread's TEB32 (its FS32 base).
+    teb32: u64,
+    /// 32: RSP that `osyx_wow64_callback_return` restores.
+    landing_rsp: u64,
+}
 
-/// The dedicated 64-bit stack the gate switches to. It must be writable
-/// and is never used by Rust; the gate resets RSP to its top on each call.
+const _: () = assert!(core::mem::offset_of!(Ctx, stack_top) == 16 && core::mem::offset_of!(Ctx, landing_rsp) == 32);
+
+/// The calling thread's [`Ctx`] (null when it never ran 32-bit code).
+fn ctx() -> *mut Ctx {
+    let teb = crate::teb::current();
+    if teb == 0 {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: TEB_SIZE bytes; the slot holds 0 or a Ctx of this thread.
+    unsafe { crate::teb::get::<u64>(teb, TEB64_CTX as usize) as *mut Ctx }
+}
+
+/// The main thread's 64-bit gate stack (other threads allocate theirs).
 #[repr(align(16))]
 #[allow(dead_code)] // the bytes are touched only by the assembly gate
 struct BridgeStack([u8; BRIDGE_STACK_SIZE]);
@@ -141,25 +181,32 @@ osyx_wow64_gate:
     // usable 64-bit pointer (the arena is below 4 GiB).
     mov esp, esp
     cld                             // Rust and the Win64 ABI require DF = 0
-    mov [rip + {saved_rsp}], rsp
-    mov ecx, eax                    // idx (Win64 argument 1)
-    lea rdx, [rsp + 4]              // first 32-bit stack argument
-    lea rsp, [rip + {bridge_stack}]
-    add rsp, {stack_size}
+    mov r10, rsp                    // rsp32
+    mov r11, gs:[0x30]              // TEB64
+    mov r11, [r11 + {teb64_ctx}]    // Ctx
+    mov rsp, [r11 + 16]             // Ctx::stack_top
     and rsp, -16
+    push qword ptr [r11]            // the enclosing entry's Ctx::esp
+    push r10
+    mov [r11], r10                  // callbacks build below this call
+    mov ecx, eax                    // idx (Win64 argument 1)
+    lea rdx, [r10 + 4]              // first 32-bit stack argument
     sub rsp, 32                     // Win64 shadow space
     call {dispatch}
-    // dispatch returned with EAX = low result; it stored EDX and the
-    // stdcall cleanup in memory. An IRET from 64-bit mode into a
+    add rsp, 32
+    // dispatch returned with EAX = low result and stored EDX and the
+    // stdcall cleanup in the Ctx. An IRET from 64-bit mode into a
     // compatibility segment reloads SS:RSP from the frame even at the same
     // privilege, so the frame has five slots and RSP is the value the
     // caller resumes with.
-    mov edx, [rip + {result_high}]
-    mov ecx, [rip + {saved_rsp}]
-    mov r8d, [rip + {result_cleanup}]
-    lea rcx, [rcx + r8 + 4]         // past the return address and arguments
-    mov r9, [rip + {saved_rsp}]
-    mov r9d, [r9]                   // RIP: the return address on the 32-bit stack
+    pop r10                         // rsp32 of this call
+    mov r11, gs:[0x30]
+    mov r11, [r11 + {teb64_ctx}]
+    pop qword ptr [r11]             // restore the enclosing Ctx::esp
+    mov edx, [r11 + 8]
+    mov r8d, [r11 + 12]
+    lea rcx, [r10 + r8 + 4]         // past the return address and arguments
+    mov r9d, [r10]                  // RIP: the return address on the 32-bit stack
     lea rsp, [rcx - 40]             // frame below the resume stack pointer
     push 0x1B                       // SS: USER_DS
     push rcx                        // RSP after the return
@@ -173,6 +220,72 @@ osyx_wow64_gate:
     mov ds, cx
     mov es, cx
     iretq
+
+    // osyx_wow64_call32(target: u32, args: *const u32, n: u32, ctx: *mut Ctx) -> u32
+    //
+    // SysV entry. Pushes the stdcall arguments and the return stub below
+    // Ctx::esp and enters `target` in compatibility mode; the callee's
+    // `ret` reaches the stub, whose far jump lands in
+    // osyx_wow64_callback_return with the result in EAX.
+    .balign 16
+    .global osyx_wow64_call32
+osyx_wow64_call32:
+    push rbp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbx, rcx                    // Ctx
+    push qword ptr [rbx + 16]       // enclosing Ctx::stack_top
+    push qword ptr [rbx + 32]       // enclosing Ctx::landing_rsp
+    mov [rbx + 32], rsp
+    lea rax, [rsp - 64]
+    mov [rbx + 16], rax             // gates the callee enters go below
+    mov eax, [rbx]                  // Ctx::esp
+    and eax, -4
+    mov r8d, edx                    // n
+    lea r9, [r8 * 4 + 4]
+    sub rax, r9                     // the callee's ESP: return address, then arguments
+    xor r10d, r10d
+2:
+    cmp r10d, r8d
+    jae 3f
+    mov r11d, [rsi + r10 * 4]
+    mov [rax + r10 * 4 + 4], r11d
+    inc r10d
+    jmp 2b
+3:
+    mov dword ptr [rax], {ret_stub}
+    push 0x1B                       // SS
+    push rax                        // RSP
+    push 0x202                      // RFLAGS
+    push 0x3B                       // CS: compatibility mode
+    mov edi, edi
+    push rdi                        // RIP: the callback
+    mov ecx, 0x1B
+    mov ds, cx
+    mov es, cx
+    iretq
+
+    .balign 16
+    .global osyx_wow64_callback_return
+osyx_wow64_callback_return:
+    // From the return stub: EAX = result, all else undefined.
+    cld
+    mov r11, gs:[0x30]
+    mov r11, [r11 + {teb64_ctx}]
+    mov rsp, [r11 + 32]
+    pop qword ptr [r11 + 32]
+    pop qword ptr [r11 + 16]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    mov eax, eax
+    ret
 
     .balign 16
     .global osyx_wow64_enter32
@@ -260,12 +373,9 @@ osyx_win64_invoke:
     pop rbp
     ret
     "#,
-    saved_rsp = sym SAVED_RSP,
-    bridge_stack = sym BRIDGE_STACK,
-    stack_size = const BRIDGE_STACK_SIZE,
+    teb64_ctx = const TEB64_CTX,
+    ret_stub = const RET_STUB,
     dispatch = sym bridge_dispatch,
-    result_high = sym RESULT_HIGH,
-    result_cleanup = sym RESULT_CLEANUP,
 );
 
 extern "C" {
@@ -275,6 +385,10 @@ extern "C" {
     fn osyx_wow64_enter32(entry: u32, stack_top: u32) -> !;
     /// Calls a dynamic Win64 function with `n` already-widened arguments.
     fn osyx_win64_invoke(host: u64, args: *const u64, n: u32) -> u64;
+    /// Calls a 32-bit stdcall function; returns its EAX.
+    fn osyx_wow64_call32(target: u32, args: *const u32, n: u32, ctx: *mut Ctx) -> u32;
+    /// The 64-bit landing of the callback return stub.
+    fn osyx_wow64_callback_return();
 }
 
 /// The 32-bit arena and the import dispatcher for one process.
@@ -307,6 +421,18 @@ impl Bridge {
             poke32(TEB32 + TEB_PEB, PEB32);
         }
 
+        // The callback return stub: jmp far USER_CS:osyx_wow64_callback_return.
+        let landing = osyx_wow64_callback_return as *const () as usize;
+        assert!(landing != 0 && landing < 1usize << 32, "wow64: callback landing is not below 4 GiB");
+        // SAFETY: the stub page is writable until `enter` protects it; the
+        // last 16 bytes are reserved for this stub (MAX_IMPORTS).
+        unsafe {
+            let p = RET_STUB as *mut u8;
+            *p = 0xEA;
+            core::ptr::write_unaligned(p.add(1).cast::<u32>(), landing as u32);
+            core::ptr::write_unaligned(p.add(5).cast::<u16>(), USER_CS);
+        }
+
         // OSyx cannot map a page with no access; a read-only page is the
         // guard: a stack overflow writing into it faults.
         mem::protect(GUARD32 as u64, PAGE, Prot::ReadOnly)
@@ -325,6 +451,7 @@ impl Bridge {
     /// implementation is at `host`, or `None` when no signature is known.
     pub fn import(&mut self, symbol: &str, host: u64) -> Option<u32> {
         let signature = SIGNATURES.iter().find(|s| s.name == symbol)?;
+        let host = host_override(symbol).unwrap_or(host);
         assert!(signature.args.len() <= MAX_ARG_SLOTS, "wow64: import signature has too many arguments");
         assert!(self.entries.len() < MAX_IMPORTS, "wow64: too many imports for the stub page");
         let gate = osyx_wow64_gate as *const () as usize;
@@ -365,6 +492,9 @@ impl Bridge {
             os_std::process::exit(126);
         }
         ACTIVE.store(self as *mut Bridge, Ordering::Relaxed);
+        // The main thread's Ctx: the static gate stack and the arena TEB32.
+        let host_top = core::ptr::addr_of_mut!(BRIDGE_STACK) as u64 + BRIDGE_STACK_SIZE as u64;
+        install_ctx(self.stack_top as u64, host_top, self.teb as u64);
         if crate::VERBOSE.load(Ordering::Relaxed) {
             os_std::eprintln!("winrun: wow64 enter {entry:#x}, rsp {:#x}, teb {:#x}", self.stack_top, self.teb);
         }
@@ -392,9 +522,11 @@ extern "win64" fn bridge_dispatch(index: u32, args: *const u32) -> u64 {
         os_std::process::exit(0xC000_0005u32 as i32);
     }
     // SAFETY: `ACTIVE` points at the Bridge whose `enter` built these
-    // stubs; it lives until the 32-bit program ends.
+    // stubs; it lives until the 32-bit program ends. The gate found this
+    // thread's Ctx through the same TEB64 slot.
     let bridge = unsafe { &*bridge };
-    let teb = bridge.teb;
+    let ctx = unsafe { &mut *ctx() };
+    let teb = ctx.teb32;
 
     // Rust (os_std) uses FS for TLS: restore the 64-bit base before any
     // implementation or allocator code runs.
@@ -404,9 +536,98 @@ extern "win64" fn bridge_dispatch(index: u32, args: *const u32) -> u64 {
     // IRETQ frame the gate builds).
     let _ = os_sys::set_fs32_base(teb as usize);
 
-    RESULT_CLEANUP.store(cleanup, Ordering::Relaxed);
-    RESULT_HIGH.store(high, Ordering::Relaxed);
+    ctx.cleanup = cleanup;
+    ctx.result_high = high;
     low
+}
+
+/// Gives the calling thread (which has a TEB64) a [`Ctx`]: 32-bit code
+/// starts at `esp`, gate frames go below `host_top`, FS32 is `teb32`.
+fn install_ctx(esp: u64, host_top: u64, teb32: u64) {
+    let c = alloc::boxed::Box::leak(alloc::boxed::Box::new(Ctx {
+        esp,
+        result_high: 0,
+        cleanup: 0,
+        stack_top: host_top,
+        teb32,
+        landing_rsp: 0,
+    }));
+    // SAFETY: the current thread's TEB64 (TEB_SIZE bytes).
+    unsafe { crate::teb::put(crate::teb::current(), TEB64_CTX as usize, c as *mut Ctx as u64) };
+}
+
+/// Calls the 32-bit stdcall function `target` with `args` from 64-bit host
+/// code running for a 32-bit thread (inside an import, or a thread's
+/// start), and returns its EAX. The callee runs below the 32-bit stack
+/// position of the innermost import call and may call imports itself.
+pub(crate) fn call32(target: u32, args: &[u32]) -> u32 {
+    let c = ctx();
+    assert!(!c.is_null(), "wow64: call32 on a thread without 32-bit state");
+    // SAFETY: this thread's Ctx; FS32 is restored before the host resumes.
+    unsafe {
+        let teb = (*c).teb32;
+        if os_sys::set_fs32_base(teb as usize).is_err() {
+            os_std::process::exit(0xC000_0005u32 as i32);
+        }
+        let r = osyx_wow64_call32(target, args.as_ptr(), args.len() as u32, c);
+        let _ = os_sys::set_fs32_base(0);
+        r
+    }
+}
+
+// ---- threads -------------------------------------------------------------
+
+/// Start of a 32-bit thread, handed to the host CreateThread.
+struct ThreadStart {
+    start: u32,
+    param: u32,
+}
+
+/// CreateThread for 32-bit callers: `start` is a 32-bit
+/// `DWORD WINAPI start(LPVOID)`. The host thread gets its own 32-bit
+/// stack, TEB32 and 64-bit gate stack, then calls `start(param)`; its
+/// return value is the thread's exit code.
+#[allow(non_snake_case)] // the Win32 name
+extern "win64" fn CreateThread32(attributes: u64, stack: usize, start: u64, param: u64, flags: u32, tid: *mut u32) -> u64 {
+    let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ThreadStart { start: start as u32, param: param as u32 }));
+    let h = crate::kernel32::CreateThread(attributes, stack, thread32_main as *const () as u64, arg as u64, flags, tid);
+    if h == 0 {
+        // SAFETY: not handed to any thread.
+        drop(unsafe { alloc::boxed::Box::from_raw(arg) });
+    }
+    h
+}
+
+extern "win64" fn thread32_main(arg: u64) -> u32 {
+    // SAFETY: the Box made by CreateThread32 for this thread.
+    let ThreadStart { start, param } = *unsafe { alloc::boxed::Box::from_raw(arg as *mut ThreadStart) };
+    let stack32 = mem::alloc_pages(THREAD_STACK32 + PAGE, Prot::ReadWrite);
+    let host = mem::alloc_pages(THREAD_HOST_STACK, Prot::ReadWrite);
+    let (Some(stack32), Some(host)) = (stack32, host) else { return 0xC000_0017 }; // STATUS_NO_MEMORY
+    // The TEB32 is the stack mapping's first page (the low-memory window is
+    // below 2 GiB, so both are addressable by 32-bit code).
+    let teb = stack32 as u32;
+    let (limit, top) = (teb + PAGE as u32, teb + PAGE as u32 + THREAD_STACK32 as u32);
+    // SAFETY: the fresh, writable page at `teb`.
+    unsafe {
+        poke32(teb + TEB_EXCEPTION_LIST, u32::MAX);
+        poke32(teb + TEB_STACK_BASE, top);
+        poke32(teb + TEB_STACK_LIMIT, limit);
+        poke32(teb + TEB_SELF, teb);
+        poke32(teb + TEB_PROCESS_ID, os_std::process::id().unwrap_or(0) as u32);
+        poke32(teb + TEB_THREAD_ID, os_sys::gettid() as u32);
+        poke32(teb + TEB_PEB, PEB32);
+    }
+    install_ctx(top as u64, host + THREAD_HOST_STACK as u64, teb as u64);
+    call32(start, &[param])
+}
+
+/// Host functions that replace the built-in one for 32-bit callers.
+fn host_override(symbol: &str) -> Option<u64> {
+    match symbol {
+        "CreateThread" => Some(CreateThread32 as *const () as u64),
+        _ => None,
+    }
 }
 
 fn dispatch(bridge: &Bridge, index: u32, args: *const u32) -> (u64, u32, u32) {

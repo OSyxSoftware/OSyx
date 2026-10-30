@@ -649,6 +649,14 @@ fn with<R>(f: impl FnOnce(&mut Loader) -> R) -> R {
     f(g.as_mut().expect("loader initialised"))
 }
 
+/// Like [`with`], but `None` in a 32-bit process: `run_pe32` keeps its
+/// linker to itself, and there are no PE32+ modules whose TLS or
+/// DllMain a new thread would need.
+fn with_loaded<R>(f: impl FnOnce(&mut Loader) -> R) -> Option<R> {
+    let mut g = LOADER.lock().unwrap();
+    g.as_mut().map(f)
+}
+
 /// HMODULE of module `i`: its image base, or the built-in's handle page.
 fn module_handle(l: &Loader, i: usize) -> u64 {
     let m = &l.linker.modules[i];
@@ -741,7 +749,7 @@ const TLS_SLOTS: usize = 256;
 /// missing ones. Rebuilding the array would silently wipe every thread-local
 /// the program had stored (jemalloc's thread cache, NSS's, Gecko's).
 pub fn setup_thread_tls(teb_addr: u64) {
-    with(|l| {
+    with_loaded(|l| {
         if l.tls.is_empty() {
             return;
         }
@@ -777,7 +785,7 @@ pub fn setup_thread_tls(teb_addr: u64) {
 /// prologue there probes `[gs:0x10]`/`[gs:0x08]` and a mismatch faults at the
 /// stack limit instead of growing the stack.
 pub fn notify_threads(reason: u32) {
-    let list: Vec<(u64, u64, Vec<u64>)> = with(|l| {
+    let list: Vec<(u64, u64, Vec<u64>)> = with_loaded(|l| {
         (0..l.linker.modules.len())
             .filter(|&i| l.state.get(i).is_some_and(|s| s.attached))
             .filter_map(|i| {
@@ -790,7 +798,8 @@ pub fn notify_threads(reason: u32) {
                 }
             })
             .collect()
-    });
+    })
+    .unwrap_or_default();
     for (base, entry, cbs) in list {
         for cb in cbs {
             // SAFETY: as in `deliver_attach`.

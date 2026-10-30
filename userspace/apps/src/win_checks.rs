@@ -42,6 +42,9 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("PE32 32-bit program: i386 code runs and exits 7", || run("hello32.exe", &[]) == Some(7));
     // 32-bit calls through the bridge signatures; exit code = failures.
     t.check("PE32 32-bit program: kernel32, INI files and registry through the bridge", || run("api32.exe", &[]) == Some(0));
+    t.check("PE32 32-bit program: CreateThread, 32-bit start routines and concurrent bridge calls", || {
+        run("thread32.exe", &[]) == Some(0)
+    });
     t.check("Windows file I/O on OSyx file systems (target C)", || run("fileio.exe", &[]) == Some(0));
     t.check("Windows volume, device and adapter inventory", || run("sysadmin.exe", &[]) == Some(0));
     t.check("Windows file version resources and queries", || run("version.exe", &[]) == Some(0));
