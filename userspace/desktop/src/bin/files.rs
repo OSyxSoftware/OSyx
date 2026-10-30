@@ -48,14 +48,23 @@ const D_INFO: u32 = 4;
 /// Home, Desktop, Trash and Root come before the mounted volumes.
 const BUILTIN_PLACES: usize = 4;
 
-/// Mounted volumes other than `/` for the side bar.
+/// Mounted volumes other than `/` for the side bar. USB sticks and disks
+/// the media manager mounted show their volume label.
 fn volume_places() -> Vec<(String, String, Icon)> {
     let Ok(mounts) = system::mounts() else { return Vec::new() };
+    let media = osyx_abi::media::parse(&fs::read_to_string(osyx_abi::media::STATUS_PATH).unwrap_or_default());
     mounts
         .iter()
         .map(|m| (system::field_str(&m.path), system::field_str(&m.fstype)))
         .filter(|(path, _)| *path != "/")
-        .map(|(path, fstype)| (format!("{path} ({fstype})"), String::from(path), Icon::Drive))
+        .map(|(path, fstype)| {
+            let volume = media.iter().flat_map(|d| d.volumes.iter()).find(|v| v.mount.as_deref() == Some(&path[..]));
+            let label = match volume {
+                Some(v) => format!("{} ({})", v.name(), osyx_abi::media::fs_name(&v.fstype)),
+                None => format!("{path} ({fstype})"),
+            };
+            (label, String::from(path), Icon::Drive)
+        })
         .collect()
 }
 

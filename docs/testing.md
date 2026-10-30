@@ -28,6 +28,29 @@ from MSYS2, and e2fsprogs 1.47 / sgdisk in WSL Ubuntu 24.04 (`mke2fs -d`
 for the root image and test fixtures, `e2fsck -fn`, `debugfs`, `dumpe2fs`;
 partitions are addressed inside the image file with `?offset=`).
 
+## USB media
+
+`scripts/usb-storage-test.ps1` boots the kernel with a stick on the xHCI
+controller (label PENDRIVE, MBR partition, once FAT32 and once exFAT, images
+made by `mkfat32`/`mkexfat` and `scripts/mkusbmbr.py`) and the guest program
+`init tests media` (`userspace/apps/src/media_checks.rs`): automount at
+`/media/PENDRIVE`, read and write, eject refused while a file is open, eject,
+unplug and replug through QMP (`device_del`/`device_add`), the data written
+before is still there, and the stick pulled out while a file is open (the
+kernel must survive and clean up). `scripts/desktop-test.ps1` repeats the
+plug, list, Open, Eject and pull-out through the task bar. Host tests:
+`osyx-exfat` (formatting, files, directories, renames, no-space, contiguous
+files, dirty flag), `osyx-part` (MBR), `osyx-abi` (`media`, `battery`).
+
+## Battery
+
+`osyx-battery` (host tests): the mock machine speaks the EC protocol with
+failures and time-outs; hand-assembled AML tables (batteries, adapter,
+`_BIX`, EC-backed fields, firmware arithmetic, `Store` into `Index`) run in
+the real interpreter. QEMU has no battery: `init.args=battery-demo` publishes
+a charging and then a discharging state for the task bar. The EC and the
+firmware of a real ThinkPad are not covered.
+
 ## Suite (`scripts/test.ps1`)
 
 | Test | Checks |
