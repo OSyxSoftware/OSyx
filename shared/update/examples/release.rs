@@ -35,8 +35,9 @@ fn octal(field: &[u8]) -> Result<u64, String> {
     u64::from_str_radix(s, 8).map_err(|_| format!("bad octal field {s:?}"))
 }
 
-fn text(field: &[u8]) -> String {
-    String::from_utf8_lossy(&field[..field.iter().position(|&b| b == 0).unwrap_or(field.len())]).into_owned()
+fn text(field: &[u8]) -> Result<&str, String> {
+    std::str::from_utf8(&field[..field.iter().position(|&b| b == 0).unwrap_or(field.len())])
+        .map_err(|_| String::from("archive path is not UTF-8"))
 }
 
 /// Regular files of a ustar archive: (path without "./", mode, data).
@@ -53,9 +54,9 @@ fn tar_files(data: &[u8]) -> Result<Vec<(String, u32, Vec<u8>)>, String> {
         if checksum != actual {
             return Err(String::from("archive header checksum mismatch"));
         }
-        let mut name = text(&h[0..100]);
+        let mut name = text(&h[0..100])?.to_string();
         if &h[257..262] == b"ustar" {
-            let prefix = text(&h[345..500]);
+            let prefix = text(&h[345..500])?;
             if !prefix.is_empty() {
                 name = format!("{prefix}/{name}");
             }
@@ -214,6 +215,14 @@ mod tests {
         set_checksum(&mut archive);
         assert!(tar_files(&archive).is_ok());
         archive[0] ^= 1;
+        assert!(tar_files(&archive).is_err());
+    }
+
+    #[test]
+    fn rejects_non_utf8_path() {
+        let mut archive = vec![0; 512];
+        archive[0] = 0xff;
+        set_checksum(&mut archive);
         assert!(tar_files(&archive).is_err());
     }
 
