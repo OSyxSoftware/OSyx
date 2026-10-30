@@ -37,6 +37,17 @@ pub const MANIFEST: &str = "manifest.txt";
 pub const SIGNATURE: &str = "manifest.sig";
 pub const PAYLOAD: &str = "payload.bin";
 
+/// Preserve custom update servers while following the repository transfer.
+pub fn update_url(url: &str) -> &str {
+    let url = url.trim_end_matches('/');
+    if url == "https://github.com/v3nn7/OSyx/releases/latest/download" {
+        "https://github.com/OSyxSoftware/OSyx/releases/latest/download"
+    } else {
+        url
+    }
+}
+
+
 /// Public half of the release signing key (hex), built into every system.
 /// The secret half stays with whoever publishes releases, outside the
 /// repository (scripts/release.ps1).
@@ -257,5 +268,16 @@ mod tests {
         assert!(!newer("0.1.0", "0.2.0"));
         assert!(!newer("x", "0.1.0"));
         assert_eq!(release_version("OSyx 0.1.0\n"), Some("0.1.0"));
+    }
+}
+
+#[cfg(test)]
+mod update_url_tests {
+    #[test]
+    fn migrates_only_the_old_official_url() {
+        let new = "https://github.com/OSyxSoftware/OSyx/releases/latest/download";
+        assert_eq!(super::update_url("https://github.com/v3nn7/OSyx/releases/latest/download/"), new);
+        assert_eq!(super::update_url(new), new);
+        assert_eq!(super::update_url("https://example.org/releases/"), "https://example.org/releases");
     }
 }

@@ -4,7 +4,7 @@
 
 **A new x86-64 operating system, written from scratch in Rust.**
 
-[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/v3nn7/OSyx?utm_source=badge)
+[![CI](https://github.com/OSyxSoftware/OSyx/actions/workflows/ci.yml/badge.svg)](https://github.com/OSyxSoftware/OSyx/actions/workflows/ci.yml)
 
 Its own UEFI boot manager, kernel, file systems, network stack, compositor
 and desktop, and a compatibility layer that runs Windows PE32+ programs.
@@ -53,7 +53,7 @@ in QEMU with OVMF in the automated tests.
 ## Try it
 
 1. Download `osyx-<version>-live-usb.img` from
-   [Releases](https://github.com/v3nn7/OSyx/releases) and write it to a USB
+   [Releases](https://github.com/OSyxSoftware/OSyx/releases) and write it to a USB
    stick (Rufus, balenaEtcher or `dd`; this erases the stick).
 2. Boot the computer from the stick (x86-64 UEFI, Secure Boot off, at least 512 MiB of RAM).
    The live system runs entirely in RAM and touches no disk.
@@ -64,7 +64,7 @@ in QEMU with OVMF in the automated tests.
 ## Updates
 
 Installed systems keep themselves up to date. `/bin/osyx-update` checks the
-latest [release](https://github.com/v3nn7/OSyx/releases) once a day,
+latest [release](https://github.com/OSyxSoftware/OSyx/releases) once a day,
 verifies its Ed25519 signature against the key built into the system and
 installs the new programs, kernel and boot loader; your settings and files
 in `/etc`, `/home` and `/var` stay as they are. A notification asks for a
@@ -124,3 +124,7 @@ Third-party parts keep their own licences: the OpenBSD and NetBSD sources in
 `drivers/bsd` (ISC and BSD, notices in each file), Intel device firmware in
 `drivers/bsd/firmware` (`LICENCE.iwlwifi_firmware`, `LICENCE.ibt_firmware`),
 the bundled fonts (SIL OFL) and the Rust crates from crates.io.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development, testing and pull requests. Report security issues as described in [SECURITY.md](SECURITY.md).

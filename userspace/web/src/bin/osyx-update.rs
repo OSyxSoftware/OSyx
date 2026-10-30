@@ -217,7 +217,7 @@ fn run_once(log: &mut Log, check_only: bool) -> Result<&'static str, String> {
         log.line(&format!("updates are not configured (no url= in {CONF})"));
         return Ok("up-to-date");
     };
-    let url = url.trim_end_matches('/');
+    let url = osyx_update::update_url(&url);
     let key = osyx_update::public_key().ok_or("this system has no release key built in")?;
     let current_text = fs::read_to_string(RELEASE).unwrap_or_default();
     let current = osyx_update::release_version(&current_text).unwrap_or("0");

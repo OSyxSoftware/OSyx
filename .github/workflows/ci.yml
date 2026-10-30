@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    name: Portable host tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust targets
+        run: rustup show
+      - name: Test networking, UI, compositor and shared crates
+        run: >-
+          cargo test --locked
+          -p osyx-abi -p osyx-bootinfo -p osyx-crypto -p osyx-input
+          -p osyx-net -p osyx-update -p prism-proto -p prism-core -p osyx-ui
+          -p osyx-gfx -p osyx-elf -p osyx-pe -p osyx-pe-loader
+
+  freestanding:
+    name: Check OS targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install compiler for BSD drivers
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Install Rust targets
+        run: rustup show
+      - name: Check UEFI loader
+        run: cargo check --locked -p osyx-uefi-loader --target x86_64-unknown-uefi
+      - name: Check kernel and BSD drivers
+        run: cargo check --locked -p osyx-kernel --target x86_64-unknown-none
+      - name: Check userspace
+        env:
+          RUSTFLAGS: '-C relocation-model=static -C code-model=small --cfg polyval_force_soft --cfg poly1305_force_soft --cfg aes_force_soft --cfg chacha20_force_soft --cfg curve25519_dalek_backend="serial"'
+        run: >-
+          cargo check --locked --target x86_64-unknown-none
+          -p osyx-apps -p osyx-desktop -p osyx-nettools -p osyx-win32 -p osyx-web
