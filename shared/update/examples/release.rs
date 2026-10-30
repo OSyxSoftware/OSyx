@@ -22,7 +22,7 @@ const SETUP_ESP: &str = "system/share/osyx-setup/esp/";
 const SETUP_DIR: &str = "system/share/osyx-setup/";
 
 fn octal(field: &[u8]) -> Result<u64, String> {
-    let s: String = field.iter().take_while(|&&b| b != 0 && b != b' ').map(|&b| b as char).collect();
+    let s: String = field.iter().skip_while(|&&b| b == b' ').take_while(|&&b| b != 0 && b != b' ').map(|&b| b as char).collect();
     let s = s.trim();
     if s.is_empty() {
         return Ok(0);
@@ -42,6 +42,11 @@ fn tar_files(data: &[u8]) -> Result<Vec<(String, u32, Vec<u8>)>, String> {
         let h = &data[at..at + 512];
         if h.iter().all(|&b| b == 0) {
             break;
+        }
+        let checksum = octal(&h[148..156])?;
+        let actual: u64 = h.iter().enumerate().map(|(i, &b)| if (148..156).contains(&i) { 32 } else { b as u64 }).sum();
+        if checksum != actual {
+            return Err(String::from("archive header checksum mismatch"));
         }
         let mut name = text(&h[0..100]);
         if &h[257..262] == b"ustar" {
@@ -171,14 +176,31 @@ fn main() {
 mod tests {
     use super::*;
 
+    fn set_checksum(header: &mut [u8]) {
+        header[148..156].fill(b' ');
+        let sum: u64 = header[..512].iter().map(|&b| b as u64).sum();
+        header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    }
+
     #[test]
     fn rejects_truncated_header_and_padding() {
         assert!(tar_files(&[1; 100]).is_err());
         let mut archive = vec![0; 513];
         archive[..4].copy_from_slice(b"test");
         archive[124..126].copy_from_slice(b"1\0");
+        set_checksum(&mut archive);
         assert!(tar_files(&archive).is_err());
         archive.resize(1024, 0);
         assert_eq!(tar_files(&archive).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rejects_corrupted_header() {
+        let mut archive = vec![0; 512];
+        archive[..4].copy_from_slice(b"test");
+        set_checksum(&mut archive);
+        assert!(tar_files(&archive).is_ok());
+        archive[0] ^= 1;
+        assert!(tar_files(&archive).is_err());
     }
 }
