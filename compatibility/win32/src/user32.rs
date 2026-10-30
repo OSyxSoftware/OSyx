@@ -4625,7 +4625,15 @@ pub(crate) fn register_format(name: &str) -> u32 {
 
 /// The system clipboard in this process's format ids.
 pub(crate) fn clipboard_contents() -> Vec<proto::ClipEntry> {
-    with(|g| g.clipboard.clone())
+    with(|g| {
+        let mut entries = g.clipboard.clone();
+        if !entries.iter().any(|e| e.format == 15) {
+            if let Some(data) = proto::clipboard_hdrop(&entries) {
+                entries.push(proto::ClipEntry { format: 15, name: None, data });
+            }
+        }
+        entries
+    })
 }
 
 /// Replaces the system clipboard (data rendered from an OLE data object).
@@ -4702,7 +4710,8 @@ extern "win64" fn GetClipboardData(format: u32) -> u64 {
             return h;
         }
         let entries: Vec<_> = g.clipboard_own.iter().chain(g.clipboard.iter()).cloned().collect();
-        let data = proto::clipboard_text_format(&entries, format);
+        let data = proto::clipboard_text_format(&entries, format)
+            .or_else(|| (format == 15).then(|| proto::clipboard_hdrop(&entries)).flatten());
         let Some(data) = data else { return 0 };
         let Some(h) = crate::kernel32::heap_alloc(data.len().max(1), true) else {
             return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
@@ -4718,7 +4727,8 @@ extern "win64" fn GetClipboardData(format: u32) -> u64 {
 extern "win64" fn IsClipboardFormatAvailable(format: u32) -> Bool {
     with(|g| {
         let entries: Vec<_> = g.clipboard_own.iter().chain(g.clipboard.iter()).cloned().collect();
-        proto::clipboard_text_format(&entries, format).is_some() as Bool
+        (proto::clipboard_text_format(&entries, format).is_some()
+            || (format == 15 && proto::clipboard_hdrop(&entries).is_some())) as Bool
     })
 }
 
@@ -4735,8 +4745,9 @@ extern "win64" fn EnumClipboardFormats(next: u32) -> u32 {
             }
         }
         let entries: Vec<_> = g.clipboard_own.iter().chain(g.clipboard.iter()).cloned().collect();
-        for format in [1, proto::CLIP_UNICODE_TEXT] {
-            if !formats.contains(&format) && proto::clipboard_text_format(&entries, format).is_some() {
+        for format in [1, proto::CLIP_UNICODE_TEXT, 15] {
+            if !formats.contains(&format) && (proto::clipboard_text_format(&entries, format).is_some()
+                || (format == 15 && proto::clipboard_hdrop(&entries).is_some())) {
                 formats.push(format);
             }
         }

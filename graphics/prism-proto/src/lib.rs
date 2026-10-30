@@ -295,6 +295,26 @@ pub fn clipboard_files(entries: &[ClipEntry]) -> Option<(Vec<String>, bool)> {
     Some((paths, data[0] != 0))
 }
 
+/// Convert native file paths to a wide Windows CF_HDROP payload.
+pub fn clipboard_hdrop(entries: &[ClipEntry]) -> Option<Vec<u8>> {
+    let (paths, _) = clipboard_files(entries)?;
+    let mut data = alloc::vec![0u8; 20];
+    data[0..4].copy_from_slice(&20u32.to_le_bytes());
+    data[16..20].copy_from_slice(&1u32.to_le_bytes());
+    for path in paths {
+        for c in "C:".chars().chain(path.chars().map(|c| if c == '/' { '\\' } else { c })) {
+            let mut units = [0u16; 2];
+            for u in c.encode_utf16(&mut units) {
+                data.extend_from_slice(&u.to_le_bytes());
+            }
+        }
+        data.extend_from_slice(&[0, 0]);
+        if data.len() > MAX_CLIPBOARD_BYTES - 2 { return None; }
+    }
+    data.extend_from_slice(&[0, 0]);
+    Some(data)
+}
+
 /// Encode text as a NUL-terminated UTF-16LE clipboard entry.
 pub fn clipboard_text_entry(text: &str) -> ClipEntry {
     let mut data = Vec::new();
@@ -1183,6 +1203,11 @@ mod tests {
     fn file_clipboard_round_trips_and_rejects_bad_paths() {
         let paths = vec![String::from("/home/user/a\nb"), String::from("/tmp/ż")];
         let entry = clipboard_files_entry(&paths, true).unwrap();
+        let hdrop = clipboard_hdrop(&[entry.clone()]).unwrap();
+        assert_eq!(&hdrop[..4], &20u32.to_le_bytes());
+        assert_eq!(&hdrop[16..20], &1u32.to_le_bytes());
+        let units: Vec<u16> = hdrop[20..].chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        assert_eq!(units, "C:\\home\\user\\a\nb\0C:\\tmp\\ż\0\0".encode_utf16().collect::<Vec<_>>());
         assert_eq!(clipboard_files(&[entry.clone()]), Some((paths, true)));
         let mut broken = entry;
         broken.data.pop();
