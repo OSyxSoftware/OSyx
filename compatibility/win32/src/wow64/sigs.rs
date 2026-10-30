@@ -103,6 +103,8 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(IsWindowVisible, [Handle], U32),
     sig!(LoadCursorW, [Handle, Handle], U32),
     sig!(LoadImageW, [Handle, Handle, Uint, Int, Int, Uint], U32),
+    sig!(LoadBitmapW, [Handle, Ptr], Handle),
+    sig!(MessageBoxIndirectW, [Ptr], I32),
     sig!(LookupPrivilegeValueW, [Ptr, Ptr, Ptr], U32),
     sig!(MoveFileExW, [Ptr, Ptr, Uint], U32),
     sig!(MoveFileW, [Ptr, Ptr], U32),

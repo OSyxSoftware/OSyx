@@ -71,6 +71,10 @@ __declspec(dllimport) void __stdcall PostQuitMessage(int code);
 typedef struct { HANDLE icon; int index; DWORD attributes; WCHAR display[260], kind[80]; } SHFILEINFO32;
 _Static_assert(sizeof(SHFILEINFO32) == 692, "32-bit SHFILEINFOW");
 __declspec(dllimport) DWORD __stdcall SHGetFileInfoW(const WCHAR *path, DWORD attrs, SHFILEINFO32 *info, DWORD size, DWORD flags);
+typedef struct { DWORD size; HANDLE owner, instance; const WCHAR *text, *caption; DWORD style; const WCHAR *icon; DWORD context, callback, language; } MSGBOXPARAMS32;
+_Static_assert(sizeof(MSGBOXPARAMS32) == 40, "32-bit MSGBOXPARAMSW");
+__declspec(dllimport) int __stdcall MessageBoxIndirectW(const MSGBOXPARAMS32 *params);
+__declspec(dllimport) HANDLE __stdcall LoadBitmapW(HANDLE instance, const WCHAR *name);
 
 static long __stdcall test_wndproc(HANDLE hwnd, DWORD msg, DWORD w, long l) {
     return hwnd == (HANDLE)7 && msg == 8 && w == 9 && l == -10 ? -42 : 0;
@@ -158,6 +162,9 @@ void __stdcall start(void) {
     check("SHGetFileInfoW 32-bit layout", SHGetFileInfoW(L"C:\\test.txt", 0x80, &fileinfo.info, sizeof fileinfo.info,
           0x10 | 0x200 | 0x400) != 0 && wide_eq(fileinfo.info.display, "test.txt") &&
           wide_eq(fileinfo.info.kind, "Text Document") && fileinfo.guard == 0xdeadbeef);
+    MSGBOXPARAMS32 box = { 40, 0, 0, 0, 0, 0, 0, 0, 1, 0 };
+    check("MessageBoxIndirectW rejects unsupported callback", MessageBoxIndirectW(&box) == 0);
+    check("LoadBitmapW reports missing resource", LoadBitmapW(0, (const WCHAR *)1) == 0);
 
     check("lstrcmpiA ignores case", lstrcmpiA("Steam", "sTEAM") == 0 && lstrcmpiA("a", "b") < 0);
     check("MulDiv rounds and rejects /0", MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(1, 1, 0) == -1);

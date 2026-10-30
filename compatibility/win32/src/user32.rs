@@ -2914,6 +2914,10 @@ extern "win64" fn LoadImageW(inst: u64, name: u64, kind: u32, _w: i32, _h: i32, 
     fail(ERROR_RESOURCE_NAME_NOT_FOUND, 0)
 }
 
+extern "win64" fn LoadBitmapW(inst: u64, name: u64) -> u64 {
+    LoadImageW(inst, name, 0, 0, 0, 0)
+}
+
 extern "win64" fn LoadCursorW(inst: u64, id: u64) -> u64 {
     LoadCursorA(inst, id)
 }
@@ -3923,6 +3927,32 @@ extern "win64" fn MessageBoxW(owner: u64, text: *const u16, caption: *const u16,
     // SAFETY: as above.
     let (t, c) = unsafe { (path::wide_to_string(text), path::wide_to_string(caption)) };
     message_box(owner, t.unwrap_or_default(), c.unwrap_or_else(|| String::from("Error")), flags)
+}
+
+extern "win64" fn MessageBoxIndirectW(params: *const u8) -> i32 {
+    if params.is_null() { return fail(ERROR_INVALID_PARAMETER, 0); }
+    // SAFETY: MSGBOXPARAMSW is supplied by the caller; cbSize selects its ABI.
+    unsafe {
+        let addr = params as u64;
+        let size: u32 = teb::get(addr, 0);
+        if crate::wow64::is_active() {
+            if size < 40 { return fail(ERROR_INVALID_PARAMETER, 0); }
+            let owner = teb::get::<u32>(addr, 4) as u64;
+            let text = teb::get::<u32>(addr, 12) as *const u16;
+            let caption = teb::get::<u32>(addr, 16) as *const u16;
+            let flags = teb::get::<u32>(addr, 20);
+            if teb::get::<u32>(addr, 32) != 0 { return fail(ERROR_NOT_SUPPORTED, 0); }
+            MessageBoxW(owner, text, caption, flags)
+        } else {
+            if size < 80 { return fail(ERROR_INVALID_PARAMETER, 0); }
+            let owner = teb::get::<u64>(addr, 8);
+            let text = teb::get::<u64>(addr, 24) as *const u16;
+            let caption = teb::get::<u64>(addr, 32) as *const u16;
+            let flags = teb::get::<u32>(addr, 40);
+            if teb::get::<u64>(addr, 64) != 0 { return fail(ERROR_NOT_SUPPORTED, 0); }
+            MessageBoxW(owner, text, caption, flags)
+        }
+    }
 }
 
 // ---- window geometry, caret, queries, monitors ---------------------------------------------
@@ -5233,6 +5263,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetIconInfo,
         DestroyIcon,
         LoadImageW,
+        LoadBitmapW,
         OpenClipboard,
         CloseClipboard,
         EmptyClipboard,
@@ -5365,6 +5396,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         DrawTextW,
         MessageBoxA,
         MessageBoxW,
+        MessageBoxIndirectW,
     ]
     .into_iter()
     .chain([

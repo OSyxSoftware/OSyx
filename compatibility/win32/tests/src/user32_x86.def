@@ -9,3 +9,5 @@ EXPORTS
     PeekMessageW
     DispatchMessageW
     PostQuitMessage
+    MessageBoxIndirectW
+    LoadBitmapW
