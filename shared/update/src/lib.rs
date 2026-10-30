@@ -178,7 +178,7 @@ impl Manifest {
         }
         let version = version.ok_or("manifest without a version")?;
         let (payload_sha256, payload_size) = payload.ok_or("manifest without a payload")?;
-        if files.iter().map(|f| f.size).sum::<u64>() != payload_size {
+        if files.iter().try_fold(0u64, |sum, f| sum.checked_add(f.size)) != Some(payload_size) {
             return Err(String::from("the files do not add up to the payload size"));
         }
         Ok(Manifest { version, payload_size, payload_sha256, files })
@@ -246,6 +246,17 @@ mod tests {
         let evil = m.to_text().replace("bin/init", "etc/shadow");
         assert!(Manifest::parse(&evil).is_err());
         assert!(Manifest::parse("osyx-update 2\nversion 1\n").is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_overflowing_file_sizes() {
+        let m = Manifest {
+            version: "1.0".to_string(),
+            payload_size: 0,
+            payload_sha256: [0; 32],
+            files: vec![entry("bin/a", u64::MAX), entry("bin/b", 1)],
+        };
+        assert!(Manifest::parse(&m.to_text()).is_err());
     }
 
     #[test]
