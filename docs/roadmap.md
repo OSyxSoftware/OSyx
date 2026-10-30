@@ -97,8 +97,9 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
     runtime dependencies of larger applications; Windows 11 API-set research
     with REA (`research/windows11-apiset-and-forwarding.md`).
 13. **Storage**: ext4 htree insertion and deeper extent trees, page cache with
-    delayed writes, FAT timestamps (FAT files still report the FAT epoch),
-    interrupt-driven virtio (queues are polled).
+    delayed writes, interrupt-driven virtio (queues are polled). Done: FAT
+    entries are stamped with the wall clock on create and write, and `stat`
+    reports the stored time (2-second DOS resolution).
 14. **SMP**: finer-grained kernel locking (still one kernel entry lock and
     `TABLE` for mappings and page faults) and load balancing policies.
 15. **OSyx Std**: `RwLock`, `Once`/`OnceLock`, `mpsc`; then the genuine `std`
