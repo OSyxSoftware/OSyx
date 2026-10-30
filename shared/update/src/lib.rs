@@ -151,7 +151,7 @@ impl Manifest {
             match f.next() {
                 Some("version") => {
                     let v = f.next().ok_or_else(bad)?;
-                    if v.is_empty() || !v.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    if v.split('.').any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) || part.parse::<u64>().is_err()) {
                         return Err(bad());
                     }
                     version = Some(v.to_string());
@@ -272,6 +272,17 @@ mod tests {
         }
         let manifest = Manifest { version: "1.0".to_string(), payload_size: 2, payload_sha256: [0; 32], files: vec![entry("bin/a", 1), entry("bin/b.osyx-new", 1)] };
         assert!(Manifest::parse(&manifest.to_text()).is_ok());
+    }
+
+    #[test]
+    fn manifest_rejects_invalid_version_components() {
+        let manifest = Manifest { version: "1.2".to_string(), payload_size: 0, payload_sha256: [0; 32], files: vec![] };
+        assert!(Manifest::parse(&manifest.to_text()).is_ok());
+        for version in [".", ".1", "1.", "1..2", "1.18446744073709551616"] {
+            let mut malformed = manifest.clone();
+            malformed.version = version.to_string();
+            assert!(Manifest::parse(&malformed.to_text()).is_err(), "{version}");
+        }
     }
 
     #[test]
