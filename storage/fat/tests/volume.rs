@@ -362,7 +362,7 @@ fn rejects_nonempty_file_without_first_cluster() {
     let mut image = fs.unmount().unwrap();
     let root = (g.data_start + (g.root_cluster - 2) * g.sectors_per_cluster) as usize * 512;
     let entry = image[root..root + g.cluster_bytes() as usize]
-        .chunks_exact(32)
+        .as_chunks::<32>().0.iter()
         .position(|entry| &entry[..11] == b"BROKEN  BIN")
         .unwrap();
     let entry = root + entry * 32;
@@ -383,7 +383,7 @@ fn rejects_directory_without_first_cluster() {
     let mut image = fs.unmount().unwrap();
     let root = (g.data_start + (g.root_cluster - 2) * g.sectors_per_cluster) as usize * 512;
     let entry = image[root..root + g.cluster_bytes() as usize]
-        .chunks_exact(32)
+        .as_chunks::<32>().0.iter()
         .position(|entry| &entry[..11] == b"BROKEN     ")
         .unwrap();
     let entry = root + entry * 32;

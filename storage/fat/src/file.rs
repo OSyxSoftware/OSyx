@@ -18,30 +18,6 @@ pub struct FileRef {
     cursor_generation: u64,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{format, OpenOptions};
-    use alloc::vec;
-
-    #[test]
-    fn sequential_reads_keep_cursor_until_fat_changes() {
-        let mut image = vec![0; 64 * 1024 * 1024];
-        format(&mut image, "TEST", 1).unwrap();
-        let mut fs = FileSystem::mount(image).unwrap();
-        let mut file = fs.open("/file", OpenOptions { create: true, ..Default::default() }).unwrap();
-        fs.write(&mut file, 0, &vec![1; 1536]).unwrap();
-        fs.read(&mut file, 512, &mut [0]).unwrap();
-        let cursor = file.cursor;
-        fs.stat(&mut file).unwrap();
-        assert_eq!(file.cursor, cursor);
-        let mut other = fs.open("/other", OpenOptions { create: true, ..Default::default() }).unwrap();
-        fs.write(&mut other, 0, b"x").unwrap();
-        fs.stat(&mut file).unwrap();
-        assert_eq!(file.cursor, None);
-    }
-}
-
 impl FileRef {
     pub(crate) fn new(entry: Pos, first_cluster: u32, size: u32, is_dir: bool) -> FileRef {
         FileRef { entry, first_cluster, size, is_dir, cursor: None, cursor_generation: 0 }
@@ -293,5 +269,29 @@ impl<D: BlockDevice> FileSystem<D> {
         f.cursor = None;
         f.size = size as u32;
         self.update_entry(f.entry, f.first_cluster, f.size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{format, OpenOptions};
+    use alloc::vec;
+
+    #[test]
+    fn sequential_reads_keep_cursor_until_fat_changes() {
+        let mut image = vec![0; 64 * 1024 * 1024];
+        format(&mut image, "TEST", 1).unwrap();
+        let mut fs = FileSystem::mount(image).unwrap();
+        let mut file = fs.open("/file", OpenOptions { create: true, ..Default::default() }).unwrap();
+        fs.write(&mut file, 0, &vec![1; 1536]).unwrap();
+        fs.read(&mut file, 512, &mut [0]).unwrap();
+        let cursor = file.cursor;
+        fs.stat(&mut file).unwrap();
+        assert_eq!(file.cursor, cursor);
+        let mut other = fs.open("/other", OpenOptions { create: true, ..Default::default() }).unwrap();
+        fs.write(&mut other, 0, b"x").unwrap();
+        fs.stat(&mut file).unwrap();
+        assert_eq!(file.cursor, None);
     }
 }
