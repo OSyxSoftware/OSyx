@@ -47,6 +47,8 @@ pub const USER_HOME: &str = "/home/user";
 const PASSWORD_ROUNDS: u32 = 100_000;
 /// Copy buffer for file contents.
 const CHUNK: usize = 256 * 1024;
+const LOADER: &str = "EFI/BOOT/BOOTX64.EFI";
+const LOADER_TEMP: &str = "EFI/BOOT/OSYX.TMP";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -435,6 +437,11 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     CLOCK.store(config.time, Ordering::Relaxed);
     // Fail before touching the disk if the boot files are missing.
     let boot = source.boot_files().map_err(Error::Source)?;
+    if boot.iter().filter(|(p, _)| p.eq_ignore_ascii_case(LOADER)).count() != 1
+        || boot.iter().any(|(p, _)| p.eq_ignore_ascii_case(LOADER_TEMP) || (p.eq_ignore_ascii_case(LOADER) && p != LOADER))
+    {
+        return Err(Error::Source("boot files contain a reserved loader path".into()));
+    }
     for need in ["EFI/BOOT/BOOTX64.EFI", "EFI/OSYX/KERNEL.ELF"] {
         if !boot.iter().any(|(p, _)| p == need) {
             return Err(Error::Source(format!("{need} is missing")));
@@ -510,7 +517,13 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
         // The loader itself goes last: only a complete ESP is bootable.
         files.sort_by_key(|(p, _)| p == "EFI/BOOT/BOOTX64.EFI");
         for (path, data) in &files {
-            fat_write(&mut esp, path, data)?;
+            if path == LOADER {
+                fat_write(&mut esp, LOADER_TEMP, data)?;
+                esp.flush().map_err(|e| fat_err("flushing the boot loader", e))?;
+                esp.rename(LOADER_TEMP, LOADER).map_err(|e| fat_err("publishing the boot loader", e))?;
+            } else {
+                fat_write(&mut esp, path, data)?;
+            }
             expected_boot.push((path.clone(), data.len() as u64));
             progress.log(&format!("ESP: {path} ({} bytes)", data.len()));
         }
