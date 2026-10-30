@@ -457,6 +457,7 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
             return Err(Error::Source(format!("{need} is missing or empty")));
         }
     }
+    let total = estimate(source, "/", config).map_err(Error::Source)?.max(1);
 
     progress.stage(Stage::Partitioning, 0.0);
     // Wipe the first MiB of each partition so stale signatures never show
@@ -498,7 +499,6 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
             return Err(Error::Io(format!("the new root is not writable: {why}")));
         }
         progress.stage(Stage::Copying, 0.06);
-        let total = estimate(source, "/", config).map_err(Error::Source)?.max(1);
         progress.log(&format!("copying {} MiB of system files", total / MIB));
         let mut copy = Copy { fs: &mut fs, source, config, report: &mut report, total, progress, buf: vec![0u8; CHUNK] };
         copy.dir("/", ROOT_INO)?;
@@ -558,17 +558,18 @@ fn skipped(path: &str, config: &Config) -> bool {
 
 /// Bytes of file data below `path` that will be copied.
 fn estimate<S: Source>(source: &mut S, path: &str, config: &Config) -> core::result::Result<u64, String> {
-    let mut sum = 0;
+    let mut sum = 0u64;
     for e in source.list(path)? {
         let p = join(path, &e.name);
         if EMPTY_DIRS.contains(&p.as_str()) || skipped(&p, config) {
             continue;
         }
-        match e.kind {
-            Kind::File => sum += e.size,
-            Kind::Dir => sum += estimate(source, &p, config)?,
-            Kind::Symlink(_) => {}
-        }
+        let size = match e.kind {
+            Kind::File => e.size,
+            Kind::Dir => estimate(source, &p, config)?,
+            Kind::Symlink(_) => 0,
+        };
+        sum = sum.checked_add(size).ok_or_else(|| format!("{path}: source size overflow"))?;
     }
     Ok(sum)
 }

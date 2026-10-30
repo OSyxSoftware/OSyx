@@ -47,11 +47,12 @@ struct MemSource {
     oversize_at: Option<String>,
     extra_boot: Option<String>,
     lower_cmdline: bool,
+    fail_list: bool,
 }
 
 impl MemSource {
     fn new() -> MemSource {
-        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0, empty_boot: None, oversize_at: None, extra_boot: None, lower_cmdline: false };
+        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0, empty_boot: None, oversize_at: None, extra_boot: None, lower_cmdline: false, fail_list: false };
         for (d, mode, uid) in [("/bin", 0o755, 0), ("/etc", 0o755, 0), ("/etc/osyx", 0o755, 0), ("/dev", 0o755, 0), ("/tmp", 0o1777, 0), ("/home", 0o755, 0), ("/home/user", 0o755, 1000), ("/system", 0o755, 0), ("/system/share", 0o755, 0), ("/system/share/osyx-setup", 0o755, 0)] {
             s.dir(d, mode, uid);
         }
@@ -78,6 +79,7 @@ impl MemSource {
 
 impl Source for MemSource {
     fn list(&mut self, path: &str) -> std::result::Result<Vec<SourceEntry>, String> {
+        if self.fail_list { return Err("simulated directory read error".into()); }
         let prefix = if path == "/" { "/".to_string() } else { format!("{path}/") };
         Ok(self
             .entries
@@ -188,6 +190,17 @@ fn invalid_plan_never_writes_disk() {
         let mut disk = GuardDisk { writes: 0 };
         let mut source = MemSource::new();
         source.extra_boot = Some(path.into());
+        assert!(matches!(install(&mut disk, &good, &mut source, &config(), &mut Log::default()), Err(Error::Source(_))));
+        assert_eq!(disk.writes, 0);
+    }
+    for overflow in [false, true] {
+        let mut disk = GuardDisk { writes: 0 };
+        let mut source = MemSource::new();
+        if overflow {
+            source.entries.get_mut("/bin/init").unwrap().size = u64::MAX;
+        } else {
+            source.fail_list = true;
+        }
         assert!(matches!(install(&mut disk, &good, &mut source, &config(), &mut Log::default()), Err(Error::Source(_))));
         assert_eq!(disk.writes, 0);
     }
