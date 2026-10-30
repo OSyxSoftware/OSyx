@@ -56,8 +56,8 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
    `userspace/filekit/src/openwith.rs`). Still open: built-in audio, video
    and PDF viewers (today those kinds need a registered application).
 5. **Release hygiene**: partly done. CodSpeed benchmarks run on every pull
-   request. Still open: the release workflow runs only the host tests and
-   target checks, not the Win32, SMP, desktop and Zen QEMU suites.
+   request. Still open: the release workflow builds and signs only; it runs
+   neither the host tests nor the Win32, SMP, desktop and Zen QEMU suites.
 
 ### Performance (see research/performance-profile.md)
 
@@ -72,8 +72,6 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
    writable sections stay eagerly loaded for coherent write-back; virtio-blk
    keeps up to four chains in flight; read-ahead windows run on a background
    kernel thread while the reader gets the first pages immediately.
-   writable sections stay eagerly loaded for coherent write-back. Still
-   open: virtio-blk has one request in flight and readahead is synchronous.
 8. Software WebRender: fewer full-frame copies, damage-based presents in
    PRISM. Done: PRISM renders and presents only damaged rectangles; Gecko
    already runs it with software WebRender. Still open: the Win32
@@ -91,9 +89,10 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 
 ### Longer term
 
-11. **Real-hardware coverage**: NVMe, AHCI, physical NICs, Wi-Fi and I2C-HID
-    drivers exist; the open work is verification and fixes on more machines
-    and firmware. I2C-HID touchpads are not supported yet.
+11. **Real-hardware coverage**: NVMe, AHCI, wired NICs (`e1000`, `rtl8168`)
+    and Intel Wi-Fi (`iwm` through the BSD layer) drivers exist; the open
+    work is verification and fixes on more machines and firmware. I2C-HID
+    touchpads have no driver yet.
 12. **Windows compatibility expansion**: cross-process sharing and object
     names, child controls, SEH, delay imports, process creation and the
     runtime dependencies of larger applications; Windows 11 API-set research
@@ -101,10 +100,14 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 13. **Storage**: ext4 htree insertion and deeper extent trees, page cache with
     delayed writes, interrupt-driven virtio (queues are polled). Done: FAT
     entries are stamped with the wall clock on create and write, and `stat`
-    reports the stored time (2-second DOS resolution).
+    reports the stored time (2-second DOS resolution); the write-back thread
+    flushes ext4 after 5 s and exFAT after 2 s of quiet. Still open: FAT
+    writes its metadata through on every change, and ext4 has no htree
+    insertion yet.
 14. **SMP**: finer-grained kernel locking (still one kernel entry lock and
     `TABLE` for mappings and page faults) and load balancing policies.
-15. **OSyx Std**: `RwLock`, `Once`/`OnceLock`, `mpsc`; then the genuine `std`
+15. **OSyx Std**: `thread`, futex-based `Mutex`, `Condvar`, `RwLock`,
+    `Once`/`OnceLock` and `mpsc` are implemented; next is the genuine `std`
     port ([rust-std.md](rust-std.md)).
 16. **Desktop**: per-pixel alpha (ARGB8888 windows) and raw-report keyboards
     are implemented; still open: AXIS pipelines, redirection and blocks (see
