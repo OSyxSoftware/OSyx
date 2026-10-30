@@ -45,10 +45,14 @@
 
 #![no_std]
 
+extern crate alloc;
+
+pub mod battery;
 pub mod ipc;
+pub mod media;
 pub mod net;
 
-pub const ABI_VERSION: u32 = 11;
+pub const ABI_VERSION: u32 = 12;
 pub mod fault;
 
 /// Highest user virtual address + 1 (the canonical lower half).
@@ -399,9 +403,10 @@ pub mod firmware {
     pub const PCI: u64 = 4;
 }
 
-/// Battery state published by the ACPI service in [`BATTERY_STATUS_PATH`]
-/// as one line: `percent charging ac` (`percent` 0-100, `charging` and
-/// `ac` 0 or 1), or `none` when the machine reports no battery.
+/// Battery state published by the ACPI service in [`BATTERY_STATUS_PATH`]:
+/// a first line `percent charging ac` (`percent` 0-100, `charging` and
+/// `ac` 0 or 1), or `none` when the machine reports no battery, and an
+/// optional second line of `key=value` details. See [`battery`].
 pub const BATTERY_STATUS_PATH: &str = "/run/battery";
 
 /// `map_ex` flags.

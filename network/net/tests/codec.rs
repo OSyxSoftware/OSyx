@@ -510,6 +510,11 @@ fn dns_rejects_malformed_and_spoofed_responses() {
     // A record with a wrong data length.
     let short = dns_response(7, "example.com", &[("example.com", dns::TYPE_A, &[1, 2, 3])], 0, false);
     assert_eq!(dns::parse_response(&short, 7, "example.com", dns::TYPE_A), Err(dns::DnsError::Truncated));
+    let target = encode_name("edge.example.net");
+    let mut cname = dns_response(7, "example.com", &[("example.com", dns::TYPE_CNAME, &target)], 0, false);
+    let rdata = dns::build_query(7, "example.com", dns::TYPE_A).len() + encode_name("example.com").len() + 10;
+    cname[rdata - 2..rdata].copy_from_slice(&1u16.to_be_bytes());
+    assert_eq!(dns::parse_response(&cname, 7, "example.com", dns::TYPE_A), Err(dns::DnsError::Truncated));
     // CNAME loops are detected.
     let (x, y) = (encode_name("b.test"), encode_name("a.test"));
     let looped = dns_response(3, "a.test", &[("a.test", dns::TYPE_CNAME, &x), ("b.test", dns::TYPE_CNAME, &y)], 0, false);

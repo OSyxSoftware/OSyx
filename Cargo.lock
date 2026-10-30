@@ -874,9 +874,17 @@ version = "0.1.0"
 name = "osyx-apps"
 version = "0.1.0"
 dependencies = [
- "aml",
  "os-std",
  "os-sys",
+ "osyx-abi",
+ "osyx-battery",
+]
+
+[[package]]
+name = "osyx-battery"
+version = "0.1.0"
+dependencies = [
+ "aml",
  "osyx-abi",
 ]
 
@@ -912,6 +920,10 @@ dependencies = [
 
 [[package]]
 name = "osyx-elf"
+version = "0.1.0"
+
+[[package]]
+name = "osyx-exfat"
 version = "0.1.0"
 
 [[package]]
@@ -959,6 +971,7 @@ dependencies = [
  "osyx-bootinfo",
  "osyx-crypto",
  "osyx-elf",
+ "osyx-exfat",
  "osyx-ext4",
  "osyx-fat",
  "osyx-gfx",

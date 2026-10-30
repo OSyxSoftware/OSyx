@@ -12,6 +12,8 @@
 #![no_std]
 #![no_main]
 
+#[path = "../drives.rs"]
+mod drives;
 #[path = "../shell_common.rs"]
 mod common;
 
@@ -20,6 +22,8 @@ use os_std::prelude::*;
 use os_std::process::{self, Command};
 use os_std::time::{Duration, Instant};
 use os_std::{system, thread};
+use osyx_abi::battery::Status as Battery;
+use osyx_abi::media::{self, Change, Disk, DiskState};
 use osyx_gfx::{rgb, Color, Rect, Surface};
 use osyx_input::{button, key};
 use osyx_ui::layout::{contains, inset};
@@ -72,27 +76,54 @@ enum PopupKind {
     /// The Wi-Fi network picker; `pass` is the password prompt for a
     /// secured network, with its "Show password" box.
     Wifi { state: WifiState, list: ListView, pass: Option<(String, TextField, Checkbox)>, message: String },
+    /// The removable drives list (see `drives.rs`).
+    Drives { view: drives::View },
 }
 
 /// Battery indicator width on the panel.
 const BATTERY_W: u32 = 78;
 
-/// The battery state `batteryd` publishes (`percent charging ac`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Battery {
-    percent: u32,
-    charging: bool,
-    ac: bool,
+/// Drives button width on the panel.
+const DRIVES_W: u32 = 44;
+
+/// The battery state `batteryd` publishes (see `osyx_abi::battery`); `None`
+/// without a battery.
+fn read_battery() -> Option<Battery> {
+    let text = os_std::fs::read_to_string(osyx_abi::BATTERY_STATUS_PATH).ok()?;
+    Battery::parse(&text).filter(Battery::present)
 }
 
-impl Battery {
-    fn read() -> Option<Battery> {
-        let text = os_std::fs::read_to_string(osyx_abi::BATTERY_STATUS_PATH).ok()?;
-        let mut f = text.split_whitespace();
-        let percent = f.next()?.parse().ok()?;
-        let flag = |s: Option<&str>| s == Some("1");
-        Some(Battery { percent, charging: flag(f.next()), ac: flag(f.next()) })
+/// The notification shown when the battery indicator is clicked.
+fn battery_note(b: &Battery) -> (String, String) {
+    use osyx_abi::battery::State;
+    let level = if b.state == State::Unknown && b.percent == 0 { String::from("Battery") } else { format!("Battery {} %", b.percent) };
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(String::from(match b.state {
+        State::Charging => "Charging",
+        State::Discharging => "On battery",
+        State::Full => "Fully charged",
+        State::Idle => "Plugged in, not charging",
+        _ => "State unknown",
+    }));
+    if let Some(t) = b.time_text() {
+        parts.push(match b.state {
+            State::Charging => format!("{t} until full"),
+            _ => format!("{t} remaining"),
+        });
     }
+    if let Some(mw) = b.rate_mw.filter(|&r| r > 0) {
+        parts.push(format!("{}.{} W", mw / 1000, mw % 1000 / 100));
+    }
+    if let Some(h) = b.health_percent() {
+        parts.push(format!("health {h} %"));
+    }
+    if b.batteries > 1 {
+        parts.push(format!("{} batteries", b.batteries));
+    }
+    if b.stale {
+        parts.push(String::from("firmware not answering, last known values"));
+    }
+    (level, parts.join(", "))
 }
 
 /// The sound card and volume from the kernel's `/run/audio.status`.
@@ -312,6 +343,7 @@ impl Popup {
             PopupKind::Launcher { .. } => PopupTag::Launcher,
             PopupKind::Menu { purpose: MenuPurpose::Power, .. } => PopupTag::PowerMenu,
             PopupKind::Quick { .. } => PopupTag::Quick,
+            PopupKind::Drives { .. } => PopupTag::Drives,
             _ => PopupTag::Other,
         }
     }
@@ -322,6 +354,7 @@ enum PopupTag {
     Launcher,
     PowerMenu,
     Quick,
+    Drives,
     Other,
 }
 
@@ -345,7 +378,12 @@ enum PanelAction {
     Task(usize),
     Clock,
     Quick,
+    Drives,
+    Battery,
 }
+
+/// Finished ejects: the disk and what went wrong (None: it worked).
+static EJECTS: os_std::sync::Mutex<Vec<(String, Option<os_std::error::ErrorKind>)>> = os_std::sync::Mutex::new(Vec::new());
 
 /// Exits of the shell's children, collected by the reaper thread.
 static EXITS: os_std::sync::Mutex<Vec<(u64, i32)>> = os_std::sync::Mutex::new(Vec::new());
@@ -395,6 +433,15 @@ struct Shell {
     /// last read (ms).
     battery: Option<Battery>,
     battery_checked: u64,
+    /// Removable drives from `/run/media.status`, the text they were parsed
+    /// from, and when it was read (ms).
+    media: Vec<Disk>,
+    media_text: String,
+    media_checked: u64,
+    /// Disks an eject was asked for and the last problem to tell the user.
+    ejecting: Vec<String>,
+    drives_hover: bool,
+    drives_message: String,
     shortcut_cells: Vec<usize>,
     icon_drag: Option<IconDrag>,
     /// (pid, application name) of programs started from the shell.
@@ -503,6 +550,12 @@ fn main() -> i32 {
         update_announced: false,
         battery: None,
         battery_checked: 0,
+        media: Vec::new(),
+        media_text: String::new(),
+        media_checked: 0,
+        ejecting: Vec::new(),
+        drives_hover: false,
+        drives_message: String::new(),
         shortcut_cells: Vec::new(),
         icon_drag: None,
         children: Vec::new(),
@@ -572,6 +625,11 @@ impl Shell {
                 self.battery_checked = self.now();
                 self.update_battery();
             }
+            if self.now().saturating_sub(self.media_checked) >= 1000 {
+                self.media_checked = self.now();
+                self.update_media();
+            }
+            self.collect_ejects();
             self.expire_notes();
             self.collect_exits();
             if self.now().saturating_sub(self.shortcut_scan) >= 2000 {
@@ -869,6 +927,8 @@ impl Shell {
         }
         let clock = self.clock_rect();
         let quick = self.quick_rect();
+        let drives = self.drives_rect();
+        let battery = self.battery_rect();
         match ui {
             Ui::PointerMove { x, y } => {
                 let h = contains(&clock, x, y);
@@ -877,11 +937,21 @@ impl Shell {
                 let q = contains(&quick, x, y);
                 redraw |= q != self.quick_hover;
                 self.quick_hover = q;
+                let d = drives.is_some_and(|r| contains(&r, x, y));
+                redraw |= d != self.drives_hover;
+                self.drives_hover = d;
             }
             Ui::PointerLeave => {
-                redraw |= self.clock_hover || self.quick_hover;
+                redraw |= self.clock_hover || self.quick_hover || self.drives_hover;
                 self.clock_hover = false;
                 self.quick_hover = false;
+                self.drives_hover = false;
+            }
+            Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && drives.is_some_and(|r| contains(&r, x, y)) => {
+                action = Some(PanelAction::Drives)
+            }
+            Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && battery.is_some_and(|r| contains(&r, x, y)) => {
+                action = Some(PanelAction::Battery)
             }
             Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && contains(&clock, x, y) => {
                 action = Some(PanelAction::Clock)
@@ -895,6 +965,13 @@ impl Shell {
         match action {
             Some(PanelAction::Launcher) => self.toggle_launcher(),
             Some(PanelAction::Quick) => self.toggle_quick(),
+            Some(PanelAction::Drives) => self.toggle_drives(),
+            Some(PanelAction::Battery) => {
+                if let Some(b) = self.battery {
+                    let (title, body) = battery_note(&b);
+                    self.show_note(&title, &body);
+                }
+            }
             Some(PanelAction::Power) => {
                 if self.recently_closed(PopupTag::PowerMenu) {
                     return;
@@ -944,6 +1021,7 @@ impl Shell {
         let mut wifi_join: Option<(String, String)> = None;
         let mut wifi_forget: Option<String> = None;
         let mut wifi_reconnect = false;
+        let mut drive_action: Option<drives::Hit> = None;
         match &mut p.kind {
             PopupKind::Launcher { search, list, shown, list_focus } => {
                 if let Ui::PointerDown { x, y, button: button::RIGHT, .. } = ui {
@@ -1081,6 +1159,23 @@ impl Shell {
                     }
                 }
             }
+            PopupKind::Drives { view } => match ui {
+                Ui::PointerMove { x, y } => {
+                    let h = drives::hit(&view.disks, x, y);
+                    if h != view.hover {
+                        view.hover = h;
+                        p.win.dirty = true;
+                    }
+                }
+                Ui::PointerLeave => {
+                    if view.hover.take().is_some() {
+                        p.win.dirty = true;
+                    }
+                }
+                Ui::PointerDown { x, y, button: button::LEFT, .. } => drive_action = drives::hit(&view.disks, x, y),
+                Ui::Key(k) if k.down && k.key == key::ESCAPE => close = true,
+                _ => {}
+            },
             PopupKind::Quick { net, radios, sound, dragging, hover } => match ui {
                 Ui::PointerMove { x, y } => {
                     let h = QuickItem::at(x, y);
@@ -1126,6 +1221,14 @@ impl Shell {
                 Ui::Key(k) if k.down && k.key == key::ESCAPE => close = true,
                 _ => {}
             },
+        }
+        match drive_action {
+            Some(drives::Hit::Eject(disk)) => self.eject(&disk),
+            Some(drives::Hit::Open(path)) => {
+                self.close_popup();
+                self.open_in_files(&path);
+            }
+            None => {}
         }
         if close
             || launch.is_some()
@@ -1257,7 +1360,7 @@ impl Shell {
     /// System programs that need root (Setup writes whole disks) and are
     /// started without run-app's drop to the desktop user. Matched exactly,
     /// so a user-edited shortcut can start them but cannot add arguments.
-    const PRIVILEGED: &'static [&'static str] = &["/system/bin/setup"];
+    const PRIVILEGED: &'static [&'static str] = &["/system/bin/setup", "/system/bin/settings"];
 
     fn launch(&mut self, name: &str, exec: &str) {
         if exec == "/system/bin/zen" && self.children.iter().any(|(_, n)| n == name) {
@@ -1466,6 +1569,193 @@ impl Shell {
         self.panel.dirty = true;
     }
 
+    // ---- removable drives ----------------------------------------------------
+
+    fn drives_rect(&self) -> Option<Rect> {
+        if self.media.is_empty() {
+            return None;
+        }
+        let r = self.battery_rect().unwrap_or(self.quick_rect());
+        Some(Rect::new(r.x - 4 - DRIVES_W as i32, 8, DRIVES_W, PANEL_H - 16))
+    }
+
+    /// (mount point, total, free bytes) of every mounted volume.
+    fn drive_usage(disks: &[Disk]) -> Vec<(String, u64, u64)> {
+        disks
+            .iter()
+            .flat_map(|d| d.volumes.iter())
+            .filter_map(|v| v.mount.as_ref())
+            .filter_map(|m| {
+                let s = os_std::os::statfs(m).ok()?;
+                Some((m.clone(), s.total_blocks.saturating_mul(s.block_size), s.free_blocks.saturating_mul(s.block_size)))
+            })
+            .collect()
+    }
+
+    fn toggle_drives(&mut self) {
+        if self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Drives) {
+            self.close_popup();
+            return;
+        }
+        if self.recently_closed(PopupTag::Drives) {
+            return;
+        }
+        let view = drives::View {
+            usage: Self::drive_usage(&self.media),
+            disks: self.media.clone(),
+            message: self.drives_message.clone(),
+            ejecting: self.ejecting.clone(),
+            hover: None,
+        };
+        let h = drives::height(&view.disks, !view.message.is_empty());
+        let right = self.drives_rect().map_or(self.w as i32 - 8, |r| r.right() as i32);
+        let x = (right - drives::WIDTH as i32).clamp(8, (self.w as i32 - drives::WIDTH as i32 - 8).max(8));
+        let y = (self.h - PANEL_H) as i32 - h as i32 - 8;
+        println!("desktop: drives list opened ({} disks)", view.disks.len());
+        self.open_popup(x, y, drives::WIDTH, h, PopupKind::Drives { view });
+        self.panel.dirty = true;
+    }
+
+    /// Reads `/run/media.status`; announces drives that came or went and
+    /// keeps the panel button and an open list current.
+    fn update_media(&mut self) {
+        let text = os_std::fs::read_to_string(media::STATUS_PATH).unwrap_or_default();
+        let refresh_usage = self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Drives);
+        if text == self.media_text && !refresh_usage {
+            return;
+        }
+        let changed = text != self.media_text;
+        let disks = media::parse(&text);
+        if changed {
+            for change in media::diff(&self.media, &disks) {
+                match change {
+                    Change::Connected(d) => {
+                        let (title, body) = drives::connected_text(&d);
+                        println!("desktop: drive connected: {title}");
+                        self.show_note(&title, &body);
+                    }
+                    Change::Ejected(d) => {
+                        let name = d.model.clone();
+                        println!("desktop: drive ejected: {name}");
+                        self.show_note("Safe to remove", &format!("{} can be unplugged now.", if name.is_empty() { "The drive" } else { &name }));
+                    }
+                    Change::Unplugged(d) if d.state == DiskState::Mounted => {
+                        let name = d.volumes.first().map_or(d.model.clone(), |v| String::from(v.name()));
+                        println!("desktop: drive removed without ejecting: {name}");
+                        self.show_note(
+                            &format!("{name} was removed"),
+                            "It was unplugged without ejecting. Files that were being saved may be lost.",
+                        );
+                    }
+                    Change::Unplugged(_) => println!("desktop: ejected drive unplugged"),
+                }
+            }
+            let had = !self.media.is_empty();
+            self.media_text = text;
+            self.media = disks;
+            if had != !self.media.is_empty() {
+                self.layout_panel();
+            }
+            self.panel.dirty = true;
+        }
+        let usage = Self::drive_usage(&self.media);
+        let (disks, message, ejecting) = (self.media.clone(), self.drives_message.clone(), self.ejecting.clone());
+        let mut resize = None;
+        if let Some(p) = self.popup.as_mut() {
+            if let PopupKind::Drives { view } = &mut p.kind {
+                if view.disks != disks || view.usage != usage || view.message != message || view.ejecting != ejecting {
+                    view.disks = disks;
+                    view.usage = usage;
+                    view.message = message;
+                    view.ejecting = ejecting;
+                    resize = Some(drives::height(&view.disks, !view.message.is_empty()));
+                    p.win.dirty = true;
+                }
+            }
+        }
+        if let Some(h) = resize {
+            if let Some(p) = self.popup.as_mut() {
+                let y = (self.h - PANEL_H) as i32 - h as i32 - 8;
+                p.y = y;
+                let _ = p.win.set_geometry(&mut self.conn, p.x, y, drives::WIDTH, h);
+            }
+        }
+    }
+
+    /// Asks the kernel to eject `disk` from a thread of its own: flushing a
+    /// slow stick takes seconds and the desktop must keep running.
+    fn eject(&mut self, disk: &str) {
+        if self.ejecting.iter().any(|d| d == disk) {
+            return;
+        }
+        println!("desktop: ejecting {disk}");
+        self.ejecting.push(String::from(disk));
+        self.drives_message.clear();
+        let disk = String::from(disk);
+        thread::spawn(move || {
+            use os_std::io::Write;
+            let result = os_std::fs::OpenOptions::new()
+                .write(true)
+                .open(media::CONTROL_PATH)
+                .and_then(|mut f| f.write_all(format!("eject {disk}\n").as_bytes()));
+            if let Ok(mut q) = EJECTS.lock() {
+                q.push((disk, result.err().map(|e| e.kind())));
+            }
+        });
+        self.media_checked = 0;
+    }
+
+    /// Picks up the results of finished ejects.
+    fn collect_ejects(&mut self) {
+        let done: Vec<_> = match EJECTS.lock() {
+            Ok(mut q) => core::mem::take(&mut *q),
+            Err(_) => return,
+        };
+        for (disk, error) in done {
+            self.ejecting.retain(|d| *d != disk);
+            let name = self
+                .media
+                .iter()
+                .find(|d| d.name == disk)
+                .map_or(disk.clone(), |d| d.volumes.first().map_or(d.model.clone(), |v| String::from(v.name())));
+            let busy = self.media.iter().find(|d| d.name == disk).and_then(|d| d.busy_path().map(String::from));
+            let message = match error {
+                None => {
+                    println!("desktop: {disk} ejected");
+                    String::new()
+                }
+                Some(os_std::error::ErrorKind::ResourceBusy) => {
+                    println!("desktop: eject of {disk} refused: in use");
+                    let place = busy.map_or(String::new(), |p| format!(" ({p})"));
+                    format!("{name} is in use{place}. Close the programs and files using it, then eject again.")
+                }
+                Some(kind) => {
+                    println!("desktop: eject of {disk} failed: {kind:?}");
+                    format!("{name} could not be ejected safely ({kind:?}). Data may not have been written; do not unplug it yet.")
+                }
+            };
+            if !message.is_empty() {
+                self.show_note(&format!("Cannot eject {name}"), &message);
+            }
+            self.drives_message = message;
+            self.media_checked = 0;
+            self.panel.dirty = true;
+        }
+    }
+
+    /// Opens a folder in the file manager with the desktop user's rights.
+    fn open_in_files(&mut self, path: &str) {
+        let mut c = Command::new("/system/bin/run-app");
+        c.arg("/system/bin/files").arg(path);
+        match c.spawn() {
+            Ok(child) => {
+                println!("desktop: file manager opened on {path} as process {}", child.id());
+                self.children.push((child.id(), String::from("Files")));
+            }
+            Err(e) => self.show_note("Cannot open the drive", &format!("{path}: {e}")),
+        }
+    }
+
     fn open_wifi(&mut self, state: WifiState) {
         let mut list = ListView::new(vec![Column::new("Network", 0, Align::Left), Column::new("Security", 120, Align::Right)]);
         list.show_header = false;
@@ -1642,12 +1932,12 @@ impl Shell {
     }
 
     fn clock_rect(&self) -> Rect {
-        let r = self.battery_rect().unwrap_or(self.quick_rect());
+        let r = self.drives_rect().or(self.battery_rect()).unwrap_or(self.quick_rect());
         Rect::new(r.x - 4 - CLOCK_W as i32, 6, CLOCK_W, PANEL_H - 12)
     }
 
     fn update_battery(&mut self) {
-        let b = Battery::read();
+        let b = read_battery();
         if b != self.battery {
             let appeared = b.is_some() != self.battery.is_some();
             self.battery = b;
@@ -1753,6 +2043,9 @@ impl Shell {
                 self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Quick),
             );
             let battery = self.battery_rect().zip(self.battery);
+            let drives = self.drives_rect().map(|r| {
+                (r, self.media.len(), self.drives_hover, self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Drives))
+            });
             let mut s = self.panel.surface()?;
             let mut p = Painter::new(&mut s, &theme, &fonts);
             draw_panel(
@@ -1765,6 +2058,7 @@ impl Shell {
                 self.clock_hover,
                 quick,
                 battery,
+                drives,
                 self.windows.is_empty(),
             );
             self.panel.present(&mut self.conn, None)?;
@@ -1876,6 +2170,7 @@ fn draw_panel(
     clock_hover: bool,
     (quick_rect, quick_hover, quick_open): (Rect, bool, bool),
     battery: Option<(Rect, Battery)>,
+    drives: Option<(Rect, usize, bool, bool)>,
     empty: bool,
 ) {
     let t = *p.theme;
@@ -1913,6 +2208,15 @@ fn draw_panel(
     if let Some((r, b)) = battery {
         draw_battery(p, r, b);
     }
+    if let Some((r, count, hover, open)) = drives {
+        if hover || open {
+            p.rounded(r, t.radius_small, if open { t.selection } else { t.raised }, 255);
+        }
+        icon::draw(p, Icon::Drive, Rect::new(r.x + 8, r.y + (r.h as i32 - 22) / 2, 22, 22), t.text);
+        if count > 1 {
+            p.text_in(FontKind::Ui, Rect::new(r.x + 30, r.y, r.w.saturating_sub(32), r.h), &format!("{count}"), t.text_dim, Align::Left);
+        }
+    }
     p.vline(quick_rect.right() as i32 + 5, 12, full.h - 24, PANEL_LINE);
     power.draw(p, false);
 }
@@ -1921,12 +2225,15 @@ fn draw_panel(
 /// the percentage beside it.
 fn draw_battery(p: &mut Painter, r: Rect, b: Battery) {
     let t = *p.theme;
+    let unknown = b.state == osyx_abi::battery::State::Unknown && b.percent == 0;
+    let percent = b.percent as u32;
+    let charging = b.charging();
     let (body_w, body_h) = (26u32, 14u32);
     let x = r.x + 4;
     let y = r.y + (r.h as i32 - body_h as i32) / 2;
-    let level = if b.charging {
+    let level = if charging {
         rgb(80, 200, 120)
-    } else if b.percent <= 15 {
+    } else if percent <= 15 {
         rgb(232, 72, 72)
     } else {
         t.text
@@ -1941,9 +2248,9 @@ fn draw_battery(p: &mut Painter, r: Rect, b: Battery) {
     p.fill(Rect::new(x + body_w as i32, y + 4, 3, body_h - 8), t.text);
     // Charge level inside a one-pixel gap.
     let inner_w = body_w - 6;
-    let filled = (inner_w * b.percent.min(100)).div_ceil(100).max(u32::from(b.percent > 0));
+    let filled = (inner_w * percent.min(100)).div_ceil(100).max(u32::from(percent > 0));
     p.fill(Rect::new(x + 3, y + 3, filled, body_h - 6), level);
-    if b.charging {
+    if charging {
         // A bolt across the cell: down-left stroke, short bar, down-left stroke.
         let (cx, cy) = (x + body_w as i32 / 2, y + body_h as i32 / 2);
         for dx in 0..2 {
@@ -1955,9 +2262,9 @@ fn draw_battery(p: &mut Painter, r: Rect, b: Battery) {
         p.line(cx - 1, cy, cx + 4, cy, rgb(255, 214, 64));
         p.line(cx + 3, cy, cx - 2, y + body_h as i32 + 1, rgb(255, 214, 64));
     }
-    let text = format!("{}%", b.percent.min(100));
+    let text = if unknown { String::from("--") } else { format!("{}%", percent.min(100)) };
     let tr = Rect::new(x + body_w as i32 + 7, r.y, r.w.saturating_sub(body_w + 11), r.h);
-    p.text_in(FontKind::Ui, tr, &text, if b.percent <= 15 && !b.charging { level } else { t.text }, Align::Left);
+    p.text_in(FontKind::Ui, tr, &text, if percent <= 15 && !charging { level } else { t.text }, Align::Left);
 }
 
 /// Controls without a working driver are shown but disabled (naming the
@@ -2093,6 +2400,7 @@ fn draw_popup(p: &mut Painter, kind: &PopupKind, apps: &[AppEntry]) {
         PopupKind::Confirm { dialog } => dialog.draw(p),
         PopupKind::Quick { net, radios, sound, hover, .. } => draw_quick(p, net, radios, sound.as_ref(), *hover),
         PopupKind::Wifi { state, list, pass, message } => draw_wifi(p, state, list, pass.as_ref(), message),
+        PopupKind::Drives { view } => drives::draw(p, view),
     }
     // A one pixel frame (popups are square; PRISM adds the shadow).
     p.fill(Rect::new(0, 0, full.w, 1), t.border);
