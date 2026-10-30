@@ -7,7 +7,8 @@
 //! file that is open fails with `Busy` (Windows behaves the same way).
 //! Ownership and permissions do not exist on FAT: everything belongs to
 //! root, directories are 0755 and files 0644 (0444 with the read-only
-//! attribute). Metadata is written through after every change.
+//! attribute). Metadata reaches the medium through the write-back thread
+//! once the volume has been quiet for two seconds, or on `sync`/unmount.
 
 use super::{Filesystem, Result};
 use crate::block::{BlockDev, Disk};
@@ -24,6 +25,8 @@ use osyx_vfs::{Cred, DirEntry, FsUsage, NewNode};
 /// The FAT driver's fixed timestamp (1980-01-01 00:00:00 UTC).
 const FAT_EPOCH_NS: i64 = 315_532_800 * 1_000_000_000;
 const ROOT: u64 = 1;
+/// Quiet period before dirty FAT sectors and FSInfo reach the medium.
+const DIRTY_EXPIRE_MS: u64 = 2000;
 
 pub fn fs_errno(e: FsError) -> Errno {
     match e {
@@ -51,6 +54,8 @@ struct State {
     open: BTreeMap<u64, u32>,
     /// Cached file references of regular files.
     files: BTreeMap<u64, FileRef>,
+    /// Uptime (ms) of the last change whose FAT sectors are still in memory.
+    dirty_since: Option<u64>,
 }
 
 pub struct FatVolume {
@@ -72,7 +77,7 @@ impl State {
     }
 
     fn ino_for(&mut self, path: &str) -> u64 {
-        let key = path.to_lowercase();
+        let key = osyx_vfs::path::fold_case(path);
         if let Some(&i) = self.by_path.get(&key) {
             return i;
         }
@@ -84,7 +89,7 @@ impl State {
     }
 
     fn forget(&mut self, path: &str) {
-        if let Some(i) = self.by_path.remove(&path.to_lowercase()) {
+        if let Some(i) = self.by_path.remove(&osyx_vfs::path::fold_case(path)) {
             self.paths.remove(&i);
             self.files.remove(&i);
         }
@@ -96,8 +101,8 @@ impl State {
         if list.iter().any(|e| e.name == name) {
             return Ok(name.to_string());
         }
-        let lower = name.to_lowercase();
-        list.into_iter().map(|e| e.name).find(|n| n.to_lowercase() == lower).ok_or(Errno::NotFound)
+        let lower = osyx_vfs::path::fold_case(name);
+        list.into_iter().map(|e| e.name).find(|n| osyx_vfs::path::fold_case(n) == lower).ok_or(Errno::NotFound)
     }
 
     fn file(&mut self, ino: u64) -> Result<&mut FileRef> {
@@ -114,7 +119,9 @@ impl State {
     }
 
     fn flush(&mut self) -> Result<()> {
-        self.fs.flush().map_err(fs_errno)
+        self.fs.flush().map_err(fs_errno)?;
+        self.dirty_since = None;
+        Ok(())
     }
 }
 
@@ -128,7 +135,7 @@ impl FatVolume {
         paths.insert(ROOT, String::from("/"));
         let mut by_path = BTreeMap::new();
         by_path.insert(String::from("/"), ROOT);
-        let state = State { fs, paths, by_path, next: ROOT + 1, open: BTreeMap::new(), files: BTreeMap::new() };
+        let state = State { fs, paths, by_path, next: ROOT + 1, open: BTreeMap::new(), files: BTreeMap::new(), dirty_since: None };
         Ok(FatVolume { state: KMutex::new(state), label, device, read_only, owner: owner.unwrap_or((0, 0)) })
     }
 
@@ -147,10 +154,10 @@ impl FatVolume {
         // Entries touched by this change carry the current time.
         s.fs.set_time(crate::time::now_ns().div_euclid(1_000_000_000));
         let r = f(&mut s);
-        let flushed = s.flush();
-        let v = r?;
-        flushed?;
-        Ok(v)
+        // Dirty FAT sectors and FSInfo stay in memory: the write-back thread
+        // or sync/unmount writes them once the volume has been quiet.
+        s.dirty_since = Some(crate::interrupts::uptime_ms());
+        r
     }
 }
 
@@ -316,15 +323,17 @@ impl Filesystem for FatVolume {
             let sp = s.path(sdir)?;
             let from = join(&sp, &s.actual_name(&sp, sname)?);
             let to = join(&s.path(ddir)?, dname);
-            if from.to_lowercase() != to.to_lowercase() {
-                if let Some(&victim) = s.by_path.get(&to.to_lowercase()) {
+            let from_key = osyx_vfs::path::fold_case(&from);
+            let to_key = osyx_vfs::path::fold_case(&to);
+            if from_key != to_key {
+                if let Some(&victim) = s.by_path.get(&to_key) {
                     if s.is_open(victim) {
                         return Err(Errno::Busy);
                     }
                 }
             }
             s.fs.rename(&from, &to).map_err(fs_errno)?;
-            if from.to_lowercase() != to.to_lowercase() {
+            if from_key != to_key {
                 s.forget(&to);
             }
             // Move every known node at or below `from` to its new path; their
@@ -337,8 +346,8 @@ impl Filesystem for FatVolume {
                 .collect();
             for (i, old) in moved {
                 let new = alloc::format!("{}{}", to, &old[from.len()..]);
-                s.by_path.remove(&old.to_lowercase());
-                s.by_path.insert(new.to_lowercase(), i);
+                s.by_path.remove(&osyx_vfs::path::fold_case(&old));
+                s.by_path.insert(osyx_vfs::path::fold_case(&new), i);
                 s.paths.insert(i, new);
                 s.files.remove(&i);
             }
@@ -370,6 +379,19 @@ impl Filesystem for FatVolume {
             return Ok(());
         }
         self.state.lock().flush()
+    }
+
+    /// Writes the held metadata once the volume has been quiet for two
+    /// seconds; the drive's cache flush then makes a pulled stick safe.
+    fn writeback(&self, now_ms: u64) -> Result<bool> {
+        if self.read_only {
+            return Ok(false);
+        }
+        let mut s = self.state.lock();
+        match s.dirty_since {
+            Some(t) if now_ms.saturating_sub(t) >= DIRTY_EXPIRE_MS => s.flush().map(|_| true),
+            _ => Ok(false),
+        }
     }
 
     fn usage(&self) -> FsUsage {
