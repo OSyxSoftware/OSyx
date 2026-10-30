@@ -240,7 +240,6 @@ pub fn parse<R: SectorReader>(r: &mut R) -> Result<Table, GptError> {
     }
     match read_header(r, 1) {
         Ok(t) => Ok(t),
-        Err(GptError::Io) => Err(GptError::Io),
         Err(primary) => {
             let backup = r.sectors() - 1;
             match read_header(r, backup) {

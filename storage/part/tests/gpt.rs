@@ -61,6 +61,27 @@ fn damaged_primary_falls_back_to_backup() {
 }
 
 #[test]
+fn primary_io_error_falls_back_to_backup() {
+    struct FailingPrimary(Mem, u64);
+    impl SectorReader for FailingPrimary {
+        fn sectors(&self) -> u64 { self.0.sectors() }
+        fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), GptError> {
+            if lba == self.1 { Err(GptError::Io) } else { self.0.read(lba, buf) }
+        }
+    }
+    for failing_lba in [1, 2] {
+        let (disk, _) = disk(8);
+        let table = parse(&mut FailingPrimary(disk, failing_lba)).unwrap();
+        assert!(table.used_backup);
+        assert_eq!(table.partitions.len(), 2);
+    }
+    let (mut disk, _) = disk(8);
+    let backup = disk.0.len() - SECTOR;
+    disk.0[backup] = 0;
+    assert_eq!(parse(&mut FailingPrimary(disk, 1)), Err(GptError::Io));
+}
+
+#[test]
 fn corrupt_tables_are_rejected() {
     let (mut d, _) = disk(8);
     let last = d.0.len() - SECTOR;
