@@ -8,6 +8,11 @@ process can currently receive one. Open handles and system calls remain
 unrestricted, so these checks are not a sandbox. Policy installation and
 inheritance need adversarial runtime and concurrency tests.
 
+A deny-by-default syscall allowlist is checked before the dispatcher's fast
+paths and inherited by children. No process currently receives a filter;
+the set of calls Gecko needs and the handling of arguments and handles have
+not been validated.
+
 OSyx must enforce the boundary in the kernel, independently of the Win32
 compatibility process. A command-line flag or environment variable alone is
 not an authority to enter or leave the sandbox.

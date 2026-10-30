@@ -120,6 +120,9 @@ pub unsafe fn set_kernel_stack(top: u64) {
 
 #[no_mangle]
 extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
+    if !process::syscall_allowed(f.rax) {
+        return osyx_abi::encode(Err(Errno::PermissionDenied));
+    }
     crate::smp::note_last_syscall(crate::smp::cached_tid(), f.rip, f.rax);
     crate::prof::note_syscall(crate::smp::cached_tid(), f.rax);
     // Read-only queries that touch nothing but scheduler state or atomics

@@ -54,6 +54,7 @@ pub mod battery;
 pub mod ipc;
 pub mod media;
 pub mod net;
+pub mod sandbox;
 pub mod wow64;
 
 pub const ABI_VERSION: u32 = 13;

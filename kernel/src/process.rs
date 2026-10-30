@@ -37,8 +37,9 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use osyx_abi::{auxv, startup, wow64, Errno};
+use osyx_abi::sandbox::SyscallPolicy;
 use osyx_elf::{AddressRange, ElfError, ElfImage};
 use osyx_vfs::Cred;
 use osyx_vfs::sandbox::PathPolicy;
@@ -364,6 +365,7 @@ pub struct Process {
     cwd: String,
     /// Inherited unchanged by descendants and retained across exec.
     path_policy: Option<Arc<PathPolicy>>,
+    syscall_policy: Option<Arc<SyscallPolicy>>,
 }
 
 /// An open file shared by the handle table and in-flight system calls.
@@ -376,6 +378,8 @@ struct Table {
 }
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+// Once set, never cleared. Set before a filtered process becomes runnable.
+static SYSCALL_FILTERS_EXIST: AtomicBool = AtomicBool::new(false);
 static TABLE: IrqSpinLock<Table> = IrqSpinLock::new(Table { procs: BTreeMap::new(), waiters: Vec::new() });
 /// Open objects by process and handle number: 0-2 only if standard streams
 /// were redirected at spawn, the rest from `FIRST_FILE_HANDLE`. Separate from
@@ -545,7 +549,7 @@ fn report_release(pid: Pid, name: &str, what: &str, (owned, freed): (u64, u64)) 
 }
 
 impl Process {
-    fn new(parent: Pid, name: &str, cx: Lookup, mut space: Space) -> Process {
+    fn new(parent: Pid, name: &str, cx: Lookup, syscall_policy: Option<Arc<SyscallPolicy>>, mut space: Space) -> Process {
         let program_shared = core::mem::take(&mut space.program_shared);
         Process {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
@@ -566,6 +570,7 @@ impl Process {
             cred: cx.cred,
             cwd: cx.cwd,
             path_policy: cx.path_policy,
+            syscall_policy,
         }
     }
 
@@ -663,16 +668,19 @@ pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 
     if TABLE.lock().procs.len() >= MAX_PROCESSES {
         return Err(ExecError::TooManyProcesses);
     }
-    let cx = {
+    let (cx, syscall_policy) = {
         let t = TABLE.lock();
         match t.procs.get(&parent) {
-            Some(p) => p.lookup(),
-            None if parent == KERNEL_PID => Lookup::kernel(),
+            Some(p) => (p.lookup(), p.syscall_policy.clone()),
+            None if parent == KERNEL_PID => (Lookup::kernel(), None),
             None => return Err(ExecError::Load(Errno::NotFound)),
         }
     };
     let (space, entry, rsp, path) = build_image(&cx, req)?;
-    let mut p = Process::new(parent, req.name(), cx, space);
+    let mut p = Process::new(parent, req.name(), cx, syscall_policy, space);
+    if p.syscall_policy.is_some() {
+        SYSCALL_FILTERS_EXIST.store(true, Ordering::Release);
+    }
     let pid = p.pid;
     {
         let mut handles = HANDLES.lock();
@@ -2154,6 +2162,19 @@ pub fn current_lookup() -> Lookup {
         Some(p) => p.lookup(),
         None if pid == KERNEL_PID => Lookup::kernel(),
         None => Lookup { path_policy: Some(Arc::new(PathPolicy::default())), ..Lookup::kernel() },
+    }
+}
+
+/// Check before every dispatcher path, including paths that avoid the entry lock.
+pub fn syscall_allowed(number: u64) -> bool {
+    if !SYSCALL_FILTERS_EXIST.load(Ordering::Acquire) {
+        return true;
+    }
+    let pid = sched::current_pid();
+    let t = TABLE.lock();
+    match t.procs.get(&pid) {
+        Some(p) => p.syscall_policy.as_ref().is_none_or(|policy| policy.allows(number)),
+        None => pid == KERNEL_PID,
     }
 }
 
