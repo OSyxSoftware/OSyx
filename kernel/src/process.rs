@@ -38,7 +38,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
-use osyx_abi::{auxv, startup, Errno};
+use osyx_abi::{auxv, startup, wow64, Errno};
 use osyx_elf::{AddressRange, ElfError, ElfImage};
 use osyx_vfs::Cred;
 
@@ -407,6 +407,83 @@ extern "C" {
     fn osyx_iret_to_user(entry: u64, user_rsp: u64, arg: u64) -> !;
 }
 
+global_asm!(
+    r#"
+    .section .text
+    // ! osyx_iret_to_user32(frame: *const osyx_abi::wow64::CompatIretFrame,
+    //                      arg: u64)
+    // Enters ring 3 in compatibility mode. The frame carries RIP, CS
+    // (USER_CS32), RFLAGS, RSP and SS (USER_DS) in the order iretq pops them;
+    // rdi = arg and every other general purpose register is zero.
+    .global osyx_iret_to_user32
+osyx_iret_to_user32:
+    cli
+    push rdi
+    push rsi
+    push rdx
+    call osyx_kernel_leave
+    pop rdx
+    pop rsi
+    pop rdi
+    push qword ptr [rdi + 32]   // SS  = USER_DS (0x1B)
+    push qword ptr [rdi + 24]   // RSP, below 4 GiB and 16-byte aligned
+    push qword ptr [rdi + 16]   // RFLAGS: IF set
+    push qword ptr [rdi + 8]    // CS  = USER_CS32 (0x3B)
+    push qword ptr [rdi + 0]    // RIP, below 4 GiB
+    mov rdi, rsi
+    xor eax, eax
+    xor ebx, ebx
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor ebp, ebp
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+    xor r12d, r12d
+    xor r13d, r13d
+    xor r14d, r14d
+    xor r15d, r15d
+    swapgs
+    iretq
+    "#
+);
+
+extern "C" {
+    fn osyx_iret_to_user32(frame: *const wow64::CompatIretFrame, arg: u64) -> !;
+}
+
+/// Enters `entry` in 32-bit compatibility mode with `rsp` and `rdi = arg`.
+///
+/// The IRET frame selects CS = [`wow64::USER_CS32`] (D=1, L=0, DPL 3) and
+/// SS = [`wow64::USER_DS`]; the CPU switches to compatibility mode. The entry
+/// point and the stack must lie below 4 GiB (compatibility mode has 32-bit
+/// address size) and `rsp` must be 16-byte aligned at a call boundary. FS is
+/// loaded from the thread's 32-bit descriptor, so 32-bit code finds its TEB
+/// at `fs:[0x18]`; the FPU/AVX state is the thread's usual 832-byte XSAVE
+/// image (compat mode uses the same state components, no new area).
+///
+/// # Safety
+/// `entry` and `user_rsp` must lie in the current process's user address
+/// space, which must be active; a bad value only faults in ring 3.
+#[allow(dead_code)] // First caller: the M4 32-bit bridge.
+pub unsafe fn enter_compat(entry: u64, user_rsp: u64, arg: u64) -> ! {
+    let frame = wow64::CompatIretFrame::new(entry, user_rsp)
+        .expect("32-bit entry point or stack outside compatibility mode");
+    // The CPU keeps one hidden FS base. The 32-bit descriptor of this CPU
+    // carries the calling thread's base (the scheduler installs it with the
+    // thread), so load it here rather than relying on what the caller left.
+    // SAFETY: a ring-0 load of a ring-3 data selector; the kernel does not use
+    // FS and the stub runs with interrupts off until `iretq`.
+    unsafe {
+        core::arch::asm!("mov fs, {sel:x}", sel = in(reg) wow64::USER_FS32 as u64, options(nostack, preserves_flags))
+    };
+    // SAFETY: forwarded caller contract; `frame` lives on this kernel stack
+    // until `iretq` consumes it.
+    unsafe { osyx_iret_to_user32(&frame, arg) }
+}
+
 /// Where a user thread starts in ring 3.
 struct UserStart {
     rip: u64,
@@ -674,6 +751,7 @@ pub fn exec_current(req: ExecRequest) -> ExecError {
     sched::rename_current(&name);
     sched::set_current_fs_base(0);
     sched::set_current_gs_base(0);
+    sched::set_current_fs32_base(0);
     sched::reset_current_fpu();
     crate::user_fault::clear_process(pid);
     unmap_shared_from(space.root, old_shared);

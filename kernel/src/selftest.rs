@@ -37,7 +37,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 26] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 27] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -53,6 +53,7 @@ pub fn run(boot: &BootData) -> Summary {
         ("sleep and join", &sleep_join),
         ("FPU/SSE state per thread", &fpu_state),
         ("FS base per thread", &fs_base),
+        ("32-bit compatibility segments", &compat_segments),
         ("PCI enumeration", &pci_scan),
         ("block device I/O", &block_io),
         ("VFS on tmpfs: files and directories", &crate::selftest_fs::tmpfs_files),
@@ -502,6 +503,65 @@ fn fs_base() -> TestResult {
     let after = unsafe { cpu::rdmsr(0xC000_0100) };
     ensure!(after == mine, "kmain's FS base changed from {mine:#x} to {after:#x}");
     Ok(())
+}
+
+/// 32-bit compatibility segments: the descriptors installed in the GDT, the
+/// per-thread FS32 base switch and the IRET frame that enters compatibility
+/// mode. The ring-3 jump itself is the M4 bridge's job.
+fn compat_segments() -> TestResult {
+    use osyx_abi::wow64;
+    const TEB: u64 = 0x7FFD_F000;
+
+    let code = crate::arch::gdt::descriptor(7);
+    ensure!(code == wow64::code32_descriptor(), "GDT entry 7 is {code:#x}, not the 32-bit code descriptor");
+    ensure!(wow64::descriptor_d(code) && !wow64::descriptor_l(code), "entry 7 is not 32-bit code");
+    ensure!((wow64::descriptor_access(code) & 0x60) == 0x60, "entry 7 is not DPL 3");
+    ensure!((wow64::descriptor_access(code) & 0x18) == 0x18, "entry 7 is not a code segment");
+    ensure!(wow64::descriptor_base(crate::arch::gdt::descriptor(8)) == 0, "entry 8 has a base before any set");
+    // SAFETY: IA32_FS_BASE exists on every x86-64 CPU.
+    let prior = unsafe { cpu::rdmsr(0xC000_0100) };
+
+    sched::set_current_fs32_base(TEB);
+    let fs = crate::arch::gdt::descriptor(8);
+    ensure!(wow64::descriptor_base(fs) == TEB as u32, "entry 8 base {:#x} after set", wow64::descriptor_base(fs));
+    ensure!((wow64::descriptor_access(fs) & 0x10) != 0, "entry 8 is not a data segment");
+    let sel = fs_selector();
+    ensure!(sel == wow64::USER_FS32, "FS selector {sel:#x} after set");
+    // The descriptor load must have replaced the one hidden FS base, which is
+    // what compatibility-mode code reads at fs:[0x18].
+    // SAFETY: as above.
+    let hidden = unsafe { cpu::rdmsr(0xC000_0100) };
+    ensure!(hidden == TEB, "hidden FS base {hidden:#x}, not the descriptor base");
+
+    let frame = wow64::CompatIretFrame::new(0x0040_1000, 0x7FFE_0000).ok_or("compat IRET frame rejected")?;
+    ensure!(frame.cs == 0x3B && frame.ss == 0x1B, "frame selectors {:#x}/{:#x}", frame.cs, frame.ss);
+    ensure!(frame.rflags == 0x202, "frame rflags {:#x}", frame.rflags);
+    kprintln!(
+        "wow64: CS32 {:#x} desc {code:#x}, FS32 {:#x} base {:#x} (FS selector {:#x}, hidden base {hidden:#x}), iret rip {:#x} cs {:#x} rsp {:#x} ss {:#x}",
+        wow64::USER_CS32,
+        wow64::USER_FS32,
+        TEB,
+        sel,
+        frame.rip,
+        frame.cs,
+        frame.rsp,
+        frame.ss
+    );
+
+    sched::set_current_fs32_base(0);
+    ensure!(wow64::descriptor_base(crate::arch::gdt::descriptor(8)) == 0, "entry 8 base not cleared");
+    // SAFETY: as above.
+    let restored = unsafe { cpu::rdmsr(0xC000_0100) };
+    ensure!(restored == prior, "FS base {restored:#x} after clear, was {prior:#x}");
+    Ok(())
+}
+
+/// The FS selector currently loaded (reads the visible part only).
+fn fs_selector() -> u16 {
+    let sel: u16;
+    // SAFETY: reading a segment register has no side effects.
+    unsafe { core::arch::asm!("mov {sel:x}, fs", sel = out(reg) sel, options(nomem, nostack, preserves_flags)) };
+    sel
 }
 
 fn pci_scan() -> TestResult {

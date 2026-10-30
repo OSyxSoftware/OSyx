@@ -11,11 +11,19 @@ use alloc::collections::BTreeMap;
 use core::arch::global_asm;
 use osyx_abi::{
     fault::{self, Context},
-    Errno,
+    wow64, Errno,
 };
 struct Pending {
     frame: TrapFrame,
     mxcsr_mask: u32,
+    /// 32-bit TEB base the thread had when the fault was delivered, 0 for
+    /// a 64-bit fault. `resume` reinstalls it before returning to CS32.
+    fs32: u64,
+}
+
+/// True when `cs` is the compatibility-mode code selector.
+fn compat(cs: u64) -> bool {
+    (cs as u16) & !3 == wow64::USER_CS32 & !3
 }
 struct Registration {
     entry: u64,
@@ -113,6 +121,13 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
         return false;
     }
     let mut c = from_frame(f);
+    // Compatibility mode only has 32-bit addresses; the upper halves of the
+    // pushed frame are not meaningful there.
+    let compat = compat(f.cs);
+    if compat {
+        f.rsp &= 0xFFFF_FFFF;
+        c.gpr[fault::RSP] &= 0xFFFF_FFFF;
+    }
     // The soft-float kernel has not changed the user's x87/SSE/AVX registers.
     unsafe {
         cpu::fpu_save(c.fx.as_mut_ptr());
@@ -127,11 +142,18 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
     if fixup::copy_to_user(addr, bytes).is_err() || fixup::copy_to_user(stack, &0u64.to_le_bytes()).is_err() {
         return false;
     }
-    r.active.insert(tid, Pending { frame: *f, mxcsr_mask: if mask == 0 { 0xffbf } else { mask } });
+    let fs32 = if compat { sched::current_fs32_base() } else { 0 };
+    r.active.insert(tid, Pending { frame: *f, mxcsr_mask: if mask == 0 { 0xffbf } else { mask }, fs32 });
     f.rip = r.entry;
     f.rdi = addr;
     f.rsp = stack;
     f.rflags = (f.rflags & !((1 << 8) | (1 << 10) | (1 << 16))) | 0x202;
+    if compat {
+        // The handler is 64-bit code: enter it with CS32's sibling selector
+        // and the thread's real FS base (the compat FS points at the TEB).
+        f.cs = wow64::USER_CS as u64;
+        sched::set_current_fs32_base(0);
+    }
     true
 }
 
@@ -168,10 +190,11 @@ pub fn resume(addr: u64) -> Result<u64, Errno> {
         if mxcsr & !pending.mxcsr_mask != 0 {
             return Err(Errno::InvalidArgument);
         }
-        Ok(r.active.remove(&tid).unwrap().frame)
+        let pending = r.active.remove(&tid).unwrap();
+        Ok((pending.frame, pending.fs32))
     })();
-    let mut f = match outcome {
-        Ok(f) => f,
+    let (mut f, fs32) = match outcome {
+        Ok(v) => v,
         Err(e) => {
             if were_enabled {
                 cpu::enable_interrupts();
@@ -188,6 +211,10 @@ pub fn resume(addr: u64) -> Result<u64, Errno> {
     // Arithmetic/trace/direction/resume/alignment flags only. In particular
     // IF stays enabled, IOPL/NT/VM are never accepted from user memory.
     f.rflags = (c.rflags & 0x0005_0dd5) | 0x202;
+    // A compatibility-mode continuation needs its TEB back in FS.
+    if fs32 != 0 {
+        sched::set_current_fs32_base(fs32);
+    }
     // Original ring-3 CS/SS are retained. This trusted frame and aligned
     // FXSAVE image live on this thread's kernel stack until IRET completes.
     unsafe {
