@@ -377,6 +377,28 @@ fn dhcp_ignores_replies_from_unselected_server() {
     assert!(matches!(event, Some(dhcp::Event::Renewed(_))));
 }
 
+#[test]
+fn dhcp_uses_ordered_lease_timers() {
+    let mac = MacAddr([0x52, 0x54, 0, 0, 0, 9]);
+    let server = Ipv4Addr::new(10, 0, 2, 2);
+    let address = Ipv4Addr::new(10, 0, 2, 15);
+    for (t1, t2, expected) in [(110, None, (60, 105)), (100, Some(90), (60, 105)), (0, Some(90), (60, 105)), (30, Some(90), (30, 90))] {
+        let mut client = dhcp::Client::new(mac, 7, "osyx");
+        let xid = dhcp::Message::parse(&client.poll(0).0.unwrap().payload).unwrap().xid;
+        let reply = |kind| dhcp::build_reply(kind, xid, mac, address, server, Ipv4Addr::new(255, 255, 255, 0), server, server, 120);
+        client.input(&reply(dhcp::OFFER), 10);
+        let mut ack = reply(dhcp::ACK);
+        ack.pop();
+        ack.extend_from_slice(&[58, 4]);
+        ack.extend_from_slice(&(t1 as u32).to_be_bytes());
+        if let Some(t2) = t2 { ack.extend_from_slice(&[59, 4]); ack.extend_from_slice(&(t2 as u32).to_be_bytes()); }
+        ack.push(255);
+        let (_, event) = client.input(&ack, 20);
+        let Some(dhcp::Event::Bound(lease)) = event else { panic!("expected lease") };
+        assert_eq!((lease.t1, lease.t2), (20 + expected.0 * 1000, 20 + expected.1 * 1000));
+    }
+}
+
 fn dns_response(id: u16, name: &str, answers: &[(&str, u16, &[u8])], rcode: u8, tc: bool) -> Vec<u8> {
     let mut m = dns::build_query(id, name, dns::TYPE_A);
     m[2] = 0x81 | if tc { 0x02 } else { 0 };

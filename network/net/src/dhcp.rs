@@ -459,8 +459,9 @@ impl Client {
         }
         let server = m.server_id.or(self.offer.map(|o| o.1)).or(self.lease.as_ref().map(|l| l.server))?;
         let lease_s = m.lease_s.unwrap_or(MIN_LEASE_S).max(MIN_LEASE_S) as u64;
-        let t1 = m.t1_s.map(|v| v as u64).filter(|&v| v < lease_s).unwrap_or(lease_s / 2);
-        let t2 = m.t2_s.map(|v| v as u64).filter(|&v| v > t1 && v < lease_s).unwrap_or(lease_s * 7 / 8);
+        let defaults = (lease_s / 2, lease_s * 7 / 8);
+        let proposed = (m.t1_s.map(u64::from).unwrap_or(defaults.0), m.t2_s.map(u64::from).unwrap_or(defaults.1));
+        let (t1, t2) = if proposed.0 > 0 && proposed.0 < proposed.1 && proposed.1 < lease_s { proposed } else { defaults };
         let prior = self.lease.as_ref().filter(|l| l.addr == addr);
         let prefix = m.subnet.and_then(mask_prefix).or_else(|| prior.map(|l| l.prefix)).unwrap_or(24);
         Some(Lease {
