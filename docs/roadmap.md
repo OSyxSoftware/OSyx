@@ -109,9 +109,10 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 15. **OSyx Std**: `thread`, futex-based `Mutex`, `Condvar`, `RwLock`,
     `Once`/`OnceLock` and `mpsc` are implemented; next is the genuine `std`
     port ([rust-std.md](rust-std.md)).
-16. **Desktop**: per-pixel alpha (ARGB8888 windows) and raw-report keyboards
-    are implemented; still open: AXIS pipelines, redirection and blocks (see
-    [graphics.md](graphics.md)).
+16. **Desktop**: per-pixel alpha (ARGB8888 windows), raw-report keyboards,
+    AXIS redirection (`<`, `>`, `>>`, built-ins included), pipelines with at
+    most one built-in stage and `if`/`for` blocks are implemented; still
+    open: job control (see [graphics.md](graphics.md)).
 
 ## Real hardware: current scope and limits
 
