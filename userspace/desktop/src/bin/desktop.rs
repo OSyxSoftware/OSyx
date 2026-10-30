@@ -391,6 +391,7 @@ static EXITS: os_std::sync::Mutex<Vec<(u64, i32)>> = os_std::sync::Mutex::new(Ve
 struct Shell {
     conn: Connection,
     fonts: Fonts,
+    clipboard: osyx_ui::Clipboard,
     theme: Theme,
     adapter: Adapter,
     start: Instant,
@@ -514,6 +515,7 @@ fn main() -> i32 {
     let mut shell = Shell {
         conn,
         fonts,
+        clipboard: osyx_ui::Clipboard::default(),
         theme: common::configured_theme(),
         adapter: Adapter::default(),
         start: Instant::now(),
@@ -669,6 +671,10 @@ impl Shell {
 
     fn event(&mut self, ev: Event) {
         match &ev {
+            Event::ClipboardChanged { entries, .. } => {
+                self.clipboard.receive(proto::clipboard_text(entries));
+                return;
+            }
             Event::WindowList { windows } => {
                 let processes = system::processes().unwrap_or_default();
                 let families: Vec<_> = processes
@@ -754,6 +760,10 @@ impl Shell {
                 self.restack_notes();
             }
         }
+        if let Some(text) = self.clipboard.take_changed() {
+            let entry = proto::clipboard_text_entry(text);
+            let _ = self.conn.send(&proto::Request::ClipboardSet { entries: vec![entry] }, &[]);
+        }
     }
 
     /// Super+key shortcuts.
@@ -786,7 +796,7 @@ impl Shell {
         let fonts = self.fonts;
         let now = self.now();
         let Some(l) = &mut self.lock else { return };
-        match l.field.event(&ui, true, &fonts) {
+        match l.field.event_with_clipboard(&ui, true, &fonts, &mut self.clipboard) {
             Response::Submitted => {
                 // One attempt per second against guessing.
                 if now.saturating_sub(l.last_failure) < 1000 {
@@ -1045,7 +1055,7 @@ impl Shell {
                     }
                 }
                 let before = String::from(search.text());
-                match search.event(&ui, !*list_focus, &fonts) {
+                match search.event_with_clipboard(&ui, !*list_focus, &fonts, &mut self.clipboard) {
                     Response::Submitted => {
                         launch = list
                             .selected()
@@ -1085,7 +1095,7 @@ impl Shell {
                 r if r.needs_redraw() => p.win.dirty = true,
                 _ => {}
             },
-            PopupKind::Confirm { dialog } => match dialog.event(&ui, &fonts) {
+            PopupKind::Confirm { dialog } => match dialog.event_with_clipboard(&ui, &fonts, &mut self.clipboard) {
                 Response::Activated(1) => confirm = Some(dialog.tag),
                 Response::Activated(_) | Response::Cancelled => close = true,
                 r if r.needs_redraw() => p.win.dirty = true,
@@ -1101,7 +1111,7 @@ impl Shell {
                     if toggled.needs_redraw() {
                         p.win.dirty = true;
                     }
-                    match field.event(&ui, true, &fonts) {
+                    match field.event_with_clipboard(&ui, true, &fonts, &mut self.clipboard) {
                         Response::Submitted => {
                             let pw = String::from(field.text());
                             if (8..=63).contains(&pw.len()) {
