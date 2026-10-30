@@ -77,6 +77,15 @@ fn corrupt_tables_are_rejected() {
     assert!(build(1 << 14, Guid([0; 16]), &bad).is_err());
 }
 
+#[test]
+fn build_rejects_overlaps_and_invalid_lengths() {
+    let part = |first_lba, sectors| NewPartition { type_guid: TYPE_ESP, unique_guid: Guid([1; 16]), first_lba, sectors, name: "" };
+    assert!(build(1 << 14, Guid([9; 16]), &[part(2048, 100), part(2147, 20)]).is_err());
+    assert!(build(1 << 14, Guid([9; 16]), &[part(2048, 0)]).is_err());
+    assert!(build(1 << 14, Guid([9; 16]), &[part(u64::MAX, 2)]).is_err());
+    assert!(build(1 << 14, Guid([9; 16]), &[part(2148, 20), part(2048, 100)]).is_ok());
+}
+
 /// Flips every byte of the primary header and array one at a time: parsing
 /// must never panic, and must either succeed via the backup or fail cleanly.
 #[test]

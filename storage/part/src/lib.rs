@@ -274,11 +274,16 @@ pub fn build(disk_sectors: u64, disk_guid: Guid, parts: &[NewPartition<'_>]) -> 
         return Err(GptError::Corrupt("disk too small"));
     }
     let mut array = vec![0u8; ENTRY_COUNT * ENTRY_SIZE];
+    let mut ranges = Vec::with_capacity(parts.len());
     for (i, p) in parts.iter().enumerate() {
-        let end = p.first_lba + p.sectors - 1;
-        if p.sectors == 0 || p.first_lba < first || end > last {
+        let end = p.sectors.checked_sub(1).and_then(|n| p.first_lba.checked_add(n)).ok_or(GptError::Corrupt("partition outside the usable range"))?;
+        if p.first_lba < first || end > last {
             return Err(GptError::Corrupt("partition outside the usable range"));
         }
+        if ranges.iter().any(|&(start, stop)| p.first_lba <= stop && start <= end) {
+            return Err(GptError::Corrupt("partitions overlap"));
+        }
+        ranges.push((p.first_lba, end));
         let e = &mut array[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE];
         e[0..16].copy_from_slice(&p.type_guid.0);
         e[16..32].copy_from_slice(&p.unique_guid.0);
