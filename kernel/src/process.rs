@@ -118,6 +118,9 @@ struct Region {
     /// is page `i` of the image). A page whose entry points at the image's
     /// frame is shared and mapped read-only; a write copies it first.
     image: Option<Arc<ImageSection>>,
+    /// A file section behind the region, mapping pages on first touch. The
+    /// frames belong to the section's backing, not to this address space.
+    file: Option<FileRegion>,
     /// Pages moved to compressed memory: page index -> compressed bytes
     /// (empty: an all-zero page). Restored on the next access.
     swapped: BTreeMap<u64, SwappedPage>,
@@ -126,11 +129,25 @@ struct Region {
     reclaim_cursor: u64,
 }
 
+struct FileRegion {
+    section: Arc<crate::filemap::Section>,
+    /// Page index in the file of the region's first page.
+    first_page: u64,
+}
+
 impl Region {
     fn new(pages: u64, prot: u64) -> Region {
         let mut runs = BTreeMap::new();
         runs.insert(0, prot);
-        Region { pages, prot: runs, image: None, swapped: BTreeMap::new(), reclaim_cursor: 0, refault_guard: Default::default() }
+        Region {
+            pages,
+            prot: runs,
+            image: None,
+            file: None,
+            swapped: BTreeMap::new(),
+            reclaim_cursor: 0,
+            refault_guard: Default::default(),
+        }
     }
 
     /// Whether `frame` at page `page` of the region is the shared image frame.
@@ -340,9 +357,6 @@ pub struct Process {
     exited_cpu_ticks: u64,
     /// Set by `exit`: the status reported once the last thread has ended.
     exit_status: Option<i32>,
-    /// Open objects by handle number: 0-2 only if standard streams were
-    /// redirected at spawn, the rest from `FIRST_FILE_HANDLE`.
-    handles: BTreeMap<u64, Object>,
     /// User and group for permission checks (inherited by children).
     cred: Cred,
     /// Canonical absolute current directory (inherited by children).
@@ -360,6 +374,12 @@ struct Table {
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static TABLE: IrqSpinLock<Table> = IrqSpinLock::new(Table { procs: BTreeMap::new(), waiters: Vec::new() });
+/// Open objects by process and handle number: 0-2 only if standard streams
+/// were redirected at spawn, the rest from `FIRST_FILE_HANDLE`. Separate from
+/// [`TABLE`]: channel and wait system calls look handles up on every message,
+/// and they must not queue behind mappings or page faults. Lock order:
+/// TABLE, then this table.
+static HANDLES: IrqSpinLock<BTreeMap<Pid, BTreeMap<u64, Object>>> = IrqSpinLock::new(BTreeMap::new());
 static OUTPUT_TAIL: IrqSpinLock<VecDeque<String>> = IrqSpinLock::new(VecDeque::new());
 
 global_asm!(
@@ -540,7 +560,6 @@ impl Process {
             threads: Vec::new(),
             exited_cpu_ticks: 0,
             exit_status: None,
-            handles: BTreeMap::new(),
             cred,
             cwd,
         }
@@ -591,7 +610,16 @@ fn unmap_images_from(root: u64, regions: BTreeMap<u64, Region>) {
         if r.image.is_some() {
             unmap_image_pages(root, start, &r, 0, r.pages);
         }
+        if r.file.is_some() {
+            unmap_file_pages(root, start, r.pages);
+        }
     }
+}
+
+/// Clears the page entries of a file view: every frame belongs to the
+/// section's backing and must not be freed with the address space.
+fn unmap_file_pages(root: u64, start: u64, pages: u64) {
+    paging::edit_range_in(root, start, start + pages * PAGE_SIZE, |_, _| paging::Leaf::Clear);
 }
 
 /// Clears the shared image entries among pages `first..last` of `r` (at
@@ -636,12 +664,16 @@ pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 
     };
     let (space, entry, rsp, path) = build_image(&cx, req)?;
     let mut p = Process::new(parent, req.name(), cx.cred, cx.cwd, space);
-    for (i, o) in stdio.into_iter().enumerate() {
-        if let Some(o) = o {
-            p.handles.insert(i as u64, o);
+    let pid = p.pid;
+    {
+        let mut handles = HANDLES.lock();
+        let table = handles.entry(pid).or_default();
+        for (i, o) in stdio.into_iter().enumerate() {
+            if let Some(o) = o {
+                table.insert(i as u64, o);
+            }
         }
     }
-    let pid = p.pid;
     if p.name == "winrun" && !req.argv.iter().any(|a| a == "-contentproc") {
         crate::smp::set_sample_pid(pid);
     }
@@ -864,7 +896,7 @@ pub fn finish_current_thread(code: i32) -> ! {
     sched::set_current_root(paging::kernel_root());
     crate::futex::forget_process(pid);
     let mut to_wake = Vec::new();
-    let closed;
+    let closed = HANDLES.lock().remove(&pid).unwrap_or_default();
     {
         let mut t = TABLE.lock();
         let Table { procs, waiters } = &mut *t;
@@ -874,7 +906,6 @@ pub fn finish_current_thread(code: i32) -> ! {
             p.flush_line();
         }
         p.release_memory();
-        closed = core::mem::take(&mut p.handles);
         if !closed.is_empty() {
             kprintln!("process {} ({}): closed {} open handles", pid, p.name, closed.len());
         }
@@ -921,18 +952,18 @@ pub fn add_handle(f: vfs::OpenFile) -> Result<u64, Errno> {
 /// handles (lowest free numbers from `FIRST_FILE_HANDLE`).
 pub fn add_objects(objects: Vec<Object>) -> Result<Vec<u64>, Errno> {
     let pid = sched::current_pid();
-    let mut t = TABLE.lock();
-    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
-    if p.handles.len() + objects.len() > osyx_abi::MAX_HANDLES {
+    let mut handles = HANDLES.lock();
+    let p = handles.entry(pid).or_default();
+    if p.len() + objects.len() > osyx_abi::MAX_HANDLES {
         return Err(Errno::TooManyHandles);
     }
     let mut out = Vec::with_capacity(objects.len());
     let mut h = osyx_abi::FIRST_FILE_HANDLE;
     for o in objects {
-        while p.handles.contains_key(&h) {
+        while p.contains_key(&h) {
             h += 1;
         }
-        p.handles.insert(h, o);
+        p.insert(h, o);
         out.push(h);
     }
     Ok(out)
@@ -953,8 +984,8 @@ pub fn get_handle(h: u64) -> Result<FileHandle, Errno> {
 /// The object behind handle `h` of the current process.
 pub fn get_object(h: u64) -> Result<Object, Errno> {
     let pid = sched::current_pid();
-    let t = TABLE.lock();
-    t.procs.get(&pid).and_then(|p| p.handles.get(&h)).cloned().ok_or(Errno::BadHandle)
+    let handles = HANDLES.lock();
+    handles.get(&pid).and_then(|p| p.get(&h)).cloned().ok_or(Errno::BadHandle)
 }
 
 /// The shared memory object (as its address) and the offset in it behind
@@ -990,6 +1021,34 @@ fn shared_keys_clear(pid: Pid) {
     for b in bases {
         index.remove(&(pid, b));
     }
+}
+
+/// Maps `[offset, offset + len)` of a file section into the current process.
+/// The region reserves the address range only: every page is loaded from the
+/// section's backing on its first touch, so mapping a 177 MiB archive costs
+/// no reads until it is used.
+pub fn map_section(
+    section: Arc<crate::filemap::Section>,
+    offset: u64,
+    len: u64,
+    writable: bool,
+) -> Result<u64, Errno> {
+    use osyx_abi::{PROT_READ, PROT_WRITE};
+    let prot = if writable { PROT_READ | PROT_WRITE } else { PROT_READ };
+    let pages = len.div_ceil(PAGE_SIZE);
+    let pid = sched::current_pid();
+    let mut t = TABLE.lock();
+    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    if p.mapped_pages + pages > MAP_LIMIT_PAGES {
+        return Err(Errno::NoMemory);
+    }
+    let base = free_run(p, p.next_map, pages, PAGE_SIZE).ok_or(Errno::NoMemory)?;
+    let mut region = Region::new(pages, prot);
+    region.file = Some(FileRegion { section, first_page: offset / PAGE_SIZE });
+    p.regions.insert(base, region);
+    p.mapped_pages += pages;
+    p.next_map = base + (pages + 1) * PAGE_SIZE; // leave a guard page
+    Ok(base)
 }
 
 /// Maps all of `shm` into the current process (read-only unless
@@ -1077,7 +1136,7 @@ pub fn list() -> Vec<osyx_abi::ipc::ProcInfo> {
 /// until that call returns.
 pub fn close_handle(h: u64) -> Result<(), Errno> {
     let pid = sched::current_pid();
-    let removed = TABLE.lock().procs.get_mut(&pid).and_then(|p| p.handles.remove(&h));
+    let removed = HANDLES.lock().get_mut(&pid).and_then(|p| p.remove(&h));
     removed.map(drop).ok_or(Errno::BadHandle)
 }
 
@@ -1220,6 +1279,11 @@ pub fn protect(addr: u64, len: u64, prot: u64) -> Result<(), Errno> {
     if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE {
         return Err(Errno::InvalidArgument);
     }
+    if let Some(f) = r.file.as_ref() {
+        if flags.writable && !f.section.writable {
+            return Err(Errno::PermissionDenied);
+        }
+    }
     // A page already touched keeps its frame under the new flags; the others
     // get them when first touched. Rewriting the leaf entries in one pass
     // avoids a page-table walk and a TLB shootdown per page, which matters
@@ -1245,6 +1309,11 @@ fn release_frames(space: &mut Space, start: u64, r: &Region, addr: u64, pages: u
         let first = (addr - start) / PAGE_SIZE;
         unmap_image_pages(space.root, start, r, first, first + pages);
     }
+    if r.file.is_some() {
+        // Section frames, never owned by this address space.
+        unmap_file_pages(space.root, addr, pages);
+        return;
+    }
     for i in 0..pages {
         let va = addr + i * PAGE_SIZE;
         if paging::translate_in(space.root, va).is_some() {
@@ -1267,7 +1336,7 @@ pub fn discard(addr: u64, len: u64) -> Result<(), Errno> {
     let mut t = TABLE.lock();
     let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
     let (&start, r) = p.regions.range_mut(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
-    if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE {
+    if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE || r.file.is_some() {
         return Err(Errno::InvalidArgument);
     }
     release_frames(&mut p.space, start, r, addr, pages);
@@ -1335,6 +1404,11 @@ fn prefault_range(mut page: u64, end: u64) -> u64 {
             continue;
         };
         if page >= start + r.pages * PAGE_SIZE {
+            page += PAGE_SIZE;
+            continue;
+        }
+        // A file view gets its frames from the section, never zeroed here.
+        if r.file.is_some() {
             page += PAGE_SIZE;
             continue;
         }
@@ -1503,7 +1577,10 @@ pub fn reclaim(want: u64) -> u64 {
             continue;
         }
         let root = p.space.root;
-        let starts: Vec<u64> = p.regions.iter().filter(|(_, r)| r.image.is_none()).map(|(&s, _)| s).collect();
+        // File views are clean copies owned by their section: compressing
+        // them would duplicate data and break the frame accounting.
+        let starts: Vec<u64> =
+            p.regions.iter().filter(|(_, r)| r.image.is_none() && r.file.is_none()).map(|(&s, _)| s).collect();
         for start in starts {
             if done >= want {
                 break;
@@ -1749,6 +1826,14 @@ fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> Demand {
             return Demand::Refused;
         }
         let index = (page - start) / PAGE_SIZE;
+        // A file view: load the page outside the process table, then map it
+        // under the table again (the region may have been unmapped meanwhile).
+        if let Some(f) = r.file.as_ref() {
+            let first = f.first_page + index;
+            let section = f.section.clone();
+            drop(t);
+            return file_fault(page, first, section, write, fetch, wait);
+        }
         if r.swapped.contains_key(&index) {
             if paging::translate_in(root, page).is_some() {
                 return Demand::Mapped;
@@ -1786,6 +1871,57 @@ fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> Demand {
         Demand::Mapped
     } else {
         Demand::NoMemory
+    }
+}
+
+/// Maps one page of a file view after loading it from the section. The disk
+/// read runs without the process table; the region is re-validated before the
+/// frame goes in, so a concurrent `unmap` or `execve` wins.
+fn file_fault(page: u64, file_page: u64, section: Arc<crate::filemap::Section>, write: bool, fetch: bool, wait: bool) -> Demand {
+    let shm = match section.page(file_page) {
+        Ok(shm) => shm,
+        Err(Errno::NoMemory) => return Demand::NoMemory,
+        Err(e) => {
+            kprintln!("filemap: read page {} failed: {}", file_page, e.name());
+            return Demand::Refused;
+        }
+    };
+    let pid = sched::current_pid();
+    let mut t = if wait {
+        TABLE.lock()
+    } else {
+        match lock_table_briefly() {
+            Some(t) => t,
+            None => return Demand::Refused,
+        }
+    };
+    let Some(p) = t.procs.get_mut(&pid) else { return Demand::Refused };
+    let Some((&start, r)) = p.regions.range(..=page).next_back() else { return Demand::Refused };
+    // The section must still be there: the region may have been replaced.
+    if !r.file.as_ref().is_some_and(|f| Arc::ptr_eq(&f.section, &section)) {
+        return Demand::Refused;
+    }
+    let index = (page - start) / PAGE_SIZE;
+    if index >= r.pages {
+        return Demand::Refused;
+    }
+    let flags = match prot_flags(r.prot_at(index)) {
+        Ok(flags) => flags,
+        Err(_) => return Demand::Refused,
+    };
+    if (write && !flags.writable) || (fetch && !flags.executable) {
+        return Demand::Refused;
+    }
+    if paging::translate_in(p.space.root, page).is_some() {
+        return Demand::Mapped;
+    }
+    match paging::map_in(p.space.root, page, shm.frames()[0], flags) {
+        Ok(tables) => {
+            p.space.frames += tables;
+            Demand::Mapped
+        }
+        Err(MapError::OutOfMemory) => Demand::NoMemory,
+        Err(_) => Demand::Refused,
     }
 }
 
