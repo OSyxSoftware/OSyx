@@ -382,6 +382,8 @@ pub mod nr {
     pub const SET_FS32_BASE: u64 = 96;
     /// `spawn_restricted(exec: *const ExecArgs, policy: *const sandbox::SpawnPolicy)`.
     pub const SPAWN_RESTRICTED: u64 = 97;
+    /// `channel_pair(out: *mut [u64; 2]) -> 0`: anonymous connected endpoints.
+    pub const CHANNEL_PAIR: u64 = 98;
 }
 
 /// Thread priorities (`nr::THREAD_PRIORITY`).

@@ -53,6 +53,22 @@ pub fn pipe(out: u64) -> Result<u64, Errno> {
     Ok(0)
 }
 
+pub fn channel_pair(out: u64) -> Result<u64, Errno> {
+    if !user_range_ok(out, 16) {
+        return Err(Errno::Fault);
+    }
+    let (cred, _) = process::current_identity();
+    let (a, b) = ipc::pair(sched::current_pid(), cred.uid);
+    let handles = process::add_objects(alloc::vec![Object::Channel(Arc::new(a)), Object::Channel(Arc::new(b))])?;
+    let pair = [handles[0], handles[1]];
+    if let Err(err) = put_user(out, &pair) {
+        let _ = process::close_handle(pair[0]);
+        let _ = process::close_handle(pair[1]);
+        return Err(err);
+    }
+    Ok(0)
+}
+
 pub fn spawn_stdio(args: u64, stdio: u64) -> Result<u64, Errno> {
     let req = ExecRequest::from_user(args)?;
     let raw: [u64; 3] = get_user(stdio)?;

@@ -8,7 +8,8 @@ loading its image; descendants inherit them. Restricted children cannot inherit
 file stdio handles, receive file-backed sections over IPC, or publish shared
 images. They cannot connect to or register global IPC services, and may kill
 only themselves or direct children. A parent may grant one existing channel
-as child handle 3. The channel's recorded peer identity describes its original
+as child handle 3. An anonymous channel pair avoids exposing a service name.
+The channel's recorded peer identity describes its original
 connection, not necessarily the child. Other handle and IPC paths remain
 unreviewed. This is not a browser sandbox.
 Installation and inheritance need adversarial runtime and concurrency tests.

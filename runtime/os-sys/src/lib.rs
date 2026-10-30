@@ -632,6 +632,13 @@ mod imp {
         Ok((out[0], out[1]))
     }
 
+    /// Creates connected anonymous channels without a public service name.
+    pub fn channel_pair() -> Result<(u64, u64), Errno> {
+        let mut out = [0u64; 2];
+        decode(syscall1(nr::CHANNEL_PAIR, out.as_mut_ptr() as u64))?;
+        Ok((out[0], out[1]))
+    }
+
     /// `spawn` with the child's handles 0-2 taken from `stdio`
     /// (`HANDLE_NONE` keeps the console).
     pub fn spawn_stdio(path: &str, argv: &[u8], envp: &[u8], stdio: [u64; 3]) -> Result<u64, Errno> {
