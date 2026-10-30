@@ -542,9 +542,22 @@ pub fn restricted_opens() -> TestResult {
         ensure!(matches!(vfs::open(&restricted, &format!("{dir}/escape"), OPEN_READ, 0), Err(Errno::PermissionDenied)), "symlink escape allowed");
         ensure!(matches!(vfs::open(&restricted, &inside, OPEN_WRITE, 0), Err(Errno::PermissionDenied)), "write allowed");
         ensure!(matches!(vfs::open_exec(&restricted, &inside), Err(Errno::PermissionDenied)), "execute allowed");
+        ensure!(matches!(vfs::stat(&restricted, outside), Err(Errno::PermissionDenied)), "outside stat allowed");
+        ensure!(matches!(vfs::unlink(&restricted, &inside), Err(Errno::PermissionDenied)), "unlink allowed");
+        ensure!(matches!(vfs::rename(&restricted, &inside, &format!("{dir}/renamed")), Err(Errno::PermissionDenied)), "rename allowed");
+        ensure!(matches!(vfs::chmod(&restricted, &inside, 0o777), Err(Errno::PermissionDenied)), "chmod allowed");
+        ensure!(matches!(vfs::mkdir(&restricted, &format!("{dir}/subdir"), 0o755), Err(Errno::PermissionDenied)), "mkdir allowed");
+        ensure!(matches!(vfs::symlink(&restricted, outside, &format!("{dir}/newlink")), Err(Errno::PermissionDenied)), "symlink allowed");
         let new = format!("{dir}/new");
         ensure!(matches!(create(&restricted, &new, 0o644), Err(Errno::PermissionDenied)), "create allowed");
         ensure!(matches!(vfs::stat(&root, &new), Err(Errno::NotFound)), "denied create left a file");
+        let rw = Access { read: true, write: true, exec: false };
+        let writable = Lookup { path_policy: Some(Arc::new(PathPolicy::new(&[(dir, rw)]).map_err(|err| e("write policy", err))?)), ..root.clone() };
+        write_file(&writable, &new, b"new").map_err(|err| e("allowed create", err))?;
+        let renamed = format!("{dir}/renamed");
+        vfs::rename(&writable, &new, &renamed).map_err(|err| e("allowed rename", err))?;
+        ensure!(matches!(vfs::rename(&writable, &renamed, outside), Err(Errno::PermissionDenied)), "rename escape allowed");
+        vfs::unlink(&writable, &renamed).map_err(|err| e("allowed unlink", err))?;
         let _ = vfs::unlink(&root, outside);
         Ok(())
     })();

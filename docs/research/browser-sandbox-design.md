@@ -2,10 +2,10 @@
 
 Status: design only. Gecko content processes are not currently sandboxed.
 
-The VFS has experimental checks for `open` and program loading when an
-explicit lookup policy is supplied. No process currently receives such a
-policy. Other filesystem operations, open handles, process inheritance and
-system calls remain unrestricted, so these checks are not a sandbox.
+The VFS has experimental path checks when an explicit lookup policy is
+supplied. No process currently receives such a policy. Open handles, process
+inheritance and system calls remain unrestricted, so these checks are not a
+sandbox. The checks also need adversarial runtime and concurrency tests.
 
 OSyx must enforce the boundary in the kernel, independently of the Win32
 compatibility process. A command-line flag or environment variable alone is
