@@ -110,9 +110,9 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
     `Once`/`OnceLock` and `mpsc` are implemented; next is the genuine `std`
     port ([rust-std.md](rust-std.md)).
 16. **Desktop**: per-pixel alpha (ARGB8888 windows), raw-report keyboards,
-    AXIS redirection (`<`, `>`, `>>`, built-ins included), pipelines of
-    programs and `if`/`for` blocks are implemented; still open: built-ins
-    inside a pipeline and job control (see [graphics.md](graphics.md)).
+    AXIS redirection (`<`, `>`, `>>`, built-ins included), pipelines with at
+    most one built-in stage and `if`/`for` blocks are implemented; still
+    open: job control (see [graphics.md](graphics.md)).
 
 ## Real hardware: current scope and limits
 

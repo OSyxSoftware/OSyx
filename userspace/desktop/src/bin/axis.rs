@@ -15,10 +15,10 @@
 //!
 //! Programs inherit the shell's standard streams, so their output appears
 //! in the terminal. `<`, `>` and `>>` redirect standard input/output of a
-//! command (built-ins included) and `|` connects programs into a pipeline.
-//! `if cond { ... } else { ... }` and `for name in words { ... }` group
-//! lines; `cond` is an expression with `== != < > <= >=`. Not implemented
-//! yet: built-ins in a pipeline and job control.
+//! command (built-ins included) and `|` connects programs into a pipeline
+//! (one built-in per pipeline). `if cond { ... } else { ... }` and
+//! `for name in words { ... }` group lines; `cond` is an expression with
+//! `== != < > <= >=`. Not implemented yet: job control.
 
 #![no_std]
 #![no_main]
@@ -396,7 +396,7 @@ impl Shell {
                 println!("  dmesg [WORD]: kernel log (only lines containing WORD), e.g. `dmesg iwm`");
                 println!("Statements: name = expr   print(expr, ...)   $name in commands, $? = last status");
                 println!("Blocks: if a == b {{ ... }} else {{ ... }}   for x in a b {{ ... }}");
-                println!("Redirection: cmd < in, cmd > out, cmd >> out; programs: cmd | cmd | ...");
+                println!("Redirection: cmd < in, cmd > out, cmd >> out; pipelines: cmd | cmd | ...");
                 println!("Network: ping HOST, net list|info|configure, dns lookup NAME, netstat [-a|-s], nc");
                 println!("Other words run programs from /bin, /usr/bin and /system/bin.");
                 Ok(0)
@@ -551,11 +551,10 @@ impl Shell {
         if stages.len() == 1 {
             return self.command(&stages[0], &cmds[0]);
         }
-        for words in &cmds {
-            if is_builtin(&words[0]) {
-                self.fail(&format!("{}: built-in commands cannot be used in a pipeline", words[0]));
-                return Ok(2);
-            }
+        let builtins = cmds.iter().filter(|w| is_builtin(&w[0])).count();
+        if builtins > 1 {
+            self.fail("only one built-in command per pipeline");
+            return Ok(2);
         }
         self.pipe(stages, &cmds)
     }
@@ -645,7 +644,9 @@ impl Shell {
         }
     }
 
-    /// Every stage after the first reads the previous stage's pipe.
+    /// Every stage after the first reads the previous stage's pipe. At most
+    /// one stage is a built-in: it runs in the shell process after the
+    /// programs around it have started, so waiting for output never deadlocks.
     fn pipe(&mut self, stages: &[Stage], cmds: &[Vec<String>]) -> Result<i32, Exit> {
         let mut inputs = Vec::with_capacity(stages.len());
         let mut outputs = Vec::with_capacity(stages.len());
@@ -662,7 +663,13 @@ impl Shell {
             }
         }
         let mut paths = Vec::with_capacity(stages.len());
-        for words in cmds {
+        let mut builtin = None;
+        for (i, words) in cmds.iter().enumerate() {
+            if is_builtin(&words[0]) {
+                builtin = Some(i);
+                paths.push(String::new());
+                continue;
+            }
             let Some(p) = self.program(&words[0]) else {
                 eprintln!("axis: {}: command not found (try `help`)", words[0]);
                 return Ok(127);
@@ -672,43 +679,89 @@ impl Shell {
         let mut links = Vec::with_capacity(stages.len() - 1);
         for _ in 1..stages.len() {
             match ipc::pipe() {
-                Ok(p) => links.push(p),
+                Ok((r, w)) => links.push((Some(r), Some(w))),
                 Err(e) => {
                     self.fail(&format!("pipe: {e}"));
                     return Ok(2);
                 }
             }
         }
-        let mut children = Vec::with_capacity(stages.len());
+        let mut spawned = Vec::with_capacity(stages.len());
         for (i, words) in cmds.iter().enumerate() {
-            let stdin = inputs[i].as_ref().map_or_else(|| if i > 0 { links[i - 1].0.handle() } else { osyx_abi::STDIN }, File::handle);
-            let stdout = outputs[i]
-                .as_ref()
-                .map_or_else(|| if i + 1 < cmds.len() { links[i].1.handle() } else { osyx_abi::STDOUT }, File::handle);
+            if Some(i) == builtin {
+                continue;
+            }
+            let stdin = match inputs[i].as_ref() {
+                Some(f) => f.handle(),
+                None if i > 0 => links[i - 1].0.as_ref().map_or(osyx_abi::STDIN, |r| r.handle()),
+                None => osyx_abi::STDIN,
+            };
+            let stdout = match outputs[i].as_ref() {
+                Some(f) => f.handle(),
+                None if i + 1 < cmds.len() => links[i].1.as_ref().map_or(osyx_abi::STDOUT, |w| w.handle()),
+                None => osyx_abi::STDOUT,
+            };
             let mut c = Command::new(&paths[i]);
             c.arg0(&words[0]).args(&words[1..]);
             match c.spawn_stdio([stdin, stdout, osyx_abi::STDERR]) {
-                Ok(ch) => children.push(ch),
+                Ok(ch) => spawned.push((i, ch)),
                 Err(e) => {
                     eprintln!("axis: {}: {e}", words[0]);
                     drop(links);
                     drop(inputs);
                     drop(outputs);
-                    for ch in children {
+                    for (_, ch) in spawned {
                         let _ = ch.wait();
                     }
                     return Ok(126);
                 }
             }
         }
+        let mut statuses = Vec::new();
+        statuses.resize(stages.len(), 0);
+        let mut leave = false;
+        if let Some(i) = builtin {
+            // Keep only the pipe ends the built-in itself uses; every other
+            // copy is closed here so the programs see end of data.
+            for (j, (r, w)) in links.iter_mut().enumerate() {
+                if !(inputs[i].is_none() && j + 1 == i) {
+                    *r = None;
+                }
+                if !(outputs[i].is_none() && j == i) {
+                    *w = None;
+                }
+            }
+            let stdin = match inputs[i].as_ref() {
+                Some(f) => f.handle(),
+                None if i > 0 => links[i - 1].0.as_ref().map_or(osyx_abi::STDIN, |r| r.handle()),
+                None => osyx_abi::STDIN,
+            };
+            let stdout = match outputs[i].as_ref() {
+                Some(f) => f.handle(),
+                None if i + 1 < cmds.len() => links[i].1.as_ref().map_or(osyx_abi::STDOUT, |w| w.handle()),
+                None => osyx_abi::STDOUT,
+            };
+            io::redirect_stdin(Some(stdin));
+            io::redirect_stdout(Some(stdout));
+            let args: Vec<&str> = cmds[i][1..].iter().map(String::as_str).collect();
+            match self.builtin(&cmds[i][0], &args) {
+                Some(Ok(code)) => statuses[i] = code,
+                Some(Err(Exit)) => {
+                    leave = true;
+                    statuses[i] = self.last;
+                }
+                None => statuses[i] = 127,
+            }
+            io::redirect_stdin(None);
+            io::redirect_stdout(None);
+        }
         // Our copies of the pipe ends would keep readers waiting for end of
         // data; the children hold their own.
         drop(links);
         drop(inputs);
         drop(outputs);
-        let mut status = 0;
-        for (i, ch) in children.into_iter().enumerate() {
-            status = match ch.wait() {
+        for (i, ch) in spawned {
+            statuses[i] = match ch.wait() {
                 Ok(st) => report(&cmds[i][0], st),
                 Err(e) => {
                     eprintln!("axis: {}: {e}", cmds[i][0]);
@@ -716,7 +769,10 @@ impl Shell {
                 }
             };
         }
-        Ok(status)
+        if leave {
+            return Err(Exit);
+        }
+        Ok(statuses.pop().unwrap_or(0))
     }
 }
 
