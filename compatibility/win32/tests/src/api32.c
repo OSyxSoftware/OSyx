@@ -34,6 +34,10 @@ __declspec(dllimport) DWORD __stdcall GetPrivateProfileStringW(const WCHAR *sect
 __declspec(dllimport) BOOL __stdcall WritePrivateProfileStringW(const WCHAR *section, const WCHAR *key, const WCHAR *value,
                                                                 const WCHAR *file);
 __declspec(dllimport) BOOL __stdcall DeleteFileW(const WCHAR *path);
+__declspec(dllimport) HANDLE __stdcall CreateFileW(const WCHAR *name, DWORD access, DWORD share, void *sa, DWORD disposition,
+                                                   DWORD flags, HANDLE tmpl);
+__declspec(dllimport) BOOL __stdcall ReadFile(HANDLE file, void *buf, DWORD len, DWORD *read, void *overlapped);
+__declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE h);
 __declspec(dllimport) long __stdcall RegCreateKeyExW(HKEY key, const WCHAR *sub, DWORD reserved, WCHAR *cls, DWORD options,
                                                      DWORD sam, void *sa, HKEY *result, DWORD *disposition);
 __declspec(dllimport) long __stdcall RegSetValueExW(HKEY key, const WCHAR *name, DWORD reserved, DWORD type,
@@ -104,6 +108,29 @@ void __stdcall start(void) {
     check("GetPrivateProfileStringW reads it back", n == 8 && wide_eq(buf, "C:\\Steam"));
     n = GetPrivateProfileStringW(L"Setup", L"Missing", L"none", buf, 64, ini);
     check("GetPrivateProfileStringW default", n == 4 && wide_eq(buf, "none"));
+    WritePrivateProfileStringW(L"Setup", L"Quoted", L"\"C:\\Program Files\"", ini);
+    n = GetPrivateProfileStringW(L"Setup", L"Quoted", L"", buf, 64, ini);
+    check("GetPrivateProfileStringW strips enclosing quotes", n == 16 && wide_eq(buf, "C:\\Program Files"));
+    DeleteFileW(ini);
+    buf[0] = buf[1] = 'x';
+    n = GetPrivateProfileStringW(0, 0, L"none", buf, 64, ini);
+    check("missing file: section list is empty", n == 0 && buf[0] == 0 && buf[1] == 0);
+
+    /* An ANSI (non-UTF-8) byte in another line survives an update. */
+    static const char ansi[] = "[A]\r\nk=caf\xe9\r\n";
+    DWORD w;
+    HANDLE f = CreateFileW(ini, 0x40000000, 0, 0, 2 /* CREATE_ALWAYS */, 0, 0);
+    WriteFile(f, ansi, sizeof ansi - 1, &w, 0);
+    CloseHandle(f);
+    WritePrivateProfileStringW(L"A", L"n", L"1", ini);
+    char raw[64];
+    DWORD got_bytes = 0;
+    f = CreateFileW(ini, 0x80000000, 1, 0, 3 /* OPEN_EXISTING */, 0, 0);
+    ReadFile(f, raw, sizeof raw, &got_bytes, 0);
+    CloseHandle(f);
+    int e9 = 0, c3 = 0;
+    for (DWORD i = 0; i < got_bytes; i++) e9 += (unsigned char)raw[i] == 0xe9, c3 += (unsigned char)raw[i] == 0xc3;
+    check("WritePrivateProfileStringW keeps ANSI bytes", e9 == 1 && c3 == 0);
     DeleteFileW(ini);
 
     HKEY key = (HKEY)0x12345678;

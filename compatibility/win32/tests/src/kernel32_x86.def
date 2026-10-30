@@ -21,3 +21,6 @@ EXPORTS
     GetPrivateProfileStringW
     WritePrivateProfileStringW
     DeleteFileW
+    CreateFileW
+    ReadFile
+    CloseHandle
