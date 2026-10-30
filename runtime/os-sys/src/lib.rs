@@ -265,11 +265,14 @@ mod imp {
         if start == 0 {
             return None;
         }
-        let size = (len as u64).next_multiple_of(4096);
+        // A request larger than the window fails here, before any
+        // arithmetic on it can overflow.
+        let size = (len as u64).checked_next_multiple_of(4096).filter(|&s| s <= LOW_END);
+        let Some(size) = size else { return Some(Err(Errno::NoMemory)) };
         let mut at = start.next_multiple_of(align);
         let mut wrapped = false;
         loop {
-            if at + size > LOW_END {
+            if at.checked_add(size).is_none_or(|end| end > LOW_END) {
                 if wrapped {
                     return Some(Err(Errno::NoMemory));
                 }
