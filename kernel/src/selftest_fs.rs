@@ -385,6 +385,11 @@ pub fn fat_boot() -> TestResult {
     ensure!(read_file(&cx, "/boot/kselftest/ż.txt") == Ok(b"unicode".to_vec()), "Unicode miss invalidated on create");
     vfs::unlink(&cx, "/boot/kselftest/Ż.txt").map_err(|x| e("unlink Unicode file", x))?;
     ensure!(vfs::stat(&cx, "/boot/kselftest/ż.txt") == Err(Errno::NotFound), "Unicode hit invalidated on unlink");
+    ensure!(vfs::stat(&cx, "/boot/kselftest/Ος.txt") == Err(Errno::NotFound), "cache contextual Unicode miss");
+    write_file(&cx, "/boot/kselftest/ΟΣ.txt", b"unicode").map_err(|x| e("contextual Unicode file", x))?;
+    ensure!(read_file(&cx, "/boot/kselftest/Ος.txt") == Ok(b"unicode".to_vec()), "contextual Unicode miss invalidated on create");
+    vfs::unlink(&cx, "/boot/kselftest/ΟΣ.txt").map_err(|x| e("unlink contextual Unicode file", x))?;
+    ensure!(vfs::stat(&cx, "/boot/kselftest/Ος.txt") == Err(Errno::NotFound), "contextual Unicode hit invalidated on unlink");
     vfs::rename(&cx, "/boot/kselftest/Mixed Case Name.TXT", "/boot/kselftest/renamed.bin").map_err(|x| e("rename", x))?;
     let h = vfs::open(&cx, "/boot/kselftest/renamed.bin", OPEN_READ, 0).map_err(|x| e("open", x))?;
     ensure!(vfs::unlink(&cx, "/boot/kselftest/renamed.bin") == Err(Errno::Busy), "FAT refuses to remove an open file");
