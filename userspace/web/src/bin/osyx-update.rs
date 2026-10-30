@@ -198,11 +198,7 @@ fn install(log: &mut Log, m: &Manifest, payload: &str) -> Result<usize, String> 
             let old = to.replace("/KERNEL.ELF", "/KERNEL.OLD");
             fs::copy(to, &old).map_err(|e| format!("{old}: {e}"))?;
         }
-        if fs::rename(&tmp, to).is_err() {
-            // FAT (the EFI partition) may not rename over an existing file.
-            let _ = fs::remove_file(to);
-            fs::rename(&tmp, to).map_err(|e| format!("{to}: {e}"))?;
-        }
+        fs::rename(&tmp, to).map_err(|e| format!("{to}: {e}"))?;
         if *esp {
             log.line(&format!("boot file {to} replaced"));
         }
