@@ -161,8 +161,10 @@ other word runs a program from `/bin`, `/usr/bin`, `/system/bin` with the
 terminal's pipes as its standard streams. `<`, `>` and `>>` redirect the
 standard input and output of a command — built-ins included, using
 `os_std::io::redirect_stdin`/`redirect_stdout` — and `|` connects programs
-into a pipeline. Still open: built-ins inside a pipeline, blocks (`if` /
-`for`) and job control.
+into a pipeline. `if cond { ... } else { ... }` and
+`for name in words { ... }` group lines; conditions are expressions with
+`==`, `!=`, `<`, `>`, `<=` and `>=`. Still open: built-ins inside a
+pipeline and job control.
 
 ## Boot
 

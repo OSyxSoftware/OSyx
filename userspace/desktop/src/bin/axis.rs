@@ -16,8 +16,9 @@
 //! Programs inherit the shell's standard streams, so their output appears
 //! in the terminal. `<`, `>` and `>>` redirect standard input/output of a
 //! command (built-ins included) and `|` connects programs into a pipeline.
-//! Not implemented yet: built-ins in a pipeline, blocks (`if` / `for`), job
-//! control.
+//! `if cond { ... } else { ... }` and `for name in words { ... }` group
+//! lines; `cond` is an expression with `== != < > <= >=`. Not implemented
+//! yet: built-ins in a pipeline and job control.
 
 #![no_std]
 #![no_main]
@@ -28,6 +29,7 @@ use os_std::prelude::*;
 use os_std::process::{Command, ExitStatus};
 use os_std::time::Instant;
 use os_std::{env, io, ipc, os, system};
+use osyx_shell::block::{self, Stmt};
 use osyx_shell::{parse, Stage};
 
 os_std::entry!(main);
@@ -46,12 +48,17 @@ fn main() -> i32 {
     if let Some(script) = args.get(1) {
         return match fs::read_to_string(script) {
             Ok(text) => {
-                for line in text.lines() {
-                    if sh.line(line).is_break() {
-                        break;
+                let lines: Vec<&str> = text.lines().collect();
+                match block::parse_script(&lines) {
+                    Ok(stmts) => {
+                        sh.run(&stmts);
+                        sh.last
+                    }
+                    Err(e) => {
+                        eprintln!("axis: {script}: {e}");
+                        2
                     }
                 }
-                sh.last
             }
             Err(e) => {
                 eprintln!("axis: {script}: {e}");
@@ -64,26 +71,56 @@ fn main() -> i32 {
     let mut buf = [0u8; 512];
     loop {
         prompt();
-        // Read one line (stdin is a pipe: data arrives in chunks).
-        let line = loop {
-            if let Some(nl) = pending.iter().position(|&b| b == b'\n') {
-                let rest = pending.split_off(nl + 1);
-                let line = String::from_utf8_lossy(&pending[..nl]).into_owned();
-                pending = rest;
-                break Some(line);
+        let mut lines: Vec<String> = Vec::new();
+        loop {
+            let Some(line) = read_line(&mut pending, &mut buf) else { return sh.last };
+            let line = String::from(line.trim_end_matches('\r'));
+            if !line.trim().is_empty() {
+                sh.history.push(line.clone());
             }
-            match io::Read::read(&mut io::stdin(), &mut buf) {
-                Ok(0) | Err(_) => break None,
-                Ok(n) => pending.extend_from_slice(&buf[..n]),
+            lines.push(line);
+            let block_lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let d = match block::depth(&block_lines) {
+                Ok(d) => d,
+                Err(e) => {
+                    sh.fail(&e);
+                    break;
+                }
+            };
+            if d > 0 {
+                print!("... ");
+                let _ = io::Write::flush(&mut io::stdout());
+                continue;
             }
-        };
-        let Some(line) = line else { return sh.last };
-        let line = line.trim_end_matches('\r');
-        if !line.trim().is_empty() {
-            sh.history.push(String::from(line));
+            if d < 0 {
+                sh.fail("unexpected `}`");
+                break;
+            }
+            match block::parse_script(&block_lines) {
+                Ok(stmts) => {
+                    if sh.run(&stmts).is_break() {
+                        return sh.last;
+                    }
+                }
+                Err(e) => sh.fail(&e),
+            }
+            break;
         }
-        if sh.line(line).is_break() {
-            return sh.last;
+    }
+}
+
+/// One line from standard input (it arrives in chunks); `None` at end.
+fn read_line(pending: &mut Vec<u8>, buf: &mut [u8]) -> Option<String> {
+    loop {
+        if let Some(nl) = pending.iter().position(|&b| b == b'\n') {
+            let rest = pending.split_off(nl + 1);
+            let line = String::from_utf8_lossy(&pending[..nl]).into_owned();
+            *pending = rest;
+            return Some(line);
+        }
+        match io::Read::read(&mut io::stdin(), buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => pending.extend_from_slice(&buf[..n]),
         }
     }
 }
@@ -130,6 +167,46 @@ impl Value {
 }
 
 impl Shell {
+    /// Runs parsed statements: commands, `if` and `for` blocks.
+    fn run(&mut self, stmts: &[Stmt]) -> Flow {
+        for st in stmts {
+            let flow = match st {
+                Stmt::Command(line) => self.line(line),
+                Stmt::If { cond, then, alt } => match self.expr(cond) {
+                    Ok(v) if truthy(&v) => self.run(then),
+                    Ok(_) => self.run(alt),
+                    Err(e) => {
+                        self.fail(&e);
+                        Flow::Continue
+                    }
+                },
+                Stmt::For { name, words, body } => self.run_for(name, words, body),
+            };
+            if flow.is_break() {
+                return flow;
+            }
+        }
+        Flow::Continue
+    }
+
+    fn run_for(&mut self, name: &str, words: &str, body: &[Stmt]) -> Flow {
+        let items = match self.words(words) {
+            Ok(items) => items,
+            Err(e) => {
+                self.fail(&e);
+                return Flow::Continue;
+            }
+        };
+        for item in items {
+            self.vars.insert(String::from(name), item);
+            let flow = self.run(body);
+            if flow.is_break() {
+                return flow;
+            }
+        }
+        Flow::Continue
+    }
+
     fn line(&mut self, line: &str) -> Flow {
         let line = strip_comment(line).trim();
         if line.is_empty() {
@@ -184,14 +261,30 @@ impl Shell {
         split_top_level(s, ',').iter().filter(|p| !p.trim().is_empty()).map(|p| self.expr(p)).collect()
     }
 
-    /// `term (+|-|*) term ...`, left to right; `+` concatenates when either
-    /// side is a string.
+    /// A comparison of two sums, or just a sum. Comparisons yield `Int(0)`
+    /// or `Int(1)`.
     fn expr(&self, s: &str) -> Result<Value, String> {
         let toks = tokenize_expr(s)?;
-        let mut it = toks.into_iter();
-        let mut acc = self.term(it.next().ok_or("empty expression")?)?;
+        match toks.iter().position(|t| is_cmp(t)) {
+            Some(i) => {
+                if toks[i + 1..].iter().any(|t| is_cmp(t)) {
+                    return Err(String::from("only one comparison per expression"));
+                }
+                let l = self.sum(&toks[..i])?;
+                let r = self.sum(&toks[i + 1..])?;
+                compare(&toks[i], &l, &r).map(|b| Value::Int(b as i64))
+            }
+            None => self.sum(&toks),
+        }
+    }
+
+    /// `term (+|-|*) term ...`, left to right; `+` concatenates when either
+    /// side is a string.
+    fn sum(&self, toks: &[String]) -> Result<Value, String> {
+        let mut it = toks.iter();
+        let mut acc = self.term(it.next().ok_or("empty expression")?.clone())?;
         while let Some(op) = it.next() {
-            let rhs = self.term(it.next().ok_or("operator without a right-hand side")?)?;
+            let rhs = self.term(it.next().ok_or("operator without a right-hand side")?.clone())?;
             acc = match (op.as_str(), acc, rhs) {
                 ("+", Value::Int(a), Value::Int(b)) => Value::Int(a.checked_add(b).ok_or("integer overflow")?),
                 ("-", Value::Int(a), Value::Int(b)) => Value::Int(a.checked_sub(b).ok_or("integer overflow")?),
@@ -206,6 +299,12 @@ impl Shell {
     fn term(&self, t: String) -> Result<Value, String> {
         if let Some(s) = t.strip_prefix('\u{1}') {
             return Ok(Value::Str(String::from(s)));
+        }
+        if let Some(name) = t.strip_prefix('$') {
+            if name == "?" {
+                return Ok(Value::Int(self.last as i64));
+            }
+            return self.term(String::from(name));
         }
         if let Ok(i) = t.parse::<i64>() {
             return Ok(Value::Int(i));
@@ -296,6 +395,7 @@ impl Shell {
                 println!("  volume [0-100|mute|unmute], beep [HZ [MS]], play FILE.wav: sound");
                 println!("  dmesg [WORD]: kernel log (only lines containing WORD), e.g. `dmesg iwm`");
                 println!("Statements: name = expr   print(expr, ...)   $name in commands, $? = last status");
+                println!("Blocks: if a == b {{ ... }} else {{ ... }}   for x in a b {{ ... }}");
                 println!("Redirection: cmd < in, cmd > out, cmd >> out; programs: cmd | cmd | ...");
                 println!("Network: ping HOST, net list|info|configure, dns lookup NAME, netstat [-a|-s], nc");
                 println!("Other words run programs from /bin, /usr/bin and /system/bin.");
@@ -1098,14 +1198,19 @@ fn tokenize_expr(s: &str) -> Result<Vec<String>, String> {
                 }
                 out.push(lit);
             }
-            '+' | '-' | '*' if !out.is_empty() && !is_op(out.last()) => {
+            '+' | '-' | '*' | '=' | '!' | '<' | '>' if !out.is_empty() && !is_op(out.last()) => {
                 chars.next();
-                out.push(String::from(c));
+                let mut op = String::from(c);
+                if chars.peek() == Some(&'=') {
+                    chars.next();
+                    op.push('=');
+                }
+                out.push(op);
             }
             _ => {
                 let mut t = String::new();
                 while let Some(&ch) = chars.peek() {
-                    if ch == ' ' || ((ch == '+' || ch == '*' || ch == '-') && !t.is_empty()) {
+                    if ch == ' ' || (matches!(ch, '+' | '*' | '-' | '=' | '!' | '<' | '>') && !t.is_empty()) {
                         break;
                     }
                     t.push(ch);
@@ -1119,5 +1224,33 @@ fn tokenize_expr(s: &str) -> Result<Vec<String>, String> {
 }
 
 fn is_op(t: Option<&String>) -> bool {
-    t.is_some_and(|t| t == "+" || t == "-" || t == "*")
+    t.is_some_and(|t| matches!(t.as_str(), "+" | "-" | "*" | "==" | "!=" | "<" | ">" | "<=" | ">="))
+}
+
+fn is_cmp(t: &str) -> bool {
+    matches!(t, "==" | "!=" | "<" | ">" | "<=" | ">=")
+}
+
+fn compare(op: &str, l: &Value, r: &Value) -> Result<bool, String> {
+    use core::cmp::Ordering;
+    let ord = match (l, r) {
+        (Value::Int(a), Value::Int(b)) => a.cmp(b),
+        (a, b) => a.text().cmp(&b.text()),
+    };
+    Ok(match op {
+        "==" => ord == Ordering::Equal,
+        "!=" => ord != Ordering::Equal,
+        "<" => ord == Ordering::Less,
+        ">" => ord == Ordering::Greater,
+        "<=" => ord != Ordering::Greater,
+        ">=" => ord != Ordering::Less,
+        _ => return Err(format!("unknown operator {op:?}")),
+    })
+}
+
+fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Int(i) => *i != 0,
+        Value::Str(s) => !s.is_empty(),
+    }
 }

@@ -9,6 +9,8 @@
 
 extern crate alloc;
 
+pub mod block;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
