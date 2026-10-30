@@ -203,4 +203,21 @@ mod tests {
         archive[0] ^= 1;
         assert!(tar_files(&archive).is_err());
     }
+
+    #[test]
+    fn reads_generated_ustar_archive() {
+        let dir = std::env::temp_dir();
+        let name = format!("osyx-ustar-test-{}", std::process::id());
+        let path = dir.join(&name);
+        std::fs::write(&path, b"test data").unwrap();
+        let executable = if Path::new("C:/msys64/usr/bin/tar.exe").exists() { "C:/msys64/usr/bin/tar.exe" } else { "tar" };
+        let result = std::process::Command::new(executable).arg("--format=ustar").args(["-cf", "-", "-C"]).arg(&dir).arg(&name).output();
+        std::fs::remove_file(&path).unwrap();
+        let output = result.expect("tar must be available for archive interoperability testing");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let files = tar_files(&output.stdout).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, name);
+        assert_eq!(files[0].2, b"test data");
+    }
 }
