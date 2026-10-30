@@ -34,7 +34,9 @@ Floor: code, commands, paths, numbers and error strings verbatim; never drop not
 <!-- caveman-end -->
 
 Pull request labels:
-- Every pull request you open must carry labels. Add them at creation or immediately after: `gh pr edit <number> --add-label <label>`.
+- Every pull request must carry labels.
+- With write access, add them yourself at creation or immediately after: `gh pr edit <number> --add-label <label>`.
+- Without write access (a fork), GitHub rejects labels; put one line in the pull request body instead — `Labels: ci, update` — and the PR labels workflow applies them.
 - Exactly one type label: `bug`, `enhancement`, `documentation`, `dependencies`, `ci`, `security` or `testing`.
 - Every area label that matches the change: `wifi`, `network`, `storage`, `installer`, `update`, `desktop`, `kernel` or `drivers`.
 - Create a missing label first: `gh label create <name> --color <hex> --description <text>`.
