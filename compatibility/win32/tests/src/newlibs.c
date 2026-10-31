@@ -411,6 +411,123 @@ static void thread_wer_cycles(void) {
     check("the cycle count grows with CPU time", cycles(GetCurrentProcess(), &c2) && c2 > c);
 }
 
+/* ---- kernel-backed APIs: suspend, thread times, working set, hard links (results probed on Windows) ---- */
+
+static volatile LONG spin_count;
+static volatile LONG spin_stop;
+
+static DWORD WINAPI spinner(void *unused) {
+    (void)unused;
+    while (!spin_stop) spin_count++;
+    return 7;
+}
+
+static void kernel_apis(void) {
+    HMODULE k = GetModuleHandleA("kernel32.dll");
+    DWORD (WINAPI *suspend)(HANDLE) = (void *)GetProcAddress(k, "SuspendThread");
+    BOOL (WINAPI *times)(HANDLE, FILETIME *, FILETIME *, FILETIME *, FILETIME *) = (void *)GetProcAddress(k, "GetThreadTimes");
+    BOOL (WINAPI *thread_cycles)(HANDLE, ULONGLONG *) = (void *)GetProcAddress(k, "QueryThreadCycleTime");
+    BOOL (WINAPI *working_set)(HANDLE, void *, DWORD) = (void *)GetProcAddress(k, "K32QueryWorkingSet");
+    BOOL (WINAPI *hard_link)(const WCHAR *, const WCHAR *, void *) = (void *)GetProcAddress(k, "CreateHardLinkW");
+
+    spin_count = 0;
+    spin_stop = 0;
+    HANDLE t = CreateThread(NULL, 0, spinner, NULL, 0, NULL);
+    Sleep(30);
+    LONG before = spin_count;
+    check("the spinning thread runs", t && before > 0);
+    FILETIME cr, ex, kr, us;
+    check("GetThreadTimes: a creation time and no exit time while it runs", times(t, &cr, &ex, &kr, &us) && (cr.dwLowDateTime || cr.dwHighDateTime) && ex.dwLowDateTime == 0 && ex.dwHighDateTime == 0);
+    ULONGLONG user = ((ULONGLONG)us.dwHighDateTime << 32) | us.dwLowDateTime;
+    check("GetThreadTimes: the spinning thread has used CPU time", user > 0);
+    ULONGLONG cyc = 0;
+    check("QueryThreadCycleTime counts cycles", thread_cycles(t, &cyc) && cyc > 0);
+
+    DWORD previous = suspend(t);
+    check("SuspendThread returns the previous count 0", previous == 0);
+    LONG frozen = spin_count;
+    Sleep(40);
+    check("a suspended thread does not run", spin_count == frozen);
+    check("a second SuspendThread returns 1", suspend(t) == 1);
+    check("ResumeThread returns 2 and 1, then 0", ResumeThread(t) == 2 && ResumeThread(t) == 1 && ResumeThread(t) == 0);
+    LONG running = spin_count;
+    Sleep(40);
+    check("a resumed thread runs again", spin_count > running);
+
+    DWORD refused = 0;
+    for (int i = 0; i < 127; i++) suspend(t);
+    SetLastError(0);
+    refused = suspend(t);
+    check("the 128th SuspendThread fails with ERROR_SIGNAL_REFUSED", refused == (DWORD)-1 && GetLastError() == 156);
+    for (int i = 0; i < 127; i++) ResumeThread(t);
+    check("ResumeThread of a running thread returns 0", ResumeThread(t) == 0);
+
+    SetLastError(0);
+    check("SuspendThread of a bad handle is ERROR_INVALID_HANDLE", suspend((HANDLE)0x1234) == (DWORD)-1 && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0);
+    check("GetThreadTimes of a bad handle is ERROR_INVALID_HANDLE", !times((HANDLE)0x1234, &cr, &ex, &kr, &us) && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0);
+    check("QueryThreadCycleTime of a bad handle is ERROR_INVALID_HANDLE", !thread_cycles((HANDLE)0x1234, &cyc) && GetLastError() == ERROR_INVALID_HANDLE);
+
+    spin_stop = 1;
+    WaitForSingleObject(t, 5000);
+    check("GetThreadTimes: an exit time once it ended, CPU time kept", times(t, &cr, &ex, &kr, &us) && (ex.dwLowDateTime || ex.dwHighDateTime) && (((ULONGLONG)us.dwHighDateTime << 32) | us.dwLowDateTime) >= user);
+    SetLastError(0);
+    check("SuspendThread of an ended thread is ERROR_ACCESS_DENIED", suspend(t) == (DWORD)-1 && GetLastError() == ERROR_ACCESS_DENIED);
+    CloseHandle(t);
+
+    ULONG_PTR header[2] = { 0, 0 };
+    SetLastError(0);
+    check("K32QueryWorkingSet with a small buffer is ERROR_BAD_LENGTH and the count", !working_set(GetCurrentProcess(), header, 8) && GetLastError() == 24 && header[0] > 0);
+    SetLastError(0);
+    check("K32QueryWorkingSet of a bad handle is ERROR_INVALID_HANDLE", !working_set((HANDLE)0x1234, header, 8) && GetLastError() == ERROR_INVALID_HANDLE);
+    SIZE_T bytes = sizeof(ULONG_PTR) * (header[0] + 256);
+    ULONG_PTR *ws = HeapAlloc(GetProcessHeap(), 0, bytes);
+    int local = 1, found_stack = 0, found_code = 0;
+    if (ws && working_set(GetCurrentProcess(), ws, (DWORD)bytes)) {
+        for (ULONG_PTR i = 1; i <= ws[0]; i++) {
+            ULONG_PTR page = ws[i] & ~(ULONG_PTR)0xFFF, prot = ws[i] & 31;
+            if (page == ((ULONG_PTR)&local & ~(ULONG_PTR)0xFFF)) found_stack = prot == 4;
+            if (page == ((ULONG_PTR)kernel_apis & ~(ULONG_PTR)0xFFF)) found_code = prot == 3;
+        }
+    }
+    check("K32QueryWorkingSet lists the stack page as PAGE_READWRITE", found_stack);
+    check("K32QueryWorkingSet lists the code page as PAGE_EXECUTE_READ", found_code);
+    if (ws) HeapFree(GetProcessHeap(), 0, ws);
+
+    WCHAR dir[MAX_PATH], a[MAX_PATH], b[MAX_PATH], c[MAX_PATH], wrong[MAX_PATH];
+    GetTempPathW(MAX_PATH, dir);
+    wsprintfW(a, L"%slink_a.txt", dir);
+    wsprintfW(b, L"%slink_b.txt", dir);
+    wsprintfW(c, L"%smissing_dir\\link_c.txt", dir);
+    wsprintfW(wrong, L"%snot_there.txt", dir);
+    DeleteFileW(a);
+    DeleteFileW(b);
+    HANDLE f = CreateFileW(a, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    DWORD written = 0;
+    WriteFile(f, "abc", 3, &written, NULL);
+    CloseHandle(f);
+    check("CreateHardLinkW makes a second name", hard_link(b, a, NULL));
+    BY_HANDLE_FILE_INFORMATION info;
+    f = CreateFileW(b, GENERIC_READ, 7, NULL, OPEN_EXISTING, 0, NULL);
+    check("the link has two links and the same size", f != INVALID_HANDLE_VALUE && GetFileInformationByHandle(f, &info) && info.nNumberOfLinks == 2 && info.nFileSizeLow == 3);
+    char data[4] = { 0 };
+    DWORD got = 0;
+    check("the link reads the same content", ReadFile(f, data, 3, &got, NULL) && got == 3 && data[0] == 'a' && data[2] == 'c');
+    CloseHandle(f);
+    SetLastError(0);
+    check("an existing new name is ERROR_ALREADY_EXISTS", !hard_link(b, a, NULL) && GetLastError() == ERROR_ALREADY_EXISTS);
+    SetLastError(0);
+    check("a missing source is ERROR_FILE_NOT_FOUND", !hard_link(c, wrong, NULL) && GetLastError() == ERROR_FILE_NOT_FOUND);
+    SetLastError(0);
+    check("a directory source is ERROR_ACCESS_DENIED", !hard_link(c, dir, NULL) && GetLastError() == ERROR_ACCESS_DENIED);
+    SetLastError(0);
+    check("a missing target directory is ERROR_PATH_NOT_FOUND", !hard_link(c, a, NULL) && GetLastError() == ERROR_PATH_NOT_FOUND);
+    check("deleting one name keeps the other with one link", DeleteFileW(a) && (f = CreateFileW(b, GENERIC_READ, 7, NULL, OPEN_EXISTING, 0, NULL)) != INVALID_HANDLE_VALUE && GetFileInformationByHandle(f, &info) && info.nNumberOfLinks == 1);
+    CloseHandle(f);
+    DeleteFileW(b);
+}
+
 void __stdcall start(void) {
     hashes();
     randomness();
@@ -420,5 +537,6 @@ void __stdcall start(void) {
     devices_and_input();
     interfaces_and_streams();
     thread_wer_cycles();
+    kernel_apis();
     finish("newlibs");
 }
