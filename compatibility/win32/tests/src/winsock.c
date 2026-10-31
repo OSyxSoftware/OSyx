@@ -193,6 +193,13 @@ void __stdcall start(void) {
           getsockopt(o, SOL_SOCKET, SO_KEEPALIVE, (char *)&oval, &olen) == 0 && oval == 1);
     closesocket(o);
 
+    /* A negative length must fail, not be read as a huge size. */
+    char small[3] = {0};
+    check_eq("gethostname rejects a negative length", gethostname(small, -1), SOCKET_ERROR);
+    check_eq("... with WSAEFAULT", WSAGetLastError(), WSAEFAULT);
+    char host[256];
+    check_eq("gethostname fits the host name", gethostname(host, sizeof host), 0);
+
     /* UDP echo with the host. */
     SOCKET u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     a.sin_port = htons((u_short)udp_port);

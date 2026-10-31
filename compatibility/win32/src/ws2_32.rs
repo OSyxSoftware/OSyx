@@ -825,7 +825,9 @@ extern "win64" fn getprotobynumber(number: i32) -> u64 {
 
 extern "win64" fn gethostname(buf: *mut u8, len: i32) -> i32 {
     let name = host_name();
-    if buf.is_null() || (len as usize) < name.len() + 1 {
+    // A signed length: casting a negative one would look large and let the
+    // copy run past a tiny caller buffer.
+    if buf.is_null() || len <= 0 || (len as usize) < name.len() + 1 {
         return err(WSAEFAULT, SOCKET_ERROR);
     }
     // SAFETY: the caller's buffer holds the name and its NUL.
