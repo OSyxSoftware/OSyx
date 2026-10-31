@@ -538,6 +538,11 @@ mod imp {
     }
 
     /// Writes the link target into `buf`; returns its length (truncated to `buf`).
+    /// A second name (hard link) `new` for the file `existing`.
+    pub fn link(existing: &str, new: &str) -> Result<(), Errno> {
+        decode(syscall4(nr::LINK, existing.as_ptr() as u64, existing.len() as u64, new.as_ptr() as u64, new.len() as u64)).map(|_| ())
+    }
+
     pub fn readlink(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
         decode(syscall4(
             nr::READLINK,
