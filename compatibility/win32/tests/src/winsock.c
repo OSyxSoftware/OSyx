@@ -134,6 +134,10 @@ void __stdcall start(void) {
     int soerr = 0, elen = sizeof soerr;
     check_eq("getsockopt(SO_ERROR)", getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&soerr, &elen), 0);
     check_eq("... WSAECONNREFUSED", soerr, WSAECONNREFUSED);
+    soerr = -1;
+    elen = sizeof soerr;
+    check_eq("getsockopt(SO_ERROR) clears the error", getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&soerr, &elen), 0);
+    check_eq("... now zero", soerr, 0);
     closesocket(s);
 
     /* UDP echo with the host. */

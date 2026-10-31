@@ -1572,6 +1572,12 @@ impl Stack {
         Ok((t.state(), t.error().map(tcp_error)))
     }
 
+    /// Clears the connection error after reporting it (SO_ERROR resets it).
+    pub fn tcp_take_error(&mut self, id: SocketId) -> Result<(), NetError> {
+        self.tcb(id)?.take_error();
+        Ok(())
+    }
+
     pub fn tcp_send(&mut self, id: SocketId, data: &[u8]) -> Result<usize, NetError> {
         let n = self.tcb(id)?.send(data).map_err(tcp_error)?;
         self.flush();

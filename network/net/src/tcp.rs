@@ -595,6 +595,11 @@ impl Tcb {
         self.recv_outcome()
     }
 
+    /// Clears the pending error; getsockopt(SO_ERROR) reports it once.
+    pub fn take_error(&mut self) -> Option<TcpError> {
+        self.error.take()
+    }
+
     /// What `recv` reports when no data is queued.
     fn recv_outcome(&self) -> Result<usize, TcpError> {
         if self.fin_received {

@@ -362,6 +362,9 @@ fn tcp_connect_to_a_closed_port_is_refused() {
     let c = n.a.tcp_connect(None, Endpoint::new(B_IP, 1234)).unwrap();
     assert!(n.run_until(1000, |n| n.a.tcp_state(c).unwrap().1 == Some(NetError::ConnRefused)));
     assert!(n.b.stats.tcp_resets_sent >= 1);
+    // getsockopt(SO_ERROR) reads the error once and clears it.
+    assert_eq!(n.a.tcp_take_error(c), Ok(()));
+    assert_eq!(n.a.tcp_state(c).unwrap().1, None);
 }
 
 #[test]

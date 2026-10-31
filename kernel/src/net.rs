@@ -839,9 +839,18 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
         abi::ctl::LAST_MSG_LEN => return Ok(s.last_msg_len.load(Ordering::Relaxed)),
         abi::ctl::PENDING_ERROR => {
             let Some(id) = s.id().filter(|_| s.kind == abi::SOCK_STREAM) else { return Ok(0) };
-            let (_, err) = stack_call(|st| st.tcp_state(id))?;
+            let (_, err) = match stack_call(|st| st.tcp_state(id)) {
+                Ok(v) => v,
+                // The connection is already gone: nothing is pending.
+                Err(Errno::BadHandle) => return Ok(0),
+                Err(e) => return Err(e),
+            };
             return match err {
-                Some(e) => Err(errno(e)),
+                // Read-and-clear, as getsockopt(SO_ERROR) does on Windows.
+                Some(e) => {
+                    stack_call(|st| st.tcp_take_error(id))?;
+                    Err(errno(e))
+                }
                 None => Ok(0),
             };
         }
