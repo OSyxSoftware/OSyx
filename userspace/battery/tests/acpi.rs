@@ -26,12 +26,18 @@ struct EcState {
 struct Machine {
     ec: Arc<Mutex<EcState>>,
     clock: Arc<AtomicU64>,
+    /// Command/status and data port of the EC.
+    ports: (u16, u16),
 }
 
 impl Machine {
     fn new() -> Machine {
+        Machine::with_ports(0x66, 0x62)
+    }
+
+    fn with_ports(command: u16, data: u16) -> Machine {
         let ec = EcState { regs: [0; 256], phase: 0, addr: 0, out: None, hung: false, fail_reads: 0 };
-        Machine { ec: Arc::new(Mutex::new(ec)), clock: Arc::new(AtomicU64::new(0)) }
+        Machine { ec: Arc::new(Mutex::new(ec)), clock: Arc::new(AtomicU64::new(0)), ports: (command, data) }
     }
 
     fn set(&self, addr: usize, bytes: &[u8]) {
@@ -41,6 +47,7 @@ impl Machine {
 
 impl Hardware for Machine {
     fn port_in(&self, port: u16, _width: u8) -> u64 {
+        let port = if port == self.ports.0 { 0x66 } else if port == self.ports.1 { 0x62 } else { 0xFFFF };
         let mut ec = self.ec.lock().unwrap();
         match port {
             0x66 => {
@@ -59,6 +66,7 @@ impl Hardware for Machine {
     }
 
     fn port_out(&self, port: u16, _width: u8, value: u64) {
+        let port = if port == self.ports.0 { 0x66 } else if port == self.ports.1 { 0x62 } else { 0xFFFF };
         let mut ec = self.ec.lock().unwrap();
         if ec.hung {
             return;
@@ -415,13 +423,57 @@ fn ec_protocol_basics() {
 
 #[test]
 fn ecdt_ports() {
+    // Header 36 bytes, EC_CONTROL at 36 and EC_DATA at 48 (12-byte generic
+    // addresses: space id 1 = system I/O, address at +4).
+    let gas = |t: &mut Vec<u8>, at: usize, space: u8, port: u64| {
+        t[at] = space;
+        t[at + 4..at + 12].copy_from_slice(&port.to_le_bytes());
+    };
     let mut t = vec![0u8; 80];
-    t[44 + 4..44 + 6].copy_from_slice(&0x1604u16.to_le_bytes());
-    t[56 + 4..56 + 6].copy_from_slice(&0x1600u16.to_le_bytes());
-    assert_eq!(EcPorts::from_ecdt(Some(&t)), EcPorts { command: 0x1604, data: 0x1600 });
-    assert_eq!(EcPorts::from_ecdt(Some(&vec![0u8; 80])), EcPorts::LEGACY);
-    assert_eq!(EcPorts::from_ecdt(Some(&[0u8; 10])), EcPorts::LEGACY);
-    assert_eq!(EcPorts::from_ecdt(None), EcPorts::LEGACY);
+    gas(&mut t, 36, 1, 0x1604);
+    gas(&mut t, 48, 1, 0x1600);
+    t[60..64].copy_from_slice(&7u32.to_le_bytes()); // a UID must not be mistaken for a port
+    assert_eq!(EcPorts::from_ecdt(Some(&t)), Some(EcPorts { command: 0x1604, data: 0x1600 }));
+    gas(&mut t, 36, 0, 0x1604); // memory-mapped: not a port
+    assert_eq!(EcPorts::from_ecdt(Some(&t)), None);
+    assert_eq!(EcPorts::from_ecdt(Some(&vec![0u8; 80])), None);
+    assert_eq!(EcPorts::from_ecdt(Some(&[0u8; 10])), None);
+    assert_eq!(EcPorts::from_ecdt(None), None);
+}
+
+#[test]
+fn crs_ports() {
+    // IO(Decode16, 0x62, 0x62, 1, 1), IO(Decode16, 0x66, 0x66, 1, 1), EndTag.
+    let crs = [0x47, 1, 0x62, 0, 0x62, 0, 1, 1, 0x47, 1, 0x66, 0, 0x66, 0, 1, 1, 0x79, 0];
+    assert_eq!(EcPorts::from_crs(&crs), Some(EcPorts { command: 0x66, data: 0x62 }));
+    // A fixed-location descriptor, a large item in between.
+    let crs = [0x4B, 0x00, 0x16, 1, 0x89, 0x01, 0x00, 0xAA, 0x4B, 0x04, 0x16, 1, 0x79, 0];
+    assert_eq!(EcPorts::from_crs(&crs), Some(EcPorts { command: 0x1604, data: 0x1600 }));
+    assert_eq!(EcPorts::from_crs(&[0x47, 1, 0x62, 0, 0x62, 0, 1, 1, 0x79, 0]), None); // one port only
+    assert_eq!(EcPorts::from_crs(&[]), None);
+    assert_eq!(EcPorts::from_crs(&[0x47, 1, 0x62]), None); // truncated
+}
+
+#[test]
+fn ec_ports_come_from_crs_when_there_is_no_ecdt() {
+    // An EC at 0x1604/0x1600 named only by its _CRS, a battery behind it.
+    let machine = Machine::with_ports(0x1604, 0x1600);
+    machine.set(0x20, &[1, 0, 0, 0]);
+    let crs = vec![0x47, 1, 0x00, 0x16, 0x00, 0x16, 1, 1, 0x47, 1, 0x04, 0x16, 0x04, 0x16, 1, 1, 0x79, 0];
+    let mut buffer = vec![0x11];
+    let body = cat(&[int(crs.len() as u64), crs]);
+    buffer.extend(pkg_len(body.len()));
+    buffer.extend(body);
+    let ec = device("EC0_", cat(&[name("_HID", eisa("PNP0C09")), name("_CRS", buffer)]));
+    let tables = vec![table(scope_sb(cat(&[ec, battery("BAT0", Some(0x1f), &[0, 40000, 38000, 1, 11400], &[1, 5000, 19000, 11300])])))];
+    let mut log = |s: &str| panic!("AML load problem: {s}");
+    let acpi = Acpi::load(machine.clone(), None, &tables, &mut log);
+    assert_eq!(acpi.ec_ports(), (Some(EcPorts { command: 0x1604, data: 0x1600 }), "_CRS"));
+    assert_eq!(acpi.battery_devices(), 1);
+    // Without an EC device or ECDT the legacy ports are used.
+    let bare = vec![table(scope_sb(battery("BAT0", Some(0x1f), &[0, 40000, 38000, 1, 11400], &[1, 5000, 19000, 11300])))];
+    let acpi = Acpi::load(Machine::new(), None, &bare, &mut log);
+    assert_eq!(acpi.ec_ports(), (Some(EcPorts::LEGACY), "legacy ports"));
 }
 
 
