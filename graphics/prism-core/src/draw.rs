@@ -459,6 +459,36 @@ impl Cursor {
         Rect::new(self.bounds.x + x, self.bounds.y + y, self.bounds.w, self.bounds.h)
     }
 
+    /// The pointer as a `size` x `size` ARGB image (straight alpha, as a
+    /// hardware cursor plane takes it) and the hot spot inside it; `None`
+    /// when the shape does not fit.
+    pub fn argb_image(&self, size: u32) -> Option<(Vec<u32>, (u32, u32))> {
+        let (ox, oy) = (-self.bounds.x, -self.bounds.y);
+        if ox < 0 || oy < 0 || self.bounds.w > size || self.bounds.h > size {
+            return None;
+        }
+        let mut image = alloc::vec![0u32; (size * size) as usize];
+        // The pixels are listed bottom first (shadow, then shape): each one
+        // is composited "over" what is there.
+        for &(dx, dy, colour, alpha) in &self.pixels {
+            let (x, y) = ((dx as i32 + ox) as u32, (dy as i32 + oy) as u32);
+            let p = &mut image[(y * size + x) as usize];
+            let src_a = (alpha as u32).min(255);
+            let dst_a = *p >> 24;
+            let out_a = src_a + dst_a * (255 - src_a) / 255;
+            if out_a == 0 {
+                continue;
+            }
+            let channel = |shift: u32| {
+                let s = (colour >> shift) & 0xFF;
+                let d = (*p >> shift) & 0xFF;
+                (s * src_a + d * dst_a * (255 - src_a) / 255) / out_a
+            };
+            *p = out_a << 24 | channel(16) << 16 | channel(8) << 8 | channel(0);
+        }
+        Some((image, (ox as u32, oy as u32)))
+    }
+
     pub fn draw(&self, dst: &mut Surface, x: i32, y: i32, clip: Rect) {
         let clip = clip.intersect(&dst.bounds());
         for &(dx, dy, c, a) in &self.pixels {

@@ -438,6 +438,9 @@ impl Compositor {
     pub fn cursor_area(&self) -> Rect { self.cursor.area(self.ptr_x, self.ptr_y).intersect(&self.screen) }
 
     pub fn draw_cursor_overlay(&self, target: &mut Surface) { self.cursor.draw(target, self.ptr_x, self.ptr_y, self.screen); }
+    /// The current pointer shape as a `size` x `size` ARGB image and its hot
+    /// spot, for a hardware cursor plane.
+    pub fn cursor_image(&self, size: u32) -> Option<(Vec<u32>, (u32, u32))> { self.cursor.argb_image(size) }
 
     pub fn focused(&self) -> Option<WindowId> {
         self.focus

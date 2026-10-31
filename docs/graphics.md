@@ -58,6 +58,21 @@ keyboard layout (US, Polish) is applied by PRISM.
 framebuffer is mapped write-combining into the caller, one owner at a time),
 `display_release`. When the owner exits the kernel status screen returns.
 
+On VirtIO-GPU the owner hands over changed pixels with `display_flush_rects`
+(up to 64 rectangles per call): the kernel sends one TRANSFER_TO_HOST_2D per
+rectangle and one RESOURCE_FLUSH of their union, so a frame costs one system
+call and one host refresh (`display_flush` remains for single rectangles).
+The pointer goes on the device's cursor plane: `display_cursor` uploads a
+64x64 ARGB image with its hot spot (a null image hides it) and
+`display_cursor_move` moves it with one cursor-queue command; no screen
+pixels are drawn, copied or flushed for pointer motion. PRISM uses both when
+the backend is VirtIO-GPU and keeps its software cursor overlay on the GOP
+framebuffer (or with `OSYX_PRISM_SOFT_CURSOR=1`). Measured under QEMU with
+`-trace virtio_gpu_*`: 40 pointer moves sent 80 transfers and 80 flushes
+before, 40 cursor moves and no transfers or flushes after; opening and
+closing the launcher twice sent 200 transfers and 200 flushes before, 46 and
+39 after. The cursor is hidden when the display goes back to the kernel.
+
 EDID base blocks and CEA-861 extensions are decoded by the host-tested
 `drivers/display` crate. When the VirtIO-GPU offers an EDID, the kernel logs
 the monitor, its mode count and the preferred mode, and starts the scanout at

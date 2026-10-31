@@ -114,7 +114,7 @@ fn main() -> i32 {
         info.height,
         info.stride,
         if rgb { "RGBX" } else { "BGRX" },
-        if gpu { "virtio-gpu (damage flushed per frame)" } else { "linear framebuffer" }
+        if gpu { "virtio-gpu (damage flushed once per frame)" } else { "linear framebuffer" }
     );
     let listener = match Listener::listen(prism_proto::SERVICE) {
         Ok(l) => l,
@@ -150,8 +150,12 @@ fn main() -> i32 {
         height: info.height,
         rgb,
         gpu,
+        batched_flush: gpu,
+        hw_cursor: false,
+        hw_cursor_shape: None,
         flush_time_us: 0,
         flushes: 0,
+        flush_calls: 0,
         flushed_pixels: 0,
         last_frame: 0,
         cursor_stamp: None,
@@ -169,6 +173,7 @@ fn main() -> i32 {
         shell_pid: None,
         shell_restarts: 0,
     };
+    prism.enable_hw_cursor();
     prism.start_shell();
     let r = prism.run(&listener, seat);
     let _ = system::display_release();
@@ -187,8 +192,15 @@ struct Prism {
     rgb: bool,
     /// VirtIO-GPU backend: changed rectangles must be flushed.
     gpu: bool,
+    /// The kernel takes a frame's rectangles in one call (one device flush).
+    batched_flush: bool,
+    /// The pointer is the GPU's cursor plane, not pixels drawn here.
+    hw_cursor: bool,
+    hw_cursor_shape: Option<prism_core::draw::CursorShape>,
     flush_time_us: u64,
+    /// Rectangles flushed, and the system calls that flushed them.
     flushes: u64,
+    flush_calls: u64,
     flushed_pixels: u64,
     last_frame: u64,
     cursor_stamp: Option<(i32, i32, prism_core::draw::CursorShape)>,
@@ -547,17 +559,14 @@ impl Prism {
         }
         if self.gpu {
             let t1 = Instant::now();
-            for r in &rects {
-                let r = r.intersect(&Rect::new(0, 0, self.width, self.height));
-                if r.w == 0 || r.h == 0 {
-                    continue;
-                }
-                if let Err(e) = system::display_flush(r.x as u32, r.y as u32, r.w, r.h) {
-                    eprintln!("prism: display flush failed: {e}");
-                }
-                self.flushes += 1;
-                self.flushed_pixels += r.w as u64 * r.h as u64;
-            }
+            let screen = Rect::new(0, 0, self.width, self.height);
+            let list: Vec<[u32; 4]> = rects
+                .iter()
+                .map(|r| r.intersect(&screen))
+                .filter(|r| r.w > 0 && r.h > 0)
+                .map(|r| [r.x as u32, r.y as u32, r.w, r.h])
+                .collect();
+            self.flush(&list);
             self.flush_time_us += t1.elapsed().as_micros() as u64;
         }
         self.last_frame = now;
@@ -571,12 +580,87 @@ impl Prism {
         }
     }
 
+    /// Hands the changed rectangles to the display: one system call (and
+    /// one device flush) per frame, or one per rectangle on a kernel
+    /// without `display_flush_rects`.
+    fn flush(&mut self, list: &[[u32; 4]]) {
+        if list.is_empty() {
+            return;
+        }
+        self.flushes += list.len() as u64;
+        self.flushed_pixels += list.iter().map(|r| r[2] as u64 * r[3] as u64).sum::<u64>();
+        if self.batched_flush {
+            let mut ok = true;
+            for chunk in list.chunks(system::MAX_FLUSH_RECTS) {
+                self.flush_calls += 1;
+                if let Err(e) = system::display_flush_rects(chunk) {
+                    eprintln!("prism: batched display flush failed ({e}); flushing per rectangle");
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                return;
+            }
+            self.batched_flush = false;
+        }
+        for &[x, y, w, h] in list {
+            self.flush_calls += 1;
+            if let Err(e) = system::display_flush(x, y, w, h) {
+                eprintln!("prism: display flush failed: {e}");
+            }
+        }
+    }
+
+    /// On VirtIO-GPU the pointer becomes the device's cursor plane: moving
+    /// it is one small command, and no screen pixels are drawn, copied or
+    /// flushed for it. Elsewhere (or if the kernel refuses) PRISM keeps
+    /// drawing the overlay itself.
+    fn enable_hw_cursor(&mut self) {
+        if !self.gpu || env::var("OSYX_PRISM_SOFT_CURSOR").is_ok_and(|v| v == "1") {
+            return;
+        }
+        let (x, y, shape) = self.comp.cursor_state();
+        let Some((image, hot)) = self.comp.cursor_image(system::CURSOR_SIZE) else { return };
+        match system::display_cursor(Some(&image), hot).and_then(|()| system::display_cursor_move(x.max(0) as u32, y.max(0) as u32)) {
+            Ok(()) => {
+                self.hw_cursor = true;
+                self.hw_cursor_shape = Some(shape);
+                self.cursor_stamp = Some((x, y, shape));
+                println!("prism: hardware cursor on the virtio-gpu cursor plane");
+            }
+            Err(e) => println!("prism: no hardware cursor ({e}); drawing the pointer"),
+        }
+    }
+
     /// Restore the old cursor from the clean back buffer, draw only the
     /// new cursor rectangle, then restore the clean pixels in RAM. Moving
     /// the pointer does not copy or recompose a full desktop surface.
     fn paint_cursor(&mut self, force: bool) {
         let stamp = self.comp.cursor_state();
         if !force && self.cursor_stamp == Some(stamp) {
+            return;
+        }
+        if self.hw_cursor {
+            // The plane is separate from the screen pixels: damage below it
+            // needs nothing, only a new shape or position does.
+            if self.cursor_stamp == Some(stamp) {
+                return;
+            }
+            let (x, y, shape) = stamp;
+            if self.hw_cursor_shape != Some(shape) {
+                if let Some((image, hot)) = self.comp.cursor_image(system::CURSOR_SIZE) {
+                    if let Err(e) = system::display_cursor(Some(&image), hot) {
+                        eprintln!("prism: cursor shape not shown: {e}");
+                    }
+                }
+                self.hw_cursor_shape = Some(shape);
+            }
+            if let Err(e) = system::display_cursor_move(x.max(0) as u32, y.max(0) as u32) {
+                eprintln!("prism: cursor move failed: {e}");
+            }
+            self.cursor_stamp = Some(stamp);
+            self.cursor_updates += 1;
             return;
         }
         let old = self.cursor_area;
@@ -601,12 +685,14 @@ impl Prism {
                 .copy_from_slice(&self.cursor_saved[row * area.w as usize..(row + 1) * area.w as usize]);
         }
         if self.gpu {
+            let mut list = Vec::with_capacity(2);
             if old != area && !old.is_empty() {
-                let _ = system::display_flush(old.x as u32, old.y as u32, old.w, old.h);
+                list.push([old.x as u32, old.y as u32, old.w, old.h]);
             }
             if !area.is_empty() {
-                let _ = system::display_flush(area.x as u32, area.y as u32, area.w, area.h);
+                list.push([area.x as u32, area.y as u32, area.w, area.h]);
             }
+            self.flush(&list);
         }
         self.cursor_stamp = Some(stamp);
         self.cursor_area = area;
@@ -730,12 +816,17 @@ impl Prism {
             avg / 1000,
             avg % 1000
         );
-        println!("prism: {} cursor overlay updates without desktop recomposition", self.cursor_updates);
+        if self.hw_cursor {
+            println!("prism: {} hardware cursor updates (no pixels drawn or flushed)", self.cursor_updates);
+        } else {
+            println!("prism: {} cursor overlay updates without desktop recomposition", self.cursor_updates);
+        }
         if self.gpu {
-            let per = self.flush_time_us.checked_div(self.flushes).unwrap_or(0);
+            let per = self.flush_time_us.checked_div(self.flush_calls).unwrap_or(0);
             println!(
-                "prism: virtio-gpu: {} damage flushes, {} Mpx transferred, avg {} us per flush ({} ms in flushes)",
+                "prism: virtio-gpu: {} damage rectangles in {} flush calls, {} Mpx transferred, avg {} us per call ({} ms in flushes)",
                 self.flushes,
+                self.flush_calls,
                 self.flushed_pixels / 1_000_000,
                 per,
                 self.flush_time_us / 1000

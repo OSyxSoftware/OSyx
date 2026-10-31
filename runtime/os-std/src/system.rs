@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use alloc::string::String;
 use alloc::vec::Vec;
 pub use os_sys::ipc::{
-    field_str, pixel, DisplayInfo, MountInfo, ProcInfo, BACKEND_LINEAR, BACKEND_VIRTIO_GPU, POWER_OFF, POWER_REBOOT,
+    field_str, pixel, DisplayInfo, MountInfo, ProcInfo, BACKEND_LINEAR, BACKEND_VIRTIO_GPU, CURSOR_SIZE, MAX_FLUSH_RECTS, POWER_OFF, POWER_REBOOT,
     PROC_RUNNING, PROC_ZOMBIE,
 };
 
@@ -111,4 +111,22 @@ pub fn display_flush(x: u32, y: u32, w: u32, h: u32) -> Result<()> {
 /// Switches the display resolution (root only); acquire again afterwards.
 pub fn display_set_mode(width: u32, height: u32) -> Result<()> {
     os_sys::display_set_mode(width, height).map_err(Error::from)
+}
+
+/// Presents several changed rectangles `[x, y, w, h]` of the acquired
+/// buffer at once: on VirtIO-GPU one screen flush for all of them.
+pub fn display_flush_rects(rects: &[[u32; 4]]) -> Result<()> {
+    os_sys::display_flush_rects(rects).map_err(Error::from)
+}
+
+/// Shows a hardware cursor (`CURSOR_SIZE` squared ARGB pixels, straight
+/// alpha, hot spot `hot`) or hides it (`None`). Fails with `Unsupported`
+/// where there is none (a linear framebuffer).
+pub fn display_cursor(image: Option<&[u32]>, hot: (u32, u32)) -> Result<()> {
+    os_sys::display_cursor(image, hot).map_err(Error::from)
+}
+
+/// Moves the hardware cursor's hot spot.
+pub fn display_cursor_move(x: u32, y: u32) -> Result<()> {
+    os_sys::display_cursor_move(x, y).map_err(Error::from)
 }

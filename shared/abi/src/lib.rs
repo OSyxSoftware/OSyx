@@ -419,6 +419,21 @@ pub mod nr {
     /// and/or modification time of the file behind `handle`, named by
     /// nanoseconds since the Unix epoch. `mask` is one of [`crate::futimes`].
     pub const FUTIMES: u64 = 107;
+    /// `display_flush_rects(rects: *const [u32; 4], count) -> 0`: the display
+    /// owner presents up to `ipc::MAX_FLUSH_RECTS` changed rectangles
+    /// (x, y, w, h) at once. On VirtIO-GPU each one is transferred and the
+    /// screen is flushed once for all of them; a no-op on a linear
+    /// framebuffer.
+    pub const DISPLAY_FLUSH_RECTS: u64 = 108;
+    /// `display_cursor(image: *const u32, hot_x, hot_y) -> 0`: the display
+    /// owner shows a hardware cursor, `image` being `ipc::CURSOR_SIZE` x
+    /// `ipc::CURSOR_SIZE` ARGB pixels (straight alpha) with its hot spot at
+    /// (`hot_x`, `hot_y`); a null `image` hides it. `NotSupported` when the
+    /// output has none (a linear framebuffer): draw the pointer instead.
+    pub const DISPLAY_CURSOR: u64 = 109;
+    /// `display_cursor_move(x, y) -> 0`: moves the hardware cursor's hot spot
+    /// to screen position (`x`, `y`).
+    pub const DISPLAY_CURSOR_MOVE: u64 = 110;
 }
 
 /// Field mask of `nr::FUTIMES`.

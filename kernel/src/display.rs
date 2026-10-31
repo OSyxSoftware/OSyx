@@ -74,6 +74,26 @@ unsafe impl Send for Display {}
 
 static DISPLAY: IrqSpinLock<Option<Display>> = IrqSpinLock::new(None);
 
+/// The hardware cursor of a VirtIO-GPU output: one `CURSOR_SIZE` square
+/// B8G8R8A8 resource with its own backing, uploaded when the image changes
+/// and shown through the cursor queue, so pointer motion costs one small
+/// command instead of redrawing and flushing screen pixels.
+struct HwCursor {
+    gpu: Arc<VirtioGpu>,
+    resource: u32,
+    /// Kept alive for the resource; `va` is the kernel's view of it.
+    _backing: Arc<SharedMemory>,
+    va: u64,
+    scanout: u32,
+    hot: (u32, u32),
+    pos: (u32, u32),
+    shown: bool,
+}
+
+/// Device commands sleep: the cursor state has a sleeping lock of its own,
+/// taken without `DISPLAY` held.
+static CURSOR: crate::sync::KMutex<Option<HwCursor>> = crate::sync::KMutex::new(None);
+
 /// A rectangle to push to a VirtIO-GPU scanout once the lock is released.
 #[must_use]
 pub struct Flush {
@@ -461,6 +481,100 @@ pub fn flush(pid: u64, x: u32, y: u32, w: u32, h: u32) -> Result<(), Errno> {
     Ok(())
 }
 
+/// The owner presents several rectangles of its buffer at once (one
+/// device flush for all of them on VirtIO-GPU).
+pub fn flush_rects(pid: u64, rects: &[[u32; 4]]) -> Result<(), Errno> {
+    let (gpu, resource, stride, list) = {
+        let g = DISPLAY.lock();
+        let d = g.as_ref().ok_or(Errno::NotSupported)?;
+        if d.owner != pid {
+            return Err(Errno::PermissionDenied);
+        }
+        let Output::Gpu(o) = &d.output else { return Ok(()) };
+        let list: Vec<virtio_gpu::Rect> = rects
+            .iter()
+            .filter(|&&[x, y, w, h]| x < d.width && y < d.height && w > 0 && h > 0)
+            .map(|&[x, y, w, h]| virtio_gpu::Rect { x, y, w: w.min(d.width - x), h: h.min(d.height - y) })
+            .collect();
+        (o.gpu.clone(), o.resource, d.stride * 4, list)
+    };
+    if let Err(e) = gpu.present_rects(resource, &list, stride) {
+        crate::kprintln!("display: virtio-gpu present failed: {}", e.describe());
+    }
+    Ok(())
+}
+
+/// The owner's VirtIO-GPU output and scanout, if it has a cursor queue.
+fn cursor_output(pid: u64) -> Result<(Arc<VirtioGpu>, u32), Errno> {
+    let g = DISPLAY.lock();
+    let d = g.as_ref().ok_or(Errno::NotSupported)?;
+    if d.owner != pid {
+        return Err(Errno::PermissionDenied);
+    }
+    match &d.output {
+        Output::Gpu(o) if o.gpu.has_cursor() => Ok((o.gpu.clone(), o.scanout)),
+        _ => Err(Errno::NotSupported),
+    }
+}
+
+/// Shows `image` (`CURSOR_SIZE` squared ARGB pixels, little endian) as the
+/// hardware cursor with hot spot `hot`, or hides it (`None`).
+pub fn set_cursor(pid: u64, image: Option<&[u8]>, hot: (u32, u32)) -> Result<(), Errno> {
+    let (gpu, scanout) = cursor_output(pid)?;
+    let n = osyx_abi::ipc::CURSOR_SIZE;
+    let mut c = CURSOR.lock();
+    let Some(image) = image else {
+        if let Some(cur) = c.as_mut().filter(|cur| cur.shown) {
+            cur.shown = false;
+            cur.gpu.update_cursor(cur.scanout, 0, 0, 0, 0, 0).map_err(|_| Errno::Io)?;
+        }
+        return Ok(());
+    };
+    if c.as_ref().is_some_and(|cur| !Arc::ptr_eq(&cur.gpu, &gpu)) {
+        *c = None;
+    }
+    if c.is_none() {
+        let backing = SharedMemory::new(n as u64 * n as u64 * 4).map_err(|_| Errno::NoMemory)?;
+        let va = crate::mem::map_frames(backing.frames()).map_err(|_| Errno::NoMemory)?;
+        let resource = gpu.create_resource(n, n, virtio_gpu::FORMAT_B8G8R8A8).map_err(|_| Errno::Io)?;
+        if gpu.attach_backing(resource, backing.frames()).is_err() {
+            let _ = gpu.unref_resource(resource);
+            return Err(Errno::Io);
+        }
+        *c = Some(HwCursor { gpu: gpu.clone(), resource, _backing: backing, va, scanout, hot, pos: (0, 0), shown: false });
+    }
+    let cur = c.as_mut().expect("cursor resource");
+    // SAFETY: `va` maps the resource's n*n*4-byte backing; `image` has that size.
+    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), cur.va as *mut u8, (n * n * 4) as usize) };
+    cur.scanout = scanout;
+    cur.hot = hot;
+    gpu.transfer(cur.resource, virtio_gpu::Rect { x: 0, y: 0, w: n, h: n }, n * 4).map_err(|_| Errno::Io)?;
+    gpu.update_cursor(scanout, cur.pos.0, cur.pos.1, cur.resource, hot.0, hot.1).map_err(|_| Errno::Io)?;
+    cur.shown = true;
+    Ok(())
+}
+
+/// Moves the hardware cursor (its hot spot) to (`x`, `y`).
+pub fn move_cursor(pid: u64, x: u32, y: u32) -> Result<(), Errno> {
+    let (_, scanout) = cursor_output(pid)?;
+    let mut c = CURSOR.lock();
+    let cur = c.as_mut().ok_or(Errno::NotSupported)?;
+    cur.pos = (x, y);
+    if !cur.shown {
+        return Ok(());
+    }
+    cur.gpu.move_cursor(scanout, x, y).map_err(|_| Errno::Io)
+}
+
+/// Hides the hardware cursor when the display goes back to the kernel.
+fn hide_cursor() {
+    let mut c = CURSOR.lock();
+    if let Some(cur) = c.as_mut().filter(|cur| cur.shown) {
+        cur.shown = false;
+        let _ = cur.gpu.update_cursor(cur.scanout, 0, 0, 0, 0, 0);
+    }
+}
+
 /// Switches to `width` x `height` (VirtIO-GPU: any size the device takes;
 /// a linear framebuffer only has its boot mode). Allowed while the kernel
 /// or the caller owns the display.
@@ -522,6 +636,7 @@ pub fn release(pid: u64) -> bool {
         d.present(full)
     };
     run(f);
+    hide_cursor();
     crate::kprintln!("display: released by process {}, kernel status screen restored", pid);
     true
 }
