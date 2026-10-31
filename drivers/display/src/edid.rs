@@ -528,6 +528,8 @@ fn parse_cea(block: &[u8], modes: &mut Vec<Mode>, preferred_taken: &mut bool) ->
         i = end;
     }
 
+    // Data blocks may end before the DTD area; the gap is padding.
+    i = dtd_offset;
     let native = block[3] & 0x0F;
     let mut dtds = 0u8;
     while i + 18 <= BLOCK_LEN {
@@ -718,6 +720,66 @@ mod tests {
         bad[BLOCK_LEN + 4] = (2 << 5) | 30;
         fix_checksum((&mut bad[BLOCK_LEN..]).try_into().unwrap());
         assert_eq!(Edid::parse(&bad), Err(EdidError::MalformedCea));
+    }
+
+    #[test]
+    fn cea_padding_before_dtds_is_skipped() {
+        let mut bytes = [0u8; 2 * BLOCK_LEN];
+        let mut base = base_block();
+        base[24] = 0;
+        base[126] = 1;
+        base[54] = 0;
+        base[55] = 0; // no base DTD
+        fix_checksum(&mut base);
+        bytes[..BLOCK_LEN].copy_from_slice(&base);
+
+        let mut ext = [0u8; BLOCK_LEN];
+        ext[0] = 0x02;
+        ext[1] = 3;
+        ext[2] = 8; // two padding bytes after the video block
+        ext[3] = 1;
+        ext[4] = (2 << 5) | 1;
+        ext[5] = 4; // 1280x720@60
+        let dtd: [u8; 18] =
+            [2, 58, 0x80, 0x18, 0x71, 0x38, 0x2D, 0x40, 88, 44, 0x45, 0x00, 0x12, 0x21, 0x2C, 0x00, 0x00, 0x1E];
+        ext[8..26].copy_from_slice(&dtd);
+        fix_checksum(&mut ext);
+        bytes[BLOCK_LEN..].copy_from_slice(&ext);
+
+        let e = Edid::parse(&bytes).unwrap();
+        let preferred = e.preferred_mode().unwrap();
+        assert_eq!((preferred.width, preferred.height), (1920, 1080));
+        assert_eq!(preferred.pixel_clock_khz, Some(148_500));
+        assert!(preferred.preferred);
+    }
+
+    #[test]
+    fn mutated_blocks_never_panic() {
+        let mut bytes = [0u8; 2 * BLOCK_LEN];
+        let mut base = base_block();
+        base[126] = 1;
+        fix_checksum(&mut base);
+        bytes[..BLOCK_LEN].copy_from_slice(&base);
+        bytes[BLOCK_LEN..].copy_from_slice(&cea_block(16));
+        let mut state = 0x1234_5678u32;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state
+        };
+        for _ in 0..4000 {
+            let mut m = bytes;
+            for _ in 0..(next() % 6 + 1) {
+                let i = next() as usize % m.len();
+                m[i] = (next() >> 24) as u8;
+            }
+            // Repair the checksums so the mutated fields are actually parsed.
+            let (a, b) = m.split_at_mut(BLOCK_LEN);
+            fix_checksum(a.try_into().unwrap());
+            fix_checksum(b.try_into().unwrap());
+            let _ = Edid::parse(&m);
+            let cut = next() as usize % m.len();
+            let _ = Edid::parse(&m[..cut]);
+        }
     }
 
     #[test]
