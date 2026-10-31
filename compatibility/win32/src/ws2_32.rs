@@ -20,6 +20,8 @@ const SOCKET_ERROR: i32 = -1;
 const AF_INET: u16 = 2;
 const AF_INET6: i32 = 23;
 const AI_PASSIVE: i32 = 1;
+const AI_NUMERICHOST: i32 = 4;
+const AI_NUMERICSERV: i32 = 8;
 const SOCK_STREAM: i32 = 1;
 const SOCK_DGRAM: i32 = 2;
 const SOL_SOCKET: i32 = 0xFFFF;
@@ -676,11 +678,6 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
     }
     // SAFETY: NULL or NUL-terminated strings.
     let (n, svc) = unsafe { (crate::path::ansi_to_string(node), crate::path::ansi_to_string(service)) };
-    let port: u16 = match svc.as_deref().map(str::parse) {
-        None => 0,
-        Some(Ok(p)) => p,
-        Some(Err(_)) => return WSATRY_AGAIN as i32, // named services: not supported
-    };
     let (mut flags, mut socktype, mut proto) = (0i32, 0i32, 0i32);
     if !hints.is_null() {
         // SAFETY: the caller's ADDRINFOA hints.
@@ -692,6 +689,22 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
             }
             socktype = teb::get(hints as u64, 8);
             proto = teb::get(hints as u64, 12);
+        }
+    }
+    let port: u16 = match svc.as_deref() {
+        None => 0,
+        Some(s) => match s.parse() {
+            Ok(p) => p,
+            // A named service needs the services database, which OSyx has not.
+            Err(_) if flags & AI_NUMERICSERV == 0 => return WSATRY_AGAIN as i32,
+            Err(_) => return WSAHOST_NOT_FOUND as i32,
+        },
+    };
+    if flags & AI_NUMERICHOST != 0 {
+        if let Some(name) = n.as_deref() {
+            if parse_ipv4(name).is_none() {
+                return WSAHOST_NOT_FOUND as i32;
+            }
         }
     }
     let addrs = match n {
