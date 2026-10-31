@@ -29,6 +29,11 @@ jobs:
           -p osyx-net -p osyx-update -p prism-proto -p prism-core -p osyx-ui
           -p osyx-gfx -p osyx-font -p osyx-elf -p osyx-pe -p osyx-pe-loader
 
+      - name: Win Parity Check (tool tests, then a scan without test evidence)
+        run: |
+          python3 -m unittest scripts/test_winparity.py
+          python3 scripts/winparity.py scan --tests-log none --format terminal,json --no-history --top 5
+
       - name: Test wireless WPA support
         run: cargo test --locked -p osyx-wireless --features wpa
 

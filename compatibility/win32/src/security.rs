@@ -552,6 +552,13 @@ extern "win64" fn IsValidSecurityDescriptor(p: *const u8) -> i32 {
     1
 }
 
+extern "win64" fn SetFileSecurityW(name: *const u16, info: u32, descriptor: *const u8) -> i32 {
+    match crate::objsec::set_file_security(name, info, descriptor) {
+        Ok(()) => 1,
+        Err(e) => fail(e, 0),
+    }
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         IsValidSid,
@@ -574,6 +581,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetAce,
         InitializeSecurityDescriptor,
         IsValidSecurityDescriptor,
+        SetFileSecurityW,
         SetSecurityDescriptorOwner,
         SetSecurityDescriptorGroup,
         SetSecurityDescriptorDacl,

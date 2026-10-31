@@ -146,6 +146,16 @@ extern "win64" fn CheckTokenMembership(token: u64, sid: *const u8, member: *mut 
     1
 }
 
+/// Whether the calling thread's effective token is in BUILTIN\Administrators
+/// (S-1-5-32-544), as `IsUserAnAdmin` asks.
+pub(crate) fn is_admin() -> bool {
+    const ADMINISTRATORS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0, 0];
+    let t = tokens::effective();
+    let data = t.state.data.lock().unwrap().clone();
+    let (allow, _) = tokens::access_sids(t.uid, t.gid, &data);
+    allow.iter().any(|s| s.as_slice() == ADMINISTRATORS)
+}
+
 /// Locally unique within this boot: the process id in the high part, a
 /// per-process counter in the low part.
 extern "win64" fn AllocateLocallyUniqueId(luid: *mut u32) -> i32 {

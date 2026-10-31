@@ -924,6 +924,14 @@ fn new_file_attributes(attributes: u64) -> Result<u64, u32> {
     if attributes == 0 {
         return Ok(0);
     }
+    if crate::wow64::is_active() {
+        // SAFETY: the caller's 32-bit SECURITY_ATTRIBUTES (12 bytes).
+        let (len, sd) = unsafe { (*(attributes as *const u32), *((attributes + 4) as *const u32)) };
+        if len != 12 {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        return Ok(sd as u64);
+    }
     // SAFETY: the caller's SECURITY_ATTRIBUTES (24 bytes).
     let (len, sd) = unsafe { (*(attributes as *const u32), *((attributes + 8) as *const u64)) };
     if len != 24 { Err(ERROR_INVALID_PARAMETER) } else { Ok(sd) }
@@ -1593,7 +1601,13 @@ extern "win64" fn GetCommandLineW() -> u64 {
 
 /// STARTUPINFO: everything zero except `cb` (the default for a console process).
 extern "win64" fn GetStartupInfoA(si: *mut u8) {
-    if !si.is_null() {
+    if !si.is_null() && crate::wow64::is_active() {
+        // SAFETY: STARTUPINFO is 68 bytes for a 32-bit caller.
+        unsafe {
+            core::ptr::write_bytes(si, 0, 68);
+            *(si as *mut u32) = 68;
+        }
+    } else if !si.is_null() {
         // SAFETY: STARTUPINFOA is 104 bytes.
         unsafe {
             core::ptr::write_bytes(si, 0, 104);

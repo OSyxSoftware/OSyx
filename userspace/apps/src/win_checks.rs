@@ -113,6 +113,7 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("Win32 GUI window through PRISM (target E)", || {
         prism.is_ok() && run("gui.exe", &[]) == Some(0)
     });
+    t.check("PE32 window, child controls and paint through PRISM", || prism.is_ok() && run("gui32.exe", &[]) == Some(0));
     // These create windows too.
     t.check("OLE apartments, GUID strings, drag-drop registration and the OLE clipboard", || {
         prism.is_ok() && run("ole2.exe", &[]) == Some(0)

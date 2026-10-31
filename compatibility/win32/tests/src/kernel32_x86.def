@@ -30,3 +30,12 @@ EXPORTS
     WaitForSingleObject
     GetExitCodeThread
     Sleep
+    GetModuleHandleW
+    LoadLibraryExW
+    GetProcAddress
+    GetLastError
+    GetFileAttributesW
+    LocalFree
+    FreeLibrary
+    CreateDirectoryW
+    RemoveDirectoryW

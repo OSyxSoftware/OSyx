@@ -6,3 +6,6 @@ EXPORTS
     RegQueryValueExW
     RegCloseKey
     RegDeleteKeyW
+    RegEnumKeyW
+    SetFileSecurityW
+    GetNamedSecurityInfoW
