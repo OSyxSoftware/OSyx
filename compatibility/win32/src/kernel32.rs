@@ -2422,7 +2422,10 @@ pub fn heap_alloc_for(owner: u64, size: usize, zero: bool) -> Option<u64> {
     let layout = core::alloc::Layout::from_size_align(size.checked_add(16)?, 16).ok()?;
     // SAFETY: a non-zero-sized layout.
     let p = unsafe {
-        if zero {
+        // 32-bit programs get zeroed memory whatever they asked for: they
+        // were written for a system whose fresh heap pages are zero, and some
+        // (NSIS installers) read what they never wrote.
+        if zero || crate::wow64::is_active() {
             alloc::alloc::alloc_zeroed(layout)
         } else {
             alloc::alloc::alloc(layout)
