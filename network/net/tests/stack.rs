@@ -63,6 +63,37 @@ fn loopback_ping_and_udp_work_without_a_link() {
 }
 
 #[test]
+fn peeks_leave_the_data_queued() {
+    let mut n = Net::new();
+    let ping = n.a.icmp_open().unwrap();
+    n.a.icmp_echo(ping, Ipv4Addr::LOOPBACK, 11, b"me").unwrap();
+    assert!(matches!(n.a.icmp_peek(ping), Ok(IcmpEvent::Reply { seq: 11, .. })));
+    assert!(matches!(n.a.icmp_recv(ping), Ok(IcmpEvent::Reply { seq: 11, .. })));
+    assert_eq!(n.a.icmp_peek(ping), Err(NetError::WouldBlock));
+
+    let u1 = n.a.udp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7001)).unwrap();
+    let u2 = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    n.a.udp_send_to(u2, Some(Endpoint::new(Ipv4Addr::LOOPBACK, 7001)), b"peek").unwrap();
+    let mut buf = [0u8; 8];
+    let (from, len, total) = n.a.udp_peek_from(u1, &mut buf).unwrap();
+    assert_eq!((&buf[..len], total, from.addr), (&b"peek"[..], 4, Ipv4Addr::LOOPBACK));
+    assert_eq!(n.a.recv_available(u1), Ok(4), "a peek consumes nothing");
+    let (from, len, _) = n.a.udp_recv_from(u1, &mut buf).unwrap();
+    assert_eq!((&buf[..len], from.addr), (&b"peek"[..], Ipv4Addr::LOOPBACK));
+
+    let (c, s) = connect(&mut n, 6160);
+    assert_eq!(n.a.tcp_send(c, b"peek at me").unwrap(), 10);
+    assert!(n.run_until(1000, |n| n.b.recv_available(s) == Ok(10)));
+    let mut part = [0u8; 5];
+    assert_eq!(n.b.tcp_peek(s, &mut part), Ok(5));
+    assert_eq!(&part, b"peek ");
+    assert_eq!(n.b.recv_available(s), Ok(10), "a peek consumes nothing");
+    let mut all = [0u8; 10];
+    assert_eq!(n.b.tcp_recv(s, &mut all), Ok(10));
+    assert_eq!(&all, b"peek at me");
+}
+
+#[test]
 fn tcp_bind_reserves_a_dynamic_port_before_listen_or_connect() {
     let mut n = Net::new();
     let bound = n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 0)).unwrap();

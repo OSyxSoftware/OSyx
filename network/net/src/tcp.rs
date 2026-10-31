@@ -580,6 +580,23 @@ impl Tcb {
             }
             return Ok(n);
         }
+        self.recv_outcome()
+    }
+
+    /// Copies received data without consuming it (MSG_PEEK).
+    pub fn peek(&self, out: &mut [u8]) -> Result<usize, TcpError> {
+        if !self.recv_buf.is_empty() {
+            let n = out.len().min(self.recv_buf.len());
+            for (o, b) in out.iter_mut().zip(self.recv_buf.iter()) {
+                *o = *b;
+            }
+            return Ok(n);
+        }
+        self.recv_outcome()
+    }
+
+    /// What `recv` reports when no data is queued.
+    fn recv_outcome(&self) -> Result<usize, TcpError> {
         if self.fin_received {
             return Ok(0);
         }

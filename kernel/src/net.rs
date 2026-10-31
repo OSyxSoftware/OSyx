@@ -674,6 +674,7 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
     }
     let timeout = s.recv_timeout.load(Ordering::Relaxed);
     let nonblock = flags & abi::MSG_DONTWAIT != 0;
+    let peek = flags & abi::MSG_PEEK != 0;
     let mut k = alloc::vec![0u8; len];
     let run = |op: &mut RecvOp| {
         if nonblock {
@@ -687,7 +688,8 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
             let id = ensure_udp(&s, None)?;
             let mut total = None;
             let r = run(&mut |st| {
-                st.udp_recv_from(id, &mut k).map(|(f, n, len)| {
+                let d = if peek { st.udp_peek_from(id, &mut k) } else { st.udp_recv_from(id, &mut k) };
+                d.map(|(f, n, len)| {
                     total = Some(len);
                     (n, Some(to_sa(f)))
                 })
@@ -699,7 +701,7 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
         }
         abi::SOCK_PING => {
             let id = s.id().ok_or(Errno::BadHandle)?;
-            run(&mut |st| match st.icmp_recv(id)? {
+            run(&mut |st| match if peek { st.icmp_peek(id)? } else { st.icmp_recv(id)? } {
                 IcmpEvent::Reply { from, seq, ttl, data } => {
                     let n = data.len().min(k.len());
                     k[..n].copy_from_slice(&data[..n]);
@@ -710,7 +712,7 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
         }
         abi::SOCK_STREAM => {
             let id = s.id().ok_or(Errno::NotConnected)?;
-            run(&mut |st| st.tcp_recv(id, &mut k).map(|n| (n, None)))?
+            run(&mut |st| if peek { st.tcp_peek(id, &mut k) } else { st.tcp_recv(id, &mut k) }.map(|n| (n, None)))?
         }
         _ => return Err(Errno::NotSupported),
     };

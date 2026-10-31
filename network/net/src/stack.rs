@@ -1373,6 +1373,23 @@ impl Stack {
         Ok(self.udp(id)?.local)
     }
 
+    /// The next datagram without removing it (MSG_PEEK).
+    pub fn udp_peek_from(&self, id: SocketId, buf: &mut [u8]) -> Result<(Endpoint, usize, usize), NetError> {
+        let u = match self.sockets.get(&id) {
+            Some(Socket::Udp(u)) => u,
+            _ => return Err(NetError::BadSocket),
+        };
+        if let Some((from, d)) = u.rx.front() {
+            let n = d.len().min(buf.len());
+            buf[..n].copy_from_slice(&d[..n]);
+            return Ok((*from, n, d.len()));
+        }
+        if let Some(e) = u.error {
+            return Err(e);
+        }
+        Err(NetError::WouldBlock)
+    }
+
     /// Bytes a receive can return without waiting (FIONREAD).
     pub fn recv_available(&mut self, id: SocketId) -> Result<usize, NetError> {
         match self.sockets.get(&id) {
@@ -1430,6 +1447,14 @@ impl Stack {
     pub fn icmp_recv(&mut self, id: SocketId) -> Result<IcmpEvent, NetError> {
         match self.sockets.get_mut(&id) {
             Some(Socket::Icmp(i)) => i.rx.pop_front().ok_or(NetError::WouldBlock),
+            _ => Err(NetError::BadSocket),
+        }
+    }
+
+    /// The next ICMP event without removing it (MSG_PEEK).
+    pub fn icmp_peek(&self, id: SocketId) -> Result<IcmpEvent, NetError> {
+        match self.sockets.get(&id) {
+            Some(Socket::Icmp(i)) => i.rx.front().cloned().ok_or(NetError::WouldBlock),
             _ => Err(NetError::BadSocket),
         }
     }
@@ -1546,6 +1571,11 @@ impl Stack {
         let n = self.tcb(id)?.recv(buf).map_err(tcp_error)?;
         self.flush(); // window updates
         Ok(n)
+    }
+
+    /// Received stream bytes without consuming them (MSG_PEEK).
+    pub fn tcp_peek(&mut self, id: SocketId, buf: &mut [u8]) -> Result<usize, NetError> {
+        self.tcb(id)?.peek(buf).map_err(tcp_error)
     }
 
     /// Half-close: no more data from us (a FIN follows the queued data).

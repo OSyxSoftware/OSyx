@@ -101,6 +101,10 @@ void __stdcall start(void) {
     check("WSARecvFrom gets it",
           WSARecvFrom(ur, &wi, 1, &wn, NULL, (struct sockaddr *)&wfrom, &wflen, NULL, NULL) == 0 && wn == 5);
     check("... bytes and sender", mem_eq(wb, "wsaud", 5) && wfrom.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    check("WSASendTo sends the datagram again",
+          WSASendTo(uw, &wo, 1, &wn, 0, (struct sockaddr *)&ua, sizeof ua, NULL, NULL) == 0 && wn == 5);
+    check("MSG_PEEK returns the datagram", recv(ur, wb, sizeof wb, MSG_PEEK) == 5 && mem_eq(wb, "wsaud", 5));
+    check("... without consuming it", recv(ur, wb, sizeof wb, 0) == 5 && mem_eq(wb, "wsaud", 5));
     WSABUF wt = {11, "truncated!!"};
     check("WSASendTo sends 11 bytes",
           WSASendTo(uw, &wt, 1, &wn, 0, (struct sockaddr *)&ua, sizeof ua, NULL, NULL) == 0 && wn == 11);
@@ -142,6 +146,10 @@ void __stdcall start(void) {
     n = 0;
     check_eq("WSAIoctl(FIONREAD)", WSAIoctl(sv, FIONREAD, NULL, 0, &avail, sizeof avail, &n, NULL, NULL), 0);
     check("... pending bytes and count", avail == 11 && n == 4);
+    char peeked[5] = {0};
+    check("MSG_PEEK returns data", recv(sv, peeked, sizeof peeked, MSG_PEEK) == 5 && mem_eq(peeked, "hello", 5));
+    avail = 0;
+    check("... without consuming it", ioctlsocket(sv, FIONREAD, &avail) == 0 && avail == 11);
     char part1[5] = {0}, part2[6] = {0};
     WSABUF in[2] = {{5, part1}, {6, part2}};
     n = 0;
