@@ -1570,6 +1570,22 @@ impl Stack {
         self.tcb(id)?.peek(buf).map_err(tcp_error)
     }
 
+    /// Bytes ready to read right away: queued TCP data, the size of the
+    /// next datagram, or the next echo reply's payload. 0 when nothing is
+    /// waiting.
+    pub fn available(&self, id: SocketId) -> Result<usize, NetError> {
+        match self.sockets.get(&id) {
+            Some(Socket::Tcp(t)) => Ok(t.tcb.recv_queue()),
+            Some(Socket::Udp(u)) => Ok(u.rx.front().map_or(0, |(_, d)| d.len())),
+            Some(Socket::Icmp(i)) => Ok(match i.rx.front() {
+                Some(IcmpEvent::Reply { data, .. }) => data.len(),
+                Some(IcmpEvent::Error { .. }) | None => 0,
+            }),
+            Some(Socket::BoundTcp(_)) | Some(Socket::Listener(_)) => Err(NetError::NotConnected),
+            None => Err(NetError::BadSocket),
+        }
+    }
+
     /// Half-close: no more data from us (a FIN follows the queued data).
     pub fn tcp_shutdown(&mut self, id: SocketId) -> Result<(), NetError> {
         self.tcb(id)?.close();

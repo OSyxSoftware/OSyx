@@ -73,6 +73,12 @@ void __stdcall start(void) {
     m.dwBufferCount = 2;
     DWORD sent = 0;
     check("WSASendMsg gathers two buffers", WSASendMsg(w, &m, 0, &sent, NULL, NULL) == 0 && sent == 11);
+    DWORD avail = 0;
+    got = 0;
+    check("WSAIoctl(FIONREAD) reports the queued datagram",
+          WSAIoctl(r, FIONREAD, NULL, 0, &avail, sizeof avail, &got, NULL, NULL) == 0 && got == 4 && avail == 11);
+    avail = 0;
+    check("ioctlsocket(FIONREAD) reports it too", ioctlsocket(r, FIONREAD, &avail) == 0 && avail == 11);
     on = 0;
     WSAIoctl(r, FIONBIO, &on, sizeof on, NULL, 0, &got, NULL, NULL);
     check("... into one datagram", recv(r, buf, sizeof buf, 0) == 11 && mem_eq(buf, "hello, msg!", 11));

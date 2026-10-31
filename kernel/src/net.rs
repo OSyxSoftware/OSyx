@@ -779,6 +779,10 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
             let err = stack_call(|st| st.tcp_state(id)).ok().and_then(|(_, e)| e);
             return Ok(err.map_or(0, |e| errno(e) as u64));
         }
+        abi::ctl::AVAILABLE => {
+            let id = s.id().ok_or(Errno::NotConnected)?;
+            return Ok(stack_call(|st| st.available(id))? as u64);
+        }
         _ => return Err(Errno::InvalidArgument),
     }
     Ok(0)

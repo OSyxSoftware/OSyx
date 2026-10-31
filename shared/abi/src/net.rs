@@ -39,6 +39,9 @@ pub mod ctl {
     /// Pending connection error as an `Errno` number (0 = none): the SYN
     /// failed after a non-blocking `connect` returned `WouldBlock`.
     pub const ERROR: u64 = 11;
+    /// Bytes ready to read without blocking: queued TCP data or the size
+    /// of the next UDP datagram (0 if none). Winsock FIONREAD.
+    pub const AVAILABLE: u64 = 12;
 }
 
 /// TCP states reported by `ctl::STATE` and `NetSocket::state`.

@@ -707,6 +707,32 @@ fn udp_peek_leaves_the_datagram_queued() {
 }
 
 #[test]
+fn available_reports_queued_bytes() {
+    let mut n = Net::new();
+    let (c, s) = connect(&mut n, 7103);
+    assert_eq!(n.b.available(s), Ok(0));
+    assert_eq!(n.a.tcp_send(c, b"count me"), Ok(8));
+    assert!(n.run_until(1000, |n| n.b.available(s) == Ok(8)));
+    // Peeking does not change the count.
+    assert_eq!(n.b.tcp_peek(s, &mut [0u8; 4]), Ok(4));
+    assert_eq!(n.b.available(s), Ok(8));
+    let mut buf = [0u8; 16];
+    assert_eq!(n.b.tcp_recv(s, &mut buf[..5]), Ok(5));
+    assert_eq!(n.b.available(s), Ok(3));
+    assert_eq!(n.b.tcp_recv(s, &mut buf), Ok(3));
+    assert_eq!(n.b.available(s), Ok(0));
+
+    let rx = n.a.udp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7104)).unwrap();
+    assert_eq!(n.a.available(rx), Ok(0));
+    let tx = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    n.a.udp_send_to(tx, Some(Endpoint::new(Ipv4Addr::LOOPBACK, 7104)), b"12345").unwrap();
+    assert_eq!(n.a.available(rx), Ok(5));
+    let mut ubuf = [0u8; 8];
+    n.a.udp_recv_from(rx, &mut ubuf).unwrap();
+    assert_eq!(n.a.available(rx), Ok(0));
+}
+
+#[test]
 fn udp_broadcast_needs_the_broadcast_option() {
     let mut n = Net::new();
     let tx = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
