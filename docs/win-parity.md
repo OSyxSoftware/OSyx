@@ -59,3 +59,14 @@ Windows API the Win32 layer in `compatibility/win32` implements, for x64 and for
 
 Percentages are measurements of the sources and logs at hand; they say nothing about
 APIs that the tool classifies `unknown`, and nothing is estimated.
+
+## Website
+
+The Win Parity section of the website (`site/`) shows numbers from a scan, copied unchanged into `site/winparity.json`:
+
+```
+python scripts/winparity.py scan
+python scripts/site-winparity.py
+```
+
+Commit the refreshed JSON together with the change that moved the numbers.
