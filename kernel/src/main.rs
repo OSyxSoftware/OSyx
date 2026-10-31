@@ -413,6 +413,9 @@ fn log_subsystems() {
     for line in drivers::xhci::status() {
         kprintln!("usb: {}", line);
     }
+    for line in drivers::i2c::status() {
+        kprintln!("i2c: {}", line);
+    }
     kprintln!("input: {} events in total", input::total_events());
     for (vector, n) in irq::counts() {
         kprintln!("irq: vector {:#x} fired {} times", vector, n);
