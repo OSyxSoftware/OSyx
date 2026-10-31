@@ -668,11 +668,35 @@ fn desktop_session() -> i32 {
             Err(e) => eprintln!("init: cannot start /bin/firstboot: {e}"),
         }
     }
-    // Battery and AC state for the taskbar (ACPI; runs as root).
-    match Command::new("/bin/batteryd").spawn() {
-        Ok(c) => println!("init: battery state kept by process {}", c.id()),
-        Err(e) => eprintln!("init: cannot start /bin/batteryd: {e}"),
-    }
+    // Battery and AC state for the taskbar (ACPI; runs as root). The AML
+    // interpreter can meet firmware it cannot handle and end the process:
+    // it is started again a few times.
+    thread::spawn(|| {
+        const GIVE_UP_AFTER: u32 = 8;
+        let mut quick_failures = 0;
+        loop {
+            let started = Instant::now();
+            match Command::new("/bin/batteryd").status() {
+                Ok(s) if s.success() => {
+                    println!("init: batteryd finished");
+                    return;
+                }
+                Ok(s) => eprintln!("init: batteryd ended with status {:#x}", s.raw()),
+                Err(e) => {
+                    eprintln!("init: cannot start /bin/batteryd: {e}");
+                    return;
+                }
+            }
+            // A run of a minute or more was working: it starts the count over.
+            quick_failures = if started.elapsed() >= Duration::from_secs(60) { 1 } else { quick_failures + 1 };
+            if quick_failures >= GIVE_UP_AFTER {
+                eprintln!("init: batteryd keeps failing; no battery state will be published");
+                return;
+            }
+            thread::sleep(Duration::from_secs(5 * quick_failures as u64));
+        }
+    });
+    println!("init: battery state kept by /bin/batteryd");
     // Touchpads and keyboards on I2C (HID over I2C): ACPI discovery, then the
     // kernel driver takes over. Runs as root and exits when done.
     match Command::new("/bin/i2chidd").spawn() {
