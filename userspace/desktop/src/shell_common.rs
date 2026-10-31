@@ -773,3 +773,43 @@ pub fn save_pins(pins: &[AppEntry]) -> os_std::error::Result<()> {
     }
     fs::write(PINS_FILE, text)
 }
+
+/// A Windows program an installer left in Program Files together with its
+/// uninstaller.
+#[derive(Clone)]
+pub struct InstalledProgram {
+    pub name: String,
+    pub folder: String,
+    /// The uninstaller's OSyx path.
+    pub uninstaller: String,
+    pub icon: Icon,
+}
+
+/// The programs in `/Program Files` and `/Program Files (x86)` that have an
+/// uninstaller (a top-level `.exe` named `uninstall...` or `unins...`),
+/// sorted by name. The uninstaller itself is what an installer registers
+/// for "Add or remove programs"; it is the same file here.
+pub fn installed_programs() -> Vec<InstalledProgram> {
+    let mut programs = Vec::new();
+    for root in ["/Program Files", "/Program Files (x86)"] {
+        let Ok(dir) = fs::read_dir(root) else { continue };
+        for entry in dir.filter(|e| e.file_type().is_dir()) {
+            let name = String::from(entry.file_name());
+            let folder = format!("{root}/{name}");
+            let Ok(files) = fs::read_dir(&folder) else { continue };
+            let mut uninstallers: Vec<String> = files
+                .map(|f| String::from(f.file_name()))
+                .filter(|n| {
+                    let l = n.to_ascii_lowercase();
+                    l.ends_with(".exe") && l.starts_with("unins")
+                })
+                .collect();
+            uninstallers.sort();
+            let Some(uninstaller) = uninstallers.first() else { continue };
+            let icon = main_program(&folder, &name).map_or(Icon::Program, |exe| exe_icon(&exe));
+            programs.push(InstalledProgram { name, uninstaller: format!("{folder}/{uninstaller}"), folder, icon });
+        }
+    }
+    programs.sort_by_key(|p| p.name.to_ascii_lowercase());
+    programs
+}
