@@ -76,6 +76,45 @@ pub fn atom_header_offset(image: &[u8]) -> Option<usize> {
     if signature == ATOM_SIGNATURE || signature == b"MOTA" { Some(header) } else { None }
 }
 
+/// Find a matching ATOM VBIOS in an ACPI VFCT table. PCI coordinates and
+/// IDs must all match; an image for another GPU is never used as a fallback.
+/// Layout: AMD's UEFI_ACPI_VFCT and VFCT_IMAGE_HEADER in Linux atombios.h.
+pub fn vfct_vbios(table: &[u8], bus: u8, device: u8, function: u8, vendor_id: u16, device_id: u16) -> Option<&[u8]> {
+    const VFCT_HEADER: usize = 0x4c;
+    const IMAGE_HEADER: usize = 28;
+    fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+        Some(u32::from_le_bytes(bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?))
+    }
+    fn u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
+        Some(u16::from_le_bytes(bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?))
+    }
+    if table.get(..4)? != b"VFCT" { return None; }
+    let length = u32_at(table, 4)? as usize;
+    let table = table.get(..length)?;
+    if table.len() < VFCT_HEADER || table.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) != 0 { return None; }
+    let mut offset = u32_at(table, 0x34)? as usize;
+    if offset < VFCT_HEADER || offset >= table.len() { return None; }
+    let lib_offset = u32_at(table, 0x38)? as usize;
+    if lib_offset > table.len() || (lib_offset != 0 && lib_offset == offset) { return None; }
+    let end = if lib_offset > offset { lib_offset } else { table.len() };
+    while offset < end {
+        let header_end = offset.checked_add(IMAGE_HEADER)?;
+        if header_end > end { return None; }
+        let image_len = u32_at(table, offset + 24)? as usize;
+        let image_end = header_end.checked_add(image_len)?;
+        if image_end > end { return None; }
+        let matches = u32_at(table, offset)? == bus as u32
+            && u32_at(table, offset + 4)? == device as u32
+            && u32_at(table, offset + 8)? == function as u32
+            && u16_at(table, offset + 12)? == vendor_id
+            && u16_at(table, offset + 14)? == device_id;
+        let image = &table[header_end..image_end];
+        if matches && atom_header_offset(image).is_some() { return Some(image); }
+        offset = image_end;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +164,44 @@ mod tests {
         assert_eq!(atom_header_offset(&rom[..0x3007]), None);
         rom[0x48..0x4a].copy_from_slice(&u16::MAX.to_le_bytes());
         assert_eq!(atom_header_offset(&rom), None);
+    }
+
+    #[test]
+    fn vfct_selects_only_the_matching_valid_gpu_image() {
+        fn checksum(table: &mut [u8]) {
+            table[9] = 0;
+            table[9] = 0u8.wrapping_sub(table.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)));
+        }
+        fn image(table: &mut [u8], at: usize, bus: u32, dev: u32, id: u16) {
+            table[at..at + 4].copy_from_slice(&bus.to_le_bytes());
+            table[at + 4..at + 8].copy_from_slice(&dev.to_le_bytes());
+            table[at + 12..at + 14].copy_from_slice(&AMD_VENDOR.to_le_bytes());
+            table[at + 14..at + 16].copy_from_slice(&id.to_le_bytes());
+            table[at + 24..at + 28].copy_from_slice(&128u32.to_le_bytes());
+            let rom = &mut table[at + 28..at + 156];
+            rom[..2].copy_from_slice(&ROM_SIGNATURE);
+            rom[0x48..0x4a].copy_from_slice(&0x50u16.to_le_bytes());
+            rom[0x54..0x58].copy_from_slice(&ATOM_SIGNATURE);
+        }
+        let mut table = [0u8; 76 + 156 * 2];
+        table[..4].copy_from_slice(b"VFCT");
+        let len = table.len() as u32;
+        table[4..8].copy_from_slice(&len.to_le_bytes());
+        table[0x34..0x38].copy_from_slice(&76u32.to_le_bytes());
+        image(&mut table, 76, 1, 0, 0x15d8);
+        image(&mut table, 76 + 156, 2, 0, 0x1636);
+        checksum(&mut table);
+        assert_eq!(vfct_vbios(&table, 2, 0, 0, AMD_VENDOR, 0x1636).map(|v| v.len()), Some(128));
+        assert!(vfct_vbios(&table, 1, 0, 1, AMD_VENDOR, 0x15d8).is_none());
+        assert!(vfct_vbios(&table, 3, 0, 0, AMD_VENDOR, 0x15d8).is_none());
+        assert!(vfct_vbios(&table[..100], 1, 0, 0, AMD_VENDOR, 0x15d8).is_none());
+        for length in 0..table.len() {
+            assert!(vfct_vbios(&table[..length], 1, 0, 0, AMD_VENDOR, 0x15d8).is_none());
+        }
+        table[76 + 24..76 + 28].copy_from_slice(&u32::MAX.to_le_bytes());
+        checksum(&mut table);
+        assert!(vfct_vbios(&table, 1, 0, 0, AMD_VENDOR, 0x15d8).is_none());
+        table[9] ^= 1;
+        assert!(vfct_vbios(&table, 1, 0, 0, AMD_VENDOR, 0x15d8).is_none());
     }
 }

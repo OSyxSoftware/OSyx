@@ -3,9 +3,9 @@
 //! Native DCN modesetting needs the VBIOS IP discovery table (or the
 //! per-ASIC register bases it replaces), the display microcontroller
 //! firmware and the DCN state tables. None of that is implemented: this
-//! module identifies an AMD display function, reads the start of its VBIOS
-//! and says so in the boot log. The firmware framebuffer (GOP) stays in
-//! use.
+//! module identifies an AMD display function, looks for its VBIOS in ACPI
+//! VFCT or the PCI ROM and reports it. The firmware framebuffer (GOP) stays
+//! in use.
 //!
 //! The VBIOS window is enabled only for the read and restored afterwards.
 //! PCI configuration registers are written temporarily; display registers
@@ -39,6 +39,15 @@ pub fn probe(devices: &[pci::Device]) -> u32 {
             _ => String::from("no memory BAR0"),
         };
         crate::kprintln!("amdgpu: {:04x}:{:04x} at {}, {}, {}", dev.vendor, dev.device, dev.addr, dcn, framebuffer);
+        let vfct = crate::acpi::table_bytes(b"VFCT", 0).and_then(|table| {
+            amd::vfct_vbios(table, dev.addr.bus, dev.addr.device, dev.addr.function, dev.vendor, dev.device)
+        });
+        if let Some(rom) = vfct {
+            if let Some(offset) = amd::atom_header_offset(rom) {
+                crate::kprintln!("amdgpu: ACPI VFCT VBIOS {} KiB, ATOM header at {:#x}; native DCN modesetting is not implemented, the firmware framebuffer stays in use", rom.len() >> 10, offset);
+                continue;
+            }
+        }
         match rom_size(dev).and_then(|size| read_rom(dev, size).map(|rom| (size, rom))) {
             Some((size, rom)) => match amd::atom_header_offset(&rom) {
                 Some(offset) => crate::kprintln!(
