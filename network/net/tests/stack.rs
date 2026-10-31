@@ -579,6 +579,28 @@ fn dns_ignores_spoofed_replies_and_times_out() {
 }
 
 #[test]
+fn dns_fails_over_to_the_next_server_after_one_timeout() {
+    let mut n = Net::new();
+    // The first server never answers (no host at 10.0.0.3); the second does.
+    n.a.set_dns_servers(&[Ipv4Addr::new(10, 0, 0, 3), B_IP]);
+    let sock = n.b.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 53)).unwrap();
+    let table = [("failover.test", [10, 9, 8, 7])];
+    let Resolve::Pending(q) = n.a.resolve("failover.test") else { panic!() };
+    let mut conns = Vec::new();
+    let before = n.now;
+    let mut result = None;
+    assert!(n.run_until(3500, |n| {
+        serve_dns(n, sock, None, &table, false, &mut conns);
+        result = n.a.resolve_result(q);
+        result.is_some()
+    }));
+    assert_eq!(result, Some(Ok(vec![Ipv4Addr::new(10, 9, 8, 7)])));
+    let elapsed = n.now - before;
+    assert!(elapsed < 3000, "failover took {elapsed} ms");
+    assert_eq!(n.a.stats.dns_queries, 2, "one query per server before the answer");
+}
+
+#[test]
 fn malformed_frames_are_counted_not_trusted() {
     let mut n = Net::new();
     let mut seed = 0x5EED_u32;

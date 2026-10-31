@@ -1811,6 +1811,26 @@ impl Stack {
         }
     }
 
+    /// Moves a query to the next server, cycling through the list on every
+    /// timeout. A dead first server therefore costs one timeout, not
+    /// `DNS_ATTEMPTS` of them, before the next server is tried.
+    fn dns_advance(&mut self, qid: QueryId, exhausted: NetError) {
+        let servers = self.dns_servers.len().max(1);
+        let (attempt, server) = {
+            let Some(q) = self.queries.get_mut(&qid) else { return };
+            q.attempt += 1;
+            (q.attempt, q.attempt as usize % servers)
+        };
+        if attempt >= DNS_ATTEMPTS * servers as u32 {
+            self.finish_query(qid, Err(exhausted));
+            return;
+        }
+        if let Some(q) = self.queries.get_mut(&qid) {
+            q.server = server;
+        }
+        self.dns_send(qid);
+    }
+
     fn finish_query(&mut self, qid: QueryId, r: Result<Vec<Ipv4Addr>, NetError>) {
         if let Some(q) = self.queries.remove(&qid) {
             self.drop_transport(q.transport);
@@ -1880,10 +1900,7 @@ impl Stack {
             }
             _ => {
                 // Server failure or refusal: try the next server.
-                let q = self.queries.get_mut(&qid).expect("query exists");
-                q.server += 1;
-                q.attempt = 0;
-                self.dns_send(qid);
+                self.dns_advance(qid, NetError::DnsFailure);
                 return !self.queries.contains_key(&qid);
             }
         }
@@ -1947,14 +1964,9 @@ impl Stack {
                 }
                 _ => {}
             }
-            let Some(q) = self.queries.get_mut(&qid) else { continue };
+            let Some(q) = self.queries.get(&qid) else { continue };
             if now >= q.deadline {
-                q.attempt += 1;
-                if q.attempt >= DNS_ATTEMPTS {
-                    q.attempt = 0;
-                    q.server += 1;
-                }
-                self.dns_send(qid);
+                self.dns_advance(qid, NetError::TimedOut);
             }
         }
     }
