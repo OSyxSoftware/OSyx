@@ -1234,22 +1234,28 @@ impl Stack {
         id
     }
 
-    fn port_in_use(&self, port: u16, udp: bool) -> bool {
+    /// Whether binding `local` would collide with an existing socket.
+    /// A wildcard address collides with every address on that port.
+    fn port_in_use(&self, local: Endpoint, udp: bool) -> bool {
+        let overlaps = |other: Endpoint| {
+            other.port == local.port
+                && (other.addr.is_unspecified() || local.addr.is_unspecified() || other.addr == local.addr)
+        };
         self.sockets.values().any(|s| match s {
-            Socket::Udp(u) => udp && u.local.port == port,
-            Socket::Listener(l) => !udp && l.local.port == port,
-            Socket::BoundTcp(local) => !udp && local.port == port,
-            Socket::Tcp(t) => !udp && t.tcb.local.port == port && t.parent.is_none(),
+            Socket::Udp(u) => udp && overlaps(u.local),
+            Socket::Listener(l) => !udp && overlaps(l.local),
+            Socket::BoundTcp(local) => !udp && overlaps(*local),
+            Socket::Tcp(t) => !udp && t.parent.is_none() && overlaps(t.tcb.local),
             Socket::Icmp(_) => false,
         })
     }
 
-    fn ephemeral(&mut self, udp: bool) -> Result<u16, NetError> {
+    fn ephemeral(&mut self, addr: Ipv4Addr, udp: bool) -> Result<u16, NetError> {
         let span = (*EPHEMERAL.end() - *EPHEMERAL.start()) as u32 + 1;
         for _ in 0..span {
             let p = self.next_ephemeral;
             self.next_ephemeral = if p >= *EPHEMERAL.end() { *EPHEMERAL.start() } else { p + 1 };
-            if !self.port_in_use(p, udp) {
+            if !self.port_in_use(Endpoint::new(addr, p), udp) {
                 return Ok(p);
             }
         }
@@ -1276,8 +1282,8 @@ impl Stack {
     /// A UDP socket bound to `local` (port 0: an ephemeral port).
     pub fn udp_bind(&mut self, local: Endpoint) -> Result<SocketId, NetError> {
         self.check_local(local.addr)?;
-        let port = if local.port == 0 { self.ephemeral(true)? } else { local.port };
-        if local.port != 0 && self.port_in_use(port, true) {
+        let port = if local.port == 0 { self.ephemeral(local.addr, true)? } else { local.port };
+        if self.port_in_use(Endpoint::new(local.addr, port), true) {
             return Err(NetError::AddrInUse);
         }
         self.insert(Socket::Udp(UdpSocket {
@@ -1468,8 +1474,8 @@ impl Stack {
     /// The reservation survives until listen, connect or close.
     pub fn tcp_bind(&mut self, local: Endpoint) -> Result<SocketId, NetError> {
         self.check_local(local.addr)?;
-        let port = if local.port == 0 { self.ephemeral(false)? } else { local.port };
-        if self.port_in_use(port, false) {
+        let port = if local.port == 0 { self.ephemeral(local.addr, false)? } else { local.port };
+        if self.port_in_use(Endpoint::new(local.addr, port), false) {
             return Err(NetError::AddrInUse);
         }
         self.insert(Socket::BoundTcp(Endpoint::new(local.addr, port)))
@@ -1517,12 +1523,12 @@ impl Stack {
         };
         let port = match local {
             Some(l) if l.port != 0 => {
-                if bound.is_none() && self.port_in_use(l.port, false) {
+                if bound.is_none() && self.port_in_use(Endpoint::new(src, l.port), false) {
                     return Err(NetError::AddrInUse);
                 }
                 l.port
             }
-            _ => self.ephemeral(false)?,
+            _ => self.ephemeral(src, false)?,
         };
         let l = Endpoint::new(src, port);
         let iss = self.isn(l, remote);

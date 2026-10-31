@@ -137,6 +137,28 @@ fn tcp_bind_reserves_a_dynamic_port_before_listen_or_connect() {
 }
 
 #[test]
+fn binds_only_conflict_on_the_same_address() {
+    let mut n = Net::new();
+    let lo = n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7100)).unwrap();
+    // Another local address on the same port is a different endpoint.
+    assert!(n.a.tcp_bind(Endpoint::new(A_IP, 7100)).is_ok());
+    // The wildcard covers every address, so it collides with both.
+    assert_eq!(n.a.tcp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 7100)), Err(NetError::AddrInUse));
+    assert_eq!(n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7100)), Err(NetError::AddrInUse));
+    let listener = n.a.tcp_listen(Endpoint::new(Ipv4Addr::LOOPBACK, 7101), 1).unwrap();
+    assert_eq!(n.a.tcp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 7101)), Err(NetError::AddrInUse));
+    n.a.close(lo, false);
+    n.a.close(listener, false);
+
+    let udp = n.a.udp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7102)).unwrap();
+    assert!(n.a.udp_bind(Endpoint::new(A_IP, 7102)).is_ok());
+    assert_eq!(n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 7102)), Err(NetError::AddrInUse));
+    // TCP and UDP port spaces are independent.
+    assert!(n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7102)).is_ok());
+    n.a.close(udp, false);
+}
+
+#[test]
 fn udp_datagrams_flow_and_errors_are_reported() {
     let mut n = Net::new();
     let server = n.b.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 9000)).unwrap();
