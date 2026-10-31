@@ -309,6 +309,17 @@ mod imp {
     pub fn thread_priority(tid: u64, priority: u64) -> Result<u64, Errno> {
         decode(syscall2(nr::THREAD_PRIORITY, tid, priority))
     }
+    /// Changes or reads the suspend count of a thread of this process (tid 0
+    /// is the caller; `op` from `osyx_abi::suspend`); returns the previous count.
+    pub fn thread_suspend(tid: u64, op: u64) -> Result<u64, Errno> {
+        decode(syscall2(nr::THREAD_SUSPEND, tid, op))
+    }
+
+    /// Scheduler samples (milliseconds) the thread has run for.
+    pub fn thread_times(tid: u64) -> Result<u64, Errno> {
+        decode(syscall1(nr::THREAD_TIMES, tid))
+    }
+
     pub fn process_write_barrier()->Result<(),Errno> { decode(syscall1(nr::PROCESS_WRITE_BARRIER,0)).map(|_|()) }
 
     pub fn sysinfo() -> Result<SystemInfo, Errno> {

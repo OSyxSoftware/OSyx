@@ -379,6 +379,34 @@ pub mod nr {
     /// [`SET_FS_BASE`] again; 0 restores the thread's 64-bit base. `base`
     /// must be page-aligned, below 4 GiB and (unless 0) in the user half.
     pub const SET_FS32_BASE: u64 = 96;
+    /// `thread_suspend(tid, op) -> previous suspend count` for a thread of
+    /// the caller's process (tid 0 = the caller); `op` is one of
+    /// [`crate::suspend`]. A suspended thread stops at its next return to
+    /// user mode (a thread waiting inside the kernel finishes its wait
+    /// first), as on Windows. `Busy` once the count is [`crate::suspend::MAX`].
+    pub const THREAD_SUSPEND: u64 = 97;
+    /// `thread_times(tid) -> cpu_ticks`: scheduler samples (one per
+    /// millisecond) the thread of the caller's process has run for.
+    pub const THREAD_TIMES: u64 = 98;
+    /// `working_set(pid, buf, cap) -> count`: writes the page-aligned user
+    /// addresses of the resident pages of process `pid` (the caller's own
+    /// or, for root, any) into `buf` (`cap` u64 entries) and returns how
+    /// many pages are resident in all; entries beyond `cap` are not written.
+    pub const WORKING_SET: u64 = 99;
+    /// `link(existing, new) -> 0`: a second name (hard link) for the file
+    /// `existing`. `AlreadyExists`, `IsADirectory`, `CrossDevice` as for
+    /// `rename`.
+    pub const LINK: u64 = 100;
+}
+
+/// Operations of `nr::THREAD_SUSPEND`.
+pub mod suspend {
+    /// Reads the suspend count.
+    pub const QUERY: u64 = 0;
+    pub const SUSPEND: u64 = 1;
+    pub const RESUME: u64 = 2;
+    /// MAXIMUM_SUSPEND_COUNT of Windows.
+    pub const MAX: u32 = 127;
 }
 
 /// Thread priorities (`nr::THREAD_PRIORITY`).

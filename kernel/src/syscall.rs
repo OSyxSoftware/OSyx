@@ -271,6 +271,8 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::CPU_INFO => Ok(crate::smp::online() as u64 | (crate::smp::index() as u64)<<32),
         nr::THREAD_AFFINITY => sched::set_affinity(f.rdi,f.rsi),
         nr::THREAD_PRIORITY => sched::set_priority(f.rdi, f.rsi),
+        nr::THREAD_SUSPEND => sched::thread_suspend(f.rdi, f.rsi),
+        nr::THREAD_TIMES => sched::thread_times(f.rdi),
         nr::PROCESS_WRITE_BARRIER => {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             crate::smp::flush_remote(0,true);
@@ -447,6 +449,8 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
     if sched::current_kill_pending() {
         process::finish_current_thread(0);
     }
+    // A suspended thread (SuspendThread) stops here, with no lock held.
+    sched::park_if_suspended();
     osyx_abi::encode(r)
 }
 
