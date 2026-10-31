@@ -1,6 +1,12 @@
 # Browser content sandbox: implementation notes
 
-Status: design only. Gecko content processes are not currently sandboxed.
+Status: experimental prototype, off by default. Gecko content processes are not
+sandboxed yet.
+
+Implemented and exercised by `scripts/sandbox-test.ps1` (also with `-Winrun`):
+policy installation at child creation, inheritance through `exec`, VFS path
+checks during resolution, handle restrictions, IPC isolation, deny-by-default
+syscall filtering, broker channel grants and held-start children.
 
 The VFS has experimental path checks when an explicit lookup policy is
 supplied. An unrestricted parent can request both policies for a child before
