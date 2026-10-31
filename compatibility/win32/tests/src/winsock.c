@@ -72,6 +72,8 @@ void __stdcall start(void) {
     a.sin_port = htons((u_short)tcp_port);
     a.sin_addr.s_addr = inet_addr("10.0.2.2");
     check_eq("connect to the host echo server", connect(s, (struct sockaddr *)&a, sizeof a), 0);
+    check_eq("connect again on the connected socket fails", connect(s, (struct sockaddr *)&a, sizeof a), SOCKET_ERROR);
+    check_eq("... with WSAEISCONN", WSAGetLastError(), WSAEISCONN);
     static const char msg[] = "hello from a Winsock program on OSyx";
     check_eq("send", send(s, msg, sizeof msg - 1, 0), sizeof msg - 1);
     char buf[128];

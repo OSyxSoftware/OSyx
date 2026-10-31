@@ -567,7 +567,7 @@ pub fn sys_connect(h: u64, addr: u64) -> Result<u64, Errno> {
             stack_call(|st| st.udp_connect(id, remote)).map(|_| 0)
         }
         abi::SOCK_STREAM => {
-            let id = match s.id() {
+            let (id, started) = match s.id() {
                 Some(id) => {
                     // A connect already in progress (non-blocking retry).
                     if s.state.lock().listening {
@@ -576,17 +576,40 @@ pub fn sys_connect(h: u64, addr: u64) -> Result<u64, Errno> {
                     if s.state.lock().bound.is_some() {
                         stack_call(|st| st.tcp_connect_bound(id, remote))?;
                         s.state.lock().bound = None;
+                        (id, true)
+                    } else {
+                        // Nothing left to start: this socket already connected,
+                        // is still connecting, or failed.
+                        (id, false)
                     }
-                    id
                 }
                 None => {
                     let local = s.state.lock().bound;
                     let id = stack_call(|st| st.tcp_connect(local, remote))?;
                     s.state.lock().id = Some(id);
                     with_stack(|_| ());
-                    id
+                    (id, true)
                 }
             };
+            if !started {
+                let (state, err) = match stack_call(|st| st.tcp_state(id)) {
+                    Ok(v) => v,
+                    // The stack already forgot the failed connection.
+                    Err(Errno::BadHandle) => {
+                        s.state.lock().id = None;
+                        return Err(Errno::NotConnected);
+                    }
+                    Err(e) => return Err(e),
+                };
+                if let Some(e) = err {
+                    return Err(errno(e));
+                }
+                match state {
+                    osyx_net::tcp::State::SynSent | osyx_net::tcp::State::SynReceived => {}
+                    osyx_net::tcp::State::Closed => return Err(Errno::NotConnected),
+                    _ => return Err(Errno::AlreadyConnected),
+                }
+            }
             let timeout = s.connect_timeout.load(Ordering::Relaxed);
             let r = blocking(&s, WRITABLE, timeout, |st| {
                 let (state, err) = st.tcp_state(id)?;
