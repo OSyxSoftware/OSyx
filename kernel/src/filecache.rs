@@ -300,12 +300,15 @@ pub fn read_cached_to_user(key: Key, offset: u64, dst: u64, len: usize) -> Optio
         let e = c.entries.get_mut(&key)?;
         let (shm, page_len) = e.pages.get(&index).cloned()?;
         e.used = clock;
-        // A short page may predate a write that extended the file; only the
-        // normal path knows whether this is really the end of the file.
-        if within >= page_len {
+        // Only a request this cached page holds completely is served here.
+        // One that runs into the next page, or past a short page (which may
+        // predate a write that extended the file), takes the normal path:
+        // answering with the rest of this page would be a short read in the
+        // middle of the file, which programs take for its end.
+        if within + len > page_len {
             return None;
         }
-        let n = (page_len - within).min(len);
+        let n = len;
         // SAFETY: the shared page keeps the frame mapped while it is alive.
         unsafe {
             core::ptr::copy_nonoverlapping(
