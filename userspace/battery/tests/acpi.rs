@@ -455,6 +455,9 @@ fn crs_ports() {
     let crs = [0x4B, 0x00, 0x16, 1, 0x89, 0x01, 0x00, 0xAA, 0x4B, 0x04, 0x16, 1, 0x79, 0];
     assert_eq!(EcPorts::from_crs(&crs), Some(EcPorts { command: 0x1604, data: 0x1600 }));
     assert_eq!(EcPorts::from_crs(&[0x47, 1, 0x62, 0, 0x62, 0, 1, 1, 0x79, 0]), None); // one port only
+    // A range is not a fixed EC port.
+    let ranged = [0x47, 1, 0x62, 0, 0x6F, 0, 1, 1, 0x47, 1, 0x66, 0, 0x66, 0, 1, 1, 0x79, 0];
+    assert_eq!(EcPorts::from_crs(&ranged), None);
     assert_eq!(EcPorts::from_crs(&[]), None);
     assert_eq!(EcPorts::from_crs(&[0x47, 1, 0x62]), None); // truncated
 }

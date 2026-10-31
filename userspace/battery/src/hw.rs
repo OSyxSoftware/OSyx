@@ -71,7 +71,14 @@ impl EcPorts {
             match tag >> 3 {
                 0x08 if len >= 7 => {
                     // I/O port descriptor: info, min (2), max (2), align, length.
-                    ports[found] = u16::from_le_bytes([*crs.get(at + 2)?, *crs.get(at + 3)?]);
+                    // An EC register is a fixed port: a range (min != max) is
+                    // not one, and no port is guessed from it.
+                    let min = u16::from_le_bytes([*crs.get(at + 2)?, *crs.get(at + 3)?]);
+                    let max = u16::from_le_bytes([*crs.get(at + 4)?, *crs.get(at + 5)?]);
+                    if min != max {
+                        return None;
+                    }
+                    ports[found] = min;
                     found += 1;
                 }
                 0x09 if len >= 3 => {
