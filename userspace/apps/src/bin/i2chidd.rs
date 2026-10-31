@@ -6,13 +6,21 @@
 //! system. `osyx-i2chid` evaluates `_HID`/`_CID`, `_STA`, `_CRS`, the HID
 //! over I2C `_DSM` and the controller's `SSCN`/`FMCN`; the description
 //! goes to the kernel with `firmware(I2C_HID)`, which checks it again and
-//! logs why it leaves a device alone. The program exits when that is done:
-//! the kernel polls the devices from then on.
+//! logs why it leaves a device alone.
+//!
+//! The program stays resident: it repeats the discovery with backoff
+//! (30 s doubling to 5 min) so a namespace that was not fully readable at
+//! boot, a controller that came out of reset late, or a device the kernel
+//! refused once all get another chance. The kernel skips devices it
+//! already drives, so a quiet pass is one encode and one syscall.
+//! `--once` runs a single pass, prints every line and exits with the
+//! result (the `tests,i2c` mode).
 #![no_std]
 #![no_main]
 
 use os_std::prelude::*;
-use os_std::time::Instant;
+use os_std::time::{Duration, Instant};
+use os_std::{env, thread};
 use osyx_abi::firmware as op;
 use osyx_battery::Hardware;
 
@@ -21,6 +29,12 @@ os_std::entry!(main);
 /// The machine through `nr::FIRMWARE`.
 struct Machine {
     start: Instant,
+}
+
+impl Machine {
+    fn new() -> Machine {
+        Machine { start: Instant::now() }
+    }
 }
 
 fn fw(code: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
@@ -49,6 +63,9 @@ impl Hardware for Machine {
     fn now_ms(&self) -> u64 {
         self.start.elapsed().as_millis() as u64
     }
+    fn sleep_ms(&self, ms: u64) {
+        thread::sleep(Duration::from_millis(ms));
+    }
 }
 
 /// The `n`-th ACPI table with signature `sig`.
@@ -60,39 +77,84 @@ fn table(sig: &[u8; 4], n: u64) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn main() -> i32 {
-    let _ = os_std::system::thread_priority(0, os_std::system::priority::BELOW_NORMAL);
+struct Pass {
+    devices: usize,
+    claimed: usize,
+    /// Load problems and per-device discovery lines, printed when the
+    /// result changes.
+    problems: Vec<String>,
+    lines: Vec<String>,
+}
+
+/// One discovery and registration. `None`: no DSDT or the kernel refused
+/// the description itself; the next pass may still work.
+fn pass() -> Option<Pass> {
     let Some(dsdt) = table(b"DSDT", 0) else {
         eprintln!("i2chidd: no DSDT");
-        return 1;
+        return None;
     };
     let mut tables = vec![dsdt];
     for n in 0.. {
         let Some(ssdt) = table(b"SSDT", n) else { break };
         tables.push(ssdt);
     }
-    let machine = Machine { start: Instant::now() };
-    let mut ctx = osyx_i2chid::load(machine, &tables, &mut |problem| eprintln!("i2chidd: {problem}"));
-    let devices = osyx_i2chid::enumerate(&mut ctx, &mut |line| println!("i2chidd: {line}"));
+    let mut problems = Vec::new();
+    let machine = Machine::new();
+    let mut ctx = osyx_i2chid::load(machine, &tables, &mut |problem| problems.push(String::from(problem)));
+    let mut lines = Vec::new();
+    let devices = osyx_i2chid::enumerate(&mut ctx, &mut |line| lines.push(String::from(line)));
     if devices.is_empty() {
-        println!("i2chidd: no HID over I2C devices in the ACPI tables");
-        return 0;
+        return Some(Pass { devices: 0, claimed: 0, problems, lines });
     }
     let blob = match osyx_i2c::spec::encode(&devices) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("i2chidd: cannot describe {} device(s) to the kernel: {e:?}", devices.len());
-            return 1;
+            return None;
         }
     };
     match os_sys::firmware(op::I2C_HID, blob.as_ptr() as u64, blob.len() as u64, 0, 0) {
-        Ok(claimed) => {
-            println!("i2chidd: the kernel claimed {claimed} of {} device(s)", devices.len());
-            0
-        }
+        Ok(claimed) => Some(Pass { devices: devices.len(), claimed: claimed as usize, problems, lines }),
         Err(e) => {
             eprintln!("i2chidd: the kernel refused the description: {e:?}");
-            1
+            None
         }
+    }
+}
+
+fn main() -> i32 {
+    let _ = os_std::system::thread_priority(0, os_std::system::priority::BELOW_NORMAL);
+    let once = env::args().any(|a| a == "--once");
+    let mut previous: Option<(usize, usize)> = None;
+    let mut wait_secs = 30u64;
+    loop {
+        let status = pass();
+        if let Some(p) = &status {
+            let key = (p.devices, p.claimed);
+            if once || previous != Some(key) {
+                for problem in &p.problems {
+                    eprintln!("i2chidd: {problem}");
+                }
+                for line in &p.lines {
+                    println!("i2chidd: {line}");
+                }
+                if p.devices == 0 {
+                    println!("i2chidd: no HID over I2C devices in the ACPI tables");
+                } else {
+                    println!("i2chidd: the kernel claimed {} of {} device(s)", p.claimed, p.devices);
+                }
+                previous = Some(key);
+                wait_secs = 30;
+            }
+        } else {
+            // The namespace or the kernel may come around: look again soon.
+            previous = None;
+            wait_secs = 30;
+        }
+        if once {
+            return if status.is_some() { 0 } else { 1 };
+        }
+        thread::sleep(Duration::from_secs(wait_secs));
+        wait_secs = (wait_secs * 2).min(300);
     }
 }

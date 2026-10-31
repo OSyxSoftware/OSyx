@@ -142,20 +142,27 @@ impl AmlContext {
     }
 
     pub fn parse_table(&mut self, stream: &[u8]) -> Result<(), AmlError> {
+        self.parse_table_at(stream).map_err(|(error, _)| error)
+    }
+
+    /// Like [`AmlContext::parse_table`], with the offset the stream could not
+    /// be parsed at. Firmware tables the interpreter cannot follow say where;
+    /// the objects parsed before that point stay in the namespace.
+    pub fn parse_table_at(&mut self, stream: &[u8]) -> Result<(), (AmlError, usize)> {
         if stream.len() == 0 {
-            return Err(AmlError::UnexpectedEndOfStream);
+            return Err((AmlError::UnexpectedEndOfStream, 0));
         }
 
         let table_length = PkgLength::from_raw_length(stream, stream.len() as u32).unwrap();
         match term_object::term_list(table_length).parse(stream, self) {
             Ok(_) => Ok(()),
-            Err((_, _, Propagate::Err(err))) => {
+            Err((rest, _, Propagate::Err(err))) => {
                 error!("Failed to parse AML stream. Err = {:?}", err);
-                Err(err)
+                Err((err, stream.len().saturating_sub(rest.len())))
             }
-            Err((_, _, other)) => {
+            Err((rest, _, other)) => {
                 error!("AML table evaluated to unexpected result: {:?}", other);
-                Err(AmlError::MalformedStream)
+                Err((AmlError::MalformedStream, stream.len().saturating_sub(rest.len())))
             }
         }
     }
@@ -291,12 +298,12 @@ impl AmlContext {
 
     pub(crate) fn read_target(&self, target: &Target) -> Result<&AmlValue, AmlError> {
         match target {
-            Target::Null => todo!(),
+            // Neither a null target nor the debug object holds a value.
+            Target::Null | Target::Debug => Err(AmlError::Unimplemented),
             Target::Name(name) => {
                 let (_, handle) = self.namespace.search(name, &self.current_scope)?;
                 self.namespace.get(handle)
             }
-            Target::Debug => todo!(),
             Target::Arg(arg) => self.current_arg(*arg),
             Target::Local(local) => self.local(*local),
             Target::Index(object, position) => match self.read_target(object)? {
@@ -353,8 +360,9 @@ impl AmlContext {
             }
 
             Target::Debug => {
-                // TODO
-                unimplemented!()
+                // A diagnostic store: the value goes nowhere, the operation
+                // still succeeds. Firmware uses `Store (x, Debug)` for tracing.
+                Ok(value)
             }
 
             Target::Arg(arg_num) => {
@@ -619,6 +627,16 @@ impl AmlContext {
         }
     }
 
+    /// OSyx: `DefSleep`, for firmware that waits for hardware between steps.
+    pub(crate) fn sleep_ms(&self, ms: u32) {
+        self.handler.sleep_ms(ms);
+    }
+
+    /// OSyx: `DefStall`.
+    pub(crate) fn stall_us(&self, us: u32) {
+        self.handler.stall_us(us);
+    }
+
     fn add_predefined_objects(&mut self) {
         /*
          * These are the scopes predefined by the spec. Some tables will try to access them without defining them
@@ -750,6 +768,18 @@ pub trait Handler: Send + Sync {
 
     /// OSyx: writes register `offset` of the embedded controller.
     fn write_ec_u8(&self, _offset: u8, _value: u8) {}
+
+    /// OSyx: suspends the firmware's execution for `ms` milliseconds
+    /// (`DefSleep`). Firmware uses it between embedded-controller writes.
+    fn sleep_ms(&self, _ms: u32) {}
+
+    /// OSyx: delays for `us` microseconds (`DefStall`). The default sleeps
+    /// for the rounded-up number of milliseconds instead of spinning.
+    fn stall_us(&self, us: u32) {
+        if us > 0 {
+            self.sleep_ms(us.div_ceil(1000));
+        }
+    }
 
     fn handle_fatal_error(&self, fatal_type: u8, fatal_code: u32, fatal_arg: u64) {
         panic!("Fatal error while executing AML (encountered DefFatal op). fatal_type = {:?}, fatal_code = {:?}, fatal_arg = {:?}", fatal_type, fatal_code, fatal_arg);

@@ -1,15 +1,17 @@
 use crate::{
     misc::debug_obj,
     name_object::{name_string, simple_name, super_name, target},
-    opcode::{self, opcode},
+    opcode::{self, ext_opcode, opcode},
     parser::{choice, comment_scope, n_of, take, take_to_end_of_pkglength, try_with_context, Parser, Propagate},
     pkg_length::pkg_length,
     term_object::{data_ref_object, term_arg, def_cond_ref_of},
     value::{AmlType, AmlValue, Args},
+    AmlContext,
     AmlError,
     DebugVerbosity,
 };
 use alloc::{
+    format,
     string::{String, ToString},
     sync::Arc,
     vec,
@@ -71,6 +73,13 @@ where
             def_shift_right(),
             def_store(),
             def_to_integer(),
+            def_to_buffer(),
+            def_to_string(),
+            def_to_decimal_string(),
+            def_to_hex_string(),
+            def_copy_object(),
+            def_acquire(),
+            def_wait(),
             def_cond_ref_of(),
             method_invocation() // XXX: this must always appear last. See how we have to parse it to see why.
         ),
@@ -599,7 +608,11 @@ where
 
                         // TODO: what to do with this?
                         AmlType::DdbHandle => 0,
-                        AmlType::ObjReference => todo!(),
+                        // Object references do not have an `ObjectType` of
+                        // their own: the referred object's type counts, and
+                        // the crate has no reference values, so report the
+                        // unknown type instead of aborting the method.
+                        AmlType::ObjReference => 0,
                     };
 
                     (Ok(AmlValue::Integer(typ)), context)
@@ -641,6 +654,47 @@ where
                     }
 
                     Ok((input, context, AmlValue::Package(package_contents)))
+                }
+            }),
+        ))
+        .map(|((), package)| Ok(package))
+}
+
+/// OSyx: `DefVarPackage`, whose element count is computed at run time.
+pub fn def_var_package<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefVarPackage := 0x13 PkgLength VarNumElements PackageElementList
+     * VarNumElements := TermArg => Integer
+     *
+     * The count is evaluated for its side effects, but the list is read to
+     * the end of the package length: firmware sometimes leaves the count at
+     * zero and fills the package anyway.
+     */
+    opcode(opcode::DEF_VAR_PACKAGE_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefVarPackage",
+            pkg_length().feed(|pkg_length| {
+                move |mut input: &'a [u8], mut context: &'c mut AmlContext| {
+                    let (new_input, new_context, count) = term_arg().parse(input, context)?;
+                    input = new_input;
+                    context = new_context;
+                    if let Err(err) = count.as_integer(context) {
+                        return Err((input, context, Propagate::Err(err)));
+                    }
+
+                    let mut contents = Vec::new();
+                    while pkg_length.still_parsing(input) {
+                        let (new_input, new_context, value) = package_element().parse(input, context)?;
+                        input = new_input;
+                        context = new_context;
+                        contents.push(value);
+                    }
+
+                    Ok((input, context, AmlValue::Package(contents)))
                 }
             }),
         ))
@@ -976,6 +1030,194 @@ where
             try_with_context!(context, context.store(target, result.clone()));
             (Ok(result), context)
         })
+}
+
+/// OSyx: the bytes `DefToBuffer` produces. An integer is copied as its
+/// eight little-endian bytes; a string keeps its terminating null.
+fn to_buffer_bytes(value: &AmlValue, context: &AmlContext) -> Result<Vec<u8>, AmlError> {
+    match value {
+        AmlValue::Buffer(bytes) => Ok(bytes.lock().clone()),
+        AmlValue::Integer(value) => Ok(value.to_le_bytes().to_vec()),
+        AmlValue::Boolean(value) => Ok((*value as u64).to_le_bytes().to_vec()),
+        AmlValue::String(string) => {
+            let mut bytes = Vec::with_capacity(string.len() + 1);
+            bytes.extend_from_slice(string.as_bytes());
+            bytes.push(0);
+            Ok(bytes)
+        }
+        AmlValue::Field { .. } | AmlValue::BufferField { .. } => {
+            Ok(value.as_integer(context)?.to_le_bytes().to_vec())
+        }
+        _ => Err(AmlError::IncompatibleValueConversion { current: value.type_of(), target: AmlType::Buffer }),
+    }
+}
+
+fn def_to_buffer<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefToBuffer := 0x96 Operand Target
+     * Operand := TermArg => Buffer | Integer | String
+     */
+    opcode(opcode::DEF_TO_BUFFER_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefToBuffer",
+            term_arg().then(target()).map_with_context(|(operand, target), context| {
+                let bytes = try_with_context!(context, to_buffer_bytes(&operand, context));
+                let result = AmlValue::Buffer(Arc::new(spinning_top::Spinlock::new(bytes)));
+                try_with_context!(context, context.store(target, result.clone()));
+                (Ok(result), context)
+            }),
+        ))
+        .map(|((), result)| Ok(result))
+}
+
+fn to_string_value(value: &AmlValue, length: usize, context: &AmlContext) -> Result<String, AmlError> {
+    match value {
+        AmlValue::String(string) => Ok(string.clone()),
+        AmlValue::Integer(value) => Ok(value.to_string()),
+        AmlValue::Boolean(value) => Ok((*value as u64).to_string()),
+        AmlValue::Buffer(bytes) => {
+            /*
+             * The length argument applies to buffers only: it is the maximum
+             * number of characters, and the string ends at the first null.
+             */
+            let bytes = bytes.lock();
+            let bytes = &bytes[..bytes.len().min(length)];
+            let end = bytes.iter().position(|&byte| byte == 0).unwrap_or(bytes.len());
+            Ok(bytes[..end].iter().map(|&byte| byte as char).collect())
+        }
+        AmlValue::Field { .. } | AmlValue::BufferField { .. } => {
+            Ok(value.as_integer(context)?.to_string())
+        }
+        _ => Err(AmlError::IncompatibleValueConversion { current: value.type_of(), target: AmlType::String }),
+    }
+}
+
+fn def_to_string<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefToString := 0x9C Operand Length Target
+     */
+    opcode(opcode::DEF_TO_STRING_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefToString",
+            term_arg().then(term_arg()).then(target()).map_with_context(
+                |((operand, length), target), context| {
+                    let length = try_with_context!(context, length.as_integer(context)) as usize;
+                    let string = try_with_context!(context, to_string_value(&operand, length, context));
+                    let result = AmlValue::String(string);
+                    try_with_context!(context, context.store(target, result.clone()));
+                    (Ok(result), context)
+                },
+            ),
+        ))
+        .map(|((), result)| Ok(result))
+}
+
+fn def_to_decimal_string<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefToDecimalString := 0x97 Operand Target
+     */
+    opcode(opcode::DEF_TO_DECIMAL_STRING_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefToDecimalString",
+            term_arg().then(target()).map_with_context(|(operand, target), context| {
+                let value = try_with_context!(context, operand.as_integer(context));
+                let result = AmlValue::String(format!("{value}"));
+                try_with_context!(context, context.store(target, result.clone()));
+                (Ok(result), context)
+            }),
+        ))
+        .map(|((), result)| Ok(result))
+}
+
+fn def_to_hex_string<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefToHexString := 0x98 Operand Target
+     */
+    opcode(opcode::DEF_TO_HEX_STRING_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefToHexString",
+            term_arg().then(target()).map_with_context(|(operand, target), context| {
+                let value = try_with_context!(context, operand.as_integer(context));
+                let result = AmlValue::String(format!("0x{value:X}"));
+                try_with_context!(context, context.store(target, result.clone()));
+                (Ok(result), context)
+            }),
+        ))
+        .map(|((), result)| Ok(result))
+}
+
+fn def_copy_object<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefCopyObject := 0x9D TermArg SimpleName
+     */
+    opcode(opcode::DEF_COPY_OBJECT_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefCopyObject",
+            term_arg().then(simple_name()).map_with_context(|(value, target), context| {
+                let stored = try_with_context!(context, context.store(target, value.clone()));
+                (Ok(stored), context)
+            }),
+        ))
+        .map(|((), result)| Ok(result))
+}
+
+fn def_acquire<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefAcquire := ExtOpPrefix 0x23 MutexObject Timeout
+     *
+     * The interpreter runs firmware on one thread, so a mutex is never held
+     * by anyone else: acquiring it always succeeds.
+     */
+    ext_opcode(opcode::EXT_DEF_ACQUIRE_OP)
+        .then(comment_scope(
+            DebugVerbosity::Scopes,
+            "DefAcquire",
+            super_name().then(term_arg()).map(|(_event, _timeout)| Ok(AmlValue::Integer(0))),
+        ))
+        .map(|((), result)| Ok(result))
+}
+
+fn def_wait<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefWait := ExtOpPrefix 0x25 EventObject Timeout
+     *
+     * Events are never signalled (nothing in the interpreter runs
+     * concurrently), and a wait that timed out would make firmware take its
+     * error path; report success so the object is treated as ready.
+     */
+    ext_opcode(opcode::EXT_DEF_WAIT_OP)
+        .then(comment_scope(
+            DebugVerbosity::Scopes,
+            "DefWait",
+            super_name().then(term_arg()).map(|(_event, _timeout)| Ok(AmlValue::Integer(0))),
+        ))
+        .map(|((), result)| Ok(result))
 }
 
 fn method_invocation<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>

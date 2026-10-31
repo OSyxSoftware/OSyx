@@ -492,8 +492,6 @@ fn ec_ports_come_from_crs_when_there_is_no_ecdt() {
     assert_eq!(acpi.ec_ports(), (Some(EcPorts::LEGACY), "legacy ports"));
 }
 
-
-
 /// `_BST` as real firmware writes it: arithmetic in locals, then a package
 /// of locals.
 #[test]
@@ -549,4 +547,150 @@ fn index_store_into_a_local_package() {
     let mut acpi = load(&m, vec![table(scope_sb(dev))]);
     let s = acpi.poll().batteries[0].expect("the method ran");
     assert_eq!((s.discharging, s.rate, s.remaining, s.voltage), (true, Some(500), Some(250), Some(12_000)));
+}
+
+/// `ToBuffer`, `CopyObject`, a variable package, `Notify`, `Sleep`, `Stall`
+/// and the event/mutex objects, as firmware writes them.
+#[test]
+fn firmware_to_buffer_events_and_notify() {
+    let m = Machine::new();
+    let var_package = |items: &[Vec<u8>]| {
+        let inner = cat(&[int(items.len() as u64), cat(items)]);
+        cat(&[vec![0x13], pkg_len(inner.len()), inner])
+    };
+    let deref_index = |local: u8, i: u64| cat(&[vec![0x83, 0x88, local], int(i), vec![0x00]]);
+    let body = cat(&[
+        // Acquire(MUT0, 0xFFFF) ... Release(MUT0)
+        cat(&[vec![0x5B, 0x23], seg("MUT0"), vec![0x0B, 0xFF, 0xFF]]),
+        // Local0 = ToBuffer(2): the state "charging".
+        cat(&[vec![0x96], int(2), vec![0x60]]),
+        // Local1 = VarPackage(3) { 1000, 500, 12000 }
+        cat(&[vec![0x70], var_package(&[int(1_000), int(500), int(12_000)]), vec![0x61]]),
+        // CopyObject(DerefOf(Index(Local1, 1)), Local2)
+        cat(&[vec![0x9D], deref_index(0x61, 1), vec![0x62]]),
+        // Local3 and Local4 get the remaining elements (a package element
+        // cannot be an expression).
+        cat(&[vec![0x70], deref_index(0x61, 0), vec![0x63]]),
+        cat(&[vec![0x70], deref_index(0x61, 2), vec![0x64]]),
+        // Notify(\_SB.BAT0, 0x80); Sleep(1); Stall(1000)
+        cat(&[vec![0x86], cat(&[vec![0x5C, 0x2F, 0x02], seg("_SB_"), seg("BAT0")]), int(0x80)]),
+        cat(&[vec![0x5B, 0x22], int(1)]),
+        cat(&[vec![0x5B, 0x21], int(1_000)]),
+        // Signal(EVT0); Wait(EVT0, 0xFFFF); Reset(EVT0); Release(MUT0)
+        cat(&[vec![0x5B, 0x24], seg("EVT0")]),
+        cat(&[vec![0x5B, 0x25], seg("EVT0"), vec![0x0B, 0xFF, 0xFF]]),
+        cat(&[vec![0x5B, 0x26], seg("EVT0")]),
+        cat(&[vec![0x5B, 0x27], seg("MUT0")]),
+        // Return(Package { Local0, Local2, Local3, Local4 })
+        ret(cat(&[vec![0x12], pkg_len(5), vec![4], vec![0x60, 0x62, 0x63, 0x64]])),
+    ]);
+    let dev = device(
+        "BAT0",
+        cat(&[
+            name("_HID", eisa("PNP0C0A")),
+            cat(&[vec![0x5B, 0x01], seg("MUT0"), vec![0x00]]), // Mutex(MUT0, 0)
+            cat(&[vec![0x5B, 0x02], seg("EVT0")]),             // Event(EVT0)
+            method("_BIF", ret(package(ints(&[0, 1_000, 1_000, 1, 11_400])))),
+            method("_BST", body),
+        ]),
+    );
+    let mut acpi = load(&m, vec![table(scope_sb(dev))]);
+    let s = acpi.poll().batteries[0].expect("the method ran");
+    assert_eq!((s.charging, s.rate, s.remaining, s.voltage), (true, Some(500), Some(1_000), Some(12_000)));
+}
+
+/// `IndexField`, `BankField`, `DataRegion` and the access/connect field
+/// elements are consumed without losing the objects that follow them.
+#[test]
+fn index_bank_fields_and_data_regions_do_not_stop_parsing() {
+    let m = Machine::new();
+    let index_body = cat(&[
+        seg("PIDX"),
+        seg("PDAT"),
+        vec![0x01], // ByteAcc, NoLock, Preserve
+        seg("FLD0"),
+        vec![8],
+        vec![0x01, 0x01, 0x00], // AccessAs(ByteAcc, Attrib)
+        seg("FLD1"),
+        vec![0x10],
+        vec![0x02],
+        seg("GIOP"), // ConnectField(NameString)
+        vec![0x03, 0x00, 0x00, 0x00], // ExtendedAccessField(AnyAcc, Attrib, 0)
+        seg("FLD2"),
+        vec![8],
+    ]);
+    let index_field = cat(&[vec![0x5B, 0x86], pkg_len(index_body.len()), index_body]);
+    let bank_body = cat(&[
+        seg("BANK"),
+        int(0),
+        seg("PDAT"),
+        vec![0x01],
+        seg("FLD3"),
+        vec![8],
+    ]);
+    let bank_field = cat(&[vec![0x5B, 0x87], pkg_len(bank_body.len()), bank_body]);
+    // DataRegion(DRGN, 0, 0, 0): no PkgLength.
+    let data_region = cat(&[vec![0x5B, 0x88], seg("DRGN"), int(0), int(0), int(0)]);
+    let dev = device(
+        "BAT0",
+        cat(&[
+            name("_HID", eisa("PNP0C0A")),
+            name("PIDX", int(0)),
+            name("PDAT", int(0)),
+            name("BANK", int(0)),
+            index_field,
+            bank_field,
+            data_region,
+            method("_BIF", ret(package(ints(&[0, 50_000, 45_000, 1, 11_400])))),
+            method("_BST", ret(package(ints(&[1, 9_000, 22_500, 11_000])))),
+        ]),
+    );
+    let mut acpi = load(&m, vec![table(scope_sb(dev))]);
+    assert_eq!(acpi.battery_devices(), 1, "the battery after the fields was parsed");
+    let st = Monitor::new().update(&acpi.poll());
+    assert_eq!((st.state, st.percent), (State::Discharging, 50));
+}
+
+/// `_CID` and the device name find a battery whose `_HID` is missing.
+#[test]
+fn battery_found_by_cid_or_name_without_a_hid() {
+    let m = Machine::new();
+    let by_cid = device(
+        "CMB1",
+        cat(&[
+            name("_CID", eisa("PNP0C0A")),
+            method("_STA", ret(int(0x1F))),
+            method("_BIF", ret(package(ints(&[0, 50_000, 45_000, 1, 11_400])))),
+            method("_BST", ret(package(ints(&[1, 9_000, 22_500, 11_000])))),
+        ]),
+    );
+    let by_name = device(
+        "BAT9",
+        cat(&[
+            method("_BIF", ret(package(ints(&[0, 50_000, 45_000, 1, 11_400])))),
+            method("_BST", ret(package(ints(&[1, 4_500, 0, 11_000])))),
+        ]),
+    );
+    let adapter = device("ADP1", cat(&[method("_PSR", ret(int(1)))]));
+    let t = table(scope_sb(cat(&[by_cid, by_name, adapter])));
+    let mut acpi = load(&m, vec![t]);
+    assert_eq!((acpi.battery_devices(), acpi.adapter_devices()), (2, 1));
+    let st = Monitor::new().update(&acpi.poll());
+    assert_eq!((st.batteries, st.ac), (2, true));
+}
+
+/// A table the interpreter cannot follow reports where it stopped and keeps
+/// the objects it parsed before that point.
+#[test]
+fn a_table_that_stops_parsing_keeps_what_came_before() {
+    let m = Machine::new();
+    let bif = [0, 50_000, 45_000, 1, 11_400];
+    let bst = [1, 9_000, 22_500, 11_000];
+    let mut aml = scope_sb(battery("BAT0", Some(0x1F), &bif, &bst));
+    aml.extend_from_slice(&[0x08, b'X']); // a truncated NameSeg
+    let mut problems = Vec::new();
+    let mut acpi = Acpi::load(m, Some(EcPorts::LEGACY), &[table(aml)], &mut |s: &str| problems.push(String::from(s)));
+    assert!(problems.iter().any(|p| p.contains("AML offset")), "{problems:?}");
+    assert_eq!(acpi.battery_devices(), 1, "the battery parsed before the problem is kept");
+    assert_eq!(Monitor::new().update(&acpi.poll()).percent, 50);
 }

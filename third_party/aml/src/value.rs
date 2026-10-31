@@ -214,6 +214,10 @@ pub enum AmlValue {
     Mutex {
         sync_level: u8,
     },
+    /// OSyx: an event object (`DefEvent`). Without threads inside the
+    /// interpreter nothing can signal or wait on it, so it only exists so
+    /// `Signal`, `Reset` and `Wait` find their object.
+    Event,
     // TODO: I think this will need to be `Arc`ed as well, as `Index` can be used on both Buffers and Packages
     Package(Vec<AmlValue>),
     PowerResource {
@@ -257,6 +261,7 @@ impl AmlValue {
             AmlValue::BufferField { .. } => AmlType::BufferField,
             AmlValue::Processor { .. } => AmlType::Processor,
             AmlValue::Mutex { .. } => AmlType::Mutex,
+            AmlValue::Event => AmlType::Event,
             AmlValue::Package(_) => AmlType::Package,
             AmlValue::PowerResource { .. } => AmlType::PowerResource,
             AmlValue::ThermalZone => AmlType::ThermalZone,
@@ -397,9 +402,10 @@ impl AmlValue {
         match desired_type {
             AmlType::Integer => self.as_integer(context).map(|value| AmlValue::Integer(value)),
             AmlType::Buffer => self.as_buffer(context).map(|value| AmlValue::Buffer(value)),
-            AmlType::FieldUnit => panic!(
-                "Can't implicitly convert to FieldUnit. This must be special-cased by the caller for now :("
-            ),
+            AmlType::FieldUnit => Err(AmlError::IncompatibleValueConversion {
+                current: self.type_of(),
+                target: AmlType::FieldUnit,
+            }),
             _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: desired_type }),
         }
     }

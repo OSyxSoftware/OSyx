@@ -1,5 +1,5 @@
 use crate::{
-    expression::{def_buffer, def_package, expression_opcode},
+    expression::{def_buffer, def_package, def_var_package, expression_opcode},
     misc::{arg_obj, local_obj},
     name_object::{name_seg, name_string, target, Target},
     namespace::{AmlName, LevelType},
@@ -104,13 +104,17 @@ where
             def_create_field(),
             def_op_region(),
             def_field(),
+            def_index_field(),
+            def_bank_field(),
+            def_data_region(),
             def_method(),
             def_external(),
             def_device(),
             def_processor(),
             def_power_res(),
             def_thermal_zone(),
-            def_mutex()
+            def_mutex(),
+            def_event()
         ),
     )
 }
@@ -515,7 +519,7 @@ where
                     let mut current_offset = 0;
                     while list_length.still_parsing(input) {
                         let (new_input, new_context, field_length) =
-                            field_element(region_handle, FieldFlags::new(flags), current_offset)
+                            field_element(Some(region_handle), FieldFlags::new(flags), current_offset)
                                 .parse(input, context)?;
                         input = new_input;
                         context = new_context;
@@ -532,7 +536,7 @@ where
 /// Parses a `FieldElement`. Takes the current offset within the field list, and returns the length
 /// of the field element parsed.
 pub fn field_element<'a, 'c>(
-    region_handle: AmlHandle,
+    region_handle: Option<AmlHandle>,
     flags: FieldFlags,
     current_offset: u64,
 ) -> impl Parser<'a, 'c, u64>
@@ -564,31 +568,153 @@ where
     let reserved_field =
         opcode(opcode::RESERVED_FIELD).then(pkg_length()).map(|((), length)| Ok(length.raw_length as u64));
 
-    // TODO: work out what to do with an access field
-    // let access_field = opcode(opcode::ACCESS_FIELD)
-    //     .then(take())
-    //     .then(take())
-    //     .map_with_context(|(((), access_type), access_attrib), context| (Ok(    , context));
+    // An access attribute changes how the *following* fields are accessed;
+    // nothing in this interpreter needs it, but it must not stop parsing.
+    let access_field =
+        opcode(opcode::ACCESS_FIELD).then(take()).then(take()).map(|_| Ok(0));
+    let extended_access_field = opcode(opcode::EXTENDED_ACCESS_FIELD)
+        .then(take())
+        .then(take())
+        .then(take())
+        .map(|_| Ok(0));
+    // A connect field names (or describes) an interrupt or controller the
+    // fields belong to. Its resources are not interpreted.
+    let connect_field = opcode(opcode::CONNECT_FIELD)
+        .then(choice!(name_string().map(|_| Ok(())), def_buffer().map(|_| Ok(()))))
+        .map(|_| Ok(0));
 
     let named_field = name_seg().then(pkg_length()).map_with_context(move |(name_seg, length), context| {
-        try_with_context!(
-            context,
-            context.namespace.add_value_at_resolved_path(
-                AmlName::from_name_seg(name_seg),
-                &context.current_scope,
-                AmlValue::Field {
-                    region: region_handle,
-                    flags,
-                    offset: current_offset,
-                    length: length.raw_length as u64,
-                },
-            )
-        );
+        // Fields of an `IndexField`/`BankField` are not modelled (they would
+        // need a write to the index register before every access), so their
+        // names are consumed without being added to the namespace.
+        if let Some(region_handle) = region_handle {
+            try_with_context!(
+                context,
+                context.namespace.add_value_at_resolved_path(
+                    AmlName::from_name_seg(name_seg),
+                    &context.current_scope,
+                    AmlValue::Field {
+                        region: region_handle,
+                        flags,
+                        offset: current_offset,
+                        length: length.raw_length as u64,
+                    },
+                )
+            );
+        }
 
         (Ok(length.raw_length as u64), context)
     });
 
-    choice!(reserved_field, named_field)
+    choice!(reserved_field, access_field, connect_field, extended_access_field, named_field)
+}
+
+/// OSyx: consumes a field list without adding anything to the namespace.
+fn skip_field_list<'a, 'c>(list_length: PkgLength) -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    move |mut input: &'a [u8], mut context: &'c mut AmlContext| {
+        let mut current_offset = 0;
+        while list_length.still_parsing(input) {
+            let (new_input, new_context, field_length) =
+                field_element(None, FieldFlags::new(0), current_offset).parse(input, context)?;
+            input = new_input;
+            context = new_context;
+            current_offset += field_length;
+        }
+
+        Ok((input, context, ()))
+    }
+}
+
+pub fn def_index_field<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefIndexField := ExtOpPrefix 0x86 PkgLength NameString NameString FieldFlags FieldList
+     *
+     * The fields are read and written through an index/data register pair.
+     * The interpreter consumes the definition so the rest of the table is
+     * parsed; accessing one of the fields fails instead of returning
+     * someone else's data.
+     */
+    ext_opcode(opcode::EXT_DEF_INDEX_FIELD_OP)
+        .then(comment_scope(
+            DebugVerbosity::Scopes,
+            "DefIndexField",
+            pkg_length()
+                .then(name_string())
+                .then(name_string())
+                .then(take())
+                .feed(|(((list_length, _index), _data), _flags)| skip_field_list(list_length)),
+        ))
+        .discard_result()
+}
+
+pub fn def_bank_field<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefBankField := ExtOpPrefix 0x87 PkgLength NameString BankValue NameString FieldFlags FieldList
+     *
+     * `BankValue` is a TermArg (usually a constant), not a name.
+     */
+    ext_opcode(opcode::EXT_DEF_BANK_FIELD_OP)
+        .then(comment_scope(
+            DebugVerbosity::Scopes,
+            "DefBankField",
+            pkg_length()
+                .then(name_string())
+                .then(term_arg())
+                .then(name_string())
+                .then(take())
+                .feed(|((((list_length, _bank), _bank_value), _data), _flags)| skip_field_list(list_length)),
+        ))
+        .discard_result()
+}
+
+pub fn def_data_region<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefDataRegion := ExtOpPrefix 0x88 NameString TermArg TermArg TermArg
+     *
+     * A region backed by another ACPI table's data. Firmware here only reads
+     * it for diagnostics; the definition is consumed and not modelled.
+     */
+    ext_opcode(opcode::EXT_DEF_DATA_REGION_OP)
+        .then(comment_scope(
+            DebugVerbosity::Scopes,
+            "DefDataRegion",
+            name_string().then(term_arg()).then(term_arg()).then(term_arg()),
+        ))
+        .discard_result()
+}
+
+pub fn def_event<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefEvent := ExtOpPrefix 0x02 NameString
+     */
+    ext_opcode(opcode::EXT_DEF_EVENT_OP)
+        .then(comment_scope(
+            DebugVerbosity::Scopes,
+            "DefEvent",
+            name_string().map_with_context(|name, context| {
+                try_with_context!(
+                    context,
+                    context.namespace.add_value_at_resolved_path(name, &context.current_scope, AmlValue::Event)
+                );
+                (Ok(()), context)
+            }),
+        ))
+        .discard_result()
 }
 
 pub fn def_method<'a, 'c>() -> impl Parser<'a, 'c, ()>
@@ -920,8 +1046,7 @@ where
      * The order of the parsers are important here, as DefPackage and DefVarPackage can be
      * accidently parsed as ComputationalDatas.
      */
-    // TODO: this doesn't yet parse DefVarPackage
-    comment_scope(DebugVerbosity::AllScopes, "DataObject", choice!(def_package(), computational_data()))
+    comment_scope(DebugVerbosity::AllScopes, "DataObject", choice!(def_var_package(), def_package(), computational_data()))
 }
 
 pub fn computational_data<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>

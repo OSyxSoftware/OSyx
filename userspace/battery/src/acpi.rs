@@ -55,6 +55,26 @@ fn hid_text(v: &AmlValue, ctx: &AmlContext) -> Option<String> {
     }
 }
 
+/// `_HID` and `_CID` (one id or a package of them). Some firmware puts the
+/// battery id in `_CID` only.
+fn ids_of(ctx: &mut AmlContext, dev: &AmlName) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(v) = call(ctx, dev, "_HID", Args::EMPTY) {
+        ids.extend(hid_text(&v, ctx));
+    }
+    match call(ctx, dev, "_CID", Args::EMPTY) {
+        Some(AmlValue::Package(items)) => ids.extend(items.iter().filter_map(|v| hid_text(v, ctx))),
+        Some(v) => ids.extend(hid_text(&v, ctx)),
+        None => {}
+    }
+    ids
+}
+
+/// Whether `dev` has `child` (usually a method) in the namespace.
+fn has(ctx: &AmlContext, dev: &AmlName, child: &str) -> bool {
+    path(dev, child).is_some_and(|p| ctx.namespace.get_by_path(&p).is_ok())
+}
+
 fn path(base: &AmlName, child: &str) -> Option<AmlName> {
     AmlName::from_str(&format!("{}.{}", base.as_string(), child)).ok()
 }
@@ -82,8 +102,7 @@ fn crs_ports(ctx: &mut AmlContext, dev: &AmlName) -> Option<EcPorts> {
     }
 }
 
-/// Devices by `_HID`.
-fn devices(ctx: &mut AmlContext, wanted: &[&str]) -> Vec<AmlName> {
+fn all_devices(ctx: &mut AmlContext) -> Vec<AmlName> {
     let mut all = Vec::new();
     let _ = ctx.namespace.traverse(|name, level| {
         if level.typ == LevelType::Device {
@@ -91,14 +110,38 @@ fn devices(ctx: &mut AmlContext, wanted: &[&str]) -> Vec<AmlName> {
         }
         Ok(true)
     });
-    let mut found = Vec::new();
-    for name in all {
-        let Some(hid) = call(ctx, &name, "_HID", Args::EMPTY) else { continue };
-        if hid_text(&hid, ctx).is_some_and(|t| wanted.contains(&t.as_str())) {
+    all
+}
+
+/// Devices by `_HID` or `_CID`.
+fn devices(ctx: &mut AmlContext, wanted: &[&str]) -> Vec<AmlName> {
+    all_devices(ctx)
+        .into_iter()
+        .filter(|name| ids_of(ctx, name).iter().any(|id| wanted.contains(&id.as_str())))
+        .collect()
+}
+
+/// Devices whose last name segment starts with one of `prefixes` (and, if
+/// given, that hold `method`). Some firmware leaves `_HID` unreadable (a
+/// table the interpreter lost halfway through); the name and the method
+/// still tell a battery from an adapter.
+fn named_devices(ctx: &mut AmlContext, prefixes: &[&str], method: Option<&str>) -> Vec<AmlName> {
+    all_devices(ctx)
+        .into_iter()
+        .filter(|name| {
+            let text = name.as_string();
+            let last = text.rsplit('.').next().unwrap_or("");
+            prefixes.iter().any(|p| last.starts_with(p)) && method.is_none_or(|m| has(ctx, name, m))
+        })
+        .collect()
+}
+
+fn merge(found: &mut Vec<AmlName>, more: Vec<AmlName>) {
+    for name in more {
+        if !found.contains(&name) {
             found.push(name);
         }
     }
-    found
 }
 
 impl Acpi {
@@ -116,11 +159,15 @@ impl Acpi {
         let ec_cell = firmware.ec_cell();
         let mut ctx = AmlContext::new(Box::new(firmware), DebugVerbosity::None);
         for (i, t) in tables.iter().enumerate() {
-            if let Err(e) = ctx.parse_table(&t[36.min(t.len())..]) {
-                log(&format!("table {i}: {e:?}"));
+            let header = 36.min(t.len());
+            if let Err((e, at)) = ctx.parse_table_at(&t[header..]) {
+                // The objects parsed before `at` stay: a table this
+                // interpreter cannot follow part-way still yields devices.
+                log(&format!("table {i} ({} bytes): {e:?} at AML offset {at}", t.len()));
             }
         }
-        let ec_devices = devices(&mut ctx, &["PNP0C09"]);
+        let mut ec_devices = devices(&mut ctx, &["PNP0C09"]);
+        merge(&mut ec_devices, named_devices(&mut ctx, &["H_EC", "EC"], None));
         let ec_source = if ec.is_some() {
             "ECDT"
         } else if let Some(ports) = ec_devices.iter().find_map(|d| crs_ports(&mut ctx, d)) {
@@ -144,8 +191,12 @@ impl Acpi {
             ec_source,
         };
         acpi.connect_ec();
-        acpi.batteries = devices(&mut acpi.ctx, &["PNP0C0A"]).into_iter().map(|name| Battery { name, info: None, info_age: 0 }).collect();
-        acpi.adapters = devices(&mut acpi.ctx, &["ACPI0003"]);
+        let mut batteries = devices(&mut acpi.ctx, &["PNP0C0A"]);
+        merge(&mut batteries, named_devices(&mut acpi.ctx, &["BAT", "CMB"], Some("_BST")));
+        acpi.batteries = batteries.into_iter().map(|name| Battery { name, info: None, info_age: 0 }).collect();
+        let mut adapters = devices(&mut acpi.ctx, &["ACPI0003"]);
+        merge(&mut adapters, named_devices(&mut acpi.ctx, &["AC", "ADP"], Some("_PSR")));
+        acpi.adapters = adapters;
         acpi
     }
 
