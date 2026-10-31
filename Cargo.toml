@@ -14,6 +14,7 @@ members = [
     "compatibility/win32",
     "kernel",
     "kernel/mm",
+    "drivers/i2c",
     "drivers/usb",
     "drivers/wireless",
     "graphics/prism-proto",
@@ -35,6 +36,7 @@ members = [
     "userspace/battery",
     "userspace/desktop",
     "userspace/filekit",
+    "userspace/i2chid",
     "userspace/install",
     "userspace/nettools",
     "userspace/shell",
@@ -54,6 +56,7 @@ default-members = [
     "compatibility/pe-parser",
     "compatibility/pe-loader",
     "kernel/mm",
+    "drivers/i2c",
     "drivers/usb",
     "drivers/wireless",
     "graphics/prism-proto",
@@ -73,6 +76,7 @@ default-members = [
     "userspace/filekit",
     "userspace/shell",
     "userspace/battery",
+    "userspace/i2chid",
     "userspace/install",
 ]
 
