@@ -79,6 +79,28 @@ void __stdcall start(void) {
     closesocket(w);
     closesocket(r);
 
+    /* WSASendTo/WSARecvFrom over loopback UDP. */
+    SOCKET ur = socket(AF_INET, SOCK_DGRAM, 0), uw = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in ua = {0};
+    ua.sin_family = AF_INET;
+    ua.sin_port = htons(8128);
+    ua.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    check_eq("bind 127.0.0.1:8128", bind(ur, (struct sockaddr *)&ua, sizeof ua), 0);
+    WSABUF wo = {5, "wsaud"};
+    DWORD wn = 0;
+    check("WSASendTo sends a datagram",
+          WSASendTo(uw, &wo, 1, &wn, 0, (struct sockaddr *)&ua, sizeof ua, NULL, NULL) == 0 && wn == 5);
+    char wb[16] = {0};
+    WSABUF wi = {16, wb};
+    struct sockaddr_in wfrom;
+    int wflen = sizeof wfrom;
+    wn = 0;
+    check("WSARecvFrom gets it",
+          WSARecvFrom(ur, &wi, 1, &wn, NULL, (struct sockaddr *)&wfrom, &wflen, NULL, NULL) == 0 && wn == 5);
+    check("... bytes and sender", mem_eq(wb, "wsaud", 5) && wfrom.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    closesocket(uw);
+    closesocket(ur);
+
     /* WSASend/WSARecv gather and scatter over loopback TCP. */
     SOCKET ls = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in ta = {0};

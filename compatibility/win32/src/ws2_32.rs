@@ -835,13 +835,46 @@ fn wsa_bufs(bufs: *const u8, count: u32) -> Result<Vec<(u32, u64)>, u32> {
         return Err(WSAEFAULT);
     }
     let base = bufs as u64;
-    Ok((0..count as u64)
-        .map(|i| {
-            let off = (i * 16) as usize;
-            // SAFETY: the caller's WSABUF array.
-            unsafe { (teb::get::<u32>(base, off), teb::get::<u64>(base, off + 8)) }
-        })
-        .collect())
+    let mut parts = Vec::with_capacity(count as usize);
+    for i in 0..count as u64 {
+        let off = (i * 16) as usize;
+        // SAFETY: the caller's WSABUF array.
+        let (len, p) = unsafe { (teb::get::<u32>(base, off), teb::get::<u64>(base, off + 8)) };
+        if len > 0 && p == 0 {
+            return Err(WSAEFAULT);
+        }
+        parts.push((len, p));
+    }
+    Ok(parts)
+}
+
+/// The WSABUFs read as one contiguous buffer.
+fn wsa_gather(bufs: *const u8, count: u32) -> Result<Vec<u8>, u32> {
+    let mut data = Vec::new();
+    for (len, p) in wsa_bufs(bufs, count)? {
+        // SAFETY: the caller's WSABUF of `len` bytes.
+        data.extend_from_slice(unsafe { core::slice::from_raw_parts(p as *const u8, len as usize) });
+    }
+    Ok(data)
+}
+
+/// One receive scattered over the WSABUFs; returns the byte count and peer.
+fn wsa_receive(fd: u64, bufs: *const u8, count: u32, fl: u64) -> Result<(usize, SockAddr), u32> {
+    let parts = wsa_bufs(bufs, count)?;
+    let total: usize = parts.iter().map(|p| p.0 as usize).sum();
+    let mut data = alloc::vec![0u8; total];
+    let (n, from) = os_sys::sock_recv(fd, &mut data, fl).map_err(wsa)?;
+    let mut done = 0;
+    for (len, p) in parts {
+        let take = (len as usize).min(n - done);
+        if take == 0 {
+            continue;
+        }
+        // SAFETY: the caller's WSABUF of `len` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(data[done..].as_ptr(), p as *mut u8, take) };
+        done += take;
+    }
+    Ok((n, from))
 }
 
 /// WSASend: gathers the WSABUFs into one stream write or datagram.
@@ -852,14 +885,7 @@ extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f
         if f != 0 || !overlapped.is_null() || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
-        let mut data = Vec::new();
-        for (len, p) in wsa_bufs(bufs, count)? {
-            if len > 0 && p == 0 {
-                return Err(WSAEFAULT);
-            }
-            // SAFETY: the caller's WSABUF of `len` bytes.
-            data.extend_from_slice(unsafe { core::slice::from_raw_parts(p as *const u8, len as usize) });
-        }
+        let data = wsa_gather(bufs, count)?;
         os_sys::sock_send(fd, &data, None, 0).map_err(wsa)
     })();
     match r {
@@ -867,6 +893,58 @@ extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f
             if !sent.is_null() {
                 // SAFETY: the caller's out count.
                 unsafe { *sent = n as u32 };
+            }
+            0
+        }
+        Err(e) => err(e, SOCKET_ERROR),
+    }
+}
+
+/// WSASendTo: like WSASend, with the destination of a datagram.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn WSASendTo(
+    s: u64,
+    bufs: *const u8,
+    count: u32,
+    sent: *mut u32,
+    f: u32,
+    to: *const u8,
+    tolen: i32,
+    overlapped: *mut u8,
+    completion: u64,
+) -> i32 {
+    let r = (|| {
+        let (fd, _) = fd(s)?;
+        if f != 0 || !overlapped.is_null() || completion != 0 {
+            return Err(WSAEOPNOTSUPP);
+        }
+        let to = if to.is_null() { None } else { Some(read_addr(to, tolen)?) };
+        let data = wsa_gather(bufs, count)?;
+        os_sys::sock_send(fd, &data, to.as_ref(), 0).map_err(wsa)
+    })();
+    match r {
+        Ok(n) => {
+            if !sent.is_null() {
+                // SAFETY: the caller's out count.
+                unsafe { *sent = n as u32 };
+            }
+            0
+        }
+        Err(e) => err(e, SOCKET_ERROR),
+    }
+}
+
+/// The received count and in/out flags of a WSARecv-style call.
+fn recv_result(r: Result<(usize, *mut u32), u32>, received: *mut u32) -> i32 {
+    match r {
+        Ok((n, f)) => {
+            if !received.is_null() {
+                // SAFETY: the caller's out count.
+                unsafe { *received = n as u32 };
+            }
+            if !f.is_null() {
+                // SAFETY: the caller's in/out flags; nothing partial to report.
+                unsafe { *f = 0 };
             }
             0
         }
@@ -892,36 +970,38 @@ extern "win64" fn WSARecv(
         // SAFETY: the caller's in/out flags.
         let user_flags = if f.is_null() { 0 } else { unsafe { *f as i32 } };
         let fl = flags(user_flags)?;
-        let parts = wsa_bufs(bufs, count)?;
-        let total: usize = parts.iter().map(|p| p.0 as usize).sum();
-        let mut data = alloc::vec![0u8; total];
-        let (n, _) = os_sys::sock_recv(fd, &mut data, fl).map_err(wsa)?;
-        let mut done = 0;
-        for (len, p) in parts {
-            let take = (len as usize).min(n - done);
-            if take == 0 {
-                continue;
-            }
-            // SAFETY: the caller's WSABUF of `len` bytes.
-            unsafe { core::ptr::copy_nonoverlapping(data[done..].as_ptr(), p as *mut u8, take) };
-            done += take;
-        }
+        let (n, _) = wsa_receive(fd, bufs, count, fl)?;
         Ok((n, f))
     })();
-    match r {
-        Ok((n, f)) => {
-            if !received.is_null() {
-                // SAFETY: the caller's out count.
-                unsafe { *received = n as u32 };
-            }
-            if !f.is_null() {
-                // SAFETY: the caller's in/out flags; nothing partial to report.
-                unsafe { *f = 0 };
-            }
-            0
+    recv_result(r, received)
+}
+
+/// WSARecvFrom: like WSARecv, also returning the sender's address.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn WSARecvFrom(
+    s: u64,
+    bufs: *const u8,
+    count: u32,
+    received: *mut u32,
+    f: *mut u32,
+    from: *mut u8,
+    fromlen: *mut i32,
+    overlapped: *mut u8,
+    completion: u64,
+) -> i32 {
+    let r = (|| {
+        let (fd, _) = fd(s)?;
+        if !overlapped.is_null() || completion != 0 {
+            return Err(WSAEOPNOTSUPP);
         }
-        Err(e) => err(e, SOCKET_ERROR),
-    }
+        // SAFETY: the caller's in/out flags.
+        let user_flags = if f.is_null() { 0 } else { unsafe { *f as i32 } };
+        let fl = flags(user_flags)?;
+        let (n, peer) = wsa_receive(fd, bufs, count, fl)?;
+        write_addr(&peer, from, fromlen);
+        Ok((n, f))
+    })();
+    recv_result(r, received)
 }
 
 /// WSASendMsg: WSAMSG { name, namelen, lpBuffers, dwBufferCount, Control,
@@ -1255,7 +1335,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         WSASocketW,
         WSAIoctl,
         WSASend,
+        WSASendTo,
         WSARecv,
+        WSARecvFrom,
         WSASendMsg,
         inet_pton,
         inet_ntop,
