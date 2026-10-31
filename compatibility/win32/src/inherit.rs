@@ -24,6 +24,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use osyx_abi::ipc::MAX_MESSAGE_HANDLES;
+use os_std::sync::Mutex;
 
 pub const ENV: &str = "OSYX_WINRUN_INHERIT";
 /// The restricted child receives its broker channel as kernel handle 3.
@@ -40,6 +41,20 @@ const EVENT_MANUAL: u32 = 1;
 /// record). A file offset is not shared, which Gecko's read-only extension
 /// and cache descriptors do not need.
 const KIND_FILE: u32 = 4;
+/// A pipe relayed over a transferred channel capability.
+const KIND_PIPE_CHANNEL: u32 = 5;
+pub struct OwnedChannel(pub u64);
+impl Drop for OwnedChannel { fn drop(&mut self) { let _ = os_sys::close(self.0); } }
+struct Broker { channel: OwnedChannel, lock: Mutex<()> }
+static BROKERS: Mutex<Vec<(u64, Arc<Broker>)>> = Mutex::new(Vec::new());
+
+pub fn register_broker(pid: u64, channel: u64) {
+    BROKERS.lock().unwrap().push((pid, Arc::new(Broker { channel: OwnedChannel(channel), lock: Mutex::new(()) })));
+}
+
+pub fn unregister_broker(pid: u64) {
+    BROKERS.lock().unwrap().retain(|(id, _)| *id != pid);
+}
 const FILE_READ: u32 = 1;
 const FILE_WRITE: u32 = 2;
 /// Longest path a duplicated file may carry.
@@ -141,15 +156,10 @@ pub fn offer(handles: &[u64]) -> Result<Option<String>, u32> {
 }
 
 /// Queue inherited objects on an explicitly granted channel before starting
-/// the child. File-backed sections and pipe relays need broker support that a
-/// restricted child does not yet have, so fail rather than offer them.
-pub fn offer_on_channel(handles: &[u64], channel: u64) -> Result<(), u32> {
+/// the child. File-backed sections still require broker validation.
+pub fn offer_on_channel(handles: &[u64], channel: u64) -> Result<Vec<OwnedChannel>, u32> {
     for &handle in handles {
         match objects::get(handle) {
-            Some(Object::Pipe(_)) => {
-                if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: restricted child cannot inherit pipe {handle:#x}"); }
-                return Err(ERROR_NOT_SUPPORTED);
-            }
             Some(Object::Section(s)) if s.file_mapping => {
                 if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: restricted child cannot inherit file section {handle:#x}"); }
                 return Err(ERROR_NOT_SUPPORTED);
@@ -157,8 +167,18 @@ pub fn offer_on_channel(handles: &[u64], channel: u64) -> Result<(), u32> {
             _ => {}
         }
     }
-    let items = handles.iter().map(|&h| item(h)).collect::<Result<Vec<_>, _>>()?;
-    if items.iter().any(|i| i.kind == KIND_PIPE || (i.kind == KIND_SECTION && i.flags & SECTION_FILE != 0)) {
+    let mut owned = Vec::new();
+    let mut items = Vec::new();
+    for &h in handles {
+        if matches!(objects::get(h), Some(Object::Pipe(_))) {
+            let (endpoint, flags) = crate::pipes::relay_out_channel(h)?;
+            owned.push(OwnedChannel(endpoint));
+            items.push(Item { handle: h, kernel: None, kind: KIND_PIPE_CHANNEL, flags, size: osyx_abi::FIRST_FILE_HANDLE + owned.len() as u64 });
+        } else {
+            items.push(item(h)?);
+        }
+    }
+    if items.iter().any(|i| i.kind == KIND_SECTION && i.flags & SECTION_FILE != 0) {
         return Err(ERROR_NOT_SUPPORTED);
     }
     let mut records = Vec::with_capacity(items.len() * RECORD);
@@ -170,7 +190,7 @@ pub fn offer_on_channel(handles: &[u64], channel: u64) -> Result<(), u32> {
     for chunk in kernel.chunks(MAX_MESSAGE_HANDLES) {
         os_sys::channel_send(channel, &[], chunk).map_err(errno_to_win32)?;
     }
-    Ok(())
+    Ok(owned)
 }
 
 /// Takes the handles the parent offered (named by `name`), at their values.
@@ -281,6 +301,7 @@ fn object(r: &[u8], kernel: Option<u64>, extra: &[u8]) -> Option<Object> {
     let size = u64::from_le_bytes(r[16..24].try_into().unwrap());
     match half(8) {
         KIND_PIPE => crate::pipes::relay_in(size >> 32, size as u32, half(12)).ok(),
+        KIND_PIPE_CHANNEL if size > osyx_abi::FIRST_FILE_HANDLE => Some(crate::pipes::relay_in_channel(size, half(12))),
         KIND_FILE => {
             let path = core::str::from_utf8(extra.get(..size as usize)?).ok()?;
             let flags = half(12);
@@ -316,10 +337,10 @@ fn recv_wait(c: u64, buf: &mut [u8], handles: &mut [u64]) -> Result<(usize, usiz
 }
 
 /// Answers one request on connection `c`.
-fn serve(c: u64) {
+fn serve(c: u64) -> bool {
     let mut buf = alloc::vec![0u8; 4 + RECORD + MAX_PATH_BYTES];
     let mut hs = [0u64; 1];
-    let Ok((n, k)) = recv_wait(c, &mut buf, &mut hs) else { return };
+    let Ok((n, k)) = recv_wait(c, &mut buf, &mut hs) else { return false };
     let op = if n >= 4 { u32::from_le_bytes(buf[0..4].try_into().unwrap()) } else { 0 };
     match op {
         PUT if n >= 4 + RECORD && k == has_kernel(&buf[4..4 + RECORD]) as usize => {
@@ -360,6 +381,19 @@ fn serve(c: u64) {
         }
         _ => {}
     }
+    true
+}
+
+/// Serve the trusted parent on the already granted channel, without creating
+/// a globally named service in the restricted process.
+pub fn start_direct_service() -> Result<(), u32> {
+    os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
+        let c = osyx_abi::FIRST_FILE_HANDLE;
+        loop {
+            let mut w = [os_sys::ipc::WaitItem { handle: c, events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP, revents: 0 }];
+            if os_sys::wait_handles(&mut w, u64::MAX).is_err() || !serve(c) { return; }
+        }
+    }).map(|_| ()).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)
 }
 
 /// Starts this process's handle service (once, at startup).
@@ -390,6 +424,31 @@ fn connect(pid: u64) -> Result<u64, u32> {
 
 /// DuplicateHandle of `h` from this process into process `pid`.
 pub fn put(pid: u64, h: u64) -> Result<u64, u32> {
+    let broker = BROKERS.lock().unwrap().iter().find(|(id, _)| *id == pid).map(|(_, b)| b.clone());
+    if let Some(broker) = broker {
+        // Never use a trusted parent's file capability to bypass the child's
+        // filesystem policy. Only anonymous sections and events are granted.
+        match objects::get(h) {
+            Some(Object::Event(_)) => {}
+            Some(Object::Section(s)) if !s.file_mapping && s.file.is_none() => {}
+            Some(o) => {
+                if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: broker refuses handle {h:#x} ({})", objects::kind_name(&o)); }
+                return Err(ERROR_NOT_SUPPORTED);
+            }
+            None => return Err(ERROR_INVALID_HANDLE),
+        }
+        let i = item(h)?;
+        let _guard = broker.lock.lock().unwrap();
+        let c = broker.channel.0;
+        let mut msg = Vec::with_capacity(4 + RECORD);
+        msg.extend_from_slice(&PUT.to_le_bytes());
+        msg.extend_from_slice(&record(&i));
+        os_sys::channel_send(c, &msg, i.kernel.as_slice()).map_err(errno_to_win32)?;
+        let mut out = [0u8; 8];
+        let (n, _) = recv_wait(c, &mut out, &mut [])?;
+        let value = u64::from_le_bytes(out);
+        return if n == 8 && value != 0 { Ok(value) } else { Err(ERROR_NOT_SUPPORTED) };
+    }
     let file = file_item(h)?;
     let i = match &file {
         Some((i, _)) => Item { handle: i.handle, kernel: None, kind: i.kind, flags: i.flags, size: i.size },

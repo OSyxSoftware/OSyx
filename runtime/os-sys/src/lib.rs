@@ -668,6 +668,10 @@ mod imp {
     }
 
     pub fn spawn_restricted_with_options(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64, flags: u64) -> Result<u64, Errno> {
+        spawn_restricted_with_channels(path, argv, envp, paths, syscalls, broker, flags, &[])
+    }
+
+    pub fn spawn_restricted_with_channels(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64, flags: u64, channels: &[u64]) -> Result<u64, Errno> {
         let a = exec_args(path, argv, envp);
         let policy = osyx_abi::sandbox::SpawnPolicy {
             paths: paths.as_ptr() as u64,
@@ -676,6 +680,8 @@ mod imp {
             syscall_count: syscalls.len() as u64,
             broker_handle: broker,
             flags,
+            channels: channels.as_ptr() as u64,
+            channel_count: channels.len() as u64,
         };
         decode(syscall2(nr::SPAWN_RESTRICTED, &a as *const _ as u64, &policy as *const _ as u64))
     }

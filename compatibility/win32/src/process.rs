@@ -36,12 +36,15 @@ pub struct ProcessObj {
 static CHILDREN: Mutex<Vec<Arc<ProcessObj>>> = Mutex::new(Vec::new());
 
 /// Experimental deny-by-default profile. It is not a validated Gecko policy.
-fn spawn_content_candidate(path: &str, argv: &[u8], env: &[u8], channel: u64, suspended: bool) -> Result<u64, osyx_abi::Errno> {
+fn spawn_content_candidate(path: &str, argv: &[u8], env: &[u8], channel: u64, channels: &[u64], suspended: bool) -> Result<u64, osyx_abi::Errno> {
     use osyx_abi::{nr, sandbox::{PathRule, PATH_EXEC, PATH_READ}};
     let prefixes = ["/bin", "/opt/zen", "/system", "/Windows", "/usr", "/etc"];
-    let rules: Vec<PathRule> = prefixes.iter().map(|p| PathRule {
+    let mut rules: Vec<PathRule> = prefixes.iter().map(|p| PathRule {
         path: p.as_ptr() as u64, path_len: p.len() as u64, access: PATH_READ | PATH_EXEC,
     }).collect();
+    // Gecko's ProcessPrng requires the kernel CSPRNG, not other devices.
+    let random = "/dev/random";
+    rules.push(PathRule { path: random.as_ptr() as u64, path_len: random.len() as u64, access: PATH_READ });
     let calls = [
         nr::EXIT, nr::WRITE, nr::MAP, nr::UNMAP, nr::SYSINFO, nr::CLOCK, nr::YIELD, nr::SLEEP,
         nr::THREAD_SPAWN, nr::THREAD_EXIT, nr::FUTEX_WAIT, nr::FUTEX_WAKE, nr::SET_FS_BASE, nr::GETTID,
@@ -54,7 +57,7 @@ fn spawn_content_candidate(path: &str, argv: &[u8], env: &[u8], channel: u64, su
         nr::FUTEX_WAIT_OWNED, nr::SET_FS32_BASE,
     ];
     let flags = if suspended { osyx_abi::sandbox::SPAWN_SUSPENDED } else { 0 };
-    os_sys::spawn_restricted_with_options(path, argv, env, &rules, &calls, channel, flags)
+    os_sys::spawn_restricted_with_channels(path, argv, env, &rules, &calls, channel, flags, channels)
 }
 
 pub fn exit_code(p: &ProcessObj) -> u32 {
@@ -207,6 +210,7 @@ const DEBUG_ONLY_THIS_PROCESS: u32 = 0x2;
 const CREATE_UNICODE_ENVIRONMENT: u32 = 0x400;
 const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x80000;
 const STARTF_USESTDHANDLES: u32 = 0x100;
+pub(crate) const STD_HANDLES_ENV: &str = "OSYX_WINRUN_STD_HANDLES";
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: u64 = 0x20002;
 
 /// STARTUPINFOA differs from STARTUPINFOW only in the string pointers
@@ -323,11 +327,18 @@ pub(crate) extern "win64" fn CreateProcessW(
     if let Some(i) = environment.iter().position(|e| e.starts_with(crate::inherit::ENV) && e[crate::inherit::ENV.len()..].starts_with('=')) {
         environment.remove(i);
     }
+    environment.retain(|e| !e.split_once('=').is_some_and(|(key, _)| key.eq_ignore_ascii_case(STD_HANDLES_ENV)));
     let mut broker = None;
     let mut child_channel = None;
+    let mut inherited_channels = Vec::new();
     if restricted {
         if si_flags & STARTF_USESTDHANDLES != 0 {
+            let mut std_spec = String::new();
             for (i, handle) in std_handles.iter().enumerate() {
+                if *handle == 0 || *handle == u64::MAX {
+                    std_spec.push(if *handle == 0 { 'n' } else { 'i' });
+                    continue;
+                }
                 let supported = matches!((i, objects::get(*handle)),
                     (0, Some(Object::Console(objects::Console::In)))
                     | (1, Some(Object::Console(objects::Console::Out)))
@@ -336,18 +347,23 @@ pub(crate) extern "win64" fn CreateProcessW(
                     if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: restricted child unsupported standard handle {i}: {handle:#x}"); }
                     return fail(ERROR_NOT_SUPPORTED, 0);
                 }
+                std_spec.push('c');
             }
+            environment.push(format!("{STD_HANDLES_ENV}={std_spec}"));
         }
         let (parent_end, child_end) = match os_sys::channel_pair() {
             Ok(pair) => pair,
             Err(e) => return fail(errno_to_win32(e), 0),
         };
-        if let Err(e) = crate::inherit::offer_on_channel(&inherited, parent_end) {
-            if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: restricted child cannot inherit handles: error {e}"); }
-            let _ = os_sys::close(parent_end);
-            let _ = os_sys::close(child_end);
-            return fail(e, 0);
-        }
+        inherited_channels = match crate::inherit::offer_on_channel(&inherited, parent_end) {
+            Ok(channels) => channels,
+            Err(e) => {
+                if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: restricted child cannot inherit handles: error {e}"); }
+                let _ = os_sys::close(parent_end);
+                let _ = os_sys::close(child_end);
+                return fail(e, 0);
+            }
+        };
         broker = Some(parent_end);
         child_channel = Some(child_end);
         environment.push(format!("{}={}", crate::inherit::ENV, crate::inherit::DIRECT_CHANNEL));
@@ -384,7 +400,8 @@ pub(crate) extern "win64" fn CreateProcessW(
     let console = streams.map(|(h, console)| if console { os_sys::HANDLE_NONE } else { h });
     let spawned = match child_channel {
         Some(channel) => {
-            let result = spawn_content_candidate(&path, &argv, &environment, channel, flags & CREATE_SUSPENDED != 0);
+            let channels: Vec<u64> = inherited_channels.iter().map(|c| c.0).collect();
+            let result = spawn_content_candidate(&path, &argv, &environment, channel, &channels, flags & CREATE_SUSPENDED != 0);
             let _ = os_sys::close(channel);
             result
         }
@@ -409,6 +426,7 @@ pub(crate) extern "win64" fn CreateProcessW(
         }
     };
     let p = Arc::new(ProcessObj { pid, child: true, done: AtomicBool::new(false), exit_code: AtomicU32::new(STILL_ACTIVE), jobbed: AtomicBool::new(false) });
+    if let Some(channel) = broker { crate::inherit::register_broker(pid, channel); }
     CHILDREN.lock().unwrap().push(p.clone());
     let watcher = p.clone();
     let watching = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
@@ -417,10 +435,10 @@ pub(crate) extern "win64" fn CreateProcessW(
         }
         watcher.done.store(true, Ordering::SeqCst);
         objects::signal_all();
-        if let Some(channel) = broker { let _ = os_sys::close(channel); }
+        if broker.is_some() { crate::inherit::unregister_broker(watcher.pid); }
     });
     if watching.is_err() {
-        if let Some(channel) = broker { let _ = os_sys::close(channel); }
+        if broker.is_some() { crate::inherit::unregister_broker(pid); }
     }
     let hp = objects::insert(Object::Process(p.clone()));
     let ht = objects::insert(Object::Process(p));

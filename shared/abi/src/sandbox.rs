@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 pub const MAX_PATH_RULES: u64 = 64;
 pub const MAX_SYSCALL_RULES: u64 = 256;
+pub const MAX_SPAWN_CHANNELS: u64 = 32;
 pub const PATH_READ: u64 = 1;
 pub const PATH_WRITE: u64 = 2;
 pub const PATH_EXEC: u64 = 4;
@@ -33,11 +34,14 @@ pub struct SpawnPolicy {
     /// Optional channel capability installed as handle 3 in the child.
     pub broker_handle: u64,
     pub flags: u64,
+    /// Existing channel handles installed consecutively after the broker.
+    pub channels: u64,
+    pub channel_count: u64,
 }
 
 impl Default for SpawnPolicy {
     fn default() -> Self {
-        Self { paths: 0, path_count: 0, syscalls: 0, syscall_count: 0, broker_handle: crate::HANDLE_NONE, flags: 0 }
+        Self { paths: 0, path_count: 0, syscalls: 0, syscall_count: 0, broker_handle: crate::HANDLE_NONE, flags: 0, channels: 0, channel_count: 0 }
     }
 }
 
@@ -66,8 +70,9 @@ mod tests {
     #[test]
     fn spawn_policy_layout_and_default_broker() {
         assert_eq!(core::mem::size_of::<PathRule>(), 24);
-        assert_eq!(core::mem::size_of::<SpawnPolicy>(), 48);
+        assert_eq!(core::mem::size_of::<SpawnPolicy>(), 64);
         assert_eq!(SpawnPolicy::default().broker_handle, crate::HANDLE_NONE);
+        assert_eq!(SpawnPolicy::default().channel_count, 0);
     }
 
     #[test]

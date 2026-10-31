@@ -114,6 +114,12 @@ fn main() -> i32 {
             };
             if !matches!(os_sys::wait(pid), Ok((_, 0))) { return 21; }
             let (peer, endpoint) = match os_sys::channel_pair() { Ok(pair) => pair, Err(_) => return 24 };
+            let file = match os_sys::open("/bin/worker", osyx_abi::OPEN_READ, 0) { Ok(file) => file, Err(_) => return 34 };
+            if os_sys::spawn_restricted_with_channels("/bin/worker", b"worker\0exit\00\0", b"", &rules, &calls, endpoint, 0, &[file]) != Err(osyx_abi::Errno::InvalidArgument) { return 35; }
+            let _ = os_sys::close(file);
+            let too_many = [endpoint; 33];
+            if os_sys::spawn_restricted_with_channels("/bin/worker", b"worker\0exit\00\0", b"", &rules, &calls, endpoint, 0, &too_many) != Err(osyx_abi::Errno::InvalidArgument) { return 36; }
+            if os_sys::spawn_restricted_with_channels("/bin/worker", b"worker\0exit\00\0", b"", &rules, &calls, os_sys::HANDLE_NONE, 0, &[endpoint]) != Err(osyx_abi::Errno::InvalidArgument) { return 37; }
             if os_sys::channel_send(peer, b"request", &[]).is_err() { return 27; }
             let pid = match os_sys::spawn_restricted_with_broker("/bin/worker", b"worker\0sandbox-channel\0", b"", &rules, &calls, endpoint) {
                 Ok(pid) => pid,

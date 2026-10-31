@@ -7,8 +7,10 @@ supplied. An unrestricted parent can request both policies for a child before
 loading its image; descendants inherit them. Restricted children cannot inherit
 file stdio handles, receive file-backed sections over IPC, or publish shared
 images. They cannot connect to or register global IPC services, and may kill
-only themselves or direct children. A parent may grant one existing channel
-as child handle 3. An anonymous channel pair avoids exposing a service name.
+only themselves or direct children. A parent may grant one broker channel
+as child handle 3, plus up to 32 channels in consecutive handles from 4.
+The kernel validates every granted handle before starting the child. Anonymous
+channel pairs avoid exposing a service name.
 The channel's recorded peer identity describes its original
 connection, not necessarily the child. Other handle and IPC paths remain
 unreviewed. This is not a browser sandbox.
@@ -19,8 +21,10 @@ with `-contentproc`, enabled only by `OSYX_EXPERIMENTAL_CONTENT_SANDBOX=1`.
 Its provisional read-only paths and syscall list have not been tested with
 Gecko. The path fails closed when requested handles are unsupported. Winrun
 can decode inherited page-file sections and events from the granted channel;
-file-backed sections and pipe relays are refused. The channel stays open
-after inheritance, but no Gecko broker protocol is implemented.
+connected pipes use separately granted channel relays. The retained broker
+channel can duplicate events and anonymous sections after startup. It refuses
+files, file-backed sections and unsupported object types. The protocol and
+the full set of grants Gecko requires still need validation.
 
 A deny-by-default syscall allowlist is checked before the dispatcher's fast
 paths and inherited by children. The set of calls Gecko needs and the handling
@@ -38,11 +42,13 @@ initially failed because the launcher requested `CREATE_SUSPENDED`. OSyx now
 starts a held initial thread and supports resuming it from the parent. A
 subsequent probe reached a denied cross-process memory operation and then
 raised `0xc000001d` without the required CPU features. With SSE4.2 and the
-diagnostic launcher bypass, Zen reaches content-process creation, but requests
-an unsupported standard input handle (`0xffffffffffffffff`). Winrun rejects
-that request; no Gecko content process started. Matching console handles are
-supported, while other standard handles and pipe inheritance remain blocked.
-The probe does not establish browser or sandbox functionality.
+diagnostic launcher bypass, Zen reaches content-process creation. It passes an
+invalid standard input handle and a connected pipe. Winrun preserves invalid
+and null standard handles, uses `/dev/random` for its CSPRNG, and can relay
+connected pipes. A subsequent probe started Gecko children and loaded
+`xul.dll`, but an unsupported post-start `DuplicateHandle` caused the content
+IPC channel to close. Other redirected standard handles remain unsupported.
+The probes do not establish browser or sandbox functionality.
 
 The initial thread is held before it can run, including for restricted
 children. Only its direct parent can resume it. A held child whose parent exits
@@ -79,7 +85,9 @@ Run `scripts/sandbox-test.ps1` to boot the sandbox-specific kernel tests with
 an existing `build/esp` loader and a temporary FAT directory. This targeted
 test does not replace the full system suite or a Gecko test. Add `-Winrun` to
 build a small PE fixture and verify that a restricted Windows child cannot
-read a file that its parent can read, and can use an inherited Windows event.
+read a file that its parent can read, and can use an inherited Windows event
+and connected pipe, and that the parent can grant an event after startup
+without granting a file.
 This needs the MSVC Rust target.
 
 Test direct and indirect file access, symlink and rename escapes, `exec` and

@@ -183,6 +183,10 @@ fn main() -> i32 {
                 return 126;
             }
         }
+        if name == inherit::DIRECT_CHANNEL && inherit::start_direct_service().is_err() {
+            eprintln!("winrun: cannot start direct handle service");
+            return 126;
+        }
     }
     if let Some(i) = env.iter().position(|(k, _)| k == "OSYX_WINRUN_CWD") {
         let (_, dir) = env.remove(i);
@@ -243,8 +247,19 @@ fn main() -> i32 {
     if pe32_bytes.is_some() {
         os_sys::set_low_map(0x5000_0000);
     }
+    let mut std_override = [None; 3];
+    if let Some(i) = env.iter().position(|(k, _)| k == process::STD_HANDLES_ENV) {
+        let (_, spec) = env.remove(i);
+        if spec.len() != 3 || !spec.bytes().all(|b| matches!(b, b'c' | b'n' | b'i')) {
+            eprintln!("winrun: invalid standard handle specification");
+            return 126;
+        }
+        for (i, b) in spec.bytes().enumerate() {
+            std_override[i] = match b { b'n' => Some(0), b'i' => Some(u64::MAX), _ => None };
+        }
+    }
     let env_strings: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    kernel32::init_process(&exe, &cmd, env);
+    kernel32::init_process(&exe, &cmd, env, std_override);
     winsta::clear_markers();
     exceptions::install();
     // A 32-bit image cannot start through the PE32+ path: it is linked at

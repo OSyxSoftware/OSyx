@@ -134,13 +134,16 @@ pub fn with_process<R>(f: impl FnOnce(&mut ProcessState) -> R) -> R {
 }
 
 /// Sets up the console handles, command line and environment.
-pub fn init_process(exe_path: &str, command_line: &str, env: Vec<(String, String)>) {
+pub fn init_process(exe_path: &str, command_line: &str, env: Vec<(String, String)>, std_override: [Option<u64>; 3]) {
     crate::sysext::mark_start();
-    let std = [
+    let mut std = [
         objects::insert(Object::Console(Console::In)),
         objects::insert(Object::Console(Console::Out)),
         objects::insert(Object::Console(Console::Err)),
     ];
+    for (i, value) in std_override.into_iter().enumerate() {
+        if let Some(value) = value { std[i] = value; }
+    }
     let a = mem::arena_alloc(command_line.len() + 1, 8);
     let units: Vec<u16> = command_line.encode_utf16().chain(core::iter::once(0)).collect();
     let w = mem::arena_alloc(units.len() * 2, 8);
