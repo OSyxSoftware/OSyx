@@ -80,6 +80,9 @@ __declspec(dllimport) void __stdcall SetLastError(DWORD code);
 __declspec(dllimport) BOOL __stdcall SetForegroundWindow(HANDLE window);
 __declspec(dllimport) BOOL __stdcall BringWindowToTop(HANDLE window);
 __declspec(dllimport) BOOL __stdcall TrackPopupMenu(HANDLE menu, DWORD flags, int x, int y, int reserved, HANDLE window, const void *rect);
+typedef struct { unsigned long data1; unsigned short data2, data3; unsigned char data4[8]; } GUID;
+typedef long HRESULT;
+__declspec(dllimport) HRESULT __stdcall IUnknown_QueryService(void *punk, const GUID *service, const GUID *riid, void **out);
 __declspec(dllimport) BOOL __stdcall GetFileSizeEx(HANDLE file, long long *size);
 __declspec(dllimport) BOOL __stdcall SetFilePointerEx(HANDLE file, long long distance, long long *position, DWORD method);
 typedef struct { unsigned short year, month, weekday, day, hour, minute, second, millis; } SYSTIME32;
@@ -227,6 +230,55 @@ static int wide_eq(const WCHAR *a, const char *b) {
     while (*b && *a == (WCHAR)*b) a++, b++;
     return *a == 0 && *b == 0;
 }
+
+/* An IServiceProvider for IUnknown_QueryService: QueryInterface hands out
+ * this object for IID_IServiceProvider and vtable slot 3 answers service
+ * queries with itself, counting every call. */
+static const GUID IID_IServiceProvider = {0x6d5140c1, 0x7436, 0x11ce, {0x80, 0x34, 0x00, 0xaa, 0x00, 0x60, 0x09, 0xfa}};
+static const GUID IID_TestService = {0x0536b4a1, 0x2c3d, 0x4e5f, {0x8a, 0x9b, 0x0c, 0x1d, 0x2e, 0x3f, 0x40, 0x51}};
+static int svc_qi_calls, svc_query_calls, svc_refs;
+
+static int guid_eq(const GUID *a, const GUID *b) {
+    const unsigned char *x = (const unsigned char *)a, *y = (const unsigned char *)b;
+    for (int i = 0; i < 16; i++)
+        if (x[i] != y[i]) return 0;
+    return 1;
+}
+
+static HRESULT __stdcall svc_qi(void *self, const GUID *iid, void **out) {
+    svc_qi_calls++;
+    if (!guid_eq(iid, &IID_IServiceProvider)) {
+        *out = 0;
+        return (HRESULT)0x80004002; /* E_NOINTERFACE */
+    }
+    svc_refs++;
+    *out = self;
+    return 0;
+}
+
+static unsigned long __stdcall svc_addref(void *self) {
+    (void)self;
+    return ++svc_refs;
+}
+
+static unsigned long __stdcall svc_release(void *self) {
+    (void)self;
+    return --svc_refs;
+}
+
+static HRESULT __stdcall svc_query(void *self, const GUID *service, const GUID *riid, void **out) {
+    (void)service;
+    (void)riid;
+    svc_query_calls++;
+    svc_refs++;
+    *out = self;
+    return 0;
+}
+
+static const struct {
+    void *qi, *addref, *release, *query;
+} svc_vtbl = { svc_qi, svc_addref, svc_release, svc_query };
+static const struct { const void *vtbl; } service_provider = { &svc_vtbl };
 
 void __stdcall start(void) {
     out = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -386,6 +438,16 @@ void __stdcall start(void) {
         check("BringWindowToTop(bogus) fails with ERROR_INVALID_WINDOW_HANDLE", !BringWindowToTop((HANDLE)0x1234) && GetLastError() == 1400);
         SetLastError(0);
         check("TrackPopupMenu fails with ERROR_NOT_SUPPORTED", !TrackPopupMenu((HANDLE)1, 0, 0, 0, 0, 0, 0) && GetLastError() == 50);
+        HANDLE user32 = LoadLibraryExW(L"user32.dll", 0, 0);
+        BOOL (__stdcall *allow_fg)(DWORD) = user32 ? GetProcAddress(user32, "AllowSetForegroundWindow") : 0;
+        check("AllowSetForegroundWindow is granted through a PE32 gate", allow_fg && allow_fg(0xFFFFFFFF));
+        void *service_out = (void *)1;
+        HRESULT query_hr = IUnknown_QueryService((void *)&service_provider, &IID_TestService, &IID_TestService, &service_out);
+        check("shlwapi ordinal 176 IUnknown_QueryService calls the PE32 service provider",
+              query_hr == 0 && service_out == (void *)&service_provider && svc_qi_calls == 1 && svc_query_calls == 1 && svc_refs == 1);
+        service_out = (void *)1;
+        check("IUnknown_QueryService rejects a NULL out through the PE32 gate",
+              IUnknown_QueryService((void *)&service_provider, &IID_TestService, &IID_TestService, 0) == (HRESULT)0x80070057 && service_out == (void *)1);
     }
 
     {
@@ -442,6 +504,16 @@ void __stdcall start(void) {
               WriteFile(pw, "abc", 3, &n, 0) && n == 3 && ReadFile(pr, got, 3, &n, 0) && n == 3 && got[0] == 'a' && got[2] == 'c');
         if (pr) CloseHandle(pr);
         if (pw) CloseHandle(pw);
+        BOOL (__stdcall *peek_pipe)(HANDLE, void *, DWORD, DWORD *, DWORD *, DWORD *) = GetProcAddress(kernel, "PeekNamedPipe");
+        HANDLE qr = 0, qw = 0;
+        DWORD peeked = 0, avail = 0, left = 0;
+        char ring[8] = { 0 };
+        BOOL queued = CreatePipe(&qr, &qw, 0, 0) && WriteFile(qw, "xyz", 3, &n, 0) && n == 3;
+        check("PeekNamedPipe reports queued bytes through a PE32 gate",
+              queued && peek_pipe && peek_pipe(qr, ring, sizeof ring, &peeked, &avail, &left) && peeked == 3 && avail == 3 && left == 0 && ring[2] == 'z');
+        check("... without consuming them", queued && ReadFile(qr, ring, 3, &n, 0) && n == 3 && ring[0] == 'x');
+        if (qr) CloseHandle(qr);
+        if (qw) CloseHandle(qw);
 
         /* COM apartments: first call S_OK, second S_FALSE. */
         long first = CoInitialize(0), second = CoInitialize(0);
@@ -569,6 +641,31 @@ void __stdcall start(void) {
         wfmtbuf[4] = 'X';
         check("_snwprintf truncates in wide characters", snwprintf32 && snwprintf32(wfmtbuf, 4, L"%s", L"hello") == -1 && wfmtbuf[3] == 'l' && wfmtbuf[4] == 'X');
         check("_snprintf consumes 64-bit PE32 arguments", snprintf32 && snprintf32(fmtbuf, 12, "%I64x", 0x123456789ULL) == 9 && fmtbuf[0] == '1' && fmtbuf[8] == '9' && fmtbuf[9] == 0);
+        int (__cdecl *swscanf32)(const WCHAR *, const WCHAR *, ...) = crt ? GetProcAddress(crt, "swscanf") : 0;
+        WCHAR scanned[8] = {0};
+        int scanned_num = 0;
+        double scanned_real = 0;
+        check("swscanf reads PE32 variadic arguments",
+              swscanf32 && swscanf32(L"42 alpha 2.5", L"%d %ls %lf", &scanned_num, scanned, &scanned_real) == 3 && scanned_num == 42 &&
+                  wide_eq(scanned, "alpha") && scanned_real > 2.49 && scanned_real < 2.51);
+        int (__cdecl *getmainargs32)(int *, char ***, char ***, int, int *) = crt ? GetProcAddress(crt, "__getmainargs") : 0;
+        int (__cdecl *wgetmainargs32)(int *, WCHAR ***, WCHAR ***, int, int *) = crt ? GetProcAddress(crt, "__wgetmainargs") : 0;
+        int argc = 0, newmode = -1;
+        char **argv = 0, **envp = 0;
+        int mainargs = getmainargs32 ? getmainargs32(&argc, &argv, &envp, 0, &newmode) : -1;
+        int env_seen = 0;
+        for (char **e = envp; e && *e; e++)
+            if (lstrcmpiA(*e, "PROCESSOR_ARCHITECTURE=AMD64") == 0) env_seen = 1;
+        check("__getmainargs returns PE32 argc, argv and environment",
+              mainargs == 0 && argc >= 1 && argv && argv[argc] == 0 && argv[0] && argv[0][0] && env_seen && newmode == 0);
+        int wargc = 0, wnewmode = -1;
+        WCHAR **wargv = 0, **wenvp = 0;
+        int wmainargs = wgetmainargs32 ? wgetmainargs32(&wargc, &wargv, &wenvp, 0, &wnewmode) : -1;
+        int wenv_seen = 0;
+        for (WCHAR **e = wenvp; e && *e; e++)
+            if (wide_eq(*e, "PROCESSOR_ARCHITECTURE=AMD64")) wenv_seen = 1;
+        check("__wgetmainargs returns PE32 wide argc, argv and environment",
+              wmainargs == 0 && wargc == argc && wargv && wargv[wargc] == 0 && wargv[0] && wargv[0][0] && wenv_seen && wnewmode == 0);
         int (__cdecl *crt_time)(int *) = crt ? GetProcAddress(crt, "time") : 0;
         struct { int seconds; DWORD guard; } now = { 0, 0xa5a5a5a5 };
         int time_result = crt_time ? crt_time(&now.seconds) : -1;

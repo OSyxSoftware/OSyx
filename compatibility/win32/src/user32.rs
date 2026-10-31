@@ -5022,6 +5022,12 @@ extern "win64" fn SetForegroundWindow(wnd: u64) -> Bool {
     })
 }
 
+/// Windows limits which processes may call SetForegroundWindow; here every
+/// process may, so the permission is always granted (ASFW_ANY is -1).
+extern "win64" fn AllowSetForegroundWindow(_pid: u32) -> Bool {
+    TRUE
+}
+
 extern "win64" fn GetForegroundWindow() -> u64 {
     with(|g| g.focus)
 }
@@ -6812,6 +6818,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetTopWindow,
         SetParent,
         SetForegroundWindow,
+        AllowSetForegroundWindow,
         GetForegroundWindow,
         BringWindowToTop,
         IsIconic,

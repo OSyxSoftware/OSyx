@@ -1,0 +1,3 @@
+LIBRARY shlwapi.dll
+EXPORTS
+    IUnknown_QueryService @176 NONAME

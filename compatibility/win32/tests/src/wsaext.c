@@ -165,13 +165,13 @@ void __stdcall start(void) {
     WSABUF out[2] = {{5, "hello"}, {6, ", wsa!"}};
     DWORD n = 0;
     check("WSASend gathers two buffers", WSASend(cl, out, 2, &n, 0, NULL, NULL) == 0 && n == 11);
-    DWORD avail = 0;
-    check_eq("ioctlsocket(FIONREAD)", ioctlsocket(sv, FIONREAD, &avail), 0);
-    check_eq("... pending bytes", avail, 11);
-    avail = 0;
+    DWORD pending = 0;
+    check_eq("ioctlsocket(FIONREAD)", ioctlsocket(sv, FIONREAD, &pending), 0);
+    check_eq("... pending bytes", pending, 11);
+    pending = 0;
     n = 0;
-    check_eq("WSAIoctl(FIONREAD)", WSAIoctl(sv, FIONREAD, NULL, 0, &avail, sizeof avail, &n, NULL, NULL), 0);
-    check("... pending bytes and count", avail == 11 && n == 4);
+    check_eq("WSAIoctl(FIONREAD)", WSAIoctl(sv, FIONREAD, NULL, 0, &pending, sizeof pending, &n, NULL, NULL), 0);
+    check("... pending bytes and count", pending == 11 && n == 4);
     char peeked[5] = {0};
     check("MSG_PEEK returns data", recv(sv, peeked, sizeof peeked, MSG_PEEK) == 5 && mem_eq(peeked, "hello", 5));
     avail = 0;
@@ -238,13 +238,13 @@ void __stdcall start(void) {
           WSCEnumProtocols(NULL, NULL, &len, &err) == SOCKET_ERROR && err == WSAENOBUFS && len >= 2 * sizeof(WSAPROTOCOL_INFOW));
     int tcp_only[] = {IPPROTO_TCP, 0};
     len = sizeof catalog;
-    int n = WSCEnumProtocols(tcp_only, catalog, &len, &err);
+    int count = WSCEnumProtocols(tcp_only, catalog, &len, &err);
     int found = -1;
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < count; i++)
         if (catalog[i].iAddressFamily == AF_INET && catalog[i].iSocketType == SOCK_STREAM &&
             catalog[i].ProtocolChain.ChainLen == BASE_PROTOCOL)
             found = i;
-    check("WSCEnumProtocols lists the IPv4 TCP base provider", n > 0 && found >= 0);
+    check("WSCEnumProtocols lists the IPv4 TCP base provider", count > 0 && found >= 0);
     int udp = 0;
     for (int i = 0; i < n; i++) udp |= catalog[i].iSocketType == SOCK_DGRAM;
     check("... and no UDP provider for {IPPROTO_TCP}", !udp);

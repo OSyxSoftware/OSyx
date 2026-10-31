@@ -66,32 +66,36 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 Measured with `scripts/winparity.py scan` against the binaries in `build/steam`
 (32-bit `SteamSetup.exe` and its NSIS plug-ins) and `build/zen/1.23.4b`
 (`zen.exe`, `xul.dll`, `mozglue.dll`, `nss3.dll`) on 2026-10-31, at commit
-6f1134d. The scan finds 97.4 % of the Steam imports usable (247 implemented,
-13 partial, 5 missing, 1 without a WoW64 bridge, 1 unsupported) and 98.1 % of
-Zen's (1407 implemented, 93 partial, 7 unsupported). These are source-scan
-measurements of exports, not proof of behaviour.
+a770b41 with the Steam/Zen API batch applied. The scan finds 99.3 % of the
+Steam imports usable (252 implemented, 13 partial, 1 constant stub, 1
+unsupported) and 98.1 % of Zen's (1406 implemented, 94 partial, 38 reported
+missing, 7 unsupported). These are source-scan measurements of exports, not
+proof of behaviour.
+
+The batch that removed the Steam gaps implements `kernel32!PeekNamedPipe`
+(with a WoW64 bridge for `nsExec.dll`), `msvcrt!__wgetmainargs` and
+`__getmainargs`, `msvcrt!swscanf`, `shell32!ShellExecuteExW` for PE32,
+`shlwapi` ordinal 176 (`IUnknown_QueryService`) and
+`user32!AllowSetForegroundWindow`. The remaining stub is
+`AllowSetForegroundWindow`, which returns TRUE on purpose: every process may
+take the foreground here.
 
 What is left, in the order it blocks the applications:
 
 | Application | API | State | Why it matters |
 |---|---|---|---|
-| Steam, `nsExec.dll` | `kernel32!PeekNamedPipe` | missing | NSIS's exec plug-in polls the child's stdout/stderr through pipes |
-| Steam, `StdUtils.dll` | `msvcrt!__wgetmainargs` | missing | 32-bit CRT startup asks the runtime for argv and envp |
-| Steam, `StdUtils.dll` | `msvcrt!swscanf` | missing | text parsing; the engine already exists as `__stdio_common_vswscanf` |
-| Steam, `StdUtils.dll` | `shell32!ShellExecuteExW` | WoW64 bridge missing | opens a file or URL; the x64 entry point is implemented |
-| Steam, `StdUtils.dll` | `shlwapi!#176` | missing | an ordinal import; its name has to be resolved before implementing |
-| Steam, `StdUtils.dll` | `user32!AllowSetForegroundWindow` | missing | NSIS asks to bring its window forward |
 | Steam, `SteamSetup.exe` | `user32!TrackPopupMenu` | unsupported | the setup's context menus |
 | Zen, `xul.dll` | `user32!TrackPopupMenu` | unsupported | browser context menus |
 | Zen, `xul.dll` | `user32!CreateSyntheticPointerDevice` | unsupported | pen input only |
 | Zen, `xul.dll` | `gdi32!ChoosePixelFormat`, `SetPixelFormat`, `SwapBuffers` | unsupported | the WebGL/OpenGL path; needs the 3D layer from item 9 |
 | Zen, `xul.dll` | `gdi32!GetFontData`, `GetOutlineTextMetricsA` | unsupported | font metrics for some pages |
 | Zen, `nss3.dll` | `wsock32!` ordinals 1-23, 51-54, 57, 111, 115, 116, 151 | reported missing | already exported by `ws2_32::legacy_ordinals` and resolved by the loader; the scanner reads only ordinal numbers written literally in the function named in `loader.rs`, not those of the `ordinals()` it delegates to, so the report overstates this gap |
+| Zen, `msi.dll` | ordinals 8, 32, 70, 92, 118, 159, 160 | reported missing | ordinal imports of the installer stack; names to be resolved from the reference tables |
+| Zen, `winspool.drv` | ordinal 203 | reported missing | the printing stack |
 
-The next batch is `PeekNamedPipe`, the CRT entry points, the `ShellExecuteExW`
-bridge and the shlwapi ordinal; `TrackPopupMenu` needs popup-menu tracking in
-`user32` first. For the ordinal report, either teach the parity tool to follow
-the delegation or list the ordinals where the tool reads them.
+`TrackPopupMenu` needs popup-menu tracking in `user32` first. For the ordinal
+report, either teach the parity tool to follow the delegation or list the
+ordinals where the tool reads them.
 
 ### Performance (see research/performance-profile.md)
 

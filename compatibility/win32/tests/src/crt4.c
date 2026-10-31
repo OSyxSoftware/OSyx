@@ -140,6 +140,11 @@ static void legacy_format(void) {
     check("_snwprintf formats x64 variadic arguments", wide && wide(wbuf, 16, L"%s:%u", L"os", 42) == 5 && wcscmp(wbuf, L"os:42") == 0);
     buf[4] = 'X';
     check("_snprintf truncates without writing a terminator", narrow && narrow(buf, 4, "%s", "hello") == -1 && buf[3] == 'l' && buf[4] == 'X');
+    int (*sscan)(const wchar_t *, const wchar_t *, ...) = crt ? (void *)GetProcAddress(crt, "swscanf") : NULL;
+    wchar_t word[8] = {0}; int num = 0; double real = 0;
+    check("swscanf reads x64 variadic arguments",
+          sscan && sscan(L"42 alpha 2.5", L"%d %ls %lf", &num, word, &real) == 3 && num == 42 && wcscmp(word, L"alpha") == 0 &&
+              real > 2.49 && real < 2.51);
     long long (*crt_time)(long long *) = crt ? (void *)GetProcAddress(crt, "time") : NULL;
     struct { long long seconds; uint64_t guard; } now = { 0, 0xa5a5a5a5a5a5a5a5ULL };
     long long seconds = crt_time ? crt_time(&now.seconds) : -1;

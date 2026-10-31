@@ -144,7 +144,16 @@ void __stdcall start(void) {
     HANDLE t = CreateThread(NULL, 0, message_client, NULL, 0, NULL);
     BOOL c = ConnectNamedPipe(ms, NULL);
     check("synchronous ConnectNamedPipe", c || GetLastError() == ERROR_PIPE_CONNECTED);
-    DWORD n = 0;
+    DWORD n = 0, avail = 0, left = 0;
+    for (int i = 0; i < 200; i++) {
+        if (!PeekNamedPipe(ms, NULL, 0, NULL, &avail, NULL) || avail) break;
+        Sleep(10);
+    }
+    check_eq("PeekNamedPipe sees the queued message", avail, 10);
+    check("... copies part of it without consuming it",
+          PeekNamedPipe(ms, buf, 4, &n, &avail, &left) && n == 4 && avail == 10 && left == 6 && mem_eq(buf, "0123", 4));
+    check("... and the whole message is still there",
+          PeekNamedPipe(ms, buf, 16, &n, &avail, &left) && n == 10 && avail == 10 && left == 0 && mem_eq(buf, "0123456789", 10));
     check("a short read of a message: ERROR_MORE_DATA", !ReadFile(ms, buf, 4, &n, NULL) && GetLastError() == ERROR_MORE_DATA && n == 4 && mem_eq(buf, "0123", 4));
     check("... the rest of it", ReadFile(ms, buf, 16, &n, NULL) && n == 6 && mem_eq(buf, "456789", 6));
     check("the next message", ReadFile(ms, buf, 16, &n, NULL) && n == 2 && mem_eq(buf, "ab", 2));

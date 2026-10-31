@@ -562,6 +562,16 @@ pub fn read_handle(h: u64, buf: *mut u8, n: u32, offset: Option<u64>) -> Result<
             if !f.access.0 {
                 return Err(ERROR_ACCESS_DENIED);
             }
+            if f.key.0 == objects::PIPE_DEV {
+                let mut peeked = f.peeked.lock().unwrap();
+                if !peeked.is_empty() {
+                    let k = (n as usize).min(peeked.len());
+                    // SAFETY: the caller's buffer of `n` bytes.
+                    unsafe { core::ptr::copy_nonoverlapping(peeked.as_ptr(), buf, k) };
+                    peeked.drain(..k);
+                    return Ok(k as u32);
+                }
+            }
             if let Some(o) = offset {
                 os_sys::seek(f.fd, o as i64, osyx_abi::SEEK_SET).map_err(errno_to_win32)?;
             }
@@ -645,6 +655,62 @@ extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: *mut u32, o
             TRUE
         }
         Err(e) => fail(e, FALSE),
+    }
+}
+
+/// The bytes a read would return, without consuming them (a pipe only).
+/// Named pipes keep their own message model (pipes.rs); an anonymous pipe is
+/// a plain descriptor, so the available bytes move to a per-handle buffer
+/// that the next read drains first.
+extern "win64" fn PeekNamedPipe(h: u64, buf: *mut u8, n: u32, read: *mut u32, avail: *mut u32, left: *mut u32) -> Bool {
+    const ERROR_BROKEN_PIPE: u32 = 109;
+    const PEEK_CHUNK: usize = 64 * 1024;
+    match objects::get(h) {
+        Some(Object::Pipe(p)) => crate::pipes::peek_file(&p, buf, n, read, avail, left),
+        Some(Object::File(f)) if f.key.0 == objects::PIPE_DEV => {
+            if !f.access.0 {
+                return fail(ERROR_ACCESS_DENIED, FALSE);
+            }
+            let mut queued = f.peeked.lock().unwrap();
+            if queued.is_empty() {
+                let mut items = [osyx_abi::ipc::WaitItem {
+                    handle: f.fd,
+                    events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP,
+                    revents: 0,
+                }];
+                let ready = matches!(os_sys::wait_handles(&mut items, 0), Ok(n) if n > 0 && items[0].revents != 0);
+                if ready {
+                    let mut scratch = alloc::vec![0u8; PEEK_CHUNK];
+                    match os_sys::read_raw(f.fd, scratch.as_mut_ptr() as usize, scratch.len()) {
+                        Ok(0) => return fail(ERROR_BROKEN_PIPE, FALSE),
+                        Ok(k) => {
+                            scratch.truncate(k);
+                            *queued = scratch;
+                        }
+                        Err(e) => return fail(errno_to_win32(e), FALSE),
+                    }
+                }
+            }
+            let len = queued.len();
+            let k = if buf.is_null() { 0 } else { len.min(n as usize) };
+            // SAFETY: the caller's buffer of `n` bytes.
+            unsafe {
+                if k > 0 {
+                    core::ptr::copy_nonoverlapping(queued.as_ptr(), buf, k);
+                }
+                if !read.is_null() {
+                    *read = k as u32;
+                }
+                if !avail.is_null() {
+                    *avail = len as u32;
+                }
+                if !left.is_null() {
+                    *left = 0;
+                }
+            }
+            TRUE
+        }
+        _ => fail(ERROR_INVALID_HANDLE, FALSE),
     }
 }
 
@@ -3060,6 +3126,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CreateFileA,
         CreateFileW,
         ReadFile,
+        PeekNamedPipe,
         GetOverlappedResult,
         CancelIo,
         CancelIoEx,

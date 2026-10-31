@@ -175,6 +175,7 @@ static void windows_and_menus(void) {
     check("SetForegroundWindow(bogus) fails with ERROR_INVALID_WINDOW_HANDLE", !SetForegroundWindow((HWND)0x1234) && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
     SetLastError(0);
     check("BringWindowToTop(bogus) fails with ERROR_INVALID_WINDOW_HANDLE", !BringWindowToTop((HWND)0x1234) && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+    check("AllowSetForegroundWindow(ASFW_ANY) is granted", AllowSetForegroundWindow(ASFW_ANY));
     HMENU menu = CreatePopupMenu();
     SetLastError(0);
     check("TrackPopupMenu fails with ERROR_NOT_SUPPORTED instead of pretending a menu was shown",

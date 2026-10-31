@@ -39,6 +39,11 @@ pub(super) static SIGNATURES: &[Signature] = &[
     cdecl_sig!(wsprintfA, [Ptr, Ptr], I32),
     cdecl_sig!(_snprintf, [Ptr, Uint, Ptr], I32),
     cdecl_sig!(_snwprintf, [Ptr, Uint, Ptr], I32),
+    cdecl_sig!(swscanf, [Ptr, Ptr], I32),
+    // Bound to wow64::GetMainArgs32 / WGetMainArgs32: argv and environ are
+    // four-byte pointer arrays on a 32-bit caller.
+    cdecl_sig!(__getmainargs, [Ptr, Ptr, Ptr, Int, Ptr], I32),
+    cdecl_sig!(__wgetmainargs, [Ptr, Ptr, Ptr, Int, Ptr], I32),
     sig!(GetStdHandle, [Uint], Handle),
     sig!(WriteFile, [Handle, Ptr, Uint, Ptr, Ptr], I32),
     sig!(ExitProcess, [Uint], Void),
@@ -50,6 +55,7 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(CreateProcessW, [Ptr, Ptr, Ptr, Ptr, Int, Uint, Ptr, Ptr, Ptr, Ptr], U32),
     sig!(GetExitCodeThread, [Handle, Ptr], U32),
     sig!(AdjustTokenPrivileges, [Handle, Int, Ptr, Uint, Ptr, Ptr], U32),
+    sig!(AllowSetForegroundWindow, [Uint], U32),
     sig!(CloseClipboard, [], U32),
     sig!(CloseHandle, [Handle], U32),
     sig!(CallWindowProcW, [Ptr, Handle, Uint, Handle, Int], I32),
@@ -133,6 +139,8 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(ImageList_Create, [Int, Int, Uint, Int, Int], Handle),
     sig!(ImageList_AddMasked, [Handle, Handle, Uint], I32),
     sig!(ImageList_Destroy, [Handle], U32),
+    // Bound to wow64::IUnknown_QueryService32: the object is 32-bit code.
+    sig!(IUnknown_QueryService, [Ptr, Ptr, Ptr, Ptr], U32),
     sig!(InitCommonControls, [], Void),
     sig!(IsWindow, [Handle], U32),
     sig!(IsWindowEnabled, [Handle], U32),
@@ -157,6 +165,7 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(PostMessageA, [Handle, Uint, Uint, Int], U32),
     sig!(PeekMessageW, [Ptr, Handle, Uint, Uint, Uint], U32),
     sig!(PeekMessageA, [Ptr, Handle, Uint, Uint, Uint], U32),
+    sig!(PeekNamedPipe, [Handle, Ptr, Uint, Ptr, Ptr, Ptr], U32),
     sig!(ReadFile, [Handle, Ptr, Uint, Ptr, Ptr], U32),
     sig!(RegCloseKey, [Handle], U32),
     sig!(RegCreateKeyExW, [Handle, Ptr, Uint, Ptr, Uint, Uint, Handle, OutWide, Ptr], U32),
@@ -201,6 +210,8 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(SetWindowTextW, [Handle, Ptr], U32),
     sig!(SetWindowLongW, [Handle, Int, Int], I32),
     sig!(ShellExecuteW, [Handle, Ptr, Ptr, Ptr, Ptr, Int], U32),
+    // Bound to wow64::ShellExecuteExW32: SHELLEXECUTEINFOW is 60 bytes.
+    sig!(ShellExecuteExW, [Ptr], U32),
     sig!(ShowWindow, [Handle, Int], U32),
     sig!(Sleep, [Uint], Void),
     sig!(SystemParametersInfoW, [Uint, Uint, Ptr, Uint], U32),

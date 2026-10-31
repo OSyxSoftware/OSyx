@@ -81,6 +81,8 @@ mod string;
 mod time;
 mod utility;
 pub(crate) use utility::entropy;
+pub(crate) use runtime::{GetMainArgs32, WGetMainArgs32};
+pub(crate) use scan::legacy_swscanf32;
 
 pub use heap::{crt_free, crt_malloc};
 

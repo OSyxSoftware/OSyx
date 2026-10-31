@@ -396,8 +396,102 @@ extern "win64" fn IsOS(feature: u32) -> i32 {
     matches!(feature, 1 | 3 | 4 | 7 | 18 | 20 | 25 | 26 | 37) as i32
 }
 
+/// {6d5140c1-7436-11ce-8034-00aa006009fa}
+const IID_ISERVICE_PROVIDER: [u8; 16] =
+    [0xc1, 0x40, 0x51, 0x6d, 0x36, 0x74, 0xce, 0x11, 0x80, 0x34, 0x00, 0xaa, 0x00, 0x60, 0x09, 0xfa];
+const E_FAIL: u32 = 0x8000_4005;
+
+type QueryInterface = extern "win64" fn(u64, *const u8, *mut u64) -> u32;
+type QueryService = extern "win64" fn(u64, *const u8, *const u8, *mut u64) -> u32;
+type Release = extern "win64" fn(u64) -> u32;
+
+/// IUnknown_QueryService (ordinal 176): asks the object for
+/// IServiceProvider and forwards to its QueryService; an object without
+/// that interface fails with E_FAIL, as documented.
+extern "win64" fn IUnknown_QueryService(punk: u64, service: *const u8, riid: *const u8, out: *mut u64) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = 0 };
+    if punk == 0 || service.is_null() || riid.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: `punk` is a COM object: its first word is its vtable, whose
+    // first slot is QueryInterface and third is Release.
+    let (qi, release): (QueryInterface, Release) = unsafe {
+        let vtbl = *(punk as *const *const u64);
+        if vtbl.is_null() {
+            return E_FAIL;
+        }
+        (core::mem::transmute(*vtbl), core::mem::transmute(*vtbl.add(2)))
+    };
+    let mut sp = 0u64;
+    if qi(punk, IID_ISERVICE_PROVIDER.as_ptr(), &mut sp) != 0 || sp == 0 {
+        return E_FAIL;
+    }
+    // SAFETY: an IServiceProvider, whose QueryService is vtable slot 3.
+    let qs: QueryService = unsafe { core::mem::transmute(*(sp as *const *const u64).cast::<u64>().add(3)) };
+    let hr = qs(sp, service, riid, out);
+    release(sp);
+    hr
+}
+
+/// `ordinals()` value of IUnknown_QueryService, for the import mapping.
+pub(crate) fn query_service_address() -> u64 {
+    IUnknown_QueryService as *const () as u64
+}
+
+/// IUnknown_QueryService from a 32-bit caller: the object is 32-bit code,
+/// so its vtable is called through the WoW64 gate, and the interface it
+/// returns is kept in a page below 4 GiB.
+#[allow(non_snake_case)]
+pub(crate) extern "win64" fn IUnknown_QueryService32(punk: u32, service: u32, riid: u32, out: u32) -> u32 {
+    if out == 0 {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's 32-bit out pointer.
+    unsafe { core::ptr::write_unaligned(out as *mut u32, 0) };
+    if punk == 0 || service == 0 || riid == 0 {
+        return E_INVALIDARG;
+    }
+    let iid = IID_ISERVICE_PROVIDER.as_ptr() as u64;
+    assert!(iid < 1 << 32, "shlwapi: IID above 4 GiB cannot be passed to 32-bit code");
+    let Some(page) = crate::mem::alloc_pages(crate::mem::PAGE, crate::mem::Prot::ReadWrite) else {
+        return E_OUTOFMEMORY;
+    };
+    let sp_slot = page as u32;
+    let hr = (|| {
+        // SAFETY: `punk` is a COM object in the guest's address space.
+        let vtbl = unsafe { core::ptr::read_unaligned(punk as *const u32) };
+        if vtbl == 0 {
+            return E_FAIL;
+        }
+        // SAFETY: slot 0 of a COM vtable is QueryInterface.
+        let qi = unsafe { core::ptr::read_unaligned(vtbl as *const u32) };
+        if crate::wow64::call32(qi, &[punk, iid as u32, sp_slot]) != 0 {
+            return E_FAIL;
+        }
+        // SAFETY: the interface pointer the object wrote to the page.
+        let sp = unsafe { core::ptr::read_unaligned(sp_slot as *const u32) };
+        if sp == 0 {
+            return E_FAIL;
+        }
+        // SAFETY: slots 2 (Release) and 3 (QueryService) of its vtable.
+        let (release, qs) = unsafe {
+            let vtbl = core::ptr::read_unaligned(sp as *const u32);
+            (core::ptr::read_unaligned((vtbl + 8) as *const u32), core::ptr::read_unaligned((vtbl + 12) as *const u32))
+        };
+        let hr = crate::wow64::call32(qs, &[sp, service, riid, out]);
+        crate::wow64::call32(release, &[sp]);
+        hr
+    })();
+    crate::mem::free_pages(page, crate::mem::PAGE);
+    hr
+}
+
 pub fn ordinals() -> Vec<(u16, u64)> {
-    alloc::vec![(437, IsOS as *const () as u64)]
+    alloc::vec![(437, IsOS as *const () as u64), (176, query_service_address())]
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
@@ -412,6 +506,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         StrStrIW,
         AssocQueryStringW,
         IsOS,
+        IUnknown_QueryService,
     ]
 }
 

@@ -1070,6 +1070,63 @@ extern "win64" fn ShellExecuteExW(info: *mut u8) -> i32 {
 }
 
 
+/// ShellExecuteExW for a 32-bit caller: the same work, with the 60-byte
+/// SHELLEXECUTEINFOW layout and four-byte handles.
+#[allow(non_snake_case)]
+pub(crate) extern "win64" fn ShellExecuteExW32(info: *mut u8) -> i32 {
+    const SIZE32: u32 = 60;
+    const HINSTAPP32: usize = 32;
+    const HPROCESS32: usize = 56;
+    if info.is_null() {
+        crate::teb::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // SAFETY: cbSize is the first field of the caller's struct.
+    let (cb, mask) = unsafe {
+        (core::ptr::read_unaligned(info as *const u32), core::ptr::read_unaligned((info as *const u32).add(1)))
+    };
+    if cb < SIZE32 {
+        crate::teb::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // SAFETY: the validated struct has every field below; strings are NULL
+    // or NUL-terminated.
+    let (verb, file, params, dir) = unsafe {
+        let field = |at: usize| core::ptr::read_unaligned(info.add(at) as *const u32) as *const u16;
+        (
+            path::wide_to_string(field(12)),
+            path::wide_to_string(field(16)),
+            path::wide_to_string(field(20)),
+            path::wide_to_string(field(24)),
+        )
+    };
+    // SAFETY: inside the validated struct.
+    let (hinst, hprocess) = unsafe { ((info.add(HINSTAPP32) as *mut u32), (info.add(HPROCESS32) as *mut u32)) };
+    unsafe { hprocess.write_unaligned(0) };
+    let Some(file) = file else {
+        crate::teb::set_last_error(ERROR_NO_ASSOCIATION);
+        unsafe { hinst.write_unaligned(SE_ERR_FNF as u32) };
+        return 0;
+    };
+    let verb = verb.unwrap_or_default().to_ascii_lowercase();
+    match shell_launch(&verb, &file, params.as_deref(), dir.as_deref()) {
+        Ok(handle) => {
+            unsafe { hinst.write_unaligned(42) };
+            if mask & SEE_MASK_NOCLOSEPROCESS != 0 {
+                unsafe { hprocess.write_unaligned(handle as u32) };
+            } else {
+                crate::objects::close(handle);
+            }
+            1
+        }
+        Err((error, win32)) => {
+            crate::teb::set_last_error(win32);
+            unsafe { hinst.write_unaligned(error as u32) };
+            0
+        }
+    }
+}
+
 extern "win64" fn Shell_NotifyIconW(_message: u32, _data: u64) -> i32 {
     // There is no notification area: the icon cannot be added, changed or removed.
     crate::kernel32::fail(crate::error::ERROR_NOT_SUPPORTED, 0)
