@@ -145,6 +145,9 @@ pub unsafe fn set_kernel_stack(top: u64) {
 
 #[no_mangle]
 extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
+    if !process::syscall_allowed(f.rax) {
+        return osyx_abi::encode(Err(Errno::PermissionDenied));
+    }
     crate::smp::note_last_syscall(crate::smp::cached_tid(), f.rip, f.rax);
     crate::prof::note_syscall(crate::smp::cached_tid(), f.rax);
     // Read-only queries that touch nothing but scheduler state or atomics
@@ -418,7 +421,12 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             .and_then(|p| vfs::statfs(&Lookup::current(), &p))
             .and_then(|st| put_user(f.rdx, &st)),
         nr::PIPE => sys_objects::pipe(f.rdi),
+        nr::CHANNEL_PAIR => sys_objects::channel_pair(f.rdi),
         nr::SPAWN_STDIO => sys_objects::spawn_stdio(f.rdi, f.rsi),
+        nr::SPAWN_STDIO_SUSPENDED => sys_objects::spawn_stdio_suspended(f.rdi, f.rsi),
+        nr::RESUME_CHILD => process::resume_child(f.rdi),
+        nr::GRANT_CHILD_CHANNEL => process::grant_child_channel(f.rdi, f.rsi),
+        nr::SPAWN_RESTRICTED => sys_objects::spawn_restricted(f.rdi, f.rsi),
         nr::CHANNEL_LISTEN => sys_objects::channel_listen(f.rdi, f.rsi),
         nr::CHANNEL_CONNECT => sys_objects::channel_connect(f.rdi, f.rsi),
         nr::CHANNEL_ACCEPT => sys_objects::channel_accept(f.rdi),

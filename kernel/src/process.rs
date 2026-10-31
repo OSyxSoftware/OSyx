@@ -37,10 +37,12 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use osyx_abi::{auxv, startup, wow64, Errno};
+use osyx_abi::sandbox::SyscallPolicy;
 use osyx_elf::{AddressRange, ElfError, ElfImage};
 use osyx_vfs::Cred;
+use osyx_vfs::sandbox::PathPolicy;
 
 pub type Pid = u64;
 /// Parent id of processes started (or adopted) by the kernel.
@@ -361,6 +363,10 @@ pub struct Process {
     cred: Cred,
     /// Canonical absolute current directory (inherited by children).
     cwd: String,
+    /// Inherited unchanged by descendants and retained across exec.
+    path_policy: Option<Arc<PathPolicy>>,
+    syscall_policy: Option<Arc<SyscallPolicy>>,
+    primary_suspended: bool,
 }
 
 /// An open file shared by the handle table and in-flight system calls.
@@ -373,6 +379,8 @@ struct Table {
 }
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+// Once set, never cleared. Set before a filtered process becomes runnable.
+static SYSCALL_FILTERS_EXIST: AtomicBool = AtomicBool::new(false);
 static TABLE: IrqSpinLock<Table> = IrqSpinLock::new(Table { procs: BTreeMap::new(), waiters: Vec::new() });
 /// Open objects by process and handle number: 0-2 only if standard streams
 /// were redirected at spawn, the rest from `FIRST_FILE_HANDLE`. Separate from
@@ -518,6 +526,7 @@ fn user_thread_entry(start: u64, _: u64) {
     let s = unsafe { alloc::boxed::Box::from_raw(start as *mut UserStart) };
     let (rip, rsp, arg) = (s.rip, s.rsp, s.arg);
     drop(s);
+    if sched::current_kill_pending() { finish_current_thread(0); }
     // SAFETY: the entry and stack lie in the user half of the address space
     // that is active for this thread; a bad value only faults in ring 3.
     unsafe { osyx_iret_to_user(rip, rsp, arg) }
@@ -525,9 +534,9 @@ fn user_thread_entry(start: u64, _: u64) {
 
 /// Creates a thread of process `p` (caller holds no locks and has
 /// interrupts disabled, so the tid is recorded before the thread can run).
-fn start_thread(p: &mut Process, rip: u64, rsp: u64, arg: u64, fs_base: u64) -> Tid {
+fn start_thread(p: &mut Process, rip: u64, rsp: u64, arg: u64, fs_base: u64, held: bool) -> Tid {
     let start = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(UserStart { rip, rsp, arg })) as u64;
-    let tid = sched::spawn(&p.name, p.pid, p.space.root, user_thread_entry, start, 0, fs_base);
+    let tid = sched::spawn_initial(&p.name, p.pid, p.space.root, user_thread_entry, start, 0, fs_base, held);
     p.threads.push(tid);
     tid
 }
@@ -542,7 +551,7 @@ fn report_release(pid: Pid, name: &str, what: &str, (owned, freed): (u64, u64)) 
 }
 
 impl Process {
-    fn new(parent: Pid, name: &str, cred: Cred, cwd: String, mut space: Space) -> Process {
+    fn new(parent: Pid, name: &str, cx: Lookup, syscall_policy: Option<Arc<SyscallPolicy>>, mut space: Space) -> Process {
         let program_shared = core::mem::take(&mut space.program_shared);
         Process {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
@@ -560,9 +569,16 @@ impl Process {
             threads: Vec::new(),
             exited_cpu_ticks: 0,
             exit_status: None,
-            cred,
-            cwd,
+            cred: cx.cred,
+            cwd: cx.cwd,
+            path_policy: cx.path_policy,
+            syscall_policy,
+            primary_suspended: false,
         }
+    }
+
+    fn lookup(&self) -> Lookup {
+        Lookup { cred: self.cred, cwd: self.cwd.clone(), case_insensitive: false, path_policy: self.path_policy.clone() }
     }
 
     /// Removes every shared memory mapping (the frames stay with their
@@ -652,18 +668,86 @@ pub fn spawn(parent: Pid, req: &ExecRequest) -> Result<Pid, ExecError> {
 
 /// [`spawn`] with the child's handles 0, 1 and 2 set to `stdio`.
 pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 3]) -> Result<Pid, ExecError> {
+    spawn_impl(parent, req, stdio, None, None, Vec::new(), false)
+}
+
+pub fn spawn_with_stdio_suspended(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 3]) -> Result<Pid, ExecError> {
+    spawn_impl(parent, req, stdio, None, None, Vec::new(), true)
+}
+
+/// Resume the initial thread of a direct child; return its previous hold count.
+pub fn resume_child(pid: Pid) -> Result<u64, Errno> {
+    let me = sched::current_pid();
+    let mut table = TABLE.lock();
+    let p = table.procs.get_mut(&pid).ok_or(Errno::NotFound)?;
+    if p.parent != me { return Err(Errno::PermissionDenied); }
+    if p.life != Life::Running || p.exit_status.is_some() { return Err(Errno::NotFound); }
+    if !p.primary_suspended { return Ok(0); }
+    let tid = *p.threads.first().ok_or(Errno::NotFound)?;
+    p.primary_suspended = false;
+    sched::wake_boosted(tid, 0);
+    Ok(1)
+}
+
+/// Starts a kernel-owned child with both restrictions installed before image
+/// loading and before the first user instruction. This is an internal testing
+/// hook, not a userspace API or a complete browser sandbox. No handles are
+/// inherited; syscall and path rules must be supplied together.
+pub(crate) fn spawn_kernel_restricted(
+    req: &ExecRequest,
+    paths: Arc<PathPolicy>,
+    syscalls: Arc<SyscallPolicy>,
+) -> Result<Pid, ExecError> {
+    spawn_impl(KERNEL_PID, req, [None, None, None], Some((paths, syscalls)), None, Vec::new(), false)
+}
+
+/// An unrestricted parent may choose restrictions for its new child.
+/// A restricted parent cannot replace or widen its inherited policy.
+pub(crate) fn spawn_restricted(parent: Pid, req: &ExecRequest, paths: Arc<PathPolicy>, syscalls: Arc<SyscallPolicy>, broker: Option<Object>, channels: Vec<Object>, suspended: bool) -> Result<Pid, ExecError> {
+    spawn_impl(parent, req, [None, None, None], Some((paths, syscalls)), broker, channels, suspended)
+}
+
+fn spawn_impl(
+    parent: Pid,
+    req: &ExecRequest,
+    stdio: [Option<Object>; 3],
+    restrictions: Option<(Arc<PathPolicy>, Arc<SyscallPolicy>)>,
+    broker: Option<Object>,
+    channels: Vec<Object>,
+    suspended: bool,
+) -> Result<Pid, ExecError> {
     if TABLE.lock().procs.len() >= MAX_PROCESSES {
         return Err(ExecError::TooManyProcesses);
     }
-    let cx = {
+    let (mut cx, mut syscall_policy) = {
         let t = TABLE.lock();
         match t.procs.get(&parent) {
-            Some(p) => Lookup { cred: p.cred, cwd: p.cwd.clone(), case_insensitive: false },
-            None => Lookup::kernel(),
+            Some(p) => (p.lookup(), p.syscall_policy.clone()),
+            None if parent == KERNEL_PID => (Lookup::kernel(), None),
+            None => return Err(ExecError::Load(Errno::NotFound)),
         }
     };
+    if let Some((paths, syscalls)) = restrictions {
+        // A restricted process can never replace its inherited restrictions.
+        if cx.path_policy.is_some() || syscall_policy.is_some() {
+            return Err(ExecError::Load(Errno::PermissionDenied));
+        }
+        cx.path_policy = Some(paths);
+        syscall_policy = Some(syscalls);
+    }
+    // File handles can outlive a rename or originate outside the child's
+    // view. Pipes remain available for explicit parent-child communication.
+    if cx.path_policy.is_some() && stdio.iter().flatten().any(|o| !matches!(o, Object::Pipe(_))) {
+        return Err(ExecError::Load(Errno::PermissionDenied));
+    }
+    if broker.as_ref().is_some_and(|o| !matches!(o, Object::Channel(_))) {
+        return Err(ExecError::Load(Errno::InvalidArgument));
+    }
     let (space, entry, rsp, path) = build_image(&cx, req)?;
-    let mut p = Process::new(parent, req.name(), cx.cred, cx.cwd, space);
+    let mut p = Process::new(parent, req.name(), cx, syscall_policy, space);
+    if p.syscall_policy.is_some() {
+        SYSCALL_FILTERS_EXIST.store(true, Ordering::Release);
+    }
     let pid = p.pid;
     {
         let mut handles = HANDLES.lock();
@@ -672,6 +756,12 @@ pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 
             if let Some(o) = o {
                 table.insert(i as u64, o);
             }
+        }
+        if let Some(channel) = broker {
+            table.insert(osyx_abi::FIRST_FILE_HANDLE, channel);
+        }
+        for (i, channel) in channels.into_iter().enumerate() {
+            table.insert(osyx_abi::FIRST_FILE_HANDLE + 1 + i as u64, channel);
         }
     }
     if p.name == "winrun" && !req.argv.iter().any(|a| a == "-contentproc") {
@@ -697,8 +787,10 @@ pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 
     // process and its thread list are in the table.
     let were_enabled = cpu::interrupts_enabled();
     cpu::disable_interrupts();
-    start_thread(&mut p, entry, rsp, 0, 0);
+    let tid = start_thread(&mut p, entry, rsp, 0, 0, true);
+    p.primary_suspended = suspended;
     TABLE.lock().procs.insert(pid, p);
+    if !suspended { sched::wake_boosted(tid, 0); }
     if were_enabled {
         cpu::enable_interrupts();
     }
@@ -722,7 +814,7 @@ pub fn spawn_thread(entry: u64, stack_top: u64, arg: u64, fs_base: u64) -> Resul
         match t.procs.get_mut(&pid) {
             Some(p) if p.exit_status.is_some() => Err(Errno::Interrupted),
             Some(p) if p.threads.len() >= osyx_abi::MAX_THREADS => Err(Errno::NoMemory),
-            Some(p) => Ok(start_thread(p, entry, stack_top, arg, fs_base)),
+            Some(p) => Ok(start_thread(p, entry, stack_top, arg, fs_base, false)),
             None => Err(Errno::NotSupported),
         }
     };
@@ -896,6 +988,7 @@ pub fn finish_current_thread(code: i32) -> ! {
     sched::set_current_root(paging::kernel_root());
     crate::futex::forget_process(pid);
     let mut to_wake = Vec::new();
+    let mut held_orphans = Vec::new();
     let closed = HANDLES.lock().remove(&pid).unwrap_or_default();
     {
         let mut t = TABLE.lock();
@@ -919,6 +1012,12 @@ pub fn finish_current_thread(code: i32) -> ! {
         for c in procs.values_mut().filter(|c| c.parent == pid) {
             c.parent = KERNEL_PID;
             c.orphan = true;
+            // No process can resume an orphaned initial thread. Reap it
+            // without running user code rather than leaking it forever.
+            if c.primary_suspended {
+                c.exit_status.get_or_insert(osyx_abi::KILLED_STATUS);
+                held_orphans.extend(c.threads.iter().copied());
+            }
         }
         if orphan {
             procs.remove(&pid);
@@ -933,6 +1032,7 @@ pub fn finish_current_thread(code: i32) -> ! {
             });
         }
     }
+    for tid in held_orphans { sched::request_kill(tid); }
     // Volume metadata is written through, so dropping the files needs no I/O.
     // Pipe and channel ends wake their peers as they go.
     drop(closed);
@@ -971,6 +1071,28 @@ pub fn add_objects(objects: Vec<Object>) -> Result<Vec<u64>, Errno> {
 
 pub fn add_object(o: Object) -> Result<u64, Errno> {
     add_objects(alloc::vec![o]).map(|v| v[0])
+}
+
+/// Grant only an existing channel to a live restricted direct child. Holding
+/// the process table lock prevents the child from entering final cleanup
+/// between the liveness check and insertion into its handle table.
+pub fn grant_child_channel(pid: Pid, handle: u64) -> Result<u64, Errno> {
+    let me = sched::current_pid();
+    let object = get_object(handle)?;
+    if !matches!(object, Object::Channel(_)) { return Err(Errno::InvalidArgument); }
+    let table = TABLE.lock();
+    let parent = table.procs.get(&me).ok_or(Errno::PermissionDenied)?;
+    if parent.path_policy.is_some() { return Err(Errno::PermissionDenied); }
+    let child = table.procs.get(&pid).ok_or(Errno::NotFound)?;
+    if child.parent != me || child.path_policy.is_none() { return Err(Errno::PermissionDenied); }
+    if child.life != Life::Running || child.threads.is_empty() || child.exit_status.is_some() { return Err(Errno::NotFound); }
+    let mut handles = HANDLES.lock();
+    let target = handles.get_mut(&pid).ok_or(Errno::NotFound)?;
+    if target.len() >= osyx_abi::MAX_HANDLES { return Err(Errno::TooManyHandles); }
+    let mut h = osyx_abi::FIRST_FILE_HANDLE;
+    while target.contains_key(&h) { h += 1; }
+    target.insert(h, object);
+    Ok(h)
 }
 
 /// The open file behind handle `h` (`BadHandle` for other objects).
@@ -1089,6 +1211,12 @@ pub fn kill(pid: Pid) -> Result<(), Errno> {
     let (my_cred, _) = current_identity();
     let threads: Vec<Tid> = {
         let mut t = TABLE.lock();
+        // A restricted process may terminate itself or its direct children,
+        // never its broker or another process with the same uid.
+        let restricted = t.procs.get(&me).is_none_or(|p| p.path_policy.is_some());
+        if restricted && pid != me && !t.procs.get(&pid).is_some_and(|p| p.parent == me) {
+            return Err(Errno::PermissionDenied);
+        }
         let p = t.procs.get_mut(&pid).ok_or(Errno::NotFound)?;
         if !my_cred.is_root() && p.cred.uid != my_cred.uid {
             return Err(Errno::PermissionDenied);
@@ -2145,6 +2273,42 @@ pub fn current_identity() -> (Cred, String) {
     let pid = sched::current_pid();
     let t = TABLE.lock();
     t.procs.get(&pid).map_or((Cred::ROOT, String::from("/")), |p| (p.cred, p.cwd.clone()))
+}
+
+/// Takes one snapshot of the current process's identity and path policy.
+/// Kernel threads use the unrestricted kernel lookup. A missing non-kernel
+/// process receives a deny-all policy rather than losing its restrictions.
+pub fn current_lookup() -> Lookup {
+    let pid = sched::current_pid();
+    let t = TABLE.lock();
+    match t.procs.get(&pid) {
+        Some(p) => p.lookup(),
+        None if pid == KERNEL_PID => Lookup::kernel(),
+        None => Lookup { path_policy: Some(Arc::new(PathPolicy::default())), ..Lookup::kernel() },
+    }
+}
+
+/// Check before every dispatcher path, including paths that avoid the entry lock.
+pub fn syscall_allowed(number: u64) -> bool {
+    if !SYSCALL_FILTERS_EXIST.load(Ordering::Acquire) {
+        return true;
+    }
+    let pid = sched::current_pid();
+    let t = TABLE.lock();
+    match t.procs.get(&pid) {
+        Some(p) => p.syscall_policy.as_ref().is_none_or(|policy| policy.allows(number)),
+        None => pid == KERNEL_PID,
+    }
+}
+
+/// Missing non-kernel processes fail closed.
+pub fn current_path_restricted() -> bool {
+    let pid = sched::current_pid();
+    let t = TABLE.lock();
+    match t.procs.get(&pid) {
+        Some(p) => p.path_policy.is_some(),
+        None => pid != KERNEL_PID,
+    }
 }
 
 pub fn set_current_cwd(cwd: String) -> Result<(), Errno> {
