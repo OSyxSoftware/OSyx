@@ -1468,6 +1468,10 @@ extern "win64" fn ResumeThread(h: u64) -> u32 {
             }
             prev
         }
+        Some(Object::Process(p)) => match crate::process::resume_primary(&p) {
+            Ok(count) => count,
+            Err(e) => fail(e, u32::MAX),
+        },
         _ => fail(ERROR_INVALID_HANDLE, u32::MAX),
     }
 }

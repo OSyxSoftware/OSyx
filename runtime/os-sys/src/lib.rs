@@ -646,6 +646,15 @@ mod imp {
         decode(syscall2(nr::SPAWN_STDIO, &a as *const osyx_abi::ExecArgs as u64, stdio.as_ptr() as u64))
     }
 
+    pub fn spawn_stdio_suspended(path: &str, argv: &[u8], envp: &[u8], stdio: [u64; 3]) -> Result<u64, Errno> {
+        let a = exec_args(path, argv, envp);
+        decode(syscall2(nr::SPAWN_STDIO_SUSPENDED, &a as *const osyx_abi::ExecArgs as u64, stdio.as_ptr() as u64))
+    }
+
+    pub fn resume_child(pid: u64) -> Result<u64, Errno> {
+        decode(syscall1(nr::RESUME_CHILD, pid))
+    }
+
     /// Starts a child with experimental path and syscall policies. This does
     /// not yet provide a complete security boundary.
     /// The caller must keep each path referenced by `paths` alive for the call.
@@ -655,6 +664,10 @@ mod imp {
 
     /// As `spawn_restricted`, granting one existing channel as child handle 3.
     pub fn spawn_restricted_with_broker(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64) -> Result<u64, Errno> {
+        spawn_restricted_with_options(path, argv, envp, paths, syscalls, broker, 0)
+    }
+
+    pub fn spawn_restricted_with_options(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64, flags: u64) -> Result<u64, Errno> {
         let a = exec_args(path, argv, envp);
         let policy = osyx_abi::sandbox::SpawnPolicy {
             paths: paths.as_ptr() as u64,
@@ -662,6 +675,7 @@ mod imp {
             syscalls: syscalls.as_ptr() as u64,
             syscall_count: syscalls.len() as u64,
             broker_handle: broker,
+            flags,
         };
         decode(syscall2(nr::SPAWN_RESTRICTED, &a as *const _ as u64, &policy as *const _ as u64))
     }

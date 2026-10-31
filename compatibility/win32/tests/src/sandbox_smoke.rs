@@ -17,6 +17,7 @@ unsafe extern "system" {
     fn CloseHandle(handle: u64) -> i32;
     fn CreateEventW(attributes: usize, manual: i32, initial: i32, name: *const u16) -> u64;
     fn SetHandleInformation(handle: u64, mask: u32, flags: u32) -> i32;
+    fn ResumeThread(handle: u64) -> u32;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -29,6 +30,7 @@ pub extern "system" fn start() -> ! {
             if *p == b'-' as u16 { child = true; break; }
             p = p.add(1);
         }
+        if child && *p.add(1) == b'h' as u16 { ExitProcess(7); }
         let mut secret = [0u16; 64];
         for (i, b) in b"C:\\tmp\\sandbox-winrun-secret".iter().enumerate() { *secret.as_mut_ptr().add(i) = *b as u16; }
         let file = CreateFileW(secret.as_ptr(), 0x8000_0000, 7, 0, 3, 0, 0);
@@ -47,6 +49,19 @@ pub extern "system" fn start() -> ! {
         if file == u64::MAX { ExitProcess(13); }
         let _ = CloseHandle(file);
         let app: [u16; 20] = [67,58,92,111,112,116,92,122,101,110,92,122,101,110,46,101,120,101,0,0];
+        let mut held_cmd = [0u16; 64];
+        for (i, b) in b"C:\\opt\\zen\\zen.exe -holdchild".iter().enumerate() { *held_cmd.as_mut_ptr().add(i) = *b as u16; }
+        let mut held_startup = [0u64; 13];
+        held_startup[0] = 104;
+        let mut held_info = [0u64; 3];
+        if CreateProcessW(app.as_ptr(), held_cmd.as_mut_ptr(), 0, 0, 0, 4, 0, 0, held_startup.as_ptr() as *const u8, held_info.as_mut_ptr()) == 0 { ExitProcess(18); }
+        if WaitForSingleObject(held_info[0], 0) != 258 { ExitProcess(19); }
+        if ResumeThread(held_info[1]) != 1 { ExitProcess(20); }
+        if WaitForSingleObject(held_info[0], 20_000) != 0 { ExitProcess(21); }
+        let mut held_code = 0;
+        if GetExitCodeProcess(held_info[0], &mut held_code) == 0 || held_code != 7 { ExitProcess(22); }
+        let _ = CloseHandle(held_info[0]);
+        let _ = CloseHandle(held_info[1]);
         let event = CreateEventW(0, 1, 1, core::ptr::null());
         if event == 0 || SetHandleInformation(event, 1, 1) == 0 { ExitProcess(17); }
         let mut cmd = [0u16; 64];
@@ -60,9 +75,10 @@ pub extern "system" fn start() -> ! {
         let mut startup = [0u64; 13];
         startup[0] = 104;
         let mut info = [0u64; 3];
-        if CreateProcessW(app.as_ptr(), cmd.as_mut_ptr(), 0, 0, 1, 0, 0, 0, startup.as_ptr() as *const u8, info.as_mut_ptr()) == 0 {
+        if CreateProcessW(app.as_ptr(), cmd.as_mut_ptr(), 0, 0, 1, 4, 0, 0, startup.as_ptr() as *const u8, info.as_mut_ptr()) == 0 {
             ExitProcess(10);
         }
+        if WaitForSingleObject(info[0], 0) != 258 || ResumeThread(info[1]) != 1 { ExitProcess(23); }
         if WaitForSingleObject(info[0], 20_000) != 0 { ExitProcess(11); }
         let mut code = 0;
         if GetExitCodeProcess(info[0], &mut code) == 0 || code != 0 { ExitProcess(12); }

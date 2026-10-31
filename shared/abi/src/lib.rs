@@ -384,6 +384,10 @@ pub mod nr {
     pub const SPAWN_RESTRICTED: u64 = 97;
     /// `channel_pair(out: *mut [u64; 2]) -> 0`: anonymous connected endpoints.
     pub const CHANNEL_PAIR: u64 = 98;
+    /// Start a child with redirected streams and its initial thread held.
+    pub const SPAWN_STDIO_SUSPENDED: u64 = 99;
+    /// Resume a direct child's initial thread; return the previous hold count.
+    pub const RESUME_CHILD: u64 = 100;
 }
 
 /// Thread priorities (`nr::THREAD_PRIORITY`).

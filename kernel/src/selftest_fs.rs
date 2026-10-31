@@ -590,6 +590,16 @@ pub fn restricted_process() -> TestResult {
     Ok(())
 }
 
+/// Verify a held child cannot execute before resume or after termination.
+pub fn suspended_process() -> TestResult {
+    use crate::{exec::ExecRequest, process};
+    let req = ExecRequest::new("/bin/worker", &["worker", "suspend-test"], &[]).map_err(|err| e("request", err))?;
+    let pid = process::spawn(process::KERNEL_PID, &req).map_err(|err| format!("spawn: {err}"))?;
+    let (_, status) = process::wait(process::KERNEL_PID, pid).map_err(|err| e("wait", err))?;
+    ensure!(status == 0, "suspended process test exited with status {status}");
+    Ok(())
+}
+
 /// Run only in an explicitly requested test boot with a fixture, never replace
 /// an installed browser. The caller supplies winrun and sandboxpe modules.
 pub fn restricted_winrun() -> TestResult {

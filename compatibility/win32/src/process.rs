@@ -36,7 +36,7 @@ pub struct ProcessObj {
 static CHILDREN: Mutex<Vec<Arc<ProcessObj>>> = Mutex::new(Vec::new());
 
 /// Experimental deny-by-default profile. It is not a validated Gecko policy.
-fn spawn_content_candidate(path: &str, argv: &[u8], env: &[u8], channel: u64) -> Result<u64, osyx_abi::Errno> {
+fn spawn_content_candidate(path: &str, argv: &[u8], env: &[u8], channel: u64, suspended: bool) -> Result<u64, osyx_abi::Errno> {
     use osyx_abi::{nr, sandbox::{PathRule, PATH_EXEC, PATH_READ}};
     let prefixes = ["/bin", "/opt/zen", "/system", "/Windows", "/usr", "/etc"];
     let rules: Vec<PathRule> = prefixes.iter().map(|p| PathRule {
@@ -53,11 +53,17 @@ fn spawn_content_candidate(path: &str, argv: &[u8], env: &[u8], channel: u64) ->
         nr::PREFAULT, nr::TIME_CALIB, nr::IMAGE_MAP, nr::IMAGE_QUERY, nr::THREAD_PRIORITY,
         nr::FUTEX_WAIT_OWNED, nr::SET_FS32_BASE,
     ];
-    os_sys::spawn_restricted_with_broker(path, argv, env, &rules, &calls, channel)
+    let flags = if suspended { osyx_abi::sandbox::SPAWN_SUSPENDED } else { 0 };
+    os_sys::spawn_restricted_with_options(path, argv, env, &rules, &calls, channel, flags)
 }
 
 pub fn exit_code(p: &ProcessObj) -> u32 {
     if p.done.load(Ordering::SeqCst) { p.exit_code.load(Ordering::SeqCst) } else { STILL_ACTIVE }
+}
+
+pub fn resume_primary(p: &ProcessObj) -> Result<u32, u32> {
+    if !p.child || p.done.load(Ordering::SeqCst) { return Err(ERROR_ACCESS_DENIED); }
+    os_sys::resume_child(p.pid).map(|n| n as u32).map_err(errno_to_win32)
 }
 
 pub fn terminate(p: &ProcessObj, _code: u32) -> Result<(), u32> {
@@ -243,7 +249,7 @@ pub(crate) extern "win64" fn CreateProcessW(
     if let Err(e) = crate::security::validate_attributes(psa).and_then(|()| crate::security::validate_attributes(tsa)) {
         return fail(e, 0);
     }
-    if flags & (CREATE_SUSPENDED | DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS) != 0 {
+    if flags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS) != 0 {
         if crate::VERBOSE.load(Ordering::Relaxed) {
             os_std::eprintln!("winrun: CreateProcessW unsupported creation flags {flags:#x}");
         }
@@ -364,12 +370,20 @@ pub(crate) extern "win64" fn CreateProcessW(
     let console = streams.map(|(h, console)| if console { os_sys::HANDLE_NONE } else { h });
     let spawned = match child_channel {
         Some(channel) => {
-            let result = spawn_content_candidate(&path, &argv, &environment, channel);
+            let result = spawn_content_candidate(&path, &argv, &environment, channel, flags & CREATE_SUSPENDED != 0);
             let _ = os_sys::close(channel);
             result
         }
-        None => match os_sys::spawn_stdio(&path, &argv, &environment, stdio) {
-            Err(osyx_abi::Errno::BadHandle) if console != stdio => os_sys::spawn_stdio(&path, &argv, &environment, console),
+        None => match if flags & CREATE_SUSPENDED != 0 {
+            os_sys::spawn_stdio_suspended(&path, &argv, &environment, stdio)
+        } else {
+            os_sys::spawn_stdio(&path, &argv, &environment, stdio)
+        } {
+            Err(osyx_abi::Errno::BadHandle) if console != stdio => if flags & CREATE_SUSPENDED != 0 {
+                os_sys::spawn_stdio_suspended(&path, &argv, &environment, console)
+            } else {
+                os_sys::spawn_stdio(&path, &argv, &environment, console)
+            },
             r => r,
         },
     };

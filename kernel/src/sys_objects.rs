@@ -70,6 +70,14 @@ pub fn channel_pair(out: u64) -> Result<u64, Errno> {
 }
 
 pub fn spawn_stdio(args: u64, stdio: u64) -> Result<u64, Errno> {
+    spawn_stdio_impl(args, stdio, false)
+}
+
+pub fn spawn_stdio_suspended(args: u64, stdio: u64) -> Result<u64, Errno> {
+    spawn_stdio_impl(args, stdio, true)
+}
+
+fn spawn_stdio_impl(args: u64, stdio: u64, suspended: bool) -> Result<u64, Errno> {
     let req = ExecRequest::from_user(args)?;
     let raw: [u64; 3] = get_user(stdio)?;
     let mut objs: [Option<Object>; 3] = [None, None, None];
@@ -82,17 +90,21 @@ pub fn spawn_stdio(args: u64, stdio: u64) -> Result<u64, Errno> {
             objs[i] = Some(o);
         }
     }
-    process::spawn_with_stdio(sched::current_pid(), &req, objs).map_err(|e| e.errno())
+    if suspended {
+        process::spawn_with_stdio_suspended(sched::current_pid(), &req, objs).map_err(|e| e.errno())
+    } else {
+        process::spawn_with_stdio(sched::current_pid(), &req, objs).map_err(|e| e.errno())
+    }
 }
 
 pub fn spawn_restricted(args: u64, policy: u64) -> Result<u64, Errno> {
-    use osyx_abi::sandbox::{PathRule, SpawnPolicy, SyscallPolicy, MAX_PATH_RULES, MAX_SYSCALL_RULES, PATH_EXEC, PATH_READ, PATH_WRITE};
+    use osyx_abi::sandbox::{PathRule, SpawnPolicy, SyscallPolicy, MAX_PATH_RULES, MAX_SYSCALL_RULES, PATH_EXEC, PATH_READ, PATH_WRITE, SPAWN_SUSPENDED};
     use osyx_vfs::{sandbox::PathPolicy, Access};
     if process::current_path_restricted() {
         return Err(Errno::PermissionDenied);
     }
     let p: SpawnPolicy = get_user(policy)?;
-    if p.path_count > MAX_PATH_RULES || p.syscall_count > MAX_SYSCALL_RULES {
+    if p.path_count > MAX_PATH_RULES || p.syscall_count > MAX_SYSCALL_RULES || p.flags & !SPAWN_SUSPENDED != 0 {
         return Err(Errno::InvalidArgument);
     }
     let broker = if p.broker_handle == HANDLE_NONE {
@@ -126,7 +138,7 @@ pub fn spawn_restricted(args: u64, policy: u64) -> Result<u64, Errno> {
         copy_from_user(bytes, p.syscalls)?;
     }
     let req = ExecRequest::from_user(args)?;
-    process::spawn_restricted(sched::current_pid(), &req, paths, Arc::new(SyscallPolicy::new(&allowed)), broker).map_err(|e| e.errno())
+    process::spawn_restricted(sched::current_pid(), &req, paths, Arc::new(SyscallPolicy::new(&allowed)), broker, p.flags & SPAWN_SUSPENDED != 0).map_err(|e| e.errno())
 }
 
 /// Reads standard input (handle 0) when it was redirected.

@@ -391,6 +391,8 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::PIPE => sys_objects::pipe(f.rdi),
         nr::CHANNEL_PAIR => sys_objects::channel_pair(f.rdi),
         nr::SPAWN_STDIO => sys_objects::spawn_stdio(f.rdi, f.rsi),
+        nr::SPAWN_STDIO_SUSPENDED => sys_objects::spawn_stdio_suspended(f.rdi, f.rsi),
+        nr::RESUME_CHILD => process::resume_child(f.rdi),
         nr::SPAWN_RESTRICTED => sys_objects::spawn_restricted(f.rdi, f.rsi),
         nr::CHANNEL_LISTEN => sys_objects::channel_listen(f.rdi, f.rsi),
         nr::CHANNEL_CONNECT => sys_objects::channel_connect(f.rdi, f.rsi),

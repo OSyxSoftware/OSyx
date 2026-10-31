@@ -366,6 +366,7 @@ pub struct Process {
     /// Inherited unchanged by descendants and retained across exec.
     path_policy: Option<Arc<PathPolicy>>,
     syscall_policy: Option<Arc<SyscallPolicy>>,
+    primary_suspended: bool,
 }
 
 /// An open file shared by the handle table and in-flight system calls.
@@ -525,6 +526,7 @@ fn user_thread_entry(start: u64, _: u64) {
     let s = unsafe { alloc::boxed::Box::from_raw(start as *mut UserStart) };
     let (rip, rsp, arg) = (s.rip, s.rsp, s.arg);
     drop(s);
+    if sched::current_kill_pending() { finish_current_thread(0); }
     // SAFETY: the entry and stack lie in the user half of the address space
     // that is active for this thread; a bad value only faults in ring 3.
     unsafe { osyx_iret_to_user(rip, rsp, arg) }
@@ -532,9 +534,9 @@ fn user_thread_entry(start: u64, _: u64) {
 
 /// Creates a thread of process `p` (caller holds no locks and has
 /// interrupts disabled, so the tid is recorded before the thread can run).
-fn start_thread(p: &mut Process, rip: u64, rsp: u64, arg: u64, fs_base: u64) -> Tid {
+fn start_thread(p: &mut Process, rip: u64, rsp: u64, arg: u64, fs_base: u64, held: bool) -> Tid {
     let start = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(UserStart { rip, rsp, arg })) as u64;
-    let tid = sched::spawn(&p.name, p.pid, p.space.root, user_thread_entry, start, 0, fs_base);
+    let tid = sched::spawn_initial(&p.name, p.pid, p.space.root, user_thread_entry, start, 0, fs_base, held);
     p.threads.push(tid);
     tid
 }
@@ -571,6 +573,7 @@ impl Process {
             cwd: cx.cwd,
             path_policy: cx.path_policy,
             syscall_policy,
+            primary_suspended: false,
         }
     }
 
@@ -665,7 +668,25 @@ pub fn spawn(parent: Pid, req: &ExecRequest) -> Result<Pid, ExecError> {
 
 /// [`spawn`] with the child's handles 0, 1 and 2 set to `stdio`.
 pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 3]) -> Result<Pid, ExecError> {
-    spawn_impl(parent, req, stdio, None, None)
+    spawn_impl(parent, req, stdio, None, None, false)
+}
+
+pub fn spawn_with_stdio_suspended(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 3]) -> Result<Pid, ExecError> {
+    spawn_impl(parent, req, stdio, None, None, true)
+}
+
+/// Resume the initial thread of a direct child; return its previous hold count.
+pub fn resume_child(pid: Pid) -> Result<u64, Errno> {
+    let me = sched::current_pid();
+    let mut table = TABLE.lock();
+    let p = table.procs.get_mut(&pid).ok_or(Errno::NotFound)?;
+    if p.parent != me { return Err(Errno::PermissionDenied); }
+    if p.life != Life::Running || p.exit_status.is_some() { return Err(Errno::NotFound); }
+    if !p.primary_suspended { return Ok(0); }
+    let tid = *p.threads.first().ok_or(Errno::NotFound)?;
+    p.primary_suspended = false;
+    sched::wake_boosted(tid, 0);
+    Ok(1)
 }
 
 /// Starts a kernel-owned child with both restrictions installed before image
@@ -677,13 +698,13 @@ pub(crate) fn spawn_kernel_restricted(
     paths: Arc<PathPolicy>,
     syscalls: Arc<SyscallPolicy>,
 ) -> Result<Pid, ExecError> {
-    spawn_impl(KERNEL_PID, req, [None, None, None], Some((paths, syscalls)), None)
+    spawn_impl(KERNEL_PID, req, [None, None, None], Some((paths, syscalls)), None, false)
 }
 
 /// An unrestricted parent may choose restrictions for its new child.
 /// A restricted parent cannot replace or widen its inherited policy.
-pub(crate) fn spawn_restricted(parent: Pid, req: &ExecRequest, paths: Arc<PathPolicy>, syscalls: Arc<SyscallPolicy>, broker: Option<Object>) -> Result<Pid, ExecError> {
-    spawn_impl(parent, req, [None, None, None], Some((paths, syscalls)), broker)
+pub(crate) fn spawn_restricted(parent: Pid, req: &ExecRequest, paths: Arc<PathPolicy>, syscalls: Arc<SyscallPolicy>, broker: Option<Object>, suspended: bool) -> Result<Pid, ExecError> {
+    spawn_impl(parent, req, [None, None, None], Some((paths, syscalls)), broker, suspended)
 }
 
 fn spawn_impl(
@@ -692,6 +713,7 @@ fn spawn_impl(
     stdio: [Option<Object>; 3],
     restrictions: Option<(Arc<PathPolicy>, Arc<SyscallPolicy>)>,
     broker: Option<Object>,
+    suspended: bool,
 ) -> Result<Pid, ExecError> {
     if TABLE.lock().procs.len() >= MAX_PROCESSES {
         return Err(ExecError::TooManyProcesses);
@@ -761,8 +783,10 @@ fn spawn_impl(
     // process and its thread list are in the table.
     let were_enabled = cpu::interrupts_enabled();
     cpu::disable_interrupts();
-    start_thread(&mut p, entry, rsp, 0, 0);
+    let tid = start_thread(&mut p, entry, rsp, 0, 0, true);
+    p.primary_suspended = suspended;
     TABLE.lock().procs.insert(pid, p);
+    if !suspended { sched::wake_boosted(tid, 0); }
     if were_enabled {
         cpu::enable_interrupts();
     }
@@ -786,7 +810,7 @@ pub fn spawn_thread(entry: u64, stack_top: u64, arg: u64, fs_base: u64) -> Resul
         match t.procs.get_mut(&pid) {
             Some(p) if p.exit_status.is_some() => Err(Errno::Interrupted),
             Some(p) if p.threads.len() >= osyx_abi::MAX_THREADS => Err(Errno::NoMemory),
-            Some(p) => Ok(start_thread(p, entry, stack_top, arg, fs_base)),
+            Some(p) => Ok(start_thread(p, entry, stack_top, arg, fs_base, false)),
             None => Err(Errno::NotSupported),
         }
     };
@@ -960,6 +984,7 @@ pub fn finish_current_thread(code: i32) -> ! {
     sched::set_current_root(paging::kernel_root());
     crate::futex::forget_process(pid);
     let mut to_wake = Vec::new();
+    let mut held_orphans = Vec::new();
     let closed = HANDLES.lock().remove(&pid).unwrap_or_default();
     {
         let mut t = TABLE.lock();
@@ -983,6 +1008,12 @@ pub fn finish_current_thread(code: i32) -> ! {
         for c in procs.values_mut().filter(|c| c.parent == pid) {
             c.parent = KERNEL_PID;
             c.orphan = true;
+            // No process can resume an orphaned initial thread. Reap it
+            // without running user code rather than leaking it forever.
+            if c.primary_suspended {
+                c.exit_status.get_or_insert(osyx_abi::KILLED_STATUS);
+                held_orphans.extend(c.threads.iter().copied());
+            }
         }
         if orphan {
             procs.remove(&pid);
@@ -997,6 +1028,7 @@ pub fn finish_current_thread(code: i32) -> ! {
             });
         }
     }
+    for tid in held_orphans { sched::request_kill(tid); }
     // Volume metadata is written through, so dropping the files needs no I/O.
     // Pipe and channel ends wake their peers as they go.
     drop(closed);

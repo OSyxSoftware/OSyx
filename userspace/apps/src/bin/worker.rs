@@ -56,6 +56,45 @@ fn main() -> i32 {
     let args: Vec<String> = env::args().collect();
     let pid = process::id().unwrap_or(0);
     match args.get(1).map(String::as_str) {
+        Some("suspend-test") => {
+            if os_sys::resume_child(pid) != Err(osyx_abi::Errno::PermissionDenied) { return 53; }
+            let marker = "/tmp/suspended-process-test";
+            let _ = fs::remove_file(marker);
+            let stdio = [os_sys::HANDLE_NONE; 3];
+            let pid = match os_sys::spawn_stdio_suspended("/bin/worker", b"worker\0suspend-child\0", b"", stdio) {
+                Ok(pid) => pid, Err(_) => return 40,
+            };
+            thread::sleep(Duration::from_millis(40));
+            if fs::metadata(marker).is_ok() { return 41; }
+            if os_sys::resume_child(pid) != Ok(1) || os_sys::resume_child(pid) != Ok(0) { return 42; }
+            if !matches!(os_sys::wait(pid), Ok((_, 0))) || fs::metadata(marker).is_err() { return 43; }
+            let _ = fs::remove_file(marker);
+            let pid = match os_sys::spawn_stdio_suspended("/bin/worker", b"worker\0suspend-child\0", b"", stdio) {
+                Ok(pid) => pid, Err(_) => return 44,
+            };
+            if os_sys::kill(pid).is_err() || !matches!(os_sys::wait(pid), Ok((_, osyx_abi::KILLED_STATUS))) { return 45; }
+            if fs::metadata(marker).is_ok() { return 46; }
+            let pid_file = "/tmp/suspended-orphan-test";
+            let _ = fs::remove_file(pid_file);
+            if !matches!(Command::new("/bin/worker").arg("suspend-orphan").status(), Ok(s) if s.raw() == 0) { return 48; }
+            let orphan = match fs::read_to_string(pid_file).ok().and_then(|s| s.parse::<u64>().ok()) { Some(pid) => pid, None => return 49 };
+            let _ = fs::remove_file(pid_file);
+            for _ in 0..100 {
+                if matches!(os_sys::proc_info(orphan), Err(osyx_abi::Errno::NotFound)) { return 0; }
+                thread::sleep(Duration::from_millis(10));
+            }
+            return 50;
+        }
+        Some("suspend-orphan") => {
+            let pid = match os_sys::spawn_stdio_suspended("/bin/worker", b"worker\0suspend-child\0", b"", [os_sys::HANDLE_NONE; 3]) {
+                Ok(pid) => pid, Err(_) => return 51,
+            };
+            if fs::write("/tmp/suspended-orphan-test", format!("{pid}")).is_ok() { 0 } else { 52 }
+        }
+        Some("suspend-child") => {
+            thread::sleep(Duration::from_millis(50));
+            if fs::write("/tmp/suspended-process-test", b"ran").is_ok() { 0 } else { 47 }
+        }
         Some("sandbox-broker") => {
             use osyx_abi::sandbox::{PathRule, SpawnPolicy, MAX_PATH_RULES, PATH_EXEC, PATH_READ};
             let invalid = SpawnPolicy { path_count: MAX_PATH_RULES + 1, ..SpawnPolicy::default() };

@@ -11,6 +11,7 @@ pub const MAX_SYSCALL_RULES: u64 = 256;
 pub const PATH_READ: u64 = 1;
 pub const PATH_WRITE: u64 = 2;
 pub const PATH_EXEC: u64 = 4;
+pub const SPAWN_SUSPENDED: u64 = 1;
 
 /// A canonical absolute UTF-8 subtree and its access bits.
 #[repr(C)]
@@ -31,11 +32,12 @@ pub struct SpawnPolicy {
     pub syscall_count: u64,
     /// Optional channel capability installed as handle 3 in the child.
     pub broker_handle: u64,
+    pub flags: u64,
 }
 
 impl Default for SpawnPolicy {
     fn default() -> Self {
-        Self { paths: 0, path_count: 0, syscalls: 0, syscall_count: 0, broker_handle: crate::HANDLE_NONE }
+        Self { paths: 0, path_count: 0, syscalls: 0, syscall_count: 0, broker_handle: crate::HANDLE_NONE, flags: 0 }
     }
 }
 
@@ -64,7 +66,7 @@ mod tests {
     #[test]
     fn spawn_policy_layout_and_default_broker() {
         assert_eq!(core::mem::size_of::<PathRule>(), 24);
-        assert_eq!(core::mem::size_of::<SpawnPolicy>(), 40);
+        assert_eq!(core::mem::size_of::<SpawnPolicy>(), 48);
         assert_eq!(SpawnPolicy::default().broker_handle, crate::HANDLE_NONE);
     }
 

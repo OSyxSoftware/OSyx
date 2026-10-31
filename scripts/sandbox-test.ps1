@@ -46,7 +46,7 @@ try {
     }
     if (-not $vm.HasExited) { $vm.Kill(); $vm.WaitForExit() }
     $output = [IO.File]::ReadAllText($log)
-    $tests = @('VFS: restricted opens', 'restricted process: syscall and filesystem inheritance')
+    $tests = @('VFS: restricted opens', 'restricted process: syscall and filesystem inheritance', 'suspended process start and kill')
     if ($Winrun) { $tests += 'Winrun restricted CreateProcess' }
     foreach ($test in $tests) {
         if ($output -notmatch ([regex]::Escape("[test] $test ... ok"))) {

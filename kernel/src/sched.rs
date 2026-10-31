@@ -372,18 +372,25 @@ pub fn init_secondary(top: u64) {
 /// caller's priority.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u64, fs_base: u64) -> Tid {
+    spawn_initial(name, pid, root, entry, a, b, fs_base, false)
+}
+
+/// Creates a thread blocked before it can execute its entry function.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_initial(name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u64, fs_base: u64, held: bool) -> Tid {
     let mut g = SCHED.lock();
     let s = g.as_mut().expect("scheduler not initialised");
     let tid = s.next_tid;
     s.next_tid += 1;
     let mut t = new_thread(tid, name, pid, root, entry, a, b, fs_base);
+    if held { t.state = State::Blocked; }
     if let Some(parent) = s.threads.get(&s.current[crate::smp::index()]) {
         if parent.pid == pid && pid != 0 {
             t.priority = parent.priority;
         }
     }
     s.threads.insert(tid, t);
-    s.enqueue(tid);
+    if !held { s.enqueue(tid); }
     tid
 }
 
