@@ -26,12 +26,23 @@ A deny-by-default syscall allowlist is checked before the dispatcher's fast
 paths and inherited by children. The set of calls Gecko needs and the handling
 of arguments and handles have not been validated.
 
+For diagnostic `sandbox` and `sandboxfat` probes only, init creates a fresh
+registry hive that disables Mozilla's separate Windows launcher. That skips
+its mitigations and is not a production workaround. It lets the probe reach
+the browser while cross-process launcher setup remains unsupported. Mozilla's
+[launcher registry implementation](https://github.com/mozilla-firefox/firefox/blob/main/toolkit/xre/LauncherRegistryInfo.cpp)
+describes the force-disabled state.
+
 An experimental FAT-backed QEMU probe of the official Zen 1.23.4b package
 initially failed because the launcher requested `CREATE_SUSPENDED`. OSyx now
 starts a held initial thread and supports resuming it from the parent. A
 subsequent probe reached a denied cross-process memory operation and then
-raised `0xc000001d`; no Gecko content process started. The probe does not
-establish browser or sandbox functionality.
+raised `0xc000001d` without the required CPU features. With SSE4.2 and the
+diagnostic launcher bypass, Zen reaches content-process creation, but requests
+an unsupported standard input handle (`0xffffffffffffffff`). Winrun rejects
+that request; no Gecko content process started. Matching console handles are
+supported, while other standard handles and pipe inheritance remain blocked.
+The probe does not establish browser or sandbox functionality.
 
 The initial thread is held before it can run, including for restricted
 children. Only its direct parent can resume it. A held child whose parent exits

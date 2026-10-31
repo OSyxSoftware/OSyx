@@ -146,8 +146,14 @@ pub fn offer(handles: &[u64]) -> Result<Option<String>, u32> {
 pub fn offer_on_channel(handles: &[u64], channel: u64) -> Result<(), u32> {
     for &handle in handles {
         match objects::get(handle) {
-            Some(Object::Pipe(_)) => return Err(ERROR_NOT_SUPPORTED),
-            Some(Object::Section(s)) if s.file_mapping => return Err(ERROR_NOT_SUPPORTED),
+            Some(Object::Pipe(_)) => {
+                if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: restricted child cannot inherit pipe {handle:#x}"); }
+                return Err(ERROR_NOT_SUPPORTED);
+            }
+            Some(Object::Section(s)) if s.file_mapping => {
+                if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: restricted child cannot inherit file section {handle:#x}"); }
+                return Err(ERROR_NOT_SUPPORTED);
+            }
             _ => {}
         }
     }

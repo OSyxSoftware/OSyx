@@ -273,6 +273,7 @@ pub(crate) extern "win64" fn CreateProcessW(
         let list = unsafe { &*(attrs as *const AttributeList) };
         for &(attribute, value, size) in &list.entries[..list.used as usize] {
             if attribute != PROC_THREAD_ATTRIBUTE_HANDLE_LIST {
+                if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: unsupported process attribute {attribute:#x}"); }
                 return fail(ERROR_NOT_SUPPORTED, 0);
             }
             if value == 0 || size % 8 != 0 {
@@ -307,6 +308,9 @@ pub(crate) extern "win64" fn CreateProcessW(
     let restricted = exe.eq_ignore_ascii_case("/opt/zen/zen.exe")
         && rest.iter().any(|arg| arg.eq_ignore_ascii_case("-contentproc"))
         && os_std::env::var("OSYX_EXPERIMENTAL_CONTENT_SANDBOX").is_ok_and(|v| v == "1");
+    if crate::VERBOSE.load(Ordering::Relaxed) && rest.iter().any(|arg| arg.eq_ignore_ascii_case("-contentproc")) {
+        os_std::eprintln!("winrun: content child {exe}, flags {flags:#x}, inherit {}, sandbox {restricted}", inherited.len());
+    }
     let mut environment: Vec<String> =
         if env != 0 { environment_block(env, flags & CREATE_UNICODE_ENVIRONMENT != 0) } else { kernel32::env_vars().into_iter().map(|(k, v)| format!("{k}={v}")).collect() };
     // SAFETY: as above.
@@ -323,13 +327,23 @@ pub(crate) extern "win64" fn CreateProcessW(
     let mut child_channel = None;
     if restricted {
         if si_flags & STARTF_USESTDHANDLES != 0 {
-            return fail(ERROR_NOT_SUPPORTED, 0);
+            for (i, handle) in std_handles.iter().enumerate() {
+                let supported = matches!((i, objects::get(*handle)),
+                    (0, Some(Object::Console(objects::Console::In)))
+                    | (1, Some(Object::Console(objects::Console::Out)))
+                    | (2, Some(Object::Console(objects::Console::Err))));
+                if !supported {
+                    if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: restricted child unsupported standard handle {i}: {handle:#x}"); }
+                    return fail(ERROR_NOT_SUPPORTED, 0);
+                }
+            }
         }
         let (parent_end, child_end) = match os_sys::channel_pair() {
             Ok(pair) => pair,
             Err(e) => return fail(errno_to_win32(e), 0),
         };
         if let Err(e) = crate::inherit::offer_on_channel(&inherited, parent_end) {
+            if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: restricted child cannot inherit handles: error {e}"); }
             let _ = os_sys::close(parent_end);
             let _ = os_sys::close(child_end);
             return fail(e, 0);

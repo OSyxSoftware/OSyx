@@ -549,7 +549,22 @@ user_pref("network.connectivity-service.enabled", false);
         return 1;
     }
     let mut zen = Command::new(if installed { "/system/bin/zen" } else { "/bin/winrun" });
-    if sandbox { zen.env("OSYX_EXPERIMENTAL_CONTENT_SANDBOX", "1"); }
+    if sandbox {
+        // Diagnostic only: Mozilla's launcher patches another process before
+        // it starts. Skip that separate launcher in this isolated test so the
+        // browser's content-process path can be examined independently.
+        let key = "Software\\Mozilla\\Zen\\Launcher";
+        let name = "C:\\opt\\zen\\zen.exe|Browser";
+        let hex = |s: &str| -> String { s.as_bytes().iter().map(|b| format!("{b:02x}")).collect() };
+        let registry = format!("K\t{}\nV\t{}\t{}\t11\t0000000000000000\n", hex(key), hex(key), hex(name));
+        let registry_dir = format!("{profile}/.osyx-registry");
+        if let Err(e) = fs::create_dir_all(&registry_dir).and_then(|_| fs::write(format!("{registry_dir}/user.reg"), registry)) {
+            println!("ZEN_PROBE_RESULT infrastructure=diagnostic_registry_failed: {e}");
+            if let Ok(p) = prism { let _ = os_std::system::kill(p.id()); let _ = p.wait(); }
+            return 1;
+        }
+        zen.env("HOME", &profile).env("OSYX_EXPERIMENTAL_CONTENT_SANDBOX", "1");
+    }
     // The session runs as root, so Gecko's launcher would start the browser
     // with a de-elevated token, which OSyx cannot run: keep its own. The
     // probe has its own temporary profile with software-rendering prefs.

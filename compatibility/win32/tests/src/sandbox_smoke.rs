@@ -18,6 +18,7 @@ unsafe extern "system" {
     fn CreateEventW(attributes: usize, manual: i32, initial: i32, name: *const u16) -> u64;
     fn SetHandleInformation(handle: u64, mask: u32, flags: u32) -> i32;
     fn ResumeThread(handle: u64) -> u32;
+    fn GetStdHandle(which: u32) -> u64;
     fn ExitProcess(code: u32) -> !;
 }
 
@@ -74,7 +75,15 @@ pub extern "system" fn start() -> ! {
         for i in 0..count { *cmd.as_mut_ptr().add(prefix.len() + i) = *digits.as_ptr().add(count - i - 1); }
         let mut startup = [0u64; 13];
         startup[0] = 104;
+        (startup.as_mut_ptr() as *mut u8).add(60).cast::<u32>().write_unaligned(0x100);
+        startup[10] = GetStdHandle((-10i32) as u32);
+        startup[11] = GetStdHandle((-11i32) as u32);
+        startup[12] = GetStdHandle((-12i32) as u32);
         let mut info = [0u64; 3];
+        let stdin = startup[10];
+        startup[10] = event;
+        if CreateProcessW(app.as_ptr(), cmd.as_mut_ptr(), 0, 0, 1, 4, 0, 0, startup.as_ptr() as *const u8, info.as_mut_ptr()) != 0 { ExitProcess(24); }
+        startup[10] = stdin;
         if CreateProcessW(app.as_ptr(), cmd.as_mut_ptr(), 0, 0, 1, 4, 0, 0, startup.as_ptr() as *const u8, info.as_mut_ptr()) == 0 {
             ExitProcess(10);
         }
