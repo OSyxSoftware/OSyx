@@ -105,6 +105,9 @@ struct Sock {
     nonblocking: bool,
     /// SO_LINGER seconds; zero means off.
     linger: u16,
+    /// SO_RCVTIMEO/SO_SNDTIMEO in milliseconds; zero means forever.
+    recv_timeout: u32,
+    send_timeout: u32,
 }
 
 static SOCKETS: Mutex<BTreeMap<u64, Sock>> = Mutex::new(BTreeMap::new());
@@ -231,7 +234,7 @@ extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
             let mut n = NEXT.lock().unwrap();
             let s = *n;
             *n += 4;
-            SOCKETS.lock().unwrap().insert(s, Sock { fd, stream, nonblocking: false, linger: 0 });
+            SOCKETS.lock().unwrap().insert(s, Sock { fd, stream, nonblocking: false, linger: 0, recv_timeout: 0, send_timeout: 0 });
             s
         }
         Err(e) => err(wsa(e), INVALID_SOCKET),
@@ -303,7 +306,7 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
         let mut n = NEXT.lock().unwrap();
         let ns = *n;
         *n += 4;
-        SOCKETS.lock().unwrap().insert(ns, Sock { fd: nfd, stream: true, nonblocking: listener.nonblocking, linger: 0 });
+        SOCKETS.lock().unwrap().insert(ns, Sock { fd: nfd, stream: true, nonblocking: listener.nonblocking, linger: 0, recv_timeout: 0, send_timeout: 0 });
         Ok(ns)
     })();
     r.unwrap_or_else(|e| err(e, INVALID_SOCKET))
@@ -390,10 +393,20 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
         };
         match (level, name) {
             (SOL_SOCKET, SO_RCVTIMEO) => {
-                os_sys::sock_ctl(fd, net::ctl::RECV_TIMEOUT, int()? as u64 * 1_000_000).map(|_| ()).map_err(wsa)
+                let ms = int()?;
+                os_sys::sock_ctl(fd, net::ctl::RECV_TIMEOUT, ms as u64 * 1_000_000).map_err(wsa)?;
+                if let Some(sock) = SOCKETS.lock().unwrap().get_mut(&s) {
+                    sock.recv_timeout = ms;
+                }
+                Ok(())
             }
             (SOL_SOCKET, SO_SNDTIMEO) => {
-                os_sys::sock_ctl(fd, net::ctl::SEND_TIMEOUT, int()? as u64 * 1_000_000).map(|_| ()).map_err(wsa)
+                let ms = int()?;
+                os_sys::sock_ctl(fd, net::ctl::SEND_TIMEOUT, ms as u64 * 1_000_000).map_err(wsa)?;
+                if let Some(sock) = SOCKETS.lock().unwrap().get_mut(&s) {
+                    sock.send_timeout = ms;
+                }
+                Ok(())
             }
             (SOL_SOCKET, SO_BROADCAST) => {
                 os_sys::sock_ctl(fd, net::ctl::BROADCAST, (int()? != 0) as u64).map(|_| ()).map_err(wsa)
@@ -451,6 +464,8 @@ extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *
                 }
             }
             (SOL_SOCKET, SO_ERROR | SO_REUSEADDR | SO_KEEPALIVE) => 0,
+            (SOL_SOCKET, SO_RCVTIMEO) => st.recv_timeout,
+            (SOL_SOCKET, SO_SNDTIMEO) => st.send_timeout,
             (IPPROTO_TCP, TCP_NODELAY) if stream => 1,
             _ => return Err(WSAENOPROTOOPT),
         };

@@ -136,6 +136,12 @@ void __stdcall start(void) {
     keep = 0;
     int optlen = sizeof keep;
     check_eq("getsockopt(SO_KEEPALIVE)", getsockopt(sv, SOL_SOCKET, SO_KEEPALIVE, (char *)&keep, &optlen), 0);
+    DWORD tmo = 2500;
+    check_eq("setsockopt(SO_RCVTIMEO)", setsockopt(sv, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tmo, sizeof tmo), 0);
+    tmo = 0;
+    optlen = sizeof tmo;
+    check_eq("getsockopt(SO_RCVTIMEO)", getsockopt(sv, SOL_SOCKET, SO_RCVTIMEO, (char *)&tmo, &optlen), 0);
+    check_eq("... timeout in ms", tmo, 2500);
     struct linger lg = {1, 7};
     check_eq("setsockopt(SO_LINGER)", setsockopt(sv, SOL_SOCKET, SO_LINGER, (const char *)&lg, sizeof lg), 0);
     lg.l_onoff = 0;
