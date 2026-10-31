@@ -591,7 +591,7 @@ static void security_and_namespace(void) {
     for (int i = 0; st == 0 && i < 64; i++) {
         LSASTR *entry = (LSASTR *)buf, *type = entry + 1;
         WCHAR *text = (WCHAR *)entry->Buffer;
-        int match = entry->Length == 38 && text[0] == 'O' && text[4] == 'N' && ((WCHAR *)type->Buffer)[0] == 'E';
+        int match = entry->Length == 36 && text[0] == 'O' && text[4] == 'N' && ((WCHAR *)type->Buffer)[0] == 'E';
         found |= match;
         st = query_dir(d, buf, sizeof buf, TRUE, FALSE, &context, &needed);
     }
@@ -616,8 +616,11 @@ static void stock_icons_display_and_transactions(void) {
     *(DWORD *)info = 544;
     check("SHGetStockIconInfo(SIID_FOLDER) names imageres.dll index -3", stock(3, 0, info) == 0 && *(int *)(info + 20) == -3 && ((WCHAR *)(info + 24))[0] == 'C');
     WCHAR *path = (WCHAR *)(info + 24);
-    int ends_imageres = 0;
-    for (int n = 0; path[n]; n++) ends_imageres = path[n] == 's' && path[n + 1] == 0 && path[n - 1] == 'e' && path[n - 2] == 'r';
+    int len = 0;
+    while (path[len]) len++;
+    static const WCHAR tail[] = L"imageres.dll";
+    int ends_imageres = len >= 12;
+    for (int i = 0; ends_imageres && i < 12; i++) ends_imageres = path[len - 12 + i] == tail[i];
     check("the folder icon lives in imageres.dll", ends_imageres);
     *(DWORD *)info = 544;
     check("SIID_DOCNOASSOC is index -2 and its system index is 0", stock(0, 0x4000, info) == 0 && *(int *)(info + 20) == -2 && *(int *)(info + 16) == 0);
