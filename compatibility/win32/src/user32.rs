@@ -28,6 +28,7 @@ use osyx_gfx::text::Font as MonoFont;
 use osyx_gfx::{Color, Rect, Surface};
 use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
+mod controls;
 mod gdi;
 mod keyboard;
 mod dialog_template;
@@ -143,6 +144,8 @@ struct Win {
     /// The PRISM window; none for a child control, which draws into its
     /// top-level ancestor's surface and is no window of the compositor.
     win: Option<Window>,
+    /// State of a progress bar or list view.
+    data: controls::ControlData,
     pos: (i32, i32),
     size: (u32, u32),
     /// The most recent normal geometry, preserved while maximized/minimized.
@@ -1205,7 +1208,7 @@ pub(crate) fn register_common_controls() {
     with(|g| {
         for name in ["msctls_progress32", "SysListView32"] {
             if !g.classes.iter().any(|c| c.name.eq_ignore_ascii_case(name)) {
-                g.classes.push(Class { name: String::from(name), wndproc: DefWindowProcW as *const () as u64,
+                g.classes.push(Class { name: String::from(name), wndproc: ControlWndProc as *const () as u64,
                     background: 0, icon: 0, cursor: 0, style: 0 });
             }
         }
@@ -1402,6 +1405,7 @@ fn create_window(
                 check_state: 0,
                 system_menu: 0,
                 win,
+                data: controls::ControlData::default(),
                 pos: (x.max(0), y.max(0)),
                 size: (width, height),
                 normal: Rect::new(x.max(0), y.max(0), width, height),
@@ -2901,7 +2905,10 @@ extern "win64" fn ControlWndProc(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
             }
             0
         }
-        _ => DefWindowProcW(hwnd, msg, w, l),
+        _ => {
+            let kind = with(|g| g.windows.get(&hwnd).and_then(|win| controls::kind_of(&g.classes[win.class].name)));
+            kind.and_then(|k| controls::message(hwnd, k, msg, w, l)).unwrap_or_else(|| DefWindowProcW(hwnd, msg, w, l))
+        }
     }
 }
 
@@ -2919,6 +2926,10 @@ fn paint_control(hwnd: u64, dc: u64) {
     SetBkMode(dc, 1);
     SetTextColor(dc, if disabled { 0x0080_8080 } else { 0 });
     let put_text = |rect: &mut [i32; 4], fmt: u32| { DrawTextW(dc, text.as_ptr(), -1, rect.as_mut_ptr(), fmt | DT_NOPREFIX); };
+    if let Some(kind) = controls::kind_of(&class) {
+        controls::paint(dc, kind, hwnd, width, height);
+        return;
+    }
     match class.as_str() {
         "STATIC" => match style & 0x1F {
             0..=2 | 0xB | 0xC => {
