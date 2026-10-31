@@ -592,9 +592,7 @@ impl Stack {
     /// resolving the hardware address first.
     fn send_packet_on(&mut self, iface: usize, next_hop: Ipv4Addr, packet: Vec<u8>, broadcast: bool) {
         let i = &self.ifaces[iface];
-        let directed = i.addr.is_some_and(|(a, p)| {
-            next_hop.in_subnet(a, p) && next_hop.to_u32() | crate::wire::prefix_mask(p) == next_hop.to_u32()
-        });
+        let directed = i.addr.is_some_and(|(a, p)| next_hop.is_subnet_broadcast(a, p));
         if broadcast || next_hop.is_broadcast() || directed {
             let frame = ethernet::build(MacAddr::BROADCAST, i.mac, ETHERTYPE_IPV4, &packet);
             self.push_frame(iface, frame);
@@ -765,9 +763,7 @@ impl Stack {
         };
         let i = &self.ifaces[iface];
         let unconfigured = i.addr.is_none();
-        let subnet_broadcast = i.addr.is_some_and(|(a, p)| {
-            h.dst.in_subnet(a, p) && h.dst.to_u32() | crate::wire::prefix_mask(p) == h.dst.to_u32()
-        });
+        let subnet_broadcast = i.addr.is_some_and(|(a, p)| h.dst.is_subnet_broadcast(a, p));
         let broadcast = h.dst.is_broadcast() || subnet_broadcast;
         let to_us = self.is_local(h.dst) && (iface == 0 || !h.dst.is_loopback());
         // While unconfigured, DHCP replies may be unicast to the offered address.
@@ -932,7 +928,10 @@ impl Stack {
             if !u.local.addr.is_unspecified() && u.local.addr != h.dst && !broadcast {
                 continue;
             }
-            if broadcast && !u.broadcast && !u.local.addr.is_unspecified() {
+            if broadcast && !u.local.addr.is_unspecified() && u.local.addr != h.dst {
+                // A broadcast belongs to sockets bound to the wildcard address
+                // or to the broadcast address. SO_BROADCAST only allows
+                // sending, so it must not widen this match.
                 continue;
             }
             if let Some(r) = u.remote {

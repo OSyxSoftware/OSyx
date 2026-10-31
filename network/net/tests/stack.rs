@@ -125,6 +125,24 @@ fn udp_connect_reports_its_peer() {
 }
 
 #[test]
+fn broadcast_reaches_only_sockets_bound_to_it_or_the_wildcard() {
+    let mut n = Net::new();
+    let specific = n.a.udp_bind(Endpoint::new(A_IP, 9100)).unwrap();
+    n.a.udp_set_broadcast(specific, true).unwrap();
+    let wildcard = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 9102)).unwrap();
+    let sender = n.b.udp_bind(Endpoint::new(B_IP, 9101)).unwrap();
+    let bcast = Ipv4Addr::new(10, 0, 0, 255);
+    n.b.udp_send_to(sender, Some(Endpoint::new(bcast, 9100)), b"narrow").unwrap();
+    n.b.udp_send_to(sender, Some(Endpoint::new(bcast, 9102)), b"wild").unwrap();
+    let mut buf = [0u8; 8];
+    assert!(n.run_until(100, |n| n.a.udp_recv_from(wildcard, &mut buf).is_ok()));
+    assert_eq!(&buf[..4], b"wild");
+    // SO_BROADCAST permits sending; it does not make a unicast-bound socket
+    // accept broadcasts.
+    assert_eq!(n.a.udp_recv_from(specific, &mut buf), Err(NetError::WouldBlock));
+}
+
+#[test]
 fn tcp_bind_reserves_a_dynamic_port_before_listen_or_connect() {
     let mut n = Net::new();
     let bound = n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 0)).unwrap();
