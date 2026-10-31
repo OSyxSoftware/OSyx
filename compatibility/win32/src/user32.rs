@@ -6310,32 +6310,192 @@ extern "win64" fn CallWindowProcW(proc_: u64, wnd: u64, msg: u32, wparam: u64, l
     call(proc_, wnd, msg, wparam, lparam)
 }
 
-/// OSyx has one screen described by MonitorFromWindow/GetMonitorInfo; the
-/// DisplayConfig path model (paths, sources, targets, modes) is not built, so
-/// these report ERROR_NOT_SUPPORTED and callers fall back to the monitor API.
-const ERROR_NOT_SUPPORTED_WIN: u32 = 50;
+// ---- display configuration ---------------------------------------------------------------------
+//
+// OSyx has one display: one adapter (LUID 1:0), one source and one target
+// (id 0), joined by one active path. QueryDisplayConfig reports it with two
+// modes (the source mode and the target mode) at the compositor's size and
+// 60 Hz; DisplayConfigGetDeviceInfo names the source, the target and the
+// adapter. Structures follow the Windows x64 layouts.
 
-extern "win64" fn GetDisplayConfigBufferSizes(_flags: u32, paths: *mut u32, modes: *mut u32) -> u32 {
-    if paths.is_null() || modes.is_null() {
+const DISPLAY_ADAPTER_LOW: u32 = 1;
+const QDC_ALL_PATHS: u32 = 1;
+const QDC_ONLY_ACTIVE_PATHS: u32 = 2;
+const QDC_DATABASE_CURRENT: u32 = 4;
+const QDC_OPTIONS: u32 = 0x10 | 0x20 | 0x40;
+const ERROR_INSUFFICIENT_BUFFER_W: u32 = 122;
+const DISPLAYCONFIG_PATH_INFO_SIZE: usize = 72;
+const DISPLAYCONFIG_MODE_INFO_SIZE: usize = 64;
+
+/// A QDC_* flag word is valid with exactly one of the three path sets.
+fn display_flags_ok(flags: u32) -> bool {
+    let sets = flags & (QDC_ALL_PATHS | QDC_ONLY_ACTIVE_PATHS | QDC_DATABASE_CURRENT);
+    sets.count_ones() == 1 && flags & !(QDC_ALL_PATHS | QDC_ONLY_ACTIVE_PATHS | QDC_DATABASE_CURRENT | QDC_OPTIONS) == 0
+}
+
+extern "win64" fn GetDisplayConfigBufferSizes(flags: u32, paths: *mut u32, modes: *mut u32) -> u32 {
+    if paths.is_null() || modes.is_null() || !display_flags_ok(flags) {
         return ERROR_INVALID_PARAMETER;
     }
     // SAFETY: the caller's out pointers.
     unsafe {
-        *paths = 0;
-        *modes = 0;
+        *paths = 1;
+        *modes = 2;
     }
-    ERROR_NOT_SUPPORTED_WIN
+    0
 }
 
-extern "win64" fn QueryDisplayConfig(_flags: u32, paths: *mut u32, _path: *mut u8, modes: *mut u32, _mode: *mut u8, _topology: *mut u32) -> u32 {
-    if paths.is_null() || modes.is_null() {
+fn put_u32(base: *mut u8, at: usize, v: u32) {
+    // SAFETY: callers pass structures large enough for the offset.
+    unsafe { core::ptr::write_unaligned(base.add(at) as *mut u32, v) }
+}
+
+fn put_luid(base: *mut u8, at: usize) {
+    put_u32(base, at, DISPLAY_ADAPTER_LOW);
+    put_u32(base, at + 4, 0);
+}
+
+extern "win64" fn QueryDisplayConfig(flags: u32, paths: *mut u32, path: *mut u8, modes: *mut u32, mode: *mut u8, topology: *mut u32) -> u32 {
+    if paths.is_null() || modes.is_null() || path.is_null() || mode.is_null() || !display_flags_ok(flags) {
         return ERROR_INVALID_PARAMETER;
     }
-    ERROR_NOT_SUPPORTED_WIN
+    // The topology is reported only for the database query, which needs a place for it.
+    if (flags & QDC_DATABASE_CURRENT != 0) == topology.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's count words.
+    let (have_paths, have_modes) = unsafe { (*paths, *modes) };
+    if have_paths < 1 || have_modes < 2 {
+        // SAFETY: as above.
+        unsafe {
+            *paths = 1;
+            *modes = 2;
+        }
+        return ERROR_INSUFFICIENT_BUFFER_W;
+    }
+    let r = screen_rect();
+    let (w, h) = (r.2 as u32, r.3 as u32);
+    // SAFETY: the caller's buffers hold at least one path and two modes.
+    unsafe {
+        core::ptr::write_bytes(path, 0, DISPLAYCONFIG_PATH_INFO_SIZE);
+        core::ptr::write_bytes(mode, 0, DISPLAYCONFIG_MODE_INFO_SIZE * 2);
+        // Source: adapter, id 0, mode index 0, DISPLAYCONFIG_SOURCE_IN_USE.
+        put_luid(path, 0);
+        put_u32(path, 12, 0);
+        put_u32(path, 16, 1);
+        // Target: adapter, id 0, mode index 1, output technology OTHER (-1),
+        // rotation and scaling identity, 60/1 Hz, progressive, available,
+        // DISPLAYCONFIG_TARGET_IN_USE; the path is DISPLAYCONFIG_PATH_ACTIVE.
+        put_luid(path, 20);
+        put_u32(path, 32, 1);
+        put_u32(path, 36, u32::MAX);
+        put_u32(path, 40, 1);
+        put_u32(path, 44, 1);
+        put_u32(path, 48, 60);
+        put_u32(path, 52, 1);
+        put_u32(path, 56, 1);
+        put_u32(path, 60, 1);
+        put_u32(path, 64, 1);
+        put_u32(path, 68, 1);
+        // Mode 0, the source mode: width, height, DISPLAYCONFIG_PIXELFORMAT_32BPP, position 0,0.
+        put_u32(mode, 0, 1);
+        put_luid(mode, 8);
+        put_u32(mode, 16, w);
+        put_u32(mode, 20, h);
+        put_u32(mode, 24, 4);
+        // Mode 1, the target mode: pixel rate, 60 Hz vertical, the active and
+        // total size, video standard "other", progressive.
+        let t = mode.add(DISPLAYCONFIG_MODE_INFO_SIZE);
+        put_u32(t, 0, 2);
+        put_luid(t, 8);
+        core::ptr::write_unaligned(t.add(16) as *mut u64, w as u64 * h as u64 * 60);
+        put_u32(t, 24, h * 60);
+        put_u32(t, 28, 1);
+        put_u32(t, 32, 60);
+        put_u32(t, 36, 1);
+        put_u32(t, 40, w);
+        put_u32(t, 44, h);
+        put_u32(t, 48, w);
+        put_u32(t, 52, h);
+        put_u32(t, 56, 255);
+        put_u32(t, 60, 1);
+        *paths = 1;
+        *modes = 2;
+        if !topology.is_null() {
+            *topology = 1; // DISPLAYCONFIG_TOPOLOGY_INTERNAL
+        }
+    }
+    0
 }
 
-extern "win64" fn DisplayConfigGetDeviceInfo(_packet: *mut u8) -> u32 {
-    ERROR_NOT_SUPPORTED_WIN
+const DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME: u32 = 1;
+const DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME: u32 = 2;
+const DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE: u32 = 3;
+const DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME: u32 = 4;
+
+/// DisplayConfigGetDeviceInfo(header): the request type picks the answer and
+/// the structure that follows the 20-byte header; the packet must be large
+/// enough for it and name this adapter (and id 0) or the call is
+/// ERROR_INVALID_PARAMETER, as is an unknown type.
+extern "win64" fn DisplayConfigGetDeviceInfo(packet: *mut u8) -> u32 {
+    if packet.is_null() {
+        crate::teb::set_last_error(ERROR_NOACCESS);
+        return 31; // ERROR_GEN_FAILURE
+    }
+    // SAFETY: a DISPLAYCONFIG_DEVICE_INFO_HEADER: type, size, LUID, id.
+    let (kind, size, luid_low, luid_high, id) = unsafe {
+        (
+            core::ptr::read_unaligned(packet as *const u32),
+            core::ptr::read_unaligned(packet.add(4) as *const u32),
+            core::ptr::read_unaligned(packet.add(8) as *const u32),
+            core::ptr::read_unaligned(packet.add(12) as *const u32),
+            core::ptr::read_unaligned(packet.add(16) as *const u32),
+        )
+    };
+    let needed = match kind {
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME => 84,
+        DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME => 420,
+        DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE => 76,
+        DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME => 276,
+        _ => return ERROR_INVALID_PARAMETER,
+    };
+    if size < needed || luid_low != DISPLAY_ADAPTER_LOW || luid_high != 0 || (kind != DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME && id != 0) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the packet holds `size >= needed` bytes; the answer follows the header.
+    unsafe {
+        core::ptr::write_bytes(packet.add(20), 0, needed as usize - 20);
+        match kind {
+            DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME => put_wide(packet.add(20), 32, DISPLAY_NAME),
+            DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME => {
+                // flags 0 (no EDID name), output technology OTHER, no EDID ids, connector 0.
+                put_u32(packet, 24, u32::MAX);
+                put_wide(packet.add(36), 64, "OSyx PRISM display");
+                put_wide(packet.add(164), 128, r"\\?\DISPLAY#OSYX0001#1&0&UID0#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}");
+            }
+            DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE => {
+                let r = screen_rect();
+                let (w, h) = (r.2 as u32, r.3 as u32);
+                put_u32(packet, 20, w);
+                put_u32(packet, 24, h);
+                // The target mode, as in QueryDisplayConfig.
+                let t = packet.add(28);
+                core::ptr::write_unaligned(t as *mut u64, w as u64 * h as u64 * 60);
+                put_u32(t, 8, h * 60);
+                put_u32(t, 12, 1);
+                put_u32(t, 16, 60);
+                put_u32(t, 20, 1);
+                put_u32(t, 24, w);
+                put_u32(t, 28, h);
+                put_u32(t, 32, w);
+                put_u32(t, 36, h);
+                put_u32(t, 40, 255);
+                put_u32(t, 44, 1);
+            }
+            _ => put_wide(packet.add(20), 128, r"\\?\OSYX#DISPLAY#0#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}"),
+        }
+    }
+    0
 }
 
 extern "win64" fn EnumDisplayMonitors(_dc: u64, _clip: *const u8, proc_: u64, data: u64) -> Bool {
