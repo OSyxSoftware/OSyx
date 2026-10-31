@@ -57,8 +57,15 @@ void __stdcall start(void) {
           res != NULL && res->ai_socktype == SOCK_STREAM && res->ai_protocol == IPPROTO_TCP &&
               ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr == htonl(INADDR_LOOPBACK));
     if (res) freeaddrinfo(res);
+    res = NULL;
+    check_eq("getaddrinfo(NULL, \"https\", NULL)", getaddrinfo(NULL, "https", NULL, &res), 0);
+    check("... resolves the named service to port 443",
+          res != NULL && ((struct sockaddr_in *)res->ai_addr)->sin_port == htons(443));
+    if (res) freeaddrinfo(res);
+    res = NULL;
+    check_eq("getaddrinfo(NULL, \"no-such-service\", NULL)",
+             getaddrinfo(NULL, "no-such-service", NULL, &res), WSATYPE_NOT_FOUND);
 
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     check("socket(AF_INET, SOCK_STREAM)", s != INVALID_SOCKET);
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;

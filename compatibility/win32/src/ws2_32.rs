@@ -66,6 +66,7 @@ const WSATRY_AGAIN: u32 = 11002;
 const WSAVERNOTSUPPORTED: u32 = 10092;
 const WSANO_DATA: u32 = 11004;
 const WSAEINVALIDPROVIDER: u32 = 10105;
+const WSATYPE_NOT_FOUND: u32 = 10109;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 
 fn wsa(e: Errno) -> u32 {
@@ -729,6 +730,27 @@ extern "win64" fn gethostbyaddr(addr: *const u8, len: i32, kind: i32) -> u64 {
 /// The protocols of Windows' default etc\protocol that OSyx implements.
 const PROTOCOLS: [(&str, i16); 4] = [("ip", 0), ("icmp", 1), ("tcp", 6), ("udp", 17)];
 
+/// Common named services of Windows' default etc\services.
+const SERVICES: [(&str, u16); 9] = [
+    ("ftp", 21),
+    ("ssh", 22),
+    ("smtp", 25),
+    ("domain", 53),
+    ("http", 80),
+    ("pop3", 110),
+    ("ntp", 123),
+    ("imap", 143),
+    ("https", 443),
+];
+
+/// The port a decimal string or a known service name stands for.
+fn service_port(service: &str) -> Option<u16> {
+    match service.parse() {
+        Ok(p) => Some(p),
+        Err(_) => SERVICES.iter().find(|(n, _)| n.eq_ignore_ascii_case(service)).map(|&(_, p)| p),
+    }
+}
+
 /// protoent (x64): p_name, p_aliases, p_proto (i16), in a per-thread buffer.
 fn protoent(name: &str, proto: i16) -> u64 {
     let buf = thread_buffer(2, 64);
@@ -793,10 +815,13 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
     }
     // SAFETY: NULL or NUL-terminated strings.
     let (n, svc) = unsafe { (crate::path::ansi_to_string(node), crate::path::ansi_to_string(service)) };
-    let port: u16 = match svc.as_deref().map(str::parse) {
+    let port: u16 = match svc.as_deref() {
         None => 0,
-        Some(Ok(p)) => p,
-        Some(Err(_)) => return WSATRY_AGAIN as i32, // named services: not supported
+        Some(s) => match service_port(s) {
+            Some(p) => p,
+            // EAI_SERVICE: the name is known to be a service, it just is not one.
+            None => return WSATYPE_NOT_FOUND as i32,
+        },
     };
     let (mut socktype, mut proto) = (0i32, 0i32);
     let mut flags = 0i32;
