@@ -104,7 +104,7 @@ jobs:
           done
       - name: Upload the artifacts of a dry run
         if: inputs.dry_run == true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: osyx-live-${{ steps.version.outputs.version }}
           path: build/release/*.iso
