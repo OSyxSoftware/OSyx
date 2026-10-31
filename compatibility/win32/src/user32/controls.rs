@@ -284,7 +284,21 @@ fn list_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
 
 /// Draws a progress bar or list view into its paint DC.
 pub(super) fn paint(dc: u64, kind: Kind, hwnd: u64, width: i32, height: i32) {
-    let Some(data) = data_of(hwnd, |d| d.clone()) else { return };
+    // Only the rows that show are copied out of the lock; `top` is then 0.
+    let visible = (height / ROW_HEIGHT).max(1) as usize;
+    let Some(data) = data_of(hwnd, |d| ControlData {
+        range: d.range,
+        pos: d.pos,
+        step: d.step,
+        bar_colour: d.bar_colour,
+        back_colour: d.back_colour,
+        rows: d.rows.iter().skip(d.top).take(visible).cloned().collect(),
+        columns: Vec::new(),
+        top: 0,
+        text_colour: d.text_colour,
+    }) else {
+        return;
+    };
     let whole = [0, 0, width, height];
     let solid = |colour: u32, rect: [i32; 4]| {
         let brush = CreateSolidBrush(colour);
