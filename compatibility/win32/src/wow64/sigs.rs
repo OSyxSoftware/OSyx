@@ -186,6 +186,7 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(SHGetFileInfoW, [Ptr, Uint, Ptr, Uint, Uint], Handle),
     sig!(SHFileOperationW, [Ptr], I32),
     sig!(SHGetSpecialFolderLocation, [Handle, Uint, OutWide], U32),
+    sig!(NtQuerySystemInformation, [Uint, Ptr, Uint, Ptr], U32),
     sig!(SHGetFolderPathW, [Handle, Uint, Handle, Uint, Ptr], U32),
     sig!(SHGetFolderPathA, [Handle, Uint, Handle, Uint, Ptr], U32),
     sig!(ScreenToClient, [Handle, Ptr], U32),

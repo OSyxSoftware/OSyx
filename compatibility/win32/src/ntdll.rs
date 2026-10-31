@@ -734,8 +734,10 @@ extern "win64" fn NtQueryDirectoryObject(h: u64, buf: u64, len: u32, single: u8,
 /// not available.
 extern "win64" fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> NtStatus {
     let Ok(info) = os_sys::sysinfo() else { return STATUS_UNSUCCESSFUL };
+    // SYSTEM_BASIC_INFORMATION is 64 bytes for 64-bit callers and 44 for PE32 ones.
+    let narrow = crate::wow64::is_active();
     let need: u32 = match class {
-        0 => 64,
+        0 => if narrow { 44 } else { 64 },
         8 => 48,
         _ => return STATUS_INVALID_INFO_CLASS,
     };
@@ -758,10 +760,17 @@ extern "win64" fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, r
                 teb::put(p, 16, 1u32);
                 teb::put(p, 20, (info.total_memory / 4096) as u32);
                 teb::put(p, 24, 0x10000u32);
-                teb::put(p, 32, 0x10000u64);
-                teb::put(p, 40, 0x7FFF_FFFE_FFFFu64);
-                teb::put(p, 48, 1u64);
-                teb::put(p, 56, 1u8);
+                if narrow {
+                    teb::put(p, 28, 0x10000u32);
+                    teb::put(p, 32, 0x7FFE_FFFFu32);
+                    teb::put(p, 36, 1u32);
+                    teb::put(p, 40, 1u8);
+                } else {
+                    teb::put(p, 32, 0x10000u64);
+                    teb::put(p, 40, 0x7FFF_FFFE_FFFFu64);
+                    teb::put(p, 48, 1u64);
+                    teb::put(p, 56, 1u8);
+                }
             }
             _ => {
                 // Samples are 1 ms; kernel time includes idle time.
