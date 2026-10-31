@@ -1542,7 +1542,8 @@ impl Stack {
     fn tcb(&mut self, id: SocketId) -> Result<&mut Tcb, NetError> {
         match self.sockets.get_mut(&id) {
             Some(Socket::Tcp(t)) => Ok(&mut t.tcb),
-            Some(Socket::BoundTcp(_)) => Err(NetError::NotConnected),
+            // A listener or a bind reservation has no connection yet.
+            Some(Socket::BoundTcp(_)) | Some(Socket::Listener(_)) => Err(NetError::NotConnected),
             _ => Err(NetError::BadSocket),
         }
     }

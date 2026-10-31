@@ -390,6 +390,10 @@ fn many_concurrent_connections() {
 fn listener_backlog_is_bounded_and_closing_it_resets_pending() {
     let mut n = Net::new();
     let l = n.b.tcp_listen(Endpoint::new(Ipv4Addr::UNSPECIFIED, 4000), 2).unwrap();
+    // Receiving from a listener is not connected, not a bad socket.
+    let mut buf = [0u8; 4];
+    assert_eq!(n.b.tcp_recv(l, &mut buf), Err(NetError::NotConnected));
+    assert_eq!(n.b.tcp_peek(l, &mut buf), Err(NetError::NotConnected));
     let clients: Vec<u32> = (0..5).map(|_| n.a.tcp_connect(None, Endpoint::new(B_IP, 4000)).unwrap()).collect();
     n.run(200);
     let established = clients.iter().filter(|&&c| n.a.tcp_state(c).unwrap().0 == State::Established).count();
