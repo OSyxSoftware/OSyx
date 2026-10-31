@@ -388,9 +388,9 @@ pub fn decode_dib(data: &[u8]) -> Option<Bitmap> {
     };
     let palette_at = header;
     let xor_at = palette_at + colours * 4;
-    let xor_stride = ((width as usize * bpp as usize + 31) / 32) * 4;
+    let xor_stride = (width as usize * bpp as usize).div_ceil(32) * 4;
     let and_at = xor_at + xor_stride * height as usize;
-    let and_stride = ((width as usize + 31) / 32) * 4;
+    let and_stride = (width as usize).div_ceil(32) * 4;
     if data.len() < xor_at + xor_stride * height as usize {
         return None;
     }
