@@ -56,6 +56,14 @@ Anything that cannot be driven is logged with its reason and left alone:
 `i2chidd: <path>: skipped: ...` (discovery) or `i2c: ... not claimed: ...` /
 `i2c-hid <path>: ... not claimed: ...` (kernel).
 
+`i2chidd` stays resident: it repeats discovery with a 30 s delay that doubles
+to 5 min, so a namespace that was not readable at boot, a controller released
+from reset late, or a device the kernel refused once all get another chance.
+The kernel skips devices it already drives and retries a refused device or a
+controller that failed before, so a quiet pass costs one encode and one
+syscall. `i2chidd --once` runs a single pass and exits with its result (0 when
+the pass worked); `tests,i2c` uses that.
+
 ## Tests
 
 * `cargo test -p osyx-i2c`: DesignWare against a register-level model

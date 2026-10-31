@@ -22,6 +22,8 @@ pub trait Hardware: Send + Sync {
     fn pci_write(&self, bdf: u64, offset: u64, width: u8, value: u64);
     /// Milliseconds from any fixed point; used for EC time-outs.
     fn now_ms(&self) -> u64;
+    /// Blocks the calling thread. Firmware `Sleep`/`Stall` end up here.
+    fn sleep_ms(&self, _ms: u64) {}
 }
 
 /// The EC's command/status and data ports.
@@ -113,6 +115,9 @@ const EC_READ: u64 = 0x80;
 const EC_WRITE: u64 = 0x81;
 /// Longest wait for one EC handshake step.
 pub const EC_TIMEOUT_MS: u64 = 100;
+/// Firmware that asks for a longer `Sleep` would stall the poll this long at
+/// most; anything past that is almost certainly a broken method.
+const MAX_FIRMWARE_SLEEP_MS: u64 = 1_000;
 
 /// Counters shared with the owner of the interpreter, which only sees what
 /// AML returns: failed EC transactions are invisible there.
@@ -313,6 +318,9 @@ impl<H: Hardware> Handler for Firmware<H> {
     }
     fn write_ec_u8(&self, offset: u8, value: u8) {
         let _ = self.ec_write(offset, value);
+    }
+    fn sleep_ms(&self, ms: u32) {
+        self.hw.sleep_ms(ms.min(MAX_FIRMWARE_SLEEP_MS as u32) as u64);
     }
     fn handle_fatal_error(&self, _fatal_type: u8, _fatal_code: u32, _fatal_arg: u64) {
         // The interpreter must not take the daemon down with it: the

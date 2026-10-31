@@ -25,6 +25,7 @@ pub const DEF_NAME_OP: u8 = 0x08;
 pub const DEF_SCOPE_OP: u8 = 0x10;
 pub const DEF_BUFFER_OP: u8 = 0x11;
 pub const DEF_PACKAGE_OP: u8 = 0x12;
+pub const DEF_VAR_PACKAGE_OP: u8 = 0x13;
 pub const DEF_METHOD_OP: u8 = 0x14;
 pub const DEF_EXTERNAL_OP: u8 = 0x15;
 pub const DEF_CREATE_DWORD_FIELD_OP: u8 = 0x8a;
@@ -33,8 +34,16 @@ pub const DEF_CREATE_BYTE_FIELD_OP: u8 = 0x8c;
 pub const DEF_CREATE_BIT_FIELD_OP: u8 = 0x8d;
 pub const DEF_CREATE_QWORD_FIELD_OP: u8 = 0x8f;
 pub const EXT_DEF_MUTEX_OP: u8 = 0x01;
+pub const EXT_DEF_EVENT_OP: u8 = 0x02;
 pub const EXT_DEF_COND_REF_OF_OP: u8 = 0x12;
 pub const EXT_DEF_CREATE_FIELD_OP: u8 = 0x13;
+pub const EXT_DEF_STALL_OP: u8 = 0x21;
+pub const EXT_DEF_SLEEP_OP: u8 = 0x22;
+pub const EXT_DEF_ACQUIRE_OP: u8 = 0x23;
+pub const EXT_DEF_SIGNAL_OP: u8 = 0x24;
+pub const EXT_DEF_WAIT_OP: u8 = 0x25;
+pub const EXT_DEF_RESET_OP: u8 = 0x26;
+pub const EXT_DEF_RELEASE_OP: u8 = 0x27;
 pub const EXT_REVISION_OP: u8 = 0x30;
 pub const EXT_DEF_FATAL_OP: u8 = 0x32;
 pub const EXT_DEF_OP_REGION_OP: u8 = 0x80;
@@ -43,6 +52,9 @@ pub const EXT_DEF_DEVICE_OP: u8 = 0x82;
 pub const EXT_DEF_PROCESSOR_OP: u8 = 0x83;
 pub const EXT_DEF_POWER_RES_OP: u8 = 0x84;
 pub const EXT_DEF_THERMAL_ZONE_OP: u8 = 0x85;
+pub const EXT_DEF_INDEX_FIELD_OP: u8 = 0x86;
+pub const EXT_DEF_BANK_FIELD_OP: u8 = 0x87;
+pub const EXT_DEF_DATA_REGION_OP: u8 = 0x88;
 
 /*
  * Type 1 opcodes
@@ -54,6 +66,7 @@ pub const DEF_WHILE_OP: u8 = 0xa2;
 pub const DEF_NOOP_OP: u8 = 0xa3;
 pub const DEF_RETURN_OP: u8 = 0xa4;
 pub const DEF_BREAK_OP: u8 = 0xa5;
+pub const DEF_NOTIFY_OP: u8 = 0x86;
 pub const DEF_BREAKPOINT_OP: u8 = 0xcc;
 
 /*
@@ -87,7 +100,12 @@ pub const DEF_L_NOT_OP: u8 = 0x92;
 pub const DEF_L_EQUAL_OP: u8 = 0x93;
 pub const DEF_L_GREATER_OP: u8 = 0x94;
 pub const DEF_L_LESS_OP: u8 = 0x95;
+pub const DEF_TO_BUFFER_OP: u8 = 0x96;
+pub const DEF_TO_DECIMAL_STRING_OP: u8 = 0x97;
+pub const DEF_TO_HEX_STRING_OP: u8 = 0x98;
 pub const DEF_TO_INTEGER_OP: u8 = 0x99;
+pub const DEF_TO_STRING_OP: u8 = 0x9c;
+pub const DEF_COPY_OBJECT_OP: u8 = 0x9d;
 pub const DEF_MID_OP: u8 = 0x9e;
 
 /*

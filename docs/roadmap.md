@@ -47,8 +47,10 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 3. **Battery detection**: done in code. Multiple batteries are aggregated,
    ACPI hotplug is followed, unknown or implausible EC values are filtered,
    and the AML tests cover two batteries, a missing battery and wild values
-   (`userspace/battery/`, `tests/acpi.rs`). Still open: verification on real
-   ThinkPads.
+   (`userspace/battery/`, `tests/acpi.rs`). Batteries are found by `_HID`,
+   `_CID` or (when the table is only partly readable) by name and `_BST`;
+   `batteryd` stays resident and rescans the namespace every 30 s until a
+   battery device appears. Still open: verification on real ThinkPads.
 4. **File formats and multiple files in Files**: partly done. Multi-selection
    (copy, move, delete, pack into tar), Extract here for tar/tar.gz/zip/7z/gz,
    a viewer and hex viewer, and "Open with" with per-extension choices are

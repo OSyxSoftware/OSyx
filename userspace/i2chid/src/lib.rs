@@ -40,8 +40,10 @@ use osyx_i2c::spec::{ControllerSpec, DeviceSpec, Interrupt, Location};
 pub fn load<H: Hardware + 'static>(hw: H, tables: &[Vec<u8>], log: &mut dyn FnMut(&str)) -> AmlContext {
     let mut ctx = AmlContext::new(Box::new(Firmware::new(hw, None, Arc::new(Stats::default()))), DebugVerbosity::None);
     for (i, t) in tables.iter().enumerate() {
-        if let Err(e) = ctx.parse_table(&t[36.min(t.len())..]) {
-            log(&format!("table {i}: {e:?}"));
+        let header = 36.min(t.len());
+        if let Err((e, at)) = ctx.parse_table_at(&t[header..]) {
+            // Objects parsed before `at` stay in the namespace.
+            log(&format!("table {i} ({} bytes): {e:?} at AML offset {at}", t.len()));
         }
     }
     if let Err(e) = ctx.initialize_objects() {

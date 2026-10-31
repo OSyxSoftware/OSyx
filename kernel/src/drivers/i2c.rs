@@ -140,8 +140,10 @@ impl I2cBus for DeviceBus {
 
 struct Registry {
     controllers: Vec<(Key, Result<Arc<Controller>, String>)>,
-    /// (controller, target address) of every device handed out.
-    devices: Vec<(Key, u8)>,
+    /// (controller, target address) and the outcome of the latest attempt:
+    /// a device the driver refused is dropped again so a later
+    /// `register` can retry it (the discovery service rescans).
+    devices: Vec<(Key, u8, Arc<AtomicU8>)>,
 }
 
 static REGISTRY: KMutex<Registry> = KMutex::new(Registry { controllers: Vec::new(), devices: Vec::new() });
@@ -253,19 +255,23 @@ struct Task {
 
 /// Parses `blob` (an `osyx_i2c::spec` description) and starts a thread per
 /// new device. Waits (bounded) until every device is probed and returns how
-/// many were claimed.
+/// many of the described devices are claimed (already running ones
+/// included). May be called again with the same description: running
+/// devices are skipped, refused ones and failed controllers are retried.
 pub fn register(blob: &[u8]) -> Result<usize, Errno> {
     let specs = spec::decode(blob).map_err(|e| {
         kprintln!("i2c: rejected the device description: {e:?}");
         Errno::InvalidArgument
     })?;
-    let mut outcomes: Vec<Arc<AtomicU8>> = Vec::new();
+    let mut attempts: Vec<(Key, u8, Arc<AtomicU8>)> = Vec::new();
     {
         let mut reg = REGISTRY.lock();
+        // A controller that failed before is tried again: an LPSS function
+        // can be released from reset late.
+        reg.controllers.retain(|(_, r)| r.is_ok());
         for d in &specs {
             let key = key_of(&d.controller);
-            if reg.devices.contains(&(key, d.address)) {
-                kprintln!("i2c: {}: already handed to the driver", d.path);
+            if reg.devices.iter().any(|(k, a, _)| *k == key && *a == d.address) {
                 continue;
             }
             let speed = BusSpeed::from_hz(d.speed_hz);
@@ -280,13 +286,13 @@ pub fn register(blob: &[u8]) -> Result<usize, Errno> {
                     r
                 }
             };
-            reg.devices.push((key, d.address));
             let Ok(controller) = controller else {
                 kprintln!("i2c: {}: not claimed, its controller is unusable", d.path);
                 continue;
             };
             let outcome = Arc::new(AtomicU8::new(PENDING));
-            outcomes.push(outcome.clone());
+            reg.devices.push((key, d.address, outcome.clone()));
+            attempts.push((key, d.address, outcome.clone()));
             let task = Box::new(Task {
                 path: d.path.clone(),
                 address: d.address,
@@ -300,11 +306,24 @@ pub fn register(blob: &[u8]) -> Result<usize, Errno> {
         }
     }
     let deadline = timer::Deadline::after_ms(PROBE_WAIT_MS);
-    while outcomes.iter().any(|o| o.load(Ordering::Acquire) == PENDING) && !deadline.expired() {
+    while attempts.iter().any(|(_, _, o)| o.load(Ordering::Acquire) == PENDING) && !deadline.expired() {
         timer::sleep_ms(5);
     }
-    let claimed = outcomes.iter().filter(|o| o.load(Ordering::Acquire) == CLAIMED).count();
-    kprintln!("i2c: {} of {} HID over I2C device(s) claimed", claimed, specs.len());
+    let mut reg = REGISTRY.lock();
+    // A refusal may be transient (the device was still waking up, the bus
+    // was busy): forget it so the next `register` probes again.
+    reg.devices.retain(|(key, address, outcome)| {
+        !(outcome.load(Ordering::Acquire) == REFUSED
+            && attempts.iter().any(|(k, a, o)| k == key && a == address && Arc::ptr_eq(o, outcome)))
+    });
+    let claimed = specs
+        .iter()
+        .filter(|d| {
+            let key = key_of(&d.controller);
+            reg.devices.iter().any(|(k, a, o)| *k == key && *a == d.address && o.load(Ordering::Acquire) == CLAIMED)
+        })
+        .count();
+    kprintln!("i2c: {claimed} of {} HID over I2C device(s) claimed", specs.len());
     Ok(claimed)
 }
 

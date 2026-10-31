@@ -112,7 +112,7 @@ fn main() -> i32 {
         // driver) and exit with its status. The i2c-hid-test script gives the
         // VM an SSDT with a touchpad whose controller does not exist.
         Some("i2c") => {
-            return match Command::new("/bin/i2chidd").status() {
+            return match Command::new("/bin/i2chidd").arg("--once").status() {
                 Ok(s) => {
                     println!("init: i2chidd exit status {:?}", s.code());
                     s.code().unwrap_or(1)
@@ -728,11 +728,20 @@ fn desktop_session() -> i32 {
     });
     println!("init: battery state kept by /bin/batteryd");
     // Touchpads and keyboards on I2C (HID over I2C): ACPI discovery, then the
-    // kernel driver takes over. Runs as root and exits when done.
-    match Command::new("/bin/i2chidd").spawn() {
-        Ok(c) => println!("init: HID over I2C discovery running (process {})", c.id()),
-        Err(e) => eprintln!("init: cannot start /bin/i2chidd: {e}"),
-    }
+    // kernel driver takes over. The service stays resident (it rescans and
+    // retries refused devices); started again if it ends, and waited for so
+    // it never lingers as a zombie.
+    thread::spawn(|| loop {
+        match Command::new("/bin/i2chidd").status() {
+            Ok(s) => eprintln!("init: i2chidd ended with status {:#x}; starting it again", s.raw()),
+            Err(e) => {
+                eprintln!("init: cannot start /bin/i2chidd: {e}");
+                return;
+            }
+        }
+        thread::sleep(Duration::from_secs(5));
+    });
+    println!("init: HID over I2C discovery kept by /bin/i2chidd");
     // Recover an established Wi-Fi connection when its gateway stops responding.
     match Command::new("/bin/wifi-watch").spawn() {
         Ok(c) => println!("init: Wi-Fi recovery running (process {})", c.id()),

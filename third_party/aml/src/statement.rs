@@ -1,4 +1,5 @@
 use crate::{
+    name_object::super_name,
     opcode::{self, ext_opcode, opcode},
     parser::{
         choice,
@@ -37,8 +38,14 @@ where
             def_continue(),
             def_fatal(),
             def_if_else(),
+            def_notify(),
             def_noop(),
+            def_release(),
+            def_reset(),
             def_return(),
+            def_signal(),
+            def_sleep(),
+            def_stall(),
             def_while()
         ),
     )
@@ -184,6 +191,105 @@ where
      * DefNoop := 0xa3
      */
     opcode(opcode::DEF_NOOP_OP).then(comment_scope(DebugVerbosity::AllScopes, "DefNoop", id())).discard_result()
+}
+
+fn def_notify<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefNotify := 0x86 SuperName TermArg
+     *
+     * There is no firmware event listener to tell: the notification is
+     * accepted and dropped.
+     */
+    opcode(opcode::DEF_NOTIFY_OP)
+        .then(comment_scope(DebugVerbosity::Scopes, "DefNotify", super_name().then(term_arg()).map(|_| Ok(()))))
+        .discard_result()
+}
+
+fn def_release<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefRelease := ExtOpPrefix 0x27 MutexObject
+     */
+    ext_opcode(opcode::EXT_DEF_RELEASE_OP)
+        .then(comment_scope(DebugVerbosity::Scopes, "DefRelease", super_name().map(|_| Ok(()))))
+        .discard_result()
+}
+
+fn def_reset<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefReset := ExtOpPrefix 0x26 EventObject
+     */
+    ext_opcode(opcode::EXT_DEF_RESET_OP)
+        .then(comment_scope(DebugVerbosity::Scopes, "DefReset", super_name().map(|_| Ok(()))))
+        .discard_result()
+}
+
+fn def_signal<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefSignal := ExtOpPrefix 0x24 EventObject
+     */
+    ext_opcode(opcode::EXT_DEF_SIGNAL_OP)
+        .then(comment_scope(DebugVerbosity::Scopes, "DefSignal", super_name().map(|_| Ok(()))))
+        .discard_result()
+}
+
+fn def_sleep<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefSleep := ExtOpPrefix 0x22 MsecTime
+     * MsecTime := TermArg => Integer
+     */
+    ext_opcode(opcode::EXT_DEF_SLEEP_OP)
+        .then(comment_scope(
+            DebugVerbosity::Scopes,
+            "DefSleep",
+            term_arg().map_with_context(|time, context| {
+                let ms = match time.as_integer(context) {
+                    Ok(ms) => ms,
+                    Err(err) => return (Err(Propagate::Err(err)), context),
+                };
+                context.sleep_ms(ms.min(u32::MAX as u64) as u32);
+                (Ok(()), context)
+            }),
+        ))
+        .discard_result()
+}
+
+fn def_stall<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefStall := ExtOpPrefix 0x21 UsecTime
+     * UsecTime := TermArg => Integer
+     */
+    ext_opcode(opcode::EXT_DEF_STALL_OP)
+        .then(comment_scope(
+            DebugVerbosity::Scopes,
+            "DefStall",
+            term_arg().map_with_context(|time, context| {
+                let us = match time.as_integer(context) {
+                    Ok(us) => us,
+                    Err(err) => return (Err(Propagate::Err(err)), context),
+                };
+                context.stall_us(us.min(u32::MAX as u64) as u32);
+                (Ok(()), context)
+            }),
+        ))
+        .discard_result()
 }
 
 fn def_return<'a, 'c>() -> impl Parser<'a, 'c, ()>
