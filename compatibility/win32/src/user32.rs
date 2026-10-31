@@ -3308,10 +3308,20 @@ extern "win64" fn GetSysColorBrush(i: i32) -> u64 {
     })
 }
 
-/// There is no system sound: the call fails with ERROR_NOT_SUPPORTED
-/// rather than report a beep nobody heard.
-extern "win64" fn MessageBeep(_kind: u32) -> Bool {
-    fail(ERROR_NOT_SUPPORTED, FALSE)
+/// MessageBeep: a short tone on the sound card, a different pitch per
+/// message-box icon (MB_ICONHAND, QUESTION, EXCLAMATION, ASTERISK; the
+/// default beep for MB_OK and for -1 and any other value). Like Windows it
+/// returns TRUE even when no sound card is present to play it.
+extern "win64" fn MessageBeep(kind: u32) -> Bool {
+    let (freq, ms) = match kind {
+        0x10 => (440, 200),
+        0x20 => (660, 150),
+        0x30 => (880, 150),
+        0x40 => (1000, 120),
+        _ => (800, 100),
+    };
+    crate::winmm::play_tone(freq, ms);
+    TRUE
 }
 
 // ---- painting -------------------------------------------------------------------------

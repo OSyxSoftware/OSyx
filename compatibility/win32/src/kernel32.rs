@@ -111,7 +111,7 @@ unsafe fn sa(p: *const u8) -> Option<String> {
 
 /// # Safety
 /// As [`sa`] for UTF-16.
-unsafe fn sw(p: *const u16) -> Option<String> {
+pub(crate) unsafe fn sw(p: *const u16) -> Option<String> {
     // SAFETY: forwarded.
     unsafe { path::wide_to_string(p) }
 }

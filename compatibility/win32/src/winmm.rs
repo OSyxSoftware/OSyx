@@ -249,6 +249,31 @@ fn wait_ms(ms: u64) {
     os_std::thread::sleep(core::time::Duration::from_millis(ms));
 }
 
+/// A square-wave tone on the sound card, played by a detached thread, for
+/// MessageBeep. Returns whether a card exists to play it.
+pub(crate) fn play_tone(freq: u32, ms: u32) -> bool {
+    if sound_card().is_none() {
+        return false;
+    }
+    os_std::thread::Builder::new()
+        .stack_size(64 << 10)
+        .spawn(move || {
+            use os_std::io::Write;
+            let frames = (DEVICE_RATE as u32 / 1000 * ms) as usize;
+            let half = (DEVICE_RATE as u32 / (2 * freq.max(1))).max(1) as usize;
+            let mut pcm = alloc::vec::Vec::with_capacity(frames * 4);
+            for i in 0..frames {
+                let level: i16 = if (i / half) % 2 == 0 { 6000 } else { -6000 };
+                pcm.extend_from_slice(&level.to_le_bytes());
+                pcm.extend_from_slice(&level.to_le_bytes());
+            }
+            if let Ok(mut f) = os_std::fs::OpenOptions::new().write(true).open("/dev/audio") {
+                let _ = f.write_all(&pcm);
+            }
+        })
+        .is_ok()
+}
+
 // ---- wave output ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]

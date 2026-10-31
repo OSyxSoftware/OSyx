@@ -75,8 +75,47 @@ extern "win64" fn QueryThreadCycleTime(_h: u64, _cycles: *mut u64) -> i32 {
     fail(ERROR_NOT_SUPPORTED, 0)
 }
 
-extern "win64" fn QueryProcessCycleTime(_h: u64, _cycles: *mut u64) -> i32 {
-    fail(ERROR_NOT_SUPPORTED, 0)
+/// TSC cycles per second, measured once against the monotonic clock (which
+/// the kernel derives from the same counter, at nanosecond resolution).
+fn tsc_hz() -> u64 {
+    static HZ: AtomicU64 = AtomicU64::new(0);
+    let known = HZ.load(Ordering::Relaxed);
+    if known != 0 {
+        return known;
+    }
+    let (ns0, c0) = (os_sys::clock(osyx_abi::CLOCK_MONOTONIC).unwrap_or(0), rdtsc());
+    os_std::thread::sleep(core::time::Duration::from_millis(5));
+    let (ns1, c1) = (os_sys::clock(osyx_abi::CLOCK_MONOTONIC).unwrap_or(0), rdtsc());
+    let hz = (c1 - c0) as u128 * 1_000_000_000 / (ns1.saturating_sub(ns0).max(1)) as u128;
+    HZ.store(hz as u64, Ordering::Relaxed);
+    hz as u64
+}
+
+fn rdtsc() -> u64 {
+    // SAFETY: RDTSC exists on every x86-64 and has no side effects.
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// QueryProcessCycleTime: the process's CPU time (the scheduler samples, one
+/// per millisecond) in TSC cycles.
+extern "win64" fn QueryProcessCycleTime(h: u64, cycles: *mut u64) -> i32 {
+    if !is_process(h) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if cycles.is_null() {
+        return fail(ERROR_NOACCESS, 0);
+    }
+    let pid = match objects::get(h) {
+        Some(Object::Process(p)) => p.pid,
+        _ => kernel32::pid(),
+    };
+    let info = match os_sys::proc_info(pid) {
+        Ok(i) => i,
+        Err(e) => return fail(errno_to_win32(e), 0),
+    };
+    // SAFETY: the caller's out pointer.
+    unsafe { *cycles = (info.cpu_ticks as u128 * tsc_hz() as u128 / 1000) as u64 };
+    1
 }
 
 /// Only the calling thread can end itself (ExitThread); OSyx offers no way
