@@ -1511,6 +1511,9 @@ fn destroy(hwnd: u64, notify: bool) -> bool {
         call(proc_, hwnd, WM_DESTROY, 0, 0);
         call(proc_, hwnd, WM_NCDESTROY, 0, 0);
     }
+    if with(|g| g.windows.get(&hwnd).is_some_and(|w| w.visible)) {
+        repaint_parent_of(hwnd);
+    }
     with(|g| {
         if let Some(w) = g.windows.remove(&hwnd) {
             if w.system_menu != 0 { destroy_menu(g, w.system_menu); }
@@ -1644,10 +1647,24 @@ extern "win64" fn ShowWindow(hwnd: u64, cmd: i32) -> Bool {
                     call(p, hwnd, WM_SHOWWINDOW, 1, 0);
                 }
             }
+            if was && cmd == 0 {
+                repaint_parent_of(hwnd);
+            }
             was as Bool
         }
         None => fail(ERROR_INVALID_WINDOW_HANDLE, FALSE),
     }
+}
+
+/// A hidden or destroyed child control leaves its pixels in the parent's
+/// surface: the parent paints that area again.
+fn repaint_parent_of(hwnd: u64) {
+    with(|g| {
+        let owner = g.windows.get(&hwnd).filter(|w| w.style & WS_CHILD != 0).map(|w| w.owner);
+        if let Some(owner) = owner {
+            g.invalidate(owner, None, true);
+        }
+    });
 }
 
 fn sync_window_visibility(hwnd: u64) {
@@ -1834,6 +1851,7 @@ extern "win64" fn SetWindowPos(hwnd: u64, after: u64, x: i32, y: i32, cx: i32, c
     match r {
         Some((resized, moved)) => {
             if flags & (0x40 | 0x80) != 0 { sync_window_visibility(hwnd); }
+            if flags & 0x80 != 0 { repaint_parent_of(hwnd); }
             notify_window_pos(hwnd, flags | if !resized { 0x800 } else { 0 } | if !moved { 0x1000 } else { 0 }, false);
             TRUE
         }
