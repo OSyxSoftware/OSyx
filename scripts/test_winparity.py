@@ -255,6 +255,24 @@ extern "win64" {
         self.assertIn("assembly", osyx.pick("RaiseException").reason)
         self.assertEqual(osyx.pick("path_getter").cls, "implemented")
 
+    def test_macro_generated_functions_are_found(self):
+        src = """
+macro_rules! unary {
+    ($($s:ident = $f:ident;)*) => {$(
+        extern "win64" fn $s(x: f64) -> f64 {
+            $f(x)
+        }
+    )*};
+}
+unary! {
+    sin_soft = sin_f; cos_soft = cos_f;
+}
+fn sin_f(x: f64) -> f64 { x }
+"""
+        fns = w.parse_win64_fns("m.rs", w.expand_macros(src))
+        self.assertEqual(sorted(f.name for f in fns), ["cos_soft", "sin_soft"])
+        self.assertIn("cos_f(x)", [f for f in fns if f.name == "cos_soft"][0].body)
+
     def test_export_resolution(self):
         d = self.osyx.dlls
         self.assertEqual(set(d["a.dll"]), {"One", "Two", "TwoAlias"})

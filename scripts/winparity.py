@@ -318,6 +318,44 @@ class RustFn:
         self.wow64 = "wow64::is_active" in body
 
 
+def expand_macros(src: str):
+    """Source of the functions `macro_rules!` repetitions generate in `src`.
+
+    Handles the shape this tree uses: one rule `($($a:ident = $b:ident;)*) =>
+    {$( extern "win64" fn $a(..) {..} )*}` invoked as `name! { x = y; ... }`.
+    Each invocation entry is matched against the rule's pattern and the
+    template is instantiated with its values, so the generated functions are
+    classified like hand-written ones."""
+    nocomment, masked = mask_rust(src)
+    out = []
+    for mm in re.finditer(r"macro_rules!\s+(\w+)\s*\{", masked):
+        name = mm.group(1)
+        bo = masked.find("{", mm.start())
+        bc = match_close(masked, bo, "{", "}")
+        if bc < 0:
+            continue
+        rule = nocomment[bo + 1:bc - 1]
+        r = re.search(r"\(\s*\$\((.*?)\)\*\s*\)\s*=>\s*\{\s*\$\((.*)\)\*\s*\}", rule, re.S)
+        if not r or 'extern "win64" fn' not in r.group(2):
+            continue
+        pattern, template = r.group(1), r.group(2)
+        names = re.findall(r"\$(\w+):\w+", pattern)
+        literals = re.split(r"\$\w+:\w+", pattern)
+        rx = "(.+?)".join(r"\s*".join(re.escape(t) for t in lit.split()) for lit in literals)
+        rx = r"\s*" + rx
+        for inv in re.finditer(r"\b%s!\s*\{" % re.escape(name), masked):
+            io = masked.find("{", inv.start())
+            ic = match_close(masked, io, "{", "}")
+            if ic < 0:
+                continue
+            for entry in re.finditer(rx, nocomment[io + 1:ic - 1], re.S):
+                text = template
+                for var, val in sorted(zip(names, entry.groups()), key=lambda p: -len(p[0])):
+                    text = text.replace("$" + var, val.strip())
+                out.append(text)
+    return "\n".join(out)
+
+
 def parse_win64_fns(path: str, src: str):
     nocomment, masked = mask_rust(src)
     fns = []
@@ -436,7 +474,7 @@ class Osyx:
             self.modfiles.setdefault(parts[-1], []).append(p)
         self.fns = {}        # name -> [RustFn]
         for p, s in self.files.items():
-            for fn in parse_win64_fns(p, s):
+            for fn in parse_win64_fns(p, s) + parse_win64_fns(p, expand_macros(s)):
                 self.fns.setdefault(fn.name, []).append(fn)
         self._index_indirect()
         self.dlls = OrderedDict()      # dll -> {name: impl_ident}
