@@ -260,6 +260,11 @@ impl App for Settings {
             } else {
                 (before + dy.unsigned_abs() as usize).min(max_top)
             };
+            // Uninstall must not act on a row the user can no longer see.
+            if self.selected_program.is_some_and(|i| i < self.programs_top || i >= self.programs_top + PROGRAM_ROWS) {
+                self.selected_program = None;
+                return true;
+            }
             return self.programs_top != before;
         }
         if let Ui::PointerDown { x, y, .. } = ev {

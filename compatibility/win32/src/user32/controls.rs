@@ -235,6 +235,8 @@ fn list_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
         LVM_DELETEITEM => data_of(hwnd, |d| {
             if (w as usize) < d.rows.len() {
                 d.rows.remove(w as usize);
+                // The first visible row stays a row (or 0 with none left).
+                d.top = d.top.min(d.rows.len().saturating_sub(1));
                 1
             } else {
                 0
