@@ -1440,10 +1440,16 @@ impl Shell {
     fn add_shortcut(&mut self, i: usize) {
         let Some(app) = self.apps.get(i) else { return };
         let name = app.name.clone();
-        let file = app.source.rsplit('/').next().unwrap_or("application.app");
+        // An `.app` entry or a Windows shortcut is copied; a Windows program
+        // found in Program Files gets an `.app` entry of its own.
+        let (file, data) = if app.source.ends_with(".app") || app.source.to_ascii_lowercase().ends_with(".lnk") {
+            (String::from(app.source.rsplit('/').next().unwrap_or("application.app")), os_std::fs::read(&app.source))
+        } else {
+            (format!("{name}.app"), Ok(format!("Name={name}\nExec={}\nIcon=program\n", app.exec).into_bytes()))
+        };
         let target = format!("{}/{file}", common::DESKTOP_DIR);
         let result = os_std::fs::create_dir_all(common::DESKTOP_DIR)
-            .and_then(|_| os_std::fs::read(&app.source))
+            .and_then(|_| data)
             .and_then(|data| os_std::fs::write(&target, data));
         match result {
             Ok(()) => {

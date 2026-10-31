@@ -201,7 +201,7 @@ extern "win64" fn CoInitializeSecurity(_sd: u64, _count: i32, _services: u64, _r
     S_OK
 }
 
-extern "win64" fn CoCreateInstance(_clsid: *const u8, outer: u64, _context: u32, _iid: *const u8, out: *mut u64) -> u32 {
+extern "win64" fn CoCreateInstance(clsid: *const u8, outer: u64, _context: u32, iid: *const u8, out: *mut u64) -> u32 {
     if out.is_null() {
         return E_POINTER;
     }
@@ -213,7 +213,12 @@ extern "win64" fn CoCreateInstance(_clsid: *const u8, outer: u64, _context: u32,
     if outer != 0 {
         return CLASS_E_NOAGGREGATION;
     }
-    REGDB_E_CLASSNOTREG // no COM classes are registered on OSyx
+    // SAFETY: the caller's CLSID.
+    if !clsid.is_null() && unsafe { *(clsid as *const [u8; 16]) } == crate::shelllink::CLSID_SHELLLINK {
+        // SAFETY: the caller's IID and out pointer.
+        return unsafe { crate::shelllink::create(iid, out) };
+    }
+    REGDB_E_CLASSNOTREG // the other classes are not provided on OSyx
 }
 
 /// IID_IForegroundTransfer {00000145-0000-0000-C000-000000000046}.
