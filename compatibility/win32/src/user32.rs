@@ -2498,7 +2498,13 @@ extern "win64" fn DispatchMessageW(msg: *const u8) -> i64 {
 
 extern "win64" fn SendMessageA(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
     match wndproc_of(hwnd) {
-        Some(p) => call(p, hwnd, msg, w, l),
+        Some(p) => {
+            let result = call(p, hwnd, msg, w, l);
+            if msg >= 0x400 && crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+                os_std::eprintln!("winrun: SendMessage({hwnd:#x}, {msg:#x}, {w:#x}, {l:#x}) = {result}");
+            }
+            result
+        }
         None => fail(ERROR_INVALID_WINDOW_HANDLE, 0),
     }
 }
@@ -2815,7 +2821,10 @@ extern "win64" fn ControlWndProc(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
                 _ => {}
             }
             InvalidateRect(owner, core::ptr::null(), TRUE);
-            SendMessageW(owner, WM_COMMAND, id & 0xFFFF, hwnd as i64); // BN_CLICKED is 0
+            let result = SendMessageW(owner, WM_COMMAND, id & 0xFFFF, hwnd as i64); // BN_CLICKED is 0
+            if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+                os_std::eprintln!("winrun: button {hwnd:#x} id={id} click -> WM_COMMAND to {owner:#x} = {result}");
+            }
             0
         }
         _ => DefWindowProcW(hwnd, msg, w, l),
