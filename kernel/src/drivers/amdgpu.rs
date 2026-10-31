@@ -8,7 +8,8 @@
 //! use.
 //!
 //! The VBIOS window is enabled only for the read and restored afterwards.
-//! Nothing is written to the device.
+//! PCI configuration registers are written temporarily; display registers
+//! are not programmed.
 
 use crate::pci::{self, Bar, CMD_MEMORY};
 use alloc::string::String;
@@ -20,8 +21,7 @@ use osyx_display::amd::{self, DcnVersion};
 const ROM_BAR: u8 = 0x30;
 /// Address bits of the ROM BAR; bits 10:1 are reserved.
 const ROM_MASK: u32 = 0xFFFF_F800;
-/// The part of the ROM that is read. Every known VBIOS places its ATOM
-/// header in the first eight KiB.
+/// Read the first 64 KiB, covering the u16 ATOM ROM header pointer.
 const ROM_SCAN: u64 = 64 * 1024;
 
 /// Logs every AMD display function and its VBIOS. Returns how many were

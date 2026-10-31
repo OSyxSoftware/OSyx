@@ -62,16 +62,18 @@ pub fn is_amd_display(vendor: u16, class: u8) -> bool {
 /// BAR.
 ///
 /// The image must start with the legacy ROM signature. The ATOM header is
-/// located by its text because its offset depends on the VBIOS version; the
-/// search is limited to the first eight KiB, where every known VBIOS places
-/// it. This is identification only: nothing from the header is interpreted
-/// yet.
+/// pointed to by the little-endian u16 at offset 0x48. Its four-byte
+/// signature follows the common table header. This is identification only:
+/// no command or data tables are interpreted yet.
+/// See Linux's `check_atom_bios` in `drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c`.
 pub fn atom_header_offset(image: &[u8]) -> Option<usize> {
-    if image.len() < 16 || image[..2] != ROM_SIGNATURE {
+    if image.len() < 0x4a || image[..2] != ROM_SIGNATURE {
         return None;
     }
-    let limit = image.len().min(8192);
-    image[..limit].windows(ATOM_SIGNATURE.len()).position(|w| w == ATOM_SIGNATURE)
+    let header = u16::from_le_bytes([image[0x48], image[0x49]]) as usize;
+    if header == 0 { return None; }
+    let signature = image.get(header.checked_add(4)?..header.checked_add(8)?)?;
+    if signature == ATOM_SIGNATURE || signature == b"MOTA" { Some(header) } else { None }
 }
 
 #[cfg(test)]
@@ -97,20 +99,31 @@ mod tests {
     fn atom_header_requires_a_legacy_rom() {
         let mut rom = [0u8; 256];
         rom[..2].copy_from_slice(&ROM_SIGNATURE);
-        rom[0x30..0x34].copy_from_slice(&ATOM_SIGNATURE);
-        assert_eq!(atom_header_offset(&rom), Some(0x30));
+        rom[0x48..0x4a].copy_from_slice(&0x80u16.to_le_bytes());
+        rom[0x84..0x88].copy_from_slice(&ATOM_SIGNATURE);
+        assert_eq!(atom_header_offset(&rom), Some(0x80));
+
+        rom[0x84..0x88].copy_from_slice(b"MOTA");
+        assert_eq!(atom_header_offset(&rom), Some(0x80));
 
         rom[0] = 0;
         assert_eq!(atom_header_offset(&rom), None);
 
-        let no_atom = [0x55, 0xAA, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        assert_eq!(atom_header_offset(&no_atom), None);
         assert_eq!(atom_header_offset(&[]), None);
+    }
 
-        // An ATOM header beyond the search window is not found.
-        let mut far = [0u8; 16 * 1024];
-        far[..2].copy_from_slice(&ROM_SIGNATURE);
-        far[8192..8196].copy_from_slice(&ATOM_SIGNATURE);
-        assert_eq!(atom_header_offset(&far), None);
+    #[test]
+    fn atom_header_uses_pointer_and_checks_bounds() {
+        let mut rom = [0u8; 16 * 1024];
+        rom[..2].copy_from_slice(&ROM_SIGNATURE);
+        rom[0x30..0x34].copy_from_slice(&ATOM_SIGNATURE); // unrelated text
+        assert_eq!(atom_header_offset(&rom), None);
+        rom[0x48..0x4a].copy_from_slice(&0x3000u16.to_le_bytes());
+        rom[0x3004..0x3008].copy_from_slice(&ATOM_SIGNATURE);
+        assert_eq!(atom_header_offset(&rom), Some(0x3000));
+        assert_eq!(atom_header_offset(&rom[..0x49]), None);
+        assert_eq!(atom_header_offset(&rom[..0x3007]), None);
+        rom[0x48..0x4a].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(atom_header_offset(&rom), None);
     }
 }
