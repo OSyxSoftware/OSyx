@@ -705,3 +705,16 @@ fn udp_peek_leaves_the_datagram_queued() {
     assert_eq!(&buf[..len], b"peek");
     assert_eq!(n.a.udp_peek_from(rx, &mut buf), Err(NetError::WouldBlock));
 }
+
+#[test]
+fn udp_peek_does_not_consume_the_pending_error() {
+    let mut n = Net::new();
+    let client = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    n.a.udp_connect(client, Endpoint::new(B_IP, 9999)).unwrap();
+    n.a.udp_send_to(client, None, b"nobody").unwrap();
+    let mut buf = [0u8; 8];
+    assert!(n.run_until(100, |n| n.a.udp_peek_from(client, &mut buf) == Err(NetError::PortUnreachable)));
+    // ICMP unreachable stays pending until a real recv consumes it.
+    assert_eq!(n.a.udp_peek_from(client, &mut buf), Err(NetError::PortUnreachable));
+    assert_eq!(n.a.udp_recv_from(client, &mut buf), Err(NetError::PortUnreachable));
+}

@@ -1380,7 +1380,8 @@ impl Stack {
             buf[..n].copy_from_slice(&d[..n]);
             return Ok((*from, n, d.len()));
         }
-        if let Some(e) = u.error.take() {
+        // A peek must not consume the pending error: the next recv reports it.
+        if let Some(e) = u.error {
             return Err(e);
         }
         Err(NetError::WouldBlock)
