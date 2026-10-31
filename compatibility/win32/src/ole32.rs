@@ -945,6 +945,7 @@ extern "win64" fn EnumClone(this: u64, out: *mut u64) -> u32 {
 // ---- HGLOBAL stream, agile references, marshaler ---------------------------------------
 
 const STG_E_INVALIDFUNCTION: u32 = 0x8003_0001;
+const STG_E_SEEKERROR: u32 = 0x8003_0019;
 const STG_E_INVALIDPOINTER: u32 = 0x8003_0009;
 /// {0c733a30-2a1c-11ce-ade5-00aa0044773d}
 const IID_ISEQUENTIALSTREAM: [u8; 16] = [0x30, 0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11, 0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d];
@@ -1113,11 +1114,11 @@ extern "win64" fn StreamSeek(this: u64, delta: i64, origin: u32, new_pos: *mut u
         0 => 0,
         1 => *pos as i128,
         2 => size,
-        _ => return STG_E_INVALIDFUNCTION,
+        _ => return STG_E_SEEKERROR,
     };
     let next = base + delta as i128;
     if next < 0 || next > u64::MAX as i128 {
-        return STG_E_INVALIDFUNCTION;
+        return STG_E_SEEKERROR;
     }
     *pos = next as u64;
     if !new_pos.is_null() {

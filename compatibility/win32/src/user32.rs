@@ -5485,8 +5485,12 @@ extern "win64" fn RegisterRawInputDevices(devices: *const u8, n: u32, size: u32)
 // ---- clipboard --------------------------------------------------------------------------
 
 extern "win64" fn GetRawInputDeviceList(_list: *mut u8, num_devices: *mut u32, size: u32) -> u32 {
-    if num_devices.is_null() || size != 16 {
+    // Windows checks the element size before the count pointer.
+    if size != 16 {
         return fail(ERROR_INVALID_PARAMETER, u32::MAX);
+    }
+    if num_devices.is_null() {
+        return fail(ERROR_NOACCESS, u32::MAX);
     }
     unsafe { *num_devices = 0 };
     0
@@ -5513,7 +5517,9 @@ extern "win64" fn CloseTouchInputHandle(_handle: u64) -> Bool {
 }
 
 extern "win64" fn GetGestureInfo(_handle: u64, _info: *mut u8) -> Bool {
-    fail(ERROR_INVALID_HANDLE, FALSE)
+    // Windows answers an unknown gesture handle with ERROR_INVALID_PARAMETER here
+    // (CloseGestureInfoHandle says ERROR_INVALID_HANDLE).
+    fail(ERROR_INVALID_PARAMETER, FALSE)
 }
 
 extern "win64" fn CloseGestureInfoHandle(_handle: u64) -> Bool {
