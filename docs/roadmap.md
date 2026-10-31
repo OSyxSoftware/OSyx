@@ -120,7 +120,9 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 
 NVMe, AHCI, physical Ethernet and Intel Wi-Fi drivers are present. The README lists the ThinkPad T495 as tested hardware; support on other machines and firmware varies. NVMe and AHCI use polled I/O.
 
-- **Display**: GOP on physical hardware; VirtIO-GPU under QEMU. Native GPU modesetting is not implemented.
+- **Display**: GOP on physical hardware; VirtIO-GPU under QEMU with EDID
+  preferred-mode selection. AMD display functions and their VBIOS are
+  identified at boot, but native GPU modesetting is not implemented.
 - **SMP**: user threads run in parallel; kernel entry uses a common lock.
 - **USB**: xHCI supports hubs; device and topology coverage remains limited.
 - **Laptop input**: PS/2 input is supported. HID over I2C (keyboards, mice, precision touchpads behind a DesignWare I2C controller, found through ACPI by `i2chidd`) is implemented but polled and not yet verified on real hardware; touchscreens, gestures (tap, scroll) and interrupt-driven input are not supported.

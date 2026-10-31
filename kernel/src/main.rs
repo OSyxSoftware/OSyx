@@ -268,6 +268,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let keep_log = boot.has_option("log.screen");
     // A VirtIO-GPU is preferred over the firmware framebuffer (with one,
     // GOP is usually Blt-only anyway); `display=gop` keeps GOP.
+    drivers::amdgpu::probe(&pci_devices);
     let gpu = if boot.option_value("display") == Some("gop") { None } else { drivers::virtio_gpu::find(&pci_devices) };
     let mode = boot.option_value("display.mode").and_then(|m| {
         let (w, h) = m.split_once('x')?;
