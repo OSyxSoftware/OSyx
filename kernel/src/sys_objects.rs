@@ -435,6 +435,16 @@ pub fn proc_info(pid: u64, out: u64) -> Result<u64, Errno> {
     Ok(0)
 }
 
+/// `working_set(pid, buf, cap)`: the resident user pages of a process.
+pub fn working_set(pid: u64, buf: u64, cap: u64) -> Result<u64, Errno> {
+    let me = sched::current_pid();
+    let pid = if pid == 0 { me } else { pid };
+    let root = process::working_set_root(pid, me)?;
+    let (pages, total) = crate::mem::paging::user_pages(root, cap.min(1 << 22) as usize);
+    put_slice(buf, pages.len() as u64 * 8, &pages)?;
+    Ok(total)
+}
+
 pub fn proc_list(buf: u64, len: u64) -> Result<u64, Errno> {
     put_slice(buf, len, &process::list())
 }

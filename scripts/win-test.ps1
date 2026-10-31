@@ -9,7 +9,9 @@
 param(
     [switch]$SkipBuild,
     [int]$TimeoutSec = 300,
-    [ValidateRange(1,16)][int]$CpuCount = 1
+    [ValidateRange(1,16)][int]$CpuCount = 1,
+    # Also run the Win Parity Check on this run's log (scripts/win-parity.ps1).
+    [switch]$Parity
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 $testDir = Join-Path $BuildDir 'test'
@@ -66,7 +68,17 @@ foreach ($m in [regex]::Matches($t, '\[winrun:\d+\]\s+(ok|FAIL)\s+(.+)')) {
 # hello32.exe prints no per-program summary (no C runtime, no check helpers),
 # so its evidence is the marker line and the exit code check in win_checks.
 Record 'hello32.exe printed the 32-bit marker' ($t -match 'hello32: 32-bit code ran') ''
-foreach ($p in 'hello', 'fileio', 'threads', 'winsock', 'wsock32', 'wsaext', 'k32ansi', 'k32xul', 'advapi', 'newdlls', 'pipes', 'gdi2', 'gui', 'sysadmin', 'version', 'synch', 'prio', 'security', 'exceptions', 'mapping', 'runtime', 'seh', 'platform', 'shell', 'winmm', 'sandbox', 'ole2', 'msgwait', 'dwm', 'keyboard', 'input', 'shlpath', 'secattr', 'childproc', 'imageshare', 'dwrite', 'interop', 'ucrt', 'crt2', 'crt3', 'crt4') {
+# api32.exe prints "api32: ok|FAIL NAME" per call and a summary line.
+foreach ($m in [regex]::Matches($t, 'api32: (ok|FAIL) (.+)')) {
+    Record ("api32: " + $m.Groups[2].Value.Trim()) ($m.Groups[1].Value -eq 'ok') ''
+}
+Record 'api32.exe summary' ($t -match 'api32: summary ok') ''
+# thread32.exe prints "thread32: ok|FAIL NAME" per check and a summary line.
+foreach ($m in [regex]::Matches($t, 'thread32: (ok|FAIL) (.+)')) {
+    Record ("thread32: " + $m.Groups[2].Value.Trim()) ($m.Groups[1].Value -eq 'ok') ''
+}
+Record 'thread32.exe summary' ($t -match 'thread32: summary ok') ''
+foreach ($p in 'hello', 'fileio', 'threads', 'winsock', 'wsock32', 'wsaext', 'k32ansi', 'k32xul', 'advapi', 'newdlls', 'pipes', 'gdi2', 'gui', 'sysadmin', 'version', 'synch', 'prio', 'security', 'exceptions', 'mapping', 'runtime', 'seh', 'platform', 'shell', 'winmm', 'sandbox', 'ole2', 'msgwait', 'dwm', 'keyboard', 'input', 'newlibs', 'stubfix', 'shlpath', 'secattr', 'childproc', 'imageshare', 'dwrite', 'interop', 'ucrt', 'crt2', 'crt3', 'crt4') {
     $s = [regex]::Match($t, "\[winrun:\d+\] ${p}: (\d+) passed, (\d+) failed")
     Record "$p.exe summary" ($s.Success -and $s.Groups[2].Value -eq '0') $s.Value
 }
@@ -81,4 +93,5 @@ Record 'no kernel panic' ($t -notmatch 'KERNEL PANIC') ''
 $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
 $failed = @($results | Where-Object Result -eq 'FAIL').Count
 Write-Host ("windows test: {0} passed, {1} failed" -f ($results.Count - $failed), $failed)
+if ($Parity) { & (Join-Path $PSScriptRoot 'win-parity.ps1') -TestsLog $log | Out-Host }
 exit $failed

@@ -1278,6 +1278,39 @@ impl<D: BlockDevice> Ext4<D> {
         })
     }
 
+    /// Gives the existing non-directory inode `target` a second name `name`
+    /// in `dir` (a hard link).
+    pub fn link(&mut self, dir: u32, name: &str, target: u32) -> Result<()> {
+        validate_name(name)?;
+        self.op(|fs| {
+            let mut parent = fs.dir_tx(dir)?;
+            if parent.links == 0 {
+                return Err(Error::NotFound);
+            }
+            if fs.find_entry(&parent, name).is_ok() {
+                return Err(Error::AlreadyExists);
+            }
+            let mut inode = fs.tx_inode(target)?;
+            if inode.is_dir() {
+                return Err(Error::IsADirectory);
+            }
+            if inode.links == 0 {
+                return Err(Error::NotFound);
+            }
+            if inode.links >= MAX_LINKS {
+                return Err(Error::NoSpace);
+            }
+            inode.links += 1;
+            inode.ctime = fs.now();
+            fs.put_inode(&mut inode)?;
+            fs.add_entry(&mut parent, name, target, ft_of(inode.mode))?;
+            let now = fs.now();
+            parent.mtime = now;
+            parent.ctime = now;
+            fs.put_inode(&mut parent)
+        })
+    }
+
     /// Frees an inode with no names left: its blocks, then the inode.
     fn destroy_inode(&mut self, ino: u32) -> Result<()> {
         let mut inode = self.tx_inode(ino)?;
