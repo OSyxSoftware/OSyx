@@ -784,6 +784,14 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
             return stack_call(|st| st.recv_available(id)).map(|n| n as u64);
         }
         abi::ctl::LAST_MSG_LEN => return Ok(s.last_msg_len.load(Ordering::Relaxed)),
+        abi::ctl::PENDING_ERROR => {
+            let Some(id) = s.id().filter(|_| s.kind == abi::SOCK_STREAM) else { return Ok(0) };
+            let (_, err) = stack_call(|st| st.tcp_state(id))?;
+            return match err {
+                Some(e) => Err(errno(e)),
+                None => Ok(0),
+            };
+        }
         _ => return Err(Errno::InvalidArgument),
     }
     Ok(0)

@@ -519,7 +519,15 @@ extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *
                     SOCK_DGRAM as u32
                 }
             }
-            (SOL_SOCKET, SO_ERROR | SO_REUSEADDR | SO_KEEPALIVE) => 0,
+            (SOL_SOCKET, SO_ERROR) => {
+                // A failed non-blocking connect shows up here rather than in
+                // the connect call itself.
+                match os_sys::sock_ctl(st.fd, net::ctl::PENDING_ERROR, 0) {
+                    Ok(_) => 0,
+                    Err(e) => wsa(e),
+                }
+            }
+            (SOL_SOCKET, SO_REUSEADDR | SO_KEEPALIVE) => 0,
             (SOL_SOCKET, SO_RCVTIMEO) => st.recv_timeout,
             (SOL_SOCKET, SO_SNDTIMEO) => st.send_timeout,
             (IPPROTO_TCP, TCP_NODELAY) if stream => 1,

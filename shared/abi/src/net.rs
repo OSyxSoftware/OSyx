@@ -41,6 +41,9 @@ pub mod ctl {
     pub const RECV_AVAILABLE: u64 = 11;
     /// Size of the datagram the last successful `recv` returned (untruncated).
     pub const LAST_MSG_LEN: u64 = 12;
+    /// Error a stream connection failed with (e.g. a refused non-blocking
+    /// connect); 0 when there is none.
+    pub const PENDING_ERROR: u64 = 13;
 }
 
 /// TCP states reported by `ctl::STATE` and `NetSocket::state`.

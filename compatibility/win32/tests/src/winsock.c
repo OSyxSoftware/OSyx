@@ -107,6 +107,22 @@ void __stdcall start(void) {
     check_eq("... with WSAECONNREFUSED", WSAGetLastError(), WSAECONNREFUSED);
     closesocket(s);
 
+    /* A non-blocking connect failure is reported through SO_ERROR. */
+    s = socket(AF_INET, SOCK_STREAM, 0);
+    u_long on = 1;
+    check_eq("ioctlsocket(FIONBIO)", ioctlsocket(s, FIONBIO, &on), 0);
+    check_eq("non-blocking connect to a closed port", connect(s, (struct sockaddr *)&la, sizeof la), SOCKET_ERROR);
+    check_eq("... WSAEWOULDBLOCK", WSAGetLastError(), WSAEWOULDBLOCK);
+    fd_set ws;
+    FD_ZERO(&ws);
+    FD_SET(s, &ws);
+    struct timeval tv = {5, 0};
+    check("select waits for the failed connect", select(0, NULL, &ws, NULL, &tv) == 1 && FD_ISSET(s, &ws));
+    int soerr = 0, elen = sizeof soerr;
+    check_eq("getsockopt(SO_ERROR)", getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&soerr, &elen), 0);
+    check_eq("... WSAECONNREFUSED", soerr, WSAECONNREFUSED);
+    closesocket(s);
+
     /* UDP echo with the host. */
     SOCKET u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     a.sin_port = htons((u_short)udp_port);
