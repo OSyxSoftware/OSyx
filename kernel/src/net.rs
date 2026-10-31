@@ -467,6 +467,14 @@ fn ensure_udp(s: &SocketObj, local: Option<Endpoint>) -> Result<u32, Errno> {
         let _ = stack_call(|st| st.udp_set_broadcast(id, true));
     }
     let mut g = s.state.lock();
+    if let Some(existing) = g.id {
+        // Another caller bound first. Release our stack socket through the
+        // network thread, outside the socket state lock.
+        drop(g);
+        CLOSING.lock().push((id, false));
+        wake();
+        return if local.is_some() { Err(Errno::InvalidArgument) } else { Ok(existing) };
+    }
     g.id = Some(id);
     g.bound = Some(ep);
     Ok(id)
