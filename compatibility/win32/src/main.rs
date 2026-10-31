@@ -34,6 +34,7 @@ mod eventlog;
 mod exceptions;
 mod files;
 mod fls;
+mod heaps;
 mod ini;
 mod iphlpapi;
 mod kernel32;

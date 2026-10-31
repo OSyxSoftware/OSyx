@@ -4689,16 +4689,54 @@ extern "win64" fn SetParent(wnd: u64, _parent: u64) -> u64 {
     wnd
 }
 
-extern "win64" fn SetForegroundWindow(_wnd: u64) -> Bool {
-    TRUE
+/// The top-level window a window belongs to (a child control's owner chain).
+fn root_window(g: &Gui, wnd: u64) -> Option<u64> {
+    let mut root = wnd;
+    for _ in 0..g.windows.len() + 1 {
+        let w = g.windows.get(&root)?;
+        if w.style & WS_CHILD == 0 || !g.windows.contains_key(&w.owner) {
+            return Some(root);
+        }
+        root = w.owner;
+    }
+    None
+}
+
+/// Activates the top-level window of `wnd` in PRISM and makes it the
+/// foreground and focus window (unless focus is already inside it).
+extern "win64" fn SetForegroundWindow(wnd: u64) -> Bool {
+    with(|g| {
+        let Some(root) = root_window(g, wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+        if let Some(c) = g.conn.as_mut() {
+            if let Some(w) = g.windows.get_mut(&root) {
+                let _ = w.win.action(c, proto::Action::Activate);
+            }
+        }
+        if root_window(g, g.focus) != Some(root) {
+            g.focus = root;
+        }
+        TRUE
+    })
 }
 
 extern "win64" fn GetForegroundWindow() -> u64 {
     with(|g| g.focus)
 }
 
-extern "win64" fn BringWindowToTop(_wnd: u64) -> Bool {
-    TRUE
+/// Raises a top-level window above its siblings (PRISM activation raises
+    /// it); a child control has no stacking order of its own here.
+extern "win64" fn BringWindowToTop(wnd: u64) -> Bool {
+    with(|g| {
+        let Some(w) = g.windows.get(&wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+        if w.style & WS_CHILD == 0 {
+            if let Some(c) = g.conn.as_mut() {
+                if let Some(w) = g.windows.get_mut(&wnd) {
+                    let _ = w.win.action(c, proto::Action::Activate);
+                }
+            }
+        }
+        TRUE
+    })
 }
 
 extern "win64" fn IsIconic(wnd: u64) -> Bool {
@@ -5513,8 +5551,10 @@ extern "win64" fn SetMenuItemInfoW(_menu: u64, _item: u32, _by_pos: Bool, _info:
     FALSE
 }
 
+/// Popup menus are not drawn yet: the call fails with ERROR_NOT_SUPPORTED
+/// instead of reporting that the user dismissed a menu that was never shown.
 extern "win64" fn TrackPopupMenu(_menu: u64, _flags: u32, _x: i32, _y: i32, _reserved: i32, _wnd: u64, _rect: *const u8) -> Bool {
-    FALSE
+    fail(ERROR_NOT_SUPPORTED, FALSE)
 }
 
 extern "win64" fn GetWindowTextLengthW(wnd: u64) -> i32 {

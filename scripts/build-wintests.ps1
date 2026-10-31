@@ -87,6 +87,8 @@ $programs = [ordered]@{
     'newdlls.exe' = @{ Src = @('newdlls.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lrpcrt4', '-lcfgmgr32', '-lpropsys', '-loleaut32', '-lole32', '-lkernel32') }
     'pipes.exe'   = @{ Src = @('pipes.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'k32xul.exe'  = @{ Src = @('k32xul.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
+    'stubfix.exe' = @{ Src = @('stubfix.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lkernel32') }
+    'thrdll.dll'  = @{ Src = @('thrdll.c'); Args = @('-shared', '-Wl,-e,DllMainCRTStartup', '-lkernel32') }
     'sysadmin.exe' = @{ Src = @('sysadmin.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-liphlpapi', '-lsetupapi', '-lkernel32') }
 }
 foreach ($name in $programs.Keys) {

@@ -39,3 +39,21 @@ EXPORTS
     FreeLibrary
     CreateDirectoryW
     RemoveDirectoryW
+    HeapCreate
+    HeapDestroy
+    HeapAlloc
+    HeapFree
+    HeapSize
+    HeapValidate
+    HeapLock
+    HeapUnlock
+    HeapReAlloc
+    GetProcessHeap
+    GetProcessHeaps
+    InitializeCriticalSection
+    EnterCriticalSection
+    LeaveCriticalSection
+    DeleteCriticalSection
+    TryEnterCriticalSection
+    DisableThreadLibraryCalls
+    SetLastError

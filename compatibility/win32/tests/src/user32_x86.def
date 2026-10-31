@@ -33,3 +33,6 @@ EXPORTS
     DialogBoxParamW
     EndDialog
     PostMessageW
+    SetForegroundWindow
+    BringWindowToTop
+    TrackPopupMenu

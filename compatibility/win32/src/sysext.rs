@@ -751,13 +751,20 @@ extern "win64" fn GetProcessHandleCount(process: u64, out: *mut u32) -> i32 {
     1
 }
 
-/// Every heap handle shares one allocator; the process heap stands for it.
+/// The process heap, then the heaps made by HeapCreate. Returns how many
+/// there are; at most `n` handles are written.
 extern "win64" fn GetProcessHeaps(n: u32, out: *mut u64) -> u32 {
-    if n >= 1 && !out.is_null() {
-        // SAFETY: the caller's array of `n` handles.
-        unsafe { *out = kernel32::process_heap() };
+    let all = crate::heaps::all();
+    if !out.is_null() {
+        for (i, h) in all.iter().take(n as usize).enumerate() {
+            // SAFETY: the caller's array of `n` handles (4 bytes each for a
+            // 32-bit caller).
+            unsafe {
+                if crate::wow64::is_active() { *(out as *mut u32).add(i) = *h as u32 } else { *out.add(i) = *h }
+            }
+        }
     }
-    1
+    all.len() as u32
 }
 
 /// HeapCompatibilityInformation (LFH) and terminate-on-corruption would

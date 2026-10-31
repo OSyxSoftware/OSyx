@@ -60,6 +60,26 @@ __declspec(dllimport) BOOL __stdcall SetFileSecurityW(const WCHAR *name, DWORD i
 __declspec(dllimport) DWORD __stdcall GetNamedSecurityInfoW(const WCHAR *name, DWORD kind, DWORD info,
                                                            void **owner, void **group, void **dacl, void **sacl, void **descriptor);
 
+__declspec(dllimport) HANDLE __stdcall HeapCreate(DWORD options, DWORD initial, DWORD maximum);
+__declspec(dllimport) BOOL __stdcall HeapDestroy(HANDLE heap);
+__declspec(dllimport) void *__stdcall HeapAlloc(HANDLE heap, DWORD flags, DWORD size);
+__declspec(dllimport) BOOL __stdcall HeapFree(HANDLE heap, DWORD flags, void *block);
+__declspec(dllimport) DWORD __stdcall HeapSize(HANDLE heap, DWORD flags, const void *block);
+__declspec(dllimport) BOOL __stdcall HeapValidate(HANDLE heap, DWORD flags, const void *block);
+__declspec(dllimport) BOOL __stdcall HeapLock(HANDLE heap);
+__declspec(dllimport) BOOL __stdcall HeapUnlock(HANDLE heap);
+__declspec(dllimport) HANDLE __stdcall GetProcessHeap(void);
+__declspec(dllimport) DWORD __stdcall GetProcessHeaps(DWORD count, HANDLE *heaps);
+__declspec(dllimport) void __stdcall InitializeCriticalSection(void *section);
+__declspec(dllimport) void __stdcall EnterCriticalSection(void *section);
+__declspec(dllimport) void __stdcall LeaveCriticalSection(void *section);
+__declspec(dllimport) BOOL __stdcall TryEnterCriticalSection(void *section);
+__declspec(dllimport) void __stdcall DeleteCriticalSection(void *section);
+__declspec(dllimport) BOOL __stdcall DisableThreadLibraryCalls(HANDLE module);
+__declspec(dllimport) void __stdcall SetLastError(DWORD code);
+__declspec(dllimport) BOOL __stdcall SetForegroundWindow(HANDLE window);
+__declspec(dllimport) BOOL __stdcall BringWindowToTop(HANDLE window);
+__declspec(dllimport) BOOL __stdcall TrackPopupMenu(HANDLE menu, DWORD flags, int x, int y, int reserved, HANDLE window, const void *rect);
 typedef long (__stdcall *WNDPROC)(HANDLE, DWORD, DWORD, long);
 typedef struct {
     DWORD style;
@@ -276,6 +296,54 @@ void __stdcall start(void) {
     check("SetFileSecurityW changes native permissions", status == 0 && everyone_write);
     if (security_descriptor) LocalFree(security_descriptor);
     DeleteFileW(source); DeleteFileW(copied); DeleteFileW(moved);
+
+    {
+        /* Heaps, critical sections and friends with the 32-bit layouts. */
+        HANDLE process = GetProcessHeap();
+        SetLastError(0);
+        check("HeapDestroy(process heap) fails with ERROR_INVALID_HANDLE", !HeapDestroy(process) && GetLastError() == 6);
+        HANDLE heap = HeapCreate(0, 0, 0);
+        void *block = heap ? HeapAlloc(heap, 8, 100) : 0;
+        check("HeapCreate, HeapAlloc zeroed, HeapSize", heap && heap != process && block && ((unsigned char *)block)[99] == 0 && HeapSize(heap, 0, block) == 100);
+        check("HeapValidate of the block and of the heap", HeapValidate(heap, 0, block) && HeapValidate(heap, 0, 0));
+        SetLastError(0);
+        check("HeapFree with the wrong heap fails with ERROR_INVALID_PARAMETER", !HeapFree(process, 0, block) && GetLastError() == 87);
+        HANDLE heaps[8];
+        heaps[4] = (HANDLE)0x5a5a5a5a;
+        DWORD count = GetProcessHeaps(4, heaps);
+        int listed = 0;
+        for (DWORD i = 0; i < count && i < 4; i++) listed += heaps[i] == heap;
+        check("GetProcessHeaps writes 4-byte handles and lists the heap", listed == 1 && heaps[4] == (HANDLE)0x5a5a5a5a);
+        check("HeapLock, HeapUnlock, HeapUnlock of an unlocked heap", HeapLock(heap) && HeapLock(heap) && HeapUnlock(heap) && HeapUnlock(heap) && HeapUnlock(heap));
+        check("HeapDestroy releases the heap", HeapDestroy(heap));
+        SetLastError(0);
+        check("HeapAlloc from the destroyed heap fails with ERROR_INVALID_HANDLE", HeapAlloc(heap, 0, 8) == 0 && GetLastError() == 6);
+
+        struct { DWORD fields[6]; DWORD guard[4]; } cs = { { 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff }, { 0xa5a5a5a5, 0xa5a5a5a5, 0xa5a5a5a5, 0xa5a5a5a5 } };
+        InitializeCriticalSection(&cs);
+        int cleared = 1;
+        for (int i = 0; i < 6; i++) cleared &= cs.fields[i] == 0;
+        check("InitializeCriticalSection clears exactly 24 bytes", cleared && cs.guard[0] == 0xa5a5a5a5 && cs.guard[3] == 0xa5a5a5a5);
+        EnterCriticalSection(&cs);
+        EnterCriticalSection(&cs);
+        check("critical section: owner, recursion count and TryEnter", cs.fields[3] != 0 && cs.fields[2] == 2 && TryEnterCriticalSection(&cs));
+        LeaveCriticalSection(&cs); LeaveCriticalSection(&cs); LeaveCriticalSection(&cs);
+        check("critical section is free after the last leave", cs.fields[3] == 0 && cs.fields[2] == 0 && cs.fields[1] == 0);
+        cs.fields[2] = 7;
+        DeleteCriticalSection(&cs);
+        cleared = 1;
+        for (int i = 0; i < 6; i++) cleared &= cs.fields[i] == 0;
+        check("DeleteCriticalSection clears 24 bytes only", cleared && cs.guard[0] == 0xa5a5a5a5 && cs.guard[3] == 0xa5a5a5a5);
+
+        SetLastError(0);
+        check("DisableThreadLibraryCalls(bogus) fails with ERROR_MOD_NOT_FOUND", !DisableThreadLibraryCalls((HANDLE)0x1234) && GetLastError() == 126);
+        SetLastError(0);
+        check("SetForegroundWindow(bogus) fails with ERROR_INVALID_WINDOW_HANDLE", !SetForegroundWindow((HANDLE)0x1234) && GetLastError() == 1400);
+        SetLastError(0);
+        check("BringWindowToTop(bogus) fails with ERROR_INVALID_WINDOW_HANDLE", !BringWindowToTop((HANDLE)0x1234) && GetLastError() == 1400);
+        SetLastError(0);
+        check("TrackPopupMenu fails with ERROR_NOT_SUPPORTED", !TrackPopupMenu((HANDLE)1, 0, 0, 0, 0, 0, 0) && GetLastError() == 50);
+    }
 
     check("lstrcmpiA ignores case", lstrcmpiA("Steam", "sTEAM") == 0 && lstrcmpiA("a", "b") < 0);
     check("MulDiv rounds and rejects /0", MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(1, 1, 0) == -1);

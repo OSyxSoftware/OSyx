@@ -1719,22 +1719,58 @@ extern "win64" fn FreeEnvironmentStringsA(p: u64) -> Bool {
 
 // ---- synchronisation ---------------------------------------------------------------
 
-// CRITICAL_SECTION (40 bytes): DebugInfo, LockCount (i32, the futex word
-// here: 0 free, 1 held, 2 held with waiters), RecursionCount, OwningThread,
-// LockSemaphore, SpinCount.
-const CS_LOCK: usize = 8;
-const CS_RECURSION: usize = 12;
-const CS_OWNER: usize = 16;
+// CRITICAL_SECTION: DebugInfo, LockCount (i32, the futex word here: 0 free,
+// 1 held, 2 held with waiters), RecursionCount, OwningThread, LockSemaphore,
+// SpinCount. 40 bytes for 64-bit callers (fields at 8, 12, 16), 24 bytes for
+// 32-bit callers under WoW64 (fields at 4, 8, 12).
+struct CsLayout {
+    lock: usize,
+    recursion: usize,
+    owner: usize,
+    size: usize,
+}
+
+fn cs_layout() -> CsLayout {
+    if crate::wow64::is_active() {
+        CsLayout { lock: 4, recursion: 8, owner: 12, size: 24 }
+    } else {
+        CsLayout { lock: 8, recursion: 12, owner: 16, size: 40 }
+    }
+}
 
 fn cs_word(cs: u64) -> &'static AtomicU32 {
     // SAFETY: the caller's CRITICAL_SECTION outlives every use (Windows
     // contract); the field is 4-byte aligned in the structure.
-    unsafe { &*((cs as usize + CS_LOCK) as *const AtomicU32) }
+    unsafe { &*((cs as usize + cs_layout().lock) as *const AtomicU32) }
+}
+
+fn cs_owner(cs: u64) -> u64 {
+    let l = cs_layout();
+    // SAFETY: the caller's CRITICAL_SECTION.
+    unsafe { if l.size == 24 { teb::get::<u32>(cs, l.owner) as u64 } else { teb::get::<u64>(cs, l.owner) } }
+}
+
+fn cs_set_owner(cs: u64, tid: u64) {
+    let l = cs_layout();
+    // SAFETY: the caller's CRITICAL_SECTION.
+    unsafe {
+        if l.size == 24 { teb::put(cs, l.owner, tid as u32) } else { teb::put(cs, l.owner, tid) }
+    }
+}
+
+fn cs_recursion(cs: u64) -> i32 {
+    // SAFETY: the caller's CRITICAL_SECTION.
+    unsafe { teb::get::<i32>(cs, cs_layout().recursion) }
+}
+
+fn cs_set_recursion(cs: u64, n: i32) {
+    // SAFETY: the caller's CRITICAL_SECTION.
+    unsafe { teb::put(cs, cs_layout().recursion, n) }
 }
 
 extern "win64" fn InitializeCriticalSection(cs: u64) {
-    // SAFETY: the caller's 40-byte CRITICAL_SECTION.
-    unsafe { core::ptr::write_bytes(cs as *mut u8, 0, 40) };
+    // SAFETY: the caller's CRITICAL_SECTION of the caller's size.
+    unsafe { core::ptr::write_bytes(cs as *mut u8, 0, cs_layout().size) };
 }
 
 extern "win64" fn InitializeCriticalSectionAndSpinCount(cs: u64, _spin: u32) -> Bool {
@@ -1747,49 +1783,49 @@ extern "win64" fn InitializeCriticalSectionEx(cs: u64, _spin: u32, _flags: u32) 
     TRUE
 }
 
-extern "win64" fn DeleteCriticalSection(_cs: u64) {}
+/// The structure holds no kernel object, so deleting it means waking any
+/// thread still waiting on it (a caller bug, but it must not sleep forever)
+/// and clearing it, as Windows does.
+extern "win64" fn DeleteCriticalSection(cs: u64) {
+    if cs == 0 {
+        return;
+    }
+    let w = cs_word(cs);
+    if w.load(Ordering::Acquire) == 2 {
+        os_sys::futex_wake(w.as_ptr(), u32::MAX);
+    }
+    // SAFETY: the caller's CRITICAL_SECTION of the caller's size.
+    unsafe { core::ptr::write_bytes(cs as *mut u8, 0, cs_layout().size) };
+}
 
 pub(crate) extern "win64" fn EnterCriticalSection(cs: u64) {
     let me = teb::current_tid();
-    // SAFETY: the caller's CRITICAL_SECTION.
-    unsafe {
-        if teb::get::<u64>(cs, CS_OWNER) == me {
-            teb::put(cs, CS_RECURSION, teb::get::<i32>(cs, CS_RECURSION) + 1);
-            return;
-        }
+    if cs_owner(cs) == me {
+        cs_set_recursion(cs, cs_recursion(cs) + 1);
+        return;
     }
     let w = cs_word(cs);
     if w.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
         while w.swap(2, Ordering::Acquire) != 0 {
             // The holder (an OSyx thread id, as in the TEB) inherits this
             // thread's priority while it waits.
-            // SAFETY: as above.
-            let owner = unsafe { teb::get::<u64>(cs, CS_OWNER) };
-            let _ = os_sys::futex_wait_owned(w.as_ptr(), 2, 0, owner);
+            let _ = os_sys::futex_wait_owned(w.as_ptr(), 2, 0, cs_owner(cs));
         }
     }
-    // SAFETY: as above; we own the section now.
-    unsafe {
-        teb::put(cs, CS_OWNER, me);
-        teb::put(cs, CS_RECURSION, 1i32);
-    }
+    // We own the section now.
+    cs_set_owner(cs, me);
+    cs_set_recursion(cs, 1);
 }
 
 extern "win64" fn TryEnterCriticalSection(cs: u64) -> Bool {
     let me = teb::current_tid();
-    // SAFETY: the caller's CRITICAL_SECTION.
-    unsafe {
-        if teb::get::<u64>(cs, CS_OWNER) == me {
-            teb::put(cs, CS_RECURSION, teb::get::<i32>(cs, CS_RECURSION) + 1);
-            return TRUE;
-        }
+    if cs_owner(cs) == me {
+        cs_set_recursion(cs, cs_recursion(cs) + 1);
+        return TRUE;
     }
     if cs_word(cs).compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-        // SAFETY: as above.
-        unsafe {
-            teb::put(cs, CS_OWNER, me);
-            teb::put(cs, CS_RECURSION, 1i32);
-        }
+        cs_set_owner(cs, me);
+        cs_set_recursion(cs, 1);
         TRUE
     } else {
         FALSE
@@ -1797,15 +1833,12 @@ extern "win64" fn TryEnterCriticalSection(cs: u64) -> Bool {
 }
 
 pub(crate) extern "win64" fn LeaveCriticalSection(cs: u64) {
-    // SAFETY: the caller's CRITICAL_SECTION, held by this thread.
-    unsafe {
-        let r = teb::get::<i32>(cs, CS_RECURSION) - 1;
-        teb::put(cs, CS_RECURSION, r);
-        if r > 0 {
-            return;
-        }
-        teb::put(cs, CS_OWNER, 0u64);
+    let r = cs_recursion(cs) - 1;
+    cs_set_recursion(cs, r);
+    if r > 0 {
+        return;
     }
+    cs_set_owner(cs, 0);
     let w = cs_word(cs);
     if w.swap(0, Ordering::Release) == 2 {
         os_sys::futex_wake(w.as_ptr(), 1);
@@ -2252,6 +2285,12 @@ pub(crate) extern "win64" fn VirtualQuery(addr: u64, out: *mut u8, len: usize) -
 const HEAP_ZERO_MEMORY: u32 = 0x8;
 
 pub fn heap_alloc(size: usize, zero: bool) -> Option<u64> {
+    crate::heaps::gate_process();
+    heap_alloc_for(0, size, zero)
+}
+
+/// A block owned by heap `owner` (0: the process heap); see heaps.rs.
+pub fn heap_alloc_for(owner: u64, size: usize, zero: bool) -> Option<u64> {
     let layout = core::alloc::Layout::from_size_align(size.checked_add(16)?, 16).ok()?;
     // SAFETY: a non-zero-sized layout.
     let p = unsafe {
@@ -2265,8 +2304,17 @@ pub fn heap_alloc(size: usize, zero: bool) -> Option<u64> {
         return None;
     }
     // SAFETY: `p` has room for the header.
-    unsafe { *(p as *mut usize) = size };
+    unsafe {
+        *(p as *mut usize) = size;
+        *(p as *mut u64).add(1) = owner;
+    }
     Some(p as u64 + 16)
+}
+
+/// The heap that owns block `p` (0: the process heap).
+pub fn heap_owner(p: u64) -> u64 {
+    // SAFETY: `p` came from `heap_alloc_for`.
+    unsafe { *((p - 8) as *const u64) }
 }
 
 pub fn heap_size(p: u64) -> usize {
@@ -2277,6 +2325,9 @@ pub fn heap_size(p: u64) -> usize {
 pub fn heap_free(p: u64) -> bool {
     if p == 0 {
         return true;
+    }
+    if heap_owner(p) == 0 {
+        crate::heaps::gate_process();
     }
     let size = heap_size(p);
     // SAFETY: as allocated in `heap_alloc`.
@@ -2290,41 +2341,32 @@ extern "win64" fn GetProcessHeap() -> u64 {
     process_heap()
 }
 
-extern "win64" fn HeapCreate(_opts: u32, _initial: usize, _max: usize) -> u64 {
-    mem::arena_alloc(16, 16)
+extern "win64" fn HeapCreate(opts: u32, initial: usize, max: usize) -> u64 {
+    crate::heaps::create(opts, initial, max)
 }
 
-extern "win64" fn HeapDestroy(_h: u64) -> Bool {
-    TRUE
+extern "win64" fn HeapDestroy(h: u64) -> Bool {
+    crate::heaps::destroy(h)
 }
 
-extern "win64" fn HeapAlloc(_h: u64, flags: u32, size: usize) -> u64 {
-    heap_alloc(size, flags & HEAP_ZERO_MEMORY != 0).unwrap_or_else(|| fail(ERROR_NOT_ENOUGH_MEMORY, 0))
+extern "win64" fn HeapAlloc(h: u64, flags: u32, size: usize) -> u64 {
+    crate::heaps::alloc(h, flags, size)
 }
 
-extern "win64" fn HeapFree(_h: u64, _flags: u32, p: u64) -> Bool {
-    b(heap_free(p))
+extern "win64" fn HeapFree(h: u64, flags: u32, p: u64) -> Bool {
+    crate::heaps::free(h, flags, p)
 }
 
-extern "win64" fn HeapSize(_h: u64, _flags: u32, p: u64) -> usize {
-    heap_size(p)
+extern "win64" fn HeapSize(h: u64, flags: u32, p: u64) -> usize {
+    crate::heaps::size(h, flags, p)
 }
 
-extern "win64" fn HeapReAlloc(_h: u64, flags: u32, p: u64, size: usize) -> u64 {
-    let Some(n) = heap_alloc(size, flags & HEAP_ZERO_MEMORY != 0) else { return fail(ERROR_NOT_ENOUGH_MEMORY, 0) };
-    if p != 0 {
-        let old = heap_size(p);
-        // SAFETY: both blocks are valid for min(old, size) bytes.
-        unsafe { core::ptr::copy_nonoverlapping(p as *const u8, n as *mut u8, old.min(size)) };
-        heap_free(p);
-    }
-    n
+extern "win64" fn HeapReAlloc(h: u64, flags: u32, p: u64, size: usize) -> u64 {
+    crate::heaps::realloc(h, flags, p, size)
 }
 
-/// Blocks carry no guard words or checksums, so there is no corruption
-/// this could detect.
-extern "win64" fn HeapValidate(_h: u64, _flags: u32, _p: u64) -> Bool {
-    TRUE
+extern "win64" fn HeapValidate(h: u64, flags: u32, p: u64) -> Bool {
+    crate::heaps::validate(h, flags, p)
 }
 
 /// The shared allocator neither coalesces on request nor reports its
@@ -2483,14 +2525,12 @@ extern "win64" fn GlobalReAlloc(h: u64, size: usize, flags: u32) -> u64 {
     n
 }
 
-/// Heaps share one allocator whose own lock already serializes every
-/// call, so locking a heap leaves nothing more to exclude.
-extern "win64" fn HeapLock(_h: u64) -> Bool {
-    TRUE
+extern "win64" fn HeapLock(h: u64) -> Bool {
+    crate::heaps::lock(h)
 }
 
-extern "win64" fn HeapUnlock(_h: u64) -> Bool {
-    TRUE
+extern "win64" fn HeapUnlock(h: u64) -> Bool {
+    crate::heaps::unlock(h)
 }
 
 /// The shared allocator keeps no per-heap block list to walk.
@@ -2777,8 +2817,8 @@ extern "win64" fn FreeLibrary(h: u64) -> Bool {
     loader::free_library(h).map_or_else(|e| fail(e, FALSE), |_| TRUE)
 }
 
-extern "win64" fn DisableThreadLibraryCalls(_h: u64) -> Bool {
-    TRUE
+extern "win64" fn DisableThreadLibraryCalls(h: u64) -> Bool {
+    loader::disable_thread_calls(h).map_or_else(|e| fail(e, FALSE), |_| TRUE)
 }
 
 // ---- strings and code pages ---------------------------------------------------------

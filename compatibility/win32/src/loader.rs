@@ -641,6 +641,8 @@ struct ModState {
     refs: u32,
     attached: bool,
     tls_callbacks: Vec<u64>,
+    /// DisableThreadLibraryCalls: no DLL_THREAD_ATTACH/DETACH to DllMain.
+    no_thread_calls: bool,
 }
 
 struct Loader {
@@ -683,7 +685,7 @@ fn module_by_handle(l: &Loader, h: u64) -> Option<usize> {
 fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> {
     let order = l.linker.init_order(root);
     while l.state.len() < l.linker.modules.len() {
-        l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new() });
+        l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false });
     }
     let mut todo = Vec::new();
     for i in order {
@@ -785,6 +787,20 @@ pub fn setup_thread_tls(teb_addr: u64) {
     });
 }
 
+/// `DisableThreadLibraryCalls`: the module gets no more DLL_THREAD_ATTACH or
+/// DLL_THREAD_DETACH calls to its DllMain. An unknown handle is
+/// ERROR_MOD_NOT_FOUND, as on Windows.
+pub fn disable_thread_calls(h: u64) -> Result<(), u32> {
+    with(|l| {
+        let i = module_by_handle(l, h).ok_or(ERROR_MOD_NOT_FOUND)?;
+        while l.state.len() <= i {
+            l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false });
+        }
+        l.state[i].no_thread_calls = true;
+        Ok(())
+    })
+}
+
 /// DLL_THREAD_ATTACH / DETACH for the calling thread (TLS callbacks and
 /// DllMain of every attached DLL, in load order).
 ///
@@ -800,7 +816,9 @@ pub fn notify_threads(reason: u32) {
                 let m = &l.linker.modules[i];
                 match &m.kind {
                     Kind::Pe { is_dll, .. } => {
-                        Some((m.base, if *is_dll { m.entry() } else { 0 }, l.state[i].tls_callbacks.clone()))
+                        // TLS callbacks still run for a DLL that disabled thread calls.
+                        let entry = if *is_dll && !l.state[i].no_thread_calls { m.entry() } else { 0 };
+                        Some((m.base, entry, l.state[i].tls_callbacks.clone()))
                     }
                     Kind::Builtin(_) => None,
                 }
@@ -1007,7 +1025,7 @@ pub fn run_pe32(bytes: Vec<u8>, args: &[String], cmd: &str, env: &[String]) -> R
     }).collect();
     // Keep the PE32 linker for GetProcAddress and LoadLibrary.
     let state = (0..linker.modules.len()).map(|_| ModState {
-        ldr: 0, refs: 1, attached: true, tls_callbacks: Vec::new(),
+        ldr: 0, refs: 1, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false,
     }).collect();
     *LOADER.lock().unwrap() = Some(Loader { linker, exe, state, tls: Vec::new() });
     bridge.prepare().map_err(String::from)?;
@@ -1202,7 +1220,7 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         }
         let todo = register_new(l, i);
         while l.state.len() < l.linker.modules.len() {
-            l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new() });
+            l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false });
         }
         l.state[i].refs += 1;
         (todo, module_handle(l, i))
