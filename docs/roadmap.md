@@ -20,7 +20,7 @@ on 2026-10-30.
 | 7g | Kernel objects and IPC: pipes, channels, shared memory, wait_handles (ABI v7) | Done |
 | 7h | Native xHCI driver, USB enumeration, HID keyboard/mouse, input core | Done (root ports, boot keyboards; see graphics.md) |
 | 7i | PRISM compositor, protocol v1, UI toolkit, desktop shell, AXIS Terminal, Files, System Information | Done (software composition; see graphics.md) |
-| 8 | Native Windows PE execution | Initial subset implemented (console, files, threads, DLLs, GUI, Winsock; see windows-compatibility.md). Steam setup imports 97.4 % and Zen 98.1 % available by source scan (see Steam and Zen API gaps) |
+| 8 | Native Windows PE execution | Initial subset implemented (console, files, threads, DLLs, GUI, Winsock; see windows-compatibility.md). Every Steam and Zen import the scanner scores is usable in source scan: Steam 265 implemented and 2 partial of 267, Zen 1476 implemented and 69 partial of 2644 (see Steam and Zen API gaps) |
 | 9 | Native networking | Implemented (VirtIO-Net and IPv4 stack; see network/net) |
 | 10 | VirtIO-GPU display backend | Implemented (2D scanout/damage/cursor; software composition) |
 | 11 | Task Manager, Settings and four PE32+ desktop utilities | Implemented initial versions |
@@ -65,37 +65,48 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 
 Measured with `scripts/winparity.py scan` against the binaries in `build/steam`
 (32-bit `SteamSetup.exe` and its NSIS plug-ins) and `build/zen/1.23.4b`
-(`zen.exe`, `xul.dll`, `mozglue.dll`, `nss3.dll`) on 2026-10-31, at commit
-a770b41 with the Steam/Zen API batch applied. The scan finds 99.3 % of the
-Steam imports usable (252 implemented, 13 partial, 1 constant stub, 1
-unsupported) and 98.1 % of Zen's (1406 implemented, 94 partial, 38 reported
-missing, 7 unsupported). These are source-scan measurements of exports, not
-proof of behaviour.
+(`zen.exe`, `xul.dll`, `mozglue.dll`, `nss3.dll`) on 2026-10-31. The scan
+scores every Steam import as usable (265 implemented, 2 partial of 267) and
+every Zen one too (1476 implemented, 69 partial of 2644; 851 imports ship
+with the application, 248 belong to external DLLs). No import is missing or
+unsupported. These are source-scan measurements of exports, not proof of
+behaviour.
 
-The batch that removed the Steam gaps implements `kernel32!PeekNamedPipe`
-(with a WoW64 bridge for `nsExec.dll`), `msvcrt!__wgetmainargs` and
-`__getmainargs`, `msvcrt!swscanf`, `shell32!ShellExecuteExW` for PE32,
-`shlwapi` ordinal 176 (`IUnknown_QueryService`) and
-`user32!AllowSetForegroundWindow`. The remaining stub is
-`AllowSetForegroundWindow`, which returns TRUE on purpose: every process may
-take the foreground here.
+The latest batch closes the gaps listed before it: `user32!TrackPopupMenu`
+(tracked popup menus with owner-drawn bitmaps, `TPM_RETURNCMD`,
+keyboard and mouse selection), `CreateSyntheticPointerDevice` with
+`InjectSyntheticPointerInput` for touch and pen records,
+`gdi32!ChoosePixelFormat`, `SetPixelFormat`, `SwapBuffers`, `GetFontData`
+and `GetOutlineTextMetricsA`, the `msi.dll` database/view/record
+functions, `winspool.drv` ordinal 203, the `wsock32` legacy ordinals (the
+scanner now follows an ordinal table that delegates to another), plus
+`SetFileTime` (new `futimes` system call and ext4/tmpfs support),
+`TerminateThread` (per-thread kill status), `OpenProcess` with handle
+inheritance, `RegCreateKeyExW` with `REG_OPTION_CREATE_LINK` and link
+following, `ExitWindowsEx` logoff, and the remaining constant stubs.
+
+A second batch takes on the partial rows: named events, mutexes, sections,
+threads and timers honour handle inheritance; `DuplicateHandle` works
+between two other processes; `HANDLE_FLAG_PROTECT_FROM_CLOSE` keeps
+`CloseHandle` from releasing a handle; `CopyFileExW` takes its documented
+flags and copies symbolic links; `FindFirstFileExW` matches case
+sensitively when asked; `SetFileInformationByHandle` sets access and write
+times, renames relative to a root directory handle and deletes with POSIX
+semantics; `CreateIoCompletionPort` associates any open handle;
+`GetProcessMitigationPolicy` answers for any process handle; timer security
+attributes, access masks and resume hints are accepted.
 
 What is left, in the order it blocks the applications:
 
 | Application | API | State | Why it matters |
 |---|---|---|---|
-| Steam, `SteamSetup.exe` | `user32!TrackPopupMenu` | unsupported | the setup's context menus |
-| Zen, `xul.dll` | `user32!TrackPopupMenu` | unsupported | browser context menus |
-| Zen, `xul.dll` | `user32!CreateSyntheticPointerDevice` | unsupported | pen input only |
-| Zen, `xul.dll` | `gdi32!ChoosePixelFormat`, `SetPixelFormat`, `SwapBuffers` | unsupported | the WebGL/OpenGL path; needs the 3D layer from item 9 |
-| Zen, `xul.dll` | `gdi32!GetFontData`, `GetOutlineTextMetricsA` | unsupported | font metrics for some pages |
-| Zen, `nss3.dll` | `wsock32!` ordinals 1-23, 51-54, 57, 111, 115, 116, 151 | reported missing | already exported by `ws2_32::legacy_ordinals` and resolved by the loader; the scanner reads only ordinal numbers written literally in the function named in `loader.rs`, not those of the `ordinals()` it delegates to, so the report overstates this gap |
-| Zen, `msi.dll` | ordinals 8, 32, 70, 92, 118, 159, 160 | reported missing | ordinal imports of the installer stack; names to be resolved from the reference tables |
-| Zen, `winspool.drv` | ordinal 203 | reported missing | the printing stack |
+| Steam, `SteamSetup.exe` | `kernel32!CreateProcessW` with `DEBUG_PROCESS`, `DEBUG_ONLY_THIS_PROCESS` | partial | those flags need a debug-event API (`WaitForDebugEvent`, `ContinueDebugEvent`); the rest of `CreateProcessW` works |
+| Steam, `msvcrt.dll` | `??2@YAPAXI@Z` | partial | allocation works, but `operator new` returns NULL instead of throwing `std::bad_alloc`: winrun has no MSVC C++ exception objects, the throw lives in the application's `vcruntime140`/`msvcp140` |
+| Zen, many DLLs | 69 rows | partial | job objects and tokens, service control, event log, crypt32 stores, hooks and window stations, D3D11/DXGI, the GDI path calls, pointer confinement, and queries of other processes |
 
-`TrackPopupMenu` needs popup-menu tracking in `user32` first. For the ordinal
-report, either teach the parity tool to follow the delegation or list the
-ordinals where the tool reads them.
+Zen's partial rows are capabilities OSyx does not model (Windows jobs,
+logon sessions, the service database, certificate stores); none of them stops
+the browser from starting.
 
 ### Performance (see research/performance-profile.md)
 

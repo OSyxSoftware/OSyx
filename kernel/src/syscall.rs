@@ -217,7 +217,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             cpu::enable_interrupts();
             let r = sys_objects::wait_handles(f.rdi, f.rsi, f.rdx);
             if sched::current_kill_pending() {
-                process::finish_current_thread(0);
+                process::finish_current_thread(crate::sched::current_kill_code());
             }
             return osyx_abi::encode(r);
         }
@@ -283,7 +283,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         crate::smp::note_syscall(f.rax);
         if sched::current_kill_pending() {
             let _entry = crate::smp::KernelEntry::new_yielding();
-            process::finish_current_thread(0);
+            process::finish_current_thread(crate::sched::current_kill_code());
         }
         return osyx_abi::encode(r);
     }
@@ -301,6 +301,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::THREAD_PRIORITY => sched::set_priority(f.rdi, f.rsi),
         nr::THREAD_SUSPEND => sched::thread_suspend(f.rdi, f.rsi),
         nr::THREAD_TIMES => sched::thread_times(f.rdi),
+        nr::THREAD_KILL => sched::thread_kill(f.rdi, f.rsi as i32),
         nr::WORKING_SET => sys_objects::working_set(f.rdi, f.rsi, f.rdx),
         nr::PROCESS_WRITE_BARRIER => {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -409,6 +410,16 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             copy_to_user(f.rdx, &t.as_bytes()[..n]).map(|_| n as u64)
         }),
         nr::CHMOD => user_path(f.rdi, f.rsi).and_then(|p| vfs::chmod(&Lookup::current(), &p, f.rdx as u32)).map(|_| 0),
+        nr::FUTIMES => {
+            let known = osyx_abi::futimes::ATIME | osyx_abi::futimes::MTIME;
+            if f.rsi & !known != 0 {
+                Err(Errno::InvalidArgument)
+            } else {
+                let atime = (f.rsi & osyx_abi::futimes::ATIME != 0).then_some(f.rdx as i64);
+                let mtime = (f.rsi & osyx_abi::futimes::MTIME != 0).then_some(f.r10 as i64);
+                with_file(f.rdi, |o| o.set_times(&Lookup::current(), atime, mtime)).map(|_| 0)
+            }
+        }
         nr::MOUNT => sys_mount(f.rdi),
         nr::UMOUNT => user_path(f.rdi, f.rsi).and_then(|p| sys_umount(&p)).map(|_| 0),
         nr::GETUID => {
@@ -485,7 +496,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
     // Safe point: a thread whose process is exiting ends here instead of
     // returning to user mode.
     if sched::current_kill_pending() {
-        process::finish_current_thread(0);
+        process::finish_current_thread(crate::sched::current_kill_code());
     }
     // A suspended thread (SuspendThread) stops here, with no lock held.
     sched::park_if_suspended();

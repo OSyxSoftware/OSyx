@@ -112,8 +112,12 @@ void __stdcall start(void) {
     check("remote process handles are not fabricated",!K32EnumProcessModules((HANDLE)123,modules,sizeof modules,&needed)&&GetLastError()==ERROR_INVALID_HANDLE);
     LARGE_INTEGER due; due.QuadPart=-200000; /* relative 20 ms */
     SECURITY_ATTRIBUTES security={sizeof(SECURITY_ATTRIBUTES),NULL,FALSE};
-    check("timer security attributes fail explicitly",!CreateWaitableTimerExW(&security,NULL,0,TIMER_ALL_ACCESS)&&GetLastError()==ERROR_NOT_SUPPORTED);
-    check("restricted timer access fails explicitly",!CreateWaitableTimerExW(NULL,NULL,0,TIMER_MODIFY_STATE)&&GetLastError()==ERROR_NOT_SUPPORTED);
+    HANDLE secured=CreateWaitableTimerExW(&security,NULL,0,TIMER_ALL_ACCESS);
+    check("timer security attributes are accepted",secured!=NULL);
+    if(secured) CloseHandle(secured);
+    HANDLE restricted=CreateWaitableTimerExW(NULL,NULL,0,TIMER_MODIFY_STATE);
+    check("a restricted timer access mask is accepted",restricted!=NULL);
+    if(restricted) CloseHandle(restricted);
     HANDLE timer=CreateWaitableTimerExW(NULL,NULL,0,TIMER_ALL_ACCESS);
     check("create waitable timer",timer!=NULL);
     ULONGLONG started=GetTickCount64();

@@ -1484,6 +1484,27 @@ impl<D: BlockDevice> Ext4<D> {
         })
     }
 
+    /// Sets the access and/or modification time (nanoseconds since the Unix
+    /// epoch); `None` leaves that time alone. Like `set_mode`, the change is
+    /// recorded in the inode's change time.
+    pub fn set_times(&mut self, ino: u32, atime_ns: Option<i64>, mtime_ns: Option<i64>) -> Result<()> {
+        fn split(ns: i64) -> (i64, u32) {
+            (ns.div_euclid(1_000_000_000), ns.rem_euclid(1_000_000_000) as u32)
+        }
+        self.op(|fs| {
+            let now = fs.now();
+            let mut i = fs.tx_inode(ino)?;
+            if let Some(t) = atime_ns {
+                i.atime = split(t);
+            }
+            if let Some(t) = mtime_ns {
+                i.mtime = split(t);
+            }
+            i.ctime = now;
+            fs.put_inode(&mut i)
+        })
+    }
+
     // ---- open files and orphans ----------------------------------------------------
 
     /// Records an open handle of `ino`.

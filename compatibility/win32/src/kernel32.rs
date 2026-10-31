@@ -1279,7 +1279,30 @@ extern "win64" fn DuplicateHandle(
     let other = |p: u64| crate::process::other_pid(p);
     match (other(src_process), other(dst_process)) {
         (Err(e), _) | (_, Err(e)) => return fail(e, FALSE),
-        (Ok(Some(_)), Ok(Some(_))) => return fail(ERROR_NOT_SUPPORTED, FALSE),
+        (Ok(Some(src_pid)), Ok(Some(dst_pid))) => {
+            if dst.is_null() {
+                return fail(ERROR_INVALID_PARAMETER, FALSE);
+            }
+            // Take the object from the source process, then offer it to the
+            // destination's handle table; neither process is the caller.
+            let h = match crate::inherit::take(src_pid, src, options & 1 != 0) {
+                Ok(h) => h,
+                Err(e) => return fail(e, FALSE),
+            };
+            let out = match crate::inherit::put(dst_pid, h) {
+                Ok(out) => out,
+                Err(e) => return fail(e, FALSE),
+            };
+            if out == 0 {
+                return fail(ERROR_NOT_SUPPORTED, FALSE);
+            }
+            // The object now lives in the destination; drop our temporary.
+            objects::close(h);
+            let _ = inherit;
+            // SAFETY: the caller's out pointer.
+            unsafe { *dst = out };
+            return TRUE;
+        }
         (Ok(None), Ok(Some(pid))) => {
             if dst.is_null() {
                 return fail(ERROR_INVALID_PARAMETER, FALSE);
@@ -2028,45 +2051,37 @@ fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
 
 /// Opens a named object of this process (names are process-local here,
 /// like the objects themselves).
-fn open_named(name: Option<String>, want: fn(&Object) -> bool) -> u64 {
+fn open_named(name: Option<String>, inherit: bool, want: fn(&Object) -> bool) -> u64 {
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, 0) };
-    match objects::find_named(&name) {
+    let h = match objects::find_named(&name) {
         Some(o) if want(&o) => objects::insert(o),
-        Some(_) => fail(ERROR_INVALID_HANDLE, 0),
-        None => fail(ERROR_FILE_NOT_FOUND, 0),
+        Some(_) => return fail(ERROR_INVALID_HANDLE, 0),
+        None => return fail(ERROR_FILE_NOT_FOUND, 0),
+    };
+    if inherit {
+        objects::set_inheritable(h, true);
     }
+    h
 }
 
 extern "win64" fn OpenEventA(_access: u32, inherit: Bool, name: *const u8) -> u64 {
-    if inherit != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sa(name) }, |o| matches!(o, Object::Event(_)))
+    open_named(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Event(_)))
 }
 
 extern "win64" fn OpenMutexW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
-    if inherit != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sw(name) }, |o| matches!(o, Object::Mutex(_)))
+    open_named(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Mutex(_)))
 }
 
 pub(crate) extern "win64" fn OpenFileMappingW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
-    if inherit != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sw(name) }, |o| matches!(o, Object::Section(_)))
+    open_named(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Section(_)))
 }
 
 extern "win64" fn OpenFileMappingA(_access: u32, inherit: Bool, name: *const u8) -> u64 {
-    if inherit != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sa(name) }, |o| matches!(o, Object::Section(_)))
+    open_named(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Section(_)))
 }
 
 extern "win64" fn CreateEventA(attributes: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
@@ -2622,8 +2637,9 @@ extern "win64" fn MulDiv(a: i32, b: i32, c: i32) -> i32 {
     i32::try_from(q).unwrap_or(-1)
 }
 
-// Global memory: only fixed blocks exist (GlobalAlloc refuses
-// GMEM_MOVEABLE), so a handle is the block's address and is never locked.
+// Global memory is always fixed: like 32- and 64-bit Windows, GMEM_MOVEABLE
+// does not produce movable blocks, so a handle is the block's address and is
+// never locked.
 
 extern "win64" fn GlobalLock(h: u64) -> u64 {
     if h == 0 {
@@ -2697,10 +2713,9 @@ extern "win64" fn LocalFree(p: u64) -> u64 {
     0
 }
 
+/// GMEM_MOVEABLE is accepted and ignored, as on 32/64-bit Windows: the
+/// block is fixed and the returned handle is its address.
 extern "win64" fn GlobalAlloc(flags: u32, size: usize) -> u64 {
-    if flags & 0x2 != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0); // GMEM_MOVEABLE
-    }
     LocalAlloc(flags, size)
 }
 

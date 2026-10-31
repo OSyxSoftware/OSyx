@@ -437,7 +437,7 @@ void __stdcall start(void) {
         SetLastError(0);
         check("BringWindowToTop(bogus) fails with ERROR_INVALID_WINDOW_HANDLE", !BringWindowToTop((HANDLE)0x1234) && GetLastError() == 1400);
         SetLastError(0);
-        check("TrackPopupMenu fails with ERROR_NOT_SUPPORTED", !TrackPopupMenu((HANDLE)1, 0, 0, 0, 0, 0, 0) && GetLastError() == 50);
+        check("TrackPopupMenu(bogus menu) fails with ERROR_INVALID_MENU_HANDLE", !TrackPopupMenu((HANDLE)1, 0, 0, 0, 0, 0, 0) && GetLastError() == 1401);
         HANDLE user32 = LoadLibraryExW(L"user32.dll", 0, 0);
         BOOL (__stdcall *allow_fg)(DWORD) = user32 ? GetProcAddress(user32, "AllowSetForegroundWindow") : 0;
         check("AllowSetForegroundWindow is granted through a PE32 gate", allow_fg && allow_fg(0xFFFFFFFF));

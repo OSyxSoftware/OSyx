@@ -56,6 +56,7 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(GetExitCodeThread, [Handle, Ptr], U32),
     sig!(AdjustTokenPrivileges, [Handle, Int, Ptr, Uint, Ptr, Ptr], U32),
     sig!(AllowSetForegroundWindow, [Uint], U32),
+    sig!(GetDefaultPrinterW, [Ptr, Ptr], U32),
     sig!(CloseClipboard, [], U32),
     sig!(CloseHandle, [Handle], U32),
     sig!(CallWindowProcW, [Ptr, Handle, Uint, Handle, Int], I32),

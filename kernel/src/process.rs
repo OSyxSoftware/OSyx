@@ -526,7 +526,7 @@ fn user_thread_entry(start: u64, _: u64) {
     let s = unsafe { alloc::boxed::Box::from_raw(start as *mut UserStart) };
     let (rip, rsp, arg) = (s.rip, s.rsp, s.arg);
     drop(s);
-    if sched::current_kill_pending() { finish_current_thread(0); }
+    if sched::current_kill_pending() { finish_current_thread(sched::current_kill_code()); }
     // SAFETY: the entry and stack lie in the user half of the address space
     // that is active for this thread; a bad value only faults in ring 3.
     unsafe { osyx_iret_to_user(rip, rsp, arg) }

@@ -216,6 +216,13 @@ impl Filesystem for Ext4Volume {
         self.fs.lock().set_mode(Self::ino(ino)?, mode as u16).map_err(errno)
     }
 
+    fn set_times(&self, ino: u64, atime_ns: Option<i64>, mtime_ns: Option<i64>) -> Result<()> {
+        if self.read_only {
+            return Err(Errno::ReadOnly);
+        }
+        self.fs.lock().set_times(Self::ino(ino)?, atime_ns, mtime_ns).map_err(errno)
+    }
+
     fn open(&self, ino: u64) -> Result<()> {
         self.fs.lock().open(Self::ino(ino)?);
         Ok(())

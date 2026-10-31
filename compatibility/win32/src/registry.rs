@@ -27,6 +27,7 @@ const GENERIC_WRITE: u32 = 0x4000_0000;
 const GENERIC_ALL: u32 = 0x1000_0000;
 const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
 const REG_OPTION_VOLATILE: u32 = 1;
+const REG_OPTION_CREATE_LINK: u32 = 2;
 const REG_CREATED_NEW_KEY: u32 = 1;
 const REG_OPENED_EXISTING_KEY: u32 = 2;
 
@@ -37,6 +38,7 @@ const REG_BINARY: u32 = 3;
 const REG_DWORD: u32 = 4;
 const REG_DWORD_BIG_ENDIAN: u32 = 5;
 const REG_MULTI_SZ: u32 = 7;
+const REG_LINK: u32 = 6;
 const REG_QWORD: u32 = 11;
 
 const ERROR_MORE_DATA: u32 = 234;
@@ -261,6 +263,69 @@ fn join(base: &str, sub: &str) -> Result<String, u32> {
     })
 }
 
+/// The target of a symbolic link key: the default value of kind REG_LINK.
+fn link_target(key: &Key) -> Option<String> {
+    let v = key.values.get("")?;
+    (v.kind == REG_LINK).then(|| utf16_string(&v.data))
+}
+
+/// (hive, path) a link's target names. `\REGISTRY\MACHINE\...` and
+/// `\REGISTRY\USER\<sid>\...` are absolute (the user hive is already the
+/// current user's); anything else is a path in the link's own hive.
+fn link_destination(hive: Hive, target: &str) -> (Hive, String) {
+    let t = target.trim_matches('\\');
+    let lower = t.to_lowercase();
+    for (name, h) in [("registry\\machine", Hive::Machine), ("hkey_local_machine", Hive::Machine),
+                      ("registry\\user", Hive::User), ("hkey_current_user", Hive::User)] {
+        if let Some(_rest) = lower.strip_prefix(name) {
+            let orig = t[name.len()..].trim_start_matches('\\');
+            if h == Hive::User {
+                // Skip the SID: OSyx keeps one user hive per account.
+                return (Hive::User, orig.split_once('\\').map_or(String::new(), |(_, p)| String::from(p)));
+            }
+            return (Hive::Machine, String::from(orig));
+        }
+    }
+    (hive, String::from(t))
+}
+
+/// Resolves symbolic links in `path` (`REG_LINK` default values of keys on
+/// the way), so that opens and creates reach the target key. `follow_last`
+/// is false when creating the link key itself.
+fn follow(r: &mut Registry, hive: Hive, path: String, follow_last: bool) -> (Hive, String) {
+    let (mut hive, mut path) = (hive, path);
+    for _ in 0..32 {
+        load(hive, &mut r.hives[hive as usize]);
+        let parts: Vec<&str> = path.split('\\').collect();
+        let mut prefix = String::new();
+        let mut link = None;
+        for (i, part) in parts.iter().enumerate() {
+            prefix = if prefix.is_empty() { String::from(*part) } else { format!("{prefix}\\{part}") };
+            if i + 1 == parts.len() && !follow_last {
+                break;
+            }
+            match r.hives[hive as usize].keys.get(&prefix.to_lowercase()) {
+                Some(k) => {
+                    if let Some(t) = link_target(k) {
+                        link = Some((t, parts[i + 1..].join("\\")));
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        let Some((target, rest)) = link else { break };
+        let (nh, np) = link_destination(hive, &target);
+        hive = nh;
+        path = match (np.is_empty(), rest.is_empty()) {
+            (_, true) => np,
+            (true, false) => rest,
+            (false, false) => format!("{np}\\{rest}"),
+        };
+    }
+    (hive, path)
+}
+
 /// (hive, path, access) of an open or predefined key.
 fn resolve(r: &mut Registry, hkey: u64) -> Result<(Hive, String, u32), u32> {
     if let Some((h, p)) = root(hkey) {
@@ -303,6 +368,7 @@ extern "win64" fn RegOpenKeyExW(hkey: u64, sub: *const u16, options: u32, sam: u
         Ok(p) => p,
         Err(e) => return e,
     };
+    let (hive, path) = follow(&mut r, hive, path, true);
     if !r.hives[hive as usize].keys.contains_key(&path.to_lowercase()) {
         return ERROR_FILE_NOT_FOUND;
     }
@@ -324,8 +390,8 @@ extern "win64" fn RegCreateKeyExW(
     out: *mut u64,
     disposition: *mut u32,
 ) -> u32 {
-    if out.is_null() || options & !REG_OPTION_VOLATILE != 0 {
-        return if options & 0x2 != 0 { ERROR_NOT_SUPPORTED } else { ERROR_INVALID_PARAMETER }; // CREATE_LINK
+    if out.is_null() || options & !(REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK) != 0 {
+        return ERROR_INVALID_PARAMETER;
     }
     if let Err(e) = crate::security::validate_attributes(attributes) {
         return e;
@@ -340,6 +406,9 @@ extern "win64" fn RegCreateKeyExW(
         Ok(p) => p,
         Err(e) => return e,
     };
+    // A link key is created at its own name; otherwise links on the way are
+    // followed, as on Windows.
+    let (hive, path) = follow(&mut r, hive, path, options & REG_OPTION_CREATE_LINK == 0);
     let d = &mut r.hives[hive as usize];
     let existed = d.keys.contains_key(&path.to_lowercase());
     if !existed {

@@ -410,6 +410,21 @@ pub mod nr {
     pub const RESUME_CHILD: u64 = 104;
     /// Grant an existing channel to a live, restricted direct child.
     pub const GRANT_CHILD_CHANNEL: u64 = 105;
+    /// `thread_kill(tid, code) -> 0` for a thread of the caller's process
+    /// (tid 0 = the caller, which this never returns from). The thread ends
+    /// at its next safe point with `code` as its status; a thread waiting
+    /// inside the kernel is woken first, as on Windows.
+    pub const THREAD_KILL: u64 = 106;
+    /// `futimes(handle, mask, atime_ns, mtime_ns) -> 0`: sets the access
+    /// and/or modification time of the file behind `handle`, named by
+    /// nanoseconds since the Unix epoch. `mask` is one of [`crate::futimes`].
+    pub const FUTIMES: u64 = 107;
+}
+
+/// Field mask of `nr::FUTIMES`.
+pub mod futimes {
+    pub const ATIME: u64 = 1;
+    pub const MTIME: u64 = 2;
 }
 
 /// Operations of `nr::THREAD_SUSPEND`.

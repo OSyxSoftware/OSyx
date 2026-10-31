@@ -320,6 +320,19 @@ mod imp {
         decode(syscall1(nr::THREAD_TIMES, tid))
     }
 
+    /// Ends a thread of this process (tid 0: the caller, which never returns
+    /// from the call) at its next safe point, with `code` as its status.
+    pub fn thread_kill(tid: u64, code: i32) -> Result<u64, Errno> {
+        decode(syscall2(nr::THREAD_KILL, tid, code as u32 as u64))
+    }
+
+    /// Sets the access and/or modification time of the file behind `handle`,
+    /// in nanoseconds since the Unix epoch; `mask` is from
+    /// `osyx_abi::futimes` (1: atime, 2: mtime).
+    pub fn futimes(handle: u64, mask: u64, atime_ns: i64, mtime_ns: i64) -> Result<(), Errno> {
+        decode(syscall4(nr::FUTIMES, handle, mask, atime_ns as u64, mtime_ns as u64)).map(|_| ())
+    }
+
     /// Page-aligned addresses of the resident user pages of process `pid`
     /// (0: this one), as many as fit in `out`; returns how many pages are
     /// resident in all.

@@ -84,6 +84,7 @@ mod capi;
 mod bcrypt;
 mod newlibs;
 mod minordlls;
+mod msi;
 mod dwmapi;
 mod dwrite;
 mod inherit;

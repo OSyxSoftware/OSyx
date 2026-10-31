@@ -82,6 +82,10 @@ impl Filesystem for TmpfsVolume {
         self.fs.lock().set_mode(ino, mode)
     }
 
+    fn set_times(&self, ino: u64, atime_ns: Option<i64>, mtime_ns: Option<i64>) -> Result<()> {
+        self.fs.lock().set_times(ino, atime_ns, mtime_ns)
+    }
+
     fn open(&self, ino: u64) -> Result<()> {
         self.fs.lock().open(ino)
     }

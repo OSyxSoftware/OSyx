@@ -820,8 +820,7 @@ const HANDLE_FLAG_INHERIT: u32 = 1;
 const HANDLE_FLAG_PROTECT_FROM_CLOSE: u32 = 2;
 
 /// HANDLE_FLAG_INHERIT is kept per handle (CreateProcess passes such
-/// handles on, see inherit.rs); protecting a handle from CloseHandle is not
-/// supported.
+/// handles on, see inherit.rs); a protected handle makes CloseHandle fail.
 extern "win64" fn SetHandleInformation(h: u64, mask: u32, flags: u32) -> i32 {
     if objects::get(h).is_none() {
         return fail(ERROR_INVALID_HANDLE, 0);
@@ -829,16 +828,15 @@ extern "win64" fn SetHandleInformation(h: u64, mask: u32, flags: u32) -> i32 {
     if mask & !(HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE) != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    if flags & mask & HANDLE_FLAG_PROTECT_FROM_CLOSE != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
     if mask & HANDLE_FLAG_INHERIT != 0 {
         objects::set_inheritable(h, flags & HANDLE_FLAG_INHERIT != 0);
+    }
+    if mask & HANDLE_FLAG_PROTECT_FROM_CLOSE != 0 {
+        objects::set_protected(h, flags & HANDLE_FLAG_PROTECT_FROM_CLOSE != 0);
     }
     1
 }
 
-/// The handle's HANDLE_FLAG_INHERIT; handles are never protected.
 extern "win64" fn GetHandleInformation(h: u64, flags: *mut u32) -> i32 {
     if objects::get(h).is_none() {
         return fail(ERROR_INVALID_HANDLE, 0);
@@ -847,7 +845,10 @@ extern "win64" fn GetHandleInformation(h: u64, flags: *mut u32) -> i32 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's out pointer.
-    unsafe { *flags = if objects::is_inheritable(h) { HANDLE_FLAG_INHERIT } else { 0 } };
+    unsafe {
+        *flags = if objects::is_inheritable(h) { HANDLE_FLAG_INHERIT } else { 0 }
+            | if objects::is_protected(h) { HANDLE_FLAG_PROTECT_FROM_CLOSE } else { 0 };
+    }
     1
 }
 
@@ -968,9 +969,11 @@ extern "win64" fn GetThreadInformation(thread: u64, class: u32, info: u64, len: 
 // enforced and read as all-zero flags.
 const PROCESS_DEP_POLICY: u32 = 0;
 
+/// Every OSyx process has the same kernel mitigations, so a handle to any
+/// process answers with the same policy data as the caller's own.
 extern "win64" fn GetProcessMitigationPolicy(process: u64, policy: u32, buf: *mut u8, len: usize) -> i32 {
-    if process != objects::CURRENT_PROCESS {
-        return fail(ERROR_NOT_SUPPORTED, 0);
+    if process != objects::CURRENT_PROCESS && !matches!(objects::get(process), Some(objects::Object::Process(_))) {
+        return fail(ERROR_INVALID_HANDLE, 0);
     }
     let need = if policy == PROCESS_DEP_POLICY { 8 } else { 4 };
     if buf.is_null() || len < need || policy > 16 || policy == 5 {

@@ -363,8 +363,31 @@ extern "win64" fn DocumentPropertiesW(_hwnd: u64, _printer: u64, _device: *const
     fail(ERROR_INVALID_PRINTER_NAME, -1)
 }
 
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+
+/// Ordinal 203 on Windows. No printer is installed, so there is no default
+/// printer name (the buffer length is set to zero, as on Windows).
+extern "win64" fn GetDefaultPrinterW(_buf: *mut u16, size: *mut u32) -> i32 {
+    if size.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's in/out length.
+    unsafe { *size = 0 };
+    fail(ERROR_FILE_NOT_FOUND, 0)
+}
+
 pub fn winspool_exports() -> Vec<(&'static str, u64)> {
-    export_table![OpenPrinterW, ClosePrinter, EnumPrintersW, DeviceCapabilitiesW, DocumentPropertiesW]
+    export_table![OpenPrinterW, ClosePrinter, EnumPrintersW, DeviceCapabilitiesW, DocumentPropertiesW, GetDefaultPrinterW]
+}
+
+/// Windows exports GetDefaultPrinterW only by ordinal.
+pub fn winspool_ordinals() -> Vec<(u16, u64)> {
+    alloc::vec![(203, GetDefaultPrinterW as *const () as u64)]
+}
+
+/// The address the ordinal entry above points at, for the import mapping.
+pub(crate) fn default_printer_address() -> u64 {
+    GetDefaultPrinterW as *const () as u64
 }
 
 // ---- uiautomationcore.dll and oleacc.dll -------------------------------------------------

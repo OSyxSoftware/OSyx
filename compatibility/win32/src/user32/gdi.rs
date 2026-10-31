@@ -5,6 +5,10 @@ use super::*;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_BITMAP: u64 = STOCK_BASE + 21;
 const GDI_ERROR: u32 = u32::MAX;
+const ERROR_INVALID_PIXEL_FORMAT: u32 = 2000;
+
+static CANTARELL: &[u8] = include_bytes!("../../../../graphics/assets/Cantarell-VF.otf");
+static PIXEL_FORMATS: Mutex<BTreeMap<u64, i32>> = Mutex::new(BTreeMap::new());
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -1700,8 +1704,60 @@ extern "win64" fn GetCharWidth32A(dc: u64, first: u32, last: u32, widths: *mut i
     }
     TRUE
 }
-extern "win64" fn GetFontData(_dc: u64, _table: u32, _offset: u32, _out: *mut u8, _size: u32) -> u32 {
-    fail(ERROR_NOT_SUPPORTED, GDI_ERROR) // Atlas fonts have no sfnt tables.
+fn be16(data: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(data.get(at..at + 2)?.try_into().ok()?))
+}
+fn be32(data: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
+}
+/// Byte range of an sfnt table, validated against the file length.
+fn sfnt_table(data: &[u8], tag: u32) -> Option<(usize, usize)> {
+    let version = be32(data, 0)?;
+    if version != 0x0001_0000 && version != u32::from_be_bytes(*b"OTTO") {
+        return None;
+    }
+    let count = be16(data, 4)? as usize;
+    if 12usize.checked_add(count.checked_mul(16)?)? > data.len() {
+        return None;
+    }
+    for i in 0..count {
+        let record = 12 + i * 16;
+        if be32(data, record)? != tag {
+            continue;
+        }
+        let offset = be32(data, record + 8)? as usize;
+        let length = be32(data, record + 12)? as usize;
+        if offset.checked_add(length)? > data.len() {
+            return None;
+        }
+        return Some((offset, length));
+    }
+    None
+}
+extern "win64" fn GetFontData(dc: u64, table: u32, offset: u32, out: *mut u8, size: u32) -> u32 {
+    if !with(|g| g.dcs.contains_key(&dc)) {
+        return GDI_ERROR;
+    }
+    let (start, length) = if table == 0 {
+        (0, CANTARELL.len())
+    } else {
+        let Some(range) = sfnt_table(CANTARELL, table) else { return GDI_ERROR };
+        range
+    };
+    let skip = offset as usize;
+    let available = length.saturating_sub(skip);
+    if available == 0 {
+        return 0;
+    }
+    if out.is_null() || size == 0 {
+        return available as u32;
+    }
+    let count = (size as usize).min(available);
+    // SAFETY: the caller's buffer holds `size` bytes; `count` never exceeds it.
+    unsafe {
+        core::ptr::copy_nonoverlapping(CANTARELL.as_ptr().add(start + skip), out, count);
+    }
+    count as u32
 }
 fn has_glyph(k: FontKind, ch: char) -> bool {
     match k {
@@ -1836,9 +1892,106 @@ extern "win64" fn GetGlyphOutlineW(
     }
     need
 }
-extern "win64" fn GetOutlineTextMetricsA(_dc: u64, _size: u32, _out: *mut u8) -> u32 {
-    // OSyx fonts are not TrueType outlines: there is no OUTLINETEXTMETRIC to report.
-    fail(ERROR_NOT_SUPPORTED, 0)
+extern "win64" fn GetOutlineTextMetricsA(dc: u64, size: u32, out: *mut u8) -> u32 {
+    let Some(k) = with(|g| g.dcs.get(&dc).map(|d| font_of(&g.gdi, d.font))) else { return 0 };
+    let wide = !crate::wow64::is_active();
+    let header = if wide { 232usize } else { 212 };
+    let (style, full) = match k {
+        FontKind::SansBold => ("Bold", "Cantarell Bold"),
+        FontKind::Large => ("Light", "Cantarell Light"),
+        _ => ("Regular", "Cantarell Regular"),
+    };
+    let names = ["Cantarell", "Cantarell", style, full];
+    let total = header + names.iter().map(|n| n.len() + 1).sum::<usize>();
+    if out.is_null() || size == 0 {
+        return total as u32;
+    }
+    if (size as usize) < total {
+        return 0;
+    }
+    let h = line_height(k) as i32;
+    let asc = ascent(k);
+    let desc = h - asc;
+    let avg = measure(k, "x") as i32;
+    let maxw = measure(k, "W") as i32;
+    let weight = if matches!(k, FontKind::SansBold) { 700i32 } else { 400 };
+    let pitch = match k {
+        FontKind::Mono => 0x31u8,
+        _ => 0x20,
+    };
+    let selection = if matches!(k, FontKind::SansBold) { 0x20u32 } else { 0x40 };
+    let sub_w = avg * 2 / 3;
+    let sub_h = asc * 2 / 3;
+    // SAFETY: the caller supplied `size` >= total bytes at `out`.
+    unsafe {
+        core::ptr::write_bytes(out, 0, total);
+        let base = out as u64;
+        teb::put(base, 0, header as u32);
+        teb::put(base, 4, h);
+        teb::put(base, 8, asc);
+        teb::put(base, 12, desc);
+        teb::put(base, 16, 0i32);
+        teb::put(base, 20, 0i32);
+        teb::put(base, 24, avg);
+        teb::put(base, 28, maxw);
+        teb::put(base, 32, weight);
+        teb::put(base, 36, 0i32);
+        teb::put(base, 40, 96i32);
+        teb::put(base, 44, 96i32);
+        teb::put(base, 48, 32u8);
+        teb::put(base, 49, 0xffu8);
+        teb::put(base, 50, b'?');
+        teb::put(base, 51, b' ');
+        teb::put(base, 52, 0u8);
+        teb::put(base, 53, 0u8);
+        teb::put(base, 54, 0u8);
+        teb::put(base, 55, pitch);
+        teb::put(base, 56, 0u8);
+        teb::put(base, 72, selection);
+        teb::put(base, 76, 0u32);
+        teb::put(base, 80, 1i32);
+        teb::put(base, 84, 0i32);
+        teb::put(base, 88, 0i32);
+        teb::put(base, 92, 2048u32);
+        teb::put(base, 96, asc);
+        teb::put(base, 100, desc);
+        teb::put(base, 104, 0u32);
+        teb::put(base, 108, (asc * 7 / 10) as u32);
+        teb::put(base, 112, (asc / 2) as u32);
+        teb::put(base, 116, 0i32);
+        teb::put(base, 120, -asc);
+        teb::put(base, 124, maxw);
+        teb::put(base, 128, desc);
+        teb::put(base, 132, asc);
+        teb::put(base, 136, desc);
+        teb::put(base, 140, 0u32);
+        teb::put(base, 144, 1u32);
+        teb::put(base, 148, sub_w);
+        teb::put(base, 152, sub_h);
+        teb::put(base, 156, 0i32);
+        teb::put(base, 160, asc / 4);
+        teb::put(base, 164, sub_w);
+        teb::put(base, 168, sub_h);
+        teb::put(base, 172, 0i32);
+        teb::put(base, 176, asc / 2);
+        teb::put(base, 180, (h / 12).max(1) as u32);
+        teb::put(base, 184, asc / 2);
+        teb::put(base, 188, (h / 14).max(1));
+        teb::put(base, 192, -(desc / 4));
+        let mut offset = header;
+        for (i, name) in names.iter().enumerate() {
+            core::ptr::copy_nonoverlapping(name.as_ptr(), out.add(offset), name.len());
+            let slot = if wide { 200 + i * 8 } else { 196 + i * 4 };
+            let address = base + offset as u64;
+            if wide {
+                teb::put(base, slot, address);
+            } else {
+                teb::put(base, slot, address as u32);
+            }
+            offset += name.len() + 1;
+        }
+    }
+    total as u32
 }
 extern "win64" fn GetICMProfileW(dc: u64, size: *mut u32, _out: *mut u16) -> Bool {
     if size.is_null() {
@@ -1849,14 +2002,49 @@ extern "win64" fn GetICMProfileW(dc: u64, size: *mut u32, _out: *mut u16) -> Boo
     }
     fail(ERROR_FILE_NOT_FOUND, FALSE) // The compositor has no installed ICC profile.
 }
-extern "win64" fn ChoosePixelFormat(_dc: u64, _pfd: *const u8) -> i32 {
-    fail(ERROR_NOT_SUPPORTED, 0)
+/// OSyx offers one software format: 32-bit BGRA, double-buffered window surface.
+fn pixel_format_ok(pfd: *const u8) -> bool {
+    if pfd.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's PIXELFORMATDESCRIPTOR, whose nSize is checked first.
+    unsafe {
+        teb::get::<u16>(pfd as u64, 0) == 40
+            && teb::get::<u8>(pfd as u64, 8) == 0
+            && teb::get::<u8>(pfd as u64, 9) >= 24
+    }
 }
-extern "win64" fn SetPixelFormat(_dc: u64, _format: i32, _pfd: *const u8) -> Bool {
-    fail(ERROR_NOT_SUPPORTED, FALSE)
+extern "win64" fn ChoosePixelFormat(dc: u64, pfd: *const u8) -> i32 {
+    if !with(|g| g.dcs.contains_key(&dc)) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if pfd.is_null() {
+        return 0;
+    }
+    if pixel_format_ok(pfd) { 1 } else { fail(ERROR_INVALID_PARAMETER, 0) }
 }
-extern "win64" fn SwapBuffers(_dc: u64) -> Bool {
-    fail(ERROR_NOT_SUPPORTED, FALSE)
+extern "win64" fn SetPixelFormat(dc: u64, format: i32, pfd: *const u8) -> Bool {
+    if !with(|g| g.dcs.contains_key(&dc)) {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    if format != 1 || !pixel_format_ok(pfd) {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let mut formats = PIXEL_FORMATS.lock().unwrap();
+    if formats.get(&dc).is_some_and(|old| *old != format) {
+        return fail(ERROR_INVALID_PIXEL_FORMAT, FALSE);
+    }
+    formats.insert(dc, format);
+    TRUE
+}
+extern "win64" fn SwapBuffers(dc: u64) -> Bool {
+    let Some((hwnd, memory)) = with(|g| g.dcs.get(&dc).map(|d| (d.hwnd, d.memory))) else {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    };
+    if !memory && hwnd != 0 {
+        super::present(hwnd, None);
+    }
+    TRUE
 }
 /// Escapes are printer and driver commands; a display DC supports none
 /// (QUERYESCSUPPORT included), which Windows answers with 0.

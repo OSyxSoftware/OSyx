@@ -11,8 +11,9 @@
 //!
 //! What a handle can carry to another process: sections backed by
 //! page-file memory (shared memory objects, which the kernel passes on a
-//! channel), events (their state moves to shared memory, see objects.rs)
-//! and connected pipes (relayed, see pipes.rs). Other objects live inside
+//! channel), events (their state moves to shared memory, see objects.rs),
+//! connected pipes (relayed, see pipes.rs) and process handles (the child
+//! opens the same process, see process_for_pid). Other objects live inside
 //! one winrun (mutexes, semaphores, files opened through the VFS...), so
 //! CreateProcess refuses to inherit them with ERROR_NOT_SUPPORTED rather
 //! than start a child that would find nothing behind a handle it was
@@ -43,6 +44,9 @@ const EVENT_MANUAL: u32 = 1;
 const KIND_FILE: u32 = 4;
 /// A pipe relayed over a transferred channel capability.
 const KIND_PIPE_CHANNEL: u32 = 5;
+/// A process handle: the process id. The child builds its own handle to
+/// that process (which it may wait on), since no kernel object crosses.
+const KIND_PROCESS: u32 = 6;
 pub struct OwnedChannel(pub u64);
 impl Drop for OwnedChannel { fn drop(&mut self) { let _ = os_sys::close(self.0); } }
 struct Broker { channel: OwnedChannel, lock: Mutex<()> }
@@ -100,6 +104,7 @@ fn item(h: u64) -> Result<Item, u32> {
             let (id, flags) = crate::pipes::relay_out(h)?;
             Ok(Item { handle: h, kernel: None, kind: KIND_PIPE, flags, size: (crate::kernel32::pid() << 32) | id as u64 })
         }
+        Some(Object::Process(p)) => Ok(Item { handle: h, kernel: None, kind: KIND_PROCESS, flags: 0, size: p.pid }),
         Some(o) => {
             if crate::VERBOSE.load(Ordering::Relaxed) {
                 os_std::eprintln!("winrun: cannot inherit handle {h:#x} ({}) into another process", objects::kind_name(&o));
@@ -311,6 +316,7 @@ fn object(r: &[u8], kernel: Option<u64>, extra: &[u8], direct: bool) -> Option<O
             objects::get(h)
         }
         KIND_EVENT => crate::objects::EventObj::from_shared(kernel?, half(12) & EVENT_MANUAL != 0).map(Object::Event),
+        KIND_PROCESS => crate::process::process_for_pid(size).map(Object::Process),
         KIND_SECTION => Some(Object::Section(Arc::new(SectionObj {
             shm: kernel?,
             file_mapping: half(12) & SECTION_FILE != 0,
