@@ -94,6 +94,16 @@ fn peeks_leave_the_data_queued() {
 }
 
 #[test]
+fn udp_connect_reports_its_peer() {
+    let mut n = Net::new();
+    let u = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    assert_eq!(n.a.udp_peer(u), Err(NetError::NotConnected));
+    let peer = Endpoint::new(B_IP, 9000);
+    n.a.udp_connect(u, peer).unwrap();
+    assert_eq!(n.a.udp_peer(u), Ok(peer));
+}
+
+#[test]
 fn tcp_bind_reserves_a_dynamic_port_before_listen_or_connect() {
     let mut n = Net::new();
     let bound = n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 0)).unwrap();

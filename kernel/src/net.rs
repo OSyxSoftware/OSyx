@@ -764,6 +764,7 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
                     }
                 }
                 (abi::SOCK_DGRAM, Some(id)) if !peer => stack_call(|st| st.udp_local(id))?,
+                (abi::SOCK_DGRAM, Some(id)) => stack_call(|st| st.udp_peer(id))?,
                 (_, _) if !peer => bound.unwrap_or_default(),
                 _ => return Err(Errno::NotConnected),
             };

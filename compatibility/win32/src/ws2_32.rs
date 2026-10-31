@@ -766,6 +766,9 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
     if !started() {
         return WSANOTINITIALISED as i32;
     }
+    if res.is_null() {
+        return WSAEFAULT as i32;
+    }
     // SAFETY: NULL or NUL-terminated strings.
     let (n, svc) = unsafe { (crate::path::ansi_to_string(node), crate::path::ansi_to_string(service)) };
     let port: u16 = match svc.as_deref().map(str::parse) {

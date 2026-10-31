@@ -117,6 +117,20 @@ void __stdcall start(void) {
     int n = recvfrom(u, buf, sizeof buf, 0, (struct sockaddr *)&from, &flen);
     check("recvfrom gets the echo from 10.0.2.2", n == 4 && mem_eq(buf, "udp!", 4) && from.sin_addr.s_addr == inet_addr("10.0.2.2"));
     closesocket(u);
+
+    /* getpeername works on a connected datagram socket. */
+    SOCKET uc = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in ca = {0};
+    ca.sin_family = AF_INET;
+    ca.sin_port = htons(8129);
+    ca.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    check_eq("connect UDP", connect(uc, (struct sockaddr *)&ca, sizeof ca), 0);
+    struct sockaddr_in cn;
+    int cnlen = sizeof cn;
+    check("getpeername on connected UDP",
+          getpeername(uc, (struct sockaddr *)&cn, &cnlen) == 0 && cn.sin_port == htons(8129) &&
+              cn.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    closesocket(uc);
     check_eq("WSACleanup", WSACleanup(), 0);
     finish("winsock");
 }

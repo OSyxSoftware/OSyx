@@ -1373,6 +1373,11 @@ impl Stack {
         Ok(self.udp(id)?.local)
     }
 
+    /// The address a datagram socket was connected to.
+    pub fn udp_peer(&mut self, id: SocketId) -> Result<Endpoint, NetError> {
+        self.udp(id)?.remote.ok_or(NetError::NotConnected)
+    }
+
     /// The next datagram without removing it (MSG_PEEK).
     pub fn udp_peek_from(&self, id: SocketId, buf: &mut [u8]) -> Result<(Endpoint, usize, usize), NetError> {
         let u = match self.sockets.get(&id) {
