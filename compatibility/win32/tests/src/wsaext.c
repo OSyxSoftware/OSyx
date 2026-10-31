@@ -101,6 +101,22 @@ void __stdcall start(void) {
     check("WSARecvFrom gets it",
           WSARecvFrom(ur, &wi, 1, &wn, NULL, (struct sockaddr *)&wfrom, &wflen, NULL, NULL) == 0 && wn == 5);
     check("... bytes and sender", mem_eq(wb, "wsaud", 5) && wfrom.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    WSABUF wt = {11, "truncated!!"};
+    check("WSASendTo sends 11 bytes",
+          WSASendTo(uw, &wt, 1, &wn, 0, (struct sockaddr *)&ua, sizeof ua, NULL, NULL) == 0 && wn == 11);
+    char tb[5] = {0};
+    WSABUF ti = {5, tb};
+    wn = 0;
+    wflen = sizeof wfrom;
+    check("WSARecvFrom reports a truncated datagram",
+          WSARecvFrom(ur, &ti, 1, &wn, NULL, (struct sockaddr *)&wfrom, &wflen, NULL, NULL) == SOCKET_ERROR &&
+              WSAGetLastError() == WSAEMSGSIZE && wn == 5 && mem_eq(tb, "trunc", 5));
+    check("WSASendTo sends it again",
+          WSASendTo(uw, &wt, 1, &wn, 0, (struct sockaddr *)&ua, sizeof ua, NULL, NULL) == 0 && wn == 11);
+    char rb[5] = {0};
+    check("recvfrom reports a truncated datagram",
+          recvfrom(ur, rb, 5, 0, NULL, NULL) == SOCKET_ERROR && WSAGetLastError() == WSAEMSGSIZE &&
+              mem_eq(rb, "trunc", 5));
     closesocket(uw);
     closesocket(ur);
 

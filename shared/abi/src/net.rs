@@ -39,6 +39,8 @@ pub mod ctl {
     /// Bytes that a receive can return at once: all queued stream data, or
     /// the size of the first queued datagram/ICMP event.
     pub const RECV_AVAILABLE: u64 = 11;
+    /// Size of the datagram the last successful `recv` returned (untruncated).
+    pub const LAST_MSG_LEN: u64 = 12;
 }
 
 /// TCP states reported by `ctl::STATE` and `NetSocket::state`.

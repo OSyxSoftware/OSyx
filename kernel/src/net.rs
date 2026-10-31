@@ -331,6 +331,8 @@ pub struct SocketObj {
     recv_timeout: AtomicU64,
     send_timeout: AtomicU64,
     connect_timeout: AtomicU64,
+    /// Original size of the datagram the last `recv` returned.
+    last_msg_len: AtomicU64,
 }
 
 impl SocketObj {
@@ -448,6 +450,7 @@ pub fn sys_socket(kind: u64) -> Result<u64, Errno> {
         recv_timeout: AtomicU64::new(0),
         send_timeout: AtomicU64::new(0),
         connect_timeout: AtomicU64::new(0),
+        last_msg_len: AtomicU64::new(0),
     });
     SOCKETS.lock().push(Arc::downgrade(&obj));
     process::add_object(Object::Socket(obj))
@@ -543,6 +546,7 @@ pub fn sys_accept(h: u64, peer: u64) -> Result<u64, Errno> {
         recv_timeout: AtomicU64::new(0),
         send_timeout: AtomicU64::new(0),
         connect_timeout: AtomicU64::new(0),
+        last_msg_len: AtomicU64::new(0),
     });
     SOCKETS.lock().push(Arc::downgrade(&obj));
     // Readiness of the new socket.
@@ -681,7 +685,17 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
     let (n, addr) = match s.kind {
         abi::SOCK_DGRAM => {
             let id = ensure_udp(&s, None)?;
-            run(&mut |st| st.udp_recv_from(id, &mut k).map(|(f, n, _)| (n, Some(to_sa(f)))))?
+            let mut total = None;
+            let r = run(&mut |st| {
+                st.udp_recv_from(id, &mut k).map(|(f, n, len)| {
+                    total = Some(len);
+                    (n, Some(to_sa(f)))
+                })
+            })?;
+            if let Some(len) = total {
+                s.last_msg_len.store(len as u64, Ordering::Relaxed);
+            }
+            r
         }
         abi::SOCK_PING => {
             let id = s.id().ok_or(Errno::BadHandle)?;
@@ -766,6 +780,7 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
             let Some(id) = s.id() else { return Ok(0) };
             return stack_call(|st| st.recv_available(id)).map(|n| n as u64);
         }
+        abi::ctl::LAST_MSG_LEN => return Ok(s.last_msg_len.load(Ordering::Relaxed)),
         _ => return Err(Errno::InvalidArgument),
     }
     Ok(0)

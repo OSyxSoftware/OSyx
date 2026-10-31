@@ -355,12 +355,17 @@ extern "win64" fn recv(s: u64, buf: *mut u8, len: i32, f: i32) -> i32 {
 extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8, fromlen: *mut i32) -> i32 {
     trace_io(format_args!("recv({s:#x}, {len}) begin"));
     let r = (|| {
-        let (fd, _) = fd(s)?;
+        let (fd, stream) = fd(s)?;
         let fl = flags(f)?;
         // SAFETY: the caller's buffer of `len` bytes.
         let data = unsafe { core::slice::from_raw_parts_mut(buf, len.max(0) as usize) };
         let (n, peer) = os_sys::sock_recv(fd, data, fl).map_err(wsa)?;
         write_addr(&peer, from, fromlen);
+        // A datagram longer than the buffer was truncated; the bytes are
+        // delivered, but Winsock reports the original size.
+        if datagram_truncated(fd, stream, n)? {
+            return Err(WSAEMSGSIZE);
+        }
         Ok(n)
     })();
     trace_io(format_args!("recv({s:#x}) -> {r:?}"));
@@ -873,12 +878,14 @@ fn wsa_gather(bufs: *const u8, count: u32) -> Result<Vec<u8>, u32> {
     Ok(data)
 }
 
-/// One receive scattered over the WSABUFs; returns the byte count and peer.
-fn wsa_receive(fd: u64, bufs: *const u8, count: u32, fl: u64) -> Result<(usize, SockAddr), u32> {
+/// One receive scattered over the WSABUFs; returns the byte count, peer and
+/// whether the datagram was longer than the buffers.
+fn wsa_receive(fd: u64, bufs: *const u8, count: u32, fl: u64, stream: bool) -> Result<(usize, SockAddr, bool), u32> {
     let parts = wsa_bufs(bufs, count)?;
     let total: usize = parts.iter().map(|p| p.0 as usize).sum();
     let mut data = alloc::vec![0u8; total];
     let (n, from) = os_sys::sock_recv(fd, &mut data, fl).map_err(wsa)?;
+    let truncated = datagram_truncated(fd, stream, n)?;
     let mut done = 0;
     for (len, p) in parts {
         let take = (len as usize).min(n - done);
@@ -889,7 +896,7 @@ fn wsa_receive(fd: u64, bufs: *const u8, count: u32, fl: u64) -> Result<(usize, 
         unsafe { core::ptr::copy_nonoverlapping(data[done..].as_ptr(), p as *mut u8, take) };
         done += take;
     }
-    Ok((n, from))
+    Ok((n, from, truncated))
 }
 
 /// WSASend: gathers the WSABUFs into one stream write or datagram.
@@ -950,9 +957,9 @@ extern "win64" fn WSASendTo(
 }
 
 /// The received count and in/out flags of a WSARecv-style call.
-fn recv_result(r: Result<(usize, *mut u32), u32>, received: *mut u32) -> i32 {
+fn recv_result(r: Result<(usize, *mut u32, bool), u32>, received: *mut u32) -> i32 {
     match r {
-        Ok((n, f)) => {
+        Ok((n, f, truncated)) => {
             if !received.is_null() {
                 // SAFETY: the caller's out count.
                 unsafe { *received = n as u32 };
@@ -961,10 +968,22 @@ fn recv_result(r: Result<(usize, *mut u32), u32>, received: *mut u32) -> i32 {
                 // SAFETY: the caller's in/out flags; nothing partial to report.
                 unsafe { *f = 0 };
             }
+            if truncated {
+                return err(WSAEMSGSIZE, SOCKET_ERROR);
+            }
             0
         }
         Err(e) => err(e, SOCKET_ERROR),
     }
+}
+
+/// Whether the last receive truncated a datagram (Winsock WSAEMSGSIZE).
+fn datagram_truncated(fd: u64, stream: bool, n: usize) -> Result<bool, u32> {
+    if stream {
+        return Ok(false);
+    }
+    let total = os_sys::sock_ctl(fd, net::ctl::LAST_MSG_LEN, 0).map_err(wsa)?;
+    Ok(total as usize > n)
 }
 
 /// WSARecv: one receive scattered over the WSABUFs.
@@ -978,15 +997,15 @@ extern "win64" fn WSARecv(
     completion: u64,
 ) -> i32 {
     let r = (|| {
-        let (fd, _) = fd(s)?;
+        let (fd, stream) = fd(s)?;
         if !overlapped.is_null() || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
         // SAFETY: the caller's in/out flags.
         let user_flags = if f.is_null() { 0 } else { unsafe { *f as i32 } };
         let fl = flags(user_flags)?;
-        let (n, _) = wsa_receive(fd, bufs, count, fl)?;
-        Ok((n, f))
+        let (n, _, truncated) = wsa_receive(fd, bufs, count, fl, stream)?;
+        Ok((n, f, truncated))
     })();
     recv_result(r, received)
 }
@@ -1005,16 +1024,16 @@ extern "win64" fn WSARecvFrom(
     completion: u64,
 ) -> i32 {
     let r = (|| {
-        let (fd, _) = fd(s)?;
+        let (fd, stream) = fd(s)?;
         if !overlapped.is_null() || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
         // SAFETY: the caller's in/out flags.
         let user_flags = if f.is_null() { 0 } else { unsafe { *f as i32 } };
         let fl = flags(user_flags)?;
-        let (n, peer) = wsa_receive(fd, bufs, count, fl)?;
+        let (n, peer, truncated) = wsa_receive(fd, bufs, count, fl, stream)?;
         write_addr(&peer, from, fromlen);
-        Ok((n, f))
+        Ok((n, f, truncated))
     })();
     recv_result(r, received)
 }
