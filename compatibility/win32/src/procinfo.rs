@@ -3,10 +3,8 @@
 //! kernel's frame accounting, error modes, session ids, power requests and
 //! restart registration, and the computer name.
 //!
-//! What OSyx does not have is reported as such: there is no per-thread CPU
-//! accounting or cycle counter (GetThreadTimes, Query*CycleTime fail with
-//! ERROR_NOT_SUPPORTED), no forced termination of another thread, no
-//! battery information, and no Windows Error Reporting to act on a restart
+//! What OSyx does not have is reported as such: there is no battery
+//! information and no Windows Error Reporting to act on a restart
 //! registration (it is kept and reported back, never used).
 #![allow(non_snake_case)]
 use crate::{
@@ -167,16 +165,33 @@ extern "win64" fn QueryProcessCycleTime(h: u64, cycles: *mut u64) -> i32 {
     1
 }
 
-/// Only the calling thread can end itself (ExitThread); OSyx offers no way
-/// to stop another thread at an arbitrary point.
+/// Ends a thread of this process at its next safe point, with `code` as its
+/// exit status (as on Windows, no thread exit handlers run). The thread
+/// handle becomes signalled once the thread has really stopped.
 extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
-    if !is_thread(h) {
-        return fail(ERROR_INVALID_HANDLE, 0);
-    }
-    if kernel32::GetThreadId(h) == os_sys::gettid() as u32 {
+    let Some((tid, obj)) = thread_of(h) else { return fail(ERROR_INVALID_HANDLE, 0) };
+    if tid == os_sys::gettid() as u32 {
         kernel32::ExitThread(code);
     }
-    fail(ERROR_NOT_SUPPORTED, 0)
+    let ticks = os_sys::thread_times(tid as u64).unwrap_or(0);
+    match os_sys::thread_kill(tid as u64, code as i32) {
+        Ok(_) => {}
+        Err(osyx_abi::Errno::NotFound) => return fail(ERROR_INVALID_HANDLE, 0),
+        Err(e) => return fail(errno_to_win32(e), 0),
+    }
+    if let Some(t) = obj {
+        t.exit_code.store(code, Ordering::SeqCst);
+        let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
+            while os_sys::thread_times(tid as u64) != Err(osyx_abi::Errno::NotFound) {
+                os_std::thread::sleep(core::time::Duration::from_millis(10));
+            }
+            t.final_ticks.store(ticks, Ordering::SeqCst);
+            t.exited_ns.store(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(1).max(1), Ordering::SeqCst);
+            t.done.store(true, Ordering::SeqCst);
+            objects::signal_all();
+        });
+    }
+    1
 }
 
 /// One processor: ideal processor 0 is the only one.

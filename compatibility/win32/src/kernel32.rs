@@ -2622,8 +2622,9 @@ extern "win64" fn MulDiv(a: i32, b: i32, c: i32) -> i32 {
     i32::try_from(q).unwrap_or(-1)
 }
 
-// Global memory: only fixed blocks exist (GlobalAlloc refuses
-// GMEM_MOVEABLE), so a handle is the block's address and is never locked.
+// Global memory is always fixed: like 32- and 64-bit Windows, GMEM_MOVEABLE
+// does not produce movable blocks, so a handle is the block's address and is
+// never locked.
 
 extern "win64" fn GlobalLock(h: u64) -> u64 {
     if h == 0 {
@@ -2697,10 +2698,9 @@ extern "win64" fn LocalFree(p: u64) -> u64 {
     0
 }
 
+/// GMEM_MOVEABLE is accepted and ignored, as on 32/64-bit Windows: the
+/// block is fixed and the returned handle is its address.
 extern "win64" fn GlobalAlloc(flags: u32, size: usize) -> u64 {
-    if flags & 0x2 != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0); // GMEM_MOVEABLE
-    }
     LocalAlloc(flags, size)
 }
 

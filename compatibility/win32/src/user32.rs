@@ -55,7 +55,9 @@ const WM_GETTEXT: u32 = 0x000D;
 pub const WM_GETTEXTLENGTH: u32 = 0x000E;
 pub const WM_PAINT: u32 = 0x000F;
 pub const WM_CLOSE: u32 = 0x0010;
+const WM_QUERYENDSESSION: u32 = 0x0011;
 pub const WM_QUIT: u32 = 0x0012;
+const WM_ENDSESSION: u32 = 0x0016;
 pub const WM_ERASEBKGND: u32 = 0x0014;
 pub const WM_SHOWWINDOW: u32 = 0x0018;
 pub const WM_NCCREATE: u32 = 0x0081;
@@ -65,6 +67,7 @@ pub const WM_KEYUP: u32 = 0x0101;
 pub const WM_CHAR: u32 = 0x0102;
 pub const WM_SYSKEYDOWN: u32 = 0x0104;
 pub const WM_SYSKEYUP: u32 = 0x0105;
+const WM_COMMAND: u32 = 0x0111;
 pub const WM_TIMER: u32 = 0x0113;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_LBUTTONDOWN: u32 = 0x0201;
@@ -175,11 +178,12 @@ struct ImageList {
     bitmaps: Vec<(u64, u32)>,
 }
 
+#[derive(Clone)]
 struct MenuItem {
     id: u64,
     flags: u32,
     text: Option<String>,
-    /// MENUITEMINFO.dwItemData.
+    /// MENUITEMINFO.dwItemData, or the bitmap handle of an MF_BITMAP item.
     data: u64,
 }
 
@@ -3232,12 +3236,24 @@ pub(crate) fn stock_icon(kind: u32, size: u32) -> u64 {
 }
 
 /// Predefined cursors and icons: the resource id is the handle (PRISM
-/// draws its own pointer).
-extern "win64" fn LoadCursorA(_inst: u64, id: u64) -> u64 {
+/// draws its own pointer). A custom id is resolved against the module's
+/// cursor and icon groups so a missing resource loads as NULL, like on
+/// Windows; the handle itself is derived from the resource id because the
+/// image is never drawn.
+extern "win64" fn LoadCursorA(inst: u64, id: u64) -> u64 {
     if id < 0x10000 {
-        0x1_0000 + id
+        return 0x1_0000 + id;
+    }
+    if id >> 16 != 0 {
+        return 0; // a resource name; named lookup is not offered
+    }
+    let num = id & 0xffff;
+    let found = crate::loader::numeric_resource(inst, 12, num).is_ok()
+        || crate::loader::numeric_resource(inst, 14, num).is_ok();
+    if found {
+        0x1_0000 + num
     } else {
-        fail(ERROR_NOT_SUPPORTED, 0)
+        0
     }
 }
 
@@ -3602,13 +3618,15 @@ extern "win64" fn GetDC(hwnd: u64) -> u64 {
     if hwnd == 0 {
         return gdi::display_dc();
     }
-    if !wait_drawable(hwnd) {
-        return fail(ERROR_NOT_SUPPORTED, 0); // no drawing on the whole screen
+    let state = with(|g| g.windows.get(&hwnd).map(|w| (w.size, w.win.is_configured())));
+    let Some((size, configured)) = state else { return 0 };
+    // A configured window may still be presenting the previous frame, the
+    // same wait BeginPaint does; a hidden window gets its DC at once (its
+    // drawing lands in the buffer and shows on ShowWindow).
+    if configured {
+        wait_drawable(hwnd);
     }
-    with(|g| {
-        let Some(size) = g.windows.get(&hwnd).map(|w| w.size) else { return 0 };
-        new_dc(g, hwnd, Rect::new(0, 0, size.0, size.1))
-    })
+    with(|g| new_dc(g, hwnd, Rect::new(0, 0, size.0, size.1)))
 }
 
 extern "win64" fn ReleaseDC(hwnd: u64, dc: u64) -> i32 {
@@ -4404,6 +4422,8 @@ extern "win64" fn MessageBoxW(owner: u64, text: *const u16, caption: *const u16,
     message_box(owner, t.unwrap_or_default(), c.unwrap_or_else(|| String::from("Error")), flags)
 }
 
+/// MSGBOXPARAMSW; the message box callback only serves MB_HELP's Help
+/// button, which the dialog does not draw, so the pointer is ignored.
 extern "win64" fn MessageBoxIndirectW(params: *const u8) -> i32 {
     if params.is_null() { return fail(ERROR_INVALID_PARAMETER, 0); }
     // SAFETY: MSGBOXPARAMSW is supplied by the caller; cbSize selects its ABI.
@@ -4416,7 +4436,6 @@ extern "win64" fn MessageBoxIndirectW(params: *const u8) -> i32 {
             let text = teb::get::<u32>(addr, 12) as *const u16;
             let caption = teb::get::<u32>(addr, 16) as *const u16;
             let flags = teb::get::<u32>(addr, 20);
-            if teb::get::<u32>(addr, 32) != 0 { return fail(ERROR_NOT_SUPPORTED, 0); }
             MessageBoxW(owner, text, caption, flags)
         } else {
             if size < 80 { return fail(ERROR_INVALID_PARAMETER, 0); }
@@ -4424,7 +4443,6 @@ extern "win64" fn MessageBoxIndirectW(params: *const u8) -> i32 {
             let text = teb::get::<u64>(addr, 24) as *const u16;
             let caption = teb::get::<u64>(addr, 32) as *const u16;
             let flags = teb::get::<u32>(addr, 40);
-            if teb::get::<u64>(addr, 64) != 0 { return fail(ERROR_NOT_SUPPORTED, 0); }
             MessageBoxW(owner, text, caption, flags)
         }
     }
@@ -4816,16 +4834,21 @@ extern "win64" fn UnhookWindowsHookEx(_hook: u64) -> Bool {
 
 /// Reads string `id` of the string table of `inst` (NULL: the program) into
 /// `buf` (at most `cch - 1` units plus a NUL). Returns the units copied, 0
-/// with the error set if there is no such string. `cch == 0` (a pointer to
-/// the read-only resource) is not supported.
+/// with the error set if there is no such string. `cch == 0` asks for the
+/// length without a buffer, as Windows' documented size query does; the
+/// read-only resource pointer variant cannot be offered because the string
+/// is decoded into fresh storage.
 extern "win64" fn LoadStringW(inst: u64, id: u32, buf: *mut u16, cch: i32) -> i32 {
-    if buf.is_null() || cch < 0 {
+    if cch < 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    if cch == 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
     let Some(units) = string_resource(inst, id) else { return 0 };
+    if cch == 0 {
+        return units.len() as i32;
+    }
+    if buf.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
     let n = units.len().min(cch as usize - 1);
     // SAFETY: the caller's buffer of `cch` units.
     unsafe {
@@ -4836,14 +4859,17 @@ extern "win64" fn LoadStringW(inst: u64, id: u32, buf: *mut u16, cch: i32) -> i3
 }
 
 extern "win64" fn LoadStringA(inst: u64, id: u32, buf: *mut u8, cch: i32) -> i32 {
-    if buf.is_null() || cch < 0 {
+    if cch < 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
-    }
-    if cch == 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
     }
     let Some(units) = string_resource(inst, id) else { return 0 };
     let text = String::from_utf16_lossy(&units);
+    if cch == 0 {
+        return text.len() as i32;
+    }
+    if buf.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
     let n = text.len().min(cch as usize - 1);
     // SAFETY: the caller's buffer of `cch` bytes.
     unsafe {
@@ -5022,9 +5048,16 @@ extern "win64" fn SetForegroundWindow(wnd: u64) -> Bool {
     })
 }
 
-/// Windows limits which processes may call SetForegroundWindow; here every
-/// process may, so the permission is always granted (ASFW_ANY is -1).
-extern "win64" fn AllowSetForegroundWindow(_pid: u32) -> Bool {
+/// Every process here may raise a window, so the permission is granted to
+/// ASFW_ANY and to any live process; a pid that names no process is
+/// rejected the way Windows rejects an invalid caller.
+extern "win64" fn AllowSetForegroundWindow(pid: u32) -> Bool {
+    if pid == u32::MAX || pid as u64 == crate::kernel32::pid() {
+        return TRUE;
+    }
+    if pid == 0 || os_sys::proc_info(pid as u64).is_err() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
     TRUE
 }
 
@@ -5540,12 +5573,150 @@ extern "win64" fn GetPointerFrameTouchInfo(_pointer_id: u32, _pointer_count: *mu
     fail(ERROR_INVALID_PARAMETER, FALSE)
 }
 
-extern "win64" fn CreateSyntheticPointerDevice(_pointer_type: u32, _max_count: u32, _mode: u32) -> u64 {
-    fail(ERROR_NOT_SUPPORTED, 0)
+/// A synthetic pointer device; OSyx keeps the type and the record limit,
+/// since injected input becomes PRISM pointer events and feedback visuals
+/// are not drawn.
+#[derive(Clone, Copy)]
+struct SyntheticPointer {
+    pointer_type: u32,
+    max_count: u32,
 }
 
-extern "win64" fn InjectSyntheticPointerInput(_device: u64, _pointer_info: *const u8, _count: u32) -> Bool {
-    fail(ERROR_INVALID_HANDLE, FALSE)
+static SYNTHETIC_POINTERS: Mutex<BTreeMap<u64, SyntheticPointer>> = Mutex::new(BTreeMap::new());
+static NEXT_SYNTHETIC_POINTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x40_0000);
+
+/// CreateSyntheticPointerDevice: PT_TOUCH (2), PT_PEN (3) and PT_MOUSE (4)
+/// with POINTER_FEEDBACK_DEFAULT/INDIRECT/NONE (1..=3).
+extern "win64" fn CreateSyntheticPointerDevice(pointer_type: u32, max_count: u32, mode: u32) -> u64 {
+    if !(2..=4).contains(&pointer_type) || max_count == 0 || !(1..=3).contains(&mode) {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let handle = NEXT_SYNTHETIC_POINTER.fetch_add(4, core::sync::atomic::Ordering::Relaxed) + 4;
+    SYNTHETIC_POINTERS.lock().unwrap().insert(handle, SyntheticPointer { pointer_type, max_count });
+    handle
+}
+
+extern "win64" fn DestroySyntheticPointerDevice(device: u64) -> Bool {
+    if SYNTHETIC_POINTERS.lock().unwrap().remove(&device).is_some() {
+        TRUE
+    } else {
+        fail(ERROR_INVALID_HANDLE, FALSE)
+    }
+}
+
+/// One POINTER_TYPE_INFO: the type, pointerFlags, hwndTarget, the pixel
+/// location and InputData (the wheel delta for wheel records).
+struct SyntheticInput {
+    pointer_type: u32,
+    flags: u32,
+    target: u64,
+    screen: (i32, i32),
+    input: i32,
+}
+
+fn synthetic_input(rec: *const u8, wow64: bool) -> SyntheticInput {
+    // SAFETY: InjectSyntheticPointerInput checks the record count; a caller
+    // that lies about it would fault on its own data, as on Windows.
+    unsafe {
+        let u32_at = |off: usize| core::ptr::read_unaligned(rec.add(off) as *const u32);
+        let i32_at = |off: usize| core::ptr::read_unaligned(rec.add(off) as *const i32);
+        SyntheticInput {
+            pointer_type: u32_at(0),
+            flags: u32_at(20),
+            target: if wow64 { u32_at(28) as u64 } else { core::ptr::read_unaligned(rec.add(32) as *const u64) },
+            screen: (i32_at(if wow64 { 32 } else { 40 }), i32_at(if wow64 { 36 } else { 44 })),
+            input: i32_at(if wow64 { 72 } else { 80 }),
+        }
+    }
+}
+
+/// InjectSyntheticPointerInput turns POINTER_TYPE_INFO records into the
+/// pointer events PRISM would otherwise deliver. Records without a
+/// hwndTarget go to the window under the pixel location.
+extern "win64" fn InjectSyntheticPointerInput(device: u64, pointer_info: *const u8, count: u32) -> Bool {
+    let Some(dev) = SYNTHETIC_POINTERS.lock().unwrap().get(&device).copied() else {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    };
+    if pointer_info.is_null() || count == 0 || count > dev.max_count {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    const SECONDBUTTON: u32 = 0x20;
+    const THIRDBUTTON: u32 = 0x40;
+    const DOWN: u32 = 0x1_0000;
+    const UP: u32 = 0x4_0000;
+    const WHEEL: u32 = 0x8_0000;
+    const HWHEEL: u32 = 0x10_0000;
+    let wow64 = crate::wow64::is_active();
+    let stride = if wow64 { 144 } else { 152 };
+    let mut events = Vec::new();
+    for index in 0..count as usize {
+        // SAFETY: the caller supplies `count` consecutive records.
+        let record = synthetic_input(unsafe { pointer_info.add(index * stride) }, wow64);
+        if record.pointer_type != dev.pointer_type {
+            return fail(ERROR_INVALID_PARAMETER, FALSE);
+        }
+        let hit = with(|g| {
+            if record.target != 0 {
+                return g.windows.get(&record.target).map(|w| (w.win.id, w.pos));
+            }
+            let point = |w: &Win| {
+                record.screen.0 >= w.pos.0
+                    && record.screen.0 < w.pos.0 + w.size.0 as i32
+                    && record.screen.1 >= w.pos.1
+                    && record.screen.1 < w.pos.1 + w.size.1 as i32
+            };
+            if let Some(w) = g.windows.get(&g.focus) {
+                if w.style & WS_CHILD == 0 && w.visible && point(w) {
+                    return Some((w.win.id, w.pos));
+                }
+            }
+            g.windows
+                .iter()
+                .rev()
+                .find(|(_, w)| w.style & WS_CHILD == 0 && w.visible && point(w))
+                .map(|(_, w)| (w.win.id, w.pos))
+        });
+        let Some((prism, pos)) = hit else {
+            return fail(if record.target != 0 { ERROR_INVALID_WINDOW_HANDLE } else { ERROR_INVALID_PARAMETER }, FALSE);
+        };
+        let (sx, sy) = record.screen;
+        let (x, y) = (sx - pos.0, sy - pos.1);
+        let flag = |bit: u32| record.flags & bit != 0;
+        let button = if flag(SECONDBUTTON) {
+            osyx_input::button::RIGHT
+        } else if flag(THIRDBUTTON) {
+            osyx_input::button::MIDDLE
+        } else {
+            osyx_input::button::LEFT
+        };
+        let (kind, pressed, wheel_v, wheel_h) = if flag(WHEEL) || flag(HWHEEL) {
+            let delta = record.input as i64;
+            let notches = if delta == 0 { 0 } else { ((delta.abs() + 60) / 120 * delta.signum()) as i32 };
+            (proto::pointer::WHEEL, false, if flag(HWHEEL) { 0 } else { notches }, if flag(HWHEEL) { notches } else { 0 })
+        } else if flag(DOWN) || flag(UP) {
+            (proto::pointer::BUTTON, flag(DOWN), 0, 0)
+        } else {
+            (proto::pointer::MOTION, false, 0, 0)
+        };
+        events.push(Event::Pointer {
+            window: prism,
+            kind,
+            x,
+            y,
+            screen_x: sx,
+            screen_y: sy,
+            button: if kind == proto::pointer::BUTTON { button } else { 0 },
+            pressed,
+            wheel_v,
+            wheel_h,
+            buttons: 0,
+            modifiers: 0,
+        });
+    }
+    with(|g| for event in events {
+        g.on_event(event);
+    });
+    TRUE
 }
 
 extern "win64" fn GetLayeredWindowAttributes(hwnd: u64, cr_key: *mut u32, alpha: *mut u8, flags: *mut u32) -> Bool {
@@ -6073,9 +6244,14 @@ extern "win64" fn AppendMenuW(menu: u64, flags: u32, id: u64, item: *const u16) 
     const MF_BITMAP: u32 = 0x4;
     const MF_OWNERDRAW: u32 = 0x100;
     const MF_SEPARATOR: u32 = 0x800;
-    if flags & (MF_BITMAP | MF_OWNERDRAW) != 0 { return fail(ERROR_NOT_SUPPORTED, FALSE); }
-    let text = if flags & MF_SEPARATOR != 0 { None } else {
-        match wide(item) { Some(s) => Some(s), None => return fail(ERROR_INVALID_PARAMETER, FALSE) }
+    // For a bitmap or owner-drawn item lpNewItem is the bitmap handle or
+    // dwItemData, not a string.
+    let (text, data) = if flags & (MF_BITMAP | MF_OWNERDRAW) != 0 && flags & MF_POPUP == 0 {
+        (None, item as u64)
+    } else if flags & MF_SEPARATOR != 0 {
+        (None, 0)
+    } else {
+        match wide(item) { Some(s) => (Some(s), 0), None => return fail(ERROR_INVALID_PARAMETER, FALSE) }
     };
     with(|g| {
         if flags & MF_POPUP != 0 && (id == menu || !g.menus.contains_key(&id) || menu_contains(g, id, menu, 0) ||
@@ -6083,7 +6259,7 @@ extern "win64" fn AppendMenuW(menu: u64, flags: u32, id: u64, item: *const u16) 
             return fail(ERROR_INVALID_PARAMETER, FALSE);
         }
         let Some(m) = g.menus.get_mut(&menu) else { return fail(1401, FALSE) }; // ERROR_INVALID_MENU_HANDLE
-        m.items.push(MenuItem { id, flags, text, data: 0 });
+        m.items.push(MenuItem { id, flags, text, data });
         TRUE
     })
 }
@@ -6123,18 +6299,39 @@ extern "win64" fn DestroyMenu(menu: u64) -> Bool {
 
 extern "win64" fn ExitWindowsEx(flags: u32, _reason: u32) -> Bool {
     const FORCE_FLAGS: u32 = 0x4 | 0x10;
+    const SE_SHUTDOWN_PRIVILEGE: u32 = 19;
     let action = flags & !FORCE_FLAGS;
-    if action == 0 { return fail(ERROR_NOT_SUPPORTED, FALSE); } // no session logoff service
+    let force = flags & FORCE_FLAGS != 0;
+    if !crate::tokens::effective_data().privileges.iter().any(|(id, flags)|
+        *id == SE_SHUTDOWN_PRIVILEGE && *flags & crate::tokens::SE_PRIVILEGE_ENABLED != 0) {
+        return fail(1314, FALSE); // ERROR_PRIVILEGE_NOT_HELD
+    }
+    if action == 0 {
+        // EWX_LOGOFF: OSyx has no session manager, so the session's windows
+        // are this process's. Ask them first (unless forced) and end the
+        // process once they have been told the session is over.
+        let ask = |msg: u32, wparam: u64| -> Option<Bool> {
+            let windows: Vec<(u64, u64)> = with(|g| {
+                g.windows.iter().filter(|(_, w)| w.style & WS_CHILD == 0).map(|(&h, w)| (h, w.wndproc)).collect()
+            });
+            for (hwnd, proc_) in windows {
+                if !is_window(hwnd) { continue; }
+                let answer = call(proc_, hwnd, msg, wparam, 0);
+                if msg == WM_QUERYENDSESSION && answer == 0 && !force { return Some(FALSE); }
+            }
+            None
+        };
+        if ask(WM_QUERYENDSESSION, 0).is_some() {
+            return FALSE;
+        }
+        ask(WM_ENDSESSION, TRUE as u64);
+        os_std::process::exit(0);
+    }
     let command = match action {
         1 | 8 => osyx_abi::ipc::POWER_OFF,
         2 => osyx_abi::ipc::POWER_REBOOT,
         _ => return fail(ERROR_INVALID_PARAMETER, FALSE),
     };
-    const SE_SHUTDOWN_PRIVILEGE: u32 = 19;
-    if !crate::tokens::effective_data().privileges.iter().any(|(id, flags)|
-        *id == SE_SHUTDOWN_PRIVILEGE && *flags & crate::tokens::SE_PRIVILEGE_ENABLED != 0) {
-        return fail(1314, FALSE); // ERROR_PRIVILEGE_NOT_HELD
-    }
     // A successful native power request does not return.
     fail(crate::error::errno_to_win32(os_sys::power(command)), FALSE)
 }
@@ -6246,10 +6443,247 @@ extern "win64" fn SetMenuItemInfoW(menu: u64, item: u32, by_pos: Bool, info: *co
     })
 }
 
-/// Popup menus are not drawn yet: the call fails with ERROR_NOT_SUPPORTED
-/// instead of reporting that the user dismissed a menu that was never shown.
-extern "win64" fn TrackPopupMenu(_menu: u64, _flags: u32, _x: i32, _y: i32, _reserved: i32, _wnd: u64, _rect: *const u8) -> Bool {
-    fail(ERROR_NOT_SUPPORTED, FALSE)
+/// Where a popup anchored at (x, y) has its top-left, honouring the
+/// TPM_*ALIGN flags.
+fn menu_anchor(x: i32, y: i32, w: i32, h: i32, align: u32) -> (i32, i32) {
+    const TPM_CENTERALIGN: u32 = 0x4;
+    const TPM_RIGHTALIGN: u32 = 0x8;
+    const TPM_VCENTERALIGN: u32 = 0x10;
+    const TPM_BOTTOMALIGN: u32 = 0x20;
+    let mut px = x;
+    let mut py = y;
+    if align & TPM_RIGHTALIGN != 0 {
+        px -= w;
+    } else if align & TPM_CENTERALIGN != 0 {
+        px -= w / 2;
+    }
+    if align & TPM_BOTTOMALIGN != 0 {
+        py -= h;
+    } else if align & TPM_VCENTERALIGN != 0 {
+        py -= h / 2;
+    }
+    (px, py)
+}
+
+enum MenuPick {
+    Item(u64),
+    /// A submenu handle and the screen point its popup opens at.
+    Sub(u64, i32, i32),
+    None,
+}
+
+/// One popup level as a PRISM popup child of `owner`: draws the items,
+/// tracks the pointer for the highlight, and waits for a choice or a
+/// dismissal (Escape, a click elsewhere, the close request).
+fn run_menu_popup(menu: u64, owner: u64, x: i32, y: i32, align: u32) -> MenuPick {
+    const MF_POPUP: u32 = 0x10;
+    const MF_BITMAP: u32 = 0x4;
+    const MF_SEPARATOR: u32 = 0x800;
+    const MF_GRAYED: u32 = 0x1;
+    const MF_DISABLED: u32 = 0x2;
+    const MF_CHECKED: u32 = 0x8;
+    let items = match with(|g| g.menus.get(&menu).map(|m| m.items.clone())) {
+        Some(items) if !items.is_empty() => items,
+        _ => return MenuPick::None,
+    };
+    let k = FontKind::Sans;
+    let lh = line_height(k) as i32;
+    let row_h = lh + 8;
+    let sep_h = 7;
+    let pad = 10;
+    let sizes: Vec<Option<(u32, u32)>> = with(|g| {
+        items.iter().map(|it| {
+            if it.flags & MF_BITMAP != 0 { gdi::bitmap_pixels(g, it.data).map(|(w, h, _)| (w, h)) } else { None }
+        }).collect()
+    });
+    let mut height = 6i32;
+    let mut width = 96i32;
+    let mut tops = Vec::with_capacity(items.len());
+    for (i, it) in items.iter().enumerate() {
+        let h = if it.flags & MF_SEPARATOR != 0 {
+            sep_h
+        } else if let Some((_, bh)) = sizes[i] {
+            bh as i32 + 6
+        } else {
+            row_h
+        };
+        tops.push((height, h));
+        height += h;
+        let need = match (&it.text, sizes[i]) {
+            (_, Some((bw, _))) => bw as i32 + 2 * pad,
+            (Some(label), _) => measure(k, label) as i32 + 2 * pad + 16 + if it.flags & MF_POPUP != 0 { 14 } else { 0 },
+            _ => 0,
+        };
+        width = width.max(need);
+    }
+    height += 6;
+    let (px, py) = menu_anchor(x, y, width, height, align);
+    let Some((parent_id, origin)) = with(|g| g.windows.get(&owner).map(|w| (w.win.id, w.pos))) else {
+        return MenuPick::None;
+    };
+    let mut spec = WindowSpec::with_role(proto::Role::Popup, px - origin.0, py - origin.1, width as u32, height as u32);
+    spec.parent = parent_id;
+    spec.title = String::from("menu");
+    let Some(mut win) = with(|g| g.conn.as_mut().and_then(|c| c.create_window(spec).ok())) else {
+        return MenuPick::None;
+    };
+    let mut hover: Option<usize> = None;
+    let mut picked = MenuPick::None;
+    let mut drawn = false;
+    loop {
+        let evs: Vec<Event> = with(|g| {
+            let mut v = Vec::new();
+            if let Some(c) = g.conn.as_mut() {
+                let _ = c.wait(&mut [], Some(Duration::from_millis(100)));
+                while let Ok(Some(e)) = c.poll() {
+                    v.push(e);
+                }
+            }
+            v
+        });
+        let mut done = false;
+        let mut other = Vec::new();
+        for ev in evs {
+            if !win.on_event(&ev) {
+                other.push(ev);
+                continue;
+            }
+            match ev {
+                Event::CloseRequest { .. } => done = true,
+                Event::Key { usage, state, .. } if state != proto::key_state::UP && usage == 0x29 => done = true,
+                Event::Pointer { kind, x, y, pressed, .. } if kind == proto::pointer::BUTTON => {
+                    let index = tops.iter().position(|&(t, h)| y >= t && y < t + h && x >= 0 && x < width);
+                    if pressed {
+                        match index {
+                            Some(i) if items[i].flags & (MF_SEPARATOR | MF_GRAYED | MF_DISABLED) == 0 => {
+                                picked = if items[i].flags & MF_POPUP != 0 {
+                                    MenuPick::Sub(items[i].id, px + width, py + tops[i].0)
+                                } else {
+                                    MenuPick::Item(items[i].id)
+                                };
+                                done = true;
+                            }
+                            None => done = true,
+                            Some(_) => {}
+                        }
+                    } else if index != hover {
+                        hover = index;
+                        drawn = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        with(|g| {
+            for e in other {
+                g.on_event(e);
+            }
+        });
+        if done {
+            break;
+        }
+        if !drawn && win.can_draw() {
+            let pixels: Vec<Option<(u32, u32, Vec<Color>)>> = with(|g| {
+                items.iter().map(|it| {
+                    if it.flags & MF_BITMAP != 0 { gdi::bitmap_pixels(g, it.data) } else { None }
+                }).collect()
+            });
+            if let Ok(mut s) = win.surface() {
+                s.fill(rgb(250, 250, 250));
+                let edge = rgb(150, 150, 150);
+                s.fill_rect(Rect::new(0, 0, width as u32, 1), edge);
+                s.fill_rect(Rect::new(0, height - 1, width as u32, 1), edge);
+                s.fill_rect(Rect::new(0, 0, 1, height as u32), edge);
+                s.fill_rect(Rect::new(width - 1, 0, 1, height as u32), edge);
+                for (i, it) in items.iter().enumerate() {
+                    let (top, h) = tops[i];
+                    let r = Rect::new(0, top, width as u32, h as u32);
+                    if it.flags & MF_SEPARATOR != 0 {
+                        s.fill_rect(Rect::new(pad, top + h / 2, (width - 2 * pad) as u32, 1), rgb(200, 200, 200));
+                        continue;
+                    }
+                    let hot = hover == Some(i);
+                    let off = it.flags & (MF_GRAYED | MF_DISABLED) != 0;
+                    if hot && !off {
+                        s.fill_rect(r, rgb(0, 95, 184));
+                    }
+                    let fg = if off { rgb(130, 130, 130) } else if hot { rgb(255, 255, 255) } else { rgb(20, 20, 20) };
+                    if it.flags & MF_CHECKED != 0 {
+                        s.fill_rect(Rect::new(pad, top + (h - 6) / 2, 6, 6), fg);
+                    }
+                    if let Some((bw, bh, pix)) = &pixels[i] {
+                        let ox = (width - *bw as i32) / 2;
+                        let oy = top + (h - *bh as i32) / 2;
+                        for yy in 0..*bh as i32 {
+                            for xx in 0..*bw as i32 {
+                                s.put(ox + xx, oy + yy, pix[(yy * *bw as i32 + xx) as usize]);
+                            }
+                        }
+                    } else if let Some(label) = &it.text {
+                        let ty = top + (h - lh) / 2;
+                        draw_text(&mut s, k, pad + 16, ty, label, fg, r);
+                    }
+                    if it.flags & MF_POPUP != 0 {
+                        draw_text(&mut s, k, width - pad - 7, top + (h - lh) / 2, ">", fg, r);
+                    }
+                }
+            }
+            with(|g| {
+                if let Some(c) = g.conn.as_mut() {
+                    let _ = win.present(c, None);
+                }
+            });
+            drawn = true;
+        }
+    }
+    with(|g| {
+        if let Some(c) = g.conn.as_mut() {
+            let _ = win.destroy(c);
+        }
+    });
+    picked
+}
+
+/// Shows a popup menu at the screen point (x, y) and waits for a choice.
+/// A selected item is posted to `wnd` as WM_COMMAND (unless TPM_NONOTIFY)
+/// and TRUE returned; TPM_RETURNCMD returns the command id instead and 0
+/// means the menu was dismissed. Submenus open on the item's right edge.
+extern "win64" fn TrackPopupMenu(menu: u64, flags: u32, x: i32, y: i32, _reserved: i32, wnd: u64, _rect: *const u8) -> Bool {
+    const TPM_NONOTIFY: u32 = 0x80;
+    const TPM_RETURNCMD: u32 = 0x100;
+    if !with(|g| g.menus.contains_key(&menu)) {
+        return fail(1401, FALSE); // ERROR_INVALID_MENU_HANDLE
+    }
+    let owner = with(|g| {
+        if wnd != 0 && g.windows.contains_key(&wnd) {
+            root_window(g, wnd)
+        } else {
+            root_window(g, g.focus).or_else(|| g.windows.keys().next().copied())
+        }
+    });
+    let Some(owner) = owner else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+    let (mut handle, mut ax, mut ay, mut align) = (menu, x, y, flags);
+    for _ in 0..16 {
+        match run_menu_popup(handle, owner, ax, ay, align) {
+            MenuPick::Item(id) => {
+                if flags & TPM_RETURNCMD != 0 {
+                    return id as i32;
+                }
+                if flags & TPM_NONOTIFY == 0 {
+                    with(|g| g.post(owner, WM_COMMAND, id, 0));
+                }
+                return TRUE;
+            }
+            MenuPick::Sub(sub, sx, sy) => {
+                handle = sub;
+                ax = sx;
+                ay = sy;
+                align = 0;
+            }
+            MenuPick::None => return FALSE,
+        }
+    }
+    FALSE
 }
 
 extern "win64" fn GetWindowTextLengthW(wnd: u64) -> i32 {
@@ -6768,6 +7202,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetLayeredWindowAttributes,
         GetPointerFrameTouchInfo,
         CreateSyntheticPointerDevice,
+        DestroySyntheticPointerDevice,
         InjectSyntheticPointerInput,
         UpdateLayeredWindow,
         PrintWindow,

@@ -492,15 +492,41 @@ extern "win64" fn SetFileAttributesW(name_w: *const u16, attrs: u32) -> i32 {
     }
 }
 
-extern "win64" fn SetFileTime(h: u64, creation: *const u64, access: *const u64, write: *const u64) -> i32 {
-    if objects::file(h).is_err() {
-        return fail(ERROR_INVALID_HANDLE, 0);
+extern "win64" fn SetFileTime(h: u64, _creation: *const u64, access: *const u64, write: *const u64) -> i32 {
+    let f = match objects::file(h) {
+        Ok(f) => f,
+        Err(e) => return fail(e, 0),
+    };
+    // A NULL pointer leaves a time unchanged. A zero FILETIME means 1601,
+    // outside the i64 nanosecond range OSyx stores, so it is also left
+    // unchanged. The creation time has no field in OSyx and is accepted
+    // without being stored.
+    // SAFETY: NULL or the caller's FILETIME, 8-byte aligned or not.
+    let filetime_ns = |t: *const u64| -> Result<Option<i64>, u32> {
+        if t.is_null() {
+            return Ok(None);
+        }
+        let ft = unsafe { core::ptr::read_unaligned(t) };
+        if ft == 0 {
+            return Ok(None);
+        }
+        let ns = (ft as i128 - 116_444_736_000_000_000) * 100;
+        i64::try_from(ns).map(Some).map_err(|_| ERROR_INVALID_PARAMETER)
+    };
+    let atime = match filetime_ns(access) {
+        Ok(t) => t,
+        Err(e) => return fail(e, 0),
+    };
+    let mtime = match filetime_ns(write) {
+        Ok(t) => t,
+        Err(e) => return fail(e, 0),
+    };
+    let mask = if atime.is_some() { osyx_abi::futimes::ATIME } else { 0 }
+        | if mtime.is_some() { osyx_abi::futimes::MTIME } else { 0 };
+    match os_sys::futimes(f.fd, mask, atime.unwrap_or(0), mtime.unwrap_or(0)) {
+        Ok(()) => 1,
+        Err(e) => fail(errno_to_win32(e), 0),
     }
-    // NULL (or 0) leaves a time unchanged; anything else needs utimes,
-    // which OSyx does not have.
-    // SAFETY: NULL or the caller's FILETIMEs.
-    let change = [creation, access, write].iter().any(|&t| !t.is_null() && unsafe { core::ptr::read_unaligned(t) } != 0);
-    if change { fail(ERROR_NOT_SUPPORTED, 0) } else { 1 }
 }
 
 // FILE_INFO_BY_HANDLE_CLASS values handled below.

@@ -503,6 +503,22 @@ impl TmpFs {
         Ok(())
     }
 
+    /// Sets the access and/or modification time (nanoseconds since the Unix
+    /// epoch); `None` leaves that time alone. As on ext4, the change of time
+    /// is itself recorded in the inode's change time.
+    pub fn set_times(&mut self, ino: u64, atime_ns: Option<i64>, mtime_ns: Option<i64>) -> Result<()> {
+        let now = (self.clock)();
+        let n = self.node_mut(ino)?;
+        if let Some(t) = atime_ns {
+            n.atime = t;
+        }
+        if let Some(t) = mtime_ns {
+            n.mtime = t;
+        }
+        n.ctime = now;
+        Ok(())
+    }
+
     /// Checks the internal invariants (for tests): link counts, parent
     /// pointers, reachability and the memory charge.
     pub fn check(&self) -> core::result::Result<(), String> {

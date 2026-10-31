@@ -209,7 +209,7 @@ pub fn resume(addr: u64) -> Result<u64, Errno> {
         }
     };
     if sched::current_kill_pending() {
-        crate::process::finish_current_thread(0);
+        crate::process::finish_current_thread(crate::sched::current_kill_code());
     }
     [f.rax, f.rbx, f.rcx, f.rdx, f.rsi, f.rdi, f.rbp, f.rsp, f.r8, f.r9, f.r10, f.r11, f.r12, f.r13, f.r14, f.r15] =
         c.gpr;

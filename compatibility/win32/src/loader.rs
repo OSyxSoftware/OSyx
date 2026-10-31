@@ -248,7 +248,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("bcrypt.dll", crate::bcrypt::exports(), Vec::new()),
         builtin("secur32.dll", crate::newlibs::secur32_exports(), Vec::new()),
         builtin("shfolder.dll", crate::newlibs::shfolder_exports(), Vec::new()),
-        builtin("winspool.drv", crate::newlibs::winspool_exports(), Vec::new()),
+        builtin("winspool.drv", crate::newlibs::winspool_exports(), crate::newlibs::winspool_ordinals()),
+        builtin("msi.dll", crate::msi::exports(), crate::msi::ordinals()),
         builtin("uiautomationcore.dll", crate::newlibs::uiautomationcore_exports(), Vec::new()),
         builtin("oleacc.dll", crate::newlibs::oleacc_exports(), Vec::new()),
         builtin("msvcrt.dll", crate::newlibs::msvcrt_exports(), Vec::new()),
@@ -552,6 +553,10 @@ impl Host for WinHost {
         // shlwapi's ordinal-only IUnknown_QueryService (re-exported by shcore).
         let symbol = symbol.or_else(|| {
             (ordinal == 176 && address == crate::shlwapi::query_service_address()).then_some("IUnknown_QueryService")
+        });
+        // winspool's ordinal-only GetDefaultPrinterW.
+        let symbol = symbol.or_else(|| {
+            (ordinal == 203 && address == crate::newlibs::default_printer_address()).then_some("GetDefaultPrinterW")
         });
         let Some(symbol) = symbol else { return 0 };
         match self.bridge.as_ref() {

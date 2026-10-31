@@ -90,9 +90,12 @@ pub struct Thread {
     /// finds its TEB (`fs:[0x18]`). Installed in this CPU's GDT with the
     /// thread; 0 for threads that never run 32-bit code.
     fs32_base: u64,
-    /// Set when the owning process is exiting: the thread ends at its next
-    /// safe point (return to user mode or an interrupted blocking call).
+    /// Set when the owning process is exiting or TerminateThread named the
+    /// thread: the thread ends at its next safe point (return to user mode
+    /// or an interrupted blocking call), with `kill_code` as its status.
     kill_pending: bool,
+    /// Status a pending kill ends the thread with.
+    kill_code: i32,
     /// A wake-up arrived while the thread was still running, i.e. between its
     /// condition check and marking itself blocked. The next block is skipped.
     wake_pending: bool,
@@ -286,6 +289,7 @@ fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b
         gs_base: 0,
         fs32_base: 0,
         kill_pending: false,
+        kill_code: 0,
         wake_pending: false,
         leaving: false,
         bkl: false,
@@ -323,6 +327,7 @@ pub fn init() {
         gs_base: 0,
         fs32_base: 0,
         kill_pending: false,
+        kill_code: 0,
         wake_pending: false,
         leaving: false,
         bkl: false,
@@ -369,7 +374,7 @@ pub fn init_secondary(top: u64) {
         tid,name:alloc::format!("idle/{index}"),pid:0,state:State::Running,rsp:0,
         root:paging::kernel_root(),_kstack:Vec::new(),kstack_top:top,
         fpu:FpuState::initial(),wake_at:None,joiners:Vec::new(),slice:TIME_SLICE_TICKS,
-        fs_base:0,gs_base:0,fs32_base:0,kill_pending:false,wake_pending:false,leaving:false,bkl:false,cpu_ticks:0,affinity:u64::MAX,last_cpu:index,priority:NORMAL,boost:0,inherited:0,queued_at:0,low_rsp:top,stack_warned:false,suspend:0,parked:false,
+        fs_base:0,gs_base:0,fs32_base:0,kill_pending:false,kill_code:0,wake_pending:false,leaving:false,bkl:false,cpu_ticks:0,affinity:u64::MAX,last_cpu:index,priority:NORMAL,boost:0,inherited:0,queued_at:0,low_rsp:top,stack_warned:false,suspend:0,parked:false,
     });
     s.threads.insert(tid,t);s.current[index]=tid;s.idle[index]=tid;
     crate::smp::set_current(tid, 0);
@@ -911,8 +916,8 @@ pub fn mark_current_blocked_until(deadline: Option<u64>) {
 }
 
 /// Asks thread `tid` to end at its next safe point and wakes it if blocked
-/// so that it gets there.
-pub fn request_kill(tid: Tid) {
+/// so that it gets there. The thread's status is `code`.
+pub fn request_kill_with(tid: Tid, code: i32) {
     let mut g = SCHED.lock();
     let Some(s) = g.as_mut() else { return };
     if let Some(t) = s.threads.get_mut(&tid) {
@@ -920,6 +925,7 @@ pub fn request_kill(tid: Tid) {
             KILLS_PENDING.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         }
         t.kill_pending = true;
+        t.kill_code = code;
         if t.state == State::Blocked {
             t.state = State::Ready;
             t.wake_at = None;
@@ -930,6 +936,11 @@ pub fn request_kill(tid: Tid) {
             t.wake_pending = true;
         }
     }
+}
+
+/// Asks thread `tid` to end with status 0.
+pub fn request_kill(tid: Tid) {
+    request_kill_with(tid, 0);
 }
 
 /// Threads asked to end that still exist. Every system call and every timer
@@ -943,6 +954,15 @@ pub fn current_kill_pending() -> bool {
         return false;
     }
     SCHED.lock().as_ref().is_some_and(|s| s.threads.get(&s.current[crate::smp::index()]).is_some_and(|t| t.kill_pending))
+}
+
+/// Status the current thread's pending kill ends it with (0 when it is not
+/// being killed). Only meaningful right after [`current_kill_pending`].
+pub fn current_kill_code() -> i32 {
+    SCHED.lock().as_ref().and_then(|s| {
+        let t = s.threads.get(&s.current[crate::smp::index()])?;
+        if t.kill_pending { Some(t.kill_code) } else { None }
+    }).unwrap_or(0)
 }
 
 /// Threads with a non-zero suspend count. Every return to user mode asks
@@ -1056,6 +1076,29 @@ pub fn thread_times(tid: Tid) -> Result<u64, osyx_abi::Errno> {
         return Err(Errno::PermissionDenied);
     }
     Ok(t.cpu_ticks)
+}
+
+/// Ends thread `tid` of the caller's process at its next safe point with
+/// status `code`; tid 0 ends the calling thread, which never returns from
+/// here. A thread blocked inside the kernel is woken first.
+pub fn thread_kill(tid: Tid, code: i32) -> Result<u64, osyx_abi::Errno> {
+    use osyx_abi::Errno;
+    let me = current_tid();
+    let tid = if tid == 0 { me } else { tid };
+    let pid = current_pid();
+    {
+        let guard = SCHED.lock();
+        let s = guard.as_ref().ok_or(Errno::NotSupported)?;
+        let t = s.threads.get(&tid).ok_or(Errno::NotFound)?;
+        if t.pid != pid {
+            return Err(Errno::PermissionDenied);
+        }
+    }
+    if tid == me {
+        crate::process::exit_current(code);
+    }
+    request_kill_with(tid, code);
+    Ok(0)
 }
 
 /// Sets the GS base of the current thread and loads it into the CPU.

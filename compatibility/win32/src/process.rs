@@ -452,23 +452,20 @@ pub(crate) extern "win64" fn CreateProcessW(
     1
 }
 
-extern "win64" fn OpenProcess(_access: u32, inherit: i32, pid: u32) -> u64 {
-    if inherit != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
+/// The process object for `pid`: the shared one for a child, a fresh one
+/// for this process or for another live process (with a poll watcher, since
+/// OSyx reports only a child's exit to its parent).
+pub fn process_for_pid(pid: u64) -> Option<Arc<ProcessObj>> {
+    if pid == kernel32::pid() {
+        return Some(Arc::new(ProcessObj { pid, child: false, done: AtomicBool::new(false), exit_code: AtomicU32::new(STILL_ACTIVE), jobbed: AtomicBool::new(false) }));
     }
-    if pid as u64 == kernel32::pid() {
-        let me = Arc::new(ProcessObj { pid: pid as u64, child: false, done: AtomicBool::new(false), exit_code: AtomicU32::new(STILL_ACTIVE), jobbed: AtomicBool::new(false) });
-        return objects::insert(Object::Process(me));
+    if let Some(p) = CHILDREN.lock().unwrap().iter().find(|p| p.pid == pid) {
+        return Some(p.clone());
     }
-    if let Some(p) = CHILDREN.lock().unwrap().iter().find(|p| p.pid == pid as u64) {
-        return objects::insert(Object::Process(p.clone()));
+    if os_sys::proc_info(pid).is_err() {
+        return None;
     }
-    if os_sys::proc_info(pid as u64).is_err() {
-        return fail(ERROR_INVALID_PARAMETER, 0);
-    }
-    // Another process (a Windows child's parent, say): it can be waited
-    // for and named in DuplicateHandle, but not terminated or read.
-    let p = Arc::new(ProcessObj { pid: pid as u64, child: false, done: AtomicBool::new(false), exit_code: AtomicU32::new(STILL_ACTIVE), jobbed: AtomicBool::new(false) });
+    let p = Arc::new(ProcessObj { pid, child: false, done: AtomicBool::new(false), exit_code: AtomicU32::new(STILL_ACTIVE), jobbed: AtomicBool::new(false) });
     let watcher = p.clone();
     let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
         // OSyx reports only a child's exit, so poll the process record.
@@ -481,7 +478,16 @@ extern "win64" fn OpenProcess(_access: u32, inherit: i32, pid: u32) -> u64 {
         watcher.done.store(true, Ordering::SeqCst);
         objects::signal_all();
     });
-    objects::insert(Object::Process(p))
+    Some(p)
+}
+
+extern "win64" fn OpenProcess(_access: u32, inherit: i32, pid: u32) -> u64 {
+    let Some(p) = process_for_pid(pid as u64) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let h = objects::insert(Object::Process(p));
+    if inherit != 0 {
+        objects::set_inheritable(h, true);
+    }
+    h
 }
 
 /// The process id a process handle names, if it is not this process.

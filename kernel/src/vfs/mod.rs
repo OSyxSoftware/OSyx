@@ -106,6 +106,12 @@ pub trait Filesystem: Send + Sync {
     fn set_mode(&self, _ino: u64, _mode: u32) -> Result<()> {
         Err(Errno::ReadOnly)
     }
+    /// Sets the access and/or modification time of `ino` (nanoseconds since
+    /// the Unix epoch); `None` leaves that time alone. File systems without
+    /// stored times refuse it.
+    fn set_times(&self, _ino: u64, _atime_ns: Option<i64>, _mtime_ns: Option<i64>) -> Result<()> {
+        Err(Errno::NotSupported)
+    }
     /// A handle to `ino` was opened.
     fn open(&self, _ino: u64) -> Result<()> {
         Ok(())
@@ -1167,6 +1173,20 @@ impl OpenFile {
                 r
             }
         }
+    }
+
+    /// Sets the access and/or modification time of the open file. Permission
+    /// is that of `chmod`: a handle opened for writing is not required, as
+    /// Windows attributes that right to the handle's FILE_WRITE_ATTRIBUTES.
+    pub fn set_times(&mut self, cx: &Lookup, atime_ns: Option<i64>, mtime_ns: Option<i64>) -> Result<()> {
+        if self.device.is_some() {
+            return Err(Errno::NotSupported);
+        }
+        self.node.mount.writable()?;
+        if !perm::may_chmod(&self.node.stat()?, &cx.cred) {
+            return Err(Errno::PermissionDenied);
+        }
+        self.node.mount.fs.set_times(self.node.ino, atime_ns, mtime_ns)
     }
 
     pub fn sync(&mut self) -> Result<()> {

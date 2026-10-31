@@ -231,7 +231,7 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
         if from_user && crate::sched::current_kill_pending() {
             let _entry = crate::smp::KernelEntry::new();
             crate::smp::set_hold_kind(crate::smp::HOLD_TIMER);
-            crate::process::finish_current_thread(0);
+            crate::process::finish_current_thread(crate::sched::current_kill_code());
         }
         // A thread suspended while it ran user code stops at the first tick.
         if from_user {
@@ -247,7 +247,7 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
         if from_user && crate::sched::current_kill_pending() {
             let _entry = crate::smp::KernelEntry::new();
             crate::smp::set_hold_kind(crate::smp::HOLD_IRQ);
-            crate::process::finish_current_thread(0);
+            crate::process::finish_current_thread(crate::sched::current_kill_code());
         }
         return;
     }
@@ -294,7 +294,7 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     // Safe point: about to return to ring 3 in a thread whose process is
     // exiting (e.g. it was preempted in user mode by the timer).
     if from_user && crate::sched::current_kill_pending() {
-        crate::process::finish_current_thread(0);
+        crate::process::finish_current_thread(crate::sched::current_kill_code());
     }
 }
 

@@ -593,12 +593,25 @@ class Osyx:
     def _ordinals(self, text: str):
         out = []
         for m in re.finditer(r"(?:crate::)?(\w+)::(\w*ordinals\w*)\s*\(\s*\)", text):
-            for p in self.modfiles.get(m.group(1), []):
-                body = self._fn_text(p, m.group(2))
-                if body:
-                    out += [int(x) for x in re.findall(r"\(\s*(\d+)\s*,", body)]
-                    break
+            out += self._ordinal_body(m.group(1), m.group(2))
         return sorted(set(out))
+
+    def _ordinal_body(self, mod: str, fname: str, depth=0):
+        """Ordinals declared by `mod::fname`, following a call to another
+        ordinal table: wsock32's legacy_ordinals() starts from ordinals()
+        and remaps entries without listing the ordinals again."""
+        if depth > 4:
+            return []
+        for p in self.modfiles.get(mod, []):
+            body = self._fn_text(p, fname)
+            if body is None:
+                continue
+            out = [int(x) for x in re.findall(r"\(\s*(\d+)\s*,", body)]
+            for inner in re.finditer(r"\b(\w*ordinals\w*)\s*\(\s*\)", body):
+                if inner.group(1) != fname:
+                    out += self._ordinal_body(mod, inner.group(1), depth + 1)
+            return out
+        return []
 
     def _parse_builtins(self):
         loader = os.path.join(self.src, "loader.rs")
