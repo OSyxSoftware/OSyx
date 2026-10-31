@@ -20,7 +20,7 @@ on 2026-10-30.
 | 7g | Kernel objects and IPC: pipes, channels, shared memory, wait_handles (ABI v7) | Done |
 | 7h | Native xHCI driver, USB enumeration, HID keyboard/mouse, input core | Done (root ports, boot keyboards; see graphics.md) |
 | 7i | PRISM compositor, protocol v1, UI toolkit, desktop shell, AXIS Terminal, Files, System Information | Done (software composition; see graphics.md) |
-| 8 | Native Windows PE execution | Initial subset implemented (console, files, threads, DLLs, GUI, Winsock; see windows-compatibility.md) |
+| 8 | Native Windows PE execution | Initial subset implemented (console, files, threads, DLLs, GUI, Winsock; see windows-compatibility.md). Steam setup imports 97.4 % and Zen 98.1 % available by source scan (see Steam and Zen API gaps) |
 | 9 | Native networking | Implemented (VirtIO-Net and IPv4 stack; see network/net) |
 | 10 | VirtIO-GPU display backend | Implemented (2D scanout/damage/cursor; software composition) |
 | 11 | Task Manager, Settings and four PE32+ desktop utilities | Implemented initial versions |
@@ -58,6 +58,38 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 5. **Release hygiene**: partly done. CodSpeed benchmarks run on every pull
    request. Still open: the release workflow builds and signs only; it runs
    neither the host tests nor the Win32, SMP, desktop and Zen QEMU suites.
+
+### Steam and Zen API gaps
+
+Measured with `scripts/winparity.py scan` against the binaries in `build/steam`
+(32-bit `SteamSetup.exe` and its NSIS plug-ins) and `build/zen/1.23.4b`
+(`zen.exe`, `xul.dll`, `mozglue.dll`, `nss3.dll`) on 2026-10-31, at commit
+6f1134d. The scan finds 97.4 % of the Steam imports usable (247 implemented,
+13 partial, 5 missing, 1 without a WoW64 bridge, 1 unsupported) and 98.1 % of
+Zen's (1407 implemented, 93 partial, 7 unsupported). These are source-scan
+measurements of exports, not proof of behaviour.
+
+What is left, in the order it blocks the applications:
+
+| Application | API | State | Why it matters |
+|---|---|---|---|
+| Steam, `nsExec.dll` | `kernel32!PeekNamedPipe` | missing | NSIS's exec plug-in polls the child's stdout/stderr through pipes |
+| Steam, `StdUtils.dll` | `msvcrt!__wgetmainargs` | missing | 32-bit CRT startup asks the runtime for argv and envp |
+| Steam, `StdUtils.dll` | `msvcrt!swscanf` | missing | text parsing; the engine already exists as `__stdio_common_vswscanf` |
+| Steam, `StdUtils.dll` | `shell32!ShellExecuteExW` | WoW64 bridge missing | opens a file or URL; the x64 entry point is implemented |
+| Steam, `StdUtils.dll` | `shlwapi!#176` | missing | an ordinal import; its name has to be resolved before implementing |
+| Steam, `StdUtils.dll` | `user32!AllowSetForegroundWindow` | missing | NSIS asks to bring its window forward |
+| Steam, `SteamSetup.exe` | `user32!TrackPopupMenu` | unsupported | the setup's context menus |
+| Zen, `xul.dll` | `user32!TrackPopupMenu` | unsupported | browser context menus |
+| Zen, `xul.dll` | `user32!CreateSyntheticPointerDevice` | unsupported | pen input only |
+| Zen, `xul.dll` | `gdi32!ChoosePixelFormat`, `SetPixelFormat`, `SwapBuffers` | unsupported | the WebGL/OpenGL path; needs the 3D layer from item 9 |
+| Zen, `xul.dll` | `gdi32!GetFontData`, `GetOutlineTextMetricsA` | unsupported | font metrics for some pages |
+| Zen, `nss3.dll` | `wsock32!` ordinals 1-23, 51-54, 57, 111, 115, 116, 151 | reported missing | already exported by `ws2_32::legacy_ordinals` and resolved by the loader; the scanner reads only ordinal numbers written literally in the function named in `loader.rs`, not those of the `ordinals()` it delegates to, so the report overstates this gap |
+
+The next batch is `PeekNamedPipe`, the CRT entry points, the `ShellExecuteExW`
+bridge and the shlwapi ordinal; `TrackPopupMenu` needs popup-menu tracking in
+`user32` first. For the ordinal report, either teach the parity tool to follow
+the delegation or list the ordinals where the tool reads them.
 
 ### Performance (see research/performance-profile.md)
 
@@ -97,8 +129,10 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
     need an I/O APIC driver and GPIO controller drivers.
 12. **Windows compatibility expansion**: cross-process sharing and object
     names, child controls, SEH, delay imports, process creation and the
-    runtime dependencies of larger applications; Windows 11 API-set research
-    with REA (`research/windows11-apiset-and-forwarding.md`).
+    runtime dependencies of larger applications; the measured remaining
+    imports of Steam and Zen are listed under
+    [Steam and Zen API gaps](#steam-and-zen-api-gaps). Windows 11 API-set
+    research with REA (`research/windows11-apiset-and-forwarding.md`).
 13. **Storage**: ext4 htree insertion and deeper extent trees, page cache with
     delayed writes, interrupt-driven virtio (queues are polled). Done: FAT
     entries are stamped with the wall clock on create and write, and `stat`
