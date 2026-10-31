@@ -273,6 +273,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::THREAD_PRIORITY => sched::set_priority(f.rdi, f.rsi),
         nr::THREAD_SUSPEND => sched::thread_suspend(f.rdi, f.rsi),
         nr::THREAD_TIMES => sched::thread_times(f.rdi),
+        nr::WORKING_SET => sys_objects::working_set(f.rdi, f.rsi, f.rdx),
         nr::PROCESS_WRITE_BARRIER => {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             crate::smp::flush_remote(0,true);

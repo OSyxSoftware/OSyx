@@ -320,6 +320,13 @@ mod imp {
         decode(syscall1(nr::THREAD_TIMES, tid))
     }
 
+    /// Page-aligned addresses of the resident user pages of process `pid`
+    /// (0: this one), as many as fit in `out`; returns how many pages are
+    /// resident in all.
+    pub fn working_set(pid: u64, out: &mut [u64]) -> Result<u64, Errno> {
+        decode(syscall3(nr::WORKING_SET, pid, out.as_mut_ptr() as u64, out.len() as u64))
+    }
+
     pub fn process_write_barrier()->Result<(),Errno> { decode(syscall1(nr::PROCESS_WRITE_BARRIER,0)).map(|_|()) }
 
     pub fn sysinfo() -> Result<SystemInfo, Errno> {
