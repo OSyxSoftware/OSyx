@@ -293,7 +293,7 @@ fn target(h: u64) -> Result<Target, u32> {
         Object::Process(a) => (PROCESS, true, weak(a)),
         Object::WindowStation(a) => (WINSTA, true, weak(a)),
         Object::Desktop(a) => (DESKTOP, true, weak(a)),
-        Object::File(_) | Object::Console(_) | Object::Null | Object::Pipe(_) => return Err(ERROR_NOT_SUPPORTED),
+        Object::File(_) | Object::Console(_) | Object::Null | Object::Pipe(_) | Object::Directory(_) => return Err(ERROR_NOT_SUPPORTED),
     };
     Ok(Target { key, alive, mapping, secured })
 }

@@ -1152,6 +1152,7 @@ extern "win64" fn NtQueryObject(h: u64, class: u32, buf: *mut u8, len: u32, ret:
         2 => {
             let name = match o {
                 objects::Object::File(_) | objects::Object::Console(_) | objects::Object::Null | objects::Object::Pipe(_) => "File",
+                objects::Object::Directory(_) => "Directory",
                 objects::Object::Thread(_) => "Thread",
                 objects::Object::Event(_) => "Event",
                 objects::Object::KeyedEvent(_) => "KeyedEvent",
