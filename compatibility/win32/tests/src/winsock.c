@@ -200,6 +200,17 @@ void __stdcall start(void) {
     char host[256];
     check_eq("gethostname fits the host name", gethostname(host, sizeof host), 0);
 
+    /* Broadcast needs SO_BROADCAST; a plain socket is refused. */
+    SOCKET nb = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    struct sockaddr_in bc = {0};
+    bc.sin_family = AF_INET;
+    bc.sin_port = htons(8127);
+    bc.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    check_eq("sendto broadcast without SO_BROADCAST fails",
+             sendto(nb, "x", 1, 0, (struct sockaddr *)&bc, sizeof bc), SOCKET_ERROR);
+    check_eq("... with WSAEACCES", WSAGetLastError(), WSAEACCES);
+    closesocket(nb);
+
     /* UDP echo with the host. */
     SOCKET u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     a.sin_port = htons((u_short)udp_port);

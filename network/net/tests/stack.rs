@@ -132,6 +132,10 @@ fn broadcast_reaches_only_sockets_bound_to_it_or_the_wildcard() {
     let wildcard = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 9102)).unwrap();
     let sender = n.b.udp_bind(Endpoint::new(B_IP, 9101)).unwrap();
     let bcast = Ipv4Addr::new(10, 0, 0, 255);
+    // A directed broadcast is still a broadcast: without SO_BROADCAST the
+    // send fails, exactly as for the limited broadcast address.
+    assert_eq!(n.b.udp_send_to(sender, Some(Endpoint::new(bcast, 9100)), b"narrow"), Err(NetError::AccessDenied));
+    n.b.udp_set_broadcast(sender, true).unwrap();
     n.b.udp_send_to(sender, Some(Endpoint::new(bcast, 9100)), b"narrow").unwrap();
     n.b.udp_send_to(sender, Some(Endpoint::new(bcast, 9102)), b"wild").unwrap();
     let mut buf = [0u8; 8];

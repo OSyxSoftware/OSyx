@@ -376,6 +376,7 @@ fn errno(e: NetError) -> Errno {
         NetError::MessageTooLong => Errno::MessageTooLong,
         NetError::NoBuffers => Errno::NoMemory,
         NetError::Shutdown => Errno::BrokenPipe,
+        NetError::AccessDenied => Errno::PermissionDenied,
         NetError::NameNotFound => Errno::NameNotFound,
         NetError::DnsFailure => Errno::DnsFailure,
         NetError::BadSocket => Errno::BadHandle,

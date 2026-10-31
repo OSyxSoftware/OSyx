@@ -44,6 +44,8 @@ pub enum NetError {
     NoBuffers,
     /// The socket was shut down for this direction.
     Shutdown,
+    /// Sending a broadcast without the broadcast option enabled.
+    AccessDenied,
     /// DNS: the name does not exist.
     NameNotFound,
     /// DNS: no server, a server failure or an unusable answer.
@@ -69,6 +71,7 @@ impl NetError {
             NetError::MessageTooLong => "message too long",
             NetError::NoBuffers => "no buffer space",
             NetError::Shutdown => "socket shut down",
+            NetError::AccessDenied => "permission denied",
             NetError::NameNotFound => "name not found",
             NetError::DnsFailure => "DNS failure",
             NetError::BadSocket => "bad socket",
@@ -1346,8 +1349,11 @@ impl Stack {
         if remote.port == 0 {
             return Err(NetError::InvalidArgument);
         }
-        if remote.addr.is_broadcast() && !broadcast {
-            return Err(NetError::InvalidArgument);
+        // A broadcast needs SO_BROADCAST, whether limited or directed.
+        let is_broadcast = remote.addr.is_broadcast()
+            || self.ifaces.iter().any(|i| i.addr.is_some_and(|(a, p)| remote.addr.is_subnet_broadcast(a, p)));
+        if is_broadcast && !broadcast {
+            return Err(NetError::AccessDenied);
         }
         let src = if local.addr.is_unspecified() {
             if remote.addr.is_broadcast() {

@@ -41,6 +41,7 @@ const MSG_PEEK: i32 = 2;
 const MSG_WAITALL: i32 = 8;
 
 const WSAEINTR: u32 = 10004;
+const WSAEACCES: u32 = 10013;
 const WSAEFAULT: u32 = 10014;
 const WSAEINVAL: u32 = 10022;
 const WSAEMFILE: u32 = 10024;
@@ -87,6 +88,7 @@ fn wsa(e: Errno) -> u32 {
         Errno::NameNotFound => WSAHOST_NOT_FOUND,
         Errno::DnsFailure => WSATRY_AGAIN,
         Errno::Interrupted => WSAEINTR,
+        Errno::PermissionDenied => WSAEACCES,
         Errno::Fault => WSAEFAULT,
         Errno::NoMemory => WSAENOBUFS,
         Errno::TooManyHandles => WSAEMFILE,
