@@ -162,6 +162,20 @@ void __stdcall start(void) {
     check_eq("... now zero", soerr, 0);
     closesocket(s);
 
+    /* select with nothing to watch waits out its timeout; bad arguments fail. */
+    fd_set none;
+    FD_ZERO(&none);
+    struct timeval wait_tv = {0, 20000};
+    check_eq("select over empty sets waits out the timeout", select(0, &none, &none, NULL, &wait_tv), 0);
+    struct timeval bad_tv = {0, 1000000};
+    check_eq("select rejects tv_usec >= 1000000", select(0, &none, &none, NULL, &bad_tv), SOCKET_ERROR);
+    check_eq("... with WSAEINVAL", WSAGetLastError(), WSAEINVAL);
+    fd_set ex;
+    FD_ZERO(&ex);
+    FD_SET((SOCKET)0xdeadbeef, &ex);
+    check_eq("select rejects a non-socket in exceptfds", select(0, &none, &none, &ex, &wait_tv), SOCKET_ERROR);
+    check_eq("... with WSAENOTSOCK", WSAGetLastError(), WSAENOTSOCK);
+
     /* UDP echo with the host. */
     SOCKET u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     a.sin_port = htons((u_short)udp_port);

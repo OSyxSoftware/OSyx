@@ -1389,6 +1389,9 @@ extern "win64" fn __WSAFDIsSet(s: u64, set: *const u8) -> i32 {
 /// writing (the exception set is reported empty); timeval {sec, usec}.
 extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *mut u8, timeout: *const i32) -> i32 {
     trace_io(format_args!("select begin"));
+    if rd.is_null() && wr.is_null() && ex.is_null() {
+        return err(WSAEINVAL, SOCKET_ERROR);
+    }
     let read_set = |p: *mut u8| -> Vec<u64> {
         if p.is_null() {
             return Vec::new();
@@ -1400,6 +1403,13 @@ extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *mut u8, time
         }
     };
     let (r, w) = (read_set(rd), read_set(wr));
+    // The exception set is always reported empty (OSyx has no OOB data), but
+    // an invalid handle in it is still an error, as on Windows.
+    for s in read_set(ex) {
+        if let Err(e) = fd(s) {
+            return err(e, SOCKET_ERROR);
+        }
+    }
     let mut items = Vec::new();
     for (&s, ev) in
         r.iter().map(|s| (s, osyx_abi::ipc::WAIT_READABLE)).chain(w.iter().map(|s| (s, osyx_abi::ipc::WAIT_WRITABLE)))
@@ -1412,8 +1422,14 @@ extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *mut u8, time
     let ns = if timeout.is_null() {
         u64::MAX
     } else {
-        // SAFETY: the caller's timeval.
-        unsafe { (*timeout).max(0) as u64 * 1_000_000_000 + (*timeout.add(1)).max(0) as u64 * 1000 }
+        // SAFETY: the caller's timeval {sec, usec}.
+        unsafe {
+            let (sec, usec) = (*timeout, *timeout.add(1));
+            if sec < 0 || usec < 0 || usec >= 1_000_000 {
+                return err(WSAEINVAL, SOCKET_ERROR);
+            }
+            sec as u64 * 1_000_000_000 + usec as u64 * 1000
+        }
     };
     let mut raw: Vec<os_sys::ipc::WaitItem> = items.iter().map(|(_, i)| *i).collect();
     if let Err(e) = os_sys::wait_handles(&mut raw, ns) {
@@ -1435,6 +1451,21 @@ extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *mut u8, time
             }
         }
     };
+    if r.is_empty() && w.is_empty() {
+        // No descriptor can become ready: Windows simply waits out the
+        // timeout (forever when there is none). The kernel's wait rejects an
+        // empty handle list, so sleep here instead.
+        if timeout.is_null() {
+            loop {
+                os_sys::sleep(1_000_000_000);
+            }
+        }
+        os_sys::sleep(ns);
+        write_set(rd, &[]);
+        write_set(wr, &[]);
+        write_set(ex, &[]);
+        return 0;
+    }
     let ready = |ev: u32| -> Vec<u64> {
         items
             .iter()
