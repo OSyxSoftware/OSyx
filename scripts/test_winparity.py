@@ -214,6 +214,47 @@ class OsyxTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_indirect_implementations_are_found(self):
+        root = tempfile.mkdtemp()
+        src = os.path.join(root, "compatibility", "win32", "src")
+        os.makedirs(src)
+        with open(os.path.join(src, "loader.rs"), "w") as f:
+            f.write("fn builtins() { builtin(\"x.dll\", crate::m::exports(), Vec::new()); }\n")
+        with open(os.path.join(src, "m.rs"), "w") as f:
+            f.write("""
+pub fn exports() -> Vec<(&'static str, u64)> {
+    let mut v = export_table![sin, RaiseException];
+    v.push(("Path", crate::m::path_getter()));
+    v
+}
+extern "win64" fn sin_soft(x: u64) -> u64 { x + 1 }
+xmm_abi! {
+    sin => sin_soft ["movq rcx, xmm0"] "movq xmm0, rax";
+}
+pub fn path_getter() -> u64 { Path_impl as *const () as u64 }
+extern "win64" fn Path_impl(p: u64) -> u64 { p * 2 }
+global_asm!(
+r#"
+.global osyx_raise
+osyx_raise:
+    push rbp
+    mov rbp, rsp
+    pop rbp
+    ret
+"#
+);
+extern "win64" {
+    #[link_name = "osyx_raise"]
+    pub(crate) fn RaiseException(code: u32);
+}
+""")
+        osyx = w.Osyx(root)
+        osyx.classify_all()
+        self.assertEqual(osyx.pick("sin").cls, "implemented")
+        self.assertEqual(osyx.pick("RaiseException").cls, "implemented")
+        self.assertIn("assembly", osyx.pick("RaiseException").reason)
+        self.assertEqual(osyx.pick("path_getter").cls, "implemented")
+
     def test_export_resolution(self):
         d = self.osyx.dlls
         self.assertEqual(set(d["a.dll"]), {"One", "Two", "TwoAlias"})

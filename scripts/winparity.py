@@ -438,14 +438,47 @@ class Osyx:
         for p, s in self.files.items():
             for fn in parse_win64_fns(p, s):
                 self.fns.setdefault(fn.name, []).append(fn)
+        self._index_indirect()
         self.dlls = OrderedDict()      # dll -> {name: impl_ident}
         self.ordinals = {}             # dll -> [ordinals]
         self._parse_builtins()
         self.sigs, self.overrides = self._parse_wow64()
 
+    def _index_indirect(self):
+        """Implementations reached without a plain `extern "win64" fn NAME`:
+        `xmm_abi!` shims (`name => name_soft [...]`: the real body is the _soft
+        function), getter functions that return `Name as *const ()`, and
+        routines in `global_asm!` declared through `#[link_name]`."""
+        self.alias, self.getter, self.asm = {}, {}, {}
+        labels = {}
+        for path, src in self.files.items():
+            for blk in re.finditer(r"xmm_abi!\s*\{(.*?)\n\}", src, re.S):
+                for m in re.finditer(r"(\w+)\s*=>\s*(\w+)\s*\[", blk.group(1)):
+                    self.alias[m.group(1)] = m.group(2)
+            for m in re.finditer(r"\bfn\s+(\w+)\s*\(\s*\)\s*->\s*u64\s*\{\s*(?:crate::)?(?:\w+::)*(\w+)\s+as\s+\*const", src):
+                self.getter[m.group(1)] = m.group(2)
+            for g in re.finditer(r"global_asm!\((.*?)\n\);", src, re.S):
+                text = g.group(1)
+                for lm in re.finditer(r"^(\w+):\n(.*?)(?=^\.global|^\w+:\n|\Z)", text, re.S | re.M):
+                    instr = [l for l in lm.group(2).split("\n") if l.strip() and not l.strip().startswith((".", "#", ";", "//"))]
+                    labels[lm.group(1)] = len(instr)
+            for m in re.finditer(r'#\[link_name\s*=\s*"(\w+)"\]\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)', src):
+                self.asm[m.group(2)] = (m.group(1), path)
+        self.asm = {n: (lab, p) for n, (lab, p) in self.asm.items() if labels.get(lab, 0) >= 3}
+        self.labels = labels
+
     def pick(self, name: str, near: str = None):
         c = self.fns.get(name)
         if not c:
+            for table, key in ((self.alias, name), (self.getter, name)):
+                target = table.get(key)
+                if target and target != name and self.fns.get(target):
+                    return self.pick(target, near)
+            if name in self.asm:
+                label, path = self.asm[name]
+                fn = RustFn(name, path, [], "", "")
+                fn.cls, fn.reason = "implemented", "assembly routine %s (%d instructions)" % (label, self.labels[label])
+                return fn
             return None
         if near:
             for fn in c:
