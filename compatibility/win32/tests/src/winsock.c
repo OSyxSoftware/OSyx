@@ -35,6 +35,29 @@ void __stdcall start(void) {
     check("unknown host fails", he == NULL);
     check_eq("... with WSAHOST_NOT_FOUND", WSAGetLastError(), WSAHOST_NOT_FOUND);
 
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    check_eq("getaddrinfo(\"example.com\", \"80\")", getaddrinfo("example.com", "80", &hints, &res), 0);
+    check("... a TCP stream result",
+          res != NULL && res->ai_family == AF_INET && res->ai_socktype == SOCK_STREAM &&
+              res->ai_protocol == IPPROTO_TCP && res->ai_addrlen == sizeof(struct sockaddr_in));
+    if (res) freeaddrinfo(res);
+    struct addrinfo ph = {0}, *pr = NULL;
+    ph.ai_flags = AI_PASSIVE;
+    ph.ai_family = AF_INET;
+    check_eq("getaddrinfo(NULL, \"8125\", AI_PASSIVE)", getaddrinfo(NULL, "8125", &ph, &pr), 0);
+    check("... the wildcard address",
+          pr != NULL && ((struct sockaddr_in *)pr->ai_addr)->sin_addr.s_addr == htonl(INADDR_ANY) &&
+              ((struct sockaddr_in *)pr->ai_addr)->sin_port == htons(8125));
+    if (pr) freeaddrinfo(pr);
+    res = NULL;
+    check_eq("getaddrinfo(NULL, \"80\", NULL)", getaddrinfo(NULL, "80", NULL, &res), 0);
+    check("... a loopback TCP stream by default",
+          res != NULL && res->ai_socktype == SOCK_STREAM && res->ai_protocol == IPPROTO_TCP &&
+              ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    if (res) freeaddrinfo(res);
+
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     check("socket(AF_INET, SOCK_STREAM)", s != INVALID_SOCKET);
     struct sockaddr_in a = {0};

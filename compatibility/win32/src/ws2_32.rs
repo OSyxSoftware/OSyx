@@ -21,6 +21,7 @@ const AF_INET: u16 = 2;
 const AF_INET6: i32 = 23;
 const SOCK_STREAM: i32 = 1;
 const SOCK_DGRAM: i32 = 2;
+const AI_PASSIVE: i32 = 1;
 const SOL_SOCKET: i32 = 0xFFFF;
 const SO_REUSEADDR: i32 = 0x4;
 const SO_KEEPALIVE: i32 = 0x8;
@@ -31,6 +32,7 @@ const SO_RCVTIMEO: i32 = 0x1006;
 const SO_ERROR: i32 = 0x1007;
 const SO_TYPE: i32 = 0x1008;
 const IPPROTO_TCP: i32 = 6;
+const IPPROTO_UDP: i32 = 17;
 const TCP_NODELAY: i32 = 1;
 const FIONBIO: u32 = 0x8004_667E;
 const MSG_PEEK: i32 = 2;
@@ -772,9 +774,11 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
         Some(Err(_)) => return WSATRY_AGAIN as i32, // named services: not supported
     };
     let (mut socktype, mut proto) = (0i32, 0i32);
+    let mut flags = 0i32;
     if !hints.is_null() {
         // SAFETY: the caller's ADDRINFOA hints.
         unsafe {
+            flags = teb::get(hints as u64, 0);
             let family: i32 = teb::get(hints as u64, 4);
             if family != 0 && family != AF_INET as i32 {
                 return WSAEAFNOSUPPORT as i32;
@@ -783,11 +787,20 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
             proto = teb::get(hints as u64, 12);
         }
     }
+    // No type means the common TCP stream; the protocol follows from it.
+    if socktype == 0 {
+        socktype = SOCK_STREAM;
+    }
+    if proto == 0 {
+        proto = if socktype == SOCK_DGRAM { IPPROTO_UDP } else { IPPROTO_TCP };
+    }
     let addrs = match n {
         Some(n) => match resolve(&n) {
             Ok(a) => a,
             Err(e) => return e as i32,
         },
+        // AI_PASSIVE asks for the wildcard address a server can bind.
+        None if flags & AI_PASSIVE != 0 => alloc::vec![[0, 0, 0, 0]],
         None => alloc::vec![[127, 0, 0, 1]],
     };
     let mut head = 0u64;
