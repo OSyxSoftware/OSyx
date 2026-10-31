@@ -458,11 +458,6 @@ impl Tcb {
         self.error
     }
 
-    /// Takes the pending error, as `getsockopt(SO_ERROR)` does.
-    pub fn take_error(&mut self) -> Option<TcpError> {
-        self.error.take()
-    }
-
     /// Effective sending MSS.
     pub fn mss(&self) -> u16 {
         self.peer_mss.min(self.our_mss)
@@ -585,27 +580,28 @@ impl Tcb {
             }
             return Ok(n);
         }
-        if self.fin_received {
-            return Ok(0);
-        }
-        if let Some(e) = self.error {
-            return Err(e);
-        }
-        match self.state {
-            State::Closed | State::Listen => Err(TcpError::NotConnected),
-            _ => Err(TcpError::WouldBlock),
-        }
+        self.recv_outcome()
     }
 
-    /// Like [`Tcb::recv`], but leaves the data queued (`MSG_PEEK`).
+    /// Copies received data without consuming it (MSG_PEEK).
     pub fn peek(&self, out: &mut [u8]) -> Result<usize, TcpError> {
         if !self.recv_buf.is_empty() {
             let n = out.len().min(self.recv_buf.len());
-            for (o, b) in out.iter_mut().zip(self.recv_buf.iter().take(n)) {
+            for (o, b) in out.iter_mut().zip(self.recv_buf.iter()) {
                 *o = *b;
             }
             return Ok(n);
         }
+        self.recv_outcome()
+    }
+
+    /// Clears the pending error; getsockopt(SO_ERROR) reports it once.
+    pub fn take_error(&mut self) -> Option<TcpError> {
+        self.error.take()
+    }
+
+    /// What `recv` reports when no data is queued.
+    fn recv_outcome(&self) -> Result<usize, TcpError> {
         if self.fin_received {
             return Ok(0);
         }

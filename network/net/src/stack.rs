@@ -44,6 +44,8 @@ pub enum NetError {
     NoBuffers,
     /// The socket was shut down for this direction.
     Shutdown,
+    /// Sending a broadcast without the broadcast option enabled.
+    AccessDenied,
     /// DNS: the name does not exist.
     NameNotFound,
     /// DNS: no server, a server failure or an unusable answer.
@@ -69,6 +71,7 @@ impl NetError {
             NetError::MessageTooLong => "message too long",
             NetError::NoBuffers => "no buffer space",
             NetError::Shutdown => "socket shut down",
+            NetError::AccessDenied => "permission denied",
             NetError::NameNotFound => "name not found",
             NetError::DnsFailure => "DNS failure",
             NetError::BadSocket => "bad socket",
@@ -595,10 +598,7 @@ impl Stack {
     /// resolving the hardware address first.
     fn send_packet_on(&mut self, iface: usize, next_hop: Ipv4Addr, packet: Vec<u8>, broadcast: bool) {
         let i = &self.ifaces[iface];
-        let directed = i.addr.is_some_and(|(a, p)| {
-            let host = !crate::wire::prefix_mask(p);
-            p < 31 && next_hop.in_subnet(a, p) && next_hop.to_u32() & host == host
-        });
+        let directed = i.addr.is_some_and(|(a, p)| next_hop.is_subnet_broadcast(a, p));
         if broadcast || next_hop.is_broadcast() || directed {
             let frame = ethernet::build(MacAddr::BROADCAST, i.mac, ETHERTYPE_IPV4, &packet);
             self.push_frame(iface, frame);
@@ -769,10 +769,7 @@ impl Stack {
         };
         let i = &self.ifaces[iface];
         let unconfigured = i.addr.is_none();
-        let subnet_broadcast = i.addr.is_some_and(|(a, p)| {
-            let host = !crate::wire::prefix_mask(p);
-            p < 31 && h.dst.in_subnet(a, p) && h.dst.to_u32() & host == host
-        });
+        let subnet_broadcast = i.addr.is_some_and(|(a, p)| h.dst.is_subnet_broadcast(a, p));
         let broadcast = h.dst.is_broadcast() || subnet_broadcast;
         let to_us = self.is_local(h.dst) && (iface == 0 || !h.dst.is_loopback());
         // While unconfigured, DHCP replies may be unicast to the offered address.
@@ -825,12 +822,18 @@ impl Stack {
                 let from = h.src;
                 for s in self.sockets.values_mut() {
                     if let Socket::Icmp(sock) = s {
-                        if sock.ident == ident {
-                            sock.targets.retain(|&(a, sq)| !(a == from && sq == seq));
-                            if sock.rx.len() < ICMP_QUEUE {
-                                sock.rx.push_back(IcmpEvent::Reply { from, seq, ttl, data: data.to_vec() });
-                                self.changed = true;
-                            }
+                        if sock.ident != ident {
+                            continue;
+                        }
+                        // Only a reply to a request this socket actually sent
+                        // belongs to it; a stray reply must not look like one.
+                        let Some(p) = sock.targets.iter().position(|&(a, sq)| a == from && sq == seq) else {
+                            continue;
+                        };
+                        sock.targets.remove(p);
+                        if sock.rx.len() < ICMP_QUEUE {
+                            sock.rx.push_back(IcmpEvent::Reply { from, seq, ttl, data: data.to_vec() });
+                            self.changed = true;
                         }
                     }
                 }
@@ -859,8 +862,14 @@ impl Stack {
                 let (ident, seq) = (be16(rest, 4), be16(rest, 6));
                 for s in self.sockets.values_mut() {
                     if let Socket::Icmp(sock) = s {
-                        if sock.ident == ident && sock.rx.len() < ICMP_QUEUE {
-                            sock.targets.retain(|&(a, sq)| !(a == oh.dst && sq == seq));
+                        if sock.ident != ident {
+                            continue;
+                        }
+                        let Some(p) = sock.targets.iter().position(|&(a, sq)| a == oh.dst && sq == seq) else {
+                            continue;
+                        };
+                        sock.targets.remove(p);
+                        if sock.rx.len() < ICMP_QUEUE {
                             sock.rx.push_back(IcmpEvent::Error { from, seq, error, code });
                             self.changed = true;
                         }
@@ -925,7 +934,10 @@ impl Stack {
             if !u.local.addr.is_unspecified() && u.local.addr != h.dst && !broadcast {
                 continue;
             }
-            if broadcast && !u.broadcast && !u.local.addr.is_unspecified() {
+            if broadcast && !u.local.addr.is_unspecified() && u.local.addr != h.dst {
+                // A broadcast belongs to sockets bound to the wildcard address
+                // or to the broadcast address. SO_BROADCAST only allows
+                // sending, so it must not widen this match.
                 continue;
             }
             if let Some(r) = u.remote {
@@ -1239,22 +1251,28 @@ impl Stack {
         id
     }
 
-    fn port_in_use(&self, port: u16, udp: bool) -> bool {
+    /// Whether binding `local` would collide with an existing socket.
+    /// A wildcard address collides with every address on that port.
+    fn port_in_use(&self, local: Endpoint, udp: bool) -> bool {
+        let overlaps = |other: Endpoint| {
+            other.port == local.port
+                && (other.addr.is_unspecified() || local.addr.is_unspecified() || other.addr == local.addr)
+        };
         self.sockets.values().any(|s| match s {
-            Socket::Udp(u) => udp && u.local.port == port,
-            Socket::Listener(l) => !udp && l.local.port == port,
-            Socket::BoundTcp(local) => !udp && local.port == port,
-            Socket::Tcp(t) => !udp && t.tcb.local.port == port && t.parent.is_none(),
+            Socket::Udp(u) => udp && overlaps(u.local),
+            Socket::Listener(l) => !udp && overlaps(l.local),
+            Socket::BoundTcp(local) => !udp && overlaps(*local),
+            Socket::Tcp(t) => !udp && t.parent.is_none() && overlaps(t.tcb.local),
             Socket::Icmp(_) => false,
         })
     }
 
-    fn ephemeral(&mut self, udp: bool) -> Result<u16, NetError> {
+    fn ephemeral(&mut self, addr: Ipv4Addr, udp: bool) -> Result<u16, NetError> {
         let span = (*EPHEMERAL.end() - *EPHEMERAL.start()) as u32 + 1;
         for _ in 0..span {
             let p = self.next_ephemeral;
             self.next_ephemeral = if p >= *EPHEMERAL.end() { *EPHEMERAL.start() } else { p + 1 };
-            if !self.port_in_use(p, udp) {
+            if !self.port_in_use(Endpoint::new(addr, p), udp) {
                 return Ok(p);
             }
         }
@@ -1281,8 +1299,8 @@ impl Stack {
     /// A UDP socket bound to `local` (port 0: an ephemeral port).
     pub fn udp_bind(&mut self, local: Endpoint) -> Result<SocketId, NetError> {
         self.check_local(local.addr)?;
-        let port = if local.port == 0 { self.ephemeral(true)? } else { local.port };
-        if local.port != 0 && self.port_in_use(port, true) {
+        let port = if local.port == 0 { self.ephemeral(local.addr, true)? } else { local.port };
+        if self.port_in_use(Endpoint::new(local.addr, port), true) {
             return Err(NetError::AddrInUse);
         }
         self.insert(Socket::Udp(UdpSocket {
@@ -1319,17 +1337,6 @@ impl Stack {
         Ok(())
     }
 
-    /// Limited (`255.255.255.255`) or subnet-directed broadcast.
-    fn is_broadcast_address(&self, addr: Ipv4Addr) -> bool {
-        addr.is_broadcast()
-            || self.ifaces.iter().skip(1).any(|i| {
-                i.addr.is_some_and(|(a, p)| {
-                    let host = !crate::wire::prefix_mask(p);
-                    p < 31 && addr.in_subnet(a, p) && addr.to_u32() & host == host
-                })
-            })
-    }
-
     pub fn udp_send_to(&mut self, id: SocketId, to: Option<Endpoint>, data: &[u8]) -> Result<usize, NetError> {
         if data.len() > MAX_UDP_PAYLOAD {
             return Err(NetError::MessageTooLong);
@@ -1345,8 +1352,11 @@ impl Stack {
         if remote.port == 0 {
             return Err(NetError::InvalidArgument);
         }
-        if !broadcast && self.is_broadcast_address(remote.addr) {
-            return Err(NetError::InvalidArgument);
+        // A broadcast needs SO_BROADCAST, whether limited or directed.
+        let is_broadcast = remote.addr.is_broadcast()
+            || self.ifaces.iter().any(|i| i.addr.is_some_and(|(a, p)| remote.addr.is_subnet_broadcast(a, p)));
+        if is_broadcast && !broadcast {
+            return Err(NetError::AccessDenied);
         }
         let src = if local.addr.is_unspecified() {
             if remote.addr.is_broadcast() {
@@ -1385,7 +1395,7 @@ impl Stack {
         Err(NetError::WouldBlock)
     }
 
-    /// Like [`Stack::udp_recv_from`], but leaves the datagram queued.
+    /// The next datagram without removing it (MSG_PEEK).
     pub fn udp_peek_from(&mut self, id: SocketId, buf: &mut [u8]) -> Result<(Endpoint, usize, usize), NetError> {
         let u = self.udp(id)?;
         if let Some((from, d)) = u.rx.front() {
@@ -1402,6 +1412,25 @@ impl Stack {
 
     pub fn udp_local(&mut self, id: SocketId) -> Result<Endpoint, NetError> {
         Ok(self.udp(id)?.local)
+    }
+
+    /// The address a datagram socket was connected to.
+    pub fn udp_peer(&mut self, id: SocketId) -> Result<Endpoint, NetError> {
+        self.udp(id)?.remote.ok_or(NetError::NotConnected)
+    }
+
+    /// Bytes a receive can return without waiting (FIONREAD).
+    pub fn recv_available(&mut self, id: SocketId) -> Result<usize, NetError> {
+        match self.sockets.get(&id) {
+            Some(Socket::Tcp(t)) => Ok(t.tcb.recv_queue()),
+            Some(Socket::Udp(u)) => Ok(u.rx.front().map_or(0, |d| d.1.len())),
+            Some(Socket::Icmp(i)) => Ok(match i.rx.front() {
+                Some(IcmpEvent::Reply { data, .. }) => data.len(),
+                Some(IcmpEvent::Error { .. }) => 0,
+                None => 0,
+            }),
+            _ => Err(NetError::BadSocket),
+        }
     }
 
     /// An ICMP echo socket (like a Linux "ping socket"): it sends echo
@@ -1426,22 +1455,37 @@ impl Stack {
         if data.len() > 65_000 {
             return Err(NetError::MessageTooLong);
         }
-        let ident = match self.sockets.get_mut(&id) {
-            Some(Socket::Icmp(i)) => {
-                if i.targets.len() >= 64 {
-                    i.targets.remove(0);
-                }
-                i.targets.push((to, seq));
-                i.ident
-            }
+        let ident = match self.sockets.get(&id) {
+            Some(Socket::Icmp(i)) => i.ident,
             _ => return Err(NetError::BadSocket),
         };
         let src = self.source_for(to).ok_or(NetError::NoRoute)?;
         let msg = icmp::echo(icmp::ECHO_REQUEST, ident, seq, data);
+        // Registered before the send: a loopback request is answered inside
+        // `send_ip`, so the reply has to find its target already there.
+        self.record_target(id, to, seq);
         self.stats.icmp_out += 1;
-        self.send_ip(src, to, PROTO_ICMP, &msg, false)?;
+        if let Err(e) = self.send_ip(src, to, PROTO_ICMP, &msg, false) {
+            self.forget_target(id, to, seq);
+            return Err(e);
+        }
         self.flush();
         Ok(())
+    }
+
+    fn record_target(&mut self, id: SocketId, to: Ipv4Addr, seq: u16) {
+        if let Some(Socket::Icmp(i)) = self.sockets.get_mut(&id) {
+            if i.targets.len() >= 64 {
+                i.targets.remove(0);
+            }
+            i.targets.push((to, seq));
+        }
+    }
+
+    fn forget_target(&mut self, id: SocketId, to: Ipv4Addr, seq: u16) {
+        if let Some(Socket::Icmp(i)) = self.sockets.get_mut(&id) {
+            i.targets.retain(|&(a, sq)| !(a == to && sq == seq));
+        }
     }
 
     pub fn icmp_recv(&mut self, id: SocketId) -> Result<IcmpEvent, NetError> {
@@ -1451,12 +1495,20 @@ impl Stack {
         }
     }
 
+    /// The next ICMP event without removing it (MSG_PEEK).
+    pub fn icmp_peek(&self, id: SocketId) -> Result<IcmpEvent, NetError> {
+        match self.sockets.get(&id) {
+            Some(Socket::Icmp(i)) => i.rx.front().cloned().ok_or(NetError::WouldBlock),
+            _ => Err(NetError::BadSocket),
+        }
+    }
+
     /// Reserves the local endpoint immediately, including a dynamic port.
     /// The reservation survives until listen, connect or close.
     pub fn tcp_bind(&mut self, local: Endpoint) -> Result<SocketId, NetError> {
         self.check_local(local.addr)?;
-        let port = if local.port == 0 { self.ephemeral(false)? } else { local.port };
-        if self.port_in_use(port, false) {
+        let port = if local.port == 0 { self.ephemeral(local.addr, false)? } else { local.port };
+        if self.port_in_use(Endpoint::new(local.addr, port), false) {
             return Err(NetError::AddrInUse);
         }
         self.insert(Socket::BoundTcp(Endpoint::new(local.addr, port)))
@@ -1504,12 +1556,12 @@ impl Stack {
         };
         let port = match local {
             Some(l) if l.port != 0 => {
-                if bound.is_none() && self.port_in_use(l.port, false) {
+                if bound.is_none() && self.port_in_use(Endpoint::new(src, l.port), false) {
                     return Err(NetError::AddrInUse);
                 }
                 l.port
             }
-            _ => self.ephemeral(false)?,
+            _ => self.ephemeral(src, false)?,
         };
         let l = Endpoint::new(src, port);
         let iss = self.isn(l, remote);
@@ -1576,25 +1628,9 @@ impl Stack {
         Ok(n)
     }
 
-    /// Copies received data without taking it out of the queue (`MSG_PEEK`).
+    /// Received stream bytes without consuming them (MSG_PEEK).
     pub fn tcp_peek(&mut self, id: SocketId, buf: &mut [u8]) -> Result<usize, NetError> {
         self.tcb(id)?.peek(buf).map_err(tcp_error)
-    }
-
-    /// Bytes ready to read right away: queued TCP data, the size of the
-    /// next datagram, or the next echo reply's payload. 0 when nothing is
-    /// waiting.
-    pub fn available(&self, id: SocketId) -> Result<usize, NetError> {
-        match self.sockets.get(&id) {
-            Some(Socket::Tcp(t)) => Ok(t.tcb.recv_queue()),
-            Some(Socket::Udp(u)) => Ok(u.rx.front().map_or(0, |(_, d)| d.len())),
-            Some(Socket::Icmp(i)) => Ok(match i.rx.front() {
-                Some(IcmpEvent::Reply { data, .. }) => data.len(),
-                Some(IcmpEvent::Error { .. }) | None => 0,
-            }),
-            Some(Socket::BoundTcp(_)) | Some(Socket::Listener(_)) => Err(NetError::NotConnected),
-            None => Err(NetError::BadSocket),
-        }
     }
 
     /// Half-close: no more data from us (a FIN follows the queued data).

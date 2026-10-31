@@ -14,6 +14,8 @@ pub const SOCK_PING: u64 = 3;
 pub const MSG_DONTWAIT: u64 = 1;
 /// `recv`: return data but leave it queued (ping sockets: not supported).
 pub const MSG_PEEK: u64 = 2;
+/// `recv` on a stream: wait for the whole buffer (EOF or error ends it).
+pub const MSG_WAITALL: u64 = 4;
 
 /// `sock_ctl` operations.
 pub mod ctl {
@@ -42,6 +44,8 @@ pub mod ctl {
     /// Bytes ready to read without blocking: queued TCP data or the size
     /// of the next UDP datagram (0 if none). Winsock FIONREAD.
     pub const AVAILABLE: u64 = 12;
+    /// Size of the datagram the last successful `recv` returned (untruncated).
+    pub const LAST_MSG_LEN: u64 = 13;
 }
 
 /// TCP states reported by `ctl::STATE` and `NetSocket::state`.

@@ -63,6 +63,90 @@ fn loopback_ping_and_udp_work_without_a_link() {
 }
 
 #[test]
+fn echo_replies_must_match_a_sent_request() {
+    let mut n = Net::new();
+    let s = n.a.icmp_open().unwrap();
+    let ident = n.a.icmp_ident(s).unwrap();
+    let inject = |n: &mut Net, from: Ipv4Addr, seq: u16| {
+        let reply = osyx_net::icmp::echo(osyx_net::icmp::ECHO_REPLY, ident, seq, b"spoof");
+        let pkt = osyx_net::ipv4::build(from, A_IP, 1, 64, 9, &reply, 1500, false).unwrap().remove(0);
+        let frame = osyx_net::ethernet::build(A_MAC, B_MAC, 0x0800, &pkt);
+        n.a.receive(1, &frame);
+    };
+    inject(&mut n, B_IP, 42);
+    assert_eq!(n.a.icmp_recv(s), Err(NetError::WouldBlock), "unsolicited reply");
+    // A send that never left the host leaves no request to answer.
+    assert_eq!(n.a.icmp_echo(s, Ipv4Addr::new(8, 8, 8, 8), 43, b""), Err(NetError::NoRoute));
+    inject(&mut n, Ipv4Addr::new(8, 8, 8, 8), 43);
+    assert_eq!(n.a.icmp_recv(s), Err(NetError::WouldBlock), "reply to a request that never left");
+    n.a.icmp_echo(s, B_IP, 42, b"real").unwrap();
+    assert!(n.run_until(100, |n| matches!(n.a.icmp_recv(s), Ok(IcmpEvent::Reply { from, seq: 42, .. }) if from == B_IP)));
+}
+
+#[test]
+fn peeks_leave_the_data_queued() {
+    let mut n = Net::new();
+    let ping = n.a.icmp_open().unwrap();
+    n.a.icmp_echo(ping, Ipv4Addr::LOOPBACK, 11, b"me").unwrap();
+    assert!(matches!(n.a.icmp_peek(ping), Ok(IcmpEvent::Reply { seq: 11, .. })));
+    assert!(matches!(n.a.icmp_recv(ping), Ok(IcmpEvent::Reply { seq: 11, .. })));
+    assert_eq!(n.a.icmp_peek(ping), Err(NetError::WouldBlock));
+
+    let u1 = n.a.udp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7001)).unwrap();
+    let u2 = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    n.a.udp_send_to(u2, Some(Endpoint::new(Ipv4Addr::LOOPBACK, 7001)), b"peek").unwrap();
+    let mut buf = [0u8; 8];
+    let (from, len, total) = n.a.udp_peek_from(u1, &mut buf).unwrap();
+    assert_eq!((&buf[..len], total, from.addr), (&b"peek"[..], 4, Ipv4Addr::LOOPBACK));
+    assert_eq!(n.a.recv_available(u1), Ok(4), "a peek consumes nothing");
+    let (from, len, _) = n.a.udp_recv_from(u1, &mut buf).unwrap();
+    assert_eq!((&buf[..len], from.addr), (&b"peek"[..], Ipv4Addr::LOOPBACK));
+
+    let (c, s) = connect(&mut n, 6160);
+    assert_eq!(n.a.tcp_send(c, b"peek at me").unwrap(), 10);
+    assert!(n.run_until(1000, |n| n.b.recv_available(s) == Ok(10)));
+    let mut part = [0u8; 5];
+    assert_eq!(n.b.tcp_peek(s, &mut part), Ok(5));
+    assert_eq!(&part, b"peek ");
+    assert_eq!(n.b.recv_available(s), Ok(10), "a peek consumes nothing");
+    let mut all = [0u8; 10];
+    assert_eq!(n.b.tcp_recv(s, &mut all), Ok(10));
+    assert_eq!(&all, b"peek at me");
+}
+
+#[test]
+fn udp_connect_reports_its_peer() {
+    let mut n = Net::new();
+    let u = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    assert_eq!(n.a.udp_peer(u), Err(NetError::NotConnected));
+    let peer = Endpoint::new(B_IP, 9000);
+    n.a.udp_connect(u, peer).unwrap();
+    assert_eq!(n.a.udp_peer(u), Ok(peer));
+}
+
+#[test]
+fn broadcast_reaches_only_sockets_bound_to_it_or_the_wildcard() {
+    let mut n = Net::new();
+    let specific = n.a.udp_bind(Endpoint::new(A_IP, 9100)).unwrap();
+    n.a.udp_set_broadcast(specific, true).unwrap();
+    let wildcard = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 9102)).unwrap();
+    let sender = n.b.udp_bind(Endpoint::new(B_IP, 9101)).unwrap();
+    let bcast = Ipv4Addr::new(10, 0, 0, 255);
+    // A directed broadcast is still a broadcast: without SO_BROADCAST the
+    // send fails, exactly as for the limited broadcast address.
+    assert_eq!(n.b.udp_send_to(sender, Some(Endpoint::new(bcast, 9100)), b"narrow"), Err(NetError::AccessDenied));
+    n.b.udp_set_broadcast(sender, true).unwrap();
+    n.b.udp_send_to(sender, Some(Endpoint::new(bcast, 9100)), b"narrow").unwrap();
+    n.b.udp_send_to(sender, Some(Endpoint::new(bcast, 9102)), b"wild").unwrap();
+    let mut buf = [0u8; 8];
+    assert!(n.run_until(100, |n| n.a.udp_recv_from(wildcard, &mut buf).is_ok()));
+    assert_eq!(&buf[..4], b"wild");
+    // SO_BROADCAST permits sending; it does not make a unicast-bound socket
+    // accept broadcasts.
+    assert_eq!(n.a.udp_recv_from(specific, &mut buf), Err(NetError::WouldBlock));
+}
+
+#[test]
 fn tcp_bind_reserves_a_dynamic_port_before_listen_or_connect() {
     let mut n = Net::new();
     let bound = n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 0)).unwrap();
@@ -93,6 +177,28 @@ fn tcp_bind_reserves_a_dynamic_port_before_listen_or_connect() {
     let released = n.a.tcp_bound_local(reservation).unwrap();
     n.a.close(reservation, false);
     assert!(n.a.tcp_listen(released, 1).is_ok());
+}
+
+#[test]
+fn binds_only_conflict_on_the_same_address() {
+    let mut n = Net::new();
+    let lo = n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7100)).unwrap();
+    // Another local address on the same port is a different endpoint.
+    assert!(n.a.tcp_bind(Endpoint::new(A_IP, 7100)).is_ok());
+    // The wildcard covers every address, so it collides with both.
+    assert_eq!(n.a.tcp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 7100)), Err(NetError::AddrInUse));
+    assert_eq!(n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7100)), Err(NetError::AddrInUse));
+    let listener = n.a.tcp_listen(Endpoint::new(Ipv4Addr::LOOPBACK, 7101), 1).unwrap();
+    assert_eq!(n.a.tcp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 7101)), Err(NetError::AddrInUse));
+    n.a.close(lo, false);
+    n.a.close(listener, false);
+
+    let udp = n.a.udp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7102)).unwrap();
+    assert!(n.a.udp_bind(Endpoint::new(A_IP, 7102)).is_ok());
+    assert_eq!(n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 7102)), Err(NetError::AddrInUse));
+    // TCP and UDP port spaces are independent.
+    assert!(n.a.tcp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7102)).is_ok());
+    n.a.close(udp, false);
 }
 
 #[test]
@@ -225,6 +331,19 @@ fn tcp_handshake_transfer_and_orderly_teardown() {
     assert_eq!(n.a.socket_count(), 1, "TIME-WAIT keeps the connection");
     n.run(osyx_net::tcp::TIME_WAIT_MS + 100);
     assert_eq!(n.a.socket_count(), 0);
+}
+
+#[test]
+fn tcp_receive_availability_reports_queued_bytes() {
+    let mut n = Net::new();
+    let (c, s) = connect(&mut n, 6150);
+    assert_eq!(n.b.recv_available(s), Ok(0));
+    let data = b"how much is queued?";
+    assert_eq!(n.a.tcp_send(c, data).unwrap(), data.len());
+    assert!(n.run_until(1000, |n| n.b.recv_available(s) == Ok(data.len())), "all sent bytes are queued");
+    let mut buf = [0u8; 4];
+    assert_eq!(n.b.tcp_recv(s, &mut buf).unwrap(), 4);
+    assert!(n.run_until(100, |n| n.b.recv_available(s) == Ok(data.len() - 4)), "reading consumes the reported bytes");
 }
 
 #[test]
@@ -761,26 +880,26 @@ fn udp_peek_leaves_the_datagram_queued() {
 fn available_reports_queued_bytes() {
     let mut n = Net::new();
     let (c, s) = connect(&mut n, 7103);
-    assert_eq!(n.b.available(s), Ok(0));
+    assert_eq!(n.b.recv_available(s), Ok(0));
     assert_eq!(n.a.tcp_send(c, b"count me"), Ok(8));
-    assert!(n.run_until(1000, |n| n.b.available(s) == Ok(8)));
+    assert!(n.run_until(1000, |n| n.b.recv_available(s) == Ok(8)));
     // Peeking does not change the count.
     assert_eq!(n.b.tcp_peek(s, &mut [0u8; 4]), Ok(4));
-    assert_eq!(n.b.available(s), Ok(8));
+    assert_eq!(n.b.recv_available(s), Ok(8));
     let mut buf = [0u8; 16];
     assert_eq!(n.b.tcp_recv(s, &mut buf[..5]), Ok(5));
-    assert_eq!(n.b.available(s), Ok(3));
+    assert_eq!(n.b.recv_available(s), Ok(3));
     assert_eq!(n.b.tcp_recv(s, &mut buf), Ok(3));
-    assert_eq!(n.b.available(s), Ok(0));
+    assert_eq!(n.b.recv_available(s), Ok(0));
 
     let rx = n.a.udp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7104)).unwrap();
-    assert_eq!(n.a.available(rx), Ok(0));
+    assert_eq!(n.a.recv_available(rx), Ok(0));
     let tx = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
     n.a.udp_send_to(tx, Some(Endpoint::new(Ipv4Addr::LOOPBACK, 7104)), b"12345").unwrap();
-    assert_eq!(n.a.available(rx), Ok(5));
+    assert_eq!(n.a.recv_available(rx), Ok(5));
     let mut ubuf = [0u8; 8];
     n.a.udp_recv_from(rx, &mut ubuf).unwrap();
-    assert_eq!(n.a.available(rx), Ok(0));
+    assert_eq!(n.a.recv_available(rx), Ok(0));
 }
 
 #[test]
@@ -791,7 +910,7 @@ fn udp_broadcast_needs_the_broadcast_option() {
     let subnet_broadcast = Ipv4Addr::new(10, 0, 0, 255);
     assert_eq!(
         n.a.udp_send_to(tx, Some(Endpoint::new(subnet_broadcast, 7002)), b"x"),
-        Err(NetError::InvalidArgument),
+        Err(NetError::AccessDenied),
         "subnet-directed broadcast without SO_BROADCAST"
     );
     n.a.udp_set_broadcast(tx, true).unwrap();
