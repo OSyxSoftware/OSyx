@@ -1752,12 +1752,14 @@ impl Stack {
         Resolve::Pending(qid)
     }
 
-    /// Takes the result of a query started by `resolve`.
+    /// Takes the result of a query started by `resolve`. Several callers can
+    /// share one outstanding query, so the result is not consumed: every
+    /// waiter sees it until the entry is evicted or cancelled.
     pub fn resolve_result(&mut self, qid: QueryId) -> Option<Result<Vec<Ipv4Addr>, NetError>> {
         if self.queries.contains_key(&qid) {
             return None;
         }
-        Some(self.results.remove(&qid).unwrap_or(Err(NetError::DnsFailure)))
+        Some(self.results.get(&qid).cloned().unwrap_or(Err(NetError::DnsFailure)))
     }
 
     /// Forgets a query whose caller gave up.

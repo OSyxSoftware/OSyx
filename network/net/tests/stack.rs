@@ -579,6 +579,25 @@ fn dns_ignores_spoofed_replies_and_times_out() {
 }
 
 #[test]
+fn dns_shared_query_answers_every_waiter() {
+    let mut n = Net::new();
+    n.a.set_dns_servers(&[B_IP]);
+    let sock = n.b.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 53)).unwrap();
+    let table = [("shared.test", [10, 4, 4, 4])];
+    let Resolve::Pending(q1) = n.a.resolve("shared.test") else { panic!() };
+    let Resolve::Pending(q2) = n.a.resolve("shared.test") else { panic!() };
+    assert_eq!(q1, q2, "the second caller shares the outstanding query");
+    let mut conns = Vec::new();
+    assert!(n.run_until(1000, |n| {
+        serve_dns(n, sock, None, &table, false, &mut conns);
+        n.a.resolve_result(q1).is_some()
+    }));
+    let want = Some(Ok(vec![Ipv4Addr::new(10, 4, 4, 4)]));
+    assert_eq!(n.a.resolve_result(q1), want);
+    assert_eq!(n.a.resolve_result(q2), want, "both waiters see the answer");
+}
+
+#[test]
 fn dns_fails_over_to_the_next_server_after_one_timeout() {
     let mut n = Net::new();
     // The first server never answers (no host at 10.0.0.3); the second does.
