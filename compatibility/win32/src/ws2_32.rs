@@ -1017,24 +1017,20 @@ extern "win64" fn WSASendMsg(s: u64, msg: *const u8, f: u32, sent: *mut u32, ove
             return Err(WSAEOPNOTSUPP);
         }
         // SAFETY: the caller's WSAMSG (x64 layout: 56 bytes) and WSABUFs.
-        let (to, data) = unsafe {
+        let (to, bufs, count) = unsafe {
             let m = msg as u64;
             let name: u64 = teb::get(m, 0);
             let name_len: i32 = teb::get(m, 8);
             let bufs: u64 = teb::get(m, 16);
             let count: u32 = teb::get(m, 24);
+            // Control is a WSABUF at 32; ancillary messages are not supported.
             if teb::get::<u32>(m, 32) != 0 {
                 return Err(WSAEINVAL);
             }
             let to = if name == 0 { None } else { Some(read_addr(name as *const u8, name_len)?) };
-            let mut data = Vec::new();
-            for i in 0..count as u64 {
-                let len: u32 = teb::get(bufs, (i * 16) as usize);
-                let p: u64 = teb::get(bufs, (i * 16 + 8) as usize);
-                data.extend_from_slice(core::slice::from_raw_parts(p as *const u8, len as usize));
-            }
-            (to, data)
+            (to, bufs, count)
         };
+        let data = wsa_gather(bufs as *const u8, count)?;
         os_sys::sock_send(fd, &data, to.as_ref(), 0).map_err(wsa)
     })();
     match r {

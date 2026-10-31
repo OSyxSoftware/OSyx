@@ -73,6 +73,9 @@ void __stdcall start(void) {
     m.dwBufferCount = 2;
     DWORD sent = 0;
     check("WSASendMsg gathers two buffers", WSASendMsg(w, &m, 0, &sent, NULL, NULL) == 0 && sent == 11);
+    WSABUF bad = {4, NULL};
+    check("a null WSABUF is rejected",
+          WSASend(w, &bad, 1, &sent, 0, NULL, NULL) == SOCKET_ERROR && WSAGetLastError() == WSAEFAULT);
     on = 0;
     WSAIoctl(r, FIONBIO, &on, sizeof on, NULL, 0, &got, NULL, NULL);
     check("... into one datagram", recv(r, buf, sizeof buf, 0) == 11 && mem_eq(buf, "hello, msg!", 11));
