@@ -3163,6 +3163,74 @@ fn system_parameters(action: u32, _param: u32, value: *mut u8, wide: bool) -> Bo
     }
 }
 
+/// A procedural stock icon of `size` pixels: kind 1 a folder, 2 a document,
+/// 3 a drive, anything else a blue badge. 32-bit with an alpha channel and
+/// the AND mask Windows icons carry. Returns an HICON.
+pub(crate) fn stock_icon(kind: u32, size: u32) -> u64 {
+    let n = size as usize;
+    let mut pixels = alloc::vec![0u32; n * n];
+    let inside = |x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize| x >= x0 && x < x1 && y >= y0 && y < y1;
+    for y in 0..n {
+        for x in 0..n {
+            let (fx, fy) = (x * 32 / n, y * 32 / n);
+            let argb = match kind {
+                1 => {
+                    if inside(fx, fy, 3, 7, 14, 10) { 0xFFE8B730 } // tab
+                    else if inside(fx, fy, 3, 10, 29, 27) { if fy < 13 { 0xFFF5D26B } else { 0xFFEDBF3E } }
+                    else { 0 }
+                }
+                2 => {
+                    if inside(fx, fy, 7, 3, 25, 29) {
+                        if fx >= 19 && fy < 9 { 0xFFD0D5DB } // folded corner
+                        else if fx == 7 || fx == 24 || fy == 3 || fy == 28 { 0xFF8A93A0 }
+                        else if fy % 4 == 0 && fy > 11 && fx > 10 && fx < 22 { 0xFF9AA3B0 } // text lines
+                        else { 0xFFFFFFFF }
+                    } else { 0 }
+                }
+                3 => {
+                    if inside(fx, fy, 3, 11, 29, 24) {
+                        if fy >= 20 { 0xFF6C7480 } else { 0xFFBFC5CE }
+                    } else if inside(fx, fy, 24, 21, 27, 23) { 0xFF37D067 } else { 0 }
+                }
+                _ => {
+                    let (dx, dy) = (fx as i32 - 16, fy as i32 - 16);
+                    if dx * dx + dy * dy <= 13 * 13 { 0xFF3B7DDD } else { 0 }
+                }
+            };
+            pixels[y * n + x] = argb;
+        }
+    }
+    // BITMAPINFOHEADER (height doubled), bottom-up BGRA, then the 1-bpp AND mask.
+    let mask_stride = n.div_ceil(32) * 4;
+    let mut data = alloc::vec::Vec::with_capacity(40 + n * n * 4 + mask_stride * n);
+    for v in [40u32, n as u32, (n * 2) as u32] {
+        data.extend_from_slice(&v.to_le_bytes());
+    }
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&32u16.to_le_bytes());
+    data.extend_from_slice(&[0u8; 24]);
+    for y in (0..n).rev() {
+        for x in 0..n {
+            data.extend_from_slice(&pixels[y * n + x].to_le_bytes());
+        }
+    }
+    for y in (0..n).rev() {
+        let mut row = alloc::vec![0u8; mask_stride];
+        for x in 0..n {
+            if pixels[y * n + x] >> 24 == 0 {
+                row[x / 8] |= 0x80 >> (x % 8);
+            }
+        }
+        data.extend_from_slice(&row);
+    }
+    with(|g| {
+        let Some((mask, color)) = gdi::resource_icon(g, &data) else { return 0 };
+        let h = g.handle();
+        g.icons.insert(h, Icon { is_icon: true, hotspot: (0, 0), mask, color });
+        h
+    })
+}
+
 /// Predefined cursors and icons: the resource id is the handle (PRISM
 /// draws its own pointer).
 extern "win64" fn LoadCursorA(_inst: u64, id: u64) -> u64 {

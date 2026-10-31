@@ -643,8 +643,92 @@ extern "win64" fn SHGetSpecialFolderLocation(_hwnd: u64, _csidl: u32, pidl: *mut
     E_INVALIDARG // no shell namespace: only the file dialogs' PIDLs exist
 }
 
-extern "win64" fn SHGetStockIconInfo(_id: i32, _flags: u32, _info: *mut u8) -> u32 {
-    E_NOTIMPL
+// ---- stock icons ------------------------------------------------------------------------------
+//
+// SHGetStockIconInfo names an icon by SHSTOCKICONID. Locations and system
+// image list indices are those of Windows (imageres.dll, shell32.dll,
+// imagesp1.dll, mydocs.dll under System32): (icon index, DLL, system index).
+// OSyx has no such DLLs, so SHGSI_ICON draws a simple icon of the right kind
+// (folder, document, drive or a generic one) at the size asked for.
+
+const STOCK_ICONS: [(i16, u8, i16); 181] = [
+    (-2, 0, 0), (-90, 0, 1), (-15, 0, 2), (-3, 0, 3), (-4, 0, 4), (-29, 0, 5),
+    (-28, 0, 6), (-35, 0, 7), (-32, 0, 8), (-33, 0, 9), (-31, 0, 10), (-30, 0, 11),
+    (-34, 0, 12), (-152, 0, 13), (-15, 1, 14), (-109, 0, 15), (-51, 0, 16), (-25, 0, 17),
+    (-19, 1, 18), (-20, 1, 19), (-21, 1, 20), (-27, 0, 21), (-177, 0, 22), (-99, 0, 23),
+    (-100, 0, 24), (-101, 0, 25), (-27, 1, 26), (-28, 1, 27), (-164, 0, 28), (-163, 0, 29),
+    (-97, 0, 30), (-55, 0, 31), (-54, 0, 32), (-34, 1, 33), (-110, 0, 34), (-137, 1, 35),
+    (-37, 1, 36), (-26, 0, 37), (-77, 0, 38), (-80, 0, 39), (-85, 0, 40), (-42, 1, 41),
+    (-43, 1, 42), (-44, 1, 43), (-45, 1, 44), (-46, 1, 45), (-47, 1, 46), (-48, 1, 47),
+    (-49, 1, 48), (-8, 0, 50), (-53, 0, 51), (-143, 0, 52), (-76, 0, 53), (-199, 1, 54),
+    (-52, 0, 55), (-148, 0, 56), (-142, 0, 57), (-162, 0, 58), (-75, 0, 59), (-37, 0, 60),
+    (-56, 0, 61), (-39, 0, 62), (-41, 0, 63), (-38, 0, 64), (-40, 0, 65), (-180, 0, 66),
+    (-64, 0, 67), (-62, 0, 68), (-155, 0, 69), (-61, 0, 70), (-63, 0, 71), (-131, 0, 72),
+    (-132, 0, 73), (-133, 0, 74), (-134, 0, 75), (-5, 0, 76), (-6, 0, 77), (-78, 0, 78),
+    (-84, 0, 79), (-81, 0, 80), (-98, 0, 81), (-82, 0, 82), (-161, 0, 83), (-94, 0, 84),
+    (-89, 0, 85), (-135, 0, 86), (-136, 0, 87), (-137, 0, 88), (-138, 0, 89), (-139, 0, 90),
+    (-140, 0, 91), (-141, 0, 92), (-172, 0, 93), (-173, 0, 94), (-109, 0, 15), (-119, 0, 95),
+    (-88, 0, 96), (-60, 0, 97), (-65, 0, 98), (-47, 0, 99), (-57, 0, 100), (-46, 0, 101),
+    (-66, 0, 102), (-171, 0, 103), (-120, 0, 104), (-174, 0, 105), (-121, 0, 106), (-36, 0, 107),
+    (-87, 0, 108), (-108, 0, 109), (-101, 3, 110), (-238, 1, 111), (-18, 0, 112), (-139, 1, 113),
+    (-171, 1, 114), (-17, 0, 115), (-103, 0, 116), (-50, 0, 117), (-48, 0, 118), (-198, 1, 119),
+    (-49, 0, 120), (-197, 1, 121), (-19, 0, 122), (-20, 0, 123), (-21, 0, 124), (-22, 0, 125),
+    (-23, 0, 126), (-79, 0, 127), (-104, 0, 128), (-105, 0, 129), (-106, 0, 130), (-107, 0, 131),
+    (-200, 2, 132), (-201, 2, 133), (-202, 2, 134), (-203, 2, 135), (-204, 2, 136), (-205, 2, 137),
+    (-206, 2, 138), (-207, 2, 139), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140),
+    (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140),
+    (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140),
+    (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-1015, 0, 141), (-1017, 0, 142),
+    (-1018, 0, 143), (-1026, 0, 144), (-1030, 0, 145), (-1031, 0, 146), (-1032, 0, 147), (-1033, 0, 148),
+    (-1034, 0, 149), (-1035, 0, 150), (-1036, 0, 151), (-1037, 0, 152), (-1001, 0, 153), (-157, 0, 49),
+    (-5201, 0, 154), (-5, 0, 76), (-3, 0, 3), (-162, 0, 58), (-1304, 0, 155), (-1305, 0, 156),
+    (-1306, 0, 157),
+];
+const STOCK_DLLS: [&str; 4] = ["imageres.dll", "shell32.dll", "imagesp1.dll", "mydocs.dll"];
+const SHSTOCKICONINFO_SIZE: u32 = 544;
+const SHGSI_ICON: u32 = 0x100;
+const SHGSI_SYSICONINDEX: u32 = 0x4000;
+const SHGSI_LINKOVERLAY: u32 = 0x8000;
+const SHGSI_SELECTED: u32 = 0x1_0000;
+const SHGSI_SMALLICON: u32 = 0x1;
+const SHGSI_SHELLICONSIZE: u32 = 0x4;
+const SHGSI_VALID: u32 = SHGSI_ICON | SHGSI_SYSICONINDEX | SHGSI_LINKOVERLAY | SHGSI_SELECTED | SHGSI_SMALLICON | SHGSI_SHELLICONSIZE;
+
+/// SHGetStockIconInfo(id, flags, &SHSTOCKICONINFO): the struct is cbSize,
+/// hIcon @8, iSysImageIndex @16, iIcon @20 and szPath[260] @24. E_INVALIDARG
+/// for an unknown id, unknown flags or a struct of the wrong size.
+extern "win64" fn SHGetStockIconInfo(id: i32, flags: u32, info: *mut u8) -> u32 {
+    if info.is_null() || id < 0 || id as usize >= STOCK_ICONS.len() || flags & !SHGSI_VALID != 0 {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's SHSTOCKICONINFO; cbSize is checked before more is written.
+    unsafe {
+        if core::ptr::read_unaligned(info as *const u32) != SHSTOCKICONINFO_SIZE {
+            return E_INVALIDARG;
+        }
+        core::ptr::write_bytes(info.add(8), 0, SHSTOCKICONINFO_SIZE as usize - 8);
+    }
+    let (index, dll, system) = STOCK_ICONS[id as usize];
+    let path = alloc::format!("C:\\Windows\\System32\\{}", STOCK_DLLS[dll as usize]);
+    // SAFETY: as above; the path fits szPath (260 UTF-16 units).
+    unsafe {
+        core::ptr::write_unaligned(info.add(16) as *mut i32, if flags & SHGSI_SYSICONINDEX != 0 { system as i32 } else { -1 });
+        core::ptr::write_unaligned(info.add(20) as *mut i32, index as i32);
+        for (i, c) in path.encode_utf16().take(259).enumerate() {
+            core::ptr::write_unaligned(info.add(24 + 2 * i) as *mut u16, c);
+        }
+        if flags & SHGSI_ICON != 0 {
+            let size = if flags & SHGSI_SMALLICON != 0 { 16 } else { 32 };
+            let kind = match id {
+                3 | 4 | 175 | 176 => 1,        // folders
+                0..=2 => 2,                     // documents
+                5..=12 => 3,                    // drives
+                _ => 0,
+            };
+            core::ptr::write_unaligned(info.add(8) as *mut u64, crate::user32::stock_icon(kind, size));
+        }
+    }
+    S_OK
 }
 
 extern "win64" fn SHQueryUserNotificationState(out: *mut u32) -> u32 {
