@@ -225,6 +225,35 @@ enum Gdi {
     Region,
 }
 
+/// The window whose PRISM surface shows `hwnd`, and where `hwnd`'s client
+/// area starts in it. A child control is no PRISM window of its own: it draws
+/// into the surface of its top-level ancestor.
+fn surface_host(windows: &BTreeMap<u64, Win>, hwnd: u64) -> (u64, (i32, i32)) {
+    let (mut current, mut origin) = (hwnd, (0, 0));
+    for _ in 0..64 {
+        let Some(w) = windows.get(&current) else { break };
+        if w.style & WS_CHILD == 0 || !windows.contains_key(&w.owner) {
+            break;
+        }
+        origin = (origin.0 + w.pos.0, origin.1 + w.pos.1);
+        current = w.owner;
+    }
+    (current, origin)
+}
+
+/// The pixels `hwnd` draws on: its own PRISM surface, or for a child control
+/// its client rectangle inside the surface of its top-level ancestor.
+fn window_surface(windows: &mut BTreeMap<u64, Win>, hwnd: u64) -> Option<Surface<'_>> {
+    let (host, origin) = surface_host(windows, hwnd);
+    let size = windows.get(&hwnd)?.size;
+    let surface = windows.get_mut(&host)?.win.surface().ok()?;
+    if host == hwnd {
+        Some(surface)
+    } else {
+        surface.into_sub(Rect::new(origin.0, origin.1, size.0, size.1))
+    }
+}
+
 #[derive(Clone)]
 struct Dc {
     hwnd: u64,
@@ -543,6 +572,21 @@ impl Gui {
         self.fresh.insert(teb::current_tid(), bits);
     }
 
+    /// The deepest visible, enabled child control of `hwnd` containing the
+    /// client point (x, y), with the point in that control's coordinates; the
+    /// window itself when no control is there. Later siblings are on top.
+    fn child_at(&self, hwnd: u64, x: i32, y: i32) -> (u64, i32, i32) {
+        let hit = self.windows.iter().rev().find(|(_, w)| {
+            w.style & WS_CHILD != 0 && w.owner == hwnd && w.visible && w.style & WS_DISABLED == 0
+                && x >= w.pos.0 && y >= w.pos.1
+                && x < w.pos.0 + w.size.0 as i32 && y < w.pos.1 + w.size.1 as i32
+        });
+        match hit {
+            Some((&child, w)) => self.child_at(child, x - w.pos.0, y - w.pos.1),
+            None => (hwnd, x, y),
+        }
+    }
+
     fn invalidate(&mut self, hwnd: u64, r: Option<Rect>, erase: bool) {
         if let Some(w) = self.windows.get_mut(&hwnd) {
             let full = Rect::new(0, 0, w.size.0, w.size.1);
@@ -556,6 +600,15 @@ impl Gui {
                 None => r,
             });
             w.erase |= erase;
+        }
+        // Erasing a parent paints over its child controls, which share its
+        // surface: they paint again after it.
+        if erase {
+            let children: Vec<u64> = self.windows.iter()
+                .filter(|(_, w)| w.style & WS_CHILD != 0 && w.owner == hwnd).map(|(&h, _)| h).collect();
+            for child in children {
+                self.invalidate(child, None, true);
+            }
         }
     }
 
@@ -589,6 +642,9 @@ impl Gui {
         match ev {
             Event::Configure { width, height, states, .. } => {
                 let Some(w) = self.windows.get_mut(&hwnd) else { return };
+                // A child control's size is the program's; its hidden PRISM
+                // window only supplies the "configured" state.
+                if w.style & WS_CHILD != 0 { return; }
                 let next_state = if states & proto::state::MINIMIZED != 0 { WS_MINIMIZE }
                     else if states & proto::state::MAXIMIZED != 0 { WS_MAXIMIZE } else { 0 };
                 w.pending_state = None;
@@ -670,6 +726,8 @@ impl Gui {
                 }
             }
             Event::Pointer { kind, x, y, screen_x, screen_y, button, pressed, wheel_v, .. } => {
+                // The pointer belongs to the child control under it.
+                let (hwnd, x, y) = self.child_at(hwnd, x, y);
                 self.last_input = crate::kernel32::tick_ms();
                 // A tracked window the pointer moves out of gets WM_MOUSELEAVE.
                 let leave: Vec<u64> = self.track_leave.iter().copied().filter(|&w| w != hwnd).collect();
@@ -990,6 +1048,7 @@ fn call(proc_: u64, hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
         && proc_ != DefWindowProcA as *const () as usize as u64
         && proc_ != DefWindowProcW as *const () as usize as u64
         && proc_ != DialogWndProc as *const () as usize as u64
+        && proc_ != ControlWndProc as *const () as usize as u64
     {
         return crate::wow64::call32(proc_ as u32, &[hwnd as u32, msg, w as u32, l as u32]) as i32 as i64;
     }
@@ -1026,6 +1085,7 @@ fn guest_wndproc(proc_: u64) -> u64 {
     let symbol = if proc_ == DefWindowProcW as *const () as u64 { Some("DefWindowProcW") }
         else if proc_ == DefWindowProcA as *const () as u64 { Some("DefWindowProcA") }
         else if proc_ == DialogWndProc as *const () as u64 { Some("DialogWndProc") }
+        else if proc_ == ControlWndProc as *const () as u64 { Some("ControlWndProc") }
         else { None };
     match symbol {
         Some(name) => crate::wow64::import_active(name, proc_).map_or_else(|| fail(ERROR_NOT_ENOUGH_MEMORY, 0), u64::from),
@@ -1264,7 +1324,7 @@ fn create_window(
         }
         if ["BUTTON", "STATIC", "EDIT"].iter().any(|n| class.eq_ignore_ascii_case(n))
             && !g.classes.iter().any(|c| c.name.eq_ignore_ascii_case(&class)) {
-            g.classes.push(Class { name: class.clone(), wndproc: DefWindowProcW as *const () as u64, background: 0, icon: 0, cursor: 0, style: 0 });
+            g.classes.push(Class { name: class.clone(), wndproc: ControlWndProc as *const () as u64, background: 0, icon: 0, cursor: 0, style: 0 });
         }
         let ci =
             g.classes.iter().position(|c| c.name.eq_ignore_ascii_case(&class)).ok_or(ERROR_CANNOT_FIND_WND_CLASS)?;
@@ -1555,10 +1615,14 @@ extern "win64" fn ShowWindow(hwnd: u64, cmd: i32) -> Bool {
 fn sync_window_visibility(hwnd: u64) {
     with(|g| {
         let Some(w) = g.windows.get(&hwnd) else { return };
-        let auxiliary = w.owner == (-3i64) as u64 || w.ex_style & (0x80 | 0x08000000) != 0
+        // A child control is drawn into its parent's surface: its own PRISM
+        // window stays hidden and out of the taskbar, or it would show as a
+        // blank window of its own.
+        let child = w.style & WS_CHILD != 0;
+        let auxiliary = child || w.owner == (-3i64) as u64 || w.ex_style & (0x80 | 0x08000000) != 0
             || (w.owner != 0 && w.ex_style & 0x40000 == 0);
         let request = proto::Request::SetWindowVisibility {
-            window: w.win.id, visible: w.visible && w.owner != (-3i64) as u64,
+            window: w.win.id, visible: w.visible && !child && w.owner != (-3i64) as u64,
             taskbar: w.visible && !auxiliary,
         };
         if let Some(c) = g.conn.as_mut() { let _ = c.send(&request, &[]); }
@@ -2676,6 +2740,150 @@ extern "win64" fn DefWindowProcW(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
     }
 }
 
+/// `&` marks an accelerator in a control's text: `&&` is a literal `&`.
+fn strip_accelerator(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            if let Some('&') = chars.peek() {
+                out.push('&');
+                chars.next();
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+const BS_TYPE_MASK: u32 = 0xF;
+const BS_CHECKBOX: u32 = 2;
+const BS_AUTOCHECKBOX: u32 = 3;
+const BS_RADIOBUTTON: u32 = 4;
+const BS_3STATE: u32 = 5;
+const BS_GROUPBOX: u32 = 7;
+const BS_AUTORADIOBUTTON: u32 = 9;
+const WS_DISABLED: u32 = 0x0800_0000;
+
+/// The stock BUTTON, STATIC and EDIT classes, enough for installer dialogs:
+/// text labels, push buttons, check boxes and radio buttons that report
+/// clicks to their parent as WM_COMMAND, and a framed text box. They draw
+/// into the parent's surface like every child control.
+extern "win64" fn ControlWndProc(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
+    const WM_COMMAND: u32 = 0x0111;
+    const BM_SETCHECK: u32 = 0x00F1;
+    const BM_CLICK: u32 = 0x00F5;
+    match msg {
+        WM_PAINT => {
+            let mut ps = [0u8; 72];
+            let dc = BeginPaint(hwnd, ps.as_mut_ptr());
+            if dc != 0 {
+                paint_control(hwnd, dc);
+            }
+            EndPaint(hwnd, ps.as_ptr());
+            0
+        }
+        // Transparent: the parent's background shows through.
+        WM_ERASEBKGND => 1,
+        WM_SETTEXT | BM_SETCHECK => {
+            let r = DefWindowProcW(hwnd, msg, w, l);
+            let parent = with(|g| g.windows.get(&hwnd).map_or(0, |win| win.owner));
+            // The old text or mark is part of the parent's pixels now.
+            InvalidateRect(if parent != 0 { parent } else { hwnd }, core::ptr::null(), TRUE);
+            r
+        }
+        WM_LBUTTONUP | BM_CLICK => {
+            let Some((class, style, owner, id)) = with(|g| g.windows.get(&hwnd).map(|win| (
+                g.classes[win.class].name.to_ascii_uppercase(), win.style, win.owner, win.control_id))) else { return 0 };
+            if class != "BUTTON" || style & WS_DISABLED != 0 || owner == 0 { return 0 }
+            match style & BS_TYPE_MASK {
+                BS_AUTOCHECKBOX | BS_3STATE => with(|g| {
+                    if let Some(win) = g.windows.get_mut(&hwnd) { win.check_state = (win.check_state == 0) as u32; }
+                }),
+                BS_AUTORADIOBUTTON => with(|g| {
+                    let siblings: Vec<u64> = g.windows.iter()
+                        .filter(|(&h, win)| h != hwnd && win.owner == owner && win.style & WS_CHILD != 0
+                            && win.style & BS_TYPE_MASK == BS_AUTORADIOBUTTON && g.classes[win.class].name.eq_ignore_ascii_case("BUTTON"))
+                        .map(|(&h, _)| h).collect();
+                    for h in siblings { if let Some(win) = g.windows.get_mut(&h) { win.check_state = 0; } }
+                    if let Some(win) = g.windows.get_mut(&hwnd) { win.check_state = 1; }
+                }),
+                _ => {}
+            }
+            InvalidateRect(owner, core::ptr::null(), TRUE);
+            SendMessageW(owner, WM_COMMAND, id & 0xFFFF, hwnd as i64); // BN_CLICKED is 0
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, w, l),
+    }
+}
+
+/// Draws one stock control into its paint DC.
+fn paint_control(hwnd: u64, dc: u64) {
+    const DT_RIGHT: u32 = 0x2;
+    const DT_NOPREFIX: u32 = 0x800;
+    let Some((class, style, title, (width, height), check)) = with(|g| g.windows.get(&hwnd).map(|win| (
+        g.classes[win.class].name.to_ascii_uppercase(), win.style, strip_accelerator(&win.title), win.size, win.check_state))) else { return };
+    let (width, height) = (width as i32, height as i32);
+    let stock = |brush: u32| STOCK_BASE + brush as u64;
+    let mut whole = [0, 0, width, height];
+    let text: Vec<u16> = title.encode_utf16().chain(core::iter::once(0)).collect();
+    let disabled = style & WS_DISABLED != 0;
+    SetBkMode(dc, 1);
+    SetTextColor(dc, if disabled { 0x0080_8080 } else { 0 });
+    let put_text = |rect: &mut [i32; 4], fmt: u32| { DrawTextW(dc, text.as_ptr(), -1, rect.as_mut_ptr(), fmt | DT_NOPREFIX); };
+    match class.as_str() {
+        "STATIC" => match style & 0x1F {
+            0..=2 | 0xB | 0xC => {
+                let align = match style & 0x1F { 1 => DT_CENTER, 2 => DT_RIGHT, _ => 0 };
+                let wrap = if matches!(style & 0x1F, 0xB | 0xC) { DT_SINGLELINE } else { DT_WORDBREAK };
+                put_text(&mut whole, align | wrap);
+            }
+            4..=6 => { FillRect(dc, whole.as_ptr(), stock(match style & 0x1F { 4 => BLACK_BRUSH, 5 => GRAY_BRUSH, _ => WHITE_BRUSH })); }
+            7..=9 => { FrameRect(dc, whole.as_ptr(), stock(match style & 0x1F { 7 => BLACK_BRUSH, 8 => GRAY_BRUSH, _ => WHITE_BRUSH })); }
+            _ => {}
+        },
+        "BUTTON" => match style & BS_TYPE_MASK {
+            BS_CHECKBOX | BS_AUTOCHECKBOX | BS_3STATE | BS_RADIOBUTTON | BS_AUTORADIOBUTTON => {
+                let top = (height - 13).max(0) / 2;
+                let boxr = [0, top, 13, top + 13];
+                FillRect(dc, boxr.as_ptr(), stock(WHITE_BRUSH));
+                FrameRect(dc, boxr.as_ptr(), stock(BLACK_BRUSH));
+                if check != 0 {
+                    let mark = [4, top + 4, 9, top + 9];
+                    FillRect(dc, mark.as_ptr(), stock(BLACK_BRUSH));
+                }
+                let mut label = [19, 0, width, height];
+                put_text(&mut label, DT_VCENTER | DT_SINGLELINE);
+            }
+            BS_GROUPBOX => {
+                let mut frame = [0, 6, width, height];
+                FrameRect(dc, frame.as_mut_ptr(), stock(GRAY_BRUSH));
+                let mut label = [8, 0, width, 14];
+                put_text(&mut label, DT_SINGLELINE);
+            }
+            // Push buttons; a default button (1) has the heavier frame.
+            _ => {
+                FillRect(dc, whole.as_ptr(), stock(LTGRAY_BRUSH));
+                FrameRect(dc, whole.as_ptr(), stock(BLACK_BRUSH));
+                if style & BS_TYPE_MASK == 1 && width > 4 && height > 4 {
+                    let inner = [1, 1, width - 1, height - 1];
+                    FrameRect(dc, inner.as_ptr(), stock(BLACK_BRUSH));
+                }
+                put_text(&mut whole, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+        },
+        "EDIT" => {
+            FillRect(dc, whole.as_ptr(), stock(WHITE_BRUSH));
+            FrameRect(dc, whole.as_ptr(), stock(GRAY_BRUSH));
+            let mut inner = [3, 2, (width - 3).max(3), (height - 2).max(2)];
+            put_text(&mut inner, if style & 0x4 != 0 { DT_WORDBREAK } else { DT_SINGLELINE | DT_VCENTER });
+        }
+        _ => {}
+    }
+}
+
 extern "win64" fn SetTimer(hwnd: u64, id: u64, ms: u32, proc_: u64) -> u64 {
     with(|g| {
         if hwnd != 0 && !g.windows.contains_key(&hwnd) {
@@ -3417,7 +3625,8 @@ fn wait_drawable(hwnd: u64) -> bool {
     loop {
         let ok = with(|g| {
             g.pump();
-            g.windows.get(&hwnd).map(|w| w.win.can_draw())
+            let (host, _) = surface_host(&g.windows, hwnd);
+            g.windows.get(&host).map(|w| w.win.can_draw())
         });
         match ok {
             Some(true) => {
@@ -3536,6 +3745,9 @@ fn band_hash_rows(s: &osyx_gfx::Surface<'_>, y0: u32, y1: u32) -> u32 {
 
 fn present(hwnd: u64, r: Option<Rect>) {
     with(|g| {
+        // A child control shows through its top-level window's surface.
+        let (hwnd, origin) = surface_host(&g.windows, hwnd);
+        let r = r.map(|a| Rect::new(a.x + origin.0, a.y + origin.1, a.w, a.h));
         let Some(w) = g.windows.get_mut(&hwnd) else { return };
         let full = Rect::new(0, 0, w.size.0, w.size.1);
         // PRISM copies only the committed rects, so a paint present must also

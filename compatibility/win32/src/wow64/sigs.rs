@@ -80,6 +80,7 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(DefWindowProcW, [Handle, Uint, Handle, Int], U32),
     sig!(DefWindowProcA, [Handle, Uint, Handle, Int], U32),
     sig!(DialogWndProc, [Handle, Uint, Handle, Int], I32),
+    sig!(ControlWndProc, [Handle, Uint, Handle, Int], I32),
     sig!(DeleteFileW, [Ptr], U32),
     sig!(DeleteObject, [Handle], U32),
     sig!(DispatchMessageW, [Ptr], I32),

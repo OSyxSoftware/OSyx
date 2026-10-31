@@ -1,12 +1,12 @@
 {
-  "generated": "2026-10-31T16:20:55Z",
-  "commit": "8ab817ccea",
+  "generated": "2026-10-31T16:26:14Z",
+  "commit": "ab5a1af1ab",
   "windows": "10.0.26100.9711",
   "x64": {
     "reference_exports": 20632,
     "coverage": 13.4,
     "strict": 12.9,
-    "behaviour": 7.3,
+    "behaviour": 7.6,
     "implemented": 2661,
     "partial": 97,
     "stubs": 0,
@@ -30,13 +30,13 @@
         "dll": "kernelbase.dll",
         "total": 2037,
         "coverage": 19.6,
-        "behaviour": 12.6
+        "behaviour": 14.1
       },
       {
         "dll": "kernel32.dll",
         "total": 1698,
         "coverage": 26.1,
-        "behaviour": 16.4
+        "behaviour": 18.0
       },
       {
         "dll": "msvcrt.dll",
@@ -128,8 +128,8 @@
   },
   "tests": {
     "programs": 48,
-    "checks_ok": 2743,
-    "checks_fail": 5
+    "checks_ok": 2745,
+    "checks_fail": 3
   },
   "profiles": {
     "steam": 100.0,

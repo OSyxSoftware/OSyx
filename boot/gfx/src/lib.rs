@@ -178,6 +178,18 @@ impl<'a> Surface<'a> {
         Rect::new(0, 0, self.width, self.height)
     }
 
+    /// A view of `r` (clipped to the surface) whose origin is `r`'s top-left
+    /// corner; it shares the pixels and the stride. `None` if nothing is left.
+    pub fn into_sub(self, r: Rect) -> Option<Surface<'a>> {
+        let r = r.intersect(&self.bounds());
+        if r.w == 0 || r.h == 0 {
+            return None;
+        }
+        let start = r.y as usize * self.stride as usize + r.x as usize;
+        let end = start + (r.h as usize - 1) * self.stride as usize + r.w as usize;
+        Some(Surface { pixels: &mut self.pixels[start..end], width: r.w, height: r.h, stride: self.stride })
+    }
+
     pub fn pixels(&self) -> &[Color] {
         self.pixels
     }
@@ -496,5 +508,23 @@ mod tests {
         assert_eq!(s.get(3, 10), s.get(17, 10));
         assert_eq!(s.get(10, 3), s.get(10, 17));
         assert_eq!(s.get(0, 0), Some(0));
+    }
+
+    #[test]
+    fn sub_surface_shares_pixels_and_clips_to_the_parent() {
+        let mut px = [0u32; 6 * 4];
+        let s = Surface::new(&mut px, 6, 4, 6).unwrap();
+        let mut sub = s.into_sub(Rect::new(4, 2, 5, 5)).unwrap();
+        assert_eq!((sub.width(), sub.height()), (2, 2));
+        sub.fill(7);
+        sub.put(2, 0, 9);
+        assert_eq!(px, [
+            0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 7, 7,
+            0, 0, 0, 0, 7, 7,
+        ]);
+        let s = Surface::new(&mut px, 6, 4, 6).unwrap();
+        assert!(s.into_sub(Rect::new(6, 0, 3, 3)).is_none());
     }
 }

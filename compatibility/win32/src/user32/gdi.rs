@@ -617,7 +617,7 @@ pub(super) fn draw_dc<R>(
         let mut surface = if let (Some(b), Some(p)) = (&bitmap, &mut pixels) {
             Surface::new(p, b.dib.w, b.dib.h, b.dib.w).ok()?
         } else {
-            g.windows.get_mut(&d.hwnd)?.win.surface().ok()?
+            window_surface(&mut g.windows, d.hwnd)?
         };
         let full = surface.bounds().intersect(&d.paint);
         let clips = d.clip.clone().unwrap_or_else(|| Region::from_rect(full));
@@ -643,7 +643,9 @@ pub(super) fn draw_dc<R>(
         if let Some(b) = bitmap {
             g.bitmaps.insert(d.bitmap, b);
         }
-        if let Some(w) = g.windows.get_mut(&d.hwnd) {
+        let (host, origin) = surface_host(&g.windows, d.hwnd);
+        if let Some(w) = g.windows.get_mut(&host) {
+            let touched = Rect::new(touched.x + origin.0, touched.y + origin.1, touched.w, touched.h);
             w.drawn = Some(w.drawn.map(|r| r.union(&touched)).unwrap_or(touched));
         }
         result
@@ -682,7 +684,7 @@ fn snapshot(dc: u64, requested: Rect) -> Option<Snapshot> {
             }
             Some(Snapshot { pixels, area, width, height })
         } else {
-            let s = g.windows.get_mut(&d.hwnd)?.win.surface().ok()?;
+            let s = window_surface(&mut g.windows, d.hwnd)?;
             let (width, height) = (s.width(), s.height());
             let area = requested.intersect(&Rect::new(0, 0, width, height));
             let mut pixels = Vec::with_capacity(area.w as usize * area.h as usize);
@@ -774,6 +776,11 @@ fn fast_blit(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i3
             return None;
         }
         if !src_memory && src_hwnd == 0 {
+            return None;
+        }
+        // A child control has no surface of its own: the general path maps it.
+        let is_child = |h: u64| g.windows.get(&h).is_some_and(|w| w.style & WS_CHILD != 0);
+        if (!src_memory && is_child(src_hwnd)) || (!dst_memory && is_child(dst_hwnd)) {
             return None;
         }
         let paint = d.paint;
