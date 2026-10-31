@@ -7,6 +7,7 @@
 .\scripts\build.ps1 [-Cmdline '…'] [-NoInit] [-KeepRoot] [-DebugBuild] [-Live]
 .\scripts\run-qemu.ps1 [-Cmdline '…'] [-Gdb] [-Follow] [-Headless]
 .\scripts\test.ps1 [-SkipHost] [-SkipQemu]
+.\scripts\i2c-hid-test.ps1          # HID over I2C discovery and refusal under QEMU (docs/i2c-hid.md)
 ```
 
 QEMU runs `q35`, `qemu64,+nx`, 512 MiB, OVMF from the MSYS2 QEMU package
