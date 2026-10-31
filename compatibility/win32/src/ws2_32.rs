@@ -115,6 +115,9 @@ struct Sock {
     /// SO_RCVTIMEO/SO_SNDTIMEO in milliseconds; zero means forever.
     recv_timeout: u32,
     send_timeout: u32,
+    /// SO_REUSEADDR/SO_KEEPALIVE, accepted as no-ops but reported back.
+    reuseaddr: bool,
+    keepalive: bool,
     /// `shutdown(SD_RECEIVE)` / `shutdown(SD_SEND)` were called.
     read_shutdown: bool,
     write_shutdown: bool,
@@ -260,6 +263,8 @@ extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
                 linger: 0,
                 recv_timeout: 0,
                 send_timeout: 0,
+                reuseaddr: false,
+                keepalive: false,
                 read_shutdown: false,
                 write_shutdown: false,
             });
@@ -346,6 +351,8 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
             linger: 0,
             recv_timeout: 0,
             send_timeout: 0,
+            reuseaddr: false,
+            keepalive: false,
             read_shutdown: false,
             write_shutdown: false,
         });
@@ -488,9 +495,21 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
             (SOL_SOCKET, SO_BROADCAST) => {
                 os_sys::sock_ctl(fd, net::ctl::BROADCAST, (int()? != 0) as u64).map(|_| ()).map_err(wsa)
             }
-            // OSyx lets a port be bound again once its old connection is
-            // gone, and does not delay small segments: both are the default.
-            (SOL_SOCKET, SO_REUSEADDR) | (SOL_SOCKET, SO_KEEPALIVE) | (IPPROTO_TCP, TCP_NODELAY) => int().map(|_| ()),
+            (SOL_SOCKET, SO_REUSEADDR) => {
+                let on = int()? != 0;
+                if let Some(sock) = SOCKETS.lock().unwrap().get_mut(&s) {
+                    sock.reuseaddr = on;
+                }
+                Ok(())
+            }
+            (SOL_SOCKET, SO_KEEPALIVE) => {
+                let on = int()? != 0;
+                if let Some(sock) = SOCKETS.lock().unwrap().get_mut(&s) {
+                    sock.keepalive = on;
+                }
+                Ok(())
+            }
+            (IPPROTO_TCP, TCP_NODELAY) => int().map(|_| ()),
             // Linger 0 closes abortively, which the kernel can do; a positive
             // linger only records the value (close never leaves data behind).
             (SOL_SOCKET, SO_LINGER) => {
@@ -548,7 +567,8 @@ extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *
                     Err(e) => wsa(e),
                 }
             }
-            (SOL_SOCKET, SO_REUSEADDR | SO_KEEPALIVE) => 0,
+            (SOL_SOCKET, SO_REUSEADDR) => st.reuseaddr as u32,
+            (SOL_SOCKET, SO_KEEPALIVE) => st.keepalive as u32,
             (SOL_SOCKET, SO_RCVTIMEO) => st.recv_timeout,
             (SOL_SOCKET, SO_SNDTIMEO) => st.send_timeout,
             (IPPROTO_TCP, TCP_NODELAY) if stream => 1,

@@ -180,6 +180,19 @@ void __stdcall start(void) {
     check_eq("select rejects a non-socket in exceptfds", select(0, &none, &none, &ex, &wait_tv), SOCKET_ERROR);
     check_eq("... with WSAENOTSOCK", WSAGetLastError(), WSAENOTSOCK);
 
+    /* Option values round-trip through getsockopt. */
+    SOCKET o = socket(AF_INET, SOCK_STREAM, 0);
+    int en = 1, oval = 0, olen = sizeof oval;
+    check_eq("setsockopt(SO_REUSEADDR)", setsockopt(o, SOL_SOCKET, SO_REUSEADDR, (const char *)&en, sizeof en), 0);
+    check("getsockopt(SO_REUSEADDR) returns it",
+          getsockopt(o, SOL_SOCKET, SO_REUSEADDR, (char *)&oval, &olen) == 0 && oval == 1);
+    oval = 0;
+    olen = sizeof oval;
+    check_eq("setsockopt(SO_KEEPALIVE)", setsockopt(o, SOL_SOCKET, SO_KEEPALIVE, (const char *)&en, sizeof en), 0);
+    check("getsockopt(SO_KEEPALIVE) returns it",
+          getsockopt(o, SOL_SOCKET, SO_KEEPALIVE, (char *)&oval, &olen) == 0 && oval == 1);
+    closesocket(o);
+
     /* UDP echo with the host. */
     SOCKET u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     a.sin_port = htons((u_short)udp_port);
