@@ -24,6 +24,12 @@
     "UiaReturnRawElementProvider": "with no UI Automation client no WM_GETOBJECT is answered: 0 is the not-handled result",
     "UiaRaiseAutomationEvent": "with no listening client an event has nobody to reach; Windows returns S_OK then",
     "UiaRaiseAutomationPropertyChangedEvent": "with no listening client a change has nobody to reach; Windows returns S_OK then",
-    "singleton_ref": "COM AddRef/Release of static objects: the count never changes, 1 is the Windows result for a static singleton"
+    "singleton_ref": "COM AddRef/Release of static objects: the count never changes, 1 is the Windows result for a static singleton",
+    "waveOutGetNumDevs": "OSyx has no sound or MIDI hardware: zero devices is the true count",
+    "waveInGetNumDevs": "OSyx has no sound or MIDI hardware: zero devices is the true count",
+    "midiOutGetNumDevs": "OSyx has no sound or MIDI hardware: zero devices is the true count",
+    "midiInGetNumDevs": "OSyx has no sound or MIDI hardware: zero devices is the true count",
+    "StreamCommit": "a memory stream has nothing to flush or roll back: Windows returns S_OK (probed)",
+    "StreamRevert": "a memory stream has nothing to flush or roll back: Windows returns S_OK (probed)"
   }
 }

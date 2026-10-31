@@ -128,6 +128,9 @@ extern "win64" fn FakeHandle(_a: u32) -> u64 { 0x20_0001 }
 extern "win64" fn Named(_a: u32) -> u32 { HKL_US }
 extern "win64" fn ErrConst(_a: u32) -> u32 { E_NOTIMPL }
 extern "win64" fn HexErr(_a: u32) -> u32 { 0x8000_4001 }
+extern "win64" fn MmErr(_a: u32) -> u32 { MMSYSERR_INVALHANDLE }
+extern "win64" fn StgErr(_a: u32) -> u32 { STG_E_INVALIDFUNCTION }
+extern "win64" fn MmOk(_a: u32) -> u32 { MMSYSERR_NOERROR }
 extern "win64" fn Pass(c: u64) -> u64 { c }
 ''')
         self.assertEqual(got["Real"], "implemented")
@@ -145,6 +148,9 @@ extern "win64" fn Pass(c: u64) -> u64 { c }
         self.assertEqual(got["FakeHandle"], "stub_success")
         self.assertEqual(got["Named"], "stub_success")
         self.assertEqual(got["ErrConst"], "unsupported")
+        self.assertEqual(got["MmErr"], "unsupported")
+        self.assertEqual(got["StgErr"], "unsupported")
+        self.assertEqual(got["MmOk"], "stub_success")
         self.assertEqual(got["HexErr"], "unsupported")
 
 

@@ -379,7 +379,7 @@ def classify(fn: RustFn, index: dict, seen=None):
     plain = re.sub(r"^(?:\w+::)+", "", last)
     sole = len(stmts) == 1 and re.fullmatch(r"[A-Za-z_]\w*|0[xX][0-9A-Fa-f_]+|\d[\d_]*(?:[ui]\d+|usize)?", plain)
     if sole and not used and fn.params and plain not in SUCCESS_CONST and plain not in EMPTY_CONST:
-        error_name = re.match(r"(?:E_|OLE_E_|DV_E_|CLASS_E_|STATUS_(?:NOT|INVALID|UNSUCC|ACCESS|BUFFER))|.*NOT_SUPPORTED|.*NOT_IMPL", plain)
+        error_name = re.match(r"(?:E_|OLE_E_|DV_E_|CLASS_E_|STG_E_|MMSYSERR_(?!NOERROR)|WAVERR_(?!NOERROR)|MIDIERR_(?!NOERROR)|STATUS_(?:NOT|INVALID|UNSUCC|ACCESS|BUFFER))|.*NOT_SUPPORTED|.*NOT_IMPL", plain)
         error_code = re.fullmatch(r"0[xX]8[0-9A-Fa-f_]{7}", plain.replace("_", ""))
         if error_name or error_code:
             fn.cls, fn.reason = "unsupported", "returns the error constant %s" % plain

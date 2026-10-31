@@ -8,6 +8,7 @@
 #include <security.h>
 #include <winspool.h>
 #include <shlobj.h>
+#include <objidl.h>
 
 #define STATUS_INVALID_HANDLE_ ((NTSTATUS)0xC0000008)
 #define STATUS_INVALID_PARAMETER_ ((NTSTATUS)0xC000000D)
@@ -211,11 +212,122 @@ static void accessibility_and_crt(void) {
     }
 }
 
+/* ---- winmm devices, raw input and touch, IP interfaces, memory streams ---- */
+
+static void devices_and_input(void) {
+    char buf[64];
+    UINT size = 64, count = 7;
+    UINT (WINAPI *num_devs[4])(void);
+    HMODULE winmm = LoadLibraryA("winmm.dll"), user = LoadLibraryA("user32.dll");
+    const char *names[4] = { "waveOutGetNumDevs", "waveInGetNumDevs", "midiOutGetNumDevs", "midiInGetNumDevs" };
+    int none = winmm != NULL;
+    for (int i = 0; none && i < 4; i++) {
+        num_devs[i] = (void *)GetProcAddress(winmm, names[i]);
+        none = num_devs[i] && num_devs[i]() == 0;
+    }
+    check("winmm reports no wave or MIDI devices", none);
+    UINT (WINAPI *wave_caps)(UINT_PTR, void *, UINT) = (void *)GetProcAddress(winmm, "waveOutGetDevCapsW");
+    UINT (WINAPI *wave_open)(void *, UINT, const void *, DWORD_PTR, DWORD_PTR, DWORD) = (void *)GetProcAddress(winmm, "waveOutOpen");
+    UINT (WINAPI *wave_close)(HANDLE) = (void *)GetProcAddress(winmm, "waveOutClose");
+    UINT (WINAPI *wave_write)(HANDLE, void *, UINT) = (void *)GetProcAddress(winmm, "waveOutWrite");
+    UINT (WINAPI *midi_short)(HANDLE, DWORD) = (void *)GetProcAddress(winmm, "midiOutShortMsg");
+    UINT (WINAPI *midi_start)(HANDLE) = (void *)GetProcAddress(winmm, "midiInStart");
+    HANDLE opened = NULL;
+    check("a device id names no device: MMSYSERR_BADDEVICEID", wave_caps && wave_caps(9999, buf, 8) == 2 && wave_open && wave_open(&opened, 9999, buf, 0, 0, 0) == 2 && opened == NULL);
+    check("a wave handle is invalid: MMSYSERR_INVALHANDLE", wave_close && wave_close((HANDLE)0x1234) == 5);
+    check("a wave header of the wrong size is MMSYSERR_INVALPARAM", wave_write && wave_write((HANDLE)0x1234, buf, 32) == 11);
+    check("a MIDI handle is invalid: MMSYSERR_INVALHANDLE", midi_short && midi_short((HANDLE)0x1234, 0) == 5 && midi_start && midi_start((HANDLE)0x1234) == 5);
+
+    UINT (WINAPI *list)(void *, UINT *, UINT) = user ? (void *)GetProcAddress(user, "GetRawInputDeviceList") : NULL;
+    UINT (WINAPI *info)(HANDLE, UINT, void *, UINT *) = user ? (void *)GetProcAddress(user, "GetRawInputDeviceInfoW") : NULL;
+    UINT (WINAPI *data)(HANDLE, UINT, void *, UINT *, UINT) = user ? (void *)GetProcAddress(user, "GetRawInputData") : NULL;
+    BOOL (WINAPI *pointer_type)(UINT, void *) = user ? (void *)GetProcAddress(user, "GetPointerType") : NULL;
+    BOOL (WINAPI *touch_info)(HANDLE, UINT, void *, int) = user ? (void *)GetProcAddress(user, "GetTouchInputInfo") : NULL;
+    BOOL (WINAPI *touch_close)(HANDLE) = user ? (void *)GetProcAddress(user, "CloseTouchInputHandle") : NULL;
+    BOOL (WINAPI *gesture_info)(HANDLE, void *) = user ? (void *)GetProcAddress(user, "GetGestureInfo") : NULL;
+    BOOL (WINAPI *layered)(HWND, DWORD *, BYTE *, DWORD *) = user ? (void *)GetProcAddress(user, "GetLayeredWindowAttributes") : NULL;
+    SetLastError(0);
+    check("GetRawInputDeviceList without a count is ERROR_NOACCESS", list && list(NULL, NULL, 16) == (UINT)-1 && GetLastError() == ERROR_NOACCESS);
+    SetLastError(0);
+    check("GetRawInputDeviceList with a wrong element size is ERROR_INVALID_PARAMETER", list && list(NULL, &count, 4) == (UINT)-1 && GetLastError() == ERROR_INVALID_PARAMETER);
+    check("GetRawInputDeviceList finds no devices", list && list(NULL, &count, 16) == 0 && count == 0);
+    SetLastError(0);
+    check("GetRawInputDeviceInfoW of an unknown handle is ERROR_INVALID_HANDLE", info && info((HANDLE)0x1234, 0x20000007, buf, &size) == (UINT)-1 && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0);
+    check("GetRawInputData of an unknown handle is ERROR_INVALID_HANDLE", data && data((HANDLE)0x1234, 0x10000003, buf, &size, 24) == (UINT)-1 && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0);
+    check("GetPointerType of an unknown pointer is ERROR_INVALID_PARAMETER", pointer_type && !pointer_type(0xFFFF, buf) && GetLastError() == ERROR_INVALID_PARAMETER);
+    SetLastError(0);
+    check("GetTouchInputInfo / CloseTouchInputHandle of an unknown handle are ERROR_INVALID_HANDLE", touch_info && !touch_info((HANDLE)0x1234, 1, buf, 40) && GetLastError() == ERROR_INVALID_HANDLE && touch_close && !touch_close((HANDLE)0x1234) && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0);
+    check("GetGestureInfo of an unknown handle is ERROR_INVALID_PARAMETER", gesture_info && !gesture_info((HANDLE)0x1234, buf) && GetLastError() == ERROR_INVALID_PARAMETER);
+    SetLastError(0);
+    check("GetLayeredWindowAttributes of an unknown window is ERROR_INVALID_WINDOW_HANDLE", layered && !layered((HWND)0x1234, NULL, NULL, NULL) && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+}
+
+static void interfaces_and_streams(void) {
+    HMODULE ip = LoadLibraryA("iphlpapi.dll");
+    ULONG (WINAPI *interface_table)(USHORT, void **) = ip ? (void *)GetProcAddress(ip, "GetIpInterfaceTable") : NULL;
+    void (WINAPI *free_table)(void *) = ip ? (void *)GetProcAddress(ip, "FreeMibTable") : NULL;
+    ULONG (WINAPI *best)(const void *, DWORD *) = ip ? (void *)GetProcAddress(ip, "GetBestInterfaceEx") : NULL;
+    char *(WINAPI *index_to_name)(ULONG, char *) = ip ? (void *)GetProcAddress(ip, "if_indextoname") : NULL;
+    ULONG (WINAPI *name_to_index)(const char *) = ip ? (void *)GetProcAddress(ip, "if_nametoindex") : NULL;
+    unsigned char *table = NULL;
+    check("GetIpInterfaceTable(AF_INET) returns a table", interface_table && interface_table(2, (void **)&table) == 0 && table != NULL);
+    ULONG entries = table ? *(ULONG *)table : 0;
+    check("every row is AF_INET with the LUID index of its interface", entries > 0 && *(USHORT *)(table + 8) == 2 && (*(ULONGLONG *)(table + 8 + 8) >> 24 & 0xFFFFFF) == *(ULONG *)(table + 8 + 16));
+    ULONG first_index = table ? *(ULONG *)(table + 8 + 16) : 0;
+    if (free_table) free_table(table);
+    if (free_table) free_table(NULL);
+    unsigned char *empty = NULL;
+    check("GetIpInterfaceTable(AF_INET6) is an empty table", interface_table && interface_table(23, (void **)&empty) == 0 && empty && *(ULONG *)empty == 0);
+    if (free_table) free_table(empty);
+    check("GetIpInterfaceTable rejects an unknown family and a NULL table", interface_table && interface_table(77, NULL) == ERROR_INVALID_PARAMETER && interface_table(77, (void **)&empty) == ERROR_INVALID_PARAMETER);
+    unsigned char dest[16] = { 2, 0, 0, 0, 127, 0, 0, 1 };
+    DWORD index = 0xFFFFFFFF;
+    check("GetBestInterfaceEx rejects NULL arguments", best && best(NULL, NULL) == ERROR_INVALID_PARAMETER);
+    check("GetBestInterfaceEx for 127.0.0.1 picks an interface", best && best(dest, &index) == 0 && index != 0xFFFFFFFF);
+    char name[64] = { 0 };
+    check("if_indextoname / if_nametoindex round trip", index_to_name && name_to_index && index_to_name(first_index, name) == name && name[0] && name_to_index(name) == first_index);
+    check("if_indextoname of an unknown index is NULL", index_to_name && index_to_name(99999, name) == NULL);
+
+    HMODULE ole = LoadLibraryA("ole32.dll");
+    HRESULT (WINAPI *create)(HGLOBAL, BOOL, IStream **) = ole ? (void *)GetProcAddress(ole, "CreateStreamOnHGlobal") : NULL;
+    IStream *s = NULL, *c = NULL, *d = NULL;
+    char buf[16] = { 0 };
+    ULONG n = 0;
+    LARGE_INTEGER zero = { 0 }, minus = { 0 };
+    ULARGE_INTEGER pos, size, rd, wr;
+    minus.QuadPart = -1;
+    check("CreateStreamOnHGlobal(NULL) makes a stream; a NULL out is E_INVALIDARG", create && create(NULL, TRUE, &s) == S_OK && s && create(NULL, TRUE, NULL) == E_INVALIDARG);
+    if (!s) return;
+    check("Write stores the bytes", s->lpVtbl->Write(s, "abcd", 4, &n) == S_OK && n == 4);
+    check("Seek(0, SET) rewinds", s->lpVtbl->Seek(s, zero, STREAM_SEEK_SET, &pos) == S_OK && pos.QuadPart == 0);
+    check("Read returns the bytes and S_OK even past the end", s->lpVtbl->Read(s, buf, 10, &n) == S_OK && n == 4 && buf[0] == 'a' && buf[3] == 'd' && s->lpVtbl->Read(s, buf, 10, &n) == S_OK && n == 0);
+    check("a negative position or an unknown origin is STG_E_SEEKERROR", s->lpVtbl->Seek(s, minus, STREAM_SEEK_SET, &pos) == STG_E_SEEKERROR && s->lpVtbl->Seek(s, zero, 7, &pos) == STG_E_SEEKERROR);
+    minus.QuadPart = 100;
+    check("writing beyond the end grows the stream with zeros", s->lpVtbl->Seek(s, minus, STREAM_SEEK_SET, &pos) == S_OK && pos.QuadPart == 100 && s->lpVtbl->Write(s, "x", 1, &n) == S_OK && s->lpVtbl->Seek(s, zero, STREAM_SEEK_END, &pos) == S_OK && pos.QuadPart == 101);
+    size.QuadPart = 2;
+    STATSTG st;
+    check("SetSize truncates; Stat reports a stream of that size", s->lpVtbl->SetSize(s, size) == S_OK && s->lpVtbl->Stat(s, &st, STATFLAG_NONAME) == S_OK && st.type == STGTY_STREAM && st.cbSize.QuadPart == 2 && st.pwcsName == NULL);
+    check("Commit and Revert succeed; LockRegion is STG_E_INVALIDFUNCTION", s->lpVtbl->Commit(s, 0) == S_OK && s->lpVtbl->Revert(s) == S_OK && s->lpVtbl->LockRegion(s, pos, pos, LOCK_WRITE) == STG_E_INVALIDFUNCTION);
+    check("Clone shares the bytes with its own position", s->lpVtbl->Seek(s, zero, STREAM_SEEK_SET, &pos) == S_OK && s->lpVtbl->Clone(s, &c) == S_OK && c->lpVtbl->Read(c, buf, 2, &n) == S_OK && n == 2 && c->lpVtbl->Write(c, "ZZ", 2, &n) == S_OK && s->lpVtbl->Seek(s, zero, STREAM_SEEK_SET, &pos) == S_OK && s->lpVtbl->Read(s, buf, 4, &n) == S_OK && n == 4 && buf[0] == 'a' && buf[2] == 'Z');
+    size.QuadPart = 100;
+    check("CopyTo copies from the position", create(NULL, TRUE, &d) == S_OK && s->lpVtbl->Seek(s, zero, STREAM_SEEK_SET, &pos) == S_OK && s->lpVtbl->CopyTo(s, d, size, &rd, &wr) == S_OK && rd.QuadPart == 4 && wr.QuadPart == 4);
+    void *other = NULL;
+    check("QueryInterface answers IUnknown and IStream, not IDispatch", s->lpVtbl->QueryInterface(s, &IID_IUnknown, &other) == S_OK && s->lpVtbl->QueryInterface(s, &IID_IStream, &other) == S_OK && s->lpVtbl->QueryInterface(s, &IID_IDispatch, &other) == E_NOINTERFACE && other == NULL);
+    check("Release counts the extra references", s->lpVtbl->Release(s) == 2 && s->lpVtbl->Release(s) == 1 && s->lpVtbl->Release(s) == 0);
+    c->lpVtbl->Release(c);
+    d->lpVtbl->Release(d);
+}
+
 void __stdcall start(void) {
     hashes();
     randomness();
     secur();
     shell_and_print();
     accessibility_and_crt();
+    devices_and_input();
+    interfaces_and_streams();
     finish("newlibs");
 }

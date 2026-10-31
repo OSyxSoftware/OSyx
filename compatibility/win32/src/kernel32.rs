@@ -2527,7 +2527,7 @@ extern "win64" fn GlobalUnlock(h: u64) -> Bool {
     TRUE
 }
 
-extern "win64" fn GlobalSize(h: u64) -> usize {
+pub(crate) extern "win64" fn GlobalSize(h: u64) -> usize {
     if h == 0 {
         return fail(ERROR_INVALID_HANDLE, 0);
     }

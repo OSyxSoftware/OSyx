@@ -942,6 +942,279 @@ extern "win64" fn EnumClone(this: u64, out: *mut u64) -> u32 {
     S_OK
 }
 
+// ---- IStream over memory ------------------------------------------------------------------
+//
+// CreateStreamOnHGlobal(NULL, ...): a growable memory stream. The bytes live
+// in a buffer the stream owns and shares with its clones, each clone with its
+// own seek pointer. Results follow Windows (probed with the same calls).
+
+const STG_E_INVALIDFUNCTION: u32 = 0x8003_0001;
+const STG_E_SEEKERROR: u32 = 0x8003_0019;
+const STG_E_MEDIUMFULL: u32 = 0x8003_0070;
+const IID_ISEQUENTIALSTREAM: [u8; 16] = [0x30, 0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11, 0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d];
+const IID_ISTREAM: [u8; 16] = [0x0c, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
+const STGTY_STREAM: u32 = 2;
+/// Memory a stream will not grow to: a seek or SetSize beyond it fails.
+const STREAM_LIMIT: u64 = 1 << 31;
+
+/// IStream's vtable: IUnknown, Read, Write, Seek, SetSize, CopyTo, Commit,
+/// Revert, LockRegion, UnlockRegion, Stat, Clone.
+#[repr(C)]
+struct StreamVtbl {
+    query_interface: extern "win64" fn(u64, *const [u8; 16], *mut u64) -> u32,
+    add_ref: extern "win64" fn(u64) -> u32,
+    release: extern "win64" fn(u64) -> u32,
+    read: extern "win64" fn(u64, *mut u8, u32, *mut u32) -> u32,
+    write: extern "win64" fn(u64, *const u8, u32, *mut u32) -> u32,
+    seek: extern "win64" fn(u64, i64, u32, *mut u64) -> u32,
+    set_size: extern "win64" fn(u64, u64) -> u32,
+    copy_to: extern "win64" fn(u64, u64, u64, *mut u64, *mut u64) -> u32,
+    commit: extern "win64" fn(u64, u32) -> u32,
+    revert: extern "win64" fn(u64) -> u32,
+    lock_region: extern "win64" fn(u64, u64, u64, u32) -> u32,
+    unlock_region: extern "win64" fn(u64, u64, u64, u32) -> u32,
+    stat: extern "win64" fn(u64, *mut u8, u32) -> u32,
+    clone: extern "win64" fn(u64, *mut u64) -> u32,
+}
+
+#[repr(C)]
+struct MemStream {
+    vtbl: &'static StreamVtbl,
+    refs: AtomicU32,
+    data: alloc::sync::Arc<Mutex<Vec<u8>>>,
+    pos: Mutex<u64>,
+}
+
+static STREAM_VTBL: StreamVtbl = StreamVtbl {
+    query_interface: StreamQueryInterface,
+    add_ref: StreamAddRef,
+    release: StreamRelease,
+    read: StreamRead,
+    write: StreamWrite,
+    seek: StreamSeek,
+    set_size: StreamSetSize,
+    copy_to: StreamCopyTo,
+    commit: StreamCommit,
+    revert: StreamRevert,
+    lock_region: StreamLockRegion,
+    unlock_region: StreamLockRegion,
+    stat: StreamStat,
+    clone: StreamClone,
+};
+
+fn stream<'a>(this: u64) -> &'a MemStream {
+    // SAFETY: a MemStream made by `new_stream`.
+    unsafe { &*(this as *const MemStream) }
+}
+
+fn new_stream(data: alloc::sync::Arc<Mutex<Vec<u8>>>, pos: u64) -> u64 {
+    Box::into_raw(Box::new(MemStream { vtbl: &STREAM_VTBL, refs: AtomicU32::new(1), data, pos: Mutex::new(pos) })) as u64
+}
+
+/// CreateStreamOnHGlobal(hglobal, deleteOnRelease, &stream). A stream on a
+/// block the caller keeps (deleteOnRelease FALSE) would have to write into
+/// that block; OSyx has no such stream, so it is refused.
+extern "win64" fn CreateStreamOnHGlobal(hglobal: u64, delete_on_release: i32, out: *mut u64) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    let mut bytes = Vec::new();
+    if hglobal != 0 {
+        if delete_on_release == 0 {
+            return E_NOTIMPL;
+        }
+        let size = kernel32::GlobalSize(hglobal);
+        // SAFETY: a fixed block of `size` bytes whose ownership passes to the stream.
+        bytes.extend_from_slice(unsafe { core::slice::from_raw_parts(hglobal as *const u8, size) });
+        kernel32::global_free(hglobal);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = new_stream(alloc::sync::Arc::new(Mutex::new(bytes)), 0) };
+    S_OK
+}
+
+extern "win64" fn StreamQueryInterface(this: u64, riid: *const [u8; 16], out: *mut u64) -> u32 {
+    if riid.is_null() || out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's IID and out pointer.
+    unsafe {
+        if *riid == IID_IUNKNOWN || *riid == IID_ISEQUENTIALSTREAM || *riid == IID_ISTREAM {
+            StreamAddRef(this);
+            *out = this;
+            return S_OK;
+        }
+        *out = 0;
+    }
+    E_NOINTERFACE
+}
+
+extern "win64" fn StreamAddRef(this: u64) -> u32 {
+    stream(this).refs.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+extern "win64" fn StreamRelease(this: u64) -> u32 {
+    let left = stream(this).refs.fetch_sub(1, Ordering::AcqRel) - 1;
+    if left == 0 {
+        // SAFETY: the last reference: the Box from `new_stream`.
+        drop(unsafe { Box::from_raw(this as *mut MemStream) });
+    }
+    left
+}
+
+extern "win64" fn StreamRead(this: u64, buf: *mut u8, len: u32, read: *mut u32) -> u32 {
+    let st = stream(this);
+    let data = st.data.lock().unwrap();
+    let mut pos = st.pos.lock().unwrap();
+    let start = (*pos).min(data.len() as u64) as usize;
+    let n = (data.len() - start).min(len as usize);
+    if n > 0 {
+        if buf.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: the caller's buffer holds `len` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(data[start..].as_ptr(), buf, n) };
+    }
+    *pos += n as u64;
+    if !read.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *read = n as u32 };
+    }
+    S_OK
+}
+
+/// Writes at the seek pointer; a pointer beyond the end grows the stream
+/// with zero bytes first.
+fn write_at(st: &MemStream, bytes: &[u8]) -> u32 {
+    let mut data = st.data.lock().unwrap();
+    let mut pos = st.pos.lock().unwrap();
+    let end = *pos + bytes.len() as u64;
+    if end > STREAM_LIMIT {
+        return STG_E_MEDIUMFULL;
+    }
+    if data.len() < end as usize {
+        data.resize(end as usize, 0);
+    }
+    data[*pos as usize..end as usize].copy_from_slice(bytes);
+    *pos = end;
+    S_OK
+}
+
+extern "win64" fn StreamWrite(this: u64, buf: *const u8, len: u32, written: *mut u32) -> u32 {
+    if len > 0 && buf.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's buffer holds `len` bytes.
+    let bytes = if len == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(buf, len as usize) } };
+    let hr = write_at(stream(this), bytes);
+    if !written.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *written = if hr == S_OK { len } else { 0 } };
+    }
+    hr
+}
+
+extern "win64" fn StreamSeek(this: u64, delta: i64, origin: u32, new_pos: *mut u64) -> u32 {
+    let st = stream(this);
+    let len = st.data.lock().unwrap().len() as i64;
+    let mut pos = st.pos.lock().unwrap();
+    let base = match origin {
+        0 => 0,
+        1 => *pos as i64,
+        2 => len,
+        _ => return STG_E_SEEKERROR,
+    };
+    let target = match base.checked_add(delta) {
+        Some(t) if t >= 0 && (t as u64) <= STREAM_LIMIT => t as u64,
+        _ => return STG_E_SEEKERROR,
+    };
+    *pos = target;
+    if !new_pos.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *new_pos = target };
+    }
+    S_OK
+}
+
+extern "win64" fn StreamSetSize(this: u64, size: u64) -> u32 {
+    if size > STREAM_LIMIT {
+        return STG_E_MEDIUMFULL;
+    }
+    stream(this).data.lock().unwrap().resize(size as usize, 0);
+    S_OK
+}
+
+extern "win64" fn StreamCopyTo(this: u64, dest: u64, len: u64, read: *mut u64, written: *mut u64) -> u32 {
+    if dest == 0 {
+        return E_INVALIDARG;
+    }
+    let bytes = {
+        let st = stream(this);
+        let data = st.data.lock().unwrap();
+        let mut pos = st.pos.lock().unwrap();
+        let start = (*pos).min(data.len() as u64) as usize;
+        let n = ((data.len() - start) as u64).min(len) as usize;
+        *pos += n as u64;
+        data[start..start + n].to_vec()
+    };
+    let mut put = 0u32;
+    // SAFETY: `dest` is a COM stream: its first word is its vtable, whose
+    // Write is slot 4.
+    let hr = unsafe {
+        let write: extern "win64" fn(u64, *const u8, u32, *mut u32) -> u32 = core::mem::transmute(*(*(dest as *const *const usize)).add(4));
+        write(dest, bytes.as_ptr(), bytes.len() as u32, &mut put)
+    };
+    // SAFETY: the callers' out pointers.
+    unsafe {
+        if !read.is_null() {
+            *read = bytes.len() as u64;
+        }
+        if !written.is_null() {
+            *written = put as u64;
+        }
+    }
+    hr
+}
+
+/// A memory stream has nothing to flush or roll back.
+extern "win64" fn StreamCommit(_this: u64, _flags: u32) -> u32 {
+    S_OK
+}
+extern "win64" fn StreamRevert(_this: u64) -> u32 {
+    S_OK
+}
+
+/// LockRegion and UnlockRegion: memory streams do not support locking.
+extern "win64" fn StreamLockRegion(_this: u64, _offset: u64, _len: u64, _kind: u32) -> u32 {
+    STG_E_INVALIDFUNCTION
+}
+
+/// STATSTG (80 bytes): the type at 8 and the size at 16 are all a memory
+/// stream has; the name is never returned.
+extern "win64" fn StreamStat(this: u64, out: *mut u8, _flags: u32) -> u32 {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: the caller's STATSTG.
+    unsafe {
+        core::ptr::write_bytes(out, 0, 80);
+        *(out.add(8) as *mut u32) = STGTY_STREAM;
+        *(out.add(16) as *mut u64) = stream(this).data.lock().unwrap().len() as u64;
+    }
+    S_OK
+}
+
+extern "win64" fn StreamClone(this: u64, out: *mut u64) -> u32 {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    let st = stream(this);
+    let pos = *st.pos.lock().unwrap();
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = new_stream(st.data.clone(), pos) };
+    S_OK
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     let mut e = export_table![
         CoTaskMemAlloc,
@@ -973,7 +1246,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         OleGetClipboard,
         OleFlushClipboard,
         OleIsCurrentClipboard,
-        ReleaseStgMedium
+        ReleaseStgMedium,
+        CreateStreamOnHGlobal
     ];
     e.push(("PropVariantClear", crate::propsys::PropVariantClear as *const () as u64));
     e

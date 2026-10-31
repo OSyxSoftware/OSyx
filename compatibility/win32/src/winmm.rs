@@ -64,6 +64,180 @@ extern "win64" fn PlaySoundW(sound: *const u16, _module: u64, flags: u32) -> i32
     (sound.is_null() || flags & SND_PURGE != 0) as i32
 }
 
+// ---- waveform and MIDI devices ------------------------------------------------------------
+//
+// OSyx has neither sound output or input nor MIDI ports, so every device
+// count is zero and no device id exists. The calls answer as winmm does for
+// ids and handles it does not know (checked against Windows with bogus
+// arguments): MMSYSERR_BADDEVICEID for an id, MMSYSERR_INVALHANDLE for a
+// handle, MMSYSERR_INVALPARAM for a header of the wrong size.
+
+const MMSYSERR_BADDEVICEID: u32 = 2;
+const MMSYSERR_INVALHANDLE: u32 = 5;
+const MMSYSERR_INVALPARAM: u32 = 11;
+/// sizeof(WAVEHDR) on x64.
+const WAVEHDR_SIZE: u32 = 48;
+
+/// Number of waveform output devices.
+extern "win64" fn waveOutGetNumDevs() -> u32 {
+    0
+}
+
+/// Number of waveform input devices.
+extern "win64" fn waveInGetNumDevs() -> u32 {
+    0
+}
+
+/// Number of MIDI output devices.
+extern "win64" fn midiOutGetNumDevs() -> u32 {
+    0
+}
+
+/// Number of MIDI input devices.
+extern "win64" fn midiInGetNumDevs() -> u32 {
+    0
+}
+
+/// Every *GetDevCaps*: with no device, no id is valid.
+extern "win64" fn waveOutGetDevCapsA(_id: u64, _caps: *mut u8, _size: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn waveOutGetDevCapsW(_id: u64, _caps: *mut u8, _size: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn waveInGetDevCapsA(_id: u64, _caps: *mut u8, _size: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn waveInGetDevCapsW(_id: u64, _caps: *mut u8, _size: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn midiOutGetDevCapsA(_id: u64, _caps: *mut u8, _size: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn midiOutGetDevCapsW(_id: u64, _caps: *mut u8, _size: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn midiInGetDevCapsA(_id: u64, _caps: *mut u8, _size: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn midiInGetDevCapsW(_id: u64, _caps: *mut u8, _size: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+
+/// Opening a device: the id names no device. Nothing is written to *handle.
+extern "win64" fn waveOutOpen(_handle: *mut u64, _id: u32, _format: *const u8, _callback: u64, _instance: u64, _flags: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn waveInOpen(_handle: *mut u64, _id: u32, _format: *const u8, _callback: u64, _instance: u64, _flags: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn midiOutOpen(_handle: *mut u64, _id: u32, _callback: u64, _instance: u64, _flags: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn midiInOpen(_handle: *mut u64, _id: u32, _callback: u64, _instance: u64, _flags: u32) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+
+/// Wave headers: the size is checked before the handle, as winmm does.
+fn wave_header(header: *const u8, size: u32) -> u32 {
+    if header.is_null() || size != WAVEHDR_SIZE {
+        MMSYSERR_INVALPARAM
+    } else {
+        MMSYSERR_INVALHANDLE
+    }
+}
+extern "win64" fn waveOutPrepareHeader(_h: u64, header: *const u8, size: u32) -> u32 {
+    wave_header(header, size)
+}
+extern "win64" fn waveOutUnprepareHeader(_h: u64, header: *const u8, size: u32) -> u32 {
+    wave_header(header, size)
+}
+extern "win64" fn waveOutWrite(_h: u64, header: *const u8, size: u32) -> u32 {
+    wave_header(header, size)
+}
+
+/// Handle-only calls: no handle is ever valid.
+extern "win64" fn waveOutClose(_h: u64) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn waveOutPause(_h: u64) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn waveOutRestart(_h: u64) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn waveOutReset(_h: u64) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn waveOutGetPosition(_h: u64, _time: *mut u8, _size: u32) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiOutClose(_h: u64) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiOutReset(_h: u64) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiOutShortMsg(_h: u64, _message: u32) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiOutLongMsg(_h: u64, _header: *const u8, _size: u32) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiOutPrepareHeader(_h: u64, _header: *const u8, _size: u32) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiOutUnprepareHeader(_h: u64, _header: *const u8, _size: u32) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiInClose(_h: u64) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiInStart(_h: u64) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiInStop(_h: u64) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiInReset(_h: u64) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiInAddBuffer(_h: u64, _header: *const u8, _size: u32) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiInPrepareHeader(_h: u64, _header: *const u8, _size: u32) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+extern "win64" fn midiInUnprepareHeader(_h: u64, _header: *const u8, _size: u32) -> u32 {
+    MMSYSERR_INVALHANDLE
+}
+
+/// The driver message calls take a device id or a handle; neither names a
+/// device here.
+extern "win64" fn waveOutMessage(_h: u64, _message: u32, _a: u64, _b: u64) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn waveInMessage(_h: u64, _message: u32, _a: u64, _b: u64) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn midiOutMessage(_h: u64, _message: u32, _a: u64, _b: u64) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+extern "win64" fn midiInMessage(_h: u64, _message: u32, _a: u64, _b: u64) -> u32 {
+    MMSYSERR_BADDEVICEID
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![timeGetTime, timeBeginPeriod, timeEndPeriod, timeGetDevCaps, PlaySoundW]
+    export_table![
+        timeGetTime, timeBeginPeriod, timeEndPeriod, timeGetDevCaps, PlaySoundW,
+        waveOutGetNumDevs, waveInGetNumDevs, midiOutGetNumDevs, midiInGetNumDevs,
+        waveOutGetDevCapsA, waveOutGetDevCapsW, waveInGetDevCapsA, waveInGetDevCapsW,
+        midiOutGetDevCapsA, midiOutGetDevCapsW, midiInGetDevCapsA, midiInGetDevCapsW,
+        waveOutOpen, waveInOpen, midiOutOpen, midiInOpen,
+        waveOutPrepareHeader, waveOutUnprepareHeader, waveOutWrite,
+        waveOutClose, waveOutPause, waveOutRestart, waveOutReset, waveOutGetPosition,
+        midiOutClose, midiOutReset, midiOutShortMsg, midiOutLongMsg, midiOutPrepareHeader, midiOutUnprepareHeader,
+        midiInClose, midiInStart, midiInStop, midiInReset, midiInAddBuffer, midiInPrepareHeader, midiInUnprepareHeader,
+        waveOutMessage, waveInMessage, midiOutMessage, midiInMessage
+    ]
 }

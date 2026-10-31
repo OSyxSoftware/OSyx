@@ -5404,6 +5404,76 @@ extern "win64" fn RegisterRawInputDevices(devices: *const u8, n: u32, size: u32)
     TRUE
 }
 
+// ---- raw input, touch, gestures and pointers ---------------------------------------------
+//
+// OSyx delivers keyboard and mouse input as window messages only: it has no
+// raw input devices, touch screen, gesture or pointer stream. The calls
+// answer as Windows does for handles and ids it does not know (error codes
+// taken from Windows with bogus arguments).
+
+const SIZEOF_RAWINPUTDEVICELIST: u32 = 16;
+
+/// GetRawInputDeviceList: no devices, so the count is zero.
+extern "win64" fn GetRawInputDeviceList(_list: *mut u8, count: *mut u32, size: u32) -> u32 {
+    if size != SIZEOF_RAWINPUTDEVICELIST {
+        return fail(ERROR_INVALID_PARAMETER, u32::MAX);
+    }
+    if count.is_null() {
+        return fail(ERROR_NOACCESS, u32::MAX);
+    }
+    // SAFETY: the caller's count.
+    unsafe { *count = 0 };
+    0
+}
+
+/// No raw input device handle is valid.
+fn raw_input_handle(size: *const u32) -> u32 {
+    if size.is_null() {
+        fail(ERROR_NOACCESS, u32::MAX)
+    } else {
+        fail(ERROR_INVALID_HANDLE, u32::MAX)
+    }
+}
+extern "win64" fn GetRawInputDeviceInfoW(_device: u64, _command: u32, _data: *mut u8, size: *mut u32) -> u32 {
+    raw_input_handle(size)
+}
+extern "win64" fn GetRawInputDeviceInfoA(_device: u64, _command: u32, _data: *mut u8, size: *mut u32) -> u32 {
+    raw_input_handle(size)
+}
+extern "win64" fn GetRawInputData(_raw: u64, _command: u32, _data: *mut u8, size: *mut u32, _header: u32) -> u32 {
+    raw_input_handle(size)
+}
+
+/// No pointer id exists.
+extern "win64" fn GetPointerType(_id: u32, _kind: *mut u32) -> Bool {
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
+/// No WM_TOUCH or WM_GESTURE is ever sent, so no handle can be valid.
+extern "win64" fn GetTouchInputInfo(_touch: u64, _n: u32, _inputs: *mut u8, _size: i32) -> Bool {
+    fail(ERROR_INVALID_HANDLE, FALSE)
+}
+extern "win64" fn CloseTouchInputHandle(_touch: u64) -> Bool {
+    fail(ERROR_INVALID_HANDLE, FALSE)
+}
+extern "win64" fn GetGestureInfo(_gesture: u64, _info: *mut u8) -> Bool {
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+extern "win64" fn CloseGestureInfoHandle(_gesture: u64) -> Bool {
+    fail(ERROR_INVALID_HANDLE, FALSE)
+}
+
+/// SetLayeredWindowAttributes does not exist in OSyx, so no window has
+/// attributes to report: an existing window fails like one that was never
+/// made layered, a missing one as an invalid handle.
+extern "win64" fn GetLayeredWindowAttributes(hwnd: u64, _key: *mut u32, _alpha: *mut u8, _flags: *mut u32) -> Bool {
+    if is_window(hwnd) {
+        fail(ERROR_INVALID_PARAMETER, FALSE)
+    } else {
+        fail(ERROR_INVALID_WINDOW_HANDLE, FALSE)
+    }
+}
+
 // ---- clipboard --------------------------------------------------------------------------
 //
 // One system clipboard, owned by the compositor and broadcast to every
@@ -6321,6 +6391,16 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RegisterTouchWindow,
         SetGestureConfig,
         RegisterRawInputDevices,
+        GetRawInputDeviceList,
+        GetRawInputDeviceInfoW,
+        GetRawInputDeviceInfoA,
+        GetRawInputData,
+        GetPointerType,
+        GetTouchInputInfo,
+        CloseTouchInputHandle,
+        GetGestureInfo,
+        CloseGestureInfoHandle,
+        GetLayeredWindowAttributes,
         RegisterClipboardFormatW,
         TrackMouseEvent,
         GetLastInputInfo,
