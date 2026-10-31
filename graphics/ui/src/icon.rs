@@ -391,7 +391,7 @@ pub fn decode_png(data: &[u8]) -> Option<Bitmap> {
                 colour_type = body[9];
                 header_seen = true;
             }
-            b"PLTE" => palette = body.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+            b"PLTE" => palette = (0..body.len() / 3).map(|i| [body[3 * i], body[3 * i + 1], body[3 * i + 2]]).collect(),
             b"tRNS" => transparency = body.to_vec(),
             b"IDAT" => compressed.extend_from_slice(body),
             b"IEND" => break,
