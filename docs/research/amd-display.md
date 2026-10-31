@@ -19,7 +19,9 @@ step that programs the device needs hardware validation.
   `display.mode=WxH` overrides both.
 - `kernel/src/drivers/amdgpu.rs`: finds AMD display functions, maps known
   device IDs to a DCN generation, reads the expansion ROM and locates the
-  ATOM header. It logs what it found; it does not change the display.
+  ATOM header using the pointer at offset `0x48`. It logs what it found; it
+  does not change the display. Some integrated GPUs may expose their VBIOS
+  through another firmware interface rather than the PCI expansion ROM.
 
 ## What a DCN 1.0 mode set needs
 
