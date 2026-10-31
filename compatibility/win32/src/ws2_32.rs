@@ -24,6 +24,7 @@ const SOCK_DGRAM: i32 = 2;
 const SOL_SOCKET: i32 = 0xFFFF;
 const SO_REUSEADDR: i32 = 0x4;
 const SO_KEEPALIVE: i32 = 0x8;
+const SO_LINGER: i32 = 0x80;
 const SO_BROADCAST: i32 = 0x20;
 const SO_SNDTIMEO: i32 = 0x1005;
 const SO_RCVTIMEO: i32 = 0x1006;
@@ -102,6 +103,8 @@ struct Sock {
     fd: u64,
     stream: bool,
     nonblocking: bool,
+    /// SO_LINGER seconds; zero means off.
+    linger: u16,
 }
 
 static SOCKETS: Mutex<BTreeMap<u64, Sock>> = Mutex::new(BTreeMap::new());
@@ -228,7 +231,7 @@ extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
             let mut n = NEXT.lock().unwrap();
             let s = *n;
             *n += 4;
-            SOCKETS.lock().unwrap().insert(s, Sock { fd, stream, nonblocking: false });
+            SOCKETS.lock().unwrap().insert(s, Sock { fd, stream, nonblocking: false, linger: 0 });
             s
         }
         Err(e) => err(wsa(e), INVALID_SOCKET),
@@ -300,7 +303,7 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
         let mut n = NEXT.lock().unwrap();
         let ns = *n;
         *n += 4;
-        SOCKETS.lock().unwrap().insert(ns, Sock { fd: nfd, stream: true, nonblocking: listener.nonblocking });
+        SOCKETS.lock().unwrap().insert(ns, Sock { fd: nfd, stream: true, nonblocking: listener.nonblocking, linger: 0 });
         Ok(ns)
     })();
     r.unwrap_or_else(|e| err(e, INVALID_SOCKET))
@@ -397,7 +400,24 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
             }
             // OSyx lets a port be bound again once its old connection is
             // gone, and does not delay small segments: both are the default.
-            (SOL_SOCKET, SO_REUSEADDR) | (IPPROTO_TCP, TCP_NODELAY) => int().map(|_| ()),
+            (SOL_SOCKET, SO_REUSEADDR) | (SOL_SOCKET, SO_KEEPALIVE) | (IPPROTO_TCP, TCP_NODELAY) => int().map(|_| ()),
+            // Linger 0 closes abortively, which the kernel can do; a positive
+            // linger only records the value (close never leaves data behind).
+            (SOL_SOCKET, SO_LINGER) => {
+                if val.is_null() || len < 4 {
+                    return Err(WSAEFAULT);
+                }
+                // SAFETY: the caller's struct linger { u16 l_onoff, l_linger }.
+                let (onoff, linger) = unsafe {
+                    (core::ptr::read_unaligned(val as *const u16), core::ptr::read_unaligned((val as *const u16).add(1)))
+                };
+                let abortive = onoff != 0 && linger == 0;
+                os_sys::sock_ctl(fd, net::ctl::RESET_ON_CLOSE, abortive as u64).map_err(wsa)?;
+                if let Some(sock) = SOCKETS.lock().unwrap().get_mut(&s) {
+                    sock.linger = if onoff != 0 { linger } else { 0 };
+                }
+                Ok(())
+            }
             _ => Err(WSAENOPROTOOPT),
         }
     })())
@@ -408,7 +428,20 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
 /// fixed behaviours setsockopt accepts.
 extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *mut i32) -> i32 {
     result((|| {
-        let (_, stream) = fd(s)?;
+        let st = socket_state(s)?;
+        let stream = st.stream;
+        if (level, name) == (SOL_SOCKET, SO_LINGER) {
+            // SAFETY: the caller's value buffer of `*len` bytes.
+            unsafe {
+                if val.is_null() || len.is_null() || *len < 4 {
+                    return Err(WSAEFAULT);
+                }
+                core::ptr::write_unaligned(val as *mut u16, (st.linger != 0) as u16);
+                core::ptr::write_unaligned((val as *mut u16).add(1), st.linger);
+                *len = 4;
+            }
+            return Ok(());
+        }
         let v: u32 = match (level, name) {
             (SOL_SOCKET, SO_TYPE) => {
                 if stream {

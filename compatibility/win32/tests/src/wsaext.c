@@ -106,8 +106,24 @@ void __stdcall start(void) {
     n = 0;
     check("WSARecv scatters into two buffers", WSARecv(sv, in, 2, &n, NULL, NULL, NULL) == 0 && n == 11);
     check("... bytes", mem_eq(part1, "hello", 5) && mem_eq(part2, ", wsa!", 6));
-    closesocket(sv);
+    int keep = 1;
+    check_eq("setsockopt(SO_KEEPALIVE)", setsockopt(sv, SOL_SOCKET, SO_KEEPALIVE, (const char *)&keep, sizeof keep), 0);
+    keep = 0;
+    int optlen = sizeof keep;
+    check_eq("getsockopt(SO_KEEPALIVE)", getsockopt(sv, SOL_SOCKET, SO_KEEPALIVE, (char *)&keep, &optlen), 0);
+    struct linger lg = {1, 7};
+    check_eq("setsockopt(SO_LINGER)", setsockopt(sv, SOL_SOCKET, SO_LINGER, (const char *)&lg, sizeof lg), 0);
+    lg.l_onoff = 0;
+    lg.l_linger = 0;
+    optlen = sizeof lg;
+    check("getsockopt(SO_LINGER) echoes the timeout",
+          getsockopt(sv, SOL_SOCKET, SO_LINGER, (char *)&lg, &optlen) == 0 && lg.l_onoff == 1 && lg.l_linger == 7);
+    struct linger hard = {1, 0};
+    check_eq("set linger 0", setsockopt(cl, SOL_SOCKET, SO_LINGER, (const char *)&hard, sizeof hard), 0);
     closesocket(cl);
+    check("an abortive close resets the peer",
+          recv(sv, part1, sizeof part1, 0) == SOCKET_ERROR && WSAGetLastError() == WSAECONNRESET);
+    closesocket(sv);
     closesocket(ls);
 
     /* The provider catalog. */
