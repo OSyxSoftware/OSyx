@@ -18,10 +18,10 @@ step that programs the device needs hardware validation.
   scanout; the scanout's own size is retried if the device refuses it, and
   `display.mode=WxH` overrides both.
 - `kernel/src/drivers/amdgpu.rs`: finds AMD display functions, maps known
-  device IDs to a DCN generation, reads the expansion ROM and locates the
-  ATOM header using the pointer at offset `0x48`. It logs what it found; it
-  does not change the display. Some integrated GPUs may expose their VBIOS
-  through another firmware interface rather than the PCI expansion ROM.
+  device IDs to a DCN generation, and locates the matching VBIOS in ACPI
+  `VFCT` or the PCI expansion ROM. It identifies the ATOM header through
+  the pointer at offset `0x48` and logs its source; it does not change the
+  display. VFCT matching requires the exact PCI address and vendor/device ID.
 
 ## What a DCN 1.0 mode set needs
 
