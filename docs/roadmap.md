@@ -20,7 +20,7 @@ on 2026-10-30.
 | 7g | Kernel objects and IPC: pipes, channels, shared memory, wait_handles (ABI v7) | Done |
 | 7h | Native xHCI driver, USB enumeration, HID keyboard/mouse, input core | Done (root ports, boot keyboards; see graphics.md) |
 | 7i | PRISM compositor, protocol v1, UI toolkit, desktop shell, AXIS Terminal, Files, System Information | Done (software composition; see graphics.md) |
-| 8 | Native Windows PE execution | Initial subset implemented (console, files, threads, DLLs, GUI, Winsock; see windows-compatibility.md). Every Steam and Zen import the scanner scores is usable in source scan: Steam 265 implemented and 2 partial of 267, Zen 1462 implemented and 83 partial of 2644 (see Steam and Zen API gaps) |
+| 8 | Native Windows PE execution | Initial subset implemented (console, files, threads, DLLs, GUI, Winsock; see windows-compatibility.md). Every Steam and Zen import the scanner scores is usable in source scan: Steam 265 implemented and 2 partial of 267, Zen 1476 implemented and 69 partial of 2644 (see Steam and Zen API gaps) |
 | 9 | Native networking | Implemented (VirtIO-Net and IPv4 stack; see network/net) |
 | 10 | VirtIO-GPU display backend | Implemented (2D scanout/damage/cursor; software composition) |
 | 11 | Task Manager, Settings and four PE32+ desktop utilities | Implemented initial versions |
@@ -67,7 +67,7 @@ Measured with `scripts/winparity.py scan` against the binaries in `build/steam`
 (32-bit `SteamSetup.exe` and its NSIS plug-ins) and `build/zen/1.23.4b`
 (`zen.exe`, `xul.dll`, `mozglue.dll`, `nss3.dll`) on 2026-10-31. The scan
 scores every Steam import as usable (265 implemented, 2 partial of 267) and
-every Zen one too (1462 implemented, 83 partial of 2644; 851 imports ship
+every Zen one too (1476 implemented, 69 partial of 2644; 851 imports ship
 with the application, 248 belong to external DLLs). No import is missing or
 unsupported. These are source-scan measurements of exports, not proof of
 behaviour.
@@ -85,13 +85,24 @@ scanner now follows an ordinal table that delegates to another), plus
 inheritance, `RegCreateKeyExW` with `REG_OPTION_CREATE_LINK` and link
 following, `ExitWindowsEx` logoff, and the remaining constant stubs.
 
+A second batch takes on the partial rows: named events, mutexes, sections,
+threads and timers honour handle inheritance; `DuplicateHandle` works
+between two other processes; `HANDLE_FLAG_PROTECT_FROM_CLOSE` keeps
+`CloseHandle` from releasing a handle; `CopyFileExW` takes its documented
+flags and copies symbolic links; `FindFirstFileExW` matches case
+sensitively when asked; `SetFileInformationByHandle` sets access and write
+times, renames relative to a root directory handle and deletes with POSIX
+semantics; `CreateIoCompletionPort` associates any open handle;
+`GetProcessMitigationPolicy` answers for any process handle; timer security
+attributes, access masks and resume hints are accepted.
+
 What is left, in the order it blocks the applications:
 
 | Application | API | State | Why it matters |
 |---|---|---|---|
 | Steam, `SteamSetup.exe` | `kernel32!CreateProcessW` with `DEBUG_PROCESS`, `DEBUG_ONLY_THIS_PROCESS` | partial | those flags need a debug-event API (`WaitForDebugEvent`, `ContinueDebugEvent`); the rest of `CreateProcessW` works |
 | Steam, `msvcrt.dll` | `??2@YAPAXI@Z` | partial | allocation works, but `operator new` returns NULL instead of throwing `std::bad_alloc`: winrun has no MSVC C++ exception objects, the throw lives in the application's `vcruntime140`/`msvcp140` |
-| Zen, many DLLs | 83 rows | partial | job objects, security descriptors and tokens, service control, event log, crypt32 stores, hooks and window stations, D3D11/DXGI stubs, a few GDI path calls |
+| Zen, many DLLs | 69 rows | partial | job objects and tokens, service control, event log, crypt32 stores, hooks and window stations, D3D11/DXGI, the GDI path calls, pointer confinement, and queries of other processes |
 
 Zen's partial rows are capabilities OSyx does not model (Windows jobs,
 logon sessions, the service database, certificate stores); none of them stops
