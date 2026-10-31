@@ -825,7 +825,29 @@ pub fn disable_thread_calls(h: u64) -> Result<(), u32> {
 /// prologue there probes `[gs:0x10]`/`[gs:0x08]` and a mismatch faults at the
 /// stack limit instead of growing the stack.
 pub fn notify_threads(reason: u32) {
-    let list: Vec<(u64, u64, Vec<u64>)> = with_loaded(|l| {
+    // A 32-bit program's DLLs are 32-bit code: `wow64::run_thread32` delivers
+    // their notifications through the bridge, on the thread's 32-bit stack.
+    if wow64::is_active() {
+        return;
+    }
+    for (base, entry, cbs) in thread_notifications() {
+        for cb in cbs {
+            // SAFETY: as in `deliver_attach`.
+            let f: TlsCallback = unsafe { core::mem::transmute(cb as usize) };
+            f(base, reason, 0);
+        }
+        if entry != 0 {
+            // SAFETY: as in `deliver_attach`.
+            let f: DllMain = unsafe { core::mem::transmute(entry as usize) };
+            f(base, reason, 0);
+        }
+    }
+}
+
+/// (base, DllMain, TLS callbacks) of every attached module that takes thread
+/// notifications, in load order.
+pub(crate) fn thread_notifications() -> Vec<(u64, u64, Vec<u64>)> {
+    with_loaded(|l| {
         (0..l.linker.modules.len())
             .filter(|&i| l.state.get(i).is_some_and(|s| s.attached))
             .filter_map(|i| {
@@ -841,19 +863,7 @@ pub fn notify_threads(reason: u32) {
             })
             .collect()
     })
-    .unwrap_or_default();
-    for (base, entry, cbs) in list {
-        for cb in cbs {
-            // SAFETY: as in `deliver_attach`.
-            let f: TlsCallback = unsafe { core::mem::transmute(cb as usize) };
-            f(base, reason, 0);
-        }
-        if entry != 0 {
-            // SAFETY: as in `deliver_attach`.
-            let f: DllMain = unsafe { core::mem::transmute(entry as usize) };
-            f(base, reason, 0);
-        }
-    }
+    .unwrap_or_default()
 }
 
 /// DLL_PROCESS_DETACH for every attached DLL, in reverse order (ExitProcess).

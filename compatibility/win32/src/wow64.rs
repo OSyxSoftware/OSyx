@@ -622,6 +622,9 @@ extern "win64" fn thread32_main(arg: u64) -> u32 {
 
 /// Set up a 32-bit callback thread and execute its start routine.
 pub(crate) fn run_thread32(start: u32, param: u32) -> u32 {
+    if crate::VERBOSE.load(Ordering::Relaxed) {
+        os_std::eprintln!("winrun: wow64 thread start {start:#x}({param:#x})");
+    }
     let stack32 = mem::alloc_pages(THREAD_STACK32 + PAGE, Prot::ReadWrite);
     let host = mem::alloc_pages(THREAD_HOST_STACK, Prot::ReadWrite);
     let (Some(stack32), Some(host)) = (stack32, host) else { return 0xC000_0017 }; // STATUS_NO_MEMORY
@@ -640,7 +643,23 @@ pub(crate) fn run_thread32(start: u32, param: u32) -> u32 {
         poke32(teb + TEB_PEB, PEB32);
     }
     install_ctx(top as u64, host + THREAD_HOST_STACK as u64, teb as u64);
-    call32(start, &[param])
+    notify_dlls32(crate::loader::DLL_THREAD_ATTACH);
+    let code = call32(start, &[param]);
+    notify_dlls32(crate::loader::DLL_THREAD_DETACH);
+    code
+}
+
+/// DLL_THREAD_ATTACH / DETACH for the calling 32-bit thread: the TLS
+/// callbacks and DllMain of every attached DLL, run as 32-bit code.
+fn notify_dlls32(reason: u32) {
+    for (base, entry, callbacks) in crate::loader::thread_notifications() {
+        for callback in callbacks {
+            call32(callback as u32, &[base as u32, reason, 0]);
+        }
+        if entry != 0 {
+            call32(entry as u32, &[base as u32, reason, 0]);
+        }
+    }
 }
 
 /// Whether this process runs a 32-bit program (the bridge is live): host

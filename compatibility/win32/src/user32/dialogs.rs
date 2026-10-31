@@ -469,7 +469,7 @@ pub(crate) fn show(options: FileOptions) -> Result<Option<FileSelection>, u32> {
         spec.min_width = 620;
         spec.min_height = 440;
         if let Some(w) = g.windows.get(&owner) {
-            spec.parent = w.win.id;
+            spec.parent = w.prism_id();
             spec.flags |= proto::window_flags::SKIP_TASKBAR;
         }
         g.conn()?.create_window(spec).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)

@@ -194,8 +194,13 @@ Message-only, tool and owned windows do not create separate taskbar items.
 The desktop groups eligible windows from a winrun process and its Windows
 descendants under the named parent window; unrelated applications retain
 their own entries. Popup ownership is exposed through GetParent,
-GetWindow(GW_OWNER) and GetAncestor(GA_ROOTOWNER). Native child controls
-inside a parent client area remain unsupported.
+GetWindow(GW_OWNER) and GetAncestor(GA_ROOTOWNER). A `WS_CHILD` window has
+no visible PRISM window: it draws into its top-level ancestor's surface,
+receives the pointer messages for its rectangle and repaints after a parent
+erase. The stock BUTTON, STATIC and EDIT classes draw text, push buttons,
+check boxes, radio buttons and frames, and a button click reaches the parent
+as `WM_COMMAND`. Text entry in EDIT and the common controls beyond the ones
+the program draws itself remain unsupported.
 
 DirectWrite exposes the original IDWriteFactory font/file/face APIs,
 custom font loaders, metrics, character maps, TrueType, CFF and default-instance CFF2 outlines and glyph
