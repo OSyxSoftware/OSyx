@@ -1928,7 +1928,13 @@ impl Stack {
                 return false;
             }
         };
-        if r.truncated && !over_tcp {
+        if r.truncated && over_tcp {
+            // A TCP answer must be complete; an incomplete one says nothing
+            // about the name, so never cache it as negative.
+            self.dns_advance(qid, NetError::DnsFailure);
+            return true;
+        }
+        if r.truncated {
             // Retry the same server over TCP.
             let server = self.queries[&qid].server_addr;
             let old = self.queries[&qid].transport;

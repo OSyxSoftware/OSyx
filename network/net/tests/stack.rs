@@ -556,6 +556,45 @@ fn dns_falls_back_to_tcp_for_truncated_answers() {
 }
 
 #[test]
+fn dns_rejects_truncated_tcp_answers() {
+    let mut n = Net::new();
+    n.a.set_dns_servers(&[B_IP]);
+    let sock = n.b.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 53)).unwrap();
+    let l = n.b.tcp_listen(Endpoint::new(Ipv4Addr::UNSPECIFIED, 53), 4).unwrap();
+    let table = [("big.test", [10, 1, 2, 3])];
+    let Resolve::Pending(q) = n.a.resolve("big.test") else { panic!("expected a query") };
+    let mut result = None;
+    let mut conns: Vec<u32> = Vec::new();
+    // Every answer, over UDP and over TCP, is truncated.
+    assert!(n.run_until(60_000, |n| {
+        let mut buf = [0u8; 600];
+        while let Ok((from, len, _)) = n.b.udp_recv_from(sock, &mut buf) {
+            let reply = dns_answer(&buf[..len], &table, true);
+            n.b.udp_send_to(sock, Some(from), &reply).unwrap();
+        }
+        while let Ok((c, _)) = n.b.tcp_accept(l) {
+            conns.push(c);
+        }
+        for &c in &conns {
+            let mut b = [0u8; 600];
+            while let Ok(k) = n.b.tcp_recv(c, &mut b) {
+                if k > 2 {
+                    let reply = dns_answer(&b[2..k], &table, true);
+                    let mut framed = (reply.len() as u16).to_be_bytes().to_vec();
+                    framed.extend_from_slice(&reply);
+                    let _ = n.b.tcp_send(c, &framed);
+                }
+            }
+        }
+        result = n.a.resolve_result(q);
+        result.is_some()
+    }));
+    assert_eq!(result, Some(Err(NetError::DnsFailure)));
+    // An unusable answer must not poison the cache with a negative entry.
+    assert!(matches!(n.a.resolve("big.test"), Resolve::Pending(_)));
+}
+
+#[test]
 fn dns_ignores_spoofed_replies_and_times_out() {
     let mut n = Net::new();
     n.a.set_dns_servers(&[B_IP]);
