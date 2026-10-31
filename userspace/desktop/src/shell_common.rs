@@ -254,17 +254,204 @@ pub fn icon_by_name(name: &str) -> Icon {
     }
 }
 
+/// The launcher's applications: the installed `.app` entries, then Windows
+/// programs (Start Menu shortcuts, and programs found in Program Files).
 pub fn load_apps() -> Vec<AppEntry> {
-    load_apps_from(APP_DIR)
+    let mut apps = load_apps_from(APP_DIR);
+    for app in windows_apps() {
+        if !apps.iter().any(|a| a.exec == app.exec) {
+            apps.push(app);
+        }
+    }
+    apps
+}
+
+/// Windows programs: Start Menu shortcuts of the user and of all users, then
+/// programs in `/Program Files` and `/Program Files (x86)` that no shortcut
+/// names. A shortcut's own file name is the program's name.
+pub fn windows_apps() -> Vec<AppEntry> {
+    let mut apps: Vec<AppEntry> = Vec::new();
+    let home = env::var("HOME").unwrap_or_else(|_| String::from("/home/user"));
+    let menus = [
+        format!("{}/AppData/Roaming/Microsoft/Windows/Start Menu/Programs", home.trim_end_matches('/')),
+        String::from("/ProgramData/Microsoft/Windows/Start Menu/Programs"),
+    ];
+    for menu in &menus {
+        collect_links(menu, 2, &mut apps);
+    }
+    for root in ["/Program Files", "/Program Files (x86)"] {
+        let Ok(dir) = fs::read_dir(root) else { continue };
+        let mut names: Vec<String> =
+            dir.filter(|e| e.file_type().is_dir()).map(|e| String::from(e.file_name())).collect();
+        names.sort();
+        for name in names {
+            let folder = format!("{root}/{name}");
+            let Some(exe) = main_program(&folder, &name) else { continue };
+            if apps.iter().any(|a| a.exec.eq_ignore_ascii_case(&exe)) {
+                continue;
+            }
+            apps.push(AppEntry { source: exe.clone(), name, exec: exe, icon: Icon::Program, comment: String::from("Windows program") });
+        }
+    }
+    apps.sort_by_key(|a| a.name.to_ascii_lowercase());
+    apps
+}
+
+/// The program of an install folder: the `.exe` named like the folder, else
+/// the only `.exe` that is not an uninstaller.
+fn main_program(folder: &str, name: &str) -> Option<String> {
+    let mut exes: Vec<String> = fs::read_dir(folder)
+        .ok()?
+        .map(|e| String::from(e.file_name()))
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".exe") && !l.contains("unins")
+        })
+        .collect();
+    exes.sort();
+    let squash = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_ascii_lowercase();
+    let wanted = squash(name);
+    if let Some(n) = exes.iter().find(|n| squash(n.get(..n.len() - 4).unwrap_or(n)) == wanted) {
+        return Some(format!("{folder}/{n}"));
+    }
+    (exes.len() == 1).then(|| format!("{folder}/{}", exes[0]))
+}
+
+/// Shortcuts (`.lnk`) of a Start Menu folder, `depth` levels down.
+fn collect_links(dir: &str, depth: u32, apps: &mut Vec<AppEntry>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut items: Vec<(String, bool)> =
+        entries.map(|e| (String::from(e.file_name()), e.file_type().is_dir())).collect();
+    items.sort();
+    for (name, is_dir) in items {
+        let path = format!("{dir}/{name}");
+        if is_dir {
+            if depth > 1 {
+                collect_links(&path, depth - 1, apps);
+            }
+        } else if name.to_ascii_lowercase().ends_with(".lnk") && !name.to_ascii_lowercase().contains("uninstall") {
+            if let Some(app) = load_link(&path) {
+                if !apps.iter().any(|a| a.exec == app.exec) {
+                    apps.push(app);
+                }
+            }
+        }
+    }
+}
+
+/// An application entry for a Windows shortcut file: named like the file,
+/// started through its target.
+pub fn load_link(path: &str) -> Option<AppEntry> {
+    let data = fs::read(path).ok()?;
+    // Windows names are not case sensitive, the file system's are.
+    let target = existing_path(&link_target(&data)?)?;
+    if !target.to_ascii_lowercase().ends_with(".exe") || !fs::metadata(&target).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let name = file.get(..file.len().saturating_sub(4)).unwrap_or(file);
+    Some(AppEntry {
+        source: String::from(path),
+        name: String::from(name),
+        exec: target,
+        icon: Icon::Program,
+        comment: String::from("Windows program"),
+    })
+}
+
+/// `path` with each component spelled as it is on disk (the first entry that
+/// matches ignoring case), or `None` if some component does not exist.
+fn existing_path(path: &str) -> Option<String> {
+    let mut found = String::new();
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        let dir = if found.is_empty() { "/" } else { found.as_str() };
+        let exact = format!("{found}/{part}");
+        if fs::metadata(&exact).is_ok() {
+            found = exact;
+            continue;
+        }
+        let name = fs::read_dir(dir).ok()?.map(|e| String::from(e.file_name())).find(|n| n.eq_ignore_ascii_case(part))?;
+        found = format!("{found}/{name}");
+    }
+    (!found.is_empty()).then_some(found)
+}
+
+/// The target of a Shell Link (MS-SHLLINK) as an OSyx path: the local base
+/// path of its LinkInfo, else its relative path string when that is a full
+/// path. Anything else (network targets, shell items without a path) has no
+/// target here.
+pub fn link_target(data: &[u8]) -> Option<String> {
+    let u16_at = |at: usize| data.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let u32_at = |at: usize| data.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    if u32_at(0)? != 0x4C {
+        return None;
+    }
+    let flags = u32_at(0x14)?;
+    let unicode = flags & 0x80 != 0;
+    let mut at = 0x4C;
+    if flags & 0x01 != 0 {
+        at += 2 + u16_at(at)?; // LinkTargetIDList
+    }
+    let mut target = None;
+    if flags & 0x02 != 0 {
+        let base = at;
+        let size = u32_at(base)?;
+        if u32_at(base + 8)? & 1 != 0 {
+            let text = |from: usize| -> Option<String> {
+                let bytes = data.get(from..)?;
+                let end = bytes.iter().position(|&b| b == 0)?;
+                Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+            };
+            let mut path = text(base + u32_at(base + 0x10)?)?;
+            let tail = text(base + u32_at(base + 0x18)?).unwrap_or_default();
+            if !tail.is_empty() {
+                if !path.ends_with('\\') {
+                    path.push('\\');
+                }
+                path.push_str(&tail);
+            }
+            target = Some(path);
+        }
+        at = base + size;
+    }
+    // StringData in order: name, relative path, working directory, arguments, icon.
+    let mut relative = None;
+    for (i, bit) in [0x04usize, 0x08, 0x10, 0x20, 0x40].into_iter().enumerate() {
+        if flags & bit == 0 {
+            continue;
+        }
+        let count = u16_at(at)?;
+        at += 2;
+        let bytes = if unicode { count * 2 } else { count };
+        let raw = data.get(at..at + bytes)?;
+        at += bytes;
+        if i == 1 {
+            relative = Some(if unicode {
+                char::decode_utf16((0..raw.len() / 2).map(|i| u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]])))
+                    .map(|c| c.unwrap_or('\u{FFFD}'))
+                    .collect::<String>()
+            } else {
+                String::from_utf8_lossy(raw).into_owned()
+            });
+        }
+    }
+    let win = target.or(relative.filter(|r| r.contains(":\\")))?;
+    let rest = win.get(2..).filter(|_| win.as_bytes().get(1) == Some(&b':'))?;
+    Some(rest.replace('\\', "/"))
 }
 
 pub fn load_apps_from(path: &str) -> Vec<AppEntry> {
     let mut apps = Vec::new();
     let Ok(dir) = fs::read_dir(path) else { return apps };
-    let mut names: Vec<String> = dir.map(|e| String::from(e.file_name())).filter(|n| n.ends_with(".app")).collect();
+    let mut names: Vec<String> = dir
+        .map(|e| String::from(e.file_name()))
+        .filter(|n| n.ends_with(".app") || n.to_ascii_lowercase().ends_with(".lnk"))
+        .collect();
     names.sort();
     for n in names {
-        if let Some(app) = load_app(&format!("{path}/{n}")) {
+        let file = format!("{path}/{n}");
+        let app = if n.ends_with(".app") { load_app(&file) } else { load_link(&file) };
+        if let Some(app) = app {
             apps.push(app);
         }
     }

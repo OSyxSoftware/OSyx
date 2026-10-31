@@ -16,7 +16,7 @@ fn main() -> i32 {
     env::set_var("HOME", "/home/user");
     env::set_var("USER", "user");
     let _ = env::set_current_dir("/home/user");
-    let pe = program.ends_with(".exe");
+    let pe = program.to_ascii_lowercase().ends_with(".exe");
     let mut command = Command::new(if pe { "/bin/winrun" } else { &program });
     if pe {
         command.arg(&program);

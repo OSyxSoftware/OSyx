@@ -198,6 +198,18 @@ The elevated program keeps the desktop user's profile (`HOME`). The prompt
 shows only the path, not a publisher, and does not run on a separate secure
 desktop.
 
+Installed Windows programs appear in the launcher: the Start Menu shortcuts
+of the user and of all users (`.lnk`, read for their target) and, for anything
+no shortcut names, the main `.exe` of each folder in `/Program Files` and
+`/Program Files (x86)`. A program creates shortcuts through `CoCreateInstance`
+of `CLSID_ShellLink` (`IShellLinkW`, `IPersistFile`; PE32 programs too, as
+NSIS `CreateShortCut` does): `Save` writes a real Shell Link file. The
+desktop shows `.lnk` files in `~/Desktop` as icons; the all-users desktop is
+that same folder. Shortcut targets are matched ignoring case, as Windows
+does. Arguments, working directory and the shortcut's icon are stored in the
+file but not used when the shell starts it; the icon is the generic program
+icon.
+
 Windows windows start hidden and follow ShowWindow/SetWindowPos visibility.
 Message-only, tool and owned windows do not create separate taskbar items.
 The desktop groups eligible windows from a winrun process and its Windows
