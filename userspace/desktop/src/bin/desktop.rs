@@ -67,6 +67,37 @@ enum MenuPurpose {
     Shortcut(usize),
 }
 
+/// What a context menu of an application or shortcut can do.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryAction {
+    Open,
+    RunAsAdmin,
+    ShowLocation,
+    AddToDesktop,
+    RemoveShortcut,
+}
+
+/// The menu of an application entry: (action, label, icon). The program
+/// actions apply to Windows programs, which are the ones that can ask for
+/// administrator rights and live in a folder worth showing.
+fn entry_actions(app: &AppEntry, on_desktop: bool) -> Vec<(EntryAction, &'static str, Icon)> {
+    let windows = app.exec.to_ascii_lowercase().ends_with(".exe");
+    let mut actions = Vec::new();
+    if on_desktop {
+        actions.push((EntryAction::Open, "Open", Icon::Program));
+    } else {
+        actions.push((EntryAction::AddToDesktop, "Add to desktop", Icon::Link));
+    }
+    if windows {
+        actions.push((EntryAction::RunAsAdmin, "Run as administrator", Icon::Lock));
+        actions.push((EntryAction::ShowLocation, "Open file location", Icon::Folder));
+    }
+    if on_desktop {
+        actions.push((EntryAction::RemoveShortcut, "Remove shortcut", Icon::Trash));
+    }
+    actions
+}
+
 const CONFIRM_OFF: u32 = 1;
 const CONFIRM_REBOOT: u32 = 2;
 /// The "User Account Control" prompt of the elevation service.
@@ -905,15 +936,11 @@ impl Shell {
                 } else if b == button::LEFT {
                     self.icon_drag = Some(IconDrag { index: i, start: (x, y), pointer: (x, y), moved: false });
                 } else if b == button::RIGHT {
-                    self.open_menu(
-                        vec![
-                            MenuItem::new("Open", Some(Icon::Program)),
-                            MenuItem::new("Remove shortcut", Some(Icon::Trash)),
-                        ],
-                        MenuPurpose::Shortcut(i),
-                        x,
-                        y,
-                    );
+                    let items = entry_actions(&self.shortcuts[i], true)
+                        .into_iter()
+                        .map(|(_, label, icon)| MenuItem::new(label, Some(icon)))
+                        .collect();
+                    self.open_menu(items, MenuPurpose::Shortcut(i), x, y);
                 }
                 return;
             }
@@ -1324,15 +1351,28 @@ impl Shell {
             }
         }
         if let Some((i, x, y)) = app_menu {
-            self.open_menu(vec![MenuItem::new("Add to desktop", Some(Icon::Link))], MenuPurpose::Application(i), x, y);
+            let items = entry_actions(&self.apps[i], false)
+                .into_iter()
+                .map(|(_, label, icon)| MenuItem::new(label, Some(icon)))
+                .collect();
+            self.open_menu(items, MenuPurpose::Application(i), x, y);
         }
     }
 
     fn menu_pick(&mut self, purpose: MenuPurpose, i: usize) {
         match (purpose, i) {
-            (MenuPurpose::Application(app), 0) => self.add_shortcut(app),
-            (MenuPurpose::Shortcut(app), 0) => self.launch_shortcut(app),
-            (MenuPurpose::Shortcut(app), 1) => self.remove_shortcut(app),
+            (MenuPurpose::Application(app), i) => {
+                let Some(entry) = self.apps.get(app).cloned() else { return };
+                if let Some(&(action, _, _)) = entry_actions(&entry, false).get(i) {
+                    self.entry_action(action, &entry, app);
+                }
+            }
+            (MenuPurpose::Shortcut(app), i) => {
+                let Some(entry) = self.shortcuts.get(app).cloned() else { return };
+                if let Some(&(action, _, _)) = entry_actions(&entry, true).get(i) {
+                    self.entry_action(action, &entry, app);
+                }
+            }
             (MenuPurpose::Desktop, 5) => {
                 self.toggle_launcher();
                 self.show_note(
@@ -1391,15 +1431,17 @@ impl Shell {
     const PRIVILEGED: &'static [&'static str] = &["/system/bin/setup", "/system/bin/settings"];
 
     fn launch(&mut self, name: &str, exec: &str) {
-        self.launch_with(name, exec, &[], "");
+        self.launch_with(name, exec, &[], "", false);
     }
 
     /// Starts an application entry with its own arguments and directory.
     fn launch_entry(&mut self, app: &AppEntry) {
-        self.launch_with(&app.name, &app.exec, &app.args, &app.workdir);
+        self.launch_with(&app.name, &app.exec, &app.args, &app.workdir, false);
     }
 
-    fn launch_with(&mut self, name: &str, exec: &str, args: &[String], workdir: &str) {
+    /// `elevate` asks for administrator rights whatever the program's manifest
+    /// says (winrun then shows the consent prompt).
+    fn launch_with(&mut self, name: &str, exec: &str, args: &[String], workdir: &str, elevate: bool) {
         if exec == "/system/bin/zen" && self.children.iter().any(|(_, n)| n == name) {
             if let Some(window) = self.windows.iter().find(|w| w.title.contains("Zen")) {
                 let _ = self.conn.window_action(window.id, Action::Activate, true);
@@ -1415,6 +1457,9 @@ impl Shell {
             c.arg(exec).args(args);
             if !workdir.is_empty() {
                 c.env("OSYX_WINRUN_CWD", workdir);
+            }
+            if elevate {
+                c.env("OSYX_ELEVATE", "1");
             }
             c
         };
@@ -1470,6 +1515,20 @@ impl Shell {
                 self.show_note("Desktop shortcut", &format!("{name} added to the desktop."));
             }
             Err(e) => self.show_note("Cannot add shortcut", &format!("{e}")),
+        }
+    }
+
+    /// Does `action` for `entry`, the `index`th application or shortcut.
+    fn entry_action(&mut self, action: EntryAction, entry: &AppEntry, index: usize) {
+        match action {
+            EntryAction::Open => self.launch_entry(entry),
+            EntryAction::RunAsAdmin => self.launch_with(&entry.name, &entry.exec, &entry.args, &entry.workdir, true),
+            EntryAction::ShowLocation => {
+                let dir = entry.exec.rsplit_once('/').map_or("/", |(d, _)| if d.is_empty() { "/" } else { d });
+                self.launch_with("Files", "/system/bin/files", &[String::from(dir)], "", false);
+            }
+            EntryAction::AddToDesktop => self.add_shortcut(index),
+            EntryAction::RemoveShortcut => self.remove_shortcut(index),
         }
     }
 

@@ -178,7 +178,10 @@ fn main() -> i32 {
     };
     // A program that demands administrator rights runs through the desktop's
     // consent prompt (see elevation.rs); root and the elevated copy skip it.
-    if os_std::os::getuid().0 != 0 && os_std::fs::read(&exe).is_ok_and(|image| elevation::wanted(&image)) {
+    // OSYX_ELEVATE=1 (the shell's "Run as administrator") asks for it whatever the manifest says.
+    if os_std::os::getuid().0 != 0
+        && (os_std::env::var("OSYX_ELEVATE").is_ok_and(|v| v == "1") || os_std::fs::read(&exe).is_ok_and(|image| elevation::wanted(&image)))
+    {
         let dir = os_std::env::var("OSYX_WINRUN_CWD").unwrap_or_else(|_| cwd_osyx());
         return elevation::run(&exe, &dir, verbose, &args[1..]);
     }
