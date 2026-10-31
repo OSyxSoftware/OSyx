@@ -823,10 +823,10 @@ fn copy_out<C: Ch>(buf: *mut C, s: &[C], n: usize) {
 }
 
 /// `__stdio_common_vsprintf` / `vswprintf`.
-fn vsprintf<C: Ch>(opts: u64, buf: *mut C, count: usize, fmt: *const C, args: *const u64) -> i32 {
+fn vsprintf<C: Ch>(opts: u64, buf: *mut C, count: usize, fmt: *const C, args: *const u64, pe32: bool) -> i32 {
     validate!(!fmt.is_null(), EINVAL, -1);
     validate!(count == 0 || !buf.is_null(), EINVAL, -1);
-    let s = match format(opts, fmt_units(fmt), args, false, false) {
+    let s = match format(opts, fmt_units(fmt), args, false, pe32) {
         Ok(s) => s,
         Err(Failed(e)) => {
             set_errno(e);
@@ -926,10 +926,37 @@ fn vsnprintf_s<C: Ch>(opts: u64, buf: *mut C, size: usize, count: usize, fmt: *c
 }
 
 extern "win64" fn __stdio_common_vsprintf(o: u64, b: *mut u8, n: usize, f: *const u8, _l: u64, a: *const u64) -> i32 {
-    vsprintf(o, b, n, f, a)
+    vsprintf(o, b, n, f, a, false)
 }
 extern "win64" fn __stdio_common_vswprintf(o: u64, b: *mut u16, n: usize, f: *const u16, _l: u64, a: *const u64) -> i32 {
-    vsprintf(o, b, n, f, a)
+    vsprintf(o, b, n, f, a, false)
+}
+
+extern "win64" fn legacy_snprintf(b: *mut u8, n: usize, f: *const u8, a: *const u64) -> i32 {
+    vsprintf(LEGACY_VSPRINTF_NULL_TERMINATION, b, n, f, a, false)
+}
+
+extern "win64" fn legacy_snwprintf(b: *mut u16, n: usize, f: *const u16, a: *const u64) -> i32 {
+    vsprintf(LEGACY_VSPRINTF_NULL_TERMINATION | LEGACY_WIDE_SPECIFIERS, b, n, f, a, false)
+}
+
+#[unsafe(naked)]
+extern "win64" fn _snprintf() {
+    core::arch::naked_asm!("mov [rsp+32], r9", "lea r9, [rsp+32]", "jmp {target}", target = sym legacy_snprintf)
+}
+
+#[unsafe(naked)]
+extern "win64" fn _snwprintf() {
+    core::arch::naked_asm!("mov [rsp+32], r9", "lea r9, [rsp+32]", "jmp {target}", target = sym legacy_snwprintf)
+}
+
+/// Legacy MSVCRT formatting with arguments in 32-bit stack slots.
+pub(crate) fn legacy_snprintf32(wide: bool, b: u32, n: u32, f: u32, a: *const u32) -> i32 {
+    if wide {
+        vsprintf(LEGACY_VSPRINTF_NULL_TERMINATION | LEGACY_WIDE_SPECIFIERS, b as *mut u16, n as usize, f as *const u16, a.cast(), true)
+    } else {
+        vsprintf(LEGACY_VSPRINTF_NULL_TERMINATION, b as *mut u8, n as usize, f as *const u8, a.cast(), true)
+    }
 }
 extern "win64" fn __stdio_common_vsprintf_s(o: u64, b: *mut u8, n: usize, f: *const u8, _l: u64, a: *const u64) -> i32 {
     vsprintf_s(o, b, n, f, a)
@@ -1027,6 +1054,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         _set_printf_count_output,
         _get_printf_count_output,
+        _snprintf,
+        _snwprintf,
         __stdio_common_vsprintf,
         __stdio_common_vswprintf,
         __stdio_common_vsprintf_s,

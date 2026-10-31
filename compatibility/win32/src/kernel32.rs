@@ -2139,7 +2139,7 @@ extern "win64" fn WaitForSingleObjectEx(h: u64, ms: u32, _alertable: Bool) -> u3
     WaitForSingleObject(h, ms)
 }
 
-extern "win64" fn WaitForMultipleObjects(n: u32, hs: *const u64, all: Bool, ms: u32) -> u32 {
+pub(crate) extern "win64" fn WaitForMultipleObjects(n: u32, hs: *const u64, all: Bool, ms: u32) -> u32 {
     if hs.is_null() || n == 0 || n > 64 {
         return fail(ERROR_INVALID_PARAMETER, objects::WAIT_FAILED);
     }
@@ -2148,7 +2148,7 @@ extern "win64" fn WaitForMultipleObjects(n: u32, hs: *const u64, all: Bool, ms: 
     objects::wait(list, all != 0, ms).unwrap_or_else(|e| fail(e, objects::WAIT_FAILED))
 }
 
-extern "win64" fn WaitForMultipleObjectsEx(n: u32, hs: *const u64, all: Bool, ms: u32, _alertable: Bool) -> u32 {
+pub(crate) extern "win64" fn WaitForMultipleObjectsEx(n: u32, hs: *const u64, all: Bool, ms: u32, _alertable: Bool) -> u32 {
     WaitForMultipleObjects(n, hs, all, ms)
 }
 
