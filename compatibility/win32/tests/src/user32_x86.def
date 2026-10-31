@@ -36,3 +36,9 @@ EXPORTS
     SetForegroundWindow
     BringWindowToTop
     TrackPopupMenu
+    IsChild
+    GetTopWindow
+    UnregisterClassW
+    SetWindowsHookExW
+    UnhookWindowsHookEx
+    LoadStringW

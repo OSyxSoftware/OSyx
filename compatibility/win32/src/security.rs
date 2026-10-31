@@ -417,7 +417,13 @@ pub(crate) unsafe fn component(p: *const u8, field: usize) -> Result<*const u8, 
         }
         (p as usize).checked_add(offset).map(|p| p as *const u8).ok_or(BAD_DESCRIPTOR)
     } else {
-        Ok(unsafe { rd::<u64>(p, 8 + field * 8) } as *const u8)
+        // Absolute form: four pointers, 8 bytes each (40-byte descriptor) or,
+        // for a 32-bit caller, 4 bytes each (20 bytes) from offset 4.
+        if crate::wow64::is_active() {
+            Ok(unsafe { rd::<u32>(p, 4 + field * 4) } as usize as *const u8)
+        } else {
+            Ok(unsafe { rd::<u64>(p, 8 + field * 8) } as *const u8)
+        }
     }
 }
 extern "win64" fn InitializeSecurityDescriptor(p: *mut u8, revision: u32) -> i32 {
@@ -428,7 +434,7 @@ extern "win64" fn InitializeSecurityDescriptor(p: *mut u8, revision: u32) -> i32
         return fail(REVISION_MISMATCH, 0);
     }
     unsafe {
-        core::ptr::write_bytes(p, 0, 40);
+        core::ptr::write_bytes(p, 0, if crate::wow64::is_active() { 20 } else { 40 });
         *p = 1;
     }
     1
@@ -464,7 +470,11 @@ fn set_component(p: *mut u8, field: usize, value: *const u8, bit: u16, defaulted
     }
     unsafe {
         wr(p, 2, control);
-        wr(p, 8 + field * 8, if present { value as u64 } else { 0 });
+        if crate::wow64::is_active() {
+            wr(p, 4 + field * 4, if present { value as usize as u32 } else { 0 });
+        } else {
+            wr(p, 8 + field * 8, if present { value as u64 } else { 0 });
+        }
     }
     1
 }

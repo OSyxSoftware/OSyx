@@ -9,3 +9,17 @@ EXPORTS
     RegEnumKeyW
     SetFileSecurityW
     GetNamedSecurityInfoW
+    InitializeSecurityDescriptor
+    SetSecurityDescriptorDacl
+    SetSecurityDescriptorOwner
+    GetSecurityDescriptorDacl
+    GetSecurityDescriptorOwner
+    IsValidSecurityDescriptor
+    InitializeAcl
+    AddAccessAllowedAce
+    IsValidAcl
+    AllocateAndInitializeSid
+    FreeSid
+    GetLengthSid
+    IsValidSid
+    EqualSid

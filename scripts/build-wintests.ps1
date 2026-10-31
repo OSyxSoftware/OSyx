@@ -44,7 +44,7 @@ if (Stale $apisetLib @("$src\apiset-processthreads.def")) {
 $programs = [ordered]@{
     'filedialogs.exe' = @{ Src = @('filedialogs.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lcomdlg32', '-lshell32', '-lole32', '-luser32', '-lkernel32') }
     'minimal.exe' = @{ Src = @('minimal.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
-    'version.exe' = @{ Src = @('version.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', $versionObj, '-lversion', '-lkernel32') }
+    'version.exe' = @{ Src = @('version.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', $versionObj, '-lversion', '-luser32', '-lkernel32') }
     'synch.exe' = @{ Src = @('synch.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32', '-lsynchronization') }
     'prio.exe' = @{ Src = @('prio.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'security.exe' = @{ Src = @('security.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ladvapi32', '-lkernel32') }
@@ -111,7 +111,7 @@ Remove-Item "$out\*.lib" -ErrorAction SilentlyContinue
 # --target=i686-pc-windows-gnu with lld; lld-link is required for /lib.
 $pe32Programs = [ordered]@{
     'hello32.exe' = @{ Src = @('hello32.c'); Libs = @() }
-    'api32.exe' = @{ Src = @('api32.c'); Libs = @('advapi32', 'user32', 'shell32', 'gdi32', 'comctl32') }
+    'api32.exe' = @{ Src = @('api32.c'); Libs = @('advapi32', 'user32', 'shell32', 'gdi32', 'comctl32', 'ole32') }
     'thread32.exe' = @{ Src = @('thread32.c'); Libs = @() }
     'gui32.exe' = @{ Src = @('gui32.c'); Libs = @('user32', 'gdi32') }
 }
@@ -121,7 +121,7 @@ if ($pe32Programs.Count -gt 0) {
         throw 'lld-link not found (C:\msys64\ucrt64\bin\lld-link.exe): the i686 toolchain is needed to build hello32.exe'
     }
     # One import library per <dll>_x86.def.
-    foreach ($dll in 'kernel32', 'advapi32', 'user32', 'shell32', 'gdi32', 'comctl32') {
+    foreach ($dll in 'kernel32', 'advapi32', 'user32', 'shell32', 'gdi32', 'comctl32', 'ole32') {
         $lib = Join-Path $out "${dll}_x86.lib"
         if (Stale $lib @("$src\${dll}_x86.def", (Join-Path $PSScriptRoot 'build-wintests.ps1'))) {
             Invoke-Checked "$dll x86 import library" {

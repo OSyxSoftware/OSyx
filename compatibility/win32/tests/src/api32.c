@@ -80,6 +80,39 @@ __declspec(dllimport) void __stdcall SetLastError(DWORD code);
 __declspec(dllimport) BOOL __stdcall SetForegroundWindow(HANDLE window);
 __declspec(dllimport) BOOL __stdcall BringWindowToTop(HANDLE window);
 __declspec(dllimport) BOOL __stdcall TrackPopupMenu(HANDLE menu, DWORD flags, int x, int y, int reserved, HANDLE window, const void *rect);
+__declspec(dllimport) BOOL __stdcall GetFileSizeEx(HANDLE file, long long *size);
+__declspec(dllimport) BOOL __stdcall SetFilePointerEx(HANDLE file, long long distance, long long *position, DWORD method);
+typedef struct { unsigned short year, month, weekday, day, hour, minute, second, millis; } SYSTIME32;
+__declspec(dllimport) void __stdcall GetSystemTime(SYSTIME32 *time);
+__declspec(dllimport) BOOL __stdcall SystemTimeToFileTime(const SYSTIME32 *time, unsigned long long *file_time);
+__declspec(dllimport) unsigned long long __stdcall VerSetConditionMask(unsigned long long mask, DWORD type, unsigned char condition);
+__declspec(dllimport) void *__stdcall GlobalReAlloc(void *block, DWORD size, DWORD flags);
+__declspec(dllimport) HANDLE __stdcall CreateFileMappingW(HANDLE file, void *attributes, DWORD protect, DWORD high, DWORD low, const WCHAR *name);
+__declspec(dllimport) void *__stdcall MapViewOfFile(HANDLE mapping, DWORD access, DWORD high, DWORD low, DWORD bytes);
+__declspec(dllimport) BOOL __stdcall UnmapViewOfFile(const void *view);
+__declspec(dllimport) BOOL __stdcall CreatePipe(HANDLE *read, HANDLE *write, void *attributes, DWORD size);
+__declspec(dllimport) long __stdcall InterlockedIncrement(volatile long *p);
+__declspec(dllimport) long __stdcall InterlockedDecrement(volatile long *p);
+__declspec(dllimport) long __stdcall InterlockedExchange(volatile long *p, long value);
+__declspec(dllimport) long __stdcall InterlockedExchangeAdd(volatile long *p, long value);
+__declspec(dllimport) long __stdcall InterlockedCompareExchange(volatile long *p, long exchange, long comparand);
+__declspec(dllimport) long long __stdcall InterlockedCompareExchange64(volatile long long *p, long long exchange, long long comparand);
+__declspec(dllimport) long __stdcall CoInitialize(void *reserved);
+__declspec(dllimport) void __stdcall CoUninitialize(void);
+__declspec(dllimport) BOOL __stdcall InitializeSecurityDescriptor(void *descriptor, DWORD revision);
+__declspec(dllimport) BOOL __stdcall SetSecurityDescriptorDacl(void *descriptor, BOOL present, void *acl, BOOL defaulted);
+__declspec(dllimport) BOOL __stdcall SetSecurityDescriptorOwner(void *descriptor, void *owner, BOOL defaulted);
+__declspec(dllimport) BOOL __stdcall GetSecurityDescriptorDacl(void *descriptor, BOOL *present, void **acl, BOOL *defaulted);
+__declspec(dllimport) BOOL __stdcall GetSecurityDescriptorOwner(void *descriptor, void **owner, BOOL *defaulted);
+__declspec(dllimport) BOOL __stdcall IsValidSecurityDescriptor(void *descriptor);
+__declspec(dllimport) BOOL __stdcall InitializeAcl(void *acl, DWORD size, DWORD revision);
+__declspec(dllimport) BOOL __stdcall AddAccessAllowedAce(void *acl, DWORD revision, DWORD access, void *sid);
+__declspec(dllimport) BOOL __stdcall IsValidAcl(void *acl);
+__declspec(dllimport) BOOL __stdcall AllocateAndInitializeSid(void *authority, unsigned char count, DWORD a0, DWORD a1, DWORD a2, DWORD a3, DWORD a4, DWORD a5, DWORD a6, DWORD a7, void **sid);
+__declspec(dllimport) void *__stdcall FreeSid(void *sid);
+__declspec(dllimport) DWORD __stdcall GetLengthSid(void *sid);
+__declspec(dllimport) BOOL __stdcall IsValidSid(void *sid);
+__declspec(dllimport) BOOL __stdcall EqualSid(void *a, void *b);
 typedef long (__stdcall *WNDPROC)(HANDLE, DWORD, DWORD, long);
 typedef struct {
     DWORD style;
@@ -343,6 +376,91 @@ void __stdcall start(void) {
         check("BringWindowToTop(bogus) fails with ERROR_INVALID_WINDOW_HANDLE", !BringWindowToTop((HANDLE)0x1234) && GetLastError() == 1400);
         SetLastError(0);
         check("TrackPopupMenu fails with ERROR_NOT_SUPPORTED", !TrackPopupMenu((HANDLE)1, 0, 0, 0, 0, 0, 0) && GetLastError() == 50);
+    }
+
+    {
+        /* Interlocked operations. */
+        volatile long v = 5;
+        check("InterlockedIncrement/Decrement return the new value", InterlockedIncrement(&v) == 6 && InterlockedDecrement(&v) == 5 && v == 5);
+        check("InterlockedExchange/ExchangeAdd return the old value", InterlockedExchange(&v, 9) == 5 && InterlockedExchangeAdd(&v, 3) == 9 && v == 12);
+        check("InterlockedCompareExchange stores only on a match", InterlockedCompareExchange(&v, 1, 99) == 12 && v == 12 && InterlockedCompareExchange(&v, 1, 12) == 12 && v == 1);
+        volatile long long w = 0x100000002LL;
+        check("InterlockedCompareExchange64 on a 64-bit value", InterlockedCompareExchange64(&w, 7, 0x100000002LL) == 0x100000002LL && w == 7 &&
+              InterlockedCompareExchange64(&w, 8, 5) == 7 && w == 7);
+
+        /* 64-bit file offsets and sizes. */
+        static const WCHAR big[] = L"C:\\tmp\\api32-seek.bin";
+        HANDLE f = CreateFileW(big, 0xC0000000, 0, 0, 2, 0x80, 0);
+        DWORD wrote = 0;
+        if (f != (HANDLE)-1) WriteFile(f, "0123456789", 10, &wrote, 0);
+        long long size = -1, pos = -1;
+        check("GetFileSizeEx writes a 64-bit size", f != (HANDLE)-1 && GetFileSizeEx(f, &size) && size == 10);
+        check("SetFilePointerEx from the end with a negative 64-bit distance", SetFilePointerEx(f, -3, &pos, 2) && pos == 7);
+        check("SetFilePointerEx from the start", SetFilePointerEx(f, 4, &pos, 0) && pos == 4);
+        if (f != (HANDLE)-1) CloseHandle(f);
+        DeleteFileW(big);
+
+        /* Time. */
+        SYSTIME32 y2k = { 2000, 1, 6, 1, 0, 0, 0, 0 }, now;
+        unsigned long long ft = 0;
+        check("SystemTimeToFileTime of 2000-01-01", SystemTimeToFileTime(&y2k, &ft) && ft == 0x01BF53EB256D4000ULL);
+        GetSystemTime(&now);
+        check("GetSystemTime fills 16 bytes with a plausible date", now.year >= 2024 && now.month >= 1 && now.month <= 12 && now.day >= 1 && now.day <= 31);
+        check("VerSetConditionMask places a 64-bit condition", VerSetConditionMask(0, 2, 3) == 0x8000000000000018ULL);
+
+        /* GlobalReAlloc keeps the contents. */
+        char *g = GlobalAlloc(0, 8);
+        if (g) { for (int i = 0; i < 8; i++) g[i] = (char)(i + 1); }
+        char *g2 = g ? GlobalReAlloc(g, 64, 2) : 0;
+        check("GlobalReAlloc grows and keeps the bytes", g2 && g2[0] == 1 && g2[7] == 8);
+
+        /* Mappings and pipes with 32-bit pointers and handles. */
+        HANDLE section = CreateFileMappingW((HANDLE)-1, 0, 4, 0, 4096, 0);
+        SetLastError(0);
+        volatile unsigned char *view = section ? MapViewOfFile(section, 2, 0, 0, 0) : 0;
+        /* The kernel places shared views high; a 32-bit caller gets an error, never a truncated pointer. */
+        check("page-file view of a 32-bit caller is refused with ERROR_NOT_ENOUGH_MEMORY or lies below 2 GiB and works",
+              section && ((view == 0 && GetLastError() == 8) || ((DWORD)view < 0x80000000u && (view[0] = 0x5a, view[4095] = 0xa5, view[0] == 0x5a && view[4095] == 0xa5))));
+        if (view) UnmapViewOfFile((const void *)view);
+        SetLastError(0);
+        check("UnmapViewOfFile of an address that is not a view fails with ERROR_INVALID_ADDRESS", !UnmapViewOfFile((const void *)0x12340000) && GetLastError() == 487);
+        if (section) CloseHandle(section);
+        HANDLE pr = 0, pw = 0;
+        char got[4] = { 0 };
+        DWORD n = 0;
+        check("CreatePipe writes two 4-byte handles; data goes through", CreatePipe(&pr, &pw, 0, 0) && pr && pw && pr != pw &&
+              WriteFile(pw, "abc", 3, &n, 0) && n == 3 && ReadFile(pr, got, 3, &n, 0) && n == 3 && got[0] == 'a' && got[2] == 'c');
+        if (pr) CloseHandle(pr);
+        if (pw) CloseHandle(pw);
+
+        /* COM apartments: first call S_OK, second S_FALSE. */
+        long first = CoInitialize(0), second = CoInitialize(0);
+        check("CoInitialize: S_OK then S_FALSE", first == 0 && second == 1);
+        CoUninitialize(); CoUninitialize();
+
+        /* Security descriptors in the 20-byte layout of a 32-bit program. */
+        struct { unsigned char sd[20]; DWORD guard[2]; unsigned char acl[64]; } sec = { { 0xff }, { 0xa5a5a5a5, 0xa5a5a5a5 }, { 0 } };
+        unsigned char world[6] = { 0, 0, 0, 0, 0, 1 };
+        void *sid = 0;
+        check("AllocateAndInitializeSid writes a 4-byte pointer", AllocateAndInitializeSid(world, 1, 0, 0, 0, 0, 0, 0, 0, 0, &sid) && sid);
+        check("SID checks: valid, 12 bytes, equal to itself", sid && IsValidSid(sid) && GetLengthSid(sid) == 12 && EqualSid(sid, sid));
+        check("InitializeAcl, AddAccessAllowedAce, IsValidAcl", InitializeAcl(sec.acl, 64, 2) && AddAccessAllowedAce(sec.acl, 2, 0x1f01ff, sid) && IsValidAcl(sec.acl));
+        check("InitializeSecurityDescriptor clears 20 bytes only", InitializeSecurityDescriptor(sec.sd, 1) && sec.sd[0] == 1 && sec.sd[1] == 0 && sec.guard[0] == 0xa5a5a5a5 && sec.guard[1] == 0xa5a5a5a5);
+        void *back = 0, *owner = 0;
+        BOOL present = 0, defaulted = 1;
+        check("SetSecurityDescriptorDacl / GetSecurityDescriptorDacl round trip with 4-byte pointers",
+              SetSecurityDescriptorDacl(sec.sd, 1, sec.acl, 0) && GetSecurityDescriptorDacl(sec.sd, &present, &back, &defaulted) &&
+              present == 1 && back == (void *)sec.acl && defaulted == 0 && sec.guard[0] == 0xa5a5a5a5);
+        check("SetSecurityDescriptorOwner / GetSecurityDescriptorOwner", SetSecurityDescriptorOwner(sec.sd, sid, 0) && GetSecurityDescriptorOwner(sec.sd, &owner, &defaulted) && owner == sid);
+        check("IsValidSecurityDescriptor accepts it", IsValidSecurityDescriptor(sec.sd));
+        {
+            struct { DWORD length; DWORD descriptor; int inherit; } attributes = { 12, (DWORD)sec.sd, 0 };
+            static const WCHAR dir[] = L"C:\\tmp\\sd32built";
+            RemoveDirectoryW(dir);
+            check("CreateDirectoryW with an absolute descriptor built through the bridge", CreateDirectoryW(dir, &attributes));
+            RemoveDirectoryW(dir);
+        }
+        check("FreeSid returns NULL", FreeSid(sid) == 0);
     }
 
     check("lstrcmpiA ignores case", lstrcmpiA("Steam", "sTEAM") == 0 && lstrcmpiA("a", "b") < 0);

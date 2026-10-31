@@ -167,6 +167,26 @@ static void windows_and_menus(void) {
     if (menu) DestroyMenu(menu);
 }
 
+static void interlocked(void) {
+    HMODULE k = GetModuleHandleA("kernel32.dll");
+    LONG (WINAPI *inc)(volatile LONG *) = (LONG (WINAPI *)(volatile LONG *))GetProcAddress(k, "InterlockedIncrement");
+    LONG (WINAPI *dec)(volatile LONG *) = (LONG (WINAPI *)(volatile LONG *))GetProcAddress(k, "InterlockedDecrement");
+    LONG (WINAPI *xchg)(volatile LONG *, LONG) = (LONG (WINAPI *)(volatile LONG *, LONG))GetProcAddress(k, "InterlockedExchange");
+    LONG (WINAPI *add)(volatile LONG *, LONG) = (LONG (WINAPI *)(volatile LONG *, LONG))GetProcAddress(k, "InterlockedExchangeAdd");
+    LONG (WINAPI *cas)(volatile LONG *, LONG, LONG) = (LONG (WINAPI *)(volatile LONG *, LONG, LONG))GetProcAddress(k, "InterlockedCompareExchange");
+    LONGLONG (WINAPI *cas64)(volatile LONGLONG *, LONGLONG, LONGLONG) = (LONGLONG (WINAPI *)(volatile LONGLONG *, LONGLONG, LONGLONG))GetProcAddress(k, "InterlockedCompareExchange64");
+    check("kernel32 exports the Interlocked functions", inc && dec && xchg && add && cas && cas64);
+    if (!(inc && dec && xchg && add && cas && cas64)) return;
+    volatile LONG v = 5;
+    check("InterlockedIncrement/Decrement return the new value", inc(&v) == 6 && dec(&v) == 5 && v == 5);
+    check("InterlockedExchange/ExchangeAdd return the old value", xchg(&v, 9) == 5 && add(&v, 3) == 9 && v == 12);
+    check("InterlockedCompareExchange stores only on a match", cas(&v, 1, 99) == 12 && v == 12 && cas(&v, 1, 12) == 12 && v == 1);
+    volatile LONGLONG w = 0x100000002LL;
+    check("InterlockedCompareExchange64", cas64(&w, 7, 0x100000002LL) == 0x100000002LL && w == 7 && cas64(&w, 8, 5) == 7 && w == 7);
+    v = 0x7fffffff;
+    check("InterlockedIncrement wraps like Windows", inc(&v) == (LONG)0x80000000);
+}
+
 static void attribute_lists(void) {
     SIZE_T size = 0;
     InitializeProcThreadAttributeList(NULL, 1, 0, &size);
@@ -186,5 +206,6 @@ void __stdcall start(void) {
     thread_library_calls();
     windows_and_menus();
     attribute_lists();
+    interlocked();
     finish("stubfix");
 }

@@ -24,6 +24,14 @@ __declspec(dllimport) HANDLE __stdcall CreateDialogParamW(HANDLE, const WCHAR *,
 __declspec(dllimport) long __stdcall DialogBoxParamW(HANDLE, const WCHAR *, HANDLE, WNDPROC, long);
 __declspec(dllimport) int __stdcall EndDialog(HANDLE, long);
 __declspec(dllimport) int __stdcall PostMessageW(HANDLE, DWORD, DWORD, long);
+__declspec(dllimport) int __stdcall IsChild(HANDLE, HANDLE);
+__declspec(dllimport) HANDLE __stdcall GetTopWindow(HANDLE);
+__declspec(dllimport) int __stdcall UnregisterClassW(const WCHAR *, HANDLE);
+__declspec(dllimport) HANDLE __stdcall SetWindowsHookExW(int, void *, HANDLE, DWORD);
+__declspec(dllimport) int __stdcall UnhookWindowsHookEx(HANDLE);
+__declspec(dllimport) int __stdcall LoadStringW(HANDLE, DWORD, WCHAR *, int);
+__declspec(dllimport) void __stdcall SetLastError(DWORD);
+__declspec(dllimport) DWORD __stdcall GetLastError(void);
 __declspec(dllimport) HANDLE __stdcall LoadBitmapW(HANDLE, const WCHAR *);
 __declspec(dllimport) int __stdcall DeleteObject(HANDLE);
 __declspec(dllimport) HANDLE __stdcall GetModuleHandleW(const WCHAR *);
@@ -76,6 +84,26 @@ void __stdcall start(void) {
     if (!modeless || dialog_init != 1 || !GetDlgItem(modeless, 42)) failed++;
     if (modeless && !DestroyWindow(modeless)) failed++;
     if (DialogBoxParamW(0, (const WCHAR *)101, parent, dlgproc, 2) != 73 || dialog_init != 2) failed++;
+    if (!parent || !child || !IsChild(parent, child) || IsChild(child, parent)) failed++;
+    if (!parent || GetTopWindow(parent) == 0) failed++;
+    SetLastError(0);
+    if (GetTopWindow((HANDLE)0x1234) != 0 || GetLastError() != 1400) failed++;
+    SetLastError(0);
+    if (UnregisterClassW(name, 0) || GetLastError() != 1412) failed++;
+    SetLastError(0);
+    if (UnregisterClassW(L"OSyxNoSuchClass", 0) || GetLastError() != 1411) failed++;
+    SetLastError(0);
+    if (SetWindowsHookExW(3, (void *)proc, 0, 0) != 0 || GetLastError() != 50) failed++;
+    SetLastError(0);
+    if (UnhookWindowsHookEx((HANDLE)0x1234) || GetLastError() != 1404) failed++;
+    {
+        WCHAR text[64];
+        text[13] = 0x5a5a;
+        if (LoadStringW(GetModuleHandleW(0), 3, text, 64) != 12 || text[0] != 'S' || text[12] != 0 || text[13] != 0x5a5a) failed++;
+        if (LoadStringW(0, 19, text, 64) != 8 || text[0] != 'N') failed++;
+        SetLastError(0);
+        if (LoadStringW(0, 4, text, 64) != 0 || GetLastError() != 1814) failed++;
+    }
     HANDLE bitmap = LoadBitmapW(GetModuleHandleW(0), (const WCHAR *)7);
     if (!bitmap || !DeleteObject(bitmap)) failed++;
     if (LoadBitmapW(GetModuleHandleW(0), (const WCHAR *)8) != 0) failed++;

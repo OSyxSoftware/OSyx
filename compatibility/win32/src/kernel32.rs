@@ -2337,6 +2337,43 @@ pub fn heap_free(p: u64) -> bool {
     true
 }
 
+// Interlocked operations on 32-bit and 64-bit values, as exported by kernel32
+// (compilers inline them for 64-bit callers; 32-bit programs may import them).
+fn atomic32<'a>(p: *mut i32) -> &'a core::sync::atomic::AtomicI32 {
+    // SAFETY: the caller's aligned 32-bit variable.
+    unsafe { &*(p as *const core::sync::atomic::AtomicI32) }
+}
+
+extern "win64" fn InterlockedIncrement(p: *mut i32) -> i32 {
+    atomic32(p).fetch_add(1, Ordering::SeqCst).wrapping_add(1)
+}
+
+extern "win64" fn InterlockedDecrement(p: *mut i32) -> i32 {
+    atomic32(p).fetch_sub(1, Ordering::SeqCst).wrapping_sub(1)
+}
+
+extern "win64" fn InterlockedExchange(p: *mut i32, value: i32) -> i32 {
+    atomic32(p).swap(value, Ordering::SeqCst)
+}
+
+extern "win64" fn InterlockedExchangeAdd(p: *mut i32, value: i32) -> i32 {
+    atomic32(p).fetch_add(value, Ordering::SeqCst)
+}
+
+extern "win64" fn InterlockedCompareExchange(p: *mut i32, exchange: i32, comparand: i32) -> i32 {
+    match atomic32(p).compare_exchange(comparand, exchange, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(v) | Err(v) => v,
+    }
+}
+
+extern "win64" fn InterlockedCompareExchange64(p: *mut i64, exchange: i64, comparand: i64) -> i64 {
+    // SAFETY: the caller's 8-byte aligned variable.
+    let a = unsafe { &*(p as *const core::sync::atomic::AtomicI64) };
+    match a.compare_exchange(comparand, exchange, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(v) | Err(v) => v,
+    }
+}
+
 extern "win64" fn GetProcessHeap() -> u64 {
     process_heap()
 }
@@ -3075,6 +3112,12 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         InitializeCriticalSectionAndSpinCount,
         InitializeCriticalSectionEx,
         DeleteCriticalSection,
+        InterlockedIncrement,
+        InterlockedDecrement,
+        InterlockedExchange,
+        InterlockedExchangeAdd,
+        InterlockedCompareExchange,
+        InterlockedCompareExchange64,
         EnterCriticalSection,
         TryEnterCriticalSection,
         LeaveCriticalSection,

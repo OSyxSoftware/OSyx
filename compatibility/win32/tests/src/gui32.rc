@@ -7,3 +7,8 @@ BEGIN
     CONTROL "Check", 42, "Button", WS_CHILD | BS_AUTOCHECKBOX, 4, 4, 45, 12
 END
 7 BITMAP "gui32.bmp"
+STRINGTABLE
+BEGIN
+ 3 "String three"
+ 19 "Nineteen"
+END

@@ -57,3 +57,20 @@ EXPORTS
     TryEnterCriticalSection
     DisableThreadLibraryCalls
     SetLastError
+    GetFileSizeEx
+    SetFilePointerEx
+    GetSystemTime
+    SystemTimeToFileTime
+    VerSetConditionMask
+    VerifyVersionInfoW
+    GlobalReAlloc
+    CreateFileMappingW
+    MapViewOfFile
+    UnmapViewOfFile
+    CreatePipe
+    InterlockedIncrement
+    InterlockedDecrement
+    InterlockedExchange
+    InterlockedExchangeAdd
+    InterlockedCompareExchange
+    InterlockedCompareExchange64

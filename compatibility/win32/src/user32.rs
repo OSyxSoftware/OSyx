@@ -1182,8 +1182,29 @@ fn register_class_ex(wc: *const u8, wide: bool) -> u16 {
     register_class(tmp.as_ptr(), wide)
 }
 
-extern "win64" fn UnregisterClassA(_name: *const u8, _inst: u64) -> Bool {
-    TRUE
+/// Removes a class registered by the program. A class with live windows
+/// stays (ERROR_CLASS_HAS_WINDOWS); an unknown or system class is
+/// ERROR_CLASS_DOES_NOT_EXIST. The slot stays so atoms and live indices keep
+/// their meaning; the name is cleared so it can be registered again.
+fn unregister_class(name: Option<String>) -> Bool {
+    let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
+    if ["BUTTON", "STATIC", "EDIT", "OSyxDialog"].iter().any(|n| name.eq_ignore_ascii_case(n)) {
+        return fail(1411, FALSE);
+    }
+    with(|g| {
+        let Some(ci) = g.classes.iter().position(|c| !c.name.is_empty() && c.name.eq_ignore_ascii_case(&name)) else {
+            return fail(1411, FALSE); // ERROR_CLASS_DOES_NOT_EXIST
+        };
+        if g.windows.values().any(|w| w.class == ci) {
+            return fail(1412, FALSE); // ERROR_CLASS_HAS_WINDOWS
+        }
+        g.classes[ci].name = String::new();
+        TRUE
+    })
+}
+
+extern "win64" fn UnregisterClassA(name: *const u8, _inst: u64) -> Bool {
+    unregister_class(class_name(name as u64, false))
 }
 
 fn class_name(p: u64, wide: bool) -> Option<String> {
@@ -4596,12 +4617,90 @@ extern "win64" fn UnhookWinEvent(_hook: u64) -> Bool {
 
 extern "win64" fn NotifyWinEvent(_event: u32, _wnd: u64, _object: i32, _child: i32) {}
 
-extern "win64" fn SetWindowsHookExW(_id: i32, _proc_: u64, _module: u64, _thread: u32) -> u64 {
-    0 // no hooks are installed or called
+/// Hooks are not implemented: no hook is ever installed or called, so the
+/// call fails (ERROR_NOT_SUPPORTED; ERROR_INVALID_HOOK_FILTER and
+/// ERROR_INVALID_FILTER_PROC first, as Windows checks them).
+extern "win64" fn SetWindowsHookExW(id: i32, proc_: u64, _module: u64, _thread: u32) -> u64 {
+    if !(-1..=14).contains(&id) {
+        return fail(1426, 0); // ERROR_INVALID_HOOK_FILTER
+    }
+    if proc_ == 0 {
+        return fail(1427, 0); // ERROR_INVALID_FILTER_PROC
+    }
+    fail(ERROR_NOT_SUPPORTED, 0)
 }
 
+/// No hook handle was ever returned, so every handle is invalid.
 extern "win64" fn UnhookWindowsHookEx(_hook: u64) -> Bool {
-    TRUE
+    fail(1404, FALSE) // ERROR_INVALID_HOOK_HANDLE
+}
+
+/// Reads string `id` of the string table of `inst` (NULL: the program) into
+/// `buf` (at most `cch - 1` units plus a NUL). Returns the units copied, 0
+/// with the error set if there is no such string. `cch == 0` (a pointer to
+/// the read-only resource) is not supported.
+extern "win64" fn LoadStringW(inst: u64, id: u32, buf: *mut u16, cch: i32) -> i32 {
+    if buf.is_null() || cch < 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if cch == 0 {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    let Some(units) = string_resource(inst, id) else { return 0 };
+    let n = units.len().min(cch as usize - 1);
+    // SAFETY: the caller's buffer of `cch` units.
+    unsafe {
+        core::ptr::copy_nonoverlapping(units.as_ptr(), buf, n);
+        *buf.add(n) = 0;
+    }
+    n as i32
+}
+
+extern "win64" fn LoadStringA(inst: u64, id: u32, buf: *mut u8, cch: i32) -> i32 {
+    if buf.is_null() || cch < 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if cch == 0 {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    let Some(units) = string_resource(inst, id) else { return 0 };
+    let text = String::from_utf16_lossy(&units);
+    let n = text.len().min(cch as usize - 1);
+    // SAFETY: the caller's buffer of `cch` bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(text.as_ptr(), buf, n);
+        *buf.add(n) = 0;
+    }
+    n as i32
+}
+
+/// String `id` from the RT_STRING block `id / 16 + 1`: sixteen strings, each
+/// a length in units and the units. Sets the last error when absent.
+fn string_resource(inst: u64, id: u32) -> Option<Vec<u16>> {
+    let block = match crate::loader::numeric_resource(inst, 6, (id / 16 + 1) as u64) {
+        Ok(b) => b,
+        Err(e) => {
+            // 1813 (type not found) from the lookup also covers a missing
+            // block of a table that exists: report the name.
+            fail::<u32>(if e == 1813 { 1814 } else { e }, 0);
+            return None;
+        }
+    };
+    let mut at = 0usize;
+    for i in 0..16u32 {
+        let len = u16::from_le_bytes([*block.get(at)?, *block.get(at + 1)?]) as usize;
+        at += 2;
+        if i == id % 16 {
+            let bytes = block.get(at..at + len * 2)?;
+            if len == 0 {
+                fail::<u32>(1814, 0); // ERROR_RESOURCE_NAME_NOT_FOUND: an empty slot
+                return None;
+            }
+            return Some(bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect());
+        }
+        at += len * 2;
+    }
+    None
 }
 
 /// Property key: an atom (`#n`) or a case-insensitive name.
@@ -4671,8 +4770,22 @@ extern "win64" fn GetAncestor(wnd: u64, flags: u32) -> u64 {
     }
 }
 
-extern "win64" fn IsChild(_parent: u64, _wnd: u64) -> Bool {
-    FALSE
+/// Whether `wnd` is a child, grandchild ... of `parent`.
+extern "win64" fn IsChild(parent: u64, wnd: u64) -> Bool {
+    with(|g| {
+        let mut cur = wnd;
+        for _ in 0..g.windows.len() + 1 {
+            let Some(w) = g.windows.get(&cur) else { return FALSE };
+            if w.style & WS_CHILD == 0 {
+                return FALSE;
+            }
+            if w.owner == parent {
+                return g.windows.contains_key(&parent) as Bool;
+            }
+            cur = w.owner;
+        }
+        FALSE
+    })
 }
 
 extern "win64" fn GetWindow(wnd: u64, cmd: u32) -> u64 {
@@ -4681,8 +4794,19 @@ extern "win64" fn GetWindow(wnd: u64, cmd: u32) -> u64 {
     } else { 0 }
 }
 
-extern "win64" fn GetTopWindow(_wnd: u64) -> u64 {
-    0
+/// The topmost child of `wnd` (the most recently created one: new windows
+/// go on top), or of the desktop when `wnd` is NULL. 0 if there is none.
+extern "win64" fn GetTopWindow(wnd: u64) -> u64 {
+    with(|g| {
+        if wnd != 0 && !g.windows.contains_key(&wnd) {
+            return fail(ERROR_INVALID_WINDOW_HANDLE, 0);
+        }
+        g.windows.iter()
+            .filter(|(_, w)| if wnd == 0 { w.style & WS_CHILD == 0 } else { w.style & WS_CHILD != 0 && w.owner == wnd })
+            .map(|(&h, _)| h)
+            .max()
+            .unwrap_or(0)
+    })
 }
 
 extern "win64" fn SetParent(wnd: u64, _parent: u64) -> u64 {
@@ -5002,10 +5126,7 @@ extern "win64" fn GetClassInfoA(inst: u64, name: *const u8, out: *mut u8) -> Boo
 }
 
 extern "win64" fn UnregisterClassW(name: *const u16, _inst: u64) -> Bool {
-    if wide(name).is_none() {
-        return fail(ERROR_INVALID_PARAMETER, FALSE);
-    }
-    TRUE // the class table lives as long as the process
+    unregister_class(class_name(name as u64, true))
 }
 
 extern "win64" fn GetClassLongPtrW(wnd: u64, index: i32) -> u64 {
@@ -5895,6 +6016,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         NotifyWinEvent,
         SetWindowsHookExW,
         UnhookWindowsHookEx,
+        LoadStringW,
+        LoadStringA,
         GetPropW,
         SetPropW,
         RemovePropW,

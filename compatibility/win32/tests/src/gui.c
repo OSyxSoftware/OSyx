@@ -105,6 +105,31 @@ void __stdcall start(void) {
     SetWindowPos(main_window, NULL, 0, 0, 480, 260, SWP_NOMOVE | SWP_NOZORDER);
     char title[64];
     check("GetWindowTextA", GetWindowTextA(main_window, title, sizeof title) == 13);
+    {
+        HWND child = CreateWindowExA(0, "BUTTON", "child", WS_CHILD | WS_VISIBLE, 0, 0, 50, 20, main_window, (HMENU)(UINT_PTR)5, wc.hInstance, NULL);
+        check("IsChild reports a child control", child && IsChild(main_window, child) && !IsChild(child, main_window));
+        check("GetTopWindow(parent) is its newest child", GetTopWindow(main_window) == child);
+        SetLastError(0);
+        check("GetTopWindow(bogus) fails with ERROR_INVALID_WINDOW_HANDLE", GetTopWindow((HWND)0x1234) == NULL && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+        SetLastError(0);
+        check("UnregisterClassA of a class with windows fails with ERROR_CLASS_HAS_WINDOWS", !UnregisterClassA("OSyxWin32Test", wc.hInstance) && GetLastError() == ERROR_CLASS_HAS_WINDOWS);
+        SetLastError(0);
+        check("UnregisterClassA of an unknown class fails with ERROR_CLASS_DOES_NOT_EXIST", !UnregisterClassA("OSyxNoSuchClass", wc.hInstance) && GetLastError() == ERROR_CLASS_DOES_NOT_EXIST);
+        WNDCLASSA temp = wc;
+        temp.lpszClassName = "OSyxTempClass";
+        BOOL again = RegisterClassA(&temp) && UnregisterClassA("OSyxTempClass", wc.hInstance) && !UnregisterClassA("OSyxTempClass", wc.hInstance) && RegisterClassA(&temp);
+        check("a class without windows can be unregistered and registered again", again);
+        UnregisterClassA("OSyxTempClass", wc.hInstance);
+        SetLastError(0);
+        check("SetWindowsHookExW is refused with ERROR_NOT_SUPPORTED", SetWindowsHookExW(WH_GETMESSAGE, (HOOKPROC)wndproc, NULL, GetCurrentThreadId()) == NULL && GetLastError() == ERROR_NOT_SUPPORTED);
+        SetLastError(0);
+        check("SetWindowsHookExW rejects a bad hook id with ERROR_INVALID_HOOK_FILTER", SetWindowsHookExW(99, (HOOKPROC)wndproc, NULL, 0) == NULL && GetLastError() == ERROR_INVALID_HOOK_FILTER);
+        SetLastError(0);
+        SetLastError(0);
+        check("SetWindowsHookExW with a NULL procedure fails with ERROR_INVALID_FILTER_PROC", SetWindowsHookExW(WH_GETMESSAGE, NULL, NULL, 0) == NULL && GetLastError() == ERROR_INVALID_FILTER_PROC);
+        SetLastError(0);
+        check("UnhookWindowsHookEx(bogus) fails with ERROR_INVALID_HOOK_HANDLE", !UnhookWindowsHookEx((HHOOK)0x1234) && GetLastError() == ERROR_INVALID_HOOK_HANDLE);
+    }
     ShowWindow(main_window, SW_SHOW);
     UpdateWindow(main_window);
     MSG m;
