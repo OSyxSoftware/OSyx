@@ -216,7 +216,7 @@ static void without_windows(void) {
     SetLastError(0);
     check("SetThreadDesktop(bogus) fails with ERROR_INVALID_HANDLE", !SetThreadDesktop((HDESK)0x1234) && GetLastError() == ERROR_INVALID_HANDLE);
     SetLastError(0);
-    check("MessageBeep fails with ERROR_NOT_SUPPORTED (no sound output; Windows would beep)", !MessageBeep(MB_OK) && GetLastError() == ERROR_NOT_SUPPORTED);
+    check("MessageBeep returns TRUE for the default beep and for every icon, as Windows does", MessageBeep(MB_OK) && MessageBeep(MB_ICONHAND) && MessageBeep(MB_ICONQUESTION) && MessageBeep(MB_ICONEXCLAMATION) && MessageBeep(MB_ICONASTERISK) && MessageBeep(0xFFFFFFFF));
     check("ReplyMessage outside a sent message fails", !ReplyMessage(0));
 
     check("ImmGetOpenStatus(NULL) is FALSE", !ImmGetOpenStatus(NULL));
