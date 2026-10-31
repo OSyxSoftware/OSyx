@@ -26,6 +26,7 @@
     "UiaRaiseAutomationPropertyChangedEvent": "with no listening client a change has nobody to reach; Windows returns S_OK then",
     "singleton_ref": "COM AddRef/Release of static objects: the count never changes, 1 is the Windows result for a static singleton",
     "StreamCommit": "a memory stream has nothing to flush or roll back: Windows returns S_OK (probed)",
-    "StreamRevert": "a memory stream has nothing to flush or roll back: Windows returns S_OK (probed)"
+    "StreamRevert": "a memory stream has nothing to flush or roll back: Windows returns S_OK (probed)",
+    "FtmDisconnectObject": "the free-threaded marshaler keeps no per-client state, so there is nothing to disconnect; Windows returns S_OK"
   }
 }
