@@ -77,34 +77,214 @@ extern "win64" fn InitSecurityInterfaceW() -> *const SspiTable {
     &SSPI_TABLE
 }
 
-/// The local security authority is not reachable: no logon sessions can be
-/// created or queried.
+// ---- the local security authority ------------------------------------------------------------
+//
+// LSA handles come from LsaConnectUntrusted (any process) or
+// LsaRegisterLogonProcess (SeTcbPrivilege). Only a registered logon process
+// may call LsaLogonUser; authentication packages are found by name. Logons
+// check /etc/shadow (accounts.rs). Results the LSA allocates are tracked so
+// LsaFreeReturnBuffer frees only those.
+
+const STATUS_PRIVILEGE_NOT_HELD: u32 = 0xC000_0041;
+const STATUS_NO_SUCH_PACKAGE: u32 = 0xC000_00FE;
+const STATUS_MEMORY_NOT_ALLOCATED: u32 = 0xC000_00A0;
+const STATUS_RPC_INVALID_BINDING: u32 = 0xC003_0005;
+const STATUS_LOGON_FAILURE: u32 = 0xC000_006D;
+const STATUS_NO_SUCH_USER: u32 = 0xC000_0064;
+const STATUS_WRONG_PASSWORD: u32 = 0xC000_006A;
+const SE_TCB_PRIVILEGE: u32 = 7;
+
+/// Authentication package ids (the values a Windows 11 machine reports).
+const PACKAGE_NEGOTIATE: u32 = 0;
+const PACKAGE_KERBEROS: u32 = 2;
+const PACKAGE_MSV1_0: u32 = 11;
+
+static LSA_HANDLES: os_std::sync::Mutex<alloc::collections::BTreeMap<u64, bool>> = os_std::sync::Mutex::new(alloc::collections::BTreeMap::new());
+static LSA_BUFFERS: os_std::sync::Mutex<alloc::collections::BTreeSet<u64>> = os_std::sync::Mutex::new(alloc::collections::BTreeSet::new());
+static NEXT_LSA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x1a50);
+static NEXT_LUID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x3e8f0);
+
+fn new_lsa_handle(trusted: bool) -> u64 {
+    let h = NEXT_LSA.fetch_add(8, core::sync::atomic::Ordering::Relaxed);
+    LSA_HANDLES.lock().unwrap().insert(h, trusted);
+    h
+}
+
+/// A connection with no privilege: it may look up packages but not log on.
 extern "win64" fn LsaConnectUntrusted(handle: *mut u64) -> u32 {
     if handle.is_null() {
         return STATUS_INVALID_PARAMETER;
     }
     // SAFETY: the caller's out pointer.
-    unsafe { *handle = 0 };
-    STATUS_NOT_SUPPORTED
+    unsafe { *handle = new_lsa_handle(false) };
+    0
 }
 
-/// No LSA handle exists, so every handle is invalid.
-extern "win64" fn LsaDeregisterLogonProcess(_handle: u64) -> u32 {
-    STATUS_INVALID_HANDLE
+/// A logon process connection: the caller's token must hold SeTcbPrivilege.
+extern "win64" fn LsaRegisterLogonProcess(name: *const u8, handle: *mut u64, mode: *mut u32) -> u32 {
+    if name.is_null() || handle.is_null() || mode.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if !crate::tokens::process_data().privileges.iter().any(|&(luid, _)| luid == SE_TCB_PRIVILEGE) {
+        return STATUS_PRIVILEGE_NOT_HELD;
+    }
+    // SAFETY: the caller's out pointers.
+    unsafe {
+        *handle = new_lsa_handle(true);
+        *mode = 0;
+    }
+    0
 }
 
-/// LSA never returns a buffer, so there is none to free.
-extern "win64" fn LsaFreeReturnBuffer(_buffer: u64) -> u32 {
-    STATUS_INVALID_PARAMETER
+/// Closes a connection; an unknown or already closed handle is an invalid
+/// RPC binding.
+extern "win64" fn LsaDeregisterLogonProcess(handle: u64) -> u32 {
+    if LSA_HANDLES.lock().unwrap().remove(&handle).is_some() { 0 } else { STATUS_RPC_INVALID_BINDING }
 }
 
+/// Reads an LSA_STRING (Length, MaximumLength, 4 bytes of padding, Buffer).
+fn lsa_string(p: *const u8) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: an LSA_STRING whose buffer holds `Length` bytes.
+    unsafe {
+        let len = core::ptr::read_unaligned(p as *const u16) as usize;
+        let buf = core::ptr::read_unaligned(p.add(8) as *const u64) as *const u8;
+        if buf.is_null() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(core::slice::from_raw_parts(buf, len)).into_owned())
+    }
+}
+
+/// Finds an authentication package by name.
+extern "win64" fn LsaLookupAuthenticationPackage(handle: u64, name: *const u8, id: *mut u32) -> u32 {
+    if !LSA_HANDLES.lock().unwrap().contains_key(&handle) {
+        return STATUS_RPC_INVALID_BINDING;
+    }
+    let Some(name) = lsa_string(name).filter(|_| !id.is_null()) else { return STATUS_INVALID_PARAMETER };
+    let found = match name.as_str() {
+        "MICROSOFT_AUTHENTICATION_PACKAGE_V1_0" => PACKAGE_MSV1_0,
+        "Negotiate" => PACKAGE_NEGOTIATE,
+        "Kerberos" => PACKAGE_KERBEROS,
+        _ => {
+            // SAFETY: the caller's out pointer.
+            unsafe { *id = u32::MAX };
+            return STATUS_NO_SUCH_PACKAGE;
+        }
+    };
+    // SAFETY: the caller's out pointer.
+    unsafe { *id = found };
+    0
+}
+
+/// Frees a buffer an LSA call returned; anything else is not allocated.
+extern "win64" fn LsaFreeReturnBuffer(buffer: u64) -> u32 {
+    if LSA_BUFFERS.lock().unwrap().remove(&buffer) {
+        crate::kernel32::heap_free(buffer);
+        0
+    } else {
+        STATUS_MEMORY_NOT_ALLOCATED
+    }
+}
+
+/// Reads a UNICODE_STRING (Length, MaximumLength, 4 bytes of padding, Buffer).
+fn unicode_string(p: *const u8) -> String {
+    // SAFETY: a UNICODE_STRING whose buffer holds `Length` bytes.
+    unsafe {
+        let len = core::ptr::read_unaligned(p as *const u16) as usize / 2;
+        let buf = core::ptr::read_unaligned(p.add(8) as *const u64) as *const u16;
+        if buf.is_null() || len == 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(core::slice::from_raw_parts(buf, len))
+    }
+}
+
+const MSV1_0_INTERACTIVE_LOGON_SIZE: u32 = 56;
+const MSV1_0_INTERACTIVE_PROFILE_SIZE: usize = 160;
+const MSV1_0_INTERACTIVE_LOGON: u32 = 2;
+const MSV1_0_INTERACTIVE_PROFILE: u32 = 2;
+
+/// LsaLogonUser for the MSV1_0 package with an MSV1_0_INTERACTIVE_LOGON
+/// block (domain, user, password): checks the password against /etc/shadow
+/// and returns a token, the logon session id and an interactive profile.
+/// Only a registered logon process may call it; the Kerberos and Negotiate
+/// packages need a domain controller that does not exist here.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn LsaLogonUser(_handle: u64, _origin: u64, _kind: u32, _package: u32, _info: u64, _len: u32, _groups: u64, _source: u64, _profile: u64, _profile_len: u64, _luid: u64, _token: u64, _quotas: u64, _substatus: u64) -> u32 {
-    STATUS_INVALID_HANDLE
+extern "win64" fn LsaLogonUser(
+    handle: u64,
+    origin: *const u8,
+    kind: u32,
+    package: u32,
+    info: *const u8,
+    info_len: u32,
+    _groups: u64,
+    source: *const u8,
+    profile: *mut u64,
+    profile_len: *mut u32,
+    luid: *mut u32,
+    token: *mut u64,
+    quotas: *mut u8,
+    substatus: *mut u32,
+) -> u32 {
+    let Some(trusted) = LSA_HANDLES.lock().unwrap().get(&handle).copied() else { return STATUS_RPC_INVALID_BINDING };
+    if !matches!(package, PACKAGE_NEGOTIATE | PACKAGE_KERBEROS | PACKAGE_MSV1_0) {
+        return STATUS_NOT_SUPPORTED;
+    }
+    if !trusted || origin.is_null() || source.is_null() || info.is_null() || info_len < MSV1_0_INTERACTIVE_LOGON_SIZE || profile.is_null() || profile_len.is_null() || luid.is_null() || token.is_null() || quotas.is_null() || substatus.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if package != PACKAGE_MSV1_0 || !matches!(kind, 2 | 3 | 4 | 5 | 7 | 8 | 9) {
+        return STATUS_NOT_SUPPORTED;
+    }
+    // SAFETY: an MSV1_0_INTERACTIVE_LOGON of at least 56 bytes: MessageType,
+    // then the LogonDomainName, UserName and Password UNICODE_STRINGs.
+    let (message, domain, user, password) = unsafe { (core::ptr::read_unaligned(info as *const u32), unicode_string(info.add(8)), unicode_string(info.add(24)), unicode_string(info.add(40))) };
+    if message != MSV1_0_INTERACTIVE_LOGON {
+        return STATUS_INVALID_PARAMETER;
+    }
+    let verdict = if crate::accounts::domain_is_local(&domain) { crate::accounts::logon(&user, &password) } else { Err(crate::accounts::LogonFailure::NoSuchUser) };
+    let (uid, gid) = match verdict {
+        Ok(ids) => ids,
+        Err(why) => {
+            // SAFETY: the caller's out pointer.
+            unsafe {
+                *substatus = if why == crate::accounts::LogonFailure::NoSuchUser { STATUS_NO_SUCH_USER } else { STATUS_WRONG_PASSWORD };
+            }
+            return STATUS_LOGON_FAILURE;
+        }
+    };
+    let Some(block) = crate::kernel32::heap_alloc(MSV1_0_INTERACTIVE_PROFILE_SIZE, true) else { return 0xC000_0017 };
+    LSA_BUFFERS.lock().unwrap().insert(block);
+    let session = NEXT_LUID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: the caller's out pointers; `block` holds the profile.
+    unsafe {
+        core::ptr::write_unaligned(block as *mut u32, MSV1_0_INTERACTIVE_PROFILE);
+        core::ptr::write_unaligned((block + 8) as *mut i64, crate::kernel32::filetime(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0) as i64) as i64);
+        *profile = block;
+        *profile_len = MSV1_0_INTERACTIVE_PROFILE_SIZE as u32;
+        *luid = session;
+        *luid.add(1) = 0;
+        *token = crate::accounts::logon_token(uid, gid, kind == 3);
+        core::ptr::write_bytes(quotas, 0, 48);
+        *substatus = 0;
+    }
+    0
 }
 
 pub fn secur32_exports() -> Vec<(&'static str, u64)> {
-    export_table![GetUserNameExW, InitSecurityInterfaceW, LsaConnectUntrusted, LsaDeregisterLogonProcess, LsaFreeReturnBuffer, LsaLogonUser]
+    export_table![
+        GetUserNameExW,
+        InitSecurityInterfaceW,
+        LsaConnectUntrusted,
+        LsaRegisterLogonProcess,
+        LsaDeregisterLogonProcess,
+        LsaLookupAuthenticationPackage,
+        LsaFreeReturnBuffer,
+        LsaLogonUser
+    ]
 }
 
 // ---- shfolder.dll -----------------------------------------------------------------------
