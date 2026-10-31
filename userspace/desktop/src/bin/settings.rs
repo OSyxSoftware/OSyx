@@ -135,6 +135,8 @@ struct Settings {
     /// Programs with an uninstaller, the selected row and the button.
     programs: Vec<InstalledProgram>,
     selected_program: Option<usize>,
+    /// First program row shown.
+    programs_top: usize,
     uninstall: Button,
     status: String,
     focus: usize,
@@ -180,6 +182,19 @@ impl Settings {
         }
         net::configure(&config)
     }
+    /// Keeps the list inside its rows and the selected program in view, so
+    /// Uninstall never acts on a program the user cannot see.
+    fn show_selected_program(&mut self) {
+        self.programs_top = self.programs_top.min(self.programs.len().saturating_sub(PROGRAM_ROWS));
+        if let Some(i) = self.selected_program {
+            if i < self.programs_top {
+                self.programs_top = i;
+            } else if i >= self.programs_top + PROGRAM_ROWS {
+                self.programs_top = i + 1 - PROGRAM_ROWS;
+            }
+        }
+    }
+
     fn content(&self) -> Rect {
         let (w, h) = self.size;
         Rect::new(SIDEBAR as i32 + 16, 16, w.saturating_sub(SIDEBAR + 32), h.saturating_sub(32))
@@ -236,6 +251,17 @@ impl App for Settings {
 
     fn event(&mut self, ev: Ui, cx: &mut Ctx) -> bool {
         let c = self.content();
+        // The wheel scrolls the program list (dy > 0 is up).
+        if let (Section::Apps, Ui::Wheel { dy, .. }) = (self.section, &ev) {
+            let before = self.programs_top;
+            let max_top = self.programs.len().saturating_sub(PROGRAM_ROWS);
+            self.programs_top = if *dy > 0 {
+                before.saturating_sub(*dy as usize)
+            } else {
+                (before + dy.unsigned_abs() as usize).min(max_top)
+            };
+            return self.programs_top != before;
+        }
         if let Ui::PointerDown { x, y, .. } = ev {
             if inside(self.hostname.rect, x, y) {
                 self.focus = 0;
@@ -254,6 +280,7 @@ impl App for Settings {
                         if *s == Section::Apps {
                             self.programs = installed_programs();
                             self.selected_program = None;
+                            self.programs_top = 0;
                         }
                         return true;
                     }
@@ -282,7 +309,7 @@ impl App for Settings {
                 Section::Apps => {
                     for (i, r) in option_rows(c, self.programs.len().min(PROGRAM_ROWS), c.y + 74).into_iter().enumerate() {
                         if inside(r, x, y) {
-                            self.selected_program = Some(i);
+                            self.selected_program = Some(self.programs_top + i);
                             return true;
                         }
                     }
@@ -398,6 +425,7 @@ impl App for Settings {
                 let kept = self.selected_program.and_then(|i| self.programs.get(i)).map(|p| p.uninstaller.clone());
                 self.programs = now;
                 self.selected_program = kept.and_then(|path| self.programs.iter().position(|p| p.uninstaller == path));
+                self.show_selected_program();
             }
             return changed;
         }
@@ -591,13 +619,18 @@ impl App for Settings {
             }
             Section::Apps => {
                 let rows = self.programs.len().min(PROGRAM_ROWS);
-                let g = Self::group(p, Rect::new(c.x, c.y + 40, c.w, 34 + (rows.max(1) * 40) as u32 + 8), "Installed programs");
+                let title = if self.programs.len() > rows {
+                    format!("Installed programs ({}-{} of {}, scroll for more)", self.programs_top + 1, self.programs_top + rows, self.programs.len())
+                } else {
+                    String::from("Installed programs")
+                };
+                let g = Self::group(p, Rect::new(c.x, c.y + 40, c.w, 34 + (rows.max(1) * 40) as u32 + 8), &title);
                 if self.programs.is_empty() {
                     p.text(FontKind::Ui, g.x + 16, g.y + 12, "No program with an uninstaller is installed in Program Files.", t.text_dim);
                 }
                 for (i, r) in option_rows(c, rows, c.y + 74).into_iter().enumerate() {
-                    let program = &self.programs[i];
-                    if self.selected_program == Some(i) {
+                    let program = &self.programs[self.programs_top + i];
+                    if self.selected_program == Some(self.programs_top + i) {
                         p.rounded(r, 6, t.selection, 255);
                     }
                     icon::draw(p, program.icon, Rect::new(r.x + 8, r.y + 4, 28, 28), t.text);
@@ -679,6 +712,7 @@ fn main() -> i32 {
         install_update: Button::new(6, "Install update", ButtonStyle::Primary),
         programs: installed_programs(),
         selected_program: None,
+        programs_top: 0,
         uninstall: Button::new(7, "Uninstall", ButtonStyle::Danger),
         status: String::new(),
         focus: 0,

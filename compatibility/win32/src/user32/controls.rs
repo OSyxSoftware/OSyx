@@ -162,12 +162,13 @@ fn progress_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
 }
 
 /// The text of an LVITEM (`pszText`) in the caller's layout.
-fn item_text(item: i64, wide: bool) -> String {
+/// `mask_says_text`: an inserted item must state LVIF_TEXT; `LVM_SETITEMTEXT` has no mask.
+fn item_text(item: i64, wide: bool, mask_says_text: bool) -> String {
     if item == 0 {
         return String::new();
     }
     // SAFETY: the caller's LVITEM: mask at 0.
-    if unsafe { teb::get::<u32>(item as u64, 0) } & LVIF_TEXT == 0 {
+    if mask_says_text && unsafe { teb::get::<u32>(item as u64, 0) } & LVIF_TEXT == 0 {
         return String::new(); // no text in this item
     }
     // LVITEM: mask, iItem, iSubItem, state, stateMask, then pszText: at 20
@@ -209,7 +210,7 @@ fn list_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
     let result = match msg {
         LVM_GETITEMCOUNT => return data_of(hwnd, |d| d.rows.len() as i64),
         LVM_INSERTITEMW | LVM_INSERTITEMA => {
-            let text = item_text(l, msg == LVM_INSERTITEMW);
+            let text = item_text(l, msg == LVM_INSERTITEMW, true);
             let (index, _) = item_fields(l);
             data_of(hwnd, |d| {
                 let at = (index.max(0) as usize).min(d.rows.len());
@@ -218,7 +219,7 @@ fn list_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
             })
         }
         LVM_SETITEMTEXTW | LVM_SETITEMTEXTA => {
-            let text = item_text(l, msg == LVM_SETITEMTEXTW);
+            let text = item_text(l, msg == LVM_SETITEMTEXTW, false);
             let (_, column) = item_fields(l);
             data_of(hwnd, |d| match d.rows.get_mut(w as usize) {
                 Some(row) => {
