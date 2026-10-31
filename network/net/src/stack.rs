@@ -820,12 +820,18 @@ impl Stack {
                 let from = h.src;
                 for s in self.sockets.values_mut() {
                     if let Socket::Icmp(sock) = s {
-                        if sock.ident == ident {
-                            sock.targets.retain(|&(a, sq)| !(a == from && sq == seq));
-                            if sock.rx.len() < ICMP_QUEUE {
-                                sock.rx.push_back(IcmpEvent::Reply { from, seq, ttl, data: data.to_vec() });
-                                self.changed = true;
-                            }
+                        if sock.ident != ident {
+                            continue;
+                        }
+                        // Only a reply to a request this socket actually sent
+                        // belongs to it; a stray reply must not look like one.
+                        let Some(p) = sock.targets.iter().position(|&(a, sq)| a == from && sq == seq) else {
+                            continue;
+                        };
+                        sock.targets.remove(p);
+                        if sock.rx.len() < ICMP_QUEUE {
+                            sock.rx.push_back(IcmpEvent::Reply { from, seq, ttl, data: data.to_vec() });
+                            self.changed = true;
                         }
                     }
                 }
@@ -854,8 +860,14 @@ impl Stack {
                 let (ident, seq) = (be16(rest, 4), be16(rest, 6));
                 for s in self.sockets.values_mut() {
                     if let Socket::Icmp(sock) = s {
-                        if sock.ident == ident && sock.rx.len() < ICMP_QUEUE {
-                            sock.targets.retain(|&(a, sq)| !(a == oh.dst && sq == seq));
+                        if sock.ident != ident {
+                            continue;
+                        }
+                        let Some(p) = sock.targets.iter().position(|&(a, sq)| a == oh.dst && sq == seq) else {
+                            continue;
+                        };
+                        sock.targets.remove(p);
+                        if sock.rx.len() < ICMP_QUEUE {
                             sock.rx.push_back(IcmpEvent::Error { from, seq, error, code });
                             self.changed = true;
                         }
@@ -1437,22 +1449,37 @@ impl Stack {
         if data.len() > 65_000 {
             return Err(NetError::MessageTooLong);
         }
-        let ident = match self.sockets.get_mut(&id) {
-            Some(Socket::Icmp(i)) => {
-                if i.targets.len() >= 64 {
-                    i.targets.remove(0);
-                }
-                i.targets.push((to, seq));
-                i.ident
-            }
+        let ident = match self.sockets.get(&id) {
+            Some(Socket::Icmp(i)) => i.ident,
             _ => return Err(NetError::BadSocket),
         };
         let src = self.source_for(to).ok_or(NetError::NoRoute)?;
         let msg = icmp::echo(icmp::ECHO_REQUEST, ident, seq, data);
+        // Registered before the send: a loopback request is answered inside
+        // `send_ip`, so the reply has to find its target already there.
+        self.record_target(id, to, seq);
         self.stats.icmp_out += 1;
-        self.send_ip(src, to, PROTO_ICMP, &msg, false)?;
+        if let Err(e) = self.send_ip(src, to, PROTO_ICMP, &msg, false) {
+            self.forget_target(id, to, seq);
+            return Err(e);
+        }
         self.flush();
         Ok(())
+    }
+
+    fn record_target(&mut self, id: SocketId, to: Ipv4Addr, seq: u16) {
+        if let Some(Socket::Icmp(i)) = self.sockets.get_mut(&id) {
+            if i.targets.len() >= 64 {
+                i.targets.remove(0);
+            }
+            i.targets.push((to, seq));
+        }
+    }
+
+    fn forget_target(&mut self, id: SocketId, to: Ipv4Addr, seq: u16) {
+        if let Some(Socket::Icmp(i)) = self.sockets.get_mut(&id) {
+            i.targets.retain(|&(a, sq)| !(a == to && sq == seq));
+        }
     }
 
     pub fn icmp_recv(&mut self, id: SocketId) -> Result<IcmpEvent, NetError> {

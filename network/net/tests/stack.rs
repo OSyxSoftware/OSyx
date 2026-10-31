@@ -63,6 +63,27 @@ fn loopback_ping_and_udp_work_without_a_link() {
 }
 
 #[test]
+fn echo_replies_must_match_a_sent_request() {
+    let mut n = Net::new();
+    let s = n.a.icmp_open().unwrap();
+    let ident = n.a.icmp_ident(s).unwrap();
+    let inject = |n: &mut Net, from: Ipv4Addr, seq: u16| {
+        let reply = osyx_net::icmp::echo(osyx_net::icmp::ECHO_REPLY, ident, seq, b"spoof");
+        let pkt = osyx_net::ipv4::build(from, A_IP, 1, 64, 9, &reply, 1500, false).unwrap().remove(0);
+        let frame = osyx_net::ethernet::build(A_MAC, B_MAC, 0x0800, &pkt);
+        n.a.receive(1, &frame);
+    };
+    inject(&mut n, B_IP, 42);
+    assert_eq!(n.a.icmp_recv(s), Err(NetError::WouldBlock), "unsolicited reply");
+    // A send that never left the host leaves no request to answer.
+    assert_eq!(n.a.icmp_echo(s, Ipv4Addr::new(8, 8, 8, 8), 43, b""), Err(NetError::NoRoute));
+    inject(&mut n, Ipv4Addr::new(8, 8, 8, 8), 43);
+    assert_eq!(n.a.icmp_recv(s), Err(NetError::WouldBlock), "reply to a request that never left");
+    n.a.icmp_echo(s, B_IP, 42, b"real").unwrap();
+    assert!(n.run_until(100, |n| matches!(n.a.icmp_recv(s), Ok(IcmpEvent::Reply { from, seq: 42, .. }) if from == B_IP)));
+}
+
+#[test]
 fn peeks_leave_the_data_queued() {
     let mut n = Net::new();
     let ping = n.a.icmp_open().unwrap();
