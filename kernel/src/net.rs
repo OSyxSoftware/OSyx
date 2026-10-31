@@ -784,7 +784,7 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
                 return Ok(0);
             }
             let Some(id) = s.id() else { return Ok(0) };
-            let err = stack_call(|st| st.tcp_state(id)).ok().and_then(|(_, e)| e);
+            let err = stack_call(|st| st.tcp_take_error(id)).ok().flatten();
             return Ok(err.map_or(0, |e| errno(e) as u64));
         }
         abi::ctl::AVAILABLE => {

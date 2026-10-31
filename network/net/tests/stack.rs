@@ -286,6 +286,12 @@ fn tcp_connect_to_a_closed_port_is_refused() {
     let c = n.a.tcp_connect(None, Endpoint::new(B_IP, 1234)).unwrap();
     assert!(n.run_until(1000, |n| n.a.tcp_state(c).unwrap().1 == Some(NetError::ConnRefused)));
     assert!(n.b.stats.tcp_resets_sent >= 1);
+    // SO_ERROR reports the failure once, like getsockopt does.
+    assert_eq!(n.a.tcp_take_error(c), Ok(Some(NetError::ConnRefused)));
+    assert_eq!(n.a.tcp_take_error(c), Ok(None));
+    assert_eq!(n.a.tcp_state(c).unwrap().1, None);
+    let mut buf = [0u8; 4];
+    assert_eq!(n.a.tcp_recv(c, &mut buf), Err(NetError::NotConnected));
 }
 
 #[test]

@@ -1553,6 +1553,11 @@ impl Stack {
         Ok((t.state(), t.error().map(tcp_error)))
     }
 
+    /// Returns and clears the pending error (`getsockopt SO_ERROR`).
+    pub fn tcp_take_error(&mut self, id: SocketId) -> Result<Option<NetError>, NetError> {
+        Ok(self.tcb(id)?.take_error().map(tcp_error))
+    }
+
     pub fn tcp_send(&mut self, id: SocketId, data: &[u8]) -> Result<usize, NetError> {
         let n = self.tcb(id)?.send(data).map_err(tcp_error)?;
         self.flush();

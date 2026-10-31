@@ -458,6 +458,11 @@ impl Tcb {
         self.error
     }
 
+    /// Takes the pending error, as `getsockopt(SO_ERROR)` does.
+    pub fn take_error(&mut self) -> Option<TcpError> {
+        self.error.take()
+    }
+
     /// Effective sending MSS.
     pub fn mss(&self) -> u16 {
         self.peer_mss.min(self.our_mss)
