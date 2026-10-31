@@ -771,6 +771,14 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
             let (st, _) = stack_call(|st| st.tcp_state(id))?;
             return Ok(tcp_state_index(st));
         }
+        abi::ctl::ERROR => {
+            if s.kind != abi::SOCK_STREAM {
+                return Ok(0);
+            }
+            let Some(id) = s.id() else { return Ok(0) };
+            let err = stack_call(|st| st.tcp_state(id)).ok().and_then(|(_, e)| e);
+            return Ok(err.map_or(0, |e| errno(e) as u64));
+        }
         _ => return Err(Errno::InvalidArgument),
     }
     Ok(0)

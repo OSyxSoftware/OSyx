@@ -36,6 +36,9 @@ pub mod ctl {
     pub const RESET_ON_CLOSE: u64 = 9;
     /// arg: connect timeout in nanoseconds (0 = the TCP default).
     pub const CONNECT_TIMEOUT: u64 = 10;
+    /// Pending connection error as an `Errno` number (0 = none): the SYN
+    /// failed after a non-blocking `connect` returned `WouldBlock`.
+    pub const ERROR: u64 = 11;
 }
 
 /// TCP states reported by `ctl::STATE` and `NetSocket::state`.
