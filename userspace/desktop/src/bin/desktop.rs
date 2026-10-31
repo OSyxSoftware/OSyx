@@ -1049,7 +1049,7 @@ impl Shell {
         match &mut p.kind {
             PopupKind::Launcher { search, list, shown, list_focus } => {
                 if let Ui::PointerDown { x, y, button: button::RIGHT, .. } = ui {
-                    app_menu = list.row_at(x, y).and_then(|i| shown.get(i).copied()).map(|i| (i, p.x + x, p.y + y));
+                    app_menu = list.row_at(x, y).and_then(|i| app_at(shown, i)).map(|i| (i, p.x + x, p.y + y));
                 }
                 // Arrow keys and Enter in the search field drive the list.
                 if let Ui::Key(k) = ui {
@@ -1074,7 +1074,7 @@ impl Shell {
                         launch = list
                             .selected()
                             .or(if shown.is_empty() { None } else { Some(0) })
-                            .and_then(|i| shown.get(i).copied());
+                            .and_then(|i| app_at(shown, i));
                     }
                     Response::Cancelled => close = true,
                     r if r.needs_redraw() => p.win.dirty = true,
@@ -1086,7 +1086,7 @@ impl Shell {
                     list.select(if shown.is_empty() { None } else { Some(0) });
                 }
                 match list.event(&ui, *list_focus) {
-                    Response::Activated(i) => launch = shown.get(i).copied(),
+                    Response::Activated(i) => launch = app_at(shown, i),
                     r if r.needs_redraw() => p.win.dirty = true,
                     _ => {}
                 }
@@ -2232,17 +2232,48 @@ fn shortcut_rect(i: usize, h: u32) -> Rect {
     Rect::new(16 + (i / rows) as i32 * 116, 16 + (i % rows) as i32 * 100, 104, 92)
 }
 
+/// The row of a Start Menu folder's name in the launcher list.
+const GROUP_HEADER: usize = usize::MAX;
+
+/// The application a launcher row stands for (`None` for a folder name).
+fn app_at(shown: &[usize], row: usize) -> Option<usize> {
+    shown.get(row).copied().filter(|&i| i != GROUP_HEADER)
+}
+
+/// The launcher rows for `q`: application indices, and with no search a
+/// `GROUP_HEADER` before each Start Menu folder that holds more than one.
 fn filter_apps(apps: &[AppEntry], q: &str) -> Vec<usize> {
     let q = q.to_lowercase();
-    (0..apps.len())
-        .filter(|&i| {
-            q.is_empty() || apps[i].name.to_lowercase().contains(&q) || apps[i].comment.to_lowercase().contains(&q)
-        })
-        .collect()
+    if !q.is_empty() {
+        return (0..apps.len())
+            .filter(|&i| apps[i].name.to_lowercase().contains(&q) || apps[i].comment.to_lowercase().contains(&q))
+            .collect();
+    }
+    let mut rows = Vec::new();
+    let mut last = "";
+    for (i, app) in apps.iter().enumerate() {
+        if !app.group.is_empty() && app.group != last && apps.iter().filter(|a| a.group == app.group).count() > 1 {
+            rows.push(GROUP_HEADER);
+        }
+        last = &app.group;
+        rows.push(i);
+    }
+    rows
 }
 
 fn app_items(apps: &[AppEntry], shown: &[usize]) -> Vec<ListItem> {
-    shown.iter().map(|&i| ListItem::new(Some(apps[i].icon), &[&apps[i].name])).collect()
+    (0..shown.len())
+        .map(|row| match app_at(shown, row) {
+            Some(i) => ListItem::new(Some(apps[i].icon), &[&apps[i].name]),
+            None => {
+                // A header names the folder of the application after it.
+                let name = shown.get(row + 1).and_then(|&i| apps.get(i)).map_or("", |a| a.group.as_str());
+                let mut item = ListItem::new(Some(Icon::Folder), &[name]);
+                item.dim = true;
+                item
+            }
+        })
+        .collect()
 }
 
 const PANEL_BG: Color = rgb(11, 14, 21);
@@ -2482,7 +2513,7 @@ fn draw_popup(p: &mut Painter, kind: &PopupKind, apps: &[AppEntry]) {
             }
             let footer = Rect::new(20, (LAUNCHER_H - 44) as i32, LAUNCHER_W - 40, 40);
             p.hline(12, footer.y, LAUNCHER_W - 24, t.border);
-            let comment = list.selected().and_then(|i| shown.get(i)).map_or("", |&i| apps[i].comment.as_str());
+            let comment = list.selected().and_then(|i| app_at(shown, i)).map_or("", |i| apps[i].comment.as_str());
             p.text_in(FontKind::Ui, footer, comment, t.text_dim, Align::Left);
         }
         PopupKind::Menu { menu, .. } => menu.draw(p),

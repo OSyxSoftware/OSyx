@@ -223,6 +223,8 @@ pub struct AppEntry {
     /// Arguments and working directory of a Windows shortcut.
     pub args: Vec<String>,
     pub workdir: String,
+    /// The Start Menu folder of a shortcut ("" for the rest).
+    pub group: String,
 }
 
 pub const APP_DIR: &str = "/system/share/applications";
@@ -376,7 +378,7 @@ pub fn windows_apps() -> Vec<AppEntry> {
         String::from("/ProgramData/Microsoft/Windows/Start Menu/Programs"),
     ];
     for menu in &menus {
-        collect_links(menu, 2, &mut apps);
+        collect_links(menu, 2, "", &mut apps);
     }
     for root in ["/Program Files", "/Program Files (x86)"] {
         let Ok(dir) = fs::read_dir(root) else { continue };
@@ -390,10 +392,10 @@ pub fn windows_apps() -> Vec<AppEntry> {
                 continue;
             }
             let icon = exe_icon(&exe);
-            apps.push(AppEntry { source: exe.clone(), name, exec: exe, icon, comment: String::from("Windows program"), args: Vec::new(), workdir: String::new() });
+            apps.push(AppEntry { source: exe.clone(), name, exec: exe, icon, comment: String::from("Windows program"), args: Vec::new(), workdir: String::new(), group: String::new() });
         }
     }
-    apps.sort_by_key(|a| a.name.to_ascii_lowercase());
+    apps.sort_by_key(|a| (a.group.to_ascii_lowercase(), a.name.to_ascii_lowercase()));
     apps
 }
 
@@ -418,7 +420,7 @@ fn main_program(folder: &str, name: &str) -> Option<String> {
 }
 
 /// Shortcuts (`.lnk`) of a Start Menu folder, `depth` levels down.
-fn collect_links(dir: &str, depth: u32, apps: &mut Vec<AppEntry>) {
+fn collect_links(dir: &str, depth: u32, group: &str, apps: &mut Vec<AppEntry>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut items: Vec<(String, bool)> =
         entries.map(|e| (String::from(e.file_name()), e.file_type().is_dir())).collect();
@@ -427,10 +429,12 @@ fn collect_links(dir: &str, depth: u32, apps: &mut Vec<AppEntry>) {
         let path = format!("{dir}/{name}");
         if is_dir {
             if depth > 1 {
-                collect_links(&path, depth - 1, apps);
+                // Only the first folder below the Start Menu names a group.
+                collect_links(&path, depth - 1, if group.is_empty() { &name } else { group }, apps);
             }
         } else if name.to_ascii_lowercase().ends_with(".lnk") && !name.to_ascii_lowercase().contains("uninstall") {
-            if let Some(app) = load_link(&path) {
+            if let Some(mut app) = load_link(&path) {
+                app.group = String::from(group);
                 if !apps.iter().any(|a| a.exec == app.exec) {
                     apps.push(app);
                 }
@@ -461,6 +465,7 @@ pub fn load_link(path: &str) -> Option<AppEntry> {
         comment: String::from("Windows program"),
         args: split_arguments(&link.arguments),
         workdir: existing_path(&link.working_dir).unwrap_or_default(),
+        group: String::new(),
     })
 }
 
@@ -653,6 +658,7 @@ pub fn load_app(path: &str) -> Option<AppEntry> {
         comment: String::new(),
         args: Vec::new(),
         workdir: String::new(),
+        group: String::new(),
     };
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else { continue };
