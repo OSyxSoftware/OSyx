@@ -596,7 +596,8 @@ impl Stack {
     fn send_packet_on(&mut self, iface: usize, next_hop: Ipv4Addr, packet: Vec<u8>, broadcast: bool) {
         let i = &self.ifaces[iface];
         let directed = i.addr.is_some_and(|(a, p)| {
-            next_hop.in_subnet(a, p) && next_hop.to_u32() | crate::wire::prefix_mask(p) == next_hop.to_u32()
+            let host = !crate::wire::prefix_mask(p);
+            p < 31 && next_hop.in_subnet(a, p) && next_hop.to_u32() & host == host
         });
         if broadcast || next_hop.is_broadcast() || directed {
             let frame = ethernet::build(MacAddr::BROADCAST, i.mac, ETHERTYPE_IPV4, &packet);
@@ -769,7 +770,8 @@ impl Stack {
         let i = &self.ifaces[iface];
         let unconfigured = i.addr.is_none();
         let subnet_broadcast = i.addr.is_some_and(|(a, p)| {
-            h.dst.in_subnet(a, p) && h.dst.to_u32() | crate::wire::prefix_mask(p) == h.dst.to_u32()
+            let host = !crate::wire::prefix_mask(p);
+            p < 31 && h.dst.in_subnet(a, p) && h.dst.to_u32() & host == host
         });
         let broadcast = h.dst.is_broadcast() || subnet_broadcast;
         let to_us = self.is_local(h.dst) && (iface == 0 || !h.dst.is_loopback());
@@ -1317,6 +1319,17 @@ impl Stack {
         Ok(())
     }
 
+    /// Limited (`255.255.255.255`) or subnet-directed broadcast.
+    fn is_broadcast_address(&self, addr: Ipv4Addr) -> bool {
+        addr.is_broadcast()
+            || self.ifaces.iter().skip(1).any(|i| {
+                i.addr.is_some_and(|(a, p)| {
+                    let host = !crate::wire::prefix_mask(p);
+                    p < 31 && addr.in_subnet(a, p) && addr.to_u32() & host == host
+                })
+            })
+    }
+
     pub fn udp_send_to(&mut self, id: SocketId, to: Option<Endpoint>, data: &[u8]) -> Result<usize, NetError> {
         if data.len() > MAX_UDP_PAYLOAD {
             return Err(NetError::MessageTooLong);
@@ -1332,7 +1345,7 @@ impl Stack {
         if remote.port == 0 {
             return Err(NetError::InvalidArgument);
         }
-        if remote.addr.is_broadcast() && !broadcast {
+        if !broadcast && self.is_broadcast_address(remote.addr) {
             return Err(NetError::InvalidArgument);
         }
         let src = if local.addr.is_unspecified() {

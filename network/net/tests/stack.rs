@@ -707,6 +707,35 @@ fn udp_peek_leaves_the_datagram_queued() {
 }
 
 #[test]
+fn udp_broadcast_needs_the_broadcast_option() {
+    let mut n = Net::new();
+    let tx = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let rx = n.b.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 7002)).unwrap();
+    let subnet_broadcast = Ipv4Addr::new(10, 0, 0, 255);
+    assert_eq!(
+        n.a.udp_send_to(tx, Some(Endpoint::new(subnet_broadcast, 7002)), b"x"),
+        Err(NetError::InvalidArgument),
+        "subnet-directed broadcast without SO_BROADCAST"
+    );
+    n.a.udp_set_broadcast(tx, true).unwrap();
+    n.a.take_tx();
+    assert_eq!(n.a.udp_send_to(tx, Some(Endpoint::new(subnet_broadcast, 7002)), b"x"), Ok(1));
+    // It goes out as a broadcast frame, not into ARP for a host address.
+    let frames = n.a.take_tx();
+    assert_eq!(frames.len(), 1, "one broadcast frame");
+    assert_eq!(&frames[0].1[..6], &[0xFF; 6]);
+    assert_eq!(&frames[0].1[30..34], &subnet_broadcast.0);
+    // The peer accepts a broadcast datagram (sent again: the frame above
+    // was taken out of the transmit queue for inspection).
+    assert_eq!(n.a.udp_send_to(tx, Some(Endpoint::new(subnet_broadcast, 7002)), b"x"), Ok(1));
+    let mut buf = [0u8; 8];
+    assert!(n.run_until(10, |n| matches!(n.b.udp_recv_from(rx, &mut buf), Ok((_, 1, 1)))));
+    assert_eq!(&buf[..1], b"x");
+    // A unicast peer in the same subnet never needs the option.
+    assert_eq!(n.a.udp_send_to(tx, Some(Endpoint::new(B_IP, 7002)), b"x"), Ok(1));
+}
+
+#[test]
 fn udp_peek_does_not_consume_the_pending_error() {
     let mut n = Net::new();
     let client = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
