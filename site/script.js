@@ -22,4 +22,6 @@ fetch('winparity.json').then(r => r.ok ? r.json() : Promise.reject()).then(d => 
   document.getElementById('parity-tables').innerHTML = table('LARGEST DLLS, x64', d.x64) + table('LARGEST DLLS, x86 / WOW64', d.x86);
   const note = document.getElementById('parity-note');
   note.insertAdjacentHTML('afterbegin', `Scanned ${d.generated.slice(0, 10)} at commit ${d.commit} against Windows ${d.windows}. `);
-}).catch(() => {});
+}).catch(() => {
+  document.getElementById('parity-cards').textContent = 'Win Parity data could not be loaded. Please refresh the page and try again.';
+});
