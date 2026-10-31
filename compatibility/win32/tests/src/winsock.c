@@ -187,6 +187,9 @@ void __stdcall start(void) {
     setsockopt(u, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
     struct sockaddr_in from;
     int flen = sizeof from;
+    int shortlen = 8;
+    check_eq("recvfrom with a short fromlen fails", recvfrom(u, buf, sizeof buf, 0, (struct sockaddr *)&from, &shortlen), SOCKET_ERROR);
+    check_eq("... with WSAEFAULT", WSAGetLastError(), WSAEFAULT);
     int n = recvfrom(u, buf, sizeof buf, 0, (struct sockaddr *)&from, &flen);
     check("recvfrom gets the echo from 10.0.2.2", n == 4 && mem_eq(buf, "udp!", 4) && from.sin_addr.s_addr == inet_addr("10.0.2.2"));
     closesocket(u);

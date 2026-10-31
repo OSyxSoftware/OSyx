@@ -412,6 +412,11 @@ extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8
     let r = (|| {
         let (fd, stream) = fd(s)?;
         check_shutdown(s, true)?;
+        // Reject a too-small peer address buffer before the datagram is
+        // consumed, as Windows does.
+        if !from.is_null() && (fromlen.is_null() || unsafe { *fromlen } < 16) {
+            return Err(WSAEFAULT);
+        }
         let fl = flags(f)?;
         // SAFETY: the caller's buffer of `len` bytes; a zero-length receive
         // may pass a NULL pointer, which never becomes a real slice.
@@ -1157,6 +1162,9 @@ extern "win64" fn WSARecvFrom(
         check_shutdown(s, true)?;
         if !overlapped.is_null() || completion != 0 {
             return Err(WSAEOPNOTSUPP);
+        }
+        if !from.is_null() && (fromlen.is_null() || unsafe { *fromlen } < 16) {
+            return Err(WSAEFAULT);
         }
         // SAFETY: the caller's in/out flags.
         let user_flags = if f.is_null() { 0 } else { unsafe { *f as i32 } };
