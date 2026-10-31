@@ -299,6 +299,8 @@ pub struct Stack {
     pub dns_cache: dns::Cache,
     queries: BTreeMap<QueryId, Query>,
     results: BTreeMap<QueryId, Result<Vec<Ipv4Addr>, NetError>>,
+    /// Callers still waiting for each query (a `resolve` result can be shared).
+    waiters: BTreeMap<QueryId, u32>,
     next_query: QueryId,
     dns_changed: bool,
     hostname: String,
@@ -330,6 +332,7 @@ impl Stack {
             dns_cache: dns::Cache::new(),
             queries: BTreeMap::new(),
             results: BTreeMap::new(),
+            waiters: BTreeMap::new(),
             next_query: 1,
             dns_changed: false,
             hostname: String::from("osyx"),
@@ -1750,6 +1753,7 @@ impl Stack {
         }
         // Share an outstanding query for the same name.
         if let Some((qid, _)) = self.queries.iter().find(|(_, q)| q.name == n) {
+            *self.waiters.entry(*qid).or_insert(1) += 1;
             return Resolve::Pending(*qid);
         }
         let qid = self.next_query;
@@ -1766,6 +1770,7 @@ impl Stack {
             server_addr: Ipv4Addr::UNSPECIFIED,
         };
         self.queries.insert(qid, q);
+        self.waiters.insert(qid, 1);
         self.dns_send(qid);
         self.flush();
         Resolve::Pending(qid)
@@ -1778,11 +1783,25 @@ impl Stack {
         if self.queries.contains_key(&qid) {
             return None;
         }
+        if let Some(w) = self.waiters.get_mut(&qid) {
+            *w = w.saturating_sub(1);
+            if *w == 0 {
+                self.waiters.remove(&qid);
+            }
+        }
         Some(self.results.get(&qid).cloned().unwrap_or(Err(NetError::DnsFailure)))
     }
 
-    /// Forgets a query whose caller gave up.
+    /// Forgets a query whose caller gave up. A query shared by several
+    /// callers stays alive until the last one cancels it.
     pub fn resolve_cancel(&mut self, qid: QueryId) {
+        if let Some(w) = self.waiters.get_mut(&qid) {
+            *w = w.saturating_sub(1);
+            if *w > 0 {
+                return;
+            }
+            self.waiters.remove(&qid);
+        }
         self.results.remove(&qid);
         if let Some(q) = self.queries.remove(&qid) {
             self.drop_transport(q.transport);

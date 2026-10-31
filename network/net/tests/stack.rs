@@ -598,6 +598,27 @@ fn dns_shared_query_answers_every_waiter() {
 }
 
 #[test]
+fn cancelling_one_waiter_keeps_the_shared_query() {
+    let mut n = Net::new();
+    n.a.set_dns_servers(&[B_IP]);
+    let sock = n.b.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 53)).unwrap();
+    let table = [("shared.test", [10, 5, 5, 5])];
+    let Resolve::Pending(q1) = n.a.resolve("shared.test") else { panic!() };
+    let Resolve::Pending(q2) = n.a.resolve("shared.test") else { panic!() };
+    assert_eq!(q1, q2);
+    // The first caller gives up; the second still gets the answer.
+    n.a.resolve_cancel(q1);
+    let mut conns = Vec::new();
+    let mut result = None;
+    assert!(n.run_until(1000, |n| {
+        serve_dns(n, sock, None, &table, false, &mut conns);
+        result = n.a.resolve_result(q2);
+        result.is_some()
+    }));
+    assert_eq!(result, Some(Ok(vec![Ipv4Addr::new(10, 5, 5, 5)])));
+}
+
+#[test]
 fn dns_fails_over_to_the_next_server_after_one_timeout() {
     let mut n = Net::new();
     // The first server never answers (no host at 10.0.0.3); the second does.
