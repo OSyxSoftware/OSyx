@@ -254,6 +254,67 @@ pub fn icon_by_name(name: &str) -> Icon {
     }
 }
 
+/// Programs larger than this are not read for their icon.
+const MAX_ICON_SOURCE: u64 = 64 << 20;
+
+/// Icons found so far: program path -> (file size when read, its icon).
+static EXE_ICONS: os_std::sync::Mutex<os_std::collections::BTreeMap<String, (u64, Icon)>> =
+    os_std::sync::Mutex::new(os_std::collections::BTreeMap::new());
+
+/// The icon of a Windows program: its first icon group, in the size that
+/// suits the shell best; the generic program icon when there is none. Read
+/// once per program (and again if its size changes).
+pub fn exe_icon(path: &str) -> Icon {
+    let len = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if let Some(&(known, icon)) = EXE_ICONS.lock().ok().and_then(|c| c.get(path).copied()).as_ref() {
+        if known == len {
+            return icon;
+        }
+    }
+    let icon = read_exe_icon(path, len).unwrap_or(Icon::Program);
+    if let Ok(mut cache) = EXE_ICONS.lock() {
+        cache.insert(String::from(path), (len, icon));
+    }
+    icon
+}
+
+fn read_exe_icon(path: &str, len: u64) -> Option<Icon> {
+    if len == 0 || len > MAX_ICON_SOURCE {
+        return None;
+    }
+    let image = fs::read(path).ok()?;
+    let pe = osyx_pe::PeFile::parse_any(&image).ok()?;
+    // GRPICONDIR: reserved, type (1), count; then 14-byte entries of width,
+    // height, colours, reserved, planes, bit count, size and RT_ICON id.
+    let group = pe.resource(14, None, None).ok()??;
+    let u16_at = |at: usize| group.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let count = u16_at(4)? as usize;
+    // The shell draws icons at 16 to 40 pixels: 48 and 32 look best.
+    const PREFERRED: [u32; 5] = [48, 32, 64, 24, 16];
+    let mut candidates: Vec<(usize, u16, u16)> = Vec::new();
+    for i in 0..count.min(64) {
+        let at = 6 + i * 14;
+        let width = match *group.get(at)? {
+            0 => 256,
+            w => w as u32,
+        };
+        let (bits, id) = (u16_at(at + 6)?, u16_at(at + 12)?);
+        if let Some(rank) = PREFERRED.iter().position(|&w| w == width) {
+            candidates.push((rank, u16::MAX - bits, id)); // best size first, then most colours
+        }
+    }
+    candidates.sort();
+    for (_, _, id) in candidates {
+        let Some(data) = pe.resource(3, Some(id), None).ok().flatten() else { continue };
+        if let Some(bitmap) = osyx_ui::icon::decode_dib(data) {
+            if let Some(icon) = osyx_ui::icon::register_bitmap(bitmap) {
+                return Some(icon);
+            }
+        }
+    }
+    None
+}
+
 /// The launcher's applications: the installed `.app` entries, then Windows
 /// programs (Start Menu shortcuts, and programs found in Program Files).
 pub fn load_apps() -> Vec<AppEntry> {
@@ -290,7 +351,8 @@ pub fn windows_apps() -> Vec<AppEntry> {
             if apps.iter().any(|a| a.exec.eq_ignore_ascii_case(&exe)) {
                 continue;
             }
-            apps.push(AppEntry { source: exe.clone(), name, exec: exe, icon: Icon::Program, comment: String::from("Windows program") });
+            let icon = exe_icon(&exe);
+            apps.push(AppEntry { source: exe.clone(), name, exec: exe, icon, comment: String::from("Windows program") });
         }
     }
     apps.sort_by_key(|a| a.name.to_ascii_lowercase());
@@ -350,11 +412,12 @@ pub fn load_link(path: &str) -> Option<AppEntry> {
     }
     let file = path.rsplit('/').next().unwrap_or(path);
     let name = file.get(..file.len().saturating_sub(4)).unwrap_or(file);
+    let icon = exe_icon(&target);
     Some(AppEntry {
         source: String::from(path),
         name: String::from(name),
         exec: target,
-        icon: Icon::Program,
+        icon,
         comment: String::from("Windows program"),
     })
 }

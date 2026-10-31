@@ -207,8 +207,11 @@ NSIS `CreateShortCut` does): `Save` writes a real Shell Link file. The
 desktop shows `.lnk` files in `~/Desktop` as icons; the all-users desktop is
 that same folder. Shortcut targets are matched ignoring case, as Windows
 does. Arguments, working directory and the shortcut's icon are stored in the
-file but not used when the shell starts it; the icon is the generic program
-icon.
+file but not used when the shell starts it. The launcher and the desktop show
+the program's own icon: the 48, 32, 64, 24 or 16 pixel bitmap (in that
+order of preference) of its first icon group, read from the `.exe` once and
+kept; programs larger than 64 MiB, PNG-compressed icons and programs without
+an icon get the generic program icon.
 
 Windows windows start hidden and follow ShowWindow/SetWindowPos visibility.
 Message-only, tool and owned windows do not create separate taskbar items.
