@@ -173,6 +173,30 @@ void __stdcall start(void) {
     closesocket(sv);
     closesocket(ls);
 
+    /* shutdown(SD_RECEIVE/SD_SEND) refuses the matching I/O. */
+    SOCKET hl = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in ha = {0};
+    ha.sin_family = AF_INET;
+    ha.sin_port = htons(8126);
+    ha.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    check_eq("bind 127.0.0.1:8126", bind(hl, (struct sockaddr *)&ha, sizeof ha), 0);
+    check_eq("listen 8126", listen(hl, 4), 0);
+    SOCKET hc = socket(AF_INET, SOCK_STREAM, 0);
+    check_eq("connect 8126", connect(hc, (struct sockaddr *)&ha, sizeof ha), 0);
+    SOCKET hs = accept(hl, NULL, NULL);
+    check("accept 8126", hs != INVALID_SOCKET);
+    check_eq("send before shutdown", send(hc, "data", 4, 0), 4);
+    check_eq("shutdown(SD_RECEIVE)", shutdown(hs, SD_RECEIVE), 0);
+    char hb[4];
+    check("recv after shutdown(SD_RECEIVE)",
+          recv(hs, hb, sizeof hb, 0) == SOCKET_ERROR && WSAGetLastError() == WSAESHUTDOWN);
+    check_eq("shutdown(SD_SEND)", shutdown(hc, SD_SEND), 0);
+    check("send after shutdown(SD_SEND)",
+          send(hc, "x", 1, 0) == SOCKET_ERROR && WSAGetLastError() == WSAESHUTDOWN);
+    closesocket(hc);
+    closesocket(hs);
+    closesocket(hl);
+
     /* The provider catalog. */
     DWORD len = 0;
     int err = 0;

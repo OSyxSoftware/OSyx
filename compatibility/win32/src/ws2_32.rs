@@ -53,6 +53,7 @@ const WSAECONNRESET: u32 = 10054;
 const WSAENOBUFS: u32 = 10055;
 const WSAEISCONN: u32 = 10056;
 const WSAENOTCONN: u32 = 10057;
+const WSAESHUTDOWN: u32 = 10058;
 const WSAETIMEDOUT: u32 = 10060;
 const WSAECONNREFUSED: u32 = 10061;
 const WSAEHOSTUNREACH: u32 = 10065;
@@ -108,6 +109,9 @@ struct Sock {
     /// SO_RCVTIMEO/SO_SNDTIMEO in milliseconds; zero means forever.
     recv_timeout: u32,
     send_timeout: u32,
+    /// `shutdown(SD_RECEIVE)` / `shutdown(SD_SEND)` were called.
+    read_shutdown: bool,
+    write_shutdown: bool,
 }
 
 static SOCKETS: Mutex<BTreeMap<u64, Sock>> = Mutex::new(BTreeMap::new());
@@ -128,6 +132,15 @@ fn started() -> bool {
 /// The kernel socket of SOCKET `s`.
 fn fd(s: u64) -> Result<(u64, bool), u32> {
     socket_state(s).map(|s| (s.fd, s.stream))
+}
+
+/// Reject I/O after the matching half of the socket was shut down.
+fn check_shutdown(s: u64, read: bool) -> Result<(), u32> {
+    let st = socket_state(s)?;
+    if (read && st.read_shutdown) || (!read && st.write_shutdown) {
+        return Err(WSAESHUTDOWN);
+    }
+    Ok(())
 }
 
 fn socket_state(s: u64) -> Result<Sock, u32> {
@@ -234,7 +247,16 @@ extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
             let mut n = NEXT.lock().unwrap();
             let s = *n;
             *n += 4;
-            SOCKETS.lock().unwrap().insert(s, Sock { fd, stream, nonblocking: false, linger: 0, recv_timeout: 0, send_timeout: 0 });
+            SOCKETS.lock().unwrap().insert(s, Sock {
+                fd,
+                stream,
+                nonblocking: false,
+                linger: 0,
+                recv_timeout: 0,
+                send_timeout: 0,
+                read_shutdown: false,
+                write_shutdown: false,
+            });
             s
         }
         Err(e) => err(wsa(e), INVALID_SOCKET),
@@ -306,7 +328,16 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
         let mut n = NEXT.lock().unwrap();
         let ns = *n;
         *n += 4;
-        SOCKETS.lock().unwrap().insert(ns, Sock { fd: nfd, stream: true, nonblocking: listener.nonblocking, linger: 0, recv_timeout: 0, send_timeout: 0 });
+        SOCKETS.lock().unwrap().insert(ns, Sock {
+            fd: nfd,
+            stream: true,
+            nonblocking: listener.nonblocking,
+            linger: 0,
+            recv_timeout: 0,
+            send_timeout: 0,
+            read_shutdown: false,
+            write_shutdown: false,
+        });
         Ok(ns)
     })();
     r.unwrap_or_else(|e| err(e, INVALID_SOCKET))
@@ -323,6 +354,7 @@ extern "win64" fn send(s: u64, buf: *const u8, len: i32, f: i32) -> i32 {
     trace_io(format_args!("send({s:#x}, {len}) begin"));
     let r = (|| {
         let (fd, _) = fd(s)?;
+        check_shutdown(s, false)?;
         if f != 0 {
             return Err(WSAEOPNOTSUPP);
         }
@@ -337,6 +369,7 @@ extern "win64" fn send(s: u64, buf: *const u8, len: i32, f: i32) -> i32 {
 extern "win64" fn sendto(s: u64, buf: *const u8, len: i32, f: i32, to: *const u8, tolen: i32) -> i32 {
     let r = (|| {
         let (fd, _) = fd(s)?;
+        check_shutdown(s, false)?;
         if f != 0 {
             return Err(WSAEOPNOTSUPP);
         }
@@ -356,6 +389,7 @@ extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8
     trace_io(format_args!("recv({s:#x}, {len}) begin"));
     let r = (|| {
         let (fd, stream) = fd(s)?;
+        check_shutdown(s, true)?;
         let fl = flags(f)?;
         // SAFETY: the caller's buffer of `len` bytes.
         let data = unsafe { core::slice::from_raw_parts_mut(buf, len.max(0) as usize) };
@@ -375,11 +409,20 @@ extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8
 extern "win64" fn shutdown(s: u64, how: i32) -> i32 {
     result((|| {
         let (fd, _) = fd(s)?;
-        match how {
-            0 => Ok(()), // SD_RECEIVE: nothing to tell the peer
-            1 | 2 => os_sys::sock_ctl(fd, net::ctl::SHUTDOWN_WRITE, 0).map(|_| ()).map_err(wsa),
-            _ => Err(WSAEINVAL),
+        let (read, write) = match how {
+            0 => (true, false),       // SD_RECEIVE
+            1 => (false, true),       // SD_SEND
+            2 => (true, true),        // SD_BOTH
+            _ => return Err(WSAEINVAL),
+        };
+        if write {
+            os_sys::sock_ctl(fd, net::ctl::SHUTDOWN_WRITE, 0).map_err(wsa)?;
         }
+        if let Some(sock) = SOCKETS.lock().unwrap().get_mut(&s) {
+            sock.read_shutdown |= read;
+            sock.write_shutdown |= write;
+        }
+        Ok(())
     })())
 }
 
@@ -904,6 +947,7 @@ fn wsa_receive(fd: u64, bufs: *const u8, count: u32, fl: u64, stream: bool) -> R
 extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, overlapped: *mut u8, completion: u64) -> i32 {
     let r = (|| {
         let (fd, _) = fd(s)?;
+        check_shutdown(s, false)?;
         if f != 0 || !overlapped.is_null() || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
@@ -937,6 +981,7 @@ extern "win64" fn WSASendTo(
 ) -> i32 {
     let r = (|| {
         let (fd, _) = fd(s)?;
+        check_shutdown(s, false)?;
         if f != 0 || !overlapped.is_null() || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
@@ -998,6 +1043,7 @@ extern "win64" fn WSARecv(
 ) -> i32 {
     let r = (|| {
         let (fd, stream) = fd(s)?;
+        check_shutdown(s, true)?;
         if !overlapped.is_null() || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
@@ -1025,6 +1071,7 @@ extern "win64" fn WSARecvFrom(
 ) -> i32 {
     let r = (|| {
         let (fd, stream) = fd(s)?;
+        check_shutdown(s, true)?;
         if !overlapped.is_null() || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
@@ -1044,6 +1091,7 @@ extern "win64" fn WSARecvFrom(
 extern "win64" fn WSASendMsg(s: u64, msg: *const u8, f: u32, sent: *mut u32, overlapped: *mut u8, completion: u64) -> i32 {
     let r = (|| {
         let (fd, _) = fd(s)?;
+        check_shutdown(s, false)?;
         if msg.is_null() {
             return Err(WSAEFAULT);
         }
