@@ -445,3 +445,60 @@ fn list_marks_for_multi_selection() {
     l.set_items(vec![ListItem::new(None, &["only"])]);
     assert!(l.marked().is_empty());
 }
+
+/// A 2x2 icon DIB: BITMAPINFOHEADER, `pixels` (bottom row first) and a mask.
+fn dib(bpp: u16, pixels: &[u8], mask: [u8; 2]) -> Vec<u8> {
+    let mut d = Vec::new();
+    d.extend_from_slice(&40u32.to_le_bytes());
+    d.extend_from_slice(&2u32.to_le_bytes()); // width
+    d.extend_from_slice(&4u32.to_le_bytes()); // height of colour plus mask
+    d.extend_from_slice(&1u16.to_le_bytes());
+    d.extend_from_slice(&bpp.to_le_bytes());
+    d.extend_from_slice(&[0u8; 24]); // BI_RGB, sizes, resolution, colours
+    d.extend_from_slice(pixels);
+    d.extend_from_slice(&[mask[0], 0, 0, 0, mask[1], 0, 0, 0]); // two 4-byte mask rows
+    d
+}
+
+#[test]
+fn dib_icon_32_bit_keeps_its_alpha() {
+    // Bottom row: opaque red, half-transparent green; top row: blue, clear.
+    let pixels = [0, 0, 255, 255, 0, 255, 0, 128, 255, 0, 0, 255, 0, 0, 0, 0];
+    let b = icon::decode_dib(&dib(32, &pixels, [0, 0])).expect("a 32-bit icon");
+    assert_eq!((b.width, b.height), (2, 2));
+    assert_eq!(b.pixels, [0xFF00_00FF, 0x0000_0000, 0xFFFF_0000, 0x8000_FF00]);
+}
+
+#[test]
+fn dib_icon_without_alpha_uses_the_mask() {
+    // 24 bits: bottom row white, white; top row black, black; the mask (1 =
+    // transparent) clears the top right pixel.
+    let pixels = [255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let b = icon::decode_dib(&dib(24, &pixels, [0, 0b0100_0000])).expect("a 24-bit icon");
+    // Rows of 2 pixels pad to 8 bytes; the first 6 bytes of each row count.
+    assert_eq!(b.pixels, [0xFF00_0000, 0, 0xFFFF_FFFF, 0xFFFF_FFFF]);
+}
+
+#[test]
+fn dib_icon_rejects_what_it_cannot_read() {
+    assert!(icon::decode_dib(&[]).is_none());
+    assert!(icon::decode_dib(b"\x89PNG\r\n\x1a\n").is_none());
+    let mut compressed = dib(32, &[0; 16], [0, 0]);
+    compressed[16] = 1; // BI_RLE8
+    assert!(icon::decode_dib(&compressed).is_none());
+    assert!(icon::decode_dib(&dib(32, &[0; 4], [0, 0])).is_none()); // truncated colour data
+}
+
+#[test]
+fn bitmap_icons_register_and_draw_scaled() {
+    assert!(icon::register_bitmap(icon::Bitmap { width: 2, height: 2, pixels: vec![0; 3] }).is_none());
+    let red = icon::register_bitmap(icon::Bitmap { width: 2, height: 2, pixels: vec![0xFFFF_0000; 4] }).expect("registered");
+    let mut px = vec![0x0000_00FFu32; 8 * 8];
+    let mut s = Surface::new(&mut px, 8, 8, 8).unwrap();
+    let fonts = Fonts::load();
+    let theme = MIDNIGHT;
+    let mut p = Painter::new(&mut s, &theme, &fonts);
+    icon::draw(&mut p, red, Rect::new(2, 2, 4, 4), 0xFFFFFF);
+    assert_eq!(px[3 * 8 + 3], 0x00FF_0000, "inside the box the bitmap's colour");
+    assert_eq!(px[0], 0x0000_00FF, "outside it nothing is drawn");
+}

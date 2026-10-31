@@ -47,6 +47,7 @@ os-std = { path = "../../runtime/os-std" }
 osyx-gfx = { path = "../../boot/gfx" }
 osyx-input = { path = "../../shared/input" }
 osyx-ui = { path = "../../graphics/ui" }
+osyx-pe = { path = "../../compatibility/pe-parser" }
 prism-client = { path = "../../graphics/prism-client" }
 prism-core = { path = "../../graphics/prism-core" }
 prism-proto = { path = "../../graphics/prism-proto" }
