@@ -149,11 +149,11 @@ fn main() -> i32 {
         Some("swap-stress") => return swap_stress(),
         Some("zen-probe") => {
             let mode = args.get(3).map(String::as_str).unwrap_or("");
-            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", false, mode == "prof");
+            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", false, mode == "prof", mode == "sandbox" || mode == "sandboxfat");
         }
         Some("zen-installed") => {
             let mode = args.get(3).map(String::as_str).unwrap_or("");
-            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", true, mode == "prof");
+            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", true, mode == "prof", mode == "sandbox");
         }
         // `init tests winapp <program> [args...]`: PRISM and then one Windows
         // GUI program (an installer, for instance) with winrun's verbose log.
@@ -441,9 +441,17 @@ fn swap_stress() -> i32 {
 /// system, which starts the desktop shell) and restarts it if it fails. If
 /// it cannot be brought up, init exits and the kernel's status screen
 /// stays as the diagnostic fallback.
-fn zen_probe(url: Option<&str>, network_trace: bool, mozlog: bool, events: bool, count: bool, installed: bool, prof: bool) -> i32 {
+#[allow(clippy::too_many_arguments)]
+fn zen_probe(url: Option<&str>, network_trace: bool, mozlog: bool, events: bool, count: bool, installed: bool, prof: bool, sandbox: bool) -> i32 {
     println!("zen-probe: official /opt/zen/zen.exe via /bin/winrun; no substitute browser");
-    let mut prism_cmd = Command::new("/system/bin/prism");
+    let sandbox_fat = os_std::env::args().any(|a| a == "sandboxfat");
+    if sandbox_fat {
+        let setup = fs::create_dir_all("/opt/zen").and_then(|_| fs::create_dir_all("/home"))
+            .and_then(|_| os_std::os::unmount("/mnt/vdb"))
+            .and_then(|_| os_std::os::mount("/dev/disks/vdb", "/opt/zen", "fat32", true, 0));
+        if let Err(e) = setup { println!("ZEN_PROBE_RESULT infrastructure=zen_mount_failed: {e}"); return 1; }
+    }
+    let mut prism_cmd = Command::new(if sandbox_fat { "/bin/prism" } else { "/system/bin/prism" });
     // Trace only on request: serial output is slow and the compositor's
     // per-frame logging costs more than a full frame at 1080p.
     if network_trace { prism_cmd.env("OSYX_PRISM_TRACE", "1"); }
@@ -525,6 +533,10 @@ user_pref("network.connectivity-service.enabled", false);
     if network_trace {
         prefs.push_str("user_pref(\"devtools.console.stdout.chrome\", true);\nuser_pref(\"devtools.console.stdout.content\", true);\n");
     }
+    if sandbox {
+        prefs.push_str("user_pref(\"browser.tabs.remote.autostart\", true);\nuser_pref(\"browser.tabs.remote.autostart.2\", true);\n");
+        println!("zen-probe: experimental content sandbox requested; result is not verified");
+    }
     if os_std::fs::create_dir_all(&profile).and_then(|_| os_std::fs::write(
         format!("{profile}/user.js"),
         prefs,
@@ -537,11 +549,12 @@ user_pref("network.connectivity-service.enabled", false);
         return 1;
     }
     let mut zen = Command::new(if installed { "/system/bin/zen" } else { "/bin/winrun" });
+    if sandbox { zen.env("OSYX_EXPERIMENTAL_CONTENT_SANDBOX", "1"); }
     // The session runs as root, so Gecko's launcher would start the browser
     // with a de-elevated token, which OSyx cannot run: keep its own. The
     // probe has its own temporary profile with software-rendering prefs.
     if !installed {
-        if network_trace { zen.arg("-v"); }
+        if network_trace || sandbox { zen.arg("-v"); }
         zen.args(["/opt/zen/zen.exe", "--no-remote", "-profile"]);
     }
     let url = url.unwrap_or("file:///C:/tmp/zen-probe-page.html");

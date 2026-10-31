@@ -244,6 +244,9 @@ pub(crate) extern "win64" fn CreateProcessW(
         return fail(e, 0);
     }
     if flags & (CREATE_SUSPENDED | DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS) != 0 {
+        if crate::VERBOSE.load(Ordering::Relaxed) {
+            os_std::eprintln!("winrun: CreateProcessW unsupported creation flags {flags:#x}");
+        }
         return fail(ERROR_NOT_SUPPORTED, 0);
     }
     if startup.is_null() || info.is_null() {

@@ -26,6 +26,13 @@ A deny-by-default syscall allowlist is checked before the dispatcher's fast
 paths and inherited by children. The set of calls Gecko needs and the handling
 of arguments and handles have not been validated.
 
+An experimental FAT-backed QEMU probe of the official Zen 1.23.4b package
+reached its Windows launcher, but `CreateProcessW` rejected flags `0x404`
+(`CREATE_SUSPENDED` and `CREATE_UNICODE_ENVIRONMENT`) with error 50. The
+launcher then raised `0xc000001d`; no
+Gecko content process started. The probe does not establish browser or
+sandbox functionality.
+
 OSyx must enforce the boundary in the kernel, independently of the Win32
 compatibility process. A command-line flag or environment variable alone is
 not an authority to enter or leave the sandbox.
