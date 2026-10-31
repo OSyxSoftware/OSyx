@@ -14,6 +14,8 @@ pub const SOCK_PING: u64 = 3;
 pub const MSG_DONTWAIT: u64 = 1;
 /// `recv`: return data but leave it queued (UDP/ping: not supported).
 pub const MSG_PEEK: u64 = 2;
+/// `recv` on a stream: wait for the whole buffer (EOF or error ends it).
+pub const MSG_WAITALL: u64 = 4;
 
 /// `sock_ctl` operations.
 pub mod ctl {

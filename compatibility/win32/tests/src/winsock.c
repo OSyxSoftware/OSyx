@@ -96,6 +96,10 @@ void __stdcall start(void) {
     check("accept", srv != INVALID_SOCKET && peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
     check("loopback data", send(c, "ping", 4, 0) == 4 && recv(srv, buf, 4, 0) == 4 && mem_eq(buf, "ping", 4));
     check_eq("zero-length send", send(c, NULL, 0, 0), 0);
+    check_eq("second send", send(c, "pong", 4, 0), 4);
+    check_eq("third send", send(c, "more", 4, 0), 4);
+    check("recv(MSG_WAITALL) fills the buffer",
+          recv(srv, buf, 8, MSG_WAITALL) == 8 && mem_eq(buf, "pongmore", 8));
     closesocket(srv);
     closesocket(c);
     closesocket(l);

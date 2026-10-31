@@ -675,6 +675,7 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
     let timeout = s.recv_timeout.load(Ordering::Relaxed);
     let nonblock = flags & abi::MSG_DONTWAIT != 0;
     let peek = flags & abi::MSG_PEEK != 0;
+    let waitall = flags & abi::MSG_WAITALL != 0;
     let mut k = alloc::vec![0u8; len];
     let run = |op: &mut RecvOp| {
         if nonblock {
@@ -712,7 +713,36 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
         }
         abi::SOCK_STREAM => {
             let id = s.id().ok_or(Errno::NotConnected)?;
-            run(&mut |st| if peek { st.tcp_peek(id, &mut k) } else { st.tcp_recv(id, &mut k) }.map(|n| (n, None)))?
+            if peek || !waitall {
+                run(&mut |st| if peek { st.tcp_peek(id, &mut k) } else { st.tcp_recv(id, &mut k) }.map(|n| (n, None)))?
+            } else {
+                // MSG_WAITALL: fill the buffer; EOF, an error or a
+                // non-blocking socket ends the wait early.
+                let mut done = 0;
+                let mut err = None;
+                while done < k.len() {
+                    let r = if nonblock {
+                        stack_call(|st| st.tcp_recv(id, &mut k[done..]))
+                    } else {
+                        blocking(&s, READABLE, timeout, |st| st.tcp_recv(id, &mut k[done..]))
+                    };
+                    match r {
+                        Ok(0) => break,
+                        Ok(n) => done += n,
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                    if nonblock {
+                        break;
+                    }
+                }
+                match err {
+                    Some(e) if done == 0 => return Err(e),
+                    _ => (done, None),
+                }
+            }
         }
         _ => return Err(Errno::NotSupported),
     };

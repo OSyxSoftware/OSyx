@@ -36,6 +36,7 @@ const IPPROTO_UDP: i32 = 17;
 const TCP_NODELAY: i32 = 1;
 const FIONBIO: u32 = 0x8004_667E;
 const MSG_PEEK: i32 = 2;
+const MSG_WAITALL: i32 = 8;
 
 const WSAEINTR: u32 = 10004;
 const WSAEFAULT: u32 = 10014;
@@ -346,10 +347,17 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
 }
 
 fn flags(f: i32) -> Result<u64, u32> {
-    if f & !MSG_PEEK != 0 {
+    if f & !(MSG_PEEK | MSG_WAITALL) != 0 {
         return Err(WSAEOPNOTSUPP);
     }
-    Ok(if f & MSG_PEEK != 0 { net::MSG_PEEK } else { 0 })
+    let mut fl = 0;
+    if f & MSG_PEEK != 0 {
+        fl |= net::MSG_PEEK;
+    }
+    if f & MSG_WAITALL != 0 {
+        fl |= net::MSG_WAITALL;
+    }
+    Ok(fl)
 }
 
 extern "win64" fn send(s: u64, buf: *const u8, len: i32, f: i32) -> i32 {
