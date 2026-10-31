@@ -2552,8 +2552,11 @@ fn create_dialog(module: u64, name: u64, owner: u64, proc_: u64, param: u64, mod
     let internal = "OSyxDialog";
     with(|g| {
         if !g.classes.iter().any(|c| c.name == internal) {
+            // COLOR_BTNFACE, the background Windows gives dialogs.
+            let face = g.handle();
+            g.gdi.insert(face, Gdi::Brush(colorref(0x00F0_F0F0)));
             g.classes.push(Class { name: String::from(internal), wndproc: DialogWndProc as *const () as u64,
-                background: 0, icon: 0, cursor: 0, style: 0 });
+                background: face, icon: 0, cursor: 0, style: 0 });
         }
     });
     let class_units: Vec<u16> = internal.encode_utf16().chain(core::iter::once(0)).collect();
