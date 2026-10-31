@@ -241,7 +241,7 @@ pub fn receive(name: &str) -> Result<usize, String> {
     for r in &records {
         let k = if has_kernel(r) { kernel.next() } else { None };
         let handle = u64::from_le_bytes(r[0..8].try_into().unwrap());
-        let Some(o) = object(r, k, &[]) else { return Err(alloc::format!("unknown inherited object for {handle:#x}")) };
+        let Some(o) = object(r, k, &[], direct) else { return Err(alloc::format!("unknown inherited object for {handle:#x}")) };
         if !objects::insert_at(handle, o) {
             return Err(alloc::format!("handle {handle:#x} is already taken"));
         }
@@ -296,12 +296,12 @@ fn has_kernel(r: &[u8]) -> bool {
 }
 
 /// The object a record and its kernel object describe.
-fn object(r: &[u8], kernel: Option<u64>, extra: &[u8]) -> Option<Object> {
+fn object(r: &[u8], kernel: Option<u64>, extra: &[u8], direct: bool) -> Option<Object> {
     let half = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
     let size = u64::from_le_bytes(r[16..24].try_into().unwrap());
     match half(8) {
         KIND_PIPE => crate::pipes::relay_in(size >> 32, size as u32, half(12)).ok(),
-        KIND_PIPE_CHANNEL if size > osyx_abi::FIRST_FILE_HANDLE => Some(crate::pipes::relay_in_channel(size, half(12))),
+        KIND_PIPE_CHANNEL if direct && size > osyx_abi::FIRST_FILE_HANDLE => Some(crate::pipes::relay_in_channel(size, half(12))),
         KIND_FILE => {
             let path = core::str::from_utf8(extra.get(..size as usize)?).ok()?;
             let flags = half(12);
@@ -337,14 +337,14 @@ fn recv_wait(c: u64, buf: &mut [u8], handles: &mut [u64]) -> Result<(usize, usiz
 }
 
 /// Answers one request on connection `c`.
-fn serve(c: u64) -> bool {
+fn serve(c: u64, direct: bool) -> bool {
     let mut buf = alloc::vec![0u8; 4 + RECORD + MAX_PATH_BYTES];
     let mut hs = [0u64; 1];
     let Ok((n, k)) = recv_wait(c, &mut buf, &mut hs) else { return false };
     let op = if n >= 4 { u32::from_le_bytes(buf[0..4].try_into().unwrap()) } else { 0 };
     match op {
         PUT if n >= 4 + RECORD && k == has_kernel(&buf[4..4 + RECORD]) as usize => {
-            let h = match object(&buf[4..4 + RECORD], (k == 1).then_some(hs[0]), &buf[4 + RECORD..n]) {
+            let h = match object(&buf[4..4 + RECORD], (k == 1).then_some(hs[0]), &buf[4 + RECORD..n], direct) {
                 Some(o) => objects::insert(o),
                 None => {
                     if k == 1 {
@@ -391,7 +391,7 @@ pub fn start_direct_service() -> Result<(), u32> {
         let c = osyx_abi::FIRST_FILE_HANDLE;
         loop {
             let mut w = [os_sys::ipc::WaitItem { handle: c, events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP, revents: 0 }];
-            if os_sys::wait_handles(&mut w, u64::MAX).is_err() || !serve(c) { return; }
+            if os_sys::wait_handles(&mut w, u64::MAX).is_err() || !serve(c, true) { return; }
         }
     }).map(|_| ()).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)
 }
@@ -409,7 +409,7 @@ pub fn start_service() {
             return;
         }
         if let Ok(c) = os_sys::channel_accept(listener) {
-            serve(c);
+            serve(c, false);
             let _ = os_sys::close(c);
         }
         }
@@ -427,18 +427,24 @@ pub fn put(pid: u64, h: u64) -> Result<u64, u32> {
     let broker = BROKERS.lock().unwrap().iter().find(|(id, _)| *id == pid).map(|(_, b)| b.clone());
     if let Some(broker) = broker {
         // Never use a trusted parent's file capability to bypass the child's
-        // filesystem policy. Only anonymous sections and events are granted.
-        match objects::get(h) {
-            Some(Object::Event(_)) => {}
-            Some(Object::Section(s)) if !s.file_mapping && s.file.is_none() => {}
-            Some(o) => {
+        // filesystem policy. Grant only anonymous sections, events and pipes.
+        let object = objects::get(h).ok_or(ERROR_INVALID_HANDLE)?;
+        let _guard = broker.lock.lock().unwrap();
+        let mut owned = None;
+        let i = match object {
+            Object::Event(_) => item(h)?,
+            Object::Section(s) if !s.file_mapping && s.file.is_none() => item(h)?,
+            Object::Pipe(_) => {
+                let (endpoint, flags) = crate::pipes::relay_out_channel(h)?;
+                owned = Some(OwnedChannel(endpoint));
+                let target = os_sys::grant_child_channel(pid, endpoint).map_err(errno_to_win32)?;
+                Item { handle: h, kernel: None, kind: KIND_PIPE_CHANNEL, flags, size: target }
+            }
+            o => {
                 if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: broker refuses handle {h:#x} ({})", objects::kind_name(&o)); }
                 return Err(ERROR_NOT_SUPPORTED);
             }
-            None => return Err(ERROR_INVALID_HANDLE),
-        }
-        let i = item(h)?;
-        let _guard = broker.lock.lock().unwrap();
+        };
         let c = broker.channel.0;
         let mut msg = Vec::with_capacity(4 + RECORD);
         msg.extend_from_slice(&PUT.to_le_bytes());
@@ -447,6 +453,7 @@ pub fn put(pid: u64, h: u64) -> Result<u64, u32> {
         let mut out = [0u8; 8];
         let (n, _) = recv_wait(c, &mut out, &mut [])?;
         let value = u64::from_le_bytes(out);
+        drop(owned);
         return if n == 8 && value != 0 { Ok(value) } else { Err(ERROR_NOT_SUPPORTED) };
     }
     let file = file_item(h)?;
@@ -485,7 +492,7 @@ pub fn take(pid: u64, h: u64, close_source: bool) -> Result<u64, u32> {
         if n == 4 {
             return Err(u32::from_le_bytes(buf[0..4].try_into().unwrap()));
         }
-        match (n >= RECORD && k == has_kernel(&buf) as usize).then(|| object(&buf[..RECORD], (k == 1).then_some(hs[0]), &buf[RECORD..n])).flatten() {
+        match (n >= RECORD && k == has_kernel(&buf) as usize).then(|| object(&buf[..RECORD], (k == 1).then_some(hs[0]), &buf[RECORD..n], false)).flatten() {
             Some(o) => Ok(objects::insert(o)),
             None => Err(ERROR_NOT_SUPPORTED),
         }

@@ -388,6 +388,8 @@ pub mod nr {
     pub const SPAWN_STDIO_SUSPENDED: u64 = 99;
     /// Resume a direct child's initial thread; return the previous hold count.
     pub const RESUME_CHILD: u64 = 100;
+    /// Grant an existing channel to a live, restricted direct child.
+    pub const GRANT_CHILD_CHANNEL: u64 = 101;
 }
 
 /// Thread priorities (`nr::THREAD_PRIORITY`).

@@ -655,6 +655,10 @@ mod imp {
         decode(syscall1(nr::RESUME_CHILD, pid))
     }
 
+    pub fn grant_child_channel(pid: u64, channel: u64) -> Result<u64, Errno> {
+        decode(syscall2(nr::GRANT_CHILD_CHANNEL, pid, channel))
+    }
+
     /// Starts a child with experimental path and syscall policies. This does
     /// not yet provide a complete security boundary.
     /// The caller must keep each path referenced by `paths` alive for the call.

@@ -9,8 +9,9 @@ file stdio handles, receive file-backed sections over IPC, or publish shared
 images. They cannot connect to or register global IPC services, and may kill
 only themselves or direct children. A parent may grant one broker channel
 as child handle 3, plus up to 32 channels in consecutive handles from 4.
-The kernel validates every granted handle before starting the child. Anonymous
-channel pairs avoid exposing a service name.
+The kernel validates every granted handle before starting the child. An
+unrestricted parent may also grant a channel to its live, restricted direct
+child after startup. Anonymous channel pairs avoid exposing a service name.
 The channel's recorded peer identity describes its original
 connection, not necessarily the child. Other handle and IPC paths remain
 unreviewed. This is not a browser sandbox.
@@ -22,8 +23,8 @@ Its provisional read-only paths and syscall list have not been tested with
 Gecko. The path fails closed when requested handles are unsupported. Winrun
 can decode inherited page-file sections and events from the granted channel;
 connected pipes use separately granted channel relays. The retained broker
-channel can duplicate events and anonymous sections after startup. It refuses
-files, file-backed sections and unsupported object types. The protocol and
+channel can duplicate events, anonymous sections and connected pipes after
+startup. It refuses files, file-backed sections and unsupported object types. The protocol and
 the full set of grants Gecko requires still need validation.
 
 A deny-by-default syscall allowlist is checked before the dispatcher's fast
@@ -47,7 +48,8 @@ invalid standard input handle and a connected pipe. Winrun preserves invalid
 and null standard handles, uses `/dev/random` for its CSPRNG, and can relay
 connected pipes. A subsequent probe started Gecko children and loaded
 `xul.dll`, but an unsupported post-start `DuplicateHandle` caused the content
-IPC channel to close. Other redirected standard handles remain unsupported.
+IPC channel to close. A later probe reached a request to duplicate an audio
+pipe; this is now supported experimentally. Other redirected standard handles remain unsupported.
 The probes do not establish browser or sandbox functionality.
 
 The initial thread is held before it can run, including for restricted

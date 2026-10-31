@@ -116,7 +116,9 @@ fn main() -> i32 {
             let (peer, endpoint) = match os_sys::channel_pair() { Ok(pair) => pair, Err(_) => return 24 };
             let file = match os_sys::open("/bin/worker", osyx_abi::OPEN_READ, 0) { Ok(file) => file, Err(_) => return 34 };
             if os_sys::spawn_restricted_with_channels("/bin/worker", b"worker\0exit\00\0", b"", &rules, &calls, endpoint, 0, &[file]) != Err(osyx_abi::Errno::InvalidArgument) { return 35; }
+            if os_sys::grant_child_channel(process::id().unwrap_or(0), file) != Err(osyx_abi::Errno::InvalidArgument) { return 38; }
             let _ = os_sys::close(file);
+            if os_sys::grant_child_channel(process::id().unwrap_or(0), endpoint) != Err(osyx_abi::Errno::PermissionDenied) { return 39; }
             let too_many = [endpoint; 33];
             if os_sys::spawn_restricted_with_channels("/bin/worker", b"worker\0exit\00\0", b"", &rules, &calls, endpoint, 0, &too_many) != Err(osyx_abi::Errno::InvalidArgument) { return 36; }
             if os_sys::spawn_restricted_with_channels("/bin/worker", b"worker\0exit\00\0", b"", &rules, &calls, os_sys::HANDLE_NONE, 0, &[endpoint]) != Err(osyx_abi::Errno::InvalidArgument) { return 37; }
@@ -133,6 +135,7 @@ fn main() -> i32 {
             return 0;
         }
         Some("sandbox-channel") => {
+            if os_sys::grant_child_channel(process::id().unwrap_or(0), 3) != Err(osyx_abi::Errno::PermissionDenied) { return 40; }
             let mut request = [0u8; 16];
             if !matches!(os_sys::channel_recv(3, &mut request, &mut []), Ok((7, 0))) || &request[..7] != b"request" { return 31; }
             if os_sys::channel_send(3, b"reply", &[]).is_err() { return 32; }

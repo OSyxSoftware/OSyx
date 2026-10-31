@@ -1073,6 +1073,28 @@ pub fn add_object(o: Object) -> Result<u64, Errno> {
     add_objects(alloc::vec![o]).map(|v| v[0])
 }
 
+/// Grant only an existing channel to a live restricted direct child. Holding
+/// the process table lock prevents the child from entering final cleanup
+/// between the liveness check and insertion into its handle table.
+pub fn grant_child_channel(pid: Pid, handle: u64) -> Result<u64, Errno> {
+    let me = sched::current_pid();
+    let object = get_object(handle)?;
+    if !matches!(object, Object::Channel(_)) { return Err(Errno::InvalidArgument); }
+    let table = TABLE.lock();
+    let parent = table.procs.get(&me).ok_or(Errno::PermissionDenied)?;
+    if parent.path_policy.is_some() { return Err(Errno::PermissionDenied); }
+    let child = table.procs.get(&pid).ok_or(Errno::NotFound)?;
+    if child.parent != me || child.path_policy.is_none() { return Err(Errno::PermissionDenied); }
+    if child.life != Life::Running || child.threads.is_empty() || child.exit_status.is_some() { return Err(Errno::NotFound); }
+    let mut handles = HANDLES.lock();
+    let target = handles.get_mut(&pid).ok_or(Errno::NotFound)?;
+    if target.len() >= osyx_abi::MAX_HANDLES { return Err(Errno::TooManyHandles); }
+    let mut h = osyx_abi::FIRST_FILE_HANDLE;
+    while target.contains_key(&h) { h += 1; }
+    target.insert(h, object);
+    Ok(h)
+}
+
 /// The open file behind handle `h` (`BadHandle` for other objects).
 pub fn get_handle(h: u64) -> Result<FileHandle, Errno> {
     match get_object(h)? {

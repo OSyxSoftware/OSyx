@@ -79,8 +79,9 @@ pub extern "system" fn start() -> ! {
             let mut response = [0u8; 4];
             let mut read = 0;
             if ReadFile(pipe, response.as_mut_ptr(), 4, &mut read, 0) == 0 || read != 4 || u32::from_le_bytes(response) != u32::from_le_bytes(*b"pong") { ExitProcess(31); }
-            let mut duplicate = [0u8; 8];
-            if ReadFile(pipe, duplicate.as_mut_ptr(), 8, &mut read, 0) == 0 || read != 8 || WaitForSingleObject(u64::from_le_bytes(duplicate), 0) != 0 { ExitProcess(36); }
+            let mut duplicate = [0u64; 2];
+            if ReadFile(pipe, duplicate.as_mut_ptr().cast(), 16, &mut read, 0) == 0 || read != 16 || WaitForSingleObject(*duplicate.as_ptr(), 0) != 0 { ExitProcess(36); }
+            if WriteFile(*duplicate.as_ptr().add(1), b"late".as_ptr(), 4, &mut written, 0) == 0 || written != 4 { ExitProcess(40); }
             ExitProcess(0);
         }
         if file == u64::MAX { ExitProcess(13); }
@@ -148,8 +149,17 @@ pub extern "system" fn start() -> ! {
         let secret_file = CreateFileW(secret.as_ptr(), 0x8000_0000, 7, 0, 3, 0, 0);
         let mut remote_file = 0u64;
         if secret_file == u64::MAX || DuplicateHandle(u64::MAX, secret_file, info[0], &mut remote_file, 0, 0, 2) != 0 { ExitProcess(39); }
-        let handle_bytes = remote_event.to_le_bytes();
-        if WriteFile(server, handle_bytes.as_ptr(), 8, &mut written, 0) == 0 || written != 8 { ExitProcess(38); }
+        let mut late_name = [0u16; 64];
+        for (i, b) in b"\\\\.\\pipe\\osyx-sandbox-late".iter().enumerate() { *late_name.as_mut_ptr().add(i) = *b as u16; }
+        let late_server = CreateNamedPipeW(late_name.as_ptr(), 3, 0, 1, 4096, 4096, 0, 0);
+        let late_client = CreateFileW(late_name.as_ptr(), 0xc000_0000, 0, 0, 3, 0, 0);
+        if late_server == u64::MAX || late_client == u64::MAX { ExitProcess(41); }
+        let _ = ConnectNamedPipe(late_server, 0);
+        let mut remote_pipe = 0u64;
+        if DuplicateHandle(u64::MAX, late_client, info[0], &mut remote_pipe, 0, 0, 2) == 0 { ExitProcess(42); }
+        let handles = [remote_event, remote_pipe];
+        if WriteFile(server, handles.as_ptr().cast(), 16, &mut written, 0) == 0 || written != 16 { ExitProcess(38); }
+        if ReadFile(late_server, received.as_mut_ptr(), 4, &mut read, 0) == 0 || read != 4 || u32::from_le_bytes(received) != u32::from_le_bytes(*b"late") { ExitProcess(43); }
         if WaitForSingleObject(info[0], 20_000) != 0 { ExitProcess(11); }
         let mut code = 0;
         if GetExitCodeProcess(info[0], &mut code) == 0 || code != 0 { ExitProcess(12); }
