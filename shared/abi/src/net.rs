@@ -36,6 +36,9 @@ pub mod ctl {
     pub const RESET_ON_CLOSE: u64 = 9;
     /// arg: connect timeout in nanoseconds (0 = the TCP default).
     pub const CONNECT_TIMEOUT: u64 = 10;
+    /// Bytes that a receive can return at once: all queued stream data, or
+    /// the size of the first queued datagram/ICMP event.
+    pub const RECV_AVAILABLE: u64 = 11;
 }
 
 /// TCP states reported by `ctl::STATE` and `NetSocket::state`.

@@ -1373,6 +1373,20 @@ impl Stack {
         Ok(self.udp(id)?.local)
     }
 
+    /// Bytes a receive can return without waiting (FIONREAD).
+    pub fn recv_available(&mut self, id: SocketId) -> Result<usize, NetError> {
+        match self.sockets.get(&id) {
+            Some(Socket::Tcp(t)) => Ok(t.tcb.recv_queue()),
+            Some(Socket::Udp(u)) => Ok(u.rx.front().map_or(0, |d| d.1.len())),
+            Some(Socket::Icmp(i)) => Ok(match i.rx.front() {
+                Some(IcmpEvent::Reply { data, .. }) => data.len(),
+                Some(IcmpEvent::Error { .. }) => 0,
+                None => 0,
+            }),
+            _ => Err(NetError::BadSocket),
+        }
+    }
+
     /// An ICMP echo socket (like a Linux "ping socket"): it sends echo
     /// requests with its own identifier and receives the matching replies
     /// and errors.

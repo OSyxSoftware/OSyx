@@ -436,13 +436,23 @@ extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *
 extern "win64" fn ioctlsocket(s: u64, cmd: u32, arg: *mut u32) -> i32 {
     result((|| {
         let (fd, _) = fd(s)?;
-        if cmd != FIONBIO || arg.is_null() {
-            return Err(WSAEINVAL);
+        if arg.is_null() {
+            return Err(WSAEFAULT);
         }
-        // SAFETY: the caller's argument.
-        let on = unsafe { *arg } != 0;
-        os_sys::sock_ctl(fd, net::ctl::NONBLOCK, on as u64).map_err(wsa)?;
-        SOCKETS.lock().unwrap().get_mut(&s).ok_or(WSAENOTSOCK)?.nonblocking = on;
+        match cmd {
+            FIONBIO => {
+                // SAFETY: the caller's argument.
+                let on = unsafe { *arg } != 0;
+                os_sys::sock_ctl(fd, net::ctl::NONBLOCK, on as u64).map_err(wsa)?;
+                SOCKETS.lock().unwrap().get_mut(&s).ok_or(WSAENOTSOCK)?.nonblocking = on;
+            }
+            FIONREAD => {
+                let n = os_sys::sock_ctl(fd, net::ctl::RECV_AVAILABLE, 0).map_err(wsa)?;
+                // SAFETY: the caller's argument.
+                unsafe { *arg = n as u32 };
+            }
+            _ => return Err(WSAEINVAL),
+        }
         Ok(())
     })())
 }
@@ -732,7 +742,7 @@ extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *const u8, gr
 
 const FIONREAD: u32 = 0x4004_667F;
 
-/// WSAIoctl: FIONBIO only, synchronously. Extension functions
+/// WSAIoctl: FIONBIO and FIONREAD, synchronously. Extension functions
 /// (SIO_GET_EXTENSION_FUNCTION_POINTER: ConnectEx, AcceptEx, ...) need
 /// overlapped I/O and are reported unsupported, so callers fall back.
 #[allow(clippy::too_many_arguments)]
@@ -741,14 +751,14 @@ extern "win64" fn WSAIoctl(
     code: u32,
     input: *const u8,
     in_len: u32,
-    _output: *mut u8,
-    _out_len: u32,
+    output: *mut u8,
+    out_len: u32,
     returned: *mut u32,
     overlapped: *mut u8,
     completion: u64,
 ) -> i32 {
     result((|| {
-        fd(s)?;
+        let (fd, _) = fd(s)?;
         if !overlapped.is_null() || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
@@ -763,7 +773,19 @@ extern "win64" fn WSAIoctl(
                     return Err(teb::last_error());
                 }
             }
-            FIONREAD => return Err(WSAEOPNOTSUPP),
+            FIONREAD => {
+                if output.is_null() || out_len < 4 {
+                    return Err(WSAEFAULT);
+                }
+                let n = os_sys::sock_ctl(fd, net::ctl::RECV_AVAILABLE, 0).map_err(wsa)?;
+                // SAFETY: the caller's 4-byte output.
+                unsafe { core::ptr::write_unaligned(output as *mut u32, n as u32) };
+                if !returned.is_null() {
+                    // SAFETY: the caller's out count.
+                    unsafe { *returned = 4 };
+                }
+                return Ok(());
+            }
             _ => return Err(WSAEINVAL),
         }
         if !returned.is_null() {

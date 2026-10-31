@@ -94,6 +94,13 @@ void __stdcall start(void) {
     WSABUF out[2] = {{5, "hello"}, {6, ", wsa!"}};
     DWORD n = 0;
     check("WSASend gathers two buffers", WSASend(cl, out, 2, &n, 0, NULL, NULL) == 0 && n == 11);
+    DWORD avail = 0;
+    check_eq("ioctlsocket(FIONREAD)", ioctlsocket(sv, FIONREAD, &avail), 0);
+    check_eq("... pending bytes", avail, 11);
+    avail = 0;
+    n = 0;
+    check_eq("WSAIoctl(FIONREAD)", WSAIoctl(sv, FIONREAD, NULL, 0, &avail, sizeof avail, &n, NULL, NULL), 0);
+    check("... pending bytes and count", avail == 11 && n == 4);
     char part1[5] = {0}, part2[6] = {0};
     WSABUF in[2] = {{5, part1}, {6, part2}};
     n = 0;

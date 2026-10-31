@@ -227,6 +227,19 @@ fn tcp_handshake_transfer_and_orderly_teardown() {
 }
 
 #[test]
+fn tcp_receive_availability_reports_queued_bytes() {
+    let mut n = Net::new();
+    let (c, s) = connect(&mut n, 6150);
+    assert_eq!(n.b.recv_available(s), Ok(0));
+    let data = b"how much is queued?";
+    assert_eq!(n.a.tcp_send(c, data).unwrap(), data.len());
+    assert!(n.run_until(1000, |n| n.b.recv_available(s) == Ok(data.len())), "all sent bytes are queued");
+    let mut buf = [0u8; 4];
+    assert_eq!(n.b.tcp_recv(s, &mut buf).unwrap(), 4);
+    assert!(n.run_until(100, |n| n.b.recv_available(s) == Ok(data.len() - 4)), "reading consumes the reported bytes");
+}
+
+#[test]
 fn tcp_survives_loss_duplication_and_reordering() {
     let mut n = Net::new();
     n.loss = 50; // 5 %

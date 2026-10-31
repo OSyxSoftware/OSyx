@@ -761,6 +761,11 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
             let (st, _) = stack_call(|st| st.tcp_state(id))?;
             return Ok(tcp_state_index(st));
         }
+        abi::ctl::RECV_AVAILABLE => {
+            // A socket that never reached the stack has nothing queued.
+            let Some(id) = s.id() else { return Ok(0) };
+            return stack_call(|st| st.recv_available(id)).map(|n| n as u64);
+        }
         _ => return Err(Errno::InvalidArgument),
     }
     Ok(0)
