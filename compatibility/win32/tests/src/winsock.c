@@ -95,6 +95,7 @@ void __stdcall start(void) {
     SOCKET srv = accept(l, (struct sockaddr *)&peer, &plen);
     check("accept", srv != INVALID_SOCKET && peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
     check("loopback data", send(c, "ping", 4, 0) == 4 && recv(srv, buf, 4, 0) == 4 && mem_eq(buf, "ping", 4));
+    check_eq("zero-length send", send(c, NULL, 0, 0), 0);
     closesocket(srv);
     closesocket(c);
     closesocket(l);

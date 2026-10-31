@@ -360,8 +360,10 @@ extern "win64" fn send(s: u64, buf: *const u8, len: i32, f: i32) -> i32 {
         if f != 0 {
             return Err(WSAEOPNOTSUPP);
         }
-        // SAFETY: the caller's buffer of `len` bytes.
-        let data = unsafe { core::slice::from_raw_parts(buf, len.max(0) as usize) };
+        // SAFETY: the caller's buffer of `len` bytes; a zero-length send may
+        // pass a NULL pointer, which never becomes a real slice.
+        let (n, p) = (len.max(0) as usize, if len > 0 { buf } else { core::ptr::NonNull::dangling().as_ptr() });
+        let data = unsafe { core::slice::from_raw_parts(p, n) };
         os_sys::sock_send(fd, data, None, 0).map_err(wsa)
     })();
     trace_io(format_args!("send({s:#x}) -> {r:?}"));
@@ -376,8 +378,10 @@ extern "win64" fn sendto(s: u64, buf: *const u8, len: i32, f: i32, to: *const u8
             return Err(WSAEOPNOTSUPP);
         }
         let a = if to.is_null() { None } else { Some(read_addr(to, tolen)?) };
-        // SAFETY: the caller's buffer of `len` bytes.
-        let data = unsafe { core::slice::from_raw_parts(buf, len.max(0) as usize) };
+        // SAFETY: the caller's buffer of `len` bytes; a zero-length send may
+        // pass a NULL pointer, which never becomes a real slice.
+        let (n, p) = (len.max(0) as usize, if len > 0 { buf } else { core::ptr::NonNull::dangling().as_ptr() });
+        let data = unsafe { core::slice::from_raw_parts(p, n) };
         os_sys::sock_send(fd, data, a.as_ref(), 0).map_err(wsa)
     })();
     r.map_or_else(|e| err(e, SOCKET_ERROR), |n| n as i32)
@@ -393,8 +397,10 @@ extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8
         let (fd, stream) = fd(s)?;
         check_shutdown(s, true)?;
         let fl = flags(f)?;
-        // SAFETY: the caller's buffer of `len` bytes.
-        let data = unsafe { core::slice::from_raw_parts_mut(buf, len.max(0) as usize) };
+        // SAFETY: the caller's buffer of `len` bytes; a zero-length receive
+        // may pass a NULL pointer, which never becomes a real slice.
+        let (n, p) = (len.max(0) as usize, if len > 0 { buf } else { core::ptr::NonNull::dangling().as_ptr() });
+        let data = unsafe { core::slice::from_raw_parts_mut(p, n) };
         let (n, peer) = os_sys::sock_recv(fd, data, fl).map_err(wsa)?;
         write_addr(&peer, from, fromlen);
         // A datagram longer than the buffer was truncated; the bytes are
@@ -931,6 +937,10 @@ fn wsa_bufs(bufs: *const u8, count: u32) -> Result<Vec<(u32, u64)>, u32> {
 fn wsa_gather(bufs: *const u8, count: u32) -> Result<Vec<u8>, u32> {
     let mut data = Vec::new();
     for (len, p) in wsa_bufs(bufs, count)? {
+        // A zero-length entry may carry a NULL pointer.
+        if len == 0 {
+            continue;
+        }
         // SAFETY: the caller's WSABUF of `len` bytes.
         data.extend_from_slice(unsafe { core::slice::from_raw_parts(p as *const u8, len as usize) });
     }
