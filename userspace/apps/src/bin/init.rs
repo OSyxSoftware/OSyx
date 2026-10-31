@@ -179,11 +179,31 @@ fn main() -> i32 {
                 return 1;
             }
             thread::sleep(Duration::from_secs(2));
-            let mut c = Command::new("/bin/winrun");
-            c.arg("-v");
+            // `--user` starts the program the way the desktop does: through
+            // run-app, as the desktop user (uid 1000). `--quiet` leaves out
+            // winrun's -v log.
+            let mut first = 2;
+            let (mut as_user, mut quiet) = (false, false);
+            while let Some(flag) = args.get(first).map(String::as_str) {
+                match flag {
+                    "--user" => as_user = true,
+                    "--quiet" => quiet = true,
+                    _ => break,
+                }
+                first += 1;
+            }
+            let mut c = if as_user {
+                Command::new("/system/bin/run-app")
+            } else {
+                let mut c = Command::new("/bin/winrun");
+                if !quiet {
+                    c.arg("-v");
+                }
+                c
+            };
             // Every failing Win32 call is logged with its error.
             c.env("OSYX_WINRUN_TRACE", "1");
-            for a in &args[2..] {
+            for a in &args[first..] {
                 c.arg(a);
             }
             let code = c.status().ok().and_then(|s| s.code()).unwrap_or(1);
