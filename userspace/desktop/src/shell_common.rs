@@ -725,3 +725,51 @@ pub fn unix_now() -> i64 {
         .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
 }
+
+/// The taskbar's pinned applications, one source file per line: an `.app`
+/// entry, a Windows shortcut or a program.
+pub const PINS_FILE: &str = "/home/user/.pinned";
+
+/// The entry a pinned source stands for (`None` once it is gone).
+pub fn load_pinned(source: &str) -> Option<AppEntry> {
+    let lower = source.to_ascii_lowercase();
+    if lower.ends_with(".app") {
+        load_app(source)
+    } else if lower.ends_with(".lnk") {
+        load_link(source)
+    } else if lower.ends_with(".exe") && fs::metadata(source).is_ok_and(|m| m.is_file()) {
+        let file = source.rsplit('/').next().unwrap_or(source);
+        let name = file.get(..file.len().saturating_sub(4)).unwrap_or(file);
+        Some(AppEntry {
+            source: String::from(source),
+            name: String::from(name),
+            exec: String::from(source),
+            icon: exe_icon(source),
+            comment: String::from("Windows program"),
+            args: Vec::new(),
+            workdir: String::new(),
+            group: String::new(),
+        })
+    } else {
+        None
+    }
+}
+
+/// The pinned entries, in the order they were pinned.
+pub fn load_pins() -> Vec<AppEntry> {
+    fs::read_to_string(PINS_FILE)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| load_pinned(l.trim()))
+        .collect()
+}
+
+/// Writes the pinned sources back.
+pub fn save_pins(pins: &[AppEntry]) -> os_std::error::Result<()> {
+    let mut text = String::new();
+    for pin in pins {
+        text.push_str(&pin.source);
+        text.push('\n');
+    }
+    fs::write(PINS_FILE, text)
+}

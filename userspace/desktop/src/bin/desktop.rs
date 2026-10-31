@@ -65,6 +65,7 @@ enum MenuPurpose {
     Power,
     Application(usize),
     Shortcut(usize),
+    Pinned(usize),
 }
 
 /// What a context menu of an application or shortcut can do.
@@ -75,24 +76,32 @@ enum EntryAction {
     ShowLocation,
     AddToDesktop,
     RemoveShortcut,
+    PinToTaskbar,
+    UnpinFromTaskbar,
 }
 
 /// The menu of an application entry: (action, label, icon). The program
 /// actions apply to Windows programs, which are the ones that can ask for
 /// administrator rights and live in a folder worth showing.
-fn entry_actions(app: &AppEntry, on_desktop: bool) -> Vec<(EntryAction, &'static str, Icon)> {
+fn entry_actions(app: &AppEntry, on_desktop: bool, pinned: bool) -> Vec<(EntryAction, &'static str, Icon)> {
     let windows = app.exec.to_ascii_lowercase().ends_with(".exe");
     let mut actions = Vec::new();
-    if on_desktop {
+    if on_desktop || pinned {
         actions.push((EntryAction::Open, "Open", Icon::Program));
-    } else {
+    }
+    if !on_desktop && !pinned {
         actions.push((EntryAction::AddToDesktop, "Add to desktop", Icon::Link));
     }
     if windows {
         actions.push((EntryAction::RunAsAdmin, "Run as administrator", Icon::Lock));
         actions.push((EntryAction::ShowLocation, "Open file location", Icon::Folder));
     }
-    if on_desktop {
+    if pinned {
+        actions.push((EntryAction::UnpinFromTaskbar, "Unpin from taskbar", Icon::Close));
+    } else {
+        actions.push((EntryAction::PinToTaskbar, "Pin to taskbar", Icon::Link));
+    }
+    if on_desktop && !pinned {
         actions.push((EntryAction::RemoveShortcut, "Remove shortcut", Icon::Trash));
     }
     actions
@@ -411,6 +420,8 @@ enum PanelAction {
     Launcher,
     Power,
     Task(usize),
+    Pinned(usize),
+    PinnedMenu(usize, i32, i32),
     Clock,
     Quick,
     Drives,
@@ -441,6 +452,9 @@ struct Shell {
     launcher_btn: Button,
     power_btn: Button,
     tasks: Vec<Button>,
+    /// Applications pinned to the taskbar, and their buttons.
+    pinned: Vec<AppEntry>,
+    pin_buttons: Vec<Button>,
     windows: Vec<WindowInfo>,
     clock: (String, String),
     clock_hover: bool,
@@ -574,6 +588,8 @@ fn main() -> i32 {
         launcher_btn: Button::new(0, "", ButtonStyle::Flat).with_icon(Icon::Apps),
         power_btn: Button::new(0, "", ButtonStyle::Flat).with_icon(Icon::Power),
         tasks: Vec::new(),
+        pinned: common::load_pins(),
+        pin_buttons: Vec::new(),
         windows: Vec::new(),
         clock: (String::new(), String::new()),
         clock_hover: false,
@@ -627,6 +643,7 @@ fn main() -> i32 {
         common::APP_DIR,
         shell.tz.std_name
     );
+    shell.layout_panel();
     shell.run()
 }
 
@@ -936,7 +953,7 @@ impl Shell {
                 } else if b == button::LEFT {
                     self.icon_drag = Some(IconDrag { index: i, start: (x, y), pointer: (x, y), moved: false });
                 } else if b == button::RIGHT {
-                    let items = entry_actions(&self.shortcuts[i], true)
+                    let items = entry_actions(&self.shortcuts[i], true, false)
                         .into_iter()
                         .map(|(_, label, icon)| MenuItem::new(label, Some(icon)))
                         .collect();
@@ -974,6 +991,17 @@ impl Shell {
             match b.event(&ui, false) {
                 Response::Activated(i) => action = Some(PanelAction::Task(i)),
                 r => redraw |= r.needs_redraw(),
+            }
+        }
+        for b in &mut self.pin_buttons {
+            match b.event(&ui, false) {
+                Response::Activated(i) => action = Some(PanelAction::Pinned(i)),
+                r => redraw |= r.needs_redraw(),
+            }
+        }
+        if let Ui::PointerDown { x, y, button: button::RIGHT, .. } = ui {
+            if let Some(i) = self.pin_buttons.iter().position(|b| contains(&b.rect, x, y)) {
+                action = Some(PanelAction::PinnedMenu(i, x, y));
             }
         }
         let clock = self.clock_rect();
@@ -1037,6 +1065,22 @@ impl Shell {
                 let x = r.right() as i32 - mw as i32;
                 let y = (self.h - PANEL_H) as i32 - mh as i32 - 8;
                 self.open_menu(items, MenuPurpose::Power, x, y);
+            }
+            Some(PanelAction::Pinned(i)) => {
+                if let Some(app) = self.pinned.get(i).cloned() {
+                    self.launch_entry(&app);
+                }
+            }
+            Some(PanelAction::PinnedMenu(i, x, y)) => {
+                if let Some(app) = self.pinned.get(i) {
+                    let items: Vec<MenuItem> = entry_actions(app, false, true)
+                        .into_iter()
+                        .map(|(_, label, icon)| MenuItem::new(label, Some(icon)))
+                        .collect();
+                    let (_, mh) = Menu::new(items.clone()).size(&self.fonts);
+                    let top = (self.h - PANEL_H) as i32 - mh as i32 - 8;
+                    self.open_menu(items, MenuPurpose::Pinned(i), x, top);
+                }
             }
             Some(PanelAction::Task(i)) => {
                 if let Some(info) = self.windows.get(i) {
@@ -1351,7 +1395,7 @@ impl Shell {
             }
         }
         if let Some((i, x, y)) = app_menu {
-            let items = entry_actions(&self.apps[i], false)
+            let items = entry_actions(&self.apps[i], false, false)
                 .into_iter()
                 .map(|(_, label, icon)| MenuItem::new(label, Some(icon)))
                 .collect();
@@ -1363,13 +1407,19 @@ impl Shell {
         match (purpose, i) {
             (MenuPurpose::Application(app), i) => {
                 let Some(entry) = self.apps.get(app).cloned() else { return };
-                if let Some(&(action, _, _)) = entry_actions(&entry, false).get(i) {
+                if let Some(&(action, _, _)) = entry_actions(&entry, false, false).get(i) {
+                    self.entry_action(action, &entry, app);
+                }
+            }
+            (MenuPurpose::Pinned(app), i) => {
+                let Some(entry) = self.pinned.get(app).cloned() else { return };
+                if let Some(&(action, _, _)) = entry_actions(&entry, false, true).get(i) {
                     self.entry_action(action, &entry, app);
                 }
             }
             (MenuPurpose::Shortcut(app), i) => {
                 let Some(entry) = self.shortcuts.get(app).cloned() else { return };
-                if let Some(&(action, _, _)) = entry_actions(&entry, true).get(i) {
+                if let Some(&(action, _, _)) = entry_actions(&entry, true, false).get(i) {
                     self.entry_action(action, &entry, app);
                 }
             }
@@ -1527,9 +1577,34 @@ impl Shell {
                 let dir = entry.exec.rsplit_once('/').map_or("/", |(d, _)| if d.is_empty() { "/" } else { d });
                 self.launch_with("Files", "/system/bin/files", &[String::from(dir)], "", false);
             }
+            EntryAction::PinToTaskbar => self.pin(entry),
+            EntryAction::UnpinFromTaskbar => self.unpin(index),
             EntryAction::AddToDesktop => self.add_shortcut(index),
             EntryAction::RemoveShortcut => self.remove_shortcut(index),
         }
+    }
+
+    /// Pins `entry` to the taskbar (once).
+    fn pin(&mut self, entry: &AppEntry) {
+        if self.pinned.iter().any(|p| p.source == entry.source) {
+            return;
+        }
+        self.pinned.push(entry.clone());
+        self.save_pinned();
+    }
+
+    fn unpin(&mut self, index: usize) {
+        if index < self.pinned.len() {
+            self.pinned.remove(index);
+            self.save_pinned();
+        }
+    }
+
+    fn save_pinned(&mut self) {
+        if let Err(e) = common::save_pins(&self.pinned) {
+            self.show_note("Taskbar", &format!("Cannot save the pinned applications: {e}"));
+        }
+        self.layout_panel();
     }
 
     fn launch_shortcut(&mut self, i: usize) {
@@ -2123,7 +2198,18 @@ impl Shell {
         let h = PANEL_H;
         self.launcher_btn.rect = Rect::new(8, 8, 44, h as i32 as u32 - 16);
         self.power_btn.rect = Rect::new(self.w as i32 - 8 - 40, 8, 40, h - 16);
-        let left = 64;
+        let mut left = 64;
+        self.pin_buttons = self
+            .pinned
+            .iter()
+            .enumerate()
+            .map(|(i, app)| {
+                let mut b = Button::new(i, "", ButtonStyle::Flat).with_icon(app.icon);
+                b.rect = Rect::new(left + i as i32 * 44, 8, 40, h - 16);
+                b
+            })
+            .collect();
+        left += self.pinned.len() as i32 * 44 + if self.pinned.is_empty() { 0 } else { 8 };
         let right = self.clock_rect().x - 12;
         let n = self.windows.len().max(1) as i32;
         let avail = (right - left).max(0);
@@ -2200,6 +2286,7 @@ impl Shell {
                 &mut p,
                 &self.launcher_btn,
                 &self.power_btn,
+                &self.pin_buttons,
                 &self.tasks,
                 &self.clock,
                 clock,
@@ -2343,6 +2430,7 @@ fn draw_panel(
     p: &mut Painter,
     launcher: &Button,
     power: &Button,
+    pins: &[Button],
     tasks: &[Button],
     clock: &(String, String),
     clock_rect: Rect,
@@ -2357,10 +2445,13 @@ fn draw_panel(
     p.fill(full, PANEL_BG);
     p.hline(0, 0, full.w, PANEL_LINE);
     launcher.draw(p, false);
+    for b in pins {
+        b.draw(p, false);
+    }
     for b in tasks {
         b.draw(p, false);
     }
-    if empty {
+    if empty && pins.is_empty() {
         let r = Rect::new(72, 0, 460, full.h);
         p.text_in(
             FontKind::Ui,
