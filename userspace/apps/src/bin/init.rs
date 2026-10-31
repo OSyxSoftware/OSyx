@@ -12,6 +12,7 @@
 //! * `fault`:       dereference an unmapped address (the kernel must kill us)
 //! * `panic`:       panic (OSyx Std must report it and exit with 101)
 //! * `exit,<code>`: exit with `<code>`
+//! * `i2c`:         run /bin/i2chidd (HID over I2C discovery) and exit with its status
 //! * `swap-stress`: exercise compressible anonymous pages under memory pressure
 //! * `crash-prep`:  leave an open, removed file on / for the power-cut test
 //! * `net,<tcp>,<udp>`: network checks against the host's echo servers on
@@ -106,6 +107,21 @@ fn main() -> i32 {
         Some("exit") => {
             let code = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             process::exit(code);
+        }
+        // `tests,i2c`: run the HID over I2C discovery service (ACPI -> kernel
+        // driver) and exit with its status. The i2c-hid-test script gives the
+        // VM an SSDT with a touchpad whose controller does not exist.
+        Some("i2c") => {
+            return match Command::new("/bin/i2chidd").status() {
+                Ok(s) => {
+                    println!("init: i2chidd exit status {:?}", s.code());
+                    s.code().unwrap_or(1)
+                }
+                Err(e) => {
+                    eprintln!("init: cannot run /bin/i2chidd: {e}");
+                    1
+                }
+            };
         }
         Some("desktop") => return desktop_session(),
         // QEMU has no battery: after batteryd has reported none, publish a
@@ -681,6 +697,12 @@ fn desktop_session() -> i32 {
         }
     });
     println!("init: battery state kept by /bin/batteryd");
+    // Touchpads and keyboards on I2C (HID over I2C): ACPI discovery, then the
+    // kernel driver takes over. Runs as root and exits when done.
+    match Command::new("/bin/i2chidd").spawn() {
+        Ok(c) => println!("init: HID over I2C discovery running (process {})", c.id()),
+        Err(e) => eprintln!("init: cannot start /bin/i2chidd: {e}"),
+    }
     // Recover an established Wi-Fi connection when its gateway stops responding.
     match Command::new("/bin/wifi-watch").spawn() {
         Ok(c) => println!("init: Wi-Fi recovery running (process {})", c.id()),

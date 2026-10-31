@@ -413,6 +413,11 @@ pub mod firmware {
     /// `(bus << 16 | device << 8 | function, offset, width | 0x100 to
     /// write, value) -> value read`: PCI configuration, segment 0.
     pub const PCI: u64 = 4;
+    /// `(buf, len) -> devices claimed`: hands the kernel the HID over I2C
+    /// devices that the ACPI service found (`osyx_i2c::spec` encoding). The
+    /// call returns when every device has been probed (bounded); a device
+    /// the kernel cannot or will not drive is logged and left alone.
+    pub const I2C_HID: u64 = 5;
 }
 
 /// Battery state published by the ACPI service in [`BATTERY_STATUS_PATH`]:

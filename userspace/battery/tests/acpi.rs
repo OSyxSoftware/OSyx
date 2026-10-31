@@ -319,10 +319,15 @@ fn store_index(field: &str, i: u64) -> Vec<u8> {
 
 /// A battery whose `_BST` reads the embedded controller.
 fn ec_battery() -> Vec<u8> {
+    ec_battery_with(vec![])
+}
+
+/// The EC-backed battery; `ec_extra` is added to the EC device (a `_CRS`).
+fn ec_battery_with(ec_extra: Vec<u8>) -> Vec<u8> {
     let region = cat(&[vec![0x5B, 0x80], seg("ECOR"), vec![0x03], int(0), int(0x100)]);
     let field_body = cat(&[seg("ECOR"), vec![0x01], seg("B0ST"), vec![8], seg("RATE"), vec![16], seg("REMN"), vec![16], seg("VOLT"), vec![16]]);
     let field = cat(&[vec![0x5B, 0x81], pkg_len(field_body.len()), field_body]);
-    let ec = device("EC__", cat(&[name("_HID", eisa("PNP0C09")), region, field]));
+    let ec = device("EC__", cat(&[name("_HID", eisa("PNP0C09")), ec_extra, region, field]));
     let bat = device(
         "BAT0",
         cat(&[
@@ -456,20 +461,31 @@ fn crs_ports() {
 
 #[test]
 fn ec_ports_come_from_crs_when_there_is_no_ecdt() {
-    // An EC at 0x1604/0x1600 named only by its _CRS, a battery behind it.
-    let machine = Machine::with_ports(0x1604, 0x1600);
-    machine.set(0x20, &[1, 0, 0, 0]);
+    // An EC at 0x1604/0x1600 named only by its _CRS; the battery readings
+    // come through it. Data port first, command port second.
     let crs = vec![0x47, 1, 0x00, 0x16, 0x00, 0x16, 1, 1, 0x47, 1, 0x04, 0x16, 0x04, 0x16, 1, 1, 0x79, 0];
     let mut buffer = vec![0x11];
     let body = cat(&[int(crs.len() as u64), crs]);
     buffer.extend(pkg_len(body.len()));
     buffer.extend(body);
-    let ec = device("EC0_", cat(&[name("_HID", eisa("PNP0C09")), name("_CRS", buffer)]));
-    let tables = vec![table(scope_sb(cat(&[ec, battery("BAT0", Some(0x1f), &[0, 40000, 38000, 1, 11400], &[1, 5000, 19000, 11300])])))];
+    let tables = vec![ec_battery_with(name("_CRS", buffer))];
     let mut log = |s: &str| panic!("AML load problem: {s}");
-    let acpi = Acpi::load(machine.clone(), None, &tables, &mut log);
+
+    let machine = Machine::with_ports(0x1604, 0x1600);
+    set_bst(&machine, 1, 9_000, 22_500, 11_000);
+    let mut acpi = Acpi::load(machine.clone(), None, &tables, &mut log);
     assert_eq!(acpi.ec_ports(), (Some(EcPorts { command: 0x1604, data: 0x1600 }), "_CRS"));
-    assert_eq!(acpi.battery_devices(), 1);
+    let poll = acpi.poll();
+    assert_eq!(poll.ec_errors, 0);
+    let st = Monitor::new().update(&poll);
+    assert_eq!((st.state, st.percent), (State::Discharging, 50), "the readings came through the _CRS ports");
+    assert!(acpi.stats().ec_transactions.load(Ordering::Relaxed) > 0);
+
+    // The same machine read through the legacy ports fails: the test would
+    // notice firmware still using 0x66/0x62.
+    let mut legacy = Acpi::load(machine.clone(), Some(EcPorts::LEGACY), &tables, &mut log);
+    assert!(legacy.poll().ec_errors > 0);
+
     // Without an EC device or ECDT the legacy ports are used.
     let bare = vec![table(scope_sb(battery("BAT0", Some(0x1f), &[0, 40000, 38000, 1, 11400], &[1, 5000, 19000, 11300])))];
     let acpi = Acpi::load(Machine::new(), None, &bare, &mut log);
