@@ -1262,6 +1262,9 @@ extern "win64" fn DuplicateHandle(
                     exit_code: AtomicU32::new(259), // STILL_ACTIVE
                     suspended: AtomicU32::new(0),
                     teb: AtomicU64::new(teb::current()),
+                    created_ns: AtomicU64::new(crate::sysext::process_start_ns()),
+                    exited_ns: AtomicU64::new(0),
+                    final_ticks: AtomicU64::new(0),
                 })),
             }
         }
@@ -1392,6 +1395,9 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
         exit_code: AtomicU32::new(259),
         suspended: AtomicU32::new(suspended as u32),
         teb: AtomicU64::new(0),
+        created_ns: AtomicU64::new(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0)),
+        exited_ns: AtomicU64::new(0),
+        final_ticks: AtomicU64::new(0),
     });
     let size = stack_size.clamp(64 << 10, 64 << 20).next_multiple_of(mem::GRANULARITY);
     let me = obj.clone();
@@ -1435,6 +1441,8 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
             mem::free_stack(stack, size);
             mem::free_pages(t, teb::TEB_SIZE);
             me.exit_code.store(code, Ordering::SeqCst);
+            me.final_ticks.store(os_sys::thread_times(0).unwrap_or(0), Ordering::SeqCst);
+            me.exited_ns.store(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(1).max(1), Ordering::SeqCst);
             me.done.store(true, Ordering::SeqCst);
             objects::signal_all();
         })
@@ -1466,24 +1474,56 @@ pub(crate) extern "win64" fn CreateThread(attributes: u64, stack: usize, start: 
     }
 }
 
+/// The suspend count of Windows is the sum of the two holds a thread can be
+/// under: CREATE_SUSPENDED (`ThreadObj::suspended`, the start waits on it)
+/// and SuspendThread (the kernel's per-thread count, which stops the thread
+/// at its next return to user mode).
+fn kernel_suspend_count(tid: u32) -> u64 {
+    os_sys::thread_suspend(tid as u64, osyx_abi::suspend::QUERY).unwrap_or(0)
+}
+
+const ERROR_SIGNAL_REFUSED_W: u32 = 156;
+
 extern "win64" fn ResumeThread(h: u64) -> u32 {
     match objects::get(h) {
         Some(Object::Thread(t)) => {
-            let prev = t.suspended.load(Ordering::SeqCst);
-            if prev > 0 {
+            let tid = t.tid.load(Ordering::SeqCst);
+            let created = t.suspended.load(Ordering::SeqCst);
+            let held = if t.done.load(Ordering::SeqCst) { 0 } else { kernel_suspend_count(tid) };
+            if held > 0 {
+                let _ = os_sys::thread_suspend(tid as u64, osyx_abi::suspend::RESUME);
+            } else if created > 0 {
                 t.suspended.fetch_sub(1, Ordering::SeqCst);
                 os_sys::futex_wake(t.suspended.as_ptr(), u32::MAX);
             }
-            prev
+            (created as u64 + held) as u32
         }
         _ => fail(ERROR_INVALID_HANDLE, u32::MAX),
     }
 }
 
-/// Only threads created suspended can be held; suspending a running
-/// thread is not supported by OSyx.
-extern "win64" fn SuspendThread(_h: u64) -> u32 {
-    fail(ERROR_NOT_SUPPORTED, u32::MAX)
+/// SuspendThread: raises the thread's suspend count and returns the previous
+/// one. It stops at its next return to user mode (see the kernel's
+/// `thread_suspend`); a thread waiting inside the kernel stops when its wait
+/// ends. At the maximum count of 127 it fails with ERROR_SIGNAL_REFUSED, and
+/// a thread that has ended with ERROR_ACCESS_DENIED.
+extern "win64" fn SuspendThread(h: u64) -> u32 {
+    let (tid, created) = match objects::get(h) {
+        Some(Object::Thread(t)) => {
+            if t.done.load(Ordering::SeqCst) {
+                return fail(ERROR_ACCESS_DENIED, u32::MAX);
+            }
+            (t.tid.load(Ordering::SeqCst), t.suspended.load(Ordering::SeqCst) as u64)
+        }
+        _ if h == objects::CURRENT_THREAD => (teb::current_tid() as u32, 0),
+        _ => return fail(ERROR_INVALID_HANDLE, u32::MAX),
+    };
+    match os_sys::thread_suspend(tid as u64, osyx_abi::suspend::SUSPEND) {
+        Ok(previous) => (previous + created) as u32,
+        Err(osyx_abi::Errno::Busy) => fail(ERROR_SIGNAL_REFUSED_W, u32::MAX),
+        Err(osyx_abi::Errno::NotFound) => fail(ERROR_ACCESS_DENIED, u32::MAX),
+        Err(e) => fail(errno_to_win32(e), u32::MAX),
+    }
 }
 
 pub(crate) extern "win64" fn ExitThread(code: u32) -> ! {

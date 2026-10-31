@@ -499,19 +499,21 @@ pub fn replace_in(root: u64, va: u64, pa: u64, flags: Flags) -> Result<u64, MapE
     Ok(old & ADDR_MASK)
 }
 
-/// Page-aligned addresses of the present user pages mapped in `root` (a 2 MiB
-/// or 1 GiB page is listed as the 4 KiB pages it covers), lowest first, at
-/// most `limit` of them; the second value is the total count.
+/// The present user pages mapped in `root`, lowest first, at most `limit`
+/// of them, and their total number. Each entry is the page-aligned address
+/// with the leaf's protection in the low bits: bit 0 writable, bit 1
+/// executable. A 2 MiB or 1 GiB page is listed as the 4 KiB pages it covers.
 pub fn user_pages(root: u64, limit: usize) -> (alloc::vec::Vec<u64>, u64) {
     let _g = PAGING.lock();
     let mut out = alloc::vec::Vec::new();
     let mut total = 0u64;
-    let mut note = |va: u64, count: u64, out: &mut alloc::vec::Vec<u64>| {
+    let mut note = |va: u64, count: u64, leaf: u64, out: &mut alloc::vec::Vec<u64>| {
+        let prot = (leaf & WRITABLE != 0) as u64 | ((leaf & NO_EXEC == 0) as u64) << 1;
         for k in 0..count {
             if out.len() >= limit {
                 break;
             }
-            out.push(va + (k << 12));
+            out.push((va + (k << 12)) | prot);
         }
         total += count;
     };
@@ -528,7 +530,7 @@ pub fn user_pages(root: u64, limit: usize) -> (alloc::vec::Vec<u64>, u64) {
             }
             let base3 = (i4 << 39) | (i3 << 30);
             if e3 & HUGE != 0 {
-                note(base3, 1 << 18, &mut out);
+                note(base3, 1 << 18, e3, &mut out);
                 continue;
             }
             for i2 in 0..512u64 {
@@ -538,13 +540,13 @@ pub fn user_pages(root: u64, limit: usize) -> (alloc::vec::Vec<u64>, u64) {
                 }
                 let base2 = base3 | (i2 << 21);
                 if e2 & HUGE != 0 {
-                    note(base2, 512, &mut out);
+                    note(base2, 512, e2, &mut out);
                     continue;
                 }
                 for i1 in 0..512u64 {
                     let e1 = unsafe { *table(e2 & ADDR_MASK).add(i1 as usize) };
                     if e1 & PRESENT != 0 && e1 & USER != 0 {
-                        note(base2 | (i1 << 12), 1, &mut out);
+                        note(base2 | (i1 << 12), 1, e1, &mut out);
                     }
                 }
             }

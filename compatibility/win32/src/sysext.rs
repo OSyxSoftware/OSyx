@@ -17,6 +17,11 @@ use os_std::sync::Mutex;
 /// Wall-clock time the process started (ns since 1970), set by init_process.
 static START_NS: AtomicU64 = AtomicU64::new(0);
 
+/// Real-time clock (ns since the Unix epoch) when the process started.
+pub(crate) fn process_start_ns() -> u64 {
+    START_NS.load(Ordering::Relaxed)
+}
+
 pub fn mark_start() {
     START_NS.store(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0), Ordering::Relaxed);
 }

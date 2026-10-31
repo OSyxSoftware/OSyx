@@ -388,10 +388,12 @@ pub mod nr {
     /// `thread_times(tid) -> cpu_ticks`: scheduler samples (one per
     /// millisecond) the thread of the caller's process has run for.
     pub const THREAD_TIMES: u64 = 98;
-    /// `working_set(pid, buf, cap) -> count`: writes the page-aligned user
-    /// addresses of the resident pages of process `pid` (the caller's own
-    /// or, for root, any) into `buf` (`cap` u64 entries) and returns how
-    /// many pages are resident in all; entries beyond `cap` are not written.
+    /// `working_set(pid, buf, cap) -> count`: writes the resident pages of
+    /// process `pid` (the caller's own or, for root or the owner, another)
+    /// into `buf` (`cap` u64 entries) and returns how many pages are
+    /// resident in all; entries beyond `cap` are not written. An entry is
+    /// the page-aligned user address with the protection in its low bits:
+    /// bit 0 writable, bit 1 executable.
     pub const WORKING_SET: u64 = 99;
     /// `link(existing, new) -> 0`: a second name (hard link) for the file
     /// `existing`. `AlreadyExists`, `IsADirectory`, `CrossDevice` as for

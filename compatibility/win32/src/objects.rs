@@ -155,6 +155,11 @@ pub struct ThreadObj {
     pub suspended: AtomicU32,
     /// The thread's TEB (0 until it runs).
     pub teb: AtomicU64,
+    /// Real-time clock (ns since the Unix epoch) at creation and at exit
+    /// (0 while it runs), and the scheduler samples it used when it ended.
+    pub created_ns: AtomicU64,
+    pub exited_ns: AtomicU64,
+    pub final_ticks: AtomicU64,
 }
 
 /// An event's state is one word: 1 signalled, 0 not. It lives in the
