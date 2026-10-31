@@ -35,6 +35,7 @@ const PBM_SETBARCOLOR: u32 = 0x0409;
 const PBM_SETMARQUEE: u32 = 0x040A;
 const CCM_SETBKCOLOR: u32 = 0x2001;
 
+const LVIF_TEXT: u32 = 0x0001;
 const LVM_SETBKCOLOR: u32 = 0x1001;
 const LVM_GETITEMCOUNT: u32 = 0x1004;
 const LVM_INSERTITEMA: u32 = 0x1007;
@@ -128,7 +129,16 @@ fn progress_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
                 d.pos = if next > d.range.1 { d.range.0 } else { clamp(d, next) };
                 Some(old as i64)
             }
-            PBM_GETRANGE => Some(if w != 0 { d.range.0 } else { d.range.1 } as i64),
+            PBM_GETRANGE => {
+                if l != 0 {
+                    // SAFETY: the caller's PBRANGE (iLow, iHigh).
+                    unsafe {
+                        teb::put(l as u64, 0, d.range.0);
+                        teb::put(l as u64, 4, d.range.1);
+                    }
+                }
+                Some(if w != 0 { d.range.0 } else { d.range.1 } as i64)
+            }
             PBM_GETPOS => Some(d.pos as i64),
             PBM_SETBARCOLOR => {
                 let old = d.bar_colour.unwrap_or(0xFF00_0000);
@@ -156,6 +166,10 @@ fn item_text(item: i64, wide: bool) -> String {
     if item == 0 {
         return String::new();
     }
+    // SAFETY: the caller's LVITEM: mask at 0.
+    if unsafe { teb::get::<u32>(item as u64, 0) } & LVIF_TEXT == 0 {
+        return String::new(); // no text in this item
+    }
     // LVITEM: mask, iItem, iSubItem, state, stateMask, then pszText: at 20
     // for a PE32 program, at 24 (after padding) for a 64-bit one.
     // SAFETY: the caller's LVITEM.
@@ -166,7 +180,10 @@ fn item_text(item: i64, wide: bool) -> String {
             teb::get::<u64>(item as u64, 24)
         }
     };
-    if text == 0 {
+    // LPSTR_TEXTCALLBACK (-1): the program supplies the text on demand, which
+    // this list does not ask for; it is not a pointer.
+    let callback = if crate::wow64::is_active() { text == u32::MAX as u64 } else { text == u64::MAX };
+    if text == 0 || callback {
         return String::new();
     }
     // SAFETY: a NUL-terminated string of the caller.
@@ -229,6 +246,9 @@ fn list_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
         }),
         LVM_ENSUREVISIBLE => data_of(hwnd, |d| {
             let index = w as usize;
+            if index >= d.rows.len() {
+                return 0;
+            }
             if index < d.top {
                 d.top = index;
             } else if index >= d.top + visible_rows {
@@ -275,9 +295,10 @@ pub(super) fn paint(dc: u64, kind: Kind, hwnd: u64, width: i32, height: i32) {
         Kind::Progress => {
             solid(data.back_colour.unwrap_or(0x00E6_E6E6), whole);
             let (low, high) = if data.range == (0, 0) { (0, 100) } else { data.range };
-            let span = (high - low).max(1) as i64;
+            let (low, high) = (low as i64, high as i64);
+            let span = (high - low).max(1);
             let inner = (width - 2).max(0) as i64;
-            let filled = ((data.pos - low).clamp(0, high - low) as i64 * inner / span) as i32;
+            let filled = ((data.pos as i64 - low).clamp(0, (high - low).max(0)) * inner / span) as i32;
             if filled > 0 {
                 // The bar's default is the Windows green of the classic theme.
                 solid(data.bar_colour.unwrap_or(0x0025_B006), [1, 1, 1 + filled, (height - 1).max(2)]);

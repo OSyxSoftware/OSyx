@@ -206,12 +206,14 @@ of `CLSID_ShellLink` (`IShellLinkW`, `IPersistFile`; PE32 programs too, as
 NSIS `CreateShortCut` does): `Save` writes a real Shell Link file. The
 desktop shows `.lnk` files in `~/Desktop` as icons; the all-users desktop is
 that same folder. Shortcut targets are matched ignoring case, as Windows
-does. Arguments, working directory and the shortcut's icon are stored in the
-file but not used when the shell starts it. The launcher and the desktop show
-the program's own icon: the 48, 32, 64, 24 or 16 pixel bitmap (in that
-order of preference) of its first icon group, read from the `.exe` once and
-kept; programs larger than 64 MiB, PNG-compressed icons and programs without
-an icon get the generic program icon.
+does, and only drive `C:` exists. A shortcut's arguments and working directory
+are used when the shell starts it. The launcher and the desktop show the
+shortcut's icon location (an `.ico` file, or a program's icon group; a negative
+index names the group's resource id, any other index selects the first group)
+and otherwise the program's own icon: the 48, 32, 64, 24, 16 or 256 pixel
+image (in that order of preference) of its first icon group, read once and
+kept. Images are DIB or 8-bit, non-interlaced PNG; programs larger than 64 MiB,
+other image formats and programs without an icon get the generic program icon.
 
 Windows windows start hidden and follow ShowWindow/SetWindowPos visibility.
 Message-only, tool and owned windows do not create separate taskbar items.

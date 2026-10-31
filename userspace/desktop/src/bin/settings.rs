@@ -280,7 +280,7 @@ impl App for Settings {
                     }
                 }
                 Section::Apps => {
-                    for (i, r) in option_rows(c, self.programs.len().min(PROGRAM_ROWS), c.y + 56).into_iter().enumerate() {
+                    for (i, r) in option_rows(c, self.programs.len().min(PROGRAM_ROWS), c.y + 74).into_iter().enumerate() {
                         if inside(r, x, y) {
                             self.selected_program = Some(i);
                             return true;
@@ -393,8 +393,11 @@ impl App for Settings {
             let now = installed_programs();
             let changed = now.iter().map(|p| &p.uninstaller).ne(self.programs.iter().map(|p| &p.uninstaller));
             if changed {
+                // The selection is the program, not its row: another one may
+                // move into the row when this one is gone.
+                let kept = self.selected_program.and_then(|i| self.programs.get(i)).map(|p| p.uninstaller.clone());
                 self.programs = now;
-                self.selected_program = self.selected_program.filter(|&i| i < self.programs.len());
+                self.selected_program = kept.and_then(|path| self.programs.iter().position(|p| p.uninstaller == path));
             }
             return changed;
         }
@@ -588,11 +591,11 @@ impl App for Settings {
             }
             Section::Apps => {
                 let rows = self.programs.len().min(PROGRAM_ROWS);
-                let g = Self::group(p, Rect::new(c.x, c.y + 40, c.w, 26 + (rows.max(1) * 40) as u32), "Installed programs");
+                let g = Self::group(p, Rect::new(c.x, c.y + 40, c.w, 34 + (rows.max(1) * 40) as u32 + 8), "Installed programs");
                 if self.programs.is_empty() {
                     p.text(FontKind::Ui, g.x + 16, g.y + 12, "No program with an uninstaller is installed in Program Files.", t.text_dim);
                 }
-                for (i, r) in option_rows(c, rows, c.y + 56).into_iter().enumerate() {
+                for (i, r) in option_rows(c, rows, c.y + 74).into_iter().enumerate() {
                     let program = &self.programs[i];
                     if self.selected_program == Some(i) {
                         p.rounded(r, 6, t.selection, 255);

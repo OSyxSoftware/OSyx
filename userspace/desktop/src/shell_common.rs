@@ -498,8 +498,11 @@ pub struct LinkData {
 /// A Windows path (`C:\a\b`) as an OSyx path (`/a/b`); `None` for anything
 /// that is not on drive C.
 fn windows_to_osyx(win: &str) -> Option<String> {
-    let rest = win.get(2..).filter(|_| win.as_bytes().get(1) == Some(&b':'))?;
-    Some(rest.replace('\\', "/"))
+    let bytes = win.as_bytes();
+    if !matches!(bytes.first(), Some(b'C' | b'c')) || bytes.get(1) != Some(&b':') {
+        return None;
+    }
+    Some(win.get(2..)?.replace('\\', "/"))
 }
 
 /// Reads a Shell Link: the local base path of its LinkInfo (else its
