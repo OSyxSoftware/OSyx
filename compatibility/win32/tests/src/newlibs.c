@@ -495,12 +495,13 @@ static void kernel_apis(void) {
     check("K32QueryWorkingSet lists the code page as PAGE_EXECUTE_READ", found_code);
     if (ws) HeapFree(GetProcessHeap(), 0, ws);
 
-    WCHAR dir[MAX_PATH], a[MAX_PATH], b[MAX_PATH], c[MAX_PATH], wrong[MAX_PATH];
+    WCHAR dir[MAX_PATH], a[MAX_PATH], b[MAX_PATH], c[MAX_PATH], wrong[MAX_PATH], dirlink[MAX_PATH];
     GetTempPathW(MAX_PATH, dir);
     wsprintfW(a, L"%slink_a.txt", dir);
     wsprintfW(b, L"%slink_b.txt", dir);
     wsprintfW(c, L"%smissing_dir\\link_c.txt", dir);
     wsprintfW(wrong, L"%snot_there.txt", dir);
+    wsprintfW(dirlink, L"%slink_d.txt", dir);
     DeleteFileW(a);
     DeleteFileW(b);
     HANDLE f = CreateFileW(a, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
@@ -520,7 +521,7 @@ static void kernel_apis(void) {
     SetLastError(0);
     check("a missing source is ERROR_FILE_NOT_FOUND", !hard_link(c, wrong, NULL) && GetLastError() == ERROR_FILE_NOT_FOUND);
     SetLastError(0);
-    check("a directory source is ERROR_ACCESS_DENIED", !hard_link(c, dir, NULL) && GetLastError() == ERROR_ACCESS_DENIED);
+    check("a directory source is ERROR_ACCESS_DENIED", !hard_link(dirlink, dir, NULL) && GetLastError() == ERROR_ACCESS_DENIED);
     SetLastError(0);
     check("a missing target directory is ERROR_PATH_NOT_FOUND", !hard_link(c, a, NULL) && GetLastError() == ERROR_PATH_NOT_FOUND);
     check("deleting one name keeps the other with one link", DeleteFileW(a) && (f = CreateFileW(b, GENERIC_READ, 7, NULL, OPEN_EXISTING, 0, NULL)) != INVALID_HANDLE_VALUE && GetFileInformationByHandle(f, &info) && info.nNumberOfLinks == 1);
