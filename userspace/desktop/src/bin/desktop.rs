@@ -14,6 +14,8 @@
 
 #[path = "../drives.rs"]
 mod drives;
+#[path = "../elevate.rs"]
+mod elevate;
 #[path = "../shell_common.rs"]
 mod common;
 
@@ -67,6 +69,8 @@ enum MenuPurpose {
 
 const CONFIRM_OFF: u32 = 1;
 const CONFIRM_REBOOT: u32 = 2;
+/// The "User Account Control" prompt of the elevation service.
+const CONFIRM_ELEVATE: u32 = 3;
 
 enum PopupKind {
     Launcher { search: TextField, list: ListView, shown: Vec<usize>, list_focus: bool },
@@ -447,6 +451,12 @@ struct Shell {
     icon_drag: Option<IconDrag>,
     /// (pid, application name) of programs started from the shell.
     children: Vec<(u64, String)>,
+    /// Requests of the `elevate` service.
+    elevation: elevate::Service,
+    /// The request the open prompt asks about.
+    elevation_prompt: Option<elevate::Request>,
+    /// Programs started as root after consent, and who waits for them.
+    elevated: Vec<(u64, os_std::ipc::Channel)>,
     lock: Option<LockScreen>,
     /// A key was pressed while Super was held (no launcher on release).
     super_used: bool,
@@ -561,6 +571,9 @@ fn main() -> i32 {
         shortcut_cells: Vec::new(),
         icon_drag: None,
         children: Vec::new(),
+        elevation: elevate::Service::start(),
+        elevation_prompt: None,
+        elevated: Vec::new(),
         lock: None,
         super_used: false,
     };
@@ -607,7 +620,7 @@ impl Shell {
 
     fn run(&mut self) -> i32 {
         loop {
-            let timeout = if self.notes.is_empty() { 1000 } else { 250 };
+            let timeout = if self.notes.is_empty() && !self.elevation.busy() && self.elevation_prompt.is_none() { 1000 } else { 250 };
             if let Err(e) = self.conn.wait(&mut [], Some(Duration::from_millis(timeout))) {
                 eprintln!("desktop: lost PRISM: {e}");
                 return 2;
@@ -634,6 +647,7 @@ impl Shell {
             self.collect_ejects();
             self.expire_notes();
             self.collect_exits();
+            self.service_elevation();
             if self.now().saturating_sub(self.shortcut_scan) >= 2000 {
                 self.refresh_shortcuts();
             }
@@ -1303,7 +1317,11 @@ impl Shell {
             self.menu_pick(purpose, i);
         }
         if let Some(tag) = confirm {
-            self.power(tag);
+            if tag == CONFIRM_ELEVATE {
+                self.elevation_granted();
+            } else {
+                self.power(tag);
+            }
         }
         if let Some((i, x, y)) = app_menu {
             self.open_menu(vec![MenuItem::new("Add to desktop", Some(Icon::Link))], MenuPurpose::Application(i), x, y);
@@ -1504,6 +1522,10 @@ impl Shell {
             Err(_) => return,
         };
         for (pid, raw) in exits {
+            if let Some(i) = self.elevated.iter().position(|(p, _)| *p == pid) {
+                let (_, channel) = self.elevated.remove(i);
+                let _ = channel.send(format!("exit {raw}").as_bytes(), &[]);
+            }
             let name = self.children.iter().position(|(p, _)| *p == pid).map(|i| self.children.remove(i).1);
             let name = name.unwrap_or_else(|| format!("process {pid}"));
             let st = os_std::process::ExitStatus::from_raw(raw);
@@ -1517,6 +1539,45 @@ impl Shell {
                 if raw == 101 {
                     self.show_note(&format!("{name} stopped"), &format!("Process {pid} panicked (exit status 101)."));
                 }
+            }
+        }
+    }
+
+    // ---- elevation -----------------------------------------------------------
+
+    /// Takes new requests, asks about the next one, and refuses the one whose
+    /// prompt closed without a "Yes".
+    fn service_elevation(&mut self) {
+        self.elevation.poll();
+        let asking = self.popup.as_ref().is_some_and(|p| matches!(&p.kind, PopupKind::Confirm { dialog } if dialog.tag == CONFIRM_ELEVATE));
+        if self.elevation_prompt.is_some() && !asking {
+            if let Some(request) = self.elevation_prompt.take() {
+                println!("desktop: elevation of {} declined", request.exe);
+                request.reply("denied");
+            }
+        }
+        // One prompt at a time, and never over another confirmation.
+        if self.elevation_prompt.is_none() && self.popup.as_ref().is_none_or(|p| !matches!(p.kind, PopupKind::Confirm { .. })) {
+            if let Some(request) = self.elevation.queue.pop_front() {
+                let message = request.prompt();
+                self.confirm(CONFIRM_ELEVATE, "User Account Control", &message, "Yes");
+                self.elevation_prompt = Some(request);
+            }
+        }
+    }
+
+    /// "Yes": starts the program as root; its exit status goes back to the
+    /// requester when the reaper collects it.
+    fn elevation_granted(&mut self) {
+        let Some(request) = self.elevation_prompt.take() else { return };
+        match request.start() {
+            Ok(pid) => {
+                println!("desktop: elevated {} as process {pid}", request.exe);
+                self.elevated.push((pid, request.channel));
+            }
+            Err(why) => {
+                eprintln!("desktop: cannot elevate {}: {why}", request.exe);
+                request.reply(&format!("failed {why}"));
             }
         }
     }

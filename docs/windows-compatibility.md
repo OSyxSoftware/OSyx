@@ -189,6 +189,15 @@ the shared object, so a signal in one process wakes a waiter in another.
 The Zen diagnostic launcher disables Gecko's Windows sandboxes through
 Mozilla's environment switches; the Windows sandbox broker is unsupported.
 
+A program whose manifest requests `requireAdministrator` or `highestAvailable`
+(an installer writing to `C:\Program Files`) is not started as the desktop
+user. `winrun` asks the desktop's `elevate` service, which shows a "User
+Account Control" prompt naming the program and starts it as root only after
+"Yes". Cancel or closing the prompt ends the launch with exit status 1223.
+The elevated program keeps the desktop user's profile (`HOME`). The prompt
+shows only the path, not a publisher, and does not run on a separate secure
+desktop.
+
 Windows windows start hidden and follow ShowWindow/SetWindowPos visibility.
 Message-only, tool and owned windows do not create separate taskbar items.
 The desktop groups eligible windows from a winrun process and its Windows

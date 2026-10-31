@@ -25,6 +25,7 @@ mod imports;
 mod relocs;
 mod tls;
 mod resources;
+mod manifest;
 
 pub use exception::{RuntimeFunction, RuntimeFunctions, UnwindInfo};
 pub use exports::{Export, ExportTarget, Exports};
@@ -32,6 +33,7 @@ pub use imports::{DelayImport, DelayImportDescriptors, Import, ImportDescriptors
 pub use relocs::{BaseRelocations, Relocation, RelocationKind};
 pub use tls::{TlsCallbacks, TlsInfo};
 pub use resources::{version_value, VersionValue};
+pub use manifest::{execution_level, ExecutionLevel};
 
 use core::fmt;
 

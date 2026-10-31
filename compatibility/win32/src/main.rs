@@ -30,6 +30,7 @@ mod comctl32;
 mod cryptbase;
 mod dbghelp;
 mod error;
+mod elevation;
 mod eventlog;
 mod exceptions;
 mod files;
@@ -120,6 +121,11 @@ fn quote(a: &str) -> String {
     s
 }
 
+/// The working directory as an OSyx path.
+fn cwd_osyx() -> String {
+    os_std::env::current_dir().map(|p| String::from(p.as_str())).unwrap_or_else(|_| String::from("/"))
+}
+
 fn main() -> i32 {
     let mut args: Vec<String> = os_std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--exports") {
@@ -169,6 +175,11 @@ fn main() -> i32 {
             return 2;
         }
     };
+    // A program that demands administrator rights runs through the desktop's
+    // consent prompt (see elevation.rs); root and the elevated copy skip it.
+    if os_std::os::getuid().0 != 0 && os_std::fs::read(&exe).is_ok_and(|image| elevation::wanted(&image)) {
+        return elevation::run(&exe, &cwd_osyx(), verbose, &args[1..]);
+    }
     let win_exe = path::to_windows(&exe);
     let mut cmd = quote(&win_exe);
     for a in &args[1..] {
