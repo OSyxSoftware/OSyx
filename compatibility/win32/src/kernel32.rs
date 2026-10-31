@@ -2006,7 +2006,7 @@ fn event_op(h: u64, set: bool) -> Bool {
     }
 }
 
-extern "win64" fn SetEvent(h: u64) -> Bool {
+pub(crate) extern "win64" fn SetEvent(h: u64) -> Bool {
     event_op(h, true)
 }
 

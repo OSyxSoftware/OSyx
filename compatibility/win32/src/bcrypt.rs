@@ -3,6 +3,7 @@
 //! generator. Other algorithms (ciphers, SHA-384/512, key exchange,
 //! signatures) are refused with STATUS_NOT_SUPPORTED so a caller does not
 //! mistake a missing primitive for a result.
+#![allow(non_snake_case)]
 
 use crate::capi::{Md5, Sha1};
 use alloc::collections::BTreeMap;

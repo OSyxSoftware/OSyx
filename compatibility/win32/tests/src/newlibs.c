@@ -217,26 +217,69 @@ static void accessibility_and_crt(void) {
 static void devices_and_input(void) {
     char buf[64];
     UINT size = 64, count = 7;
-    UINT (WINAPI *num_devs[4])(void);
     HMODULE winmm = LoadLibraryA("winmm.dll"), user = LoadLibraryA("user32.dll");
-    const char *names[4] = { "waveOutGetNumDevs", "waveInGetNumDevs", "midiOutGetNumDevs", "midiInGetNumDevs" };
-    int none = winmm != NULL;
-    for (int i = 0; none && i < 4; i++) {
-        num_devs[i] = (void *)GetProcAddress(winmm, names[i]);
-        none = num_devs[i] && num_devs[i]() == 0;
-    }
-    check("winmm reports no wave or MIDI devices", none);
+    UINT (WINAPI *wave_count)(void) = (void *)GetProcAddress(winmm, "waveOutGetNumDevs");
+    UINT (WINAPI *midi_out_count)(void) = (void *)GetProcAddress(winmm, "midiOutGetNumDevs");
+    UINT (WINAPI *midi_in_count)(void) = (void *)GetProcAddress(winmm, "midiInGetNumDevs");
+    UINT (WINAPI *wave_in_count)(void) = (void *)GetProcAddress(winmm, "waveInGetNumDevs");
     UINT (WINAPI *wave_caps)(UINT_PTR, void *, UINT) = (void *)GetProcAddress(winmm, "waveOutGetDevCapsW");
     UINT (WINAPI *wave_open)(void *, UINT, const void *, DWORD_PTR, DWORD_PTR, DWORD) = (void *)GetProcAddress(winmm, "waveOutOpen");
     UINT (WINAPI *wave_close)(HANDLE) = (void *)GetProcAddress(winmm, "waveOutClose");
+    UINT (WINAPI *wave_prepare)(HANDLE, void *, UINT) = (void *)GetProcAddress(winmm, "waveOutPrepareHeader");
+    UINT (WINAPI *wave_unprepare)(HANDLE, void *, UINT) = (void *)GetProcAddress(winmm, "waveOutUnprepareHeader");
     UINT (WINAPI *wave_write)(HANDLE, void *, UINT) = (void *)GetProcAddress(winmm, "waveOutWrite");
+    UINT (WINAPI *wave_pause)(HANDLE) = (void *)GetProcAddress(winmm, "waveOutPause");
+    UINT (WINAPI *wave_restart)(HANDLE) = (void *)GetProcAddress(winmm, "waveOutRestart");
+    UINT (WINAPI *wave_reset)(HANDLE) = (void *)GetProcAddress(winmm, "waveOutReset");
+    UINT (WINAPI *wave_position)(HANDLE, void *, UINT) = (void *)GetProcAddress(winmm, "waveOutGetPosition");
+    UINT (WINAPI *wave_text)(UINT, WCHAR *, UINT) = (void *)GetProcAddress(winmm, "waveOutGetErrorTextW");
     UINT (WINAPI *midi_short)(HANDLE, DWORD) = (void *)GetProcAddress(winmm, "midiOutShortMsg");
     UINT (WINAPI *midi_start)(HANDLE) = (void *)GetProcAddress(winmm, "midiInStart");
+    UINT (WINAPI *midi_open)(void *, UINT, DWORD_PTR, DWORD_PTR, DWORD) = (void *)GetProcAddress(winmm, "midiOutOpen");
+    check("winmm exports the wave and MIDI entry points", wave_count && midi_out_count && midi_in_count && wave_in_count && wave_caps && wave_open && wave_close && wave_prepare && wave_write && wave_reset && wave_position);
     HANDLE opened = NULL;
-    check("a device id names no device: MMSYSERR_BADDEVICEID", wave_caps && wave_caps(9999, buf, 8) == 2 && wave_open && wave_open(&opened, 9999, buf, 0, 0, 0) == 2 && opened == NULL);
-    check("a wave handle is invalid: MMSYSERR_INVALHANDLE", wave_close && wave_close((HANDLE)0x1234) == 5);
-    check("a wave header of the wrong size is MMSYSERR_INVALPARAM", wave_write && wave_write((HANDLE)0x1234, buf, 32) == 11);
-    check("a MIDI handle is invalid: MMSYSERR_INVALHANDLE", midi_short && midi_short((HANDLE)0x1234, 0) == 5 && midi_start && midi_start((HANDLE)0x1234) == 5);
+    UINT cards = wave_count ? wave_count() : 0;
+    if (cards == 0) {
+        check("with no sound card the id names no device: MMSYSERR_BADDEVICEID", wave_caps(0, buf, 8) == 2 && wave_open(&opened, 0, buf, 0, 0, 0) == 2 && opened == NULL);
+    } else {
+        unsigned char caps[84] = { 0 };
+        check("waveOutGetDevCapsW names the card and its two channels", wave_caps(0, caps, 84) == 0 && *(WCHAR *)(caps + 8) != 0 && *(WORD *)(caps + 76) == 2);
+        WAVEFORMATEX bad = { 1, 2, 48000, 192000, 4, 24, 0 };
+        check("a 24-bit format is WAVERR_BADFORMAT", wave_open(&opened, 0, &bad, 0, 0, 0) == 32 && opened == NULL);
+        WAVEFORMATEX fmt = { 1, 2, 44100, 176400, 4, 16, 0 };
+        check("WAVE_FORMAT_QUERY accepts 44.1 kHz stereo without opening", wave_open(NULL, 0, &fmt, 0, 0, 1) == 0);
+        HANDLE event = CreateEventW(NULL, FALSE, FALSE, NULL);
+        check("waveOutOpen with CALLBACK_EVENT returns a handle", wave_open(&opened, 0xFFFFFFFF, &fmt, (DWORD_PTR)event, 0, 0x50000) == 0 && opened != NULL);
+        static short silence[441 * 2];
+        unsigned char hdr[48] = { 0 };
+        *(void **)hdr = silence;
+        *(DWORD *)(hdr + 8) = sizeof silence;
+        check("waveOutWrite of an unprepared header is WAVERR_UNPREPARED", wave_write(opened, hdr, 48) == 34);
+        check("waveOutPrepareHeader sets WHDR_PREPARED", wave_prepare(opened, hdr, 48) == 0 && (*(DWORD *)(hdr + 24) & 2));
+        check("waveOutWrite queues the header: WHDR_INQUEUE or already done", wave_write(opened, hdr, 48) == 0);
+        DWORD waited = WaitForSingleObject(event, 5000);
+        check("the callback event fires and the header is WHDR_DONE", waited == 0 && (*(DWORD *)(hdr + 24) & 1) && !(*(DWORD *)(hdr + 24) & 0x10));
+        unsigned char time[16] = { 0 };
+        *(DWORD *)time = 4;
+        check("waveOutGetPosition in bytes counts what was played", wave_position(opened, time, 12) == 0 && *(DWORD *)time == 4 && *(DWORD *)(time + 4) == sizeof silence);
+        *(DWORD *)time = 1;
+        check("waveOutGetPosition in milliseconds", wave_position(opened, time, 12) == 0 && *(DWORD *)time == 1 && *(DWORD *)(time + 4) == 10);
+        check("waveOutPause and waveOutRestart succeed", wave_pause(opened) == 0 && wave_restart(opened) == 0);
+        check("waveOutReset rewinds the position", wave_reset(opened) == 0 && (*(DWORD *)time = 4, wave_position(opened, time, 12) == 0) && *(DWORD *)(time + 4) == 0);
+        check("waveOutUnprepareHeader clears WHDR_PREPARED", wave_unprepare(opened, hdr, 48) == 0 && !(*(DWORD *)(hdr + 24) & 2));
+        check("waveOutClose releases the handle; it is invalid after", wave_close(opened) == 0 && wave_close(opened) == 5);
+        CloseHandle(event);
+    }
+    check("a wave handle that was never opened is MMSYSERR_INVALHANDLE", wave_close((HANDLE)0x1234) == 5);
+    check("a wave header of the wrong size is MMSYSERR_INVALPARAM", wave_write((HANDLE)0x1234, buf, 32) == 11);
+    WCHAR text[128];
+    check("waveOutGetErrorTextW describes MMSYSERR_INVALHANDLE and rejects unknown codes", wave_text(5, text, 128) == 0 && text[0] != 0 && wave_text(999, text, 128) == 9);
+    check("MIDI and capture device counts are those of the /dev nodes", midi_out_count() == midi_in_count() && wave_in_count() == wave_in_count());
+    if (midi_out_count() == 0) {
+        check("with no MIDI port the id names no device: MMSYSERR_BADDEVICEID", midi_open(&opened, 0, 0, 0, 0) == 2);
+    }
+    check("a MIDI handle that was never opened is MMSYSERR_INVALHANDLE", midi_short((HANDLE)0x1234, 0) == 5 && midi_start((HANDLE)0x1234) == 5);
+    check("a short MIDI message with a data byte as status is refused for an invalid handle first", midi_short((HANDLE)0x1234, 0x40) == 5);
 
     UINT (WINAPI *list)(void *, UINT *, UINT) = user ? (void *)GetProcAddress(user, "GetRawInputDeviceList") : NULL;
     UINT (WINAPI *info)(HANDLE, UINT, void *, UINT *) = user ? (void *)GetProcAddress(user, "GetRawInputDeviceInfoW") : NULL;

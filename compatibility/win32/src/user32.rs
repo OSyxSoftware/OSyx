@@ -2601,7 +2601,7 @@ extern "win64" fn PostMessageA(hwnd: u64, msg: u32, w: u64, l: i64) -> Bool {
     })
 }
 
-extern "win64" fn PostMessageW(hwnd: u64, msg: u32, w: u64, l: i64) -> Bool {
+pub(crate) extern "win64" fn PostMessageW(hwnd: u64, msg: u32, w: u64, l: i64) -> Bool {
     PostMessageA(hwnd, msg, w, l)
 }
 

@@ -2,6 +2,7 @@
 //! `uiautomationcore.dll` and `oleacc.dll`. Each does what OSyx can really
 //! do (user names, folder paths, an empty printer list, "no UI Automation
 //! client") and fails with the documented error for the rest.
+#![allow(non_snake_case)]
 
 use crate::error::*;
 use crate::kernel32::fail;
