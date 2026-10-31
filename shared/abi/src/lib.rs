@@ -54,6 +54,7 @@ pub mod battery;
 pub mod ipc;
 pub mod media;
 pub mod net;
+pub mod sandbox;
 pub mod wow64;
 
 pub const ABI_VERSION: u32 = 13;
@@ -399,6 +400,16 @@ pub mod nr {
     /// `existing`. `AlreadyExists`, `IsADirectory`, `CrossDevice` as for
     /// `rename`.
     pub const LINK: u64 = 100;
+    /// `spawn_restricted(exec: *const ExecArgs, policy: *const sandbox::SpawnPolicy)`.
+    pub const SPAWN_RESTRICTED: u64 = 101;
+    /// `channel_pair(out: *mut [u64; 2]) -> 0`: anonymous connected endpoints.
+    pub const CHANNEL_PAIR: u64 = 102;
+    /// Start a child with redirected streams and its initial thread held.
+    pub const SPAWN_STDIO_SUSPENDED: u64 = 103;
+    /// Resume a direct child's initial thread; return the previous hold count.
+    pub const RESUME_CHILD: u64 = 104;
+    /// Grant an existing channel to a live, restricted direct child.
+    pub const GRANT_CHILD_CHANNEL: u64 = 105;
 }
 
 /// Operations of `nr::THREAD_SUSPEND`.

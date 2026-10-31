@@ -4696,7 +4696,7 @@ extern "win64" fn GetQueueStatus(flags: u32) -> u32 {
 /// Waits for objects or for messages of `mask`'s kinds. Without
 /// MWMO_INPUTAVAILABLE only messages queued since the thread last looked
 /// count, as on Windows. Returns WAIT_OBJECT_0 + n for input.
-extern "win64" fn MsgWaitForMultipleObjectsEx(n: u32, hs: *const u64, ms: u32, mask: u32, flags: u32) -> u32 {
+pub(crate) extern "win64" fn MsgWaitForMultipleObjectsEx(n: u32, hs: *const u64, ms: u32, mask: u32, flags: u32) -> u32 {
     use crate::objects::{INFINITE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
     diag(|d| {
         d.msgwait += 1;
@@ -4757,7 +4757,7 @@ extern "win64" fn MsgWaitForMultipleObjectsEx(n: u32, hs: *const u64, ms: u32, m
     }
 }
 
-extern "win64" fn MsgWaitForMultipleObjects(n: u32, hs: *const u64, wait_all: Bool, ms: u32, mask: u32) -> u32 {
+pub(crate) extern "win64" fn MsgWaitForMultipleObjects(n: u32, hs: *const u64, wait_all: Bool, ms: u32, mask: u32) -> u32 {
     MsgWaitForMultipleObjectsEx(n, hs, ms, mask, if wait_all != 0 { MWMO_WAITALL } else { 0 })
 }
 

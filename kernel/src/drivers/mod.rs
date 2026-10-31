@@ -1,6 +1,7 @@
 //! Device drivers.
 
 pub mod ahci;
+pub mod amdgpu;
 pub mod e1000;
 pub mod i2c;
 pub mod nvme;

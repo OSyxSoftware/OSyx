@@ -658,11 +658,62 @@ mod imp {
         Ok((out[0], out[1]))
     }
 
+    /// Creates connected anonymous channels without a public service name.
+    pub fn channel_pair() -> Result<(u64, u64), Errno> {
+        let mut out = [0u64; 2];
+        decode(syscall1(nr::CHANNEL_PAIR, out.as_mut_ptr() as u64))?;
+        Ok((out[0], out[1]))
+    }
+
     /// `spawn` with the child's handles 0-2 taken from `stdio`
     /// (`HANDLE_NONE` keeps the console).
     pub fn spawn_stdio(path: &str, argv: &[u8], envp: &[u8], stdio: [u64; 3]) -> Result<u64, Errno> {
         let a = exec_args(path, argv, envp);
         decode(syscall2(nr::SPAWN_STDIO, &a as *const osyx_abi::ExecArgs as u64, stdio.as_ptr() as u64))
+    }
+
+    pub fn spawn_stdio_suspended(path: &str, argv: &[u8], envp: &[u8], stdio: [u64; 3]) -> Result<u64, Errno> {
+        let a = exec_args(path, argv, envp);
+        decode(syscall2(nr::SPAWN_STDIO_SUSPENDED, &a as *const osyx_abi::ExecArgs as u64, stdio.as_ptr() as u64))
+    }
+
+    pub fn resume_child(pid: u64) -> Result<u64, Errno> {
+        decode(syscall1(nr::RESUME_CHILD, pid))
+    }
+
+    pub fn grant_child_channel(pid: u64, channel: u64) -> Result<u64, Errno> {
+        decode(syscall2(nr::GRANT_CHILD_CHANNEL, pid, channel))
+    }
+
+    /// Starts a child with experimental path and syscall policies. This does
+    /// not yet provide a complete security boundary.
+    /// The caller must keep each path referenced by `paths` alive for the call.
+    pub fn spawn_restricted(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64]) -> Result<u64, Errno> {
+        spawn_restricted_with_broker(path, argv, envp, paths, syscalls, osyx_abi::HANDLE_NONE)
+    }
+
+    /// As `spawn_restricted`, granting one existing channel as child handle 3.
+    pub fn spawn_restricted_with_broker(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64) -> Result<u64, Errno> {
+        spawn_restricted_with_options(path, argv, envp, paths, syscalls, broker, 0)
+    }
+
+    pub fn spawn_restricted_with_options(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64, flags: u64) -> Result<u64, Errno> {
+        spawn_restricted_with_channels(path, argv, envp, paths, syscalls, broker, flags, &[])
+    }
+
+    pub fn spawn_restricted_with_channels(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64, flags: u64, channels: &[u64]) -> Result<u64, Errno> {
+        let a = exec_args(path, argv, envp);
+        let policy = osyx_abi::sandbox::SpawnPolicy {
+            paths: paths.as_ptr() as u64,
+            path_count: paths.len() as u64,
+            syscalls: syscalls.as_ptr() as u64,
+            syscall_count: syscalls.len() as u64,
+            broker_handle: broker,
+            flags,
+            channels: channels.as_ptr() as u64,
+            channel_count: channels.len() as u64,
+        };
+        decode(syscall2(nr::SPAWN_RESTRICTED, &a as *const _ as u64, &policy as *const _ as u64))
     }
 
     pub fn channel_listen(name: &str) -> Result<u64, Errno> {

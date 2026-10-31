@@ -19,11 +19,11 @@ const INVALID_SOCKET: u64 = u64::MAX;
 const SOCKET_ERROR: i32 = -1;
 const AF_INET: u16 = 2;
 const AF_INET6: i32 = 23;
-const SOCK_STREAM: i32 = 1;
-const SOCK_DGRAM: i32 = 2;
 const AI_PASSIVE: i32 = 1;
 const AI_NUMERICHOST: i32 = 4;
 const AI_NUMERICSERV: i32 = 8;
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
 const SOL_SOCKET: i32 = 0xFFFF;
 const SO_REUSEADDR: i32 = 0x4;
 const SO_KEEPALIVE: i32 = 0x8;
@@ -534,9 +534,9 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
     })())
 }
 
-/// The options OSyx can report: the socket type, the pending error (OSyx
-/// reports errors on the failing call, so none is ever pending) and the
-/// fixed behaviours setsockopt accepts.
+/// The options OSyx can report: the socket type, the pending connect error
+/// (a failed non-blocking connect is otherwise only visible on the next
+/// call) and the fixed behaviours setsockopt accepts.
 extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *mut i32) -> i32 {
     result((|| {
         let st = socket_state(s)?;
@@ -561,13 +561,11 @@ extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *
                     SOCK_DGRAM as u32
                 }
             }
+            // A failed non-blocking connect reports its failure through
+            // SO_ERROR, which also clears it.
             (SOL_SOCKET, SO_ERROR) => {
-                // A failed non-blocking connect shows up here rather than in
-                // the connect call itself.
-                match os_sys::sock_ctl(st.fd, net::ctl::PENDING_ERROR, 0) {
-                    Ok(_) => 0,
-                    Err(e) => wsa(e),
-                }
+                let code = os_sys::sock_ctl(st.fd, net::ctl::ERROR, 0).unwrap_or(0);
+                Errno::from_raw(code).map_or(0, wsa)
             }
             (SOL_SOCKET, SO_REUSEADDR) => st.reuseaddr as u32,
             (SOL_SOCKET, SO_KEEPALIVE) => st.keepalive as u32,
@@ -602,9 +600,9 @@ extern "win64" fn ioctlsocket(s: u64, cmd: u32, arg: *mut u32) -> i32 {
                 SOCKETS.lock().unwrap().get_mut(&s).ok_or(WSAENOTSOCK)?.nonblocking = on;
             }
             FIONREAD => {
-                let n = os_sys::sock_ctl(fd, net::ctl::RECV_AVAILABLE, 0).map_err(wsa)?;
-                // SAFETY: the caller's argument.
-                unsafe { *arg = n as u32 };
+                let n = os_sys::sock_ctl(fd, net::ctl::AVAILABLE, 0).map_err(wsa)?;
+                // SAFETY: the caller's 4-byte out argument.
+                unsafe { core::ptr::write_unaligned(arg, n as u32) };
             }
             _ => return Err(WSAEINVAL),
         }
@@ -851,8 +849,7 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
     }
     // SAFETY: NULL or NUL-terminated strings.
     let (n, svc) = unsafe { (crate::path::ansi_to_string(node), crate::path::ansi_to_string(service)) };
-    let (mut socktype, mut proto) = (0i32, 0i32);
-    let mut flags = 0i32;
+    let (mut flags, mut socktype, mut proto) = (0i32, 0i32, 0i32);
     if !hints.is_null() {
         // SAFETY: the caller's ADDRINFOA hints.
         unsafe {
@@ -966,7 +963,7 @@ extern "win64" fn WSAIoctl(
         if !overlapped.is_null() || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
-        match code {
+        let written = match code {
             FIONBIO => {
                 if input.is_null() || in_len < 4 {
                     return Err(WSAEFAULT);
@@ -976,25 +973,22 @@ extern "win64" fn WSAIoctl(
                 if ioctlsocket(s, FIONBIO, &mut v) != 0 {
                     return Err(teb::last_error());
                 }
+                0
             }
             FIONREAD => {
                 if output.is_null() || out_len < 4 {
                     return Err(WSAEFAULT);
                 }
-                let n = os_sys::sock_ctl(fd, net::ctl::RECV_AVAILABLE, 0).map_err(wsa)?;
-                // SAFETY: the caller's 4-byte output.
+                let n = os_sys::sock_ctl(fd, net::ctl::AVAILABLE, 0).map_err(wsa)?;
+                // SAFETY: the caller's 4-byte output buffer.
                 unsafe { core::ptr::write_unaligned(output as *mut u32, n as u32) };
-                if !returned.is_null() {
-                    // SAFETY: the caller's out count.
-                    unsafe { *returned = 4 };
-                }
-                return Ok(());
+                4
             }
             _ => return Err(WSAEINVAL),
-        }
+        };
         if !returned.is_null() {
             // SAFETY: the caller's out count.
-            unsafe { *returned = 0 };
+            unsafe { *returned = written };
         }
         Ok(())
     })())

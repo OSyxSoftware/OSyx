@@ -471,6 +471,14 @@ fn ensure_udp(s: &SocketObj, local: Option<Endpoint>) -> Result<u32, Errno> {
         let _ = stack_call(|st| st.udp_set_broadcast(id, true));
     }
     let mut g = s.state.lock();
+    if let Some(existing) = g.id {
+        // Another caller bound first. Release our stack socket through the
+        // network thread, outside the socket state lock.
+        drop(g);
+        CLOSING.lock().push((id, false));
+        wake();
+        return if local.is_some() { Err(Errno::InvalidArgument) } else { Ok(existing) };
+    }
     g.id = Some(id);
     g.bound = Some(ep);
     Ok(id)
@@ -587,7 +595,12 @@ pub fn sys_connect(h: u64, addr: u64) -> Result<u64, Errno> {
                 None => {
                     let local = s.state.lock().bound;
                     let id = stack_call(|st| st.tcp_connect(local, remote))?;
-                    s.state.lock().id = Some(id);
+                    let mut g = s.state.lock();
+                    g.id = Some(id);
+                    // The stack socket now owns the local port; stop
+                    // reporting the bind reservation and never reuse it.
+                    g.bound = None;
+                    drop(g);
                     with_stack(|_| ());
                     (id, true)
                 }
@@ -730,6 +743,9 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
             r
         }
         abi::SOCK_PING => {
+            if peek {
+                return Err(Errno::NotSupported);
+            }
             let id = s.id().ok_or(Errno::BadHandle)?;
             run(&mut |st| match if peek { st.icmp_peek(id)? } else { st.icmp_recv(id)? } {
                 IcmpEvent::Reply { from, seq, ttl, data } => {
@@ -837,29 +853,20 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
             let (st, _) = stack_call(|st| st.tcp_state(id))?;
             return Ok(tcp_state_index(st));
         }
-        abi::ctl::RECV_AVAILABLE => {
+        abi::ctl::ERROR => {
+            if s.kind != abi::SOCK_STREAM {
+                return Ok(0);
+            }
+            let Some(id) = s.id() else { return Ok(0) };
+            let err = stack_call(|st| st.tcp_take_error(id)).ok().flatten();
+            return Ok(err.map_or(0, |e| errno(e) as u64));
+        }
+        abi::ctl::AVAILABLE => {
             // A socket that never reached the stack has nothing queued.
             let Some(id) = s.id() else { return Ok(0) };
             return stack_call(|st| st.recv_available(id)).map(|n| n as u64);
         }
         abi::ctl::LAST_MSG_LEN => return Ok(s.last_msg_len.load(Ordering::Relaxed)),
-        abi::ctl::PENDING_ERROR => {
-            let Some(id) = s.id().filter(|_| s.kind == abi::SOCK_STREAM) else { return Ok(0) };
-            let (_, err) = match stack_call(|st| st.tcp_state(id)) {
-                Ok(v) => v,
-                // The connection is already gone: nothing is pending.
-                Err(Errno::BadHandle) => return Ok(0),
-                Err(e) => return Err(e),
-            };
-            return match err {
-                // Read-and-clear, as getsockopt(SO_ERROR) does on Windows.
-                Some(e) => {
-                    stack_call(|st| st.tcp_take_error(id))?;
-                    Err(errno(e))
-                }
-                None => Ok(0),
-            };
-        }
         _ => return Err(Errno::InvalidArgument),
     }
     Ok(0)

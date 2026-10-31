@@ -571,6 +571,10 @@ class Osyx:
         # ("Name", crate::m::getter()): exported, the function behind it is not visible.
         for m in re.finditer(r'\(\s*"(\w+)"\s*,\s*[\w:]+?(\w+)\s*\(\s*\)\s*\)', text):
             out.setdefault(m.group(1), m.group(2))
+        # Named aliases in a loop, such as MSVCRT's decorated C++ operators.
+        for m in re.finditer(r'for\s+(\w+)\s+in\s+\[([^\]]*)\]\s*\{\s*\w+\.push\(\(\s*\1\s*,\s*(\w+)\s*\)\)\s*;\s*\}', text, re.S):
+            for name in re.findall(r'"([^"\\]+)"', m.group(2)):
+                out[name] = m.group(3)
         for m in re.finditer(r"(?:crate::)?(?:(\w+)::)?(\w*exports\w*)\s*\(\s*\)", text):
             mod, fname = m.group(1), m.group(2)
             if fname == "exports" and mod is None and here is None:
@@ -635,6 +639,8 @@ class Osyx:
                 nocomment, _ = mask_rust(fh.read())
             for m in re.finditer(r"\b(cdecl_sig|sig)!\s*\(\s*(\w+)\s*,", nocomment):
                 sigs[m.group(2)] = "cdecl" if m.group(1) == "cdecl_sig" else "stdcall"
+            for m in re.finditer(r'\bcdecl_named!\s*\(\s*"([^"\\]+)"\s*,', nocomment):
+                sigs[m.group(1)] = "cdecl"
         w = os.path.join(self.src, "wow64.rs")
         if os.path.exists(w):
             with open(w, encoding="utf-8", errors="replace") as fh:
@@ -831,6 +837,14 @@ def pct(a, b):
     return round(100.0 * a / b, 1) if b else None
 
 
+def export_class(dll, name, fn):
+    if fn is None:
+        return "unknown", "no function body found"
+    if dll == "msvcrt.dll" and name in ("??2@YAPAXI@Z", "??2@YAPEAX_K@Z") and fn.cls in REAL:
+        return "partial", "allocation works, but operator new does not throw on allocation failure"
+    return fn.cls, fn.reason
+
+
 def analyse_dll(arch, dll, ref, osyx: Osyx, ev):
     """Counts and name lists for one DLL of one architecture."""
     names = ref["exports"]
@@ -849,7 +863,7 @@ def analyse_dll(arch, dll, ref, osyx: Osyx, ev):
             cls_names["unknown"].append(n)
             reasons[n] = "no `extern \"win64\" fn %s` found" % table[n]
             continue
-        c = fn.cls
+        c, reason = export_class(dll, n, fn)
         if arch == "x86":
             if n not in osyx.sigs and n not in osyx.overrides:
                 nobridge.append(n)
@@ -858,8 +872,8 @@ def analyse_dll(arch, dll, ref, osyx: Osyx, ev):
                 continue
             wow_aware += fn.wow64
         cls_names[c].append(n)
-        if fn.reason:
-            reasons[n] = fn.reason
+        if reason:
+            reasons[n] = reason
     counts = {c: len(v) for c, v in cls_names.items()}
     total = len(names)
     full, part = counts["implemented"], counts["partial"]
@@ -974,7 +988,8 @@ def analyse_profiles(root, path, osyx: Osyx, ref):
     for dll, table in osyx.dlls.items():
         for n, impl in table.items():
             fn = osyx.pick(impl)
-            flat.setdefault(n, []).append((dll, fn.cls if fn else "unknown", fn.reason if fn else "no function body found"))
+            cls, reason = export_class(dll, n, fn)
+            flat.setdefault(n, []).append((dll, cls, reason))
     out = OrderedDict()
     for key, prof in cfg["profiles"].items():
         files, absent = [], []

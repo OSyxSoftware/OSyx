@@ -58,6 +58,16 @@ keyboard layout (US, Polish) is applied by PRISM.
 framebuffer is mapped write-combining into the caller, one owner at a time),
 `display_release`. When the owner exits the kernel status screen returns.
 
+EDID base blocks and CEA-861 extensions are decoded by the host-tested
+`drivers/display` crate. When the VirtIO-GPU offers an EDID, the kernel logs
+the monitor, its mode count and the preferred mode, and starts the scanout at
+the preferred mode; if the device cannot take it, the scanout's own size is
+used. The `display.mode=WxH` kernel option still overrides both. AMD display
+functions are identified at boot (`kernel/src/drivers/amdgpu.rs`: DCN
+generation for known device IDs and the ATOM header in the VBIOS ROM), but
+native DCN modesetting is not implemented and the GOP framebuffer stays in
+use.
+
 **IPC** (ABI v7): pipes, named-service channels (`channel_listen` is root
 only; messages up to 64 KiB with up to 4 passed handles; per-direction
 bounds of 256 messages / 1 MiB, then `WouldBlock`), shared memory objects,
@@ -176,7 +186,9 @@ cannot start, init exits and the kernel status screen stays.
 ## Testing
 
 * Host: `drivers/usb` (registers, TRBs, rings, contexts, descriptors, HID
-  reports, malformed input), `graphics/prism-proto`, `graphics/prism-core`
+  reports, malformed input), `drivers/display` (EDID base and CEA-861
+  parsing, checksums, detailed timings, mode selection, truncated and
+  malformed blocks), `graphics/prism-proto`, `graphics/prism-core`
   (blending, clipping, damage, stacking, focus, resizing, input routing,
   protocol validation, disconnect clean-up, limits), `graphics/ui` (layout,
   focus, every widget's behaviour, clipping, icons, dates and time zones).

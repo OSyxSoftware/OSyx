@@ -44,6 +44,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use osyx_abi::*;
 use osyx_vfs::path::{self, split_last, validate, validate_name};
 use osyx_vfs::perm::{self, may};
+use osyx_vfs::sandbox::PathPolicy;
 use osyx_vfs::{Access, Cred, DirEntry, FsUsage, MountTable, NewNode};
 
 pub type Result<T> = core::result::Result<T, Errno>;
@@ -181,17 +182,42 @@ pub struct Lookup {
     /// Canonical absolute current directory.
     pub cwd: String,
     pub case_insensitive: bool,
+    /// Experimental path checks. Pre-existing handles and process-level
+    /// enforcement are not yet restricted.
+    pub path_policy: Option<Arc<PathPolicy>>,
 }
 
 impl Lookup {
     pub fn kernel() -> Lookup {
-        Lookup { cred: Cred::ROOT, cwd: String::from("/"), case_insensitive: false }
+        Lookup { cred: Cred::ROOT, cwd: String::from("/"), case_insensitive: false, path_policy: None }
     }
 
     /// The calling process's credentials and current directory.
     pub fn current() -> Lookup {
-        let (cred, cwd) = crate::process::current_identity();
-        Lookup { cred, cwd, case_insensitive: false }
+        crate::process::current_lookup()
+    }
+
+    fn check_path(&self, path: &str, access: Access) -> Result<()> {
+        if self.path_policy.as_ref().is_some_and(|policy| !policy.allows(path, access)) {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(())
+    }
+
+    fn check_traverse(&self, path: &str) -> Result<()> {
+        if self.path_policy.as_ref().is_some_and(|policy| !policy.may_traverse(path)) {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(())
+    }
+
+    fn check_metadata(&self, path: &str) -> Result<()> {
+        if self.path_policy.as_ref().is_some_and(|policy| {
+            !policy.allows(path, Access::READ) && !policy.may_inspect_ancestor(path)
+        }) {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(())
     }
 }
 
@@ -332,6 +358,7 @@ fn root_entry() -> Result<WalkEntry> {
 /// symbolic link is followed.
 pub fn walk(cx: &Lookup, p: &str, follow_last: bool) -> Result<Node> {
     validate(p)?;
+    cx.check_traverse("/")?;
     let mut queue: VecDeque<String> = VecDeque::new();
     if !p.starts_with('/') {
         queue.extend(path::components(&cx.cwd).map(String::from));
@@ -352,6 +379,7 @@ pub fn walk(cx: &Lookup, p: &str, follow_last: bool) -> Result<Node> {
         }
         let (mount, dir_ino) = {
             let cur = stack.last().expect("walk stack never empty");
+            cx.check_traverse(&cur.node.path)?;
             if cur.st.kind != KIND_DIR {
                 return Err(Errno::NotADirectory);
             }
@@ -386,6 +414,7 @@ pub fn walk(cx: &Lookup, p: &str, follow_last: bool) -> Result<Node> {
             }
         };
         let canon = path::join(&stack.last().expect("walk stack never empty").node.path, &stored);
+        cx.check_traverse(&canon)?;
         let last = queue.is_empty();
         let (child, cacheable) = match mount_at(&canon) {
             Some(m) => (Node { ino: m.fs.root(), mount: m, path: canon }, false),
@@ -421,7 +450,9 @@ pub fn walk(cx: &Lookup, p: &str, follow_last: bool) -> Result<Node> {
             stack.push(WalkEntry { node: child, st: FileStat::default() });
         }
     }
-    Ok(stack.pop().expect("walk stack never empty").node)
+    let node = stack.pop().expect("walk stack never empty").node;
+    cx.check_traverse(&node.path)?;
+    Ok(node)
 }
 
 /// Resolves the directory that would contain `p`, and the final name.
@@ -500,6 +531,9 @@ pub fn mount_fs(at: &str, source: &str, flags: u64, fs: Arc<dyn Filesystem>) -> 
 
 /// Unmounts the volume mounted exactly at `p` (after resolving it).
 pub fn unmount(cx: &Lookup, p: &str) -> Result<()> {
+    if cx.path_policy.is_some() {
+        return Err(Errno::PermissionDenied);
+    }
     let at = walk(cx, p, true)?.path;
     if at == "/" {
         return Err(Errno::Busy);
@@ -617,15 +651,21 @@ pub fn shutdown() {
 // ---- operations on paths ---------------------------------------------------
 
 pub fn stat(cx: &Lookup, p: &str) -> Result<FileStat> {
-    walk(cx, p, true)?.stat()
+    let n = walk(cx, p, true)?;
+    cx.check_metadata(&n.path)?;
+    n.stat()
 }
 
 pub fn lstat(cx: &Lookup, p: &str) -> Result<FileStat> {
-    walk(cx, p, false)?.stat()
+    let n = walk(cx, p, false)?;
+    cx.check_metadata(&n.path)?;
+    n.stat()
 }
 
 pub fn mkdir(cx: &Lookup, p: &str, mode: u32) -> Result<()> {
     let (dir, name) = walk_parent(cx, p)?;
+    cx.check_path(&dir.path, Access::WRITE)?;
+    cx.check_path(&path::join(&dir.path, &name), Access::WRITE)?;
     if walk(cx, p, false).is_ok() {
         return Err(Errno::AlreadyExists);
     }
@@ -640,6 +680,8 @@ pub fn mkdir(cx: &Lookup, p: &str, mode: u32) -> Result<()> {
 pub fn symlink(cx: &Lookup, target: &str, p: &str) -> Result<()> {
     validate(target)?;
     let (dir, name) = walk_parent(cx, p)?;
+    cx.check_path(&dir.path, Access::WRITE)?;
+    cx.check_path(&path::join(&dir.path, &name), Access::WRITE)?;
     if walk(cx, p, false).is_ok() {
         return Err(Errno::AlreadyExists);
     }
@@ -679,6 +721,7 @@ pub fn link(cx: &Lookup, existing: &str, new: &str) -> Result<()> {
 
 pub fn readlink(cx: &Lookup, p: &str) -> Result<String> {
     let n = walk(cx, p, false)?;
+    cx.check_path(&n.path, Access::READ)?;
     if n.stat()?.kind != KIND_SYMLINK {
         return Err(Errno::InvalidArgument);
     }
@@ -689,8 +732,10 @@ pub fn readlink(cx: &Lookup, p: &str) -> Result<String> {
 /// empty directory (`dir == true`).
 fn remove(cx: &Lookup, p: &str, dir_wanted: bool) -> Result<()> {
     let (dir, name) = walk_parent(cx, p)?;
+    cx.check_path(&dir.path, Access::WRITE)?;
     let dst = check_dir_write(&dir, &cx.cred)?;
     let victim = existing_entry(cx, &dir, &name)?;
+    cx.check_path(&victim.path, Access::WRITE)?;
     let vst = victim.stat()?;
     if !perm::may_delete(&dst, &vst, &cx.cred) {
         return Err(Errno::PermissionDenied);
@@ -718,22 +763,26 @@ pub fn rmdir(cx: &Lookup, p: &str) -> Result<()> {
 pub fn rename(cx: &Lookup, from: &str, to: &str) -> Result<()> {
     let (sdir, sname) = walk_parent(cx, from)?;
     let (ddir, dname) = walk_parent(cx, to)?;
+    cx.check_path(&sdir.path, Access::WRITE)?;
+    cx.check_path(&ddir.path, Access::WRITE)?;
     if !Arc::ptr_eq(&sdir.mount, &ddir.mount) {
         return Err(Errno::CrossDevice);
     }
     let sst = check_dir_write(&sdir, &cx.cred)?;
     let dst = check_dir_write(&ddir, &cx.cred)?;
     let src = existing_entry(cx, &sdir, &sname)?;
+    cx.check_path(&src.path, Access::WRITE)?;
     if !perm::may_delete(&sst, &src.stat()?, &cx.cred) {
         return Err(Errno::PermissionDenied);
     }
     match existing_entry(cx, &ddir, &dname) {
         Ok(target) => {
+            cx.check_path(&target.path, Access::WRITE)?;
             if !perm::may_delete(&dst, &target.stat()?, &cx.cred) {
                 return Err(Errno::PermissionDenied);
             }
         }
-        Err(Errno::NotFound) => {}
+        Err(Errno::NotFound) => cx.check_path(&path::join(&ddir.path, &dname), Access::WRITE)?,
         Err(e) => return Err(e),
     }
     // A directory may not move below itself (also across mount-free paths
@@ -751,6 +800,7 @@ pub fn rename(cx: &Lookup, from: &str, to: &str) -> Result<()> {
 
 pub fn chmod(cx: &Lookup, p: &str, mode: u32) -> Result<()> {
     let n = walk(cx, p, true)?;
+    cx.check_path(&n.path, Access::WRITE)?;
     n.mount.writable()?;
     if !perm::may_chmod(&n.stat()?, &cx.cred) {
         return Err(Errno::PermissionDenied);
@@ -763,6 +813,7 @@ pub fn chmod(cx: &Lookup, p: &str, mode: u32) -> Result<()> {
 /// Resolves a new current directory; returns its canonical path.
 pub fn chdir(cx: &Lookup, p: &str) -> Result<String> {
     let n = walk(cx, p, true)?;
+    cx.check_traverse(&n.path)?;
     let st = n.stat()?;
     if st.kind != KIND_DIR {
         return Err(Errno::NotADirectory);
@@ -775,6 +826,7 @@ pub fn chdir(cx: &Lookup, p: &str) -> Result<String> {
 
 pub fn statfs(cx: &Lookup, p: &str) -> Result<FsStat> {
     let n = walk(cx, p, true)?;
+    cx.check_path(&n.path, Access::READ)?;
     let u = n.mount.fs.usage();
     let mut out = FsStat {
         block_size: u.block_size,
@@ -834,6 +886,8 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
             Ok(n) => n,
             Err(Errno::NotFound) => {
                 let (dir, name) = walk_parent(cx, p)?;
+                cx.check_path(&dir.path, Access::WRITE)?;
+                cx.check_path(&path::join(&dir.path, &name), Access { read: flags & OPEN_READ != 0, write, exec: false })?;
                 check_dir_write(&dir, &cx.cred)?;
                 let ino = dir.mount.fs.create(dir.ino, &name, NewNode::File, mode & MODE_PERMS, &cx.cred)?;
                 cache_forget(dir.mount.id, dir.ino, &name);
@@ -845,6 +899,7 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
     } else {
         walk(cx, p, follow)?
     };
+    cx.check_path(&node.path, Access { read: flags & OPEN_READ != 0, write, exec: false })?;
     let st = node.stat()?;
     if st.kind == KIND_SYMLINK {
         return Err(Errno::Loop);
@@ -898,6 +953,7 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
 /// execute permission, not read permission (root: any execute bit).
 pub fn open_exec(cx: &Lookup, p: &str) -> Result<OpenFile> {
     let node = walk(cx, p, true)?;
+    cx.check_path(&node.path, Access::EXEC)?;
     let st = node.stat()?;
     if st.kind != KIND_FILE || !may(&st, &cx.cred, Access::EXEC) {
         return Err(Errno::PermissionDenied);
@@ -1153,6 +1209,9 @@ impl OpenFile {
 /// `mount(2)`: `fstype` is "tmpfs", "fat32", "exfat" or "ext4"; disk file systems
 /// take a block device node path as `source`.
 pub fn mount(cx: &Lookup, source: &str, target: &str, fstype: &str, flags: u64, size_limit: u64) -> Result<()> {
+    if cx.path_policy.is_some() {
+        return Err(Errno::PermissionDenied);
+    }
     if !cx.cred.is_root() {
         return Err(Errno::PermissionDenied);
     }

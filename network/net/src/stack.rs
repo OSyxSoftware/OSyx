@@ -302,6 +302,8 @@ pub struct Stack {
     pub dns_cache: dns::Cache,
     queries: BTreeMap<QueryId, Query>,
     results: BTreeMap<QueryId, Result<Vec<Ipv4Addr>, NetError>>,
+    /// Callers still waiting for each query (a `resolve` result can be shared).
+    waiters: BTreeMap<QueryId, u32>,
     next_query: QueryId,
     dns_changed: bool,
     hostname: String,
@@ -333,6 +335,7 @@ impl Stack {
             dns_cache: dns::Cache::new(),
             queries: BTreeMap::new(),
             results: BTreeMap::new(),
+            waiters: BTreeMap::new(),
             next_query: 1,
             dns_changed: false,
             hostname: String::from("osyx"),
@@ -1392,6 +1395,21 @@ impl Stack {
         Err(NetError::WouldBlock)
     }
 
+    /// The next datagram without removing it (MSG_PEEK).
+    pub fn udp_peek_from(&mut self, id: SocketId, buf: &mut [u8]) -> Result<(Endpoint, usize, usize), NetError> {
+        let u = self.udp(id)?;
+        if let Some((from, d)) = u.rx.front() {
+            let n = d.len().min(buf.len());
+            buf[..n].copy_from_slice(&d[..n]);
+            return Ok((*from, n, d.len()));
+        }
+        // A peek must not consume the pending error: the next recv reports it.
+        if let Some(e) = u.error {
+            return Err(e);
+        }
+        Err(NetError::WouldBlock)
+    }
+
     pub fn udp_local(&mut self, id: SocketId) -> Result<Endpoint, NetError> {
         Ok(self.udp(id)?.local)
     }
@@ -1399,23 +1417,6 @@ impl Stack {
     /// The address a datagram socket was connected to.
     pub fn udp_peer(&mut self, id: SocketId) -> Result<Endpoint, NetError> {
         self.udp(id)?.remote.ok_or(NetError::NotConnected)
-    }
-
-    /// The next datagram without removing it (MSG_PEEK).
-    pub fn udp_peek_from(&self, id: SocketId, buf: &mut [u8]) -> Result<(Endpoint, usize, usize), NetError> {
-        let u = match self.sockets.get(&id) {
-            Some(Socket::Udp(u)) => u,
-            _ => return Err(NetError::BadSocket),
-        };
-        if let Some((from, d)) = u.rx.front() {
-            let n = d.len().min(buf.len());
-            buf[..n].copy_from_slice(&d[..n]);
-            return Ok((*from, n, d.len()));
-        }
-        if let Some(e) = u.error {
-            return Err(e);
-        }
-        Err(NetError::WouldBlock)
     }
 
     /// Bytes a receive can return without waiting (FIONREAD).
@@ -1593,7 +1594,8 @@ impl Stack {
     fn tcb(&mut self, id: SocketId) -> Result<&mut Tcb, NetError> {
         match self.sockets.get_mut(&id) {
             Some(Socket::Tcp(t)) => Ok(&mut t.tcb),
-            Some(Socket::BoundTcp(_)) => Err(NetError::NotConnected),
+            // A listener or a bind reservation has no connection yet.
+            Some(Socket::BoundTcp(_)) | Some(Socket::Listener(_)) => Err(NetError::NotConnected),
             _ => Err(NetError::BadSocket),
         }
     }
@@ -1604,10 +1606,14 @@ impl Stack {
         Ok((t.state(), t.error().map(tcp_error)))
     }
 
-    /// Clears the connection error after reporting it (SO_ERROR resets it).
-    pub fn tcp_take_error(&mut self, id: SocketId) -> Result<(), NetError> {
-        self.tcb(id)?.take_error();
-        Ok(())
+    /// Returns and clears the pending error (`getsockopt SO_ERROR`).
+    pub fn tcp_take_error(&mut self, id: SocketId) -> Result<Option<NetError>, NetError> {
+        Ok(self.tcb(id)?.take_error().map(tcp_error))
+    }
+
+    /// The handshake completed (or the connection moved past it).
+    pub fn tcp_connected(&mut self, id: SocketId) -> Result<bool, NetError> {
+        Ok(self.tcb(id)?.connected())
     }
 
     pub fn tcp_send(&mut self, id: SocketId, data: &[u8]) -> Result<usize, NetError> {
@@ -1824,6 +1830,7 @@ impl Stack {
         }
         // Share an outstanding query for the same name.
         if let Some((qid, _)) = self.queries.iter().find(|(_, q)| q.name == n) {
+            *self.waiters.entry(*qid).or_insert(1) += 1;
             return Resolve::Pending(*qid);
         }
         let qid = self.next_query;
@@ -1840,21 +1847,38 @@ impl Stack {
             server_addr: Ipv4Addr::UNSPECIFIED,
         };
         self.queries.insert(qid, q);
+        self.waiters.insert(qid, 1);
         self.dns_send(qid);
         self.flush();
         Resolve::Pending(qid)
     }
 
-    /// Takes the result of a query started by `resolve`.
+    /// Takes the result of a query started by `resolve`. Several callers can
+    /// share one outstanding query, so the result is not consumed: every
+    /// waiter sees it until the entry is evicted or cancelled.
     pub fn resolve_result(&mut self, qid: QueryId) -> Option<Result<Vec<Ipv4Addr>, NetError>> {
         if self.queries.contains_key(&qid) {
             return None;
         }
-        Some(self.results.remove(&qid).unwrap_or(Err(NetError::DnsFailure)))
+        if let Some(w) = self.waiters.get_mut(&qid) {
+            *w = w.saturating_sub(1);
+            if *w == 0 {
+                self.waiters.remove(&qid);
+            }
+        }
+        Some(self.results.get(&qid).cloned().unwrap_or(Err(NetError::DnsFailure)))
     }
 
-    /// Forgets a query whose caller gave up.
+    /// Forgets a query whose caller gave up. A query shared by several
+    /// callers stays alive until the last one cancels it.
     pub fn resolve_cancel(&mut self, qid: QueryId) {
+        if let Some(w) = self.waiters.get_mut(&qid) {
+            *w = w.saturating_sub(1);
+            if *w > 0 {
+                return;
+            }
+            self.waiters.remove(&qid);
+        }
         self.results.remove(&qid);
         if let Some(q) = self.queries.remove(&qid) {
             self.drop_transport(q.transport);
@@ -1904,6 +1928,26 @@ impl Stack {
         }
     }
 
+    /// Moves a query to the next server, cycling through the list on every
+    /// timeout. A dead first server therefore costs one timeout, not
+    /// `DNS_ATTEMPTS` of them, before the next server is tried.
+    fn dns_advance(&mut self, qid: QueryId, exhausted: NetError) {
+        let servers = self.dns_servers.len().max(1);
+        let (attempt, server) = {
+            let Some(q) = self.queries.get_mut(&qid) else { return };
+            q.attempt += 1;
+            (q.attempt, q.attempt as usize % servers)
+        };
+        if attempt >= DNS_ATTEMPTS * servers as u32 {
+            self.finish_query(qid, Err(exhausted));
+            return;
+        }
+        if let Some(q) = self.queries.get_mut(&qid) {
+            q.server = server;
+        }
+        self.dns_send(qid);
+    }
+
     fn finish_query(&mut self, qid: QueryId, r: Result<Vec<Ipv4Addr>, NetError>) {
         if let Some(q) = self.queries.remove(&qid) {
             self.drop_transport(q.transport);
@@ -1931,7 +1975,13 @@ impl Stack {
                 return false;
             }
         };
-        if r.truncated && !over_tcp {
+        if r.truncated && over_tcp {
+            // A TCP answer must be complete; an incomplete one says nothing
+            // about the name, so never cache it as negative.
+            self.dns_advance(qid, NetError::DnsFailure);
+            return true;
+        }
+        if r.truncated {
             // Retry the same server over TCP.
             let server = self.queries[&qid].server_addr;
             let old = self.queries[&qid].transport;
@@ -1973,10 +2023,7 @@ impl Stack {
             }
             _ => {
                 // Server failure or refusal: try the next server.
-                let q = self.queries.get_mut(&qid).expect("query exists");
-                q.server += 1;
-                q.attempt = 0;
-                self.dns_send(qid);
+                self.dns_advance(qid, NetError::DnsFailure);
                 return !self.queries.contains_key(&qid);
             }
         }
@@ -2040,14 +2087,9 @@ impl Stack {
                 }
                 _ => {}
             }
-            let Some(q) = self.queries.get_mut(&qid) else { continue };
+            let Some(q) = self.queries.get(&qid) else { continue };
             if now >= q.deadline {
-                q.attempt += 1;
-                if q.attempt >= DNS_ATTEMPTS {
-                    q.attempt = 0;
-                    q.server += 1;
-                }
-                self.dns_send(qid);
+                self.dns_advance(qid, NetError::TimedOut);
             }
         }
     }

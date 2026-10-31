@@ -12,7 +12,7 @@ pub const SOCK_PING: u64 = 3;
 
 /// `send`/`recv` flags.
 pub const MSG_DONTWAIT: u64 = 1;
-/// `recv`: return data but leave it queued (UDP/ping: not supported).
+/// `recv`: return data but leave it queued (ping sockets: not supported).
 pub const MSG_PEEK: u64 = 2;
 /// `recv` on a stream: wait for the whole buffer (EOF or error ends it).
 pub const MSG_WAITALL: u64 = 4;
@@ -38,14 +38,14 @@ pub mod ctl {
     pub const RESET_ON_CLOSE: u64 = 9;
     /// arg: connect timeout in nanoseconds (0 = the TCP default).
     pub const CONNECT_TIMEOUT: u64 = 10;
-    /// Bytes that a receive can return at once: all queued stream data, or
-    /// the size of the first queued datagram/ICMP event.
-    pub const RECV_AVAILABLE: u64 = 11;
+    /// Pending connection error as an `Errno` number (0 = none): the SYN
+    /// failed after a non-blocking `connect` returned `WouldBlock`.
+    pub const ERROR: u64 = 11;
+    /// Bytes ready to read without blocking: queued TCP data or the size
+    /// of the next UDP datagram (0 if none). Winsock FIONREAD.
+    pub const AVAILABLE: u64 = 12;
     /// Size of the datagram the last successful `recv` returned (untruncated).
-    pub const LAST_MSG_LEN: u64 = 12;
-    /// Error a stream connection failed with (e.g. a refused non-blocking
-    /// connect); 0 when there is none.
-    pub const PENDING_ERROR: u64 = 13;
+    pub const LAST_MSG_LEN: u64 = 13;
 }
 
 /// TCP states reported by `ctl::STATE` and `NetSocket::state`.

@@ -214,6 +214,17 @@ class OsyxTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_decorated_aliases_and_named_bridges(self):
+        body = 'for n in ["??2@YAPAXI@Z", "??2@YAPEAX_K@Z"] { e.push((n, malloc)); }'
+        self.assertEqual(self.osyx.resolve(body, None), {"??2@YAPAXI@Z": "malloc", "??2@YAPEAX_K@Z": "malloc"})
+        sigs = os.path.join(self.root, "compatibility", "win32", "src", "wow64", "sigs.rs")
+        with open(sigs, "a", encoding="utf-8") as f:
+            f.write('\ncdecl_named!("??2@YAPAXI@Z", [Uint], Ptr);\n')
+        self.assertEqual(w.Osyx(self.root).sigs["??2@YAPAXI@Z"], "cdecl")
+        cls, reason = w.export_class("msvcrt.dll", "??2@YAPAXI@Z", self.osyx.pick("Two"))
+        self.assertEqual(cls, "partial")
+        self.assertIn("does not throw", reason)
+
     def test_indirect_implementations_are_found(self):
         root = tempfile.mkdtemp()
         src = os.path.join(root, "compatibility", "win32", "src")

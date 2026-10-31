@@ -617,6 +617,11 @@ extern "win64" fn CreateThread32(attributes: u64, stack: usize, start: u64, para
 extern "win64" fn thread32_main(arg: u64) -> u32 {
     // SAFETY: the Box made by CreateThread32 for this thread.
     let ThreadStart { start, param } = *unsafe { alloc::boxed::Box::from_raw(arg as *mut ThreadStart) };
+    run_thread32(start, param)
+}
+
+/// Set up a 32-bit callback thread and execute its start routine.
+pub(crate) fn run_thread32(start: u32, param: u32) -> u32 {
     let stack32 = mem::alloc_pages(THREAD_STACK32 + PAGE, Prot::ReadWrite);
     let host = mem::alloc_pages(THREAD_HOST_STACK, Prot::ReadWrite);
     let (Some(stack32), Some(host)) = (stack32, host) else { return 0xC000_0017 }; // STATUS_NO_MEMORY
@@ -714,10 +719,58 @@ extern "win64" fn CreateProcessW32(
 }
 
 /// Host functions that replace the built-in one for 32-bit callers.
+#[allow(non_snake_case)]
+extern "win64" fn MsgWaitForMultipleObjects32(n: u32, handles: *const u32, wait_all: i32, ms: u32, mask: u32) -> u32 {
+    if n > 63 || (n != 0 && handles.is_null()) {
+        return crate::user32::MsgWaitForMultipleObjects(n, core::ptr::null(), wait_all, ms, mask);
+    }
+    let mut widened = [0u64; 63];
+    for (i, slot) in widened.iter_mut().take(n as usize).enumerate() {
+        // SAFETY: the guest supplies an array of n 32-bit handles.
+        *slot = unsafe { core::ptr::read_unaligned(handles.add(i)) } as i32 as i64 as u64;
+    }
+    crate::user32::MsgWaitForMultipleObjects(n, widened.as_ptr(), wait_all, ms, mask)
+}
+
+#[allow(non_snake_case)]
+extern "win64" fn MsgWaitForMultipleObjectsEx32(n: u32, handles: *const u32, ms: u32, mask: u32, flags: u32) -> u32 {
+    if n > 63 || (n != 0 && handles.is_null()) {
+        return crate::user32::MsgWaitForMultipleObjectsEx(n, core::ptr::null(), ms, mask, flags);
+    }
+    let mut widened = [0u64; 63];
+    for (i, slot) in widened.iter_mut().take(n as usize).enumerate() {
+        // SAFETY: the guest supplies an array of n 32-bit handles.
+        *slot = unsafe { core::ptr::read_unaligned(handles.add(i)) } as i32 as i64 as u64;
+    }
+    crate::user32::MsgWaitForMultipleObjectsEx(n, widened.as_ptr(), ms, mask, flags)
+}
+
+#[allow(non_snake_case)]
+extern "win64" fn WaitForMultipleObjects32(n: u32, handles: *const u32, all: i32, ms: u32) -> u32 {
+    WaitForMultipleObjectsEx32(n, handles, all, ms, 0)
+}
+
+#[allow(non_snake_case)]
+extern "win64" fn WaitForMultipleObjectsEx32(n: u32, handles: *const u32, all: i32, ms: u32, alertable: i32) -> u32 {
+    if n == 0 || n > 64 || handles.is_null() {
+        return crate::kernel32::WaitForMultipleObjectsEx(n, core::ptr::null(), all, ms, alertable);
+    }
+    let mut widened = [0u64; 64];
+    for (i, slot) in widened.iter_mut().take(n as usize).enumerate() {
+        // SAFETY: the guest supplies an array of n 32-bit handles.
+        *slot = unsafe { core::ptr::read_unaligned(handles.add(i)) } as i32 as i64 as u64;
+    }
+    crate::kernel32::WaitForMultipleObjectsEx(n, widened.as_ptr(), all, ms, alertable)
+}
+
 fn host_override(symbol: &str) -> Option<u64> {
     match symbol {
         "CreateThread" => Some(CreateThread32 as *const () as u64),
         "CreateProcessW" => Some(CreateProcessW32 as *const () as u64),
+        "MsgWaitForMultipleObjects" => Some(MsgWaitForMultipleObjects32 as *const () as u64),
+        "MsgWaitForMultipleObjectsEx" => Some(MsgWaitForMultipleObjectsEx32 as *const () as u64),
+        "WaitForMultipleObjects" => Some(WaitForMultipleObjects32 as *const () as u64),
+        "WaitForMultipleObjectsEx" => Some(WaitForMultipleObjectsEx32 as *const () as u64),
         _ => None,
     }
 }
@@ -733,6 +786,13 @@ fn dispatch(bridge: &Bridge, index: u32, args: *const u32) -> (u64, u32, u32) {
         // two slots; the formatter consumes additional stack slots as needed.
         let (out, fmt, rest) = unsafe { (*args, *args.add(1), args.add(2)) };
         let result = crate::user32::wsprintf32(entry.name == "wsprintfW", out, fmt, rest);
+        return (result as u32 as u64, 0, 0);
+    }
+
+    if entry.name == "_snprintf" || entry.name == "_snwprintf" {
+        // SAFETY: the cdecl call supplies buffer, count and format before the variadic arguments.
+        let (out, count, fmt, rest) = unsafe { (*args, *args.add(1), *args.add(2), args.add(3)) };
+        let result = crate::ucrt::printf::legacy_snprintf32(entry.name == "_snwprintf", out, count, fmt, rest);
         return (result as u32 as u64, 0, 0);
     }
 

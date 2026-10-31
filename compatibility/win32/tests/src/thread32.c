@@ -10,6 +10,7 @@
 typedef unsigned long DWORD;
 typedef int BOOL;
 typedef void *HANDLE;
+typedef unsigned short WCHAR;
 
 #define STD_OUTPUT_HANDLE ((DWORD)-11)
 #define WAIT_OBJECT_0 0
@@ -24,10 +25,14 @@ __declspec(dllimport) BOOL __stdcall GetExitCodeThread(HANDLE h, DWORD *code);
 __declspec(dllimport) DWORD __stdcall GetTickCount(void);
 __declspec(dllimport) void __stdcall Sleep(DWORD ms);
 __declspec(dllimport) int __stdcall MulDiv(int a, int b, int c);
+__declspec(dllimport) HANDLE __stdcall LoadLibraryExW(const WCHAR *name, HANDLE file, DWORD flags);
+__declspec(dllimport) void *__stdcall GetProcAddress(HANDLE module, const char *name);
+__declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE h);
 
 static HANDLE out;
 static int failed;
 static volatile DWORD results[2];
+static void (__cdecl *endthreadex)(unsigned);
 
 static int len(const char *s) {
     int n = 0;
@@ -57,6 +62,16 @@ static DWORD __stdcall worker(void *param) {
     return 0x1000 + index;
 }
 
+static unsigned __stdcall crt_worker(void *param) {
+    return (unsigned)worker(param);
+}
+
+static unsigned __stdcall crt_exit_worker(void *param) {
+    (void)param;
+    endthreadex(0x2345);
+    return 0;
+}
+
 void __stdcall start(void) {
     out = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD tid[2] = {0, 0};
@@ -73,6 +88,20 @@ void __stdcall start(void) {
     DWORD c0 = 0, c1 = 0;
     check("start routine return values are the exit codes",
           GetExitCodeThread(h[0], &c0) && GetExitCodeThread(h[1], &c1) && c0 == 0x1000 && c1 == 0x1001);
+    HANDLE crt = LoadLibraryExW(L"msvcrt.dll", 0, 0);
+    unsigned (__cdecl *beginthreadex)(void *, unsigned, unsigned (__stdcall *)(void *), void *, unsigned, unsigned *) =
+        crt ? GetProcAddress(crt, "_beginthreadex") : 0;
+    unsigned crt_tid = 0;
+    DWORD crt_exit = 0;
+    HANDLE crt_thread = beginthreadex ? (HANDLE)beginthreadex(0, 0, crt_worker, (void *)0, 0, &crt_tid) : 0;
+    check("_beginthreadex starts a PE32 callback", crt_thread && crt_tid && WaitForSingleObject(crt_thread, 10000) == WAIT_OBJECT_0 &&
+          GetExitCodeThread(crt_thread, &crt_exit) && crt_exit == 0x1000 && results[0] == 249500);
+    if (crt_thread) CloseHandle(crt_thread);
+    endthreadex = crt ? GetProcAddress(crt, "_endthreadex") : 0;
+    crt_thread = beginthreadex && endthreadex ? (HANDLE)beginthreadex(0, 0, crt_exit_worker, 0, 0, &crt_tid) : 0;
+    check("_endthreadex exits a PE32 thread with its code", crt_thread && WaitForSingleObject(crt_thread, 10000) == WAIT_OBJECT_0 &&
+          GetExitCodeThread(crt_thread, &crt_exit) && crt_exit == 0x2345);
+    if (crt_thread) CloseHandle(crt_thread);
     WriteFile(out, failed ? "thread32: summary FAIL\n" : "thread32: summary ok\n", failed ? 23 : 21, &own, 0);
     ExitProcess(failed);
 }
