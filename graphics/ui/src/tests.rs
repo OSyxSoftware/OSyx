@@ -502,3 +502,52 @@ fn bitmap_icons_register_and_draw_scaled() {
     assert_eq!(px[3 * 8 + 3], 0x00FF_0000, "inside the box the bitmap's colour");
     assert_eq!(px[0], 0x0000_00FF, "outside it nothing is drawn");
 }
+
+/// A PNG with the given colour type and filtered rows (checksums are not read).
+fn png(width: u32, height: u32, colour_type: u8, extra: &[(&[u8; 4], &[u8])], filtered: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut chunk = |kind: &[u8; 4], body: &[u8]| {
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out.extend_from_slice(&[0; 4]);
+    };
+    let mut header = Vec::new();
+    header.extend_from_slice(&width.to_be_bytes());
+    header.extend_from_slice(&height.to_be_bytes());
+    header.extend_from_slice(&[8, colour_type, 0, 0, 0]);
+    chunk(b"IHDR", &header);
+    for (kind, body) in extra {
+        chunk(kind, body);
+    }
+    chunk(b"IDAT", &miniz_oxide::deflate::compress_to_vec_zlib(filtered, 6));
+    chunk(b"IEND", &[]);
+    out
+}
+
+#[test]
+fn png_icon_rgba_with_filters() {
+    // Row 0 (Sub): red, then red + (0,255,0,0) = yellow; row 1 (Up): the row
+    // above plus (0,0,255,0) each = magenta-ish.
+    let data = png(2, 2, 6, &[], &[1, 255, 0, 0, 255, 0, 255, 0, 0, 2, 0, 0, 255, 0, 0, 0, 255, 0]);
+    let b = icon::decode_image(&data).expect("a PNG");
+    assert_eq!((b.width, b.height), (2, 2));
+    assert_eq!(b.pixels, [0xFFFF_0000, 0xFFFF_FF00, 0xFFFF_00FF, 0xFFFF_FFFF]);
+}
+
+#[test]
+fn png_icon_indexed_with_transparency() {
+    let palette = [10, 20, 30, 200, 100, 50];
+    let data = png(2, 1, 3, &[(b"PLTE", &palette), (b"tRNS", &[255, 0])], &[0, 0, 1]);
+    let b = icon::decode_png(&data).expect("an indexed PNG");
+    assert_eq!(b.pixels, [0xFF0A_141E, 0x00C8_6432]);
+}
+
+#[test]
+fn png_icon_refuses_what_it_does_not_support() {
+    assert!(icon::decode_png(&[]).is_none());
+    assert!(icon::decode_png(&png(0, 1, 6, &[], &[0])).is_none());
+    assert!(icon::decode_png(&png(1, 1, 6, &[], &[0, 1, 2])).is_none()); // too little data
+    assert!(icon::decode_png(&png(300, 1, 2, &[], &[0])).is_none()); // larger than an icon
+    assert!(icon::decode_png(&png(1, 1, 6, &[], &[9, 0, 0, 0, 0])).is_none()); // unknown filter
+}

@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 osyx-gfx = { path = "../../boot/gfx" }
 osyx-input = { path = "../../shared/input" }
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }

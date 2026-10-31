@@ -357,6 +357,107 @@ fn draw_bitmap(p: &mut Painter, id: u16, r: Rect) {
     });
 }
 
+/// The pixels of an icon image of a `.ico` file or an `RT_ICON` resource.
+pub fn decode_image(data: &[u8]) -> Option<Bitmap> {
+    if data.starts_with(&PNG_SIGNATURE) {
+        decode_png(data)
+    } else {
+        decode_dib(data)
+    }
+}
+
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// A PNG image of at most 256 x 256 pixels: not interlaced, 8 bits per
+/// channel, greyscale, RGB, indexed (with `tRNS`), grey-alpha or RGBA. The
+/// chunk checksums are not verified: an icon is not worth refusing.
+pub fn decode_png(data: &[u8]) -> Option<Bitmap> {
+    let mut at = PNG_SIGNATURE.len();
+    let (mut width, mut height, mut colour_type) = (0usize, 0usize, 0u8);
+    let mut header_seen = false;
+    let mut palette: Vec<[u8; 3]> = Vec::new();
+    let mut transparency: Vec<u8> = Vec::new();
+    let mut compressed: Vec<u8> = Vec::new();
+    while let Some(head) = data.get(at..at + 8) {
+        let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        let body = data.get(at + 8..at + 8 + length)?;
+        match &head[4..8] {
+            b"IHDR" => {
+                if body.len() != 13 || body[8] != 8 || body[10] != 0 || body[11] != 0 || body[12] != 0 {
+                    return None; // only 8-bit, deflate, adaptive filtering, no interlacing
+                }
+                width = u32::from_be_bytes([body[0], body[1], body[2], body[3]]) as usize;
+                height = u32::from_be_bytes([body[4], body[5], body[6], body[7]]) as usize;
+                colour_type = body[9];
+                header_seen = true;
+            }
+            b"PLTE" => palette = body.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+            b"tRNS" => transparency = body.to_vec(),
+            b"IDAT" => compressed.extend_from_slice(body),
+            b"IEND" => break,
+            _ => {}
+        }
+        at += 12 + length; // length, type, body, checksum
+    }
+    if !header_seen || width == 0 || height == 0 || width > 256 || height > 256 {
+        return None;
+    }
+    let channels = match colour_type {
+        0 | 3 => 1,
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        _ => return None,
+    };
+    let stride = width * channels;
+    let raw = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&compressed, (stride + 1) * height).ok()?;
+    if raw.len() != (stride + 1) * height {
+        return None;
+    }
+    // Undo the per-row filters (None, Sub, Up, Average, Paeth).
+    let mut rows = alloc::vec![0u8; stride * height];
+    for y in 0..height {
+        let filter = raw[y * (stride + 1)];
+        let line = &raw[y * (stride + 1) + 1..(y + 1) * (stride + 1)];
+        for x in 0..stride {
+            let left = if x >= channels { rows[y * stride + x - channels] as i32 } else { 0 };
+            let up = if y > 0 { rows[(y - 1) * stride + x] as i32 } else { 0 };
+            let up_left = if y > 0 && x >= channels { rows[(y - 1) * stride + x - channels] as i32 } else { 0 };
+            let predicted = match filter {
+                0 => 0,
+                1 => left,
+                2 => up,
+                3 => (left + up) / 2,
+                4 => {
+                    let p = left + up - up_left;
+                    let (pa, pb, pc) = ((p - left).abs(), (p - up).abs(), (p - up_left).abs());
+                    if pa <= pb && pa <= pc { left } else if pb <= pc { up } else { up_left }
+                }
+                _ => return None,
+            };
+            rows[y * stride + x] = line[x].wrapping_add(predicted as u8);
+        }
+    }
+    let mut pixels = Vec::with_capacity(width * height);
+    for y in 0..height {
+        for x in 0..width {
+            let p = &rows[y * stride + x * channels..][..channels];
+            let (r, g, b, a) = match colour_type {
+                0 => (p[0], p[0], p[0], 255),
+                2 => (p[0], p[1], p[2], 255),
+                3 => {
+                    let c = palette.get(p[0] as usize)?;
+                    (c[0], c[1], c[2], transparency.get(p[0] as usize).copied().unwrap_or(255))
+                }
+                4 => (p[0], p[0], p[0], p[1]),
+                _ => (p[0], p[1], p[2], p[3]),
+            };
+            pixels.push((a as u32) << 24 | (r as u32) << 16 | (g as u32) << 8 | b as u32);
+        }
+    }
+    Some(Bitmap { width: width as u32, height: height as u32, pixels })
+}
+
 /// The pixels of an icon image in a `.ico` / PE resource: a device
 /// independent bitmap (BITMAPINFOHEADER, colour data, then a 1-bit mask), as
 /// found in `RT_ICON` resources. PNG-compressed images and unusual formats

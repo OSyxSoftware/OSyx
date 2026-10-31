@@ -1311,7 +1311,7 @@ impl Shell {
         }
         if let Some(i) = launch {
             let app = self.apps[i].clone();
-            self.launch(&app.name, &app.exec);
+            self.launch_entry(&app);
         }
         if let Some((purpose, i)) = pick {
             self.menu_pick(purpose, i);
@@ -1391,6 +1391,15 @@ impl Shell {
     const PRIVILEGED: &'static [&'static str] = &["/system/bin/setup", "/system/bin/settings"];
 
     fn launch(&mut self, name: &str, exec: &str) {
+        self.launch_with(name, exec, &[], "");
+    }
+
+    /// Starts an application entry with its own arguments and directory.
+    fn launch_entry(&mut self, app: &AppEntry) {
+        self.launch_with(&app.name, &app.exec, &app.args, &app.workdir);
+    }
+
+    fn launch_with(&mut self, name: &str, exec: &str, args: &[String], workdir: &str) {
         if exec == "/system/bin/zen" && self.children.iter().any(|(_, n)| n == name) {
             if let Some(window) = self.windows.iter().find(|w| w.title.contains("Zen")) {
                 let _ = self.conn.window_action(window.id, Action::Activate, true);
@@ -1403,7 +1412,10 @@ impl Shell {
             Command::new(exec)
         } else {
             let mut c = Command::new("/system/bin/run-app");
-            c.arg(exec);
+            c.arg(exec).args(args);
+            if !workdir.is_empty() {
+                c.env("OSYX_WINRUN_CWD", workdir);
+            }
             c
         };
         match command.spawn() {
@@ -1463,7 +1475,7 @@ impl Shell {
 
     fn launch_shortcut(&mut self, i: usize) {
         if let Some(app) = self.shortcuts.get(i).cloned() {
-            self.launch(&app.name, &app.exec);
+            self.launch_entry(&app);
         }
     }
 

@@ -1154,6 +1154,7 @@ dependencies = [
 name = "osyx-ui"
 version = "0.1.0"
 dependencies = [
+ "miniz_oxide",
  "osyx-gfx",
  "osyx-input",
 ]

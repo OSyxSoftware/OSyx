@@ -220,6 +220,9 @@ pub struct AppEntry {
     pub exec: String,
     pub icon: Icon,
     pub comment: String,
+    /// Arguments and working directory of a Windows shortcut.
+    pub args: Vec<String>,
+    pub workdir: String,
 }
 
 pub const APP_DIR: &str = "/system/share/applications";
@@ -258,40 +261,82 @@ pub fn icon_by_name(name: &str) -> Icon {
 const MAX_ICON_SOURCE: u64 = 64 << 20;
 
 /// Icons found so far: program path -> (file size when read, its icon).
-static EXE_ICONS: os_std::sync::Mutex<os_std::collections::BTreeMap<String, (u64, Icon)>> =
+static EXE_ICONS: os_std::sync::Mutex<os_std::collections::BTreeMap<String, (u64, Option<Icon>)>> =
     os_std::sync::Mutex::new(os_std::collections::BTreeMap::new());
 
 /// The icon of a Windows program: its first icon group, in the size that
 /// suits the shell best; the generic program icon when there is none. Read
 /// once per program (and again if its size changes).
 pub fn exe_icon(path: &str) -> Icon {
+    icon_from(path, 0).unwrap_or(Icon::Program)
+}
+
+/// The icon at `index` of `path`: an `.ico` file, or a program or library
+/// (index 0 is the first icon group, a negative index names the group's
+/// resource id). `None` when the file has no icon this shell can draw.
+pub fn icon_from(path: &str, index: i32) -> Option<Icon> {
+    let key = format!("{path}#{index}");
     let len = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    if let Some(&(known, icon)) = EXE_ICONS.lock().ok().and_then(|c| c.get(path).copied()).as_ref() {
+    if let Some((known, icon)) = EXE_ICONS.lock().ok().and_then(|c| c.get(&key).copied()) {
         if known == len {
             return icon;
         }
     }
-    let icon = read_exe_icon(path, len).unwrap_or(Icon::Program);
+    let icon = read_icon(path, len, index);
     if let Ok(mut cache) = EXE_ICONS.lock() {
-        cache.insert(String::from(path), (len, icon));
+        cache.insert(key, (len, icon));
     }
     icon
 }
 
-fn read_exe_icon(path: &str, len: u64) -> Option<Icon> {
+/// Registers the best-sized candidate of (rank, colours, data) that decodes.
+fn register_best(mut candidates: Vec<(usize, u16, &[u8])>) -> Option<Icon> {
+    candidates.sort_by_key(|c| (c.0, c.1));
+    for (_, _, data) in candidates {
+        if let Some(icon) = osyx_ui::icon::decode_image(data).and_then(osyx_ui::icon::register_bitmap) {
+            return Some(icon);
+        }
+    }
+    None
+}
+
+/// The shell draws icons at 16 to 40 pixels: 48 and 32 look best.
+const PREFERRED_SIZES: [u32; 6] = [48, 32, 64, 24, 16, 256];
+
+fn read_icon(path: &str, len: u64, index: i32) -> Option<Icon> {
     if len == 0 || len > MAX_ICON_SOURCE {
         return None;
     }
     let image = fs::read(path).ok()?;
+    if path.to_ascii_lowercase().ends_with(".ico") {
+        // ICONDIR: reserved, type (1), count; then 16-byte entries of width,
+        // height, colours, reserved, planes, bit count, size and offset.
+        let u16_at = |at: usize| image.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+        let u32_at = |at: usize| image.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+        let mut candidates = Vec::new();
+        for i in 0..(u16_at(4)? as usize).min(64) {
+            let at = 6 + i * 16;
+            let width = match *image.get(at)? {
+                0 => 256,
+                w => w as u32,
+            };
+            let (bits, size, offset) = (u16_at(at + 6)?, u32_at(at + 8)?, u32_at(at + 12)?);
+            if let Some(rank) = PREFERRED_SIZES.iter().position(|&w| w == width) {
+                if let Some(data) = image.get(offset..offset.checked_add(size)?) {
+                    candidates.push((rank, u16::MAX - bits, data));
+                }
+            }
+        }
+        return register_best(candidates);
+    }
     let pe = osyx_pe::PeFile::parse_any(&image).ok()?;
     // GRPICONDIR: reserved, type (1), count; then 14-byte entries of width,
     // height, colours, reserved, planes, bit count, size and RT_ICON id.
-    let group = pe.resource(14, None, None).ok()??;
+    let group_id = if index < 0 { u16::try_from(-(index as i64)).ok() } else { None };
+    let group = pe.resource(14, group_id, None).ok()??;
     let u16_at = |at: usize| group.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
     let count = u16_at(4)? as usize;
-    // The shell draws icons at 16 to 40 pixels: 48 and 32 look best.
-    const PREFERRED: [u32; 5] = [48, 32, 64, 24, 16];
-    let mut candidates: Vec<(usize, u16, u16)> = Vec::new();
+    let mut candidates: Vec<(usize, u16, &[u8])> = Vec::new();
     for i in 0..count.min(64) {
         let at = 6 + i * 14;
         let width = match *group.get(at)? {
@@ -299,20 +344,13 @@ fn read_exe_icon(path: &str, len: u64) -> Option<Icon> {
             w => w as u32,
         };
         let (bits, id) = (u16_at(at + 6)?, u16_at(at + 12)?);
-        if let Some(rank) = PREFERRED.iter().position(|&w| w == width) {
-            candidates.push((rank, u16::MAX - bits, id)); // best size first, then most colours
-        }
-    }
-    candidates.sort();
-    for (_, _, id) in candidates {
-        let Some(data) = pe.resource(3, Some(id), None).ok().flatten() else { continue };
-        if let Some(bitmap) = osyx_ui::icon::decode_dib(data) {
-            if let Some(icon) = osyx_ui::icon::register_bitmap(bitmap) {
-                return Some(icon);
+        if let Some(rank) = PREFERRED_SIZES.iter().position(|&w| w == width) {
+            if let Some(data) = pe.resource(3, Some(id), None).ok().flatten() {
+                candidates.push((rank, u16::MAX - bits, data));
             }
         }
     }
-    None
+    register_best(candidates)
 }
 
 /// The launcher's applications: the installed `.app` entries, then Windows
@@ -352,7 +390,7 @@ pub fn windows_apps() -> Vec<AppEntry> {
                 continue;
             }
             let icon = exe_icon(&exe);
-            apps.push(AppEntry { source: exe.clone(), name, exec: exe, icon, comment: String::from("Windows program") });
+            apps.push(AppEntry { source: exe.clone(), name, exec: exe, icon, comment: String::from("Windows program"), args: Vec::new(), workdir: String::new() });
         }
     }
     apps.sort_by_key(|a| a.name.to_ascii_lowercase());
@@ -405,20 +443,24 @@ fn collect_links(dir: &str, depth: u32, apps: &mut Vec<AppEntry>) {
 /// started through its target.
 pub fn load_link(path: &str) -> Option<AppEntry> {
     let data = fs::read(path).ok()?;
+    let link = read_link(&data)?;
     // Windows names are not case sensitive, the file system's are.
-    let target = existing_path(&link_target(&data)?)?;
+    let target = existing_path(&link.target)?;
     if !target.to_ascii_lowercase().ends_with(".exe") || !fs::metadata(&target).is_ok_and(|m| m.is_file()) {
         return None;
     }
     let file = path.rsplit('/').next().unwrap_or(path);
     let name = file.get(..file.len().saturating_sub(4)).unwrap_or(file);
-    let icon = exe_icon(&target);
+    // The shortcut's own icon, else the program's.
+    let icon = link.icon.as_ref().and_then(|(file, index)| existing_path(file).and_then(|f| icon_from(&f, *index))).unwrap_or_else(|| exe_icon(&target));
     Some(AppEntry {
         source: String::from(path),
         name: String::from(name),
         exec: target,
         icon,
         comment: String::from("Windows program"),
+        args: split_arguments(&link.arguments),
+        workdir: existing_path(&link.working_dir).unwrap_or_default(),
     })
 }
 
@@ -439,17 +481,34 @@ fn existing_path(path: &str) -> Option<String> {
     (!found.is_empty()).then_some(found)
 }
 
-/// The target of a Shell Link (MS-SHLLINK) as an OSyx path: the local base
-/// path of its LinkInfo, else its relative path string when that is a full
-/// path. Anything else (network targets, shell items without a path) has no
-/// target here.
-pub fn link_target(data: &[u8]) -> Option<String> {
+/// What the shell uses of a Shell Link (MS-SHLLINK); paths are OSyx paths.
+pub struct LinkData {
+    pub target: String,
+    pub arguments: String,
+    pub working_dir: String,
+    /// Icon file and index, if the link names one.
+    pub icon: Option<(String, i32)>,
+}
+
+/// A Windows path (`C:\a\b`) as an OSyx path (`/a/b`); `None` for anything
+/// that is not on drive C.
+fn windows_to_osyx(win: &str) -> Option<String> {
+    let rest = win.get(2..).filter(|_| win.as_bytes().get(1) == Some(&b':'))?;
+    Some(rest.replace('\\', "/"))
+}
+
+/// Reads a Shell Link: the local base path of its LinkInfo (else its
+/// relative path string when that is a full path), the working directory,
+/// the arguments and the icon location. Network targets and shell items
+/// without a path have no target here.
+pub fn read_link(data: &[u8]) -> Option<LinkData> {
     let u16_at = |at: usize| data.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
     let u32_at = |at: usize| data.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
     if u32_at(0)? != 0x4C {
         return None;
     }
     let flags = u32_at(0x14)?;
+    let icon_index = u32_at(0x38)? as u32 as i32;
     let unicode = flags & 0x80 != 0;
     let mut at = 0x4C;
     if flags & 0x01 != 0 {
@@ -478,7 +537,7 @@ pub fn link_target(data: &[u8]) -> Option<String> {
         at = base + size;
     }
     // StringData in order: name, relative path, working directory, arguments, icon.
-    let mut relative = None;
+    let (mut relative, mut working_dir, mut arguments, mut icon) = (None, String::new(), String::new(), String::new());
     for (i, bit) in [0x04usize, 0x08, 0x10, 0x20, 0x40].into_iter().enumerate() {
         if flags & bit == 0 {
             continue;
@@ -488,19 +547,73 @@ pub fn link_target(data: &[u8]) -> Option<String> {
         let bytes = if unicode { count * 2 } else { count };
         let raw = data.get(at..at + bytes)?;
         at += bytes;
-        if i == 1 {
-            relative = Some(if unicode {
-                char::decode_utf16((0..raw.len() / 2).map(|i| u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]])))
-                    .map(|c| c.unwrap_or('\u{FFFD}'))
-                    .collect::<String>()
-            } else {
-                String::from_utf8_lossy(raw).into_owned()
-            });
+        let text = if unicode {
+            char::decode_utf16((0..raw.len() / 2).map(|i| u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]])))
+                .map(|c| c.unwrap_or('\u{FFFD}'))
+                .collect::<String>()
+        } else {
+            String::from_utf8_lossy(raw).into_owned()
+        };
+        match i {
+            1 => relative = Some(text),
+            2 => working_dir = text,
+            3 => arguments = text,
+            4 => icon = text,
+            _ => {}
         }
     }
     let win = target.or(relative.filter(|r| r.contains(":\\")))?;
-    let rest = win.get(2..).filter(|_| win.as_bytes().get(1) == Some(&b':'))?;
-    Some(rest.replace('\\', "/"))
+    Some(LinkData {
+        target: windows_to_osyx(&win)?,
+        arguments,
+        working_dir: windows_to_osyx(&working_dir).unwrap_or_default(),
+        // "C:\path\file.ico" or "C:\path\app.exe,3": the index may ride in the text.
+        icon: if icon.is_empty() {
+            None
+        } else {
+            let (file, index) = match icon.rsplit_once(',') {
+                Some((f, i)) if i.trim().parse::<i32>().is_ok() => (f, i.trim().parse().unwrap_or(0)),
+                _ => (icon.as_str(), icon_index),
+            };
+            windows_to_osyx(file.trim_matches('"')).map(|f| (f, index))
+        },
+    })
+}
+
+/// A command line split the way Windows programs read theirs: spaces
+/// separate, double quotes group, `\"` is a quote.
+pub fn split_arguments(line: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let (mut quoted, mut started) = (false, false);
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'"') => {
+                chars.next();
+                current.push('"');
+                started = true;
+            }
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    args.push(core::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        args.push(current);
+    }
+    args
 }
 
 pub fn load_apps_from(path: &str) -> Vec<AppEntry> {
@@ -538,6 +651,8 @@ pub fn load_app(path: &str) -> Option<AppEntry> {
         exec: String::new(),
         icon: Icon::Program,
         comment: String::new(),
+        args: Vec::new(),
+        workdir: String::new(),
     };
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else { continue };
