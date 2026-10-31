@@ -948,6 +948,8 @@ dependencies = [
  "os-sys",
  "osyx-abi",
  "osyx-battery",
+ "osyx-i2c",
+ "osyx-i2chid",
 ]
 
 [[package]]
@@ -1027,6 +1029,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "osyx-i2c"
+version = "0.1.0"
+dependencies = [
+ "osyx-usb",
+]
+
+[[package]]
+name = "osyx-i2chid"
+version = "0.1.0"
+dependencies = [
+ "aml",
+ "osyx-battery",
+ "osyx-i2c",
+ "spinning_top",
+]
+
+[[package]]
 name = "osyx-input"
 version = "0.1.0"
 
@@ -1053,6 +1072,7 @@ dependencies = [
  "osyx-ext4",
  "osyx-fat",
  "osyx-gfx",
+ "osyx-i2c",
  "osyx-input",
  "osyx-mm",
  "osyx-net",
