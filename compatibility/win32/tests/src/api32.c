@@ -499,6 +499,31 @@ void __stdcall start(void) {
         check("GetUserNameExW with a small buffer: ERROR_MORE_DATA and the size", !GetUserNameExW(2, user, &user_size) && GetLastError() == 234 && user_size > 4);
     }
 
+    {
+        /* msvcrt and the new kernel32 entries through PE32 gates (cdecl and stdcall). */
+        HANDLE crt = LoadLibraryExW(L"msvcrt.dll", 0, 0);
+        void *(__cdecl *crt_calloc)(unsigned, unsigned) = crt ? GetProcAddress(crt, "calloc") : 0;
+        void (__cdecl *crt_free)(void *) = crt ? GetProcAddress(crt, "free") : 0;
+        unsigned (__cdecl *crt_msize)(void *) = crt ? GetProcAddress(crt, "_msize") : 0;
+        int (__cdecl *crt_wcsicmp)(const WCHAR *, const WCHAR *) = crt ? GetProcAddress(crt, "_wcsicmp") : 0;
+        int (__cdecl *crt_wcsnicmp)(const WCHAR *, const WCHAR *, unsigned) = crt ? GetProcAddress(crt, "_wcsnicmp") : 0;
+        char *block = crt_calloc ? crt_calloc(4, 8) : 0;
+        int zeroed = block != 0;
+        for (int i = 0; block && i < 32; i++) zeroed &= block[i] == 0;
+        check("msvcrt calloc returns zeroed memory", zeroed);
+        check("msvcrt _msize is at least the requested size", block && crt_msize && crt_msize(block) >= 32);
+        if (block && crt_free) crt_free(block);
+        check("msvcrt _wcsicmp ignores case", crt_wcsicmp && crt_wcsicmp(L"Steam", L"sTEAM") == 0 && crt_wcsicmp(L"a", L"b") < 0);
+        check("msvcrt _wcsnicmp compares n characters", crt_wcsnicmp && crt_wcsnicmp(L"SteamX", L"steamY", 5) == 0 && crt_wcsnicmp(L"SteamX", L"steamY", 6) != 0);
+        BOOL (__stdcall *set_info)(HANDLE, DWORD, void *, DWORD) = GetProcAddress(kernel, "HeapSetInformation");
+        DWORD lfh = 2, bad = 9;
+        check("HeapSetInformation accepts the low-fragmentation hint", set_info && set_info(0, 0, &lfh, 4));
+        SetLastError(0);
+        check("HeapSetInformation rejects an unknown class", set_info && !set_info(0, 77, &lfh, 4) && GetLastError() == 87);
+        SetLastError(0);
+        check("HeapSetInformation rejects an out-of-range value", set_info && !set_info(0, 0, &bad, 4) && GetLastError() == 87);
+    }
+
     check("lstrcmpiA ignores case", lstrcmpiA("Steam", "sTEAM") == 0 && lstrcmpiA("a", "b") < 0);
     check("MulDiv rounds and rejects /0", MulDiv(10, 3, 4) == 8 && MulDiv(-10, 3, 4) == -8 && MulDiv(1, 1, 0) == -1);
     check("GetTickCount advances", GetTickCount() != 0);

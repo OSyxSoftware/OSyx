@@ -767,10 +767,26 @@ extern "win64" fn GetProcessHeaps(n: u32, out: *mut u64) -> u32 {
     all.len() as u32
 }
 
-/// HeapCompatibilityInformation (LFH) and terminate-on-corruption would
-/// promise allocator behaviour the shared allocator does not have.
-extern "win64" fn HeapSetInformation(_heap: u64, _class: u32, _info: u64, _len: usize) -> i32 {
-    fail(ERROR_NOT_SUPPORTED, 0)
+const HEAP_COMPATIBILITY_INFORMATION: u32 = 0;
+const HEAP_ENABLE_TERMINATION_ON_CORRUPTION: u32 = 1;
+
+/// Both classes of Windows are hints: the low-fragmentation setting (a
+/// ULONG, 0, 1 or 2) and terminate-on-corruption (heap NULL or any heap, no
+/// data). The shared allocator has one behaviour, so a valid hint is
+/// accepted; any other class or size is ERROR_INVALID_PARAMETER.
+extern "win64" fn HeapSetInformation(_heap: u64, class: u32, info: u64, len: usize) -> i32 {
+    match class {
+        HEAP_ENABLE_TERMINATION_ON_CORRUPTION if len == 0 => 1,
+        HEAP_COMPATIBILITY_INFORMATION if len == 4 && info != 0 => {
+            // SAFETY: the caller passes a ULONG of `len` bytes.
+            if unsafe { *(info as *const u32) } <= 2 {
+                1
+            } else {
+                fail(ERROR_INVALID_PARAMETER, 0)
+            }
+        }
+        _ => fail(ERROR_INVALID_PARAMETER, 0),
+    }
 }
 
 const HANDLE_FLAG_INHERIT: u32 = 1;
