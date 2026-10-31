@@ -364,6 +364,53 @@ static void interfaces_and_streams(void) {
     d->lpVtbl->Release(d);
 }
 
+/* ---- thread information, WER modules, cycle time (results probed on Windows) ---- */
+
+static void thread_wer_cycles(void) {
+    HMODULE k = GetModuleHandleA("kernel32.dll");
+    BOOL (WINAPI *set_info)(HANDLE, int, void *, DWORD) = (void *)GetProcAddress(k, "SetThreadInformation");
+    BOOL (WINAPI *get_info)(HANDLE, int, void *, DWORD) = (void *)GetProcAddress(k, "GetThreadInformation");
+    LONG (WINAPI *wer_register)(const WCHAR *, void *) = (void *)GetProcAddress(k, "WerRegisterRuntimeExceptionModule");
+    LONG (WINAPI *wer_unregister)(const WCHAR *, void *) = (void *)GetProcAddress(k, "WerUnregisterRuntimeExceptionModule");
+    BOOL (WINAPI *cycles)(HANDLE, ULONGLONG *) = (void *)GetProcAddress(k, "QueryProcessCycleTime");
+    HANDLE t = GetCurrentThread();
+    DWORD v = 3, memory = 0;
+    check("kernel32 exports the thread information and WER functions", set_info && get_info && wer_register && wer_unregister && cycles);
+    check("SetThreadInformation(ThreadMemoryPriority, 3) succeeds and reads back", set_info(t, 0, &v, 4) && get_info(t, 0, &memory, 4) && memory == 3);
+    v = 6;
+    SetLastError(0);
+    check("a memory priority above 5 is ERROR_INVALID_PARAMETER", !set_info(t, 0, &v, 4) && GetLastError() == ERROR_INVALID_PARAMETER);
+    v = 3;
+    SetLastError(0);
+    check("a wrong length is ERROR_BAD_LENGTH", !set_info(t, 0, &v, 8) && GetLastError() == 24);
+    SetLastError(0);
+    check("a NULL block is ERROR_NOACCESS", !set_info(t, 0, NULL, 4) && GetLastError() == ERROR_NOACCESS);
+    SetLastError(0);
+    check("an unknown class is ERROR_INVALID_PARAMETER", !set_info(t, 77, &v, 4) && GetLastError() == ERROR_INVALID_PARAMETER);
+    SetLastError(0);
+    check("a bad handle is ERROR_INVALID_HANDLE", !set_info((HANDLE)0x1234, 0, &v, 4) && GetLastError() == ERROR_INVALID_HANDLE);
+    DWORD throttle[3] = { 1, 1, 1 }, back[3] = { 0, 0, 0 };
+    check("power throttling is accepted and read back", set_info(t, 3, throttle, 12) && get_info(t, 3, back, 12) && back[0] == 1 && back[1] == 1 && back[2] == 1);
+    throttle[0] = 2;
+    SetLastError(0);
+    check("power throttling version 2 is ERROR_INVALID_PARAMETER", !set_info(t, 3, throttle, 12) && GetLastError() == ERROR_INVALID_PARAMETER);
+
+    check("WerRegisterRuntimeExceptionModule keeps a module and a context", wer_register(L"C:\\nonexistent\\y.dll", NULL) == 0 && wer_register(L"x.dll", (void *)5) == 0);
+    check("a NULL module is E_INVALIDARG", wer_register(NULL, NULL) == (LONG)0x80070057);
+    check("WerUnregisterRuntimeExceptionModule removes it once, then it is not found", wer_unregister(L"x.dll", (void *)5) == 0 && wer_unregister(L"x.dll", (void *)5) == (LONG)0x80070002);
+    check("an unregistered module is HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)", wer_unregister(L"never.dll", NULL) == (LONG)0x80070002);
+
+    ULONGLONG c = 0, c2 = 0;
+    SetLastError(0);
+    check("QueryProcessCycleTime of a bad handle is ERROR_INVALID_HANDLE", !cycles((HANDLE)0x1234, &c) && GetLastError() == ERROR_INVALID_HANDLE);
+    DWORD end = GetTickCount() + 30;
+    while (GetTickCount() < end) {}
+    check("QueryProcessCycleTime counts cycles of the process", cycles(GetCurrentProcess(), &c) && c > 0);
+    end = GetTickCount() + 30;
+    while (GetTickCount() < end) {}
+    check("the cycle count grows with CPU time", cycles(GetCurrentProcess(), &c2) && c2 > c);
+}
+
 void __stdcall start(void) {
     hashes();
     randomness();
@@ -372,5 +419,6 @@ void __stdcall start(void) {
     accessibility_and_crt();
     devices_and_input();
     interfaces_and_streams();
+    thread_wer_cycles();
     finish("newlibs");
 }
