@@ -66,6 +66,28 @@ void __stdcall start(void) {
     check_eq("getaddrinfo(NULL, \"no-such-service\", NULL)",
              getaddrinfo(NULL, "no-such-service", NULL, &res), WSATYPE_NOT_FOUND);
 
+    struct addrinfo nh = {0}, *nr = NULL;
+    nh.ai_family = AF_INET;
+    nh.ai_flags = AI_NUMERICHOST;
+    check_eq("getaddrinfo(\"example.com\", \"80\", AI_NUMERICHOST)",
+             getaddrinfo("example.com", "80", &nh, &nr), WSAHOST_NOT_FOUND);
+    check_eq("getaddrinfo(\"10.0.0.1\", \"80\", AI_NUMERICHOST)",
+             getaddrinfo("10.0.0.1", "80", &nh, &nr), 0);
+    check("... the numeric address",
+          nr != NULL && ((struct sockaddr_in *)nr->ai_addr)->sin_addr.s_addr == inet_addr("10.0.0.1"));
+    if (nr) freeaddrinfo(nr);
+    nr = NULL;
+    struct addrinfo ns = {0};
+    ns.ai_family = AF_INET;
+    ns.ai_flags = AI_NUMERICSERV;
+    check_eq("getaddrinfo(\"10.0.0.1\", \"http\", AI_NUMERICSERV)",
+             getaddrinfo("10.0.0.1", "http", &ns, &nr), WSAHOST_NOT_FOUND);
+    check_eq("getaddrinfo(\"10.0.0.1\", \"8080\", AI_NUMERICSERV)",
+             getaddrinfo("10.0.0.1", "8080", &ns, &nr), 0);
+    check("... the numeric port", nr != NULL && ((struct sockaddr_in *)nr->ai_addr)->sin_port == htons(8080));
+    if (nr) freeaddrinfo(nr);
+
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     check("socket(AF_INET, SOCK_STREAM)", s != INVALID_SOCKET);
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;

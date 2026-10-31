@@ -22,6 +22,8 @@ const AF_INET6: i32 = 23;
 const SOCK_STREAM: i32 = 1;
 const SOCK_DGRAM: i32 = 2;
 const AI_PASSIVE: i32 = 1;
+const AI_NUMERICHOST: i32 = 4;
+const AI_NUMERICSERV: i32 = 8;
 const SOL_SOCKET: i32 = 0xFFFF;
 const SO_REUSEADDR: i32 = 0x4;
 const SO_KEEPALIVE: i32 = 0x8;
@@ -815,14 +817,6 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
     }
     // SAFETY: NULL or NUL-terminated strings.
     let (n, svc) = unsafe { (crate::path::ansi_to_string(node), crate::path::ansi_to_string(service)) };
-    let port: u16 = match svc.as_deref() {
-        None => 0,
-        Some(s) => match service_port(s) {
-            Some(p) => p,
-            // EAI_SERVICE: the name is known to be a service, it just is not one.
-            None => return WSATYPE_NOT_FOUND as i32,
-        },
-    };
     let (mut socktype, mut proto) = (0i32, 0i32);
     let mut flags = 0i32;
     if !hints.is_null() {
@@ -837,6 +831,18 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
             proto = teb::get(hints as u64, 12);
         }
     }
+    if flags & AI_NUMERICSERV != 0 && svc.as_deref().is_some_and(|s| s.parse::<u16>().is_err()) {
+        // EAI_NONAME: the service had to be a number.
+        return WSAHOST_NOT_FOUND as i32;
+    }
+    let port: u16 = match svc.as_deref() {
+        None => 0,
+        Some(s) => match service_port(s) {
+            Some(p) => p,
+            // EAI_SERVICE: the name is known to be a service, it just is not one.
+            None => return WSATYPE_NOT_FOUND as i32,
+        },
+    };
     // No type means the common TCP stream; the protocol follows from it.
     if socktype == 0 {
         socktype = SOCK_STREAM;
@@ -845,6 +851,11 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
         proto = if socktype == SOCK_DGRAM { IPPROTO_UDP } else { IPPROTO_TCP };
     }
     let addrs = match n {
+        // AI_NUMERICHOST: never fall back to a name lookup.
+        Some(n) if flags & AI_NUMERICHOST != 0 => match parse_ipv4(&n) {
+            Some(a) => alloc::vec![a],
+            None => return WSAHOST_NOT_FOUND as i32,
+        },
         Some(n) => match resolve(&n) {
             Ok(a) => a,
             Err(e) => return e as i32,
