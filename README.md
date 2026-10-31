@@ -12,7 +12,7 @@ and desktop, and a compatibility layer that runs Windows PE32+ programs.
 **Status:** under active development and not abandoned — see
 [STATUS.md](STATUS.md) for what is being worked on.
 
-![OSyx desktop](docs/screenshots/desktop.jpg)
+![Animated introduction to OSyx and its desktop](site/assets/osyx-ad.gif)
 
 </div>
 
