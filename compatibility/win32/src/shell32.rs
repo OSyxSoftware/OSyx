@@ -36,6 +36,7 @@ enum Base {
 type Folder = ((u32, u16, u16, [u8; 8]), u32, Base);
 
 const FOLDERS: &[Folder] = &[
+    ((0xAE50C081, 0xEBD2, 0x438A, [0x86, 0x55, 0x8A, 0x09, 0x2E, 0x34, 0x98, 0x7A]), 0x08, Base::Profile("AppData\\Roaming\\Microsoft\\Windows\\Recent")),
     ((0x5E6C858F, 0x0E22, 0x4760, [0x9A, 0xFE, 0xEA, 0x33, 0x17, 0xB6, 0x71, 0x73]), 0x28, Base::Profile("")),
     ((0x3EB685DB, 0x65F9, 0x4CF6, [0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D]), 0x1A, Base::Profile("AppData\\Roaming")),
     ((0xF1B32785, 0x6FBA, 0x4FCF, [0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91]), 0x1C, Base::Profile("AppData\\Local")),
@@ -655,7 +656,80 @@ extern "win64" fn SHQueryUserNotificationState(out: *mut u32) -> u32 {
     S_OK
 }
 
-extern "win64" fn SHAddToRecentDocs(_flags: u32, _item: u64) {}
+/// The Recent folder as an OSyx path.
+fn recent_dir() -> Option<String> {
+    let win = location(Base::Profile("AppData\\Roaming\\Microsoft\\Windows\\Recent"));
+    path::to_osyx(&win, "C:\\").ok()
+}
+
+/// A minimal Shell Link (MS-SHLLINK): header, then a LinkInfo block with the
+/// local base path of the target, which is all Windows needs to resolve it.
+fn shell_link(target: &str, directory: bool) -> Vec<u8> {
+    let mut path = target.as_bytes().to_vec();
+    path.push(0);
+    let volume_id: [u8; 17] = {
+        let mut v = [0u8; 17];
+        v[0..4].copy_from_slice(&17u32.to_le_bytes()); // VolumeIDSize
+        v[4..8].copy_from_slice(&3u32.to_le_bytes()); // DRIVE_FIXED
+        v[12..16].copy_from_slice(&16u32.to_le_bytes()); // VolumeLabelOffset: an empty label
+        v
+    };
+    let info_size = 0x1C + volume_id.len() + path.len() + 1;
+    let mut l = Vec::new();
+    l.extend_from_slice(&0x4Cu32.to_le_bytes());
+    l.extend_from_slice(&[0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46]);
+    l.extend_from_slice(&(0x2u32 | 0x80 | 0x10_0000).to_le_bytes()); // HasLinkInfo, IsUnicode, ForceNoLinkTrack
+    l.extend_from_slice(&(if directory { 0x10u32 } else { 0x20 }).to_le_bytes());
+    l.extend_from_slice(&[0u8; 24]); // creation, access and write times
+    l.extend_from_slice(&0u32.to_le_bytes()); // file size
+    l.extend_from_slice(&0u32.to_le_bytes()); // icon index
+    l.extend_from_slice(&1u32.to_le_bytes()); // SW_SHOWNORMAL
+    l.extend_from_slice(&[0u8; 10]); // hot key and reserved fields
+    l.extend_from_slice(&(info_size as u32).to_le_bytes());
+    l.extend_from_slice(&0x1Cu32.to_le_bytes()); // LinkInfoHeaderSize
+    l.extend_from_slice(&1u32.to_le_bytes()); // VolumeIDAndLocalBasePath
+    l.extend_from_slice(&0x1Cu32.to_le_bytes()); // VolumeIDOffset
+    l.extend_from_slice(&((0x1C + volume_id.len()) as u32).to_le_bytes()); // LocalBasePathOffset
+    l.extend_from_slice(&0u32.to_le_bytes()); // CommonNetworkRelativeLinkOffset
+    l.extend_from_slice(&((0x1C + volume_id.len() + path.len()) as u32).to_le_bytes()); // CommonPathSuffixOffset
+    l.extend_from_slice(&volume_id);
+    l.extend_from_slice(&path);
+    l.push(0); // empty CommonPathSuffix
+    l
+}
+
+/// SHARD_PIDL (1), SHARD_PATHA (2) and SHARD_PATHW (3) put a shortcut to the
+/// file in the Recent folder; NULL empties it. Other kinds (application
+/// ids, shell links) are not handled; the function cannot report that.
+extern "win64" fn SHAddToRecentDocs(flags: u32, item: u64) {
+    let Some(dir) = recent_dir() else { return };
+    if item == 0 {
+        if let Ok(entries) = os_std::fs::read_dir(&dir) {
+            for e in entries {
+                if e.file_name().ends_with(".lnk") {
+                    let _ = os_std::fs::remove_file(e.path());
+                }
+            }
+        }
+        return;
+    }
+    // SAFETY: a PIDL of this module or a NUL-terminated string, by `flags`.
+    let target = unsafe {
+        match flags {
+            1 => crate::commdlg::pidl_file_path(item).map(|p| path::to_windows(&p)),
+            2 => path::ansi_to_string(item as *const u8),
+            3 => path::wide_to_string(item as *const u16),
+            _ => None,
+        }
+    };
+    let Some(target) = target.filter(|t| !t.is_empty()) else { return };
+    let directory = kernel32::locate(&target).ok().is_some_and(|(p, exists)| exists && os_sys::stat(&p).is_ok_and(|s| s.kind == osyx_abi::KIND_DIR));
+    let name = target.trim_end_matches('\\').rsplit('\\').next().unwrap_or("");
+    if name.is_empty() || os_std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = os_std::fs::write(format!("{dir}/{name}.lnk"), shell_link(&target, directory));
+}
 
 extern "win64" fn SHChangeNotify(_event: i32, _flags: u32, _a: u64, _b: u64) {}
 
@@ -913,7 +987,8 @@ extern "win64" fn ShellExecuteExW(info: *mut u8) -> i32 {
 
 
 extern "win64" fn Shell_NotifyIconW(_message: u32, _data: u64) -> i32 {
-    0
+    // There is no notification area: the icon cannot be added, changed or removed.
+    crate::kernel32::fail(crate::error::ERROR_NOT_SUPPORTED, 0)
 }
 
 extern "win64" fn DragQueryFileW(drop: u64, index: u32, buf: *mut u16, count: u32) -> u32 {

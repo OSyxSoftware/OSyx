@@ -537,7 +537,16 @@ extern "win64" fn OleGetClipboard(out: *mut u64) -> u32 {
 }
 
 /// The data stays available after the flush, as rendered data would.
+/// Every format was rendered when the data object was set, so flushing
+/// releases the object and leaves its data on the clipboard.
 extern "win64" fn OleFlushClipboard() -> u32 {
+    let data = {
+        let mut clip = CLIPBOARD.lock().unwrap();
+        core::mem::replace(&mut clip.0, 0)
+    };
+    if data != 0 {
+        com_call(data, 2);
+    }
     S_OK
 }
 

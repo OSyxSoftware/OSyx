@@ -242,16 +242,16 @@ extern "win64" fn GetThemeColor(theme: u64, _part: i32, _state: i32, _property: 
 }
 
 /// Touch panning feedback needs a themed window manager.
-extern "win64" fn BeginPanningFeedback(_wnd: u64) -> u8 {
-    0
+extern "win64" fn BeginPanningFeedback(_wnd: u64) -> i32 {
+    crate::kernel32::fail(crate::error::ERROR_NOT_SUPPORTED, 0)
 }
 
-extern "win64" fn UpdatePanningFeedback(_wnd: u64, _x: i32, _y: i32, _overshoot: u8) -> u8 {
-    0
+extern "win64" fn UpdatePanningFeedback(_wnd: u64, _x: i32, _y: i32, _overshoot: i32) -> i32 {
+    crate::kernel32::fail(crate::error::ERROR_NOT_SUPPORTED, 0)
 }
 
-extern "win64" fn EndPanningFeedback(_wnd: u64, _animate: u8) -> u8 {
-    0
+extern "win64" fn EndPanningFeedback(_wnd: u64, _animate: i32) -> i32 {
+    crate::kernel32::fail(crate::error::ERROR_NOT_SUPPORTED, 0)
 }
 
 pub fn uxtheme_exports() -> Vec<(&'static str, u64)> {
@@ -386,8 +386,13 @@ extern "win64" fn InternetCheckConnectionW(_url: *const u16, _flags: u32, _reser
     crate::kernel32::TRUE
 }
 
-extern "win64" fn InternetAttemptConnect(_reserved: u32) -> u32 {
-    ERROR_SUCCESS
+/// ERROR_SUCCESS when a network adapter has an address, otherwise
+/// ERROR_INTERNET_DISCONNECTED.
+extern "win64" fn InternetAttemptConnect(reserved: u32) -> u32 {
+    if reserved != 0 {
+        return ERROR_INVALID_PARAMETER;
+    }
+    if crate::iphlpapi::has_connectivity() { ERROR_SUCCESS } else { 12163 }
 }
 
 /// There is no WinINet session state to query; callers fall back to a

@@ -6,6 +6,10 @@
  * Windows would crash on a bad handle, OSyx fails with an error and the
  * test names say so. */
 #include "common.h"
+#include <shlobj.h>
+#include <imm.h>
+#include <wininet.h>
+#include <winuser.h>
 
 static HANDLE gheap;
 static volatile LONG started, finished;
@@ -167,6 +171,71 @@ static void windows_and_menus(void) {
     if (menu) DestroyMenu(menu);
 }
 
+static void without_windows(void) {
+    DOCINFOW doc = { sizeof doc };
+    SetLastError(0);
+    check("StartDocW on a non-printer DC fails with SP_ERROR and ERROR_INVALID_HANDLE", StartDocW((HDC)0x1234, &doc) == -1 && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0);
+    check("EndDoc on a non-printer DC fails with SP_ERROR and ERROR_INVALID_HANDLE", EndDoc((HDC)0x1234) == -1 && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0);
+    check("StartPage/EndPage/AbortDoc on a non-printer DC fail with SP_ERROR", StartPage((HDC)0x1234) == -1 && EndPage((HDC)0x1234) == -1 && AbortDoc((HDC)0x1234) == -1 && GetLastError() == ERROR_INVALID_HANDLE);
+
+    RECT clip = { 0, 0, 10, 10 };
+    check("ClipCursor(NULL) releases a clip", ClipCursor(NULL));
+    SetLastError(0);
+    check("ClipCursor(rect) fails with ERROR_NOT_SUPPORTED (PRISM cannot confine the pointer)", !ClipCursor(&clip) && GetLastError() == ERROR_NOT_SUPPORTED);
+
+    int count = ShowCursor(TRUE);
+    check("ShowCursor keeps a display counter", ShowCursor(FALSE) == count - 1 && ShowCursor(FALSE) == count - 2 && ShowCursor(TRUE) == count - 1 && ShowCursor(TRUE) == count);
+
+    check("GetMessageExtraInfo starts at 0", GetMessageExtraInfo() == 0);
+    check("SetMessageExtraInfo returns the old value and GetMessageExtraInfo the new one", SetMessageExtraInfo(77) == 0 && GetMessageExtraInfo() == 77 && SetMessageExtraInfo(0) == 77);
+
+    int element[1] = { COLOR_BTNFACE };
+    COLORREF old = GetSysColor(COLOR_BTNFACE), color = RGB(1, 2, 3);
+    check("SetSysColors changes GetSysColor", SetSysColors(1, element, &color) && GetSysColor(COLOR_BTNFACE) == color);
+    SetSysColors(1, element, &old);
+    check("SetSysColors restores the colour", GetSysColor(COLOR_BTNFACE) == old);
+    int bad[1] = { 99 };
+    SetLastError(0);
+    check("SetSysColors rejects an index outside 0..30 with ERROR_INVALID_PARAMETER", !SetSysColors(1, bad, &color) && GetLastError() == ERROR_INVALID_PARAMETER);
+
+    SetLastError(0);
+    check("UnhookWinEvent(bogus) fails with ERROR_INVALID_HANDLE", !UnhookWinEvent((HWINEVENTHOOK)0x1234) && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0);
+    check("SetThreadDesktop(bogus) fails with ERROR_INVALID_HANDLE", !SetThreadDesktop((HDESK)0x1234) && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0);
+    check("MessageBeep fails with ERROR_NOT_SUPPORTED (no sound output; Windows would beep)", !MessageBeep(MB_OK) && GetLastError() == ERROR_NOT_SUPPORTED);
+    check("ReplyMessage outside a sent message fails", !ReplyMessage(0));
+
+    check("ImmGetOpenStatus(NULL) is FALSE", !ImmGetOpenStatus(NULL));
+    check("ImmGetCompositionStringW(NULL) is 0", ImmGetCompositionStringW(NULL, GCS_COMPSTR, NULL, 0) == 0);
+    check("ImmReleaseContext(window, NULL) succeeds as on Windows", ImmReleaseContext((HWND)0x1234, NULL));
+    SetLastError(0);
+    check("ImmGetContext(bogus) fails with ERROR_INVALID_WINDOW_HANDLE", ImmGetContext((HWND)0x1234) == NULL && GetLastError() == ERROR_INVALID_WINDOW_HANDLE);
+
+    check("InternetAttemptConnect succeeds while an adapter has an address", InternetAttemptConnect(0) == ERROR_SUCCESS);
+
+    static const WCHAR recent[] = L"C:\\tmp\\recent-test.txt";
+    WCHAR folder[MAX_PATH], link[MAX_PATH];
+    check("CSIDL_RECENT resolves", SHGetFolderPathW(NULL, CSIDL_RECENT | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, folder) == S_OK);
+    int n = 0;
+    while (folder[n]) { link[n] = folder[n]; n++; }
+    static const WCHAR tail[] = L"\\recent-test.txt.lnk";
+    for (int i = 0; i < 20; i++) link[n + i] = tail[i];
+    DeleteFileW(link);
+    SHAddToRecentDocs(SHARD_PATHW, recent);
+    DWORD attributes = GetFileAttributesW(link);
+    check("SHAddToRecentDocs makes a shortcut in the Recent folder", attributes != INVALID_FILE_ATTRIBUTES);
+    BYTE header[4] = { 0 };
+    DWORD got = 0;
+    HANDLE f = CreateFileW(link, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f != INVALID_HANDLE_VALUE) { ReadFile(f, header, 4, &got, NULL); CloseHandle(f); }
+    check("the shortcut starts with the Shell Link header size 0x4C", got == 4 && header[0] == 0x4c && header[1] == 0 && header[2] == 0 && header[3] == 0);
+    SHAddToRecentDocs(SHARD_PATHW, NULL);
+    check("SHAddToRecentDocs(NULL) empties the Recent folder", GetFileAttributesW(link) == INVALID_FILE_ATTRIBUTES);
+}
+
 static void interlocked(void) {
     HMODULE k = GetModuleHandleA("kernel32.dll");
     LONG (WINAPI *inc)(volatile LONG *) = (LONG (WINAPI *)(volatile LONG *))GetProcAddress(k, "InterlockedIncrement");
@@ -206,6 +275,7 @@ void __stdcall start(void) {
     thread_library_calls();
     windows_and_menus();
     attribute_lists();
+    without_windows();
     interlocked();
     finish("stubfix");
 }

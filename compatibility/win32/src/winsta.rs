@@ -183,6 +183,20 @@ extern "win64" fn GetThreadDesktop(tid: u32) -> u64 {
     *d
 }
 
+/// Makes `h` (a desktop handle of this process) the thread's desktop. A
+/// thread that owns windows cannot change desktop (ERROR_BUSY). The desktop is
+/// kept per process here, as GetThreadDesktop reports it.
+extern "win64" fn SetThreadDesktop(h: u64) -> i32 {
+    if !matches!(objects::get(h), Some(Object::Desktop(_))) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if crate::user32::thread_has_windows() {
+        return fail(ERROR_BUSY, 0);
+    }
+    *THREAD_DESKTOP.lock().unwrap() = h;
+    1
+}
+
 extern "win64" fn CloseWindowStation(h: u64) -> i32 {
     if let Err(e) = station(h) {
         return fail(e, 0);
@@ -327,6 +341,7 @@ extern "win64" fn WaitForInputIdle(h: u64, timeout: u32) -> u32 {
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        SetThreadDesktop,
         CreateWindowStationW,
         CreateDesktopW,
         GetProcessWindowStation,

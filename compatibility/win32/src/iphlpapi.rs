@@ -28,6 +28,12 @@ fn addr_string(p: u64, addr: [u8; 4], prefix: u8) {
     out_a(&ip(addr), (p + 8) as *mut u8, 16);
     out_a(&ip(mask(prefix)), (p + 24) as *mut u8, 16);
 }
+/// Whether a non-loopback adapter has an address (WinINet's notion of a
+/// connection).
+pub(crate) fn has_connectivity() -> bool {
+    list().is_ok_and(|v| v.iter().any(|i| i.flags & net::IFF_LOOPBACK == 0 && i.addr != [0; 4]))
+}
+
 extern "win64" fn GetAdaptersInfo(out: u64, len: *mut u32) -> u32 {
     if len.is_null() {
         return ERROR_INVALID_PARAMETER;

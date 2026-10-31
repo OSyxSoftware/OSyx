@@ -1837,7 +1837,8 @@ extern "win64" fn GetGlyphOutlineW(
     need
 }
 extern "win64" fn GetOutlineTextMetricsA(_dc: u64, _size: u32, _out: *mut u8) -> u32 {
-    0
+    // OSyx fonts are not TrueType outlines: there is no OUTLINETEXTMETRIC to report.
+    fail(ERROR_NOT_SUPPORTED, 0)
 }
 extern "win64" fn GetICMProfileW(dc: u64, size: *mut u32, _out: *mut u16) -> Bool {
     if size.is_null() {
@@ -1857,14 +1858,12 @@ extern "win64" fn SetPixelFormat(_dc: u64, _format: i32, _pfd: *const u8) -> Boo
 extern "win64" fn SwapBuffers(_dc: u64) -> Bool {
     fail(ERROR_NOT_SUPPORTED, FALSE)
 }
-extern "win64" fn ExtEscape(
-    _dc: u64,
-    _escape: i32,
-    _count: i32,
-    _input: *const u8,
-    _out_count: i32,
-    _output: *mut u8,
-) -> i32 {
+/// Escapes are printer and driver commands; a display DC supports none
+/// (QUERYESCSUPPORT included), which Windows answers with 0.
+extern "win64" fn ExtEscape(dc: u64, _escape: i32, _count: i32, _input: *const u8, _out_count: i32, _output: *mut u8) -> i32 {
+    if with(|g| !g.dcs.contains_key(&dc)) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
     0
 }
 

@@ -78,7 +78,7 @@ $programs = [ordered]@{
     'threads.exe' = @{ Src = @('threads.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'windll.dll'  = @{ Src = @('windll.c', 'windll.def'); Args = @('-shared', '-Wl,-e,DllMainCRTStartup', $apisetLib, '-lkernel32') }
     'gdi2.exe'    = @{ Src = @('gdi2.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lgdi32', '-lkernel32') }
-    'gui.exe'     = @{ Src = @('gui.c'); Args = @('-Wl,--subsystem,windows', '-Wl,-e,start', '-luser32', '-lgdi32', '-lkernel32') }
+    'gui.exe'     = @{ Src = @('gui.c'); Args = @('-Wl,--subsystem,windows', '-Wl,-e,start', '-limm32', '-luser32', '-lgdi32', '-lkernel32') }
     'winsock.exe' = @{ Src = @('winsock.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lws2_32', '-lkernel32') }
     'wsock32.exe' = @{ Src = @('wsock32.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lwsock32', '-lkernel32') }
     'wsaext.exe'  = @{ Src = @('wsaext.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lws2_32', '-lkernel32') }
@@ -87,7 +87,7 @@ $programs = [ordered]@{
     'newdlls.exe' = @{ Src = @('newdlls.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lrpcrt4', '-lcfgmgr32', '-lpropsys', '-loleaut32', '-lole32', '-lkernel32') }
     'pipes.exe'   = @{ Src = @('pipes.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'k32xul.exe'  = @{ Src = @('k32xul.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
-    'stubfix.exe' = @{ Src = @('stubfix.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lkernel32') }
+    'stubfix.exe' = @{ Src = @('stubfix.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lwininet', '-limm32', '-lshell32', '-lgdi32', '-luser32', '-lkernel32') }
     'thrdll.dll'  = @{ Src = @('thrdll.c'); Args = @('-shared', '-Wl,-e,DllMainCRTStartup', '-lkernel32') }
     'sysadmin.exe' = @{ Src = @('sysadmin.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-liphlpapi', '-lsetupapi', '-lkernel32') }
 }

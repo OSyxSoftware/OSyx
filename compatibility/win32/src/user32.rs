@@ -156,6 +156,8 @@ struct Win {
     drawn: Option<Rect>,
     /// SetProp/GetProp/RemoveProp, keyed by lower-case name or `#atom`.
     props: BTreeMap<String, u64>,
+    /// The window's menu bar (SetMenu; the CreateWindow menu of a top-level window).
+    menu: u64,
 }
 
 /// ICONINFO: icon or cursor, hotspot, and its own mask and colour bitmaps.
@@ -177,6 +179,8 @@ struct MenuItem {
     id: u64,
     flags: u32,
     text: Option<String>,
+    /// MENUITEMINFO.dwItemData.
+    data: u64,
 }
 
 struct Menu { items: Vec<MenuItem> }
@@ -402,8 +406,17 @@ fn to_colorref(c: Color) -> u32 {
     r | g << 8 | b << 16
 }
 
-/// GetSysColor: a light Windows-like palette.
+/// Colours set by SetSysColors for this session: bit 32 set, colour below.
+static SYS_OVERRIDE: [core::sync::atomic::AtomicU64; 32] = [const { core::sync::atomic::AtomicU64::new(0) }; 32];
+
+/// GetSysColor: a light Windows-like palette, with SetSysColors changes.
 fn sys_color(i: u32) -> Color {
+    if let Some(o) = SYS_OVERRIDE.get(i as usize) {
+        let v = o.load(core::sync::atomic::Ordering::Relaxed);
+        if v >> 32 != 0 {
+            return v as u32;
+        }
+    }
     match i {
         5 => rgb(255, 255, 255),  // COLOR_WINDOW
         8 => rgb(0, 0, 0),        // COLOR_WINDOWTEXT
@@ -1307,6 +1320,7 @@ fn create_window(
                 user_data: 0,
                 drawn: None,
                 props: BTreeMap::new(),
+                menu: if style & WS_CHILD == 0 && g.menus.contains_key(&menu) { menu } else { 0 },
             },
         );
         Ok(hwnd)
@@ -3294,8 +3308,10 @@ extern "win64" fn GetSysColorBrush(i: i32) -> u64 {
     })
 }
 
-extern "win64" fn MessageBeep(_t: u32) -> Bool {
-    TRUE
+/// There is no system sound: the call fails with ERROR_NOT_SUPPORTED
+/// rather than report a beep nobody heard.
+extern "win64" fn MessageBeep(_kind: u32) -> Bool {
+    fail(ERROR_NOT_SUPPORTED, FALSE)
 }
 
 // ---- painting -------------------------------------------------------------------------
@@ -4441,29 +4457,97 @@ extern "win64" fn GetDoubleClickTime() -> u32 {
 
 /// The caret is drawn by the program into its own window; the runtime only
 /// keeps Windows' bookkeeping answers.
-extern "win64" fn CreateCaret(_wnd: u64, _bitmap: u64, _w: i32, _h: i32) -> Bool {
+struct Caret {
+    wnd: u64,
+    x: i32,
+    y: i32,
+    /// ShowCaret/HideCaret nesting: a new caret starts hidden (1).
+    hidden: i32,
+}
+
+/// One caret per thread. Only its state is kept: the system does not draw it.
+static CARETS: os_std::sync::Mutex<BTreeMap<u64, Caret>> = os_std::sync::Mutex::new(BTreeMap::new());
+
+extern "win64" fn CreateCaret(wnd: u64, _bitmap: u64, _w: i32, _h: i32) -> Bool {
+    let me = teb::current_tid();
+    let Some(thread) = with(|g| g.windows.get(&wnd).map(|w| w.thread)) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+    if thread != me {
+        return fail(ERROR_ACCESS_DENIED, FALSE);
+    }
+    CARETS.lock().unwrap().insert(me, Caret { wnd, x: 0, y: 0, hidden: 1 });
     TRUE
 }
 
 extern "win64" fn DestroyCaret() -> Bool {
+    if CARETS.lock().unwrap().remove(&teb::current_tid()).is_some() { TRUE } else { fail(ERROR_ACCESS_DENIED, FALSE) }
+}
+
+/// The caret position in the client coordinates of its window; like Windows
+/// it succeeds without a caret and reports (0, 0) there.
+extern "win64" fn GetCaretPos(pt: *mut i32) -> Bool {
+    if pt.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let (x, y) = CARETS.lock().unwrap().get(&teb::current_tid()).map_or((0, 0), |c| (c.x, c.y));
+    // SAFETY: the caller's POINT.
+    unsafe {
+        *pt = x;
+        *pt.add(1) = y;
+    }
     TRUE
 }
 
-extern "win64" fn ShowCaret(_wnd: u64) -> Bool {
-    TRUE
+extern "win64" fn ShowCaret(wnd: u64) -> Bool {
+    caret_visibility(wnd, -1)
 }
 
-extern "win64" fn HideCaret(_wnd: u64) -> Bool {
-    TRUE
+extern "win64" fn HideCaret(wnd: u64) -> Bool {
+    caret_visibility(wnd, 1)
 }
 
-extern "win64" fn SetCaretPos(_x: i32, _y: i32) -> Bool {
-    TRUE
+extern "win64" fn SetCaretPos(x: i32, y: i32) -> Bool {
+    match CARETS.lock().unwrap().get_mut(&parity_tid()) {
+        Some(c) => {
+            c.x = x;
+            c.y = y;
+            TRUE
+        }
+        None => fail(ERROR_ACCESS_DENIED, FALSE),
+    }
+}
+
+fn parity_tid() -> u64 {
+    teb::current_tid()
+}
+
+/// ShowCaret/HideCaret change the nesting count of the thread's caret;
+/// `wnd` NULL means the caret's own window, any other must be it.
+fn caret_visibility(wnd: u64, delta: i32) -> Bool {
+    if wnd != 0 && !is_window(wnd) {
+        return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
+    }
+    let mut carets = CARETS.lock().unwrap();
+    match carets.get_mut(&teb::current_tid()) {
+        Some(c) if wnd == 0 || c.wnd == wnd => {
+            c.hidden = (c.hidden + delta).max(0);
+            TRUE
+        }
+        _ => fail(ERROR_ACCESS_DENIED, FALSE),
+    }
 }
 
 /// One pointer, always visible: PRISM draws it from the pointer position.
-extern "win64" fn ShowCursor(_show: Bool) -> i32 {
-    0
+/// The display counter: ShowCursor(TRUE) adds one, ShowCursor(FALSE)
+/// subtracts one, the cursor shows while it is not negative. PRISM has no
+/// request to hide the pointer, so the counter is all there is.
+static CURSOR_COUNT: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+extern "win64" fn ShowCursor(show: Bool) -> i32 {
+    if show != 0 {
+        CURSOR_COUNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst) + 1
+    } else {
+        CURSOR_COUNT.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) - 1
+    }
 }
 
 /// PRISM owns the pointer, so this only updates what the cursor APIs report.
@@ -4472,8 +4556,13 @@ extern "win64" fn SetCursorPos(x: i32, y: i32) -> Bool {
     TRUE
 }
 
-extern "win64" fn ClipCursor(_rect: *const u8) -> Bool {
-    TRUE
+/// Confining the pointer is not possible under PRISM: releasing a clip
+/// (NULL) succeeds, setting one fails with ERROR_NOT_SUPPORTED.
+extern "win64" fn ClipCursor(rect: *const u8) -> Bool {
+    if rect.is_null() {
+        return TRUE;
+    }
+    fail(ERROR_NOT_SUPPORTED, FALSE)
 }
 
 extern "win64" fn GetCursorInfo(out: *mut u8) -> Bool {
@@ -4500,8 +4589,16 @@ extern "win64" fn GetMessageTime() -> i32 {
     with(|g| g.now_ms() as i32)
 }
 
+/// Per-thread value of SetMessageExtraInfo. The pointer and keyboard input
+/// of OSyx carries no extra information, so it starts at 0.
+static MESSAGE_EXTRA: os_std::sync::Mutex<BTreeMap<u64, i64>> = os_std::sync::Mutex::new(BTreeMap::new());
+
 extern "win64" fn GetMessageExtraInfo() -> i64 {
-    0
+    MESSAGE_EXTRA.lock().unwrap().get(&teb::current_tid()).copied().unwrap_or(0)
+}
+
+extern "win64" fn SetMessageExtraInfo(value: i64) -> i64 {
+    MESSAGE_EXTRA.lock().unwrap().insert(teb::current_tid(), value).unwrap_or(0)
 }
 
 /// High word: kinds of messages waiting; low word: kinds added since the
@@ -4586,8 +4683,11 @@ extern "win64" fn MsgWaitForMultipleObjects(n: u32, hs: *const u64, wait_all: Bo
     MsgWaitForMultipleObjectsEx(n, hs, ms, mask, if wait_all != 0 { MWMO_WAITALL } else { 0 })
 }
 
+/// A window procedure is called on the sender's thread here, so it is never
+/// handling a message sent from another thread: like Windows in that case
+/// the call fails (FALSE) without an error code.
 extern "win64" fn ReplyMessage(_result: i64) -> Bool {
-    TRUE
+    FALSE
 }
 
 /// OSyx never delivers a message from another process's SendMessage in a way
@@ -4608,11 +4708,12 @@ extern "win64" fn SetWinEventHook(_min: u32, _max: u32, _module: u64, _proc_: u6
     if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
         os_std::eprintln!("winrun: SetWinEventHook min={_min:#x} max={_max:#x} pid={_process} tid={_thread} flags={_flags:#x}");
     }
-    0 // no accessibility events are raised
+    fail(ERROR_NOT_SUPPORTED, 0) // no accessibility events are raised
 }
 
+/// SetWinEventHook never returns a hook, so every handle is invalid.
 extern "win64" fn UnhookWinEvent(_hook: u64) -> Bool {
-    TRUE
+    fail(ERROR_INVALID_HANDLE, FALSE)
 }
 
 extern "win64" fn NotifyWinEvent(_event: u32, _wnd: u64, _object: i32, _child: i32) {}
@@ -5167,8 +5268,17 @@ extern "win64" fn SetClassLongW(wnd: u64, index: i32, value: u32) -> u32 {
     if index == -24 { guest_wndproc(old) as u32 } else { old as u32 }
 }
 
-extern "win64" fn GetClassWord(_wnd: u64, _index: i32) -> u16 {
-    0
+/// GCW_ATOM (-32) is the class atom; classes here have no extra bytes, so
+/// any other index is ERROR_INVALID_INDEX.
+extern "win64" fn GetClassWord(wnd: u64, index: i32) -> u16 {
+    with(|g| {
+        let Some(w) = g.windows.get(&wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
+        if index == -32 {
+            (0xC001 + w.class) as u16
+        } else {
+            fail(1413, 0) // ERROR_INVALID_INDEX
+        }
+    })
 }
 
 extern "win64" fn FindWindowW(class: *const u16, title: *const u16) -> u64 {
@@ -5499,8 +5609,43 @@ extern "win64" fn EnumThreadWindows(thread: u32, proc_: u64, param: u64) -> Bool
 }
 
 /// Windows here have no children to enumerate.
-extern "win64" fn EnumChildWindows(_parent: u64, _proc: u64, _param: u64) -> Bool {
-    FALSE
+/// Every descendant of `parent`, topmost (newest) first; the callback stops
+/// the enumeration by returning FALSE.
+extern "win64" fn EnumChildWindows(parent: u64, proc_: u64, param: u64) -> Bool {
+    if proc_ == 0 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let list: Option<Vec<u64>> = with(|g| {
+        if parent != 0 && !g.windows.contains_key(&parent) {
+            return None;
+        }
+        let mut out = Vec::new();
+        let mut todo = alloc::vec![parent];
+        while let Some(p) = todo.pop() {
+            let mut kids: Vec<u64> = g.windows.iter().filter(|(_, w)| w.style & WS_CHILD != 0 && w.owner == p).map(|(&h, _)| h).collect();
+            kids.sort_unstable_by(|a, b| b.cmp(a));
+            todo.extend(kids.iter().rev().copied());
+            out.extend(kids);
+        }
+        Some(out)
+    });
+    let Some(list) = list else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+    for h in list {
+        if !is_window(h) {
+            continue; // destroyed by an earlier callback
+        }
+        let more = if crate::wow64::is_active() {
+            crate::wow64::call32(proc_ as u32, &[h as u32, param as u32]) != 0
+        } else {
+            // SAFETY: a caller-supplied WNDENUMPROC of the Windows x64 ABI.
+            let f: extern "win64" fn(u64, i64) -> i32 = unsafe { core::mem::transmute(proc_ as usize) };
+            f(h, param as i64) != 0
+        };
+        if !more {
+            break;
+        }
+    }
+    TRUE
 }
 
 extern "win64" fn EnumWindows(proc_: u64, param: u64) -> Bool {
@@ -5552,16 +5697,92 @@ extern "win64" fn RedrawWindow(wnd: u64, _rect: *const u8, _rgn: u64, flags: u32
     TRUE
 }
 
-extern "win64" fn AnimateWindow(_wnd: u64, _time: u32, _flags: u32) -> Bool {
-    TRUE // no animation: the window is simply shown
+/// Shows or hides the window (AW_HIDE) without the animation, which Windows
+/// also skips when animations are off. Like Windows it fails, without an
+/// error code, for a window that is already in the requested state.
+extern "win64" fn AnimateWindow(wnd: u64, _time: u32, flags: u32) -> Bool {
+    const AW_HIDE: u32 = 0x10000;
+    const AW_ACTIVATE: u32 = 0x20000;
+    let Some(visible) = with(|g| g.windows.get(&wnd).map(|w| w.visible)) else { return FALSE };
+    if flags & AW_HIDE != 0 {
+        if !visible {
+            return FALSE;
+        }
+        ShowWindow(wnd, 0);
+        return TRUE;
+    }
+    if visible {
+        return FALSE;
+    }
+    // ShowWindow answers whether the window was visible before, not whether it worked.
+    ShowWindow(wnd, if flags & AW_ACTIVATE != 0 { 5 } else { 8 });
+    TRUE
 }
 
-extern "win64" fn FlashWindowEx(_info: *const u8) -> Bool {
-    FALSE
+/// FLASHWINFO is 32 bytes (cbSize, hwnd at 8). The taskbar button is not
+/// flashed; like Windows the result says whether the window was active.
+extern "win64" fn FlashWindowEx(info: *const u8) -> Bool {
+    if info.is_null() || unsafe { teb::get::<u32>(info as u64, 0) } != 32 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: a FLASHWINFO of the size just checked.
+    let wnd = unsafe { teb::get::<u64>(info as u64, 8) };
+    with(|g| {
+        if !g.windows.contains_key(&wnd) {
+            return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
+        }
+        (root_window(g, g.focus) == Some(wnd)) as Bool
+    })
 }
 
-extern "win64" fn GetMenu(_wnd: u64) -> u64 {
-    0 // no window here has a menu bar
+/// The menu bar of a top-level window (SetMenu, or the CreateWindow menu).
+extern "win64" fn GetMenu(wnd: u64) -> u64 {
+    with(|g| {
+        let Some(w) = g.windows.get(&wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
+        if w.style & WS_CHILD == 0 && g.menus.contains_key(&w.menu) { w.menu } else { 0 }
+    })
+}
+
+/// Assigns a menu bar (NULL removes it). A child window cannot have one.
+extern "win64" fn SetMenu(wnd: u64, menu: u64) -> Bool {
+    with(|g| {
+        if menu != 0 && !g.menus.contains_key(&menu) {
+            return fail(1401, FALSE); // ERROR_INVALID_MENU_HANDLE
+        }
+        let Some(w) = g.windows.get_mut(&wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+        if w.style & WS_CHILD != 0 {
+            return fail(1401, FALSE);
+        }
+        w.menu = menu;
+        TRUE
+    })
+}
+
+/// A menu bar; kept like a popup menu (a list of items, no popup window).
+extern "win64" fn CreateMenu() -> u64 {
+    CreatePopupMenu()
+}
+
+/// The state flags of an item (MF_BYPOSITION or by command id), 0xFFFFFFFF if
+/// there is none. A pop-up item also carries its item count in the high byte.
+extern "win64" fn GetMenuState(menu: u64, item: u32, flags: u32) -> u32 {
+    const MF_BYPOSITION: u32 = 0x400;
+    const MF_POPUP: u32 = 0x10;
+    with(|g| {
+        let Some(m) = g.menus.get(&menu) else { return fail(1401, u32::MAX) };
+        let found = if flags & MF_BYPOSITION != 0 {
+            m.items.get(item as usize)
+        } else {
+            m.items.iter().find(|i| i.flags & MF_POPUP == 0 && i.id == item as u64)
+        };
+        let Some(i) = found else { return u32::MAX };
+        if i.flags & MF_POPUP != 0 {
+            let count = g.menus.get(&i.id).map_or(0, |sub| sub.items.len() as u32 & 0xFF);
+            count << 8 | (i.flags & 0xFF)
+        } else {
+            i.flags
+        }
+    })
 }
 
 extern "win64" fn CreatePopupMenu() -> u64 {
@@ -5587,7 +5808,7 @@ extern "win64" fn AppendMenuW(menu: u64, flags: u32, id: u64, item: *const u16) 
             return fail(ERROR_INVALID_PARAMETER, FALSE);
         }
         let Some(m) = g.menus.get_mut(&menu) else { return fail(1401, FALSE) }; // ERROR_INVALID_MENU_HANDLE
-        m.items.push(MenuItem { id, flags, text });
+        m.items.push(MenuItem { id, flags, text, data: 0 });
         TRUE
     })
 }
@@ -5661,15 +5882,93 @@ extern "win64" fn GetSystemMenu(wnd: u64, revert: Bool) -> u64 {
         if old != 0 && g.menus.contains_key(&old) { return old; }
         let menu = g.handle();
         let entries = [(0xF120, "Restore"), (0xF010, "Move"), (0xF000, "Size"), (0xF020, "Minimize"), (0xF030, "Maximize"), (0xF060, "Close")];
-        let items = entries.iter().map(|(id, text)| MenuItem { id: *id, flags: 0, text: Some(String::from(*text)) }).collect();
+        let items = entries.iter().map(|(id, text)| MenuItem { id: *id, flags: 0, text: Some(String::from(*text)), data: 0 }).collect();
         g.menus.insert(menu, Menu { items });
         g.windows.get_mut(&wnd).expect("window exists").system_menu = menu;
         menu
     })
 }
 
-extern "win64" fn SetMenuItemInfoW(_menu: u64, _item: u32, _by_pos: Bool, _info: *const u8) -> Bool {
-    FALSE
+/// MENUITEMINFOW (80 bytes): fMask @4, fType @8, fState @12, wID @16,
+/// hSubMenu @24, dwItemData @48, dwTypeData @56. Bitmaps, check-mark bitmaps
+/// and owner-drawn items are not supported (ERROR_NOT_SUPPORTED).
+extern "win64" fn SetMenuItemInfoW(menu: u64, item: u32, by_pos: Bool, info: *const u8) -> Bool {
+    const MIIM_STATE: u32 = 0x1;
+    const MIIM_ID: u32 = 0x2;
+    const MIIM_SUBMENU: u32 = 0x4;
+    const MIIM_CHECKMARKS: u32 = 0x8;
+    const MIIM_TYPE: u32 = 0x10;
+    const MIIM_DATA: u32 = 0x20;
+    const MIIM_STRING: u32 = 0x40;
+    const MIIM_BITMAP: u32 = 0x80;
+    const MIIM_FTYPE: u32 = 0x100;
+    const MF_POPUP: u32 = 0x10;
+    const MF_SEPARATOR: u32 = 0x800;
+    const STATE_BITS: u32 = 0x1 | 0x2 | 0x8 | 0x80; // grayed, disabled, checked, highlighted
+    if info.is_null() || unsafe { teb::get::<u32>(info as u64, 0) } != 80 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: a MENUITEMINFOW of the size just checked.
+    let (mask, kind, state, id, sub, data, text_ptr) = unsafe {
+        let b = info as u64;
+        (teb::get::<u32>(b, 4), teb::get::<u32>(b, 8), teb::get::<u32>(b, 12), teb::get::<u32>(b, 16),
+         teb::get::<u64>(b, 24), teb::get::<u64>(b, 48), teb::get::<u64>(b, 56))
+    };
+    if mask & (MIIM_CHECKMARKS | MIIM_BITMAP) != 0 || mask & (MIIM_TYPE | MIIM_FTYPE) != 0 && kind & !MF_SEPARATOR != 0 {
+        return fail(ERROR_NOT_SUPPORTED, FALSE);
+    }
+    let text = if mask & MIIM_STRING != 0 || mask & MIIM_TYPE != 0 && kind & MF_SEPARATOR == 0 {
+        match wide(text_ptr as *const u16) {
+            Some(t) => Some(t),
+            None => return fail(ERROR_INVALID_PARAMETER, FALSE),
+        }
+    } else {
+        None
+    };
+    with(|g| {
+        if sub != 0 && mask & MIIM_SUBMENU != 0 && (sub == menu || !g.menus.contains_key(&sub) || menu_contains(g, sub, menu, 0)) {
+            return fail(ERROR_INVALID_PARAMETER, FALSE);
+        }
+        let Some(m) = g.menus.get_mut(&menu) else { return fail(1401, FALSE) };
+        let index = if by_pos != 0 {
+            (item as usize).lt(&m.items.len()).then_some(item as usize)
+        } else {
+            m.items.iter().position(|i| i.flags & MF_POPUP == 0 && i.id == item as u64)
+        };
+        let Some(index) = index else { return fail(1456, FALSE) }; // ERROR_MENU_ITEM_NOT_FOUND
+        let it = &mut m.items[index];
+        if mask & MIIM_STATE != 0 {
+            it.flags = it.flags & !STATE_BITS | state & STATE_BITS;
+        }
+        if mask & MIIM_ID != 0 && it.flags & MF_POPUP == 0 {
+            it.id = id as u64;
+        }
+        if mask & MIIM_SUBMENU != 0 {
+            if sub != 0 {
+                it.flags |= MF_POPUP;
+                it.id = sub;
+            } else if it.flags & MF_POPUP != 0 {
+                it.flags &= !MF_POPUP;
+                it.id = 0;
+            }
+        }
+        if mask & (MIIM_TYPE | MIIM_FTYPE) != 0 {
+            if kind & MF_SEPARATOR != 0 {
+                it.flags |= MF_SEPARATOR;
+                it.text = None;
+            } else {
+                it.flags &= !MF_SEPARATOR;
+            }
+        }
+        if text.is_some() {
+            it.flags &= !MF_SEPARATOR;
+            it.text = text;
+        }
+        if mask & MIIM_DATA != 0 {
+            it.data = data;
+        }
+        TRUE
+    })
 }
 
 /// Popup menus are not drawn yet: the call fails with ERROR_NOT_SUPPORTED
@@ -5767,34 +6066,75 @@ extern "win64" fn GetGUIThreadInfo(_thread: u32, out: *mut u8) -> Bool {
     TRUE
 }
 
-extern "win64" fn SetSysColors(_count: i32, _elements: *const i32, _colors: *const u32) -> Bool {
-    TRUE // the desktop's palette is fixed
+/// Changes colours for this process's session; every top-level window is
+/// told with WM_SYSCOLORCHANGE.
+extern "win64" fn SetSysColors(count: i32, elements: *const i32, colors: *const u32) -> Bool {
+    if count <= 0 || elements.is_null() || colors.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's arrays of `count` entries.
+    let pairs: Vec<(i32, u32)> = (0..count as usize).map(|i| unsafe { (*elements.add(i), *colors.add(i)) }).collect();
+    if pairs.iter().any(|&(e, _)| !(0..=30).contains(&e)) {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    for (e, c) in pairs {
+        SYS_OVERRIDE[e as usize].store(1 << 32 | colorref(c) as u64, core::sync::atomic::Ordering::Relaxed);
+    }
+    let tops: Vec<u64> = with(|g| g.windows.iter().filter(|(_, w)| w.style & WS_CHILD == 0).map(|(&h, _)| h).collect());
+    for h in tops {
+        PostMessageW(h, 0x15, 0, 0); // WM_SYSCOLORCHANGE
+    }
+    TRUE
 }
 
 extern "win64" fn OpenInputDesktop(_flags: u32, _inherit: Bool, _access: u32) -> u64 {
     0x20_0001 // one input desktop, always open
 }
 
-extern "win64" fn SetThreadDesktop(_desktop: u64) -> Bool {
-    TRUE
+/// Whether the calling thread owns a window (SetThreadDesktop refuses then).
+pub(crate) fn thread_has_windows() -> bool {
+    let me = teb::current_tid();
+    with(|g| g.windows.values().any(|w| w.thread == me))
 }
 
 /// Device and power notifications are accepted and never delivered: OSyx
 /// reports no device arrival and has no power events to send.
-extern "win64" fn RegisterDeviceNotificationW(_recipient: u64, _filter: *const u8, _flags: u32) -> u64 {
-    0x30_0001
+/// Registrations are recorded so they can be released; nothing is ever
+/// delivered because OSyx reports no device arrival or removal.
+static NOTIFICATIONS: os_std::sync::Mutex<(u64, alloc::collections::BTreeSet<u64>)> = os_std::sync::Mutex::new((0x30_0000, alloc::collections::BTreeSet::new()));
+
+fn register_notification(recipient: u64) -> u64 {
+    if recipient == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut n = NOTIFICATIONS.lock().unwrap();
+    n.0 += 1;
+    let h = n.0;
+    n.1.insert(h);
+    h
 }
 
-extern "win64" fn UnregisterDeviceNotification(_notify: u64) -> Bool {
-    TRUE
+fn unregister_notification(h: u64) -> Bool {
+    if NOTIFICATIONS.lock().unwrap().1.remove(&h) { TRUE } else { fail(ERROR_INVALID_HANDLE, FALSE) }
 }
 
-extern "win64" fn RegisterPowerSettingNotification(_recipient: u64, _guid: *const u8, _flags: u32) -> u64 {
-    0x30_0002
+extern "win64" fn RegisterDeviceNotificationW(recipient: u64, _filter: *const u8, _flags: u32) -> u64 {
+    register_notification(recipient)
 }
 
-extern "win64" fn UnregisterPowerSettingNotification(_notify: u64) -> Bool {
-    TRUE
+extern "win64" fn UnregisterDeviceNotification(notify: u64) -> Bool {
+    unregister_notification(notify)
+}
+
+extern "win64" fn RegisterPowerSettingNotification(recipient: u64, guid: *const u8, _flags: u32) -> u64 {
+    if guid.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    register_notification(recipient)
+}
+
+extern "win64" fn UnregisterPowerSettingNotification(notify: u64) -> Bool {
+    unregister_notification(notify)
 }
 
 extern "win64" fn SendNotifyMessageW(wnd: u64, msg: u32, wparam: u64, lparam: i64) -> Bool {
@@ -6062,6 +6402,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetMenu,
         CreatePopupMenu,
         AppendMenuW,
+        CreateMenu,
+        GetMenuState,
         EnableMenuItem,
         DestroyMenu,
         ExitWindowsEx,
@@ -6079,7 +6421,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetGUIThreadInfo,
         SetSysColors,
         OpenInputDesktop,
-        SetThreadDesktop,
+        GetCaretPos,
+        SetMenu,
+        SetMessageExtraInfo,
         RegisterDeviceNotificationW,
         UnregisterDeviceNotification,
         RegisterPowerSettingNotification,
@@ -6161,24 +6505,31 @@ extern "win64" fn GdiFlush() -> Bool {
 
 /// Printing goes nowhere: there is no spooler, but a program that opens a
 /// job and ends it sees the calls succeed rather than fail mid-print.
-extern "win64" fn StartDocW(_dc: u64, _doc: *const u8) -> i32 {
-    1
+extern "win64" fn StartDocW(dc: u64, _doc: *const u8) -> i32 {
+    printer_dc_only(dc)
 }
 
-extern "win64" fn EndDoc(_dc: u64) -> i32 {
-    1
+extern "win64" fn EndDoc(dc: u64) -> i32 {
+    printer_dc_only(dc)
 }
 
-extern "win64" fn StartPage(_dc: u64) -> i32 {
-    1
+extern "win64" fn StartPage(dc: u64) -> i32 {
+    printer_dc_only(dc)
 }
 
-extern "win64" fn EndPage(_dc: u64) -> i32 {
-    1
+extern "win64" fn EndPage(dc: u64) -> i32 {
+    printer_dc_only(dc)
 }
 
-extern "win64" fn AbortDoc(_dc: u64) -> i32 {
-    1
+/// OSyx has no printers, so no device context is a printer's: the print
+/// calls fail with SP_ERROR (-1) and ERROR_INVALID_HANDLE, as Windows does for
+/// a screen or invalid DC.
+fn printer_dc_only(_dc: u64) -> i32 {
+    fail(ERROR_INVALID_HANDLE, -1)
+}
+
+extern "win64" fn AbortDoc(dc: u64) -> i32 {
+    printer_dc_only(dc)
 }
 
 pub fn gdi_exports() -> Vec<(&'static str, u64)> {
