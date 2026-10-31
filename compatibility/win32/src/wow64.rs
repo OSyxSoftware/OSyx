@@ -794,6 +794,8 @@ fn host_override(symbol: &str) -> Option<u64> {
         "__wgetmainargs" => Some(crate::ucrt::WGetMainArgs32 as *const () as u64),
         "ShellExecuteExW" => Some(crate::shell32::ShellExecuteExW32 as *const () as u64),
         "IUnknown_QueryService" => Some(crate::shlwapi::IUnknown_QueryService32 as *const () as u64),
+        "GetObjectW" => Some(crate::user32::GetObjectW32 as *const () as u64),
+        "GetTokenInformation" => Some(crate::tokens::GetTokenInformation32 as *const () as u64),
         _ => None,
     }
 }

@@ -366,7 +366,7 @@ extern "win64" fn CreateDCA(driver: *const u8, device: *const u8, _output: *cons
 extern "win64" fn CreateICW(a: *const u16, b: *const u16, c: *const u16, d: *const u8) -> u64 {
     CreateDCW(a, b, c, d)
 }
-extern "win64" fn CreateCompatibleDC(dc: u64) -> u64 {
+pub(super) extern "win64" fn CreateCompatibleDC(dc: u64) -> u64 {
     with(|g| {
         if dc != 0 && !g.dcs.contains_key(&dc) {
             return fail(ERROR_INVALID_HANDLE, 0);
@@ -382,7 +382,7 @@ extern "win64" fn CreateCompatibleDC(dc: u64) -> u64 {
         h
     })
 }
-extern "win64" fn DeleteDC(dc: u64) -> Bool {
+pub(super) extern "win64" fn DeleteDC(dc: u64) -> Bool {
     with(|g| g.dcs.remove(&dc).is_some()) as Bool
 }
 extern "win64" fn CreateCompatibleBitmap(dc: u64, w: i32, h: i32) -> u64 {
@@ -470,7 +470,7 @@ extern "win64" fn CreateDIBitmap(
     }
     handle
 }
-extern "win64" fn GetObjectW(obj: u64, size: i32, out: *mut u8) -> i32 {
+pub(super) extern "win64" fn GetObjectW(obj: u64, size: i32, out: *mut u8) -> i32 {
     with(|g| {
         let Some(b) = g.bitmaps.get(&obj) else { return 0 };
         if out.is_null() {
@@ -510,6 +510,46 @@ extern "win64" fn GetObjectW(obj: u64, size: i32, out: *mut u8) -> i32 {
         }
         n as i32
     })
+}
+
+/// GetObjectW for a 32-bit (WoW64) caller: BITMAP is 24 bytes there
+/// (bmBits is 4 bytes) and DIBSECTION 84 (the section handle and offset
+/// follow the masks directly); the host fills its 64-bit layout and the
+/// fields move down.
+pub(crate) extern "win64" fn GetObjectW32(obj: u64, size: i32, out: *mut u8) -> i32 {
+    const BITMAP32: i32 = 24;
+    const DIBSECTION32: i32 = 84;
+    let host = GetObjectW(obj, 0, core::ptr::null_mut());
+    if host == 0 {
+        return 0;
+    }
+    if out.is_null() {
+        return BITMAP32;
+    }
+    if size < BITMAP32 {
+        return 0;
+    }
+    let mut wide = [0u8; 104];
+    let n = GetObjectW(obj, if size >= DIBSECTION32 { 104 } else { 32 }, wide.as_mut_ptr());
+    if n == 0 {
+        return 0;
+    }
+    let mut narrow = [0u8; DIBSECTION32 as usize];
+    // bmType .. bmBitsPixel, then bmBits truncated (the 32-bit arena is low).
+    narrow[..20].copy_from_slice(&wide[..20]);
+    narrow[20..24].copy_from_slice(&wide[24..28]);
+    let len = if n == 104 {
+        narrow[24..64].copy_from_slice(&wide[32..72]); // BITMAPINFOHEADER
+        narrow[64..76].copy_from_slice(&wide[72..84]); // dsBitfields
+        narrow[76..80].copy_from_slice(&wide[88..92]); // dshSection
+        narrow[80..84].copy_from_slice(&wide[96..100]); // dsOffset
+        DIBSECTION32
+    } else {
+        BITMAP32
+    };
+    // SAFETY: the caller's buffer holds `size` >= `len` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(narrow.as_ptr(), out, len as usize) };
+    len
 }
 
 extern "win64" fn GetDIBits(
@@ -612,6 +652,8 @@ pub(super) fn draw_dc<R>(
 ) -> Option<R> {
     with(|g| {
         let d = g.dcs.get(&dc)?;
+        // A child window never draws outside its ancestors' client areas.
+        let limit = if d.memory { None } else { Some(ancestor_clip(&g.windows, d.hwnd)) };
         let mut bitmap = if d.memory { g.bitmaps.remove(&d.bitmap) } else { None };
         let mut pixels = bitmap.as_ref().map(|b| b.pixels());
         let mut surface = if let (Some(b), Some(p)) = (&bitmap, &mut pixels) {
@@ -619,7 +661,10 @@ pub(super) fn draw_dc<R>(
         } else {
             window_surface(&mut g.windows, d.hwnd)?
         };
-        let full = surface.bounds().intersect(&d.paint);
+        let mut full = surface.bounds().intersect(&d.paint);
+        if let Some(limit) = limit {
+            full = full.intersect(&limit);
+        }
         let clips = d.clip.clone().unwrap_or_else(|| Region::from_rect(full));
         let mut result = None;
         let mut touched = Rect::EMPTY;
@@ -1068,6 +1113,24 @@ fn insert_region(region: Region) -> u64 {
 extern "win64" fn CreateRectRgn(l: i32, t: i32, r: i32, b: i32) -> u64 {
     let rect = Rect::new(l.min(r), t.min(b), l.abs_diff(r), t.abs_diff(b));
     insert_region(Region::from_rect(rect))
+}
+/// `dest = a <mode> b` (RGN_AND 1, OR 2, XOR 3, DIFF 4, COPY 5: just `a`);
+/// the result's complexity, or ERROR (0).
+extern "win64" fn CombineRgn(dest: u64, a: u64, b: u64, mode: i32) -> i32 {
+    with(|g| {
+        let Some(first) = g.regions.get(&a).cloned() else { return 0 };
+        let result = if mode == 5 {
+            Some(first)
+        } else {
+            match g.regions.get(&b) {
+                Some(second) => first.combine(second, mode),
+                None => return 0,
+            }
+        };
+        let (Some(result), Some(slot)) = (result, g.regions.get_mut(&dest)) else { return 0 };
+        *slot = result;
+        slot.kind()
+    })
 }
 extern "win64" fn ExtCreateRegion(transform: *const Xform, size: u32, data: *const u8) -> u64 {
     if data.is_null() || size < 32 {
@@ -2089,6 +2152,7 @@ pub(super) fn exports() -> Vec<(&'static str, u64)> {
         SelectClipRgn,
         ExtSelectClipRgn,
         CreateRectRgn,
+        CombineRgn,
         ExtCreateRegion,
         GetClipRgn,
         GetRgnBox,

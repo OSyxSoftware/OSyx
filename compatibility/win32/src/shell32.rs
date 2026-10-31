@@ -642,12 +642,37 @@ extern "win64" fn SHGetSpecialFolderPathA(_hwnd: u64, out: *mut u8, csidl: u32, 
 
 const E_NOTIMPL: u32 = 0x8000_4001;
 
-extern "win64" fn SHGetSpecialFolderLocation(_hwnd: u64, _csidl: u32, pidl: *mut u64) -> u32 {
-    if !pidl.is_null() {
-        // SAFETY: the caller's out pointer.
-        unsafe { *pidl = 0 };
+/// The ID list of a special folder: the file-system PIDL of its path (there
+/// is no shell namespace, so virtual folders have none).
+extern "win64" fn SHGetSpecialFolderLocation(_hwnd: u64, csidl: u32, pidl: *mut u64) -> u32 {
+    if pidl.is_null() {
+        return E_INVALIDARG;
     }
-    E_INVALIDARG // no shell namespace: only the file dialogs' PIDLs exist
+    // SAFETY: the caller's out pointer; NULL on failure.
+    unsafe { *pidl = 0 };
+    let mut buf = [0u16; MAX_PATH];
+    let hr = SHGetFolderPathW(0, csidl, 0, 0, buf.as_mut_ptr());
+    if hr != S_OK {
+        return hr;
+    }
+    match ILCreateFromPathW(buf.as_ptr()) {
+        0 => E_OUTOFMEMORY,
+        id => {
+            // SAFETY: as above.
+            unsafe { *pidl = id };
+            S_OK
+        }
+    }
+}
+
+/// SHCloneSpecialIDList (ordinal 89): a special folder's ID list, the folder
+/// created first when `create` is set; NULL when it does not exist. NSIS
+/// installers call it whenever SHGetFolderPath fails for a folder that is
+/// not there yet.
+extern "win64" fn SHCloneSpecialIDList(_hwnd: u64, csidl: i32, create: i32) -> u64 {
+    let flags = csidl as u32 | if create != 0 { CSIDL_FLAG_CREATE } else { 0 };
+    let mut id = 0u64;
+    if SHGetSpecialFolderLocation(0, flags, &mut id) == S_OK { id } else { 0 }
 }
 
 // ---- stock icons ------------------------------------------------------------------------------
@@ -1191,11 +1216,28 @@ extern "win64" fn IsUserAnAdmin() -> i32 {
 }
 
 pub fn ordinals() -> Vec<(u16, u64)> {
-    alloc::vec![(155, crate::commdlg::il_free_address()), (190, ILCreateFromPathW as *const () as u64), (680, IsUserAnAdmin as *const () as u64)]
+    alloc::vec![
+        (89, SHCloneSpecialIDList as *const () as u64),
+        (155, crate::commdlg::il_free_address()),
+        (190, ILCreateFromPathW as *const () as u64),
+        (680, IsUserAnAdmin as *const () as u64),
+    ]
+}
+
+/// The shell namespace (IShellFolder) is not implemented: callers get
+/// E_NOTIMPL and a null folder instead of failing to load.
+extern "win64" fn SHGetDesktopFolder(out: *mut u64) -> u32 {
+    if !out.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *out = 0 };
+    }
+    E_NOTIMPL
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        SHGetDesktopFolder,
+        SHCloneSpecialIDList,
         IsUserAnAdmin,
         SHGetKnownFolderPath,
         SHGetFolderPathW,

@@ -7,7 +7,7 @@
 
 use crate::error::*;
 use crate::objects::{self, Console, EventObj, FileObj, MutexObj, Object, SemaphoreObj, ThreadObj};
-use crate::ini::{GetPrivateProfileStringW, WritePrivateProfileStringW};
+use crate::ini::{GetPrivateProfileIntA, GetPrivateProfileIntW, GetPrivateProfileStringW, WritePrivateProfileStringW};
 use crate::{loader, mem, path, teb};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -575,9 +575,89 @@ pub fn read_handle(h: u64, buf: *mut u8, n: u32, offset: Option<u64>) -> Result<
             if let Some(o) = offset {
                 os_sys::seek(f.fd, o as i64, osyx_abi::SEEK_SET).map_err(errno_to_win32)?;
             }
-            os_sys::read_raw(f.fd, buf as usize, n as usize).map(|k| k as u32).map_err(errno_to_win32)
+            let at = io_trace(&f.path).then(|| os_sys::seek(f.fd, 0, osyx_abi::SEEK_CUR).unwrap_or(u64::MAX));
+            let r = read_all(f.fd, buf, n);
+            if let Some(at) = at {
+                trace_io('R', &f.path, at, n, &r, buf);
+            }
+            r
         }
         _ => Err(ERROR_INVALID_HANDLE),
+    }
+}
+
+/// `OSYX_WINRUN_IOTRACE=<text>`: file reads and writes on paths containing
+/// `<text>` (any path for `1`) are logged with their position, size,
+/// result and an FNV-1a hash of the bytes, to compare a program's file
+/// traffic with a reference.
+fn io_trace(path: &str) -> bool {
+    static FILTER: Mutex<Option<Option<String>>> = Mutex::new(None);
+    let mut filter = FILTER.lock().unwrap();
+    let filter = filter.get_or_insert_with(|| os_std::env::var("OSYX_WINRUN_IOTRACE").ok().filter(|v| !v.is_empty()));
+    match filter.as_deref() {
+        None => false,
+        Some("1") => true,
+        Some(text) => path.contains(text),
+    }
+}
+
+fn trace_io(kind: char, path: &str, at: u64, want: u32, result: &Result<u32, u32>, buf: *const u8) {
+    match result {
+        Ok(k) => {
+            // SAFETY: the call just moved `k` bytes through the caller's buffer.
+            let bytes = unsafe { core::slice::from_raw_parts(buf, *k as usize) };
+            let hash = bytes.iter().fold(0x811c_9dc5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+            os_std::eprintln!("winrun: io {kind} {path} at {at} want {want} got {k} fnv {hash:08x}");
+        }
+        Err(e) => os_std::eprintln!("winrun: io {kind} {path} at {at} want {want} error {e}"),
+    }
+}
+
+/// ReadFile on a file returns everything asked for up to the end of the
+/// file. The kernel hands out at most `MAX_READ` bytes per call and, like
+/// any POSIX read, may return fewer, so the request is read in pieces until
+/// it is complete or the file ends (a read of 0). A short read from a pipe
+/// or device ends the call, as a single read would: those return what is
+/// there.
+fn read_all(fd: u64, buf: *mut u8, n: u32) -> Result<u32, u32> {
+    let n = n as usize;
+    let mut done = 0;
+    let mut regular = None;
+    loop {
+        let want = (n - done).min(osyx_abi::MAX_READ);
+        match os_sys::read_raw(fd, buf as usize + done, want) {
+            Ok(k) => {
+                done += k;
+                if k == 0 || done == n {
+                    return Ok(done as u32);
+                }
+                if k < want && !*regular.get_or_insert_with(|| os_sys::fstat(fd).is_ok_and(|st| st.kind == osyx_abi::KIND_FILE)) {
+                    return Ok(done as u32);
+                }
+            }
+            Err(e) if done == 0 => return Err(errno_to_win32(e)),
+            Err(_) => return Ok(done as u32),
+        }
+    }
+}
+
+/// WriteFile writes the whole buffer; the kernel takes at most `MAX_WRITE`
+/// bytes per call (and refuses larger ones), so it goes in pieces.
+fn write_all(fd: u64, buf: *const u8, n: u32) -> Result<u32, u32> {
+    let n = n as usize;
+    let mut done = 0;
+    loop {
+        let want = (n - done).min(osyx_abi::MAX_WRITE);
+        match os_sys::write_raw(fd, buf as usize + done, want) {
+            Ok(k) => {
+                done += k;
+                if k < want || done == n {
+                    return Ok(done as u32);
+                }
+            }
+            Err(e) if done == 0 => return Err(errno_to_win32(e)),
+            Err(_) => return Ok(done as u32),
+        }
     }
 }
 
@@ -599,7 +679,12 @@ pub fn write_handle(h: u64, buf: *const u8, n: u32, offset: Option<u64>) -> Resu
                 os_sys::seek(f.fd, o as i64, osyx_abi::SEEK_SET).map_err(errno_to_win32)?;
             }
             crate::path::note_write(&f.path, n as usize);
-            os_sys::write_raw(f.fd, buf as usize, n as usize).map(|k| k as u32).map_err(errno_to_win32)
+            let at = io_trace(&f.path).then(|| os_sys::seek(f.fd, 0, osyx_abi::SEEK_CUR).unwrap_or(u64::MAX));
+            let r = write_all(f.fd, buf, n);
+            if let Some(at) = at {
+                trace_io('W', &f.path, at, n, &r, buf);
+            }
+            r
         }
         _ => Err(ERROR_INVALID_HANDLE),
     }
@@ -3158,6 +3243,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         lstrcpyA,
         lstrcmpW,
         GetPrivateProfileStringW,
+        GetPrivateProfileIntW,
+        GetPrivateProfileIntA,
         WritePrivateProfileStringW,
         lstrcmpiA,
         MulDiv,

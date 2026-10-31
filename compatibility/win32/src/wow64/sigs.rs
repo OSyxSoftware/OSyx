@@ -12,7 +12,9 @@
 //! that call back into 32-bit code (window and thread procedures), that
 //! return 64-bit code addresses (GetProcAddress) or load modules
 //! (LoadLibraryExW), and variadic ones (wsprintf). CreateThread is listed:
-//! its 32-bit start routine runs through `wow64::CreateThread32`.
+//! its 32-bit start routine runs through `wow64::CreateThread32`. Likewise
+//! GetObjectW and GetTokenInformation are listed because `host_override`
+//! gives them 32-bit layouts (`GetObjectW32`, `GetTokenInformation32`).
 
 use super::{ArgKind, RetKind, Signature};
 
@@ -299,6 +301,44 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(EnumWindows, [Ptr, Handle], U32),
     sig!(StringFromGUID2, [Ptr, Ptr, Int], I32),
     sig!(CLSIDFromString, [Ptr, Ptr], U32),
+    sig!(IIDFromString, [Ptr, Ptr], U32),
+    sig!(IsWow64Process, [Handle, Ptr], U32),
+    sig!(IsWow64Process2, [Handle, Ptr, Ptr], U32),
+    sig!(SendDlgItemMessageW, [Handle, Int, Uint, Handle, Int], I32),
+    sig!(SendDlgItemMessageA, [Handle, Int, Uint, Handle, Int], I32),
+    // NSIS plugins (InstallOptions, LangDLL, UserInfo).
+    sig!(SetEndOfFile, [Handle], U32),
+    sig!(GetPrivateProfileIntW, [Ptr, Ptr, Int, Ptr], U32),
+    sig!(GetPrivateProfileIntA, [Ptr, Ptr, Int, Ptr], U32),
+    sig!(GetCurrentThread, [], Handle),
+    // POINT by value: x and y are two stack slots, one register on x64.
+    sig!(PtInRect, [Ptr, U64], U32),
+    sig!(GetDlgCtrlID, [Handle], I32),
+    sig!(GetClipboardData, [Uint], Handle),
+    sig!(SetWindowRgn, [Handle, Handle, Int], I32),
+    sig!(LoadIconW, [Handle, Ptr], Handle),
+    sig!(LoadIconA, [Handle, Ptr], Handle),
+    sig!(DestroyIcon, [Handle], U32),
+    sig!(CreateCompatibleDC, [Handle], Handle),
+    sig!(DeleteDC, [Handle], U32),
+    sig!(BitBlt, [Handle, Int, Int, Int, Int, Handle, Int, Int, Uint], U32),
+    // BITMAP and DIBSECTION are narrower for 32-bit callers: wow64 maps
+    // this one to `GetObjectW32`.
+    sig!(GetObjectW, [Handle, Int, Ptr], I32),
+    sig!(GetDIBits, [Handle, Handle, Uint, Uint, Ptr, Ptr, Uint], I32),
+    sig!(CreateRectRgn, [Int, Int, Int, Int], Handle),
+    sig!(CombineRgn, [Handle, Handle, Handle, Int], I32),
+    // Returns no COM object (E_NOTIMPL), so no 64-bit vtable reaches 32-bit code.
+    sig!(SHGetDesktopFolder, [OutWide], U32),
+    // SID pointers inside the result: wow64 maps it to `GetTokenInformation32`.
+    sig!(GetTokenInformation, [Handle, Uint, Ptr, Uint, Ptr], U32),
+    sig!(OpenThreadToken, [Handle, Uint, Int, OutWide], U32),
+    sig!(GetUserNameW, [Ptr, Ptr], U32),
+    sig!(CheckTokenMembership, [Handle, Ptr, Ptr], U32),
+    // NSIS looks these up by ordinal: SHCloneSpecialIDList (shell32 89)
+    // whenever SHGetFolderPath fails, IsOS (shlwapi 437) at start-up.
+    sig!(SHCloneSpecialIDList, [Handle, Int, Int], Ptr),
+    sig!(IsOS, [Uint], I32),
     sig!(GetOpenFileNameW, [Ptr], U32),
     sig!(GetSaveFileNameW, [Ptr], U32),
     sig!(CommDlgExtendedError, [], U32),

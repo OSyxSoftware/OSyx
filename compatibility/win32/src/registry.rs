@@ -205,7 +205,8 @@ fn save(h: Hive, d: &HiveData) -> Result<(), u32> {
     let mut done = 0;
     let mut result = Ok(());
     while done < text.len() {
-        match os_sys::write_raw(fd, text.as_ptr() as usize + done, text.len() - done) {
+        // The kernel refuses a write larger than MAX_WRITE.
+        match os_sys::write_raw(fd, text.as_ptr() as usize + done, (text.len() - done).min(osyx_abi::MAX_WRITE)) {
             Ok(n) if n > 0 => done += n,
             Ok(_) => break,
             Err(e) => {

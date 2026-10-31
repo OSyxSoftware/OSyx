@@ -235,19 +235,25 @@ fn runnable(t: &Token, d: &TokenData) -> bool {
 
 // ---- queries ----------------------------------------------------------------------
 
-fn put_sid(data: &mut Vec<u8>, at: usize, s: &[u8], base: u64) {
+/// Appends SID `s` and stores its address (a pointer of `ptr` bytes: 8, or
+/// 4 for a 32-bit caller) at `at`.
+fn put_sid(data: &mut Vec<u8>, at: usize, s: &[u8], base: u64, ptr: usize) {
     let offset = data.len();
-    data[at..at + 8].copy_from_slice(&(base + offset as u64).to_le_bytes());
+    data[at..at + ptr].copy_from_slice(&(base + offset as u64).to_le_bytes()[..ptr]);
     data.extend_from_slice(s);
 }
 
-fn sid_groups(list: &[(Vec<u8>, u32)], base: u64) -> Vec<u8> {
-    let mut data = alloc::vec![0; 8 + 16 * list.len()];
+/// TOKEN_GROUPS: the count (padded to pointer alignment), then one
+/// SID_AND_ATTRIBUTES per group (a pointer and a DWORD, padded to two
+/// pointers), then the SIDs.
+fn sid_groups(list: &[(Vec<u8>, u32)], base: u64, ptr: usize) -> Vec<u8> {
+    let entry = 2 * ptr;
+    let mut data = alloc::vec![0; ptr + entry * list.len()];
     data[..4].copy_from_slice(&(list.len() as u32).to_le_bytes());
     for (i, (s, attrs)) in list.iter().enumerate() {
-        let at = 8 + 16 * i;
-        data[at + 8..at + 12].copy_from_slice(&attrs.to_le_bytes());
-        put_sid(&mut data, at, s, base);
+        let at = ptr + entry * i;
+        data[at + ptr..at + ptr + 4].copy_from_slice(&attrs.to_le_bytes());
+        put_sid(&mut data, at, s, base, ptr);
     }
     data
 }
@@ -262,43 +268,45 @@ fn privileges_block(list: &[(u32, u32)]) -> Vec<u8> {
     data
 }
 
-fn token_info(t: &Token, d: &TokenData, class: u32, base: u64) -> Result<Vec<u8>, u32> {
+/// Token information class `class` laid out for a caller whose pointers
+/// are `ptr` bytes (8 on x64, 4 for a 32-bit WoW64 program).
+fn token_info(t: &Token, d: &TokenData, class: u32, base: u64, ptr: usize) -> Result<Vec<u8>, u32> {
     let u32b = |v: u32| v.to_le_bytes().to_vec();
     let mut data;
     match class {
         1 => {
-            data = alloc::vec![0; 16];
+            data = alloc::vec![0; 2 * ptr];
             let user = user_sid(t.uid);
             if d.deny_only.contains(&user) {
-                data[8..12].copy_from_slice(&SE_GROUP_USE_FOR_DENY_ONLY.to_le_bytes());
+                data[ptr..ptr + 4].copy_from_slice(&SE_GROUP_USE_FOR_DENY_ONLY.to_le_bytes());
             }
-            put_sid(&mut data, 0, &user, base);
+            put_sid(&mut data, 0, &user, base, ptr);
         }
-        2 => data = sid_groups(&groups(t.uid, t.gid, d), base),
+        2 => data = sid_groups(&groups(t.uid, t.gid, d), base, ptr),
         3 => data = privileges_block(&d.privileges),
         4 | 5 => {
-            data = alloc::vec![0; 8];
-            put_sid(&mut data, 0, if class == 4 { &d.owner } else { &d.primary_group }, base);
+            data = alloc::vec![0; ptr];
+            put_sid(&mut data, 0, if class == 4 { &d.owner } else { &d.primary_group }, base, ptr);
         }
         6 => {
-            data = alloc::vec![0; 8];
+            data = alloc::vec![0; ptr];
             if let Some(acl) = &d.default_dacl {
                 let at = data.len();
-                data[..8].copy_from_slice(&(base + at as u64).to_le_bytes());
+                data[..ptr].copy_from_slice(&(base + at as u64).to_le_bytes()[..ptr]);
                 data.extend_from_slice(acl);
             }
         }
         8 => data = u32b(if d.impersonation.is_some() { 2 } else { 1 }),
         9 => data = u32b(d.impersonation.ok_or(ERROR_INVALID_PARAMETER)?),
-        11 => data = sid_groups(&d.restricting.iter().map(|s| (s.clone(), GROUP_ON)).collect::<Vec<_>>(), base),
+        11 => data = sid_groups(&d.restricting.iter().map(|s| (s.clone(), GROUP_ON)).collect::<Vec<_>>(), base, ptr),
         12 => data = u32b(1), // OSyx has one interactive session
         // TokenElevationType: OSyx has no split (filtered) admin tokens.
         18 => data = u32b(1),
         20 => data = u32b(u32::from(t.uid == 0)),
         25 => {
-            data = alloc::vec![0; 16];
-            data[8..12].copy_from_slice(&(SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED).to_le_bytes());
-            put_sid(&mut data, 0, &integrity_sid(d.integrity), base);
+            data = alloc::vec![0; 2 * ptr];
+            data[ptr..ptr + 4].copy_from_slice(&(SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED).to_le_bytes());
+            put_sid(&mut data, 0, &integrity_sid(d.integrity), base, ptr);
         }
         27 => data = u32b(d.mandatory_policy),
         29 => data = u32b(0), // TokenIsAppContainer
@@ -308,6 +316,15 @@ fn token_info(t: &Token, d: &TokenData, class: u32, base: u64) -> Result<Vec<u8>
 }
 
 extern "win64" fn GetTokenInformation(h: u64, class: u32, out: *mut u8, size: u32, needed: *mut u32) -> i32 {
+    token_information(h, class, out, size, needed, 8)
+}
+
+/// GetTokenInformation for a 32-bit (WoW64) caller: 4-byte pointers.
+pub(crate) extern "win64" fn GetTokenInformation32(h: u64, class: u32, out: *mut u8, size: u32, needed: *mut u32) -> i32 {
+    token_information(h, class, out, size, needed, 4)
+}
+
+fn token_information(h: u64, class: u32, out: *mut u8, size: u32, needed: *mut u32, ptr: usize) -> i32 {
     let t = match token(h).and_then(|t| need(&t, TOKEN_QUERY).map(|()| t)) {
         Ok(t) => t,
         Err(e) => return fail(e, 0),
@@ -316,7 +333,7 @@ extern "win64" fn GetTokenInformation(h: u64, class: u32, out: *mut u8, size: u3
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let d = t.state.data.lock().unwrap().clone();
-    let data = match token_info(&t, &d, class, out as u64) {
+    let data = match token_info(&t, &d, class, out as u64, ptr) {
         Ok(v) => v,
         Err(e) => return fail(e, 0),
     };

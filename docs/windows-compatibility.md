@@ -198,6 +198,33 @@ The elevated program keeps the desktop user's profile (`HOME`). The prompt
 shows only the path, not a publisher, and does not run on a separate secure
 desktop.
 
+NSIS installers (checked with the 32-bit Notepad++ 8.6.9 x64 installer, NSIS
+3.09, in place of SteamSetup): the language dialog (LangDLL), welcome,
+license, directory, components, custom nsDialogs and install pages run, and a
+silent install (`/S`) completes. What makes that work:
+* `ReadFile`/`WriteFile` move the whole request: the kernel takes at most
+  `MAX_READ`/`MAX_WRITE` (1 MiB) per call and may return a short read, so
+  winrun loops until the request is done or the file ends. NSIS reads its
+  whole compressed header (1.1 MiB for Notepad++) with one call.
+* WoW64 bridges IIDFromString, IsWow64Process (TRUE for a 32-bit program),
+  IsWow64Process2, SendDlgItemMessage, GetPrivateProfileInt, GetDlgCtrlID,
+  SetWindowRgn (accepted, windows stay rectangular), CombineRgn, LoadIcon,
+  GetObjectW and GetTokenInformation with their 32-bit layouts, and the
+  ordinals NSIS looks up (shell32 89 SHCloneSpecialIDList, shlwapi 437 IsOS).
+* Controls: rich edit (`RichEdit20W`/`A`, `RICHEDIT50W`, `RichEdit`;
+  riched20/riched32/msftedit load) shows read-only text streamed in with
+  EM_STREAMIN, plain or the text of RTF, wrapped and scrollable; the combo
+  box is a drop-down list (no popup: a click selects the next string, the
+  arrow keys and the wheel move the selection); the tree view keeps items,
+  state images (drawn as check boxes), expansion, hit testing, NM_CLICK and
+  TVN_SELCHANGED. Static controls show STM_SETIMAGE bitmaps; statics, check
+  boxes and edits ask their parent for colours (WM_CTLCOLOR*), dialogs for
+  their background (WM_CTLCOLORDLG); child windows are clipped to their
+  parents; GetWindowRect, ScreenToClient, ClientToScreen and MapWindowPoints
+  use screen coordinates for child windows too.
+* `OSYX_WINRUN_IOTRACE=<text>` logs file reads and writes on paths containing
+  `<text>` (`1`: all) with position, size and an FNV-1a hash of the bytes.
+
 Installed Windows programs appear in the launcher: the Start Menu shortcuts
 of the user and of all users (`.lnk`, read for their target) and, for anything
 no shortcut names, the main `.exe` of each folder in `/Program Files` and

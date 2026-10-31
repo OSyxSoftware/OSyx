@@ -34,6 +34,7 @@ mod keyboard;
 mod dialog_template;
 pub(crate) mod dialogs;
 use gdi::{Bitmap, GdiPath, Region, Xform};
+pub(crate) use gdi::GetObjectW32;
 
 static SANS14: &[u8] = include_bytes!("../../../graphics/assets/sans14.osxp");
 static SANS14B: &[u8] = include_bytes!("../../../graphics/assets/sans14b.osxp");
@@ -147,6 +148,9 @@ struct Win {
     /// State of a progress bar or list view.
     data: controls::ControlData,
     pos: (i32, i32),
+    /// Where PRISM shows the client area of a top-level window, learned from
+    /// pointer events (`pos` is where the program asked for it).
+    screen_origin: Option<(i32, i32)>,
     size: (u32, u32),
     /// The most recent normal geometry, preserved while maximized/minimized.
     normal: Rect,
@@ -260,6 +264,41 @@ fn surface_host(windows: &BTreeMap<u64, Win>, hwnd: u64) -> (u64, (i32, i32)) {
         current = w.owner;
     }
     (current, origin)
+}
+
+/// Where `hwnd`'s client area starts on the screen: its top-level window's
+/// position (where PRISM shows it, once a pointer event told, else where
+/// the program put it) plus the offsets of the child windows in between.
+/// GetCursorPos reports real screen positions, so ScreenToClient and
+/// friends must use these for child windows too.
+fn screen_origin(windows: &BTreeMap<u64, Win>, hwnd: u64) -> Option<(i32, i32)> {
+    windows.get(&hwnd)?;
+    let (host, (ox, oy)) = surface_host(windows, hwnd);
+    let top = windows.get(&host)?;
+    let (tx, ty) = top.screen_origin.unwrap_or(top.pos);
+    Some((tx + ox, ty + oy))
+}
+
+/// The part of `hwnd`'s client area (in its own coordinates) that its
+/// ancestors leave visible: as on Windows, a child window is clipped to its
+/// parent's client rectangle, which is clipped to its own parent's.
+fn ancestor_clip(windows: &BTreeMap<u64, Win>, hwnd: u64) -> Rect {
+    let Some(w) = windows.get(&hwnd) else { return Rect::EMPTY };
+    let mut visible = Rect::new(0, 0, w.size.0, w.size.1);
+    let (mut current, mut dx, mut dy) = (hwnd, 0i32, 0i32);
+    for _ in 0..64 {
+        let Some(c) = windows.get(&current) else { break };
+        if c.style & WS_CHILD == 0 {
+            break;
+        }
+        let Some(parent) = windows.get(&c.owner) else { break };
+        // The parent's client area starts at -pos in the child's coordinates.
+        dx -= c.pos.0;
+        dy -= c.pos.1;
+        visible = visible.intersect(&Rect::new(dx, dy, parent.size.0, parent.size.1));
+        current = c.owner;
+    }
+    visible
 }
 
 /// The pixels `hwnd` draws on: its own PRISM surface, or for a child control
@@ -747,6 +786,9 @@ impl Gui {
                 }
             }
             Event::Pointer { kind, x, y, screen_x, screen_y, button, pressed, wheel_v, .. } => {
+                if let Some(w) = self.windows.get_mut(&hwnd) {
+                    w.screen_origin = Some((screen_x - x, screen_y - y));
+                }
                 // The pointer belongs to the child control under it.
                 let (hwnd, x, y) = self.child_at(hwnd, x, y);
                 self.last_input = crate::kernel32::tick_ms();
@@ -1052,10 +1094,6 @@ fn vk_of(u: u16) -> u32 {
 fn call(proc_: u64, hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
     let wake = wake_msg();
     let is_wake = wake != 0 && msg == wake;
-    if matches!(msg, WM_CHAR | WM_KEYDOWN | WM_KEYUP) {
-        let us = Instant::now().as_nanos_since_boot() / 1000;
-        os_std::eprintln!("winrun: t dispatch {us} msg={msg:#x} hwnd={hwnd:#x} w={w:#x}");
-    }
     if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && matches!(msg, WM_CHAR | WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_SETFOCUS | WM_KILLFOCUS | WM_ACTIVATE) {
         os_std::eprintln!("winrun: call msg={msg:#x} hwnd={hwnd:#x} w={w:#x}");
     }
@@ -1204,9 +1242,20 @@ fn register_class(wc: *const u8, wide: bool) -> u16 {
     })
 }
 
+/// Registers a system class on first use: the stock controls, and the rich
+/// edit classes of riched20/riched32/msftedit. GetClassInfo must find them
+/// too: installers check the rich edit class before creating one.
+fn ensure_stock_class(g: &mut Gui, class: &str) {
+    if ["BUTTON", "STATIC", "EDIT", "COMBOBOX"].iter().chain(controls::RICH_EDIT_CLASSES.iter()).any(|n| class.eq_ignore_ascii_case(n))
+        && !g.classes.iter().any(|c| c.name.eq_ignore_ascii_case(class))
+    {
+        g.classes.push(Class { name: String::from(class), wndproc: ControlWndProc as *const () as u64, background: 0, icon: 0, cursor: 0, style: 0 });
+    }
+}
+
 pub(crate) fn register_common_controls() {
     with(|g| {
-        for name in ["msctls_progress32", "SysListView32"] {
+        for name in ["msctls_progress32", "SysListView32", "SysTreeView32"] {
             if !g.classes.iter().any(|c| c.name.eq_ignore_ascii_case(name)) {
                 g.classes.push(Class { name: String::from(name), wndproc: ControlWndProc as *const () as u64,
                     background: 0, icon: 0, cursor: 0, style: 0 });
@@ -1349,15 +1398,15 @@ fn create_window(
         if style & WS_CHILD != 0 && !g.windows.contains_key(&parent) {
             return Err(ERROR_INVALID_WINDOW_HANDLE);
         }
-        if ["BUTTON", "STATIC", "EDIT"].iter().any(|n| class.eq_ignore_ascii_case(n))
-            && !g.classes.iter().any(|c| c.name.eq_ignore_ascii_case(&class)) {
-            g.classes.push(Class { name: class.clone(), wndproc: ControlWndProc as *const () as u64, background: 0, icon: 0, cursor: 0, style: 0 });
-        }
+        ensure_stock_class(g, &class);
         let ci =
             g.classes.iter().position(|c| c.name.eq_ignore_ascii_case(&class)).ok_or(ERROR_CANNOT_FIND_WND_CLASS)?;
         let (cw, ch) = g.conn().map(|c| (c.screen_width, c.screen_height))?;
         let width = if w == CW_USEDEFAULT || w <= 0 { (cw * 2 / 3).max(320) } else { w as u32 };
         let height = if h == CW_USEDEFAULT || h <= 0 { (ch * 2 / 3).max(200) } else { h as u32 };
+        // A drop-down combo box's height in a template includes its list:
+        // the control itself is one selection field high.
+        let height = if class.eq_ignore_ascii_case("ComboBox") && style & 0x3 >= 2 { height.min(22) } else { height };
         if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
             os_std::eprintln!(
                 "winrun: create {class:?} style={style:#x} at ({x},{y}) req={w}x{h} -> {width}x{height} screen={cw}x{ch}"
@@ -1407,6 +1456,7 @@ fn create_window(
                 win,
                 data: controls::ControlData::default(),
                 pos: (x.max(0), y.max(0)),
+                screen_origin: None,
                 size: (width, height),
                 normal: Rect::new(x.max(0), y.max(0), width, height),
                 pending_state: None,
@@ -1779,7 +1829,7 @@ pub(crate) fn window_rect(hwnd: u64) -> Option<[i32; 4]> {
 }
 
 extern "win64" fn GetWindowRect(hwnd: u64, r: *mut i32) -> Bool {
-    match with(|g| g.windows.get(&hwnd).map(|w| (w.pos, w.size))) {
+    match with(|g| g.windows.get(&hwnd).and_then(|w| Some((screen_origin(&g.windows, hwnd)?, w.size)))) {
         Some(((x, y), (w, h))) => {
             write_rect(r, Rect::new(x, y, w, h));
             TRUE
@@ -2620,6 +2670,41 @@ extern "win64" fn GetDlgItemTextW(dialog: u64, id: i32, buf: *mut u16, max: i32)
     if item == 0 { 0 } else { GetWindowTextW(item, buf, max) as u32 }
 }
 
+/// The identifier of a child window (0 for a top-level window).
+extern "win64" fn GetDlgCtrlID(hwnd: u64) -> i32 {
+    with(|g| match g.windows.get(&hwnd) {
+        Some(w) if w.style & WS_CHILD != 0 => w.control_id as i32,
+        Some(_) => 0,
+        None => fail(ERROR_INVALID_WINDOW_HANDLE, 0),
+    })
+}
+
+/// Window shapes are not supported (PRISM windows are rectangles): the
+/// window keeps its rectangle. As on Windows the system now owns the
+/// region, so it is deleted here.
+extern "win64" fn SetWindowRgn(hwnd: u64, region: u64, redraw: Bool) -> i32 {
+    if !is_window(hwnd) {
+        return fail(ERROR_INVALID_WINDOW_HANDLE, 0);
+    }
+    if region != 0 {
+        DeleteObject(region);
+    }
+    if redraw != 0 {
+        InvalidateRect(hwnd, core::ptr::null(), TRUE);
+    }
+    1
+}
+
+extern "win64" fn SendDlgItemMessageW(dialog: u64, id: i32, msg: u32, w: u64, l: i64) -> i64 {
+    let item = GetDlgItem(dialog, id);
+    if item == 0 { 0 } else { SendMessageW(item, msg, w, l) }
+}
+
+extern "win64" fn SendDlgItemMessageA(dialog: u64, id: i32, msg: u32, w: u64, l: i64) -> i64 {
+    let item = GetDlgItem(dialog, id);
+    if item == 0 { 0 } else { SendMessageA(item, msg, w, l) }
+}
+
 extern "win64" fn CheckDlgButton(dialog: u64, id: i32, check: u32) -> Bool {
     let item = GetDlgItem(dialog, id);
     if item == 0 { return FALSE; }
@@ -2633,6 +2718,18 @@ extern "win64" fn DialogWndProc(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
         if proc_ != 0 {
             let handled = call(proc_, hwnd, msg, w, l);
             if handled != 0 || !is_window(hwnd) { return handled; }
+            // As DefDlgProc: the dialog procedure may colour the background
+            // through WM_CTLCOLORDLG (installer pages are white this way).
+            if msg == WM_ERASEBKGND {
+                const WM_CTLCOLORDLG: u32 = 0x0136;
+                let brush = call(proc_, hwnd, WM_CTLCOLORDLG, w, hwnd as i64) as u64;
+                let size = with(|g| g.windows.get(&hwnd).map(|win| win.size));
+                if let (true, Some((cw, ch))) = (brush != 0, size) {
+                    if fill(w, Rect::new(0, 0, cw, ch), brush) {
+                        return 1;
+                    }
+                }
+            }
         }
         if msg == WM_CLOSE && modal { EndDialog(hwnd, 2); return 1; }
     }
@@ -2898,6 +2995,19 @@ extern "win64" fn ControlWndProc(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
             InvalidateRect(if parent != 0 { parent } else { hwnd }, core::ptr::null(), TRUE);
             r
         }
+        // STM_SETICON, STM_GETICON, STM_SETIMAGE, STM_GETIMAGE of a static.
+        0x0170..=0x0173 if with(|g| g.windows.get(&hwnd).is_some_and(|win| g.classes[win.class].name.eq_ignore_ascii_case("STATIC"))) => {
+            if msg & 1 == 1 {
+                return with(|g| g.windows.get(&hwnd).map_or(0, |win| win.data.image)) as i64;
+            }
+            let image = if msg == 0x0170 { w } else { l as u64 };
+            let (old, parent) = with(|g| match g.windows.get_mut(&hwnd) {
+                Some(win) => (core::mem::replace(&mut win.data.image, image), win.owner),
+                None => (0, 0),
+            });
+            InvalidateRect(if parent != 0 { parent } else { hwnd }, core::ptr::null(), TRUE);
+            old as i64
+        }
         WM_LBUTTONUP | BM_CLICK => {
             let Some((class, style, owner, id)) = with(|g| g.windows.get(&hwnd).map(|win| (
                 g.classes[win.class].name.to_ascii_uppercase(), win.style, win.owner, win.control_id))) else { return 0 };
@@ -2930,6 +3040,43 @@ extern "win64" fn ControlWndProc(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
     }
 }
 
+const WM_CTLCOLOREDIT: u32 = 0x0133;
+const WM_CTLCOLORBTN: u32 = 0x0135;
+const WM_CTLCOLORSTATIC: u32 = 0x0138;
+
+/// WM_CTLCOLOR*: the control's parent may set the DC's text colour,
+/// background colour and mode, and returns the brush for the control's
+/// background (0: none, the parent's pixels show through).
+fn ctl_color(hwnd: u64, dc: u64, msg: u32) -> u64 {
+    let parent = with(|g| g.windows.get(&hwnd).filter(|w| w.style & WS_CHILD != 0).map_or(0, |w| w.owner));
+    if parent == 0 || !is_window(parent) {
+        return 0;
+    }
+    SendMessageW(parent, msg, dc, hwnd as i64) as u64
+}
+
+/// The bitmap of an SS_BITMAP static (STM_SETIMAGE) at its own size, from
+/// the top left or centred (SS_CENTERIMAGE).
+fn paint_static_bitmap(hwnd: u64, dc: u64, style: u32, width: i32, height: i32) {
+    const SS_CENTERIMAGE: u32 = 0x200;
+    let image = with(|g| g.windows.get(&hwnd).map_or(0, |w| w.data.image));
+    let mut info = [0u8; 32];
+    if image == 0 || gdi::GetObjectW(image, 32, info.as_mut_ptr()) == 0 {
+        return;
+    }
+    let bw = i32::from_le_bytes([info[4], info[5], info[6], info[7]]);
+    let bh = i32::from_le_bytes([info[8], info[9], info[10], info[11]]).abs();
+    let (x, y) = if style & SS_CENTERIMAGE != 0 { ((width - bw) / 2, (height - bh) / 2) } else { (0, 0) };
+    let memory = gdi::CreateCompatibleDC(dc);
+    if memory == 0 {
+        return;
+    }
+    let old = SelectObject(memory, image);
+    gdi::BitBlt(dc, x.max(0), y.max(0), bw.min(width), bh.min(height), memory, (-x).max(0), (-y).max(0), 0x00CC_0020); // SRCCOPY
+    SelectObject(memory, old);
+    gdi::DeleteDC(memory);
+}
+
 /// Draws one stock control into its paint DC.
 fn paint_control(hwnd: u64, dc: u64) {
     const DT_RIGHT: u32 = 0x2;
@@ -2949,18 +3096,33 @@ fn paint_control(hwnd: u64, dc: u64) {
         return;
     }
     match class.as_str() {
-        "STATIC" => match style & 0x1F {
-            0..=2 | 0xB | 0xC => {
-                let align = match style & 0x1F { 1 => DT_CENTER, 2 => DT_RIGHT, _ => 0 };
-                let wrap = if matches!(style & 0x1F, 0xB | 0xC) { DT_SINGLELINE } else { DT_WORDBREAK };
-                put_text(&mut whole, align | wrap);
+        "STATIC" => {
+            // Text and image statics ask their parent for colours and a
+            // background brush (installers paint white headers this way).
+            if matches!(style & 0x1F, 0..=3 | 0xB | 0xC | 0xE) {
+                let brush = ctl_color(hwnd, dc, WM_CTLCOLORSTATIC);
+                if brush != 0 {
+                    FillRect(dc, whole.as_ptr(), brush);
+                }
             }
-            4..=6 => { FillRect(dc, whole.as_ptr(), stock(match style & 0x1F { 4 => BLACK_BRUSH, 5 => GRAY_BRUSH, _ => WHITE_BRUSH })); }
-            7..=9 => { FrameRect(dc, whole.as_ptr(), stock(match style & 0x1F { 7 => BLACK_BRUSH, 8 => GRAY_BRUSH, _ => WHITE_BRUSH })); }
-            _ => {}
-        },
+            match style & 0x1F {
+                0..=2 | 0xB | 0xC => {
+                    let align = match style & 0x1F { 1 => DT_CENTER, 2 => DT_RIGHT, _ => 0 };
+                    let wrap = if matches!(style & 0x1F, 0xB | 0xC) { DT_SINGLELINE } else { DT_WORDBREAK };
+                    put_text(&mut whole, align | wrap);
+                }
+                4..=6 => { FillRect(dc, whole.as_ptr(), stock(match style & 0x1F { 4 => BLACK_BRUSH, 5 => GRAY_BRUSH, _ => WHITE_BRUSH })); }
+                7..=9 => { FrameRect(dc, whole.as_ptr(), stock(match style & 0x1F { 7 => BLACK_BRUSH, 8 => GRAY_BRUSH, _ => WHITE_BRUSH })); }
+                0xE => paint_static_bitmap(hwnd, dc, style, width, height),
+                _ => {}
+            }
+        }
         "BUTTON" => match style & BS_TYPE_MASK {
             BS_CHECKBOX | BS_AUTOCHECKBOX | BS_3STATE | BS_RADIOBUTTON | BS_AUTORADIOBUTTON => {
+                let brush = ctl_color(hwnd, dc, WM_CTLCOLORSTATIC);
+                if brush != 0 {
+                    FillRect(dc, whole.as_ptr(), brush);
+                }
                 let top = (height - 13).max(0) / 2;
                 let boxr = [0, top, 13, top + 13];
                 FillRect(dc, boxr.as_ptr(), stock(WHITE_BRUSH));
@@ -2973,6 +3135,7 @@ fn paint_control(hwnd: u64, dc: u64) {
                 put_text(&mut label, DT_VCENTER | DT_SINGLELINE);
             }
             BS_GROUPBOX => {
+                ctl_color(hwnd, dc, WM_CTLCOLORSTATIC);
                 let mut frame = [0, 6, width, height];
                 FrameRect(dc, frame.as_mut_ptr(), stock(GRAY_BRUSH));
                 let mut label = [8, 0, width, 14];
@@ -2980,6 +3143,9 @@ fn paint_control(hwnd: u64, dc: u64) {
             }
             // Push buttons; a default button (1) has the heavier frame.
             _ => {
+                // The colours a parent may choose do not apply to push buttons.
+                ctl_color(hwnd, dc, WM_CTLCOLORBTN);
+                SetTextColor(dc, if disabled { 0x0080_8080 } else { 0 });
                 FillRect(dc, whole.as_ptr(), stock(LTGRAY_BRUSH));
                 FrameRect(dc, whole.as_ptr(), stock(BLACK_BRUSH));
                 if style & BS_TYPE_MASK == 1 && width > 4 && height > 4 {
@@ -2990,7 +3156,9 @@ fn paint_control(hwnd: u64, dc: u64) {
             }
         },
         "EDIT" => {
-            FillRect(dc, whole.as_ptr(), stock(WHITE_BRUSH));
+            // Read-only and disabled edits are coloured like statics.
+            let brush = ctl_color(hwnd, dc, if style & 0x800 != 0 || disabled { WM_CTLCOLORSTATIC } else { WM_CTLCOLOREDIT });
+            FillRect(dc, whole.as_ptr(), if brush != 0 { brush } else { stock(WHITE_BRUSH) });
             FrameRect(dc, whole.as_ptr(), stock(GRAY_BRUSH));
             let mut inner = [3, 2, (width - 3).max(3), (height - 2).max(2)];
             put_text(&mut inner, if style & 0x4 != 0 { DT_WORDBREAK } else { DT_SINGLELINE | DT_VCENTER });
@@ -3293,7 +3461,7 @@ extern "win64" fn GetCursorPos(p: *mut i32) -> Bool {
 }
 
 extern "win64" fn ScreenToClient(hwnd: u64, p: *mut i32) -> Bool {
-    let Some((x, y)) = with(|g| g.windows.get(&hwnd).map(|w| w.pos)) else { return FALSE };
+    let Some((x, y)) = with(|g| screen_origin(&g.windows, hwnd)) else { return FALSE };
     if !p.is_null() {
         // SAFETY: the caller's POINT.
         unsafe {
@@ -3305,7 +3473,7 @@ extern "win64" fn ScreenToClient(hwnd: u64, p: *mut i32) -> Bool {
 }
 
 extern "win64" fn ClientToScreen(hwnd: u64, p: *mut i32) -> Bool {
-    let Some((x, y)) = with(|g| g.windows.get(&hwnd).map(|w| w.pos)) else { return FALSE };
+    let Some((x, y)) = with(|g| screen_origin(&g.windows, hwnd)) else { return FALSE };
     if !p.is_null() {
         // SAFETY: the caller's POINT.
         unsafe {
@@ -3333,7 +3501,7 @@ extern "win64" fn WindowFromPoint(x: i32, y: i32) -> u64 {
 /// Client coordinates of `from` to those of `to` (0: the screen). Returns
 /// the horizontal offset in the low word and the vertical in the high.
 extern "win64" fn MapWindowPoints(from: u64, to: u64, pts: *mut i32, n: u32) -> i32 {
-    let origin = |h: u64| if h == 0 { Some((0, 0)) } else { with(|g| g.windows.get(&h).map(|w| w.pos)) };
+    let origin = |h: u64| if h == 0 { Some((0, 0)) } else { with(|g| screen_origin(&g.windows, h)) };
     let (Some(a), Some(b)) = (origin(from), origin(to)) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
     let (dx, dy) = (a.0 - b.0, a.1 - b.1);
     if !pts.is_null() {
@@ -5622,6 +5790,7 @@ extern "win64" fn GetClassInfoW(_inst: u64, name: *const u16, out: *mut u8) -> B
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
     let found = with(|g| {
+        ensure_stock_class(g, &want);
         g.classes
             .iter()
             .find(|c| c.name.eq_ignore_ascii_case(&want))
@@ -6427,6 +6596,15 @@ extern "win64" fn EnumWindows(proc_: u64, param: u64) -> Bool {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
     let list: Vec<u64> = with(|g| g.windows.keys().copied().collect());
+    // A 32-bit program's WNDENUMPROC is 32-bit code: it runs through the bridge.
+    if crate::wow64::is_active() {
+        for h in list {
+            if crate::wow64::call32(proc_ as u32, &[h as u32, param as u32]) == 0 {
+                break;
+            }
+        }
+        return TRUE;
+    }
     // SAFETY: a caller-supplied WNDENUMPROC of the Windows x64 ABI.
     let f: extern "win64" fn(u64, i64) -> i32 = unsafe { core::mem::transmute(proc_ as usize) };
     for h in list {
@@ -7433,6 +7611,10 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetDlgItem,
         SetDlgItemTextW,
         GetDlgItemTextW,
+        SendDlgItemMessageW,
+        SendDlgItemMessageA,
+        GetDlgCtrlID,
+        SetWindowRgn,
         CheckDlgButton,
         CreateDialogParamW,
         DialogBoxParamW,
