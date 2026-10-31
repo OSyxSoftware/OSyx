@@ -1071,7 +1071,7 @@ impl Shell {
                     self.launch_entry(&app);
                 }
             }
-            Some(PanelAction::PinnedMenu(i, x, y)) => {
+            Some(PanelAction::PinnedMenu(i, x, _)) => {
                 if let Some(app) = self.pinned.get(i) {
                     let items: Vec<MenuItem> = entry_actions(app, false, true)
                         .into_iter()
@@ -1556,7 +1556,7 @@ impl Shell {
         };
         let target = format!("{}/{file}", common::DESKTOP_DIR);
         let result = os_std::fs::create_dir_all(common::DESKTOP_DIR)
-            .and_then(|_| data)
+            .and(data)
             .and_then(|data| os_std::fs::write(&target, data));
         match result {
             Ok(()) => {
