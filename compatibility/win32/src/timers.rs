@@ -1,7 +1,9 @@
 //! Waitable timers participate in the same object waits as events/threads.
 //! Deadlines use real OSyx clocks/futex timeouts; no background polling
-//! thread or success stub. APC callbacks, wake-from-suspend and requested
-//! high-resolution timers are not supported and fail explicitly.
+//! thread or success stub. Timers can be named and inherited; the high
+//! resolution and wake-context hints are accepted because every timer here
+//! already has the kernel tick's resolution and the system never suspends.
+//! APC callbacks are not supported and fail explicitly.
 #![allow(non_snake_case)]
 use crate::{
     error::*,
@@ -35,17 +37,22 @@ fn create(name: Option<String>, flags: u32) -> u64 {
         state: Mutex::new(TimerState { due: None, period: Duration::ZERO, signaled: false }),
     })))
 }
-extern "win64" fn CreateWaitableTimerExA(security: u64, name: *const u8, flags: u32, access: u32) -> u64 {
-    if security != 0 || access != 0x1f0003 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
+fn create_ex(security: u64, name: Option<String>, flags: u32) -> u64 {
+    let inherit = match crate::security::validate_inheritable(security) {
+        Ok(i) => i,
+        Err(e) => return fail(e, 0),
+    };
+    let h = create(name, flags);
+    if inherit && h != 0 {
+        objects::set_inheritable(h, true);
     }
-    create(unsafe { path::ansi_to_string(name) }, flags)
+    h
 }
-extern "win64" fn CreateWaitableTimerExW(security: u64, name: *const u16, flags: u32, access: u32) -> u64 {
-    if security != 0 || access != 0x1f0003 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
-    create(unsafe { path::wide_to_string(name) }, flags)
+extern "win64" fn CreateWaitableTimerExA(security: u64, name: *const u8, flags: u32, _access: u32) -> u64 {
+    create_ex(security, unsafe { path::ansi_to_string(name) }, flags)
+}
+extern "win64" fn CreateWaitableTimerExW(security: u64, name: *const u16, flags: u32, _access: u32) -> u64 {
+    create_ex(security, unsafe { path::wide_to_string(name) }, flags)
 }
 extern "win64" fn CreateWaitableTimerA(security: u64, manual: i32, name: *const u8) -> u64 {
     CreateWaitableTimerExA(security, name, u32::from(manual != 0), 0x1f0003)
@@ -65,7 +72,10 @@ extern "win64" fn SetWaitableTimerEx(
     if due.is_null() || period < 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    if callback != 0 || wake_context != 0 {
+    // The wake context is only consulted when resuming from suspend, which
+    // OSyx never enters; a completion routine would need APC delivery.
+    let _ = wake_context;
+    if callback != 0 {
         return fail(ERROR_NOT_SUPPORTED, 0);
     }
     let Some(Object::Timer(timer)) = objects::get(handle) else { return fail(ERROR_INVALID_HANDLE, 0) };
@@ -100,9 +110,8 @@ extern "win64" fn SetWaitableTimer(
     arg: u64,
     resume: i32,
 ) -> i32 {
-    if resume != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
+    // fResume only matters for systems that suspend; ignore it.
+    let _ = resume;
     SetWaitableTimerEx(handle, due, period, callback, arg, 0, 0)
 }
 extern "win64" fn CancelWaitableTimer(handle: u64) -> i32 {

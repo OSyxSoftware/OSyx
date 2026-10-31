@@ -6302,6 +6302,9 @@ extern "win64" fn ExitWindowsEx(flags: u32, _reason: u32) -> Bool {
     const SE_SHUTDOWN_PRIVILEGE: u32 = 19;
     let action = flags & !FORCE_FLAGS;
     let force = flags & FORCE_FLAGS != 0;
+    if !matches!(action, 0 | 1 | 2 | 8) {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
     if !crate::tokens::effective_data().privileges.iter().any(|(id, flags)|
         *id == SE_SHUTDOWN_PRIVILEGE && *flags & crate::tokens::SE_PRIVILEGE_ENABLED != 0) {
         return fail(1314, FALSE); // ERROR_PRIVILEGE_NOT_HELD

@@ -178,8 +178,8 @@ static void windows_and_menus(void) {
     check("AllowSetForegroundWindow(ASFW_ANY) is granted", AllowSetForegroundWindow(ASFW_ANY));
     HMENU menu = CreatePopupMenu();
     SetLastError(0);
-    check("TrackPopupMenu fails with ERROR_NOT_SUPPORTED instead of pretending a menu was shown",
-          menu && !TrackPopupMenu(menu, 0, 0, 0, 0, NULL, NULL) && GetLastError() == ERROR_NOT_SUPPORTED);
+    check("TrackPopupMenu(bogus menu) fails with ERROR_INVALID_MENU_HANDLE",
+          menu && !TrackPopupMenu((HMENU)0x1234, 0, 0, 0, 0, NULL, NULL) && GetLastError() == 1401);
     if (menu) DestroyMenu(menu);
 }
 

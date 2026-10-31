@@ -509,8 +509,9 @@ pub struct PortObj {
 }
 
 /// Pipes are the handles with overlapped I/O (pipes.rs): associating one
-/// queues its completions to the port. Files complete synchronously and
-/// cannot be associated.
+/// queues its completions to the port. Any other open handle may be
+/// associated too, as on Windows; operations on it complete synchronously,
+/// so no packet is ever queued for it.
 extern "win64" fn CreateIoCompletionPort(file: u64, existing: u64, key: u64, _threads: u32) -> u64 {
     if file == INVALID_HANDLE_VALUE {
         if existing != 0 {
@@ -518,9 +519,7 @@ extern "win64" fn CreateIoCompletionPort(file: u64, existing: u64, key: u64, _th
         }
         return new_port();
     }
-    let Some(Object::Pipe(p)) = objects::get(file) else {
-        return fail(if objects::get(file).is_some() { ERROR_NOT_SUPPORTED } else { ERROR_INVALID_HANDLE }, 0);
-    };
+    let Some(object) = objects::get(file) else { return fail(ERROR_INVALID_HANDLE, 0) };
     let port = if existing == 0 {
         new_port()
     } else if matches!(objects::get(existing), Some(Object::Port(_))) {
@@ -528,7 +527,9 @@ extern "win64" fn CreateIoCompletionPort(file: u64, existing: u64, key: u64, _th
     } else {
         return fail(ERROR_INVALID_PARAMETER, 0);
     };
-    crate::pipes::associate(&p, port, key);
+    if let Object::Pipe(p) = object {
+        crate::pipes::associate(&p, port, key);
+    }
     port
 }
 

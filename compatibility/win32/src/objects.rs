@@ -374,10 +374,16 @@ struct Table {
     next: u64,
     /// Handles marked HANDLE_FLAG_INHERIT.
     inheritable: alloc::collections::BTreeSet<u64>,
+    /// Handles marked HANDLE_FLAG_PROTECT_FROM_CLOSE.
+    protected: alloc::collections::BTreeSet<u64>,
 }
 
-static TABLE: Mutex<Table> =
-    Mutex::new(Table { map: BTreeMap::new(), next: 0x100, inheritable: alloc::collections::BTreeSet::new() });
+static TABLE: Mutex<Table> = Mutex::new(Table {
+    map: BTreeMap::new(),
+    next: 0x100,
+    inheritable: alloc::collections::BTreeSet::new(),
+    protected: alloc::collections::BTreeSet::new(),
+});
 
 /// Puts `o` at the handle value `h` (an inherited handle keeps its value);
 /// false if `h` is taken or not a handle value.
@@ -406,6 +412,24 @@ pub fn set_inheritable(h: u64, on: bool) -> bool {
 
 pub fn is_inheritable(h: u64) -> bool {
     TABLE.lock().unwrap().inheritable.contains(&h)
+}
+
+/// Marks a handle protected from CloseHandle; false if it is not open.
+pub fn set_protected(h: u64, on: bool) -> bool {
+    let mut t = TABLE.lock().unwrap();
+    if !t.map.contains_key(&h) {
+        return false;
+    }
+    if on {
+        t.protected.insert(h);
+    } else {
+        t.protected.remove(&h);
+    }
+    true
+}
+
+pub fn is_protected(h: u64) -> bool {
+    TABLE.lock().unwrap().protected.contains(&h)
 }
 
 /// The open handles marked inheritable.
@@ -466,6 +490,9 @@ pub fn any(f: impl Fn(&Object) -> bool) -> bool {
 /// Removes a handle; the object goes away with its last handle.
 pub fn close(h: u64) -> bool {
     let mut t = TABLE.lock().unwrap();
+    if t.protected.contains(&h) {
+        return false;
+    }
     t.inheritable.remove(&h);
     let removed = t.map.remove(&h);
     drop(t);

@@ -229,7 +229,42 @@ fn write_find(out: u64, name: &str, st: &FileStat) -> i32 {
     }
     1
 }
+fn matches_exact(pattern: &str, name: &str) -> bool {
+    if pattern == "*.*" {
+        return true;
+    }
+    let p = pattern.as_bytes();
+    let n = name.as_bytes();
+    let (mut i, mut j, mut star, mut retry) = (0, 0, None, 0);
+    while j < n.len() {
+        if i < p.len() && (p[i] == b'?' || p[i] == n[j]) {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == b'*' {
+            star = Some(i);
+            i += 1;
+            retry = j;
+        } else if let Some(s) = star {
+            retry += 1;
+            j = retry;
+            i = s + 1;
+        } else {
+            return false;
+        }
+    }
+    while i < p.len() && p[i] == b'*' {
+        i += 1;
+    }
+    i == p.len()
+}
+
 pub(crate) extern "win64" fn FindFirstFileW(pattern: *const u16, out: u64) -> u64 {
+    find_first(pattern, out, false)
+}
+
+/// FIND_FIRST_EX_CASE_SENSITIVE compares the pattern's characters as they
+/// are; the default search folds ASCII case like Windows does.
+pub(crate) fn find_first(pattern: *const u16, out: u64, case_sensitive: bool) -> u64 {
     if out == 0 {
         return fail(ERROR_INVALID_PARAMETER, u64::MAX);
     }
@@ -259,7 +294,7 @@ pub(crate) extern "win64" fn FindFirstFileW(pattern: *const u16, out: u64) -> u6
     let mut rows = Vec::new();
     for entry in rd {
         let name = entry.file_name();
-        if matches(pattern, name) {
+        if if case_sensitive { matches_exact(pattern, name) } else { matches(pattern, name) } {
             if let Ok(st) = os_sys::lstat(&alloc::format!("{dir}/{name}")) {
                 rows.push((String::from(name), st));
             }

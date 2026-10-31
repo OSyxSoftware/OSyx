@@ -56,13 +56,14 @@ extern "win64" fn GetProcessIdOfThread(h: u64) -> u32 {
 
 /// A thread of this process by id: a handle to its thread object.
 extern "win64" fn OpenThread(_access: u32, inherit: i32, tid: u32) -> u64 {
-    if inherit != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
-    match objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)) {
+    let h = match objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)) {
         Some(o) => objects::insert(o),
-        None => fail(ERROR_INVALID_PARAMETER, 0),
+        None => return fail(ERROR_INVALID_PARAMETER, 0),
+    };
+    if inherit != 0 {
+        objects::set_inheritable(h, true);
     }
+    h
 }
 
 /// The thread behind a handle, as (tid, object): the pseudo handle is the

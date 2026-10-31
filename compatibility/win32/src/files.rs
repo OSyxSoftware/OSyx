@@ -130,20 +130,50 @@ extern "win64" fn CopyFileW(from: *const u16, to: *const u16, fail_if_exists: i3
 }
 
 const COPY_FILE_FAIL_IF_EXISTS: u32 = 0x1;
+const COPY_FILE_RESTARTABLE: u32 = 0x2;
+const COPY_FILE_OPEN_SOURCE_FOR_WRITE: u32 = 0x4;
+const COPY_FILE_ALLOW_DECRYPTED_DESTINATION: u32 = 0x8;
+const COPY_FILE_COPY_SYMLINK: u32 = 0x800;
+const COPY_FILE_NO_BUFFERING: u32 = 0x1000;
+const COPY_FILE_KNOWN: u32 = COPY_FILE_FAIL_IF_EXISTS | COPY_FILE_RESTARTABLE | COPY_FILE_OPEN_SOURCE_FOR_WRITE
+    | COPY_FILE_ALLOW_DECRYPTED_DESTINATION | COPY_FILE_COPY_SYMLINK | COPY_FILE_NO_BUFFERING;
+
+/// Copies a symbolic link itself: the link's target is recreated at `to`.
+fn copy_link(from: &str, to: &str, fail_if_exists: bool) -> Option<Result<(), u32>> {
+    let src = path::to_osyx(from, &kernel32::cwd_win()).ok()?;
+    let dst = path::to_osyx(to, &kernel32::cwd_win()).ok()?;
+    let mut buf = [0u8; 4096];
+    let n = os_sys::readlink(&src, &mut buf).ok()?;
+    let target = core::str::from_utf8(&buf[..n]).map_err(|_| ERROR_INVALID_NAME);
+    Some(target.and_then(|target| {
+        if fail_if_exists && os_sys::stat(&dst).is_ok() {
+            return Err(ERROR_FILE_EXISTS);
+        }
+        let _ = os_sys::unlink(&dst);
+        os_sys::symlink(target, &dst).map_err(errno_to_win32)
+    }))
+}
 
 /// CopyFileEx: the copy is one step, so a progress routine is called once
 /// with the whole size when it is done (PROGRESS_CANCEL or _STOP then
-/// removes the copy, as an interrupted copy would).
+/// removes the copy, as an interrupted copy would). COPY_FILE_COPY_SYMLINK
+/// copies the link itself; the other flags are hints.
 extern "win64" fn CopyFileExW(from: *const u16, to: *const u16, progress: u64, data: u64, cancel: *const i32, flags: u32) -> i32 {
-    if flags & !COPY_FILE_FAIL_IF_EXISTS != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
+    if flags & !COPY_FILE_KNOWN != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: NULL or the caller's cancel flag.
     if !cancel.is_null() && unsafe { *cancel } != 0 {
         return fail(ERROR_REQUEST_ABORTED, 0);
     }
     let (Some(f), Some(t)) = (name(from), name(to)) else { return fail(ERROR_INVALID_PARAMETER, 0) };
-    if let Err(e) = copy(&f, &t, flags & COPY_FILE_FAIL_IF_EXISTS != 0) {
+    let fail_if_exists = flags & COPY_FILE_FAIL_IF_EXISTS != 0;
+    let r = if flags & COPY_FILE_COPY_SYMLINK != 0 {
+        copy_link(&f, &t, fail_if_exists).unwrap_or_else(|| copy(&f, &t, fail_if_exists))
+    } else {
+        copy(&f, &t, fail_if_exists)
+    };
+    if let Err(e) = r {
         return fail(e, 0);
     }
     if progress != 0 {
@@ -326,10 +356,9 @@ extern "win64" fn FindFirstFileExW(pattern: *const u16, level: u32, data: u64, o
     if level > 1 || op > 1 || filter != 0 || flags & !0x7 != 0 {
         return fail(ERROR_INVALID_PARAMETER, u64::MAX);
     }
-    if flags & 0x1 != 0 {
-        return fail(ERROR_NOT_SUPPORTED, u64::MAX); // FIND_FIRST_EX_CASE_SENSITIVE
-    }
-    crate::volumes::FindFirstFileW(pattern, data)
+    // 0x1 CASE_SENSITIVE, 0x2 LARGE_FETCH and 0x4 ON_DISK are the only
+    // flags; the last two are performance hints, this search reads names.
+    crate::volumes::find_first(pattern, data, flags & 0x1 != 0)
 }
 
 /// WIN32_FILE_ATTRIBUTE_DATA: attributes, creation, access and write
@@ -625,31 +654,68 @@ extern "win64" fn SetFileInformationByHandle(h: u64, class: u32, data: u64, size
             }),
             FILE_DISPOSITION_INFO => need(1).map(|()| f.delete_on_close.store(teb::get::<u8>(data, 0) != 0, Ordering::SeqCst)),
             FILE_DISPOSITION_INFO_EX => need(4).and_then(|()| {
+                const DELETE: u32 = 0x1;
+                const POSIX: u32 = 0x2;
+                const IGNORE_READ_ONLY: u32 = 0x8;
                 let flags = teb::get::<u32>(data, 0);
-                if flags & !0x3 != 0 {
-                    return Err(ERROR_NOT_SUPPORTED); // POSIX semantics, ignore read-only, ...
+                if flags & !(DELETE | POSIX | IGNORE_READ_ONLY) != 0 {
+                    return Err(ERROR_INVALID_PARAMETER);
                 }
-                f.delete_on_close.store(flags & 1 != 0, Ordering::SeqCst);
+                if flags & DELETE == 0 {
+                    f.delete_on_close.store(false, Ordering::SeqCst);
+                    return Ok(());
+                }
+                if flags & IGNORE_READ_ONLY != 0 {
+                    let st = os_sys::fstat(f.fd).map_err(errno_to_win32)?;
+                    set_attributes(&f.path, &st, FILE_ATTRIBUTE_NORMAL)?;
+                }
+                if flags & POSIX != 0 {
+                    // POSIX semantics: the name disappears now even if the
+                    // file is still open; the inode goes with the last handle.
+                    let p = path::to_osyx(&f.path, &kernel32::cwd_win())?;
+                    os_sys::unlink(&p).map_err(errno_to_win32)?;
+                }
+                f.delete_on_close.store(true, Ordering::SeqCst);
                 Ok(())
             }),
             FILE_RENAME_INFO => need(24).and_then(|()| {
                 // ReplaceIfExists (u8), RootDirectory, FileNameLength, FileName.
                 let replace = teb::get::<u8>(data, 0) != 0;
-                if teb::get::<u64>(data, 8) != 0 {
-                    return Err(ERROR_NOT_SUPPORTED);
-                }
+                let root = teb::get::<u64>(data, 8);
                 let len = teb::get::<u32>(data, 16) as usize / 2;
                 if 20 + len * 2 > size as usize {
                     return Err(ERROR_BAD_LENGTH);
                 }
                 let units = core::slice::from_raw_parts((data + 20) as *const u16, len);
-                let to = String::from_utf16_lossy(units);
+                let mut to = String::from_utf16_lossy(units);
+                if root != 0 {
+                    let dir = crate::objects::file(root).map_err(|_| ERROR_INVALID_HANDLE)?;
+                    if dir.path.is_empty() {
+                        return Err(ERROR_INVALID_HANDLE);
+                    }
+                    let relative = !to.starts_with('\\') && !to.contains(':');
+                    if relative {
+                        to = alloc::format!("{}\\\\{to}", path::to_windows(&dir.path));
+                    }
+                }
                 let from = path::to_windows(&f.path);
                 if kernel32::move_file(Some(from), Some(to), u32::from(replace)) != 0 { Ok(()) } else { Err(teb::last_error()) }
             }),
             FILE_BASIC_INFO => need(36).and_then(|()| {
-                if (0..4).any(|i| teb::get::<u64>(data, i * 8) != 0) {
-                    return Err(ERROR_NOT_SUPPORTED);
+                // LARGE_INTEGER 100 ns units; 0 means "leave unchanged".
+                let ns = |v: u64| -> Result<Option<i64>, u32> {
+                    if v == 0 {
+                        return Ok(None);
+                    }
+                    let n = (v as i128 - 116_444_736_000_000_000) * 100;
+                    i64::try_from(n).map(Some).map_err(|_| ERROR_INVALID_PARAMETER)
+                };
+                let atime = ns(teb::get::<u64>(data, 8))?;
+                let mtime = ns(teb::get::<u64>(data, 16))?;
+                let mask = if atime.is_some() { osyx_abi::futimes::ATIME } else { 0 }
+                    | if mtime.is_some() { osyx_abi::futimes::MTIME } else { 0 };
+                if mask != 0 {
+                    os_sys::futimes(f.fd, mask, atime.unwrap_or(0), mtime.unwrap_or(0)).map_err(errno_to_win32)?;
                 }
                 let attrs = teb::get::<u32>(data, 32);
                 if attrs == 0 {
