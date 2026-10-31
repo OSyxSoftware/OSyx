@@ -21,3 +21,6 @@ Changes for OSyx (`src/lib.rs`):
   holding packages (`Target::Index`).
 - Package elements may be locals and arguments of the running method
   (`Package () { Local0, Local1 }`), taken by value.
+- An `If` without `Else` at the very end of a block (`If (a) { If (b) {
+  Return (x) } }`, the shape of every `_DSM`) no longer fails with
+  `UnexpectedEndOfStream`: the end of the stream means "no `Else`".

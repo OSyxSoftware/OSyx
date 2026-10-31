@@ -297,135 +297,286 @@ extern "win64" fn CancelMibChangeNotify2(h: u64) -> u32 {
     }
 }
 
-// ---- MIB tables, interface names and routing choice -------------------------------------
-
-const AF_UNSPEC: u16 = 0;
-const AF_INET: u16 = 2;
-const AF_INET6: u16 = 23;
-const ERROR_NETWORK_UNREACHABLE: u32 = 1231;
-const IPINTERFACE_ROW_SIZE: usize = 168;
-
-/// A MIB table block: the size sits in the 16 bytes before the pointer that
-/// FreeMibTable receives.
-fn mib_alloc(bytes: usize) -> u64 {
-    let layout = core::alloc::Layout::from_size_align(bytes + 16, 16).unwrap();
-    // SAFETY: the layout has a non-zero size.
-    let base = unsafe { alloc::alloc::alloc_zeroed(layout) };
-    if base.is_null() {
-        return 0;
-    }
-    // SAFETY: the block holds at least 16 bytes.
-    unsafe { *(base as *mut usize) = bytes + 16 };
-    base as u64 + 16
+struct Layout {
+    bytes: Vec<u8>,
+    fixups: Vec<(usize, usize)>,
 }
 
-/// Releases a table of GetIpInterfaceTable. NULL is accepted and ignored.
-extern "win64" fn FreeMibTable(table: u64) {
-    if table == 0 {
-        return;
+impl Layout {
+    fn new() -> Self {
+        Self { bytes: Vec::new(), fixups: Vec::new() }
     }
-    let base = (table - 16) as *mut u8;
-    // SAFETY: `table` came from mib_alloc, which stored the block size first.
-    unsafe {
-        let layout = core::alloc::Layout::from_size_align(*(base as *const usize), 16).unwrap();
-        alloc::alloc::dealloc(base, layout);
+    fn reserve(&mut self, n: usize) -> usize {
+        while !self.bytes.len().is_multiple_of(8) {
+            self.bytes.push(0);
+        }
+        let at = self.bytes.len();
+        self.bytes.resize(at + n, 0);
+        at
+    }
+    fn put16(&mut self, at: usize, v: u16) {
+        self.bytes[at..at + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    fn put32(&mut self, at: usize, v: u32) {
+        self.bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn put64(&mut self, at: usize, v: u64) {
+        self.bytes[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    fn link(&mut self, at: usize, target: usize) {
+        self.fixups.push((at, target));
+    }
+    fn cstr(&mut self, at: usize, s: &str) {
+        let dst = self.reserve(s.len() + 1);
+        self.bytes[dst..dst + s.len()].copy_from_slice(s.as_bytes());
+        self.link(at, dst);
+    }
+    fn wstr(&mut self, at: usize, s: &str) {
+        let units: Vec<u16> = s.encode_utf16().chain(core::iter::once(0)).collect();
+        let dst = self.reserve(units.len() * 2);
+        for (k, u) in units.into_iter().enumerate() {
+            self.put16(dst + k * 2, u);
+        }
+        self.link(at, dst);
+    }
+    fn sockaddr_in(&mut self, addr_field: usize, ip: [u8; 4]) {
+        let sa = self.reserve(16);
+        self.put16(sa, 2); // AF_INET
+        self.bytes[sa + 4..sa + 8].copy_from_slice(&ip);
+        self.link(addr_field, sa);
+        self.put32(addr_field + 8, 16);
+    }
+    fn finish(mut self, base: u64) -> Vec<u8> {
+        for (at, target) in self.fixups {
+            self.bytes[at..at + 8].copy_from_slice(&(base + target as u64).to_le_bytes());
+        }
+        self.bytes
     }
 }
 
-fn if_type(i: &net::NetIface) -> u64 {
-    if i.flags & net::IFF_LOOPBACK != 0 {
-        24
-    } else if i.flags & net::IFF_WIRELESS != 0 {
-        71
+fn iface_type(flags: u16) -> u32 {
+    if flags & net::IFF_LOOPBACK != 0 {
+        24 // IF_TYPE_SOFTWARE_LOOPBACK
+    } else if flags & net::IFF_WIRELESS != 0 {
+        71 // IF_TYPE_IEEE80211
     } else {
-        6
+        6 // IF_TYPE_ETHERNET_CSMACD
     }
 }
 
-/// GetIpInterfaceTable(family, &table): one MIB_IPINTERFACE_ROW per IPv4
-/// interface. OSyx has no IPv6 stack, so AF_INET6 yields an empty table.
-extern "win64" fn GetIpInterfaceTable(family: u16, table: *mut u64) -> u32 {
-    if table.is_null() || !matches!(family, AF_UNSPEC | AF_INET | AF_INET6) {
+fn iface_luid(flags: u16, index: u8) -> u64 {
+    ((iface_type(flags) as u64) << 48) | ((index as u64 & 0xff_ffff) << 24)
+}
+
+/// IP_ADAPTER_ADDRESSES_LH (448 bytes) and its linked address lists.
+extern "win64" fn GetAdaptersAddresses(family: u32, flags: u32, reserved: u64, out: u64, size: *mut u32) -> u32 {
+    if size.is_null() || reserved != 0 || !matches!(family, 0 | 2 | 23) {
         return ERROR_INVALID_PARAMETER;
+    }
+    if family == 23 {
+        unsafe { *size = 0 };
+        return 232; // ERROR_NO_DATA: OSyx is IPv4-only
     }
     let ifs = match list() {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let ifs: Vec<_> = if family == AF_INET6 { Vec::new() } else { ifs };
-    let block = mib_alloc(8 + ifs.len() * IPINTERFACE_ROW_SIZE);
-    if block == 0 {
-        return ERROR_NOT_ENOUGH_MEMORY;
+    if ifs.is_empty() {
+        unsafe { *size = 0 };
+        return 232;
     }
-    // SAFETY: the block holds the count, 4 bytes of padding and the rows.
-    unsafe {
-        teb::put(block, 0, ifs.len() as u32);
-        for (k, i) in ifs.iter().enumerate() {
-            let row = block + 8 + (k * IPINTERFACE_ROW_SIZE) as u64;
-            *(row as *mut u16) = AF_INET;
-            // NET_LUID: NetLuidIndex in bits 24..48, IfType in bits 48..64.
-            *((row + 8) as *mut u64) = (if_type(i) << 48) | ((i.index as u64) << 24);
-            teb::put(row, 16, i.index as u32);
-            teb::put(row, 152, i.mtu);
-            *((row + 156) as *mut u8) = (i.flags & net::IFF_UP != 0 && i.flags & net::IFF_LINK != 0) as u8;
+    let dns = net::dns_servers().unwrap_or_default();
+    let mut b = Layout::new();
+    let mut heads = Vec::with_capacity(ifs.len());
+    for _ in &ifs {
+        heads.push(b.reserve(448));
+    }
+    for (k, i) in ifs.iter().enumerate() {
+        let a = heads[k];
+        if k + 1 < heads.len() {
+            b.link(a + 8, heads[k + 1]);
         }
-        *table = block;
+        let loopback = i.flags & net::IFF_LOOPBACK != 0;
+        let name = net::field(&i.name);
+        let desc = format!("OSyx {name}");
+        let if_type = iface_type(i.flags);
+        let up = i.flags & net::IFF_UP != 0 && (loopback || i.flags & net::IFF_LINK != 0);
+        b.put32(a, 448);
+        b.put32(a + 4, i.index as u32);
+        b.cstr(a + 16, name);
+        b.wstr(a + 56, "");
+        b.wstr(a + 64, &desc);
+        b.wstr(a + 72, name);
+        if !loopback {
+            b.bytes[a + 80..a + 86].copy_from_slice(&i.mac);
+            b.put32(a + 88, 6);
+        }
+        let mut aflags = 0x80u32; // IP_ADAPTER_IPV4_ENABLED
+        if i.method == net::CONFIG_DHCP {
+            aflags |= 0x04; // IP_ADAPTER_DHCP_ENABLED
+        }
+        b.put32(a + 92, aflags);
+        b.put32(a + 96, i.mtu);
+        b.put32(a + 100, if_type);
+        b.put32(a + 104, if up { 1 } else { 2 }); // IfOperStatusUp / IfOperStatusDown
+        b.put32(a + 216, 1); // Ipv4Metric
+        b.put64(a + 224, iface_luid(i.flags, i.index));
+        b.put32(a + 240, 1); // CompartmentId
+        b.put32(a + 260, 1); // NET_IF_CONNECTION_DEDICATED
+
+        // GAA_FLAG_SKIP_UNICAST = 0x0001
+        if flags & 0x0001 == 0 && i.addr != [0, 0, 0, 0] {
+            let u = b.reserve(64);
+            b.link(a + 24, u);
+            b.put32(u, 64);
+            b.sockaddr_in(u + 16, i.addr);
+            let origin = if i.method == net::CONFIG_DHCP { 3 } else { 1 };
+            b.put32(u + 32, origin);
+            b.put32(u + 36, origin);
+            b.put32(u + 40, 4); // IpDadStatePreferred
+            b.put32(u + 44, u32::MAX);
+            b.put32(u + 48, u32::MAX);
+            b.put32(u + 52, u32::MAX);
+            b.bytes[u + 56] = i.prefix;
+        }
+        // GAA_FLAG_SKIP_DNS_SERVER = 0x0008
+        if flags & 0x0008 == 0 && !loopback && !dns.is_empty() {
+            let mut prev = None;
+            for srv in &dns {
+                let d = b.reserve(32);
+                match prev {
+                    None => b.link(a + 48, d),
+                    Some(p) => b.link(p + 8, d),
+                }
+                b.put32(d, 32);
+                b.sockaddr_in(d + 16, srv.0);
+                prev = Some(d);
+            }
+        }
+        // GAA_FLAG_INCLUDE_PREFIX = 0x0010
+        if flags & 0x0010 != 0 && i.addr != [0, 0, 0, 0] {
+            let p = b.reserve(40);
+            b.link(a + 176, p);
+            b.put32(p, 40);
+            let m = mask(i.prefix);
+            let net_ip = [i.addr[0] & m[0], i.addr[1] & m[1], i.addr[2] & m[2], i.addr[3] & m[3]];
+            b.sockaddr_in(p + 16, net_ip);
+            b.put32(p + 32, i.prefix as u32);
+        }
+        // GAA_FLAG_INCLUDE_GATEWAYS = 0x0080
+        if flags & 0x0080 != 0 && !loopback && i.gateway != [0, 0, 0, 0] {
+            let g = b.reserve(32);
+            b.link(a + 208, g);
+            b.put32(g, 32);
+            b.sockaddr_in(g + 16, i.gateway);
+        }
     }
-    0 // NO_ERROR
+    let need = b.bytes.len() as u32;
+    let cap = unsafe {
+        let n = *size;
+        *size = need;
+        n
+    };
+    if out == 0 || cap < need {
+        return 111; // ERROR_BUFFER_OVERFLOW
+    }
+    let bytes = b.finish(out);
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
+    }
+    0
 }
 
-/// GetBestInterfaceEx(&destination, &index): the interface whose subnet holds
-/// the destination, else the one with a default gateway.
+/// MIB_IPINTERFACE_TABLE: NumEntries (4) + 4 pad + N * MIB_IPINTERFACE_ROW (168).
+extern "win64" fn GetIpInterfaceTable(family: u16, table: *mut u64) -> u32 {
+    if table.is_null() || !matches!(family, 0 | 2 | 23) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let ifs = if family == 23 {
+        Vec::new()
+    } else {
+        match list() {
+            Ok(v) => v,
+            Err(e) => return e,
+        }
+    };
+    let total = 8 + ifs.len() * 168;
+    let Some(base) = crate::kernel32::heap_alloc(total, true) else {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    };
+    unsafe {
+        teb::put(base, 0, ifs.len() as u32);
+        for (k, i) in ifs.iter().enumerate() {
+            let row = base + 8 + k as u64 * 168;
+            teb::put(row, 0, 2u16); // AF_INET
+            teb::put(row, 8, iface_luid(i.flags, i.index));
+            teb::put(row, 16, i.index as u32);
+            teb::put(row, 20, 65535u32); // MaxReassemblySize
+            teb::put(row, 53, u8::from(i.flags & net::IFF_UP != 0)); // Connected
+            teb::put(row, 108, i.mtu);
+            teb::put(row, 112, 1u32); // Metric
+            teb::put(row, 136, i.prefix); // SitePrefixLength
+        }
+        *table = base;
+    }
+    0
+}
+
+extern "win64" fn FreeMibTable(memory: u64) {
+    if memory != 0 {
+        crate::kernel32::heap_free(memory);
+    }
+}
+
 extern "win64" fn GetBestInterfaceEx(dest: *const u8, index: *mut u32) -> u32 {
     if dest.is_null() || index.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
-    // SAFETY: a SOCKADDR_IN or larger; the family is its first field.
     let family = unsafe { *(dest as *const u16) };
-    if family != AF_INET {
+    if family == 23 {
+        return 1231; // ERROR_NETWORK_UNREACHABLE: no IPv6 routes
+    }
+    if family != 2 {
         return ERROR_INVALID_PARAMETER;
     }
-    // SAFETY: sockaddr_in: port at 2, the address at 4.
-    let target = unsafe { [*dest.add(4), *dest.add(5), *dest.add(6), *dest.add(7)] };
+    let target = unsafe { [*(dest.add(4)), *(dest.add(5)), *(dest.add(6)), *(dest.add(7))] };
     let ifs = match list() {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let up = |i: &&net::NetIface| i.flags & net::IFF_UP != 0 && i.addr != [0; 4];
-    let masked = |a: [u8; 4], prefix: u8| u32::from_be_bytes(a) & u32::from_be_bytes(mask(prefix));
-    let on_link = ifs
+    let chosen = ifs
         .iter()
-        .filter(up)
-        .filter(|i| masked(i.addr, i.prefix) == masked(target, i.prefix))
-        .max_by_key(|i| i.prefix);
-    let best = on_link.or_else(|| ifs.iter().filter(up).find(|i| i.gateway != [0; 4]));
-    match best {
+        .find(|i| i.addr == target || (target[0] == 127 && i.flags & net::IFF_LOOPBACK != 0))
+        .or_else(|| {
+            ifs.iter().find(|i| {
+                let m = mask(i.prefix);
+                i.addr != [0, 0, 0, 0]
+                    && (0..4).all(|k| (i.addr[k] & m[k]) == (target[k] & m[k]))
+            })
+        })
+        .or_else(|| ifs.iter().find(|i| i.flags & net::IFF_LOOPBACK == 0 && i.gateway != [0, 0, 0, 0]))
+        .or_else(|| ifs.first());
+    match chosen {
         Some(i) => {
-            // SAFETY: the caller's out pointer.
             unsafe { *index = i.index as u32 };
-            0 // NO_ERROR
+            0
         }
-        None => ERROR_NETWORK_UNREACHABLE,
+        None => 1231, // ERROR_NETWORK_UNREACHABLE
     }
 }
 
-/// if_indextoname(index, buffer): the interface name, or NULL.
 extern "win64" fn if_indextoname(index: u32, name: *mut u8) -> *mut u8 {
     if name.is_null() {
         return core::ptr::null_mut();
     }
-    match list().ok().and_then(|v| v.into_iter().find(|i| i.index as u32 == index)) {
-        Some(i) => {
-            let n = net::field(&i.name);
-            // SAFETY: the caller's buffer holds IF_NAMESIZE (256) bytes.
-            unsafe {
-                core::ptr::copy_nonoverlapping(n.as_ptr(), name, n.len());
-                *name.add(n.len()) = 0;
-            }
-            name
-        }
-        None => core::ptr::null_mut(),
-    }
+    let Ok(ifs) = list() else {
+        return core::ptr::null_mut();
+    };
+    let Some(i) = ifs.iter().find(|i| i.index as u32 == index) else {
+        return core::ptr::null_mut();
+    };
+    out_a(net::field(&i.name), name, 256);
+    name
 }
 
 /// if_nametoindex(name): the interface index, or 0.
@@ -442,5 +593,22 @@ extern "win64" fn if_nametoindex(name: *const u8) -> u32 {
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![GetAdaptersInfo, GetIfTable, GetNetworkParams, IcmpCreateFile, IcmpCloseHandle, IcmpSendEcho, NotifyIpInterfaceChange, NotifyUnicastIpAddressChange, NotifyRouteChange2, CancelMibChangeNotify2, FreeMibTable, GetIpInterfaceTable, GetBestInterfaceEx, if_indextoname, if_nametoindex]
+    export_table![
+        GetAdaptersInfo,
+        GetIfTable,
+        GetNetworkParams,
+        IcmpCreateFile,
+        IcmpCloseHandle,
+        IcmpSendEcho,
+        NotifyIpInterfaceChange,
+        NotifyUnicastIpAddressChange,
+        NotifyRouteChange2,
+        CancelMibChangeNotify2,
+        FreeMibTable,
+        GetIpInterfaceTable,
+        GetBestInterfaceEx,
+        if_indextoname,
+        if_nametoindex,
+        GetAdaptersAddresses,
+    ]
 }

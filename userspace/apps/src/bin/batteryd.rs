@@ -90,18 +90,30 @@ fn main() -> i32 {
         tables.push(ssdt);
     }
     let ec = EcPorts::from_ecdt(table(b"ECDT", 0).as_deref());
+    println!("batteryd: {} ACPI table(s), ECDT {}", tables.len(), if ec.is_some() { "found" } else { "absent" });
     let machine = Machine { start: Instant::now() };
-    let mut acpi = Acpi::load(machine, Some(ec), &tables, &mut |problem| eprintln!("batteryd: {problem}"));
+    let mut acpi = Acpi::load(machine, ec, &tables, &mut |problem| eprintln!("batteryd: {problem}"));
     println!("batteryd: {} battery device(s), {} AC adapter(s)", acpi.battery_devices(), acpi.adapter_devices());
+    match acpi.ec_ports() {
+        (Some(p), source) => println!("batteryd: {} EC device(s), EC ports {:#x}/{:#x} from {source}", acpi.ec_devices(), p.command, p.data),
+        (None, source) => println!("batteryd: no EC ports ({source})"),
+    }
     if acpi.battery_devices() == 0 {
         write_status(&Status::NONE.to_string());
         return 0;
     }
     let mut monitor = Monitor::new();
     let mut last = String::new();
+    let mut first = true;
     loop {
         let poll = acpi.poll();
         let status = monitor.update(&poll);
+        if first {
+            first = false;
+            let st = acpi.stats();
+            println!("batteryd: first poll: {} present, {} usable sample(s), {} EC transaction(s), {} EC error(s)",
+                poll.batteries.len(), poll.batteries.iter().flatten().count(), st.ec_transactions.load(core::sync::atomic::Ordering::Relaxed), st.errors());
+        }
         let text = status.to_string();
         if text != last {
             println!("batteryd: {}", text.trim_end().replace('\n', " | "));

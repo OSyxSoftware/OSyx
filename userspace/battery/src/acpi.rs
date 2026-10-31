@@ -2,7 +2,7 @@
 //! `_STA`, `_BIF`/`_BIX` and `_BST` of every battery device (`PNP0C0A`),
 //! `_PSR` of every AC adapter (`ACPI0003`).
 
-use crate::hw::{Firmware, Hardware, Stats};
+use crate::hw::{EcCell, EcPorts, Firmware, Hardware, Stats};
 use crate::model::{field, Poll, Sample};
 use aml::value::Args;
 use aml::{AmlContext, AmlName, AmlValue, DebugVerbosity, LevelType};
@@ -38,6 +38,8 @@ pub struct Acpi {
     ec_devices: Vec<AmlName>,
     stats: Arc<Stats>,
     polls: u32,
+    ec_cell: Arc<EcCell>,
+    ec_source: &'static str,
 }
 
 /// An `_HID` as text: EISA IDs are compressed into integers.
@@ -72,6 +74,14 @@ fn package(v: Option<AmlValue>) -> Option<Vec<AmlValue>> {
     }
 }
 
+/// The EC ports an EC device's `_CRS` names.
+fn crs_ports(ctx: &mut AmlContext, dev: &AmlName) -> Option<EcPorts> {
+    match call(ctx, dev, "_CRS", Args::EMPTY)? {
+        AmlValue::Buffer(bytes) => EcPorts::from_crs(&bytes.lock()),
+        _ => None,
+    }
+}
+
 /// Devices by `_HID`.
 fn devices(ctx: &mut AmlContext, wanted: &[&str]) -> Vec<AmlName> {
     let mut all = Vec::new();
@@ -95,18 +105,34 @@ impl Acpi {
     /// Loads the DSDT and SSDTs (whole tables, header included) and finds
     /// the devices. Tables that fail to parse are skipped: a battery method
     /// this interpreter cannot run costs that battery, not the daemon.
-    pub fn load<H: Hardware + 'static>(hw: H, ec: Option<crate::hw::EcPorts>, tables: &[Vec<u8>], log: &mut dyn FnMut(&str)) -> Acpi {
+    ///
+    /// `ec` are the ports the ECDT gave; with `None` the EC device's `_CRS`
+    /// is asked, and the legacy ports (0x62/0x66) are the last resort. The
+    /// ports are fixed before `initialize_objects`, whose `_INI` methods may
+    /// already read the EC.
+    pub fn load<H: Hardware + 'static>(hw: H, ec: Option<EcPorts>, tables: &[Vec<u8>], log: &mut dyn FnMut(&str)) -> Acpi {
         let stats = Arc::new(Stats::default());
-        let mut ctx = AmlContext::new(Box::new(Firmware::new(hw, ec, stats.clone())), DebugVerbosity::None);
+        let firmware = Firmware::new(hw, ec, stats.clone());
+        let ec_cell = firmware.ec_cell();
+        let mut ctx = AmlContext::new(Box::new(firmware), DebugVerbosity::None);
         for (i, t) in tables.iter().enumerate() {
             if let Err(e) = ctx.parse_table(&t[36.min(t.len())..]) {
                 log(&format!("table {i}: {e:?}"));
             }
         }
+        let ec_devices = devices(&mut ctx, &["PNP0C09"]);
+        let ec_source = if ec.is_some() {
+            "ECDT"
+        } else if let Some(ports) = ec_devices.iter().find_map(|d| crs_ports(&mut ctx, d)) {
+            ec_cell.set(Some(ports));
+            "_CRS"
+        } else {
+            ec_cell.set(Some(EcPorts::LEGACY));
+            "legacy ports"
+        };
         if let Err(e) = ctx.initialize_objects() {
             log(&format!("initialising objects: {e:?}"));
         }
-        let ec_devices = devices(&mut ctx, &["PNP0C09"]);
         let mut acpi = Acpi {
             ctx,
             batteries: Vec::new(),
@@ -114,6 +140,8 @@ impl Acpi {
             ec_devices,
             stats,
             polls: 0,
+            ec_cell,
+            ec_source,
         };
         acpi.connect_ec();
         acpi.batteries = devices(&mut acpi.ctx, &["PNP0C0A"]).into_iter().map(|name| Battery { name, info: None, info_age: 0 }).collect();
@@ -129,6 +157,16 @@ impl Acpi {
                 let _ = call(&mut self.ctx, &dev, "_REG", args);
             }
         }
+    }
+
+    /// The EC ports in use and where they came from.
+    pub fn ec_ports(&self) -> (Option<EcPorts>, &'static str) {
+        (self.ec_cell.get(), self.ec_source)
+    }
+
+    /// How many EC tables, devices ... the namespace holds: EC devices found.
+    pub fn ec_devices(&self) -> usize {
+        self.ec_devices.len()
     }
 
     pub fn battery_devices(&self) -> usize {
