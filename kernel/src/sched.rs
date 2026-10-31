@@ -125,6 +125,11 @@ pub struct Thread {
     low_rsp: u64,
     /// TEMP one-shot flag for the overflow report.
     stack_warned: bool,
+    /// SuspendThread count: while non-zero the thread stops at its next
+    /// return to user mode (see [`park_if_suspended`]).
+    suspend: u32,
+    /// The thread is blocked in [`park_if_suspended`].
+    parked: bool,
 }
 
 const IA32_FS_BASE: u32 = 0xC000_0100;
@@ -293,6 +298,8 @@ fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b
         queued_at: 0,
         low_rsp: top,
         stack_warned: false,
+        suspend: 0,
+        parked: false,
     })
 }
 
@@ -328,6 +335,8 @@ pub fn init() {
         queued_at: 0,
         low_rsp: 0,
         stack_warned: false,
+        suspend: 0,
+        parked: false,
     });
     let idle = new_thread(2, "idle", 0, root, idle_loop, 0, 0, 0);
     let mut threads = BTreeMap::new();
@@ -360,7 +369,7 @@ pub fn init_secondary(top: u64) {
         tid,name:alloc::format!("idle/{index}"),pid:0,state:State::Running,rsp:0,
         root:paging::kernel_root(),_kstack:Vec::new(),kstack_top:top,
         fpu:FpuState::initial(),wake_at:None,joiners:Vec::new(),slice:TIME_SLICE_TICKS,
-        fs_base:0,gs_base:0,fs32_base:0,kill_pending:false,wake_pending:false,leaving:false,bkl:false,cpu_ticks:0,affinity:u64::MAX,last_cpu:index,priority:NORMAL,boost:0,inherited:0,queued_at:0,low_rsp:top,stack_warned:false,
+        fs_base:0,gs_base:0,fs32_base:0,kill_pending:false,wake_pending:false,leaving:false,bkl:false,cpu_ticks:0,affinity:u64::MAX,last_cpu:index,priority:NORMAL,boost:0,inherited:0,queued_at:0,low_rsp:top,stack_warned:false,suspend:0,parked:false,
     });
     s.threads.insert(tid,t);s.current[index]=tid;s.idle[index]=tid;
     crate::smp::set_current(tid, 0);
@@ -692,6 +701,9 @@ fn after_switch() {
         if dead.as_ref().is_some_and(|t| t.kill_pending) {
             KILLS_PENDING.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
         }
+        if dead.as_ref().is_some_and(|t| t.suspend > 0) {
+            SUSPENDS_PENDING.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+        }
         reacquire = s.threads.get(&s.current[cpu]).is_some_and(|t| t.bkl);
     }
     drop(g);
@@ -924,6 +936,119 @@ pub fn current_kill_pending() -> bool {
         return false;
     }
     SCHED.lock().as_ref().is_some_and(|s| s.threads.get(&s.current[crate::smp::index()]).is_some_and(|t| t.kill_pending))
+}
+
+/// Threads with a non-zero suspend count. Every return to user mode asks
+/// [`park_if_suspended`]; while none is suspended that needs no scheduler lock.
+static SUSPENDS_PENDING: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Stops the current thread here while its suspend count is non-zero. Called
+/// where the thread is about to return to user mode with no kernel lock
+/// held; a thread being killed is let through.
+pub fn park_if_suspended() {
+    if SUSPENDS_PENDING.load(core::sync::atomic::Ordering::SeqCst) == 0 {
+        return;
+    }
+    let were_enabled = cpu::interrupts_enabled();
+    loop {
+        cpu::disable_interrupts();
+        {
+            let mut g = SCHED.lock();
+            let Some(s) = g.as_mut() else { break };
+            let tid = s.current[crate::smp::index()];
+            let Some(t) = s.threads.get_mut(&tid) else { break };
+            if t.suspend == 0 || t.kill_pending {
+                t.parked = false;
+                break;
+            }
+            t.parked = true;
+            if t.wake_pending {
+                // A resume (or another wake) arrived since the check above:
+                // look at the count again instead of blocking.
+                t.wake_pending = false;
+                continue;
+            }
+            t.state = State::Blocked;
+            t.wake_at = None;
+            t.leaving = true;
+        }
+        schedule();
+    }
+    if were_enabled {
+        cpu::enable_interrupts();
+    }
+}
+
+/// `nr::THREAD_SUSPEND`: changes or reads the suspend count of a thread of
+/// the caller's process and returns the previous count. Suspending another
+/// thread returns once it has stopped (or is waiting inside the kernel, where
+/// it stops when the wait ends).
+pub fn thread_suspend(tid: Tid, op: u64) -> Result<u64, osyx_abi::Errno> {
+    use osyx_abi::{suspend, Errno};
+    let me = current_tid();
+    let tid = if tid == 0 { me } else { tid };
+    let pid = current_pid();
+    let (previous, wake) = {
+        let mut guard = SCHED.lock();
+        let s = guard.as_mut().ok_or(Errno::NotSupported)?;
+        let t = s.threads.get_mut(&tid).ok_or(Errno::NotFound)?;
+        if t.pid != pid {
+            return Err(Errno::PermissionDenied);
+        }
+        let previous = t.suspend as u64;
+        let mut wake = false;
+        match op {
+            suspend::QUERY => {}
+            suspend::SUSPEND => {
+                if t.suspend >= suspend::MAX {
+                    return Err(Errno::Busy);
+                }
+                if t.suspend == 0 {
+                    SUSPENDS_PENDING.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+                }
+                t.suspend += 1;
+            }
+            suspend::RESUME => {
+                if t.suspend > 0 {
+                    t.suspend -= 1;
+                    if t.suspend == 0 {
+                        SUSPENDS_PENDING.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+                        wake = t.parked;
+                    }
+                }
+            }
+            _ => return Err(Errno::InvalidArgument),
+        }
+        (previous, wake)
+    };
+    if wake {
+        wake_boosted(tid, 0);
+    }
+    if op == suspend::SUSPEND && previous == 0 && tid != me {
+        // Wait (a few ticks at most) until the thread is off user code.
+        for _ in 0..20 {
+            let settled = SCHED.lock().as_ref().and_then(|s| s.threads.get(&tid)).is_none_or(|t| t.parked || t.state == State::Blocked || t.state == State::Dead);
+            if settled {
+                break;
+            }
+            sleep_ticks(1);
+        }
+    }
+    Ok(previous)
+}
+
+/// `nr::THREAD_TIMES`: scheduler samples the thread has used.
+pub fn thread_times(tid: Tid) -> Result<u64, osyx_abi::Errno> {
+    use osyx_abi::Errno;
+    let tid = if tid == 0 { current_tid() } else { tid };
+    let pid = current_pid();
+    let guard = SCHED.lock();
+    let s = guard.as_ref().ok_or(Errno::NotSupported)?;
+    let t = s.threads.get(&tid).ok_or(Errno::NotFound)?;
+    if t.pid != pid {
+        return Err(Errno::PermissionDenied);
+    }
+    Ok(t.cpu_ticks)
 }
 
 /// Sets the GS base of the current thread and loads it into the CPU.

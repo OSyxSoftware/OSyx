@@ -181,6 +181,8 @@ fn main() -> i32 {
             thread::sleep(Duration::from_secs(2));
             let mut c = Command::new("/bin/winrun");
             c.arg("-v");
+            // Every failing Win32 call is logged with its error.
+            c.env("OSYX_WINRUN_TRACE", "1");
             for a in &args[2..] {
                 c.arg(a);
             }

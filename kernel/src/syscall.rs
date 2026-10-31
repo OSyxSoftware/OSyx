@@ -296,6 +296,9 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::CPU_INFO => Ok(crate::smp::online() as u64 | (crate::smp::index() as u64)<<32),
         nr::THREAD_AFFINITY => sched::set_affinity(f.rdi,f.rsi),
         nr::THREAD_PRIORITY => sched::set_priority(f.rdi, f.rsi),
+        nr::THREAD_SUSPEND => sched::thread_suspend(f.rdi, f.rsi),
+        nr::THREAD_TIMES => sched::thread_times(f.rdi),
+        nr::WORKING_SET => sys_objects::working_set(f.rdi, f.rsi, f.rdx),
         nr::PROCESS_WRITE_BARRIER => {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             crate::smp::flush_remote(0,true);
@@ -394,6 +397,10 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             .and_then(|target| Ok((target, user_path(f.rdx, f.r10)?)))
             .and_then(|(target, p)| vfs::symlink(&Lookup::current(), &target, &p))
             .map(|_| 0),
+        nr::LINK => user_path(f.rdi, f.rsi)
+            .and_then(|existing| Ok((existing, user_path(f.rdx, f.r10)?)))
+            .and_then(|(existing, new)| vfs::link(&Lookup::current(), &existing, &new))
+            .map(|_| 0),
         nr::READLINK => user_path(f.rdi, f.rsi).and_then(|p| vfs::readlink(&Lookup::current(), &p)).and_then(|t| {
             let n = t.len().min(f.r10 as usize);
             copy_to_user(f.rdx, &t.as_bytes()[..n]).map(|_| n as u64)
@@ -472,6 +479,8 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
     if sched::current_kill_pending() {
         process::finish_current_thread(0);
     }
+    // A suspended thread (SuspendThread) stops here, with no lock held.
+    sched::park_if_suspended();
     osyx_abi::encode(r)
 }
 

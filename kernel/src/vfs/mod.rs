@@ -97,6 +97,11 @@ pub trait Filesystem: Send + Sync {
     fn rename(&self, _sdir: u64, _sname: &str, _ddir: u64, _dname: &str) -> Result<()> {
         Err(Errno::ReadOnly)
     }
+    /// A second name `name` in `dir` for the non-directory `target` (a hard
+    /// link). File systems without link counts refuse it.
+    fn link(&self, _dir: u64, _name: &str, _target: u64) -> Result<()> {
+        Err(Errno::NotSupported)
+    }
     fn set_mode(&self, _ino: u64, _mode: u32) -> Result<()> {
         Err(Errno::ReadOnly)
     }
@@ -644,6 +649,32 @@ pub fn symlink(cx: &Lookup, target: &str, p: &str) -> Result<()> {
         cache_forget(dir.mount.id, dir.ino, &name);
     }
     r.map(|_| ())
+}
+
+/// Creates `new` as another name of the file `existing` (a hard link; a
+/// symbolic link is linked itself, not followed).
+pub fn link(cx: &Lookup, existing: &str, new: &str) -> Result<()> {
+    let src = walk(cx, existing, false)?;
+    let st = src.stat()?;
+    if st.kind == KIND_DIR {
+        return Err(Errno::IsADirectory);
+    }
+    let (dir, name) = walk_parent(cx, new)?;
+    if !Arc::ptr_eq(&src.mount, &dir.mount) {
+        return Err(Errno::CrossDevice);
+    }
+    check_dir_write(&dir, &cx.cred)?;
+    if walk(cx, new, false).is_ok() {
+        return Err(Errno::AlreadyExists);
+    }
+    if !may(&st, &cx.cred, Access::READ) {
+        return Err(Errno::PermissionDenied);
+    }
+    let r = dir.mount.fs.link(dir.ino, &name, src.ino);
+    if r.is_ok() {
+        cache_forget(dir.mount.id, dir.ino, &name);
+    }
+    r
 }
 
 pub fn readlink(cx: &Lookup, p: &str) -> Result<String> {

@@ -28,6 +28,12 @@ fn addr_string(p: u64, addr: [u8; 4], prefix: u8) {
     out_a(&ip(addr), (p + 8) as *mut u8, 16);
     out_a(&ip(mask(prefix)), (p + 24) as *mut u8, 16);
 }
+/// Whether a non-loopback adapter has an address (WinINet's notion of a
+/// connection).
+pub(crate) fn has_connectivity() -> bool {
+    list().is_ok_and(|v| v.iter().any(|i| i.flags & net::IFF_LOOPBACK == 0 && i.addr != [0; 4]))
+}
+
 extern "win64" fn GetAdaptersInfo(out: u64, len: *mut u32) -> u32 {
     if len.is_null() {
         return ERROR_INVALID_PARAMETER;
@@ -573,15 +579,23 @@ extern "win64" fn if_indextoname(index: u32, name: *mut u8) -> *mut u8 {
     name
 }
 
+/// if_nametoindex(name): the interface index, or 0.
+extern "win64" fn if_nametoindex(name: *const u8) -> u32 {
+    if name.is_null() {
+        return 0;
+    }
+    // SAFETY: a NUL-terminated name.
+    let wanted = unsafe { core::ffi::CStr::from_ptr(name as *const core::ffi::c_char) }.to_bytes();
+    list()
+        .ok()
+        .and_then(|v| v.into_iter().find(|i| net::field(&i.name).as_bytes() == wanted))
+        .map_or(0, |i| i.index as u32)
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         GetAdaptersInfo,
-        GetAdaptersAddresses,
         GetIfTable,
-        GetIpInterfaceTable,
-        FreeMibTable,
-        GetBestInterfaceEx,
-        if_indextoname,
         GetNetworkParams,
         IcmpCreateFile,
         IcmpCloseHandle,
@@ -589,6 +603,12 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         NotifyIpInterfaceChange,
         NotifyUnicastIpAddressChange,
         NotifyRouteChange2,
-        CancelMibChangeNotify2
+        CancelMibChangeNotify2,
+        FreeMibTable,
+        GetIpInterfaceTable,
+        GetBestInterfaceEx,
+        if_indextoname,
+        if_nametoindex,
+        GetAdaptersAddresses,
     ]
 }
