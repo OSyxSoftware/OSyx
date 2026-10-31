@@ -774,6 +774,101 @@ extern "win64" fn WSAIoctl(
     })())
 }
 
+/// x64 WSABUF entries: ULONG len, four bytes of padding, CHAR *buf.
+fn wsa_bufs(bufs: *const u8, count: u32) -> Result<Vec<(u32, u64)>, u32> {
+    if count > 0 && bufs.is_null() {
+        return Err(WSAEFAULT);
+    }
+    let base = bufs as u64;
+    Ok((0..count as u64)
+        .map(|i| {
+            let off = (i * 16) as usize;
+            // SAFETY: the caller's WSABUF array.
+            unsafe { (teb::get::<u32>(base, off), teb::get::<u64>(base, off + 8)) }
+        })
+        .collect())
+}
+
+/// WSASend: gathers the WSABUFs into one stream write or datagram.
+/// Completion ports are not offered, so only the synchronous form works.
+extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, overlapped: *mut u8, completion: u64) -> i32 {
+    let r = (|| {
+        let (fd, _) = fd(s)?;
+        if f != 0 || !overlapped.is_null() || completion != 0 {
+            return Err(WSAEOPNOTSUPP);
+        }
+        let mut data = Vec::new();
+        for (len, p) in wsa_bufs(bufs, count)? {
+            if len > 0 && p == 0 {
+                return Err(WSAEFAULT);
+            }
+            // SAFETY: the caller's WSABUF of `len` bytes.
+            data.extend_from_slice(unsafe { core::slice::from_raw_parts(p as *const u8, len as usize) });
+        }
+        os_sys::sock_send(fd, &data, None, 0).map_err(wsa)
+    })();
+    match r {
+        Ok(n) => {
+            if !sent.is_null() {
+                // SAFETY: the caller's out count.
+                unsafe { *sent = n as u32 };
+            }
+            0
+        }
+        Err(e) => err(e, SOCKET_ERROR),
+    }
+}
+
+/// WSARecv: one receive scattered over the WSABUFs.
+extern "win64" fn WSARecv(
+    s: u64,
+    bufs: *const u8,
+    count: u32,
+    received: *mut u32,
+    f: *mut u32,
+    overlapped: *mut u8,
+    completion: u64,
+) -> i32 {
+    let r = (|| {
+        let (fd, _) = fd(s)?;
+        if !overlapped.is_null() || completion != 0 {
+            return Err(WSAEOPNOTSUPP);
+        }
+        // SAFETY: the caller's in/out flags.
+        let user_flags = if f.is_null() { 0 } else { unsafe { *f as i32 } };
+        let fl = flags(user_flags)?;
+        let parts = wsa_bufs(bufs, count)?;
+        let total: usize = parts.iter().map(|p| p.0 as usize).sum();
+        let mut data = alloc::vec![0u8; total];
+        let (n, _) = os_sys::sock_recv(fd, &mut data, fl).map_err(wsa)?;
+        let mut done = 0;
+        for (len, p) in parts {
+            let take = (len as usize).min(n - done);
+            if take == 0 {
+                continue;
+            }
+            // SAFETY: the caller's WSABUF of `len` bytes.
+            unsafe { core::ptr::copy_nonoverlapping(data[done..].as_ptr(), p as *mut u8, take) };
+            done += take;
+        }
+        Ok((n, f))
+    })();
+    match r {
+        Ok((n, f)) => {
+            if !received.is_null() {
+                // SAFETY: the caller's out count.
+                unsafe { *received = n as u32 };
+            }
+            if !f.is_null() {
+                // SAFETY: the caller's in/out flags; nothing partial to report.
+                unsafe { *f = 0 };
+            }
+            0
+        }
+        Err(e) => err(e, SOCKET_ERROR),
+    }
+}
+
 /// WSASendMsg: WSAMSG { name, namelen, lpBuffers, dwBufferCount, Control,
 /// dwFlags } with the buffers gathered into one datagram or stream write.
 /// Control data (ancillary messages) is not supported.
@@ -1104,6 +1199,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         __WSAFDIsSet,
         WSASocketW,
         WSAIoctl,
+        WSASend,
+        WSARecv,
         WSASendMsg,
         inet_pton,
         inet_ntop,

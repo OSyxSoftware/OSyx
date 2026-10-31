@@ -79,6 +79,30 @@ void __stdcall start(void) {
     closesocket(w);
     closesocket(r);
 
+    /* WSASend/WSARecv gather and scatter over loopback TCP. */
+    SOCKET ls = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in ta = {0};
+    ta.sin_family = AF_INET;
+    ta.sin_port = htons(8127);
+    ta.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    check_eq("bind 127.0.0.1:8127", bind(ls, (struct sockaddr *)&ta, sizeof ta), 0);
+    check_eq("listen 8127", listen(ls, 4), 0);
+    SOCKET cl = socket(AF_INET, SOCK_STREAM, 0);
+    check_eq("connect 8127", connect(cl, (struct sockaddr *)&ta, sizeof ta), 0);
+    SOCKET sv = accept(ls, NULL, NULL);
+    check("accept 8127", sv != INVALID_SOCKET);
+    WSABUF out[2] = {{5, "hello"}, {6, ", wsa!"}};
+    DWORD n = 0;
+    check("WSASend gathers two buffers", WSASend(cl, out, 2, &n, 0, NULL, NULL) == 0 && n == 11);
+    char part1[5] = {0}, part2[6] = {0};
+    WSABUF in[2] = {{5, part1}, {6, part2}};
+    n = 0;
+    check("WSARecv scatters into two buffers", WSARecv(sv, in, 2, &n, NULL, NULL, NULL) == 0 && n == 11);
+    check("... bytes", mem_eq(part1, "hello", 5) && mem_eq(part2, ", wsa!", 6));
+    closesocket(sv);
+    closesocket(cl);
+    closesocket(ls);
+
     /* The provider catalog. */
     DWORD len = 0;
     int err = 0;
