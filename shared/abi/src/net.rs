@@ -12,7 +12,7 @@ pub const SOCK_PING: u64 = 3;
 
 /// `send`/`recv` flags.
 pub const MSG_DONTWAIT: u64 = 1;
-/// `recv`: return data but leave it queued (UDP/ping: not supported).
+/// `recv`: return data but leave it queued (ping sockets: not supported).
 pub const MSG_PEEK: u64 = 2;
 
 /// `sock_ctl` operations.

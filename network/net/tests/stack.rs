@@ -651,3 +651,36 @@ fn malformed_frames_are_counted_not_trusted() {
     n.a.icmp_echo(s, B_IP, 1, b"ok").unwrap();
     assert!(n.run_until(100, |n| matches!(n.a.icmp_recv(s), Ok(IcmpEvent::Reply { .. }))));
 }
+
+#[test]
+fn tcp_peek_leaves_the_data_queued() {
+    let mut n = Net::new();
+    let (c, s) = connect(&mut n, 7100);
+    assert_eq!(n.a.tcp_send(c, b"peek me"), Ok(7));
+    let mut buf = [0u8; 32];
+    assert!(n.run_until(1000, |n| n.b.tcp_peek(s, &mut buf) == Ok(7)));
+    assert_eq!(&buf[..7], b"peek me");
+    // A second peek returns the same bytes: nothing was consumed.
+    assert_eq!(n.b.tcp_peek(s, &mut buf), Ok(7));
+    assert_eq!(&buf[..7], b"peek me");
+    assert_eq!(n.b.tcp_recv(s, &mut buf), Ok(7));
+    assert_eq!(&buf[..7], b"peek me");
+    assert_eq!(n.b.tcp_peek(s, &mut buf), Err(NetError::WouldBlock));
+}
+
+#[test]
+fn udp_peek_leaves_the_datagram_queued() {
+    let mut n = Net::new();
+    let rx = n.a.udp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 7001)).unwrap();
+    let tx = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    n.a.udp_send_to(tx, Some(Endpoint::new(Ipv4Addr::LOOPBACK, 7001)), b"peek").unwrap();
+    let mut buf = [0u8; 8];
+    let (from, len, total) = n.a.udp_peek_from(rx, &mut buf).unwrap();
+    assert_eq!((&buf[..len], total), (&b"peek"[..], 4));
+    assert_eq!(from.addr, Ipv4Addr::LOOPBACK);
+    let (_, len, _) = n.a.udp_peek_from(rx, &mut buf).unwrap();
+    assert_eq!(&buf[..len], b"peek");
+    let (_, len, _) = n.a.udp_recv_from(rx, &mut buf).unwrap();
+    assert_eq!(&buf[..len], b"peek");
+    assert_eq!(n.a.udp_peek_from(rx, &mut buf), Err(NetError::WouldBlock));
+}

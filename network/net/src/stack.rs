@@ -1369,6 +1369,20 @@ impl Stack {
         Err(NetError::WouldBlock)
     }
 
+    /// Like [`Stack::udp_recv_from`], but leaves the datagram queued.
+    pub fn udp_peek_from(&mut self, id: SocketId, buf: &mut [u8]) -> Result<(Endpoint, usize, usize), NetError> {
+        let u = self.udp(id)?;
+        if let Some((from, d)) = u.rx.front() {
+            let n = d.len().min(buf.len());
+            buf[..n].copy_from_slice(&d[..n]);
+            return Ok((*from, n, d.len()));
+        }
+        if let Some(e) = u.error.take() {
+            return Err(e);
+        }
+        Err(NetError::WouldBlock)
+    }
+
     pub fn udp_local(&mut self, id: SocketId) -> Result<Endpoint, NetError> {
         Ok(self.udp(id)?.local)
     }
@@ -1532,6 +1546,11 @@ impl Stack {
         let n = self.tcb(id)?.recv(buf).map_err(tcp_error)?;
         self.flush(); // window updates
         Ok(n)
+    }
+
+    /// Copies received data without taking it out of the queue (`MSG_PEEK`).
+    pub fn tcp_peek(&mut self, id: SocketId, buf: &mut [u8]) -> Result<usize, NetError> {
+        self.tcb(id)?.peek(buf).map_err(tcp_error)
     }
 
     /// Half-close: no more data from us (a FIN follows the queued data).

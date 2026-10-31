@@ -670,6 +670,7 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
     }
     let timeout = s.recv_timeout.load(Ordering::Relaxed);
     let nonblock = flags & abi::MSG_DONTWAIT != 0;
+    let peek = flags & abi::MSG_PEEK != 0;
     let mut k = alloc::vec![0u8; len];
     let run = |op: &mut RecvOp| {
         if nonblock {
@@ -681,9 +682,15 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
     let (n, addr) = match s.kind {
         abi::SOCK_DGRAM => {
             let id = ensure_udp(&s, None)?;
-            run(&mut |st| st.udp_recv_from(id, &mut k).map(|(f, n, _)| (n, Some(to_sa(f)))))?
+            run(&mut |st| {
+                let r = if peek { st.udp_peek_from(id, &mut k) } else { st.udp_recv_from(id, &mut k) };
+                r.map(|(f, n, _)| (n, Some(to_sa(f))))
+            })?
         }
         abi::SOCK_PING => {
+            if peek {
+                return Err(Errno::NotSupported);
+            }
             let id = s.id().ok_or(Errno::BadHandle)?;
             run(&mut |st| match st.icmp_recv(id)? {
                 IcmpEvent::Reply { from, seq, ttl, data } => {
@@ -696,7 +703,10 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
         }
         abi::SOCK_STREAM => {
             let id = s.id().ok_or(Errno::NotConnected)?;
-            run(&mut |st| st.tcp_recv(id, &mut k).map(|n| (n, None)))?
+            run(&mut |st| {
+                let r = if peek { st.tcp_peek(id, &mut k) } else { st.tcp_recv(id, &mut k) };
+                r.map(|n| (n, None))
+            })?
         }
         _ => return Err(Errno::NotSupported),
     };
