@@ -529,6 +529,179 @@ static void kernel_apis(void) {
     DeleteFileW(b);
 }
 
+/* ---- logon and LSA, object directory, stock icons, display config, transactions (results probed on Windows) ---- */
+
+typedef struct { USHORT Length, Maximum; ULONG pad; void *Buffer; } LSASTR;
+
+static void security_and_namespace(void) {
+    HMODULE sec = LoadLibraryA("secur32.dll"), adv = GetModuleHandleA("advapi32.dll"), nt = GetModuleHandleA("ntdll.dll");
+    LONG (WINAPI *connect)(HANDLE *) = (void *)GetProcAddress(sec, "LsaConnectUntrusted");
+    LONG (WINAPI *lookup)(HANDLE, LSASTR *, ULONG *) = (void *)GetProcAddress(sec, "LsaLookupAuthenticationPackage");
+    LONG (WINAPI *deregister)(HANDLE) = (void *)GetProcAddress(sec, "LsaDeregisterLogonProcess");
+    LONG (WINAPI *free_buffer)(void *) = (void *)GetProcAddress(sec, "LsaFreeReturnBuffer");
+    LONG (WINAPI *register_process)(LSASTR *, HANDLE *, ULONG *) = (void *)GetProcAddress(sec, "LsaRegisterLogonProcess");
+    BOOL (WINAPI *logon_user)(const WCHAR *, const WCHAR *, const WCHAR *, DWORD, DWORD, HANDLE *) = (void *)GetProcAddress(adv, "LogonUserW");
+    HANDLE lsa = NULL;
+    check("LsaConnectUntrusted returns a handle", connect && connect(&lsa) == 0 && lsa != NULL);
+    char msv[] = "MICROSOFT_AUTHENTICATION_PACKAGE_V1_0", bogus[] = "NoSuchPackage";
+    LSASTR name = { sizeof msv - 1, sizeof msv, 0, msv }, bad = { sizeof bogus - 1, sizeof bogus, 0, bogus };
+    ULONG id = 0;
+    check("LsaLookupAuthenticationPackage finds MSV1_0", lookup(lsa, &name, &id) == 0 && id == 11);
+    ULONG none = 7;
+    check("an unknown package is STATUS_NO_SUCH_PACKAGE", lookup(lsa, &bad, &none) == (LONG)0xC00000FE && none == (ULONG)-1);
+    check("LsaFreeReturnBuffer of memory the LSA did not allocate is STATUS_MEMORY_NOT_ALLOCATED", free_buffer(NULL) == (LONG)0xC00000A0 && free_buffer((void *)0x1234) == (LONG)0xC00000A0);
+    LSASTR process = { 8, 9, 0, "OSyxTest" };
+    HANDLE trusted = NULL;
+    ULONG mode = 0;
+    check("LsaRegisterLogonProcess without SeTcbPrivilege is STATUS_PRIVILEGE_NOT_HELD", register_process(&process, &trusted, &mode) == (LONG)0xC0000041);
+    check("LsaDeregisterLogonProcess closes once; again or a bad handle is an invalid binding", deregister(lsa) == 0 && deregister(lsa) == (LONG)0xC0030005 && deregister((HANDLE)0x1234) == (LONG)0xC0030005);
+
+    HANDLE token = NULL;
+    SetLastError(0);
+    check("LogonUserW of an unknown user is ERROR_LOGON_FAILURE", !logon_user(L"nosuchuser_zzz", L".", L"x", 2, 0, &token) && GetLastError() == 1326);
+    SetLastError(0);
+    check("LogonUserW of an unknown domain is ERROR_LOGON_FAILURE", !logon_user(L"nosuchuser_zzz", L"NOSUCHDOMAIN", L"x", 2, 0, &token) && GetLastError() == 1326);
+    SetLastError(0);
+    check("LogonUserW with a bad logon type is ERROR_INVALID_PARAMETER", !logon_user(L"a", L".", L"x", 99, 0, &token) && GetLastError() == ERROR_INVALID_PARAMETER);
+    SetLastError(0);
+    check("LogonUserW without a user name is ERROR_INVALID_PARAMETER", !logon_user(NULL, L".", L"x", 2, 0, &token) && GetLastError() == ERROR_INVALID_PARAMETER);
+    SetLastError(0);
+    check("LogonUserW with a bad provider is ERROR_INVALID_PARAMETER", !logon_user(L"a", L".", L"x", 2, 99, &token) && GetLastError() == ERROR_INVALID_PARAMETER);
+
+    /* The object namespace: a named event shows up under \BaseNamedObjects. */
+    LONG (NTAPI *open_dir)(HANDLE *, ACCESS_MASK, void *) = (void *)GetProcAddress(nt, "NtOpenDirectoryObject");
+    LONG (NTAPI *query_dir)(HANDLE, void *, ULONG, BOOLEAN, BOOLEAN, ULONG *, ULONG *) = (void *)GetProcAddress(nt, "NtQueryDirectoryObject");
+    HANDLE event = CreateEventW(NULL, TRUE, FALSE, L"OSyxNamespaceProbe");
+    struct { ULONG Length; ULONG pad; HANDLE Root; void *Name; ULONG Attributes; ULONG pad2; void *Sd, *Qos; } oa;
+    LSASTR dir = { 34, 36, 0, (void *)L"\\BaseNamedObjects" };
+    LSASTR root = { 2, 4, 0, (void *)L"\\" };
+    LSASTR nope = { 30, 32, 0, (void *)L"\\NoSuchDirectory" };
+    HANDLE d = NULL;
+    memset(&oa, 0, sizeof oa);
+    oa.Length = sizeof oa;
+    oa.Attributes = 0x40;
+    oa.Name = &nope;
+    check("a missing directory is STATUS_OBJECT_NAME_NOT_FOUND", open_dir(&d, 3, &oa) == (LONG)0xC0000034);
+    oa.Name = &dir;
+    check("NtOpenDirectoryObject opens \\BaseNamedObjects", open_dir(&d, 3, &oa) == 0 && d != NULL);
+    unsigned char buf[1024];
+    ULONG context = 0, needed = 0;
+    LONG st = query_dir(d, buf, sizeof buf, TRUE, TRUE, &context, &needed);
+    int found = 0;
+    for (int i = 0; st == 0 && i < 64; i++) {
+        LSASTR *entry = (LSASTR *)buf, *type = entry + 1;
+        WCHAR *text = (WCHAR *)entry->Buffer;
+        int match = entry->Length == 38 && text[0] == 'O' && text[4] == 'N' && ((WCHAR *)type->Buffer)[0] == 'E';
+        found |= match;
+        st = query_dir(d, buf, sizeof buf, TRUE, FALSE, &context, &needed);
+    }
+    check("the named event is listed with type Event", found);
+    check("the listing ends with STATUS_NO_MORE_ENTRIES", st == (LONG)0x8000001A);
+    context = 0;
+    check("a buffer too small for one entry is STATUS_BUFFER_TOO_SMALL with the size", query_dir(d, buf, 4, TRUE, TRUE, &context, &needed) == (LONG)0xC0000023 && needed > 64);
+    check("a bad directory handle is STATUS_INVALID_HANDLE", query_dir((HANDLE)0x1234, buf, sizeof buf, TRUE, TRUE, &context, &needed) == (LONG)0xC0000008);
+    CloseHandle(d);
+    oa.Name = &root;
+    context = 0;
+    check("the root directory holds BaseNamedObjects", open_dir(&d, 3, &oa) == 0 && query_dir(d, buf, sizeof buf, TRUE, TRUE, &context, &needed) == 0 && ((LSASTR *)buf)->Length == 32);
+    CloseHandle(d);
+    CloseHandle(event);
+}
+
+static void stock_icons_display_and_transactions(void) {
+    HMODULE shell = LoadLibraryA("shell32.dll"), user = GetModuleHandleA("user32.dll"), ktm = LoadLibraryA("ktmw32.dll"), adv = GetModuleHandleA("advapi32.dll");
+    HRESULT (WINAPI *stock)(int, UINT, void *) = (void *)GetProcAddress(shell, "SHGetStockIconInfo");
+    unsigned char info[544];
+    memset(info, 0, sizeof info);
+    *(DWORD *)info = 544;
+    check("SHGetStockIconInfo(SIID_FOLDER) names imageres.dll index -3", stock(3, 0, info) == 0 && *(int *)(info + 20) == -3 && ((WCHAR *)(info + 24))[0] == 'C');
+    WCHAR *path = (WCHAR *)(info + 24);
+    int ends_imageres = 0;
+    for (int n = 0; path[n]; n++) ends_imageres = path[n] == 's' && path[n + 1] == 0 && path[n - 1] == 'e' && path[n - 2] == 'r';
+    check("the folder icon lives in imageres.dll", ends_imageres);
+    *(DWORD *)info = 544;
+    check("SIID_DOCNOASSOC is index -2 and its system index is 0", stock(0, 0x4000, info) == 0 && *(int *)(info + 20) == -2 && *(int *)(info + 16) == 0);
+    *(DWORD *)info = 544;
+    check("the folder's system image list index is 3", stock(3, 0x4000, info) == 0 && *(int *)(info + 16) == 3);
+    *(DWORD *)info = 544;
+    check("SHGSI_ICON makes an icon", stock(3, 0x100, info) == 0 && *(HANDLE *)(info + 8) != NULL);
+    HANDLE icon = *(HANDLE *)(info + 8);
+    BOOL (WINAPI *destroy)(HANDLE) = (void *)GetProcAddress(user, "DestroyIcon");
+    if (destroy && icon) destroy(icon);
+    check("an unknown id is E_INVALIDARG", stock(9999, 0, info) == (HRESULT)0x80070057 && stock(-1, 0, info) == (HRESULT)0x80070057);
+    *(DWORD *)info = 4;
+    check("a wrong cbSize is E_INVALIDARG", stock(3, 0, info) == (HRESULT)0x80070057);
+    *(DWORD *)info = 544;
+    check("unknown flags are E_INVALIDARG", stock(3, 0x7fff0000, info) == (HRESULT)0x80070057 && stock(3, 0, NULL) == (HRESULT)0x80070057);
+
+    LONG (WINAPI *buffer_sizes)(UINT, UINT *, UINT *) = (void *)GetProcAddress(user, "GetDisplayConfigBufferSizes");
+    LONG (WINAPI *query)(UINT, UINT *, void *, UINT *, void *, UINT *) = (void *)GetProcAddress(user, "QueryDisplayConfig");
+    LONG (WINAPI *device_info)(void *) = (void *)GetProcAddress(user, "DisplayConfigGetDeviceInfo");
+    UINT paths = 0, modes = 0;
+    check("GetDisplayConfigBufferSizes: one path and two modes", buffer_sizes(2, &paths, &modes) == 0 && paths == 1 && modes == 2);
+    check("a flag word without a path set is ERROR_INVALID_PARAMETER", buffer_sizes(0, &paths, &modes) == ERROR_INVALID_PARAMETER);
+    unsigned char path_info[72], mode_info[128];
+    UINT np = 0, nm = 0;
+    check("QueryDisplayConfig with no room is ERROR_INSUFFICIENT_BUFFER", query(2, &np, path_info, &nm, mode_info, NULL) == ERROR_INSUFFICIENT_BUFFER && np == 1 && nm == 2);
+    np = 1;
+    nm = 2;
+    check("QueryDisplayConfig fills an active path", query(2, &np, path_info, &nm, mode_info, NULL) == 0 && np == 1 && nm == 2 && *(DWORD *)(path_info + 68) == 1);
+    check("the source mode has the screen size and 32 bpp", *(DWORD *)(mode_info + 16) > 0 && *(DWORD *)(mode_info + 20) > 0 && *(DWORD *)(mode_info + 24) == 4);
+    unsigned char name[420];
+    memset(name, 0, sizeof name);
+    *(DWORD *)name = 2;
+    *(DWORD *)(name + 4) = sizeof name;
+    *(DWORD *)(name + 8) = 1;
+    check("DisplayConfigGetDeviceInfo names the target", device_info(name) == 0 && ((WCHAR *)(name + 36))[0] != 0);
+    *(DWORD *)(name + 8) = 0;
+    check("another adapter is ERROR_INVALID_PARAMETER", device_info(name) == ERROR_INVALID_PARAMETER);
+    *(DWORD *)name = 99;
+    *(DWORD *)(name + 8) = 1;
+    check("an unknown request type is ERROR_INVALID_PARAMETER", device_info(name) == ERROR_INVALID_PARAMETER);
+
+    HANDLE (WINAPI *create)(void *, void *, DWORD, DWORD, DWORD, DWORD, WCHAR *) = (void *)GetProcAddress(ktm, "CreateTransaction");
+    BOOL (WINAPI *commit)(HANDLE) = (void *)GetProcAddress(ktm, "CommitTransaction");
+    BOOL (WINAPI *rollback)(HANDLE) = (void *)GetProcAddress(ktm, "RollbackTransaction");
+    BOOL (WINAPI *get_id)(HANDLE, GUID *) = (void *)GetProcAddress(ktm, "GetTransactionId");
+    LONG (WINAPI *reg_create)(HKEY, const WCHAR *, DWORD, WCHAR *, DWORD, REGSAM, void *, HKEY *, DWORD *, HANDLE, void *) = (void *)GetProcAddress(adv, "RegCreateKeyTransactedW");
+    BOOL (WINAPI *reg_delete)(HKEY, const WCHAR *) = (void *)GetProcAddress(adv, "RegDeleteKeyW");
+    check("the KTM functions exist", create && commit && rollback && get_id && reg_create);
+    SetLastError(0);
+    check("CreateTransaction with unknown options is ERROR_INVALID_PARAMETER", create(NULL, NULL, 77, 0, 0, 0, L"x") == INVALID_HANDLE_VALUE && GetLastError() == ERROR_INVALID_PARAMETER);
+    HANDLE t1 = create(NULL, NULL, 0, 0, 0, 0, L"a");
+    SetLastError(0);
+    check("rollback, then commit is ERROR_TRANSACTION_ALREADY_ABORTED, rollback again succeeds", rollback(t1) && !commit(t1) && GetLastError() == 6704 && rollback(t1));
+    CloseHandle(t1);
+    HANDLE t2 = create(NULL, NULL, 0, 0, 0, 0, L"b");
+    GUID g;
+    memset(&g, 0, sizeof g);
+    SetLastError(0);
+    check("commit succeeds once; after it commit and rollback are ERROR_TRANSACTION_ALREADY_COMMITTED", commit(t2) && !commit(t2) && GetLastError() == 6705 && !rollback(t2) && GetLastError() == 6705);
+    check("GetTransactionId returns a GUID", get_id(t2, &g) && (g.Data1 || g.Data2));
+    SetLastError(0);
+    check("a bad transaction handle is ERROR_INVALID_HANDLE", !commit((HANDLE)0x1234) && GetLastError() == ERROR_INVALID_HANDLE && !get_id((HANDLE)0x1234, &g) && GetLastError() == ERROR_INVALID_HANDLE);
+    CloseHandle(t2);
+
+    HKEY key = NULL, seen = NULL;
+    DWORD disposition = 0;
+    HANDLE t3 = create(NULL, NULL, 0, 0, 0, 0, L"c");
+    reg_delete(HKEY_CURRENT_USER, L"Software\\OSyxTxProbe\\Inner");
+    reg_delete(HKEY_CURRENT_USER, L"Software\\OSyxTxProbe");
+    check("RegCreateKeyTransactedW creates a key", reg_create(HKEY_CURRENT_USER, L"Software\\OSyxTxProbe\\Inner", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, &disposition, t3, NULL) == 0 && key && disposition == REG_CREATED_NEW_KEY);
+    if (key) RegCloseKey(key);
+    check("the rollback removes the keys the transaction created", rollback(t3) && RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\OSyxTxProbe\\Inner", 0, KEY_READ, &seen) == ERROR_FILE_NOT_FOUND && RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\OSyxTxProbe", 0, KEY_READ, &seen) == ERROR_FILE_NOT_FOUND);
+    CloseHandle(t3);
+    check("a bad transaction handle for RegCreateKeyTransactedW is ERROR_INVALID_HANDLE", reg_create(HKEY_CURRENT_USER, L"Software\\OSyxTxProbe", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, &disposition, (HANDLE)0x1234, NULL) == ERROR_INVALID_HANDLE);
+    HANDLE t4 = create(NULL, NULL, 0, 0, 0, 0, L"d");
+    key = NULL;
+    check("a committed transaction keeps its keys", reg_create(HKEY_CURRENT_USER, L"Software\\OSyxTxProbe", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, &disposition, t4, NULL) == 0 && commit(t4) && RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\OSyxTxProbe", 0, KEY_READ, &seen) == 0);
+    if (key) RegCloseKey(key);
+    if (seen) RegCloseKey(seen);
+    check("a transaction that has ended cannot create more keys", reg_create(HKEY_CURRENT_USER, L"Software\\OSyxTxProbe", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, &disposition, t4, NULL) == 6705);
+    reg_delete(HKEY_CURRENT_USER, L"Software\\OSyxTxProbe");
+    CloseHandle(t4);
+}
+
 void __stdcall start(void) {
     hashes();
     randomness();
@@ -539,5 +712,7 @@ void __stdcall start(void) {
     interfaces_and_streams();
     thread_wer_cycles();
     kernel_apis();
+    security_and_namespace();
+    stock_icons_display_and_transactions();
     finish("newlibs");
 }
