@@ -835,7 +835,7 @@ fn fast_blit(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i3
                         }
                     } else {
                         let win = g.windows.get_mut(&src_hwnd)?;
-                        SrcHolder::Surface(win.win.surface().ok()?)
+                        SrcHolder::Surface(win.win.as_mut()?.surface().ok()?)
                     };
                     let dtop = db.dib.top;
                     let dstride = db.dib.stride / 4;
@@ -847,7 +847,7 @@ fn fast_blit(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i3
                 let view =
                     SrcView { bits: &b.storage, w: b.dib.w, h: b.dib.h, stride: b.dib.stride / 4, top: b.dib.top };
                 let win = g.windows.get_mut(&dst_hwnd)?;
-                let mut surface = win.win.surface().ok()?;
+                let mut surface = win.win.as_mut()?.surface().ok()?;
                 for row in 0..ph {
                     let s = view.row(syi + row);
                     if (py + row) as u32 >= surface.height() {

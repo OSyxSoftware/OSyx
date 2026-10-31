@@ -140,7 +140,9 @@ struct Win {
     control_id: u64,
     check_state: u32,
     system_menu: u64,
-    win: Window,
+    /// The PRISM window; none for a child control, which draws into its
+    /// top-level ancestor's surface and is no window of the compositor.
+    win: Option<Window>,
     pos: (i32, i32),
     size: (u32, u32),
     /// The most recent normal geometry, preserved while maximized/minimized.
@@ -161,6 +163,19 @@ struct Win {
     props: BTreeMap<String, u64>,
     /// The window's menu bar (SetMenu; the CreateWindow menu of a top-level window).
     menu: u64,
+}
+
+impl Win {
+    /// PRISM has configured the window; a child control, which has no PRISM
+    /// window, is always ready (its host's state gates the actual drawing).
+    fn configured(&self) -> bool {
+        self.win.as_ref().is_none_or(|win| win.is_configured())
+    }
+
+    /// The window's id at the compositor; 0 for a child control.
+    fn prism_id(&self) -> u32 {
+        self.win.as_ref().map_or(0, |win| win.id)
+    }
 }
 
 /// ICONINFO: icon or cursor, hotspot, and its own mask and colour bitmaps.
@@ -194,6 +209,9 @@ struct DialogState {
     result: Option<i64>,
     modal: bool,
     thread: u64,
+    /// DWL_USER and DWL_MSGRESULT, the dialog's own window words.
+    user: i64,
+    message_result: i64,
 }
 
 struct Timer {
@@ -246,7 +264,7 @@ fn surface_host(windows: &BTreeMap<u64, Win>, hwnd: u64) -> (u64, (i32, i32)) {
 fn window_surface(windows: &mut BTreeMap<u64, Win>, hwnd: u64) -> Option<Surface<'_>> {
     let (host, origin) = surface_host(windows, hwnd);
     let size = windows.get(&hwnd)?.size;
-    let surface = windows.get_mut(&host)?.win.surface().ok()?;
+    let surface = windows.get_mut(&host)?.win.as_mut()?.surface().ok()?;
     if host == hwnd {
         Some(surface)
     } else {
@@ -557,7 +575,7 @@ impl Gui {
         if self.timers.iter().any(|t| t.thread == me && t.due <= now) {
             s |= QS_TIMER;
         }
-        if self.windows.values().any(|w| w.thread == me && w.visible && w.invalid.is_some() && w.win.is_configured()) {
+        if self.windows.values().any(|w| w.thread == me && w.visible && w.invalid.is_some() && w.configured()) {
             s |= QS_PAINT;
         }
         s
@@ -637,7 +655,7 @@ impl Gui {
         }
         if matches!(ev, Event::Key { .. } | Event::Pointer { .. } | Event::CloseRequest { .. }) && self.windows.get(&hwnd).is_some_and(|w| w.style & 0x08000000 != 0) { return; }
         if let Some(w) = self.windows.get_mut(&hwnd) {
-            w.win.on_event(&ev);
+            if let Some(win) = w.win.as_mut() { win.on_event(&ev); }
         }
         match ev {
             Event::Configure { width, height, states, .. } => {
@@ -935,7 +953,7 @@ impl Gui {
         let paint = self
             .windows
             .iter()
-            .find(|(h, w)| w.thread == me && window_matches(**h) && message_matches(WM_PAINT) && w.visible && w.invalid.is_some() && w.win.is_configured())
+            .find(|(h, w)| w.thread == me && window_matches(**h) && message_matches(WM_PAINT) && w.visible && w.invalid.is_some() && w.configured())
             .map(|(h, _)| *h);
         if let Some(hwnd) = paint {
             if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
@@ -1044,6 +1062,9 @@ fn call(proc_: u64, hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
     if proc_ == 0 {
         return DefWindowProcA(hwnd, msg, w, l);
     }
+    if (0x400..0x1000).contains(&msg) && crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: call proc={proc_:#x} hwnd={hwnd:#x} msg={msg:#x} w={w:#x} l={l:#x}");
+    }
     if crate::wow64::is_active()
         && proc_ != DefWindowProcA as *const () as usize as u64
         && proc_ != DefWindowProcW as *const () as usize as u64
@@ -1135,7 +1156,7 @@ fn dispatch_pending_frames() {
         let dirty: Vec<u64> = g
             .windows
             .iter()
-            .filter(|(_, w)| w.drawn.is_some() && w.visible && w.win.is_configured())
+            .filter(|(_, w)| w.drawn.is_some() && w.visible && w.configured())
             .map(|(&h, _)| h)
             .collect();
         (frames, dirty)
@@ -1318,6 +1339,9 @@ fn create_window(
 ) -> u64 {
     let Some(class) = class else { return fail(ERROR_CANNOT_FIND_WND_CLASS, 0) };
     let title = title.unwrap_or_default();
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: CreateWindow class={class:?} title={title:?} style={style:#x} parent={parent:#x}");
+    }
     let created = with(|g| -> Result<u64, u32> {
         if style & WS_CHILD != 0 && !g.windows.contains_key(&parent) {
             return Err(ERROR_INVALID_WINDOW_HANDLE);
@@ -1347,16 +1371,22 @@ fn create_window(
             || (parent != 0 && ex_style & WS_EX_APPWINDOW == 0) {
             spec.flags |= proto::window_flags::SKIP_TASKBAR;
         }
-        spec.parent = g.windows.get(&parent).map_or(0, |w| w.win.id);
+        spec.parent = g.windows.get(&parent).and_then(|w| w.win.as_ref()).map_or(0, |w| w.id);
         spec.min_width = if style & WS_CHILD != 0 { 1 } else { 120 };
         spec.min_height = if style & WS_CHILD != 0 { 1 } else { 80 };
         if x != CW_USEDEFAULT {
             spec.x = x;
             spec.y = y;
         }
-        let win = g.conn()?.create_window(spec).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?;
+        let win = if style & WS_CHILD != 0 {
+            None
+        } else {
+            Some(g.conn()?.create_window(spec).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?)
+        };
         let hwnd = g.handle();
-        g.by_prism.insert(win.id, hwnd);
+        if let Some(win) = &win {
+            g.by_prism.insert(win.id, hwnd);
+        }
         let wndproc = g.classes[ci].wndproc;
         g.windows.insert(
             hwnd,
@@ -1480,9 +1510,11 @@ fn destroy(hwnd: u64, notify: bool) -> bool {
     with(|g| {
         if let Some(w) = g.windows.remove(&hwnd) {
             if w.system_menu != 0 { destroy_menu(g, w.system_menu); }
-            g.by_prism.remove(&w.win.id);
-            if let Some(c) = g.conn.as_mut() {
-                let _ = w.win.destroy(c);
+            if let Some(win) = w.win {
+                g.by_prism.remove(&win.id);
+                if let Some(c) = g.conn.as_mut() {
+                    let _ = win.destroy(c);
+                }
             }
         }
         if let Some(d) = g.dialogs.get_mut(&hwnd) {
@@ -1565,10 +1597,12 @@ extern "win64" fn ShowWindow(hwnd: u64, cmd: i32) -> Bool {
         let size = w.size;
         if changed { g.queue.retain(|m| m.hwnd != hwnd || m.msg != WM_SIZE); }
         if let (Some(a), Some(c)) = (action, g.conn.as_mut()) {
-            if matches!(cmd, 1 | 4) && previous_state & WS_MINIMIZE != 0 {
-                let _ = g.windows.get_mut(&hwnd)?.win.action(c, proto::Action::Activate);
+            if let Some(win) = g.windows.get_mut(&hwnd)?.win.as_mut() {
+                if matches!(cmd, 1 | 4) && previous_state & WS_MINIMIZE != 0 {
+                    let _ = win.action(c, proto::Action::Activate);
+                }
+                let _ = win.action(c, a);
             }
-            let _ = g.windows.get_mut(&hwnd)?.win.action(c, a);
         }
         if !was && cmd != 0 {
             g.invalidate(hwnd, None, true);
@@ -1619,10 +1653,11 @@ fn sync_window_visibility(hwnd: u64) {
         // window stays hidden and out of the taskbar, or it would show as a
         // blank window of its own.
         let child = w.style & WS_CHILD != 0;
+        let Some(win) = w.win.as_ref() else { return };
         let auxiliary = child || w.owner == (-3i64) as u64 || w.ex_style & (0x80 | 0x08000000) != 0
             || (w.owner != 0 && w.ex_style & 0x40000 == 0);
         let request = proto::Request::SetWindowVisibility {
-            window: w.win.id, visible: w.visible && !child && w.owner != (-3i64) as u64,
+            window: win.id, visible: w.visible && !child && w.owner != (-3i64) as u64,
             taskbar: w.visible && !auxiliary,
         };
         if let Some(c) = g.conn.as_mut() { let _ = c.send(&request, &[]); }
@@ -1636,7 +1671,7 @@ extern "win64" fn UpdateWindow(hwnd: u64) -> Bool {
     loop {
         let ready = with(|g| {
             g.pump();
-            g.windows.get(&hwnd).map(|w| (w.win.is_configured(), w.invalid.is_some() && w.visible))
+            g.windows.get(&hwnd).map(|w| (w.configured(), w.invalid.is_some() && w.visible))
         });
         match ready {
             None => return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE),
@@ -1776,13 +1811,15 @@ extern "win64" fn SetWindowPos(hwnd: u64, after: u64, x: i32, y: i32, cx: i32, c
             w.style &= !WS_VISIBLE;
         }
         let c = g.conn.as_mut()?;
-        let _ = g.windows.get_mut(&hwnd)?.win.set_geometry(
-            c,
-            if flags & 0x2 == 0 { px } else { -1 },
-            if flags & 0x2 == 0 { py } else { -1 },
-            nw,
-            nh,
-        );
+        if let Some(win) = g.windows.get_mut(&hwnd)?.win.as_mut() {
+            let _ = win.set_geometry(
+                c,
+                if flags & 0x2 == 0 { px } else { -1 },
+                if flags & 0x2 == 0 { py } else { -1 },
+                nw,
+                nh,
+            );
+        }
         if resized { g.invalidate(hwnd, None, true); }
         if resized { g.queue.retain(|m| m.hwnd != hwnd || m.msg != WM_SIZE); }
         g.synchronize();
@@ -1816,7 +1853,7 @@ fn set_title(hwnd: u64, t: String) -> Bool {
         let w = g.windows.get_mut(&hwnd)?;
         w.title = t.clone();
         let c = g.conn.as_mut()?;
-        let _ = g.windows.get_mut(&hwnd)?.win.set_title(c, &t);
+        if let Some(win) = g.windows.get_mut(&hwnd)?.win.as_mut() { let _ = win.set_title(c, &t); }
         Some(())
     });
     ok.map_or_else(|| fail(ERROR_INVALID_WINDOW_HANDLE, FALSE), |_| TRUE)
@@ -1921,9 +1958,31 @@ const GWLP_WNDPROC: i32 = -4;
 const GWL_STYLE: i32 = -16;
 const GWLP_USERDATA: i32 = -21;
 
+/// The positive window words of a dialog: DWL_MSGRESULT, DWL_DLGPROC and
+/// DWL_USER, at the offsets of the caller's pointer size.
+#[derive(Clone, Copy, PartialEq)]
+enum DialogWord { MessageResult, Proc, User }
+
+fn dialog_word(idx: i32) -> Option<DialogWord> {
+    let step = if crate::wow64::is_active() { 4 } else { 8 };
+    match idx {
+        0 => Some(DialogWord::MessageResult),
+        i if i == step => Some(DialogWord::Proc),
+        i if i == 2 * step => Some(DialogWord::User),
+        _ => None,
+    }
+}
+
 extern "win64" fn GetWindowLongPtrA(hwnd: u64, idx: i32) -> i64 {
     with(|g| {
         let Some(w) = g.windows.get(&hwnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
+        if let (Some(word), Some(d)) = (dialog_word(idx), g.dialogs.get(&hwnd)) {
+            return match word {
+                DialogWord::MessageResult => d.message_result,
+                DialogWord::Proc => d.proc_ as i64,
+                DialogWord::User => d.user,
+            };
+        }
         match idx {
             GWLP_WNDPROC => w.wndproc as i64,
             GWL_STYLE => w.style as i64,
@@ -1943,6 +2002,14 @@ extern "win64" fn GetWindowLongPtrA(hwnd: u64, idx: i32) -> i64 {
 
 extern "win64" fn SetWindowLongPtrA(hwnd: u64, idx: i32, v: i64) -> i64 {
     let previous = with(|g| {
+        if !g.windows.contains_key(&hwnd) { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) }
+        if let (Some(word), Some(d)) = (dialog_word(idx), g.dialogs.get_mut(&hwnd)) {
+            return match word {
+                DialogWord::MessageResult => core::mem::replace(&mut d.message_result, v),
+                DialogWord::Proc => core::mem::replace(&mut d.proc_, v as u64) as i64,
+                DialogWord::User => core::mem::replace(&mut d.user, v),
+            };
+        }
         let Some(w) = g.windows.get_mut(&hwnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, 0) };
         match idx {
             GWLP_WNDPROC => core::mem::replace(&mut w.wndproc, v as u64) as i64,
@@ -2553,7 +2620,14 @@ extern "win64" fn DialogWndProc(hwnd: u64, msg: u32, w: u64, l: i64) -> i64 {
 fn create_dialog(module: u64, name: u64, owner: u64, proc_: u64, param: u64, modal: bool) -> Result<u64, u32> {
     if proc_ == 0 { return Err(ERROR_INVALID_PARAMETER); }
     if owner != 0 && !is_window(owner) { return Err(ERROR_INVALID_WINDOW_HANDLE); }
-    let raw = crate::loader::numeric_resource(module, 5, name)?;
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: CreateDialog module={module:#x} template={name:#x} owner={owner:#x}");
+    }
+    let raw = crate::loader::numeric_resource(module, 5, name).inspect_err(|e| {
+        if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+            os_std::eprintln!("winrun: CreateDialog template {name:#x}: resource error {e}");
+        }
+    })?;
     let spec = dialog_template::parse(&raw)?;
     let internal = "OSyxDialog";
     with(|g| {
@@ -2574,7 +2648,7 @@ fn create_dialog(module: u64, name: u64, owner: u64, proc_: u64, param: u64, mod
     if hwnd == 0 { return Err(teb::last_error()); }
     let was_enabled = modal && owner != 0 && IsWindowEnabled(owner) != 0;
     if was_enabled { EnableWindow(owner, FALSE); }
-    with(|g| { g.dialogs.insert(hwnd, DialogState { proc_, result: None, modal, thread: teb::current_tid() }); });
+    with(|g| { g.dialogs.insert(hwnd, DialogState { proc_, result: None, modal, thread: teb::current_tid(), user: 0, message_result: 0 }); });
     for control in spec.controls {
         let class: Vec<u16> = control.class.encode_utf16().chain(core::iter::once(0)).collect();
         let title: Vec<u16> = control.title.encode_utf16().chain(core::iter::once(0)).collect();
@@ -3638,7 +3712,7 @@ fn wait_drawable(hwnd: u64) -> bool {
         let ok = with(|g| {
             g.pump();
             let (host, _) = surface_host(&g.windows, hwnd);
-            g.windows.get(&host).map(|w| w.win.can_draw())
+            g.windows.get(&host).map(|w| w.win.as_ref().is_some_and(|win| win.can_draw()))
         });
         match ok {
             Some(true) => {
@@ -3761,6 +3835,7 @@ fn present(hwnd: u64, r: Option<Rect>) {
         let (hwnd, origin) = surface_host(&g.windows, hwnd);
         let r = r.map(|a| Rect::new(a.x + origin.0, a.y + origin.1, a.w, a.h));
         let Some(w) = g.windows.get_mut(&hwnd) else { return };
+        let Some(win) = w.win.as_mut() else { return };
         let full = Rect::new(0, 0, w.size.0, w.size.1);
         // PRISM copies only the committed rects, so a paint present must also
         // cover everything drawn through the DC outside its paint rectangle.
@@ -3775,7 +3850,7 @@ fn present(hwnd: u64, r: Option<Rect>) {
             return;
         }
         if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
-            let (top, page, popup, url) = match w.win.surface() {
+            let (top, page, popup, url) = match win.surface() {
                 Ok(s) => (
                     band_hash_rows(&s, 0, 170),
                     band_hash_rows(&s, 170, 700),
@@ -3795,7 +3870,7 @@ fn present(hwnd: u64, r: Option<Rect>) {
         if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
             static FRAMES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
             if FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                if let Ok(surface) = w.win.surface() {
+                if let Ok(surface) = win.surface() {
                     os_std::eprintln!("winrun: window frame {hwnd:#x} damage={damage:?} size={:?} pixels={:x?}", surface.bounds(), &surface.pixels()[..surface.pixels().len().min(8)]);
                 }
             }
@@ -3803,7 +3878,7 @@ fn present(hwnd: u64, r: Option<Rect>) {
         let rect = proto::Rect { x: damage.x, y: damage.y, w: damage.w, h: damage.h };
         let Some(c) = g.conn.as_mut() else { return };
         let t = Instant::now();
-        let r = g.windows.get_mut(&hwnd).map(|w| w.win.present(c, Some(rect)));
+        let r = g.windows.get_mut(&hwnd).and_then(|w| w.win.as_mut()).map(|win| win.present(c, Some(rect)));
         let us = t.elapsed().as_micros();
         if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && us >= 20_000 {
             os_std::eprintln!("winrun: presentsess hwnd={hwnd:#x} tid={} us={us}", teb::current_tid());
@@ -3842,7 +3917,7 @@ extern "win64" fn GetDC(hwnd: u64) -> u64 {
     if hwnd == 0 {
         return gdi::display_dc();
     }
-    let state = with(|g| g.windows.get(&hwnd).map(|w| (w.size, w.win.is_configured())));
+    let state = with(|g| g.windows.get(&hwnd).map(|w| (w.size, w.configured())));
     let Some((size, configured)) = state else { return 0 };
     // A configured window may still be presenting the previous frame, the
     // same wait BeginPaint does; a hidden window gets its DC at once (its
@@ -5262,7 +5337,7 @@ extern "win64" fn SetForegroundWindow(wnd: u64) -> Bool {
         let Some(root) = root_window(g, wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
         if let Some(c) = g.conn.as_mut() {
             if let Some(w) = g.windows.get_mut(&root) {
-                let _ = w.win.action(c, proto::Action::Activate);
+                if let Some(win) = w.win.as_mut() { let _ = win.action(c, proto::Action::Activate); }
             }
         }
         if root_window(g, g.focus) != Some(root) {
@@ -5297,7 +5372,7 @@ extern "win64" fn BringWindowToTop(wnd: u64) -> Bool {
         if w.style & WS_CHILD == 0 {
             if let Some(c) = g.conn.as_mut() {
                 if let Some(w) = g.windows.get_mut(&wnd) {
-                    let _ = w.win.action(c, proto::Action::Activate);
+                    if let Some(win) = w.win.as_mut() { let _ = win.action(c, proto::Action::Activate); }
                 }
             }
         }
@@ -5881,7 +5956,7 @@ extern "win64" fn InjectSyntheticPointerInput(device: u64, pointer_info: *const 
         }
         let hit = with(|g| {
             if record.target != 0 {
-                return g.windows.get(&record.target).map(|w| (w.win.id, w.pos));
+                return g.windows.get(&record.target).map(|w| (w.prism_id(), w.pos));
             }
             let point = |w: &Win| {
                 record.screen.0 >= w.pos.0
@@ -5891,14 +5966,14 @@ extern "win64" fn InjectSyntheticPointerInput(device: u64, pointer_info: *const 
             };
             if let Some(w) = g.windows.get(&g.focus) {
                 if w.style & WS_CHILD == 0 && w.visible && point(w) {
-                    return Some((w.win.id, w.pos));
+                    return Some((w.prism_id(), w.pos));
                 }
             }
             g.windows
                 .iter()
                 .rev()
                 .find(|(_, w)| w.style & WS_CHILD == 0 && w.visible && point(w))
-                .map(|(_, w)| (w.win.id, w.pos))
+                .map(|(_, w)| (w.prism_id(), w.pos))
         });
         let Some((prism, pos)) = hit else {
             return fail(if record.target != 0 { ERROR_INVALID_WINDOW_HANDLE } else { ERROR_INVALID_PARAMETER }, FALSE);
@@ -6745,7 +6820,7 @@ fn run_menu_popup(menu: u64, owner: u64, x: i32, y: i32, align: u32) -> MenuPick
     }
     height += 6;
     let (px, py) = menu_anchor(x, y, width, height, align);
-    let Some((parent_id, origin)) = with(|g| g.windows.get(&owner).map(|w| (w.win.id, w.pos))) else {
+    let Some((parent_id, origin)) = with(|g| g.windows.get(&owner).map(|w| (w.prism_id(), w.pos))) else {
         return MenuPick::None;
     };
     let mut spec = WindowSpec::with_role(proto::Role::Popup, px - origin.0, py - origin.1, width as u32, height as u32);
