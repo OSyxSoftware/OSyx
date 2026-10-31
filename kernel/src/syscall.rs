@@ -62,11 +62,29 @@ osyx_syscall_entry:
     pop rsp
     swapgs
     sysretq
+
+    // SYSCALL from 32-bit compatibility mode (AMD CPUs; Intel raises #UD).
+    // Not a system call: return to the next instruction with rax = -1.
+    // IRETQ, not SYSRET, restores the 32-bit code selector from the GDT.
+    .global osyx_syscall32_entry
+osyx_syscall32_entry:
+    swapgs
+    mov gs:[8], rsp
+    mov rsp, gs:[0]
+    push 0x1b
+    push qword ptr gs:[8]
+    push r11
+    push 0x3b
+    push rcx
+    mov rax, -1
+    swapgs
+    iretq
     "#
 );
 
 extern "C" {
     fn osyx_syscall_entry();
+    fn osyx_syscall32_entry();
 }
 
 /// Registers saved by the entry stub (lowest address first).
@@ -93,6 +111,8 @@ pub struct SyscallFrame {
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_STAR: u32 = 0xC000_0081;
 const IA32_LSTAR: u32 = 0xC000_0082;
+const IA32_CSTAR: u32 = 0xC000_0083;
+const IA32_SYSENTER_CS: u32 = 0x174;
 const IA32_FMASK: u32 = 0xC000_0084;
 
 /// Enables SYSCALL and installs the entry point.
@@ -108,6 +128,11 @@ pub unsafe fn init() {
     let sysret_base = USER_DS as u64 - 8;
     cpu::wrmsr(IA32_STAR, (sysret_base << 48) | ((KERNEL_CS as u64) << 32));
     cpu::wrmsr(IA32_LSTAR, osyx_syscall_entry as *const () as u64);
+    // Ring 3 can run 32-bit code (gdt::USER_CS32): SYSCALL there enters
+    // through CSTAR; a null SYSENTER_CS makes SYSENTER raise #GP.
+    const _: () = assert!(USER_DS == 0x1b && crate::arch::gdt::USER_CS32 == 0x3b);
+    cpu::wrmsr(IA32_CSTAR, osyx_syscall32_entry as *const () as u64);
+    cpu::wrmsr(IA32_SYSENTER_CS, 0);
     // Clear IF, TF, DF, NT and AC on entry.
     cpu::wrmsr(IA32_FMASK, (1 << 9) | (1 << 8) | (1 << 10) | (1 << 14) | (1 << 18));
 }
@@ -274,6 +299,9 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::CPU_INFO => Ok(crate::smp::online() as u64 | (crate::smp::index() as u64)<<32),
         nr::THREAD_AFFINITY => sched::set_affinity(f.rdi,f.rsi),
         nr::THREAD_PRIORITY => sched::set_priority(f.rdi, f.rsi),
+        nr::THREAD_SUSPEND => sched::thread_suspend(f.rdi, f.rsi),
+        nr::THREAD_TIMES => sched::thread_times(f.rdi),
+        nr::WORKING_SET => sys_objects::working_set(f.rdi, f.rsi, f.rdx),
         nr::PROCESS_WRITE_BARRIER => {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             crate::smp::flush_remote(0,true);
@@ -372,6 +400,10 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
             .and_then(|target| Ok((target, user_path(f.rdx, f.r10)?)))
             .and_then(|(target, p)| vfs::symlink(&Lookup::current(), &target, &p))
             .map(|_| 0),
+        nr::LINK => user_path(f.rdi, f.rsi)
+            .and_then(|existing| Ok((existing, user_path(f.rdx, f.r10)?)))
+            .and_then(|(existing, new)| vfs::link(&Lookup::current(), &existing, &new))
+            .map(|_| 0),
         nr::READLINK => user_path(f.rdi, f.rsi).and_then(|p| vfs::readlink(&Lookup::current(), &p)).and_then(|t| {
             let n = t.len().min(f.r10 as usize);
             copy_to_user(f.rdx, &t.as_bytes()[..n]).map(|_| n as u64)
@@ -455,6 +487,8 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
     if sched::current_kill_pending() {
         process::finish_current_thread(0);
     }
+    // A suspended thread (SuspendThread) stops here, with no lock held.
+    sched::park_if_suspended();
     osyx_abi::encode(r)
 }
 

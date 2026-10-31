@@ -92,7 +92,9 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 11. **Real-hardware coverage**: NVMe, AHCI, wired NICs (`e1000`, `rtl8168`)
     and Intel Wi-Fi (`iwm` through the BSD layer) drivers exist; the open
     work is verification and fixes on more machines and firmware. I2C-HID
-    touchpads have no driver yet.
+    touchpads and keyboards have a polled driver (DesignWare controllers,
+    `kernel/src/drivers/i2c.rs`) that is untested on real hardware; interrupts
+    need an I/O APIC driver and GPIO controller drivers.
 12. **Windows compatibility expansion**: cross-process sharing and object
     names, child controls, SEH, delay imports, process creation and the
     runtime dependencies of larger applications; Windows 11 API-set research
@@ -109,9 +111,10 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
 15. **OSyx Std**: `thread`, futex-based `Mutex`, `Condvar`, `RwLock`,
     `Once`/`OnceLock` and `mpsc` are implemented; next is the genuine `std`
     port ([rust-std.md](rust-std.md)).
-16. **Desktop**: per-pixel alpha (ARGB8888 windows) and raw-report keyboards
-    are implemented; still open: AXIS pipelines, redirection and blocks (see
-    [graphics.md](graphics.md)).
+16. **Desktop**: per-pixel alpha (ARGB8888 windows), raw-report keyboards,
+    AXIS redirection (`<`, `>`, `>>`, built-ins included), pipelines with at
+    most one built-in stage and `if`/`for` blocks are implemented; still
+    open: job control (see [graphics.md](graphics.md)).
 
 ## Real hardware: current scope and limits
 
@@ -120,5 +123,5 @@ NVMe, AHCI, physical Ethernet and Intel Wi-Fi drivers are present. The README li
 - **Display**: GOP on physical hardware; VirtIO-GPU under QEMU. Native GPU modesetting is not implemented.
 - **SMP**: user threads run in parallel; kernel entry uses a common lock.
 - **USB**: xHCI supports hubs; device and topology coverage remains limited.
-- **Laptop input**: PS/2 input is supported; I2C-HID touchpads and native gesture protocols are not supported.
+- **Laptop input**: PS/2 input is supported. HID over I2C (keyboards, mice, precision touchpads behind a DesignWare I2C controller, found through ACPI by `i2chidd`) is implemented but polled and not yet verified on real hardware; touchscreens, gestures (tap, scroll) and interrupt-driven input are not supported.
 - **Power**: shutdown requests ACPI S5 using FADT and the static DSDT _S5 package where available. Firmware behavior varies.

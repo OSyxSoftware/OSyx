@@ -366,15 +366,15 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         }
     }
     static REPORTS: Mutex<Vec<alloc::string::String>> = Mutex::new(Vec::new());
-    if crate::VERBOSE.load(Ordering::Relaxed) {
-        let delay = delay_load_failure(&record);
+    let delay = delay_load_failure(&record); let verbose = crate::VERBOSE.load(Ordering::Relaxed); if delay.is_some() || verbose {
+        let _ = &delay;
         let key = delay.clone().unwrap_or_else(|| alloc::format!("{:x}:{:x}", record.code, record.address));
         let report = {
             let mut seen = REPORTS.lock().unwrap();
             if seen.len() >= 32 || seen.contains(&key) { false } else { seen.push(key); true }
         };
         if report {
-            os_std::eprintln!("winrun: dispatching Windows exception {:#x} at {} in thread {}, info {:x?}", record.code, where_text(record.address), os_sys::gettid(), &record.info[..record.count.min(15) as usize]);
+            if verbose { os_std::eprintln!("winrun: dispatching Windows exception {:#x} at {} in thread {}, info {:x?}", record.code, where_text(record.address), os_sys::gettid(), &record.info[..record.count.min(15) as usize]); }
             if let Some(what) = delay { os_std::eprintln!("winrun: delay-load exception: {what}"); }
         }
     }

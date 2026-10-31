@@ -232,6 +232,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
         builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports()].concat(), crate::shell32::ordinals()),
         builtin("comdlg32.dll", crate::commdlg::exports(), Vec::new()),
+        builtin("comctl32.dll", crate::comctl32::exports(), crate::comctl32::ordinals()),
         builtin("ole32.dll", crate::ole32::exports(), Vec::new()),
         builtin("winmm.dll", crate::winmm::exports(), Vec::new()),
         builtin("oleaut32.dll", crate::oleaut32::exports(), crate::oleaut32::ordinals()),
@@ -244,6 +245,13 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("ktmw32.dll", crate::minordlls::ktmw32_exports(), Vec::new()),
         builtin("windowscodecs.dll", crate::minordlls::windowscodecs_exports(), Vec::new()),
         builtin("bcryptprimitives.dll", crate::minordlls::bcryptprimitives_exports(), Vec::new()),
+        builtin("bcrypt.dll", crate::bcrypt::exports(), Vec::new()),
+        builtin("secur32.dll", crate::newlibs::secur32_exports(), Vec::new()),
+        builtin("shfolder.dll", crate::newlibs::shfolder_exports(), Vec::new()),
+        builtin("winspool.drv", crate::newlibs::winspool_exports(), Vec::new()),
+        builtin("uiautomationcore.dll", crate::newlibs::uiautomationcore_exports(), Vec::new()),
+        builtin("oleacc.dll", crate::newlibs::oleacc_exports(), Vec::new()),
+        builtin("msvcrt.dll", crate::newlibs::msvcrt_exports(), Vec::new()),
         builtin("shcore.dll", crate::minordlls::shcore_exports(), Vec::new()),
         builtin("uxtheme.dll", crate::minordlls::uxtheme_exports(), Vec::new()),
         builtin("avrt.dll", crate::minordlls::avrt_exports(), Vec::new()),
@@ -531,14 +539,21 @@ impl Host for WinHost {
         Ok(self.adopt(base, size))
     }
 
-    fn import_thunk(&mut self, symbol: Option<&str>, _ordinal: u16, address: u64, pe32: bool) -> u64 {
+    fn import_thunk(&mut self, symbol: Option<&str>, ordinal: u16, address: u64, pe32: bool) -> u64 {
         // PE32+ slots hold the resolved address itself.
         if !pe32 {
             return address;
         }
-        // A by-ordinal import has no name to bridge; report it as unbound.
-        let (Some(symbol), Some(bridge)) = (symbol, self.bridge.as_mut()) else { return 0 };
-        bridge.import(symbol, address).map_or(0, u64::from)
+        // PE-to-PE imports are already 32-bit entry points.
+        if self.images.iter().any(|i| address >= i.base && address < i.base + i.size) {
+            return address;
+        }
+        let symbol = symbol.or_else(|| (ordinal == 17 && address == crate::comctl32::init_address()).then_some("InitCommonControls"));
+        let Some(symbol) = symbol else { return 0 };
+        match self.bridge.as_ref() {
+            Some(bridge) => bridge.import(symbol, address),
+            None => wow64::import_active(symbol, address),
+        }.map_or(0, u64::from)
     }
 
     fn commit(&mut self, base: u64, _image: Self::Image, prot: &[Protection]) -> Result<(), LinkError> {
@@ -633,6 +648,8 @@ struct ModState {
     refs: u32,
     attached: bool,
     tls_callbacks: Vec<u64>,
+    /// DisableThreadLibraryCalls: no DLL_THREAD_ATTACH/DETACH to DllMain.
+    no_thread_calls: bool,
 }
 
 struct Loader {
@@ -647,6 +664,14 @@ static LOADER: Mutex<Option<Loader>> = Mutex::new(None);
 fn with<R>(f: impl FnOnce(&mut Loader) -> R) -> R {
     let mut g = LOADER.lock().unwrap();
     f(g.as_mut().expect("loader initialised"))
+}
+
+/// Like [`with`], but `None` in a 32-bit process: `run_pe32` keeps its
+/// linker to itself, and there are no PE32+ modules whose TLS or
+/// DllMain a new thread would need.
+fn with_loaded<R>(f: impl FnOnce(&mut Loader) -> R) -> Option<R> {
+    let mut g = LOADER.lock().unwrap();
+    g.as_mut().map(f)
 }
 
 /// HMODULE of module `i`: its image base, or the built-in's handle page.
@@ -667,7 +692,7 @@ fn module_by_handle(l: &Loader, h: u64) -> Option<usize> {
 fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> {
     let order = l.linker.init_order(root);
     while l.state.len() < l.linker.modules.len() {
-        l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new() });
+        l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false });
     }
     let mut todo = Vec::new();
     for i in order {
@@ -681,7 +706,7 @@ fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> 
         let full = l.linker.host.file_name(&m.name);
         let entry = if is_dll { m.entry() } else { 0 };
         l.state[i].ldr = teb::add_ldr_entry(base, m.entry(), size, &full, &m.name);
-        let Ok(pe) = PeFile::parse(file.as_ref()) else { continue };
+        let Ok(pe) = PeFile::parse_any(file.as_ref()) else { continue };
         if let Ok(Some(tls)) = pe.tls() {
             let index = l.tls.len() as u32;
             // SAFETY: the TLS directory lies in the mapped image (validated
@@ -741,7 +766,7 @@ const TLS_SLOTS: usize = 256;
 /// missing ones. Rebuilding the array would silently wipe every thread-local
 /// the program had stored (jemalloc's thread cache, NSS's, Gecko's).
 pub fn setup_thread_tls(teb_addr: u64) {
-    with(|l| {
+    with_loaded(|l| {
         if l.tls.is_empty() {
             return;
         }
@@ -769,6 +794,20 @@ pub fn setup_thread_tls(teb_addr: u64) {
     });
 }
 
+/// `DisableThreadLibraryCalls`: the module gets no more DLL_THREAD_ATTACH or
+/// DLL_THREAD_DETACH calls to its DllMain. An unknown handle is
+/// ERROR_MOD_NOT_FOUND, as on Windows.
+pub fn disable_thread_calls(h: u64) -> Result<(), u32> {
+    with(|l| {
+        let i = module_by_handle(l, h).ok_or(ERROR_MOD_NOT_FOUND)?;
+        while l.state.len() <= i {
+            l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false });
+        }
+        l.state[i].no_thread_calls = true;
+        Ok(())
+    })
+}
+
 /// DLL_THREAD_ATTACH / DETACH for the calling thread (TLS callbacks and
 /// DllMain of every attached DLL, in load order).
 ///
@@ -777,20 +816,23 @@ pub fn setup_thread_tls(teb_addr: u64) {
 /// prologue there probes `[gs:0x10]`/`[gs:0x08]` and a mismatch faults at the
 /// stack limit instead of growing the stack.
 pub fn notify_threads(reason: u32) {
-    let list: Vec<(u64, u64, Vec<u64>)> = with(|l| {
+    let list: Vec<(u64, u64, Vec<u64>)> = with_loaded(|l| {
         (0..l.linker.modules.len())
             .filter(|&i| l.state.get(i).is_some_and(|s| s.attached))
             .filter_map(|i| {
                 let m = &l.linker.modules[i];
                 match &m.kind {
                     Kind::Pe { is_dll, .. } => {
-                        Some((m.base, if *is_dll { m.entry() } else { 0 }, l.state[i].tls_callbacks.clone()))
+                        // TLS callbacks still run for a DLL that disabled thread calls.
+                        let entry = if *is_dll && !l.state[i].no_thread_calls { m.entry() } else { 0 };
+                        Some((m.base, entry, l.state[i].tls_callbacks.clone()))
                     }
                     Kind::Builtin(_) => None,
                 }
             })
             .collect()
-    });
+    })
+    .unwrap_or_default();
     for (base, entry, cbs) in list {
         for cb in cbs {
             // SAFETY: as in `deliver_attach`.
@@ -950,6 +992,14 @@ pub fn run_pe32(bytes: Vec<u8>, args: &[String], cmd: &str, env: &[String]) -> R
     // Built-in modules have no DllMain, so the computed order is recorded
     // only: there is no 32-bit DllMain delivery on this path yet.
     let order = linker.init_order(exe);
+    for &i in &order {
+        if let Kind::Pe { file, .. } = &linker.modules[i].kind {
+            let pe = PeFile::parse_any(file.as_ref()).map_err(|e| alloc::format!("{}: {e}", linker.modules[i].name))?;
+            if pe.tls().map_err(|e| alloc::format!("{}: {e}", linker.modules[i].name))?.is_some() {
+                return Err(alloc::format!("{}: PE32 static TLS is not supported", linker.modules[i].name));
+            }
+        }
+    }
     if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
         os_std::eprintln!("winrun: 32-bit program {name} entry {entry:#x}, {} modules", order.len());
     }
@@ -973,6 +1023,25 @@ pub fn run_pe32(bytes: Vec<u8>, args: &[String], cmd: &str, env: &[String]) -> R
     let main_teb = teb::create_teb(top, limit, crate::kernel32::pid(), os_sys::gettid());
     teb::install(main_teb);
     crate::kernel32::EXE_STACK_RESERVE.store((top - limit) as usize, core::sync::atomic::Ordering::Relaxed);
+    let attaches: Vec<(u32, u32)> = order.iter().filter_map(|&i| {
+        let m = &linker.modules[i];
+        match &m.kind {
+            Kind::Pe { is_dll: true, .. } if m.entry() != 0 => Some((m.base as u32, m.entry() as u32)),
+            _ => None,
+        }
+    }).collect();
+    // Keep the PE32 linker for GetProcAddress and LoadLibrary.
+    let state = (0..linker.modules.len()).map(|_| ModState {
+        ldr: 0, refs: 1, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false,
+    }).collect();
+    *LOADER.lock().unwrap() = Some(Loader { linker, exe, state, tls: Vec::new() });
+    bridge.prepare().map_err(String::from)?;
+    for (base, dll_entry) in attaches {
+        if wow64::call32(dll_entry, &[base, DLL_PROCESS_ATTACH, 0]) == 0 {
+            wow64::clear_active();
+            return Err(alloc::format!("PE32 DLL {base:#x} rejected DLL_PROCESS_ATTACH"));
+        }
+    }
     bridge.enter(entry as u32)
 }
 
@@ -1062,6 +1131,14 @@ pub fn get_module_handle(name: Option<&str>) -> Option<u64> {
 
 /// `GetModuleFileName` of a module handle (None = the program).
 pub fn module_file_name(h: Option<u64>, exe_path: &str) -> Option<String> {
+    // A 32-bit program keeps its linker out of LOADER: the program itself
+    // is the one module whose name is known, and no other handle exists.
+    if with_loaded(|_| ()).is_none() {
+        return match h {
+            None => Some(path::to_windows(exe_path)),
+            Some(_) => None,
+        };
+    }
     with(|l| {
         let i = match h {
             None => l.exe,
@@ -1080,7 +1157,27 @@ pub fn get_proc_address(h: u64, sym: Symbol<'_>) -> Result<u64, u32> {
     with(|l| {
         let i = module_by_handle(l, h).ok_or(ERROR_MOD_NOT_FOUND)?;
         let importer = l.linker.modules[l.exe].name.clone();
-        l.linker.resolve(i, sym, &importer, 0).map_err(|_| ERROR_PROC_NOT_FOUND)
+        let address = l.linker.resolve(i, sym, &importer, 0).map_err(|_| ERROR_PROC_NOT_FOUND)?;
+        if !wow64::is_active() || l.linker.host.images.iter().any(|img| address >= img.base && address < img.base + img.size) {
+            return Ok(address);
+        }
+        let name = match sym {
+            Symbol::Name(name) => Some(name),
+            Symbol::Ordinal(_) => l.linker.host.builtins.iter().flat_map(|b| b.by_name.iter()).find_map(|(n, a)| (*a == address).then_some(*n)),
+        };
+        name.and_then(|name| wow64::import_active(name, address)).map(u64::from).ok_or(ERROR_PROC_NOT_FOUND)
+    })
+}
+
+/// Numeric RT_DIALOG resource from a mapped PE module, copied outside lock.
+pub(crate) fn numeric_resource(module: u64, kind: u16, name: u64) -> Result<Vec<u8>, u32> {
+    if name == 0 || name >= 0x10000 { return Err(50); }
+    with(|l| {
+        let index = if module == 0 { l.exe } else { module_by_handle(l, module).ok_or(ERROR_MOD_NOT_FOUND)? };
+        let Kind::Pe { file, .. } = &l.linker.modules[index].kind else { return Err(1812) };
+        let pe = PeFile::parse_any(file.as_ref()).map_err(|_| 193u32)?;
+        pe.resource(kind, Some(name as u16), None).map_err(|_| 1812u32)?
+            .map(|data| data.to_vec()).ok_or(1813)
     })
 }
 
@@ -1117,9 +1214,20 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
                 _ => 193, // ERROR_BAD_EXE_FORMAT
             }
         })?;
+        if wow64::is_active() {
+            for dep in l.linker.init_order(i) {
+                if let Kind::Pe { file, .. } = &l.linker.modules[dep].kind {
+                    let pe = PeFile::parse_any(file.as_ref()).map_err(|_| 193u32)?;
+                    if pe.tls().map_err(|_| 193u32)?.is_some() {
+                        os_std::eprintln!("winrun: LoadLibrary({name}): PE32 static TLS is not supported in {}", l.linker.modules[dep].name);
+                        return Err(50);
+                    }
+                }
+            }
+        }
         let todo = register_new(l, i);
         while l.state.len() < l.linker.modules.len() {
-            l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new() });
+            l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false });
         }
         l.state[i].refs += 1;
         (todo, module_handle(l, i))
@@ -1127,11 +1235,27 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
     if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
         os_std::eprintln!("winrun: loaded {name} at {h:#x}");
     }
-    if !todo.is_empty() {
+    if !todo.is_empty() && !wow64::is_active() {
         // New TLS indices need blocks for this thread too.
         setup_thread_tls(teb::current());
     }
-    if !deliver_attach(&todo) {
+    let attached = if wow64::is_active() {
+        todo.iter().all(|(base, entry, callbacks, _)| {
+            for &callback in callbacks { wow64::call32(callback as u32, &[*base as u32, DLL_PROCESS_ATTACH, 0]); }
+            *entry == 0 || wow64::call32(*entry as u32, &[*base as u32, DLL_PROCESS_ATTACH, 0]) != 0
+        })
+    } else { deliver_attach(&todo) };
+    if !attached {
+        // The image may stay mapped, but a later LoadLibrary must retry
+        // initialization instead of returning an uninitialized module.
+        with(|l| {
+            for (base, _, _, _) in &todo {
+                if let Some(i) = (0..l.linker.modules.len()).find(|&i| l.linker.modules[i].base == *base) {
+                    l.state[i].attached = false;
+                }
+            }
+            if let Some(i) = module_by_handle(l, h) { l.state[i].refs = l.state[i].refs.saturating_sub(1); }
+        });
         return Err(ERROR_DLL_INIT_FAILED);
     }
     Ok(h)
@@ -1186,8 +1310,12 @@ pub fn free_library(h: u64) -> Result<(), u32> {
     if let Some((base, entry)) = detach {
         if entry != 0 {
             // SAFETY: the entry point of a mapped DLL image.
-            let f: DllMain = unsafe { core::mem::transmute(entry as usize) };
-            f(base, DLL_PROCESS_DETACH, 0);
+            if wow64::is_active() {
+                wow64::call32(entry as u32, &[base as u32, DLL_PROCESS_DETACH, 0]);
+            } else {
+                let f: DllMain = unsafe { core::mem::transmute(entry as usize) };
+                f(base, DLL_PROCESS_DETACH, 0);
+            }
         }
     }
     Ok(())

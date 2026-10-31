@@ -35,18 +35,75 @@ impl EcPorts {
     /// The ports every PC firmware uses.
     pub const LEGACY: EcPorts = EcPorts { command: 0x66, data: 0x62 };
 
-    /// From the ECDT table (control register at byte 44, data at 56, as
-    /// generic addresses whose address starts 4 bytes in); the legacy ports
-    /// if the table is missing or empty.
-    pub fn from_ecdt(table: Option<&[u8]>) -> EcPorts {
-        let gas = |t: &[u8], at: usize| t.get(at + 4..at + 6).map(|b| u16::from_le_bytes([b[0], b[1]]));
-        match table {
-            Some(t) => match (gas(t, 44), gas(t, 56)) {
-                (Some(command), Some(data)) if command != 0 && data != 0 => EcPorts { command, data },
-                _ => EcPorts::LEGACY,
-            },
-            None => EcPorts::LEGACY,
+    /// From the ECDT table (ACPI 5.2.15): after the 36-byte header come
+    /// EC_CONTROL (the command/status port) and EC_DATA, each a 12-byte
+    /// generic address structure (space id, widths, then the 8-byte address
+    /// at +4). `None` if the table is missing, short, or names anything but
+    /// system I/O ports: the caller then asks the EC device's `_CRS`.
+    pub fn from_ecdt(table: Option<&[u8]>) -> Option<EcPorts> {
+        const SYSTEM_IO: u8 = 1;
+        let t = table?;
+        let gas = |at: usize| -> Option<u16> {
+            let g = t.get(at..at + 12)?;
+            let address = u64::from_le_bytes(g[4..12].try_into().ok()?);
+            (g[0] == SYSTEM_IO && address != 0 && address <= u16::MAX as u64).then_some(address as u16)
+        };
+        Some(EcPorts { command: gas(36)?, data: gas(48)? })
+    }
+
+    /// From an EC device's `_CRS` buffer: the first I/O port descriptor is
+    /// the data port, the second the command/status port (ACPI 12.11).
+    /// Small I/O (0x47) and fixed I/O (0x4B) descriptors count; the rest is
+    /// skipped by length.
+    pub fn from_crs(crs: &[u8]) -> Option<EcPorts> {
+        let mut ports = [0u16; 2];
+        let mut found = 0;
+        let mut at = 0;
+        while at < crs.len() && found < 2 {
+            let tag = crs[at];
+            if tag & 0x80 != 0 {
+                // Large item: a 16-bit length follows the tag.
+                let len = u16::from_le_bytes([*crs.get(at + 1)?, *crs.get(at + 2)?]) as usize;
+                at += 3 + len;
+                continue;
+            }
+            let len = (tag & 7) as usize;
+            match tag >> 3 {
+                0x08 if len >= 7 => {
+                    // I/O port descriptor: info, min (2), max (2), align, length.
+                    ports[found] = u16::from_le_bytes([*crs.get(at + 2)?, *crs.get(at + 3)?]);
+                    found += 1;
+                }
+                0x09 if len >= 3 => {
+                    // Fixed location I/O port: base (2), length.
+                    ports[found] = u16::from_le_bytes([*crs.get(at + 1)?, *crs.get(at + 2)?]);
+                    found += 1;
+                }
+                0x0F => break, // end tag
+                _ => {}
+            }
+            at += 1 + len;
         }
+        (found == 2 && ports[0] != 0 && ports[1] != 0).then_some(EcPorts { command: ports[1], data: ports[0] })
+    }
+}
+
+/// The EC's ports, settable after the interpreter started: they come from
+/// the ECDT, or from the EC device's `_CRS` once the namespace is loaded.
+/// Zero means none; otherwise command << 16 | data.
+#[derive(Default)]
+pub struct EcCell(AtomicU32);
+
+impl EcCell {
+    pub fn get(&self) -> Option<EcPorts> {
+        match self.0.load(Ordering::Relaxed) {
+            0 => None,
+            v => Some(EcPorts { command: (v >> 16) as u16, data: v as u16 }),
+        }
+    }
+
+    pub fn set(&self, ports: Option<EcPorts>) {
+        self.0.store(ports.map_or(0, |p| (p.command as u32) << 16 | p.data as u32), Ordering::Relaxed);
     }
 }
 
@@ -73,13 +130,20 @@ impl Stats {
 
 pub struct Firmware<H: Hardware> {
     hw: H,
-    ec: Option<EcPorts>,
+    ec: Arc<EcCell>,
     stats: Arc<Stats>,
 }
 
 impl<H: Hardware> Firmware<H> {
     pub fn new(hw: H, ec: Option<EcPorts>, stats: Arc<Stats>) -> Self {
-        Firmware { hw, ec, stats }
+        let cell = EcCell::default();
+        cell.set(ec);
+        Firmware { hw, ec: Arc::new(cell), stats }
+    }
+
+    /// The EC ports, shared with whoever sets them later.
+    pub fn ec_cell(&self) -> Arc<EcCell> {
+        self.ec.clone()
     }
 
     fn status(&self, ec: EcPorts) -> u64 {
@@ -120,7 +184,7 @@ impl<H: Hardware> Firmware<H> {
 
     /// Reads EC register `addr`; `None` after a time-out (counted).
     pub fn ec_read(&self, addr: u8) -> Option<u8> {
-        let ec = self.ec?;
+        let ec = self.ec.get()?;
         self.stats.ec_transactions.fetch_add(1, Ordering::Relaxed);
         let ok = self.wait(ec, EC_IBF, true) && {
             self.out(ec.command, EC_READ);
@@ -143,7 +207,7 @@ impl<H: Hardware> Firmware<H> {
     }
 
     pub fn ec_write(&self, addr: u8, value: u8) -> bool {
-        let Some(ec) = self.ec else { return false };
+        let Some(ec) = self.ec.get() else { return false };
         self.stats.ec_transactions.fetch_add(1, Ordering::Relaxed);
         let ok = self.wait(ec, EC_IBF, true) && {
             self.out(ec.command, EC_WRITE);

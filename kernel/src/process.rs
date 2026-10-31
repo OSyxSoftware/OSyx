@@ -1250,6 +1250,18 @@ fn make_info(p: &Process) -> osyx_abi::ipc::ProcInfo {
     info
 }
 
+/// The page table root of process `pid` for `working_set`: the caller's own
+/// process, or another one if the caller is root or owns it.
+pub fn working_set_root(pid: Pid, caller: Pid) -> Result<u64, Errno> {
+    let t = TABLE.lock();
+    let me = t.procs.get(&caller).map(|p| p.cred).unwrap_or(Cred::ROOT);
+    let p = t.procs.get(&pid).ok_or(Errno::NotFound)?;
+    if pid != caller && !me.is_root() && p.cred.uid != me.uid {
+        return Err(Errno::PermissionDenied);
+    }
+    Ok(p.space.root)
+}
+
 /// The record for one process (for `proc_info`).
 pub fn info(pid: Pid) -> Result<osyx_abi::ipc::ProcInfo, Errno> {
     TABLE.lock().procs.get(&pid).map(make_info).ok_or(Errno::NotFound)

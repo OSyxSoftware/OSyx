@@ -409,6 +409,10 @@ extern "win64" fn GetUserDefaultLangID() -> u16 {
     LCID_EN_US as u16
 }
 
+extern "win64" fn GetUserDefaultUILanguage() -> u16 {
+    LCID_EN_US as u16
+}
+
 extern "win64" fn GetUserDefaultLCID() -> u32 {
     LCID_EN_US
 }
@@ -454,6 +458,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetCPInfo,
         GetLocaleInfoEx,
         GetUserDefaultLangID,
+        GetUserDefaultUILanguage,
         GetUserDefaultLCID,
         GetUserDefaultLocaleName,
         EnumSystemLocalesEx,

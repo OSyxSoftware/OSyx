@@ -265,11 +265,14 @@ mod imp {
         if start == 0 {
             return None;
         }
-        let size = (len as u64).next_multiple_of(4096);
+        // A request larger than the window fails here, before any
+        // arithmetic on it can overflow.
+        let size = (len as u64).checked_next_multiple_of(4096).filter(|&s| s <= LOW_END);
+        let Some(size) = size else { return Some(Err(Errno::NoMemory)) };
         let mut at = start.next_multiple_of(align);
         let mut wrapped = false;
         loop {
-            if at + size > LOW_END {
+            if at.checked_add(size).is_none_or(|end| end > LOW_END) {
                 if wrapped {
                     return Some(Err(Errno::NoMemory));
                 }
@@ -306,6 +309,24 @@ mod imp {
     pub fn thread_priority(tid: u64, priority: u64) -> Result<u64, Errno> {
         decode(syscall2(nr::THREAD_PRIORITY, tid, priority))
     }
+    /// Changes or reads the suspend count of a thread of this process (tid 0
+    /// is the caller; `op` from `osyx_abi::suspend`); returns the previous count.
+    pub fn thread_suspend(tid: u64, op: u64) -> Result<u64, Errno> {
+        decode(syscall2(nr::THREAD_SUSPEND, tid, op))
+    }
+
+    /// Scheduler samples (milliseconds) the thread has run for.
+    pub fn thread_times(tid: u64) -> Result<u64, Errno> {
+        decode(syscall1(nr::THREAD_TIMES, tid))
+    }
+
+    /// Page-aligned addresses of the resident user pages of process `pid`
+    /// (0: this one), as many as fit in `out`; returns how many pages are
+    /// resident in all.
+    pub fn working_set(pid: u64, out: &mut [u64]) -> Result<u64, Errno> {
+        decode(syscall3(nr::WORKING_SET, pid, out.as_mut_ptr() as u64, out.len() as u64))
+    }
+
     pub fn process_write_barrier()->Result<(),Errno> { decode(syscall1(nr::PROCESS_WRITE_BARRIER,0)).map(|_|()) }
 
     pub fn sysinfo() -> Result<SystemInfo, Errno> {
@@ -524,6 +545,11 @@ mod imp {
     }
 
     /// Writes the link target into `buf`; returns its length (truncated to `buf`).
+    /// A second name (hard link) `new` for the file `existing`.
+    pub fn link(existing: &str, new: &str) -> Result<(), Errno> {
+        decode(syscall4(nr::LINK, existing.as_ptr() as u64, existing.len() as u64, new.as_ptr() as u64, new.len() as u64)).map(|_| ())
+    }
+
     pub fn readlink(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
         decode(syscall4(
             nr::READLINK,

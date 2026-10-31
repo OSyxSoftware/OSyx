@@ -37,7 +37,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 31] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 32] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -69,6 +69,7 @@ pub fn run(boot: &BootData) -> Summary {
         ("concurrent writers (tmpfs, FAT32, ext4)", &crate::selftest_fs::concurrent),
         ("program loader: search path, permissions, bad images", &crate::selftest_fs::program_loader),
         ("kernel file reads: whole device firmware", &firmware_read),
+        ("HID over I2C: controller, protocol, input core (simulated)", &crate::drivers::i2c::selftest),
     ];
     let mut s = Summary { passed: 0, failed: 0 };
     for (name, t) in tests.iter() {

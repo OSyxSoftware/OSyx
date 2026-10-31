@@ -20,6 +20,7 @@ osyx-ext4 = { path = "../storage/ext4" }
 osyx-fat = { path = "../storage/fat" }
 osyx-exfat = { path = "../storage/exfat" }
 osyx-gfx = { path = "../boot/gfx" }
+osyx-i2c = { path = "../drivers/i2c" }
 osyx-input = { path = "../shared/input" }
 osyx-mm = { path = "mm" }
 osyx-net = { path = "../network/net" }

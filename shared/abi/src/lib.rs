@@ -380,16 +380,46 @@ pub mod nr {
     /// [`SET_FS_BASE`] again; 0 restores the thread's 64-bit base. `base`
     /// must be page-aligned, below 4 GiB and (unless 0) in the user half.
     pub const SET_FS32_BASE: u64 = 96;
+    /// `thread_suspend(tid, op) -> previous suspend count` for a thread of
+    /// the caller's process (tid 0 = the caller); `op` is one of
+    /// [`crate::suspend`]. A suspended thread stops at its next return to
+    /// user mode (a thread waiting inside the kernel finishes its wait
+    /// first), as on Windows. `Busy` once the count is [`crate::suspend::MAX`].
+    pub const THREAD_SUSPEND: u64 = 97;
+    /// `thread_times(tid) -> cpu_ticks`: scheduler samples (one per
+    /// millisecond) the thread of the caller's process has run for.
+    pub const THREAD_TIMES: u64 = 98;
+    /// `working_set(pid, buf, cap) -> count`: writes the resident pages of
+    /// process `pid` (the caller's own or, for root or the owner, another)
+    /// into `buf` (`cap` u64 entries) and returns how many pages are
+    /// resident in all; entries beyond `cap` are not written. An entry is
+    /// the page-aligned user address with the protection in its low bits:
+    /// bit 0 writable, bit 1 executable.
+    pub const WORKING_SET: u64 = 99;
+    /// `link(existing, new) -> 0`: a second name (hard link) for the file
+    /// `existing`. `AlreadyExists`, `IsADirectory`, `CrossDevice` as for
+    /// `rename`.
+    pub const LINK: u64 = 100;
     /// `spawn_restricted(exec: *const ExecArgs, policy: *const sandbox::SpawnPolicy)`.
-    pub const SPAWN_RESTRICTED: u64 = 97;
+    pub const SPAWN_RESTRICTED: u64 = 101;
     /// `channel_pair(out: *mut [u64; 2]) -> 0`: anonymous connected endpoints.
-    pub const CHANNEL_PAIR: u64 = 98;
+    pub const CHANNEL_PAIR: u64 = 102;
     /// Start a child with redirected streams and its initial thread held.
-    pub const SPAWN_STDIO_SUSPENDED: u64 = 99;
+    pub const SPAWN_STDIO_SUSPENDED: u64 = 103;
     /// Resume a direct child's initial thread; return the previous hold count.
-    pub const RESUME_CHILD: u64 = 100;
+    pub const RESUME_CHILD: u64 = 104;
     /// Grant an existing channel to a live, restricted direct child.
-    pub const GRANT_CHILD_CHANNEL: u64 = 101;
+    pub const GRANT_CHILD_CHANNEL: u64 = 105;
+}
+
+/// Operations of `nr::THREAD_SUSPEND`.
+pub mod suspend {
+    /// Reads the suspend count.
+    pub const QUERY: u64 = 0;
+    pub const SUSPEND: u64 = 1;
+    pub const RESUME: u64 = 2;
+    /// MAXIMUM_SUSPEND_COUNT of Windows.
+    pub const MAX: u32 = 127;
 }
 
 /// Thread priorities (`nr::THREAD_PRIORITY`).
@@ -424,6 +454,11 @@ pub mod firmware {
     /// `(bus << 16 | device << 8 | function, offset, width | 0x100 to
     /// write, value) -> value read`: PCI configuration, segment 0.
     pub const PCI: u64 = 4;
+    /// `(buf, len) -> devices claimed`: hands the kernel the HID over I2C
+    /// devices that the ACPI service found (`osyx_i2c::spec` encoding). The
+    /// call returns when every device has been probed (bounded); a device
+    /// the kernel cannot or will not drive is logged and left alone.
+    pub const I2C_HID: u64 = 5;
 }
 
 /// Battery state published by the ACPI service in [`BATTERY_STATUS_PATH`]:
