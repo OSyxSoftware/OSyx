@@ -220,6 +220,11 @@ pub struct AppEntry {
     pub exec: String,
     pub icon: Icon,
     pub comment: String,
+    /// Arguments and working directory of a Windows shortcut.
+    pub args: Vec<String>,
+    pub workdir: String,
+    /// The Start Menu folder of a shortcut ("" for the rest).
+    pub group: String,
 }
 
 pub const APP_DIR: &str = "/system/share/applications";
@@ -254,6 +259,102 @@ pub fn icon_by_name(name: &str) -> Icon {
     }
 }
 
+/// Programs larger than this are not read for their icon.
+const MAX_ICON_SOURCE: u64 = 64 << 20;
+
+/// Icons found so far: program path -> (file size when read, its icon).
+static EXE_ICONS: os_std::sync::Mutex<os_std::collections::BTreeMap<String, (u64, Option<Icon>)>> =
+    os_std::sync::Mutex::new(os_std::collections::BTreeMap::new());
+
+/// The icon of a Windows program: its first icon group, in the size that
+/// suits the shell best; the generic program icon when there is none. Read
+/// once per program (and again if its size changes).
+pub fn exe_icon(path: &str) -> Icon {
+    icon_from(path, 0).unwrap_or(Icon::Program)
+}
+
+/// The icon at `index` of `path`: an `.ico` file, or a program or library
+/// (index 0 is the first icon group, a negative index names the group's
+/// resource id). `None` when the file has no icon this shell can draw.
+pub fn icon_from(path: &str, index: i32) -> Option<Icon> {
+    let key = format!("{path}#{index}");
+    let len = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if let Some((known, icon)) = EXE_ICONS.lock().ok().and_then(|c| c.get(&key).copied()) {
+        if known == len {
+            return icon;
+        }
+    }
+    let icon = read_icon(path, len, index);
+    if let Ok(mut cache) = EXE_ICONS.lock() {
+        cache.insert(key, (len, icon));
+    }
+    icon
+}
+
+/// Registers the best-sized candidate of (rank, colours, data) that decodes.
+fn register_best(mut candidates: Vec<(usize, u16, &[u8])>) -> Option<Icon> {
+    candidates.sort_by_key(|c| (c.0, c.1));
+    for (_, _, data) in candidates {
+        if let Some(icon) = osyx_ui::icon::decode_image(data).and_then(osyx_ui::icon::register_bitmap) {
+            return Some(icon);
+        }
+    }
+    None
+}
+
+/// The shell draws icons at 16 to 40 pixels: 48 and 32 look best.
+const PREFERRED_SIZES: [u32; 6] = [48, 32, 64, 24, 16, 256];
+
+fn read_icon(path: &str, len: u64, index: i32) -> Option<Icon> {
+    if len == 0 || len > MAX_ICON_SOURCE {
+        return None;
+    }
+    let image = fs::read(path).ok()?;
+    if path.to_ascii_lowercase().ends_with(".ico") {
+        // ICONDIR: reserved, type (1), count; then 16-byte entries of width,
+        // height, colours, reserved, planes, bit count, size and offset.
+        let u16_at = |at: usize| image.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+        let u32_at = |at: usize| image.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+        let mut candidates = Vec::new();
+        for i in 0..(u16_at(4)? as usize).min(64) {
+            let at = 6 + i * 16;
+            let width = match *image.get(at)? {
+                0 => 256,
+                w => w as u32,
+            };
+            let (bits, size, offset) = (u16_at(at + 6)?, u32_at(at + 8)?, u32_at(at + 12)?);
+            if let Some(rank) = PREFERRED_SIZES.iter().position(|&w| w == width) {
+                if let Some(data) = image.get(offset..offset.checked_add(size)?) {
+                    candidates.push((rank, u16::MAX - bits, data));
+                }
+            }
+        }
+        return register_best(candidates);
+    }
+    let pe = osyx_pe::PeFile::parse_any(&image).ok()?;
+    // GRPICONDIR: reserved, type (1), count; then 14-byte entries of width,
+    // height, colours, reserved, planes, bit count, size and RT_ICON id.
+    let group_id = if index < 0 { u16::try_from(-(index as i64)).ok() } else { None };
+    let group = pe.resource(14, group_id, None).ok()??;
+    let u16_at = |at: usize| group.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let count = u16_at(4)? as usize;
+    let mut candidates: Vec<(usize, u16, &[u8])> = Vec::new();
+    for i in 0..count.min(64) {
+        let at = 6 + i * 14;
+        let width = match *group.get(at)? {
+            0 => 256,
+            w => w as u32,
+        };
+        let (bits, id) = (u16_at(at + 6)?, u16_at(at + 12)?);
+        if let Some(rank) = PREFERRED_SIZES.iter().position(|&w| w == width) {
+            if let Some(data) = pe.resource(3, Some(id), None).ok().flatten() {
+                candidates.push((rank, u16::MAX - bits, data));
+            }
+        }
+    }
+    register_best(candidates)
+}
+
 /// The launcher's applications: the installed `.app` entries, then Windows
 /// programs (Start Menu shortcuts, and programs found in Program Files).
 pub fn load_apps() -> Vec<AppEntry> {
@@ -277,7 +378,7 @@ pub fn windows_apps() -> Vec<AppEntry> {
         String::from("/ProgramData/Microsoft/Windows/Start Menu/Programs"),
     ];
     for menu in &menus {
-        collect_links(menu, 2, &mut apps);
+        collect_links(menu, 2, "", &mut apps);
     }
     for root in ["/Program Files", "/Program Files (x86)"] {
         let Ok(dir) = fs::read_dir(root) else { continue };
@@ -290,10 +391,11 @@ pub fn windows_apps() -> Vec<AppEntry> {
             if apps.iter().any(|a| a.exec.eq_ignore_ascii_case(&exe)) {
                 continue;
             }
-            apps.push(AppEntry { source: exe.clone(), name, exec: exe, icon: Icon::Program, comment: String::from("Windows program") });
+            let icon = exe_icon(&exe);
+            apps.push(AppEntry { source: exe.clone(), name, exec: exe, icon, comment: String::from("Windows program"), args: Vec::new(), workdir: String::new(), group: String::new() });
         }
     }
-    apps.sort_by_key(|a| a.name.to_ascii_lowercase());
+    apps.sort_by_key(|a| (a.group.to_ascii_lowercase(), a.name.to_ascii_lowercase()));
     apps
 }
 
@@ -318,7 +420,7 @@ fn main_program(folder: &str, name: &str) -> Option<String> {
 }
 
 /// Shortcuts (`.lnk`) of a Start Menu folder, `depth` levels down.
-fn collect_links(dir: &str, depth: u32, apps: &mut Vec<AppEntry>) {
+fn collect_links(dir: &str, depth: u32, group: &str, apps: &mut Vec<AppEntry>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut items: Vec<(String, bool)> =
         entries.map(|e| (String::from(e.file_name()), e.file_type().is_dir())).collect();
@@ -327,10 +429,12 @@ fn collect_links(dir: &str, depth: u32, apps: &mut Vec<AppEntry>) {
         let path = format!("{dir}/{name}");
         if is_dir {
             if depth > 1 {
-                collect_links(&path, depth - 1, apps);
+                // Only the first folder below the Start Menu names a group.
+                collect_links(&path, depth - 1, if group.is_empty() { &name } else { group }, apps);
             }
         } else if name.to_ascii_lowercase().ends_with(".lnk") && !name.to_ascii_lowercase().contains("uninstall") {
-            if let Some(app) = load_link(&path) {
+            if let Some(mut app) = load_link(&path) {
+                app.group = String::from(group);
                 if !apps.iter().any(|a| a.exec == app.exec) {
                     apps.push(app);
                 }
@@ -343,19 +447,25 @@ fn collect_links(dir: &str, depth: u32, apps: &mut Vec<AppEntry>) {
 /// started through its target.
 pub fn load_link(path: &str) -> Option<AppEntry> {
     let data = fs::read(path).ok()?;
+    let link = read_link(&data)?;
     // Windows names are not case sensitive, the file system's are.
-    let target = existing_path(&link_target(&data)?)?;
+    let target = existing_path(&link.target)?;
     if !target.to_ascii_lowercase().ends_with(".exe") || !fs::metadata(&target).is_ok_and(|m| m.is_file()) {
         return None;
     }
     let file = path.rsplit('/').next().unwrap_or(path);
     let name = file.get(..file.len().saturating_sub(4)).unwrap_or(file);
+    // The shortcut's own icon, else the program's.
+    let icon = link.icon.as_ref().and_then(|(file, index)| existing_path(file).and_then(|f| icon_from(&f, *index))).unwrap_or_else(|| exe_icon(&target));
     Some(AppEntry {
         source: String::from(path),
         name: String::from(name),
         exec: target,
-        icon: Icon::Program,
+        icon,
         comment: String::from("Windows program"),
+        args: split_arguments(&link.arguments),
+        workdir: existing_path(&link.working_dir).unwrap_or_default(),
+        group: String::new(),
     })
 }
 
@@ -376,17 +486,37 @@ fn existing_path(path: &str) -> Option<String> {
     (!found.is_empty()).then_some(found)
 }
 
-/// The target of a Shell Link (MS-SHLLINK) as an OSyx path: the local base
-/// path of its LinkInfo, else its relative path string when that is a full
-/// path. Anything else (network targets, shell items without a path) has no
-/// target here.
-pub fn link_target(data: &[u8]) -> Option<String> {
+/// What the shell uses of a Shell Link (MS-SHLLINK); paths are OSyx paths.
+pub struct LinkData {
+    pub target: String,
+    pub arguments: String,
+    pub working_dir: String,
+    /// Icon file and index, if the link names one.
+    pub icon: Option<(String, i32)>,
+}
+
+/// A Windows path (`C:\a\b`) as an OSyx path (`/a/b`); `None` for anything
+/// that is not on drive C.
+fn windows_to_osyx(win: &str) -> Option<String> {
+    let bytes = win.as_bytes();
+    if !matches!(bytes.first(), Some(b'C' | b'c')) || bytes.get(1) != Some(&b':') {
+        return None;
+    }
+    Some(win.get(2..)?.replace('\\', "/"))
+}
+
+/// Reads a Shell Link: the local base path of its LinkInfo (else its
+/// relative path string when that is a full path), the working directory,
+/// the arguments and the icon location. Network targets and shell items
+/// without a path have no target here.
+pub fn read_link(data: &[u8]) -> Option<LinkData> {
     let u16_at = |at: usize| data.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
     let u32_at = |at: usize| data.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
     if u32_at(0)? != 0x4C {
         return None;
     }
     let flags = u32_at(0x14)?;
+    let icon_index = u32_at(0x38)? as u32 as i32;
     let unicode = flags & 0x80 != 0;
     let mut at = 0x4C;
     if flags & 0x01 != 0 {
@@ -415,7 +545,7 @@ pub fn link_target(data: &[u8]) -> Option<String> {
         at = base + size;
     }
     // StringData in order: name, relative path, working directory, arguments, icon.
-    let mut relative = None;
+    let (mut relative, mut working_dir, mut arguments, mut icon) = (None, String::new(), String::new(), String::new());
     for (i, bit) in [0x04usize, 0x08, 0x10, 0x20, 0x40].into_iter().enumerate() {
         if flags & bit == 0 {
             continue;
@@ -425,19 +555,73 @@ pub fn link_target(data: &[u8]) -> Option<String> {
         let bytes = if unicode { count * 2 } else { count };
         let raw = data.get(at..at + bytes)?;
         at += bytes;
-        if i == 1 {
-            relative = Some(if unicode {
-                char::decode_utf16((0..raw.len() / 2).map(|i| u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]])))
-                    .map(|c| c.unwrap_or('\u{FFFD}'))
-                    .collect::<String>()
-            } else {
-                String::from_utf8_lossy(raw).into_owned()
-            });
+        let text = if unicode {
+            char::decode_utf16((0..raw.len() / 2).map(|i| u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]])))
+                .map(|c| c.unwrap_or('\u{FFFD}'))
+                .collect::<String>()
+        } else {
+            String::from_utf8_lossy(raw).into_owned()
+        };
+        match i {
+            1 => relative = Some(text),
+            2 => working_dir = text,
+            3 => arguments = text,
+            4 => icon = text,
+            _ => {}
         }
     }
     let win = target.or(relative.filter(|r| r.contains(":\\")))?;
-    let rest = win.get(2..).filter(|_| win.as_bytes().get(1) == Some(&b':'))?;
-    Some(rest.replace('\\', "/"))
+    Some(LinkData {
+        target: windows_to_osyx(&win)?,
+        arguments,
+        working_dir: windows_to_osyx(&working_dir).unwrap_or_default(),
+        // "C:\path\file.ico" or "C:\path\app.exe,3": the index may ride in the text.
+        icon: if icon.is_empty() {
+            None
+        } else {
+            let (file, index) = match icon.rsplit_once(',') {
+                Some((f, i)) if i.trim().parse::<i32>().is_ok() => (f, i.trim().parse().unwrap_or(0)),
+                _ => (icon.as_str(), icon_index),
+            };
+            windows_to_osyx(file.trim_matches('"')).map(|f| (f, index))
+        },
+    })
+}
+
+/// A command line split the way Windows programs read theirs: spaces
+/// separate, double quotes group, `\"` is a quote.
+pub fn split_arguments(line: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let (mut quoted, mut started) = (false, false);
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'"') => {
+                chars.next();
+                current.push('"');
+                started = true;
+            }
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    args.push(core::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        args.push(current);
+    }
+    args
 }
 
 pub fn load_apps_from(path: &str) -> Vec<AppEntry> {
@@ -475,6 +659,9 @@ pub fn load_app(path: &str) -> Option<AppEntry> {
         exec: String::new(),
         icon: Icon::Program,
         comment: String::new(),
+        args: Vec::new(),
+        workdir: String::new(),
+        group: String::new(),
     };
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else { continue };
@@ -540,4 +727,92 @@ pub fn unix_now() -> i64 {
     os_std::time::SystemTime::now()
         .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// The taskbar's pinned applications, one source file per line: an `.app`
+/// entry, a Windows shortcut or a program.
+pub const PINS_FILE: &str = "/home/user/.pinned";
+
+/// The entry a pinned source stands for (`None` once it is gone).
+pub fn load_pinned(source: &str) -> Option<AppEntry> {
+    let lower = source.to_ascii_lowercase();
+    if lower.ends_with(".app") {
+        load_app(source)
+    } else if lower.ends_with(".lnk") {
+        load_link(source)
+    } else if lower.ends_with(".exe") && fs::metadata(source).is_ok_and(|m| m.is_file()) {
+        let file = source.rsplit('/').next().unwrap_or(source);
+        let name = file.get(..file.len().saturating_sub(4)).unwrap_or(file);
+        Some(AppEntry {
+            source: String::from(source),
+            name: String::from(name),
+            exec: String::from(source),
+            icon: exe_icon(source),
+            comment: String::from("Windows program"),
+            args: Vec::new(),
+            workdir: String::new(),
+            group: String::new(),
+        })
+    } else {
+        None
+    }
+}
+
+/// The pinned entries, in the order they were pinned.
+pub fn load_pins() -> Vec<AppEntry> {
+    fs::read_to_string(PINS_FILE)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| load_pinned(l.trim()))
+        .collect()
+}
+
+/// Writes the pinned sources back.
+pub fn save_pins(pins: &[AppEntry]) -> os_std::error::Result<()> {
+    let mut text = String::new();
+    for pin in pins {
+        text.push_str(&pin.source);
+        text.push('\n');
+    }
+    fs::write(PINS_FILE, text)
+}
+
+/// A Windows program an installer left in Program Files together with its
+/// uninstaller.
+#[derive(Clone)]
+pub struct InstalledProgram {
+    pub name: String,
+    pub folder: String,
+    /// The uninstaller's OSyx path.
+    pub uninstaller: String,
+    pub icon: Icon,
+}
+
+/// The programs in `/Program Files` and `/Program Files (x86)` that have an
+/// uninstaller (a top-level `.exe` named `uninstall...` or `unins...`),
+/// sorted by name. The uninstaller itself is what an installer registers
+/// for "Add or remove programs"; it is the same file here.
+pub fn installed_programs() -> Vec<InstalledProgram> {
+    let mut programs = Vec::new();
+    for root in ["/Program Files", "/Program Files (x86)"] {
+        let Ok(dir) = fs::read_dir(root) else { continue };
+        for entry in dir.filter(|e| e.file_type().is_dir()) {
+            let name = String::from(entry.file_name());
+            let folder = format!("{root}/{name}");
+            let Ok(files) = fs::read_dir(&folder) else { continue };
+            let mut uninstallers: Vec<String> = files
+                .map(|f| String::from(f.file_name()))
+                .filter(|n| {
+                    let l = n.to_ascii_lowercase();
+                    l.ends_with(".exe") && l.starts_with("unins")
+                })
+                .collect();
+            uninstallers.sort();
+            let Some(uninstaller) = uninstallers.first() else { continue };
+            let icon = main_program(&folder, &name).map_or(Icon::Program, |exe| exe_icon(&exe));
+            programs.push(InstalledProgram { name, uninstaller: format!("{folder}/{uninstaller}"), folder, icon });
+        }
+    }
+    programs.sort_by_key(|p| p.name.to_ascii_lowercase());
+    programs
 }

@@ -845,6 +845,27 @@ mod imp {
         decode(syscall2(nr::DISPLAY_SET_MODE, width as u64, height as u64)).map(|_| ())
     }
 
+    /// Presents several changed rectangles `[x, y, w, h]` at once (owner only).
+    pub fn display_flush_rects(rects: &[[u32; 4]]) -> Result<(), Errno> {
+        decode(syscall2(nr::DISPLAY_FLUSH_RECTS, rects.as_ptr() as u64, rects.len() as u64)).map(|_| ())
+    }
+
+    /// Shows `image` (`CURSOR_SIZE` squared ARGB pixels) as the hardware
+    /// cursor with its hot spot at `hot`, or hides it (`None`).
+    pub fn display_cursor(image: Option<&[u32]>, hot: (u32, u32)) -> Result<(), Errno> {
+        let n = (osyx_abi::ipc::CURSOR_SIZE * osyx_abi::ipc::CURSOR_SIZE) as usize;
+        if image.is_some_and(|i| i.len() < n) {
+            return Err(Errno::InvalidArgument);
+        }
+        let ptr = image.map_or(0, |i| i.as_ptr() as u64);
+        decode(syscall3(nr::DISPLAY_CURSOR, ptr, hot.0 as u64, hot.1 as u64)).map(|_| ())
+    }
+
+    /// Moves the hardware cursor's hot spot to (`x`, `y`).
+    pub fn display_cursor_move(x: u32, y: u32) -> Result<(), Errno> {
+        decode(syscall2(nr::DISPLAY_CURSOR_MOVE, x as u64, y as u64)).map(|_| ())
+    }
+
     /// Sets the calling thread's GS base.
     pub fn set_gs_base(base: usize) -> Result<(), Errno> {
         decode(syscall1(nr::SET_GS_BASE, base as u64)).map(|_| ())

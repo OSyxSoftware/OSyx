@@ -764,8 +764,31 @@ extern "win64" fn IsWow64Process(process: u64, out: *mut i32) -> i32 {
     if process != objects::CURRENT_PROCESS && !matches!(objects::get(process), Some(objects::Object::Process(_))) {
         return fail(ERROR_INVALID_HANDLE, 0);
     }
-    // SAFETY: the caller's out pointer. Every OSyx Windows process is x64.
-    unsafe { *out = 0 };
+    // A 32-bit program runs on the WoW64 bridge of a 64-bit system, as on
+    // 64-bit Windows; installers check this to pick their 64-bit payload.
+    // Other processes are taken to be 64-bit ones.
+    let wow64 = process == objects::CURRENT_PROCESS && crate::wow64::is_active();
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = wow64 as i32 };
+    1
+}
+
+const IMAGE_FILE_MACHINE_I386: u16 = 0x014C;
+const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+
+/// The process's machine (0 for a native process) and the system's (x64).
+extern "win64" fn IsWow64Process2(process: u64, process_machine: *mut u16, native_machine: *mut u16) -> i32 {
+    let mut wow64 = 0;
+    if process_machine.is_null() || IsWow64Process(process, &mut wow64) == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's out pointers (the second one is optional).
+    unsafe {
+        *process_machine = if wow64 != 0 { IMAGE_FILE_MACHINE_I386 } else { 0 };
+        if !native_machine.is_null() {
+            *native_machine = IMAGE_FILE_MACHINE_AMD64;
+        }
+    }
     1
 }
 
@@ -1221,6 +1244,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetLogicalProcessorInformationEx,
         SetThreadAffinityMask,
         IsWow64Process,
+        IsWow64Process2,
         GetProcessHandleCount,
         GetProcessHeaps,
         HeapSetInformation,

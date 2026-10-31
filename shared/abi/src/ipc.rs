@@ -86,6 +86,10 @@ pub const BACKEND_LINEAR: u32 = 1;
 /// A VirtIO-GPU scanout: writes go to guest memory and reach the screen
 /// with `display_flush`.
 pub const BACKEND_VIRTIO_GPU: u32 = 2;
+/// Width and height of a hardware cursor image (`nr::DISPLAY_CURSOR`).
+pub const CURSOR_SIZE: u32 = 64;
+/// Most rectangles one `nr::DISPLAY_FLUSH_RECTS` call takes.
+pub const MAX_FLUSH_RECTS: usize = 64;
 
 /// `ProcInfo::state`
 pub const PROC_RUNNING: u32 = 0;

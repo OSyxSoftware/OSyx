@@ -188,6 +188,53 @@ pub extern "win64" fn GetPrivateProfileStringW(
     }
 }
 
+/// The leading integer of a profile value as Windows reads it: optional
+/// sign, then decimal digits (or `0x` and hex digits); anything after them
+/// is ignored, and a value without digits is 0.
+fn profile_int(text: &str) -> u32 {
+    let t = text.trim_start();
+    let (negative, t) = match t.as_bytes().first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    let (radix, digits) = match t.get(..2) {
+        Some("0x" | "0X") => (16, &t[2..]),
+        _ => (10, t),
+    };
+    let mut value: u32 = 0;
+    for c in digits.chars().map_while(|c| c.to_digit(radix)) {
+        value = value.wrapping_mul(radix).wrapping_add(c);
+    }
+    if negative { value.wrapping_neg() } else { value }
+}
+
+/// The integer value of `key` in `section`, `default` when the file,
+/// section or key is missing.
+pub extern "win64" fn GetPrivateProfileIntW(section: *const u16, key: *const u16, default: i32, file: *const u16) -> u32 {
+    // SAFETY: Windows contract: NUL-terminated strings or null.
+    let (section, key, file) = unsafe { (path::wide_to_string(section), path::wide_to_string(key), path::wide_to_string(file)) };
+    let (Some(section), Some(key), Some(file)) = (section, key, file) else { return default as u32 };
+    let ini = file_path(&file).ok().and_then(|p| os_std::fs::read(&p).ok()).map(|b| parse(&b));
+    let value = ini.as_ref().and_then(|ini| {
+        find(ini, &section).and_then(|e| e.iter().find(|(n, v)| v.is_some() && n.eq_ignore_ascii_case(&key))).and_then(|(_, v)| v.clone())
+    });
+    match value {
+        Some(v) => profile_int(unquote(&v)),
+        None => default as u32,
+    }
+}
+
+pub extern "win64" fn GetPrivateProfileIntA(section: *const u8, key: *const u8, default: i32, file: *const u8) -> u32 {
+    let wide = |p: *const u8| -> Option<Vec<u16>> {
+        // SAFETY: Windows contract: a NUL-terminated ANSI string or null.
+        unsafe { path::ansi_to_string(p) }.map(|s| s.encode_utf16().chain(core::iter::once(0)).collect())
+    };
+    let (s, k, f) = (wide(section), wide(key), wide(file));
+    let ptr = |v: &Option<Vec<u16>>| v.as_ref().map_or(core::ptr::null(), |v| v.as_ptr());
+    GetPrivateProfileIntW(ptr(&s), ptr(&k), default, ptr(&f))
+}
+
 pub extern "win64" fn WritePrivateProfileStringW(section: *const u16, key: *const u16, value: *const u16, file: *const u16) -> i32 {
     // SAFETY: Windows contract: NUL-terminated strings or null.
     let (section, key, value, file) =

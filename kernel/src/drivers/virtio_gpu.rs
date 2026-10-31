@@ -454,6 +454,34 @@ impl VirtioGpu {
         Ok(())
     }
 
+    /// `transfer` for every rectangle, then one RESOURCE_FLUSH of their
+    /// union: the host refreshes its view once per frame instead of once
+    /// per rectangle, and the frame reaches it as a whole.
+    pub fn present_rects(&self, id: u32, rects: &[Rect], stride: u32) -> Result<(), GpuError> {
+        let Some(first) = rects.first() else { return Ok(()) };
+        let t0 = crate::interrupts::monotonic_ns();
+        let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x + first.w, first.y + first.h);
+        let mut pixels = 0u64;
+        for r in rects {
+            self.transfer(id, *r, stride)?;
+            x0 = x0.min(r.x);
+            y0 = y0.min(r.y);
+            x1 = x1.max(r.x + r.w);
+            y1 = y1.max(r.y + r.h);
+            pixels += r.w as u64 * r.h as u64;
+        }
+        let union = Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+        self.simple(CMD_RESOURCE_FLUSH, |w| {
+            w.rect(union).u32(id).u32(0);
+        })?;
+        let mut st = self.stats.lock();
+        st.transfers += rects.len() as u64;
+        st.flushes += 1;
+        st.transferred_pixels += pixels;
+        st.present_ns += crate::interrupts::monotonic_ns() - t0;
+        Ok(())
+    }
+
     fn cursor_command(&self, kind: u32, scanout: u32, x: u32, y: u32, resource: u32, hot: (u32, u32)) -> Result<(), GpuError> {
         let mut g = self.cursor.lock();
         let c = g.as_mut().ok_or(GpuError::InvalidArgument)?;

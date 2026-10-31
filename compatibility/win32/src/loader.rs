@@ -233,6 +233,10 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports()].concat(), crate::shell32::ordinals()),
         builtin("comdlg32.dll", crate::commdlg::exports(), Vec::new()),
         builtin("comctl32.dll", crate::comctl32::exports(), crate::comctl32::ordinals()),
+        // Rich edit: the classes (RichEdit20W, RICHEDIT50W, ...) are user32's.
+        builtin("riched20.dll", Vec::new(), Vec::new()),
+        builtin("riched32.dll", Vec::new(), Vec::new()),
+        builtin("msftedit.dll", Vec::new(), Vec::new()),
         builtin("ole32.dll", crate::ole32::exports(), Vec::new()),
         builtin("winmm.dll", crate::winmm::exports(), Vec::new()),
         builtin("oleaut32.dll", crate::oleaut32::exports(), crate::oleaut32::ordinals()),

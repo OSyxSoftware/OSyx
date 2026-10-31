@@ -984,6 +984,7 @@ dependencies = [
  "osyx-gfx",
  "osyx-input",
  "osyx-install",
+ "osyx-pe",
  "osyx-shell",
  "osyx-ui",
  "prism-client",
@@ -1153,6 +1154,7 @@ dependencies = [
 name = "osyx-ui"
 version = "0.1.0"
 dependencies = [
+ "miniz_oxide",
  "osyx-gfx",
  "osyx-input",
 ]

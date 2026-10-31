@@ -509,6 +509,46 @@ pub fn display_flush(x: u64, y: u64, w: u64, h: u64) -> Result<u64, Errno> {
     crate::display::flush(sched::current_pid(), clamp(x), clamp(y), clamp(w), clamp(h)).map(|_| 0)
 }
 
+/// Up to `MAX_FLUSH_RECTS` rectangles of `[x, y, w, h]` (u32 each).
+pub fn display_flush_rects(rects: u64, count: u64) -> Result<u64, Errno> {
+    let count = count as usize;
+    if count > osyx_abi::ipc::MAX_FLUSH_RECTS {
+        return Err(Errno::InvalidArgument);
+    }
+    let mut raw = alloc::vec![0u8; count * 16];
+    crate::fixup::copy_from_user(&mut raw, rects)?;
+    let list: Vec<[u32; 4]> = raw
+        .as_chunks::<4>()
+        .0
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|r| [u32::from_le_bytes(r[0]), u32::from_le_bytes(r[1]), u32::from_le_bytes(r[2]), u32::from_le_bytes(r[3])])
+        .collect();
+    crate::display::flush_rects(sched::current_pid(), &list).map(|_| 0)
+}
+
+/// A `CURSOR_SIZE` x `CURSOR_SIZE` ARGB image at `image` (0 hides the cursor).
+pub fn display_cursor(image: u64, hot_x: u64, hot_y: u64) -> Result<u64, Errno> {
+    let n = osyx_abi::ipc::CURSOR_SIZE as u64;
+    if hot_x >= n || hot_y >= n {
+        return Err(Errno::InvalidArgument);
+    }
+    let pixels = if image == 0 {
+        None
+    } else {
+        let mut raw = alloc::vec![0u8; (n * n * 4) as usize];
+        crate::fixup::copy_from_user(&mut raw, image)?;
+        Some(raw)
+    };
+    crate::display::set_cursor(sched::current_pid(), pixels.as_deref(), (hot_x as u32, hot_y as u32)).map(|_| 0)
+}
+
+pub fn display_cursor_move(x: u64, y: u64) -> Result<u64, Errno> {
+    let clamp = |v: u64| v.min(u32::MAX as u64) as u32;
+    crate::display::move_cursor(sched::current_pid(), clamp(x), clamp(y)).map(|_| 0)
+}
+
 pub fn display_set_mode(width: u64, height: u64) -> Result<u64, Errno> {
     let (cred, _) = process::current_identity();
     if !cred.is_root() {

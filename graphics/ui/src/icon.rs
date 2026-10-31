@@ -2,6 +2,9 @@
 //! the theme. Each icon fills a square box.
 
 use crate::paint::Painter;
+use alloc::vec::Vec;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 use osyx_gfx::{rgb, Color, Rect};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +36,8 @@ pub enum Icon {
     Volume,
     Settings,
     Lock,
+    /// An application's own picture, see [`register_bitmap`].
+    Bitmap(u16),
 }
 
 /// Unit directions (x, y in 1/100, y down) every 15 degrees from straight
@@ -50,6 +55,9 @@ const PAPER_FOLD: Color = rgb(140, 152, 176);
 /// Draws `icon` into the square `r` (its smaller side) in colour `c` (line
 /// icons) or its own colours (file type icons).
 pub fn draw(p: &mut Painter, icon: Icon, r: Rect, c: Color) {
+    if let Icon::Bitmap(id) = icon {
+        return draw_bitmap(p, id, r);
+    }
     let s = r.w.min(r.h) as i32;
     let x0 = r.x + (r.w as i32 - s) / 2;
     let y0 = r.y + (r.h as i32 - s) / 2;
@@ -59,6 +67,7 @@ pub fn draw(p: &mut Painter, icon: Icon, r: Rect, c: Color) {
     let stroke = (s * 256 / 11).max(300);
     let sub = |fx: i32, fy: i32, fw: i32, fh: i32| Rect::new(x0 + px(fx), y0 + px(fy), px(fw).max(1) as u32, px(fh).max(1) as u32);
     match icon {
+        Icon::Bitmap(_) => {} // drawn above
         Icon::Browser => {
             let ink = rgb(244, 220, 186);
             p.disc(x0 + s / 2, y0 + s / 2, (s * 47 / 100) as u32, rgb(47, 43, 40), 255);
@@ -249,4 +258,289 @@ fn arc_right(p: &mut Painter, centre: (i32, i32), r: i32, width: i32, c: Color) 
     for w in pts.windows(2) {
         p.segment(at(w[0]), at(w[1]), width, c, 255);
     }
+}
+
+// ---- bitmap icons ---------------------------------------------------------------------
+
+/// An application's own icon: 32-bit pixels, `0xAARRGGBB`, row by row.
+pub struct Bitmap {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u32>,
+}
+
+/// Most bitmap icons that can be registered (an [`Icon::Bitmap`] holds a
+/// 16-bit number).
+const MAX_BITMAPS: usize = 512;
+
+/// The registered bitmaps. The shell registers icons from its one thread;
+/// the lock only keeps the table sound if that ever changes.
+struct Registry {
+    locked: AtomicBool,
+    items: UnsafeCell<Vec<Bitmap>>,
+}
+
+// SAFETY: `items` is only touched with `locked` held.
+unsafe impl Sync for Registry {}
+
+static REGISTRY: Registry = Registry { locked: AtomicBool::new(false), items: UnsafeCell::new(Vec::new()) };
+
+fn with_registry<R>(f: impl FnOnce(&mut Vec<Bitmap>) -> R) -> R {
+    while REGISTRY.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
+    }
+    // SAFETY: the lock is held, so nothing else has the table.
+    let result = f(unsafe { &mut *REGISTRY.items.get() });
+    REGISTRY.locked.store(false, Ordering::Release);
+    result
+}
+
+/// Registers `bitmap` and returns the icon that draws it, or `None` when the
+/// bitmap is empty, inconsistent or the table is full.
+pub fn register_bitmap(bitmap: Bitmap) -> Option<Icon> {
+    if bitmap.width == 0 || bitmap.height == 0 || bitmap.pixels.len() != bitmap.width as usize * bitmap.height as usize {
+        return None;
+    }
+    with_registry(|items| {
+        if items.len() >= MAX_BITMAPS {
+            return None;
+        }
+        items.push(bitmap);
+        Some(Icon::Bitmap((items.len() - 1) as u16))
+    })
+}
+
+/// Draws a registered bitmap into the square `r`, scaled (box filter down,
+/// nearest-neighbour blend up) and alpha blended.
+fn draw_bitmap(p: &mut Painter, id: u16, r: Rect) {
+    let s = r.w.min(r.h) as i32;
+    if s <= 0 {
+        return;
+    }
+    let x0 = r.x + (r.w as i32 - s) / 2;
+    let y0 = r.y + (r.h as i32 - s) / 2;
+    let clip = p.clip();
+    with_registry(|items| {
+        let Some(b) = items.get(id as usize) else { return };
+        let (bw, bh) = (b.width as i64, b.height as i64);
+        for dy in 0..s {
+            for dx in 0..s {
+                let (x, y) = (x0 + dx, y0 + dy);
+                if x < clip.x || y < clip.y || x >= clip.right() as i32 || y >= clip.bottom() as i32 {
+                    continue;
+                }
+                // The source box of this destination pixel, at least one pixel.
+                let sx0 = dx as i64 * bw / s as i64;
+                let sx1 = (((dx as i64 + 1) * bw + s as i64 - 1) / s as i64).max(sx0 + 1).min(bw);
+                let sy0 = dy as i64 * bh / s as i64;
+                let sy1 = (((dy as i64 + 1) * bh + s as i64 - 1) / s as i64).max(sy0 + 1).min(bh);
+                let (mut a, mut rr, mut gg, mut bb, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+                for sy in sy0..sy1 {
+                    for sx in sx0..sx1 {
+                        let px = b.pixels[(sy * bw + sx) as usize];
+                        let alpha = px >> 24;
+                        a += alpha;
+                        // Premultiplied, so transparent pixels add no colour.
+                        rr += ((px >> 16) & 0xFF) * alpha;
+                        gg += ((px >> 8) & 0xFF) * alpha;
+                        bb += (px & 0xFF) * alpha;
+                        n += 1;
+                    }
+                }
+                if a == 0 || n == 0 {
+                    continue;
+                }
+                let colour = rgb((rr / a) as u8, (gg / a) as u8, (bb / a) as u8);
+                p.s.blend_px(x, y, colour, a / n);
+            }
+        }
+    });
+}
+
+/// The pixels of an icon image of a `.ico` file or an `RT_ICON` resource.
+pub fn decode_image(data: &[u8]) -> Option<Bitmap> {
+    if data.starts_with(&PNG_SIGNATURE) {
+        decode_png(data)
+    } else {
+        decode_dib(data)
+    }
+}
+
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// A PNG image of at most 256 x 256 pixels: not interlaced, 8 bits per
+/// channel, greyscale, RGB, indexed (with `tRNS`), grey-alpha or RGBA. The
+/// chunk checksums are not verified: an icon is not worth refusing.
+pub fn decode_png(data: &[u8]) -> Option<Bitmap> {
+    let mut at = PNG_SIGNATURE.len();
+    let (mut width, mut height, mut colour_type) = (0usize, 0usize, 0u8);
+    let mut header_seen = false;
+    let mut palette: Vec<[u8; 3]> = Vec::new();
+    let mut transparency: Vec<u8> = Vec::new();
+    let mut compressed: Vec<u8> = Vec::new();
+    while let Some(head) = data.get(at..at + 8) {
+        let length = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        let body = data.get(at + 8..at + 8 + length)?;
+        match &head[4..8] {
+            b"IHDR" => {
+                if body.len() != 13 || body[8] != 8 || body[10] != 0 || body[11] != 0 || body[12] != 0 {
+                    return None; // only 8-bit, deflate, adaptive filtering, no interlacing
+                }
+                width = u32::from_be_bytes([body[0], body[1], body[2], body[3]]) as usize;
+                height = u32::from_be_bytes([body[4], body[5], body[6], body[7]]) as usize;
+                colour_type = body[9];
+                header_seen = true;
+            }
+            b"PLTE" => palette = (0..body.len() / 3).map(|i| [body[3 * i], body[3 * i + 1], body[3 * i + 2]]).collect(),
+            b"tRNS" => transparency = body.to_vec(),
+            b"IDAT" => compressed.extend_from_slice(body),
+            b"IEND" => break,
+            _ => {}
+        }
+        at += 12 + length; // length, type, body, checksum
+    }
+    if !header_seen || width == 0 || height == 0 || width > 256 || height > 256 {
+        return None;
+    }
+    let channels = match colour_type {
+        0 | 3 => 1,
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        _ => return None,
+    };
+    let stride = width * channels;
+    let raw = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&compressed, (stride + 1) * height).ok()?;
+    if raw.len() != (stride + 1) * height {
+        return None;
+    }
+    // Undo the per-row filters (None, Sub, Up, Average, Paeth).
+    let mut rows = alloc::vec![0u8; stride * height];
+    for y in 0..height {
+        let filter = raw[y * (stride + 1)];
+        let line = &raw[y * (stride + 1) + 1..(y + 1) * (stride + 1)];
+        for x in 0..stride {
+            let left = if x >= channels { rows[y * stride + x - channels] as i32 } else { 0 };
+            let up = if y > 0 { rows[(y - 1) * stride + x] as i32 } else { 0 };
+            let up_left = if y > 0 && x >= channels { rows[(y - 1) * stride + x - channels] as i32 } else { 0 };
+            let predicted = match filter {
+                0 => 0,
+                1 => left,
+                2 => up,
+                3 => (left + up) / 2,
+                4 => {
+                    let p = left + up - up_left;
+                    let (pa, pb, pc) = ((p - left).abs(), (p - up).abs(), (p - up_left).abs());
+                    if pa <= pb && pa <= pc { left } else if pb <= pc { up } else { up_left }
+                }
+                _ => return None,
+            };
+            rows[y * stride + x] = line[x].wrapping_add(predicted as u8);
+        }
+    }
+    let mut pixels = Vec::with_capacity(width * height);
+    for y in 0..height {
+        for x in 0..width {
+            let p = &rows[y * stride + x * channels..][..channels];
+            let (r, g, b, a) = match colour_type {
+                0 => (p[0], p[0], p[0], 255),
+                2 => (p[0], p[1], p[2], 255),
+                3 => {
+                    let c = palette.get(p[0] as usize)?;
+                    (c[0], c[1], c[2], transparency.get(p[0] as usize).copied().unwrap_or(255))
+                }
+                4 => (p[0], p[0], p[0], p[1]),
+                _ => (p[0], p[1], p[2], p[3]),
+            };
+            pixels.push((a as u32) << 24 | (r as u32) << 16 | (g as u32) << 8 | b as u32);
+        }
+    }
+    Some(Bitmap { width: width as u32, height: height as u32, pixels })
+}
+
+/// The pixels of an icon image in a `.ico` / PE resource: a device
+/// independent bitmap (BITMAPINFOHEADER, colour data, then a 1-bit mask), as
+/// found in `RT_ICON` resources. PNG-compressed images and unusual formats
+/// give `None`.
+pub fn decode_dib(data: &[u8]) -> Option<Bitmap> {
+    let u16_at = |at: usize| data.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as u32);
+    let u32_at = |at: usize| data.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let header = u32_at(0)? as usize;
+    if header < 40 || u32_at(16)? != 0 {
+        return None; // not BI_RGB (PNG data also fails here)
+    }
+    let width = u32_at(4)?;
+    let height2 = u32_at(8)? as i32;
+    let (planes, bpp) = (u16_at(12)?, u16_at(14)?);
+    if planes != 1 || width == 0 || width > 256 || height2 <= 0 || height2 % 2 != 0 {
+        return None;
+    }
+    let height = (height2 / 2) as u32;
+    if height == 0 || height > 256 {
+        return None;
+    }
+    let colours = match bpp {
+        1 | 4 | 8 => {
+            let used = u32_at(32)? as usize;
+            if used == 0 { 1usize << bpp } else { used.min(1 << bpp) }
+        }
+        24 | 32 => 0,
+        _ => return None,
+    };
+    let palette_at = header;
+    let xor_at = palette_at + colours * 4;
+    let xor_stride = (width as usize * bpp as usize).div_ceil(32) * 4;
+    let and_at = xor_at + xor_stride * height as usize;
+    let and_stride = (width as usize).div_ceil(32) * 4;
+    if data.len() < xor_at + xor_stride * height as usize {
+        return None;
+    }
+    let mask = |x: u32, y: u32| -> bool {
+        // 1 = transparent; a missing mask means opaque.
+        data.get(and_at + y as usize * and_stride + x as usize / 8).is_some_and(|b| b & (0x80 >> (x % 8)) != 0)
+    };
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    let mut any_alpha = false;
+    for row in 0..height {
+        let y = height - 1 - row; // bottom-up
+        let line = xor_at + y as usize * xor_stride;
+        for x in 0..width {
+            let argb = match bpp {
+                32 => {
+                    let o = line + x as usize * 4;
+                    let (b, g, r, a) = (*data.get(o)? as u32, *data.get(o + 1)? as u32, *data.get(o + 2)? as u32, *data.get(o + 3)? as u32);
+                    any_alpha |= a != 0;
+                    a << 24 | r << 16 | g << 8 | b
+                }
+                24 => {
+                    let o = line + x as usize * 3;
+                    let (b, g, r) = (*data.get(o)? as u32, *data.get(o + 1)? as u32, *data.get(o + 2)? as u32);
+                    0xFF00_0000 | r << 16 | g << 8 | b
+                }
+                _ => {
+                    let index = match bpp {
+                        8 => *data.get(line + x as usize)? as usize,
+                        4 => (*data.get(line + x as usize / 2)? as usize >> if x % 2 == 0 { 4 } else { 0 }) & 0xF,
+                        _ => (*data.get(line + x as usize / 8)? as usize >> (7 - x % 8)) & 1,
+                    };
+                    let o = palette_at + index.min(colours.saturating_sub(1)) * 4;
+                    let (b, g, r) = (*data.get(o)? as u32, *data.get(o + 1)? as u32, *data.get(o + 2)? as u32);
+                    0xFF00_0000 | r << 16 | g << 8 | b
+                }
+            };
+            pixels.push(argb);
+        }
+    }
+    // Without per-pixel alpha (or with an all-zero alpha channel) the mask
+    // says which pixels are transparent.
+    if bpp != 32 || !any_alpha {
+        for row in 0..height {
+            for x in 0..width {
+                let i = (row * width + x) as usize;
+                let y = height - 1 - row;
+                pixels[i] = if mask(x, y) { 0 } else { pixels[i] | 0xFF00_0000 };
+            }
+        }
+    }
+    Some(Bitmap { width, height, pixels })
 }

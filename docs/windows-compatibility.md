@@ -198,6 +198,33 @@ The elevated program keeps the desktop user's profile (`HOME`). The prompt
 shows only the path, not a publisher, and does not run on a separate secure
 desktop.
 
+NSIS installers (checked with the 32-bit Notepad++ 8.6.9 x64 installer, NSIS
+3.09, in place of SteamSetup): the language dialog (LangDLL), welcome,
+license, directory, components, custom nsDialogs and install pages run, and a
+silent install (`/S`) completes. What makes that work:
+* `ReadFile`/`WriteFile` move the whole request: the kernel takes at most
+  `MAX_READ`/`MAX_WRITE` (1 MiB) per call and may return a short read, so
+  winrun loops until the request is done or the file ends. NSIS reads its
+  whole compressed header (1.1 MiB for Notepad++) with one call.
+* WoW64 bridges IIDFromString, IsWow64Process (TRUE for a 32-bit program),
+  IsWow64Process2, SendDlgItemMessage, GetPrivateProfileInt, GetDlgCtrlID,
+  SetWindowRgn (accepted, windows stay rectangular), CombineRgn, LoadIcon,
+  GetObjectW and GetTokenInformation with their 32-bit layouts, and the
+  ordinals NSIS looks up (shell32 89 SHCloneSpecialIDList, shlwapi 437 IsOS).
+* Controls: rich edit (`RichEdit20W`/`A`, `RICHEDIT50W`, `RichEdit`;
+  riched20/riched32/msftedit load) shows read-only text streamed in with
+  EM_STREAMIN, plain or the text of RTF, wrapped and scrollable; the combo
+  box is a drop-down list (no popup: a click selects the next string, the
+  arrow keys and the wheel move the selection); the tree view keeps items,
+  state images (drawn as check boxes), expansion, hit testing, NM_CLICK and
+  TVN_SELCHANGED. Static controls show STM_SETIMAGE bitmaps; statics, check
+  boxes and edits ask their parent for colours (WM_CTLCOLOR*), dialogs for
+  their background (WM_CTLCOLORDLG); child windows are clipped to their
+  parents; GetWindowRect, ScreenToClient, ClientToScreen and MapWindowPoints
+  use screen coordinates for child windows too.
+* `OSYX_WINRUN_IOTRACE=<text>` logs file reads and writes on paths containing
+  `<text>` (`1`: all) with position, size and an FNV-1a hash of the bytes.
+
 Installed Windows programs appear in the launcher: the Start Menu shortcuts
 of the user and of all users (`.lnk`, read for their target) and, for anything
 no shortcut names, the main `.exe` of each folder in `/Program Files` and
@@ -206,9 +233,14 @@ of `CLSID_ShellLink` (`IShellLinkW`, `IPersistFile`; PE32 programs too, as
 NSIS `CreateShortCut` does): `Save` writes a real Shell Link file. The
 desktop shows `.lnk` files in `~/Desktop` as icons; the all-users desktop is
 that same folder. Shortcut targets are matched ignoring case, as Windows
-does. Arguments, working directory and the shortcut's icon are stored in the
-file but not used when the shell starts it; the icon is the generic program
-icon.
+does, and only drive `C:` exists. A shortcut's arguments and working directory
+are used when the shell starts it. The launcher and the desktop show the
+shortcut's icon location (an `.ico` file, or a program's icon group; a negative
+index names the group's resource id, any other index selects the first group)
+and otherwise the program's own icon: the 48, 32, 64, 24, 16 or 256 pixel
+image (in that order of preference) of its first icon group, read once and
+kept. Images are DIB or 8-bit, non-interlaced PNG; programs larger than 64 MiB,
+other image formats and programs without an icon get the generic program icon.
 
 Windows windows start hidden and follow ShowWindow/SetWindowPos visibility.
 Message-only, tool and owned windows do not create separate taskbar items.

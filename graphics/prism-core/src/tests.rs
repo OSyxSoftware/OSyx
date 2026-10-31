@@ -901,3 +901,18 @@ fn file_drag_delivers_only_to_the_window_at_release() {
     h.click(380, 100);
     assert!(!h.events_for(target).iter().any(|e| matches!(e, Event::FileDrop { .. })));
 }
+
+#[test]
+fn cursor_image_for_a_hardware_plane() {
+    use crate::draw::{Cursor, CursorShape};
+    let arrow = Cursor::new(CursorShape::Arrow);
+    let (image, (hx, hy)) = arrow.argb_image(64).expect("the arrow fits in 64x64");
+    assert_eq!(image.len(), 64 * 64);
+    // The hot spot is the arrow's tip: an opaque edge pixel.
+    assert_eq!(image[(hy * 64 + hx) as usize] >> 24, 0xFF);
+    // Far from the shape everything is transparent.
+    assert_eq!(image[63 * 64 + 63], 0);
+    // The shadow alone is translucent black.
+    assert!(image.iter().any(|&p| (1..0xFF).contains(&(p >> 24)) && p & 0xFF_FFFF == 0));
+    assert!(arrow.argb_image(8).is_none());
+}

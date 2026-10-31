@@ -41,11 +41,9 @@ impl Request {
     /// requester's directory and with the desktop user's profile.
     pub fn start(&self) -> Result<u64, String> {
         let mut command = Command::new("/bin/winrun");
-        // Always -v: SteamSetup started from here without it crashes in its
-        // LZMA decoder (cause not found; it runs fine from init without -v
-        // and from here with it). The log goes to the serial console only.
-        let _ = self.verbose;
-        command.arg("-v");
+        if self.verbose {
+            command.arg("-v");
+        }
         command.arg(&self.exe).args(&self.args);
         command.env("OSYX_WINRUN_CWD", &self.cwd).env("HOME", "/home/user").env("USER", "user");
         command.spawn().map(|child| child.id()).map_err(|e| format!("{e}"))
