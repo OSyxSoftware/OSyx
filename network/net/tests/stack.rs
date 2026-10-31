@@ -164,6 +164,7 @@ fn connect(n: &mut Net, port: u16) -> (u32, u32) {
         s.is_some() && n.a.tcp_state(c).unwrap().0 == State::Established
     }));
     n.b.close(l, false);
+    assert_eq!(n.a.tcp_connected(c), Ok(true));
     (c, s.unwrap())
 }
 
@@ -299,6 +300,7 @@ fn tcp_connect_to_a_silent_host_times_out() {
     let mut n = Net::new();
     n.filter = Some(Box::new(|to_b, _| !to_b)); // B never hears anything
     let c = n.a.tcp_connect(None, Endpoint::new(B_IP, 80)).unwrap();
+    assert_eq!(n.a.tcp_connected(c), Ok(false), "a SYN in flight is not connected");
     assert!(n.run_until(200_000, |n| n.a.tcp_state(c).unwrap().1 == Some(NetError::TimedOut)));
 }
 

@@ -580,13 +580,20 @@ pub fn sys_connect(h: u64, addr: u64) -> Result<u64, Errno> {
                     if s.state.lock().bound.is_some() {
                         stack_call(|st| st.tcp_connect_bound(id, remote))?;
                         s.state.lock().bound = None;
+                    } else if stack_call(|st| st.tcp_connected(id))? {
+                        return Err(Errno::AlreadyConnected);
                     }
                     id
                 }
                 None => {
                     let local = s.state.lock().bound;
                     let id = stack_call(|st| st.tcp_connect(local, remote))?;
-                    s.state.lock().id = Some(id);
+                    let mut g = s.state.lock();
+                    g.id = Some(id);
+                    // The stack socket now owns the local port; stop
+                    // reporting the bind reservation and never reuse it.
+                    g.bound = None;
+                    drop(g);
                     with_stack(|_| ());
                     id
                 }

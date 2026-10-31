@@ -1559,6 +1559,11 @@ impl Stack {
         Ok(self.tcb(id)?.take_error().map(tcp_error))
     }
 
+    /// The handshake completed (or the connection moved past it).
+    pub fn tcp_connected(&mut self, id: SocketId) -> Result<bool, NetError> {
+        Ok(self.tcb(id)?.connected())
+    }
+
     pub fn tcp_send(&mut self, id: SocketId, data: &[u8]) -> Result<usize, NetError> {
         let n = self.tcb(id)?.send(data).map_err(tcp_error)?;
         self.flush();
