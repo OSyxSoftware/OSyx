@@ -358,6 +358,8 @@ pub enum Object {
     Pipe(Arc<crate::pipes::PipeObj>),
     /// A directory of the NT object namespace (NtOpenDirectoryObject).
     Directory(Arc<DirectoryObj>),
+    /// A KTM transaction (CreateTransaction).
+    Transaction(Arc<crate::ktm::TransactionObj>),
 }
 
 /// An open object directory: `\\` or `\\BaseNamedObjects`.
@@ -441,6 +443,7 @@ pub fn kind_name(o: &Object) -> &'static str {
         Object::Desktop(_) => "desktop",
         Object::Pipe(_) => "pipe",
         Object::Directory(_) => "directory",
+        Object::Transaction(_) => "transaction",
     }
 }
 
@@ -550,7 +553,7 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
         }
         Object::Console(_) | Object::File(_) | Object::Null | Object::Pipe(_) => true,
         Object::Process(p) => p.done.load(Ordering::SeqCst),
-        Object::KeyedEvent(_) | Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) | Object::WindowStation(_) | Object::Desktop(_) | Object::Directory(_) => {
+        Object::KeyedEvent(_) | Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) | Object::WindowStation(_) | Object::Desktop(_) | Object::Directory(_) | Object::Transaction(_) => {
             return Err(ERROR_INVALID_HANDLE)
         }
     })

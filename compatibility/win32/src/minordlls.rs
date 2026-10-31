@@ -178,16 +178,8 @@ pub fn cfgmgr32_exports() -> Vec<(&'static str, u64)> {
 
 // ---- ktmw32 ------------------------------------------------------------------------------
 
-extern "win64" fn CreateTransaction(_sa: u64, _uow: u64, _options: u32, _iso: u32, _flags: u32, _timeout: u32, _desc: *const u16) -> u64 {
-    fail(ERROR_NOT_SUPPORTED, u64::MAX)
-}
-
-extern "win64" fn CommitTransaction(_h: u64) -> i32 {
-    fail(ERROR_INVALID_HANDLE, 0)
-}
-
 pub fn ktmw32_exports() -> Vec<(&'static str, u64)> {
-    export_table![CreateTransaction, CommitTransaction]
+    crate::ktm::exports()
 }
 
 // ---- windowscodecs -------------------------------------------------------------------------

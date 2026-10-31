@@ -36,6 +36,7 @@ mod files;
 mod fls;
 mod heaps;
 mod ini;
+mod ktm;
 mod iphlpapi;
 mod kernel32;
 mod keyed;
