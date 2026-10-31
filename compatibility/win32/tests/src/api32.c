@@ -113,6 +113,16 @@ __declspec(dllimport) void *__stdcall FreeSid(void *sid);
 __declspec(dllimport) DWORD __stdcall GetLengthSid(void *sid);
 __declspec(dllimport) BOOL __stdcall IsValidSid(void *sid);
 __declspec(dllimport) BOOL __stdcall EqualSid(void *a, void *b);
+__declspec(dllimport) long __stdcall BCryptOpenAlgorithmProvider(HANDLE *algorithm, const WCHAR *id, const WCHAR *implementation, DWORD flags);
+__declspec(dllimport) long __stdcall BCryptCloseAlgorithmProvider(HANDLE algorithm, DWORD flags);
+__declspec(dllimport) long __stdcall BCryptGetProperty(HANDLE object, const WCHAR *property, unsigned char *out, DWORD size, DWORD *result, DWORD flags);
+__declspec(dllimport) long __stdcall BCryptCreateHash(HANDLE algorithm, HANDLE *hash, unsigned char *object, DWORD object_size, unsigned char *secret, DWORD secret_size, DWORD flags);
+__declspec(dllimport) long __stdcall BCryptHashData(HANDLE hash, unsigned char *data, DWORD size, DWORD flags);
+__declspec(dllimport) long __stdcall BCryptFinishHash(HANDLE hash, unsigned char *out, DWORD size, DWORD flags);
+__declspec(dllimport) long __stdcall BCryptDestroyHash(HANDLE hash);
+__declspec(dllimport) long __stdcall BCryptHash(HANDLE algorithm, unsigned char *secret, DWORD secret_size, unsigned char *input, DWORD input_size, unsigned char *out, DWORD out_size);
+__declspec(dllimport) long __stdcall BCryptGenRandom(HANDLE algorithm, unsigned char *out, DWORD size, DWORD flags);
+__declspec(dllimport) BOOL __stdcall GetUserNameExW(DWORD format, WCHAR *name, DWORD *size);
 typedef long (__stdcall *WNDPROC)(HANDLE, DWORD, DWORD, long);
 typedef struct {
     DWORD style;
@@ -461,6 +471,32 @@ void __stdcall start(void) {
             RemoveDirectoryW(dir);
         }
         check("FreeSid returns NULL", FreeSid(sid) == 0);
+    }
+
+    {
+        /* bcrypt and secur32 through the bridge: 4-byte handles, 4-byte pointers. */
+        HANDLE alg = 0, hash = 0;
+        unsigned char sum[32], mac[32];
+        check("BCryptOpenAlgorithmProvider writes a 4-byte handle", BCryptOpenAlgorithmProvider(&alg, L"SHA256", 0, 0) == 0 && alg);
+        check("BCryptCreateHash / HashData / FinishHash of abc",
+              BCryptCreateHash(alg, &hash, 0, 0, 0, 0, 0) == 0 && BCryptHashData(hash, (unsigned char *)"abc", 3, 0) == 0 && BCryptFinishHash(hash, sum, 32, 0) == 0 &&
+              sum[0] == 0xba && sum[1] == 0x78 && sum[2] == 0x16 && sum[3] == 0xbf && sum[30] == 0x15 && sum[31] == 0xad);
+        DWORD digest_length = 0, got = 0;
+        check("BCryptGetProperty(HashDigestLength)", BCryptGetProperty(alg, L"HashDigestLength", (unsigned char *)&digest_length, 4, &got, 0) == 0 && digest_length == 32 && got == 4);
+        check("BCryptHash equals the streamed digest", BCryptHash(alg, 0, 0, (unsigned char *)"abc", 3, mac, 32) == 0 && mac[0] == sum[0] && mac[15] == sum[15] && mac[31] == sum[31]);
+        check("BCryptFinishHash with a wrong size is STATUS_INVALID_PARAMETER", BCryptFinishHash(hash, sum, 31, 0) == (long)0xC0000008 || BCryptFinishHash(hash, sum, 31, 0) == (long)0xC000000D);
+        check("BCryptDestroyHash", BCryptDestroyHash(hash) == 0);
+        check("BCryptDestroyHash again is STATUS_INVALID_PARAMETER", BCryptDestroyHash(hash) == (long)0xC000000D);
+        check("BCryptCloseAlgorithmProvider", BCryptCloseAlgorithmProvider(alg, 0) == 0);
+        unsigned char random[16] = { 0 };
+        int nonzero = 0;
+        check("BCryptGenRandom with the system RNG", BCryptGenRandom(0, random, 16, 2) == 0);
+        for (int i = 0; i < 16; i++) nonzero |= random[i] != 0;
+        check("the random bytes are not all zero", nonzero);
+        WCHAR user[4];
+        DWORD user_size = 4;
+        SetLastError(0);
+        check("GetUserNameExW with a small buffer: ERROR_MORE_DATA and the size", !GetUserNameExW(2, user, &user_size) && GetLastError() == 234 && user_size > 4);
     }
 
     check("lstrcmpiA ignores case", lstrcmpiA("Steam", "sTEAM") == 0 && lstrcmpiA("a", "b") < 0);

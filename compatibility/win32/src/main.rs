@@ -80,6 +80,8 @@ mod etw;
 mod credman;
 mod accounts;
 mod capi;
+mod bcrypt;
+mod newlibs;
 mod minordlls;
 mod dwmapi;
 mod dwrite;

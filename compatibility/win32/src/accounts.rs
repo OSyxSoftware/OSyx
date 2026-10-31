@@ -27,6 +27,16 @@ fn user_name(uid: u32) -> String {
     crate::kernel32::env_get("USER").or_else(|| crate::kernel32::env_get("USERNAME")).unwrap_or_else(|| alloc::format!("user{uid}"))
 }
 
+/// The user of the calling thread's token, as GetUserNameW reports it.
+pub(crate) fn current_user_name() -> String {
+    user_name(tokens::effective().uid)
+}
+
+/// The computer name, as GetComputerNameW reports it.
+pub(crate) fn computer_name() -> String {
+    computer()
+}
+
 fn computer() -> String {
     let name = os_std::fs::read_to_string("/etc/hostname").map(|s| String::from(s.trim())).unwrap_or_else(|_| String::from("osyx"));
     name.to_uppercase().chars().take(15).collect()

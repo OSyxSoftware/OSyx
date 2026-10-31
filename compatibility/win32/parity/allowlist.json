@@ -18,6 +18,12 @@
     "FaceReleaseFontTable": "tables point into the face's file data, which lives as long as the face (see the comment at the function)",
     "StreamReleaseFileFragment": "fragments point into the stream's byte buffer, which lives as long as the stream",
     "loader_ref": "the local font file loader is a process-wide singleton: references do nothing, by design of IDWriteFontFileLoader",
-    "IsGUIThread": "every thread of a winrun process can use USER at once (its message queue is made on first use), as on Windows once user32 is loaded"
+    "IsGUIThread": "every thread of a winrun process can use USER at once (its message queue is made on first use), as on Windows once user32 is loaded",
+    "GetKeyboardLayout": "OSyx has one keyboard layout (US, HKL 0x04090409) for every thread, so that is the answer for any thread id",
+    "UiaClientsAreListening": "OSyx has no UI Automation client, so nobody is listening",
+    "UiaReturnRawElementProvider": "with no UI Automation client no WM_GETOBJECT is answered: 0 is the not-handled result",
+    "UiaRaiseAutomationEvent": "with no listening client an event has nobody to reach; Windows returns S_OK then",
+    "UiaRaiseAutomationPropertyChangedEvent": "with no listening client a change has nobody to reach; Windows returns S_OK then",
+    "singleton_ref": "COM AddRef/Release of static objects: the count never changes, 1 is the Windows result for a static singleton"
   }
 }

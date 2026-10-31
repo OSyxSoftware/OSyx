@@ -2570,9 +2570,9 @@ extern "win64" fn HeapUnlock(h: u64) -> Bool {
     crate::heaps::unlock(h)
 }
 
-/// The shared allocator keeps no per-heap block list to walk.
-extern "win64" fn HeapWalk(_h: u64, _entry: *mut u8) -> Bool {
-    fail(ERROR_NOT_SUPPORTED, FALSE)
+/// Private heaps keep their block list and can be walked (heaps.rs).
+extern "win64" fn HeapWalk(h: u64, entry: *mut u8) -> Bool {
+    crate::heaps::walk(h, entry)
 }
 
 extern "win64" fn LocalAlloc(flags: u32, size: usize) -> u64 {

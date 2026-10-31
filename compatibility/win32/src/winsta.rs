@@ -197,6 +197,17 @@ extern "win64" fn SetThreadDesktop(h: u64) -> i32 {
     1
 }
 
+/// A handle to the desktop that receives input: the default desktop of the
+/// interactive window station (OSyx has one). `flags` may only be
+/// DF_ALLOWOTHERACCOUNTHOOK (1).
+extern "win64" fn OpenInputDesktop(flags: u32, _inherit: i32, _access: u32) -> u64 {
+    if flags & !1 != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let desktop = interactive().desktops.lock().unwrap().iter().find(|d| d.interactive).cloned().expect("the default desktop");
+    objects::insert(Object::Desktop(desktop))
+}
+
 extern "win64" fn CloseWindowStation(h: u64) -> i32 {
     if let Err(e) = station(h) {
         return fail(e, 0);
@@ -341,6 +352,7 @@ extern "win64" fn WaitForInputIdle(h: u64, timeout: u32) -> u32 {
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        OpenInputDesktop,
         SetThreadDesktop,
         CreateWindowStationW,
         CreateDesktopW,

@@ -6087,10 +6087,6 @@ extern "win64" fn SetSysColors(count: i32, elements: *const i32, colors: *const 
     TRUE
 }
 
-extern "win64" fn OpenInputDesktop(_flags: u32, _inherit: Bool, _access: u32) -> u64 {
-    0x20_0001 // one input desktop, always open
-}
-
 /// Whether the calling thread owns a window (SetThreadDesktop refuses then).
 pub(crate) fn thread_has_windows() -> bool {
     let me = teb::current_tid();
@@ -6420,7 +6416,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         IsGUIThread,
         GetGUIThreadInfo,
         SetSysColors,
-        OpenInputDesktop,
         GetCaretPos,
         SetMenu,
         SetMessageExtraInfo,

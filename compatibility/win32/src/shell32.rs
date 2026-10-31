@@ -176,7 +176,7 @@ const CSIDL_FLAG_CREATE: u32 = 0x8000;
 const CSIDL_FLAG_DONT_VERIFY: u32 = 0x4000;
 const MAX_PATH: usize = 260;
 
-extern "win64" fn SHGetFolderPathW(_hwnd: u64, csidl: u32, token: u64, kind: u32, out: *mut u16) -> u32 {
+pub(crate) extern "win64" fn SHGetFolderPathW(_hwnd: u64, csidl: u32, token: u64, kind: u32, out: *mut u16) -> u32 {
     if out.is_null() || kind > 1 {
         return E_INVALIDARG; // SHGFP_TYPE_CURRENT (0) and SHGFP_TYPE_DEFAULT (1) agree here
     }

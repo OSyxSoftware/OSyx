@@ -374,6 +374,20 @@ def classify(fn: RustFn, index: dict, seen=None):
     if err and err.group(1) in UNSUPPORTED_ERR and inert:
         fn.cls, fn.reason = "unsupported", "returns %s" % err.group(1)
         return fn.cls
+    # `crate::kernel32::TRUE` is TRUE; a bare literal or constant name that
+    # is the whole body, with the arguments ignored, is a constant answer.
+    plain = re.sub(r"^(?:\w+::)+", "", last)
+    sole = len(stmts) == 1 and re.fullmatch(r"[A-Za-z_]\w*|0[xX][0-9A-Fa-f_]+|\d[\d_]*(?:[ui]\d+|usize)?", plain)
+    if sole and not used and fn.params and plain not in SUCCESS_CONST and plain not in EMPTY_CONST:
+        error_name = re.match(r"(?:E_|OLE_E_|DV_E_|CLASS_E_|STATUS_(?:NOT|INVALID|UNSUCC|ACCESS|BUFFER))|.*NOT_SUPPORTED|.*NOT_IMPL", plain)
+        error_code = re.fullmatch(r"0[xX]8[0-9A-Fa-f_]{7}", plain.replace("_", ""))
+        if error_name or error_code:
+            fn.cls, fn.reason = "unsupported", "returns the error constant %s" % plain
+        else:
+            fn.cls, fn.reason = "stub_success", "returns constant %s; arguments unused" % plain
+        return fn.cls
+    if plain in SUCCESS_CONST or plain in EMPTY_CONST:
+        last = plain
     if not stmts or (inert and (last in SUCCESS_CONST or last in EMPTY_CONST)):
         if used:
             pass  # the constant is returned but the arguments are used: look further

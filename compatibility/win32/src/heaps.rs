@@ -272,6 +272,42 @@ pub fn unlock(h: u64) -> Bool {
     TRUE
 }
 
+/// HeapWalk of a private heap: every live block in address order, each as a
+/// busy PROCESS_HEAP_ENTRY (x64 layout: lpData @0, cbData @8, cbOverhead @12,
+/// iRegionIndex @13, wFlags @14). An entry with lpData NULL starts the walk;
+/// after the last block the call fails with ERROR_NO_MORE_ITEMS. Regions and
+/// uncommitted ranges are not reported, and the process heap is not walkable
+/// (its blocks are not tracked).
+pub fn walk(h: u64, entry: *mut u8) -> Bool {
+    const PROCESS_HEAP_ENTRY_BUSY: u16 = 4;
+    const ERROR_NO_MORE_ITEMS: u32 = 259;
+    if entry.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if crate::wow64::is_active() || is_process(h) {
+        return fail(ERROR_NOT_SUPPORTED, FALSE);
+    }
+    if !is_private(h) {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    wait_free(h);
+    // SAFETY: the caller's PROCESS_HEAP_ENTRY (40 bytes).
+    let last = unsafe { teb::get::<u64>(entry as u64, 0) };
+    let g = HEAPS.lock().unwrap();
+    let Some(heap) = g.get(&h) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
+    let next = if last == 0 { heap.blocks.iter().next() } else { heap.blocks.range(last + 1..).next() };
+    let Some(&block) = next else { return fail(ERROR_NO_MORE_ITEMS, FALSE) };
+    // SAFETY: as above; the block header is the allocator's own.
+    unsafe {
+        core::ptr::write_bytes(entry, 0, 40);
+        teb::put(entry as u64, 0, block);
+        teb::put(entry as u64, 8, kernel32::heap_size(block) as u32);
+        teb::put(entry as u64, 12, 16u8);
+        teb::put(entry as u64, 14, PROCESS_HEAP_ENTRY_BUSY);
+    }
+    TRUE
+}
+
 /// The process heap followed by every live private heap.
 pub fn all() -> alloc::vec::Vec<u64> {
     let mut v = alloc::vec![kernel32::process_heap()];

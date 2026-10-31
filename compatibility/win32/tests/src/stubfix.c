@@ -55,6 +55,17 @@ static void heaps(void) {
     check("HeapReAlloc with HEAP_REALLOC_IN_PLACE_ONLY refuses to grow", HeapReAlloc(h, HEAP_REALLOC_IN_PLACE_ONLY, r, 4096) == NULL);
     check("the refused block is still valid", HeapValidate(h, 0, r) && HeapSize(h, 0, r) == 64);
 
+    PROCESS_HEAP_ENTRY entry = { 0 };
+    int walked = 0;
+    SIZE_T sizes = 0;
+    while (HeapWalk(h, &entry)) {
+        if (entry.wFlags & PROCESS_HEAP_ENTRY_BUSY) { walked++; sizes += entry.cbData; }
+    }
+    check("HeapWalk visits the two live blocks of a private heap", walked == 2 && sizes == 164 && GetLastError() == ERROR_NO_MORE_ITEMS);
+    SetLastError(0);
+    PROCESS_HEAP_ENTRY first = { 0 };
+    check("HeapWalk of the process heap fails with ERROR_NOT_SUPPORTED", !HeapWalk(process, &first) && GetLastError() == ERROR_NOT_SUPPORTED);
+
     HANDLE list[16];
     DWORD n = GetProcessHeaps(16, list);
     int found = 0, found_process = 0;
@@ -236,6 +247,29 @@ static void without_windows(void) {
     check("SHAddToRecentDocs(NULL) empties the Recent folder", GetFileAttributesW(link) == INVALID_FILE_ATTRIBUTES);
 }
 
+static void wininet_and_desktops(void) {
+    check("InternetCheckConnectionW reports the connection state", InternetCheckConnectionW(L"http://example.com", 0, 0) == (InternetAttemptConnect(0) == ERROR_SUCCESS));
+    SetLastError(0);
+    check("InternetCheckConnectionW with a reserved value fails with ERROR_INVALID_PARAMETER", !InternetCheckConnectionW(NULL, 0, 1) && GetLastError() == ERROR_INVALID_PARAMETER);
+    SetLastError(0);
+    check("InternetCheckConnectionW(FLAG_ICC_FORCE_CONNECTION) fails with ERROR_NOT_SUPPORTED", !InternetCheckConnectionW(L"http://example.com", FLAG_ICC_FORCE_CONNECTION, 0) && GetLastError() == ERROR_NOT_SUPPORTED);
+    SetLastError(0);
+    check("InternetCloseHandle(bogus) fails with ERROR_INVALID_HANDLE", !InternetCloseHandle((HINTERNET)0x1234) && GetLastError() == ERROR_INVALID_HANDLE);
+    check("InternetSetOptionW(NULL, SETTINGS_CHANGED) succeeds", InternetSetOptionW(NULL, INTERNET_OPTION_SETTINGS_CHANGED, NULL, 0));
+    SetLastError(0);
+    check("InternetSetOptionW with an unknown option fails with ERROR_INTERNET_INVALID_OPTION", !InternetSetOptionW(NULL, 9999, NULL, 0) && GetLastError() == ERROR_INTERNET_INVALID_OPTION);
+    SetLastError(0);
+    check("InternetSetOptionW on a bogus handle fails with ERROR_INVALID_HANDLE", !InternetSetOptionW((HINTERNET)0x1234, INTERNET_OPTION_SETTINGS_CHANGED, NULL, 0) && GetLastError() == ERROR_INVALID_HANDLE);
+
+    HDESK input = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+    check("OpenInputDesktop returns a handle", input != NULL);
+    check("CloseDesktop releases it", input && CloseDesktop(input));
+    SetLastError(0);
+    check("CloseDesktop of a released handle fails with ERROR_INVALID_HANDLE", !CloseDesktop(input) && GetLastError() == ERROR_INVALID_HANDLE);
+    SetLastError(0);
+    check("OpenInputDesktop with unknown flags fails with ERROR_INVALID_PARAMETER", OpenInputDesktop(0x80, FALSE, GENERIC_ALL) == NULL && GetLastError() == ERROR_INVALID_PARAMETER);
+}
+
 static void interlocked(void) {
     HMODULE k = GetModuleHandleA("kernel32.dll");
     LONG (WINAPI *inc)(volatile LONG *) = (LONG (WINAPI *)(volatile LONG *))GetProcAddress(k, "InterlockedIncrement");
@@ -276,6 +310,7 @@ void __stdcall start(void) {
     windows_and_menus();
     attribute_lists();
     without_windows();
+    wininet_and_desktops();
     interlocked();
     finish("stubfix");
 }

@@ -123,6 +123,11 @@ extern "win64" fn Alias(h: u64, p: *mut u32) -> i32 { Real(h, p) }
 extern "win64" fn AliasStub(h: u64) -> i32 { FakeOk(h) }
 extern "win64" fn Part(h: u64, f: u32) -> i32 { if f != 0 { return fail(ERROR_NOT_SUPPORTED, FALSE); } Real(h, core::ptr::null_mut()) }
 extern "win64" fn Const0() -> u64 { u64::MAX }
+extern "win64" fn PathTrue(_h: u64) -> i32 { crate::kernel32::TRUE }
+extern "win64" fn FakeHandle(_a: u32) -> u64 { 0x20_0001 }
+extern "win64" fn Named(_a: u32) -> u32 { HKL_US }
+extern "win64" fn ErrConst(_a: u32) -> u32 { E_NOTIMPL }
+extern "win64" fn HexErr(_a: u32) -> u32 { 0x8000_4001 }
 extern "win64" fn Pass(c: u64) -> u64 { c }
 ''')
         self.assertEqual(got["Real"], "implemented")
@@ -136,6 +141,11 @@ extern "win64" fn Pass(c: u64) -> u64 { c }
         self.assertEqual(got["Part"], "partial")
         self.assertEqual(got["Const0"], "implemented")
         self.assertEqual(got["Pass"], "implemented")
+        self.assertEqual(got["PathTrue"], "stub_success")
+        self.assertEqual(got["FakeHandle"], "stub_success")
+        self.assertEqual(got["Named"], "stub_success")
+        self.assertEqual(got["ErrConst"], "unsupported")
+        self.assertEqual(got["HexErr"], "unsupported")
 
 
 def write(path, text):
