@@ -594,6 +594,9 @@ fn expand(arg: Vec<u16>) -> Vec<Vec<u16>> {
 static ARGC: AtomicI32 = AtomicI32::new(0);
 static ARGV: AtomicU64 = AtomicU64::new(0);
 static WARGV: AtomicU64 = AtomicU64::new(0);
+/// argv with four-byte slots, for a 32-bit caller of the legacy CRT.
+static ARGV32: AtomicU64 = AtomicU64::new(0);
+static WARGV32: AtomicU64 = AtomicU64::new(0);
 static PGMPTR: AtomicU64 = AtomicU64::new(0);
 static WPGMPTR: AtomicU64 = AtomicU64::new(0);
 static ACMDLN: AtomicU64 = AtomicU64::new(0);
@@ -648,6 +651,167 @@ fn configure_argv(mode: i32, wide: bool) -> i32 {
 
 extern "win64" fn _configure_narrow_argv(mode: i32) -> i32 {
     configure_argv(mode, false)
+}
+
+/// `configure_argv` for a 32-bit caller: the same arguments in four-byte
+/// slots (the heap strings are allocated below 4 GiB).
+fn configure_argv32(mode: i32, wide: bool) -> i32 {
+    validate!((0..=2).contains(&mode), EINVAL, EINVAL);
+    if mode == 0 {
+        return 0;
+    }
+    // SAFETY: the process command line, NUL-terminated.
+    let cmd = unsafe { wstr(get_command_line_w() as *const u16) };
+    let mut args = split_command_line(cmd);
+    if mode == 2 {
+        let first = args.remove(0);
+        let mut all = alloc::vec![first];
+        for a in args {
+            all.extend(expand(a));
+        }
+        args = all;
+    }
+    let arr = crt_malloc((args.len() + 1) * 4) as *mut u32;
+    if arr.is_null() {
+        set_errno(ENOMEM);
+        return ENOMEM;
+    }
+    for (i, a) in args.iter().enumerate() {
+        let s = if wide { heap_wstr(a) as u32 } else { heap_cstr(&String::from_utf16_lossy(a).into_bytes()) as u32 };
+        // SAFETY: `arr` holds len + 1 slots.
+        unsafe { *arr.add(i) = s };
+    }
+    // SAFETY: as above.
+    unsafe { *arr.add(args.len()) = 0 };
+    ARGC.store(args.len() as i32, Ordering::SeqCst);
+    let old = (if wide { &WARGV32 } else { &ARGV32 }).swap(arr as u64, Ordering::SeqCst);
+    let _ = old;
+    0
+}
+
+// ---- legacy CRT startup (msvcrt) ------------------------------------------------------------
+
+/// `_startupinfo` holds only the default file mode.
+extern "win64" fn __getmainargs(
+    argc: *mut i32,
+    argv: *mut u64,
+    env: *mut u64,
+    wildcard: i32,
+    startinfo: *mut i32,
+) -> i32 {
+    let r = configure_argv(if wildcard != 0 { 2 } else { 1 }, false);
+    if r != 0 {
+        return r;
+    }
+    super::env::init(false);
+    // SAFETY: the caller's out pointers.
+    unsafe {
+        if !argc.is_null() {
+            *argc = ARGC.load(Ordering::SeqCst);
+        }
+        if !argv.is_null() {
+            *argv = ARGV.load(Ordering::SeqCst);
+        }
+        if !env.is_null() {
+            *env = super::env::environ_ptr(false);
+        }
+        if !startinfo.is_null() {
+            *startinfo = 0;
+        }
+    }
+    0
+}
+
+extern "win64" fn __wgetmainargs(
+    argc: *mut i32,
+    argv: *mut u64,
+    env: *mut u64,
+    wildcard: i32,
+    startinfo: *mut i32,
+) -> i32 {
+    let r = configure_argv(if wildcard != 0 { 2 } else { 1 }, true);
+    if r != 0 {
+        return r;
+    }
+    super::env::init(true);
+    // SAFETY: the caller's out pointers.
+    unsafe {
+        if !argc.is_null() {
+            *argc = ARGC.load(Ordering::SeqCst);
+        }
+        if !argv.is_null() {
+            *argv = WARGV.load(Ordering::SeqCst);
+        }
+        if !env.is_null() {
+            *env = super::env::environ_ptr(true);
+        }
+        if !startinfo.is_null() {
+            *startinfo = 0;
+        }
+    }
+    0
+}
+
+/// `__getmainargs` from a 32-bit caller: argv and environ are four-byte
+/// pointer arrays it can walk.
+#[allow(non_snake_case)]
+pub(crate) extern "win64" fn GetMainArgs32(
+    argc: *mut i32,
+    argv: *mut u32,
+    env: *mut u32,
+    wildcard: i32,
+    startinfo: *mut i32,
+) -> i32 {
+    let r = configure_argv32(if wildcard != 0 { 2 } else { 1 }, false);
+    if r != 0 {
+        return r;
+    }
+    // SAFETY: the caller's out pointers in its own address space.
+    unsafe {
+        if !argc.is_null() {
+            *argc = ARGC.load(Ordering::SeqCst);
+        }
+        if !argv.is_null() {
+            *argv = ARGV32.load(Ordering::SeqCst) as u32;
+        }
+        if !env.is_null() {
+            *env = super::env::environ_ptr32(false);
+        }
+        if !startinfo.is_null() {
+            *startinfo = 0;
+        }
+    }
+    0
+}
+
+#[allow(non_snake_case)]
+pub(crate) extern "win64" fn WGetMainArgs32(
+    argc: *mut i32,
+    argv: *mut u32,
+    env: *mut u32,
+    wildcard: i32,
+    startinfo: *mut i32,
+) -> i32 {
+    let r = configure_argv32(if wildcard != 0 { 2 } else { 1 }, true);
+    if r != 0 {
+        return r;
+    }
+    // SAFETY: the caller's out pointers in its own address space.
+    unsafe {
+        if !argc.is_null() {
+            *argc = ARGC.load(Ordering::SeqCst);
+        }
+        if !argv.is_null() {
+            *argv = WARGV32.load(Ordering::SeqCst) as u32;
+        }
+        if !env.is_null() {
+            *env = super::env::environ_ptr32(true);
+        }
+        if !startinfo.is_null() {
+            *startinfo = 0;
+        }
+    }
+    0
 }
 
 extern "win64" fn _configure_wide_argv(mode: i32) -> i32 {
@@ -861,6 +1025,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         __threadhandle,
         _configure_narrow_argv,
         _configure_wide_argv,
+        __getmainargs,
+        __wgetmainargs,
         __p___argc,
         __p___argv,
         __p___wargv,

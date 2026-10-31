@@ -112,7 +112,7 @@ Remove-Item "$out\*.lib" -ErrorAction SilentlyContinue
 # --target=i686-pc-windows-gnu with lld; lld-link is required for /lib.
 $pe32Programs = [ordered]@{
     'hello32.exe' = @{ Src = @('hello32.c'); Libs = @() }
-    'api32.exe' = @{ Src = @('api32.c'); Libs = @('advapi32', 'user32', 'shell32', 'gdi32', 'comctl32', 'ole32', 'bcrypt', 'secur32') }
+    'api32.exe' = @{ Src = @('api32.c'); Libs = @('advapi32', 'user32', 'shell32', 'shlwapi', 'gdi32', 'comctl32', 'ole32', 'bcrypt', 'secur32') }
     'thread32.exe' = @{ Src = @('thread32.c'); Libs = @() }
     'gui32.exe' = @{ Src = @('gui32.c'); Libs = @('user32', 'gdi32') }
 }
@@ -122,7 +122,7 @@ if ($pe32Programs.Count -gt 0) {
         throw 'lld-link not found (C:\msys64\ucrt64\bin\lld-link.exe): the i686 toolchain is needed to build hello32.exe'
     }
     # One import library per <dll>_x86.def.
-    foreach ($dll in 'kernel32', 'advapi32', 'user32', 'shell32', 'gdi32', 'comctl32', 'ole32', 'bcrypt', 'secur32') {
+    foreach ($dll in 'kernel32', 'advapi32', 'user32', 'shell32', 'shlwapi', 'gdi32', 'comctl32', 'ole32', 'bcrypt', 'secur32') {
         $lib = Join-Path $out "${dll}_x86.lib"
         if (Stale $lib @("$src\${dll}_x86.def", (Join-Path $PSScriptRoot 'build-wintests.ps1'))) {
             Invoke-Checked "$dll x86 import library" {

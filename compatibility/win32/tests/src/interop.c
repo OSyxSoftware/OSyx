@@ -114,6 +114,12 @@ void __stdcall start(void) {
     check("CoAllowSetForegroundWindow needs an object", CoAllowSetForegroundWindow(NULL, NULL) == E_INVALIDARG);
     refs = 1;
     check("CoAllowSetForegroundWindow asks for IForegroundTransfer", CoAllowSetForegroundWindow(&unk_obj, NULL) == E_NOINTERFACE && refs == 1);
+    HMODULE shlwapi = LoadLibraryA("shlwapi.dll");
+    HRESULT(WINAPI *query_service)(IUnknown *, const GUID *, const GUID *, void **) =
+        shlwapi ? (void *)GetProcAddress(shlwapi, "IUnknown_QueryService") : NULL;
+    void *service = (void *)1;
+    check("IUnknown_QueryService fails without an IServiceProvider",
+          query_service && query_service(&unk_obj, &nowhere, &iid_unknown, &service) == E_FAIL && service == NULL);
     CoUninitialize();
     CoUninitialize();
     check("after CoUninitialize the thread may choose an STA", CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) == S_OK);

@@ -3,6 +3,7 @@
  * socket on loopback, UDP, error codes, WSACleanup.
  * Usage: winsock.exe <tcp echo port> <udp echo port> */
 #include <winsock2.h> /* before windows.h (common.h) */
+#include <ws2tcpip.h> /* addrinfo and getaddrinfo */
 #include "common.h"
 
 static int parse_port(const char *s) {

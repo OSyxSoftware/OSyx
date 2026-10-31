@@ -110,6 +110,8 @@ pub struct FileObj {
     pub is_dir: bool,
     pub delete_on_close: AtomicBool,
     pub append: bool,
+    /// Anonymous-pipe bytes PeekNamedPipe fetched, owed to the next read.
+    pub peeked: Mutex<Vec<u8>>,
 }
 
 impl FileObj {
@@ -124,7 +126,7 @@ impl FileObj {
         delete_on_close: bool,
         append: bool,
     ) -> FileObj {
-        FileObj { fd, path, access, key, open_id, is_dir, delete_on_close: AtomicBool::new(delete_on_close), append }
+        FileObj { fd, path, access, key, open_id, is_dir, delete_on_close: AtomicBool::new(delete_on_close), append, peeked: Mutex::new(Vec::new()) }
     }
 }
 

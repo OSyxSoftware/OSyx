@@ -89,13 +89,19 @@ fn digit(c: u32) -> Option<u32> {
     }
 }
 
-struct Args(*const u64);
+/// The variadic arguments: eight-byte slots under the UCRT, four-byte slots
+/// for a 32-bit caller of the legacy CRT. Every scanf conversion takes a
+/// pointer, so one slot per argument is enough in both cases.
+struct Args {
+    p: *const u8,
+    pe32: bool,
+}
 impl Args {
     fn next(&mut self) -> u64 {
         // SAFETY: the format and va_list agree, as required by C.
         unsafe {
-            let v = *self.0;
-            self.0 = self.0.add(1);
+            let v = if self.pe32 { *self.p.cast::<u32>() as u64 } else { *self.p.cast::<u64>() };
+            self.p = self.p.add(if self.pe32 { 4 } else { 8 });
             v
         }
     }
@@ -301,8 +307,8 @@ fn character<C: Ch>(f: &mut Field<C>, wide: bool, out: &mut Vec<u16>) -> bool {
     }
 }
 
-fn scan<C: Ch>(opts: u64, input: &mut Input<C>, fmt: *const C, args: *const u64) -> i32 {
-    let mut args = Args(args);
+fn scan<C: Ch>(opts: u64, input: &mut Input<C>, fmt: *const C, args: *const u8, pe32: bool) -> i32 {
+    let mut args = Args { p: args, pe32 };
     let (mut i, mut assigned) = (0usize, 0i32);
     // SAFETY: caller provides a NUL-terminated format string.
     let at = |i: usize| unsafe { (*fmt.add(i)).code() };
@@ -584,14 +590,14 @@ fn scan<C: Ch>(opts: u64, input: &mut Input<C>, fmt: *const C, args: *const u64)
 
 fn text<C: Ch>(o: u64, s: *const C, n: usize, fmt: *const C, a: *const u64) -> i32 {
     validate!(!s.is_null() && !fmt.is_null(), EINVAL, -1);
-    scan(o, &mut Input { source: Source::Text(s, n), count: 0, look: None, loaded: false }, fmt, a)
+    scan(o, &mut Input { source: Source::Text(s, n), count: 0, look: None, loaded: false }, fmt, a.cast(), false)
 }
 
 fn stream<C: Ch>(o: u64, f: *mut File, fmt: *const C, a: *const u64) -> i32 {
     validate!(!f.is_null() && !fmt.is_null(), EINVAL, -1);
     // SAFETY: caller supplies a FILE of this runtime. The lock is recursive.
     unsafe { (*f).lock() };
-    let result = scan(o, &mut Input { source: Source::Stream(f), count: 0, look: None, loaded: false }, fmt, a);
+    let result = scan(o, &mut Input { source: Source::Stream(f), count: 0, look: None, loaded: false }, fmt, a.cast(), false);
     // SAFETY: same stream, held across scanning and lookahead restoration.
     unsafe { (*f).unlock() };
     result
@@ -617,6 +623,37 @@ extern "win64" fn __stdio_common_vfwscanf(o: u64, s: *mut File, f: *const u16, _
     stream(o, s, f, a)
 }
 
+fn text32<C: Ch>(o: u64, s: *const C, n: usize, fmt: *const C, a: *const u32) -> i32 {
+    validate!(!s.is_null() && !fmt.is_null(), EINVAL, -1);
+    scan(o, &mut Input { source: Source::Text(s, n), count: 0, look: None, loaded: false }, fmt, a.cast(), true)
+}
+
+/// Legacy `swscanf`: wide input, wide `%s`/`%c` by default.
+#[inline(never)]
+extern "win64" fn legacy_swscanf(s: *const u16, f: *const u16, a: *const u64) -> i32 {
+    // black_box keeps this from becoming a tail call, which could store
+    // over the argument slots beside this frame's shadow space.
+    core::hint::black_box(text(LEGACY_WIDE, s, usize::MAX, f, a))
+}
+
+/// Variadic arguments begin at `rsp+24` (R8 and R9, then the caller's
+/// stack slots); the thunk passes their address as the va_list.
+#[unsafe(naked)]
+extern "win64" fn swscanf() {
+    core::arch::naked_asm!(
+        "mov [rsp+24], r8",
+        "mov [rsp+32], r9",
+        "lea r8, [rsp+24]",
+        "jmp {target}",
+        target = sym legacy_swscanf
+    )
+}
+
+/// The same for a 32-bit caller: arguments in four-byte slots.
+pub(crate) fn legacy_swscanf32(s: u32, f: u32, a: *const u32) -> i32 {
+    text32(LEGACY_WIDE, s as *const u16, usize::MAX, f as *const u16, a)
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![__stdio_common_vsscanf, __stdio_common_vswscanf, __stdio_common_vfscanf, __stdio_common_vfwscanf]
+    export_table![__stdio_common_vsscanf, __stdio_common_vswscanf, __stdio_common_vfscanf, __stdio_common_vfwscanf, swscanf]
 }

@@ -549,6 +549,10 @@ impl Host for WinHost {
             return address;
         }
         let symbol = symbol.or_else(|| (ordinal == 17 && address == crate::comctl32::init_address()).then_some("InitCommonControls"));
+        // shlwapi's ordinal-only IUnknown_QueryService (re-exported by shcore).
+        let symbol = symbol.or_else(|| {
+            (ordinal == 176 && address == crate::shlwapi::query_service_address()).then_some("IUnknown_QueryService")
+        });
         let Some(symbol) = symbol else { return 0 };
         match self.bridge.as_ref() {
             Some(bridge) => bridge.import(symbol, address),

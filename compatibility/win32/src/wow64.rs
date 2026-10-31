@@ -771,6 +771,10 @@ fn host_override(symbol: &str) -> Option<u64> {
         "MsgWaitForMultipleObjectsEx" => Some(MsgWaitForMultipleObjectsEx32 as *const () as u64),
         "WaitForMultipleObjects" => Some(WaitForMultipleObjects32 as *const () as u64),
         "WaitForMultipleObjectsEx" => Some(WaitForMultipleObjectsEx32 as *const () as u64),
+        "__getmainargs" => Some(crate::ucrt::GetMainArgs32 as *const () as u64),
+        "__wgetmainargs" => Some(crate::ucrt::WGetMainArgs32 as *const () as u64),
+        "ShellExecuteExW" => Some(crate::shell32::ShellExecuteExW32 as *const () as u64),
+        "IUnknown_QueryService" => Some(crate::shlwapi::IUnknown_QueryService32 as *const () as u64),
         _ => None,
     }
 }
@@ -793,6 +797,14 @@ fn dispatch(bridge: &Bridge, index: u32, args: *const u32) -> (u64, u32, u32) {
         // SAFETY: the cdecl call supplies buffer, count and format before the variadic arguments.
         let (out, count, fmt, rest) = unsafe { (*args, *args.add(1), *args.add(2), args.add(3)) };
         let result = crate::ucrt::printf::legacy_snprintf32(entry.name == "_snwprintf", out, count, fmt, rest);
+        return (result as u32 as u64, 0, 0);
+    }
+
+    if entry.name == "swscanf" {
+        // SAFETY: the cdecl call supplies buffer and format in its first two
+        // slots; the scanner consumes further four-byte slots as needed.
+        let (s, fmt, rest) = unsafe { (*args, *args.add(1), args.add(2)) };
+        let result = crate::ucrt::legacy_swscanf32(s, fmt, rest);
         return (result as u32 as u64, 0, 0);
     }
 

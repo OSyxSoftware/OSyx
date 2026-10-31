@@ -175,5 +175,12 @@ void __stdcall start(void) {
     for (int i = 0; m && i < 16; i++) kept &= m[i] == (char)i;
     check("CoTaskMemRealloc keeps the data", kept);
     CoTaskMemFree(m);
+    SHELLEXECUTEINFOW ei = {0};
+    ei.cbSize = sizeof ei;
+    ei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    ei.lpVerb = L"open";
+    ei.lpFile = L"C:\\osyx-no-such-program.exe";
+    BOOL launched = ShellExecuteExW(&ei);
+    check("ShellExecuteExW reports a missing file", !launched && (INT_PTR)ei.hInstApp == SE_ERR_FNF);
     finish("shell");
 }

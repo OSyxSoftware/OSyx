@@ -23,6 +23,9 @@ static ENV: Mutex<Env> = Mutex::new(Env { narrow: None, wide: None });
 /// created); reallocated on every change.
 static ENVIRON: AtomicU64 = AtomicU64::new(0);
 static WENVIRON: AtomicU64 = AtomicU64::new(0);
+/// The same tables with four-byte slots, for a 32-bit CRT (`__getmainargs`).
+static ENVIRON32: AtomicU64 = AtomicU64::new(0);
+static WENVIRON32: AtomicU64 = AtomicU64::new(0);
 
 fn os_snapshot() -> Vec<Vec<u16>> {
     crate::kernel32::with_process(|p| {
@@ -73,6 +76,39 @@ fn publish(t: Option<&Vec<Entry>>, var: &AtomicU64) {
     crt_free(old as *mut u8);
 }
 
+/// Reallocates the pointer array of one 32-bit table from the same entries;
+/// the heap strings are allocated below 4 GiB, so their low half is a
+/// guest pointer.
+fn publish32(t: Option<&Vec<Entry>>, var: &AtomicU64) {
+    let old = var.load(Ordering::SeqCst);
+    let new = match t {
+        None => 0,
+        Some(t) => {
+            let arr = crt_malloc((t.len() + 1) * 4) as *mut u32;
+            if !arr.is_null() {
+                for (i, e) in t.iter().enumerate() {
+                    // SAFETY: `arr` holds len + 1 slots.
+                    unsafe { *arr.add(i) = e.ptr as u32 };
+                }
+                // SAFETY: as above.
+                unsafe { *arr.add(t.len()) = 0 };
+            }
+            arr as u64
+        }
+    };
+    var.store(new, Ordering::SeqCst);
+    crt_free(old as *mut u8);
+}
+
+/// Re-creates the 32-bit array if a 32-bit caller ever asked for it, so
+/// `_putenv` changes stay visible to it.
+fn republish32(t: Option<&Vec<Entry>>, wide: bool) {
+    let var = if wide { &WENVIRON32 } else { &ENVIRON32 };
+    if var.load(Ordering::SeqCst) != 0 {
+        publish32(t, var);
+    }
+}
+
 /// Creates the narrow (or wide) table if missing: from the other table
 /// when that exists (it carries earlier _putenv changes), else from the
 /// process environment.
@@ -88,9 +124,11 @@ fn ensure(env: &mut Env, wide: bool) {
     if wide {
         env.wide = Some(t);
         publish(env.wide.as_ref(), &WENVIRON);
+        republish32(env.wide.as_ref(), true);
     } else {
         env.narrow = Some(t);
         publish(env.narrow.as_ref(), &ENVIRON);
+        republish32(env.narrow.as_ref(), false);
     }
 }
 
@@ -106,6 +144,17 @@ pub fn environ_ptr(wide: bool) -> u64 {
     } else {
         ENVIRON.load(Ordering::SeqCst)
     }
+}
+
+/// The environment as a four-byte-slot pointer array, for a 32-bit caller
+/// of the legacy CRT (`__getmainargs`).
+pub fn environ_ptr32(wide: bool) -> u32 {
+    let mut env = ENV.lock().unwrap();
+    ensure(&mut env, wide);
+    let t = if wide { env.wide.as_ref() } else { env.narrow.as_ref() };
+    let var = if wide { &WENVIRON32 } else { &ENVIRON32 };
+    publish32(t, var);
+    var.load(Ordering::SeqCst) as u32
 }
 
 /// Looks `name` up; returns the address of its value.
@@ -149,6 +198,8 @@ fn set(name: &[u16], value: &[u16]) -> i32 {
         }
         publish(env.narrow.as_ref(), &ENVIRON);
         publish(env.wide.as_ref(), &WENVIRON);
+        republish32(env.narrow.as_ref(), false);
+        republish32(env.wide.as_ref(), true);
     }
     let mut n = name.to_vec();
     n.push(0);

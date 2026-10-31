@@ -83,6 +83,8 @@ pub struct PipeObj {
     chan: Mutex<Option<Arc<Fd>>>,
     /// The unread rest of the message last received.
     rest: Mutex<Vec<u8>>,
+    /// A zero-length message PeekNamedPipe received, still owed to a read.
+    peeked_empty: AtomicBool,
     /// Serializes reads: a reader that received more than it returned leaves
     /// the rest in `rest`, where a reader already waiting on the channel
     /// would not see it.
@@ -241,6 +243,9 @@ impl PipeObj {
                     rest.drain(..n);
                     return Ok((n, self.read_message.load(Ordering::SeqCst) && !rest.is_empty()));
                 }
+            }
+            if self.peeked_empty.swap(false, Ordering::SeqCst) {
+                return Ok((0, false)); // the empty message a peek received
             }
             // A caller buffer that holds any message receives it directly.
             // Otherwise the message lands in the pipe's receive buffer, which
@@ -537,6 +542,51 @@ fn finish(r: Result<(usize, bool), u32>, done: *mut u32) -> i32 {
     }
 }
 
+/// PeekNamedPipe: the bytes a read would return, without consuming them.
+/// One channel message is fetched at most, so a byte-mode pipe reports that
+/// message rather than the whole queue; message-mode pipes also report the
+/// remainder of the message after the copied part.
+pub fn peek_file(p: &PipeObj, buf: *mut u8, n: u32, read: *mut u32, avail: *mut u32, left: *mut u32) -> i32 {
+    let chan = match p.chan() {
+        Ok(c) => c,
+        Err(e) => return fail(e, 0),
+    };
+    let mut scratch = p.scratch.lock().unwrap();
+    let mut rest = p.rest.lock().unwrap();
+    if rest.is_empty() && !p.peeked_empty.load(Ordering::SeqCst) {
+        if scratch.len() < CHUNK {
+            scratch.resize(CHUNK, 0);
+        }
+        match os_sys::channel_recv(chan.0, &mut scratch, &mut []) {
+            Ok((0, _)) if p.message_type => p.peeked_empty.store(true, Ordering::SeqCst),
+            Ok((0, _)) => {}
+            Ok((k, _)) => rest.extend_from_slice(&scratch[..k]),
+            Err(Errno::WouldBlock) => {}
+            Err(Errno::BrokenPipe) => return fail(ERROR_BROKEN_PIPE, 0),
+            Err(e) => return fail(errno_to_win32(e), 0),
+        }
+    }
+    let len = rest.len();
+    let k = if buf.is_null() { 0 } else { len.min(n as usize) };
+    if k > 0 {
+        // SAFETY: the caller's buffer of `n` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(rest.as_ptr(), buf, k) };
+    }
+    // SAFETY: the caller's out pointers.
+    unsafe {
+        if !read.is_null() {
+            *read = k as u32;
+        }
+        if !avail.is_null() {
+            *avail = len as u32;
+        }
+        if !left.is_null() {
+            *left = if p.message_type { (len - k) as u32 } else { 0 };
+        }
+    }
+    1
+}
+
 pub fn read_file(p: Arc<PipeObj>, buf: *mut u8, n: u32, done: *mut u32, ov: u64) -> i32 {
     if p.overlapped && ov != 0 {
         let (b, len) = (buf as u64, n as usize);
@@ -637,6 +687,7 @@ pub fn open_client(name: &str, flags: u32) -> Result<u64, u32> {
         listener: None,
         chan: Mutex::new(Some(Arc::new(Fd(c)))),
         rest: Mutex::new(Vec::new()),
+        peeked_empty: AtomicBool::new(false),
         reading: Mutex::new(()),
         scratch: Mutex::new(Vec::new()),
         writing: Mutex::new(()),
@@ -720,6 +771,7 @@ extern "win64" fn CreateNamedPipeW(
         listener: Some(listener),
         chan: Mutex::new(None),
         rest: Mutex::new(Vec::new()),
+        peeked_empty: AtomicBool::new(false),
         reading: Mutex::new(()),
         scratch: Mutex::new(Vec::new()),
         writing: Mutex::new(()),
@@ -994,6 +1046,7 @@ pub(crate) fn relay_in_channel(c: u64, flags: u32) -> Object {
         listener: None,
         chan: Mutex::new(Some(Arc::new(Fd(c)))),
         rest: Mutex::new(Vec::new()),
+        peeked_empty: AtomicBool::new(false),
         reading: Mutex::new(()),
         scratch: Mutex::new(Vec::new()),
         writing: Mutex::new(()),
