@@ -457,17 +457,7 @@ fn set_file(p: &str, info: u32, owner: Option<&[u8]>, group: Option<&[u8]>, dacl
 pub(crate) fn set_file_security(name: *const u16, info: u32, sd: *const u8) -> Result<(), u32> {
     if info == 0 || info & !(OWNER | GROUP | DACL | SACL) != 0 { return Err(ERROR_INVALID_PARAMETER); }
     let name = unsafe { path::wide_to_string(name) }.ok_or(ERROR_INVALID_PARAMETER)?;
-    let control = unsafe { security::descriptor_control(sd) }?;
-    let mut absolute = [0u64; 5];
-    let input = if crate::wow64::is_active() && control & SE_SELF_RELATIVE == 0 {
-        // SECURITY_DESCRIPTOR32 has four pointers at offsets 4, 8, 12, 16.
-        absolute[0] = 1 | ((control as u64) << 16);
-        for (i, slot) in absolute[1..].iter_mut().enumerate() {
-            *slot = unsafe { rd::<u32>(sd, 4 + i * 4) } as u64;
-        }
-        absolute.as_ptr().cast::<u8>()
-    } else { sd };
-    let (owner, group, dacl, sacl, _) = unsafe { parse_sd(input) }?;
+    let (owner, group, dacl, sacl, _) = unsafe { parse_sd(sd) }?;
     if info & OWNER != 0 && owner.is_none() || info & GROUP != 0 && group.is_none() ||
        info & DACL != 0 && dacl.is_none() || info & SACL != 0 && sacl.is_none() {
         return Err(ERROR_INVALID_SECURITY_DESCR);
@@ -522,20 +512,7 @@ pub fn initial_sd(sa: u64, mapping: &Mapping) -> Result<Option<Sd>, u32> {
 /// describe what children get; OSyx gives new files their own mode, so
 /// inherit-only ACEs are left out and the rest apply to the object itself.
 pub fn apply_new_file_sd(p: &str, sd: u64) -> Result<(), u32> {
-    // An absolute descriptor of a 32-bit caller holds 4-byte pointers at
-    // offsets 4, 8, 12, 16: widen it to the host layout first.
-    let mut absolute = [0u64; 5];
-    let mut sd = sd;
-    // SAFETY: the caller's descriptor.
-    if crate::wow64::is_active() && unsafe { security::descriptor_control(sd as *const u8) }? & SE_SELF_RELATIVE == 0 {
-        let control = unsafe { security::descriptor_control(sd as *const u8) }?;
-        absolute[0] = 1 | ((control as u64) << 16);
-        for (i, slot) in absolute[1..].iter_mut().enumerate() {
-            *slot = unsafe { rd::<u32>(sd as *const u8, 4 + i * 4) } as u64;
-        }
-        sd = absolute.as_ptr() as u64;
-    }
-    // SAFETY: the caller's descriptor.
+    // SAFETY: the caller's descriptor; sd_parts reads its native guest layout.
     let (owner, group, dacl, sacl) = unsafe { sd_parts(sd as *const u8) }?;
     let dacl = dacl.map(|d| {
         d.map(|aces| {
