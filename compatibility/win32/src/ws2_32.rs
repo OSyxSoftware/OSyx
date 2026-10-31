@@ -321,6 +321,11 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
         if !listener.stream {
             return Err(WSAEOPNOTSUPP);
         }
+        // A caller-supplied address needs room for sockaddr_in; Windows
+        // rejects the call before taking a pending connection.
+        if !addr.is_null() && (len.is_null() || unsafe { *len } < 16) {
+            return Err(WSAEFAULT);
+        }
         let (nfd, peer) = os_sys::sock_accept(listener.fd).map_err(wsa)?;
         // Winsock accept inherits the listener's blocking mode. OSyx's
         // native accept creates a blocking endpoint, so apply it here.

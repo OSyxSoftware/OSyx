@@ -123,6 +123,9 @@ void __stdcall start(void) {
     check_eq("connect over loopback", connect(c, (struct sockaddr *)&la, sizeof la), 0);
     struct sockaddr_in peer;
     int plen = sizeof peer;
+    int badlen = 8;
+    check_eq("accept with a short addrlen fails", accept(l, (struct sockaddr *)&peer, &badlen), INVALID_SOCKET);
+    check_eq("... with WSAEFAULT", WSAGetLastError(), WSAEFAULT);
     SOCKET srv = accept(l, (struct sockaddr *)&peer, &plen);
     check("accept", srv != INVALID_SOCKET && peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
     check("loopback data", send(c, "ping", 4, 0) == 4 && recv(srv, buf, 4, 0) == 4 && mem_eq(buf, "ping", 4));
