@@ -699,6 +699,11 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
     let nonblock = flags & abi::MSG_DONTWAIT != 0;
     let peek = flags & abi::MSG_PEEK != 0;
     let waitall = flags & abi::MSG_WAITALL != 0;
+    // A zero-byte stream read returns at once, as on Windows; it consumes
+    // nothing and waits for nothing.
+    if len == 0 && s.kind == abi::SOCK_STREAM {
+        return Ok(0);
+    }
     let mut k = alloc::vec![0u8; len];
     let run = |op: &mut RecvOp| {
         if nonblock {
