@@ -683,8 +683,21 @@ extern "win64" fn GetComputerNameExA(kind: u32, buf: *mut u8, size: *mut u32) ->
     name_out(s.as_bytes(), buf, size, 0, ERROR_MORE_DATA)
 }
 
+/// GetComputerNameExW: the forms of GetComputerNameExA in UTF-16.
+extern "win64" fn GetComputerNameExW(kind: u32, buf: *mut u16, size: *mut u32) -> i32 {
+    let s = match kind {
+        0 | 4 => netbios(),
+        1 | 3 | 5 | 7 => host_name(),
+        2 | 6 => String::new(),
+        _ => return fail(ERROR_INVALID_PARAMETER, 0),
+    };
+    let w: Vec<u16> = s.encode_utf16().collect();
+    name_out(&w, buf, size, 0, ERROR_MORE_DATA)
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        GetComputerNameExW,
         GetComputerNameA,
         GetProcessAffinityMask,
         GetProcessIdOfThread,

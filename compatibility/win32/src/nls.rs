@@ -74,6 +74,227 @@ extern "win64" fn GetLocaleInfoW(lcid: u32, lctype: u32, buf: *mut u16, size: i3
     locale::GetLocaleInfoEx(name.as_ptr(), lctype, buf, size)
 }
 
+/// GetLocaleInfoA: the Unicode text as ANSI (UTF-8 here); with
+/// LOCALE_RETURN_NUMBER the DWORD itself (4 bytes).
+extern "win64" fn GetLocaleInfoA(lcid: u32, lctype: u32, buf: *mut u8, size: i32) -> i32 {
+    const LOCALE_RETURN_NUMBER: u32 = 0x2000_0000;
+    if size < 0 || (size > 0 && buf.is_null()) {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if lctype & LOCALE_RETURN_NUMBER != 0 {
+        let mut n = 0u32;
+        if GetLocaleInfoW(lcid, lctype, &mut n as *mut u32 as *mut u16, 2) == 0 {
+            return 0;
+        }
+        if size == 0 {
+            return 4;
+        }
+        if size < 4 {
+            return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        // SAFETY: four bytes of the caller's buffer.
+        unsafe { core::ptr::write_unaligned(buf as *mut u32, n) };
+        return 4;
+    }
+    let need = GetLocaleInfoW(lcid, lctype, core::ptr::null_mut(), 0);
+    if need == 0 {
+        return 0;
+    }
+    let mut w = alloc::vec![0u16; need as usize];
+    if GetLocaleInfoW(lcid, lctype, w.as_mut_ptr(), need) == 0 {
+        return 0;
+    }
+    let text = String::from_utf16_lossy(&w[..need as usize - 1]);
+    let n = text.len() as i32 + 1;
+    if size == 0 {
+        return n;
+    }
+    if size < n {
+        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer holds `size` >= n bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+        *buf.add(text.len()) = 0;
+    }
+    n
+}
+
+const LCID_INSTALLED: u32 = 1;
+const LCID_SUPPORTED: u32 = 2;
+const LCID_ALTERNATE_SORTS: u32 = 4;
+
+/// IsValidLocale: the LCIDs this system has data for (en-US, the
+/// invariant locale and the default aliases), installed and supported alike.
+extern "win64" fn IsValidLocale(lcid: u32, flags: u32) -> i32 {
+    if flags != LCID_INSTALLED && flags != LCID_SUPPORTED {
+        return 0;
+    }
+    lcid_locale(lcid).is_some() as i32
+}
+
+/// EnumSystemLocalesW: LOCALE_ENUMPROCW gets each LCID as eight hex digits
+/// ("00000409"); there are no alternate sorts.
+extern "win64" fn EnumSystemLocalesW(proc_: u64, flags: u32) -> i32 {
+    if proc_ == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if flags & !(LCID_INSTALLED | LCID_SUPPORTED | LCID_ALTERNATE_SORTS) != 0 {
+        return fail(ERROR_INVALID_FLAGS, 0);
+    }
+    if flags & LCID_ALTERNATE_SORTS != 0 {
+        return 1;
+    }
+    let text: Vec<u16> = alloc::format!("{LCID_EN_US:08X}").encode_utf16().chain(core::iter::once(0)).collect();
+    crate::wow64::callback(proc_, &[text.as_ptr() as u64]);
+    1
+}
+
+/// FoldStringW: MAP_FOLDDIGITS maps every Unicode decimal digit to its
+/// ASCII form; MAP_FOLDCZONE maps the compatibility zone (full-width ASCII
+/// and the ideographic space) to standard characters; MAP_EXPAND_LIGATURES
+/// expands the Latin ligatures. MAP_PRECOMPOSED and MAP_COMPOSITE use the
+/// decompositions of the Latin-1 and Latin Extended-A letters with one
+/// diacritic ([`COMPOSED`]).
+extern "win64" fn FoldStringW(flags: u32, src: *const u16, n: i32, dst: *mut u16, cap: i32) -> i32 {
+    const MAP_FOLDCZONE: u32 = 0x10;
+    const MAP_PRECOMPOSED: u32 = 0x20;
+    const MAP_COMPOSITE: u32 = 0x40;
+    const MAP_FOLDDIGITS: u32 = 0x80;
+    const MAP_EXPAND_LIGATURES: u32 = 0x2000;
+    let known = MAP_FOLDCZONE | MAP_PRECOMPOSED | MAP_COMPOSITE | MAP_FOLDDIGITS | MAP_EXPAND_LIGATURES;
+    if flags == 0
+        || flags & !known != 0
+        || (flags & MAP_PRECOMPOSED != 0 && flags & MAP_COMPOSITE != 0)
+        || (flags & MAP_EXPAND_LIGATURES != 0 && flags & (MAP_PRECOMPOSED | MAP_COMPOSITE) != 0)
+    {
+        return fail(ERROR_INVALID_FLAGS, 0);
+    }
+    if src.is_null() || n == 0 || cap < 0 || (cap > 0 && dst.is_null()) || src == dst as *const u16 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: `n` units, or a NUL-terminated string (the NUL included).
+    let input: Vec<u16> = unsafe {
+        let len = if n < 0 { (0..).take_while(|&i| *src.add(i) != 0).count() + 1 } else { n as usize };
+        core::slice::from_raw_parts(src, len).to_vec()
+    };
+    let mut out: Vec<u16> = Vec::with_capacity(input.len());
+    for c in char::decode_utf16(input.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')) {
+        let mut c = c;
+        if flags & MAP_FOLDCZONE != 0 {
+            c = match c as u32 {
+                0x3000 => ' ',
+                v @ 0xFF01..=0xFF5E => char::from_u32(v - 0xFF01 + 0x21).unwrap_or(c),
+                _ => c,
+            };
+        }
+        if flags & MAP_FOLDDIGITS != 0 {
+            if let Some(d) = unicode_digit(c) {
+                c = char::from_digit(d, 10).unwrap_or(c);
+            }
+        }
+        if flags & MAP_EXPAND_LIGATURES != 0 {
+            if let Some(e) = ligature(c) {
+                out.extend(e.encode_utf16());
+                continue;
+            }
+        }
+        if flags & MAP_COMPOSITE != 0 {
+            if let Some((base, mark)) = decompose(c) {
+                out.push(base as u16);
+                out.push(mark);
+                continue;
+            }
+        }
+        if flags & MAP_PRECOMPOSED != 0 {
+            if let Some(p) = out.last().and_then(|&last| precompose(last, c as u32)) {
+                *out.last_mut().unwrap() = p as u16;
+                continue;
+            }
+        }
+        let mut buf = [0u16; 2];
+        out.extend_from_slice(c.encode_utf16(&mut buf));
+    }
+    if cap == 0 {
+        return out.len() as i32;
+    }
+    if out.len() > cap as usize {
+        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    // SAFETY: the caller's buffer of `cap` units.
+    unsafe { core::ptr::copy_nonoverlapping(out.as_ptr(), dst, out.len()) };
+    out.len() as i32
+}
+
+/// The value of a decimal digit in any script (Unicode Nd): the blocks of
+/// ten consecutive digits, plus the superscript and subscript digits.
+fn unicode_digit(c: char) -> Option<u32> {
+    const ZEROS: [u32; 25] = [
+        0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6, 0x0C66, 0x0CE6, 0x0D66,
+        0x0DE6, 0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x2080, 0xFF10,
+    ];
+    let v = c as u32;
+    if let Some(z) = ZEROS.iter().find(|&&z| v >= z && v < z + 10) {
+        return Some(v - z);
+    }
+    match v {
+        0x2070 => Some(0),
+        0x00B9 => Some(1),
+        0x00B2 => Some(2),
+        0x00B3 => Some(3),
+        0x2074..=0x2079 => Some(v - 0x2070),
+        _ => None,
+    }
+}
+
+fn ligature(c: char) -> Option<&'static str> {
+    Some(match c {
+        '\u{00C6}' => "AE",
+        '\u{00E6}' => "ae",
+        '\u{0152}' => "OE",
+        '\u{0153}' => "oe",
+        '\u{00DF}' => "ss",
+        '\u{FB00}' => "ff",
+        '\u{FB01}' => "fi",
+        '\u{FB02}' => "fl",
+        '\u{FB03}' => "ffi",
+        '\u{FB04}' => "ffl",
+        '\u{FB06}' => "st",
+        _ => return None,
+    })
+}
+
+/// Letters with one diacritic: (precomposed, base, combining mark).
+const COMPOSED: &[(u32, char, u16)] = &[
+    (0xC0, 'A', 0x300), (0xC1, 'A', 0x301), (0xC2, 'A', 0x302), (0xC3, 'A', 0x303), (0xC4, 'A', 0x308), (0xC5, 'A', 0x30A),
+    (0xC7, 'C', 0x327), (0xC8, 'E', 0x300), (0xC9, 'E', 0x301), (0xCA, 'E', 0x302), (0xCB, 'E', 0x308), (0xCC, 'I', 0x300),
+    (0xCD, 'I', 0x301), (0xCE, 'I', 0x302), (0xCF, 'I', 0x308), (0xD1, 'N', 0x303), (0xD2, 'O', 0x300), (0xD3, 'O', 0x301),
+    (0xD4, 'O', 0x302), (0xD5, 'O', 0x303), (0xD6, 'O', 0x308), (0xD9, 'U', 0x300), (0xDA, 'U', 0x301), (0xDB, 'U', 0x302),
+    (0xDC, 'U', 0x308), (0xDD, 'Y', 0x301), (0xE0, 'a', 0x300), (0xE1, 'a', 0x301), (0xE2, 'a', 0x302), (0xE3, 'a', 0x303),
+    (0xE4, 'a', 0x308), (0xE5, 'a', 0x30A), (0xE7, 'c', 0x327), (0xE8, 'e', 0x300), (0xE9, 'e', 0x301), (0xEA, 'e', 0x302),
+    (0xEB, 'e', 0x308), (0xEC, 'i', 0x300), (0xED, 'i', 0x301), (0xEE, 'i', 0x302), (0xEF, 'i', 0x308), (0xF1, 'n', 0x303),
+    (0xF2, 'o', 0x300), (0xF3, 'o', 0x301), (0xF4, 'o', 0x302), (0xF5, 'o', 0x303), (0xF6, 'o', 0x308), (0xF9, 'u', 0x300),
+    (0xFA, 'u', 0x301), (0xFB, 'u', 0x302), (0xFC, 'u', 0x308), (0xFD, 'y', 0x301), (0xFF, 'y', 0x308), (0x100, 'A', 0x304),
+    (0x101, 'a', 0x304), (0x102, 'A', 0x306), (0x103, 'a', 0x306), (0x104, 'A', 0x328), (0x105, 'a', 0x328), (0x106, 'C', 0x301),
+    (0x107, 'c', 0x301), (0x10C, 'C', 0x30C), (0x10D, 'c', 0x30C), (0x10E, 'D', 0x30C), (0x10F, 'd', 0x30C), (0x112, 'E', 0x304),
+    (0x113, 'e', 0x304), (0x118, 'E', 0x328), (0x119, 'e', 0x328), (0x11A, 'E', 0x30C), (0x11B, 'e', 0x30C), (0x12A, 'I', 0x304),
+    (0x12B, 'i', 0x304), (0x143, 'N', 0x301), (0x144, 'n', 0x301), (0x147, 'N', 0x30C), (0x148, 'n', 0x30C), (0x14C, 'O', 0x304),
+    (0x14D, 'o', 0x304), (0x150, 'O', 0x30B), (0x151, 'o', 0x30B), (0x158, 'R', 0x30C), (0x159, 'r', 0x30C), (0x15A, 'S', 0x301),
+    (0x15B, 's', 0x301), (0x160, 'S', 0x30C), (0x161, 's', 0x30C), (0x164, 'T', 0x30C), (0x165, 't', 0x30C), (0x16A, 'U', 0x304),
+    (0x16B, 'u', 0x304), (0x16E, 'U', 0x30A), (0x16F, 'u', 0x30A), (0x170, 'U', 0x30B), (0x171, 'u', 0x30B), (0x178, 'Y', 0x308),
+    (0x179, 'Z', 0x301), (0x17A, 'z', 0x301), (0x17B, 'Z', 0x307), (0x17C, 'z', 0x307), (0x17D, 'Z', 0x30C), (0x17E, 'z', 0x30C),
+];
+
+/// MAP_COMPOSITE: a precomposed letter as base letter and combining mark.
+fn decompose(c: char) -> Option<(char, u16)> {
+    COMPOSED.iter().find(|e| e.0 == c as u32).map(|e| (e.1, e.2))
+}
+
+/// MAP_PRECOMPOSED: a base letter followed by a combining mark as one letter.
+fn precompose(base: u16, combining: u32) -> Option<u32> {
+    COMPOSED.iter().find(|e| e.1 as u32 == base as u32 && e.2 as u32 == combining).map(|e| e.0)
+}
+
 extern "win64" fn LCIDToLocaleName(lcid: u32, buf: *mut u16, size: i32, _flags: u32) -> i32 {
     let Some(en_us) = lcid_locale(lcid) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     out_count(locale_name(en_us), buf, size)
@@ -614,6 +835,10 @@ extern "win64" fn GetCurrencyFormatEx(name: *const u16, flags: u32, value: *cons
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         GetLocaleInfoW,
+        GetLocaleInfoA,
+        IsValidLocale,
+        EnumSystemLocalesW,
+        FoldStringW,
         CompareStringOrdinal,
         LCIDToLocaleName,
         LocaleNameToLCID,

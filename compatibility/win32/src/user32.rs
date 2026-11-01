@@ -3630,7 +3630,7 @@ const MAPVK_VK_TO_CHAR: u32 = 2;
 const MAPVK_VSC_TO_VK_EX: u32 = 3;
 const MAPVK_VK_TO_VSC_EX: u32 = 4;
 
-extern "win64" fn MapVirtualKeyExW(code: u32, kind: u32, _hkl: u64) -> u32 {
+pub(crate) extern "win64" fn MapVirtualKeyExW(code: u32, kind: u32, _hkl: u64) -> u32 {
     let scan_table = |t: &[u8; 128], s: u32| if s < 128 { t[s as usize] as u32 } else { 0 };
     match kind {
         MAPVK_VK_TO_VSC => scan_of(code) & 0xFF,
@@ -3643,7 +3643,7 @@ extern "win64" fn MapVirtualKeyExW(code: u32, kind: u32, _hkl: u64) -> u32 {
     }
 }
 
-extern "win64" fn MapVirtualKeyW(code: u32, kind: u32) -> u32 {
+pub(crate) extern "win64" fn MapVirtualKeyW(code: u32, kind: u32) -> u32 {
     MapVirtualKeyExW(code, kind, HKL_US)
 }
 
@@ -5902,7 +5902,7 @@ extern "win64" fn GetWindowThreadProcessId(wnd: u64, pid_out: *mut u32) -> u32 {
     thread
 }
 
-extern "win64" fn GetClassNameW(wnd: u64, buf: *mut u16, size: i32) -> i32 {
+pub(crate) extern "win64" fn GetClassNameW(wnd: u64, buf: *mut u16, size: i32) -> i32 {
     if buf.is_null() || size <= 0 {
         return 0;
     }
@@ -6044,7 +6044,7 @@ fn registered_name(format: u32) -> Option<String> {
     REGISTERED_MESSAGES.lock().unwrap().get(format.checked_sub(0xC000)? as usize).cloned()
 }
 
-extern "win64" fn RegisterWindowMessageW(name: *const u16) -> u32 {
+pub(crate) extern "win64" fn RegisterWindowMessageW(name: *const u16) -> u32 {
     if name.is_null() {
         return 0;
     }
@@ -6215,7 +6215,7 @@ fn put_wide(p: *mut u8, max_chars: usize, s: &str) {
 
 /// DISPLAY_DEVICEW (840 bytes): the one PRISM display adapter, and below it
 /// the one monitor.
-extern "win64" fn EnumDisplayDevicesW(device: *const u16, index: u32, out: *mut u8, _flags: u32) -> Bool {
+pub(crate) extern "win64" fn EnumDisplayDevicesW(device: *const u16, index: u32, out: *mut u8, _flags: u32) -> Bool {
     // SAFETY: the caller's DISPLAY_DEVICEW starts with cb.
     if out.is_null() || unsafe { teb::get::<u32>(out as u64, 0) } < 840 || index != 0 {
         return FALSE;
@@ -6272,7 +6272,7 @@ extern "win64" fn EnumDisplaySettingsExW(device: *const u16, mode: u32, out: *mu
     TRUE
 }
 
-extern "win64" fn EnumDisplaySettingsW(device: *const u16, mode: u32, out: *mut u8) -> Bool {
+pub(crate) extern "win64" fn EnumDisplaySettingsW(device: *const u16, mode: u32, out: *mut u8) -> Bool {
     EnumDisplaySettingsExW(device, mode, out, 0)
 }
 
@@ -6791,7 +6791,7 @@ extern "win64" fn EnumClipboardFormats(next: u32) -> u32 {
     })
 }
 
-extern "win64" fn GetClipboardFormatNameW(format: u32, buf: *mut u16, n: i32) -> i32 {
+pub(crate) extern "win64" fn GetClipboardFormatNameW(format: u32, buf: *mut u16, n: i32) -> i32 {
     let list = REGISTERED_MESSAGES.lock().unwrap();
     let Some(name) = format.checked_sub(0xC000).and_then(|i| list.get(i as usize)) else {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -7705,14 +7705,14 @@ extern "win64" fn UnregisterPowerSettingNotification(notify: u64) -> Bool {
     unregister_notification(notify)
 }
 
-extern "win64" fn SendNotifyMessageW(wnd: u64, msg: u32, wparam: u64, lparam: i64) -> Bool {
+pub(crate) extern "win64" fn SendNotifyMessageW(wnd: u64, msg: u32, wparam: u64, lparam: i64) -> Bool {
     with(|g| g.post(wnd, msg, wparam, lparam));
     TRUE
 }
 
 /// `SendMessageTimeoutW`: the message is delivered directly and the answer
 /// written out; nothing here can block for long enough to hit the timeout.
-extern "win64" fn SendMessageTimeoutW(wnd: u64, msg: u32, wparam: u64, lparam: i64, _flags: u32, _timeout: u32, out: *mut u64) -> i64 {
+pub(crate) extern "win64" fn SendMessageTimeoutW(wnd: u64, msg: u32, wparam: u64, lparam: i64, _flags: u32, _timeout: u32, out: *mut u64) -> i64 {
     let result = match wndproc_of(wnd) {
         Some(p) => call(p, wnd, msg, wparam, lparam),
         None => 0,

@@ -71,7 +71,7 @@ extern "win64" fn LCMapStringW(_lcid: u32, flags: u32, src: *const u16, n: i32, 
     crate::locale::LCMapStringEx(core::ptr::null(), flags, src, n, dst, cap, 0, 0, 0)
 }
 
-extern "win64" fn CompareStringW(_lcid: u32, flags: u32, s1: *const u16, n1: i32, s2: *const u16, n2: i32) -> i32 {
+pub(crate) extern "win64" fn CompareStringW(_lcid: u32, flags: u32, s1: *const u16, n1: i32, s2: *const u16, n2: i32) -> i32 {
     crate::locale::CompareStringEx(core::ptr::null(), flags, s1, n1, s2, n2, 0, 0, 0)
 }
 
@@ -506,9 +506,12 @@ pub(crate) fn extension_function(guid: &[u8; 16]) -> Option<(&'static str, u64)>
     }
 }
 
+/// WSOCK32 exports AcceptEx (#1141) and GetAcceptExSockaddrs (#1142)
+/// directly, also by ordinal.
 pub fn wsock32_extra() -> (Vec<(&'static str, u64)>, Vec<(u16, u64)>) {
     let a = GetAcceptExSockaddrs as *const () as u64;
-    (alloc::vec![("GetAcceptExSockaddrs", a)], alloc::vec![(1142, a)])
+    let x = AcceptEx as *const () as u64;
+    (alloc::vec![("GetAcceptExSockaddrs", a), ("AcceptEx", x)], alloc::vec![(1141, x), (1142, a)])
 }
 
 pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
@@ -538,6 +541,13 @@ pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
         GetModuleInformation,
         GetProcessMemoryInfo,
     ]
+    .into_iter()
+    .chain([
+        ("K32GetModuleFileNameExW", GetModuleFileNameExW as *const () as u64),
+        ("K32GetModuleInformation", GetModuleInformation as *const () as u64),
+        ("K32GetProcessMemoryInfo", GetProcessMemoryInfo as *const () as u64),
+    ])
+    .collect()
 }
 
 pub fn psapi_exports() -> Vec<(&'static str, u64)> {

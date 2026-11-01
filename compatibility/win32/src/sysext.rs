@@ -563,14 +563,61 @@ fn source_text(flags: u32, source: u64, id: u32, wide: bool) -> Result<String, u
     system_message(id).map(String::from).ok_or(ERROR_MR_MID_NOT_FOUND)
 }
 
+/// The highest insert number (%1 .. %99) a message uses.
+fn max_insert(text: &str) -> usize {
+    let mut max = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            continue;
+        }
+        match chars.peek() {
+            Some('1'..='9') => {
+                let mut n = 0usize;
+                while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
+                    n = n * 10 + d as usize;
+                    chars.next();
+                }
+                max = max.max(n.min(99));
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    max
+}
+
 /// Shared body of FormatMessageA/W; writes `units` (bytes or UTF-16).
 #[allow(clippy::too_many_arguments)]
 fn format_message(flags: u32, source: u64, id: u32, lang: u32, buf: u64, size: u32, args: u64, wide: bool) -> u32 {
     if lang != 0 && lang & 0x3ff != 0x09 {
         return fail(1815, 0); // ERROR_RESOURCE_LANG_NOT_FOUND: only English text
     }
+    let narrow = crate::wow64::is_active();
+    let source = match source_text(flags, source, id, wide) {
+        Ok(t) => t,
+        Err(e) => return fail(e, 0),
+    };
+    // A 32-bit caller's inserts are 4-byte slots: widen as many as the
+    // message refers to.
+    let mut widened: Vec<u64> = Vec::new();
     let args = if args == 0 {
         core::ptr::null()
+    } else if narrow {
+        let slots = if flags & ARGUMENT_ARRAY != 0 {
+            args as *const u32
+        } else {
+            // A va_list on x86 is a pointer to the next argument slot.
+            // SAFETY: the caller's va_list.
+            unsafe { *(args as *const u32) as u64 as *const u32 }
+        };
+        let used = if flags & IGNORE_INSERTS != 0 { 0 } else { max_insert(&source) };
+        // SAFETY: the caller supplies an argument for every insert the
+        // message uses.
+        widened.extend((0..used).map(|i| unsafe { core::ptr::read_unaligned(slots.add(i)) } as u64));
+        widened.as_ptr()
     } else if flags & ARGUMENT_ARRAY != 0 {
         args as *const u64
     } else {
@@ -578,7 +625,7 @@ fn format_message(flags: u32, source: u64, id: u32, lang: u32, buf: u64, size: u
         // SAFETY: the caller's va_list.
         unsafe { *(args as *const u64) as *const u64 }
     };
-    let text = match source_text(flags, source, id, wide).and_then(|t| expand(&t, flags, args, wide)) {
+    let text = match expand(&source, flags, args, wide) {
         Ok(t) => t,
         Err(e) => return fail(e, 0),
     };
@@ -590,7 +637,13 @@ fn format_message(flags: u32, source: u64, id: u32, lang: u32, buf: u64, size: u
             return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
         };
         // SAFETY: `buf` is the caller's pointer-sized out parameter.
-        unsafe { *(buf as *mut u64) = p };
+        unsafe {
+            if narrow {
+                core::ptr::write_unaligned(buf as *mut u32, p as u32);
+            } else {
+                *(buf as *mut u64) = p;
+            }
+        }
         p
     } else {
         if buf == 0 || count + 1 > size as usize {
@@ -1062,7 +1115,7 @@ extern "win64" fn GetProductInfo(_major: u32, _minor: u32, _sp_major: u32, _sp_m
     1
 }
 
-extern "win64" fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32 {
+pub(crate) extern "win64" fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32 {
     kernel32::out_w("C:\\Windows\\System32", buf, size)
 }
 
@@ -1075,7 +1128,7 @@ extern "win64" fn GetSystemWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
     GetWindowsDirectoryW(buf, size)
 }
 
-extern "win64" fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32 {
+pub(crate) extern "win64" fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32 {
     // SAFETY: a NUL-terminated string.
     let Some(s) = (unsafe { path::wide_to_string(src) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let expanded = crate::registry::expand_env(&s);

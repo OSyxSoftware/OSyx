@@ -15,9 +15,8 @@
 #![allow(non_snake_case)]
 use crate::{
     error::*,
-    kernel32::{self, fail, INVALID_HANDLE_VALUE},
+    kernel32::{self, fail, overlapped, INVALID_HANDLE_VALUE},
     objects::{self, Object},
-    teb,
 };
 use alloc::{boxed::Box, collections::{BTreeMap, VecDeque}, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -455,9 +454,9 @@ fn start(
     // SAFETY: the caller's OVERLAPPED, which must stay valid until the
     // operation completes (the Windows contract).
     let event: u64 = unsafe {
-        teb::put(ov, 0, STATUS_PENDING);
-        teb::put(ov, 8, 0u64);
-        teb::get(ov, 24)
+        overlapped::set_status(ov, STATUS_PENDING);
+        overlapped::set_bytes(ov, 0);
+        overlapped::event(ov)
     };
     if event & !1 != 0 {
         kernel32::reset_event(event & !1);
@@ -490,8 +489,8 @@ fn start(
 fn complete(p: &PipeObj, ov: u64, event: u64, status: u64, bytes: u32) {
     // SAFETY: the caller's OVERLAPPED, valid until the operation completes.
     unsafe {
-        teb::put(ov, 8, bytes as u64);
-        teb::put(ov, 0, status);
+        overlapped::set_bytes(ov, bytes as u64);
+        overlapped::set_status(ov, status);
     }
     if event & !1 != 0 {
         kernel32::set_event(event & !1);
@@ -515,7 +514,7 @@ fn complete_now(p: &PipeObj, ov: u64, done: *mut u32, status: u64, bytes: u32) -
         }
     }
     // SAFETY: the caller's OVERLAPPED.
-    let event: u64 = unsafe { teb::get(ov, 24) };
+    let event: u64 = unsafe { overlapped::event(ov) };
     if !done.is_null() {
         // SAFETY: the caller's out pointer.
         unsafe { *done = bytes };
@@ -655,8 +654,8 @@ fn record_sync(ov: u64, r: &Result<(usize, bool), u32>) {
     };
     // SAFETY: the caller's OVERLAPPED.
     unsafe {
-        teb::put(ov, 0, status);
-        teb::put(ov, 8, n as u64);
+        overlapped::set_status(ov, status);
+        overlapped::set_bytes(ov, n as u64);
     }
 }
 
@@ -670,9 +669,77 @@ pub fn associate(p: &PipeObj, port: u64, key: u64) {
     *p.port.lock().unwrap() = Some((port, key));
 }
 
+/// Connections WaitNamedPipe made to see that an instance was free:
+/// (service, when, client end). The next CreateFile of that pipe in this
+/// process takes the connection instead of making another; one nobody
+/// takes within [`RESERVED_FOR`] is closed.
+static RESERVED: Mutex<Vec<(String, os_std::time::Instant, Fd)>> = Mutex::new(Vec::new());
+const RESERVED_FOR: core::time::Duration = core::time::Duration::from_secs(5);
+
+/// A connection to `svc` reserved by WaitNamedPipe, if one is still fresh.
+fn take_reserved(svc: &str) -> Option<u64> {
+    let mut list = RESERVED.lock().unwrap();
+    list.retain(|(_, at, _)| at.elapsed() < RESERVED_FOR);
+    let at = list.iter().position(|(s, _, _)| s == svc)?;
+    let (_, _, fd) = list.remove(at);
+    let raw = fd.0;
+    core::mem::forget(fd);
+    Some(raw)
+}
+
+/// WaitNamedPipeW: waits until an instance of the pipe can take a
+/// connection. OSyx cannot ask whether a server's queue has room without
+/// connecting, so the wait connects; the connection is kept for this
+/// process's next CreateFile of the pipe (the server sees its client a
+/// little earlier than on Windows). No server at all is ERROR_FILE_NOT_FOUND
+/// at once; a server whose queue stays full times out (ERROR_SEM_TIMEOUT).
+/// NMPWAIT_USE_DEFAULT_WAIT (0) waits 50 ms, NMPWAIT_WAIT_FOREVER forever.
+extern "win64" fn WaitNamedPipeW(name: *const u16, timeout: u32) -> i32 {
+    const ERROR_SEM_TIMEOUT: u32 = 121;
+    const ERROR_BAD_NETPATH: u32 = 53;
+    // SAFETY: a NUL-terminated name.
+    let Some(win) = (unsafe { crate::path::wide_to_string(name) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let Some(n) = pipe_name(&win) else {
+        // \\server\pipe\name names another machine's pipe.
+        let lower = win.replace('/', "\\").to_ascii_lowercase();
+        let remote = lower.starts_with("\\\\") && lower.contains("\\pipe\\");
+        return fail(if remote { ERROR_BAD_NETPATH } else { ERROR_INVALID_NAME }, 0);
+    };
+    let svc = service(n);
+    {
+        let mut list = RESERVED.lock().unwrap();
+        list.retain(|(_, at, _)| at.elapsed() < RESERVED_FOR);
+        if list.iter().any(|(s, _, _)| *s == svc) {
+            return 1;
+        }
+    }
+    let limit = match timeout {
+        0 => Some(core::time::Duration::from_millis(50)),
+        u32::MAX => None,
+        ms => Some(core::time::Duration::from_millis(ms as u64)),
+    };
+    let start = os_std::time::Instant::now();
+    loop {
+        match os_sys::channel_connect(&svc) {
+            Ok(c) => {
+                RESERVED.lock().unwrap().push((svc, os_std::time::Instant::now(), Fd(c)));
+                return 1;
+            }
+            Err(Errno::NotFound) | Err(Errno::NameNotFound) => return fail(ERROR_FILE_NOT_FOUND, 0),
+            Err(Errno::Busy) | Err(Errno::WouldBlock) => {}
+            Err(e) => return fail(errno_to_win32(e), 0),
+        }
+        if limit.is_some_and(|l| start.elapsed() >= l) {
+            return fail(ERROR_SEM_TIMEOUT, 0);
+        }
+        os_std::thread::sleep(core::time::Duration::from_millis(10));
+    }
+}
+
 /// The client end of `\\.\pipe\name` (CreateFile).
 pub fn open_client(name: &str, flags: u32) -> Result<u64, u32> {
-    let c = match os_sys::channel_connect(&service(name)) {
+    let svc = service(name);
+    let c = match take_reserved(&svc).map(Ok).unwrap_or_else(|| os_sys::channel_connect(&svc)) {
         Ok(c) => c,
         Err(Errno::NotFound) | Err(Errno::NameNotFound) => return Err(ERROR_FILE_NOT_FOUND),
         Err(Errno::Busy) | Err(Errno::WouldBlock) => return Err(ERROR_PIPE_BUSY),
@@ -1067,5 +1134,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         SetNamedPipeHandleState,
         GetNamedPipeServerProcessId,
         TransactNamedPipe,
+        WaitNamedPipeW,
     ]
 }

@@ -13,7 +13,7 @@ use osyx_abi::ipc::DeviceInfo;
 static SETS: Mutex<BTreeMap<u64, Vec<DeviceInfo>>> = Mutex::new(BTreeMap::new());
 static NEXT: AtomicU64 = AtomicU64::new(0x4000_0000);
 
-extern "win64" fn SetupDiGetClassDevsW(guid: u64, enumerator: u64, _parent: u64, flags: u32) -> u64 {
+pub(crate) extern "win64" fn SetupDiGetClassDevsW(guid: u64, enumerator: u64, _parent: u64, flags: u32) -> u64 {
     if guid != 0 || enumerator != 0 || flags & !6 != 0 || flags & 4 == 0 {
         return fail(ERROR_NOT_SUPPORTED, u64::MAX);
     }
@@ -66,7 +66,7 @@ extern "win64" fn SetupDiEnumDeviceInfo(set: u64, index: u32, data: u64) -> i32 
     1
 }
 
-extern "win64" fn SetupDiGetDeviceRegistryPropertyW(
+pub(crate) extern "win64" fn SetupDiGetDeviceRegistryPropertyW(
     set: u64,
     data: u64,
     prop: u32,

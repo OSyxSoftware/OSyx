@@ -1053,7 +1053,7 @@ const SHELLEXECUTEINFO_SIZE: u32 = 112;
 const SEE_MASK_NOCLOSEPROCESS: u32 = 0x40;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 
-extern "win64" fn ShellExecuteExW(info: *mut u8) -> i32 {
+pub(crate) extern "win64" fn ShellExecuteExW(info: *mut u8) -> i32 {
     if info.is_null() {
         crate::teb::set_last_error(ERROR_INVALID_PARAMETER);
         return 0;

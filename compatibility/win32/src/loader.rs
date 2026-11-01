@@ -208,25 +208,25 @@ fn builtin(name: &'static str, mut exports: Vec<(&'static str, u64)>, mut ordina
 }
 
 fn builtins() -> Vec<Arc<Builtin>> {
-    let k32 = [crate::kernel32::exports(), crate::apiextra::kernel32_exports()].concat();
+    let k32 = [crate::kernel32::exports(), crate::apiextra::kernel32_exports(), crate::clientapi::kernel32_exports()].concat();
     alloc::vec![
         builtin("ntdll.dll", crate::ntdll::exports(), Vec::new()),
         builtin("kernel32.dll", k32.clone(), Vec::new()),
         builtin("kernelbase.dll", k32, Vec::new()),
-        builtin("user32.dll", [crate::user32::exports(), crate::winsta::exports()].concat(), Vec::new()),
+        builtin("user32.dll", [crate::user32::exports(), crate::winsta::exports(), crate::clientapi::user32_exports()].concat(), Vec::new()),
         builtin("gdi32.dll", [crate::user32::gdi_exports(), crate::apiextra::gdi32_exports()].concat(), Vec::new()),
         builtin("ws2_32.dll", [crate::ws2_32::exports(), crate::apiextra::ws2_32_exports()].concat(), crate::ws2_32::ordinals()),
         builtin("wsock32.dll", [crate::ws2_32::exports(), crate::apiextra::wsock32_extra().0].concat(), [crate::ws2_32::legacy_ordinals(), crate::apiextra::wsock32_extra().1].concat()),
         builtin("setupapi.dll", crate::setupapi::exports(), Vec::new()),
         builtin("iphlpapi.dll", crate::iphlpapi::exports(), Vec::new()),
-        builtin("version.dll", crate::version::exports(), Vec::new()),
-        builtin("psapi.dll", [crate::psapi::exports(), crate::apiextra::psapi_exports()].concat(), Vec::new()),
+        builtin("version.dll", [crate::version::exports(), crate::clientapi::version_exports()].concat(), Vec::new()),
+        builtin("psapi.dll", [crate::psapi::exports(), crate::apiextra::psapi_exports(), crate::clientapi::psapi_exports()].concat(), Vec::new()),
         builtin(
             "advapi32.dll",
-            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports(), crate::cryptbase::exports(), crate::apiextra::advapi32_exports()].concat(),
+            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports(), crate::cryptbase::exports(), crate::apiextra::advapi32_exports(), crate::clientapi::advapi32_exports()].concat(),
             Vec::new()
         ),
-        builtin("shlwapi.dll", crate::shlwapi::exports(), crate::shlwapi::ordinals()),
+        builtin("shlwapi.dll", [crate::shlwapi::exports(), crate::clientapi::shlwapi_exports()].concat(), crate::shlwapi::ordinals()),
         // ole32's COM entry points live in combase on Windows.
         builtin("combase.dll", [crate::shlwapi::combase_exports(), crate::ole32::exports()].concat(), Vec::new()),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),

@@ -670,7 +670,7 @@ extern "win64" fn RevertToSelf() -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn CreateProcessAsUserW(
+pub(crate) extern "win64" fn CreateProcessAsUserW(
     h: u64,
     app: *const u16,
     cmd: *mut u16,
