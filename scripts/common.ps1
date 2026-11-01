@@ -219,7 +219,7 @@ function Test-Whpx {
 }
 
 # Returns the QEMU argument list for booting build/osyx.img.
-function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '', [switch]$Gpu, [string]$GpuSize = '', [string]$DiskFile = 'build/osyx.img', [switch]$NoDisk, [string]$Cdrom = '', [ValidateRange(1,16)][int]$CpuCount = 1, [ValidateSet('auto','whpx','tcg')][string]$Accel = 'auto', [string]$Nic = 'virtio-net-pci') {
+function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 512, [int]$QmpPort = 0, [switch]$Gdb, [switch]$NoRng, [switch]$NoUsb, [switch]$NoNet, [string]$HostFwd = '', [switch]$Gpu, [string]$GpuSize = '', [string]$DiskFile = 'build/osyx.img', [switch]$NoDisk, [string]$Cdrom = '', [ValidateRange(1,16)][int]$CpuCount = 1, [ValidateSet('auto','whpx','tcg')][string]$Accel = 'auto', [string]$Nic = 'virtio-net-pci', [string]$Audio = '') {
     if (-not $Script:QemuBinary) { throw 'qemu-system-x86_64 not found (run scripts/check-env.ps1)' }
     if (-not $Script:Ovmf) { throw 'OVMF (edk2-x86_64-code.fd) not found' }
     $accelArgs = @()
@@ -273,6 +273,14 @@ function Get-QemuArgs([string]$SerialLog, [switch]$Headless, [int]$MemoryMiB = 5
         $dev = 'virtio-gpu-pci'
         if ($GpuSize) { $w, $h = $GpuSize -split 'x'; $dev += ",xres=$w,yres=$h" }
         $a += @('-vga', 'none', '-device', $dev)
+    }
+    # An Intel HD Audio controller with a duplex codec (playback and
+    # recording) on a QEMU audio backend: 'none' (silence in, nothing out),
+    # 'dsound' (the host's devices) or 'wav:<file>' (playback into a file;
+    # this backend cannot record).
+    if ($Audio) {
+        $backend = if ($Audio -like 'wav:*') { "wav,id=snd0,path=$(($Audio.Substring(4)) -replace '\\','/')" } else { "$Audio,id=snd0" }
+        $a += @('-audiodev', $backend, '-device', 'intel-hda,id=hda', '-device', 'hda-duplex,bus=hda.0,audiodev=snd0')
     }
     if ($Headless) { $a += @('-display', 'none') }
     if ($QmpPort -gt 0) { $a += @('-qmp', "tcp:127.0.0.1:$QmpPort,server,nowait") }

@@ -6,6 +6,8 @@
 //!   application when it starts) and the desktop background
 //!   (`/etc/osyx/wallpaper`, applied by the desktop shell within seconds);
 //! * Keyboard: layout (`/etc/osyx/keyboard`, read by PRISM at start);
+//! * Sound: the default output and input card (the kernel mixer, and
+//!   `/etc/osyx/audio`, which the desktop shell applies when it starts);
 //! * Date & Time: time zone (`/etc/TZ`, a POSIX TZ string);
 //! * Network: DHCP or a static IPv4 address for each interface (the
 //!   kernel's network configuration, `net_config`);
@@ -75,6 +77,7 @@ enum Section {
     Appearance,
     Display,
     Keyboard,
+    Sound,
     DateTime,
     Network,
     Storage,
@@ -82,11 +85,12 @@ enum Section {
     About,
 }
 
-const SECTIONS: [(Section, &str, Icon); 9] = [
+const SECTIONS: [(Section, &str, Icon); 10] = [
     (Section::General, "General", Icon::Program),
     (Section::Appearance, "Appearance", Icon::Apps),
     (Section::Display, "Displays", Icon::Device),
     (Section::Keyboard, "Keyboard", Icon::Device),
+    (Section::Sound, "Sound", Icon::Volume),
     (Section::DateTime, "Date & Time", Icon::Bell),
     (Section::Network, "Network", Icon::Link),
     (Section::Storage, "Storage", Icon::Drive),
@@ -157,6 +161,60 @@ fn write(path: &str, value: &str) -> String {
     }
 }
 
+/// The sound cards from the kernel's `/run/audio.status`: the playback
+/// ones (`audioN=card` lines), the recording ones (`audioinN=card`), and
+/// the default card of each direction (`device=`, `input=`).
+struct Cards {
+    outputs: Vec<String>,
+    inputs: Vec<String>,
+    output: String,
+    input: String,
+}
+
+impl Cards {
+    fn read() -> Cards {
+        let status = read("/run/audio.status");
+        let mut cards = Cards { outputs: Vec::new(), inputs: Vec::new(), output: String::new(), input: String::new() };
+        for line in status.lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let v = String::from(v.trim());
+            match k {
+                "device" => cards.output = v,
+                "input" => cards.input = v,
+                _ if k.strip_prefix("audioin").is_some_and(|n| n.parse::<u32>().is_ok()) => cards.inputs.push(v),
+                _ if k.strip_prefix("audio").is_some_and(|n| n.parse::<u32>().is_ok()) => cards.outputs.push(v),
+                _ => {}
+            }
+        }
+        cards
+    }
+}
+
+/// Makes `card` the default output or input (`key` "output" or "input"):
+/// now through the kernel mixer, and at the next start through
+/// `/etc/osyx/audio`, which keeps one line per direction.
+fn choose_card(key: &str, card: &str) -> String {
+    let line = format!("{key}={card}\n");
+    if let Err(e) = fs::OpenOptions::new().write(true).open("/dev/mixer").and_then(|mut f| {
+        use os_std::io::Write;
+        f.write_all(line.as_bytes())
+    }) {
+        return format!("Cannot switch to {card}: {e}");
+    }
+    let prefix = format!("{key}=");
+    let mut saved: Vec<String> = read("/etc/osyx/audio")
+        .lines()
+        .filter(|l| !l.starts_with(prefix.as_str()) && !l.trim().is_empty())
+        .map(String::from)
+        .collect();
+    saved.push(format!("{key}={card}"));
+    let _ = fs::create_dir("/etc/osyx");
+    match fs::write("/etc/osyx/audio", format!("{}\n", saved.join("\n")).as_bytes()) {
+        Ok(()) => format!("{card} is now the default {key}"),
+        Err(e) => format!("Switched to {card}, but cannot save /etc/osyx/audio: {e}"),
+    }
+}
+
 /// Clickable option rows: (rect, index).
 fn option_rows(area: Rect, n: usize, top: i32) -> Vec<Rect> {
     (0..n).map(|i| Rect::new(area.x + 20, top + i as i32 * 40, area.w.saturating_sub(40), 36)).collect()
@@ -206,6 +264,16 @@ impl Settings {
         let card = Rect::new(r.x, r.y + 26, r.w, r.h.saturating_sub(26));
         p.card(card, 10, osyx_gfx::rgb(36, 39, 49), t.border);
         card
+    }
+
+    /// The option rows of the Sound section: the Output group first, the
+    /// Input group below it; a group without cards keeps one row for its
+    /// message.
+    fn sound_rows(c: Rect, cards: &Cards) -> (Vec<Rect>, Vec<Rect>) {
+        let outputs = option_rows(c, cards.outputs.len().max(1), c.y + 60);
+        let below = outputs.last().map_or(c.y + 60, |r| r.y + r.h as i32) + 12 + 30;
+        let inputs = option_rows(c, cards.inputs.len().max(1), below + 34);
+        (outputs, inputs)
     }
 
     fn row(p: &mut Painter, r: Rect, label: &str, value: &str) {
@@ -325,6 +393,22 @@ impl App for Settings {
                             self.layout = i;
                             self.status =
                                 write("/etc/osyx/keyboard", LAYOUTS[i].0) + " (takes effect when the session restarts)";
+                            return true;
+                        }
+                    }
+                }
+                Section::Sound => {
+                    let cards = Cards::read();
+                    let (out_rows, in_rows) = Self::sound_rows(c, &cards);
+                    for (i, r) in out_rows.into_iter().take(cards.outputs.len()).enumerate() {
+                        if inside(r, x, y) {
+                            self.status = choose_card("output", &cards.outputs[i]);
+                            return true;
+                        }
+                    }
+                    for (i, r) in in_rows.into_iter().take(cards.inputs.len()).enumerate() {
+                        if inside(r, x, y) {
+                            self.status = choose_card("input", &cards.inputs[i]);
                             return true;
                         }
                     }
@@ -551,6 +635,25 @@ impl App for Settings {
                     Self::group(p, Rect::new(c.x, c.y + 26, c.w, 34 + LAYOUTS.len() as u32 * 40 + 8), "Input source");
                 let labels: Vec<&str> = LAYOUTS.iter().map(|(_, l)| *l).collect();
                 Self::choices(p, &rows, &labels, self.layout);
+            }
+            Section::Sound => {
+                let cards = Cards::read();
+                let (out_rows, in_rows) = Self::sound_rows(c, &cards);
+                let groups = [
+                    ("Output", &cards.outputs, &cards.output, &out_rows, "No sound card can play"),
+                    ("Input", &cards.inputs, &cards.input, &in_rows, "No sound card can record"),
+                ];
+                for (title, list, current, rows, none) in groups {
+                    let top = rows[0].y - 34;
+                    let g = Self::group(p, Rect::new(c.x, top, c.w, 34 + list.len().max(1) as u32 * 40 + 8), title);
+                    if list.is_empty() {
+                        p.text(FontKind::Ui, g.x + 16, g.y + 12, none, t.text_faint);
+                        continue;
+                    }
+                    let labels: Vec<&str> = list.iter().map(String::as_str).collect();
+                    let selected = list.iter().position(|n| n == current).unwrap_or(usize::MAX);
+                    Self::choices(p, &rows[..list.len()], &labels, selected);
+                }
             }
             Section::DateTime => {
                 let now = common::system_tz().local(common::unix_now());

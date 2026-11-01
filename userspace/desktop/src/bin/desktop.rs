@@ -200,6 +200,23 @@ impl Sound {
             Err(e) => eprintln!("desktop: /dev/mixer: {e}"),
         }
     }
+
+    /// Applies the default output and input cards chosen in Settings
+    /// (`/etc/osyx/audio`: `output=card` and `input=card` lines). A card
+    /// that is gone is left out; the kernel's own choice stays.
+    fn restore_cards() {
+        use os_std::io::Write;
+        let Ok(saved) = os_std::fs::read_to_string("/etc/osyx/audio") else { return };
+        for line in saved.lines().map(str::trim).filter(|l| l.starts_with("output=") || l.starts_with("input=")) {
+            let applied = os_std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/mixer")
+                .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
+            if let Err(e) = applied {
+                eprintln!("desktop: cannot restore {line}: {e}");
+            }
+        }
+    }
 }
 
 /// Volume slider geometry in the quick settings panel.
@@ -543,6 +560,7 @@ fn password_ok(entered: &str) -> bool {
 fn main() -> i32 {
     // The shell (taskbar, launcher) stays responsive under application load.
     let _ = os_std::system::thread_priority(0, os_std::system::priority::ABOVE_NORMAL);
+    Sound::restore_cards();
     let mut conn = match Connection::connect("desktop", true) {
         Ok(c) => c,
         Err(e) => {

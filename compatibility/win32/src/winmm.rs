@@ -66,11 +66,13 @@ extern "win64" fn PlaySoundW(sound: *const u16, _module: u64, flags: u32) -> i32
 
 // ---- waveform and MIDI devices ------------------------------------------------------------
 //
-// Wave output plays on `/dev/audio` (48 kHz, signed 16-bit, stereo: see
-// kernel/src/audio.rs); a program's PCM format (8 or 16 bits, mono or stereo,
-// any rate from 4 kHz to 192 kHz) is converted to it. MIDI ports are the
-// `/dev/midiN` nodes and wave capture the `/dev/audioinN` nodes, when the
-// kernel provides them. Each open device is a Windows thread that feeds the
+// Wave output devices are the kernel's `/dev/audioN` nodes and wave input
+// devices its `/dev/audioinN` nodes, one per sound card that can play or
+// record (48 kHz, signed 16-bit, stereo: see kernel/src/audio.rs); the
+// WAVE_MAPPER id uses the default cards, `/dev/audio` and `/dev/audioin`.
+// A program's PCM format (8 or 16 bits, mono or stereo, any rate from 4 kHz
+// to 192 kHz) is converted to and from the card's. MIDI ports are the
+// `/dev/midiN` nodes, when the kernel provides them. Each open device is a Windows thread that feeds the
 // queued headers and reports them back through the callback the program
 // chose, as winmm does. Device ids and handles are looked up in the tables
 // below, so with no such device every id is MMSYSERR_BADDEVICEID and every
@@ -178,7 +180,8 @@ fn dev_names(prefix: &str) -> alloc::vec::Vec<String> {
     let mut names: alloc::vec::Vec<String> = match os_std::fs::read_dir("/dev") {
         Ok(d) => d
             .map(|e| String::from(e.file_name()))
-            .filter(|n| n.starts_with(prefix) && n[prefix.len()..].bytes().all(|b| b.is_ascii_digit()))
+            // `prefix` and a number: `audio0`, not the `audio` alias.
+            .filter(|n| n.len() > prefix.len() && n.starts_with(prefix) && n[prefix.len()..].bytes().all(|b| b.is_ascii_digit()))
             .collect(),
         Err(_) => alloc::vec::Vec::new(),
     };
@@ -196,8 +199,38 @@ fn midi_ports() -> alloc::vec::Vec<String> {
     dev_names("midi")
 }
 
-fn capture_nodes() -> alloc::vec::Vec<String> {
-    dev_names("audioin")
+/// One waveform device: its `/dev` node and the card behind it.
+struct WaveDevice {
+    node: String,
+    card: String,
+}
+
+/// The playback (`audio`) or recording (`audioin`) cards, one `/dev` node
+/// each, named after the `audioN=card` lines of `/run/audio.status`.
+fn wave_devices(prefix: &str) -> alloc::vec::Vec<WaveDevice> {
+    let status = os_std::fs::read_to_string("/run/audio.status").unwrap_or_default();
+    dev_names(prefix)
+        .into_iter()
+        .map(|node| {
+            let key = alloc::format!("{node}=");
+            let card = status.lines().find_map(|l| l.strip_prefix(key.as_str())).map_or_else(|| node.clone(), |c| String::from(c.trim()));
+            WaveDevice { node, card }
+        })
+        .collect()
+}
+
+/// The node a device id opens and the name it reports: WAVE_MAPPER (-1) is
+/// the default card's alias (`/dev/audio`, `/dev/audioin`), as the Windows
+/// mapper uses the preferred device.
+fn wave_device(id: u64, prefix: &str) -> Option<(String, String)> {
+    let devices = wave_devices(prefix);
+    if id as u32 == u32::MAX {
+        let status = os_std::fs::read_to_string("/run/audio.status").unwrap_or_default();
+        let key = if prefix == "audio" { "device=" } else { "input=" };
+        let card = status.lines().find_map(|l| l.strip_prefix(key)).map(str::trim).filter(|c| !c.is_empty())?;
+        return (!devices.is_empty()).then(|| (String::from(prefix), String::from(card)));
+    }
+    devices.into_iter().nth(id as u32 as usize).map(|d| (d.node, d.card))
 }
 
 /// An id names a device when it is below the count (WAVE_MAPPER, -1, picks the first).
@@ -426,16 +459,16 @@ extern "win64" fn wave_out_worker(handle: u64) -> u32 {
     0
 }
 
-/// Number of waveform output devices: the sound card the kernel drives.
+/// Number of waveform output devices: the cards that can play.
 extern "win64" fn waveOutGetNumDevs() -> u32 {
-    sound_card().is_some() as u32
+    wave_devices("audio").len() as u32
 }
 
 /// WAVEOUTCAPSW (84 bytes) or WAVEOUTCAPSA (52 bytes): the card name, the
 /// formats the converter accepts (11.025 to 48 kHz, 8/16 bit, mono/stereo),
 /// two channels, volume control and sample-accurate position.
 fn wave_out_caps(id: u64, caps: *mut u8, size: u32, wide: bool) -> u32 {
-    let Some(name) = sound_card().filter(|_| device_index(id, 1).is_some()) else {
+    let Some((_, name)) = wave_device(id, "audio") else {
         return MMSYSERR_BADDEVICEID;
     };
     if caps.is_null() {
@@ -478,9 +511,9 @@ extern "win64" fn waveOutOpen(handle: *mut u64, id: u32, format: *const u8, call
     if flags & !(CALLBACK_TYPEMASK | WAVE_FORMAT_QUERY | WAVE_ALLOWSYNC | WAVE_FORMAT_DIRECT | 0x4 | 0x10) != 0 {
         return MMSYSERR_INVALFLAG;
     }
-    if sound_card().is_none() || device_index(id as u64, 1).is_none() {
+    let Some((node, _)) = wave_device(id as u64, "audio") else {
         return MMSYSERR_BADDEVICEID;
-    }
+    };
     if format.is_null() || (handle.is_null() && !query) {
         return MMSYSERR_INVALPARAM;
     }
@@ -492,7 +525,8 @@ extern "win64" fn waveOutOpen(handle: *mut u64, id: u32, format: *const u8, call
     if query {
         return MMSYSERR_NOERROR;
     }
-    let file = match os_std::fs::OpenOptions::new().write(true).open("/dev/audio") {
+    let path = alloc::format!("/dev/{node}");
+    let file = match os_std::fs::OpenOptions::new().write(true).open(path.as_str()) {
         Ok(f) => f,
         Err(_) => return MMSYSERR_NODRIVER,
     };
@@ -722,9 +756,69 @@ fn wave_in(h: u64) -> Option<Arc<WaveIn>> {
     WAVE_INS.lock().unwrap().get(&h).cloned()
 }
 
+/// The card's recorded frames (48 kHz, 16-bit stereo) waiting to be
+/// converted, and how far the conversion is.
+struct Capture {
+    /// Card frames, the first being card frame number `first`.
+    pending: alloc::vec::Vec<u8>,
+    first: u64,
+    /// Program frames produced since recording started.
+    produced: u64,
+}
+
+impl Capture {
+    /// Fills `out` with whole frames of the program's format `f`, by
+    /// nearest sample: program frame `n` is card frame `n * 48000 / rate`;
+    /// mono is the mean of both channels, 8-bit samples are unsigned.
+    /// Reads the card as needed; returns the bytes written, short only
+    /// when `closing` says to stop.
+    fn fill(&mut self, f: &Format, file: &Mutex<os_std::fs::File>, out: &mut [u8], closing: &dyn Fn() -> bool) -> usize {
+        use os_std::io::Read;
+        const CARD_FRAME: usize = 4;
+        let fb = f.frame_bytes() as usize;
+        let mut written = 0;
+        let mut chunk = [0u8; CHUNK_FRAMES * CARD_FRAME];
+        while written + fb <= out.len() {
+            let want = self.produced * DEVICE_RATE / f.rate;
+            let have = self.first + (self.pending.len() / CARD_FRAME) as u64;
+            if want >= have {
+                if closing() {
+                    break;
+                }
+                let n = file.lock().unwrap().read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    wait_ms(2);
+                }
+                self.pending.extend_from_slice(&chunk[..n - n % CARD_FRAME]);
+                continue;
+            }
+            let at = ((want - self.first) as usize) * CARD_FRAME;
+            let left = i16::from_le_bytes([self.pending[at], self.pending[at + 1]]);
+            let right = i16::from_le_bytes([self.pending[at + 2], self.pending[at + 3]]);
+            let samples = if f.channels == 2 { [left, right] } else { [((left as i32 + right as i32) / 2) as i16; 2] };
+            for s in &samples[..f.channels as usize] {
+                if f.bits == 8 {
+                    out[written] = ((*s >> 8) + 128) as u8;
+                    written += 1;
+                } else {
+                    out[written..written + 2].copy_from_slice(&s.to_le_bytes());
+                    written += 2;
+                }
+            }
+            self.produced += 1;
+        }
+        // Card frames before the next one needed are done with.
+        let next = self.produced * DEVICE_RATE / f.rate;
+        let drop = (next.saturating_sub(self.first) as usize).min(self.pending.len() / CARD_FRAME);
+        self.pending.drain(..drop * CARD_FRAME);
+        self.first += drop as u64;
+        written
+    }
+}
+
 extern "win64" fn wave_in_worker(handle: u64) -> u32 {
-    use os_std::io::Read;
     let Some(w) = wave_in(handle) else { return 0 };
+    let mut capture = Capture { pending: alloc::vec::Vec::new(), first: 0, produced: 0 };
     loop {
         let hdr = {
             let s = w.state.lock().unwrap();
@@ -742,53 +836,44 @@ extern "win64" fn wave_in_worker(handle: u64) -> u32 {
         let (data, len) = unsafe { (core::ptr::read_unaligned(h as *const u64) as *mut u8, read_u32(h, 8) as usize) };
         // SAFETY: the program keeps its buffer valid until the header is returned.
         let buf = unsafe { core::slice::from_raw_parts_mut(data, len) };
-        let got = w.file.lock().unwrap().read(buf).unwrap_or(0);
-        if got == 0 {
-            wait_ms(2);
-            continue;
-        }
-        w.state.lock().unwrap().recorded += got as u64;
         // A header is returned when it is full (or on stop/reset, below).
-        let mut filled = got;
-        while filled < len && !w.state.lock().unwrap().closing {
-            let n = w.file.lock().unwrap().read(&mut buf[filled..]).unwrap_or(0);
-            if n == 0 {
-                wait_ms(2);
-            }
-            filled += n;
-            w.state.lock().unwrap().recorded += n as u64;
-        }
-        w.state.lock().unwrap().queue.pop_front();
+        let filled = capture.fill(&w.format, &w.file, buf, &|| w.state.lock().unwrap().closing);
+        let mut s = w.state.lock().unwrap();
+        s.recorded += filled as u64;
+        s.queue.pop_front();
+        drop(s);
         finish_header(&w.cb, handle, WIM_DATA, hdr, Some(filled as u32));
     }
     0
 }
 
+/// Number of waveform input devices: the cards that can record.
 extern "win64" fn waveInGetNumDevs() -> u32 {
-    capture_nodes().len() as u32
+    wave_devices("audioin").len() as u32
 }
 
+/// WAVEINCAPSW (80 bytes) or WAVEINCAPSA (48 bytes): the card name, the
+/// formats the converter produces (11.025 to 48 kHz, 8/16 bit, mono/stereo)
+/// and two channels.
 fn wave_in_caps(id: u64, caps: *mut u8, size: u32, wide: bool) -> u32 {
-    let nodes = capture_nodes();
-    let Some(i) = device_index(id, nodes.len()) else { return MMSYSERR_BADDEVICEID };
+    let Some((_, name)) = wave_device(id, "audioin") else { return MMSYSERR_BADDEVICEID };
     if caps.is_null() {
         return MMSYSERR_INVALPARAM;
     }
     let mut block = [0u8; 80];
     let name_end;
     if wide {
-        for (n, c) in nodes[i].encode_utf16().take(31).enumerate() {
+        for (n, c) in name.encode_utf16().take(31).enumerate() {
             block[8 + n * 2..10 + n * 2].copy_from_slice(&c.to_le_bytes());
         }
         name_end = 72;
     } else {
-        for (n, b) in nodes[i].bytes().take(31).enumerate() {
+        for (n, b) in name.bytes().take(31).enumerate() {
             block[8 + n] = b;
         }
         name_end = 40;
     }
-    // Capture is the card's own format: 48 kHz, 16 bits, stereo.
-    block[name_end..name_end + 4].copy_from_slice(&0x8000u32.to_le_bytes());
+    block[name_end..name_end + 4].copy_from_slice(&0xFFFFu32.to_le_bytes());
     block[name_end + 4..name_end + 6].copy_from_slice(&2u16.to_le_bytes());
     let total = if wide { 80 } else { 48 };
     // SAFETY: the caller's WAVEINCAPS of `size` bytes.
@@ -804,19 +889,16 @@ extern "win64" fn waveInGetDevCapsW(id: u64, caps: *mut u8, size: u32) -> u32 {
 }
 
 extern "win64" fn waveInOpen(handle: *mut u64, id: u32, format: *const u8, callback: u64, instance: u64, flags: u32) -> u32 {
-    let nodes = capture_nodes();
     let query = flags & WAVE_FORMAT_QUERY != 0;
     if flags & !(CALLBACK_TYPEMASK | WAVE_FORMAT_QUERY | WAVE_ALLOWSYNC | WAVE_FORMAT_DIRECT | 0x4 | 0x10) != 0 {
         return MMSYSERR_INVALFLAG;
     }
-    let Some(i) = device_index(id as u64, nodes.len()) else { return MMSYSERR_BADDEVICEID };
+    let Some((node, _)) = wave_device(id as u64, "audioin") else { return MMSYSERR_BADDEVICEID };
     if format.is_null() || (handle.is_null() && !query) {
         return MMSYSERR_INVALPARAM;
     }
-    let fmt = match parse_format(format) {
-        Some(f) if f.rate == DEVICE_RATE && f.bits == 16 && f.channels == 2 => f,
-        _ => return WAVERR_BADFORMAT,
-    };
+    // The card records 48 kHz 16-bit stereo; the worker converts it.
+    let Some(fmt) = parse_format(format) else { return WAVERR_BADFORMAT };
     let cb = match Callback::new(callback, instance, flags) {
         Ok(c) => c,
         Err(e) => return e,
@@ -824,7 +906,7 @@ extern "win64" fn waveInOpen(handle: *mut u64, id: u32, format: *const u8, callb
     if query {
         return MMSYSERR_NOERROR;
     }
-    let path = alloc::format!("/dev/{}", nodes[i]);
+    let path = alloc::format!("/dev/{node}");
     let Ok(file) = os_std::fs::OpenOptions::new().read(true).open(path.as_str()) else { return MMSYSERR_ALLOCATED };
     let h = new_handle();
     let w = Arc::new(WaveIn { format: fmt, cb, file: Mutex::new(file), state: Mutex::new(InState { queue: VecDeque::new(), started: false, recorded: 0, closing: false }) });
