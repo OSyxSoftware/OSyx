@@ -650,26 +650,51 @@ impl Gui {
     }
 
     fn invalidate(&mut self, hwnd: u64, r: Option<Rect>, erase: bool) {
-        if let Some(w) = self.windows.get_mut(&hwnd) {
-            let full = Rect::new(0, 0, w.size.0, w.size.1);
-            let r = r.unwrap_or(full).intersect(&full);
-            if r.w == 0 || r.h == 0 { return; }
-            if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
-                os_std::eprintln!("winrun: invalidate hwnd={hwnd:#x} {}x{} at ({},{})", r.w, r.h, r.x, r.y);
-            }
-            w.invalid = Some(match w.invalid {
-                Some(o) => o.union(&r),
-                None => r,
-            });
-            w.erase |= erase;
+        let Some(w) = self.windows.get_mut(&hwnd) else { return };
+        let full = Rect::new(0, 0, w.size.0, w.size.1);
+        let r = r.unwrap_or(full).intersect(&full);
+        if r.w == 0 || r.h == 0 { return; }
+        // Already wholly invalid and erased: the windows painted over it are
+        // invalid too (below), so there is nothing more to mark.
+        if w.erase && w.invalid.is_some_and(|o| o.union(&r) == o) {
+            return;
         }
-        // Erasing a parent paints over its child controls, which share its
-        // surface: they paint again after it.
-        if erase {
-            let children: Vec<u64> = self.windows.iter()
-                .filter(|(_, w)| w.style & WS_CHILD != 0 && w.owner == hwnd).map(|(&h, _)| h).collect();
-            for child in children {
-                self.invalidate(child, None, true);
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            os_std::eprintln!("winrun: invalidate hwnd={hwnd:#x} {}x{} at ({},{})", r.w, r.h, r.x, r.y);
+        }
+        w.invalid = Some(match w.invalid {
+            Some(o) => o.union(&r),
+            None => r,
+        });
+        w.erase |= erase;
+        self.invalidate_above(hwnd, r);
+    }
+
+    /// Marks the windows that show above `r` of `hwnd` (client
+    /// coordinates) for repainting: a repaint of `hwnd` paints over them.
+    fn invalidate_above(&mut self, hwnd: u64, r: Rect) {
+        let Some(w) = self.windows.get(&hwnd) else { return };
+        let (child, owner, area) = (w.style & WS_CHILD != 0, w.owner, Rect::new(w.pos.0 + r.x, w.pos.1 + r.y, r.w, r.h));
+        // Child controls share their parent's surface, so any repaint of
+        // the parent paints over the ones in the area: they paint again
+        // after it (painting goes in handle order: parents first).
+        let children: Vec<u64> = self.windows.iter()
+            .filter(|(_, c)| c.style & WS_CHILD != 0 && c.owner == hwnd && c.visible
+                && !Rect::new(c.pos.0, c.pos.1, c.size.0, c.size.1).intersect(&r).is_empty())
+            .map(|(&h, _)| h).collect();
+        for c in children {
+            self.invalidate(c, None, true);
+        }
+        // Siblings created later are above this child (a full-window wizard
+        // page over the header controls): where they overlap it, they paint
+        // again after it.
+        if child {
+            let above: Vec<u64> = self.windows.range(hwnd + 1..)
+                .filter(|(_, s)| s.style & WS_CHILD != 0 && s.owner == owner && s.visible
+                    && !Rect::new(s.pos.0, s.pos.1, s.size.0, s.size.1).intersect(&area).is_empty())
+                .map(|(&h, _)| h).collect();
+            for s in above {
+                self.invalidate(s, None, true);
             }
         }
     }
@@ -1597,6 +1622,9 @@ fn destroy(hwnd: u64, notify: bool) -> bool {
 }
 
 extern "win64" fn DestroyWindow(hwnd: u64) -> Bool {
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: DestroyWindow({hwnd:#x})");
+    }
     if destroy(hwnd, true) {
         TRUE
     } else {
@@ -4353,6 +4381,12 @@ extern "win64" fn EndPaint(hwnd: u64, ps: *const u8) -> Bool {
         d.paint
     }));
     present(hwnd, paint);
+    // The windows above the painted area may belong to another thread and
+    // have painted before this one (a wizard page made by the installer's
+    // worker thread over the main dialog): they paint again now, on top.
+    if let Some(r) = paint {
+        with(|g| g.invalidate_above(hwnd, r));
+    }
     TRUE
 }
 
@@ -6875,30 +6909,96 @@ extern "win64" fn GetUpdateRect(wnd: u64, rect: *mut u8, erase: Bool) -> Bool {
     };
     write_rect(rect.cast(), invalid.unwrap_or(Rect::EMPTY));
     if invalid.is_some() && needs_erase && erase != 0 {
-        let dc = GetDC(wnd);
-        if dc != 0 {
-            let erased = wndproc_of(wnd).is_some_and(|p| call(p, wnd, WM_ERASEBKGND, dc, 0) != 0);
-            if erased { with(|g| { if let Some(w) = g.windows.get_mut(&wnd) { w.erase = false; } }); }
-            ReleaseDC(wnd, dc);
-        }
+        erase_now(wnd);
     }
     invalid.is_some() as Bool
 }
 
-extern "win64" fn RedrawWindow(wnd: u64, _rect: *const u8, _rgn: u64, flags: u32) -> Bool {
+/// Sends a pending WM_ERASEBKGND now, outside a paint.
+fn erase_now(wnd: u64) {
+    if !with(|g| g.windows.get(&wnd).is_some_and(|w| w.erase && w.invalid.is_some() && w.visible)) {
+        return;
+    }
+    let dc = GetDC(wnd);
+    if dc != 0 {
+        let erased = wndproc_of(wnd).is_some_and(|p| call(p, wnd, WM_ERASEBKGND, dc, 0) != 0);
+        if erased { with(|g| { if let Some(w) = g.windows.get_mut(&wnd) { w.erase = false; } }); }
+        ReleaseDC(wnd, dc);
+    }
+}
+
+/// RedrawWindow: invalidates (optionally erasing) or validates the
+/// rectangle, the region's bounds or the whole client area, then erases
+/// or paints at once for RDW_ERASENOW / RDW_UPDATENOW. Child controls
+/// repaint after their parent either way, since they draw into its
+/// surface; RDW_ALLCHILDREN also validates and updates them now.
+extern "win64" fn RedrawWindow(wnd: u64, rect: *const u8, rgn: u64, flags: u32) -> Bool {
+    const RDW_INVALIDATE: u32 = 0x1;
+    const RDW_ERASE: u32 = 0x4;
+    const RDW_VALIDATE: u32 = 0x8;
+    const RDW_NOERASE: u32 = 0x20;
+    const RDW_ALLCHILDREN: u32 = 0x80;
+    const RDW_UPDATENOW: u32 = 0x100;
+    const RDW_ERASENOW: u32 = 0x200;
     static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
     let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && (n < 40 || n.is_multiple_of(600)) {
         let size = with(|g| g.windows.get(&wnd).map(|w| w.size));
         os_std::eprintln!("winrun: redrawwindow n={n} hwnd={wnd:#x} flags={flags:#x} size={size:?}");
     }
-    if flags & 0x1 != 0 {
-        // RDW_INVALIDATE: queue a paint for the whole window.
+    // The desktop window (NULL) belongs to no program here.
+    if wnd == 0 {
+        return TRUE;
+    }
+    let Some(area) = with(|g| {
+        g.windows.get(&wnd)?;
+        Some(read_rect(rect.cast()).or_else(|| (rgn != 0).then(|| g.regions.get(&rgn).map(|r| r.bounds())).flatten()))
+    }) else {
+        return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
+    };
+    // The window, then its descendants in handle order (parents first).
+    let targets: Vec<u64> = with(|g| {
+        let mut out = alloc::vec![wnd];
+        if flags & RDW_ALLCHILDREN != 0 {
+            let mut i = 0;
+            while i < out.len() {
+                let parent = out[i];
+                out.extend(g.windows.iter().filter(|(_, c)| c.style & WS_CHILD != 0 && c.owner == parent).map(|(&h, _)| h));
+                i += 1;
+            }
+        }
+        out
+    });
+    if flags & RDW_INVALIDATE != 0 {
+        with(|g| g.invalidate(wnd, area, flags & RDW_ERASE != 0));
+    } else if flags & RDW_VALIDATE != 0 {
         with(|g| {
-            if let Some(w) = g.windows.get_mut(&wnd) {
-                w.invalid = Some(Rect { x: 0, y: 0, w: w.size.0, h: w.size.1 });
+            for (i, &h) in targets.iter().enumerate() {
+                let Some(w) = g.windows.get_mut(&h) else { continue };
+                // The area is in `wnd`'s coordinates; children validate wholly.
+                let whole = i > 0 || match (area, w.invalid) {
+                    (None, _) | (_, None) => true,
+                    (Some(a), Some(inv)) => a.union(&inv) == a,
+                };
+                if whole {
+                    w.invalid = None;
+                }
+                if whole || flags & RDW_NOERASE != 0 {
+                    w.erase = false;
+                }
             }
         });
+    }
+    if flags & (RDW_ERASENOW | RDW_UPDATENOW) != 0 {
+        for &h in &targets {
+            if flags & RDW_UPDATENOW != 0 {
+                if with(|g| g.windows.get(&h).is_some_and(|w| w.visible && w.invalid.is_some())) {
+                    UpdateWindow(h);
+                }
+            } else {
+                erase_now(h);
+            }
+        }
     }
     TRUE
 }

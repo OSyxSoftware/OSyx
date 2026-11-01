@@ -188,6 +188,8 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(LocalFree, [Handle], Handle),
     sig!(MoveFileExW, [Ptr, Ptr, Uint], U32),
     sig!(MoveFileW, [Ptr, Ptr], U32),
+    sig!(ReplaceFileW, [Ptr, Ptr, Ptr, Uint, Ptr, Ptr], I32),
+    sig!(ReplaceFileA, [Ptr, Ptr, Ptr, Uint, Ptr, Ptr], I32),
     sig!(MulDiv, [Int, Int, Int], U32),
     sig!(MultiByteToWideChar, [Uint, Uint, Ptr, Int, Ptr, Int], U32),
     sig!(OleInitialize, [Handle], U32),
@@ -292,10 +294,22 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(SetCurrentProcessExplicitAppUserModelID, [Ptr], U32),
     // oleaut32 #9
     sig!(VariantClear, [Ptr], U32),
+    // oleaut32 by ordinal (#2, #4, #6, #7, #8, #149, #150): NSIS's
+    // StdUtils plugin imports BSTRs and VariantInit this way. BSTRs live
+    // in the runtime's heap, below 2 GiB; VariantInit sets only the first
+    // 8 bytes, which a 32-bit VARIANT has too.
+    sig!(SysAllocString, [Ptr], Ptr),
+    sig!(SysAllocStringLen, [Ptr, Uint], Ptr),
+    sig!(SysAllocStringByteLen, [Ptr, Uint], Ptr),
+    sig!(SysFreeString, [Ptr], Void),
+    sig!(SysStringLen, [Ptr], U32),
+    sig!(SysStringByteLen, [Ptr], U32),
+    sig!(VariantInit, [Ptr], Void),
     // kernel32: console, environment, code pages
     sig!(SetConsoleMode, [Handle, Uint], I32),
     sig!(GetConsoleMode, [Handle, Ptr], I32),
     sig!(GetConsoleCP, [], U32),
+    sig!(GetConsoleOutputCP, [], U32),
     sig!(WriteConsoleW, [Handle, Ptr, Uint, Ptr, Ptr], I32),
     sig!(ReadConsoleA, [Handle, Ptr, Uint, Ptr, Ptr], I32),
     sig!(ReadConsoleW, [Handle, Ptr, Uint, Ptr, Ptr], I32),

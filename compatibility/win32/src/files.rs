@@ -194,13 +194,26 @@ extern "win64" fn CopyFileExW(from: *const u16, to: *const u16, progress: u64, d
 
 /// ReplaceFile: `replacement` takes `replaced`'s name, after `replaced`
 /// is moved to `backup` when one is given. Attributes and ACLs are not
-/// merged (OSyx keeps only the read-only bit).
+/// merged (OSyx keeps only the read-only bit). REPLACEFILE_WRITE_THROUGH
+/// needs nothing more: the renames below are complete when they return.
 extern "win64" fn ReplaceFileA(replaced: *const u8, replacement: *const u8, backup: *const u8, flags: u32, _e: u64, _r: u64) -> i32 {
     // SAFETY: NULL or NUL-terminated names.
     let (Some(old), Some(new), b) = (unsafe { path::ansi_to_string(replaced) }, unsafe { path::ansi_to_string(replacement) }, unsafe { path::ansi_to_string(backup) }) else {
         return fail(ERROR_INVALID_PARAMETER, 0);
     };
-    if flags & !0x6 != 0 {
+    replace_file(old, new, b, flags)
+}
+
+extern "win64" fn ReplaceFileW(replaced: *const u16, replacement: *const u16, backup: *const u16, flags: u32, _e: u64, _r: u64) -> i32 {
+    let (Some(old), Some(new)) = (name(replaced), name(replacement)) else {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    };
+    replace_file(old, new, name(backup), flags)
+}
+
+fn replace_file(old: String, new: String, b: Option<String>, flags: u32) -> i32 {
+    // REPLACEFILE_WRITE_THROUGH, _IGNORE_MERGE_ERRORS, _IGNORE_ACL_ERRORS.
+    if flags & !0x7 != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     if stat_of(&old).is_err() {
@@ -746,6 +759,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetFileAttributesExA,
         CopyFileExW,
         ReplaceFileA,
+    ReplaceFileW,
         GetLongPathNameW,
         GetShortPathNameW,
         GetFinalPathNameByHandleW,

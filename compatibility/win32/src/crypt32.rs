@@ -3,9 +3,9 @@
 //! Decodes DER: PKCS#7 SignedData (as files, blobs and the Authenticode
 //! signature embedded in a PE image's certificate table) with its
 //! certificates and signer information, X.509 certificates and their
-//! names. It verifies nothing: no signature, chain or trust checks, which
-//! on Windows are WinVerifyTrust's and CertGetCertificateChain's (not
-//! provided). Stores are in-memory collections of the certificates read;
+//! names. CertGetCertificateChain builds and verifies chains against the
+//! Mozilla root store (rustls-webpki); WinVerifyTrust's Authenticode
+//! checks are not here. Stores are in-memory collections of the certificates read;
 //! OSyx has no Windows system certificate stores (CERT_STORE_PROV_SYSTEM
 //! fails with ERROR_FILE_NOT_FOUND). Also CryptBinaryToString.
 #![allow(non_snake_case)]
@@ -16,6 +16,13 @@ use crate::{
 };
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use os_std::sync::Mutex;
+
+/// rustls-rustcrypto (whose signature verifiers the chain checks use) is
+/// built against getrandom; its randomness is the kernel's CSPRNG.
+fn osyx_random(buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    if crate::ucrt::entropy(buf) { Ok(()) } else { Err(getrandom::Error::UNSUPPORTED) }
+}
+getrandom::register_custom_getrandom!(osyx_random);
 
 const ERROR_MORE_DATA: u32 = 234;
 const CRYPT_E_ASN1_BADTAG: u32 = 0x8009_310b;
@@ -427,9 +434,17 @@ struct Handles {
     stores: BTreeMap<u64, Arc<Store>>,
     msgs: BTreeMap<u64, Msg>,
     contexts: BTreeMap<u64, Context>,
+    /// CERT_CHAIN_CONTEXT blocks handed out, with their elements' contexts.
+    chains: BTreeMap<u64, Vec<u64>>,
 }
 
-static HANDLES: Mutex<Handles> = Mutex::new(Handles { next: 0x5c00_0010, stores: BTreeMap::new(), msgs: BTreeMap::new(), contexts: BTreeMap::new() });
+static HANDLES: Mutex<Handles> = Mutex::new(Handles {
+    next: 0x5c00_0010,
+    stores: BTreeMap::new(),
+    msgs: BTreeMap::new(),
+    contexts: BTreeMap::new(),
+    chains: BTreeMap::new(),
+});
 
 fn new_handle(h: &mut Handles) -> u64 {
     let v = h.next;
@@ -1268,21 +1283,273 @@ extern "win64" fn CertAddCertificateContextToStore(store: u64, ctx: u64, _dispos
     1
 }
 
-const CERT_E_CHAINING: u32 = 0x800B_010A;
+// ---- certificate chains ----------------------------------------------------------------------
 
-/// CertGetCertificateChain: OSyx has no trusted root store to build a
-/// chain to, so no chain is built (CERT_E_CHAINING).
-extern "win64" fn CertGetCertificateChain(
-    _engine: u64, _ctx: u64, _time: *const u64, _store: u64, _para: *const u8, _flags: u32, _reserved: u64, out: *mut u64,
-) -> i32 {
-    if !out.is_null() {
-        // SAFETY: the caller's out pointer.
-        unsafe { *out = 0 };
-    }
-    fail(CERT_E_CHAINING, 0)
+// CERT_TRUST_STATUS.dwErrorStatus bits.
+const CERT_TRUST_IS_NOT_TIME_VALID: u32 = 0x1;
+const CERT_TRUST_IS_NOT_SIGNATURE_VALID: u32 = 0x8;
+const CERT_TRUST_IS_NOT_VALID_FOR_USAGE: u32 = 0x10;
+const CERT_TRUST_IS_UNTRUSTED_ROOT: u32 = 0x20;
+const CERT_TRUST_REVOCATION_STATUS_UNKNOWN: u32 = 0x40;
+const CERT_TRUST_INVALID_EXTENSION: u32 = 0x100;
+const CERT_TRUST_INVALID_BASIC_CONSTRAINTS: u32 = 0x400;
+const CERT_TRUST_INVALID_NAME_CONSTRAINTS: u32 = 0x800;
+const CERT_TRUST_IS_PARTIAL_CHAIN: u32 = 0x1_0000;
+const CERT_TRUST_IS_OFFLINE_REVOCATION: u32 = 0x100_0000;
+// CERT_TRUST_STATUS.dwInfoStatus bits.
+const CERT_TRUST_HAS_NAME_MATCH_ISSUER: u32 = 0x2;
+const CERT_TRUST_IS_SELF_SIGNED: u32 = 0x8;
+/// CERT_CHAIN_REVOCATION_CHECK_END_CERT, _CHAIN and _CHAIN_EXCLUDE_ROOT.
+const REVOCATION_CHECKS: u32 = 0x7000_0000;
+const OID_ANY_EKU: &str = "2.5.29.37.0";
+
+/// The Windows rule for a chain's requested usage (USAGE_MATCH_TYPE_AND
+/// or _OR): a certificate without the EKU extension is good for every
+/// usage, one with it must list a requested OID (all of them for AND) or
+/// anyExtendedKeyUsage.
+struct Usage {
+    oids: Vec<String>,
+    all: bool,
 }
 
-extern "win64" fn CertFreeCertificateChain(_chain: u64) {}
+impl webpki::ExtendedKeyUsageValidator for Usage {
+    #[allow(deprecated)] // the context variant has no public constructor
+    fn validate(&self, iter: webpki::KeyPurposeIdIter<'_, '_>) -> Result<(), webpki::Error> {
+        let mut present = Vec::new();
+        for id in iter {
+            let parts = id?.to_decoded_oid();
+            present.push(parts.iter().map(|p| alloc::format!("{p}")).collect::<Vec<_>>().join("."));
+        }
+        if self.oids.is_empty() || present.is_empty() || present.iter().any(|p| p == OID_ANY_EKU) {
+            return Ok(());
+        }
+        let has = |o: &String| present.contains(o);
+        let ok = if self.all { self.oids.iter().all(has) } else { self.oids.iter().any(has) };
+        if ok { Ok(()) } else { Err(webpki::Error::RequiredEkuNotFound) }
+    }
+}
+
+/// The CERT_TRUST_STATUS error bit of a path building failure.
+#[allow(deprecated)] // older error variants, still matched
+fn trust_error(e: &webpki::Error, untrusted_root: bool) -> u32 {
+    use webpki::Error as E;
+    match e {
+        E::CertExpired { .. } | E::CertNotValidYet { .. } | E::InvalidCertValidity => CERT_TRUST_IS_NOT_TIME_VALID,
+        E::InvalidSignatureForPublicKey
+        | E::SignatureAlgorithmMismatch
+        | E::UnsupportedSignatureAlgorithm
+        | E::UnsupportedSignatureAlgorithmContext(_)
+        | E::UnsupportedSignatureAlgorithmForPublicKey
+        | E::UnsupportedSignatureAlgorithmForPublicKeyContext(_) => CERT_TRUST_IS_NOT_SIGNATURE_VALID,
+        E::RequiredEkuNotFound | E::RequiredEkuNotFoundContext(_) | E::EmptyEkuExtension => CERT_TRUST_IS_NOT_VALID_FOR_USAGE,
+        E::CaUsedAsEndEntity | E::EndEntityUsedAsCa | E::PathLenConstraintViolated => CERT_TRUST_INVALID_BASIC_CONSTRAINTS,
+        E::NameConstraintViolation | E::MalformedNameConstraint | E::InvalidNetworkMaskConstraint => CERT_TRUST_INVALID_NAME_CONSTRAINTS,
+        E::BadDer | E::BadDerTime | E::ExtensionValueInvalid | E::MalformedExtensions | E::UnsupportedCriticalExtension
+        | E::UnsupportedCertVersion | E::TrailingData(_) | E::InvalidSerialNumber => CERT_TRUST_INVALID_EXTENSION,
+        // UnknownIssuer and the path search limits: no chain to a trusted root.
+        _ if untrusted_root => CERT_TRUST_IS_UNTRUSTED_ROOT,
+        _ => CERT_TRUST_IS_PARTIAL_CHAIN,
+    }
+}
+
+/// A NUL-terminated string at `p`.
+fn c_string(p: u64) -> String {
+    if p == 0 {
+        return String::new();
+    }
+    let mut s = Vec::new();
+    // SAFETY: the caller's NUL-terminated string.
+    unsafe {
+        let mut q = p as *const u8;
+        while *q != 0 {
+            s.push(*q);
+            q = q.add(1);
+        }
+    }
+    String::from_utf8_lossy(&s).into_owned()
+}
+
+/// The requested usage of a CERT_CHAIN_PARA (32- or 64-bit layout).
+fn requested_usage(para: *const u8, narrow: bool) -> Usage {
+    let mut u = Usage { oids: Vec::new(), all: true };
+    if para.is_null() {
+        return u;
+    }
+    // SAFETY: the caller's CERT_CHAIN_PARA: cbSize, then RequestedUsage
+    // {dwType, {cUsageIdentifier, rgpszUsageIdentifier}}.
+    unsafe {
+        let p = para as *const u32;
+        if *p < 16 {
+            return u;
+        }
+        u.all = *p.add(1) == 0; // USAGE_MATCH_TYPE_AND
+        let count = (*p.add(2)).min(64) as usize;
+        let list = if narrow { *p.add(3) as u64 } else { *(para.add(16) as *const u64) };
+        for i in 0..count {
+            if list == 0 {
+                break;
+            }
+            let s = if narrow { *((list + 4 * i as u64) as *const u32) as u64 } else { *((list + 8 * i as u64) as *const u64) };
+            u.oids.push(c_string(s));
+        }
+    }
+    u
+}
+
+/// The validation time: the caller's FILETIME or now, as Unix seconds.
+fn chain_time(time: *const u64) -> u64 {
+    if !time.is_null() {
+        // SAFETY: the caller's FILETIME.
+        let ft = unsafe { time.read_unaligned() };
+        return (ft / 10_000_000).saturating_sub(11_644_473_600);
+    }
+    os_std::time::SystemTime::now().duration_since(os_std::time::SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// A Name's encoding with or without its outer SEQUENCE.
+fn same_name(full: &[u8], other: &[u8]) -> bool {
+    full == other || tlv(full).is_ok_and(|(t, _)| t.body == other)
+}
+
+/// Builds the chain of `end` (DER) through `extra` to a root of the Mozilla
+/// store. Returns the chain's certificates (end first; the root only when
+/// one of `extra` is the anchor's certificate, since the store holds names
+/// and keys rather than certificates), the error bits for each, and the
+/// path error.
+fn build_chain(end: &[u8], extra: &[Vec<u8>], time: u64, usage: &Usage) -> (Vec<Vec<u8>>, u32) {
+    use rustls_pki_types::{CertificateDer, UnixTime};
+    let der = CertificateDer::from(end);
+    let Ok(ee) = webpki::EndEntityCert::try_from(&der) else { return (alloc::vec![end.to_vec()], CERT_TRUST_INVALID_EXTENSION) };
+    let intermediates: Vec<CertificateDer<'_>> = extra.iter().filter(|c| c.as_slice() != end).map(|c| CertificateDer::from(c.as_slice())).collect();
+    let algs = rustls_rustcrypto::provider().signature_verification_algorithms.all;
+    let at = UnixTime::since_unix_epoch(core::time::Duration::from_secs(time));
+    match ee.verify_for_usage(algs, webpki_roots::TLS_SERVER_ROOTS, &intermediates, at, usage, None, None) {
+        Ok(path) => {
+            let mut certs = alloc::vec![end.to_vec()];
+            certs.extend(path.intermediate_certificates().map(|c| c.der().as_ref().to_vec()));
+            let anchor = path.anchor();
+            let root = extra.iter().find(|c| parse_cert(c).is_ok_and(|p| {
+                same_name(&p.subject, anchor.subject.as_ref()) && p.subject == p.issuer
+            }));
+            if let Some(r) = root {
+                certs.push(r.clone());
+            }
+            (certs, 0)
+        }
+        Err(e) => {
+            // A path ending in a self-signed certificate the store does not
+            // hold has an untrusted root; otherwise the chain stops short.
+            let self_signed = core::iter::once(end).chain(extra.iter().map(Vec::as_slice))
+                .any(|c| parse_cert(c).is_ok_and(|p| p.subject == p.issuer));
+            (alloc::vec![end.to_vec()], trust_error(&e, self_signed))
+        }
+    }
+}
+
+/// CertGetCertificateChain: builds the chain of `ctx` through the
+/// certificates of `store` to a root of the Mozilla root store (the one
+/// OSyx's own HTTPS uses), checking signatures, validity at `time`,
+/// basic and name constraints and the requested usage. Revocation is not
+/// checked: when the caller asks for it, the chain reports its status as
+/// unknown and offline, as Windows does without a network. The chain
+/// context has one simple chain; its layout follows the caller's pointer
+/// size.
+extern "win64" fn CertGetCertificateChain(
+    _engine: u64, ctx: u64, time: *const u64, store: u64, para: *const u8, flags: u32, _reserved: u64, out: *mut u64,
+) -> i32 {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = 0 };
+    let Some(end) = context_der(ctx) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let extra = HANDLES.lock().unwrap().stores.get(&store).map(|s| s.certs.lock().unwrap().clone()).unwrap_or_default();
+    let narrow = crate::wow64::is_active();
+    let usage = requested_usage(para, narrow);
+    let (certs, error) = build_chain(&end, &extra, chain_time(time), &usage);
+    let revocation = if flags & REVOCATION_CHECKS != 0 { CERT_TRUST_REVOCATION_STATUS_UNKNOWN | CERT_TRUST_IS_OFFLINE_REVOCATION } else { 0 };
+    let mut contexts = Vec::new();
+    for c in &certs {
+        match make_context(0, 0, c) {
+            Ok(h) => contexts.push(h),
+            Err(e) => {
+                for h in contexts {
+                    CertFreeCertificateContext(h);
+                }
+                return fail(e, 0);
+            }
+        }
+    }
+    // Per element: (error, info). The path error belongs to the end
+    // certificate; the root is self-signed and, with
+    // CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, not checked.
+    let n = certs.len();
+    let has_root = error == 0 && n > 1 && parse_cert(&certs[n - 1]).is_ok_and(|p| p.subject == p.issuer);
+    let status: Vec<(u32, u32)> = (0..n).map(|i| {
+        let root = has_root && i == n - 1;
+        let checked = revocation != 0 && !(root && flags & 0x4000_0000 != 0);
+        let err = if i == 0 { error } else { 0 } | if checked { revocation } else { 0 };
+        let info = if root { CERT_TRUST_IS_SELF_SIGNED | CERT_TRUST_HAS_NAME_MATCH_ISSUER } else { 0 };
+        (err, info)
+    }).collect();
+    let chain_error = status.iter().fold(0, |a, s| a | s.0);
+    let chain_info = status.iter().fold(0, |a, s| a | s.1);
+    // Layout: CERT_CHAIN_CONTEXT, CERT_SIMPLE_CHAIN, rgpChain[1],
+    // rgpElement[n], n CERT_CHAIN_ELEMENTs.
+    let w = if narrow { 4 } else { 8 };
+    let (ctx_size, simple_size, element_size) = if narrow { (56, 32, 32) } else { (72, 40, 56) };
+    let simple = ctx_size;
+    let chains = simple + simple_size;
+    let elements_list = chains + w;
+    let elements = elements_list + n * w;
+    let total = elements + n * element_size;
+    let Some(base) = kernel32::heap_alloc(total, true) else {
+        for h in contexts {
+            CertFreeCertificateContext(h);
+        }
+        return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+    };
+    // SAFETY: a fresh zeroed block of `total` bytes.
+    let b = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
+    let put32 = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let put_ptr = |b: &mut [u8], at: usize, v: u64| {
+        if narrow { b[at..at + 4].copy_from_slice(&(v as u32).to_le_bytes()) } else { b[at..at + 8].copy_from_slice(&v.to_le_bytes()) }
+    };
+    // CERT_CHAIN_CONTEXT: cbSize, TrustStatus, cChain, rgpChain.
+    put32(b, 0, ctx_size as u32);
+    put32(b, 4, chain_error);
+    put32(b, 8, chain_info);
+    put32(b, 12, 1);
+    put_ptr(b, 16, base + chains as u64);
+    // CERT_SIMPLE_CHAIN: cbSize, TrustStatus, cElement, rgpElement.
+    put32(b, simple, simple_size as u32);
+    put32(b, simple + 4, chain_error);
+    put32(b, simple + 8, chain_info);
+    put32(b, simple + 12, n as u32);
+    put_ptr(b, simple + 16, base + elements_list as u64);
+    put_ptr(b, chains, base + simple as u64);
+    for (i, (&h, &(err, info))) in contexts.iter().zip(&status).enumerate() {
+        let e = elements + i * element_size;
+        put_ptr(b, elements_list + i * w, base + e as u64);
+        // CERT_CHAIN_ELEMENT: cbSize, pCertContext, TrustStatus.
+        put32(b, e, element_size as u32);
+        put_ptr(b, e + w, h);
+        put32(b, e + 2 * w, err);
+        put32(b, e + 2 * w + 4, info);
+    }
+    HANDLES.lock().unwrap().chains.insert(base, contexts);
+    // SAFETY: as above.
+    unsafe { *out = base };
+    1
+}
+
+extern "win64" fn CertFreeCertificateChain(chain: u64) {
+    let Some(contexts) = HANDLES.lock().unwrap().chains.remove(&chain) else { return };
+    for h in contexts {
+        CertFreeCertificateContext(h);
+    }
+    kernel32::heap_free(chain);
+}
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![

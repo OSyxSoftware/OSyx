@@ -93,13 +93,23 @@ extern "win64" fn FlsFree(index: u32) -> i32 {
         (callback, pending)
     };
     if callback != 0 {
-        // SAFETY: a PFLS_CALLBACK_FUNCTION registered with FlsAlloc.
-        let f: Callback = unsafe { core::mem::transmute(callback as usize) };
         for value in pending {
-            f(value);
+            run(callback, value);
         }
     }
     1
+}
+
+/// Calls a PFLS_CALLBACK_FUNCTION registered with FlsAlloc: 32-bit code
+/// in a 32-bit program.
+fn run(callback: u64, value: u64) {
+    if crate::wow64::is_active() {
+        crate::wow64::call32(callback as u32, &[value as u32]);
+        return;
+    }
+    // SAFETY: the program's callback, of the Windows x64 ABI.
+    let f: Callback = unsafe { core::mem::transmute(callback as usize) };
+    f(value);
 }
 
 /// Runs the calling thread's callbacks and forgets its values.
@@ -115,9 +125,7 @@ pub fn thread_exit() {
             .collect()
     };
     for (callback, value) in work {
-        // SAFETY: as in FlsFree.
-        let f: Callback = unsafe { core::mem::transmute(callback as usize) };
-        f(value);
+        run(callback, value);
     }
 }
 

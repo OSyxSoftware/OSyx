@@ -935,6 +935,16 @@ pub fn notify_process_detach() {
         Err(_) => return,
     };
     for (base, entry, cbs) in list {
+        // A 32-bit program's callbacks are 32-bit code.
+        if wow64::is_active() {
+            for cb in cbs {
+                wow64::call32(cb as u32, &[base as u32, DLL_PROCESS_DETACH, 1]);
+            }
+            if entry != 0 {
+                wow64::call32(entry as u32, &[base as u32, DLL_PROCESS_DETACH, 1]);
+            }
+            continue;
+        }
         for cb in cbs {
             // SAFETY: as in `deliver_attach`.
             let f: TlsCallback = unsafe { core::mem::transmute(cb as usize) };

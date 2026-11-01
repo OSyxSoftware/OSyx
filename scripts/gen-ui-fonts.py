@@ -5,7 +5,7 @@ when the sources or sizes change.
   sans14.osxp   Cantarell Regular 14 px  (body text)
   sans14b.osxp  Cantarell Bold 14 px     (titles, buttons)
   sans20.osxp  Cantarell Regular 20 px   (headings)
-  sans32l.osxp  Cantarell Light 32 px    (large clock / hero text)
+  sans32l.osxp  Cantarell Light 32 px    (large clock / hero text, Latin only)
   mono15.osxf   Source Code Pro Regular 15 px, U+0020..U+017F (terminal)
 
 OSXP (proportional, all integers little-endian):
@@ -37,11 +37,24 @@ LICENSES = Path(r"C:\msys64\ucrt64\share\licenses")
 
 # Latin-1 and Latin Extended-A (all Polish letters), plus common punctuation
 # and arrows used by the desktop.
-CODEPOINTS = (
+LATIN = (
     list(range(0x20, 0x7F))
     + list(range(0xA0, 0x180))
     + [0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x20AC, 0x2122,
        0x2190, 0x2191, 0x2192, 0x2193, 0x2212, 0x2713, 0x00D7]
+)
+
+# The text fonts also cover Greek and Coptic, Cyrillic and Vietnamese (Latin
+# Extended Additional and the horned letters Ơ ơ Ư ư of Latin Extended-B):
+# Windows programs show these scripts (an installer's language list, for
+# instance). The 32 px display font stays Latin: it holds the clock and
+# hero text, and every script would add about 200 KB to it.
+TEXT = (
+    LATIN
+    + list(range(0x370, 0x400))
+    + list(range(0x400, 0x500))
+    + list(range(0x1E00, 0x1F00))
+    + [0x1A0, 0x1A1, 0x1AF, 0x1B0]
 )
 
 
@@ -59,7 +72,7 @@ def render(font, ch: str, ascent: int, line: int, pad: int):
     return img
 
 
-def gen_prop(path: Path, size: int, variation: str | None, name: str):
+def gen_prop(path: Path, size: int, variation: str | None, name: str, codepoints: list[int]):
     font = load(path, size, variation)
     ascent, descent = font.getmetrics()
     line = ascent + descent
@@ -67,7 +80,7 @@ def gen_prop(path: Path, size: int, variation: str | None, name: str):
     missing = render(font, "\U000F0000", ascent, line, pad).tobytes()
     records = []
     blobs = []
-    for cp in sorted(set(CODEPOINTS)):
+    for cp in sorted(set(codepoints)):
         ch = chr(cp)
         img = render(font, ch, ascent, line, pad)
         if cp != 0x20 and cp != 0xA0 and img.tobytes() == missing:
@@ -128,10 +141,10 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     cantarell = args.fonts / "cantarell" / "Cantarell-VF.otf"
     code = args.fonts / "adobe-source-code-pro" / "SourceCodePro-Regular.otf"
-    gen_prop(cantarell, 14, b"Regular", "sans14.osxp")
-    gen_prop(cantarell, 14, b"Bold", "sans14b.osxp")
-    gen_prop(cantarell, 20, b"Regular", "sans20.osxp")
-    gen_prop(cantarell, 32, b"Light", "sans32l.osxp")
+    gen_prop(cantarell, 14, b"Regular", "sans14.osxp", TEXT)
+    gen_prop(cantarell, 14, b"Bold", "sans14b.osxp", TEXT)
+    gen_prop(cantarell, 20, b"Regular", "sans20.osxp", TEXT)
+    gen_prop(cantarell, 32, b"Light", "sans32l.osxp", LATIN)
     gen_mono(code, 15, "mono15.osxf", 0x20, 0x17F)
     for src, dst in [
         (LICENSES / "cantarell-fonts" / "COPYING", "LICENSE-Cantarell.txt"),
