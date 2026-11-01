@@ -83,21 +83,55 @@ pub(super) fn pow2(k: i32) -> f64 {
     f64::from_bits(((k + 1023) as u64) << 52)
 }
 
+/// Terms of the atanh series, and of the exponential's Taylor series.
+const ATANH_TERMS: usize = 40;
+const EXP_TERMS: usize = 12;
+
+/// Reciprocals the series need, as double-doubles: 1/(2n + 1) and 1/k.
+/// Dividing anew on every call made each logarithm cost some fifty
+/// double-double divisions.
+struct Reciprocals {
+    odd: [Dd; ATANH_TERMS],
+    int: [Dd; EXP_TERMS + 1],
+}
+
+fn reciprocals() -> &'static Reciprocals {
+    static R: os_std::sync::OnceLock<Reciprocals> = os_std::sync::OnceLock::new();
+    R.get_or_init(|| {
+        let mut r = Reciprocals { odd: [dd(0.0); ATANH_TERMS], int: [dd(0.0); EXP_TERMS + 1] };
+        for (n, v) in r.odd.iter_mut().enumerate() {
+            *v = div(dd(1.0), dd((2 * n + 1) as f64));
+        }
+        for (k, v) in r.int.iter_mut().enumerate().skip(1) {
+            *v = div(dd(1.0), dd(k as f64));
+        }
+        r
+    })
+}
+
 /// 2 atanh(s) = ln((1 + s) / (1 - s)) for |s| <= 0.18 (or 1/3).
 fn atanh2(s: Dd) -> Dd {
     let s2 = mul(s, s);
+    // Only the terms that still matter: s2^n below 1e-34 is past the
+    // double-double's 106 bits (s close to 0 needs a handful).
+    let mut terms = 0;
+    let mut t = 1.0;
+    while terms < ATANH_TERMS && t > 1e-34 {
+        t *= s2.hi;
+        terms += 1;
+    }
+    let odd = &reciprocals().odd;
     let mut sum = dd(0.0);
-    for n in (0..40).rev() {
-        sum = add(mul(sum, s2), div(dd(1.0), dd((2 * n + 1) as f64)));
+    for n in (0..terms).rev() {
+        sum = add(mul(sum, s2), odd[n]);
     }
     scale(mul(s, sum), 1)
 }
 
-/// ln 2 and ln 10 (derived once from the series).
+/// ln 2, ln 10 and ln(2 pi) (derived once from the series).
 pub(super) fn consts() -> (Dd, Dd, Dd) {
-    static C: Mutex<Option<(Dd, Dd, Dd)>> = Mutex::new(None);
-    let mut g = C.lock().unwrap();
-    *g.get_or_insert_with(|| {
+    static C: os_std::sync::OnceLock<(Dd, Dd, Dd)> = os_std::sync::OnceLock::new();
+    *C.get_or_init(|| {
         let ln2 = atanh2(div(dd(1.0), dd(3.0)));
         // ln 10 = 3 ln 2 + ln 1.25, ln 1.25 = 2 atanh(1/9).
         let ln10 = add(mul(ln2, dd(3.0)), atanh2(div(dd(1.0), dd(9.0))));
@@ -138,9 +172,10 @@ pub(super) fn exp_dd(x: Dd, ln2: Dd) -> f64 {
     }
     let n = round_half_even(x.hi / ln2.hi);
     let r = scale(sub(x, mul(ln2, dd(n))), -8);
+    let int = &reciprocals().int;
     let mut sum = dd(1.0);
-    for k in (1..=12).rev() {
-        sum = add(dd(1.0), div(mul(sum, r), dd(k as f64)));
+    for k in (1..=EXP_TERMS).rev() {
+        sum = add(dd(1.0), mul(mul(sum, r), int[k]));
     }
     for _ in 0..8 {
         sum = mul(sum, sum);
