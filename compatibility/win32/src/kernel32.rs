@@ -1219,7 +1219,7 @@ extern "win64" fn RemoveDirectoryW(name: *const u16) -> Bool {
     remove_directory(unsafe { sw(name) })
 }
 
-fn delete_file(name: Option<String>) -> Bool {
+pub(crate) fn delete_file(name: Option<String>) -> Bool {
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
     let p = match locate(&name) {
         Ok((p, true)) => p,

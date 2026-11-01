@@ -4,8 +4,11 @@
 //! a commit ERROR_TRANSACTION_ALREADY_COMMITTED, rollback after rollback
 //! succeeds). The one resource manager is the registry: keys created
 //! through RegCreateKeyTransactedW are removed again by a rollback, and
-//! kept by a commit. Changes are visible to other readers at once; there is
-//! no isolation between a transaction and the rest of the system.
+//! kept by a commit. The file system is the other: DeleteFileTransactedW
+//! moves the file aside (a commit removes it, a rollback puts it back) and
+//! MoveFileTransactedW renames, keeping a replaced destination aside the
+//! same way. Changes are visible to other readers at once; there is no
+//! isolation between a transaction and the rest of the system.
 #![allow(non_snake_case)]
 use crate::{
     error::*,
@@ -13,7 +16,7 @@ use crate::{
     objects::{self, Object},
     security,
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 use os_std::sync::Mutex;
 
@@ -29,6 +32,11 @@ const ABORTED: u32 = 2;
 /// index and lower-case path).
 pub enum Undo {
     RegistryKey(usize, alloc::string::String),
+    /// A file renamed from .0 to .1: a rollback renames it back.
+    FileRenamed(String, String),
+    /// A file moved aside from .1 to .0: a commit deletes it, a rollback
+    /// moves it back.
+    FileHeld(String, String),
 }
 
 pub struct TransactionObj {
@@ -83,7 +91,11 @@ extern "win64" fn CommitTransaction(h: u64) -> i32 {
     match active(h) {
         Ok(t) => {
             t.state.store(COMMITTED, Ordering::SeqCst);
-            t.undo.lock().unwrap().clear();
+            for op in core::mem::take(&mut *t.undo.lock().unwrap()) {
+                if let Undo::FileHeld(held, _) = op {
+                    crate::kernel32::delete_file(Some(held));
+                }
+            }
             1
         }
         Err(e) => fail(e, 0),
@@ -103,6 +115,12 @@ extern "win64" fn RollbackTransaction(h: u64) -> i32 {
     for op in ops.into_iter().rev() {
         match op {
             Undo::RegistryKey(hive, path) => crate::registry::undo_create(hive, &path),
+            Undo::FileRenamed(from, to) => {
+                crate::kernel32::move_file(Some(to), Some(from), MOVEFILE_REPLACE_EXISTING);
+            }
+            Undo::FileHeld(held, original) => {
+                crate::kernel32::move_file(Some(held), Some(original), MOVEFILE_REPLACE_EXISTING);
+            }
         }
     }
     1
@@ -118,6 +136,89 @@ extern "win64" fn GetTransactionId(h: u64, guid: *mut u8) -> i32 {
     1
 }
 
+const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+const MOVEFILE_COPY_ALLOWED: u32 = 0x2;
+const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+/// A name next to `win` to keep a file aside under while a transaction
+/// is open.
+fn aside(win: &str) -> String {
+    static N: AtomicU32 = AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let (dir, file) = win.rsplit_once(['\\', '/']).unwrap_or((".", win));
+    alloc::format!("{dir}\\.~tx{}-{n}-{file}", crate::kernel32::pid())
+}
+
+fn win_name(p: *const u16) -> Option<String> {
+    // SAFETY: NULL or a NUL-terminated name.
+    unsafe { crate::path::wide_to_string(p) }
+}
+
+/// DeleteFileTransactedW: the file is moved aside; the transaction's commit
+/// deletes it and its rollback restores it.
+extern "win64" fn DeleteFileTransactedW(name: *const u16, tx: u64) -> i32 {
+    let t = match active(tx) {
+        Ok(t) => t,
+        Err(e) => return fail(e, 0),
+    };
+    let Some(n) = win_name(name) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    match crate::kernel32::locate(&n) {
+        Ok((_, true)) => {}
+        Ok((_, false)) => return fail(ERROR_FILE_NOT_FOUND, 0),
+        Err(e) => return fail(e, 0),
+    }
+    let held = aside(&n);
+    if crate::kernel32::move_file(Some(n.clone()), Some(held.clone()), 0) == 0 {
+        return 0;
+    }
+    t.record(Undo::FileHeld(held, n));
+    1
+}
+
+/// MoveFileTransactedW: a rename the transaction's rollback undoes; a
+/// destination it replaces (MOVEFILE_REPLACE_EXISTING) is kept aside until
+/// the commit. The progress routine is called once with the whole size,
+/// as for CopyFileEx (the move is one step).
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn MoveFileTransactedW(from: *const u16, to: *const u16, _progress: u64, _data: u64, flags: u32, tx: u64) -> i32 {
+    if flags & !(MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let t = match active(tx) {
+        Ok(t) => t,
+        Err(e) => return fail(e, 0),
+    };
+    let (Some(f), Some(dst)) = (win_name(from), win_name(to)) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let mut held = None;
+    if matches!(crate::kernel32::locate(&dst), Ok((_, true))) {
+        if flags & MOVEFILE_REPLACE_EXISTING == 0 {
+            return fail(ERROR_ALREADY_EXISTS, 0);
+        }
+        let a = aside(&dst);
+        if crate::kernel32::move_file(Some(dst.clone()), Some(a.clone()), 0) == 0 {
+            return 0;
+        }
+        held = Some(a);
+    }
+    if crate::kernel32::move_file(Some(f.clone()), Some(dst.clone()), flags & !MOVEFILE_REPLACE_EXISTING) == 0 {
+        let e = crate::teb::last_error();
+        if let Some(a) = held {
+            crate::kernel32::move_file(Some(a), Some(dst), 0);
+        }
+        return fail(e, 0);
+    }
+    if let Some(a) = held {
+        t.record(Undo::FileHeld(a, dst.clone()));
+    }
+    t.record(Undo::FileRenamed(f, dst));
+    1
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![CreateTransaction, CommitTransaction, RollbackTransaction, GetTransactionId]
+}
+
+/// The kernel32 side of transactions.
+pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
+    export_table![DeleteFileTransactedW, MoveFileTransactedW]
 }

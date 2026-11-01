@@ -208,7 +208,7 @@ fn builtin(name: &'static str, mut exports: Vec<(&'static str, u64)>, mut ordina
 }
 
 fn builtins() -> Vec<Arc<Builtin>> {
-    let k32 = [crate::kernel32::exports(), crate::apiextra::kernel32_exports(), crate::clientapi::kernel32_exports()].concat();
+    let k32 = [crate::kernel32::exports(), crate::apiextra::kernel32_exports(), crate::clientapi::kernel32_exports(), crate::ktm::kernel32_exports()].concat();
     alloc::vec![
         builtin("ntdll.dll", crate::ntdll::exports(), Vec::new()),
         builtin("kernel32.dll", k32.clone(), Vec::new()),
@@ -1540,18 +1540,57 @@ pub fn where_is(addr: u64) -> Option<(String, u64)> {
     Some((name, addr - image.base))
 }
 
-/// `VirtualQuery` for addresses inside loaded images.
+/// The protection a page of a loaded image has from its section: the
+/// headers are read-only, code is PAGE_EXECUTE_READ, writable data
+/// PAGE_WRITECOPY (written pages are the process's own copy), as Windows
+/// maps an image. None outside every image.
+pub fn image_section_protect(addr: u64) -> Option<u32> {
+    let (base, _) = image_containing(addr)?;
+    let rva = addr - base;
+    // SAFETY: the mapped headers of a loaded image (validated at load).
+    unsafe {
+        let rd16 = |a: u64| core::ptr::read_unaligned(a as *const u16);
+        let rd32 = |a: u64| core::ptr::read_unaligned(a as *const u32);
+        let nt = base + rd32(base + 0x3C) as u64;
+        let count = rd16(nt + 6) as u64;
+        let sections = nt + 24 + rd16(nt + 20) as u64;
+        for i in 0..count.min(96) {
+            let s = sections + 40 * i;
+            let va = rd32(s + 12) as u64;
+            let size = (rd32(s + 8).max(rd32(s + 16)) as u64).next_multiple_of(mem::PAGE as u64);
+            if rva >= va && rva < va + size {
+                let c = rd32(s + 36);
+                let (exec, write) = (c & 0x2000_0000 != 0, c & 0x8000_0000 != 0);
+                return Some(match (exec, write) {
+                    (true, true) => mem::PAGE_EXECUTE_WRITECOPY,
+                    (true, false) => mem::PAGE_EXECUTE_READ,
+                    (false, true) => mem::PAGE_WRITECOPY,
+                    (false, false) => mem::PAGE_READONLY,
+                });
+            }
+        }
+    }
+    Some(mem::PAGE_READONLY)
+}
+
+/// `VirtualQuery` for addresses inside loaded images: the run of pages
+/// from `addr`'s page with the same protection (sections, and what
+/// VirtualProtect changed).
 pub fn query_image(addr: u64) -> Option<mem::Info> {
-    let g = LOADER.lock().ok()?;
-    let l = g.as_ref()?;
-    let img = l.linker.host.images.iter().find(|i| addr >= i.base && addr < i.base + i.size)?;
+    let (base, size) = image_containing(addr)?;
+    let page = addr & !(mem::PAGE as u64 - 1);
+    let protect = mem::image_page_protect(page)?;
+    let mut end = page + mem::PAGE as u64;
+    while end < base + size && mem::image_page_protect(end) == Some(protect) {
+        end += mem::PAGE as u64;
+    }
     Some(mem::Info {
-        base: addr & !(mem::PAGE as u64 - 1),
-        allocation_base: img.base,
+        base: page,
+        allocation_base: base,
         allocation_protect: mem::PAGE_EXECUTE_WRITECOPY,
-        size: mem::PAGE as u64,
+        size: end - page,
         state: mem::MEM_COMMIT,
-        protect: mem::PAGE_READONLY,
+        protect,
         kind: mem::MEM_IMAGE,
     })
 }

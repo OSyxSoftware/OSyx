@@ -132,10 +132,37 @@ fn hmac_pads(alg: Alg, key: &[u8]) -> ([u8; BLOCK], [u8; BLOCK]) {
     (inner, outer)
 }
 
+#[derive(Clone, Copy)]
 struct Provider {
     alg: Alg,
     hmac: bool,
     reusable: bool,
+}
+
+/// The pseudo-handles of Windows 10's built-in providers
+/// (BCRYPT_MD5_ALG_HANDLE ... BCRYPT_HMAC_SHA256_ALG_HANDLE): usable
+/// without BCryptOpenAlgorithmProvider and never closed.
+fn pseudo_provider(h: u64) -> Option<Provider> {
+    let (alg, hmac) = match h {
+        0x21 => (Alg::Md5, false),
+        0x31 => (Alg::Sha1, false),
+        0x41 => (Alg::Sha256, false),
+        0x81 => (Alg::Rng, false),
+        0x91 => (Alg::Md5, true),
+        0xa1 => (Alg::Sha1, true),
+        0xb1 => (Alg::Sha256, true),
+        _ => return None,
+    };
+    Some(Provider { alg, hmac, reusable: false })
+}
+
+/// The provider behind a handle: an opened one or a pseudo-handle.
+fn provider(h: u64) -> Option<Provider> {
+    match OBJECTS.lock().unwrap().get(&h) {
+        Some(Object::Provider(p)) => Some(*p),
+        Some(Object::Hash(_)) => None,
+        None => pseudo_provider(h),
+    }
 }
 
 struct Hash {
@@ -235,7 +262,10 @@ extern "win64" fn BCryptGetProperty(handle: u64, name: *const u16, out: *mut u8,
     let (alg, reusable) = match OBJECTS.lock().unwrap().get(&handle) {
         Some(Object::Provider(p)) => (p.alg, p.reusable),
         Some(Object::Hash(h)) => (h.alg, h.reusable),
-        None => return STATUS_INVALID_HANDLE,
+        None => match pseudo_provider(handle) {
+            Some(p) => (p.alg, p.reusable),
+            None => return STATUS_INVALID_HANDLE,
+        },
     };
     match prop.as_str() {
         "ObjectLength" => property(&16u32.to_le_bytes(), out, size, result),
@@ -281,10 +311,10 @@ extern "win64" fn BCryptCreateHash(provider: u64, out: *mut u64, _object: *mut u
     if out.is_null() || flags & !BCRYPT_HASH_REUSABLE_FLAG != 0 || (secret.is_null() && secret_len != 0) {
         return STATUS_INVALID_PARAMETER;
     }
-    let (alg, hmac, reusable) = match OBJECTS.lock().unwrap().get(&provider) {
-        Some(Object::Provider(p)) if p.alg != Alg::Rng => (p.alg, p.hmac, p.reusable || flags & BCRYPT_HASH_REUSABLE_FLAG != 0),
-        Some(Object::Provider(_)) => return STATUS_NOT_SUPPORTED,
-        _ => return STATUS_INVALID_HANDLE,
+    let (alg, hmac, reusable) = match self::provider(provider) {
+        Some(p) if p.alg != Alg::Rng => (p.alg, p.hmac, p.reusable || flags & BCRYPT_HASH_REUSABLE_FLAG != 0),
+        Some(_) => return STATUS_NOT_SUPPORTED,
+        None => return STATUS_INVALID_HANDLE,
     };
     // SAFETY: the caller's secret of `secret_len` bytes.
     let key = if secret_len == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(secret, secret_len as usize) } };
@@ -352,10 +382,10 @@ extern "win64" fn BCryptHash(provider: u64, secret: *const u8, secret_len: u32, 
     if out.is_null() || (input.is_null() && input_len != 0) || (secret.is_null() && secret_len != 0) {
         return STATUS_INVALID_PARAMETER;
     }
-    let (alg, hmac) = match OBJECTS.lock().unwrap().get(&provider) {
-        Some(Object::Provider(p)) if p.alg != Alg::Rng => (p.alg, p.hmac),
-        Some(Object::Provider(_)) => return STATUS_NOT_SUPPORTED,
-        _ => return STATUS_INVALID_HANDLE,
+    let (alg, hmac) = match self::provider(provider) {
+        Some(p) if p.alg != Alg::Rng => (p.alg, p.hmac),
+        Some(_) => return STATUS_NOT_SUPPORTED,
+        None => return STATUS_INVALID_HANDLE,
     };
     if out_len as usize != alg.digest_len() {
         return STATUS_INVALID_PARAMETER;
@@ -383,8 +413,8 @@ extern "win64" fn BCryptGenRandom(provider: u64, out: *mut u8, len: u32, flags: 
         return STATUS_INVALID_PARAMETER;
     }
     if flags & BCRYPT_USE_SYSTEM_PREFERRED_RNG == 0 {
-        match OBJECTS.lock().unwrap().get(&provider) {
-            Some(Object::Provider(p)) if p.alg == Alg::Rng => {}
+        match self::provider(provider) {
+            Some(p) if p.alg == Alg::Rng => {}
             _ => return STATUS_INVALID_HANDLE,
         }
     } else if provider != 0 {

@@ -1376,15 +1376,18 @@ fn requested_usage(para: *const u8, narrow: bool) -> Usage {
         return u;
     }
     // SAFETY: the caller's CERT_CHAIN_PARA: cbSize, then RequestedUsage
-    // {dwType, {cUsageIdentifier, rgpszUsageIdentifier}}.
+    // {dwType, {cUsageIdentifier, rgpszUsageIdentifier}}. The usage holds a
+    // pointer, so on x64 RequestedUsage starts at 8 and its list at 24; on
+    // x86 they are at 4 and 12.
     unsafe {
         let p = para as *const u32;
-        if *p < 16 {
+        let (kind_at, count_at, size) = if narrow { (4, 8, 16) } else { (8, 16, 32) };
+        if *p < size {
             return u;
         }
-        u.all = *p.add(1) == 0; // USAGE_MATCH_TYPE_AND
-        let count = (*p.add(2)).min(64) as usize;
-        let list = if narrow { *p.add(3) as u64 } else { *(para.add(16) as *const u64) };
+        u.all = core::ptr::read_unaligned(para.add(kind_at) as *const u32) == 0; // USAGE_MATCH_TYPE_AND
+        let count = core::ptr::read_unaligned(para.add(count_at) as *const u32).min(64) as usize;
+        let list = if narrow { *p.add(3) as u64 } else { core::ptr::read_unaligned(para.add(24) as *const u64) };
         for i in 0..count {
             if list == 0 {
                 break;
