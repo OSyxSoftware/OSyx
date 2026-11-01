@@ -650,26 +650,44 @@ impl Gui {
     }
 
     fn invalidate(&mut self, hwnd: u64, r: Option<Rect>, erase: bool) {
-        if let Some(w) = self.windows.get_mut(&hwnd) {
-            let full = Rect::new(0, 0, w.size.0, w.size.1);
-            let r = r.unwrap_or(full).intersect(&full);
-            if r.w == 0 || r.h == 0 { return; }
-            if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
-                os_std::eprintln!("winrun: invalidate hwnd={hwnd:#x} {}x{} at ({},{})", r.w, r.h, r.x, r.y);
-            }
-            w.invalid = Some(match w.invalid {
-                Some(o) => o.union(&r),
-                None => r,
-            });
-            w.erase |= erase;
+        let Some(w) = self.windows.get_mut(&hwnd) else { return };
+        let full = Rect::new(0, 0, w.size.0, w.size.1);
+        let r = r.unwrap_or(full).intersect(&full);
+        if r.w == 0 || r.h == 0 { return; }
+        // Already wholly invalid and erased: the windows painted over it are
+        // invalid too (below), so there is nothing more to mark.
+        if w.erase && w.invalid.is_some_and(|o| o.union(&r) == o) {
+            return;
         }
-        // Erasing a parent paints over its child controls, which share its
-        // surface: they paint again after it.
-        if erase {
-            let children: Vec<u64> = self.windows.iter()
-                .filter(|(_, w)| w.style & WS_CHILD != 0 && w.owner == hwnd).map(|(&h, _)| h).collect();
-            for child in children {
-                self.invalidate(child, None, true);
+        if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) {
+            os_std::eprintln!("winrun: invalidate hwnd={hwnd:#x} {}x{} at ({},{})", r.w, r.h, r.x, r.y);
+        }
+        w.invalid = Some(match w.invalid {
+            Some(o) => o.union(&r),
+            None => r,
+        });
+        w.erase |= erase;
+        let (child, owner, area) = (w.style & WS_CHILD != 0, w.owner, Rect::new(w.pos.0 + r.x, w.pos.1 + r.y, r.w, r.h));
+        // Child controls share their parent's surface, so any repaint of
+        // the parent paints over the ones in the area: they paint again
+        // after it (painting goes in handle order: parents first).
+        let children: Vec<u64> = self.windows.iter()
+            .filter(|(_, c)| c.style & WS_CHILD != 0 && c.owner == hwnd && c.visible
+                && !Rect::new(c.pos.0, c.pos.1, c.size.0, c.size.1).intersect(&r).is_empty())
+            .map(|(&h, _)| h).collect();
+        for c in children {
+            self.invalidate(c, None, true);
+        }
+        // Siblings created later are above this child (a full-window wizard
+        // page over the header controls): where they overlap it, they paint
+        // again after it.
+        if child {
+            let above: Vec<u64> = self.windows.range(hwnd + 1..)
+                .filter(|(_, s)| s.style & WS_CHILD != 0 && s.owner == owner && s.visible
+                    && !Rect::new(s.pos.0, s.pos.1, s.size.0, s.size.1).intersect(&area).is_empty())
+                .map(|(&h, _)| h).collect();
+            for s in above {
+                self.invalidate(s, None, true);
             }
         }
     }
@@ -1597,6 +1615,9 @@ fn destroy(hwnd: u64, notify: bool) -> bool {
 }
 
 extern "win64" fn DestroyWindow(hwnd: u64) -> Bool {
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: DestroyWindow({hwnd:#x})");
+    }
     if destroy(hwnd, true) {
         TRUE
     } else {
