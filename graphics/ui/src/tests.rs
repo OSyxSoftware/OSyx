@@ -305,6 +305,11 @@ fn wrap_text_respects_width() {
     let long = wrap_text(&fonts, FontKind::Ui, "/a/very/long/path/without/any/spaces/at/all", 80);
     assert!(long.len() > 1 && long.iter().all(|l| fonts.measure(FontKind::Ui, l) <= 80));
     assert_eq!(long.concat(), "/a/very/long/path/without/any/spaces/at/all");
+    // A long word after other text on the line is cut too.
+    let after = wrap_text(&fonts, FontKind::Ui, "Arguments: --a-very-long-option-without-any-spaces-at-all", 120);
+    assert!(after.len() > 2 && after.iter().all(|l| fonts.measure(FontKind::Ui, l) <= 120), "{after:?}");
+    assert_eq!(after[0], "Arguments:");
+    assert_eq!(after[1..].concat(), "--a-very-long-option-without-any-spaces-at-all");
 }
 
 #[test]
