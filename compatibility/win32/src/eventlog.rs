@@ -39,7 +39,7 @@ extern "win64" fn DeregisterEventSource(h: u64) -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn ReportEventW(h: u64, kind: u16, _category: u16, id: u32, _user: *const u8, count: u16, _size: u32, strings: *const u64, _data: *const u8) -> i32 {
+pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, _category: u16, id: u32, _user: *const u8, count: u16, _size: u32, strings: *const u64, _data: *const u8) -> i32 {
     let Some(source) = SOURCES.lock().unwrap().get(&h).cloned() else { return fail(ERROR_INVALID_HANDLE, 0) };
     let kind = match kind {
         0 => "success",

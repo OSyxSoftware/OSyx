@@ -14,10 +14,11 @@
 //! channel), events (their state moves to shared memory, see objects.rs),
 //! connected pipes (relayed, see pipes.rs) and process handles (the child
 //! opens the same process, see process_for_pid). Other objects live inside
-//! one winrun (mutexes, semaphores, files opened through the VFS...), so
-//! CreateProcess refuses to inherit them with ERROR_NOT_SUPPORTED rather
-//! than start a child that would find nothing behind a handle it was
-//! promised.
+//! one winrun (mutexes, semaphores...), so CreateProcess refuses to inherit
+//! them with ERROR_NOT_SUPPORTED rather than start a child that would find
+//! nothing behind a handle it was promised. Regular files opened as
+//! inheritable are the exception: they are not passed, and the child starts
+//! without them (it can open the same path).
 use crate::error::*;
 use crate::objects::{self, Object, SectionObj};
 use alloc::string::String;
@@ -119,7 +120,14 @@ fn item(h: u64) -> Result<Item, u32> {
 /// child needs (None when there is nothing to inherit); a background
 /// thread hands them over once and then closes the offer.
 pub fn offer(handles: &[u64]) -> Result<Option<String>, u32> {
-    let items = handles.iter().map(|&h| item(h)).collect::<Result<Vec<_>, _>>()?;
+    // Regular files marked inheritable stay with the parent: the child does
+    // not get them (it can open the same path), rather than CreateProcess
+    // failing for a handle the program rarely hands on.
+    let items = handles
+        .iter()
+        .filter(|&&h| !matches!(objects::get(h), Some(Object::File(_))))
+        .map(|&h| item(h))
+        .collect::<Result<Vec<_>, _>>()?;
     if items.is_empty() {
         return Ok(None);
     }

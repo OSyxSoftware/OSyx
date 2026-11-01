@@ -511,7 +511,7 @@ fn own_frames() -> Option<u64> {
 /// working set and the private commit are both the process's frames
 /// (OSyx neither pages out nor shares anonymous memory); page faults and
 /// pool usage are not counted.
-extern "win64" fn K32GetProcessMemoryInfo(h: u64, out: *mut u8, cb: u32) -> i32 {
+pub(crate) extern "win64" fn K32GetProcessMemoryInfo(h: u64, out: *mut u8, cb: u32) -> i32 {
     if h != objects::CURRENT_PROCESS {
         return fail(ERROR_ACCESS_DENIED, 0);
     }

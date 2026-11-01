@@ -124,6 +124,7 @@ struct Signature {
     is_cdecl: bool,
 }
 
+mod layouts;
 mod sigs;
 use sigs::SIGNATURES;
 
@@ -663,6 +664,7 @@ pub(crate) fn run_thread32(start: u32, param: u32) -> u32 {
         poke32(teb + TEB_PEB, PEB32);
     }
     install_ctx(top as u64, host + THREAD_HOST_STACK as u64, teb as u64);
+    crate::loader::setup_thread_tls32(teb);
     notify_dlls32(crate::loader::DLL_THREAD_ATTACH);
     let code = call32(start, &[param]);
     notify_dlls32(crate::loader::DLL_THREAD_DETACH);
@@ -688,6 +690,20 @@ pub(crate) fn current_teb32() -> Option<u32> {
     let c = ctx();
     // SAFETY: this thread's Ctx.
     (!c.is_null()).then(|| unsafe { (*c).teb32 } as u32)
+}
+
+/// (ESP, return address) of the 32-bit call into the current import: the
+/// gate records ESP at entry, pointing at the return address.
+pub(crate) fn caller_frame32() -> Option<(u32, u32)> {
+    let c = ctx();
+    if c.is_null() {
+        return None;
+    }
+    // SAFETY: this thread's Ctx; `esp` is the 32-bit stack of the call.
+    unsafe {
+        let esp = (*c).esp as u32;
+        (esp != 0).then(|| (esp, core::ptr::read_unaligned(esp as u64 as *const u32)))
+    }
 }
 
 /// The 32-bit address of the fiber code (`fibers::SWITCH32_CODE`) while a
@@ -830,6 +846,29 @@ fn host_override(symbol: &str) -> Option<u64> {
         "IUnknown_QueryService" => Some(crate::shlwapi::IUnknown_QueryService32 as *const () as u64),
         "GetObjectW" => Some(crate::user32::GetObjectW32 as *const () as u64),
         "GetTokenInformation" => Some(crate::tokens::GetTokenInformation32 as *const () as u64),
+        "EncodePointer" => Some(layouts::EncodePointer32 as *const () as u64),
+        "DecodePointer" => Some(layouts::DecodePointer32 as *const () as u64),
+        "InitializeSListHead" => Some(layouts::InitializeSListHead32 as *const () as u64),
+        "InterlockedPushEntrySList" => Some(layouts::InterlockedPushEntrySList32 as *const () as u64),
+        "InterlockedPopEntrySList" => Some(layouts::InterlockedPopEntrySList32 as *const () as u64),
+        "InterlockedFlushSList" => Some(layouts::InterlockedFlushSList32 as *const () as u64),
+        "QueryDepthSList" => Some(layouts::QueryDepthSList32 as *const () as u64),
+        "VirtualQuery" => Some(layouts::VirtualQuery32 as *const () as u64),
+        "GetSystemInfo" | "GetNativeSystemInfo" => Some(layouts::GetSystemInfo32 as *const () as u64),
+        "CommandLineToArgvW" => Some(layouts::CommandLineToArgvW32 as *const () as u64),
+        "ReportEventW" => Some(layouts::ReportEventW32 as *const () as u64),
+        "getaddrinfo" => Some(layouts::getaddrinfo32 as *const () as u64),
+        "freeaddrinfo" => Some(layouts::freeaddrinfo32 as *const () as u64),
+        "WSARecv" => Some(layouts::WSARecv32 as *const () as u64),
+        "WSASend" => Some(layouts::WSASend32 as *const () as u64),
+        "WSARecvFrom" => Some(layouts::WSARecvFrom32 as *const () as u64),
+        "WSASendTo" => Some(layouts::WSASendTo32 as *const () as u64),
+        "SetUnhandledExceptionFilter" => Some(layouts::SetUnhandledExceptionFilter32 as *const () as u64),
+        "RaiseException" => Some(layouts::RaiseException32 as *const () as u64),
+        "RtlUnwind" => Some(layouts::RtlUnwind32 as *const () as u64),
+        "select" => Some(layouts::select32 as *const () as u64),
+        "__WSAFDIsSet" => Some(layouts::WSAFDIsSet32 as *const () as u64),
+        "WSAStartup" => Some(layouts::WSAStartup32 as *const () as u64),
         _ => None,
     }
 }

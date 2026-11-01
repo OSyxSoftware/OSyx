@@ -102,7 +102,7 @@ pub(crate) fn compare_wide(a: *const u16, b: *const u16, ignore_case: bool) -> O
     compare(&chars(&x), &chars(&y), ignore_case)
 }
 
-extern "win64" fn CompareStringEx(
+pub(crate) extern "win64" fn CompareStringEx(
     name: *const u16,
     flags: u32,
     s1: *const u16,
@@ -153,7 +153,7 @@ fn sort_key(s: &[char], ignore_case: bool) -> Vec<u8> {
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn LCMapStringEx(
+pub(crate) extern "win64" fn LCMapStringEx(
     name: *const u16,
     flags: u32,
     src: *const u16,

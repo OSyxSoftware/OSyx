@@ -225,6 +225,39 @@ silent install (`/S`) completes. What makes that work:
 * `OSYX_WINRUN_IOTRACE=<text>` logs file reads and writes on paths containing
   `<text>` (`1`: all) with position, size and an FNV-1a hash of the bytes.
 
+The Steam client (SteamSetup.exe and the 32-bit Steam.exe bootstrapper,
+checked with SteamSetup from 2024-05) installs and starts: the installer's
+pages, the language page and the install run complete, and Steam.exe opens
+its update window and asks the CDN for the client manifest. What makes that
+work:
+* PE32 static TLS (`__declspec(thread)`): each 32-bit thread gets its blocks
+  in the TEB32 array at `fs:[0x2C]`; TLS callbacks run as 32-bit code.
+* x86 structured exception handling: RaiseException and RtlUnwind for 32-bit
+  code walk the handler chain at `fs:[0]` and call the handlers as 32-bit
+  code (`wow64/layouts.rs`), so `__try`/`__except` and C++ exceptions work;
+  the MSVC thread-naming exception is ignored as without a debugger.
+* About 200 more WoW64 signatures, ordinal imports named after the built-in
+  export at the same address (ws2_32's classic Winsock, shell32 #680), and
+  32-bit layouts where they differ: INIT_ONCE (4 bytes), SLIST_HEADER (8),
+  EncodePointer, VirtualQuery, GetSystemInfo, fd_set, WSADATA, WSABUF,
+  ADDRINFOA, CommandLineToArgvW, ReportEventW, VARIANT, WNDCLASSEX,
+  GetModuleInformation and PROCESS_MEMORY_COUNTERS.
+* New functions (`apiextra.rs`): FindResource/LoadResource/SizeofResource
+  (integer and `#123` names), ANSI registry functions, LCID locale forms,
+  ReadConsole, GetFileTime, IsProcessorFeaturePresent, GetModuleInformation,
+  GetProcessMemoryInfo, InitCommonControlsEx (registers the controls),
+  PostThreadMessage, GetDesktopWindow, GetClassInfoEx, DialogBoxParamA,
+  Get/SetDlgItemInt, WSASocketA, the Winsock extension functions (AcceptEx,
+  ConnectEx and DisconnectEx fail with WSAEOPNOTSUPP: overlapped sockets are
+  not offered) and a few crypt32 certificate functions (no chain building).
+* Security attributes whose descriptor gives everyone full access (a NULL
+  DACL, or only allow-ACEs for Everyone) are accepted; others still fail
+  with ERROR_NOT_SUPPORTED. A file opened with an inheritable handle is
+  marked so, but CreateProcess does not pass files to the child.
+
+Not verified: Steam's update download (the test environment has no route to
+the Steam CDN), the Steam client after the update and its web helper.
+
 Fibers (`fibers.rs`) work for 64-bit and 32-bit programs: ConvertThreadToFiber
 (Ex), CreateFiber(Ex), SwitchToFiber, DeleteFiber, ConvertFiberToThread and
 IsThreadAFiber. The current fiber is the TEB's `NT_TIB.FiberData`

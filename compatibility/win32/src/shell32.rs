@@ -274,7 +274,7 @@ fn split_command_line(s: &[u16]) -> Vec<Vec<u16>> {
 /// `CommandLineToArgvW`: the program's arguments in one LocalAlloc block.
 /// The pointer array comes first, because that is the pointer handed back
 /// (and the block `LocalFree` must free here); the strings follow it.
-extern "win64" fn CommandLineToArgvW(cmdline: *const u16, count: *mut i32) -> u64 {
+pub(crate) extern "win64" fn CommandLineToArgvW(cmdline: *const u16, count: *mut i32) -> u64 {
     if count.is_null() {
         return 0;
     }

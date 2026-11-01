@@ -377,12 +377,12 @@ fn cookie() -> u64 {
     }
 }
 
-extern "win64" fn EncodePointer(p: u64) -> u64 {
+pub(crate) extern "win64" fn EncodePointer(p: u64) -> u64 {
     let c = cookie();
     (p ^ c).rotate_right((c & 63) as u32)
 }
 
-extern "win64" fn DecodePointer(p: u64) -> u64 {
+pub(crate) extern "win64" fn DecodePointer(p: u64) -> u64 {
     let c = cookie();
     p.rotate_left((c & 63) as u32) ^ c
 }

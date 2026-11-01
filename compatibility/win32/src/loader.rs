@@ -208,22 +208,22 @@ fn builtin(name: &'static str, mut exports: Vec<(&'static str, u64)>, mut ordina
 }
 
 fn builtins() -> Vec<Arc<Builtin>> {
-    let k32 = crate::kernel32::exports();
+    let k32 = [crate::kernel32::exports(), crate::apiextra::kernel32_exports()].concat();
     alloc::vec![
         builtin("ntdll.dll", crate::ntdll::exports(), Vec::new()),
         builtin("kernel32.dll", k32.clone(), Vec::new()),
         builtin("kernelbase.dll", k32, Vec::new()),
         builtin("user32.dll", [crate::user32::exports(), crate::winsta::exports()].concat(), Vec::new()),
-        builtin("gdi32.dll", crate::user32::gdi_exports(), Vec::new()),
-        builtin("ws2_32.dll", crate::ws2_32::exports(), crate::ws2_32::ordinals()),
-        builtin("wsock32.dll", crate::ws2_32::exports(), crate::ws2_32::legacy_ordinals()),
+        builtin("gdi32.dll", [crate::user32::gdi_exports(), crate::apiextra::gdi32_exports()].concat(), Vec::new()),
+        builtin("ws2_32.dll", [crate::ws2_32::exports(), crate::apiextra::ws2_32_exports()].concat(), crate::ws2_32::ordinals()),
+        builtin("wsock32.dll", [crate::ws2_32::exports(), crate::apiextra::wsock32_extra().0].concat(), [crate::ws2_32::legacy_ordinals(), crate::apiextra::wsock32_extra().1].concat()),
         builtin("setupapi.dll", crate::setupapi::exports(), Vec::new()),
         builtin("iphlpapi.dll", crate::iphlpapi::exports(), Vec::new()),
         builtin("version.dll", crate::version::exports(), Vec::new()),
-        builtin("psapi.dll", crate::psapi::exports(), Vec::new()),
+        builtin("psapi.dll", [crate::psapi::exports(), crate::apiextra::psapi_exports()].concat(), Vec::new()),
         builtin(
             "advapi32.dll",
-            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports(), crate::cryptbase::exports()].concat(),
+            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports(), crate::cryptbase::exports(), crate::apiextra::advapi32_exports()].concat(),
             Vec::new()
         ),
         builtin("shlwapi.dll", crate::shlwapi::exports(), crate::shlwapi::ordinals()),
@@ -232,7 +232,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
         builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports()].concat(), crate::shell32::ordinals()),
         builtin("comdlg32.dll", crate::commdlg::exports(), Vec::new()),
-        builtin("comctl32.dll", crate::comctl32::exports(), crate::comctl32::ordinals()),
+        builtin("comctl32.dll", [crate::comctl32::exports(), crate::apiextra::comctl32_exports()].concat(), crate::comctl32::ordinals()),
         // Rich edit: the classes (RichEdit20W, RICHEDIT50W, ...) are user32's.
         builtin("riched20.dll", Vec::new(), Vec::new()),
         builtin("riched32.dll", Vec::new(), Vec::new()),
@@ -562,6 +562,10 @@ impl Host for WinHost {
         let symbol = symbol.or_else(|| {
             (ordinal == 203 && address == crate::newlibs::default_printer_address()).then_some("GetDefaultPrinterW")
         });
+        // Any other ordinal import: the name a built-in DLL exports at the
+        // same address (ws2_32's htons is #9, shell32's IsUserAnAdmin #680).
+        let named = |b: &Arc<Builtin>| b.by_name.iter().find(|(_, a)| *a == address).map(|(n, _)| *n);
+        let symbol = symbol.or_else(|| self.builtins.iter().find_map(named));
         let Some(symbol) = symbol else { return 0 };
         match self.bridge.as_ref() {
             Some(bridge) => bridge.import(symbol, address),
@@ -807,6 +811,42 @@ pub fn setup_thread_tls(teb_addr: u64) {
     });
 }
 
+/// TEB32 offset of ThreadLocalStoragePointer.
+const TEB32_TLS_POINTER: u64 = 0x2C;
+
+/// Static TLS blocks of a 32-bit thread: an array of TLS_SLOTS 4-byte
+/// pointers at TEB32 0x2C, one fresh copy of each module's template. The
+/// memory is the process's low heap, which 32-bit code can address.
+pub fn setup_thread_tls32(teb32: u32) {
+    with_loaded(|l| {
+        if l.tls.is_empty() {
+            return;
+        }
+        // SAFETY: the thread's TEB32.
+        let existing = unsafe { teb::get::<u32>(teb32 as u64, TEB32_TLS_POINTER as usize) };
+        let array = if existing != 0 {
+            existing as u64
+        } else {
+            let Some(a) = crate::kernel32::heap_alloc(4 * TLS_SLOTS, true) else { return };
+            // SAFETY: as above.
+            unsafe { teb::put(teb32 as u64, TEB32_TLS_POINTER as usize, a as u32) };
+            a
+        };
+        for (i, t) in l.tls.iter().enumerate().take(TLS_SLOTS) {
+            // SAFETY: the array of TLS_SLOTS entries made above.
+            if unsafe { teb::get::<u32>(array, 4 * i) } != 0 {
+                continue;
+            }
+            let Some(block) = crate::kernel32::heap_alloc(t.template.len() + t.zero_fill, true) else { continue };
+            // SAFETY: the fresh, zeroed block of that size.
+            unsafe {
+                core::ptr::copy_nonoverlapping(t.template.as_ptr(), block as *mut u8, t.template.len());
+                teb::put(array, 4 * i, block as u32);
+            }
+        }
+    });
+}
+
 /// `DisableThreadLibraryCalls`: the module gets no more DLL_THREAD_ATTACH or
 /// DLL_THREAD_DETACH calls to its DllMain. An unknown handle is
 /// ERROR_MOD_NOT_FOUND, as on Windows.
@@ -1015,11 +1055,30 @@ pub fn run_pe32(bytes: Vec<u8>, args: &[String], cmd: &str, env: &[String]) -> R
     // Built-in modules have no DllMain, so the computed order is recorded
     // only: there is no 32-bit DllMain delivery on this path yet.
     let order = linker.init_order(exe);
+    // Static TLS (__declspec(thread)): each module's template and index, as
+    // for 64-bit programs; every 32-bit thread gets its blocks in the
+    // TEB32 array (setup_thread_tls32). Callbacks run as 32-bit code.
+    let mut tls = Vec::new();
+    let mut tls_callbacks: Vec<(usize, Vec<u64>)> = Vec::new();
     for &i in &order {
+        let base = linker.modules[i].base;
         if let Kind::Pe { file, .. } = &linker.modules[i].kind {
             let pe = PeFile::parse_any(file.as_ref()).map_err(|e| alloc::format!("{}: {e}", linker.modules[i].name))?;
-            if pe.tls().map_err(|e| alloc::format!("{}: {e}", linker.modules[i].name))?.is_some() {
-                return Err(alloc::format!("{}: PE32 static TLS is not supported", linker.modules[i].name));
+            if let Some(t) = pe.tls().map_err(|e| alloc::format!("{}: {e}", linker.modules[i].name))? {
+                let index = tls.len() as u32;
+                // SAFETY: the TLS directory lies in the mapped image; the
+                // index slot is in a writable data section.
+                unsafe {
+                    let start = base + t.raw_data_start_rva as u64;
+                    let len = t.raw_data_end_rva.saturating_sub(t.raw_data_start_rva) as usize;
+                    let template = core::slice::from_raw_parts(start as *const u8, len).to_vec();
+                    tls.push(TlsModule { template, zero_fill: t.size_of_zero_fill as usize });
+                    if t.index_rva != 0 {
+                        core::ptr::write_unaligned((base + t.index_rva as u64) as *mut u32, index);
+                    }
+                }
+                let cbs: Vec<u64> = t.callbacks().filter_map(|c| c.ok()).map(|rva| base + rva as u64).collect();
+                tls_callbacks.push((i, cbs));
             }
         }
     }
@@ -1054,11 +1113,24 @@ pub fn run_pe32(bytes: Vec<u8>, args: &[String], cmd: &str, env: &[String]) -> R
         }
     }).collect();
     // Keep the PE32 linker for GetProcAddress and LoadLibrary.
-    let state = (0..linker.modules.len()).map(|_| ModState {
+    let mut state: Vec<ModState> = (0..linker.modules.len()).map(|_| ModState {
         ldr: 0, refs: 1, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false,
     }).collect();
-    *LOADER.lock().unwrap() = Some(Loader { linker, exe, state, tls: Vec::new() });
+    let mut process_callbacks = Vec::new();
+    for (i, cbs) in tls_callbacks {
+        process_callbacks.push((linker.modules[i].base as u32, cbs.clone()));
+        state[i].tls_callbacks = cbs;
+    }
+    *LOADER.lock().unwrap() = Some(Loader { linker, exe, state, tls });
     bridge.prepare().map_err(String::from)?;
+    if let Some(teb32) = wow64::current_teb32() {
+        setup_thread_tls32(teb32);
+    }
+    for (base, cbs) in process_callbacks {
+        for cb in cbs {
+            wow64::call32(cb as u32, &[base, DLL_PROCESS_ATTACH, 0]);
+        }
+    }
     for (base, dll_entry) in attaches {
         if wow64::call32(dll_entry, &[base, DLL_PROCESS_ATTACH, 0]) == 0 {
             wow64::clear_active();
