@@ -49,6 +49,11 @@ pub struct FrameBitmap<'a> {
     frames: u64,
     free: u64,
     total_usable: u64,
+    /// Lowest bitmap word that may have a free frame: allocation is first
+    /// fit, so freed frames are handed out again before untouched ones.
+    /// Reused memory is warm in the caches, and in a virtual machine a
+    /// frame the guest never touched costs the hypervisor a fault to back;
+    /// allocating ever higher frames paid that on nearly every page.
     hint: usize,
 }
 
@@ -90,6 +95,7 @@ impl<'a> FrameBitmap<'a> {
                 self.clear(f);
                 self.free += 1;
                 self.total_usable += 1;
+                self.hint = self.hint.min((f / 64) as usize);
             }
         }
     }
@@ -169,6 +175,7 @@ impl<'a> FrameBitmap<'a> {
         }
         self.clear(f);
         self.free += 1;
+        self.hint = self.hint.min((f / 64) as usize);
         Ok(())
     }
 
