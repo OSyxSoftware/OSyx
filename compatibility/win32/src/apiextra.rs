@@ -132,15 +132,10 @@ extern "win64" fn HeapQueryInformation(_heap: u64, class: u32, info: *mut u8, le
     TRUE
 }
 
-/// IsBadWritePtr / IsBadReadPtr: NULL and the first 64 KiB (never mapped
-/// on Windows or OSyx) are bad; OSyx cannot probe other addresses without
-/// faulting, so they are reported good, as most callers expect.
+/// IsBadWritePtr: whether any byte of the range cannot be accessed (the
+/// readability probe of IsBadReadPtr; OSyx maps writable what it maps).
 extern "win64" fn IsBadWritePtr(p: u64, len: usize) -> Bool {
-    (len != 0 && p < 0x10000) as Bool
-}
-
-extern "win64" fn IsBadReadPtr(p: u64, len: usize) -> Bool {
-    (len != 0 && p < 0x10000) as Bool
+    crate::sysext::is_bad_read(p, len) as Bool
 }
 
 /// GetModuleHandleExA: GetModuleHandleExW with the name widened (with
@@ -531,7 +526,6 @@ pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
         SetProcessAffinityMask,
         HeapQueryInformation,
         IsBadWritePtr,
-        IsBadReadPtr,
         GetModuleHandleExA,
         GetFileTime,
         FindResourceA,
