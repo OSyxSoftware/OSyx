@@ -652,9 +652,9 @@ fn unmap_image_pages(root: u64, start: u64, r: &Region, first: u64, last: u64) {
 
 fn unmap_shared_from(root: u64, shared: BTreeMap<u64, (Arc<SharedMemory>, u64)>) {
     for (addr, (shm, pages)) in shared {
-        for i in 0..pages {
-            let _ = paging::unmap_in(root, addr + i * PAGE_SIZE, true);
-        }
+        // The frames belong to the shared object: one walk and one
+        // shootdown clear the view, and the object is dropped after it.
+        paging::edit_range_in(root, addr, addr + pages * PAGE_SIZE, |_, _| paging::Leaf::Clear);
         drop(shm);
     }
 }
@@ -1454,16 +1454,34 @@ fn release_frames(space: &mut Space, start: u64, r: &Region, addr: u64, pages: u
         unmap_file_pages(space.root, addr, pages);
         return;
     }
-    for i in 0..pages {
-        let va = addr + i * PAGE_SIZE;
-        if paging::translate_in(space.root, va).is_some() {
-            if let Ok(frame) = paging::unmap_in(space.root, va, true) {
-                let _ = free_frame(frame);
-                space.frames -= 1;
-            }
+    // One walk that skips absent page tables and one TLB shootdown per
+    // chunk, instead of a walk and a shootdown (an NMI to every CPU running
+    // the process, waited for) per page: unmapping a large, sparsely used
+    // reservation held the entry lock for hundreds of milliseconds and
+    // stalled every other CPU's system calls. Frames are freed only after
+    // the chunk's shootdown, so no CPU can still reach a reused frame.
+    let end = addr + pages * PAGE_SIZE;
+    // Reserved up front: the visit holds the paging lock, and a heap that
+    // had to grow inside it would take that lock again.
+    let mut frames = Vec::with_capacity(pages.min(RELEASE_CHUNK_PAGES) as usize);
+    let mut at = addr;
+    while at < end {
+        let next = end.min(at + RELEASE_CHUNK_PAGES * PAGE_SIZE);
+        paging::edit_range_in(space.root, at, next, |_, frame| {
+            frames.push(frame);
+            paging::Leaf::Clear
+        });
+        for frame in frames.drain(..) {
+            let _ = free_frame(frame);
+            space.frames -= 1;
         }
+        at = next;
     }
 }
+
+/// Pages unmapped per shootdown by [`release_frames`] (8 MiB): bounds the
+/// frames held back until the flush.
+const RELEASE_CHUNK_PAGES: u64 = 2048;
 
 /// `discard` back end: whole pages inside one anonymous region lose their
 /// contents and frames; the next access reads zeros again.
@@ -1756,12 +1774,27 @@ pub fn reclaim(want: u64) -> u64 {
                 // every page used from now on must look used to the next scan.
                 crate::smp::flush_remote(root, false);
             }
-            for (va, _frame) in cold {
-                if done >= want {
-                    break;
-                }
+            // Unmap the batch before reading it, with one walk and one TLB
+            // shootdown for all of it (a shootdown per page interrupted
+            // every CPU running the process once per page).
+            cold.truncate(want.saturating_sub(done) as usize);
+            let mut taken = Vec::with_capacity(cold.len());
+            if let (Some(&(low, _)), Some(&(high, _))) = (cold.first(), cold.last()) {
+                let mut i = 0;
+                paging::edit_range_in(root, low, high + PAGE_SIZE, |va, frame| {
+                    while i < cold.len() && cold[i].0 < va {
+                        i += 1;
+                    }
+                    if i < cold.len() && cold[i].0 == va {
+                        taken.push((va, frame));
+                        paging::Leaf::Clear
+                    } else {
+                        paging::Leaf::Keep
+                    }
+                });
+            }
+            for (va, frame) in taken {
                 let full = SWAPPED_BYTES.load(Ordering::Relaxed) >= SWAP_MAX_BYTES;
-                let Ok(frame) = paging::unmap_in(root, va, true) else { continue };
                 // SAFETY: the frame is no longer mapped anywhere; it stays
                 // owned by this address space until freed below.
                 let page = unsafe { &*(phys_to_virt(frame) as *const [u8; PAGE_SIZE as usize]) };
