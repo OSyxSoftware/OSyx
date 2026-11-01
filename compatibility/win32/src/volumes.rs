@@ -292,6 +292,19 @@ pub(crate) fn find_first(pattern: *const u16, out: u64, case_sensitive: bool) ->
         Err(_) => return fail(ERROR_PATH_NOT_FOUND, u64::MAX),
     };
     let mut rows = Vec::new();
+    // Every directory but a drive's root lists "." and ".." first, so a
+    // search of an empty directory with "*" finds them rather than failing
+    // with ERROR_FILE_NOT_FOUND (directory enumerators rely on this).
+    if dir != "/" {
+        let parent = dir.rsplit_once('/').map_or("/", |(p, _)| if p.is_empty() { "/" } else { p });
+        for (name, at) in [(".", dir.as_str()), ("..", parent)] {
+            if if case_sensitive { matches_exact(pattern, name) } else { matches(pattern, name) } {
+                if let Ok(st) = os_sys::stat(at) {
+                    rows.push((String::from(name), st));
+                }
+            }
+        }
+    }
     for entry in rd {
         let name = entry.file_name();
         if if case_sensitive { matches_exact(pattern, name) } else { matches(pattern, name) } {
