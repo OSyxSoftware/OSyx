@@ -23,3 +23,11 @@ prism-client = { path = "../../graphics/prism-client" }
 osyx-input = { path = "../../shared/input" }
 osyx-crypto = { path = "../../shared/crypto" }
 osyx-ui = { path = "../../graphics/ui" }
+# CertGetCertificateChain: path building and signature checks against the
+# Mozilla root store, with the RustCrypto verifiers osyx-web uses.
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc"] }
+rustls-pki-types = { version = "1", default-features = false, features = ["alloc"] }
+webpki-roots = "1"
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc"] }
+# rustls-rustcrypto's key generation needs a source; winrun's is /dev/random.
+getrandom = { version = "0.2", features = ["custom"] }

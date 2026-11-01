@@ -1199,6 +1199,7 @@ dependencies = [
 name = "osyx-win32"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "os-std",
  "os-sys",
  "osyx-abi",
@@ -1210,6 +1211,10 @@ dependencies = [
  "osyx-pe-loader",
  "osyx-ui",
  "prism-client",
+ "rustls-pki-types",
+ "rustls-rustcrypto",
+ "rustls-webpki 0.103.16",
+ "webpki-roots",
 ]
 
 [[package]]
