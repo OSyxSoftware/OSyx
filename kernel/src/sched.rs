@@ -37,6 +37,10 @@ pub type Tid = u64;
 /// Timer ticks (1 ms each) a thread may run before it can be preempted.
 pub const TIME_SLICE_TICKS: u32 = 10;
 const KERNEL_STACK_SIZE: usize = 64 * 1024;
+/// Kernel worker threads (no process) get more: write-back commits ext4
+/// transactions and takes timer interrupts on top of that, which overran
+/// 64 KiB. There are only a handful of them.
+pub const WORKER_STACK_SIZE: usize = 256 * 1024;
 // TEMP stack-overflow detector: the bottom words of every kernel stack keep a
 // pattern no frame reaches; an overflow reaches them first.
 const STACK_CANARY: u64 = 0xC0DE_5A5A_1234_5678;
@@ -263,10 +267,11 @@ fn idle_without_tick() {
 
 #[allow(clippy::too_many_arguments)]
 fn new_thread(tid: Tid, name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u64, fs_base: u64) -> Box<Thread> {
-    let mut stack = alloc::vec![0u128; KERNEL_STACK_SIZE / 16];
+    let size = if pid == 0 { WORKER_STACK_SIZE } else { KERNEL_STACK_SIZE };
+    let mut stack = alloc::vec![0u128; size / 16];
     stack[0] = STACK_CANARY as u128;
     stack[1] = STACK_CANARY as u128;
-    let top = stack.as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64;
+    let top = stack.as_mut_ptr() as u64 + size as u64;
     // Frame consumed by osyx_switch: rflags, r15, r14, r13, r12, rbx, rbp, ret.
     let frame: [u64; 8] = [0x2, 0, b, a, entry as *const () as u64, 0, 0, osyx_thread_trampoline as *const () as u64];
     let rsp = top - 64;

@@ -121,14 +121,17 @@ fn with_stack<R>(f: impl FnOnce(&mut Stack) -> R) -> Option<R> {
     Some(r)
 }
 
-fn transmit(frames: Vec<(usize, Vec<u8>)>) {
+fn transmit(mut frames: Vec<(usize, Vec<u8>)>) {
     if frames.is_empty() {
         return;
     }
     let devs = DEVICES.lock().clone();
+    // Hand each device its frames without copying them.
     for (iface, dev) in devs {
-        let mine: Vec<Vec<u8>> = frames.iter().filter(|(i, _)| *i == iface).map(|(_, f)| f.clone()).collect();
+        let (mine, rest): (Vec<_>, Vec<_>) = frames.into_iter().partition(|(i, _)| *i == iface);
+        frames = rest;
         if !mine.is_empty() {
+            let mine: Vec<Vec<u8>> = mine.into_iter().map(|(_, f)| f).collect();
             dev.transmit(&mine);
         }
     }

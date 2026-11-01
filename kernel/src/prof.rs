@@ -148,9 +148,14 @@ pub fn switched_out_frames(rsp: u64, hi: u64, out: &mut [u64; DEPTH]) -> usize {
     walk(rbp, rsp, hi, out, 1)
 }
 
-/// Where user programs' own code (winrun and the other static executables)
-/// lives; only samples there get caller candidates.
-const USER_TEXT: core::ops::Range<u64> = 0x40_0000..0x80_0000;
+/// Where user programs' own code lives: the static executables at 4 MiB,
+/// winrun at 1 GiB (it leaves the low gigabyte to Windows images). Only
+/// samples there get caller candidates.
+const USER_TEXT: [core::ops::Range<u64>; 2] = [0x40_0000..0x80_0000, 0x4000_0000..0x4100_0000];
+
+fn user_text(a: u64) -> bool {
+    USER_TEXT.iter().any(|r| r.contains(&a))
+}
 
 /// Up to three words from the top of the user stack that look like return
 /// addresses into program code. A sample inside a leaf routine (the soft
@@ -166,7 +171,7 @@ fn user_callers(rsp: u64, out: &mut [u64; DEPTH]) -> usize {
     while off < 4096 && off < (rsp & 0xfff) + 8 * 24 && n < 4 {
         // SAFETY: inside one present, mapped page of the current address space.
         let w = unsafe { core::ptr::read_volatile((base + off) as *const u64) };
-        if USER_TEXT.contains(&w) && !out[1..n].contains(&w) {
+        if user_text(w) && !out[1..n].contains(&w) {
             out[n] = w;
             n += 1;
         }
@@ -185,12 +190,15 @@ pub fn sample(f: &crate::arch::idt::TrapFrame, tick: u64) {
     if f.cs & 3 == 3 {
         let mut frames = [0u64; DEPTH];
         frames[0] = f.rip;
-        let n = if USER_TEXT.contains(&f.rip) { user_callers(f.rsp, &mut frames) } else { 1 };
+        let n = if user_text(f.rip) { user_callers(f.rsp, &mut frames) } else { 1 };
         record(cpu, pid, tid, USER, 0, &frames[..n], 1);
     } else {
         let mut frames = [0u64; DEPTH];
         frames[0] = f.rip;
-        let n = walk(f.rbp, f.rsp, f.rsp.saturating_add(64 * 1024), &mut frames, 1);
+        // Bounded by the largest kernel stack (worker threads); frames must
+        // rise and every read is a fault-safe probe, so no scheduler lookup
+        // (and no lock) is needed in the interrupt.
+        let n = walk(f.rbp, f.rsp, f.rsp.saturating_add(sched::WORKER_STACK_SIZE as u64), &mut frames, 1);
         record(cpu, pid, tid, KERNEL, last_syscall(tid as u64), &frames[..n], 1);
     }
     if cpu == 0 && tick % OFF_CPU_PERIOD == 0 {

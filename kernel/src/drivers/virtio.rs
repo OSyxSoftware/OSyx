@@ -32,6 +32,7 @@ pub const F_VERSION_1: u64 = 1 << 32;
 const DESC_F_NEXT: u16 = 1;
 const DESC_F_WRITE: u16 = 2;
 const AVAIL_F_NO_INTERRUPT: u16 = 1;
+const USED_F_NO_NOTIFY: u16 = 1;
 
 /// Largest queue this driver sets up (all rings fit one 4 KiB frame).
 const MAX_QUEUE: u16 = 64;
@@ -520,9 +521,18 @@ impl AsyncQueue {
         Some(head)
     }
 
-    /// Notifies the device of new available buffers.
+    /// Notifies the device of new available buffers, unless it asked not to
+    /// be (`VIRTQ_USED_F_NO_NOTIFY`, set while it is still working through
+    /// the ring; it reads the ring again before clearing it, spec 2.7.7.2).
+    /// A doorbell write is an exit to the hypervisor, so this matters at
+    /// thousands of packets a second.
     pub fn kick(&self) {
+        // The new avail index must be visible before the flag is read.
         fence(Ordering::SeqCst);
+        // SAFETY: the used ring (flags at offset 0) lies in the queue frame.
+        if unsafe { read_volatile(self.used as *const u16) } & USED_F_NO_NOTIFY != 0 {
+            return;
+        }
         // SAFETY: `notify` is this queue's doorbell in the mapped notify area.
         unsafe { write_volatile(self.notify as *mut u16, self.index) };
     }

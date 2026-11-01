@@ -587,17 +587,32 @@ pub fn peek_file(p: &PipeObj, buf: *mut u8, n: u32, read: *mut u32, avail: *mut 
     1
 }
 
+/// ReadFile and WriteFile zero the caller's byte count before anything
+/// else, so a call that fails reports 0, not an earlier call's count.
+fn clear_done(done: *mut u32) {
+    if !done.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *done = 0 };
+    }
+}
+
 pub fn read_file(p: Arc<PipeObj>, buf: *mut u8, n: u32, done: *mut u32, ov: u64) -> i32 {
+    clear_done(done);
     if p.overlapped && ov != 0 {
         let (b, len) = (buf as u64, n as usize);
         if p.reads_queued.load(Ordering::SeqCst) == 0 {
             // SAFETY: the caller's buffer of `n` bytes.
             let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
-            // Errors take the pending path, which reports them as before.
             match p.try_read(out) {
                 Ok((k, false)) => return complete_now(&p, ov, done, 0, k as u32),
                 Ok((k, true)) => return complete_now(&p, ov, done, STATUS_BUFFER_OVERFLOW, k as u32),
-                Err(_) => {}
+                Err(WOULD_BLOCK) => {}
+                // A read that fails at once (broken pipe, no client yet,
+                // no data on a PIPE_NOWAIT pipe) fails synchronously, as on
+                // Windows: no completion packet, no event. Callers such as
+                // mio treat such a failure as final and do not expect a
+                // completion for it.
+                Err(e) => return fail(e, 0),
             }
         }
         return start(p, ov, Some(reads_queued), move |p, epoch| {
@@ -618,13 +633,17 @@ pub fn read_file(p: Arc<PipeObj>, buf: *mut u8, n: u32, done: *mut u32, ov: u64)
 }
 
 pub fn write_file(p: Arc<PipeObj>, buf: *const u8, n: u32, done: *mut u32, ov: u64) -> i32 {
+    clear_done(done);
     if p.overlapped && ov != 0 {
         let (b, len) = (buf as u64, n as usize);
         if p.writes_queued.load(Ordering::SeqCst) == 0 {
             // SAFETY: the caller's buffer of `n` bytes.
             let data = unsafe { core::slice::from_raw_parts(buf, len) };
-            if let Ok(k) = p.try_write(data) {
-                return complete_now(&p, ov, done, 0, k as u32);
+            match p.try_write(data) {
+                Ok(k) => return complete_now(&p, ov, done, 0, k as u32),
+                Err(WOULD_BLOCK) => {}
+                // As for reads: an immediate failure is synchronous.
+                Err(e) => return fail(e, 0),
             }
         }
         return start(p, ov, Some(writes_queued), move |p, epoch| {

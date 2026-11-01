@@ -196,10 +196,15 @@ impl VirtioNet {
             let len = len as usize;
             if (HDR_LEN..=PAGE_SIZE as usize).contains(&len) {
                 let n = len - HDR_LEN;
-                let mut v = alloc::vec![0u8; n];
+                // Filled by the copy below, so not zeroed first.
+                let mut v = Vec::with_capacity(n);
                 // SAFETY: the device returned the buffer; the frame is ours
-                // and `HDR_LEN + n <= PAGE_SIZE`.
-                unsafe { core::ptr::copy_nonoverlapping((phys_to_virt(frame) + HDR_LEN as u64) as *const u8, v.as_mut_ptr(), n) };
+                // and `HDR_LEN + n <= PAGE_SIZE`; the copy initialises all
+                // `n` bytes of the vector's capacity.
+                unsafe {
+                    core::ptr::copy_nonoverlapping((phys_to_virt(frame) + HDR_LEN as u64) as *const u8, v.as_mut_ptr(), n);
+                    v.set_len(n);
+                }
                 c.rx_frames += 1;
                 c.rx_bytes += n as u64;
                 out.push(v);
