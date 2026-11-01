@@ -1070,7 +1070,7 @@ impl Region {
     fn from_rect(r: Rect) -> Self {
         Self(if r.w > 0 && r.h > 0 { alloc::vec![r] } else { Vec::new() })
     }
-    fn bounds(&self) -> Rect {
+    pub(super) fn bounds(&self) -> Rect {
         self.0.iter().copied().reduce(|a, b| a.union(&b)).unwrap_or(Rect::EMPTY)
     }
     fn kind(&self) -> i32 {
