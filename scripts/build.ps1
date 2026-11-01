@@ -82,7 +82,7 @@ if (-not $NoZen -and -not $NoInit -and -not $KeepRoot) {
         ping = 'bin'; net = 'bin'; netstat = 'bin'; dns = 'bin'; nc = 'bin'; timesync = 'bin'; 'wifi-watch' = 'bin'
         winrun = 'bin'
         taskmgr = 'system/bin'; settings = 'system/bin'; setup = 'system/bin'
-        zen = 'system/bin'; open = 'bin'; 'run-app' = 'system/bin'
+        zen = 'system/bin'; open = 'bin'; 'run-app' = 'system/bin'; elevate = 'bin'
     }
     $userBins = @($installDirs.Keys)
     # Only these are also boot modules (the fallback root's /bin).

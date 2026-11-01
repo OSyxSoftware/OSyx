@@ -84,24 +84,25 @@ pub fn wrap_text(fonts: &Fonts, font: FontKind, text: &str, width: u32) -> Vec<S
             let candidate = if line.is_empty() { String::from(word) } else { alloc::format!("{line} {word}") };
             if fonts.measure(font, &candidate) <= width || line.is_empty() {
                 line = candidate;
-                // A single word wider than the line is cut by characters.
-                while fonts.measure(font, &line) > width && line.chars().count() > 1 {
-                    let mut cut = String::new();
-                    for ch in line.chars() {
-                        let mut next = cut.clone();
-                        next.push(ch);
-                        if fonts.measure(font, &next) > width && !cut.is_empty() {
-                            break;
-                        }
-                        cut = next;
-                    }
-                    let rest = String::from(&line[cut.len()..]);
-                    lines.push(cut);
-                    line = rest;
-                }
             } else {
                 lines.push(core::mem::take(&mut line));
                 line = String::from(word);
+            }
+            // A single word wider than the line is cut by characters, also
+            // when it starts a new line (else it would run past the edge).
+            while fonts.measure(font, &line) > width && line.chars().count() > 1 {
+                let mut cut = String::new();
+                for ch in line.chars() {
+                    let mut next = cut.clone();
+                    next.push(ch);
+                    if fonts.measure(font, &next) > width && !cut.is_empty() {
+                        break;
+                    }
+                    cut = next;
+                }
+                let rest = String::from(&line[cut.len()..]);
+                lines.push(cut);
+                line = rest;
             }
         }
         lines.push(line);
