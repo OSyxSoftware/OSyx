@@ -378,7 +378,9 @@ try {
             if ($app.Shot -eq 'settings') {
                 Click ($window.X + 100) ($window.Y + 120)
                 Shot 'settings-appearance'
-                Click ($window.X + 100) ($window.Y + 280)
+                Click ($window.X + 100) ($window.Y + 240)
+                Shot 'settings-sound'
+                Click ($window.X + 100) ($window.Y + 320)
                 Shot 'settings-network'
             }
             if ($app.Shot -eq 'textedit') {

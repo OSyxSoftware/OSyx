@@ -12,7 +12,7 @@ use os_std::{fs, thread};
 
 const DIR: &str = "/opt/wintests";
 
-fn run(exe: &str, args: &[&str]) -> Option<i32> {
+pub fn run(exe: &str, args: &[&str]) -> Option<i32> {
     let t = Instant::now();
     let mut c = Command::new("/bin/winrun");
     c.arg(&format!("{DIR}/{exe}"));
@@ -60,6 +60,7 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("bcrypt hashes and random, secur32, shfolder, winspool, uiautomationcore, oleacc and msvcrt libraries", || run("newlibs.exe", &[]) == Some(0));
     t.check("heaps, critical sections, thread library calls, foreground window and attribute lists", || run("stubfix.exe", &[]) == Some(0));
     t.check("winmm timers at the kernel tick resolution", || run("winmm.exe", &[]) == Some(0));
+    t.check("winmm wave devices: enumeration, recording, playback and conversion", || run("wavedev.exe", &[]) == Some(0));
     t.check("object security, ACLs, AccessCheck, restricted tokens and the event log", || run("sandbox.exe", &[]) == Some(0));
     t.check("US keyboard layout, key mapping and keyboard state", || run("keyboard.exe", &[]) == Some(0));
     t.check("shlwapi paths, environment folders, StrStrIW and IsOS", || run("shlpath.exe", &[]) == Some(0));

@@ -35,6 +35,8 @@ use os_std::sync::{Once, OnceLock, RwLock};
 use os_std::time::{Duration, Instant};
 use os_std::{env, fs, os, process, thread};
 
+#[path = "../audio_checks.rs"]
+mod audio_checks;
 #[path = "../exec_checks.rs"]
 mod exec_checks;
 #[path = "../fpu.rs"]
@@ -232,6 +234,13 @@ fn main() -> i32 {
             let mut t = Tests::default();
             net_checks::run(&mut t, port(2, 7101), port(3, 7102));
             println!("net checks: {} passed, {} failed", t.passed, t.failed);
+            return t.failed as i32;
+        }
+        // Sound cards, driven by scripts/audio-test.ps1.
+        Some("audio") => {
+            let mut t = Tests::default();
+            audio_checks::run(&mut t);
+            println!("audio checks: {} passed, {} failed", t.passed, t.failed);
             return t.failed as i32;
         }
         Some("win") => {
