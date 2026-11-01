@@ -587,7 +587,17 @@ pub fn peek_file(p: &PipeObj, buf: *mut u8, n: u32, read: *mut u32, avail: *mut 
     1
 }
 
+/// ReadFile and WriteFile zero the caller's byte count before anything
+/// else, so a call that fails reports 0, not an earlier call's count.
+fn clear_done(done: *mut u32) {
+    if !done.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *done = 0 };
+    }
+}
+
 pub fn read_file(p: Arc<PipeObj>, buf: *mut u8, n: u32, done: *mut u32, ov: u64) -> i32 {
+    clear_done(done);
     if p.overlapped && ov != 0 {
         let (b, len) = (buf as u64, n as usize);
         if p.reads_queued.load(Ordering::SeqCst) == 0 {
@@ -623,6 +633,7 @@ pub fn read_file(p: Arc<PipeObj>, buf: *mut u8, n: u32, done: *mut u32, ov: u64)
 }
 
 pub fn write_file(p: Arc<PipeObj>, buf: *const u8, n: u32, done: *mut u32, ov: u64) -> i32 {
+    clear_done(done);
     if p.overlapped && ov != 0 {
         let (b, len) = (buf as u64, n as usize);
         if p.writes_queued.load(Ordering::SeqCst) == 0 {

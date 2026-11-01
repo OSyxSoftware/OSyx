@@ -249,9 +249,15 @@ def main():
     # Thread names winrun logs for SetThreadDescription when profiling.
     thread_names = {}
     for ln in lines:
-        m = re.search(r'winrun: thread (\d+) name (.+)$', ln)
+        m = re.search(r'winrun: thread (\d+) name ?(.*)$', ln)
         if m:
-            thread_names[int(m.group(1))] = m.group(2).strip()
+            # ';' separates frames in folded stacks; an empty name clears
+            # an earlier one.
+            name = m.group(2).strip().replace(';', ',')
+            if name:
+                thread_names[int(m.group(1))] = name
+            else:
+                thread_names.pop(int(m.group(1)), None)
     begin = next((l for l in lines if 'prof: begin' in l), None)
     if not begin:
         sys.exit('no "prof: begin" line: boot with prof=<seconds> and wait for the dump')
