@@ -667,6 +667,13 @@ impl Gui {
             None => r,
         });
         w.erase |= erase;
+        self.invalidate_above(hwnd, r);
+    }
+
+    /// Marks the windows that show above `r` of `hwnd` (client
+    /// coordinates) for repainting: a repaint of `hwnd` paints over them.
+    fn invalidate_above(&mut self, hwnd: u64, r: Rect) {
+        let Some(w) = self.windows.get(&hwnd) else { return };
         let (child, owner, area) = (w.style & WS_CHILD != 0, w.owner, Rect::new(w.pos.0 + r.x, w.pos.1 + r.y, r.w, r.h));
         // Child controls share their parent's surface, so any repaint of
         // the parent paints over the ones in the area: they paint again
@@ -4374,6 +4381,12 @@ extern "win64" fn EndPaint(hwnd: u64, ps: *const u8) -> Bool {
         d.paint
     }));
     present(hwnd, paint);
+    // The windows above the painted area may belong to another thread and
+    // have painted before this one (a wizard page made by the installer's
+    // worker thread over the main dialog): they paint again now, on top.
+    if let Some(r) = paint {
+        with(|g| g.invalidate_above(hwnd, r));
+    }
     TRUE
 }
 
