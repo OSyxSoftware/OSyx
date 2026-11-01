@@ -23,6 +23,29 @@ const SERVICE: &str = "elevate";
 const REQUEST_WAIT: Duration = Duration::from_secs(10);
 /// Requests waiting for their turn at the prompt; more are refused.
 const MAX_QUEUE: usize = 4;
+/// Characters of the argument list the prompt shows before cutting it.
+const PROMPT_ARGS: usize = 300;
+
+/// An argument as the prompt shows it: bare, or in double quotes with `"`
+/// and `\` escaped when it is empty or holds whitespace or quotes.
+fn quote(arg: &str) -> String {
+    if !arg.is_empty() && !arg.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'' || c == '\\') {
+        return String::from(arg);
+    }
+    let mut s = String::from("\"");
+    for c in arg.chars() {
+        match c {
+            '"' | '\\' => {
+                s.push('\\');
+                s.push(c);
+            }
+            '\n' => s.push_str("\\n"),
+            c => s.push(c),
+        }
+    }
+    s.push('"');
+    s
+}
 
 /// One validated request.
 pub struct Request {
@@ -34,9 +57,23 @@ pub struct Request {
 }
 
 impl Request {
-    /// The question put to the user.
+    /// The question put to the user: the program, its arguments (quoted
+    /// where they hold spaces or quotes, so their boundaries show) and the
+    /// directory it would run in, since all of them decide what runs as root.
     pub fn prompt(&self) -> String {
-        format!("Do you want to allow this app to make changes to your computer?\n{}", self.exe)
+        let mut text = format!("Do you want to allow this app to make changes to your computer?\n{}", self.exe);
+        if !self.args.is_empty() {
+            let shown: Vec<String> = self.args.iter().map(|a| quote(a)).collect();
+            let mut line = shown.join(" ");
+            let total = line.chars().count();
+            if total > PROMPT_ARGS {
+                line = line.chars().take(PROMPT_ARGS).collect();
+                line.push_str(&format!(" ... ({} more characters)", total - PROMPT_ARGS));
+            }
+            text.push_str(&format!("\nArguments: {line}"));
+        }
+        text.push_str(&format!("\nIn: {}", self.cwd));
+        text
     }
 
     /// Whether the program is a Windows one (run under winrun).
