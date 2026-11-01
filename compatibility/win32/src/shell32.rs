@@ -1164,6 +1164,71 @@ extern "win64" fn Shell_NotifyIconW(_message: u32, _data: u64) -> i32 {
     crate::kernel32::fail(crate::error::ERROR_NOT_SUPPORTED, 0)
 }
 
+/// ShellExecuteA: the strings in UTF-16, as ShellExecuteW.
+extern "win64" fn ShellExecuteA(hwnd: u64, op: *const u8, file: *const u8, params: *const u8, dir: *const u8, show: i32) -> u64 {
+    // SAFETY: NULL or NUL-terminated strings.
+    let (o, f, p, d) = unsafe { (path::ansi_to_wide(op), path::ansi_to_wide(file), path::ansi_to_wide(params), path::ansi_to_wide(dir)) };
+    let ptr = |v: &Option<Vec<u16>>| v.as_ref().map_or(core::ptr::null(), |w| w.as_ptr());
+    ShellExecuteW(hwnd, ptr(&o), ptr(&f), ptr(&p), ptr(&d), show)
+}
+
+/// ShellExecuteExA: SHELLEXECUTEINFOA has the layout of the Unicode form
+/// (60 bytes on x86, 112 on x64) with ANSI strings: lpVerb, lpFile,
+/// lpParameters and lpDirectory follow cbSize, fMask and hwnd.
+extern "win64" fn ShellExecuteExA(info: *mut u8) -> i32 {
+    let narrow = crate::wow64::is_active();
+    let (size, strings, hinst_at, hprocess_at, width) = if narrow { (60u32, 12usize, 32usize, 56usize, 4usize) } else { (SHELLEXECUTEINFO_SIZE, 16, SHELLEXECUTEINFO_HINSTAPP, SHELLEXECUTEINFO_HPROCESS, 8) };
+    if info.is_null() {
+        crate::teb::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // SAFETY: cbSize and fMask begin the caller's structure.
+    let (cb, mask) = unsafe { (core::ptr::read_unaligned(info as *const u32), core::ptr::read_unaligned((info as *const u32).add(1))) };
+    if cb < size {
+        crate::teb::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // SAFETY: the validated structure; strings are NULL or NUL-terminated.
+    let (verb, file, params, dir) = unsafe {
+        let field = |i: usize| {
+            let at = info.add(strings + width * i);
+            (if narrow { core::ptr::read_unaligned(at as *const u32) as u64 } else { core::ptr::read_unaligned(at as *const u64) }) as *const u8
+        };
+        (path::ansi_to_string(field(0)), path::ansi_to_string(field(1)), path::ansi_to_string(field(2)), path::ansi_to_string(field(3)))
+    };
+    // SAFETY: inside the validated structure (pointer-sized fields).
+    let put = |at: usize, v: u64| unsafe {
+        if narrow {
+            core::ptr::write_unaligned(info.add(at) as *mut u32, v as u32)
+        } else {
+            core::ptr::write_unaligned(info.add(at) as *mut u64, v)
+        }
+    };
+    put(hprocess_at, 0);
+    let Some(file) = file else {
+        crate::teb::set_last_error(ERROR_NO_ASSOCIATION);
+        put(hinst_at, SE_ERR_FNF);
+        return 0;
+    };
+    let verb = verb.unwrap_or_default().to_ascii_lowercase();
+    match shell_launch(&verb, &file, params.as_deref(), dir.as_deref()) {
+        Ok(handle) => {
+            put(hinst_at, 42);
+            if mask & SEE_MASK_NOCLOSEPROCESS != 0 {
+                put(hprocess_at, handle);
+            } else {
+                crate::objects::close(handle);
+            }
+            1
+        }
+        Err((error, win32)) => {
+            crate::teb::set_last_error(win32);
+            put(hinst_at, error);
+            0
+        }
+    }
+}
+
 /// DragFinish: frees the HDROP (a global memory block) of a WM_DROPFILES.
 extern "win64" fn DragFinish(drop: u64) {
     if drop != 0 {
@@ -1243,6 +1308,8 @@ extern "win64" fn SHGetDesktopFolder(out: *mut u64) -> u32 {
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        ShellExecuteA,
+        ShellExecuteExA,
         DragFinish,
         SHGetDesktopFolder,
         SHCloneSpecialIDList,

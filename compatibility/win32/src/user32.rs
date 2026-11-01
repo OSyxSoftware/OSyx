@@ -2157,6 +2157,12 @@ extern "win64" fn SetWindowLongA(hwnd: u64, idx: i32, v: i32) -> i32 {
     SetWindowLongPtrA(hwnd, idx, v as i64) as i32
 }
 
+/// An icon from the data of an RT_ICON resource (ExtractIconEx), drawn at
+/// `size` pixels; 0 when the data is no icon.
+pub(crate) fn icon_from_resource(data: &[u8], size: u32) -> u64 {
+    client::icon_from_resource(data, size)
+}
+
 /// DragAcceptFiles (shell32): sets or clears WS_EX_ACCEPTFILES.
 pub(crate) extern "win64" fn DragAcceptFiles(hwnd: u64, accept: Bool) {
     const WS_EX_ACCEPTFILES: u32 = 0x10;
@@ -6549,19 +6555,22 @@ extern "win64" fn InjectSyntheticPointerInput(device: u64, pointer_info: *const 
     TRUE
 }
 
+/// The colour key and alpha SetLayeredWindowAttributes recorded, or an
+/// opaque LWA_ALPHA window when it was never called.
 extern "win64" fn GetLayeredWindowAttributes(hwnd: u64, cr_key: *mut u32, alpha: *mut u8, flags: *mut u32) -> Bool {
-    if !is_window(hwnd) {
+    let Some(stored) = with(|g| g.windows.get(&hwnd).map(|w| w.props.get("#layered").copied())) else {
         return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE);
-    }
+    };
+    let v = stored.unwrap_or(255u64 << 32 | 2 << 40);
     unsafe {
         if !cr_key.is_null() {
-            *cr_key = 0;
+            *cr_key = v as u32;
         }
         if !alpha.is_null() {
-            *alpha = 255;
+            *alpha = (v >> 32) as u8;
         }
         if !flags.is_null() {
-            *flags = 2; // LWA_ALPHA
+            *flags = (v >> 40) as u32;
         }
     }
     TRUE

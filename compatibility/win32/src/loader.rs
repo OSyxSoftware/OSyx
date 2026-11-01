@@ -208,7 +208,14 @@ fn builtin(name: &'static str, mut exports: Vec<(&'static str, u64)>, mut ordina
 }
 
 fn builtins() -> Vec<Arc<Builtin>> {
-    let k32 = [crate::kernel32::exports(), crate::apiextra::kernel32_exports(), crate::clientapi::kernel32_exports(), crate::ktm::kernel32_exports()].concat();
+    let k32 = [
+        crate::kernel32::exports(),
+        crate::apiextra::kernel32_exports(),
+        crate::clientapi::kernel32_exports(),
+        crate::ktm::kernel32_exports(),
+        crate::client64::kernel32_exports(),
+    ]
+    .concat();
     alloc::vec![
         builtin("ntdll.dll", crate::ntdll::exports(), Vec::new()),
         builtin("kernel32.dll", k32.clone(), Vec::new()),
@@ -218,7 +225,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("ws2_32.dll", [crate::ws2_32::exports(), crate::apiextra::ws2_32_exports()].concat(), crate::ws2_32::ordinals()),
         builtin("wsock32.dll", [crate::ws2_32::exports(), crate::apiextra::wsock32_extra().0].concat(), [crate::ws2_32::legacy_ordinals(), crate::apiextra::wsock32_extra().1].concat()),
         builtin("setupapi.dll", crate::setupapi::exports(), Vec::new()),
-        builtin("iphlpapi.dll", crate::iphlpapi::exports(), Vec::new()),
+        builtin("iphlpapi.dll", [crate::iphlpapi::exports(), crate::client64::iphlpapi_exports()].concat(), Vec::new()),
+        builtin("hid.dll", crate::client64::hid_exports(), Vec::new()),
         builtin("version.dll", [crate::version::exports(), crate::clientapi::version_exports()].concat(), Vec::new()),
         builtin("psapi.dll", [crate::psapi::exports(), crate::apiextra::psapi_exports(), crate::clientapi::psapi_exports()].concat(), Vec::new()),
         builtin(
@@ -228,16 +236,16 @@ fn builtins() -> Vec<Arc<Builtin>> {
         ),
         builtin("shlwapi.dll", [crate::shlwapi::exports(), crate::clientapi::shlwapi_exports()].concat(), crate::shlwapi::ordinals()),
         // ole32's COM entry points live in combase on Windows.
-        builtin("combase.dll", [crate::shlwapi::combase_exports(), crate::ole32::exports()].concat(), Vec::new()),
+        builtin("combase.dll", [crate::shlwapi::combase_exports(), crate::ole32::exports(), crate::client64::ole32_exports()].concat(), Vec::new()),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
-        builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports()].concat(), crate::shell32::ordinals()),
+        builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports(), crate::client64::shell32_exports()].concat(), crate::shell32::ordinals()),
         builtin("comdlg32.dll", crate::commdlg::exports(), Vec::new()),
         builtin("comctl32.dll", [crate::comctl32::exports(), crate::apiextra::comctl32_exports()].concat(), crate::comctl32::ordinals()),
         // Rich edit: the classes (RichEdit20W, RICHEDIT50W, ...) are user32's.
         builtin("riched20.dll", Vec::new(), Vec::new()),
         builtin("riched32.dll", Vec::new(), Vec::new()),
         builtin("msftedit.dll", Vec::new(), Vec::new()),
-        builtin("ole32.dll", crate::ole32::exports(), Vec::new()),
+        builtin("ole32.dll", [crate::ole32::exports(), crate::client64::ole32_exports()].concat(), Vec::new()),
         builtin("winmm.dll", crate::winmm::exports(), Vec::new()),
         builtin("oleaut32.dll", crate::oleaut32::exports(), crate::oleaut32::ordinals()),
         builtin("userenv.dll", crate::userenv::exports(), Vec::new()),

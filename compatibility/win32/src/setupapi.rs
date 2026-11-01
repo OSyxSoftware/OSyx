@@ -177,6 +177,12 @@ extern "win64" fn SetupDiGetDeviceInterfaceDetailW(
     fail(ERROR_NO_MORE_ITEMS, 0)
 }
 
+/// SetupDiGetDeviceInterfaceDetailA: as the Unicode form (no interface is
+/// ever enumerated, see SetupDiEnumDeviceInterfaces).
+extern "win64" fn SetupDiGetDeviceInterfaceDetailA(set: u64, iface_data: u64, detail: u64, detail_size: u32, required: *mut u32, dev_data: u64) -> i32 {
+    SetupDiGetDeviceInterfaceDetailW(set, iface_data, detail, detail_size, required, dev_data)
+}
+
 #[allow(clippy::too_many_arguments)]
 extern "win64" fn SetupDiGetDevicePropertyW(
     set: u64,
@@ -397,6 +403,7 @@ extern "win64" fn CM_Get_DevNode_Status(status: *mut u32, problem: *mut u32, dev
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         SetupDiGetClassDevsA,
+        SetupDiGetDeviceInterfaceDetailA,
         SetupDiGetDeviceRegistryPropertyA,
         SetupDiGetDeviceInstanceIdW,
         SetupDiGetDeviceInstanceIdA,

@@ -214,6 +214,10 @@ extern "win64" fn CreateIconFromResourceEx(bits: *const u8, size: u32, icon: Boo
     })
 }
 
+pub(super) fn icon_from_resource(data: &[u8], size: u32) -> u64 {
+    CreateIconFromResourceEx(data.as_ptr(), data.len() as u32, TRUE, 0x0003_0000, size as i32, size as i32, 0)
+}
+
 extern "win64" fn CreateIconFromResource(bits: *const u8, size: u32, icon: Bool, version: u32) -> u64 {
     CreateIconFromResourceEx(bits, size, icon, version, 0, 0, 0)
 }
@@ -453,26 +457,6 @@ extern "win64" fn SetLayeredWindowAttributes(wnd: u64, key: u32, alpha: u8, flag
     })
 }
 
-extern "win64" fn GetLayeredWindowAttributes(wnd: u64, key: *mut u32, alpha: *mut u8, flags: *mut u32) -> Bool {
-    with(|g| {
-        let Some(w) = g.windows.get(&wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
-        let Some(&v) = w.props.get("#layered") else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
-        // SAFETY: NULL or the caller's out values.
-        unsafe {
-            if !key.is_null() {
-                *key = v as u32;
-            }
-            if !alpha.is_null() {
-                *alpha = (v >> 32) as u8;
-            }
-            if !flags.is_null() {
-                *flags = (v >> 40) as u32;
-            }
-        }
-        TRUE
-    })
-}
-
 /// GetShellWindow: the shell's desktop window belongs to a shell process
 /// (Explorer); OSyx's desktop is not a Windows program, so there is none.
 extern "win64" fn GetShellWindow() -> u64 {
@@ -605,8 +589,176 @@ extern "win64" fn DialogBoxIndirectParamW(module: u64, template: *const u8, owne
     }
 }
 
+/// DialogBoxIndirectParamA: the template's strings are UTF-16 in both
+/// forms, and window messages carry the same values here.
+extern "win64" fn DialogBoxIndirectParamA(module: u64, template: *const u8, owner: u64, proc_: u64, param: u64) -> i64 {
+    DialogBoxIndirectParamW(module, template, owner, proc_, param)
+}
+
+/// The bytes of a DLGTEMPLATE(EX) in memory: its size is not passed, so
+/// up to the end of the memory region holding it.
+fn template_bytes(template: *const u8) -> &'static [u8] {
+    let mut info = [0u8; 48];
+    let len = if crate::kernel32::VirtualQuery(template as u64, info.as_mut_ptr(), 48) == 0 {
+        4096
+    } else {
+        let base = u64::from_le_bytes(info[0..8].try_into().unwrap());
+        let size = u64::from_le_bytes(info[24..32].try_into().unwrap());
+        (base + size - template as u64).min(1 << 20) as usize
+    };
+    // SAFETY: `len` readable bytes of the caller's template.
+    unsafe { core::slice::from_raw_parts(template, len) }
+}
+
+/// CreateDialogIndirectParamW/A: a modeless dialog from a template in memory.
+extern "win64" fn CreateDialogIndirectParamW(module: u64, template: *const u8, owner: u64, proc_: u64, param: u64) -> u64 {
+    if template.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    create_dialog_from(template_bytes(template), module, owner, proc_, param, false).unwrap_or_else(|e| fail(e, 0))
+}
+
+extern "win64" fn CreateDialogIndirectParamA(module: u64, template: *const u8, owner: u64, proc_: u64, param: u64) -> u64 {
+    CreateDialogIndirectParamW(module, template, owner, proc_, param)
+}
+
+/// GetClassLongPtrA: the class values are the same for both character sets.
+extern "win64" fn GetClassLongPtrA(wnd: u64, index: i32) -> u64 {
+    GetClassLongPtrW(wnd, index)
+}
+
+/// DisplayConfigSetDeviceInfo: the display's settings (target persistence,
+/// SDR white level, advanced colour, scaling) are PRISM's and cannot be
+/// changed by a program: a well-formed request for the display is
+/// ERROR_NOT_SUPPORTED, as Windows answers for a setting a target lacks;
+/// anything else ERROR_INVALID_PARAMETER.
+extern "win64" fn DisplayConfigSetDeviceInfo(packet: *const u8) -> u32 {
+    const ERROR_NOT_SUPPORTED_P: u32 = 50;
+    if packet.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: a DISPLAYCONFIG_DEVICE_INFO_HEADER: type, size, LUID, id.
+    let (kind, size) = unsafe { (core::ptr::read_unaligned(packet as *const i32), core::ptr::read_unaligned(packet.add(4) as *const u32)) };
+    // SET_TARGET_PERSISTENCE (5), SET_ADVANCED_COLOR_STATE (10),
+    // SET_SDR_WHITE_LEVEL (0xFFFFFFEE), SET_MONITOR_SPECIALIZATION (12),
+    // SET_HDR_STATE (16), SET_WCG_STATE (17).
+    if !matches!(kind, 5 | 10 | 12 | 16 | 17 | -18) || size < 20 {
+        return ERROR_INVALID_PARAMETER;
+    }
+    ERROR_NOT_SUPPORTED_P
+}
+
+/// Whether the process is system DPI aware: declared by SetProcessDPIAware
+/// or by the program's manifest (<dpiAware> true or per-monitor,
+/// <dpiAwareness>). PRISM draws every window at 96 DPI, so this changes
+/// no coordinates.
+static DPI_AWARE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+fn manifest_dpi_aware() -> bool {
+    let Ok(m) = crate::loader::numeric_resource(0, 24, 1) else { return false };
+    let text = String::from_utf8_lossy(&m).to_ascii_lowercase();
+    let value = |tag: &str| text.split(tag).nth(1).and_then(|r| r.split('<').next()).map(|v| v.trim_start_matches('>').trim().to_ascii_lowercase());
+    value("<dpiaware").is_some_and(|v| v.contains("true") || v.contains("per monitor"))
+        || value("<dpiawareness").is_some_and(|v| v.contains("permonitor") || v.contains("system"))
+}
+
+extern "win64" fn IsProcessDPIAware() -> Bool {
+    match DPI_AWARE.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => {
+            let aware = manifest_dpi_aware();
+            DPI_AWARE.store(if aware { 2 } else { 1 }, core::sync::atomic::Ordering::Relaxed);
+            aware as Bool
+        }
+        v => (v == 2) as Bool,
+    }
+}
+
+extern "win64" fn SetProcessDPIAware() -> Bool {
+    DPI_AWARE.store(2, core::sync::atomic::Ordering::Relaxed);
+    TRUE
+}
+
+/// Touch injection: InitializeTouchInjection makes the injection device
+/// (up to 256 contacts, TOUCH_FEEDBACK_DEFAULT/INDIRECT/NONE).
+static TOUCH_CONTACTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+extern "win64" fn InitializeTouchInjection(max: u32, feedback: u32) -> Bool {
+    if max == 0 || max > 256 || !matches!(feedback, 1..=3) {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    TOUCH_CONTACTS.store(max, core::sync::atomic::Ordering::Relaxed);
+    TRUE
+}
+
+/// InjectTouchInput: windows of this runtime get no WM_POINTER messages;
+/// as Windows does for programs that do not handle touch, the primary
+/// contact is promoted to the mouse: a press, motion while in contact and
+/// a release, at its pixel location, for the window there (as
+/// InjectSyntheticPointerInput delivers them). POINTER_TOUCH_INFO is 144
+/// bytes on x64 (136 on x86); the flags are at 12, the location at 32 (24).
+extern "win64" fn InjectTouchInput(count: u32, contacts: *const u8) -> Bool {
+    const POINTER_FLAG_DOWN: u32 = 0x10000;
+    const POINTER_FLAG_UPDATE: u32 = 0x20000;
+    const POINTER_FLAG_UP: u32 = 0x40000;
+    const POINTER_FLAG_INCONTACT: u32 = 0x4;
+    let max = TOUCH_CONTACTS.load(core::sync::atomic::Ordering::Relaxed);
+    if max == 0 {
+        return fail(21, FALSE); // ERROR_NOT_READY: no InitializeTouchInjection
+    }
+    if count == 0 || count > max || contacts.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let narrow = crate::wow64::is_active();
+    let pt = if narrow { 24 } else { 32 };
+    // SAFETY: the caller's array of `count` POINTER_TOUCH_INFO; the first
+    // is the primary contact.
+    let (flags, sx, sy) = unsafe {
+        let p = contacts as u64;
+        (teb::get::<u32>(p, 12), teb::get::<i32>(p, pt), teb::get::<i32>(p, pt + 4))
+    };
+    let (kind, pressed) = if flags & POINTER_FLAG_DOWN != 0 {
+        (proto::pointer::BUTTON, true)
+    } else if flags & POINTER_FLAG_UP != 0 {
+        (proto::pointer::BUTTON, false)
+    } else if flags & (POINTER_FLAG_UPDATE | POINTER_FLAG_INCONTACT) != 0 {
+        (proto::pointer::MOTION, false)
+    } else {
+        return TRUE;
+    };
+    let hit = with(|g| {
+        let inside = |w: &Win| sx >= w.pos.0 && sx < w.pos.0 + w.size.0 as i32 && sy >= w.pos.1 && sy < w.pos.1 + w.size.1 as i32;
+        g.windows.iter().rev().find(|(_, w)| w.style & WS_CHILD == 0 && w.visible && inside(w)).map(|(_, w)| (w.prism_id(), w.pos))
+    });
+    let Some((prism, pos)) = hit else { return TRUE };
+    let event = Event::Pointer {
+        window: prism,
+        kind,
+        x: sx - pos.0,
+        y: sy - pos.1,
+        screen_x: sx,
+        screen_y: sy,
+        button: if kind == proto::pointer::BUTTON { osyx_input::button::LEFT } else { 0 },
+        pressed,
+        wheel_v: 0,
+        wheel_h: 0,
+        buttons: 0,
+        modifiers: 0,
+    };
+    with(|g| g.on_event(event));
+    TRUE
+}
+
 pub(super) fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        DialogBoxIndirectParamA,
+        CreateDialogIndirectParamW,
+        CreateDialogIndirectParamA,
+        GetClassLongPtrA,
+        DisplayConfigSetDeviceInfo,
+        IsProcessDPIAware,
+        SetProcessDPIAware,
+        InitializeTouchInjection,
+        InjectTouchInput,
         GetMenuItemInfoW,
         InsertMenuW,
         DeleteMenu,
@@ -623,7 +775,6 @@ pub(super) fn exports() -> Vec<(&'static str, u64)> {
         GetClassLongA,
         SetActiveWindow,
         SetLayeredWindowAttributes,
-        GetLayeredWindowAttributes,
         GetShellWindow,
         AttachThreadInput,
         EnumDesktopWindows,

@@ -26,6 +26,7 @@ macro_rules! export_table {
 
 mod apiextra;
 mod clientapi;
+mod client64;
 mod crypt32;
 mod commdlg;
 mod comctl32;

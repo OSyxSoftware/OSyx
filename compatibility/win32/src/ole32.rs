@@ -41,7 +41,7 @@ pub extern "win64" fn CoTaskMemFree(p: u64) {
     kernel32::heap_free(p);
 }
 
-extern "win64" fn CoTaskMemRealloc(p: u64, size: usize) -> u64 {
+pub(crate) extern "win64" fn CoTaskMemRealloc(p: u64, size: usize) -> u64 {
     if p == 0 {
         return CoTaskMemAlloc(size);
     }
