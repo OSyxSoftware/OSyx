@@ -9,11 +9,24 @@
 //! An allocation of `layout` occupies exactly [`Heap::block_size`]`(layout)`
 //! bytes, which `dealloc` recomputes from the same layout; no per-allocation
 //! header is needed.
+//!
+//! In front of the list sit bins: freed blocks of up to [`BIN_LIMIT`] bytes
+//! wait in a last-in, first-out list per exact size and are handed out again
+//! without walking the address-ordered list, which grows with fragmentation
+//! (every allocation and free used to walk it, in the kernel and in every
+//! program). Binned blocks are not coalesced; the bins are bounded and are
+//! emptied into the list when an allocation finds no room ([`Heap::trim`]).
 
 use core::alloc::Layout;
 use core::ptr::{null_mut, NonNull};
 
 const UNIT: usize = 16;
+/// Largest block size kept in a bin (Ethernet frames and pages fit).
+const BIN_LIMIT: usize = 4096;
+const BINS: usize = BIN_LIMIT / UNIT;
+/// Bytes one bin may hold, and all bins together.
+const BIN_BYTES: usize = 64 * 1024;
+const BINNED_MAX: usize = 1024 * 1024;
 
 #[repr(C)]
 struct FreeBlock {
@@ -32,6 +45,10 @@ pub struct Heap {
     head: *mut FreeBlock,
     capacity: usize,
     used: usize,
+    /// Freed blocks by exact size (`size / UNIT - 1`), most recent first.
+    bins: [*mut FreeBlock; BINS],
+    bin_bytes: [u32; BINS],
+    binned: usize,
 }
 
 // SAFETY: the heap only manages raw memory handed to it; callers serialise
@@ -46,7 +63,7 @@ impl Default for Heap {
 
 impl Heap {
     pub const fn new() -> Self {
-        Heap { head: null_mut(), capacity: 0, used: 0 }
+        Heap { head: null_mut(), capacity: 0, used: 0, bins: [null_mut(); BINS], bin_bytes: [0; BINS], binned: 0 }
     }
 
     pub fn block_size(layout: Layout) -> usize {
@@ -102,7 +119,52 @@ impl Heap {
 
     pub fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
         let size = Self::block_size(layout);
-        let align = layout.align().max(UNIT);
+        // Every binned block is UNIT aligned; larger alignments take the list.
+        if size <= BIN_LIMIT && layout.align() <= UNIT {
+            let i = size / UNIT - 1;
+            let b = self.bins[i];
+            if !b.is_null() {
+                // SAFETY: binned blocks are free memory of this heap.
+                self.bins[i] = unsafe { (*b).next };
+                self.bin_bytes[i] -= size as u32;
+                self.binned -= size;
+                self.used += size;
+                return NonNull::new(b as *mut u8);
+            }
+        }
+        if let Some(p) = self.alloc_listed(size, layout.align()) {
+            return Some(p);
+        }
+        // The room may be sitting in the bins.
+        if self.binned == 0 {
+            return None;
+        }
+        self.trim();
+        self.alloc_listed(size, layout.align())
+    }
+
+    /// Returns every binned block to the address-ordered list, where it
+    /// merges with its free neighbours.
+    pub fn trim(&mut self) {
+        for i in 0..BINS {
+            let mut b = self.bins[i];
+            while !b.is_null() {
+                // SAFETY: binned blocks are free memory of this heap.
+                unsafe {
+                    let next = (*b).next;
+                    self.insert(b as usize, (i + 1) * UNIT);
+                    b = next;
+                }
+            }
+            self.bins[i] = null_mut();
+            self.bin_bytes[i] = 0;
+        }
+        self.binned = 0;
+    }
+
+    /// First fit from the address-ordered list.
+    fn alloc_listed(&mut self, size: usize, align: usize) -> Option<NonNull<u8>> {
+        let align = align.max(UNIT);
         let mut prev: *mut FreeBlock = null_mut();
         let mut cur = self.head;
         // SAFETY: the list only contains blocks inserted by `add_region` /
@@ -145,12 +207,39 @@ impl Heap {
     /// must not be used afterwards.
     pub unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
         let size = Self::block_size(layout);
+        let block = ptr.as_ptr() as *mut FreeBlock;
+        // The list's overlap check does not see binned blocks; this still
+        // catches the commonest double free (twice in a row).
+        if size <= BIN_LIMIT && block == self.bins[size / UNIT - 1] {
+            panic!("heap: double free addr={block:p} size={size:#x}");
+        }
         self.used -= size;
+        if size <= BIN_LIMIT {
+            let i = size / UNIT - 1;
+            if self.bin_bytes[i] as usize + size <= BIN_BYTES && self.binned + size <= BINNED_MAX {
+                block.write(FreeBlock { size, next: self.bins[i] });
+                self.bins[i] = block;
+                self.bin_bytes[i] += size as u32;
+                self.binned += size;
+                return;
+            }
+        }
         self.insert(ptr.as_ptr() as usize, size);
     }
 
     pub fn stats(&self) -> HeapStats {
-        let mut n = 0;
+        let mut n = self.bins.iter().map(|&b| {
+            let mut k = 0;
+            let mut cur = b;
+            // SAFETY: walking our own bins.
+            unsafe {
+                while !cur.is_null() {
+                    k += 1;
+                    cur = (*cur).next;
+                }
+            }
+            k
+        }).sum::<usize>();
         let mut cur = self.head;
         // SAFETY: walking our own list.
         unsafe {
@@ -164,7 +253,7 @@ impl Heap {
 
     /// Largest free block, for diagnostics and growth decisions.
     pub fn largest_free(&self) -> usize {
-        let mut best = 0;
+        let mut best = self.bins.iter().rposition(|b| !b.is_null()).map_or(0, |i| (i + 1) * UNIT);
         let mut cur = self.head;
         // SAFETY: walking our own list.
         unsafe {
@@ -243,6 +332,8 @@ mod tests {
         for (p, l) in live.drain(..) {
             unsafe { h.dealloc(p, l) };
         }
+        assert_eq!(h.stats().used, 0);
+        h.trim();
         let s = h.stats();
         assert_eq!(s.used, 0);
         assert_eq!(s.free_blocks, 1, "free list must coalesce back to one block");
@@ -278,6 +369,55 @@ mod tests {
         unsafe { h.add_region(s, n) };
         assert!(h.alloc(big).is_some());
         assert_eq!(h.stats().capacity, 4096 + 8192);
+    }
+
+    #[test]
+    fn freed_small_blocks_are_reused_first() {
+        let mut a = Arena::new(64 * 1024);
+        let mut h = heap(&mut a);
+        let l = Layout::from_size_align(1514, 8).unwrap();
+        let p = h.alloc(l).unwrap();
+        let q = h.alloc(l).unwrap();
+        unsafe { h.dealloc(p, l) };
+        // Same size class: the block just freed comes back.
+        assert_eq!(h.alloc(l).unwrap(), p);
+        // A larger alignment does not take a binned block.
+        unsafe { h.dealloc(q, l) };
+        let big = Layout::from_size_align(1514, 4096).unwrap();
+        let r = h.alloc(big).unwrap();
+        assert_eq!(r.as_ptr() as usize % 4096, 0);
+        assert_ne!(r, q);
+        assert_eq!(h.stats().used, 2 * Heap::block_size(l));
+    }
+
+    #[test]
+    fn binned_memory_serves_a_large_request() {
+        let mut a = Arena::new(16 * 1024);
+        let mut h = heap(&mut a);
+        let small = Layout::from_size_align(512, 16).unwrap();
+        let mut live = Vec::new();
+        while let Some(p) = h.alloc(small) {
+            live.push(p);
+        }
+        for p in live.drain(..) {
+            unsafe { h.dealloc(p, small) };
+        }
+        // Everything sits in a bin; a request no bin fits empties them.
+        let big = Layout::from_size_align(12 * 1024, 16).unwrap();
+        assert!(h.alloc(big).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "double free")]
+    fn double_free_into_a_bin_panics() {
+        let mut a = Arena::new(4096);
+        let mut h = heap(&mut a);
+        let l = Layout::from_size_align(64, 16).unwrap();
+        let p = h.alloc(l).unwrap();
+        unsafe {
+            h.dealloc(p, l);
+            h.dealloc(p, l);
+        }
     }
 
     #[test]
