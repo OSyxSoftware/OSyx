@@ -244,6 +244,13 @@ mod imp {
     /// End (exclusive) of the low window.
     /// Below 2 GiB, so sign-extended LPARAM-style values keep pointers intact.
     const LOW_END: u64 = 0x8000_0000;
+    /// Where the search starts again once the window above the cursor is
+    /// full: the free runs below the start (between a 32-bit program's
+    /// image, the WoW64 bridge and winrun itself) take large blocks too.
+    /// MAP_FIXED refuses every address already in use, so nothing mapped
+    /// there is disturbed; 16 MiB leaves the first pages and a program
+    /// image at the usual 0x400000 alone.
+    const LOW_WRAP: u64 = 0x0100_0000;
 
     /// From now on, memory placed by [`map`] and [`map_ex`] without
     /// `MAP_FIXED` lies in `[start, 2 GiB)`: a process running 32-bit code
@@ -277,7 +284,7 @@ mod imp {
                     return Some(Err(Errno::NoMemory));
                 }
                 wrapped = true;
-                at = 0x5000_0000u64.next_multiple_of(align);
+                at = LOW_WRAP.next_multiple_of(align);
                 continue;
             }
             match decode(syscall4(nr::MAP_EX, at, size, prot, osyx_abi::MAP_FIXED)) {
