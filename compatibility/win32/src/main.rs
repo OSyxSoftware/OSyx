@@ -34,6 +34,7 @@ mod elevation;
 mod eventlog;
 mod exceptions;
 mod files;
+mod fibers;
 mod fls;
 mod heaps;
 mod ini;

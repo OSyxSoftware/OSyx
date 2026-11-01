@@ -1,4 +1,4 @@
-; kernel32 import stubs for the 32-bit test fixtures (hello32.exe, api32.exe, thread32.exe).
+; kernel32 import stubs for the 32-bit test fixtures (hello32.exe, api32.exe, thread32.exe, fibers32.exe).
 ; The i686 ABI decorates stdcall references (_GetStdHandle@4, and the
 ; dllimport pointers __imp__GetStdHandle@4), but the OSyx loader resolves
 ; imports by undecorated name, so the import table must carry the plain
@@ -74,3 +74,9 @@ EXPORTS
     InterlockedExchangeAdd
     InterlockedCompareExchange
     InterlockedCompareExchange64
+    ConvertThreadToFiber
+    ConvertFiberToThread
+    CreateFiber
+    SwitchToFiber
+    DeleteFiber
+    IsThreadAFiber

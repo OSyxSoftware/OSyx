@@ -503,20 +503,41 @@ pub fn replace_in(root: u64, va: u64, pa: u64, flags: Flags) -> Result<u64, MapE
 /// of them, and their total number. Each entry is the page-aligned address
 /// with the leaf's protection in the low bits: bit 0 writable, bit 1
 /// executable. A 2 MiB or 1 GiB page is listed as the 4 KiB pages it covers.
+///
+/// Nothing is allocated under the paging lock: a heap that had to grow
+/// there would map its new pages and take the lock again, deadlocking the
+/// CPU (and then every CPU waiting for the heap or the entry lock). A first
+/// walk counts the pages, the list is reserved outside the lock, and a
+/// second walk fills at most that many.
 pub fn user_pages(root: u64, limit: usize) -> (alloc::vec::Vec<u64>, u64) {
-    let _g = PAGING.lock();
-    let mut out = alloc::vec::Vec::new();
+    let counted = {
+        let _g = PAGING.lock();
+        let mut n = 0u64;
+        walk_user_leaves(root, |_, count, _| n += count);
+        n
+    };
+    // A little room for pages mapped between the walks.
+    let room = (counted as usize).saturating_add(256).min(limit);
+    let mut out = alloc::vec::Vec::with_capacity(room);
     let mut total = 0u64;
-    let mut note = |va: u64, count: u64, leaf: u64, out: &mut alloc::vec::Vec<u64>| {
+    let _g = PAGING.lock();
+    walk_user_leaves(root, |va, count, leaf| {
         let prot = (leaf & WRITABLE != 0) as u64 | ((leaf & NO_EXEC == 0) as u64) << 1;
         for k in 0..count {
-            if out.len() >= limit {
+            if out.len() >= room {
                 break;
             }
             out.push((va + (k << 12)) | prot);
         }
         total += count;
-    };
+    });
+    (out, total)
+}
+
+/// Calls `f(va, pages, leaf)` for every present user leaf of `root`'s lower
+/// half, lowest first: a 4 KiB page, or a 2 MiB / 1 GiB page as its count
+/// of 4 KiB pages. The caller holds the paging lock.
+fn walk_user_leaves(root: u64, mut f: impl FnMut(u64, u64, u64)) {
     // SAFETY (all reads): page table pages reachable through the HHDM.
     for i4 in 0..256u64 {
         let e4 = unsafe { *table(root).add(i4 as usize) };
@@ -530,7 +551,7 @@ pub fn user_pages(root: u64, limit: usize) -> (alloc::vec::Vec<u64>, u64) {
             }
             let base3 = (i4 << 39) | (i3 << 30);
             if e3 & HUGE != 0 {
-                note(base3, 1 << 18, e3, &mut out);
+                f(base3, 1 << 18, e3);
                 continue;
             }
             for i2 in 0..512u64 {
@@ -540,19 +561,18 @@ pub fn user_pages(root: u64, limit: usize) -> (alloc::vec::Vec<u64>, u64) {
                 }
                 let base2 = base3 | (i2 << 21);
                 if e2 & HUGE != 0 {
-                    note(base2, 512, e2, &mut out);
+                    f(base2, 512, e2);
                     continue;
                 }
                 for i1 in 0..512u64 {
                     let e1 = unsafe { *table(e2 & ADDR_MASK).add(i1 as usize) };
                     if e1 & PRESENT != 0 && e1 & USER != 0 {
-                        note(base2 | (i1 << 12), 1, e1, &mut out);
+                        f(base2 | (i1 << 12), 1, e1);
                     }
                 }
             }
         }
     }
-    (out, total)
 }
 
 /// Walks the page tables of `root` (handling 2 MiB / 1 GiB pages).

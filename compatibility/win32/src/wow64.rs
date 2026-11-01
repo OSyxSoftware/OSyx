@@ -46,7 +46,7 @@ use osyx_abi::wow64::{ENTRY_RFLAGS, USER_CS, USER_CS32, USER_DS};
 const _: () = assert!(USER_CS == 0x23 && USER_CS32 == 0x3B && USER_DS == 0x1B && ENTRY_RFLAGS == 0x202);
 
 const ARENA_BASE: u32 = 0x2000_0000;
-const ARENA_SIZE: usize = 4 << 20; // stubs, TEB, PEB, guard and a 1 MiB stack
+const ARENA_SIZE: usize = 4 << 20; // stubs, TEB, PEB, guard, a 1 MiB stack and the fiber code
 const STUB_PAGE: u32 = ARENA_BASE;
 const STUB_SIZE: u32 = 12;
 /// The callback return stub: the last 16 bytes of the stub page.
@@ -59,6 +59,10 @@ const GUARD32: u32 = PEB32 + PAGE as u32;
 const STACK_BASE: u32 = GUARD32 + PAGE as u32;
 const STACK_SIZE: u32 = 1 << 20; // 1 MiB
 const STACK_TOP: u32 = STACK_BASE + STACK_SIZE;
+/// 32-bit SwitchToFiber and fiber start code (`fibers::SWITCH32_CODE`), one
+/// page above the initial stack.
+const FIBER_CODE: u32 = STACK_TOP + PAGE as u32;
+const _: () = assert!(FIBER_CODE as usize + PAGE <= ARENA_BASE as usize + ARENA_SIZE);
 
 // 32-bit TEB fields (NT_TIB and the first part of the TEB).
 const TEB_EXCEPTION_LIST: u32 = 0x00;
@@ -451,6 +455,13 @@ impl Bridge {
             }
         }
 
+        // The 32-bit fiber code; executable from `prepare` on, like the stubs.
+        // SAFETY: the page is inside the fresh arena mapping.
+        unsafe {
+            let code = &crate::fibers::SWITCH32_CODE;
+            core::ptr::copy_nonoverlapping(code.as_ptr(), FIBER_CODE as *mut u8, code.len());
+        }
+
         // OSyx cannot map a page with no access; a read-only page is the
         // guard: a stack overflow writing into it faults.
         mem::protect(GUARD32 as u64, PAGE, Prot::ReadOnly)
@@ -468,6 +479,11 @@ impl Bridge {
     /// Returns the 32-bit address of a stub for `symbol`, whose 64-bit
     /// implementation is at `host`, or `None` when no signature is known.
     pub fn import(&self, symbol: &str, host: u64) -> Option<u32> {
+        // A fiber switch changes the 32-bit stack and registers, which the
+        // gate keeps: 32-bit code does it.
+        if symbol == "SwitchToFiber" {
+            return Some(FIBER_CODE);
+        }
         let signature = SIGNATURES.iter().find(|s| s.name == symbol)?;
         let host = host_override(symbol).unwrap_or(host);
         assert!(signature.args.len() <= MAX_ARG_SLOTS, "wow64: import signature has too many arguments");
@@ -497,6 +513,10 @@ impl Bridge {
         if let Err(e) = mem::protect(STUB_PAGE as u64, PAGE, Prot::ExecuteRead) {
             os_std::eprintln!("winrun: wow64: cannot make import stubs executable: {e:?}");
             return Err("wow64: cannot make import stubs executable");
+        }
+        if let Err(e) = mem::protect(FIBER_CODE as u64, PAGE, Prot::ExecuteRead) {
+            os_std::eprintln!("winrun: wow64: cannot make the fiber code executable: {e:?}");
+            return Err("wow64: cannot make the fiber code executable");
         }
         ACTIVE.store(self as *mut Bridge, Ordering::Release);
         // The main thread's Ctx: the static gate stack and the arena TEB32.
@@ -660,6 +680,20 @@ fn notify_dlls32(reason: u32) {
             call32(entry as u32, &[base as u32, reason, 0]);
         }
     }
+}
+
+/// The calling thread's TEB32 (its FS base in 32-bit code), when it runs
+/// 32-bit code.
+pub(crate) fn current_teb32() -> Option<u32> {
+    let c = ctx();
+    // SAFETY: this thread's Ctx.
+    (!c.is_null()).then(|| unsafe { (*c).teb32 } as u32)
+}
+
+/// The 32-bit address of the fiber code (`fibers::SWITCH32_CODE`) while a
+/// 32-bit program runs.
+pub(crate) fn fiber_code() -> Option<u32> {
+    is_active().then_some(FIBER_CODE)
 }
 
 /// Whether this process runs a 32-bit program (the bridge is live): host

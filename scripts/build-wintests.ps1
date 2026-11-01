@@ -76,6 +76,7 @@ $programs = [ordered]@{
     'hello.exe'   = @{ Src = @('hello.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'fileio.exe'  = @{ Src = @('fileio.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'threads.exe' = @{ Src = @('threads.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
+    'fibers.exe'  = @{ Src = @('fibers.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'windll.dll'  = @{ Src = @('windll.c', 'windll.def'); Args = @('-shared', '-Wl,-e,DllMainCRTStartup', $apisetLib, '-lkernel32') }
     'gdi2.exe'    = @{ Src = @('gdi2.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lgdi32', '-lkernel32') }
     'gui.exe'     = @{ Src = @('gui.c'); Args = @('-Wl,--subsystem,windows', '-Wl,-e,start', '-limm32', '-luser32', '-lgdi32', '-lkernel32') }
@@ -114,6 +115,7 @@ $pe32Programs = [ordered]@{
     'hello32.exe' = @{ Src = @('hello32.c'); Libs = @() }
     'api32.exe' = @{ Src = @('api32.c'); Libs = @('advapi32', 'user32', 'shell32', 'shlwapi', 'gdi32', 'comctl32', 'ole32', 'bcrypt', 'secur32') }
     'thread32.exe' = @{ Src = @('thread32.c'); Libs = @() }
+    'fibers32.exe' = @{ Src = @('fibers.c'); Libs = @() }
     'gui32.exe' = @{ Src = @('gui32.c'); Libs = @('user32', 'gdi32') }
 }
 $pe32Common = @('--target=i686-pc-windows-gnu', '-nostdlib', '-ffreestanding', '-O2', '-Wall', '-Werror')

@@ -3427,6 +3427,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::unwind::kernel32_exports());
     exports.extend(crate::sysext::exports());
     exports.extend(crate::fls::exports());
+    exports.extend(crate::fibers::exports());
     exports.extend(crate::files::exports());
     exports.extend(crate::locale::exports());
     exports.extend(crate::zone::exports());
