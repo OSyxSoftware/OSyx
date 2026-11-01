@@ -225,6 +225,19 @@ silent install (`/S`) completes. What makes that work:
 * `OSYX_WINRUN_IOTRACE=<text>` logs file reads and writes on paths containing
   `<text>` (`1`: all) with position, size and an FNV-1a hash of the bytes.
 
+Fibers (`fibers.rs`) work for 64-bit and 32-bit programs: ConvertThreadToFiber
+(Ex), CreateFiber(Ex), SwitchToFiber, DeleteFiber, ConvertFiberToThread and
+IsThreadAFiber. The current fiber is the TEB's `NT_TIB.FiberData`
+(`gs:[0x20]`, `fs:[0x10]` for 32-bit code), so the GetCurrentFiber and
+GetFiberData macros work. A switch keeps the callee-saved registers, the x87
+control word, MXCSR and the TEB stack bounds (for 32-bit code also the SEH
+chain head) per fiber. A 32-bit SwitchToFiber is bound to 32-bit code in the
+WoW64 arena, not to the gate, because it must change the 32-bit stack and
+registers. A fiber routine that returns ends its thread, as on Windows.
+Fiber local storage stays per thread: every fiber of a thread sees the
+thread's FLS values. Tests: `fibers.exe` and `fibers32.exe` (one source,
+`fibers.c`).
+
 Installed Windows programs appear in the launcher: the Start Menu shortcuts
 of the user and of all users (`.lnk`, read for their target) and, for anything
 no shortcut names, the main `.exe` of each folder in `/Program Files` and

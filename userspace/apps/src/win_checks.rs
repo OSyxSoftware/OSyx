@@ -45,6 +45,9 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("PE32 32-bit program: CreateThread, 32-bit start routines and concurrent bridge calls", || {
         run("thread32.exe", &[]) == Some(0)
     });
+    // Fibers, 64-bit and 32-bit (SwitchToFiber runs as 32-bit code); exit code = failures.
+    t.check("fibers: ConvertThreadToFiber, CreateFiber, SwitchToFiber, DeleteFiber", || run("fibers.exe", &[]) == Some(0));
+    t.check("PE32 32-bit program: fibers through the bridge", || run("fibers32.exe", &[]) == Some(0));
     t.check("Windows file I/O on OSyx file systems (target C)", || run("fileio.exe", &[]) == Some(0));
     t.check("Windows volume, device and adapter inventory", || run("sysadmin.exe", &[]) == Some(0));
     t.check("Windows file version resources and queries", || run("version.exe", &[]) == Some(0));

@@ -1,7 +1,6 @@
-//! Fiber local storage. OSyx runs no fibers (ConvertThreadToFiber is not
-//! implemented), so every thread is one fiber and FLS is per thread, as
-//! on Windows for code that never switches fibers. Callbacks run when a
-//! thread ends (before DLL_THREAD_DETACH), for the exiting thread at
+//! Fiber local storage, kept per thread: right for code that never
+//! switches fibers, and every fiber of a thread (fibers.rs) sees the
+//! thread's values. Callbacks run when a thread ends (before DLL_THREAD_DETACH), for the exiting thread at
 //! ExitProcess, and for every thread's value when the index is freed.
 #![allow(non_snake_case)]
 use crate::{error::*, kernel32::fail};
