@@ -430,9 +430,6 @@ extern "win64" fn EnumSystemLocalesEx(proc_: u64, flags: u32, param: u64, reserv
     if proc_ == 0 || reserved != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    type Proc = extern "win64" fn(*const u16, u32, u64) -> i32;
-    // SAFETY: the caller's callback.
-    let f: Proc = unsafe { core::mem::transmute(proc_ as usize) };
     let all = flags & 0x30 == 0;
     let mut list: Vec<(&str, u32)> = Vec::new();
     if all || flags & 0x10 != 0 {
@@ -443,7 +440,7 @@ extern "win64" fn EnumSystemLocalesEx(proc_: u64, flags: u32, param: u64, reserv
     }
     for (name, kind) in list {
         let w: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
-        if f(w.as_ptr(), kind, param) == 0 {
+        if crate::wow64::callback(proc_, &[w.as_ptr() as u64, kind as u64, param]) as u32 == 0 {
             break;
         }
     }

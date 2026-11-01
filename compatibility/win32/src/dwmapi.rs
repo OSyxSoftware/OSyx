@@ -392,8 +392,54 @@ extern "win64" fn ImmGetIMEFileNameW(hkl: u64, _buf: *mut u16, _len: u32) -> u32
     0
 }
 
+/// The input context each window uses (ImmAssociateContext); a window
+/// not listed uses its default context (ImmGetContext).
+static ASSOCIATED: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::new());
+
+/// ImmAssociateContext: gives `hwnd` the context `himc` (NULL: none);
+/// returns the one it had.
+extern "win64" fn ImmAssociateContext(hwnd: u64, himc: u64) -> u64 {
+    if !crate::user32::is_window(hwnd) {
+        return 0;
+    }
+    if himc != 0 && with_context(himc, |_| ()).is_none() {
+        return 0;
+    }
+    let previous = ASSOCIATED.lock().unwrap().insert(hwnd, himc);
+    match previous {
+        Some(p) => p,
+        // The default context, made on demand as ImmGetContext does.
+        None => ImmGetContext(hwnd),
+    }
+}
+
+/// ImmGetCandidateListW: nothing is ever composed (the only layout has no
+/// IME), so no context has a candidate list: 0.
+extern "win64" fn ImmGetCandidateListW(himc: u64, _index: u32, _list: *mut u8, _len: u32) -> u32 {
+    let _ = with_context(himc, |_| ());
+    0
+}
+
+/// ImmSetCompositionStringW: without an IME there is no composition to
+/// change; Windows answers FALSE.
+extern "win64" fn ImmSetCompositionStringW(himc: u64, _index: u32, _comp: *const u8, _comp_len: u32, _read: *const u8, _read_len: u32) -> i32 {
+    let _ = with_context(himc, |_| ());
+    0
+}
+
+extern "win64" fn ImmGetIMEFileNameA(hkl: u64, _buf: *mut u8, _len: u32) -> u32 {
+    if !ime_free_layout(hkl) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    0
+}
+
 pub fn imm32_exports() -> Vec<(&'static str, u64)> {
     export_table![
+        ImmAssociateContext,
+        ImmGetCandidateListW,
+        ImmSetCompositionStringW,
+        ImmGetIMEFileNameA,
         ImmGetContext,
         ImmReleaseContext,
         ImmAssociateContextEx,

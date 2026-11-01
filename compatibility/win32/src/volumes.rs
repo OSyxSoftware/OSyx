@@ -21,7 +21,7 @@ fn usage(p: *const u16) -> Result<FsStat, u32> {
     os_sys::statfs(&locate(p)?).map_err(errno_to_win32)
 }
 
-extern "win64" fn GetLogicalDriveStringsW(size: u32, out: *mut u16) -> u32 {
+pub(crate) extern "win64" fn GetLogicalDriveStringsW(size: u32, out: *mut u16) -> u32 {
     if out.is_null() || size < 5 {
         return 5;
     }
@@ -33,7 +33,7 @@ extern "win64" fn GetLogicalDriveStringsW(size: u32, out: *mut u16) -> u32 {
 extern "win64" fn GetLogicalDrives() -> u32 {
     1 << 2
 }
-extern "win64" fn GetDriveTypeW(root: *const u16) -> u32 {
+pub(crate) extern "win64" fn GetDriveTypeW(root: *const u16) -> u32 {
     match usage(root) {
         Ok(s) => {
             if osyx_abi::ipc::field_str(&s.fstype) == "tmpfs" {
@@ -45,7 +45,7 @@ extern "win64" fn GetDriveTypeW(root: *const u16) -> u32 {
         Err(_) => 1,
     }
 }
-extern "win64" fn GetDiskFreeSpaceExW(root: *const u16, avail: *mut u64, total: *mut u64, free: *mut u64) -> i32 {
+pub(crate) extern "win64" fn GetDiskFreeSpaceExW(root: *const u16, avail: *mut u64, total: *mut u64, free: *mut u64) -> i32 {
     let s = match usage(root) {
         Ok(s) => s,
         Err(e) => return fail(e, 0),

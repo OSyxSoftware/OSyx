@@ -172,6 +172,9 @@ extern "win64" fn SetOaNoCache() {}
 
 // ---- VARIANT ----------------------------------------------------------------------------
 
+mod coerce;
+use coerce::{VariantChangeType, VariantChangeTypeEx};
+
 const VT_EMPTY: u16 = 0;
 const VT_BSTR: u16 = 8;
 const VT_DISPATCH: u16 = 9;
@@ -254,8 +257,11 @@ extern "win64" fn VariantCopy(dst: *mut u8, src: *const u8) -> u32 {
     if core::ptr::eq(dst, src) {
         return S_OK;
     }
-    // SAFETY: the caller's VARIANTs (24 bytes each).
-    let (vt, value) = unsafe { (*(src as *const u16), *(src.add(8) as *const u64)) };
+    // A 32-bit caller's VARIANT is 16 bytes with 4-byte pointers.
+    let narrow = crate::wow64::is_active();
+    let size = if narrow { 16 } else { 24 };
+    // SAFETY: the caller's VARIANTs (`size` bytes each).
+    let (vt, value) = unsafe { (*(src as *const u16), if narrow { *(src.add(8) as *const u32) as u64 } else { *(src.add(8) as *const u64) }) };
     if vt & VT_ARRAY != 0 && vt & VT_BYREF == 0 || vt == VT_RECORD {
         return DISP_E_BADVARTYPE; // no SAFEARRAY or record copies
     }
@@ -264,7 +270,7 @@ extern "win64" fn VariantCopy(dst: *mut u8, src: *const u8) -> u32 {
         return hr;
     }
     // SAFETY: as above.
-    unsafe { core::ptr::copy_nonoverlapping(src, dst, 24) };
+    unsafe { core::ptr::copy_nonoverlapping(src, dst, size) };
     if vt == VT_BSTR && value != 0 {
         let copy = SysAllocStringByteLen(value as *const u8, SysStringByteLen(value));
         if copy == 0 {
@@ -273,7 +279,17 @@ extern "win64" fn VariantCopy(dst: *mut u8, src: *const u8) -> u32 {
             return E_OUTOFMEMORY;
         }
         // SAFETY: as above.
-        unsafe { *(dst.add(8) as *mut u64) = copy };
+        unsafe {
+            if narrow {
+                *(dst.add(8) as *mut u32) = copy as u32;
+            } else {
+                *(dst.add(8) as *mut u64) = copy;
+            }
+        }
+    } else if (vt == VT_DISPATCH || vt == VT_UNKNOWN) && value != 0 && narrow {
+        // SAFETY: a 32-bit interface: IUnknown::AddRef is vtable slot 1.
+        let add_ref = unsafe { *((*(value as *const u32) as u64 + 4) as *const u32) };
+        crate::wow64::callback(add_ref as u64, &[value]);
     } else if (vt == VT_DISPATCH || vt == VT_UNKNOWN) && value != 0 {
         // SAFETY: IUnknown::AddRef is vtable slot 1.
         unsafe {
@@ -599,6 +615,8 @@ extern "win64" fn OleCreatePropertyFrame(
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        VariantChangeType,
+        VariantChangeTypeEx,
         SysAllocString,
         SysReAllocString,
         SysAllocStringLen,
@@ -642,6 +660,8 @@ pub fn ordinals() -> Vec<(u16, u64)> {
         (8, f(VariantInit as *const ())),
         (9, f(VariantClear as *const ())),
         (10, f(VariantCopy as *const ())),
+        (12, f(VariantChangeType as *const ())),
+        (147, f(VariantChangeTypeEx as *const ())),
         (16, f(SafeArrayDestroy as *const ())),
         (19, f(SafeArrayGetUBound as *const ())),
         (20, f(SafeArrayGetLBound as *const ())),

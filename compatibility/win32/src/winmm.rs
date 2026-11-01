@@ -110,9 +110,32 @@ const WHDR_PREPARED: u32 = 2;
 const WHDR_BEGINLOOP: u32 = 4;
 const WHDR_ENDLOOP: u32 = 8;
 const WHDR_INQUEUE: u32 = 0x10;
-/// sizeof(WAVEHDR) and sizeof(MIDIHDR) on x64.
-const WAVEHDR_SIZE: u32 = 48;
-const MIDIHDR_SIZE: u32 = 120;
+/// WAVEHDR and MIDIHDR hold pointers: for a 32-bit (WoW64) program they
+/// are 32 and 64 bytes, with dwBufferLength at 4, dwBytesRecorded at 8
+/// and dwFlags at 16; on x64 48 and 120, at 8, 12 and 24.
+fn narrow() -> bool {
+    crate::wow64::is_active()
+}
+
+fn wavehdr_size() -> u32 {
+    if narrow() { 32 } else { 48 }
+}
+
+fn midihdr_size() -> u32 {
+    if narrow() { 64 } else { 120 }
+}
+
+/// lpData and dwBufferLength of a WAVEHDR or MIDIHDR.
+fn header_data(h: u64) -> (*mut u8, usize) {
+    // SAFETY: a prepared header of the caller's layout.
+    unsafe {
+        if narrow() {
+            (core::ptr::read_unaligned(h as *const u32) as u64 as *mut u8, read_u32(h as *const u8, 4) as usize)
+        } else {
+            (core::ptr::read_unaligned(h as *const u64) as *mut u8, read_u32(h as *const u8, 8) as usize)
+        }
+    }
+}
 
 const WOM_OPEN: u32 = 0x3BB;
 const WOM_CLOSE: u32 = 0x3BC;
@@ -159,9 +182,9 @@ impl Callback {
     fn send(&self, handle: u64, msg: u32, p1: u64, p2: u64) {
         match self.kind {
             CALLBACK_FUNCTION if self.target != 0 => {
-                // SAFETY: a driver callback is `void CALLBACK (HANDLE, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)`.
-                let f: extern "win64" fn(u64, u32, u64, u64, u64) = unsafe { core::mem::transmute(self.target as usize) };
-                f(handle, msg, self.instance, p1, p2);
+                // A driver callback is `void CALLBACK (HANDLE, UINT, DWORD_PTR,
+                // DWORD_PTR, DWORD_PTR)`: 32-bit code for a 32-bit program.
+                crate::wow64::callback(self.target, &[handle, msg as u64, self.instance, p1, p2]);
             }
             CALLBACK_WINDOW => {
                 crate::user32::PostMessageW(self.target, msg, handle, p1 as i64);
@@ -215,12 +238,13 @@ fn read_u32(p: *const u8, at: usize) -> u32 {
 }
 
 fn header_flags(h: u64) -> u32 {
-    read_u32(h as *const u8, 24)
+    read_u32(h as *const u8, if narrow() { 16 } else { 24 })
 }
 
 fn set_header_flags(h: u64, flags: u32) {
-    // SAFETY: a WAVEHDR/MIDIHDR the program prepared; its flags are at 24.
-    unsafe { core::ptr::write_unaligned((h + 24) as *mut u32, flags) };
+    let at = if narrow() { 16 } else { 24 };
+    // SAFETY: a WAVEHDR/MIDIHDR the program prepared; dwFlags is at `at`.
+    unsafe { core::ptr::write_unaligned((h + at) as *mut u32, flags) };
 }
 
 /// Marks a header done and gives it back through the callback.
@@ -229,8 +253,8 @@ fn finish_header(cb: &Callback, handle: u64, done_msg: u32, h: u64, recorded: Op
     flags &= !WHDR_INQUEUE;
     flags |= WHDR_DONE;
     if let Some(n) = recorded {
-        // SAFETY: dwBytesRecorded sits at 12 in both header types.
-        unsafe { core::ptr::write_unaligned((h + 12) as *mut u32, n) };
+        // SAFETY: dwBytesRecorded sits at 12 (8 on x86) in both header types.
+        unsafe { core::ptr::write_unaligned((h + if narrow() { 8 } else { 12 }) as *mut u32, n) };
     }
     set_header_flags(h, flags);
     cb.send(handle, done_msg, h, 0);
@@ -360,10 +384,12 @@ fn convert(f: &Format, src: &[u8], first_out: u64, count_out: usize, out: &mut a
 fn play_header(w: &WaveOut, handle: u64, hdr: u64) {
     use os_std::io::Write;
     let h = hdr as *const u8;
-    // SAFETY: a prepared WAVEHDR: lpData at 0, dwBufferLength at 8.
-    let (data, len) = unsafe { (core::ptr::read_unaligned(h as *const u64) as *const u8, read_u32(h, 8) as usize) };
+    let (data, len) = header_data(hdr);
+    let data = data as *const u8;
     let flags = header_flags(hdr);
-    let loops = if flags & WHDR_BEGINLOOP != 0 && flags & WHDR_ENDLOOP != 0 { read_u32(h, 28).max(1) } else { 1 };
+    // dwLoops follows dwFlags.
+    let loops_at = if narrow() { 20 } else { 28 };
+    let loops = if flags & WHDR_BEGINLOOP != 0 && flags & WHDR_ENDLOOP != 0 { read_u32(h, loops_at).max(1) } else { 1 };
     let fb = w.format.frame_bytes() as usize;
     let frames_in = len / fb;
     let frames_out = (frames_in as u64 * DEVICE_RATE / w.format.rate) as usize;
@@ -516,7 +542,7 @@ extern "win64" fn waveOutOpen(handle: *mut u64, id: u32, format: *const u8, call
 
 /// The header checks every wave call makes: size and pointer first, then the handle.
 fn wave_header(header: *const u8, size: u32) -> Result<u64, u32> {
-    if header.is_null() || size != WAVEHDR_SIZE {
+    if header.is_null() || size != wavehdr_size() {
         Err(MMSYSERR_INVALPARAM)
     } else {
         Ok(header as u64)
@@ -737,9 +763,7 @@ extern "win64" fn wave_in_worker(handle: u64) -> u32 {
             wait_ms(2);
             continue;
         };
-        let h = hdr as *const u8;
-        // SAFETY: a prepared WAVEHDR: lpData at 0, dwBufferLength at 8.
-        let (data, len) = unsafe { (core::ptr::read_unaligned(h as *const u64) as *mut u8, read_u32(h, 8) as usize) };
+        let (data, len) = header_data(hdr);
         // SAFETY: the program keeps its buffer valid until the header is returned.
         let buf = unsafe { core::slice::from_raw_parts_mut(data, len) };
         let got = w.file.lock().unwrap().read(buf).unwrap_or(0);
@@ -1069,7 +1093,7 @@ extern "win64" fn midiOutShortMsg(h: u64, message: u32) -> u32 {
 }
 
 fn midi_header(header: *const u8, size: u32) -> Result<u64, u32> {
-    if header.is_null() || size != MIDIHDR_SIZE {
+    if header.is_null() || size != midihdr_size() {
         Err(MMSYSERR_INVALPARAM)
     } else {
         Ok(header as u64)
@@ -1118,8 +1142,9 @@ extern "win64" fn midiOutLongMsg(h: u64, header: *const u8, size: u32) -> u32 {
     if flags & WHDR_INQUEUE != 0 {
         return MIDIERR_STILLPLAYING;
     }
-    // SAFETY: a prepared MIDIHDR: lpData at 0, dwBufferLength at 8.
-    let bytes = unsafe { core::slice::from_raw_parts(core::ptr::read_unaligned(header as *const u64) as *const u8, read_u32(header, 8) as usize) };
+    let (data, len) = header_data(header as u64);
+    // SAFETY: a prepared MIDIHDR's buffer.
+    let bytes = unsafe { core::slice::from_raw_parts(data as *const u8, len) };
     let r = midi_write(&m, bytes);
     finish_header(&m.cb, h, MOM_DONE, hdr, None);
     r
@@ -1208,8 +1233,7 @@ extern "win64" fn midi_in_worker(handle: u64) -> u32 {
                 in_sysex = false;
                 let hdr = m.state.lock().unwrap().queue.pop_front();
                 if let (Some(hdr), true) = (hdr, started) {
-                    // SAFETY: a prepared MIDIHDR: lpData at 0, dwBufferLength at 8.
-                    let (data, cap) = unsafe { (core::ptr::read_unaligned(hdr as *const u64) as *mut u8, read_u32(hdr as *const u8, 8) as usize) };
+                    let (data, cap) = header_data(hdr);
                     let n = sysex.len().min(cap);
                     // SAFETY: the program's buffer holds `cap` bytes.
                     unsafe { core::ptr::copy_nonoverlapping(sysex.as_ptr(), data, n) };

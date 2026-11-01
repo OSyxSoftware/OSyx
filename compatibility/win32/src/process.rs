@@ -732,7 +732,7 @@ impl Drop for JobObj {
     }
 }
 
-extern "win64" fn CreateJobObjectW(sa: u64, name: *const u16) -> u64 {
+pub(crate) extern "win64" fn CreateJobObjectW(sa: u64, name: *const u16) -> u64 {
     if let Err(e) = crate::security::validate_attributes(sa) {
         return fail(e, 0);
     }

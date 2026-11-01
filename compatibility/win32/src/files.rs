@@ -121,7 +121,7 @@ fn copy(from: &str, to: &str, fail_if_exists: bool) -> Result<(), u32> {
     result
 }
 
-extern "win64" fn CopyFileW(from: *const u16, to: *const u16, fail_if_exists: i32) -> i32 {
+pub(crate) extern "win64" fn CopyFileW(from: *const u16, to: *const u16, fail_if_exists: i32) -> i32 {
     let (Some(f), Some(t)) = (name(from), name(to)) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     match copy(&f, &t, fail_if_exists != 0) {
         Ok(()) => 1,
@@ -178,11 +178,18 @@ extern "win64" fn CopyFileExW(from: *const u16, to: *const u16, progress: u64, d
     }
     if progress != 0 {
         let size = stat_of(&t).map_or(0, |(_, st)| st.size as i64);
-        type Progress = extern "win64" fn(i64, i64, i64, i64, u32, u32, u64, u64, u64) -> u32;
-        // SAFETY: the caller's LPPROGRESS_ROUTINE.
-        let f: Progress = unsafe { core::mem::transmute(progress as usize) };
-        // CALLBACK_CHUNK_FINISHED (0), stream 1, no handles.
-        if matches!(f(size, size, size, size, 1, 0, 0, 0, data), 1 | 2) {
+        // CALLBACK_CHUNK_FINISHED (0), stream 1, no handles. A 32-bit
+        // routine takes each LARGE_INTEGER as two stack slots.
+        let action = if crate::wow64::is_active() {
+            let (lo, hi) = (size as u64 & 0xFFFF_FFFF, size as u64 >> 32);
+            crate::wow64::callback(progress, &[lo, hi, lo, hi, lo, hi, lo, hi, 1, 0, 0, 0, data]) as u32
+        } else {
+            type Progress = extern "win64" fn(i64, i64, i64, i64, u32, u32, u64, u64, u64) -> u32;
+            // SAFETY: the caller's LPPROGRESS_ROUTINE.
+            let f: Progress = unsafe { core::mem::transmute(progress as usize) };
+            f(size, size, size, size, 1, 0, 0, 0, data)
+        };
+        if matches!(action, 1 | 2) {
             if let Ok((p, true)) = kernel32::locate(&t) {
                 let _ = os_sys::unlink(&p);
             }
@@ -216,19 +223,18 @@ fn replace_file(old: String, new: String, b: Option<String>, flags: u32) -> i32 
     if flags & !0x7 != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    if stat_of(&old).is_err() {
-        return fail(1176, 0); // ERROR_UNABLE_TO_REMOVE_REPLACED
-    }
-    if stat_of(&new).is_err() {
+    // Windows reports a missing file to replace, or a missing replacement,
+    // as ERROR_FILE_NOT_FOUND.
+    if stat_of(&old).is_err() || stat_of(&new).is_err() {
         return fail(ERROR_FILE_NOT_FOUND, 0);
     }
     if let Some(b) = b {
         if kernel32::move_file(Some(old.clone()), Some(b), 1) == 0 {
-            return fail(1176, 0);
+            return fail(1175, 0); // ERROR_UNABLE_TO_REMOVE_REPLACED
         }
     }
     if kernel32::move_file(Some(new), Some(old), 1) == 0 {
-        return fail(1177, 0); // ERROR_UNABLE_TO_MOVE_REPLACEMENT
+        return fail(1176, 0); // ERROR_UNABLE_TO_MOVE_REPLACEMENT
     }
     1
 }
@@ -526,7 +532,7 @@ fn set_attributes(p: &str, st: &osyx_abi::FileStat, attrs: u32) -> Result<(), u3
     os_sys::chmod(p, mode).map_err(errno_to_win32)
 }
 
-extern "win64" fn SetFileAttributesW(name_w: *const u16, attrs: u32) -> i32 {
+pub(crate) extern "win64" fn SetFileAttributesW(name_w: *const u16, attrs: u32) -> i32 {
     let Some(n) = name(name_w) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     match stat_of(&n).and_then(|(p, st)| set_attributes(&p, &st, attrs)) {
         Ok(()) => 1,

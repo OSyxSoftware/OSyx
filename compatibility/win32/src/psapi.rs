@@ -10,13 +10,20 @@ extern "win64" fn K32EnumProcessModules(process: u64, modules: *mut u64, bytes: 
     if needed.is_null() || (modules.is_null() && bytes != 0) {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
+    // HMODULEs are pointer-sized: 4 bytes each for a 32-bit caller.
+    let width = if crate::wow64::is_active() { 4 } else { 8 };
     let list = loader::summary();
+    // SAFETY: the caller's out pointers; `bytes` bounds the array.
     unsafe {
-        *needed = list.len() as u32 * 8;
+        *needed = list.len() as u32 * width;
     }
-    for (i, (_, base, _, _, _)) in list.iter().take(bytes as usize / 8).enumerate() {
+    for (i, (_, base, _, _, _)) in list.iter().take((bytes / width) as usize).enumerate() {
         unsafe {
-            *modules.add(i) = *base;
+            if width == 4 {
+                core::ptr::write_unaligned((modules as *mut u32).add(i), *base as u32);
+            } else {
+                *modules.add(i) = *base;
+            }
         }
     }
     1

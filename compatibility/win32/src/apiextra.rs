@@ -51,10 +51,31 @@ extern "win64" fn ReadConsoleW(h: u64, buf: *mut u16, n: u32, read: *mut u32, _c
     TRUE
 }
 
-/// SetConsoleCtrlHandler: accepted; OSyx consoles deliver no Ctrl+C events
-/// to Windows programs.
-extern "win64" fn SetConsoleCtrlHandler(_handler: u64, _add: Bool) -> Bool {
-    TRUE
+/// The program's console control handlers, in registration order, and
+/// whether Ctrl+C is ignored (SetConsoleCtrlHandler(NULL, TRUE)).
+pub(crate) static CTRL_HANDLERS: Mutex<(Vec<u64>, bool)> = Mutex::new((Vec::new(), false));
+
+/// SetConsoleCtrlHandler: adds or removes a handler routine; NULL sets
+/// whether Ctrl+C is ignored. The handlers run for the console control
+/// events the program raises (GenerateConsoleCtrlEvent); OSyx's terminal
+/// sends Windows programs none of its own.
+extern "win64" fn SetConsoleCtrlHandler(handler: u64, add: Bool) -> Bool {
+    let mut h = CTRL_HANDLERS.lock().unwrap();
+    if handler == 0 {
+        h.1 = add != 0;
+        return TRUE;
+    }
+    if add != 0 {
+        h.0.push(handler);
+        return TRUE;
+    }
+    match h.0.iter().rposition(|&x| x == handler) {
+        Some(i) => {
+            h.0.remove(i);
+            TRUE
+        }
+        None => fail(ERROR_INVALID_PARAMETER, FALSE),
+    }
 }
 
 // ---- locale --------------------------------------------------------------------
@@ -71,7 +92,7 @@ extern "win64" fn LCMapStringW(_lcid: u32, flags: u32, src: *const u16, n: i32, 
     crate::locale::LCMapStringEx(core::ptr::null(), flags, src, n, dst, cap, 0, 0, 0)
 }
 
-extern "win64" fn CompareStringW(_lcid: u32, flags: u32, s1: *const u16, n1: i32, s2: *const u16, n2: i32) -> i32 {
+pub(crate) extern "win64" fn CompareStringW(_lcid: u32, flags: u32, s1: *const u16, n1: i32, s2: *const u16, n2: i32) -> i32 {
     crate::locale::CompareStringEx(core::ptr::null(), flags, s1, n1, s2, n2, 0, 0, 0)
 }
 
@@ -506,9 +527,12 @@ pub(crate) fn extension_function(guid: &[u8; 16]) -> Option<(&'static str, u64)>
     }
 }
 
+/// WSOCK32 exports AcceptEx (#1141) and GetAcceptExSockaddrs (#1142)
+/// directly, also by ordinal.
 pub fn wsock32_extra() -> (Vec<(&'static str, u64)>, Vec<(u16, u64)>) {
     let a = GetAcceptExSockaddrs as *const () as u64;
-    (alloc::vec![("GetAcceptExSockaddrs", a)], alloc::vec![(1142, a)])
+    let x = AcceptEx as *const () as u64;
+    (alloc::vec![("GetAcceptExSockaddrs", a), ("AcceptEx", x)], alloc::vec![(1141, x), (1142, a)])
 }
 
 pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
@@ -538,6 +562,13 @@ pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
         GetModuleInformation,
         GetProcessMemoryInfo,
     ]
+    .into_iter()
+    .chain([
+        ("K32GetModuleFileNameExW", GetModuleFileNameExW as *const () as u64),
+        ("K32GetModuleInformation", GetModuleInformation as *const () as u64),
+        ("K32GetProcessMemoryInfo", GetProcessMemoryInfo as *const () as u64),
+    ])
+    .collect()
 }
 
 pub fn psapi_exports() -> Vec<(&'static str, u64)> {

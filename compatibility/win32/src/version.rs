@@ -23,7 +23,7 @@ fn read_version(filename: *const u16) -> Result<Vec<u8>, u32> {
     }
     Ok(data.to_vec())
 }
-extern "win64" fn GetFileVersionInfoSizeW(filename: *const u16, handle: *mut u32) -> u32 {
+pub(crate) extern "win64" fn GetFileVersionInfoSizeW(filename: *const u16, handle: *mut u32) -> u32 {
     if !handle.is_null() {
         unsafe {
             *handle = 0;
@@ -34,7 +34,7 @@ extern "win64" fn GetFileVersionInfoSizeW(filename: *const u16, handle: *mut u32
         Err(e) => fail(e, 0),
     }
 }
-extern "win64" fn GetFileVersionInfoW(filename: *const u16, _handle: u32, len: u32, out: *mut u8) -> i32 {
+pub(crate) extern "win64" fn GetFileVersionInfoW(filename: *const u16, _handle: u32, len: u32, out: *mut u8) -> i32 {
     if out.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -51,7 +51,7 @@ extern "win64" fn GetFileVersionInfoW(filename: *const u16, _handle: u32, len: u
         Err(e) => fail(e, 0),
     }
 }
-extern "win64" fn VerQueryValueW(block: *const u8, query: *const u16, out: *mut *const u8, len: *mut u32) -> i32 {
+pub(crate) extern "win64" fn VerQueryValueW(block: *const u8, query: *const u16, out: *mut *const u8, len: *mut u32) -> i32 {
     if block.is_null() || out.is_null() || len.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }

@@ -208,36 +208,44 @@ fn builtin(name: &'static str, mut exports: Vec<(&'static str, u64)>, mut ordina
 }
 
 fn builtins() -> Vec<Arc<Builtin>> {
-    let k32 = [crate::kernel32::exports(), crate::apiextra::kernel32_exports()].concat();
+    let k32 = [
+        crate::kernel32::exports(),
+        crate::apiextra::kernel32_exports(),
+        crate::clientapi::kernel32_exports(),
+        crate::ktm::kernel32_exports(),
+        crate::client64::kernel32_exports(),
+    ]
+    .concat();
     alloc::vec![
         builtin("ntdll.dll", crate::ntdll::exports(), Vec::new()),
         builtin("kernel32.dll", k32.clone(), Vec::new()),
         builtin("kernelbase.dll", k32, Vec::new()),
-        builtin("user32.dll", [crate::user32::exports(), crate::winsta::exports()].concat(), Vec::new()),
+        builtin("user32.dll", [crate::user32::exports(), crate::winsta::exports(), crate::clientapi::user32_exports()].concat(), Vec::new()),
         builtin("gdi32.dll", [crate::user32::gdi_exports(), crate::apiextra::gdi32_exports()].concat(), Vec::new()),
         builtin("ws2_32.dll", [crate::ws2_32::exports(), crate::apiextra::ws2_32_exports()].concat(), crate::ws2_32::ordinals()),
         builtin("wsock32.dll", [crate::ws2_32::exports(), crate::apiextra::wsock32_extra().0].concat(), [crate::ws2_32::legacy_ordinals(), crate::apiextra::wsock32_extra().1].concat()),
         builtin("setupapi.dll", crate::setupapi::exports(), Vec::new()),
-        builtin("iphlpapi.dll", crate::iphlpapi::exports(), Vec::new()),
-        builtin("version.dll", crate::version::exports(), Vec::new()),
-        builtin("psapi.dll", [crate::psapi::exports(), crate::apiextra::psapi_exports()].concat(), Vec::new()),
+        builtin("iphlpapi.dll", [crate::iphlpapi::exports(), crate::client64::iphlpapi_exports()].concat(), Vec::new()),
+        builtin("hid.dll", crate::client64::hid_exports(), Vec::new()),
+        builtin("version.dll", [crate::version::exports(), crate::clientapi::version_exports()].concat(), Vec::new()),
+        builtin("psapi.dll", [crate::psapi::exports(), crate::apiextra::psapi_exports(), crate::clientapi::psapi_exports()].concat(), Vec::new()),
         builtin(
             "advapi32.dll",
-            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports(), crate::cryptbase::exports(), crate::apiextra::advapi32_exports()].concat(),
+            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports(), crate::cryptbase::exports(), crate::apiextra::advapi32_exports(), crate::clientapi::advapi32_exports()].concat(),
             Vec::new()
         ),
-        builtin("shlwapi.dll", crate::shlwapi::exports(), crate::shlwapi::ordinals()),
+        builtin("shlwapi.dll", [crate::shlwapi::exports(), crate::clientapi::shlwapi_exports()].concat(), crate::shlwapi::ordinals()),
         // ole32's COM entry points live in combase on Windows.
-        builtin("combase.dll", [crate::shlwapi::combase_exports(), crate::ole32::exports()].concat(), Vec::new()),
+        builtin("combase.dll", [crate::shlwapi::combase_exports(), crate::ole32::exports(), crate::client64::ole32_exports()].concat(), Vec::new()),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
-        builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports()].concat(), crate::shell32::ordinals()),
+        builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports(), crate::client64::shell32_exports()].concat(), crate::shell32::ordinals()),
         builtin("comdlg32.dll", crate::commdlg::exports(), Vec::new()),
         builtin("comctl32.dll", [crate::comctl32::exports(), crate::apiextra::comctl32_exports()].concat(), crate::comctl32::ordinals()),
         // Rich edit: the classes (RichEdit20W, RICHEDIT50W, ...) are user32's.
         builtin("riched20.dll", Vec::new(), Vec::new()),
         builtin("riched32.dll", Vec::new(), Vec::new()),
         builtin("msftedit.dll", Vec::new(), Vec::new()),
-        builtin("ole32.dll", crate::ole32::exports(), Vec::new()),
+        builtin("ole32.dll", [crate::ole32::exports(), crate::client64::ole32_exports()].concat(), Vec::new()),
         builtin("winmm.dll", crate::winmm::exports(), Vec::new()),
         builtin("oleaut32.dll", crate::oleaut32::exports(), crate::oleaut32::ordinals()),
         builtin("userenv.dll", crate::userenv::exports(), Vec::new()),
@@ -1274,6 +1282,73 @@ pub fn get_proc_address(h: u64, sym: Symbol<'_>) -> Result<u64, u32> {
     })
 }
 
+/// A resource type or name: a 16-bit id or a string.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum ResId {
+    Id(u16),
+    Name(Vec<u16>),
+}
+
+/// The names of the resources of type `kind` in a mapped module (0: the
+/// program), from its resource directory: string names first, then ids,
+/// as the directory sorts them. Err(1813) when the module has no such type.
+pub(crate) fn resource_names(module: u64, kind: &ResId) -> Result<Vec<ResId>, u32> {
+    const ERROR_RESOURCE_DATA_NOT_FOUND: u32 = 1812;
+    const ERROR_RESOURCE_TYPE_NOT_FOUND: u32 = 1813;
+    let base = with(|l| {
+        let index = if module == 0 { Some(l.exe) } else { module_by_handle(l, module) };
+        index.and_then(|i| matches!(l.linker.modules[i].kind, Kind::Pe { .. }).then(|| l.linker.modules[i].base))
+    })
+    .ok_or(ERROR_MOD_NOT_FOUND)?;
+    // SAFETY: a mapped PE image: its headers, data directories and the
+    // resource directory they point to (the image is SizeOfImage bytes,
+    // validated when it was loaded).
+    unsafe {
+        let rd16 = |a: u64| core::ptr::read_unaligned(a as *const u16);
+        let rd32 = |a: u64| core::ptr::read_unaligned(a as *const u32);
+        let nt = base + rd32(base + 0x3C) as u64;
+        let opt = nt + 24;
+        let dirs = if rd16(opt) == 0x20B { opt + 112 } else { opt + 96 };
+        let rsrc = rd32(dirs + 8 * 2) as u64;
+        if rsrc == 0 {
+            return Err(ERROR_RESOURCE_DATA_NOT_FOUND);
+        }
+        let root = base + rsrc;
+        // Entries of a directory: (name or id, offset of the entry's data).
+        let entries = |dir: u64| -> Vec<(ResId, u32)> {
+            let n = rd16(dir + 12) as u64 + rd16(dir + 14) as u64;
+            (0..n.min(4096))
+                .map(|i| {
+                    let e = dir + 16 + 8 * i;
+                    let name = rd32(e);
+                    let id = if name & 0x8000_0000 != 0 {
+                        let s = root + (name & 0x7FFF_FFFF) as u64;
+                        let len = rd16(s) as usize;
+                        ResId::Name((0..len).map(|k| rd16(s + 2 + 2 * k as u64)).collect())
+                    } else {
+                        ResId::Id(name as u16)
+                    };
+                    (id, rd32(e + 4))
+                })
+                .collect()
+        };
+        let same = |a: &ResId, b: &ResId| match (a, b) {
+            (ResId::Id(x), ResId::Id(y)) => x == y,
+            (ResId::Name(x), ResId::Name(y)) => {
+                String::from_utf16_lossy(x).to_uppercase() == String::from_utf16_lossy(y).to_uppercase()
+            }
+            _ => false,
+        };
+        let Some((_, offset)) = entries(root).into_iter().find(|(id, _)| same(id, kind)) else {
+            return Err(ERROR_RESOURCE_TYPE_NOT_FOUND);
+        };
+        if offset & 0x8000_0000 == 0 {
+            return Err(ERROR_RESOURCE_TYPE_NOT_FOUND);
+        }
+        Ok(entries(root + (offset & 0x7FFF_FFFF) as u64).into_iter().map(|(id, _)| id).collect())
+    }
+}
+
 /// Numeric RT_DIALOG resource from a mapped PE module, copied outside lock.
 pub(crate) fn numeric_resource(module: u64, kind: u16, name: u64) -> Result<Vec<u8>, u32> {
     if name == 0 || name >= 0x10000 { return Err(50); }
@@ -1319,17 +1394,6 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
                 _ => 193, // ERROR_BAD_EXE_FORMAT
             }
         })?;
-        if wow64::is_active() {
-            for dep in l.linker.init_order(i) {
-                if let Kind::Pe { file, .. } = &l.linker.modules[dep].kind {
-                    let pe = PeFile::parse_any(file.as_ref()).map_err(|_| 193u32)?;
-                    if pe.tls().map_err(|_| 193u32)?.is_some() {
-                        os_std::eprintln!("winrun: LoadLibrary({name}): PE32 static TLS is not supported in {}", l.linker.modules[dep].name);
-                        return Err(50);
-                    }
-                }
-            }
-        }
         let todo = register_new(l, i);
         while l.state.len() < l.linker.modules.len() {
             l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false });
@@ -1343,6 +1407,12 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
     if !todo.is_empty() && !wow64::is_active() {
         // New TLS indices need blocks for this thread too.
         setup_thread_tls(teb::current());
+    } else if !todo.is_empty() {
+        // A 32-bit DLL with static TLS gets a block in every thread that
+        // runs 32-bit code, as Windows gives one to every existing thread.
+        for teb32 in wow64::thread_tebs32() {
+            setup_thread_tls32(teb32);
+        }
     }
     let attached = if wow64::is_active() {
         todo.iter().all(|(base, entry, callbacks, _)| {
@@ -1478,18 +1548,57 @@ pub fn where_is(addr: u64) -> Option<(String, u64)> {
     Some((name, addr - image.base))
 }
 
-/// `VirtualQuery` for addresses inside loaded images.
+/// The protection a page of a loaded image has from its section: the
+/// headers are read-only, code is PAGE_EXECUTE_READ, writable data
+/// PAGE_WRITECOPY (written pages are the process's own copy), as Windows
+/// maps an image. None outside every image.
+pub fn image_section_protect(addr: u64) -> Option<u32> {
+    let (base, _) = image_containing(addr)?;
+    let rva = addr - base;
+    // SAFETY: the mapped headers of a loaded image (validated at load).
+    unsafe {
+        let rd16 = |a: u64| core::ptr::read_unaligned(a as *const u16);
+        let rd32 = |a: u64| core::ptr::read_unaligned(a as *const u32);
+        let nt = base + rd32(base + 0x3C) as u64;
+        let count = rd16(nt + 6) as u64;
+        let sections = nt + 24 + rd16(nt + 20) as u64;
+        for i in 0..count.min(96) {
+            let s = sections + 40 * i;
+            let va = rd32(s + 12) as u64;
+            let size = (rd32(s + 8).max(rd32(s + 16)) as u64).next_multiple_of(mem::PAGE as u64);
+            if rva >= va && rva < va + size {
+                let c = rd32(s + 36);
+                let (exec, write) = (c & 0x2000_0000 != 0, c & 0x8000_0000 != 0);
+                return Some(match (exec, write) {
+                    (true, true) => mem::PAGE_EXECUTE_WRITECOPY,
+                    (true, false) => mem::PAGE_EXECUTE_READ,
+                    (false, true) => mem::PAGE_WRITECOPY,
+                    (false, false) => mem::PAGE_READONLY,
+                });
+            }
+        }
+    }
+    Some(mem::PAGE_READONLY)
+}
+
+/// `VirtualQuery` for addresses inside loaded images: the run of pages
+/// from `addr`'s page with the same protection (sections, and what
+/// VirtualProtect changed).
 pub fn query_image(addr: u64) -> Option<mem::Info> {
-    let g = LOADER.lock().ok()?;
-    let l = g.as_ref()?;
-    let img = l.linker.host.images.iter().find(|i| addr >= i.base && addr < i.base + i.size)?;
+    let (base, size) = image_containing(addr)?;
+    let page = addr & !(mem::PAGE as u64 - 1);
+    let protect = mem::image_page_protect(page)?;
+    let mut end = page + mem::PAGE as u64;
+    while end < base + size && mem::image_page_protect(end) == Some(protect) {
+        end += mem::PAGE as u64;
+    }
     Some(mem::Info {
-        base: addr & !(mem::PAGE as u64 - 1),
-        allocation_base: img.base,
+        base: page,
+        allocation_base: base,
         allocation_protect: mem::PAGE_EXECUTE_WRITECOPY,
-        size: mem::PAGE as u64,
+        size: end - page,
         state: mem::MEM_COMMIT,
-        protect: mem::PAGE_READONLY,
+        protect,
         kind: mem::MEM_IMAGE,
     })
 }

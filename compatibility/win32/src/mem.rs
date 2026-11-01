@@ -238,9 +238,15 @@ pub fn jit_fault(n: &osyx_abi::fault::Context) -> bool {
         return false;
     }
     let regions = REGIONS.lock().unwrap();
-    let Some((&base, r)) = regions.range(..=n.address).next_back() else { return false };
-    let index = ((n.address - base) / PAGE as u64) as usize;
-    if r.pages.get(index) != Some(&PAGE_EXECUTE_READWRITE) {
+    let private = regions.range(..=n.address).next_back().is_some_and(|(&base, r)| {
+        let index = ((n.address - base) / PAGE as u64) as usize;
+        r.pages.get(index) == Some(&PAGE_EXECUTE_READWRITE)
+    });
+    drop(regions);
+    // Image pages VirtualProtect made writable and executable switch the
+    // same way.
+    let image = !private && matches!(IMAGE_PAGES.lock().unwrap().get(&page), Some(&(PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)));
+    if !private && !image {
         return false;
     }
     protect(page, PAGE, if execute { Prot::ExecuteRead } else { Prot::ReadWrite }).is_ok()
@@ -279,11 +285,57 @@ pub fn virtual_free(addr: u64, size: usize, kind: u32) -> Result<(), NtStatus> {
     }
 }
 
+/// Protections VirtualProtect gave pages of loaded PE images (page ->
+/// PAGE_*); the other image pages have their section's protection.
+static IMAGE_PAGES: Mutex<BTreeMap<u64, u32>> = Mutex::new(BTreeMap::new());
+
+/// The protection of a page of a loaded image: what VirtualProtect last
+/// set, or what its section's characteristics give.
+pub fn image_page_protect(page: u64) -> Option<u32> {
+    if let Some(&p) = IMAGE_PAGES.lock().unwrap().get(&page) {
+        return Some(p);
+    }
+    crate::loader::image_section_protect(page)
+}
+
+/// VirtualProtect on pages of a loaded image. Writable protections map
+/// the pages writable; the kernel copies a shared image page on its first
+/// write, so other processes keep the original. PAGE_EXECUTE_READWRITE
+/// and PAGE_EXECUTE_WRITECOPY switch between writing and executing on
+/// demand, as for private memory (`jit_fault`).
+fn protect_image(addr: u64, size: usize, protect: u32) -> Result<u32, NtStatus> {
+    let (base, len) = crate::loader::image_containing(addr).ok_or(STATUS_MEMORY_NOT_ALLOCATED)?;
+    let start = addr & !(PAGE as u64 - 1);
+    let end = (addr + size.max(1) as u64).next_multiple_of(PAGE as u64);
+    if end > base + len {
+        return Err(STATUS_MEMORY_NOT_ALLOCATED);
+    }
+    let prot = match protect & !PAGE_GUARD {
+        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY => Prot::ReadWrite,
+        p => from_win(p)?,
+    };
+    let old = image_page_protect(start).unwrap_or(PAGE_READONLY);
+    protect_range(start, (end - start) as usize, prot).map_err(errno_to_status)?;
+    let mut pages = IMAGE_PAGES.lock().unwrap();
+    let mut p = start;
+    while p < end {
+        pages.insert(p, protect & !PAGE_GUARD);
+        p += PAGE as u64;
+    }
+    Ok(old)
+}
+
 /// `NtProtectVirtualMemory` / `VirtualProtect`: returns the old protection
-/// of the first page.
+/// of the first page. Pages of VirtualAlloc regions and of loaded images
+/// can be changed.
 pub fn virtual_protect(addr: u64, size: usize, protect: u32) -> Result<u32, NtStatus> {
     let prot = private_prot(protect)?;
     let mut regions = REGIONS.lock().unwrap();
+    let inside = regions.range(..=addr).next_back().is_some_and(|(&base, r)| addr < base + r.size as u64);
+    if !inside {
+        drop(regions);
+        return protect_image(addr, size, protect);
+    }
     let (&base, r) = regions.range_mut(..=addr).next_back().ok_or(STATUS_MEMORY_NOT_ALLOCATED)?;
     let first = (addr - base) as usize / PAGE;
     let last = ((addr - base) as usize + size.max(1)).div_ceil(PAGE);
