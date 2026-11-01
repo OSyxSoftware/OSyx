@@ -164,6 +164,16 @@ pub struct ThreadObj {
     pub final_ticks: AtomicU64,
 }
 
+impl Drop for ThreadObj {
+    fn drop(&mut self) {
+        // A live thread can have several objects (a duplicated
+        // GetCurrentThread); only an exited one's name goes.
+        if self.done.load(Ordering::SeqCst) {
+            crate::kernel32::forget_description(self.tid.load(Ordering::SeqCst));
+        }
+    }
+}
+
 /// An event's state is one word: 1 signalled, 0 not. It lives in the
 /// object until the event is passed to another process; then it moves to a
 /// page of shared memory both processes map, and setting it also wakes

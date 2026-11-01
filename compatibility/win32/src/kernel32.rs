@@ -1829,16 +1829,26 @@ extern "win64" fn SetThreadDescription(h: u64, desc: *const u16) -> u32 {
         return E_INVALIDARG;
     }
     if os_std::env::var("OSYX_WINRUN_MODULES").is_ok_and(|v| v == "1") {
-        // One log line per name: line breaks are escaped.
-        let name: String = char::decode_utf16(units.iter().copied())
-            .map(|c| c.unwrap_or('\u{FFFD}'))
-            .collect::<String>()
-            .replace('\r', "\\r")
-            .replace('\n', "\\n");
+        // One log line per name: every character a line reader may treat
+        // as a boundary (controls, U+0085, U+2028, U+2029) is escaped.
+        let mut name = String::new();
+        for c in char::decode_utf16(units.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')) {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                name.push_str(&alloc::format!("\\u{{{:x}}}", c as u32));
+            } else {
+                name.push(c);
+            }
+        }
         os_std::eprintln!("winrun: thread {tid} name {name}");
     }
     DESCRIPTIONS.lock().unwrap().insert(tid, units);
     0
+}
+
+/// Drops the description of a thread that has exited, when its last thread
+/// object goes away (thread ids are never reused).
+pub(crate) fn forget_description(tid: u32) {
+    DESCRIPTIONS.lock().unwrap().remove(&tid);
 }
 
 /// GetThreadDescription: a LocalAlloc'd copy (empty when none was set)
