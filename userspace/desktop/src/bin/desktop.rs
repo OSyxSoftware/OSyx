@@ -1736,13 +1736,14 @@ impl Shell {
         }
     }
 
-    /// "Yes": starts the program as root; its exit status goes back to the
-    /// requester when the reaper collects it.
+    /// "Yes": starts the program as root and tells the requester it runs;
+    /// its exit status goes back when the reaper collects it.
     fn elevation_granted(&mut self) {
         let Some(request) = self.elevation_prompt.take() else { return };
         match request.start() {
             Ok(pid) => {
                 println!("desktop: elevated {} as process {pid}", request.exe);
+                request.reply("started");
                 self.elevated.push((pid, request.channel));
             }
             Err(why) => {

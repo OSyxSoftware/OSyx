@@ -1,13 +1,15 @@
 //! The desktop's `elevate` service: consent-based elevation for programs
-//! that demand administrator rights (see `compatibility/win32/src/elevation.rs`
-//! for the client and the message format).
+//! that need administrator rights (see `runtime/os-std/src/elevate.rs` for
+//! the client and the message format).
 //!
-//! The desktop runs as root, a user process cannot. A user's `winrun` sends
-//! one request naming the program; the shell asks the user ("User Account
-//! Control") and only on "Yes" starts it as root. Declining, closing the
-//! prompt or any failure ends the request with a reply, never with a
-//! program running. The kernel names the requester (`Channel::peer`), so a
-//! request cannot claim to come from someone else.
+//! The desktop runs as root, a user process cannot. A user's program (a
+//! `winrun` for a Windows program, or any program through `os_std::elevate`)
+//! sends one request naming the program; the shell asks the user ("User
+//! Account Control") and only on "Yes" starts it as root: a `.exe` under
+//! `/bin/winrun`, an OSyx executable directly. Declining, closing the prompt
+//! or any failure ends the request with a reply, never with a program
+//! running. The kernel names the requester (`Channel::peer`), so a request
+//! cannot claim to come from someone else.
 
 use os_std::ipc::{Channel, Listener, MAX_MESSAGE};
 use os_std::prelude::*;
@@ -37,16 +39,36 @@ impl Request {
         format!("Do you want to allow this app to make changes to your computer?\n{}", self.exe)
     }
 
+    /// Whether the program is a Windows one (run under winrun).
+    fn windows(&self) -> bool {
+        self.exe.to_ascii_lowercase().ends_with(".exe")
+    }
+
     /// Starts the program as root (this process's identity), working in the
     /// requester's directory and with the desktop user's profile.
     pub fn start(&self) -> Result<u64, String> {
-        let mut command = Command::new("/bin/winrun");
-        if self.verbose {
-            command.arg("-v");
-        }
-        command.arg(&self.exe).args(&self.args);
+        let mut command = if self.windows() {
+            let mut c = Command::new("/bin/winrun");
+            if self.verbose {
+                c.arg("-v");
+            }
+            c.arg(&self.exe);
+            c
+        } else {
+            Command::new(&self.exe)
+        };
+        command.args(&self.args);
         command.env("OSYX_WINRUN_CWD", &self.cwd).env("HOME", "/home/user").env("USER", "user");
-        command.spawn().map(|child| child.id()).map_err(|e| format!("{e}"))
+        if self.windows() {
+            return command.spawn().map(|child| child.id()).map_err(|e| format!("{e}"));
+        }
+        // A child inherits the working directory: switch to the requester's
+        // for the spawn only.
+        let here = os_std::env::current_dir().map_err(|e| format!("{e}"))?;
+        os_std::env::set_current_dir(&self.cwd).map_err(|e| format!("{}: {e}", self.cwd))?;
+        let spawned = command.spawn().map(|child| child.id()).map_err(|e| format!("{e}"));
+        let _ = os_std::env::set_current_dir(&here);
+        spawned
     }
 
     pub fn reply(&self, text: &str) {
@@ -119,8 +141,17 @@ impl Service {
     }
 }
 
+/// Whether `path` starts like an ELF executable (the only native programs
+/// the service runs: no scripts handed to an interpreter as root).
+fn is_elf(path: &str) -> bool {
+    use os_std::io::Read;
+    let mut magic = [0u8; 4];
+    os_std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut magic)).is_ok() && magic == *b"\x7fELF"
+}
+
 /// `run`, verbosity, program, directory and arguments, one per line. The
-/// program must be an absolute path of a `.exe` that exists.
+/// program must be an absolute path of a `.exe` or of an ELF executable
+/// that exists.
 fn parse(text: &str) -> Result<(bool, String, String, Vec<String>), &'static str> {
     let mut lines = text.split('\n');
     if lines.next() != Some("run") {
@@ -132,8 +163,7 @@ fn parse(text: &str) -> Result<(bool, String, String, Vec<String>), &'static str
         _ => return Err("malformed request"),
     };
     let (Some(exe), Some(cwd)) = (lines.next(), lines.next()) else { return Err("malformed request") };
-    let lower = exe.to_ascii_lowercase();
-    if !exe.starts_with('/') || !lower.ends_with(".exe") || exe.split('/').any(|part| part == "..") {
+    if !exe.starts_with('/') || exe.split('/').any(|part| part == "..") {
         return Err("not a program path");
     }
     if !cwd.starts_with('/') {
@@ -141,6 +171,9 @@ fn parse(text: &str) -> Result<(bool, String, String, Vec<String>), &'static str
     }
     if !os_std::fs::metadata(exe).is_ok_and(|m| m.is_file()) {
         return Err("no such program");
+    }
+    if !exe.to_ascii_lowercase().ends_with(".exe") && !is_elf(exe) {
+        return Err("not a program");
     }
     Ok((verbose, String::from(exe), String::from(cwd), lines.map(String::from).collect()))
 }
