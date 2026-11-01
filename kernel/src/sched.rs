@@ -40,7 +40,7 @@ const KERNEL_STACK_SIZE: usize = 64 * 1024;
 /// Kernel worker threads (no process) get more: write-back commits ext4
 /// transactions and takes timer interrupts on top of that, which overran
 /// 64 KiB. There are only a handful of them.
-const WORKER_STACK_SIZE: usize = 256 * 1024;
+pub const WORKER_STACK_SIZE: usize = 256 * 1024;
 // TEMP stack-overflow detector: the bottom words of every kernel stack keep a
 // pattern no frame reaches; an overflow reaches them first.
 const STACK_CANARY: u64 = 0xC0DE_5A5A_1234_5678;

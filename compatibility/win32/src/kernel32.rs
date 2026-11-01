@@ -1829,7 +1829,12 @@ extern "win64" fn SetThreadDescription(h: u64, desc: *const u16) -> u32 {
         return E_INVALIDARG;
     }
     if os_std::env::var("OSYX_WINRUN_MODULES").is_ok_and(|v| v == "1") {
-        let name: String = char::decode_utf16(units.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')).collect();
+        // One log line per name: line breaks are escaped.
+        let name: String = char::decode_utf16(units.iter().copied())
+            .map(|c| c.unwrap_or('\u{FFFD}'))
+            .collect::<String>()
+            .replace('\r', "\\r")
+            .replace('\n', "\\n");
         os_std::eprintln!("winrun: thread {tid} name {name}");
     }
     DESCRIPTIONS.lock().unwrap().insert(tid, units);

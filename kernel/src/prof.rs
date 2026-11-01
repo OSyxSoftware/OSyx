@@ -195,7 +195,10 @@ pub fn sample(f: &crate::arch::idt::TrapFrame, tick: u64) {
     } else {
         let mut frames = [0u64; DEPTH];
         frames[0] = f.rip;
-        let n = walk(f.rbp, f.rsp, f.rsp.saturating_add(64 * 1024), &mut frames, 1);
+        // Bounded by the largest kernel stack (worker threads); frames must
+        // rise and every read is a fault-safe probe, so no scheduler lookup
+        // (and no lock) is needed in the interrupt.
+        let n = walk(f.rbp, f.rsp, f.rsp.saturating_add(sched::WORKER_STACK_SIZE as u64), &mut frames, 1);
         record(cpu, pid, tid, KERNEL, last_syscall(tid as u64), &frames[..n], 1);
     }
     if cpu == 0 && tick % OFF_CPU_PERIOD == 0 {
