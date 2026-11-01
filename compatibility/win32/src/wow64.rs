@@ -1,4 +1,4 @@
-﻿//! The 32-bit (PE32) API bridge.
+//! The 32-bit (PE32) API bridge.
 //!
 //! A PE32 program runs in IA-32e compatibility mode in the same process as
 //! `winrun`. Every import is bound to a 12-byte stub in low memory; the stub
@@ -13,7 +13,7 @@
 //! ```text
 //! 0x2000_0000  page 0       import stubs (12 bytes each; RX before entry)
 //! 0x2000_1000  page 1       TEB32, the FS base of compatibility mode
-//! 0x2000_2000  page 2       PEB32 (a small zeroed block)
+//! 0x2000_2000  page 2       PEB32, its loader data and process parameters
 //! 0x2000_3000  page 3       stack guard (read-only; OSyx has no no-access page)
 //! 0x2000_4000  pages 4..    main 32-bit stack, 1 MiB
 //! ```
@@ -531,6 +531,7 @@ impl Bridge {
         if crate::VERBOSE.load(Ordering::Relaxed) {
             os_std::eprintln!("winrun: wow64 enter {entry:#x}, rsp {:#x}, teb {:#x}", self.stack_top, self.teb);
         }
+        fill_peb32();
         // 32-bit code sees its TEB at fs:[0x18]; this also loads FS from the
         // per-thread descriptor immediately. Nothing may use os_std (FS TLS)
         // after this point until the bridge restores the 64-bit base.
@@ -541,6 +542,105 @@ impl Bridge {
         // SAFETY: the stub page is RX; the TEB and stack are mapped; the
         // IRETQ frame targets DPL-3 selectors from CPL 3.
         unsafe { osyx_wow64_enter32(entry, self.stack_top) }
+    }
+}
+
+// 32-bit PEB, PEB_LDR_DATA and RTL_USER_PROCESS_PARAMETERS fields.
+const PEB32_IMAGE_BASE: u32 = 0x08;
+const PEB32_LDR: u32 = 0x0C;
+const PEB32_PARAMETERS: u32 = 0x10;
+const PEB32_PROCESS_HEAP: u32 = 0x18;
+const PEB32_NUMBER_OF_PROCESSORS: u32 = 0x64;
+const PEB32_OS_MAJOR: u32 = 0xA4;
+const PEB32_OS_MINOR: u32 = 0xA8;
+const PEB32_OS_BUILD: u32 = 0xAC;
+const PEB32_OS_PLATFORM: u32 = 0xB0;
+/// PEB_LDR_DATA32 and the process parameters share the PEB32 page.
+const LDR32: u32 = PEB32 + 0x600;
+const PARAMS32: u32 = PEB32 + 0x800;
+const PARAMS32_SIZE: u32 = 0x2A4;
+const PARAMS32_CURDIR: u32 = 0x24;
+const PARAMS32_IMAGE_PATH: u32 = 0x38;
+const PARAMS32_COMMAND_LINE: u32 = 0x40;
+const PARAMS32_ENVIRONMENT: u32 = 0x48;
+
+/// Copies `units` (NUL included) to memory 32-bit code can address.
+fn low_copy(units: &[u16]) -> u32 {
+    let Some(p) = crate::kernel32::heap_alloc(units.len() * 2, false) else { return 0 };
+    // SAFETY: a fresh block of `units.len()` u16s.
+    unsafe { core::ptr::copy_nonoverlapping(units.as_ptr(), p as *mut u16, units.len()) };
+    p as u32
+}
+
+/// A UNICODE_STRING32 at `at` for the 64-bit UNICODE_STRING at `from`.
+///
+/// # Safety
+/// `from` must be a UNICODE_STRING of the PEB64; `at` 8 writable bytes.
+unsafe fn unicode_string32(at: u32, from: u64) {
+    use crate::teb::get;
+    // SAFETY: the caller's 64-bit string, NUL-terminated after Length.
+    let (len, buf) = unsafe { (get::<u16>(from, 0) as usize, get::<u64>(from, 8)) };
+    if buf == 0 {
+        return;
+    }
+    // SAFETY: `len` bytes of text and the NUL after them.
+    let units = unsafe { core::slice::from_raw_parts(buf as *const u16, len / 2 + 1) };
+    // SAFETY: `at` is the caller's.
+    unsafe {
+        poke16(at, len as u16);
+        poke16(at + 2, (len + 2) as u16);
+        poke32(at + 4, low_copy(units));
+    }
+}
+
+/// Fills the PEB32 from the 64-bit PEB: the image base, the process heap,
+/// the processor count, the Windows version, empty loader lists and the
+/// process parameters (current directory, image path, command line and
+/// environment). 32-bit C runtimes read them, at exit too.
+fn fill_peb32() {
+    use crate::teb::{self, get};
+    let peb = teb::peb();
+    if peb == 0 {
+        return;
+    }
+    // SAFETY: the PEB64 and its parameters were built by `teb::create_peb`;
+    // PEB32, LDR32 and PARAMS32 lie in the arena's PEB32 page.
+    unsafe {
+        poke32(PEB32 + PEB32_IMAGE_BASE, get::<u64>(peb, teb::PEB_IMAGE_BASE) as u32);
+        poke32(PEB32 + PEB32_PROCESS_HEAP, get::<u64>(peb, teb::PEB_PROCESS_HEAP) as u32);
+        poke32(PEB32 + PEB32_NUMBER_OF_PROCESSORS, get::<u32>(peb, teb::PEB_NUMBER_OF_PROCESSORS));
+        poke32(PEB32 + PEB32_OS_MAJOR, get::<u32>(peb, teb::PEB_OS_MAJOR));
+        poke32(PEB32 + PEB32_OS_MINOR, get::<u32>(peb, teb::PEB_OS_MINOR));
+        poke16(PEB32 + PEB32_OS_BUILD, get::<u16>(peb, teb::PEB_OS_BUILD));
+        poke32(PEB32 + PEB32_OS_PLATFORM, get::<u32>(peb, teb::PEB_OS_PLATFORM));
+        // PEB_LDR_DATA32: Length, Initialized, then three empty lists.
+        poke32(LDR32, 0x30);
+        poke32(LDR32 + 4, 1);
+        for list in [0x0Cu32, 0x14, 0x1C] {
+            poke32(LDR32 + list, LDR32 + list);
+            poke32(LDR32 + list + 4, LDR32 + list);
+        }
+        poke32(PEB32 + PEB32_LDR, LDR32);
+        let params: u64 = get(peb, teb::PEB_PARAMETERS);
+        if params != 0 {
+            poke32(PARAMS32, PARAMS32_SIZE); // MaximumLength
+            poke32(PARAMS32 + 4, PARAMS32_SIZE); // Length
+            poke32(PARAMS32 + 8, get::<u32>(params, 8)); // Flags
+            unicode_string32(PARAMS32 + PARAMS32_CURDIR, params + teb::PARAMS_CURDIR as u64);
+            unicode_string32(PARAMS32 + PARAMS32_IMAGE_PATH, params + teb::PARAMS_IMAGE_PATH as u64);
+            unicode_string32(PARAMS32 + PARAMS32_COMMAND_LINE, params + teb::PARAMS_COMMAND_LINE as u64);
+            // The environment block ends with an empty string.
+            let env: u64 = get(params, teb::PARAMS_ENVIRONMENT);
+            if env != 0 {
+                let mut n = 0usize;
+                while get::<u16>(env, 2 * n) != 0 || get::<u16>(env, 2 * n + 2) != 0 {
+                    n += 1;
+                }
+                let units = core::slice::from_raw_parts(env as *const u16, n + 2);
+                poke32(PARAMS32 + PARAMS32_ENVIRONMENT, low_copy(units));
+            }
+            poke32(PEB32 + PEB32_PARAMETERS, PARAMS32);
+        }
     }
 }
 
@@ -964,6 +1064,11 @@ pub(crate) fn import_active(symbol: &str, host: u64) -> Option<u32> {
 ///
 /// # Safety
 /// `at` must point at writable memory in the 32-bit arena.
+unsafe fn poke16(at: u32, value: u16) {
+    // SAFETY: the caller guarantees the address.
+    unsafe { core::ptr::write_unaligned(at as *mut u16, value) };
+}
+
 unsafe fn poke32(at: u32, value: u32) {
     // SAFETY: the caller guarantees the address.
     unsafe { core::ptr::write_unaligned(at as *mut u32, value) };
