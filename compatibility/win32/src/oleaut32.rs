@@ -207,7 +207,9 @@ extern "win64" fn VariantClear(v: *mut u8) -> u32 {
     }
     // SAFETY: the caller's VARIANT.
     let vt = unsafe { *(v as *const u16) };
-    let value = unsafe { *(v.add(8) as *const u64) };
+    // A 32-bit caller's VARIANT holds 4-byte pointers.
+    let narrow = crate::wow64::is_active();
+    let value = unsafe { if narrow { *(v.add(8) as *const u32) as u64 } else { *(v.add(8) as *const u64) } };
     if vt & VT_BYREF != 0 {
         // References are not owned; only the type must be valid.
         if !plain(vt & !VT_BYREF) && ![VT_BSTR, VT_DISPATCH, VT_UNKNOWN, 12].contains(&(vt & !VT_BYREF)) {
@@ -225,7 +227,11 @@ extern "win64" fn VariantClear(v: *mut u8) -> u32 {
     } else if vt == VT_BSTR {
         SysFreeString(value);
     } else if vt == VT_DISPATCH || vt == VT_UNKNOWN {
-        if value != 0 {
+        if value != 0 && narrow {
+            // SAFETY: a 32-bit COM interface pointer: Release is vtable slot 2.
+            let release = unsafe { *((*(value as *const u32) as u64 + 8) as *const u32) };
+            crate::wow64::call32(release, &[value as u32]);
+        } else if value != 0 {
             // SAFETY: a COM interface pointer: IUnknown::Release is vtable slot 2.
             unsafe {
                 let vtbl = *(value as *const *const u64);

@@ -36,6 +36,8 @@ const SO_TYPE: i32 = 0x1008;
 const IPPROTO_TCP: i32 = 6;
 const IPPROTO_UDP: i32 = 17;
 const TCP_NODELAY: i32 = 1;
+/// Hands out AcceptEx, ConnectEx and the other extension functions.
+const SIO_GET_EXTENSION_FUNCTION_POINTER: u32 = 0xC800_0006;
 const FIONBIO: u32 = 0x8004_667E;
 const MSG_PEEK: i32 = 2;
 const MSG_WAITALL: i32 = 8;
@@ -196,7 +198,7 @@ fn write_addr(a: &SockAddr, p: *mut u8, len: *mut i32) {
 
 /// Winsock 1.0 to 2.2 are accepted (wsock32 users ask for 1.1); a newer
 /// request negotiates 2.2, as on Windows.
-extern "win64" fn WSAStartup(version: u16, data: *mut u8) -> i32 {
+pub(crate) extern "win64" fn WSAStartup(version: u16, data: *mut u8) -> i32 {
     let (major, minor) = (version & 0xFF, version >> 8);
     if major == 0 {
         return WSAVERNOTSUPPORTED as i32;
@@ -840,7 +842,7 @@ extern "win64" fn gethostname(buf: *mut u8, len: i32) -> i32 {
 
 /// ADDRINFOA (48 bytes) + sockaddr_in per address, one heap block each;
 /// freed by freeaddrinfo.
-extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const u8, res: *mut u64) -> i32 {
+pub(crate) extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const u8, res: *mut u64) -> i32 {
     if !started() {
         return WSANOTINITIALISED as i32;
     }
@@ -919,7 +921,7 @@ extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const
     0
 }
 
-extern "win64" fn freeaddrinfo(mut p: u64) {
+pub(crate) extern "win64" fn freeaddrinfo(mut p: u64) {
     while p != 0 {
         // SAFETY: a block made by getaddrinfo (ai_next at offset 40).
         let next: u64 = unsafe { teb::get(p, 40) };
@@ -931,7 +933,7 @@ extern "win64" fn freeaddrinfo(mut p: u64) {
 /// WSASocketW: a plain socket. Overlapped I/O is not offered (calls block
 /// or fail with WSAEWOULDBLOCK), so WSA_FLAG_OVERLAPPED changes nothing;
 /// a specific provider (WSAPROTOCOL_INFOW) is not supported.
-extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *const u8, group: u32, _flags: u32) -> u64 {
+pub(crate) extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *const u8, group: u32, _flags: u32) -> u64 {
     if crate::VERBOSE.load(Ordering::Relaxed) {
         os_std::eprintln!("winrun: WSASocket family {af}, kind {kind}, protocol {proto}, provider {}, group {group}, flags {_flags:#x}", !info.is_null());
     }
@@ -983,6 +985,31 @@ extern "win64" fn WSAIoctl(
                 // SAFETY: the caller's 4-byte output buffer.
                 unsafe { core::ptr::write_unaligned(output as *mut u32, n as u32) };
                 4
+            }
+            SIO_GET_EXTENSION_FUNCTION_POINTER => {
+                if input.is_null() || in_len < 16 || output.is_null() {
+                    return Err(WSAEFAULT);
+                }
+                // SAFETY: the caller's 16-byte GUID.
+                let guid: [u8; 16] = unsafe { core::ptr::read_unaligned(input as *const [u8; 16]) };
+                let (name, host) = crate::apiextra::extension_function(&guid).ok_or(WSAEINVAL)?;
+                // A 32-bit caller gets a 4-byte pointer to a bridge stub.
+                if crate::wow64::is_active() {
+                    let stub = crate::wow64::import_active(name, host).ok_or(WSAEINVAL)?;
+                    if out_len < 4 {
+                        return Err(WSAEFAULT);
+                    }
+                    // SAFETY: the caller's 4-byte output.
+                    unsafe { core::ptr::write_unaligned(output as *mut u32, stub) };
+                    4
+                } else {
+                    if out_len < 8 {
+                        return Err(WSAEFAULT);
+                    }
+                    // SAFETY: the caller's 8-byte output.
+                    unsafe { core::ptr::write_unaligned(output as *mut u64, host) };
+                    8
+                }
             }
             _ => return Err(WSAEINVAL),
         };
@@ -1050,7 +1077,7 @@ fn wsa_receive(fd: u64, bufs: *const u8, count: u32, fl: u64, stream: bool) -> R
 
 /// WSASend: gathers the WSABUFs into one stream write or datagram.
 /// Completion ports are not offered, so only the synchronous form works.
-extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, overlapped: *mut u8, completion: u64) -> i32 {
+pub(crate) extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, overlapped: *mut u8, completion: u64) -> i32 {
     let r = (|| {
         let (fd, _) = fd(s)?;
         check_shutdown(s, false)?;
@@ -1074,7 +1101,7 @@ extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f
 
 /// WSASendTo: like WSASend, with the destination of a datagram.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn WSASendTo(
+pub(crate) extern "win64" fn WSASendTo(
     s: u64,
     bufs: *const u8,
     count: u32,
@@ -1138,7 +1165,7 @@ fn datagram_truncated(fd: u64, stream: bool, n: usize) -> Result<bool, u32> {
 }
 
 /// WSARecv: one receive scattered over the WSABUFs.
-extern "win64" fn WSARecv(
+pub(crate) extern "win64" fn WSARecv(
     s: u64,
     bufs: *const u8,
     count: u32,
@@ -1164,7 +1191,7 @@ extern "win64" fn WSARecv(
 
 /// WSARecvFrom: like WSARecv, also returning the sender's address.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn WSARecvFrom(
+pub(crate) extern "win64" fn WSARecvFrom(
     s: u64,
     bufs: *const u8,
     count: u32,
@@ -1405,7 +1432,7 @@ extern "win64" fn WSCGetProviderPath(id: *const u8, path: *mut u16, len: *mut i3
 }
 
 /// FD_ISSET: whether fd_set `set` holds `s`.
-extern "win64" fn __WSAFDIsSet(s: u64, set: *const u8) -> i32 {
+pub(crate) extern "win64" fn __WSAFDIsSet(s: u64, set: *const u8) -> i32 {
     if set.is_null() {
         return 0;
     }
@@ -1418,7 +1445,7 @@ extern "win64" fn __WSAFDIsSet(s: u64, set: *const u8) -> i32 {
 
 /// select over fd_set { u32 count; SOCKET array[64] } for reading and
 /// writing (the exception set is reported empty); timeval {sec, usec}.
-extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *mut u8, timeout: *const i32) -> i32 {
+pub(crate) extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *mut u8, timeout: *const i32) -> i32 {
     trace_io(format_args!("select begin"));
     if rd.is_null() && wr.is_null() && ex.is_null() {
         return err(WSAEINVAL, SOCKET_ERROR);

@@ -42,22 +42,81 @@ pub fn validate_inheritable(p: u64) -> Result<bool, u32> {
         return Ok(false);
     }
     let q = p as *const u8;
-    if crate::wow64::is_active() {
+    let sd = if crate::wow64::is_active() {
         if unsafe { rd::<u32>(q, 0) } != 12 {
             return Err(ERROR_INVALID_PARAMETER);
         }
-        if unsafe { rd::<u32>(q, 4) } != 0 {
-            return Err(ERROR_NOT_SUPPORTED);
-        }
+        unsafe { rd::<u32>(q, 4) as u64 }
     } else {
         if unsafe { rd::<u32>(q, 0) } != 24 {
             return Err(ERROR_INVALID_PARAMETER);
         }
-        if unsafe { rd::<u64>(q, 8) } != 0 {
-            return Err(ERROR_NOT_SUPPORTED);
+        unsafe { rd::<u64>(q, 8) }
+    };
+    if sd != 0 && !grants_everyone(sd) {
+        if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+            // SAFETY: the caller's descriptor (its first 48 bytes).
+            let head = unsafe { core::slice::from_raw_parts(sd as *const u8, 48) };
+            os_std::eprintln!("winrun: security descriptor refused: {head:02x?}");
         }
+        return Err(ERROR_NOT_SUPPORTED);
     }
     Ok(inherit_flag(p))
+}
+
+/// Whether descriptor `sd` gives everyone full access, which is what an
+/// object without a descriptor allows here: no owner, group or SACL, and
+/// a NULL or absent DACL, or a DACL of only access-allowed ACEs for
+/// Everyone (S-1-1-0) with GENERIC_ALL or all standard and specific
+/// rights. Programs that share an event between processes pass such a
+/// descriptor; anything that restricts access is still refused.
+fn grants_everyone(sd: u64) -> bool {
+    const SE_DACL_PRESENT: u16 = 0x0004;
+    const SE_SACL_PRESENT: u16 = 0x0010;
+    const SE_SELF_RELATIVE: u16 = 0x8000;
+    let p = sd as *const u8;
+    // SAFETY: the caller's SECURITY_DESCRIPTOR (absolute or self-relative).
+    unsafe {
+        let control: u16 = rd(p, 2);
+        let narrow = crate::wow64::is_active();
+        // (owner, group, sacl, dacl) as addresses (0: none).
+        let field = |i: usize| -> u64 {
+            if control & SE_SELF_RELATIVE != 0 {
+                match rd::<u32>(p, 4 + 4 * i) {
+                    0 => 0,
+                    off => sd + off as u64,
+                }
+            } else if narrow {
+                rd::<u32>(p, 4 + 4 * i) as u64
+            } else {
+                rd::<u64>(p, 8 + 8 * i)
+            }
+        };
+        if field(0) != 0 || field(1) != 0 || (control & SE_SACL_PRESENT != 0 && field(2) != 0) {
+            return false;
+        }
+        let dacl = field(3);
+        if control & SE_DACL_PRESENT == 0 || dacl == 0 {
+            return true;
+        }
+        // ACL: revision, sbz, size u16, count u16 at 4; ACEs follow.
+        let count: u16 = rd(dacl as *const u8, 4);
+        let mut ace = dacl + 8;
+        for _ in 0..count {
+            let (kind, size, mask): (u8, u16, u32) = (rd(ace as *const u8, 0), rd(ace as *const u8, 2), rd(ace as *const u8, 4));
+            // ACCESS_ALLOWED_ACE with SID S-1-1-0: 1 sub-authority, authority 1, value 0.
+            let sid = ace as *const u8;
+            let everyone = rd::<u8>(sid, 9) == 1
+                && (0..6).all(|i| rd::<u8>(sid, 10 + i) == if i == 5 { 1 } else { 0 })
+                && rd::<u32>(sid, 16) == 0;
+            let full = mask & 0x1000_0000 != 0 || mask & 0x001F_0000 == 0x001F_0000;
+            if kind != 0 || !everyone || !full || size < 20 {
+                return false;
+            }
+            ace += size as u64;
+        }
+        count > 0
+    }
 }
 
 pub fn validate_attributes(p: u64) -> Result<(), u32> {

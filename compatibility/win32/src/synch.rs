@@ -30,17 +30,61 @@ const ONCE_ASYNC: u64 = 3;
 const INIT_ONCE_CHECK_ONLY: u32 = 1;
 const INIT_ONCE_ASYNC: u32 = 2;
 const INIT_ONCE_INIT_FAILED: u32 = 4;
-fn once_state(once: u64) -> &'static AtomicU64 {
-    unsafe { &*(once as *const AtomicU64) }
+/// INIT_ONCE is pointer-sized: 8 bytes for a 64-bit caller, 4 for a
+/// 32-bit (WoW64) one, whose context values are 32-bit too.
+enum OnceState {
+    Wide(&'static AtomicU64),
+    Narrow(&'static AtomicU32),
+}
+
+impl OnceState {
+    fn load(&self, order: Ordering) -> u64 {
+        match self {
+            OnceState::Wide(a) => a.load(order),
+            OnceState::Narrow(a) => a.load(order) as u64,
+        }
+    }
+    fn store(&self, v: u64, order: Ordering) {
+        match self {
+            OnceState::Wide(a) => a.store(v, order),
+            OnceState::Narrow(a) => a.store(v as u32, order),
+        }
+    }
+    fn compare_exchange(&self, old: u64, new: u64, success: Ordering, failure: Ordering) -> Result<u64, u64> {
+        match self {
+            OnceState::Wide(a) => a.compare_exchange(old, new, success, failure),
+            OnceState::Narrow(a) => {
+                a.compare_exchange(old as u32, new as u32, success, failure).map(u64::from).map_err(u64::from)
+            }
+        }
+    }
+}
+
+fn once_state(once: u64) -> OnceState {
+    // SAFETY: the caller's INIT_ONCE, aligned as `once_valid` checked.
+    unsafe {
+        if crate::wow64::is_active() {
+            OnceState::Narrow(&*(once as *const AtomicU32))
+        } else {
+            OnceState::Wide(&*(once as *const AtomicU64))
+        }
+    }
+}
+
+/// A non-null INIT_ONCE aligned to its size.
+fn once_valid(once: u64) -> bool {
+    once != 0 && once.is_multiple_of(if crate::wow64::is_active() { 4 } else { 8 })
 }
 pub(crate) extern "win64" fn InitOnceInitialize(once: u64) {
-    unsafe { &*(once as *const AtomicU64) }.store(0, Ordering::Relaxed);
+    if once_valid(once) {
+        once_state(once).store(0, Ordering::Relaxed);
+    }
 }
 pub(crate) extern "win64" fn InitOnceExecuteOnce(once: u64, callback: u64, parameter: u64, context: *mut u64) -> i32 {
-    if once == 0 || !once.is_multiple_of(8) || callback == 0 {
+    if !once_valid(once) || callback == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let state = unsafe { &*(once as *const AtomicU64) };
+    let state = once_state(once);
     loop {
         let old = state.load(Ordering::Acquire);
         if old & 3 == 2 {
@@ -81,7 +125,7 @@ pub(crate) extern "win64" fn InitOnceExecuteOnce(once: u64, callback: u64, param
 /// InitOnceComplete (others wait); asynchronous callers race and the first
 /// InitOnceComplete wins. Error codes follow Windows.
 extern "win64" fn InitOnceBeginInitialize(once: u64, flags: u32, pending: *mut i32, context: *mut u64) -> i32 {
-    if once == 0 || !once.is_multiple_of(8) || pending.is_null() || flags & !(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC) != 0
+    if !once_valid(once) || pending.is_null() || flags & !(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC) != 0
         || flags == INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC
     {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -121,7 +165,7 @@ extern "win64" fn InitOnceBeginInitialize(once: u64, flags: u32, pending: *mut i
 extern "win64" fn InitOnceComplete(once: u64, flags: u32, context: u64) -> i32 {
     let failed = flags & INIT_ONCE_INIT_FAILED != 0;
     let asynchronous = flags & INIT_ONCE_ASYNC != 0;
-    if once == 0 || !once.is_multiple_of(8) || flags & !(INIT_ONCE_ASYNC | INIT_ONCE_INIT_FAILED) != 0
+    if !once_valid(once) || flags & !(INIT_ONCE_ASYNC | INIT_ONCE_INIT_FAILED) != 0
         || (failed && (asynchronous || context != 0)) || context & 3 != 0
     {
         return fail(ERROR_INVALID_PARAMETER, 0);

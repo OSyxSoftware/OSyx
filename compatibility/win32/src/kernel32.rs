@@ -512,9 +512,13 @@ extern "win64" fn CreateFileA(
     flags: u32,
     _template: u64,
 ) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,INVALID_HANDLE_VALUE); }
+    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, INVALID_HANDLE_VALUE) };
     // SAFETY: the caller passes a NUL-terminated name.
-    create_file_common(unsafe { sa(name) }, access, share, disposition, flags)
+    let h = create_file_common(unsafe { sa(name) }, access, share, disposition, flags);
+    if inherit && h != INVALID_HANDLE_VALUE {
+        objects::set_inheritable(h, true);
+    }
+    h
 }
 
 extern "win64" fn CreateFileW(
@@ -526,11 +530,16 @@ extern "win64" fn CreateFileW(
     flags: u32,
     _template: u64,
 ) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,INVALID_HANDLE_VALUE); }
+    // An inheritable file handle is marked so (CreateProcess does not pass
+    // files on: see inherit.rs).
+    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, INVALID_HANDLE_VALUE) };
     // SAFETY: as above.
     let path = unsafe { sw(name) };
     let traced = TRACE.load(Ordering::Relaxed).then(|| path.clone()).flatten();
     let h = create_file_common(path, access, share, disposition, flags);
+    if inherit && h != INVALID_HANDLE_VALUE {
+        objects::set_inheritable(h, true);
+    }
     if let Some(p) = traced {
         let result = if h == INVALID_HANDLE_VALUE { alloc::format!("failed: {}", teb::last_error()) } else { alloc::format!("{h:#x}") };
         os_std::eprintln!("winrun: CreateFileW({p}, access {access:#x}, share {share:#x}, disposition {disposition}, flags {flags:#x}) {result}");
@@ -709,7 +718,7 @@ fn complete_overlapped(ov: *const u8, n: u32) {
     }
 }
 
-extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u32, ov: *const u8) -> Bool {
+pub(crate) extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u32, ov: *const u8) -> Bool {
     if let Some(Object::Pipe(p)) = objects::get(h) {
         return crate::pipes::read_file(p, buf, n, read, ov as u64);
     }
@@ -1014,7 +1023,7 @@ pub fn filetime(ns: i64) -> u64 {
     (ns / 100 + 116_444_736_000_000_000) as u64
 }
 
-extern "win64" fn GetFileInformationByHandle(h: u64, out: *mut u8) -> Bool {
+pub(crate) extern "win64" fn GetFileInformationByHandle(h: u64, out: *mut u8) -> Bool {
     let s = match file_stat(h) {
         Ok(s) => s,
         Err(e) => return fail(e, FALSE),
@@ -2788,7 +2797,7 @@ extern "win64" fn HeapUnlock(h: u64) -> Bool {
 }
 
 /// Private heaps keep their block list and can be walked (heaps.rs).
-extern "win64" fn HeapWalk(h: u64, entry: *mut u8) -> Bool {
+pub(crate) extern "win64" fn HeapWalk(h: u64, entry: *mut u8) -> Bool {
     crate::heaps::walk(h, entry)
 }
 
@@ -2816,7 +2825,7 @@ extern "win64" fn GlobalFree(p: u64) -> u64 {
 }
 
 /// SYSTEM_INFO (48 bytes).
-extern "win64" fn GetSystemInfo(out: *mut u8) {
+pub(crate) extern "win64" fn GetSystemInfo(out: *mut u8) {
     if out.is_null() {
         return;
     }
@@ -2952,7 +2961,7 @@ extern "win64" fn GetModuleHandleW(name: *const u16) -> u64 {
     loader::get_module_handle(n.as_deref()).unwrap_or_else(|| fail(ERROR_MOD_NOT_FOUND, 0))
 }
 
-extern "win64" fn GetModuleHandleExW(flags: u32, name: *const u16, out: *mut u64) -> Bool {
+pub(crate) extern "win64" fn GetModuleHandleExW(flags: u32, name: *const u16, out: *mut u64) -> Bool {
     const PIN: u32 = 1;
     const UNCHANGED_REFCOUNT: u32 = 2;
     const FROM_ADDRESS: u32 = 4;
@@ -3006,7 +3015,7 @@ extern "win64" fn GetModuleFileNameA(h: u64, buf: *mut u8, size: u32) -> u32 {
     }
 }
 
-extern "win64" fn GetModuleFileNameW(h: u64, buf: *mut u16, size: u32) -> u32 {
+pub(crate) extern "win64" fn GetModuleFileNameW(h: u64, buf: *mut u16, size: u32) -> u32 {
     match module_name(h) {
         Some(n) => {
             let r = out_w(&n, buf, size);

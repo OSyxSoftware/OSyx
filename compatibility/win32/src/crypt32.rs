@@ -1239,8 +1239,57 @@ extern "win64" fn CryptAcquireCertificatePrivateKey(
     fail(CRYPT_E_NO_KEY_PROPERTY, 0)
 }
 
+/// CertCreateCertificateContext: a context for an encoded certificate,
+/// in no store.
+extern "win64" fn CertCreateCertificateContext(_encoding: u32, data: *const u8, len: u32) -> u64 {
+    if data.is_null() || len == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's `len` bytes.
+    let der = unsafe { core::slice::from_raw_parts(data, len as usize) };
+    make_context(0, 0, der).unwrap_or_else(|e| fail(e, 0))
+}
+
+/// CertAddCertificateContextToStore: the store gets a copy of the
+/// certificate (every disposition adds it, duplicates included).
+extern "win64" fn CertAddCertificateContextToStore(store: u64, ctx: u64, _disposition: u32, out: *mut u64) -> i32 {
+    let Some(der) = context_der(ctx) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let Some(s) = HANDLES.lock().unwrap().stores.get(&store).cloned() else { return fail(ERROR_INVALID_HANDLE, 0) };
+    let index = {
+        let mut certs = s.certs.lock().unwrap();
+        certs.push(der.clone());
+        certs.len() - 1
+    };
+    if !out.is_null() {
+        let c = make_context(store, index, &der).unwrap_or(0);
+        // SAFETY: the caller's out pointer.
+        unsafe { *out = c };
+    }
+    1
+}
+
+const CERT_E_CHAINING: u32 = 0x800B_010A;
+
+/// CertGetCertificateChain: OSyx has no trusted root store to build a
+/// chain to, so no chain is built (CERT_E_CHAINING).
+extern "win64" fn CertGetCertificateChain(
+    _engine: u64, _ctx: u64, _time: *const u64, _store: u64, _para: *const u8, _flags: u32, _reserved: u64, out: *mut u64,
+) -> i32 {
+    if !out.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *out = 0 };
+    }
+    fail(CERT_E_CHAINING, 0)
+}
+
+extern "win64" fn CertFreeCertificateChain(_chain: u64) {}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        CertCreateCertificateContext,
+        CertAddCertificateContextToStore,
+        CertGetCertificateChain,
+        CertFreeCertificateChain,
         CryptQueryObject,
         CryptMsgOpenToDecode,
         CryptMsgUpdate,

@@ -355,7 +355,7 @@ unsafe fn ws(p: *const u16) -> String {
     unsafe { path::wide_to_string(p) }.unwrap_or_default()
 }
 
-extern "win64" fn RegOpenKeyExW(hkey: u64, sub: *const u16, options: u32, sam: u32, out: *mut u64) -> u32 {
+pub(crate) extern "win64" fn RegOpenKeyExW(hkey: u64, sub: *const u16, options: u32, sam: u32, out: *mut u64) -> u32 {
     if out.is_null() || options & !0x8 != 0 {
         return ERROR_INVALID_PARAMETER;
     }
@@ -380,7 +380,7 @@ extern "win64" fn RegOpenKeyExW(hkey: u64, sub: *const u16, options: u32, sam: u
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn RegCreateKeyExW(
+pub(crate) extern "win64" fn RegCreateKeyExW(
     hkey: u64,
     sub: *const u16,
     _reserved: u32,
@@ -499,7 +499,7 @@ fn copy_out(data: &[u8], buf: *mut u8, size: *mut u32) -> u32 {
     ERROR_SUCCESS
 }
 
-extern "win64" fn RegQueryValueExW(hkey: u64, name: *const u16, reserved: *const u32, kind: *mut u32, buf: *mut u8, size: *mut u32) -> u32 {
+pub(crate) extern "win64" fn RegQueryValueExW(hkey: u64, name: *const u16, reserved: *const u32, kind: *mut u32, buf: *mut u8, size: *mut u32) -> u32 {
     if !reserved.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
@@ -608,7 +608,7 @@ extern "win64" fn RegGetValueW(hkey: u64, sub: *const u16, name: *const u16, fla
     zero(copy_out(&data, buf, size))
 }
 
-extern "win64" fn RegSetValueExW(hkey: u64, name: *const u16, _reserved: u32, kind: u32, data: *const u8, size: u32) -> u32 {
+pub(crate) extern "win64" fn RegSetValueExW(hkey: u64, name: *const u16, _reserved: u32, kind: u32, data: *const u8, size: u32) -> u32 {
     if data.is_null() && size != 0 {
         return ERROR_NOACCESS;
     }

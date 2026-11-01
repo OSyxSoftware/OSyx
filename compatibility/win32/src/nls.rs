@@ -396,7 +396,7 @@ fn finish_a(r: Result<String, u32>, buf: *mut u8, size: i32) -> i32 {
     }
 }
 
-extern "win64" fn GetDateFormatEx(
+pub(crate) extern "win64" fn GetDateFormatEx(
     name: *const u16,
     flags: u32,
     st: *const [u16; 8],
@@ -419,7 +419,7 @@ extern "win64" fn GetDateFormatA(lcid: u32, flags: u32, st: *const [u16; 8], fmt
     finish_a(format_date(en_us, flags, st, unsafe { path::ansi_to_string(fmt) }), buf, size)
 }
 
-extern "win64" fn GetTimeFormatEx(name: *const u16, flags: u32, st: *const [u16; 8], fmt: *const u16, buf: *mut u16, size: i32) -> i32 {
+pub(crate) extern "win64" fn GetTimeFormatEx(name: *const u16, flags: u32, st: *const [u16; 8], fmt: *const u16, buf: *mut u16, size: i32) -> i32 {
     let Some(en_us) = locale::locale(name) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     // SAFETY: NULL or a NUL-terminated picture.
     finish_w(format_time(en_us, flags, st, unsafe { path::wide_to_string(fmt) }), buf, size)

@@ -1324,6 +1324,11 @@ fn register_class_ex(wc: *const u8, wide: bool) -> u16 {
     if wc.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
+    // The 32-bit WNDCLASSEX is the 32-bit WNDCLASS after cbSize.
+    if crate::wow64::is_active() {
+        // SAFETY: the caller's 48-byte WNDCLASSEX.
+        return register_class(unsafe { wc.add(4) }, wide);
+    }
     // WNDCLASSEX: cbSize@0 style@4 proc@8 cls@16 wnd@20 inst@24 icon@32
     // cursor@40 bg@48 menu@56 name@64 iconsm@72.
     let mut tmp = [0u8; 72];
@@ -1817,6 +1822,11 @@ fn write_rect(r: *mut i32, x: Rect) {
 }
 
 extern "win64" fn GetClientRect(hwnd: u64, r: *mut i32) -> Bool {
+    if hwnd == DESKTOP_WINDOW {
+        let (_, _, w, h) = screen_rect();
+        write_rect(r, Rect::new(0, 0, w as u32, h as u32));
+        return TRUE;
+    }
     match with(|g| g.windows.get(&hwnd).map(|w| w.size)) {
         Some((w, h)) => {
             write_rect(r, Rect::new(0, 0, w, h));
@@ -1832,6 +1842,11 @@ pub(crate) fn window_rect(hwnd: u64) -> Option<[i32; 4]> {
 }
 
 extern "win64" fn GetWindowRect(hwnd: u64, r: *mut i32) -> Bool {
+    if hwnd == DESKTOP_WINDOW {
+        let (x, y, w, h) = screen_rect();
+        write_rect(r, Rect::new(x, y, w as u32, h as u32));
+        return TRUE;
+    }
     match with(|g| g.windows.get(&hwnd).and_then(|w| Some((screen_origin(&g.windows, hwnd)?, w.size)))) {
         Some(((x, y), (w, h))) => {
             write_rect(r, Rect::new(x, y, w, h));
@@ -2663,12 +2678,12 @@ extern "win64" fn GetDlgItem(dialog: u64, id: i32) -> u64 {
     })
 }
 
-extern "win64" fn SetDlgItemTextW(dialog: u64, id: i32, text: *const u16) -> Bool {
+pub(crate) extern "win64" fn SetDlgItemTextW(dialog: u64, id: i32, text: *const u16) -> Bool {
     let item = GetDlgItem(dialog, id);
     if item == 0 { FALSE } else { SetWindowTextW(item, text) }
 }
 
-extern "win64" fn GetDlgItemTextW(dialog: u64, id: i32, buf: *mut u16, max: i32) -> u32 {
+pub(crate) extern "win64" fn GetDlgItemTextW(dialog: u64, id: i32, buf: *mut u16, max: i32) -> u32 {
     let item = GetDlgItem(dialog, id);
     if item == 0 { 0 } else { GetWindowTextW(item, buf, max) as u32 }
 }
@@ -2795,7 +2810,7 @@ extern "win64" fn CreateDialogParamW(module: u64, name: u64, owner: u64, proc_: 
     create_dialog(module, name, owner, proc_, param, false).unwrap_or_else(|e| fail(e, 0))
 }
 
-extern "win64" fn DialogBoxParamW(module: u64, name: u64, owner: u64, proc_: u64, param: u64) -> i64 {
+pub(crate) extern "win64" fn DialogBoxParamW(module: u64, name: u64, owner: u64, proc_: u64, param: u64) -> i64 {
     let was_enabled = owner != 0 && IsWindowEnabled(owner) != 0;
     let hwnd = match create_dialog(module, name, owner, proc_, param, true) {
         Ok(h) => h,
@@ -2876,6 +2891,102 @@ extern "win64" fn PostMessageA(hwnd: u64, msg: u32, w: u64, l: i64) -> Bool {
 
 pub(crate) extern "win64" fn PostMessageW(hwnd: u64, msg: u32, w: u64, l: i64) -> Bool {
     PostMessageA(hwnd, msg, w, l)
+}
+
+/// The handle GetDesktopWindow returns: the screen, for GetWindowRect,
+/// GetClientRect and MonitorFromWindow. It is not a window of any program.
+const DESKTOP_WINDOW: u64 = 0x0001_0010;
+
+extern "win64" fn GetDesktopWindow() -> u64 {
+    DESKTOP_WINDOW
+}
+
+/// PostThreadMessage: a message with no window in the queue of thread
+/// `tid`, which its GetMessage/PeekMessage loop receives.
+extern "win64" fn PostThreadMessageW(tid: u32, msg: u32, w: u64, l: i64) -> Bool {
+    if tid == 0 {
+        return fail(ERROR_INVALID_THREAD_ID_P, FALSE);
+    }
+    with(|g| {
+        let time = g.now_ms();
+        let pt = g.screen_pointer;
+        let thread = tid as u64;
+        g.queue.push_back(Msg { hwnd: 0, msg, wparam: w, lparam: l, time, pt, thread });
+        *g.fresh.entry(thread).or_insert(0) |= qs_kind(msg);
+    });
+    crate::objects::signal_all();
+    TRUE
+}
+
+const ERROR_INVALID_THREAD_ID_P: u32 = 1444;
+
+/// GetClassInfoEx: GetClassInfo's fields after cbSize, plus the small icon
+/// (the class icon). The 64-bit WNDCLASSEX moves style next to cbSize; the
+/// 32-bit one is WNDCLASS shifted by four bytes.
+extern "win64" fn GetClassInfoExW(inst: u64, name: *const u16, out: *mut u8) -> Bool {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let p = out as u64;
+    if crate::wow64::is_active() {
+        if GetClassInfoW(inst, name, (p + 4) as *mut u8) == FALSE {
+            return FALSE;
+        }
+        // SAFETY: the caller's 48-byte WNDCLASSEXW: hIconSm = hIcon.
+        unsafe { teb::put(p, 44, teb::get::<u32>(p, 24)) };
+        return TRUE;
+    }
+    // SAFETY: the caller's 80-byte WNDCLASSEXW.
+    let size: u32 = unsafe { teb::get(p, 0) };
+    if GetClassInfoW(inst, name, out) == FALSE {
+        return FALSE;
+    }
+    // SAFETY: as above.
+    unsafe {
+        let style: u32 = teb::get(p, 0);
+        teb::put(p, 0, size);
+        teb::put(p, 4, style);
+        teb::put(p, 72, teb::get::<u64>(p, 32));
+    }
+    TRUE
+}
+
+extern "win64" fn SetDlgItemTextA(dialog: u64, id: i32, text: *const u8) -> Bool {
+    // SAFETY: NULL or the caller's NUL-terminated string.
+    let s = unsafe { path::ansi_to_string(text) }.unwrap_or_default();
+    let w: Vec<u16> = s.encode_utf16().chain(core::iter::once(0)).collect();
+    SetDlgItemTextW(dialog, id, w.as_ptr())
+}
+
+extern "win64" fn SetDlgItemInt(dialog: u64, id: i32, value: u32, signed: Bool) -> Bool {
+    let s = if signed != 0 { alloc::format!("{}", value as i32) } else { alloc::format!("{value}") };
+    let w: Vec<u16> = s.encode_utf16().chain(core::iter::once(0)).collect();
+    SetDlgItemTextW(dialog, id, w.as_ptr())
+}
+
+extern "win64" fn GetDlgItemInt(dialog: u64, id: i32, ok: *mut i32, signed: Bool) -> u32 {
+    let mut buf = [0u16; 32];
+    let n = GetDlgItemTextW(dialog, id, buf.as_mut_ptr(), buf.len() as i32) as usize;
+    let text = String::from_utf16_lossy(&buf[..n.min(buf.len())]);
+    let t = text.trim();
+    let value = if signed != 0 { t.parse::<i32>().ok().map(|v| v as u32) } else { t.parse::<u32>().ok() };
+    if !ok.is_null() {
+        // SAFETY: the caller's BOOL.
+        unsafe { *ok = value.is_some() as i32 };
+    }
+    value.unwrap_or(0)
+}
+
+/// DialogBoxParamA: the template name is an integer resource or an ANSI
+/// string; everything else is DialogBoxParamW's.
+extern "win64" fn DialogBoxParamA(module: u64, name: u64, owner: u64, proc_: u64, param: u64) -> i64 {
+    if name < 0x10000 {
+        return DialogBoxParamW(module, name, owner, proc_, param);
+    }
+    // SAFETY: the caller's NUL-terminated template name.
+    let Some(s) = (unsafe { path::ansi_to_string(name as *const u8) }) else { return fail(ERROR_INVALID_PARAMETER, -1) };
+    let w: Vec<u16> = s.encode_utf16().chain(core::iter::once(0)).collect();
+    DialogBoxParamW(module, w.as_ptr() as u64, owner, proc_, param)
 }
 
 extern "win64" fn PostQuitMessage(code: i32) {
@@ -5927,7 +6038,7 @@ fn wide(p: *const u16) -> Option<String> {
     }
 }
 
-extern "win64" fn GetClassInfoW(_inst: u64, name: *const u16, out: *mut u8) -> Bool {
+pub(crate) extern "win64" fn GetClassInfoW(_inst: u64, name: *const u16, out: *mut u8) -> Bool {
     let Some(want) = wide(name) else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
     if out.is_null() {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
@@ -7926,6 +8037,13 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetMonitorInfoA,
         RegisterWindowMessageW,
         GetClassInfoW,
+        GetClassInfoExW,
+        GetDesktopWindow,
+        PostThreadMessageW,
+        SetDlgItemTextA,
+        SetDlgItemInt,
+        GetDlgItemInt,
+        DialogBoxParamA,
         GetClassInfoA,
         UnregisterClassW,
         GetClassLongPtrW,

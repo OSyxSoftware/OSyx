@@ -530,6 +530,16 @@ pub fn oleacc_exports() -> Vec<(&'static str, u64)> {
 pub fn msvcrt_exports() -> Vec<(&'static str, u64)> {
     let mut e = crate::ucrt::exports();
     let find = |e: &Vec<(&'static str, u64)>, n: &str| e.iter().find(|(k, _)| *k == n).map(|(_, a)| *a);
+    // msvcrt.dll exports the memory functions that the UCRT leaves to
+    // vcruntime (NSIS plugins such as StdUtils import memset from msvcrt).
+    let ntdll = crate::rtl::ntdll_exports();
+    for n in ["memcpy", "memmove", "memset", "memcmp"] {
+        if find(&e, n).is_none() {
+            if let Some(a) = find(&ntdll, n) {
+                e.push((n, a));
+            }
+        }
+    }
     if let (Some(malloc), Some(free)) = (find(&e, "malloc"), find(&e, "free")) {
         for n in ["??2@YAPAXI@Z", "??2@YAPEAX_K@Z"] {
             e.push((n, malloc));

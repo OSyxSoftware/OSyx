@@ -24,6 +24,7 @@ macro_rules! export_table {
     };
 }
 
+mod apiextra;
 mod crypt32;
 mod commdlg;
 mod comctl32;
