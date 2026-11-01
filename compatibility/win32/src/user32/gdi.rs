@@ -335,6 +335,45 @@ pub(super) fn resource_icon(g: &mut Gui, data: &[u8]) -> Option<(u64, u64)> {
     Some((mask_handle, color_handle))
 }
 
+/// A 32-bit copy of bitmap `h` resized to `w` x `height` (0 keeps that
+/// dimension) with bilinear filtering, or `None` when the size already
+/// matches. LoadImage stretches an image to the size the program asks for;
+/// NSIS loads its welcome and header images at the size of their controls.
+pub(super) fn scaled_bitmap(g: &mut Gui, h: u64, w: i32, height: i32) -> Option<u64> {
+    let src = g.bitmaps.get(&h)?;
+    let (sw, sh) = (src.dib.w, src.dib.h);
+    let (w, height) = (if w > 0 { w as u32 } else { sw }, if height > 0 { height as u32 } else { sh });
+    if (w, height) == (sw, sh) || sw == 0 || sh == 0 {
+        return None;
+    }
+    let mut out = Bitmap::new(Dib::new(w as i32, height as i32, 32)?, false);
+    let (d, sbits) = (out.dib.clone(), src.bits());
+    let bits = out.bits_mut();
+    // Source position of a destination pixel centre, in 1/256 pixels.
+    let map = |i: u32, from: u32, to: u32| -> (u32, u32, u32) {
+        let p = ((2 * i as i64 + 1) * from as i64 * 256 / (2 * to as i64) - 128).clamp(0, (from as i64 - 1) * 256) as u32;
+        (p >> 8, (p >> 8).saturating_add(1).min(from - 1), p & 255)
+    };
+    let mix = |a: Color, b: Color, f: u32| -> Color {
+        let mut c = 0u32;
+        for shift in [0, 8, 16, 24] {
+            let (x, y) = ((a >> shift) & 255, (b >> shift) & 255);
+            c |= ((x * (256 - f) + y * f) >> 8) << shift;
+        }
+        c
+    };
+    for y in 0..d.h {
+        let (y0, y1, fy) = map(y, sh, d.h);
+        for x in 0..d.w {
+            let (x0, x1, fx) = map(x, sw, d.w);
+            let top = mix(src.dib.pixel(sbits, x0, y0), src.dib.pixel(sbits, x1, y0), fx);
+            let bottom = mix(src.dib.pixel(sbits, x0, y1), src.dib.pixel(sbits, x1, y1), fx);
+            d.put(bits, x, y, mix(top, bottom, fy));
+        }
+    }
+    Some(insert_bitmap(g, out))
+}
+
 fn insert_bitmap(g: &mut Gui, b: Bitmap) -> u64 {
     let h = g.handle();
     g.bitmaps.insert(h, b);

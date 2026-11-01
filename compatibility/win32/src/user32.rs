@@ -147,6 +147,8 @@ struct Win {
     win: Option<Window>,
     /// State of a progress bar or list view.
     data: controls::ControlData,
+    /// WM_SETFONT: the font the control draws its text with (0: the default).
+    font: u64,
     pos: (i32, i32),
     /// Where PRISM shows the client area of a top-level window, learned from
     /// pointer events (`pos` is where the program asked for it).
@@ -1455,6 +1457,7 @@ fn create_window(
                 system_menu: 0,
                 win,
                 data: controls::ControlData::default(),
+                font: 0,
                 pos: (x.max(0), y.max(0)),
                 screen_origin: None,
                 size: (width, height),
@@ -2880,7 +2883,21 @@ extern "win64" fn PostQuitMessage(code: i32) {
 }
 
 extern "win64" fn DefWindowProcA(hwnd: u64, msg: u32, _w: u64, l: i64) -> i64 {
+    const WM_SETFONT: u32 = 0x0030;
+    const WM_GETFONT: u32 = 0x0031;
     match msg {
+        WM_SETFONT => {
+            with(|g| {
+                if let Some(w) = g.windows.get_mut(&hwnd) {
+                    w.font = _w;
+                }
+            });
+            if l & 0xFFFF != 0 {
+                InvalidateRect(hwnd, core::ptr::null(), TRUE);
+            }
+            0
+        }
+        WM_GETFONT => with(|g| g.windows.get(&hwnd).map_or(0, |w| w.font)) as i64,
         0x00F0 => with(|g| g.windows.get(&hwnd).map_or(0, |w| w.check_state as i64)), // BM_GETCHECK
         0x00F1 => { // BM_SETCHECK
             with(|g| { if let Some(w) = g.windows.get_mut(&hwnd) { w.check_state = (_w as u32).min(2); } });
@@ -3077,13 +3094,61 @@ fn paint_static_bitmap(hwnd: u64, dc: u64, style: u32, width: i32, height: i32) 
     gdi::DeleteDC(memory);
 }
 
+/// A check box (or radio button) 13 pixels square at (`x`, `y`) in the look
+/// of Windows 10: a white box with a dark frame, a tick when checked, a
+/// filled square for the indeterminate state (2); radio buttons are round
+/// with a dot.
+fn paint_check_box(dc: u64, x: i32, y: i32, radio: bool, check: u32, disabled: bool) {
+    let ink = CreateSolidBrush(if disabled { 0x00BF_BFBF } else { 0x0033_3333 });
+    let paper = CreateSolidBrush(if disabled { 0x00F0_F0F0 } else { 0x00FF_FFFF });
+    if radio {
+        // A circle of 13 pixels: row spans from the centre out.
+        const SPAN: [i32; 13] = [2, 4, 5, 6, 6, 6, 6, 6, 6, 6, 5, 4, 2];
+        for (row, &half) in SPAN.iter().enumerate() {
+            let y = y + row as i32;
+            FillRect(dc, [x + 6 - half, y, x + 7 + half, y + 1].as_ptr(), ink);
+            if row > 0 && row < 12 {
+                let inner = SPAN[row].min(if row == 1 || row == 11 { 2 } else { 5 });
+                FillRect(dc, [x + 6 - inner + 1, y, x + 7 + inner - 1, y + 1].as_ptr(), paper);
+            }
+        }
+        if check != 0 {
+            FillRect(dc, [x + 4, y + 5, x + 9, y + 8].as_ptr(), ink);
+            FillRect(dc, [x + 5, y + 4, x + 8, y + 9].as_ptr(), ink);
+        }
+    } else {
+        FillRect(dc, [x, y, x + 13, y + 13].as_ptr(), paper);
+        FrameRect(dc, [x, y, x + 13, y + 13].as_ptr(), ink);
+        match check {
+            1 => {
+                // A tick: down-right for three pixels, then up-right.
+                for k in 0..3 {
+                    FillRect(dc, [x + 3 + k, y + 6 + k, x + 5 + k, y + 8 + k].as_ptr(), ink);
+                }
+                for k in 0..4 {
+                    FillRect(dc, [x + 6 + k, y + 7 - k, x + 8 + k, y + 9 - k].as_ptr(), ink);
+                }
+            }
+            2 => {
+                FillRect(dc, [x + 3, y + 3, x + 10, y + 10].as_ptr(), ink);
+            }
+            _ => {}
+        }
+    }
+    DeleteObject(ink);
+    DeleteObject(paper);
+}
+
 /// Draws one stock control into its paint DC.
 fn paint_control(hwnd: u64, dc: u64) {
     const DT_RIGHT: u32 = 0x2;
     const DT_NOPREFIX: u32 = 0x800;
-    let Some((class, style, title, (width, height), check)) = with(|g| g.windows.get(&hwnd).map(|win| (
-        g.classes[win.class].name.to_ascii_uppercase(), win.style, strip_accelerator(&win.title), win.size, win.check_state))) else { return };
+    let Some((class, style, title, (width, height), check, font)) = with(|g| g.windows.get(&hwnd).map(|win| (
+        g.classes[win.class].name.to_ascii_uppercase(), win.style, strip_accelerator(&win.title), win.size, win.check_state, win.font))) else { return };
     let (width, height) = (width as i32, height as i32);
+    if font != 0 {
+        SelectObject(dc, font);
+    }
     let stock = |brush: u32| STOCK_BASE + brush as u64;
     let mut whole = [0, 0, width, height];
     let text: Vec<u16> = title.encode_utf16().chain(core::iter::once(0)).collect();
@@ -3114,53 +3179,114 @@ fn paint_control(hwnd: u64, dc: u64) {
                 4..=6 => { FillRect(dc, whole.as_ptr(), stock(match style & 0x1F { 4 => BLACK_BRUSH, 5 => GRAY_BRUSH, _ => WHITE_BRUSH })); }
                 7..=9 => { FrameRect(dc, whole.as_ptr(), stock(match style & 0x1F { 7 => BLACK_BRUSH, 8 => GRAY_BRUSH, _ => WHITE_BRUSH })); }
                 0xE => paint_static_bitmap(hwnd, dc, style, width, height),
+                // SS_ETCHEDHORZ / SS_ETCHEDVERT / SS_ETCHEDFRAME: a shadow line
+                // with a light line beside it (the separator above an
+                // installer's buttons).
+                0x10..=0x12 => {
+                    let shadow = CreateSolidBrush(0x00A0_A0A0);
+                    let light = stock(WHITE_BRUSH);
+                    match style & 0x1F {
+                        0x10 => {
+                            FillRect(dc, [0, 0, width, 1].as_ptr(), shadow);
+                            FillRect(dc, [0, 1, width, 2].as_ptr(), light);
+                        }
+                        0x11 => {
+                            FillRect(dc, [0, 0, 1, height].as_ptr(), shadow);
+                            FillRect(dc, [1, 0, 2, height].as_ptr(), light);
+                        }
+                        _ => {
+                            FrameRect(dc, [1, 1, width, height].as_ptr(), light);
+                            FrameRect(dc, [0, 0, width - 1, height - 1].as_ptr(), shadow);
+                        }
+                    }
+                    DeleteObject(shadow);
+                }
                 _ => {}
             }
         }
         "BUTTON" => match style & BS_TYPE_MASK {
             BS_CHECKBOX | BS_AUTOCHECKBOX | BS_3STATE | BS_RADIOBUTTON | BS_AUTORADIOBUTTON => {
+                const BS_MULTILINE: u32 = 0x2000;
+                const BS_LEFTTEXT: u32 = 0x20;
                 let brush = ctl_color(hwnd, dc, WM_CTLCOLORSTATIC);
                 if brush != 0 {
                     FillRect(dc, whole.as_ptr(), brush);
                 }
+                let radio = matches!(style & BS_TYPE_MASK, BS_RADIOBUTTON | BS_AUTORADIOBUTTON);
                 let top = (height - 13).max(0) / 2;
-                let boxr = [0, top, 13, top + 13];
-                FillRect(dc, boxr.as_ptr(), stock(WHITE_BRUSH));
-                FrameRect(dc, boxr.as_ptr(), stock(BLACK_BRUSH));
-                if check != 0 {
-                    let mark = [4, top + 4, 9, top + 9];
-                    FillRect(dc, mark.as_ptr(), stock(BLACK_BRUSH));
+                let left = if style & BS_LEFTTEXT != 0 { (width - 13).max(0) } else { 0 };
+                paint_check_box(dc, left, top, radio, check, disabled);
+                let mut label = if style & BS_LEFTTEXT != 0 { [0, 0, (width - 19).max(0), height] } else { [19, 0, width, height] };
+                if style & BS_MULTILINE != 0 {
+                    // Several lines, centred as a block like Windows does.
+                    let mut measure = label;
+                    DrawTextW(dc, text.as_ptr(), -1, measure.as_mut_ptr(), DT_WORDBREAK | DT_NOPREFIX | 0x400); // DT_CALCRECT
+                    let block = measure[3] - measure[1];
+                    label[1] = ((height - block) / 2).max(0);
+                    put_text(&mut label, DT_WORDBREAK);
+                } else {
+                    put_text(&mut label, DT_VCENTER | DT_SINGLELINE);
                 }
-                let mut label = [19, 0, width, height];
-                put_text(&mut label, DT_VCENTER | DT_SINGLELINE);
             }
             BS_GROUPBOX => {
-                ctl_color(hwnd, dc, WM_CTLCOLORSTATIC);
-                let mut frame = [0, 6, width, height];
-                FrameRect(dc, frame.as_mut_ptr(), stock(GRAY_BRUSH));
-                let mut label = [8, 0, width, 14];
+                // The frame is a light line; the caption sits on the parent's
+                // background, interrupting it.
+                let brush = ctl_color(hwnd, dc, WM_CTLCOLORSTATIC);
+                let line = CreateSolidBrush(0x00DC_DCDC);
+                FrameRect(dc, [0, 7, width, height].as_ptr(), line);
+                DeleteObject(line);
+                let mut measure = [0, 0, width, height];
+                DrawTextW(dc, text.as_ptr(), -1, measure.as_mut_ptr(), DT_SINGLELINE | DT_NOPREFIX | 0x400); // DT_CALCRECT
+                if measure[2] > 0 && !title.is_empty() {
+                    let back = if brush != 0 { brush } else { CreateSolidBrush(0x00F0_F0F0) };
+                    FillRect(dc, [6, 0, (measure[2] + 10).min(width), 15].as_ptr(), back);
+                    if brush == 0 {
+                        DeleteObject(back);
+                    }
+                }
+                let mut label = [8, 0, width, 15];
                 put_text(&mut label, DT_SINGLELINE);
             }
-            // Push buttons; a default button (1) has the heavier frame.
+            // Push buttons in the look of Windows 10: a light face and a grey
+            // frame; the default button's frame is the accent blue.
             _ => {
                 // The colours a parent may choose do not apply to push buttons.
                 ctl_color(hwnd, dc, WM_CTLCOLORBTN);
-                SetTextColor(dc, if disabled { 0x0080_8080 } else { 0 });
-                FillRect(dc, whole.as_ptr(), stock(LTGRAY_BRUSH));
-                FrameRect(dc, whole.as_ptr(), stock(BLACK_BRUSH));
-                if style & BS_TYPE_MASK == 1 && width > 4 && height > 4 {
-                    let inner = [1, 1, width - 1, height - 1];
-                    FrameRect(dc, inner.as_ptr(), stock(BLACK_BRUSH));
+                let default = style & BS_TYPE_MASK == 1;
+                let (face, frame, ink) = if disabled {
+                    (0x00CC_CCCC, 0x00BF_BFBF, 0x0083_8383)
+                } else if default {
+                    (0x00E1_E1E1, 0x00D7_7800, 0)
+                } else {
+                    (0x00E1_E1E1, 0x00AD_ADAD, 0)
+                };
+                let face = CreateSolidBrush(face);
+                FillRect(dc, whole.as_ptr(), face);
+                DeleteObject(face);
+                let frame = CreateSolidBrush(frame);
+                FrameRect(dc, whole.as_ptr(), frame);
+                if default && !disabled && width > 4 && height > 4 {
+                    FrameRect(dc, [1, 1, width - 1, height - 1].as_ptr(), frame);
                 }
+                DeleteObject(frame);
+                SetTextColor(dc, ink);
                 put_text(&mut whole, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
         },
         "EDIT" => {
-            // Read-only and disabled edits are coloured like statics.
-            let brush = ctl_color(hwnd, dc, if style & 0x800 != 0 || disabled { WM_CTLCOLORSTATIC } else { WM_CTLCOLOREDIT });
-            FillRect(dc, whole.as_ptr(), if brush != 0 { brush } else { stock(WHITE_BRUSH) });
-            FrameRect(dc, whole.as_ptr(), stock(GRAY_BRUSH));
-            let mut inner = [3, 2, (width - 3).max(3), (height - 2).max(2)];
+            // Read-only and disabled edits are coloured like statics and
+            // default to the dialog face.
+            let quiet = style & 0x800 != 0 || disabled;
+            let brush = ctl_color(hwnd, dc, if quiet { WM_CTLCOLORSTATIC } else { WM_CTLCOLOREDIT });
+            let own = (brush == 0).then(|| CreateSolidBrush(if quiet { 0x00F0_F0F0 } else { 0x00FF_FFFF }));
+            FillRect(dc, whole.as_ptr(), own.unwrap_or(brush));
+            if let Some(b) = own {
+                DeleteObject(b);
+            }
+            let frame = CreateSolidBrush(if disabled { 0x00CC_CCCC } else { 0x007A_7A7A });
+            FrameRect(dc, whole.as_ptr(), frame);
+            DeleteObject(frame);
+            let mut inner = [4, 2, (width - 4).max(4), (height - 2).max(2)];
             put_text(&mut inner, if style & 0x4 != 0 { DT_WORDBREAK } else { DT_SINGLELINE | DT_VCENTER });
         }
         _ => {}
@@ -3841,9 +3967,18 @@ fn load_bitmap(inst: u64, name: u64, flags: u32) -> u64 {
     }
 }
 
-extern "win64" fn LoadImageW(inst: u64, name: u64, kind: u32, _w: i32, _h: i32, flags: u32) -> u64 {
+extern "win64" fn LoadImageW(inst: u64, name: u64, kind: u32, w: i32, h: i32, flags: u32) -> u64 {
     if kind == IMAGE_BITMAP {
-        return load_bitmap(inst, name, flags);
+        let bitmap = load_bitmap(inst, name, flags);
+        // A requested size stretches the image (NSIS fits its welcome image
+        // to the control this way); 0 keeps that dimension.
+        if bitmap != 0 && (w > 0 || h > 0) {
+            if let Some(scaled) = with(|g| gdi::scaled_bitmap(g, bitmap, w, h)) {
+                DeleteObject(bitmap);
+                return scaled;
+            }
+        }
+        return bitmap;
     }
     if inst == 0 && name < 0x10000 && flags & LR_LOADFROMFILE == 0 && matches!(kind, IMAGE_ICON | IMAGE_CURSOR) {
         return LoadCursorA(0, name);
@@ -5597,12 +5732,20 @@ extern "win64" fn IsWindowEnabled(wnd: u64) -> Bool {
 }
 
 extern "win64" fn EnableWindow(wnd: u64, enable: Bool) -> Bool {
-    with(|g| {
-        let Some(w) = g.windows.get_mut(&wnd) else { return FALSE };
+    let Some(disabled) = with(|g| {
+        let w = g.windows.get_mut(&wnd)?;
         let disabled = w.style & 0x08000000 != 0;
         if enable != 0 { w.style &= !0x08000000; } else { w.style |= 0x08000000; }
-        disabled as Bool
-    })
+        Some(disabled)
+    }) else {
+        return FALSE;
+    };
+    // A control drawn while disabled (an installer's Back or Cancel button)
+    // must not keep that look once enabled, and the other way round.
+    if disabled == (enable != 0) {
+        InvalidateRect(wnd, core::ptr::null(), TRUE);
+    }
+    disabled as Bool
 }
 
 extern "win64" fn GetWindowThreadProcessId(wnd: u64, pid_out: *mut u32) -> u32 {
