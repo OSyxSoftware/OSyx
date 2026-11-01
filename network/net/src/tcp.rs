@@ -568,9 +568,12 @@ impl Tcb {
     pub fn recv(&mut self, out: &mut [u8]) -> Result<usize, TcpError> {
         if !self.recv_buf.is_empty() {
             let n = out.len().min(self.recv_buf.len());
-            for (o, b) in out.iter_mut().zip(self.recv_buf.drain(..n)) {
-                *o = b;
-            }
+            // Copy from the ring's two halves, then drop what was read.
+            let (a, b) = self.recv_buf.as_slices();
+            let k = n.min(a.len());
+            out[..k].copy_from_slice(&a[..k]);
+            out[k..n].copy_from_slice(&b[..n - k]);
+            self.recv_buf.drain(..n);
             // Window update once a useful amount of space opened up
             // (receiver-side silly window avoidance, RFC 9293 3.8.6.2.2).
             let mss = self.mss() as u32;
