@@ -123,8 +123,11 @@ def user_frame(maps, pid, rip):
     if i >= 0 and rip < mods[i][0] + mods[i][1]:
         base, size, name = mods[i]
         return name, rip - base
+    # Static programs load at 4 MiB, winrun at 1 GiB.
     if 0x400000 <= rip < 0x800000:
         return 'winrun', rip - 0x400000
+    if 0x40000000 <= rip < 0x41000000:
+        return 'winrun', rip - 0x40000000
     return None, rip
 
 
@@ -243,6 +246,12 @@ def main():
     sysn = syscall_names(a.abi)
     labels = process_labels(lines)
     maps = module_maps(lines)
+    # Thread names winrun logs for SetThreadDescription when profiling.
+    thread_names = {}
+    for ln in lines:
+        m = re.search(r'winrun: thread (\d+) name (.+)$', ln)
+        if m:
+            thread_names[int(m.group(1))] = m.group(2).strip()
     begin = next((l for l in lines if 'prof: begin' in l), None)
     if not begin:
         sys.exit('no "prof: begin" line: boot with prof=<seconds> and wait for the dump')
@@ -261,7 +270,7 @@ def main():
         kind, pid, tid, sysnr, count = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
         frames = [int(x, 16) for x in m.group(6).split()]
         proc = labels.get(pid, 'kernel' if pid == 0 else 'pid %d' % pid)
-        thread = 'tid %d' % tid
+        thread = 'tid %d %s' % (tid, thread_names[tid]) if tid in thread_names else 'tid %d' % tid
         if kind == 'U':
             mod, off = user_frame(maps, pid, frames[0])
             usym = user_symbols(proc) if mod == 'winrun' else None

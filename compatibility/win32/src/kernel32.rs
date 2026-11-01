@@ -1799,6 +1799,67 @@ extern "win64" fn GetThreadPriority(h: u64) -> i32 {
     PRIORITIES.lock().unwrap().get(&tid).copied().unwrap_or(0)
 }
 
+/// Thread descriptions (SetThreadDescription) by thread id, as UTF-16.
+static DESCRIPTIONS: Mutex<alloc::collections::BTreeMap<u32, Vec<u16>>> = Mutex::new(alloc::collections::BTreeMap::new());
+const E_INVALIDARG: u32 = 0x8007_0057;
+const E_OUTOFMEMORY: u32 = 0x8007_000E;
+const E_HANDLE: u32 = 0x8007_0006; // HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE)
+
+/// SetThreadDescription. With OSYX_WINRUN_MODULES=1 (profiling) the name
+/// also goes to the log, so profiler samples by thread id get a name.
+extern "win64" fn SetThreadDescription(h: u64, desc: *const u16) -> u32 {
+    let tid = GetThreadId(h);
+    if tid == 0 {
+        return E_HANDLE;
+    }
+    if desc.is_null() {
+        return E_INVALIDARG;
+    }
+    let mut units = Vec::new();
+    // SAFETY: the caller's NUL-terminated string; a UNICODE_STRING holds
+    // at most 32767 characters.
+    while units.len() <= 32767 {
+        let c = unsafe { *desc.add(units.len()) };
+        if c == 0 {
+            break;
+        }
+        units.push(c);
+    }
+    if units.len() > 32767 {
+        return E_INVALIDARG;
+    }
+    if os_std::env::var("OSYX_WINRUN_MODULES").is_ok_and(|v| v == "1") {
+        let name: String = char::decode_utf16(units.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')).collect();
+        os_std::eprintln!("winrun: thread {tid} name {name}");
+    }
+    DESCRIPTIONS.lock().unwrap().insert(tid, units);
+    0
+}
+
+/// GetThreadDescription: a LocalAlloc'd copy (empty when none was set)
+/// the caller frees with LocalFree.
+extern "win64" fn GetThreadDescription(h: u64, out: *mut u64) -> u32 {
+    let tid = GetThreadId(h);
+    if tid == 0 {
+        return E_HANDLE;
+    }
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    let units = DESCRIPTIONS.lock().unwrap().get(&tid).cloned().unwrap_or_default();
+    let p = LocalAlloc(0, (units.len() + 1) * 2);
+    if p == 0 {
+        return E_OUTOFMEMORY;
+    }
+    // SAFETY: a fresh allocation of len + 1 units; `out` is the caller's.
+    unsafe {
+        core::ptr::copy_nonoverlapping(units.as_ptr(), p as *mut u16, units.len());
+        *(p as *mut u16).add(units.len()) = 0;
+        *out = p;
+    }
+    0
+}
+
 extern "win64" fn Sleep(ms: u32) {
     if ms == 0 {
         os_std::thread::yield_now();
@@ -3321,6 +3382,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ExitThread,
         GetExitCodeThread,
         GetThreadId,
+        SetThreadDescription,
+        GetThreadDescription,
         Sleep,
         SleepEx,
         SwitchToThread,
