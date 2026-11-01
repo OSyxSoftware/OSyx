@@ -644,6 +644,131 @@ extern "win64" fn CharLowerBuffW(s: *mut u16, n: u32) -> u32 {
     n
 }
 
+// ---- resources, threads, power ---------------------------------------------------------
+
+/// A resource type or name argument: MAKEINTRESOURCE, "#123" or a string.
+fn res_id(p: u64) -> Option<crate::loader::ResId> {
+    if p < 0x10000 {
+        return Some(crate::loader::ResId::Id(p as u16));
+    }
+    // SAFETY: the caller's NUL-terminated name.
+    let s = unsafe { path::wide_to_string(p as *const u16) }?;
+    Some(match s.strip_prefix('#').and_then(|n| n.parse::<u16>().ok()) {
+        Some(n) => crate::loader::ResId::Id(n),
+        None => crate::loader::ResId::Name(s.encode_utf16().collect()),
+    })
+}
+
+/// EnumResourceNamesW: calls ENUMRESNAMEPROCW(module, type, name, param)
+/// for every resource of the type; a string name is passed as a string,
+/// an id as MAKEINTRESOURCE. A FALSE from the callback stops with
+/// ERROR_RESOURCE_ENUM_USER_STOP.
+extern "win64" fn EnumResourceNamesW(module: u64, kind: u64, proc_: u64, param: u64) -> Bool {
+    const ERROR_RESOURCE_ENUM_USER_STOP: u32 = 15106;
+    let Some(k) = res_id(kind) else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
+    if proc_ == 0 {
+        return fail(ERROR_NOACCESS, FALSE);
+    }
+    let names = match crate::loader::resource_names(module, &k) {
+        Ok(n) => n,
+        Err(e) => return fail(e, FALSE),
+    };
+    let handle = if module == 0 { crate::loader::get_module_handle(None).unwrap_or(0) } else { module };
+    for name in names {
+        let text: Vec<u16>;
+        let arg = match name {
+            crate::loader::ResId::Id(id) => id as u64,
+            crate::loader::ResId::Name(units) => {
+                text = units.into_iter().chain(core::iter::once(0)).collect();
+                text.as_ptr() as u64
+            }
+        };
+        if crate::wow64::callback(proc_, &[handle, kind, arg, param]) as u32 == 0 {
+            return fail(ERROR_RESOURCE_ENUM_USER_STOP, FALSE);
+        }
+    }
+    TRUE
+}
+
+/// FreeLibraryAndExitThread: releases the module, then ends the thread.
+extern "win64" fn FreeLibraryAndExitThread(module: u64, code: u32) -> ! {
+    kernel32::FreeLibrary(module);
+    kernel32::ExitThread(code)
+}
+
+/// The arguments of a console control event's dispatch thread.
+struct CtrlEvent {
+    event: u32,
+    handlers: Vec<u64>,
+}
+
+/// GenerateConsoleCtrlEvent: raises CTRL_C_EVENT (0) or CTRL_BREAK_EVENT
+/// (1) for this process's group (0, or the process's own id): as on
+/// Windows, a new thread calls the handlers, newest first, until one
+/// returns TRUE; when none does the process ends with
+/// STATUS_CONTROL_C_EXIT. Ctrl+C is dropped while ignored. Other groups
+/// are no console group of this program: ERROR_INVALID_PARAMETER.
+extern "win64" fn GenerateConsoleCtrlEvent(event: u32, group: u32) -> Bool {
+    if event > 1 || (group != 0 && group as u64 != kernel32::pid()) {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let (handlers, ignore_c) = {
+        let h = crate::apiextra::CTRL_HANDLERS.lock().unwrap();
+        (h.0.clone(), h.1)
+    };
+    if event == 0 && ignore_c {
+        return TRUE;
+    }
+    let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(CtrlEvent { event, handlers }));
+    let thread = kernel32::CreateThread(0, 0, ctrl_dispatch as *const () as u64, arg as u64, 0, core::ptr::null_mut());
+    if thread == 0 {
+        // SAFETY: not handed to any thread.
+        drop(unsafe { alloc::boxed::Box::from_raw(arg) });
+        return FALSE;
+    }
+    kernel32::CloseHandle(thread);
+    TRUE
+}
+
+extern "win64" fn ctrl_dispatch(arg: u64) -> u32 {
+    const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+    // SAFETY: the Box made by GenerateConsoleCtrlEvent for this thread.
+    let CtrlEvent { event, handlers } = *unsafe { alloc::boxed::Box::from_raw(arg as *mut CtrlEvent) };
+    let handled = if crate::wow64::is_active() {
+        crate::wow64::with_thread32(|| handlers.iter().rev().any(|&h| crate::wow64::callback(h, &[event as u64]) as u32 != 0)).unwrap_or(false)
+    } else {
+        handlers.iter().rev().any(|&h| crate::wow64::callback(h, &[event as u64]) as u32 != 0)
+    };
+    if !handled {
+        kernel32::ExitProcess(STATUS_CONTROL_C_EXIT);
+    }
+    0
+}
+
+/// The calling thread's execution state (SetThreadExecutionState).
+static EXECUTION_STATE: os_std::sync::Mutex<alloc::collections::BTreeMap<u64, u32>> =
+    os_std::sync::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// SetThreadExecutionState: ES_SYSTEM_REQUIRED (1), ES_DISPLAY_REQUIRED
+/// (2), ES_AWAYMODE_REQUIRED (0x40), kept while ES_CONTINUOUS (0x80000000)
+/// is set; returns the thread's previous state (0 for invalid flags).
+/// OSyx does not suspend or blank the screen on idle, so the requests are
+/// already met.
+extern "win64" fn SetThreadExecutionState(flags: u32) -> u32 {
+    const ES_CONTINUOUS: u32 = 0x8000_0000;
+    const KNOWN: u32 = 0x1 | 0x2 | 0x4 | 0x40 | ES_CONTINUOUS;
+    if flags & !KNOWN != 0 || (flags & 0x40 != 0 && flags & ES_CONTINUOUS == 0) {
+        return 0;
+    }
+    let tid = os_sys::gettid();
+    let mut states = EXECUTION_STATE.lock().unwrap();
+    let previous = states.get(&tid).copied().unwrap_or(ES_CONTINUOUS);
+    if flags & ES_CONTINUOUS != 0 {
+        states.insert(tid, flags);
+    }
+    previous
+}
+
 pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
     export_table![
         CompareStringA,
@@ -662,6 +787,10 @@ pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
         CreateJobObjectA,
         DebugActiveProcess,
         DebugActiveProcessStop,
+        EnumResourceNamesW,
+        FreeLibraryAndExitThread,
+        GenerateConsoleCtrlEvent,
+        SetThreadExecutionState,
     ]
     .into_iter()
     .chain([

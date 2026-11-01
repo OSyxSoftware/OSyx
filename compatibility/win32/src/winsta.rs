@@ -208,6 +208,31 @@ extern "win64" fn OpenInputDesktop(flags: u32, _inherit: i32, _access: u32) -> u
     objects::insert(Object::Desktop(desktop))
 }
 
+/// OpenDesktopW: a desktop of the process's window station by name
+/// (the interactive one is "Default"); others are ERROR_FILE_NOT_FOUND.
+extern "win64" fn OpenDesktopW(name: *const u16, flags: u32, _inherit: i32, _access: u32) -> u64 {
+    if flags & !1 != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: a NUL-terminated name.
+    let Some(name) = (unsafe { path::wide_to_string(name) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let station = match station(GetProcessWindowStation()) {
+        Ok(w) => w,
+        Err(e) => return fail(e, 0),
+    };
+    let found = station.desktops.lock().unwrap().iter().find(|d| d.name.eq_ignore_ascii_case(&name)).cloned();
+    match found {
+        Some(d) => objects::insert(Object::Desktop(d)),
+        None => fail(ERROR_FILE_NOT_FOUND, 0),
+    }
+}
+
+extern "win64" fn OpenDesktopA(name: *const u8, flags: u32, inherit: i32, access: u32) -> u64 {
+    // SAFETY: a NUL-terminated name.
+    let w = unsafe { path::ansi_to_wide(name) };
+    OpenDesktopW(w.as_ref().map_or(core::ptr::null(), |w| w.as_ptr()), flags, inherit, access)
+}
+
 extern "win64" fn CloseWindowStation(h: u64) -> i32 {
     if let Err(e) = station(h) {
         return fail(e, 0);
@@ -352,6 +377,8 @@ extern "win64" fn WaitForInputIdle(h: u64, timeout: u32) -> u32 {
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        OpenDesktopW,
+        OpenDesktopA,
         OpenInputDesktop,
         SetThreadDesktop,
         CreateWindowStationW,

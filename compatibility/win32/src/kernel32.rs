@@ -3137,7 +3137,7 @@ extern "win64" fn LoadLibraryExW(name: *const u16, _file: u64, _flags: u32) -> u
     LoadLibraryW(name)
 }
 
-extern "win64" fn FreeLibrary(h: u64) -> Bool {
+pub(crate) extern "win64" fn FreeLibrary(h: u64) -> Bool {
     loader::free_library(h).map_or_else(|e| fail(e, FALSE), |_| TRUE)
 }
 

@@ -395,6 +395,16 @@ static CLIPBOARD: Mutex<(u64, Vec<proto::ClipEntry>)> = Mutex::new((0, Vec::new(
 
 /// IUnknown::AddRef (slot 1) or Release (slot 2) of a COM object.
 fn com_call(obj: u64, slot: usize) -> u32 {
+    // A 32-bit program's object has a vtable of 4-byte entries pointing at
+    // 32-bit stdcall code.
+    if crate::wow64::is_active() {
+        // SAFETY: as below, with 4-byte words.
+        let f = unsafe {
+            let vtbl = *(obj as *const u32) as u64;
+            *((vtbl + 4 * slot as u64) as *const u32)
+        };
+        return crate::wow64::callback(f as u64, &[obj]) as u32;
+    }
     // SAFETY: a COM object: its first word is its vtable; slots 1 and 2
     // take only `this`.
     unsafe {
@@ -568,8 +578,15 @@ extern "win64" fn ReleaseStgMedium(m: *mut u8) {
     if m.is_null() {
         return;
     }
-    // SAFETY: the caller's STGMEDIUM.
-    let (tymed, handle, unk) = unsafe { (*(m as *const u32), *(m.add(8) as *const u64), *(m.add(16) as *const u64)) };
+    // SAFETY: the caller's STGMEDIUM (x86: the handle at 4 and
+    // pUnkForRelease at 8, 4 bytes each).
+    let (tymed, handle, unk) = unsafe {
+        if crate::wow64::is_active() {
+            (*(m as *const u32), *(m.add(4) as *const u32) as u64, *(m.add(8) as *const u32) as u64)
+        } else {
+            (*(m as *const u32), *(m.add(8) as *const u64), *(m.add(16) as *const u64))
+        }
+    };
     if unk != 0 {
         com_call(unk, 2);
     } else if handle != 0 {

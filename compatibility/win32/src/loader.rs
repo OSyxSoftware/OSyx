@@ -1274,6 +1274,73 @@ pub fn get_proc_address(h: u64, sym: Symbol<'_>) -> Result<u64, u32> {
     })
 }
 
+/// A resource type or name: a 16-bit id or a string.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum ResId {
+    Id(u16),
+    Name(Vec<u16>),
+}
+
+/// The names of the resources of type `kind` in a mapped module (0: the
+/// program), from its resource directory: string names first, then ids,
+/// as the directory sorts them. Err(1813) when the module has no such type.
+pub(crate) fn resource_names(module: u64, kind: &ResId) -> Result<Vec<ResId>, u32> {
+    const ERROR_RESOURCE_DATA_NOT_FOUND: u32 = 1812;
+    const ERROR_RESOURCE_TYPE_NOT_FOUND: u32 = 1813;
+    let base = with(|l| {
+        let index = if module == 0 { Some(l.exe) } else { module_by_handle(l, module) };
+        index.and_then(|i| matches!(l.linker.modules[i].kind, Kind::Pe { .. }).then(|| l.linker.modules[i].base))
+    })
+    .ok_or(ERROR_MOD_NOT_FOUND)?;
+    // SAFETY: a mapped PE image: its headers, data directories and the
+    // resource directory they point to (the image is SizeOfImage bytes,
+    // validated when it was loaded).
+    unsafe {
+        let rd16 = |a: u64| core::ptr::read_unaligned(a as *const u16);
+        let rd32 = |a: u64| core::ptr::read_unaligned(a as *const u32);
+        let nt = base + rd32(base + 0x3C) as u64;
+        let opt = nt + 24;
+        let dirs = if rd16(opt) == 0x20B { opt + 112 } else { opt + 96 };
+        let rsrc = rd32(dirs + 8 * 2) as u64;
+        if rsrc == 0 {
+            return Err(ERROR_RESOURCE_DATA_NOT_FOUND);
+        }
+        let root = base + rsrc;
+        // Entries of a directory: (name or id, offset of the entry's data).
+        let entries = |dir: u64| -> Vec<(ResId, u32)> {
+            let n = rd16(dir + 12) as u64 + rd16(dir + 14) as u64;
+            (0..n.min(4096))
+                .map(|i| {
+                    let e = dir + 16 + 8 * i;
+                    let name = rd32(e);
+                    let id = if name & 0x8000_0000 != 0 {
+                        let s = root + (name & 0x7FFF_FFFF) as u64;
+                        let len = rd16(s) as usize;
+                        ResId::Name((0..len).map(|k| rd16(s + 2 + 2 * k as u64)).collect())
+                    } else {
+                        ResId::Id(name as u16)
+                    };
+                    (id, rd32(e + 4))
+                })
+                .collect()
+        };
+        let same = |a: &ResId, b: &ResId| match (a, b) {
+            (ResId::Id(x), ResId::Id(y)) => x == y,
+            (ResId::Name(x), ResId::Name(y)) => {
+                String::from_utf16_lossy(x).to_uppercase() == String::from_utf16_lossy(y).to_uppercase()
+            }
+            _ => false,
+        };
+        let Some((_, offset)) = entries(root).into_iter().find(|(id, _)| same(id, kind)) else {
+            return Err(ERROR_RESOURCE_TYPE_NOT_FOUND);
+        };
+        if offset & 0x8000_0000 == 0 {
+            return Err(ERROR_RESOURCE_TYPE_NOT_FOUND);
+        }
+        Ok(entries(root + (offset & 0x7FFF_FFFF) as u64).into_iter().map(|(id, _)| id).collect())
+    }
+}
+
 /// Numeric RT_DIALOG resource from a mapped PE module, copied outside lock.
 pub(crate) fn numeric_resource(module: u64, kind: u16, name: u64) -> Result<Vec<u8>, u32> {
     if name == 0 || name >= 0x10000 { return Err(50); }
@@ -1319,17 +1386,6 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
                 _ => 193, // ERROR_BAD_EXE_FORMAT
             }
         })?;
-        if wow64::is_active() {
-            for dep in l.linker.init_order(i) {
-                if let Kind::Pe { file, .. } = &l.linker.modules[dep].kind {
-                    let pe = PeFile::parse_any(file.as_ref()).map_err(|_| 193u32)?;
-                    if pe.tls().map_err(|_| 193u32)?.is_some() {
-                        os_std::eprintln!("winrun: LoadLibrary({name}): PE32 static TLS is not supported in {}", l.linker.modules[dep].name);
-                        return Err(50);
-                    }
-                }
-            }
-        }
         let todo = register_new(l, i);
         while l.state.len() < l.linker.modules.len() {
             l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false });
@@ -1343,6 +1399,12 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
     if !todo.is_empty() && !wow64::is_active() {
         // New TLS indices need blocks for this thread too.
         setup_thread_tls(teb::current());
+    } else if !todo.is_empty() {
+        // A 32-bit DLL with static TLS gets a block in every thread that
+        // runs 32-bit code, as Windows gives one to every existing thread.
+        for teb32 in wow64::thread_tebs32() {
+            setup_thread_tls32(teb32);
+        }
     }
     let attached = if wow64::is_active() {
         todo.iter().all(|(base, entry, callbacks, _)| {

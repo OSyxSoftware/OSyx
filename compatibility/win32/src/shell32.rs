@@ -1164,6 +1164,13 @@ extern "win64" fn Shell_NotifyIconW(_message: u32, _data: u64) -> i32 {
     crate::kernel32::fail(crate::error::ERROR_NOT_SUPPORTED, 0)
 }
 
+/// DragFinish: frees the HDROP (a global memory block) of a WM_DROPFILES.
+extern "win64" fn DragFinish(drop: u64) {
+    if drop != 0 {
+        crate::kernel32::heap_free(drop);
+    }
+}
+
 extern "win64" fn DragQueryFileW(drop: u64, index: u32, buf: *mut u16, count: u32) -> u32 {
     if drop == 0 { return 0; }
     // SAFETY: HDROP is an HGLOBAL returned by the data object.
@@ -1236,6 +1243,7 @@ extern "win64" fn SHGetDesktopFolder(out: *mut u64) -> u32 {
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        DragFinish,
         SHGetDesktopFolder,
         SHCloneSpecialIDList,
         IsUserAnAdmin,
@@ -1265,4 +1273,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         SetCurrentProcessExplicitAppUserModelID,
         SHGetPropertyStoreForWindow,
     ]
+    .into_iter()
+    .chain([("DragAcceptFiles", crate::user32::DragAcceptFiles as *const () as u64)])
+    .collect()
 }

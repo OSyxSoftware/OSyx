@@ -147,6 +147,15 @@ struct Entry {
 /// The bridge whose stubs are live; set once, just before `iretq`.
 static ACTIVE: AtomicPtr<Bridge> = AtomicPtr::new(core::ptr::null_mut());
 
+/// The TEB32 of every live thread that runs 32-bit code: a DLL loaded
+/// later gives each of them its static TLS block.
+static THREAD_TEBS32: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// The TEB32s of the live 32-bit threads.
+pub(crate) fn thread_tebs32() -> Vec<u32> {
+    THREAD_TEBS32.lock().unwrap().clone()
+}
+
 /// Per-thread bridge state; the gate and the callback landing use the
 /// offsets in the comments, keep them in sync with the assembly.
 #[repr(C)]
@@ -536,6 +545,7 @@ impl Bridge {
         // The main thread's Ctx: the static gate stack and the arena TEB32.
         let host_top = core::ptr::addr_of_mut!(BRIDGE_STACK) as u64 + BRIDGE_STACK_SIZE as u64;
         install_ctx(self.stack_top as u64, host_top, self.teb as u64);
+        THREAD_TEBS32.lock().unwrap().push(self.teb);
         Ok(())
     }
 
@@ -760,6 +770,12 @@ extern "win64" fn thread32_main(arg: u64) -> u32 {
 /// for 32-bit callbacks.
 pub(crate) fn callback(f: u64, args: &[u64]) -> u64 {
     if is_active() {
+        // A runtime thread (a winmm or timer worker) gets 32-bit state the
+        // first time it calls back into the program, and keeps it.
+        if ctx().is_null() && setup_thread32().is_none() {
+            os_std::eprintln!("winrun: wow64: no memory for a 32-bit callback thread");
+            return 0;
+        }
         let slots: Vec<u32> = args.iter().map(|&a| a as u32).collect();
         return call32(f as u32, &slots) as u64;
     }
@@ -773,9 +789,27 @@ pub(crate) fn run_thread32(start: u32, param: u32) -> u32 {
     if crate::VERBOSE.load(Ordering::Relaxed) {
         os_std::eprintln!("winrun: wow64 thread start {start:#x}({param:#x})");
     }
+    with_thread32(|| call32(start, &[param])).unwrap_or(0xC000_0017) // STATUS_NO_MEMORY
+}
+
+/// Gives the calling host thread (one the runtime started, with a TEB64)
+/// what 32-bit code needs, runs `f` (which may call 32-bit code with
+/// [`call32`]) between DLL_THREAD_ATTACH and DETACH, and returns its
+/// result; None without memory for the 32-bit stack.
+pub(crate) fn with_thread32<R>(f: impl FnOnce() -> R) -> Option<R> {
+    let teb = setup_thread32()?;
+    let r = f();
+    notify_dlls32(crate::loader::DLL_THREAD_DETACH);
+    THREAD_TEBS32.lock().unwrap().retain(|&t| t != teb);
+    Some(r)
+}
+
+/// Gives the calling host thread a 32-bit stack, TEB32, gate stack, static
+/// TLS blocks and its DLL_THREAD_ATTACH; returns the TEB32.
+fn setup_thread32() -> Option<u32> {
     let stack32 = mem::alloc_pages(THREAD_STACK32 + PAGE, Prot::ReadWrite);
     let host = mem::alloc_pages(THREAD_HOST_STACK, Prot::ReadWrite);
-    let (Some(stack32), Some(host)) = (stack32, host) else { return 0xC000_0017 }; // STATUS_NO_MEMORY
+    let (Some(stack32), Some(host)) = (stack32, host) else { return None };
     // The TEB32 is the stack mapping's first page (the low-memory window is
     // below 2 GiB, so both are addressable by 32-bit code).
     let teb = stack32 as u32;
@@ -791,11 +825,10 @@ pub(crate) fn run_thread32(start: u32, param: u32) -> u32 {
         poke32(teb + TEB_PEB, PEB32);
     }
     install_ctx(top as u64, host + THREAD_HOST_STACK as u64, teb as u64);
+    THREAD_TEBS32.lock().unwrap().push(teb);
     crate::loader::setup_thread_tls32(teb);
     notify_dlls32(crate::loader::DLL_THREAD_ATTACH);
-    let code = call32(start, &[param]);
-    notify_dlls32(crate::loader::DLL_THREAD_DETACH);
-    code
+    Some(teb)
 }
 
 /// DLL_THREAD_ATTACH / DETACH for the calling 32-bit thread: the TLS
@@ -1046,7 +1079,7 @@ fn host_override(symbol: &str) -> Option<u64> {
         "__wgetmainargs" => Some(crate::ucrt::WGetMainArgs32 as *const () as u64),
         "ShellExecuteExW" => Some(crate::shell32::ShellExecuteExW32 as *const () as u64),
         "IUnknown_QueryService" => Some(crate::shlwapi::IUnknown_QueryService32 as *const () as u64),
-        "GetObjectW" => Some(crate::user32::GetObjectW32 as *const () as u64),
+        "GetObjectW" | "GetObjectA" => Some(crate::user32::GetObjectW32 as *const () as u64),
         "GetTokenInformation" => Some(crate::tokens::GetTokenInformation32 as *const () as u64),
         "EncodePointer" => Some(layouts::EncodePointer32 as *const () as u64),
         "DecodePointer" => Some(layouts::DecodePointer32 as *const () as u64),

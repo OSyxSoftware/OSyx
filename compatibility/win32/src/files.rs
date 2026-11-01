@@ -223,19 +223,18 @@ fn replace_file(old: String, new: String, b: Option<String>, flags: u32) -> i32 
     if flags & !0x7 != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    if stat_of(&old).is_err() {
-        return fail(1176, 0); // ERROR_UNABLE_TO_REMOVE_REPLACED
-    }
-    if stat_of(&new).is_err() {
+    // Windows reports a missing file to replace, or a missing replacement,
+    // as ERROR_FILE_NOT_FOUND.
+    if stat_of(&old).is_err() || stat_of(&new).is_err() {
         return fail(ERROR_FILE_NOT_FOUND, 0);
     }
     if let Some(b) = b {
         if kernel32::move_file(Some(old.clone()), Some(b), 1) == 0 {
-            return fail(1176, 0);
+            return fail(1175, 0); // ERROR_UNABLE_TO_REMOVE_REPLACED
         }
     }
     if kernel32::move_file(Some(new), Some(old), 1) == 0 {
-        return fail(1177, 0); // ERROR_UNABLE_TO_MOVE_REPLACEMENT
+        return fail(1176, 0); // ERROR_UNABLE_TO_MOVE_REPLACEMENT
     }
     1
 }

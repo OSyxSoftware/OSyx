@@ -51,10 +51,31 @@ extern "win64" fn ReadConsoleW(h: u64, buf: *mut u16, n: u32, read: *mut u32, _c
     TRUE
 }
 
-/// SetConsoleCtrlHandler: accepted; OSyx consoles deliver no Ctrl+C events
-/// to Windows programs.
-extern "win64" fn SetConsoleCtrlHandler(_handler: u64, _add: Bool) -> Bool {
-    TRUE
+/// The program's console control handlers, in registration order, and
+/// whether Ctrl+C is ignored (SetConsoleCtrlHandler(NULL, TRUE)).
+pub(crate) static CTRL_HANDLERS: Mutex<(Vec<u64>, bool)> = Mutex::new((Vec::new(), false));
+
+/// SetConsoleCtrlHandler: adds or removes a handler routine; NULL sets
+/// whether Ctrl+C is ignored. The handlers run for the console control
+/// events the program raises (GenerateConsoleCtrlEvent); OSyx's terminal
+/// sends Windows programs none of its own.
+extern "win64" fn SetConsoleCtrlHandler(handler: u64, add: Bool) -> Bool {
+    let mut h = CTRL_HANDLERS.lock().unwrap();
+    if handler == 0 {
+        h.1 = add != 0;
+        return TRUE;
+    }
+    if add != 0 {
+        h.0.push(handler);
+        return TRUE;
+    }
+    match h.0.iter().rposition(|&x| x == handler) {
+        Some(i) => {
+            h.0.remove(i);
+            TRUE
+        }
+        None => fail(ERROR_INVALID_PARAMETER, FALSE),
+    }
 }
 
 // ---- locale --------------------------------------------------------------------
