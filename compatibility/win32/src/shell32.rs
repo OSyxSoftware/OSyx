@@ -933,11 +933,32 @@ fn quote_win_arg(s: &str) -> String {
 /// Starts one command line through CreateProcessW, the same path a Windows
 /// program uses for its children (a PE runs under a child winrun).
 fn spawn_line(line: &str, dir: Option<&str>) -> Result<u64, u32> {
+    spawn_line_env(line, dir, &[])
+}
+
+/// CREATE_UNICODE_ENVIRONMENT.
+const CREATE_UNICODE_ENVIRONMENT: u32 = 0x400;
+
+/// Like `spawn_line`, with `extra` variables set (or replaced) in the
+/// child's copy of this process's environment.
+fn spawn_line_env(line: &str, dir: Option<&str>, extra: &[(&str, &str)]) -> Result<u64, u32> {
     let mut line: Vec<u16> = line.encode_utf16().chain(core::iter::once(0)).collect();
     let mut dir: Option<Vec<u16>> = dir.map(|d| d.encode_utf16().chain(core::iter::once(0)).collect());
     let mut startup = [0u64; 13];
     startup[0] = 104; // cb = sizeof(STARTUPINFOW)
     let mut process = [0u64; 3];
+    // The environment block: "k=v" strings, each NUL-terminated, then a NUL.
+    let block: Option<Vec<u16>> = (!extra.is_empty()).then(|| {
+        let mut b = Vec::new();
+        let vars = kernel32::env_vars();
+        let kept = vars.iter().filter(|(k, _)| !extra.iter().any(|(e, _)| e.eq_ignore_ascii_case(k)));
+        for (k, v) in kept.map(|(k, v)| (k.as_str(), v.as_str())).chain(extra.iter().copied()) {
+            b.extend(format!("{k}={v}").encode_utf16());
+            b.push(0);
+        }
+        b.push(0);
+        b
+    });
     // SAFETY: all buffers are valid for the call; startup declares 104
     // bytes and CreateProcessW writes one PROCESS_INFORMATION.
     let ok = crate::process::CreateProcessW(
@@ -946,8 +967,8 @@ fn spawn_line(line: &str, dir: Option<&str>) -> Result<u64, u32> {
         0,
         0,
         0,
-        0,
-        0,
+        if block.is_some() { CREATE_UNICODE_ENVIRONMENT } else { 0 },
+        block.as_ref().map_or(0, |b| b.as_ptr() as u64),
         dir.as_mut().map_or(core::ptr::null(), |d| d.as_mut_ptr()),
         startup.as_ptr() as *const u8,
         process.as_mut_ptr(),
@@ -963,6 +984,63 @@ fn parent_dir(path: &str) -> &str {
     match path.trim_end_matches('/').rsplit_once('/') {
         Some(("", _)) | None => "/",
         Some((dir, _)) => dir,
+    }
+}
+
+const ERROR_CANCELLED: u32 = 1223;
+const ERROR_ELEVATION_REQUIRED: u32 = 740;
+
+/// ShellExecute's "runas": `line` (a Windows program) runs with
+/// administrator rights once the user agrees. A child winrun acts as the
+/// proxy (`OSYX_ELEVATE=1`, see elevation.rs): it asks the desktop, and its
+/// exit code becomes the elevated program's. As on Windows the call returns
+/// only after the user answered: the proxy reports `started` or `denied` to
+/// a service named for this call.
+fn run_as(line: &str, dir: Option<&str>) -> Result<u64, (u64, u32)> {
+    use os_std::ipc::{item, wait, Listener, MAX_MESSAGE, WAIT_READABLE};
+    // Root needs no consent: "runas" is "open".
+    if os_std::os::getuid().0 == 0 {
+        return spawn_line(line, dir).map_err(|e| (se_error(e), e));
+    }
+    static CALLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let n = CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let service = format!("user.{}.winrun.elevate.{}.{n}", os_std::os::getuid().0, kernel32::pid());
+    let listener = Listener::listen(&service).map_err(|_| (SE_ERR_ACCESSDENIED, ERROR_ELEVATION_REQUIRED))?;
+    let proxy = spawn_line_env(line, dir, &[("OSYX_ELEVATE", "1"), (crate::elevation::NOTIFY_ENV, &service)]).map_err(|e| (se_error(e), e))?;
+    let mut channels = Vec::new();
+    let mut buf = alloc::vec![0u8; MAX_MESSAGE];
+    loop {
+        // The proxy may report and exit at once: read what arrived before
+        // looking at whether it is gone.
+        let exited = kernel32::WaitForSingleObject(proxy, 0) == 0;
+        while let Ok(Some(c)) = listener.accept() {
+            channels.push(c);
+        }
+        for c in &channels {
+            if let Ok(Some((k, _))) = c.recv(&mut buf) {
+                match core::str::from_utf8(&buf[..k]).unwrap_or("") {
+                    "started" => return Ok(proxy),
+                    "denied" => {
+                        crate::objects::close(proxy);
+                        return Err((SE_ERR_ACCESSDENIED, ERROR_CANCELLED));
+                    }
+                    _ => {
+                        crate::objects::close(proxy);
+                        return Err((SE_ERR_ACCESSDENIED, ERROR_ELEVATION_REQUIRED));
+                    }
+                }
+            }
+        }
+        if exited {
+            let mut code = 0u32;
+            kernel32::GetExitCodeProcess(proxy, &mut code);
+            crate::objects::close(proxy);
+            let error = if code == ERROR_CANCELLED { ERROR_CANCELLED } else { ERROR_ELEVATION_REQUIRED };
+            return Err((SE_ERR_ACCESSDENIED, error));
+        }
+        // The user may take a while with the prompt.
+        let mut items = [item(listener.handle(), WAIT_READABLE)];
+        let _ = wait(&mut items, Some(core::time::Duration::from_millis(50)));
     }
 }
 
@@ -1006,10 +1084,18 @@ fn shell_launch(verb: &str, file: &str, params: Option<&str>, dir: Option<&str>)
         return spawn_line(&format!("/system/bin/files {}", quote_win_arg(parent_dir(&osyx))), None)
             .map_err(|e| (se_error(e), e));
     }
+    let lower = osyx.to_ascii_lowercase();
+    if verb == "runas" && lower.ends_with(".exe") {
+        let mut line = quote_win_arg(&osyx);
+        if let Some(p) = params.map(str::trim).filter(|p| !p.is_empty()) {
+            line.push(' ');
+            line.push_str(p);
+        }
+        return run_as(&line, dir);
+    }
     if !verb.is_empty() && verb != "open" {
         return Err((SE_ERR_NOASSOC, ERROR_NO_ASSOCIATION));
     }
-    let lower = osyx.to_ascii_lowercase();
     if lower.ends_with(".exe") {
         let mut line = quote_win_arg(&osyx);
         if let Some(p) = params.map(str::trim).filter(|p| !p.is_empty()) {
