@@ -361,6 +361,20 @@ fn removed_open_files_and_the_orphan_list() {
     assert!(fs.free_counts().0 >= free_before + 24, "orphan freed at mount");
     let img = fs.unmount().unwrap();
     e2fsck("orphan-crash", &img);
+    // Unmounted while the removed file is still open: the clean unmount
+    // frees it, and that release is on disk, not left pending.
+    let mut fs = rw(img);
+    let h = fs.create(ROOT_INO, "open3.bin", NewKind::File, 0o644, 0, 0).unwrap();
+    write_all(&mut fs, h, 0, &pattern(100_000, 4));
+    fs.sync().unwrap();
+    let (free_before, _) = fs.free_counts();
+    fs.open(h);
+    fs.unlink(ROOT_INO, "open3.bin").unwrap();
+    let img = fs.unmount().unwrap();
+    let mut fs = ro(img.clone());
+    assert!(fs.free_counts().0 >= free_before + 24, "orphan freed by the clean unmount");
+    fs.check().unwrap();
+    e2fsck("orphan-unmount", &img);
 }
 
 #[test]

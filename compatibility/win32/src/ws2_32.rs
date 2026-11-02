@@ -373,8 +373,9 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
             send_timeout: 0,
             reuseaddr: false,
             keepalive: false,
-            rcvbuf: 0,
-            sndbuf: 0,
+            // An accepted socket inherits the listener's buffer sizes.
+            rcvbuf: listener.rcvbuf,
+            sndbuf: listener.sndbuf,
             read_shutdown: false,
             write_shutdown: false,
         });

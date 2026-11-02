@@ -1454,6 +1454,9 @@ extern "win64" fn DuplicateHandle(
                         final_ticks: AtomicU64::new(0),
                     });
                     register_thread(tid, &t);
+                    // It lives as long as the process: OpenThread must find
+                    // it after its last handle closes too.
+                    MAIN_THREAD.lock().unwrap().get_or_insert_with(|| t.clone());
                     Object::Thread(t)
                 }
             }
@@ -1585,6 +1588,9 @@ pub fn stack_reserve(size: usize, is_reservation: bool) -> usize {
 /// on it would last forever (the Steam updater hung this way, at random,
 /// while extracting its package).
 static THREADS: Mutex<alloc::collections::BTreeMap<u32, alloc::sync::Weak<ThreadObj>>> = Mutex::new(alloc::collections::BTreeMap::new());
+/// The main thread's object, owned here (a spawned thread owns its own
+/// until it ends): the registry only holds weak references.
+static MAIN_THREAD: Mutex<Option<Arc<ThreadObj>>> = Mutex::new(None);
 
 /// The object of thread `tid` of this process, if it has one.
 pub(crate) fn thread_object(tid: u32) -> Option<Arc<ThreadObj>> {

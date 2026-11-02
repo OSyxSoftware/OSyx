@@ -289,11 +289,25 @@ mod imp {
         if size >= LOW_LARGE {
             // Top down in 1 MiB steps; the rising search below is the
             // fallback for free runs this coarser walk does not land on.
+            // A free page must stay on each side, as the rising search
+            // leaves one: thread stacks come from here, and an overflow
+            // must fault rather than run into the next mapping. The run
+            // with its two guard pages is claimed to prove it free, then
+            // given back and the block alone mapped.
             let step = align.max(1 << 20);
-            let mut at = (LOW_END - size) / step * step;
-            while at >= LOW_WRAP {
-                match decode(syscall4(nr::MAP_EX, at, size, prot, osyx_abi::MAP_FIXED)) {
-                    Ok(a) => return Some(Ok(a as *mut u8)),
+            let mut at = (LOW_END - size - 4096) / step * step;
+            while at >= LOW_WRAP + 4096 {
+                let span = decode(syscall4(nr::MAP_EX, at - 4096, size + 8192, prot, osyx_abi::MAP_FIXED));
+                match span {
+                    Ok(s) => {
+                        let _ = decode(syscall2(nr::UNMAP, s, size + 8192));
+                        match decode(syscall4(nr::MAP_EX, at, size, prot, osyx_abi::MAP_FIXED)) {
+                            Ok(a) => return Some(Ok(a as *mut u8)),
+                            // Another thread took it in between.
+                            Err(Errno::AlreadyExists) => at -= step,
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
                     Err(Errno::AlreadyExists) => at -= step,
                     Err(e) => return Some(Err(e)),
                 }

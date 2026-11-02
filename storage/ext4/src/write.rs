@@ -159,6 +159,9 @@ impl<D: BlockDevice> Ext4<D> {
                 self.orphans.insert(ino, 0);
                 self.release_orphan(ino)?;
             }
+            // Releasing joins the pending transaction: commit it before the
+            // superblock says the volume is clean.
+            self.flush_pending()?;
         }
         self.sb.state |= 1;
         put16(&mut self.sb.raw, 58, self.sb.state);
