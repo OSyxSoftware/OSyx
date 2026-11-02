@@ -324,6 +324,10 @@ fn schema() -> Vec<u8> {
         b.add(c, "kernel32.dll", &[("kernel32.dll", "kernelbase.dll")]).expect("valid contract name");
     }
     b.add("api-ms-win-core-rtlsupport-l1-2-0", "ntdll.dll", &[]).expect("valid contract name");
+    // The package and AppPolicy queries (the CRT probes l1-1-2).
+    for c in ["api-ms-win-appmodel-runtime-l1-1-0", "api-ms-win-appmodel-runtime-l1-1-1", "api-ms-win-appmodel-runtime-l1-1-2"] {
+        b.add(c, "kernel32.dll", &[("kernel32.dll", "kernelbase.dll")]).expect("valid contract name");
+    }
     b.add("api-ms-win-shcore-scaling-l1-1-1", "shcore.dll", &[]).expect("valid contract name");
     // The Windows 7 "downlevel" contracts that programs still import.
     b.add("api-ms-win-downlevel-shell32-l1-1-0", "shell32.dll", &[]).expect("valid contract name");

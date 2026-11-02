@@ -1098,11 +1098,95 @@ extern "win64" fn SetProcessMitigationPolicy(policy: u32, buf: *const u8, len: u
 
 const APPMODEL_ERROR_NO_PACKAGE: u32 = 15700;
 
+const APPMODEL_ERROR_NO_APPLICATION: u32 = 15703;
+
+// OSyx processes are unpackaged desktop programs: the package queries say
+// so with the error Windows gives such a process, and the AppPolicy
+// answers are those of a classic desktop process (probed on Windows 11).
+
 extern "win64" fn GetCurrentPackageFullName(len: *mut u32, _buf: *mut u16) -> u32 {
     if len.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
     APPMODEL_ERROR_NO_PACKAGE
+}
+
+extern "win64" fn GetCurrentPackageId(len: *mut u32, _buf: *mut u8) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    APPMODEL_ERROR_NO_PACKAGE
+}
+
+extern "win64" fn GetCurrentPackageFamilyName(len: *mut u32, _buf: *mut u16) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    APPMODEL_ERROR_NO_PACKAGE
+}
+
+extern "win64" fn GetCurrentPackagePath(len: *mut u32, _buf: *mut u16) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    APPMODEL_ERROR_NO_PACKAGE
+}
+
+extern "win64" fn GetCurrentApplicationUserModelId(len: *mut u32, _buf: *mut u16) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    APPMODEL_ERROR_NO_APPLICATION
+}
+
+/// One AppPolicy query: `value` for a token (the pseudo tokens included).
+fn app_policy(token: u64, out: *mut i32, value: i32) -> u32 {
+    if token == 0 || out.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { out.write_unaligned(value) };
+    0
+}
+
+/// AppPolicyProcessTerminationMethod_ExitProcess.
+extern "win64" fn AppPolicyGetProcessTerminationMethod(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 0)
+}
+
+/// AppPolicyShowDeveloperDiagnostic_ShowUI.
+extern "win64" fn AppPolicyGetShowDeveloperDiagnostic(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 1)
+}
+
+/// AppPolicyWindowingModel_ClassicDesktop.
+extern "win64" fn AppPolicyGetWindowingModel(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 2)
+}
+
+/// AppPolicyThreadInitializationType_None.
+extern "win64" fn AppPolicyGetThreadInitializationType(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 0)
+}
+
+/// AppPolicyCreateFileAccess_Full.
+extern "win64" fn AppPolicyGetCreateFileAccess(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 0)
+}
+
+/// AppPolicyClrCompat_ClassicDesktop.
+extern "win64" fn AppPolicyGetClrCompat(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 1)
+}
+
+/// AppPolicyMediaFoundationCodecLoading_All.
+extern "win64" fn AppPolicyGetMediaFoundationCodecLoading(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 0)
+}
+
+/// AppPolicyLifecycleManagement_Unmanaged.
+extern "win64" fn AppPolicyGetLifecycleManagement(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 0)
 }
 
 /// PRODUCT_UNDEFINED: OSyx is not a Windows edition.
@@ -1309,6 +1393,18 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetProcessMitigationPolicy,
         SetProcessMitigationPolicy,
         GetCurrentPackageFullName,
+        GetCurrentPackageId,
+        GetCurrentPackageFamilyName,
+        GetCurrentPackagePath,
+        GetCurrentApplicationUserModelId,
+        AppPolicyGetProcessTerminationMethod,
+        AppPolicyGetShowDeveloperDiagnostic,
+        AppPolicyGetWindowingModel,
+        AppPolicyGetThreadInitializationType,
+        AppPolicyGetCreateFileAccess,
+        AppPolicyGetClrCompat,
+        AppPolicyGetMediaFoundationCodecLoading,
+        AppPolicyGetLifecycleManagement,
         GetProductInfo,
         GetSystemDirectoryW,
         GetWindowsDirectoryW,
