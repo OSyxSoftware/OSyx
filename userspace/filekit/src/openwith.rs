@@ -5,8 +5,8 @@
 //! (`Handles=mp4,mkv,video`). The user's choices per extension or kind live
 //! in `~/.config/osyx/openwith.conf` as `mp4=/opt/player` lines. Files shows
 //! images, text and source itself or through the default browser, plays
-//! sound files and unpacks archives itself, and hands everything else to a
-//! registered application.
+//! sound files, shows PDF documents and unpacks archives itself, and hands
+//! everything else to a registered application.
 
 use crate::kind::{extension, Kind};
 use alloc::string::String;
@@ -24,6 +24,8 @@ pub enum Builtin {
     Extract,
     /// The audio player.
     Player,
+    /// The PDF viewer.
+    Pdf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +93,7 @@ fn builtin_by_name(s: &str) -> Option<Builtin> {
         "builtin:browser" => Builtin::Browser,
         "builtin:extract" => Builtin::Extract,
         "builtin:player" => Builtin::Player,
+        "builtin:pdf" => Builtin::Pdf,
         _ => return None,
     })
 }
@@ -102,6 +105,7 @@ fn builtin_name(b: Builtin) -> &'static str {
         Builtin::Browser => "builtin:browser",
         Builtin::Extract => "builtin:extract",
         Builtin::Player => "builtin:player",
+        Builtin::Pdf => "builtin:pdf",
     }
 }
 
@@ -179,7 +183,11 @@ pub fn candidates(name: &str, kind: Kind, handlers: &[Handler], browser: bool) -
             add("Audio player", Target::Builtin(Builtin::Player));
             add("Hex viewer", Target::Builtin(Builtin::Hex));
         }
-        Kind::Video | Kind::Pdf => add("Hex viewer", Target::Builtin(Builtin::Hex)),
+        Kind::Pdf => {
+            add("PDF viewer", Target::Builtin(Builtin::Pdf));
+            add("Hex viewer", Target::Builtin(Builtin::Hex));
+        }
+        Kind::Video => add("Hex viewer", Target::Builtin(Builtin::Hex)),
         Kind::Program => {}
     }
     for h in handlers.iter().filter(|h| h.handles(ext.as_deref(), kind)) {
@@ -203,7 +211,7 @@ pub fn default_target(name: &str, kind: Kind, handlers: &[Handler], choices: &Ch
     // (the hex viewer is an explicit choice, not a default).
     let app = handlers.iter().find(|h| h.handles(ext.as_deref(), kind)).map(|h| Target::Exec(h.exec.clone()));
     match kind {
-        Kind::Video | Kind::Pdf => app,
+        Kind::Video => app,
         _ => list.into_iter().next().map(|c| c.target),
     }
 }
@@ -236,11 +244,11 @@ mod tests {
         mine.set("song.mp3", Kind::Audio, Target::Exec("/opt/player".into()));
         assert_eq!(default_target("x.mp3", Kind::Audio, &handlers, &mine, true), Some(Target::Exec("/opt/player".into())), "unless the user chose otherwise");
         assert_eq!(default_target("movie.avi", classify("movie.avi"), &handlers, &choices, true), None, "nothing handles avi");
-        assert_eq!(default_target("a.pdf", Kind::Pdf, &[], &choices, true), None);
+        assert_eq!(default_target("a.pdf", Kind::Pdf, &[], &choices, true), Some(Target::Builtin(Builtin::Pdf)));
         // Still openable as hex through the menu.
         let list = candidates("a.pdf", Kind::Pdf, &[], true);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].target, Target::Builtin(Builtin::Hex));
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].target, Target::Builtin(Builtin::Hex));
     }
 
     #[test]

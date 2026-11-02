@@ -18,8 +18,8 @@
 //! whole selection. The context menu (right click) has "Open with": a file
 //! opens with the program the user chose for its type, else with what
 //! `/system/share/applications/*.app` registers (`Handles=`), else by itself
-//! (text viewer, hex viewer, audio player, default browser for images and
-//! pages).
+//! (text viewer, hex viewer, audio player, PDF viewer, default browser for
+//! images and pages).
 
 #![no_std]
 #![no_main]
@@ -28,6 +28,8 @@
 mod audio_view;
 #[path = "../fileops.rs"]
 mod fileops;
+#[path = "../pdf_view.rs"]
+mod pdf_view;
 #[path = "../shell_common.rs"]
 mod common;
 
@@ -184,6 +186,8 @@ struct Files {
     preview: Option<Preview>,
     /// The audio player, shown in place of the list.
     player: Option<audio_view::AudioView>,
+    /// The PDF viewer, shown in place of the list.
+    pdf: Option<pdf_view::PdfView>,
     drag: Option<FileDrag>,
     pending_move: Option<(String, Instant)>,
     tz: Tz,
@@ -278,6 +282,7 @@ fn main() -> i32 {
         dialog: None,
         preview: None,
         player: None,
+        pdf: None,
         drag: None,
         pending_move: None,
         tz: system_tz(),
@@ -522,9 +527,20 @@ impl Files {
                 self.spawn(c, &name, path);
             }
             Target::Builtin(Builtin::Extract) => self.extract_paths(&[String::from(path)]),
+            Target::Builtin(Builtin::Pdf) => {
+                self.close_viewers();
+                match pdf_view::PdfView::open(path) {
+                    Ok(v) => {
+                        self.pdf = Some(v);
+                        self.set_status(format!("Viewing {path}"), false);
+                    }
+                    Err(e) => self.set_status(format!("Cannot open {path}: {e}"), true),
+                }
+                let (w, h) = self.size;
+                self.layout_inner(w, h);
+            }
             Target::Builtin(Builtin::Player) => {
-                self.preview = None;
-                self.player = None;
+                self.close_viewers();
                 match audio_view::AudioView::open(path) {
                     Ok(v) => {
                         self.player = Some(v);
@@ -549,13 +565,20 @@ impl Files {
         }
     }
 
-    /// A viewer (text, hex or the player) covers the list.
+    /// A viewer (text, hex, the player or PDF) covers the list.
     fn viewing(&self) -> bool {
-        self.preview.is_some() || self.player.is_some()
+        self.preview.is_some() || self.player.is_some() || self.pdf.is_some()
+    }
+
+    fn close_viewers(&mut self) {
+        self.preview = None;
+        self.player = None;
+        self.pdf = None;
     }
 
     fn preview(&mut self, path: String, force_hex: bool) {
         self.player = None;
+        self.pdf = None;
         let data = match fs::read(&path) {
             Ok(d) => d,
             Err(e) => {
@@ -823,6 +846,9 @@ impl Files {
         self.list.rect = inset(main, 0);
         if let Some(pl) = &mut self.player {
             pl.layout(main);
+        }
+        if let Some(v) = &mut self.pdf {
+            v.layout(main);
         }
         if let Some(p) = &mut self.preview {
             let (head, body) = split_top(main, 44);
@@ -1225,6 +1251,25 @@ impl App for Files {
                 r => return r.needs_redraw(),
             }
         }
+        if let Some(v) = &mut self.pdf {
+            let mut close = false;
+            let redraw = v.event(&ev, &mut close);
+            if close {
+                self.pdf = None;
+                let n = self.entries.len();
+                self.set_status(format!("{n} items"), false);
+                return true;
+            }
+            // The tool bar and side bar stay usable while viewing.
+            if !matches!(ev, Ui::PointerDown { .. } | Ui::PointerUp { .. } | Ui::PointerMove { .. } | Ui::Wheel { .. }) {
+                return redraw;
+            }
+            if let Some((x, y)) = ev.position() {
+                if contains(&self.list.rect, x, y) {
+                    return redraw;
+                }
+            }
+        }
         if let Some(pl) = &mut self.player {
             let mut close = false;
             let redraw = pl.event(&ev, &mut close);
@@ -1449,8 +1494,7 @@ impl App for Files {
             Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT => {
                 if let Some(i) = rects.iter().position(|r| contains(r, x, y)) {
                     let target = self.places[i].1.clone();
-                    self.preview = None;
-                    self.player = None;
+                    self.close_viewers();
                     if self.navigate(&target, true) {
                         cx.title = Some(format!("Files — {}", self.cwd));
                     }
@@ -1574,12 +1618,15 @@ impl App for Files {
         if self.player.is_some() {
             return Some(250);
         }
+        if self.pdf.is_some() {
+            return Some(100);
+        }
         self.pending_move.as_ref().map(|_| 500)
     }
 
     fn tick(&mut self, _cx: &mut Ctx) -> bool {
         // The player's clock and seek bar move while it plays.
-        let playing = self.player.as_mut().is_some_and(|p| p.needs_redraw());
+        let playing = self.player.as_mut().is_some_and(|p| p.needs_redraw()) || self.pdf.as_mut().is_some_and(|v| v.needs_redraw());
         let Some((path, since)) = &self.pending_move else { return playing };
         if fs::symlink_metadata(path).is_err_and(|e| e.kind() == os_std::error::ErrorKind::NotFound) {
             self.pending_move = None;
@@ -1649,8 +1696,11 @@ impl App for Files {
         if let Some(pl) = &mut self.player {
             pl.draw(p, main);
         }
+        if let Some(v) = &mut self.pdf {
+            v.draw(p, main);
+        }
         match &self.preview {
-            _ if self.player.is_some() => {}
+            _ if self.player.is_some() || self.pdf.is_some() => {}
             Some(pv) => {
                 let (head, body) = split_top(main, 44);
                 p.fill(head, t.surface);
