@@ -1009,6 +1009,7 @@ pub fn start(exe_path: &str, command_line: &str, environment: &[String]) -> Resu
     let stack_top = stack + stack_size as u64;
     let main_teb = teb::create_teb(stack_top, stack, crate::kernel32::pid(), os_sys::gettid());
     teb::install(main_teb);
+    crate::kernel32::register_main_thread();
     let mut l = Loader { linker, exe, state: Vec::new(), tls: Vec::new() };
     let todo = register_new(&mut l, exe);
     for s in l.state.iter_mut() {
@@ -1114,6 +1115,7 @@ pub fn run_pe32(bytes: Vec<u8>, args: &[String], cmd: &str, env: &[String]) -> R
     });
     let main_teb = teb::create_teb(top, limit, crate::kernel32::pid(), os_sys::gettid());
     teb::install(main_teb);
+    crate::kernel32::register_main_thread();
     crate::kernel32::EXE_STACK_RESERVE.store((top - limit) as usize, core::sync::atomic::Ordering::Relaxed);
     let attaches: Vec<(u32, u32)> = order.iter().filter_map(|&i| {
         let m = &linker.modules[i];

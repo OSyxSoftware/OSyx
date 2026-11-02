@@ -264,18 +264,55 @@ mod imp {
         LOW_NEXT.load(core::sync::atomic::Ordering::Relaxed) != 0
     }
 
-    /// Low mode: the first free run at or above the cursor, found with
-    /// `MAP_FIXED` (the kernel refuses any address already in use).
+    /// Requests at least this large are placed from the top of the window
+    /// down; smaller ones from the cursor up. Heap regions and other small,
+    /// often permanent mappings then stay together low in the window, and
+    /// the large free runs a 32-bit program needs (the Steam updater asks
+    /// for 347 MB at once) are not cut up by them: with one rising cursor
+    /// those small regions ended up spread over the whole window.
+    const LOW_LARGE: u64 = 8 << 20;
+
+    /// Low mode: small requests take the first free run at or above the
+    /// cursor, large ones the highest free run that fits; free runs are
+    /// found with `MAP_FIXED` (the kernel refuses any address already in
+    /// use).
     fn map_low(len: usize, prot: u64, align: u64) -> Option<Result<*mut u8, Errno>> {
         use core::sync::atomic::Ordering;
         let start = LOW_NEXT.load(Ordering::Relaxed);
         if start == 0 {
             return None;
         }
-        // A request larger than the window fails here, before any
-        // arithmetic on it can overflow.
-        let size = (len as u64).checked_next_multiple_of(4096).filter(|&s| s <= LOW_END);
+        // A request larger than the window (with its two guard pages) fails
+        // here, before any arithmetic on it can overflow.
+        let size = (len as u64).checked_next_multiple_of(4096).filter(|&s| s.checked_add(8192).is_some_and(|span| span <= LOW_END));
         let Some(size) = size else { return Some(Err(Errno::NoMemory)) };
+        if size >= LOW_LARGE {
+            // Top down in 1 MiB steps; the rising search below is the
+            // fallback for free runs this coarser walk does not land on.
+            // A free page must stay on each side, as the rising search
+            // leaves one: thread stacks come from here, and an overflow
+            // must fault rather than run into the next mapping. The run
+            // with its two guard pages is claimed to prove it free, then
+            // given back and the block alone mapped.
+            let step = align.max(1 << 20);
+            let mut at = (LOW_END - size - 4096) / step * step;
+            while at >= LOW_WRAP + 4096 {
+                let span = decode(syscall4(nr::MAP_EX, at - 4096, size + 8192, prot, osyx_abi::MAP_FIXED));
+                match span {
+                    Ok(s) => {
+                        let _ = decode(syscall2(nr::UNMAP, s, size + 8192));
+                        match decode(syscall4(nr::MAP_EX, at, size, prot, osyx_abi::MAP_FIXED)) {
+                            Ok(a) => return Some(Ok(a as *mut u8)),
+                            // Another thread took it in between.
+                            Err(Errno::AlreadyExists) => at -= step,
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
+                    Err(Errno::AlreadyExists) => at -= step,
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+        }
         let mut at = start.next_multiple_of(align);
         let mut wrapped = false;
         loop {
@@ -290,7 +327,10 @@ mod imp {
             match decode(syscall4(nr::MAP_EX, at, size, prot, osyx_abi::MAP_FIXED)) {
                 Ok(a) => {
                     // Leave a page free after each run, as the kernel does.
-                    LOW_NEXT.store(a + size + 4096, Ordering::Relaxed);
+                    // A large block found here does not move the cursor.
+                    if size < LOW_LARGE {
+                        LOW_NEXT.store(a + size + 4096, Ordering::Relaxed);
+                    }
                     return Some(Ok(a as *mut u8));
                 }
                 Err(Errno::AlreadyExists) => at = (at + 0x10000).next_multiple_of(align),
@@ -304,7 +344,18 @@ mod imp {
     /// # Safety
     /// No live reference may point into the region.
     pub unsafe fn unmap(addr: *mut u8, len: usize) -> Result<(), Errno> {
-        decode(syscall2(nr::UNMAP, addr as u64, len as u64)).map(|_| ())
+        decode(syscall2(nr::UNMAP, addr as u64, len as u64)).map(|_| ())?;
+        // Low mode: a small run freed below the cursor is used again before
+        // new space above it, which keeps small mappings packed together.
+        let a = addr as u64;
+        if (len as u64) < LOW_LARGE && a >= LOW_WRAP && a < LOW_END {
+            use core::sync::atomic::Ordering;
+            // 0 means low mode is off (it is only switched on at start-up).
+            if LOW_NEXT.load(Ordering::Relaxed) != 0 {
+                LOW_NEXT.fetch_min(a, Ordering::Relaxed);
+            }
+        }
+        Ok(())
     }
 
     pub fn cpu_info() -> Result<(u32,u32),Errno> {

@@ -1,12 +1,13 @@
 //! Writing: allocation, files, directories, links, truncation, deletion.
 //!
 //! Safety model:
-//! * Every public mutating call is one journal transaction: metadata
-//!   changes collect in `tx` (block -> new contents) and are committed
-//!   and checkpointed when the call succeeds ([`Ext4::commit`]); on error
-//!   they are dropped and the in-memory superblock and group descriptors
-//!   are restored, so a failed call changes nothing on disk except data
-//!   blocks that remain unallocated.
+//! * Mutating calls collect their metadata changes in one pending
+//!   transaction, `tx` (block -> new contents), which is committed and
+//!   checkpointed as a whole ([`Ext4::commit`]) by [`Ext4::sync`] or when it
+//!   grows past its limit, so after a crash either all of the grouped calls
+//!   happened or none. A call that fails has its own changes undone in
+//!   `tx` and the in-memory superblock and group descriptors restored, so
+//!   it changes nothing on disk except data blocks that remain unallocated.
 //! * File data is staged in memory and written out *before* the metadata
 //!   that makes it reachable is committed ("ordered" mode); reads see staged
 //!   blocks. Overwrites of existing data blocks are in place, as in Linux's
@@ -58,6 +59,9 @@ pub(crate) struct Tx {
     pub freed: BTreeSet<u64>,
     /// Original contents of blocks this operation has changed, for rollback.
     undo: BTreeMap<u64, Option<Vec<u8>>>,
+    /// Staged file data this operation dropped (blocks it freed), put back
+    /// if it fails and the blocks stay allocated.
+    pending_undo: BTreeMap<u64, Vec<u8>>,
     recording: bool,
 }
 
@@ -158,6 +162,9 @@ impl<D: BlockDevice> Ext4<D> {
                 self.orphans.insert(ino, 0);
                 self.release_orphan(ino)?;
             }
+            // Releasing joins the pending transaction: commit it before the
+            // superblock says the volume is clean.
+            self.flush_pending()?;
         }
         self.sb.state |= 1;
         put16(&mut self.sb.raw, 58, self.sb.state);
@@ -191,29 +198,30 @@ impl<D: BlockDevice> Ext4<D> {
         Snapshot { sb: self.sb.clone(), groups: self.groups.clone(), orphans: self.orphans.clone() }
     }
 
-    /// Runs one mutating operation as a transaction.
+    /// Runs one mutating operation (create, link, rename, unlink, truncate,
+    /// attribute changes) against the pending transaction, like a file
+    /// write. Operations are grouped into one journal commit, as jbd2 does:
+    /// committing each on its own cost two device flushes per file, and an
+    /// update that unpacks thousands of files (the Steam client) spent
+    /// minutes in flushes. The group stays atomic; `sync` (fsync, the
+    /// periodic write-back, unmount) or the size limit commits it.
     fn op<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        if self.read_only {
-            return Err(Error::ReadOnly);
-        }
-        self.flush_pending()?;
-        let snap = self.snapshot();
-        self.tx = Tx::default();
-        match f(self).and_then(|v| self.commit_tx().map(|_| v)) {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                self.tx = Tx::default();
-                self.sb = snap.sb;
-                self.groups = snap.groups;
-                self.orphans = snap.orphans;
-                Err(e)
-            }
-        }
+        self.write_op(f)
+    }
+
+    /// Metadata blocks the pending transaction may collect before it is
+    /// committed: [`PENDING_LIMIT`], or a quarter of the journal when that
+    /// is smaller. The check runs after each operation, so the next one
+    /// starts with at least three quarters of the journal free for its own
+    /// blocks and the descriptors (an operation alone always had to fit).
+    fn pending_limit(&self) -> usize {
+        let quarter_journal = self.journal_capacity().map_or(usize::MAX, |c| c as usize / 4);
+        PENDING_LIMIT.min(quarter_journal).max(1)
     }
 
     /// Runs a file write against the pending transaction: no journal commit
-    /// unless it grows past [`PENDING_LIMIT`]. On error only this write's
-    /// metadata changes are rolled back.
+    /// unless it grows past [`Ext4::pending_limit`]. On error only this
+    /// write's metadata changes are rolled back.
     fn write_op<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         if self.read_only {
             return Err(Error::ReadOnly);
@@ -226,13 +234,17 @@ impl<D: BlockDevice> Ext4<D> {
             Ok(v) => {
                 self.tx.recording = false;
                 self.tx.undo.clear();
-                if self.tx.blocks.len() >= PENDING_LIMIT {
+                self.tx.pending_undo.clear();
+                if self.tx.blocks.len() >= self.pending_limit() {
                     self.flush_pending()?;
                 }
                 Ok(v)
             }
             Err(e) => {
                 self.tx.recording = false;
+                for (b, d) in core::mem::take(&mut self.tx.pending_undo) {
+                    self.pending.insert(b, d);
+                }
                 let undo = core::mem::take(&mut self.tx.undo);
                 for (b, prev) in undo {
                     match prev {
@@ -334,6 +346,16 @@ impl<D: BlockDevice> Ext4<D> {
             self.tx.undo.entry(b).or_insert(prev);
         }
         self.tx.blocks.insert(b, data);
+    }
+
+    /// Drops block `b` from the pending transaction, recording it for
+    /// rollback like [`Ext4::tx_put`].
+    fn tx_remove(&mut self, b: u64) {
+        if let Some(prev) = self.tx.blocks.remove(&b) {
+            if self.tx.recording {
+                self.tx.undo.entry(b).or_insert(Some(prev));
+            }
+        }
     }
 
     fn store_groups(&mut self) -> Result<()> {
@@ -541,8 +563,12 @@ impl<D: BlockDevice> Ext4<D> {
                 }
                 bm[i / 8] &= !(1 << (i % 8));
                 self.tx.freed.insert(x);
-                self.tx.blocks.remove(&x);
-                self.pending.remove(&x);
+                self.tx_remove(x);
+                if let Some(d) = self.pending.remove(&x) {
+                    if self.tx.recording {
+                        self.tx.pending_undo.entry(x).or_insert(d);
+                    }
+                }
                 self.forget_cached(x);
             }
             let bmb = self.groups[g as usize].block_bitmap;
@@ -590,8 +616,10 @@ impl<D: BlockDevice> Ext4<D> {
             }
             bm[(i / 8) as usize] |= 1 << (i % 8);
             let track_unused = self.has_group_csums_w();
+            // Through tx_put, so a failing operation undoes the bit.
+            let ibm = self.groups[g as usize].inode_bitmap;
+            self.tx_put(ibm, bm);
             let gd = &mut self.groups[g as usize];
-            self.tx.blocks.insert(gd.inode_bitmap, bm);
             gd.free_inodes -= 1;
             if dir {
                 gd.used_dirs += 1;
@@ -1315,13 +1343,14 @@ impl<D: BlockDevice> Ext4<D> {
     fn destroy_inode(&mut self, ino: u32) -> Result<()> {
         let mut inode = self.tx_inode(ino)?;
         let is_dir = inode.is_dir();
+        // Refusals first, before anything is freed.
+        if inode.file_acl() != 0 {
+            return Err(Error::Unsupported("freeing inodes with extended attribute blocks"));
+        }
         if inode.uses_extents() {
             self.free_from(&mut inode, 0)?;
         } else if !inode.is_fast_symlink(self.sb.block_size) {
             return Err(Error::Unsupported("freeing block-mapped files"));
-        }
-        if inode.file_acl() != 0 {
-            return Err(Error::Unsupported("freeing inodes with extended attribute blocks"));
         }
         inode.links = 0;
         inode.size = 0;
