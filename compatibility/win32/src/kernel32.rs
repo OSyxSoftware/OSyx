@@ -1438,20 +1438,24 @@ extern "win64" fn DuplicateHandle(
     let mut o = match src {
         objects::CURRENT_THREAD => {
             let tid = teb::current_tid() as u32;
-            match objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)) {
-                Some(o) => o,
-                // A thread the runtime did not hand out a handle for (the
-                // main thread): give the duplicate its own handle object.
-                None => Object::Thread(Arc::new(ThreadObj {
-                    tid: AtomicU32::new(tid),
-                    done: AtomicBool::new(false),
-                    exit_code: AtomicU32::new(259), // STILL_ACTIVE
-                    suspended: AtomicU32::new(0),
-                    teb: AtomicU64::new(teb::current()),
-                    created_ns: AtomicU64::new(crate::sysext::process_start_ns()),
-                    exited_ns: AtomicU64::new(0),
-                    final_ticks: AtomicU64::new(0),
-                })),
+            match thread_object(tid) {
+                Some(t) => Object::Thread(t),
+                // A thread the runtime did not start (the main thread):
+                // one object, shared by every later duplicate.
+                None => {
+                    let t = Arc::new(ThreadObj {
+                        tid: AtomicU32::new(tid),
+                        done: AtomicBool::new(false),
+                        exit_code: AtomicU32::new(259), // STILL_ACTIVE
+                        suspended: AtomicU32::new(0),
+                        teb: AtomicU64::new(teb::current()),
+                        created_ns: AtomicU64::new(crate::sysext::process_start_ns()),
+                        exited_ns: AtomicU64::new(0),
+                        final_ticks: AtomicU64::new(0),
+                    });
+                    register_thread(tid, &t);
+                    Object::Thread(t)
+                }
             }
         }
         objects::CURRENT_PROCESS => {
@@ -1573,6 +1577,28 @@ pub fn stack_reserve(size: usize, is_reservation: bool) -> usize {
     }
 }
 
+/// The object of every thread of this process by id, whether or not a
+/// handle to it is still open: CreateThread's caller often closes its
+/// handle at once, and a later DuplicateHandle(GetCurrentThread()) or
+/// OpenThread must still name the same object, the one marked done when
+/// the thread ends. A second object would never be signalled, so a wait
+/// on it would last forever (the Steam updater hung this way, at random,
+/// while extracting its package).
+static THREADS: Mutex<alloc::collections::BTreeMap<u32, alloc::sync::Weak<ThreadObj>>> = Mutex::new(alloc::collections::BTreeMap::new());
+
+/// The object of thread `tid` of this process, if it has one.
+pub(crate) fn thread_object(tid: u32) -> Option<Arc<ThreadObj>> {
+    THREADS.lock().unwrap().get(&tid).and_then(alloc::sync::Weak::upgrade)
+}
+
+/// Records the object of a thread that did not start through
+/// [`spawn_thread`] (the main thread), so later lookups find the same one.
+pub(crate) fn register_thread(tid: u32, obj: &Arc<ThreadObj>) {
+    let mut threads = THREADS.lock().unwrap();
+    threads.retain(|_, w| w.strong_count() > 0);
+    threads.insert(tid, Arc::downgrade(obj));
+}
+
 /// Starts a Windows thread running `start(param)`; returns its object.
 pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) -> Result<Arc<ThreadObj>, u32> {
     let obj = Arc::new(ThreadObj {
@@ -1615,6 +1641,7 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
                 os_std::eprintln!("winrun: thread {tid} start {at} stack {stack:#x}..{:#x}", stack + size as u64);
             }
             loader::setup_thread_tls(t);
+            register_thread(tid as u32, &me);
             me.tid.store(tid as u32, Ordering::SeqCst);
             while me.suspended.load(Ordering::SeqCst) > 0 {
                 let _ = os_sys::futex_wait(me.suspended.as_ptr(), me.suspended.load(Ordering::SeqCst), 0);
@@ -1631,6 +1658,7 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
             me.exited_ns.store(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(1).max(1), Ordering::SeqCst);
             me.done.store(true, Ordering::SeqCst);
             objects::signal_all();
+            THREADS.lock().unwrap().remove(&(tid as u32));
         })
         .map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?;
     while obj.tid.load(Ordering::SeqCst) == 0 {

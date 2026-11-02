@@ -56,7 +56,11 @@ extern "win64" fn GetProcessIdOfThread(h: u64) -> u32 {
 
 /// A thread of this process by id: a handle to its thread object.
 extern "win64" fn OpenThread(_access: u32, inherit: i32, tid: u32) -> u64 {
-    let h = match objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)) {
+    // A running thread can be opened after every handle to it was closed.
+    let found = kernel32::thread_object(tid)
+        .map(Object::Thread)
+        .or_else(|| objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)));
+    let h = match found {
         Some(o) => objects::insert(o),
         None => return fail(ERROR_INVALID_PARAMETER, 0),
     };
@@ -73,9 +77,11 @@ fn thread_of(h: u64) -> Option<(u32, Option<alloc::sync::Arc<objects::ThreadObj>
         Some(Object::Thread(t)) => Some((t.tid.load(Ordering::SeqCst), Some(t))),
         _ if h == objects::CURRENT_THREAD => {
             let tid = kernel32::GetThreadId(h);
-            let obj = objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)).and_then(|o| match o {
-                Object::Thread(t) => Some(t),
-                _ => None,
+            let obj = kernel32::thread_object(tid).or_else(|| {
+                objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)).and_then(|o| match o {
+                    Object::Thread(t) => Some(t),
+                    _ => None,
+                })
             });
             Some((tid, obj))
         }
