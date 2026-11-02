@@ -55,8 +55,12 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
    (copy, move, delete, pack into tar), Extract here for tar/tar.gz/zip/7z/gz,
    a viewer and hex viewer, and "Open with" with per-extension choices are
    implemented (`userspace/desktop/src/bin/files.rs`,
-   `userspace/filekit/src/openwith.rs`). Still open: built-in audio, video
-   and PDF viewers (today those kinds need a registered application).
+   `userspace/filekit/src/openwith.rs`). Files plays WAV, FLAC, MP3 and Ogg
+   Vorbis itself (`userspace/desktop/src/audio_view.rs`) and shows PDF
+   documents (`userspace/desktop/src/pdf_view.rs`), both decoded by
+   `userspace/media`. Still open: a built-in video player (video files
+   still need a registered application) and Opus, AAC, JPEG 2000, JBIG2
+   and CCITT fax data.
 5. **Release hygiene**: partly done. CodSpeed benchmarks run on every pull
    request. Still open: the release workflow builds and signs only; it runs
    neither the host tests nor the Win32, SMP, desktop and Zen QEMU suites.
