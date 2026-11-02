@@ -1177,22 +1177,24 @@ fn comb_filter(
     let g10 = g1 * COMB_GAINS[tap1][0];
     let g11 = g1 * COMB_GAINS[tap1][1];
     let g12 = g1 * COMB_GAINS[tap1][2];
+    // A period is only meaningful with a gain (it is 0 when unused).
+    let taps = |buf: &[f32], p: usize, t: usize, g: [f32; 3]| -> f32 {
+        if g[0] == 0.0 && g[1] == 0.0 && g[2] == 0.0 {
+            return 0.0;
+        }
+        let x = |k: usize| buf[p - k];
+        g[0] * x(t) + g[1] * (x(t + 1) + x(t - 1)) + g[2] * (x(t + 2) + x(t - 2))
+    };
     for i in 0..overlap.min(n) {
         let f = WINDOW[i] * WINDOW[i];
-        let x = |k: usize| buf[at + i - k];
-        let v = buf[at + i]
-            + (1.0 - f) * g00 * x(t0)
-            + (1.0 - f) * g01 * (x(t0 + 1) + x(t0 - 1))
-            + (1.0 - f) * g02 * (x(t0 + 2) + x(t0 - 2))
-            + f * g10 * x(t1)
-            + f * g11 * (x(t1 + 1) + x(t1 - 1))
-            + f * g12 * (x(t1 + 2) + x(t1 - 2));
-        buf[at + i] = v;
+        let p = at + i;
+        let a = taps(buf, p, t0, [(1.0 - f) * g00, (1.0 - f) * g01, (1.0 - f) * g02]);
+        let b = taps(buf, p, t1, [f * g10, f * g11, f * g12]);
+        buf[p] = buf[p] + a + b;
     }
     for i in overlap.min(n)..n {
-        let x = |k: usize| buf[at + i - k];
-        let v = buf[at + i] + g10 * x(t1) + g11 * (x(t1 + 1) + x(t1 - 1)) + g12 * (x(t1 + 2) + x(t1 - 2));
-        buf[at + i] = v;
+        let p = at + i;
+        buf[p] += taps(buf, p, t1, [g10, g11, g12]);
     }
 }
 

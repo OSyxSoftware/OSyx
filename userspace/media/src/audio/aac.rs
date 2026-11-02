@@ -365,7 +365,7 @@ fn parse_mp4(d: &[u8]) -> Result<Mp4, String> {
     let top = boxes(d, 0, d.len());
     let moov = top.iter().find(|b| &b.0 == b"moov").ok_or("no movie box in this MP4 file")?;
     let mvhd = child(d, moov.2, moov.3, b"mvhd");
-    let movie_scale = mvhd.and_then(|(s, _)| be32(d, s + if d[s] == 1 { 20 } else { 12 })).unwrap_or(0);
+    let movie_scale = mvhd.and_then(|(s, _)| be32(d, s + if d.get(s) == Some(&1) { 20 } else { 12 })).unwrap_or(0);
     let mut other = None;
     for trak in boxes(d, moov.2, moov.3).into_iter().filter(|b| &b.0 == b"trak") {
         let (ts, te) = (trak.2, trak.3);
@@ -405,8 +405,9 @@ fn parse_mp4(d: &[u8]) -> Result<Mp4, String> {
         }
         let asc = asc.ok_or("no AAC configuration in this MP4 file")?.to_vec();
         let mdhd = child(d, ms, me, b"mdhd").ok_or("no media header")?;
-        let timescale = be32(d, mdhd.0 + if d[mdhd.0] == 1 { 20 } else { 12 }).unwrap_or(0);
-        let track_id = child(d, ts, te, b"tkhd").and_then(|(s, _)| be32(d, s + if d[s] == 1 { 20 } else { 12 }));
+        let timescale = be32(d, mdhd.0 + if d.get(mdhd.0) == Some(&1) { 20 } else { 12 }).unwrap_or(0);
+        let track_id =
+            child(d, ts, te, b"tkhd").and_then(|(s, _)| be32(d, s + if d.get(s) == Some(&1) { 20 } else { 12 }));
 
         let mut frames = sample_table(d, ss, se).ok_or("damaged sample table")?;
         // Fragmented files keep their samples in movie fragments.
@@ -424,7 +425,7 @@ fn parse_mp4(d: &[u8]) -> Result<Mp4, String> {
         let (mut skip, mut keep) = (0, None);
         let elst = child(d, ts, te, b"edts").and_then(|(s, e)| child(d, s, e, b"elst"));
         if let Some((es, _)) = elst {
-            let v1 = d[es] == 1;
+            let v1 = d.get(es) == Some(&1);
             let n = be32(d, es + 4).unwrap_or(0);
             let mut p = es + 8;
             for _ in 0..n.min(16) {

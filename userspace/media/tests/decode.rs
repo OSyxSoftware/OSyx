@@ -181,3 +181,44 @@ fn opus() {
         }
     }
 }
+
+/// Damaged and cut files may fail or play noise, but never panic.
+#[test]
+fn damaged_aac_and_opus() {
+    let files = [
+        "aac-stereo-44100.m4a",
+        "aac-mono-22050.aac",
+        "aac-5.1-48000.m4a",
+        "aac-mono-8000.mp4",
+        "opus-mono-voip.opus",
+        "opus-stereo-audio.opus",
+        "opus-5.1.opus",
+    ];
+    let mut seed = 0x1234_5678u32;
+    for f in files {
+        let good = data(f);
+        for round in 0..40 {
+            let mut d = good.clone();
+            if round % 4 == 0 {
+                d.truncate(d.len() * (round + 1) / 41);
+            } else {
+                for _ in 0..1 + round / 4 {
+                    seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                    let at = (seed >> 8) as usize % d.len();
+                    d[at] ^= (seed >> 24) as u8 | 1;
+                }
+            }
+            if let Ok(mut dec) = audio::open(d) {
+                let mut blocks = 0;
+                while let Ok(Some(_)) = dec.next_block() {
+                    blocks += 1;
+                    if blocks > 10_000 {
+                        break;
+                    }
+                }
+                let _ = dec.seek(1000);
+                while let Ok(Some(_)) = dec.next_block() {}
+            }
+        }
+    }
+}
