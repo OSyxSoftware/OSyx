@@ -150,3 +150,34 @@ fn aac() {
         }
     }
 }
+
+#[test]
+fn opus() {
+    // SILK is bit-exact with libopus; CELT is floating point there too, so
+    // allow one step.
+    for (f, ch) in [
+        ("opus-mono-voip.opus", 1),
+        ("opus-stereo-audio.opus", 2),
+        ("opus-stereo-lowdelay.opus", 2),
+        ("opus-mono-16k-40ms.opus", 1),
+        ("opus-5.1.opus", 6),
+    ] {
+        let whole = check(f, 48000, ch, 1);
+        // Seeking pre-rolls 80 ms, so the decoder has settled but its
+        // state is not the straight decoding's: compare loosely.
+        let frames = (whole.len() / ch) as u64;
+        for at in [0, 1, 960, 7000, frames / 2, frames - 3, frames] {
+            let mut dec = audio::open(data(f)).unwrap();
+            assert_eq!(dec.seek(at).unwrap(), at);
+            let got = decode_all(dec.as_mut());
+            let want = &whole[at as usize * ch..];
+            assert_eq!(got.len(), want.len(), "{f}: length after seeking to {at}");
+            let (mut s, mut e) = (0.0f64, 0.0f64);
+            for (g, w) in got.iter().zip(want) {
+                s += (*w as f64).powi(2);
+                e += (*g as f64 - *w as f64).powi(2);
+            }
+            assert!(e <= s * 1e-3 + 1e-9, "{f}: after seeking to {at} error {e} of {s}");
+        }
+    }
+}

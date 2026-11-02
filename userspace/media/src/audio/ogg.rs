@@ -1,6 +1,8 @@
 //! Ogg (RFC 3533): pages with their CRC, packets split over segments and
-//! pages, and the logical stream of the first codec OSyx can play.
+//! pages, and the logical stream of the first codec OSyx can play (Vorbis
+//! or Opus).
 
+use super::opus::oggopus::OggOpusDecoder;
 use super::vorbis::VorbisDecoder;
 use super::Decoder;
 use alloc::boxed::Box;
@@ -189,8 +191,9 @@ pub fn open(data: Vec<u8>) -> Result<Box<dyn Decoder>, String> {
             return Ok(Box::new(VorbisDecoder::new(data, pg.serial)?));
         }
         if body.starts_with(b"OpusHead") {
-            other = Some("Opus");
-        } else if body.starts_with(b"\x7FFLAC") {
+            return Ok(Box::new(OggOpusDecoder::new(data, pg.serial)?));
+        }
+        if body.starts_with(b"\x7FFLAC") {
             other = Some("FLAC in Ogg");
         } else if body.starts_with(b"\x80theora") {
             other = Some("Theora video");
@@ -201,6 +204,6 @@ pub fn open(data: Vec<u8>) -> Result<Box<dyn Decoder>, String> {
     }
     Err(match other {
         Some(c) => alloc::format!("this Ogg file holds {c}, which OSyx cannot play yet"),
-        None => String::from("no Vorbis stream in this Ogg file"),
+        None => String::from("no Vorbis or Opus stream in this Ogg file"),
     })
 }

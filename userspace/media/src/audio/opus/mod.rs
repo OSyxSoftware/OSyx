@@ -3,6 +3,7 @@
 
 pub mod celt;
 mod celt_tables;
+pub mod oggopus;
 pub mod range;
 pub mod silk;
 mod silk_tables;
@@ -90,22 +91,34 @@ fn parse_size(data: &[u8]) -> Option<(usize, usize)> {
 
 /// The frames of a packet (RFC 6716 section 3.2).
 pub fn frames(packet: &[u8]) -> Option<(Toc, Vec<&[u8]>)> {
+    parse_packet(packet, false).map(|(t, f, _)| (t, f))
+}
+
+/// The frames of a packet, and the bytes it takes. A self-delimited
+/// packet (Appendix B, used for all but the last stream of a multistream
+/// packet) also gives the size of its last frame.
+pub fn parse_packet(packet: &[u8], self_delimited: bool) -> Option<(Toc, Vec<&[u8]>, usize)> {
     let t = toc(*packet.first()?);
     let mut data = &packet[1..];
     let mut sizes = Vec::new();
-    let last;
+    let mut cbr = false;
+    let count;
+    let mut last = data.len();
     match packet[0] & 3 {
-        0 => {
-            last = data.len();
-        }
+        0 => count = 1,
         1 => {
-            if data.len() & 1 != 0 {
-                return None;
+            count = 2;
+            cbr = true;
+            if !self_delimited {
+                if data.len() & 1 != 0 {
+                    return None;
+                }
+                sizes.push(data.len() / 2);
+                last = data.len() / 2;
             }
-            sizes.push(data.len() / 2);
-            last = data.len() / 2;
         }
         2 => {
+            count = 2;
             let (s, n) = parse_size(data)?;
             data = &data[n..];
             if s > data.len() {
@@ -117,7 +130,7 @@ pub fn frames(packet: &[u8]) -> Option<(Toc, Vec<&[u8]>)> {
         _ => {
             let ch = *data.first()?;
             data = &data[1..];
-            let count = (ch & 0x3F) as usize;
+            count = (ch & 0x3F) as usize;
             if count == 0 || t.frame_size * count > MAX_PACKET_SAMPLES {
                 return None;
             }
@@ -138,7 +151,8 @@ pub fn frames(packet: &[u8]) -> Option<(Toc, Vec<&[u8]>)> {
                 return None;
             }
             let mut len = len as usize;
-            if ch & 0x80 != 0 {
+            cbr = ch & 0x80 == 0;
+            if !cbr {
                 let mut l = len as isize;
                 for _ in 0..count - 1 {
                     let (s, n) = parse_size(data)?;
@@ -154,25 +168,54 @@ pub fn frames(packet: &[u8]) -> Option<(Toc, Vec<&[u8]>)> {
                     return None;
                 }
                 last = l as usize;
-            } else {
+            } else if !self_delimited {
                 last = len / count;
                 if last * count != len {
                     return None;
                 }
                 sizes.extend(core::iter::repeat_n(last, count - 1));
+            } else {
+                last = len;
             }
         }
     }
-    if last > 1275 {
+    if self_delimited {
+        let (s, n) = parse_size(data)?;
+        data = &data[n..];
+        if cbr {
+            if s * count > data.len() {
+                return None;
+            }
+            sizes.clear();
+            sizes.extend(core::iter::repeat_n(s, count - 1));
+        } else if s > last {
+            return None;
+        }
+        last = s;
+    } else if last > 1275 {
         return None;
     }
     sizes.push(last);
+    let header = packet.len() - data.len();
     let mut out = Vec::with_capacity(sizes.len());
+    let mut used = header;
     for s in sizes {
         out.push(data.get(..s)?);
         data = &data[s..];
+        used += s;
     }
-    Some((t, out))
+    Some((t, out, used))
+}
+
+/// Samples per channel at 48 kHz in a packet, from its first bytes.
+pub fn packet_samples(packet: &[u8]) -> usize {
+    let Some(&b) = packet.first() else { return 0 };
+    let n = match b & 3 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => packet.get(1).map_or(0, |c| (c & 0x3F) as usize),
+    };
+    n * toc(b).frame_size
 }
 
 /// Cross-fades `a` into `b` over `n` samples with the squared CELT window.
@@ -239,7 +282,18 @@ impl OpusDecoder {
         if packet.is_empty() {
             return self.decode_frame(None, pcm, lost_frames);
         }
-        let (t, frames) = frames(packet).ok_or("invalid Opus packet")?;
+        self.decode_packet(packet, false, pcm).map(|(n, _)| n)
+    }
+
+    /// Decodes one packet, self-delimited or not; returns the frames
+    /// decoded and the bytes of `packet` it took.
+    pub fn decode_packet(
+        &mut self,
+        packet: &[u8],
+        self_delimited: bool,
+        pcm: &mut [f32],
+    ) -> Result<(usize, usize), &'static str> {
+        let (t, frames, used) = parse_packet(packet, self_delimited).ok_or("invalid Opus packet")?;
         self.mode = t.mode;
         self.bandwidth = t.bandwidth;
         self.frame_size = t.frame_size;
@@ -249,7 +303,7 @@ impl OpusDecoder {
             let n = self.decode_frame(Some(f), &mut pcm[done * self.channels..], MAX_PACKET_SAMPLES - done)?;
             done += n;
         }
-        Ok(done)
+        Ok((done, used))
     }
 
     /// opus_decode_frame of the reference decoder.

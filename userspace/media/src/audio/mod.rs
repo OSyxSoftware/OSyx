@@ -107,6 +107,6 @@ pub fn open(data: Vec<u8>) -> Result<Box<dyn Decoder>, String> {
         Some(Format::Mp3) => Ok(Box::new(mp3::Mp3Decoder::new(data)?)),
         Some(Format::Ogg) => ogg::open(data),
         Some(Format::Aac) => Ok(Box::new(aac::AacDecoder::new(data)?)),
-        None => Err(String::from("not a sound file OSyx can play (WAV, FLAC, MP3, AAC and Ogg Vorbis are supported)")),
+        None => Err(String::from("not a sound file OSyx can play (WAV, FLAC, MP3, AAC, Ogg Vorbis and Opus are supported)")),
     }
 }
