@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn matches_the_definition() {
-        for m in [8usize, 16, 32, 120, 240, 256, 480, 960, 1024] {
+        for m in [8usize, 16, 32, 64, 120, 128, 240, 256, 480, 960, 1024, 2048, 4096] {
             let x: Vec<f32> = (0..m).map(|i| ((i * 7919 % 113) as f32 - 56.0) / 57.0).collect();
             let want = direct(&x);
             let mut got = vec![0.0f32; 2 * m];
