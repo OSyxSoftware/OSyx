@@ -16,3 +16,4 @@ pub mod jbig2;
 pub mod jpx;
 mod mq;
 pub mod pdf;
+pub mod vp8;

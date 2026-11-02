@@ -13,3 +13,6 @@
 *.jpf binary
 *.tif binary
 *.png binary
+*.webp binary
+*.ivf binary
+*.webm binary
