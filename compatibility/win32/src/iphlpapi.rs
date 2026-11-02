@@ -592,8 +592,182 @@ extern "win64" fn if_nametoindex(name: *const u8) -> u32 {
         .map_or(0, |i| i.index as u32)
 }
 
+/// GetBestInterface: GetBestInterfaceEx for an IPv4 address (network
+/// byte order).
+extern "win64" fn GetBestInterface(dest: u32, index: *mut u32) -> u32 {
+    let mut sa = [0u8; 16];
+    sa[0] = 2; // AF_INET
+    sa[4..8].copy_from_slice(&dest.to_ne_bytes());
+    GetBestInterfaceEx(sa.as_ptr(), index)
+}
+
+/// An interface's GUID. OSyx keeps no adapter registry, so the GUID is
+/// made from the index: {6f737978-0000-4000-8000-0000000000ii}.
+fn iface_guid(index: u8) -> [u8; 16] {
+    let mut g = [0u8; 16];
+    g[..4].copy_from_slice(&0x6f73_7978u32.to_le_bytes());
+    g[6..8].copy_from_slice(&0x4000u16.to_le_bytes());
+    g[8] = 0x80;
+    g[15] = index;
+    g
+}
+
+extern "win64" fn ConvertInterfaceGuidToLuid(guid: *const [u8; 16], luid: *mut u64) -> u32 {
+    if guid.is_null() || luid.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's GUID.
+    let want = unsafe { *guid };
+    match list().ok().and_then(|v| v.into_iter().find(|i| iface_guid(i.index) == want)) {
+        Some(i) => {
+            // SAFETY: the caller's out pointer.
+            unsafe { *luid = iface_luid(i.flags, i.index) };
+            0
+        }
+        None => ERROR_INVALID_PARAMETER,
+    }
+}
+
+extern "win64" fn ConvertInterfaceLuidToGuid(luid: *const u64, guid: *mut [u8; 16]) -> u32 {
+    if luid.is_null() || guid.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's LUID.
+    let want = unsafe { *luid };
+    match list().ok().and_then(|v| v.into_iter().find(|i| iface_luid(i.flags, i.index) == want)) {
+        Some(i) => {
+            // SAFETY: the caller's out pointer.
+            unsafe { *guid = iface_guid(i.index) };
+            0
+        }
+        None => ERROR_INVALID_PARAMETER,
+    }
+}
+
+/// GetIfEntry2: MIB_IF_ROW2 (1352 bytes) of the interface named by its
+/// LUID, or by its index when the LUID is zero.
+extern "win64" fn GetIfEntry2(row: *mut u8) -> u32 {
+    if row.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let p = row as u64;
+    // SAFETY: the caller's MIB_IF_ROW2.
+    let (luid, index): (u64, u32) = unsafe { (teb::get(p, 0), teb::get(p, 8)) };
+    if luid == 0 && index == 0 {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let ifs = match list() {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(i) = ifs.iter().find(|i| if luid != 0 { iface_luid(i.flags, i.index) == luid } else { i.index as u32 == index }) else {
+        return ERROR_FILE_NOT_FOUND;
+    };
+    let loopback = i.flags & net::IFF_LOOPBACK != 0;
+    let wireless = i.flags & net::IFF_WIRELESS != 0;
+    let up = i.flags & net::IFF_UP != 0 && (loopback || i.flags & net::IFF_LINK != 0);
+    let name = net::field(&i.name);
+    // SAFETY: the caller's MIB_IF_ROW2 (1352 bytes).
+    unsafe {
+        core::ptr::write_bytes(row, 0, 1352);
+        teb::put(p, 0, iface_luid(i.flags, i.index));
+        teb::put(p, 8, i.index as u32);
+        core::ptr::copy_nonoverlapping(iface_guid(i.index).as_ptr(), row.add(12), 16);
+        if !loopback {
+            teb::put(p, 1056, 6u32);
+            core::ptr::copy_nonoverlapping(i.mac.as_ptr(), row.add(1060), 6);
+            core::ptr::copy_nonoverlapping(i.mac.as_ptr(), row.add(1092), 6);
+        }
+        teb::put(p, 1124, i.mtu);
+        teb::put(p, 1128, iface_type(i.flags));
+        teb::put(p, 1136, if loopback { 13u32 } else { 0 }); // NdisMediumLoopback / NdisMedium802_3
+        teb::put(p, 1140, if wireless { 9u32 } else { 0 }); // NdisPhysicalMediumNative802_11
+        teb::put(p, 1144, if loopback { 1u32 } else { 2 }); // NET_IF_ACCESS_LOOPBACK / _BROADCAST
+        // HardwareInterface and ConnectorPresent for a real adapter.
+        *row.add(1152) = if loopback { 0 } else { 0x1 | 0x4 };
+        teb::put(p, 1156, if up { 1u32 } else { 2 }); // IfOperStatusUp / Down
+        teb::put(p, 1160, 1u32); // NET_IF_ADMIN_STATUS_UP
+        teb::put(p, 1164, if up { 1u32 } else { 2 }); // MediaConnectStateConnected / Disconnected
+        teb::put(p, 1184, 1u32); // NET_IF_CONNECTION_DEDICATED
+        for (off, n) in [
+            (1208, i.rx_bytes),
+            (1216, i.rx_packets),
+            (1232, i.rx_dropped),
+            (1240, i.rx_errors),
+            (1256, i.rx_bytes),
+            (1280, i.tx_bytes),
+            (1288, i.tx_packets),
+            (1304, i.tx_dropped),
+            (1320, i.tx_bytes),
+        ] {
+            teb::put(p, off, n as u64);
+        }
+    }
+    out_w(name, (p + 28) as *mut u16, 257);
+    out_w(&format!("OSyx {name}"), (p + 542) as *mut u16, 257);
+    0
+}
+
+/// NotifyAddrChange/NotifyRouteChange: OSyx's addresses and routes are
+/// fixed for the boot (see CHANGES), so a change never comes. With an
+/// OVERLAPPED the request stays pending (ERROR_IO_PENDING) until
+/// CancelIPChangeNotify; without one the call waits, as on Windows.
+static ADDR_WAITS: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+
+fn notify_change(handle: *mut u64, ov: *mut u8) -> u32 {
+    if ov.is_null() {
+        loop {
+            os_sys::sleep(3_600_000_000_000);
+        }
+    }
+    let event = crate::kernel32::create_event(true, false, None);
+    // SAFETY: the caller's OVERLAPPED and out handle.
+    unsafe {
+        crate::kernel32::overlapped::set_status(ov as u64, 0x103); // STATUS_PENDING
+        if !handle.is_null() {
+            *handle = event;
+        }
+    }
+    ADDR_WAITS.lock().unwrap().push((ov as u64, event));
+    997 // ERROR_IO_PENDING
+}
+
+extern "win64" fn NotifyAddrChange(handle: *mut u64, ov: *mut u8) -> u32 {
+    notify_change(handle, ov)
+}
+
+extern "win64" fn NotifyRouteChange(handle: *mut u64, ov: *mut u8) -> u32 {
+    notify_change(handle, ov)
+}
+
+/// Ends a pending notification with ERROR_OPERATION_ABORTED.
+extern "win64" fn CancelIPChangeNotify(ov: *mut u8) -> i32 {
+    let found = {
+        let mut w = ADDR_WAITS.lock().unwrap();
+        w.iter().position(|(o, _)| *o == ov as u64).map(|i| w.remove(i))
+    };
+    let Some((_, event)) = found else { return 0 };
+    // SAFETY: the OVERLAPPED of the pending request.
+    let user_event = unsafe {
+        crate::kernel32::overlapped::set_status(ov as u64, 0xC000_0120); // STATUS_CANCELLED
+        crate::kernel32::overlapped::event(ov as u64) & !1
+    };
+    if user_event != 0 {
+        crate::kernel32::SetEvent(user_event);
+    }
+    crate::kernel32::CloseHandle(event);
+    1
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        GetBestInterface,
+        ConvertInterfaceGuidToLuid,
+        ConvertInterfaceLuidToGuid,
+        GetIfEntry2,
+        NotifyAddrChange,
+        NotifyRouteChange,
+        CancelIPChangeNotify,
         GetAdaptersInfo,
         GetIfTable,
         GetNetworkParams,

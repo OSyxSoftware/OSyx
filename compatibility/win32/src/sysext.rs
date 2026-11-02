@@ -563,14 +563,61 @@ fn source_text(flags: u32, source: u64, id: u32, wide: bool) -> Result<String, u
     system_message(id).map(String::from).ok_or(ERROR_MR_MID_NOT_FOUND)
 }
 
+/// The highest insert number (%1 .. %99) a message uses.
+fn max_insert(text: &str) -> usize {
+    let mut max = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            continue;
+        }
+        match chars.peek() {
+            Some('1'..='9') => {
+                let mut n = 0usize;
+                while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
+                    n = n * 10 + d as usize;
+                    chars.next();
+                }
+                max = max.max(n.min(99));
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    max
+}
+
 /// Shared body of FormatMessageA/W; writes `units` (bytes or UTF-16).
 #[allow(clippy::too_many_arguments)]
 fn format_message(flags: u32, source: u64, id: u32, lang: u32, buf: u64, size: u32, args: u64, wide: bool) -> u32 {
     if lang != 0 && lang & 0x3ff != 0x09 {
         return fail(1815, 0); // ERROR_RESOURCE_LANG_NOT_FOUND: only English text
     }
+    let narrow = crate::wow64::is_active();
+    let source = match source_text(flags, source, id, wide) {
+        Ok(t) => t,
+        Err(e) => return fail(e, 0),
+    };
+    // A 32-bit caller's inserts are 4-byte slots: widen as many as the
+    // message refers to.
+    let mut widened: Vec<u64> = Vec::new();
     let args = if args == 0 {
         core::ptr::null()
+    } else if narrow {
+        let slots = if flags & ARGUMENT_ARRAY != 0 {
+            args as *const u32
+        } else {
+            // A va_list on x86 is a pointer to the next argument slot.
+            // SAFETY: the caller's va_list.
+            unsafe { *(args as *const u32) as u64 as *const u32 }
+        };
+        let used = if flags & IGNORE_INSERTS != 0 { 0 } else { max_insert(&source) };
+        // SAFETY: the caller supplies an argument for every insert the
+        // message uses.
+        widened.extend((0..used).map(|i| unsafe { core::ptr::read_unaligned(slots.add(i)) } as u64));
+        widened.as_ptr()
     } else if flags & ARGUMENT_ARRAY != 0 {
         args as *const u64
     } else {
@@ -578,7 +625,7 @@ fn format_message(flags: u32, source: u64, id: u32, lang: u32, buf: u64, size: u
         // SAFETY: the caller's va_list.
         unsafe { *(args as *const u64) as *const u64 }
     };
-    let text = match source_text(flags, source, id, wide).and_then(|t| expand(&t, flags, args, wide)) {
+    let text = match expand(&source, flags, args, wide) {
         Ok(t) => t,
         Err(e) => return fail(e, 0),
     };
@@ -590,7 +637,13 @@ fn format_message(flags: u32, source: u64, id: u32, lang: u32, buf: u64, size: u
             return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
         };
         // SAFETY: `buf` is the caller's pointer-sized out parameter.
-        unsafe { *(buf as *mut u64) = p };
+        unsafe {
+            if narrow {
+                core::ptr::write_unaligned(buf as *mut u32, p as u32);
+            } else {
+                *(buf as *mut u64) = p;
+            }
+        }
         p
     } else {
         if buf == 0 || count + 1 > size as usize {
@@ -1045,11 +1098,95 @@ extern "win64" fn SetProcessMitigationPolicy(policy: u32, buf: *const u8, len: u
 
 const APPMODEL_ERROR_NO_PACKAGE: u32 = 15700;
 
+const APPMODEL_ERROR_NO_APPLICATION: u32 = 15703;
+
+// OSyx processes are unpackaged desktop programs: the package queries say
+// so with the error Windows gives such a process, and the AppPolicy
+// answers are those of a classic desktop process (probed on Windows 11).
+
 extern "win64" fn GetCurrentPackageFullName(len: *mut u32, _buf: *mut u16) -> u32 {
     if len.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
     APPMODEL_ERROR_NO_PACKAGE
+}
+
+extern "win64" fn GetCurrentPackageId(len: *mut u32, _buf: *mut u8) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    APPMODEL_ERROR_NO_PACKAGE
+}
+
+extern "win64" fn GetCurrentPackageFamilyName(len: *mut u32, _buf: *mut u16) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    APPMODEL_ERROR_NO_PACKAGE
+}
+
+extern "win64" fn GetCurrentPackagePath(len: *mut u32, _buf: *mut u16) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    APPMODEL_ERROR_NO_PACKAGE
+}
+
+extern "win64" fn GetCurrentApplicationUserModelId(len: *mut u32, _buf: *mut u16) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    APPMODEL_ERROR_NO_APPLICATION
+}
+
+/// One AppPolicy query: `value` for a token (the pseudo tokens included).
+fn app_policy(token: u64, out: *mut i32, value: i32) -> u32 {
+    if token == 0 || out.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { out.write_unaligned(value) };
+    0
+}
+
+/// AppPolicyProcessTerminationMethod_ExitProcess.
+extern "win64" fn AppPolicyGetProcessTerminationMethod(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 0)
+}
+
+/// AppPolicyShowDeveloperDiagnostic_ShowUI.
+extern "win64" fn AppPolicyGetShowDeveloperDiagnostic(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 1)
+}
+
+/// AppPolicyWindowingModel_ClassicDesktop.
+extern "win64" fn AppPolicyGetWindowingModel(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 2)
+}
+
+/// AppPolicyThreadInitializationType_None.
+extern "win64" fn AppPolicyGetThreadInitializationType(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 0)
+}
+
+/// AppPolicyCreateFileAccess_Full.
+extern "win64" fn AppPolicyGetCreateFileAccess(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 0)
+}
+
+/// AppPolicyClrCompat_ClassicDesktop.
+extern "win64" fn AppPolicyGetClrCompat(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 1)
+}
+
+/// AppPolicyMediaFoundationCodecLoading_All.
+extern "win64" fn AppPolicyGetMediaFoundationCodecLoading(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 0)
+}
+
+/// AppPolicyLifecycleManagement_Unmanaged.
+extern "win64" fn AppPolicyGetLifecycleManagement(token: u64, out: *mut i32) -> u32 {
+    app_policy(token, out, 0)
 }
 
 /// PRODUCT_UNDEFINED: OSyx is not a Windows edition.
@@ -1062,7 +1199,7 @@ extern "win64" fn GetProductInfo(_major: u32, _minor: u32, _sp_major: u32, _sp_m
     1
 }
 
-extern "win64" fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32 {
+pub(crate) extern "win64" fn GetSystemDirectoryW(buf: *mut u16, size: u32) -> u32 {
     kernel32::out_w("C:\\Windows\\System32", buf, size)
 }
 
@@ -1075,7 +1212,7 @@ extern "win64" fn GetSystemWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
     GetWindowsDirectoryW(buf, size)
 }
 
-extern "win64" fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32 {
+pub(crate) extern "win64" fn ExpandEnvironmentStringsW(src: *const u16, dst: *mut u16, size: u32) -> u32 {
     // SAFETY: a NUL-terminated string.
     let Some(s) = (unsafe { path::wide_to_string(src) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let expanded = crate::registry::expand_env(&s);
@@ -1180,6 +1317,7 @@ extern "win64" fn NtQueryObject(h: u64, class: u32, buf: *mut u8, len: u32, ret:
                 objects::Object::File(_) | objects::Object::Console(_) | objects::Object::Null | objects::Object::Pipe(_) => "File",
                 objects::Object::Directory(_) => "Directory",
                 objects::Object::Transaction(_) => "Transaction",
+                objects::Object::Snapshot(_) => "Section",
                 objects::Object::Thread(_) => "Thread",
                 objects::Object::Event(_) => "Event",
                 objects::Object::KeyedEvent(_) => "KeyedEvent",
@@ -1255,6 +1393,18 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetProcessMitigationPolicy,
         SetProcessMitigationPolicy,
         GetCurrentPackageFullName,
+        GetCurrentPackageId,
+        GetCurrentPackageFamilyName,
+        GetCurrentPackagePath,
+        GetCurrentApplicationUserModelId,
+        AppPolicyGetProcessTerminationMethod,
+        AppPolicyGetShowDeveloperDiagnostic,
+        AppPolicyGetWindowingModel,
+        AppPolicyGetThreadInitializationType,
+        AppPolicyGetCreateFileAccess,
+        AppPolicyGetClrCompat,
+        AppPolicyGetMediaFoundationCodecLoading,
+        AppPolicyGetLifecycleManagement,
         GetProductInfo,
         GetSystemDirectoryW,
         GetWindowsDirectoryW,

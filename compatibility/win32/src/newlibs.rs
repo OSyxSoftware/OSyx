@@ -1,4 +1,4 @@
-//! Small system libraries: `secur32.dll`, `shfolder.dll`, `winspool.drv`,
+//! Small system libraries: `secur32.dll` (with SSPI in sspi.rs), `shfolder.dll`, `winspool.drv`,
 //! `uiautomationcore.dll` and `oleacc.dll`. Each does what OSyx can really
 //! do (user names, folder paths, an empty printer list, "no UI Automation
 //! client") and fails with the documented error for the rest.
@@ -50,31 +50,6 @@ extern "win64" fn GetUserNameExW(format: u32, buf: *mut u16, size: *mut u32) -> 
         *size = units.len() as u32;
     }
     1
-}
-
-/// Every SSPI entry point of this table: there are no security packages, so
-/// each call fails with SEC_E_UNSUPPORTED_FUNCTION.
-extern "win64" fn sspi_unsupported() -> u32 {
-    0x8009_0302
-}
-
-/// SecurityFunctionTableW, version 1: dwVersion (padded to 8 bytes) and the
-/// 28 entry points that follow.
-#[repr(C)]
-struct SspiTable {
-    version: u64,
-    entries: [*const (); 28],
-}
-
-// SAFETY: immutable function pointers.
-unsafe impl Sync for SspiTable {}
-
-static SSPI_TABLE: SspiTable = SspiTable { version: 1, entries: [sspi_unsupported as *const (); 28] };
-
-/// A real function table whose calls report that no package is available,
-/// as Windows does for an unknown package, instead of a NULL table.
-extern "win64" fn InitSecurityInterfaceW() -> *const SspiTable {
-    &SSPI_TABLE
 }
 
 // ---- the local security authority ------------------------------------------------------------
@@ -275,16 +250,17 @@ extern "win64" fn LsaLogonUser(
 }
 
 pub fn secur32_exports() -> Vec<(&'static str, u64)> {
-    export_table![
+    let mut e = crate::sspi::exports();
+    e.extend(export_table![
         GetUserNameExW,
-        InitSecurityInterfaceW,
         LsaConnectUntrusted,
         LsaRegisterLogonProcess,
         LsaDeregisterLogonProcess,
         LsaLookupAuthenticationPackage,
         LsaFreeReturnBuffer,
         LsaLogonUser
-    ]
+    ]);
+    e
 }
 
 // ---- shfolder.dll -----------------------------------------------------------------------

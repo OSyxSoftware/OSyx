@@ -15,6 +15,9 @@ use os_std::sync::Mutex;
 use os_sys::net::{self, SockAddr};
 use osyx_abi::Errno;
 
+mod events;
+pub(crate) mod mswsock;
+
 const INVALID_SOCKET: u64 = u64::MAX;
 const SOCKET_ERROR: i32 = -1;
 const AF_INET: u16 = 2;
@@ -164,6 +167,9 @@ fn fd(s: u64) -> Result<(u64, bool), u32> {
 /// Reject I/O after the matching half of the socket was shut down.
 fn check_shutdown(s: u64, read: bool) -> Result<(), u32> {
     let st = socket_state(s)?;
+    // Every receive and send passes here: they re-enable FD_READ and
+    // FD_WRITE for WSAEventSelect.
+    events::rearm(s, if read { 0x05 } else { 0x02 });
     if (read && st.read_shutdown) || (!read && st.write_shutdown) {
         return Err(WSAESHUTDOWN);
     }
@@ -300,6 +306,7 @@ extern "win64" fn closesocket(s: u64) -> i32 {
     }
     match SOCKETS.lock().unwrap().remove(&s) {
         Some(k) => {
+            events::forget(s);
             let _ = os_sys::close(k.fd);
             0
         }
@@ -337,7 +344,9 @@ extern "win64" fn listen(s: u64, backlog: i32) -> i32 {
         if !stream {
             return Err(WSAEOPNOTSUPP);
         }
-        os_sys::sock_listen(fd, backlog.clamp(1, 128) as u32).map_err(wsa)
+        os_sys::sock_listen(fd, backlog.clamp(1, 128) as u32).map_err(wsa)?;
+        events::listening(s);
+        Ok(())
     })())
 }
 
@@ -352,6 +361,7 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
         if !addr.is_null() && (len.is_null() || unsafe { *len } < 16) {
             return Err(WSAEFAULT);
         }
+        events::rearm(s, 0x08);
         let (nfd, peer) = os_sys::sock_accept(listener.fd).map_err(wsa)?;
         // Winsock accept inherits the listener's blocking mode. OSyx's
         // native accept creates a blocking endpoint, so apply it here.
@@ -956,6 +966,102 @@ pub(crate) extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hi
     0
 }
 
+const NI_NUMERICHOST: i32 = 2;
+const NI_NAMEREQD: i32 = 4;
+const NI_NUMERICSERV: i32 = 8;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+/// The host and service names getnameinfo gives for a sockaddr_in. A
+/// loopback address names this machine; other addresses have no reverse
+/// lookup in OSyx's resolver and stay numeric, unless NI_NAMEREQD asks
+/// for a name. The service is a known name or the decimal port.
+fn name_info(sa: *const u8, salen: i32, flags: i32) -> Result<(String, String), u32> {
+    if !started() {
+        return Err(WSANOTINITIALISED);
+    }
+    if sa.is_null() || salen < 16 {
+        return Err(WSAEFAULT);
+    }
+    let a = read_addr(sa, salen)?;
+    let numeric = alloc::format!("{}.{}.{}.{}", a.addr[0], a.addr[1], a.addr[2], a.addr[3]);
+    let host = if flags & NI_NUMERICHOST != 0 {
+        numeric
+    } else if a.addr[0] == 127 {
+        host_name()
+    } else if flags & NI_NAMEREQD != 0 {
+        return Err(WSAHOST_NOT_FOUND);
+    } else {
+        numeric
+    };
+    let named = SERVICES.iter().find(|&&(_, p)| p == a.port).filter(|_| flags & NI_NUMERICSERV == 0);
+    let serv = match named {
+        Some(&(n, _)) => String::from(n),
+        None => alloc::format!("{}", a.port),
+    };
+    Ok((host, serv))
+}
+
+/// Copies `s` into a buffer of `cap` units. As on Windows, a name that
+/// does not fit is cut to the buffer (without a terminator) and fails
+/// with ERROR_INSUFFICIENT_BUFFER.
+fn put_name<T: Copy + Default>(units: &[T], dst: *mut T, cap: u32) -> bool {
+    if dst.is_null() || cap == 0 {
+        return true;
+    }
+    let n = units.len().min(cap as usize);
+    // SAFETY: the caller's buffer of `cap` units.
+    unsafe {
+        core::ptr::copy_nonoverlapping(units.as_ptr(), dst, n);
+        if units.len() < cap as usize {
+            *dst.add(units.len()) = T::default();
+            return true;
+        }
+    }
+    false
+}
+
+/// Early argument errors return the code without setting the last error;
+/// name and buffer failures set it too, matching Windows.
+fn name_info_result(r: Result<bool, u32>) -> i32 {
+    match r {
+        Ok(true) => 0,
+        Ok(false) => err(ERROR_INSUFFICIENT_BUFFER, ERROR_INSUFFICIENT_BUFFER as i32),
+        Err(WSAHOST_NOT_FOUND) => err(WSAHOST_NOT_FOUND, WSAHOST_NOT_FOUND as i32),
+        Err(e) => e as i32,
+    }
+}
+
+pub(crate) extern "win64" fn getnameinfo(
+    sa: *const u8,
+    salen: i32,
+    host: *mut u8,
+    hostlen: u32,
+    serv: *mut u8,
+    servlen: u32,
+    flags: i32,
+) -> i32 {
+    name_info_result(name_info(sa, salen, flags).map(|(h, s)| {
+        let h_ok = put_name(h.as_bytes(), host, hostlen);
+        put_name(s.as_bytes(), serv, servlen) && h_ok
+    }))
+}
+
+extern "win64" fn GetNameInfoW(
+    sa: *const u8,
+    salen: i32,
+    host: *mut u16,
+    hostlen: u32,
+    serv: *mut u16,
+    servlen: u32,
+    flags: i32,
+) -> i32 {
+    name_info_result(name_info(sa, salen, flags).map(|(h, s)| {
+        let (h, s): (Vec<u16>, Vec<u16>) = (h.encode_utf16().collect(), s.encode_utf16().collect());
+        let h_ok = put_name(&h, host, hostlen);
+        put_name(&s, serv, servlen) && h_ok
+    }))
+}
+
 pub(crate) extern "win64" fn freeaddrinfo(mut p: u64) {
     while p != 0 {
         // SAFETY: a block made by getaddrinfo (ai_next at offset 40).
@@ -980,9 +1086,9 @@ pub(crate) extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *c
 
 const FIONREAD: u32 = 0x4004_667F;
 
-/// WSAIoctl: FIONBIO and FIONREAD, synchronously. Extension functions
-/// (SIO_GET_EXTENSION_FUNCTION_POINTER: ConnectEx, AcceptEx, ...) need
-/// overlapped I/O and are reported unsupported, so callers fall back.
+/// WSAIoctl: FIONBIO, FIONREAD and the extension functions
+/// (SIO_GET_EXTENSION_FUNCTION_POINTER: AcceptEx, ConnectEx, ...), which
+/// complete synchronously (mswsock.rs).
 #[allow(clippy::too_many_arguments)]
 extern "win64" fn WSAIoctl(
     s: u64,
@@ -1616,7 +1722,8 @@ pub(crate) extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *m
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![
+    let mut e = events::exports();
+    e.extend(export_table![
         WSAStartup,
         WSACleanup,
         WSAGetLastError,
@@ -1650,6 +1757,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         gethostname,
         getaddrinfo,
         freeaddrinfo,
+        getnameinfo,
+        GetNameInfoW,
         select,
         __WSAFDIsSet,
         WSASocketW,
@@ -1664,7 +1773,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         WSCEnumProtocols,
         WSCGetProviderInfo,
         WSCGetProviderPath,
-    ]
+    ]);
+    e
 }
 
 /// Winsock 2 export ordinals. The legacy DLL differs at ordinals 10-12.

@@ -17,6 +17,9 @@ use crate::{
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use os_std::sync::Mutex;
 
+mod encode;
+pub(crate) use encode::{der, der_oid, der_uint};
+
 /// rustls-rustcrypto (whose signature verifiers the chain checks use) is
 /// built against getrandom; its randomness is the kernel's CSPRNG.
 fn osyx_random(buf: &mut [u8]) -> Result<(), getrandom::Error> {
@@ -894,7 +897,10 @@ extern "win64" fn CertCloseStore(store: u64, _flags: u32) -> i32 {
         return 1;
     }
     match HANDLES.lock().unwrap().stores.remove(&store) {
-        Some(_) => 1,
+        Some(_) => {
+            encode::forget_store(store);
+            1
+        }
         None => fail(ERROR_INVALID_HANDLE, 0),
     }
 }
@@ -909,6 +915,7 @@ extern "win64" fn CertFreeCertificateContext(ctx: u64) -> i32 {
     if c.refs == 0 {
         h.contexts.remove(&ctx);
         drop(h);
+        encode::forget_context(ctx);
         kernel32::heap_free(ctx);
     }
     1
@@ -1232,26 +1239,20 @@ extern "win64" fn CertFindChainInStore(
     fail(CRYPT_E_NOT_FOUND, 0)
 }
 
+/// CryptAcquireCertificatePrivateKey: the ncrypt key named by the
+/// certificate's CERT_KEY_PROV_INFO property, or a key handle property.
 extern "win64" fn CryptAcquireCertificatePrivateKey(
-    _cert: u64,
-    _flags: u32,
+    cert: u64,
+    flags: u32,
     _parameters: u64,
     key: *mut u64,
     spec: *mut u32,
     caller_free: *mut i32,
 ) -> i32 {
-    unsafe {
-        if !key.is_null() {
-            *key = 0;
-        }
-        if !spec.is_null() {
-            *spec = 0;
-        }
-        if !caller_free.is_null() {
-            *caller_free = 0;
-        }
+    if context_der(cert).is_none() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    fail(CRYPT_E_NO_KEY_PROPERTY, 0)
+    encode::acquire_private_key(cert, flags, key, spec, caller_free)
 }
 
 /// CertCreateCertificateContext: a context for an encoded certificate,
@@ -1275,6 +1276,7 @@ extern "win64" fn CertAddCertificateContextToStore(store: u64, ctx: u64, _dispos
         certs.push(der.clone());
         certs.len() - 1
     };
+    encode::copy_props(ctx, store, index);
     if !out.is_null() {
         let c = make_context(store, index, &der).unwrap_or(0);
         // SAFETY: the caller's out pointer.
@@ -1376,15 +1378,18 @@ fn requested_usage(para: *const u8, narrow: bool) -> Usage {
         return u;
     }
     // SAFETY: the caller's CERT_CHAIN_PARA: cbSize, then RequestedUsage
-    // {dwType, {cUsageIdentifier, rgpszUsageIdentifier}}.
+    // {dwType, {cUsageIdentifier, rgpszUsageIdentifier}}. The usage holds a
+    // pointer, so on x64 RequestedUsage starts at 8 and its list at 24; on
+    // x86 they are at 4 and 12.
     unsafe {
         let p = para as *const u32;
-        if *p < 16 {
+        let (kind_at, count_at, size) = if narrow { (4, 8, 16) } else { (8, 16, 32) };
+        if *p < size {
             return u;
         }
-        u.all = *p.add(1) == 0; // USAGE_MATCH_TYPE_AND
-        let count = (*p.add(2)).min(64) as usize;
-        let list = if narrow { *p.add(3) as u64 } else { *(para.add(16) as *const u64) };
+        u.all = core::ptr::read_unaligned(para.add(kind_at) as *const u32) == 0; // USAGE_MATCH_TYPE_AND
+        let count = core::ptr::read_unaligned(para.add(count_at) as *const u32).min(64) as usize;
+        let list = if narrow { *p.add(3) as u64 } else { core::ptr::read_unaligned(para.add(24) as *const u64) };
         for i in 0..count {
             if list == 0 {
                 break;
@@ -1552,7 +1557,8 @@ extern "win64" fn CertFreeCertificateChain(chain: u64) {
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![
+    let mut e = encode::exports();
+    e.extend(export_table![
         CertCreateCertificateContext,
         CertAddCertificateContextToStore,
         CertGetCertificateChain,
@@ -1573,5 +1579,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CertFindChainInStore,
         CryptAcquireCertificatePrivateKey,
         CryptBinaryToStringW,
-    ]
+    ]);
+    e
 }

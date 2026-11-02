@@ -521,12 +521,16 @@ fn set_info(t: &Token, class: u32, info: *const u8, len: u32) -> Result<(), u32>
     let is_process = Arc::ptr_eq(&t.state, &process_state());
     let mut d = t.state.data.lock().unwrap();
     let need_len = |n: u32| if len < n || info.is_null() { Err(ERROR_BAD_LENGTH) } else { Ok(()) };
+    // Pointers in the structures are 4 bytes for a 32-bit (WoW64) caller.
+    let ptr: u32 = if crate::wow64::is_active() { 4 } else { 8 };
+    // SAFETY (both uses): the caller's structure of at least `ptr` bytes.
+    let read_ptr = || unsafe { if ptr == 4 { rd::<u32>(info, 0) as u64 } else { rd::<u64>(info, 0) } };
     match class {
         4 | 5 => {
             need(t, TOKEN_ADJUST_DEFAULT)?;
-            need_len(8)?;
+            need_len(ptr)?;
             // SAFETY: a TOKEN_OWNER / TOKEN_PRIMARY_GROUP (one SID pointer).
-            let s = sid_at(unsafe { rd::<u64>(info, 0) } as *const u8)?;
+            let s = sid_at(read_ptr() as *const u8)?;
             let g = groups(t.uid, t.gid, &d);
             if class == 4 {
                 let ok = s == user_sid(t.uid) || g.iter().any(|(x, a)| *x == s && a & SE_GROUP_OWNER != 0);
@@ -543,9 +547,9 @@ fn set_info(t: &Token, class: u32, info: *const u8, len: u32) -> Result<(), u32>
         }
         6 => {
             need(t, TOKEN_ADJUST_DEFAULT)?;
-            need_len(8)?;
+            need_len(ptr)?;
             // SAFETY: a TOKEN_DEFAULT_DACL (one ACL pointer, NULL allowed).
-            let acl = unsafe { rd::<u64>(info, 0) } as *const u8;
+            let acl = read_ptr() as *const u8;
             // SAFETY: NULL or the caller's ACL, validated by acl_bytes.
             d.default_dacl = if acl.is_null() { None } else { Some(unsafe { security::acl_bytes(acl) }.map_err(|_| ERROR_INVALID_ACL)?) };
         }
@@ -553,9 +557,9 @@ fn set_info(t: &Token, class: u32, info: *const u8, len: u32) -> Result<(), u32>
         12 | 27 => return Err(ERROR_PRIVILEGE_NOT_HELD),
         25 => {
             need(t, TOKEN_ADJUST_DEFAULT)?;
-            need_len(16)?;
+            need_len(2 * ptr)?;
             // SAFETY: a TOKEN_MANDATORY_LABEL.
-            let s = sid_at(unsafe { rd::<u64>(info, 0) } as *const u8)?;
+            let s = sid_at(read_ptr() as *const u8)?;
             if s.len() != 12 || s[1] != 1 || s[2..8] != [0, 0, 0, 0, 0, 16] {
                 return Err(ERROR_INVALID_SID);
             }
@@ -670,7 +674,7 @@ extern "win64" fn RevertToSelf() -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn CreateProcessAsUserW(
+pub(crate) extern "win64" fn CreateProcessAsUserW(
     h: u64,
     app: *const u16,
     cmd: *mut u16,

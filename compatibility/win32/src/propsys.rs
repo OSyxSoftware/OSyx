@@ -132,6 +132,9 @@ pub(crate) extern "win64" fn PropVariantClear(v: *mut PropVariant) -> u32 {
     if v.is_null() {
         return E_INVALIDARG;
     }
+    if crate::wow64::is_active() {
+        return clear32(v as *mut u8);
+    }
     // SAFETY: the caller's PROPVARIANT.
     let pv = unsafe { *v };
     if copy_supported(vt(&pv)) {
@@ -142,6 +145,31 @@ pub(crate) extern "win64" fn PropVariantClear(v: *mut PropVariant) -> u32 {
     } else {
         DISP_E_BADVARTYPE
     }
+}
+
+/// PropVariantClear of a 32-bit program's PROPVARIANT: 16 bytes, its
+/// pointers 4 bytes at offset 8; an IUnknown is released as 32-bit code.
+fn clear32(v: *mut u8) -> u32 {
+    // SAFETY: the caller's 16-byte PROPVARIANT.
+    let (t, p) = unsafe { (core::ptr::read_unaligned(v as *const u16), core::ptr::read_unaligned(v.add(8) as *const u32) as u64) };
+    if !copy_supported(t) {
+        return DISP_E_BADVARTYPE;
+    }
+    if p != 0 {
+        match t {
+            VT_LPWSTR | VT_CLSID => crate::ole32::CoTaskMemFree(p),
+            VT_BSTR => crate::oleaut32::free_bstr(p),
+            VT_UNKNOWN => {
+                // SAFETY: IUnknown::Release is vtable slot 2 (4-byte entries).
+                let release = unsafe { *((*(p as *const u32) as u64 + 8) as *const u32) };
+                crate::wow64::callback(release as u64, &[p]);
+            }
+            _ => {}
+        }
+    }
+    // SAFETY: as above.
+    unsafe { core::ptr::write_bytes(v, 0, 16) };
+    S_OK
 }
 
 fn copy_supported(t: u16) -> bool {

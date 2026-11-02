@@ -459,7 +459,7 @@ extern "win64" fn osyx_unwind_ex(target_frame: u64, target_ip: u64, record: *mut
     unwind_to(target_frame, target_ip, record, retval, start)
 }
 
-extern "win64" fn RtlRestoreContext(ctx: *const Context, record: *const Record) -> ! {
+pub(crate) extern "win64" fn RtlRestoreContext(ctx: *const Context, record: *const Record) -> ! {
     // SAFETY: the caller's CONTEXT and optional EXCEPTION_RECORD.
     let c = unsafe { *ctx };
     match unsafe { record.as_ref() } {

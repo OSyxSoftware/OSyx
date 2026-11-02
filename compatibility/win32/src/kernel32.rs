@@ -547,18 +547,82 @@ extern "win64" fn CreateFileW(
     h
 }
 
-/// OVERLAPPED: Internal, InternalHigh, Offset, OffsetHigh, hEvent.
+/// OVERLAPPED: Internal, InternalHigh (ULONG_PTR), Offset, OffsetHigh,
+/// hEvent. x64: 0, 8, 16, 20, 24; x86 (a 32-bit program): 0, 4, 8, 12, 16.
+pub(crate) mod overlapped {
+    fn narrow() -> bool {
+        crate::wow64::is_active()
+    }
+
+    /// Internal: the NTSTATUS of the operation (STATUS_PENDING while it runs).
+    ///
+    /// # Safety
+    /// `ov` must be the caller's OVERLAPPED.
+    pub(crate) unsafe fn status(ov: u64) -> u64 {
+        // SAFETY: as documented; a helper thread may complete it.
+        unsafe {
+            if narrow() { core::ptr::read_volatile(ov as *const u32) as u64 } else { core::ptr::read_volatile(ov as *const u64) }
+        }
+    }
+
+    /// # Safety
+    /// As [`status`].
+    pub(crate) unsafe fn set_status(ov: u64, v: u64) {
+        // SAFETY: as documented.
+        unsafe {
+            if narrow() { core::ptr::write_volatile(ov as *mut u32, v as u32) } else { core::ptr::write_volatile(ov as *mut u64, v) }
+        }
+    }
+
+    /// InternalHigh: the bytes transferred.
+    ///
+    /// # Safety
+    /// As [`status`].
+    pub(crate) unsafe fn bytes(ov: u64) -> u64 {
+        // SAFETY: as documented.
+        unsafe {
+            if narrow() { core::ptr::read_volatile((ov + 4) as *const u32) as u64 } else { core::ptr::read_volatile((ov + 8) as *const u64) }
+        }
+    }
+
+    /// # Safety
+    /// As [`status`].
+    pub(crate) unsafe fn set_bytes(ov: u64, v: u64) {
+        // SAFETY: as documented.
+        unsafe {
+            if narrow() { core::ptr::write_volatile((ov + 4) as *mut u32, v as u32) } else { core::ptr::write_volatile((ov + 8) as *mut u64, v) }
+        }
+    }
+
+    /// Offset | OffsetHigh << 32.
+    ///
+    /// # Safety
+    /// As [`status`].
+    pub(crate) unsafe fn offset(ov: u64) -> u64 {
+        let at = if narrow() { 8 } else { 16 };
+        // SAFETY: as documented.
+        unsafe { core::ptr::read_unaligned((ov + at) as *const u64) }
+    }
+
+    /// hEvent, sign-extended for a 32-bit caller (its low bit suppresses
+    /// the completion packet).
+    ///
+    /// # Safety
+    /// As [`status`].
+    pub(crate) unsafe fn event(ov: u64) -> u64 {
+        // SAFETY: as documented.
+        unsafe {
+            if narrow() { core::ptr::read_volatile((ov + 16) as *const u32) as i32 as i64 as u64 } else { core::ptr::read_volatile((ov + 24) as *const u64) }
+        }
+    }
+}
+
 pub(crate) fn overlapped_offset(ov: *const u8) -> Option<u64> {
     if ov.is_null() {
         return None;
     }
     // SAFETY: the caller's OVERLAPPED structure.
-    unsafe {
-        Some(
-            core::ptr::read_unaligned(ov.add(16) as *const u32) as u64
-                | (core::ptr::read_unaligned(ov.add(20) as *const u32) as u64) << 32,
-        )
-    }
+    unsafe { Some(overlapped::offset(ov as u64)) }
 }
 
 pub fn read_handle(h: u64, buf: *mut u8, n: u32, offset: Option<u64>) -> Result<u32, u32> {
@@ -709,9 +773,9 @@ fn complete_overlapped(ov: *const u8, n: u32) {
     }
     // SAFETY: the caller's OVERLAPPED structure.
     let event: u64 = unsafe {
-        teb::put(ov as u64, 0, 0u64);
-        teb::put(ov as u64, 8, n as u64);
-        teb::get(ov as u64, 24)
+        overlapped::set_status(ov as u64, 0);
+        overlapped::set_bytes(ov as u64, n as u64);
+        overlapped::event(ov as u64)
     };
     if event != 0 {
         SetEvent(event);
@@ -735,7 +799,7 @@ pub(crate) extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u
     }
 }
 
-extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: *mut u32, ov: *const u8) -> Bool {
+pub(crate) extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: *mut u32, ov: *const u8) -> Bool {
     if let Some(Object::Pipe(p)) = objects::get(h) {
         return crate::pipes::write_file(p, buf, n, written, ov as u64);
     }
@@ -819,22 +883,20 @@ extern "win64" fn GetOverlappedResult(h: u64, ov: *const u8, n: *mut u32, wait: 
     if ov.is_null() {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let read = |off: usize| -> u64 {
-        // SAFETY: the caller's OVERLAPPED; a helper thread may complete it.
-        unsafe { core::ptr::read_volatile((ov as u64 + off as u64) as *const u64) }
-    };
-    while read(0) == STATUS_PENDING {
+    // SAFETY (all three): the caller's OVERLAPPED; a helper thread may complete it.
+    let status = || unsafe { overlapped::status(ov as u64) };
+    while status() == STATUS_PENDING {
         if wait == 0 {
             return fail(ERROR_IO_INCOMPLETE, FALSE);
         }
-        match read(24) & !1 {
+        match unsafe { overlapped::event(ov as u64) } & !1 {
             0 => os_std::thread::sleep(core::time::Duration::from_millis(1)),
             event => {
                 let _ = objects::wait(&[event], false, 10);
             }
         }
     }
-    let (status, bytes) = (read(0), read(8));
+    let (status, bytes) = (status(), unsafe { overlapped::bytes(ov as u64) });
     if !n.is_null() {
         // SAFETY: the caller's out pointer.
         unsafe { *n = bytes as u32 };
@@ -851,6 +913,7 @@ extern "win64" fn CancelIoEx(h: u64, _ov: *const u8) -> Bool {
     match objects::get(h) {
         None => fail(ERROR_INVALID_HANDLE, FALSE),
         Some(Object::Pipe(p)) if crate::pipes::cancel(&p) => TRUE,
+        Some(Object::File(_)) if crate::client64::cancel_dir_watch(h) => TRUE,
         Some(_) => fail(ERROR_NOT_FOUND, FALSE),
     }
 }
@@ -881,6 +944,10 @@ extern "win64" fn CancelIo(h: u64) -> Bool {
         None => fail(ERROR_INVALID_HANDLE, FALSE),
         Some(Object::Pipe(p)) => {
             crate::pipes::cancel(&p);
+            TRUE
+        }
+        Some(Object::File(_)) => {
+            crate::client64::cancel_dir_watch(h);
             TRUE
         }
         Some(_) => TRUE,
@@ -1157,7 +1224,7 @@ extern "win64" fn RemoveDirectoryW(name: *const u16) -> Bool {
     remove_directory(unsafe { sw(name) })
 }
 
-fn delete_file(name: Option<String>) -> Bool {
+pub(crate) fn delete_file(name: Option<String>) -> Bool {
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
     let p = match locate(&name) {
         Ok((p, true)) => p,
@@ -1308,7 +1375,7 @@ extern "win64" fn GetTempPathW(size: u32, buf: *mut u16) -> u32 {
 
 /// `<dir>\<up to 3 prefix chars><hex>.TMP`; with `unique` 0 a new number
 /// is chosen and the file created (empty), as on Windows.
-extern "win64" fn GetTempFileNameW(dir: *const u16, prefix: *const u16, unique: u32, out: *mut u16) -> u32 {
+pub(crate) extern "win64" fn GetTempFileNameW(dir: *const u16, prefix: *const u16, unique: u32, out: *mut u16) -> u32 {
     // SAFETY: NUL-terminated strings (prefix may be NULL).
     let (Some(dir), prefix) = (unsafe { sw(dir) }, unsafe { sw(prefix) }.unwrap_or_default()) else {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -1928,9 +1995,17 @@ extern "win64" fn Sleep(ms: u32) {
     }
 }
 
-extern "win64" fn SleepEx(ms: u32, _alertable: Bool) -> u32 {
-    Sleep(ms);
-    0
+/// SleepEx: an alertable sleep ends early, with WAIT_IO_COMPLETION, when
+/// queued APCs ran.
+extern "win64" fn SleepEx(ms: u32, alertable: Bool) -> u32 {
+    if alertable == 0 {
+        Sleep(ms);
+        return 0;
+    }
+    crate::apc::alertable_wait(ms, 0, |slice| {
+        Sleep(slice);
+        0
+    })
 }
 
 extern "win64" fn SwitchToThread() -> Bool {
@@ -2251,7 +2326,7 @@ pub(crate) fn new_event(manual: bool, initial: bool) -> u64 {
     objects::insert(Object::Event(EventObj::new(initial, manual, None)))
 }
 
-fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
+pub(crate) fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
     if let Some(o @ Object::Event(_)) = name.as_deref().and_then(objects::find_named) {
         teb::set_last_error(ERROR_ALREADY_EXISTS);
         return objects::insert(o);
@@ -2280,7 +2355,7 @@ extern "win64" fn OpenEventA(_access: u32, inherit: Bool, name: *const u8) -> u6
     open_named(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Event(_)))
 }
 
-extern "win64" fn OpenMutexW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
+pub(crate) extern "win64" fn OpenMutexW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
     // SAFETY: a NUL-terminated name.
     open_named(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Mutex(_)))
 }
@@ -2349,7 +2424,7 @@ pub(crate) extern "win64" fn SetEvent(h: u64) -> Bool {
     event_op(h, true)
 }
 
-extern "win64" fn ResetEvent(h: u64) -> Bool {
+pub(crate) extern "win64" fn ResetEvent(h: u64) -> Bool {
     event_op(h, false)
 }
 
@@ -2434,8 +2509,11 @@ pub(crate) extern "win64" fn WaitForSingleObject(h: u64, ms: u32) -> u32 {
     objects::wait(&[h], false, ms).unwrap_or_else(|e| fail(e, objects::WAIT_FAILED))
 }
 
-extern "win64" fn WaitForSingleObjectEx(h: u64, ms: u32, _alertable: Bool) -> u32 {
-    WaitForSingleObject(h, ms)
+extern "win64" fn WaitForSingleObjectEx(h: u64, ms: u32, alertable: Bool) -> u32 {
+    if alertable == 0 {
+        return WaitForSingleObject(h, ms);
+    }
+    crate::apc::alertable_wait(ms, objects::WAIT_TIMEOUT, |slice| WaitForSingleObject(h, slice))
 }
 
 pub(crate) extern "win64" fn WaitForMultipleObjects(n: u32, hs: *const u64, all: Bool, ms: u32) -> u32 {
@@ -2447,8 +2525,11 @@ pub(crate) extern "win64" fn WaitForMultipleObjects(n: u32, hs: *const u64, all:
     objects::wait(list, all != 0, ms).unwrap_or_else(|e| fail(e, objects::WAIT_FAILED))
 }
 
-pub(crate) extern "win64" fn WaitForMultipleObjectsEx(n: u32, hs: *const u64, all: Bool, ms: u32, _alertable: Bool) -> u32 {
-    WaitForMultipleObjects(n, hs, all, ms)
+pub(crate) extern "win64" fn WaitForMultipleObjectsEx(n: u32, hs: *const u64, all: Bool, ms: u32, alertable: Bool) -> u32 {
+    if alertable == 0 {
+        return WaitForMultipleObjects(n, hs, all, ms);
+    }
+    crate::apc::alertable_wait(ms, objects::WAIT_TIMEOUT, |slice| WaitForMultipleObjects(n, hs, all, slice))
 }
 
 // TLS slots (TlsAlloc): 64 in the TEB, 1024 more in an expansion array.
@@ -2809,7 +2890,7 @@ extern "win64" fn lstrcmpiW(a: *const u16, b: *const u16) -> i32 {
     }
 }
 
-extern "win64" fn lstrcmpW(a: *const u16, b: *const u16) -> i32 {
+pub(crate) extern "win64" fn lstrcmpW(a: *const u16, b: *const u16) -> i32 {
     match (a.is_null(), b.is_null()) {
         (true, true) => 0,
         (true, false) => -1,
@@ -3192,7 +3273,7 @@ extern "win64" fn LoadLibraryExW(name: *const u16, _file: u64, _flags: u32) -> u
     LoadLibraryW(name)
 }
 
-extern "win64" fn FreeLibrary(h: u64) -> Bool {
+pub(crate) extern "win64" fn FreeLibrary(h: u64) -> Bool {
     loader::free_library(h).map_or_else(|e| fail(e, FALSE), |_| TRUE)
 }
 

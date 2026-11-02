@@ -24,7 +24,10 @@ macro_rules! export_table {
     };
 }
 
+mod apc;
 mod apiextra;
+mod clientapi;
+mod client64;
 mod crypt32;
 mod commdlg;
 mod comctl32;
@@ -38,6 +41,7 @@ mod files;
 mod fibers;
 mod fls;
 mod heaps;
+mod imagehlp;
 mod ini;
 mod ktm;
 mod iphlpapi;
@@ -52,6 +56,7 @@ mod objects;
 mod objsec;
 mod path;
 mod ole32;
+mod opengl32;
 mod oleaut32;
 mod setupapi;
 mod shell32;
@@ -86,6 +91,8 @@ mod credman;
 mod accounts;
 mod capi;
 mod bcrypt;
+mod ncrypt;
+mod sspi;
 mod newlibs;
 mod minordlls;
 mod msi;
