@@ -37,7 +37,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 32] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 33] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -47,6 +47,7 @@ pub fn run(boot: &BootData) -> Summary {
         ("kernel heap", &heap_test),
         ("breakpoint exception", &breakpoint),
         ("timer interrupts", &timer),
+        ("I/O APIC wired interrupt routing", &|| if boot.has_option("test.ioapic") { crate::arch::ioapic::selftest() } else { Ok(()) }),
         ("user copy validation", &user_copy),
         ("address space lifecycle", &address_space),
         ("preemptive kernel threads", &preemption),
