@@ -108,10 +108,18 @@ pub fn interleave<T: Copy + Default>(
         for u in u0..u1 {
             let val = if u % 2 == 0 {
                 let col = u / 2 - u0.div_ceil(2);
-                if low_row { ll.get(row * wl + col) } else { lh.get(row * wl + col) }
+                if low_row {
+                    ll.get(row * wl + col)
+                } else {
+                    lh.get(row * wl + col)
+                }
             } else {
                 let col = u / 2 - u0 / 2;
-                if low_row { hl.get(row * wh + col) } else { hh.get(row * wh + col) }
+                if low_row {
+                    hl.get(row * wh + col)
+                } else {
+                    hh.get(row * wh + col)
+                }
             };
             out[(v - v0) * w + (u - u0)] = val.copied().unwrap_or_default();
         }

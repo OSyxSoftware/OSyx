@@ -1,7 +1,8 @@
 //! Image XObjects and inline images (ISO 32000-1, 8.9): samples of 1 to 16
-//! bits in any colour space with Decode arrays, JPEG (DCTDecode), CCITT fax
-//! and JBIG2 bi-level data, stencil masks, explicit and colour key masks, and
-//! soft masks.
+//! bits in any colour space with Decode arrays, JPEG (DCTDecode), JPEG 2000
+//! (JPXDecode, with its own colour space and opacity), CCITT fax and JBIG2
+//! bi-level data, stencil masks, explicit and colour key masks, and soft
+//! masks.
 
 use super::color::{self, Space};
 use super::document::Document;
@@ -98,6 +99,21 @@ fn jpeg(data: &[u8], gray: bool) -> Option<(usize, usize, usize, Vec<u8>)> {
     (px.len() >= w * h * comps).then_some((w, h, comps, px))
 }
 
+/// Nearest-neighbour resampling of `sw` by `sh` pixels to `w` by `h`.
+fn resample(px: &[[u8; 4]], sw: usize, sh: usize, w: usize, h: usize) -> Vec<[u8; 4]> {
+    if (sw, sh) == (w, h) || sw == 0 || sh == 0 {
+        return px.to_vec();
+    }
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let sy = (y * sh / h).min(sh - 1);
+        for x in 0..w {
+            out.push(px[sy * sw + (x * sw / w).min(sw - 1)]);
+        }
+    }
+    out
+}
+
 /// Unpacks `n` components of `bpc` bits per sample, rows padded to bytes.
 fn unpack(data: &[u8], w: usize, h: usize, n: usize, bpc: u32) -> Vec<u32> {
     let row_bits = w * n * bpc as usize;
@@ -145,6 +161,11 @@ fn mask_alpha(doc: &Document, m: &Object, w: usize, h: usize, soft: bool) -> Opt
     let bpc = if soft { doc.get_key(d, "BitsPerComponent").as_i64().unwrap_or(8) as u32 } else { 1 };
     let vals: Vec<u8> = match codec {
         Some((name, _)) if name == b"DCTDecode" => jpeg(&data, true)?.3,
+        Some((name, _)) if name == b"JPXDecode" => {
+            let img = crate::jpx::decode(&data).ok()?;
+            let px = resample(&img.to_rgba(), img.w, img.h, mw, mh);
+            px.iter().map(|p| p[0]).collect()
+        }
         Some(_) => return None,
         None => {
             let max = ((1u64 << bpc) - 1) as u32;
@@ -241,6 +262,35 @@ pub fn decode(doc: &Document, d: &Dict, raw: &[u8], resolve_space: &dyn Fn(&Obje
                 }
             }
             px
+        }
+        Some((name, _)) if name == b"JPXDecode" => {
+            let img = crate::jpx::decode(&data).ok()?;
+            let mut rgba = match &space {
+                // The dictionary's colour space overrides the file's.
+                Some(sp) if !matches!(sp, Space::Gray | Space::Rgb | Space::Cmyk) && sp.components() == img.n => {
+                    let dec = sp.default_decode(8);
+                    let mut comps = vec![0.0; img.n];
+                    img.color
+                        .chunks_exact(img.n)
+                        .map(|c| {
+                            for k in 0..img.n {
+                                comps[k] = dec[2 * k] + c[k] as f64 * (dec[2 * k + 1] - dec[2 * k]) / 255.0;
+                            }
+                            let c = sp.to_rgb(&comps);
+                            [c[0], c[1], c[2], 255]
+                        })
+                        .collect()
+                }
+                _ => img.to_rgba(),
+            };
+            // The file's opacity counts only with SMaskInData.
+            let smask_in_data = doc.get_key(d, "SMaskInData").as_i64().unwrap_or(0) != 0;
+            if !smask_in_data {
+                for p in rgba.iter_mut() {
+                    p[3] = 255;
+                }
+            }
+            resample(&rgba, img.w, img.h, w, h)
         }
         Some(_) => return None,
         None => {

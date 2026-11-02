@@ -1,6 +1,8 @@
 //! The JPEG 2000 decoder against SerenityOS's test files (BSD-2-Clause,
 //! see `tests/data/jpx/README`) and their PNG references.
 
+mod common;
+
 use osyx_media::{image, jpx};
 
 fn dir() -> String {
@@ -216,4 +218,47 @@ fn openjpeg_files() {
         }
     }
     assert!(failed.is_empty(), "{} of {} failed:\n{}", failed.len(), names.len(), failed.join("\n"));
+}
+
+/// JPXDecode images in a PDF: the file's colour space, and its opacity
+/// with SMaskInData.
+#[test]
+fn pdf_jpxdecode() {
+    let render = |name: &str, extra: &str| {
+        let data = read(name);
+        let img = jpx::decode(&data).unwrap();
+        let dict = format!("/Width {} /Height {} /Filter /JPXDecode {extra}", img.w, img.h);
+        let pdf = osyx_media::pdf::Pdf::open(common::pdf_with_image(img.w, img.h, &dict, &data, &[])).unwrap();
+        (img, pdf.render(0, 1.0, &|_: &str| None).unwrap())
+    };
+    // Opaque RGB: the page shows the picture.
+    let (img, page) = render("gen/rev53-rgb.jp2", "");
+    assert_eq!((page.w, page.h), (img.w, img.h));
+    let off = page
+        .px
+        .iter()
+        .zip(img.color.chunks(3))
+        .filter(|(a, b)| a.iter().zip(*b).any(|(x, y)| x.abs_diff(*y) > 2))
+        .count();
+    assert!(off < img.w * img.h / 100, "{off} pixels differ");
+    // RGBA with SMaskInData: transparent parts show the white page.
+    let (img, page) = render("gen/rev-rgba-tiles.jp2", "/SMaskInData 1");
+    let a = img.alpha.as_ref().unwrap();
+    let (i, _) = a.iter().enumerate().min_by_key(|(_, &v)| v).unwrap();
+    assert!(a[i] < 10 && page.px[i].iter().all(|&v| v > 240), "{:?} at alpha {}", page.px[i], a[i]);
+    // Without SMaskInData the opacity is ignored.
+    let (_, page) = render("gen/rev-rgba-tiles.jp2", "");
+    assert_eq!(&page.px[i][..], &img.color[i * 3..i * 3 + 3]);
+}
+
+#[test]
+fn jpeg2000_files_open_as_pictures() {
+    for (name, format) in
+        [("gen/rev-rgba-tiles.jp2", "JPEG 2000, RGB with alpha"), ("gen/rev-gray-res8.j2k", "JPEG 2000, grey")]
+    {
+        let pic = image::decode(&read(name)).unwrap();
+        let img = jpx::decode(&read(name)).unwrap();
+        assert_eq!((pic.w, pic.h, pic.format.as_str()), (img.w, img.h, format));
+        assert_eq!(pic.frames[0].px, img.to_rgba());
+    }
 }

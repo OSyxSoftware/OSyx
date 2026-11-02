@@ -307,7 +307,8 @@ impl Block {
                 let mut first = y0;
                 // Run-length mode: a full column of four insignificant,
                 // unvisited coefficients without significant neighbours.
-                let quiet = rows == 4 && (y0..y0 + 4).all(|y| self.seen(self.idx(x, y), y) & (SIG | VISITED | 0xFF) == 0);
+                let quiet =
+                    rows == 4 && (y0..y0 + 4).all(|y| self.seen(self.idx(x, y), y) & (SIG | VISITED | 0xFF) == 0);
                 if quiet {
                     if m.bit(&mut self.ctx[RL]) == 0 {
                         continue;
@@ -369,11 +370,8 @@ pub fn decode(
     let mut p = (planes - 1 - zero) as i32;
     let mut k = 0u32;
     'segments: for (data, passes) in segments {
-        let mut coder = if is_raw(k, style) {
-            Coder::Raw(Raw { data, pos: 0, c: 0, ct: 0 })
-        } else {
-            Coder::Mq(Mq::new(data))
-        };
+        let mut coder =
+            if is_raw(k, style) { Coder::Raw(Raw { data, pos: 0, c: 0, ct: 0 }) } else { Coder::Mq(Mq::new(data)) };
         for _ in 0..*passes {
             if p < 0 {
                 break 'segments;

@@ -1,5 +1,6 @@
 //! Pictures for the image viewer built into Files: PNG, JPEG, GIF
-//! (animated), BMP, ICO and JBIG2, decoded to straight-alpha RGBA frames.
+//! (animated), BMP, ICO, JBIG2 and JPEG 2000, decoded to straight-alpha
+//! RGBA frames.
 
 mod bmp;
 mod gif;
@@ -51,9 +52,26 @@ pub fn decode(data: &[u8]) -> Result<Picture, String> {
         ico(data)
     } else if data.starts_with(&[0x97, 0x4A, 0x42, 0x32, 0x0D, 0x0A, 0x1A, 0x0A]) {
         jbig2(data)
+    } else if data.starts_with(&[0, 0, 0, 0x0C, b'j', b'P', b' ', b' ', 0x0D, 0x0A, 0x87, 0x0A])
+        || data.starts_with(&[0xFF, 0x4F, 0xFF, 0x51])
+    {
+        jpeg2000(data)
     } else {
-        Err(String::from("not a picture OSyx can show (PNG, JPEG, GIF, BMP, ICO and JBIG2 are supported)"))
+        Err(String::from("not a picture OSyx can show (PNG, JPEG, GIF, BMP, ICO, JBIG2 and JPEG 2000 are supported)"))
     }
+}
+
+fn jpeg2000(data: &[u8]) -> Result<Picture, String> {
+    let img = crate::jpx::decode(data).map_err(|e| alloc::format!("damaged JPEG 2000: {e}"))?;
+    check_size(img.w, img.h)?;
+    let kind = match img.space {
+        crate::jpx::Space::Gray => "grey",
+        crate::jpx::Space::Rgb => "RGB",
+        crate::jpx::Space::Cmyk => "CMYK",
+    };
+    let alpha = if img.alpha.is_some() { " with alpha" } else { "" };
+    let format = alloc::format!("JPEG 2000, {kind}{alpha}");
+    Ok(Picture { w: img.w, h: img.h, frames: alloc::vec![Frame { px: img.to_rgba(), delay_ms: 0 }], format })
 }
 
 /// The first page of a JBIG2 file, black on white.

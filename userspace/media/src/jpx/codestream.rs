@@ -569,13 +569,7 @@ fn band_rect(t: (usize, usize, usize, usize), nb: u32, xob: usize, yob: usize) -
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_tile_comp(
-    rect: (usize, usize, usize, usize),
-    sc: &SizComp,
-    cod: CodComp,
-    q: &Quant,
-    roi: u32,
-) -> R<TileComp> {
+fn build_tile_comp(rect: (usize, usize, usize, usize), sc: &SizComp, cod: CodComp, q: &Quant, roi: u32) -> R<TileComp> {
     let (tcx0, tcy0, tcx1, tcy1) =
         (ceil_div(rect.0, sc.dx), ceil_div(rect.1, sc.dy), ceil_div(rect.2, sc.dx), ceil_div(rect.3, sc.dy));
     let nl = cod.levels as u32;
@@ -592,11 +586,8 @@ fn build_tile_comp(
         if pw * ph > 1 << 20 {
             return Err("too many JPEG 2000 precincts");
         }
-        let kinds: &[(Orient, usize, usize)] = if r == 0 {
-            &[(Orient::LL, 0, 0)]
-        } else {
-            &[(Orient::HL, 1, 0), (Orient::LH, 0, 1), (Orient::HH, 1, 1)]
-        };
+        let kinds: &[(Orient, usize, usize)] =
+            if r == 0 { &[(Orient::LL, 0, 0)] } else { &[(Orient::HL, 1, 0), (Orient::LH, 0, 1), (Orient::HH, 1, 1)] };
         let nb = if r == 0 { nl } else { nl - r + 1 };
         let sub = (r > 0) as u32;
         let xcb = (cod.xcb as u32).min(ppx - sub);
@@ -799,7 +790,12 @@ fn read_packet(
 
 /// The packets of a tile in decoding order: (layer, resolution, component,
 /// precinct), following the progression order and any POC changes.
-fn packet_order(tcs: &[TileComp], rect: (usize, usize, usize, usize), cod: &Cod, pocs: &[Poc]) -> Vec<(u32, usize, usize, usize)> {
+fn packet_order(
+    tcs: &[TileComp],
+    rect: (usize, usize, usize, usize),
+    cod: &Cod,
+    pocs: &[Poc],
+) -> Vec<(u32, usize, usize, usize)> {
     let nc = tcs.len();
     let max_res = tcs.iter().map(|t| t.res.len()).max().unwrap_or(0);
     let default = [Poc { rs: 0, cs: 0, lye: cod.layers, re: max_res as u8, ce: nc as u16, order: cod.order }];
@@ -1022,7 +1018,13 @@ fn reconstruct(tc: &TileComp) -> Samples {
     }
 }
 
-fn decode_tile(siz: &Siz, main: &Params, tile: &TileData, rect: (usize, usize, usize, usize), comps: &mut [Component]) -> R<()> {
+fn decode_tile(
+    siz: &Siz,
+    main: &Params,
+    tile: &TileData,
+    rect: (usize, usize, usize, usize),
+    comps: &mut [Component],
+) -> R<()> {
     let tp = &tile.params;
     let cod = tp.cod.as_ref().or(main.cod.as_ref()).unwrap();
     let nc = siz.comps.len();
@@ -1034,11 +1036,8 @@ fn decode_tile(siz: &Siz, main: &Params, tile: &TileData, rect: (usize, usize, u
             .or_else(|| get(&main.coc))
             .unwrap_or_else(|| cod.comp.clone());
         let getq = |v: &Vec<Option<Quant>>| v.get(c).cloned().flatten();
-        let q = getq(&tp.qcc)
-            .or_else(|| tp.qcd.clone())
-            .or_else(|| getq(&main.qcc))
-            .or_else(|| main.qcd.clone())
-            .unwrap();
+        let q =
+            getq(&tp.qcc).or_else(|| tp.qcd.clone()).or_else(|| getq(&main.qcc)).or_else(|| main.qcd.clone()).unwrap();
         let roi = tp.rgn.get(c).copied().flatten().or(main.rgn.get(c).copied().flatten()).unwrap_or(0) as u32;
         tcs.push(build_tile_comp(rect, sc, cc, &q, roi)?);
     }
@@ -1065,7 +1064,8 @@ fn decode_tile(siz: &Siz, main: &Params, tile: &TileData, rect: (usize, usize, u
     let mut samples: Vec<Samples> = tcs.iter().map(reconstruct).collect();
     // Inverse component transform (G.2, G.3).
     if cod.mct && nc >= 3 {
-        let same = (1..3).all(|i| tcs[i].x1 - tcs[i].x0 == tcs[0].x1 - tcs[0].x0 && tcs[i].y1 - tcs[i].y0 == tcs[0].y1 - tcs[0].y0);
+        let same = (1..3)
+            .all(|i| tcs[i].x1 - tcs[i].x0 == tcs[0].x1 - tcs[0].x0 && tcs[i].y1 - tcs[i].y0 == tcs[0].y1 - tcs[0].y0);
         if same {
             match (&mut samples[..3], tcs[0].cod.reversible) {
                 ([Samples::Int(y0), Samples::Int(y1), Samples::Int(y2)], true) => {

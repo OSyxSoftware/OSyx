@@ -3,6 +3,8 @@
 //! 399 x 400 picture as `bitmap.bmp` with a different set of coding tools,
 //! and `annex-h.jbig2` is the T.88 Annex H example.
 
+mod common;
+
 use osyx_media::jbig2::{self, Bitmap};
 
 fn dir() -> String {
@@ -83,7 +85,13 @@ fn segments(file: &[u8]) -> Vec<(u8, u32, &[u8])> {
         let flags = file[p + 4];
         let refs = (file[p + 5] >> 5) as usize;
         assert!(refs <= 4);
-        let size = if number <= 256 { 1 } else if number <= 65536 { 2 } else { 4 };
+        let size = if number <= 256 {
+            1
+        } else if number <= 65536 {
+            2
+        } else {
+            4
+        };
         let mut q = p + 6 + refs * size;
         let page = if flags & 0x40 != 0 {
             q += 4;
@@ -96,47 +104,6 @@ fn segments(file: &[u8]) -> Vec<(u8, u32, &[u8])> {
         p = q + 4 + len;
         out.push((flags & 0x3F, page, &file[start..p]));
     }
-    out
-}
-
-/// A one-page PDF drawing a 399 x 400 JBIG2Decode image over the page,
-/// with the dictionary segments in a JBIG2Globals stream.
-fn pdf_with_jbig2(globals: &[u8], page: &[u8]) -> Vec<u8> {
-    let content = b"q 399 0 0 400 0 0 cm /Im0 Do Q";
-    let mut objs: Vec<Vec<u8>> = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 399 400] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
-            .to_vec(),
-    ];
-    let stream = |dict: String, data: &[u8]| {
-        let mut o = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
-        o.extend_from_slice(data);
-        o.extend_from_slice(b"\nendstream");
-        o
-    };
-    objs.push(stream(String::new(), content));
-    objs.push(stream(
-        "/Type /XObject /Subtype /Image /Width 399 /Height 400 /ColorSpace /DeviceGray /BitsPerComponent 1 \
-         /Filter /JBIG2Decode /DecodeParms << /JBIG2Globals 6 0 R >>"
-            .into(),
-        page,
-    ));
-    objs.push(stream(String::new(), globals));
-    let mut out = b"%PDF-1.7\n".to_vec();
-    let mut offsets = Vec::new();
-    for (i, o) in objs.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
-        out.extend_from_slice(o);
-        out.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = out.len();
-    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
-    for o in offsets {
-        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
-    }
-    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
     out
 }
 
@@ -153,16 +120,18 @@ fn pdf_jbig2decode_with_globals() {
         if page_no == 0 { &mut globals } else { &mut page }.extend_from_slice(bytes);
     }
     assert!(!globals.is_empty());
-    let pdf = osyx_media::pdf::Pdf::open(pdf_with_jbig2(&globals, &page)).unwrap();
+    let pdf = osyx_media::pdf::Pdf::open(common::pdf_with_image(
+        399,
+        400,
+        "/Width 399 /Height 400 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode          /DecodeParms << /JBIG2Globals 6 0 R >>",
+        &page,
+        &[&globals],
+    ))
+    .unwrap();
     let bmp = pdf.render(0, 1.0, &|_: &str| None).unwrap();
     let want = reference();
     assert_eq!((bmp.w, bmp.h), (want.w, want.h));
-    let off = bmp
-        .px
-        .iter()
-        .zip(&want.px)
-        .filter(|(rgb, &black)| (rgb[0] < 128) != (black == 1))
-        .count();
+    let off = bmp.px.iter().zip(&want.px).filter(|(rgb, &black)| (rgb[0] < 128) != (black == 1)).count();
     // Resampling may move a few edge pixels.
     assert!(off < want.w * want.h / 200, "{off} pixels differ");
 }

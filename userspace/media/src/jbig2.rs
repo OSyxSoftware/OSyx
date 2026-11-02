@@ -717,7 +717,9 @@ fn standard(n: u8) -> Table {
             l(77, 7, 6, Normal),
             l(141, 7, 32, Upper),
         ],
-        14 => vec![l(-2, 3, 0, Normal), l(-1, 3, 0, Normal), l(0, 1, 0, Normal), l(1, 3, 0, Normal), l(2, 3, 0, Normal)],
+        14 => {
+            vec![l(-2, 3, 0, Normal), l(-1, 3, 0, Normal), l(0, 1, 0, Normal), l(1, 3, 0, Normal), l(2, 3, 0, Normal)]
+        }
         _ => vec![
             l(-24, 7, 4, Normal),
             l(-8, 6, 2, Normal),
@@ -1284,7 +1286,11 @@ impl State {
             }
             let mut gb = vec![0; 1 << 16];
             let mut mq = Mq::new(data);
-            decode_generic(&mut mq, &mut gb, &GenericParams { w: cw, h: ph, template, tpgdon: false, at: &at, skip: None })?
+            decode_generic(
+                &mut mq,
+                &mut gb,
+                &GenericParams { w: cw, h: ph, template, tpgdon: false, at: &at, skip: None },
+            )?
         };
         let pats = (0..=max).map(|i| all.sub(i * pw, 0, pw, ph)).collect();
         self.patterns.insert(h.number, pats);
@@ -1750,7 +1756,8 @@ pub fn decode(data: &[u8], globals: Option<&[u8]>, embedded: bool) -> R<Vec<Bitm
             }
             for h in headers {
                 let len = h.length as usize;
-                let d = data.get(p..p.checked_add(len).ok_or("bad JBIG2 length")?).ok_or("JBIG2 segment past the end")?;
+                let d =
+                    data.get(p..p.checked_add(len).ok_or("bad JBIG2 length")?).ok_or("JBIG2 segment past the end")?;
                 p += len;
                 st.segment(&h, d)?;
             }
@@ -1764,11 +1771,7 @@ fn run_sequential(st: &mut State, data: &[u8]) -> R<()> {
     let mut p = 0;
     while p < data.len() {
         let (h, q) = segment_header(data, p)?;
-        let len = if h.length == 0xFFFF_FFFF {
-            unknown_length(&h, data, q)?
-        } else {
-            h.length as usize
-        };
+        let len = if h.length == 0xFFFF_FFFF { unknown_length(&h, data, q)? } else { h.length as usize };
         let end = q.checked_add(len).ok_or("bad JBIG2 length")?;
         let d = data.get(q..end).ok_or("JBIG2 segment past the end")?;
         st.segment(&h, d)?;
