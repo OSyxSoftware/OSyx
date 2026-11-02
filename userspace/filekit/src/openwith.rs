@@ -157,7 +157,7 @@ impl Choices {
 /// Sound files the built-in player decodes (Ogg may still hold Opus; the
 /// player says so).
 fn player_plays(ext: Option<&str>) -> bool {
-    matches!(ext, Some("mp3" | "wav" | "flac" | "ogg" | "oga" | "aac" | "m4a" | "m4b"))
+    matches!(ext, Some("mp3" | "wav" | "flac" | "ogg" | "oga" | "opus" | "aac" | "m4a" | "m4b"))
 }
 
 /// One entry of the "Open with" menu.
