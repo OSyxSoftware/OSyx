@@ -47,6 +47,7 @@ pub struct Route { gsi: u32, saved_low: u32, saved_high: u32 }
 /// Masking does not drain an IRQ already in flight; handlers must keep their
 /// data alive until pending interrupts have been accounted for.
 pub fn route(gsi: u32, vector: u8, low: bool, level: bool) -> Result<Route, &'static str> {
+    if !(crate::irq::FIRST..=crate::irq::LAST).contains(&vector) { return Err("vector outside device IRQ range"); }
     let entry = osyx_interrupts::redirection(vector, super::apic::id(), low, level).ok_or("invalid vector or APIC destination")?;
     if !super::apic::available() { return Err("no local APIC"); }
     let mut state = STATE.lock();
@@ -91,6 +92,7 @@ fn test_irq(_: u64) { TEST_IRQS.fetch_add(1, core::sync::atomic::Ordering::Relax
 pub fn selftest() -> Result<(), alloc::string::String> {
     use core::sync::atomic::Ordering;
     if crate::arch::timer::source_name() != "local APIC timer" { return Err("I/O APIC test requires local APIC timer".into()); }
+    if route_isa(0, super::pic::TIMER_VECTOR).is_ok() { return Err("legacy timer vector accepted".into()); }
     let vector = crate::irq::allocate(test_irq, 0).ok_or("no test vector")?;
     let route = match route_isa(0, vector) {
         Ok(route) => route,
