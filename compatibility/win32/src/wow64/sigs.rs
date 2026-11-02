@@ -481,6 +481,8 @@ pub(super) static SIGNATURES: &[Signature] = &[
     // ws2_32 (wow64::layouts converts addrinfo and WSABUF)
     sig!(getaddrinfo, [Ptr, Ptr, Ptr, Ptr], I32),
     sig!(freeaddrinfo, [Ptr], Void),
+    sig!(getnameinfo, [Ptr, Int, Ptr, Uint, Ptr, Uint, Int], I32),
+    sig!(GetNameInfoW, [Ptr, Int, Ptr, Uint, Ptr, Uint, Int], I32),
     sig!(WSASocketA, [Int, Int, Int, Ptr, Uint, Uint], Handle),
     sig!(WSARecv, [Handle, Ptr, Uint, Ptr, Ptr, Ptr, Ptr], I32),
     sig!(WSARecvFrom, [Handle, Ptr, Uint, Ptr, Ptr, Ptr, Ptr, Ptr, Ptr], I32),

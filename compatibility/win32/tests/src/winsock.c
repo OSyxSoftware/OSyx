@@ -78,6 +78,25 @@ void __stdcall start(void) {
           nr != NULL && ((struct sockaddr_in *)nr->ai_addr)->sin_addr.s_addr == inet_addr("10.0.0.1"));
     if (nr) freeaddrinfo(nr);
     nr = NULL;
+
+    /* getnameinfo: numeric hosts without a reverse lookup, named services. */
+    struct sockaddr_in ni = {0};
+    ni.sin_family = AF_INET;
+    ni.sin_port = htons(443);
+    ni.sin_addr.s_addr = inet_addr("10.255.1.2");
+    char ni_host[64], ni_serv[16];
+    check_eq("getnameinfo(10.255.1.2:443)",
+             getnameinfo((struct sockaddr *)&ni, sizeof ni, ni_host, sizeof ni_host, ni_serv, sizeof ni_serv, 0), 0);
+    check("... numeric host, https service", mem_eq(ni_host, "10.255.1.2", 11) && mem_eq(ni_serv, "https", 6));
+    check_eq("getnameinfo NI_NUMERICSERV",
+             getnameinfo((struct sockaddr *)&ni, sizeof ni, NULL, 0, ni_serv, sizeof ni_serv, NI_NUMERICSERV), 0);
+    check("... the decimal port", mem_eq(ni_serv, "443", 4));
+    check_eq("getnameinfo NI_NAMEREQD without a name",
+             getnameinfo((struct sockaddr *)&ni, sizeof ni, ni_host, sizeof ni_host, NULL, 0, NI_NAMEREQD), WSAHOST_NOT_FOUND);
+    check_eq("getnameinfo into a short buffer",
+             getnameinfo((struct sockaddr *)&ni, sizeof ni, ni_host, 3, NULL, 0, NI_NUMERICHOST), ERROR_INSUFFICIENT_BUFFER);
+    check_eq("getnameinfo with a short sockaddr",
+             getnameinfo((struct sockaddr *)&ni, 8, ni_host, sizeof ni_host, NULL, 0, 0), WSAEFAULT);
     struct addrinfo ns = {0};
     ns.ai_family = AF_INET;
     ns.ai_flags = AI_NUMERICSERV;
