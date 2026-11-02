@@ -107,7 +107,7 @@ pub fn decode(d: &[u8], icon: bool) -> Result<Picture, String> {
             // Run-length encoded indices, bottom-up.
             let (mut x, mut y) = (0usize, 0usize);
             let mut i = 0;
-            let mut set = |x: usize, y: usize, k: u8, px: &mut Vec<[u8; 4]>| {
+            let set = |x: usize, y: usize, k: u8, px: &mut Vec<[u8; 4]>| {
                 if x < w && y < h {
                     let c = palette.get(k as usize).copied().unwrap_or([0; 3]);
                     px[row_of(y) * w + x] = [c[0], c[1], c[2], 255];

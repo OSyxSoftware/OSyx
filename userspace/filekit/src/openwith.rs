@@ -4,8 +4,8 @@
 //! files they handle with a `Handles=` line of extensions and kind names
 //! (`Handles=mp4,mkv,video`). The user's choices per extension or kind live
 //! in `~/.config/osyx/openwith.conf` as `mp4=/opt/player` lines. Files shows
-//! images, text and source itself or through the default browser, plays
-//! sound files, shows PDF documents and unpacks archives itself, and hands
+//! pictures, text and source itself (other pictures through the default
+//! browser), plays sound files, shows PDF documents and unpacks archives itself, and hands
 //! everything else to a registered application.
 
 use crate::kind::{extension, Kind};
@@ -26,6 +26,8 @@ pub enum Builtin {
     Player,
     /// The PDF viewer.
     Pdf,
+    /// The image viewer.
+    Image,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +96,7 @@ fn builtin_by_name(s: &str) -> Option<Builtin> {
         "builtin:extract" => Builtin::Extract,
         "builtin:player" => Builtin::Player,
         "builtin:pdf" => Builtin::Pdf,
+        "builtin:image" => Builtin::Image,
         _ => return None,
     })
 }
@@ -106,6 +109,7 @@ fn builtin_name(b: Builtin) -> &'static str {
         Builtin::Extract => "builtin:extract",
         Builtin::Player => "builtin:player",
         Builtin::Pdf => "builtin:pdf",
+        Builtin::Image => "builtin:image",
     }
 }
 
@@ -154,6 +158,11 @@ impl Choices {
     }
 }
 
+/// Pictures the built-in viewer decodes.
+fn viewer_shows(ext: Option<&str>) -> bool {
+    matches!(ext, Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico"))
+}
+
 /// Sound files the built-in player decodes (Ogg may still hold Opus; the
 /// player says so).
 fn player_plays(ext: Option<&str>) -> bool {
@@ -179,6 +188,9 @@ pub fn candidates(name: &str, kind: Kind, handlers: &[Handler], browser: bool) -
             add("Hex viewer", Target::Builtin(Builtin::Hex));
         }
         Kind::Html | Kind::Image => {
+            if kind == Kind::Image && viewer_shows(ext.as_deref()) {
+                add("Image viewer", Target::Builtin(Builtin::Image));
+            }
             if browser {
                 add("Web browser", Target::Builtin(Builtin::Browser));
             }
@@ -266,8 +278,9 @@ mod tests {
     fn built_in_defaults() {
         let none = Choices::default();
         assert_eq!(default_target("a.txt", Kind::Text, &[], &none, false), Some(Target::Builtin(Builtin::Viewer)));
-        assert_eq!(default_target("a.png", Kind::Image, &[], &none, true), Some(Target::Builtin(Builtin::Browser)));
-        assert_eq!(default_target("a.png", Kind::Image, &[], &none, false), Some(Target::Builtin(Builtin::Hex)), "no browser: hex is all there is");
+        assert_eq!(default_target("a.png", Kind::Image, &[], &none, true), Some(Target::Builtin(Builtin::Image)));
+        assert_eq!(default_target("a.svg", Kind::Image, &[], &none, true), Some(Target::Builtin(Builtin::Browser)), "pictures the viewer cannot decode");
+        assert_eq!(default_target("a.svg", Kind::Image, &[], &none, false), Some(Target::Builtin(Builtin::Hex)), "no browser: hex is all there is");
         let z = classify("a.zip");
         assert_eq!(default_target("a.zip", z, &[], &none, false), Some(Target::Builtin(Builtin::Extract)));
     }
