@@ -1,2 +1,8 @@
 *.sh text eol=lf
 *.img binary
+*.pdf binary
+*.mp3 binary
+*.flac binary
+*.ogg binary
+*.wav binary
+*.gz binary
