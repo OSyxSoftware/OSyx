@@ -1,4 +1,4 @@
-//! The audio player built into Files: decodes WAV, FLAC, MP3 and Ogg Vorbis
+//! The audio player built into Files: decodes WAV, FLAC, MP3, AAC and Ogg Vorbis
 //! with `osyx_media` on a thread of its own and writes 48 kHz stereo frames
 //! to `/dev/audio`. The view shows the file, its format, the position on a
 //! seek bar, and Play/Pause, Back 10 s, Forward 10 s and a volume control.

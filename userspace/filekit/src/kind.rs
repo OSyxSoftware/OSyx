@@ -31,7 +31,7 @@ const TEXT: &[&str] = &["txt", "md", "log", "conf", "cfg", "ini", "csv", "json",
 const SOURCE: &[&str] = &["rs", "c", "h", "cc", "cpp", "hpp", "py", "sh", "js", "ts", "ax", "java", "go", "asm", "s", "css", "lua", "php", "cs", "rb"];
 const HTML: &[&str] = &["html", "htm", "xhtml"];
 const IMAGE: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "osxi", "ico", "svg", "tif", "tiff"];
-const AUDIO: &[&str] = &["mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "aac", "wma", "mid"];
+const AUDIO: &[&str] = &["mp3", "wav", "flac", "ogg", "oga", "opus", "m4a", "m4b", "aac", "wma", "mid"];
 const VIDEO: &[&str] = &["mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "m4v", "mpg", "mpeg", "ogv"];
 
 /// The lower-case extension after the last dot (`None` for no dot, a
