@@ -126,12 +126,12 @@ and starts its `steam.exe`, which loads `steamui.dll`, `steamclient64.dll`,
   (`ncrypt.dll`, the crypt32 encoders and self-signed certificates, SSPI,
   `getnameinfo`, `WSAEventSelect`, `AcceptEx`, APCs with `ReadFileEx`, the
   winmm mixer, `imagehlp.dll`, `GetIfEntry2` and others).
-- Next: `vgui2_s.dll` needs about 30 more GDI/user32/imm32/shell32
-  functions (font enumeration and loading, `Polyline`, viewport origins,
-  `SetDIBitsToDevice`, icon copies and drawing), `msimg32.dll`
-  (`AlphaBlend`, `GradientFill`, `TransparentBlt`) and `opengl32.dll`
-  (legacy immediate-mode GL 1.1 and WGL); `crashhandler64.dll` needs the
-  WinINet HTTP client (`InternetOpenW` to `InternetReadFile`).
+- `vgui2_s.dll` has `msimg32.dll` (`AlphaBlend`, `GradientFill`,
+  `TransparentBlt`) and `opengl32.dll` (OpenGL 1.1 in software with WGL)
+  now. Next it needs about 30 more GDI/user32/imm32/shell32 functions
+  (font enumeration and loading, `Polyline`, viewport origins,
+  `SetDIBitsToDevice`, icon copies and drawing); `crashhandler64.dll`
+  needs the WinINet HTTP client (`InternetOpenW` to `InternetReadFile`).
 - After that, CEF: about 100 more imports plus `winhttp.dll` and
   `dhcpcsvc.dll`, then Chromium's multi-process model on winrun.
 - SSPI has no security package yet: `AcquireCredentialsHandle` reports
