@@ -267,6 +267,11 @@ fn be64(d: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_be_bytes(d.get(at..at + 8)?.try_into().ok()?))
 }
 
+/// a * b / c without losing the product (c > 0), clamped to u64.
+fn mul_div(a: u64, b: u64, c: u64) -> u64 {
+    u64::try_from(a as u128 * b as u128 / c as u128).unwrap_or(u64::MAX)
+}
+
 /// The boxes in `d[start..end]`: (type, start of the box, body start, end).
 fn boxes(d: &[u8], start: usize, end: usize) -> Vec<([u8; 4], usize, usize, usize)> {
     let mut out = Vec::new();
@@ -441,7 +446,7 @@ fn parse_mp4(d: &[u8]) -> Result<Mp4, String> {
                 }
                 skip = u64::try_from(time).unwrap_or(0);
                 if movie_scale > 0 && dur > 0 {
-                    keep = Some(dur.saturating_mul(timescale as u64) / movie_scale as u64);
+                    keep = Some(mul_div(dur, timescale as u64, movie_scale as u64));
                 }
                 break;
             }
@@ -495,7 +500,8 @@ fn sample_table(d: &[u8], s: usize, e: usize) -> Option<Vec<(usize, usize)>> {
                 // Samples past the end of the file end the table (and keep
                 // a lying count from filling memory).
                 match at.checked_add(n) {
-                    Some(end) if end <= d.len() => {
+                    // A file cannot hold more samples than bytes.
+                    Some(end) if n > 0 && end <= d.len() && frames.len() < d.len() => {
                         frames.push((at, n));
                         at = end;
                     }
@@ -550,7 +556,7 @@ fn fragment(
             let sz = if f & 0x200 != 0 { be32(d, q + i * stride + if f & 0x100 != 0 { 4 } else { 0 })? } else { size };
             // Empty samples or ones past the end of the file end the run.
             match at.checked_add(sz as usize) {
-                Some(end) if sz > 0 && end <= d.len() => {
+                Some(end) if sz > 0 && end <= d.len() && out.len() < d.len() => {
                     out.push((at, sz as usize));
                     at = end;
                 }
@@ -1265,8 +1271,7 @@ impl AacDecoder {
                 .filter(|&&(at, len)| at.checked_add(len).is_some_and(|e| e <= data.len()))
                 .map(|&(at, len)| Frame { at, len })
                 .collect();
-            let scale =
-                |v: u64| if m.timescale > 0 { v.saturating_mul(cfg.rate as u64) / m.timescale as u64 } else { v };
+            let scale = |v: u64| if m.timescale > 0 { mul_div(v, cfg.rate as u64, m.timescale as u64) } else { v };
             (cfg, frames, false, scale(m.skip), m.keep.map(scale))
         } else {
             let mut p = id3v2_len(&data).unwrap_or(0);

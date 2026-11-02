@@ -208,6 +208,10 @@ pub fn parse_packet(packet: &[u8], self_delimited: bool) -> Option<(Toc, Vec<&[u
         data = &data[s..];
         used += s;
     }
+    // The padding must lie inside the packet too.
+    if used > packet.len() {
+        return None;
+    }
     Some((t, out, used))
 }
 
@@ -518,5 +522,6 @@ mod tests {
         let (_, f, used) = parse_packet(&p, true).unwrap();
         assert_eq!(f, vec![&[7u8, 8, 9][..]]);
         assert_eq!(used, 9, "the next stream starts after the padding");
+        assert!(parse_packet(&[0x83, 0x41, 0x01, 0x00], true).is_none(), "padding past the end");
     }
 }
