@@ -40,6 +40,23 @@ Host-testable building blocks live in no_std crates: `osyx-vfs` (path
 syntax, permission checks, mount table), `osyx-tmpfs`, `osyx-ext4`,
 `osyx-fat`, `osyx-exfat`, `osyx-part`, `osyx-crypto`.
 
+## AHCI completion interrupts
+
+AHCI tries MSI-X, then MSI, and enables completion and error interrupts on
+each active ATA port. The interrupt handler preserves port error bits before
+acknowledging them and wakes the port's command waiter. The waiter rechecks
+the completion condition after registration to avoid missed wakeups. Early
+boot and controllers without MSI retain polling; commands remain serialized
+per disk and retain their timeout.
+
+Run `scripts/ahci-irq-test.ps1` with an existing `build/esp` boot loader to
+build the kernel and check disposable SATA media in QEMU on two vCPUs.
+`-SkipBuild` reuses the kernel. The test requires read/write/flush success,
+delivered completion interrupts and completions after a scheduler wait.
+The minimal image omits worker, so process self-tests fail; this is not the
+full system suite. Physical SATA controllers, MSI-X and polling fallback,
+and error injection still require validation.
+
 ## VirtIO-blk completion interrupts
 
 VirtIO-blk configures MSI-X and verifies that its request queue accepted the

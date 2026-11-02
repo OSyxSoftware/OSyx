@@ -3,8 +3,8 @@
 //! Every implemented port with an ATA disk gets its own command list, FIS
 //! area, command table and DMA bounce pages. IDENTIFY DEVICE reads the
 //! capacity; READ/WRITE DMA EXT (LBA48) and FLUSH CACHE serve the block
-//! layer. Requests are serialised by a sleeping mutex and polled to
-//! completion: no interrupts are used.
+//! layer. Requests are serialised by a sleeping mutex. MSI-X/MSI wakes
+//! command waiters; early boot and controllers without MSI retain polling.
 
 use crate::arch::timer::{self, Deadline};
 use crate::block::{BlockDev, BlockError, SECTOR_SIZE};
@@ -16,7 +16,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const PAGE: usize = PAGE_SIZE as usize;
 /// Bounce buffer size: 32 KiB per request.
@@ -26,8 +26,10 @@ const TIMEOUT_MS: u64 = 5000;
 // Generic host control registers.
 const HBA_CAP: u64 = 0x00;
 const HBA_GHC: u64 = 0x04;
+const HBA_IS: u64 = 0x08;
 const HBA_PI: u64 = 0x0C;
 const GHC_AE: u32 = 1 << 31;
+const GHC_IE: u32 = 1 << 1;
 
 const PORT_BASE: u64 = 0x100;
 const PORT_STRIDE: u64 = 0x80;
@@ -38,6 +40,7 @@ const PX_CLBU: u64 = 0x04;
 const PX_FB: u64 = 0x08;
 const PX_FBU: u64 = 0x0C;
 const PX_IS: u64 = 0x10;
+const PX_IE: u64 = 0x14;
 const PX_CMD: u64 = 0x18;
 const PX_TFD: u64 = 0x20;
 const PX_SIG: u64 = 0x24;
@@ -55,7 +58,9 @@ const TFD_DRQ: u32 = 1 << 3;
 const TFD_BSY: u32 = 1 << 7;
 
 const IS_TFES: u32 = 1 << 30;
-const IS_HBDS: u32 = 1 << 29;
+const IS_HBFS: u32 = 1 << 29;
+const IS_HBDS: u32 = 1 << 28;
+const IS_ERRORS: u32 = IS_TFES | IS_HBFS | IS_HBDS;
 
 const SIG_ATA: u32 = 0x0000_0101;
 
@@ -67,6 +72,67 @@ const CMD_READ_DMA_EXT: u8 = 0x25;
 const CMD_WRITE_DMA_EXT: u8 = 0x35;
 
 static DISKS: AtomicUsize = AtomicUsize::new(0);
+const MAX_IRQ_CONTROLLERS: usize = 8;
+static CONTROLLERS: AtomicUsize = AtomicUsize::new(0);
+struct InterruptState {
+    base: AtomicU64,
+    pending: [AtomicU32; 32],
+    waiters: [crate::waitq::WaitQueue; 32],
+    interrupts: AtomicUsize,
+    slept: AtomicUsize,
+}
+impl InterruptState {
+    const fn new() -> Self {
+        Self { base: AtomicU64::new(0), pending: [const { AtomicU32::new(0) }; 32],
+            waiters: [const { crate::waitq::WaitQueue::new() }; 32],
+            interrupts: AtomicUsize::new(0), slept: AtomicUsize::new(0) }
+    }
+}
+static IRQ_STATE: [InterruptState; MAX_IRQ_CONTROLLERS] = [const { InterruptState::new() }; MAX_IRQ_CONTROLLERS];
+
+fn completion_interrupt(index: u64) {
+    let Some(state) = IRQ_STATE.get(index as usize) else { return };
+    let base = state.base.load(Ordering::Acquire);
+    if base == 0 { return; }
+    let m = Mmio(base);
+    let ports = m.r32(HBA_IS);
+    state.interrupts.fetch_add(1, Ordering::Relaxed);
+    for port in 0..32 {
+        if ports & (1 << port) == 0 { continue; }
+        let p = PORT_BASE + port as u64 * PORT_STRIDE;
+        let status = m.r32(p + PX_IS);
+        state.pending[port].fetch_or(status, Ordering::Release);
+        m.w32(p + PX_IS, status);
+        state.waiters[port].wake_all();
+    }
+    m.w32(HBA_IS, ports);
+}
+
+fn setup_interrupts(dev: &pci::Device, m: Mmio, implemented: u32) -> Option<usize> {
+    let index = CONTROLLERS.fetch_add(1, Ordering::Relaxed);
+    let state = IRQ_STATE.get(index)?;
+    for port in 0..32 {
+        if implemented & (1 << port) != 0 { m.w32(PORT_BASE + port * PORT_STRIDE + PX_IE, 0); }
+    }
+    state.base.store(m.0, Ordering::Release);
+    let vector = crate::irq::allocate(completion_interrupt, index as u64)?;
+    let (address, data) = crate::arch::apic::msi_message(vector);
+    let mode = if dev.enable_msix(address, data).is_ok() { Some("MSI-X") }
+        else if dev.enable_msi(address, data).is_ok() { Some("MSI") } else { None };
+    if let Some(mode) = mode {
+        m.w32(HBA_IS, u32::MAX);
+        m.w32(HBA_GHC, m.r32(HBA_GHC) | GHC_IE);
+        crate::kprintln!("ahci{index}: completion interrupts via {mode} on vector {vector:#x}");
+        Some(index)
+    } else { crate::irq::free(vector); None }
+}
+
+pub fn log_stats() {
+    for index in 0..CONTROLLERS.load(Ordering::Relaxed).min(MAX_IRQ_CONTROLLERS) {
+        let s = &IRQ_STATE[index];
+        crate::kprintln!("ahci{index}: {} completion interrupts, {} completions after sleeping", s.interrupts.load(Ordering::Relaxed), s.slept.load(Ordering::Relaxed));
+    }
+}
 
 /// Volatile access to the ABAR.
 #[derive(Clone, Copy)]
@@ -99,6 +165,7 @@ pub struct AhciDisk {
     sectors: u64,
     lba48: bool,
     inner: KMutex<Inner>,
+    interrupt_index: Option<usize>,
 }
 
 /// Probes one AHCI controller and registers every attached ATA disk.
@@ -178,7 +245,8 @@ fn start(dev: &pci::Device) -> Result<Vec<Arc<dyn BlockDev>>, &'static str> {
     let wide = cap & (1 << 31) != 0; // 64-bit DMA addresses
     let implemented = m.r32(HBA_PI);
     let max_port = cap & 0x1F;
-    m.w32(HBA_GHC, m.r32(HBA_GHC) | GHC_AE);
+    m.w32(HBA_GHC, (m.r32(HBA_GHC) | GHC_AE) & !GHC_IE);
+    let interrupt_index = setup_interrupts(dev, m, implemented);
     crate::kprintln!(
         "ahci: {:04x}:{:04x} at {}, {} ports implemented, {} DMA, BAR5 {:#x} ({} KiB)",
         dev.vendor,
@@ -202,7 +270,7 @@ fn start(dev: &pci::Device) -> Result<Vec<Arc<dyn BlockDev>>, &'static str> {
         }
         let index = DISKS.fetch_add(1, Ordering::Relaxed);
         let name = if index < 26 { format!("sd{}", (b'a' + index as u8) as char) } else { format!("sd{index}") };
-        match start_port(m, port, wide, name) {
+        match start_port(m, port, wide, name, interrupt_index) {
             Ok(disk) => {
                 crate::kprintln!("ahci: {}: {} MiB on port {} ({})", disk.name, disk.sectors >> 11, port, if disk.lba48 { "LBA48" } else { "LBA28" });
                 disks.push(Arc::new(disk) as Arc<dyn BlockDev>);
@@ -213,7 +281,7 @@ fn start(dev: &pci::Device) -> Result<Vec<Arc<dyn BlockDev>>, &'static str> {
     Ok(disks)
 }
 
-fn start_port(m: Mmio, port: u32, wide: bool, name: String) -> Result<AhciDisk, &'static str> {
+fn start_port(m: Mmio, port: u32, wide: bool, name: String, interrupt_index: Option<usize>) -> Result<AhciDisk, &'static str> {
     let cmd_list = dma_frame(wide)?;
     let fis = dma_frame(wide)?;
     let table = dma_frame(wide)?;
@@ -238,6 +306,7 @@ fn start_port(m: Mmio, port: u32, wide: bool, name: String) -> Result<AhciDisk, 
     m.w32(p + PX_FBU, (fis >> 32) as u32);
     m.w32(p + PX_IS, 0xFFFF_FFFF);
     m.w32(p + PX_SERR, 0xFFFF_FFFF);
+    if interrupt_index.is_some() { m.w32(p + PX_IE, 1 | IS_ERRORS); }
     m.w32(p + PX_CMD, CMD_ST | CMD_FRE);
     let deadline = Deadline::after_ms(500);
     while m.r32(p + PX_CMD) & CMD_CR == 0 {
@@ -255,6 +324,7 @@ fn start_port(m: Mmio, port: u32, wide: bool, name: String) -> Result<AhciDisk, 
         sectors: 0,
         lba48: true,
         inner: KMutex::new(Inner { cmd_list, _fis: fis, table, data, failed: false }),
+        interrupt_index,
     };
     {
         let mut g = disk.inner.lock();
@@ -338,6 +408,7 @@ impl AhciDisk {
         }
         m.w32(p + PX_IS, 0xFFFF_FFFF);
         m.w32(p + PX_SERR, 0xFFFF_FFFF);
+        if let Some(index) = self.interrupt_index { IRQ_STATE[index].pending[self.port as usize].store(0, Ordering::Release); }
 
         // Host-to-device register FIS (20 bytes).
         let mut f = [0u8; 20];
@@ -410,12 +481,27 @@ impl AhciDisk {
                 crate::kprintln!("ahci {}: command {:#04x} timed out (CI {:#x}, TFD {:#x}); disk disabled", self.name, command, ci, tfd);
                 return Err(BlockError::Io);
             }
-            timer::pause_tick();
+            if let Some(index) = self.interrupt_index.filter(|_| timer::healthy() && crate::sched::current_tid() != 0 && crate::arch::cpu::interrupts_enabled()) {
+                let state = &IRQ_STATE[index];
+                let mut checks = 0;
+                let result = crate::waitq::block_on(&[&state.waiters[self.port as usize]], Some(deadline.tick()), || {
+                    checks += 1;
+                    let done = m.r32(p + PX_CI) & 1 == 0 && m.r32(p + PX_TFD) & TFD_BSY == 0;
+                    (done || state.pending[self.port as usize].load(Ordering::Acquire) & IS_ERRORS != 0).then_some(())
+                });
+                if result.is_err() { g.failed = true; return Err(BlockError::Io); }
+                if checks > 2 { state.slept.fetch_add(1, Ordering::Relaxed); }
+                if state.pending[self.port as usize].load(Ordering::Acquire) & IS_ERRORS != 0 { break; }
+            } else { timer::pause_tick(); }
         }
-        let is = m.r32(p + PX_IS);
+        let mut is = m.r32(p + PX_IS);
+        if let Some(index) = self.interrupt_index { is |= IRQ_STATE[index].pending[self.port as usize].swap(0, Ordering::AcqRel); }
         let tfd = m.r32(p + PX_TFD);
         m.w32(p + PX_IS, is);
-        if tfd & TFD_ERR != 0 || is & (IS_TFES | IS_HBDS) != 0 {
+        if tfd & TFD_ERR != 0 || is & IS_ERRORS != 0 {
+            // An error interrupt can arrive before slot 0 is retired. Do not
+            // overwrite DMA buffers while the controller may still use them.
+            if m.r32(p + PX_CI) & 1 != 0 { g.failed = true; }
             crate::kprintln!("ahci {}: command {:#04x} failed (TFD {:#x}, IS {:#x})", self.name, command, tfd, is);
             return Err(BlockError::Io);
         }
