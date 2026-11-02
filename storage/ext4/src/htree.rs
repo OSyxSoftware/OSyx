@@ -295,38 +295,32 @@ impl<D: BlockDevice> Ext4<D> {
             return Ok(Some(vec![0]));
         }
         let Some((path, hash)) = self.dx_probe(dir, name)? else { return Ok(None) };
-        let bottom = path.levels.last().unwrap();
+        let mut levels = path.levels;
+        let bottom = levels.last().unwrap();
         let mut out = vec![bottom.entries[bottom.at].1 as u64];
-        // Collisions continue in the next entries (within this node; a
-        // collision run crossing nodes is searched through the parent).
-        let mut i = bottom.at + 1;
-        loop {
-            match bottom.entries.get(i) {
-                Some(&(h, b)) if h & 1 == 1 && h & !1 == hash => out.push(b as u64),
-                Some(_) => break,
-                None => {
-                    if path.levels.len() < 2 {
-                        break;
-                    }
-                    // The parent's next child starts the next node.
-                    let parent = &path.levels[path.levels.len() - 2];
-                    match parent.entries.get(parent.at + 1) {
-                        Some(&(h, node)) if h & 1 == 1 && h & !1 == hash => {
-                            let (_, nb) = self.dir_block(dir, node as u64)?;
-                            if let Some(list) = read_entries(&nb, NODE_COUNT) {
-                                out.extend(
-                                    list.iter()
-                                        .take_while(|(h2, _)| *h2 == 0 || (h2 & 1 == 1 && h2 & !1 == hash))
-                                        .map(|&(_, b)| b as u64),
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                    break;
-                }
+        // Colliding names continue in the following leaves, whose index
+        // entries carry the hash with the low bit set. Like Linux's
+        // ext4_htree_next_block: step to the next entry at the lowest level
+        // that has one, and while it continues the hash, descend through
+        // first children to its leaf. The run may cross any number of nodes.
+        while let Some(d) = (0..levels.len()).rev().find(|&d| levels[d].at + 1 < levels[d].entries.len()) {
+            levels[d].at += 1;
+            let (h, mut blk) = levels[d].entries[levels[d].at];
+            if h & 1 == 0 || h & !1 != hash {
+                break;
             }
-            i += 1;
+            for lv in levels.iter_mut().skip(d + 1) {
+                let (_, nb) = self.dir_block(dir, blk as u64)?;
+                let Some(list) = read_entries(&nb, NODE_COUNT) else { return Ok(Some(out)) };
+                if list.is_empty() {
+                    return Ok(Some(out));
+                }
+                lv.lblk = blk as u64;
+                blk = list[0].1;
+                lv.entries = list;
+                lv.at = 0;
+            }
+            out.push(blk as u64);
         }
         Ok(Some(out))
     }
