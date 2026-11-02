@@ -51,9 +51,20 @@ const MAX_IRQ_CONTROLLERS: usize = 8;
 // Stable addresses: an interrupt may arrive after a failed probe. Never
 // point an interrupt handler at the temporary controller allocation.
 static COMPLETIONS: [crate::waitq::WaitQueue; MAX_IRQ_CONTROLLERS] = [const { crate::waitq::WaitQueue::new() }; MAX_IRQ_CONTROLLERS];
+static IRQ_COUNTS: [AtomicUsize; MAX_IRQ_CONTROLLERS] = [const { AtomicUsize::new(0) }; MAX_IRQ_CONTROLLERS];
+static SLEEP_COMPLETIONS: [AtomicUsize; MAX_IRQ_CONTROLLERS] = [const { AtomicUsize::new(0) }; MAX_IRQ_CONTROLLERS];
+
+pub fn log_stats() {
+    for index in 0..CONTROLLERS.load(Ordering::Relaxed).min(MAX_IRQ_CONTROLLERS) {
+        crate::kprintln!("nvme{index}: {} completion interrupts, {} completions after sleeping", IRQ_COUNTS[index].load(Ordering::Relaxed), SLEEP_COMPLETIONS[index].load(Ordering::Relaxed));
+    }
+}
 
 fn completion_interrupt(index: u64) {
-    if let Some(queue) = COMPLETIONS.get(index as usize) { queue.wake_all(); }
+    if let Some(queue) = COMPLETIONS.get(index as usize) {
+        IRQ_COUNTS[index as usize].fetch_add(1, Ordering::Relaxed);
+        queue.wake_all();
+    }
 }
 
 fn setup_interrupts(dev: &pci::Device, index: usize) -> bool {
@@ -417,12 +428,17 @@ fn wait_completion(ctrl: &Nvme, q: &mut Queue, cid: u16) -> Result<(), NvmeError
             return Err(NvmeError::Timeout("command completion"));
         }
         if let Some(index) = ctrl.interrupt_index.filter(|_| timer::healthy() && crate::sched::current_tid() != 0 && crate::arch::cpu::interrupts_enabled()) {
+            let mut checks = 0usize;
             let result = crate::waitq::block_on(&[&COMPLETIONS[index]], Some(deadline.tick()), || {
+                checks += 1;
                 // SAFETY: the driver owns the CQ frame throughout this wait.
                 let status = unsafe { read_volatile((entry + 12) as *const u32) };
                 (((status >> 16) & 1 != 0) == q.phase).then_some(())
             });
             if result.is_err() { return Err(NvmeError::Timeout("command completion interrupt")); }
+            // block_on checks twice before scheduling; a third check proves
+            // this request returned from the scheduler rather than spinning.
+            if checks > 2 { SLEEP_COMPLETIONS[index].fetch_add(1, Ordering::Relaxed); }
         } else {
             timer::pause_tick();
         }
