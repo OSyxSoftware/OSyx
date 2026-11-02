@@ -58,3 +58,26 @@ fn jbig2() {
         let _ = osyx_media::jbig2::decode(d, None, false);
     });
 }
+
+#[test]
+#[ignore]
+fn webp() {
+    run("webp", "webp", |d| {
+        let _ = osyx_media::image::decode(d);
+    });
+}
+
+#[test]
+#[ignore]
+fn vp8() {
+    run("video", "ivf", |d| {
+        let mut dec = osyx_media::vp8::Decoder::new();
+        let mut p = 32;
+        while p + 12 <= d.len() {
+            let len = u32::from_le_bytes(d[p..p + 4].try_into().unwrap()) as usize;
+            let end = (p + 12 + len).min(d.len());
+            let _ = dec.decode(&d[p + 12..end]);
+            p = end;
+        }
+    });
+}

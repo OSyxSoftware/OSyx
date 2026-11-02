@@ -6,10 +6,14 @@
 //! [`resample::Converter`] then turns them into 48 kHz stereo 16-bit frames
 //! for `/dev/audio`.
 
+pub mod aac;
+mod aac_tables;
 pub mod flac;
+pub mod mdct;
 pub mod mp3;
 mod mp3_tables;
 pub mod ogg;
+pub mod opus;
 pub mod resample;
 pub mod vorbis;
 mod vorbis_table;
@@ -56,6 +60,7 @@ pub enum Format {
     Flac,
     Mp3,
     Ogg,
+    Aac,
 }
 
 pub fn sniff(data: &[u8]) -> Option<Format> {
@@ -67,6 +72,9 @@ pub fn sniff(data: &[u8]) -> Option<Format> {
     }
     if data.starts_with(b"OggS") {
         return Some(Format::Ogg);
+    }
+    if aac::is_mp4(data) || aac::is_adts(data) {
+        return Some(Format::Aac);
     }
     // FLAC with an ID3v2 tag in front.
     if let Some(skip) = id3v2_len(data) {
@@ -98,6 +106,7 @@ pub fn open(data: Vec<u8>) -> Result<Box<dyn Decoder>, String> {
         Some(Format::Flac) => Ok(Box::new(flac::FlacDecoder::new(data)?)),
         Some(Format::Mp3) => Ok(Box::new(mp3::Mp3Decoder::new(data)?)),
         Some(Format::Ogg) => ogg::open(data),
-        None => Err(String::from("not a sound file OSyx can play (WAV, FLAC, MP3 and Ogg Vorbis are supported)")),
+        Some(Format::Aac) => Ok(Box::new(aac::AacDecoder::new(data)?)),
+        None => Err(String::from("not a sound file OSyx can play (WAV, FLAC, MP3, AAC, Ogg Vorbis and Opus are supported)")),
     }
 }

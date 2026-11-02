@@ -169,7 +169,7 @@ fn viewer_shows(ext: Option<&str>) -> bool {
 /// Sound files the built-in player decodes (Ogg may still hold Opus; the
 /// player says so).
 fn player_plays(ext: Option<&str>) -> bool {
-    matches!(ext, Some("mp3" | "wav" | "flac" | "ogg" | "oga"))
+    matches!(ext, Some("mp3" | "wav" | "flac" | "ogg" | "oga" | "opus" | "aac" | "m4a" | "m4b"))
 }
 
 /// One entry of the "Open with" menu.
@@ -264,6 +264,7 @@ mod tests {
         let video = classify("clip.mp4");
         assert_eq!(default_target("clip.mp4", video, &handlers, &choices, true), Some(Target::Exec("/opt/player".into())));
         assert_eq!(default_target("song.mp3", classify("song.mp3"), &handlers, &choices, true), Some(Target::Builtin(Builtin::Player)), "sound plays in Files");
+        assert_eq!(default_target("song.m4a", classify("song.m4a"), &handlers, &choices, true), Some(Target::Builtin(Builtin::Player)), "AAC too");
         let mut mine = Choices::default();
         mine.set("song.mp3", Kind::Audio, Target::Exec("/opt/player".into()));
         assert_eq!(default_target("x.mp3", Kind::Audio, &handlers, &mine, true), Some(Target::Exec("/opt/player".into())), "unless the user chose otherwise");
