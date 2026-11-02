@@ -1091,6 +1091,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "osyx-media"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "miniz_oxide",
+]
+
+[[package]]
 name = "osyx-mm"
 version = "0.1.0"
 dependencies = [

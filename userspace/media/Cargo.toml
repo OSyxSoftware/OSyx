@@ -1,0 +1,12 @@
+[package]
+name = "osyx-media"
+description = "Audio, video and PDF decoding for the built-in viewers of Files: WAV, FLAC, MP3, Ogg Vorbis, resampling to the sound card rate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libm = "0.2"
+
+[dev-dependencies]
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
