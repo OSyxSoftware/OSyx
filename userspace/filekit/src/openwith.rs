@@ -5,7 +5,7 @@
 //! (`Handles=mp4,mkv,video`). The user's choices per extension or kind live
 //! in `~/.config/osyx/openwith.conf` as `mp4=/opt/player` lines. Files shows
 //! pictures, text and source itself (other pictures through the default
-//! browser), plays sound files, shows PDF documents and unpacks archives itself, and hands
+//! browser), plays sound files and WebM/Matroska videos, shows PDF documents and unpacks archives itself, and hands
 //! everything else to a registered application.
 
 use crate::kind::{extension, Kind};
@@ -28,6 +28,8 @@ pub enum Builtin {
     Pdf,
     /// The image viewer.
     Image,
+    /// The video player.
+    Video,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +99,7 @@ fn builtin_by_name(s: &str) -> Option<Builtin> {
         "builtin:player" => Builtin::Player,
         "builtin:pdf" => Builtin::Pdf,
         "builtin:image" => Builtin::Image,
+        "builtin:video" => Builtin::Video,
         _ => return None,
     })
 }
@@ -110,6 +113,7 @@ fn builtin_name(b: Builtin) -> &'static str {
         Builtin::Player => "builtin:player",
         Builtin::Pdf => "builtin:pdf",
         Builtin::Image => "builtin:image",
+        Builtin::Video => "builtin:video",
     }
 }
 
@@ -160,13 +164,21 @@ impl Choices {
 
 /// Pictures the built-in viewer decodes.
 fn viewer_shows(ext: Option<&str>) -> bool {
-    matches!(ext, Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico"))
+    matches!(
+        ext,
+        Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "jbig2" | "jb2" | "jp2" | "j2k" | "j2c" | "jpc" | "jpf" | "jpx" | "webp")
+    )
 }
 
 /// Sound files the built-in player decodes (Ogg may still hold Opus; the
 /// player says so).
 fn player_plays(ext: Option<&str>) -> bool {
-    matches!(ext, Some("mp3" | "wav" | "flac" | "ogg" | "oga"))
+    matches!(ext, Some("mp3" | "wav" | "flac" | "ogg" | "oga" | "opus" | "aac" | "m4a" | "m4b"))
+}
+
+/// Videos the built-in player decodes (WebM and Matroska with VP8 video).
+fn video_plays(ext: Option<&str>) -> bool {
+    matches!(ext, Some("webm" | "mkv"))
 }
 
 /// One entry of the "Open with" menu.
@@ -207,7 +219,12 @@ pub fn candidates(name: &str, kind: Kind, handlers: &[Handler], browser: bool) -
             add("PDF viewer", Target::Builtin(Builtin::Pdf));
             add("Hex viewer", Target::Builtin(Builtin::Hex));
         }
-        Kind::Video => add("Hex viewer", Target::Builtin(Builtin::Hex)),
+        Kind::Video => {
+            if video_plays(ext.as_deref()) {
+                add("Video player", Target::Builtin(Builtin::Video));
+            }
+            add("Hex viewer", Target::Builtin(Builtin::Hex));
+        }
         Kind::Program => {}
     }
     for h in handlers.iter().filter(|h| h.handles(ext.as_deref(), kind)) {
@@ -231,7 +248,7 @@ pub fn default_target(name: &str, kind: Kind, handlers: &[Handler], choices: &Ch
     // (the hex viewer is an explicit choice, not a default).
     let app = handlers.iter().find(|h| h.handles(ext.as_deref(), kind)).map(|h| Target::Exec(h.exec.clone()));
     match kind {
-        Kind::Video => app,
+        Kind::Video if !video_plays(ext.as_deref()) => app,
         Kind::Audio if !player_plays(ext.as_deref()) => app,
         _ => list.into_iter().next().map(|c| c.target),
     }
@@ -260,7 +277,13 @@ mod tests {
         let choices = Choices::default();
         let video = classify("clip.mp4");
         assert_eq!(default_target("clip.mp4", video, &handlers, &choices, true), Some(Target::Exec("/opt/player".into())));
+        // WebM plays in Files even with a video application installed.
+        assert_eq!(
+            default_target("clip.webm", classify("clip.webm"), &handlers, &choices, true),
+            Some(Target::Builtin(Builtin::Video))
+        );
         assert_eq!(default_target("song.mp3", classify("song.mp3"), &handlers, &choices, true), Some(Target::Builtin(Builtin::Player)), "sound plays in Files");
+        assert_eq!(default_target("song.m4a", classify("song.m4a"), &handlers, &choices, true), Some(Target::Builtin(Builtin::Player)), "AAC too");
         let mut mine = Choices::default();
         mine.set("song.mp3", Kind::Audio, Target::Exec("/opt/player".into()));
         assert_eq!(default_target("x.mp3", Kind::Audio, &handlers, &mine, true), Some(Target::Exec("/opt/player".into())), "unless the user chose otherwise");

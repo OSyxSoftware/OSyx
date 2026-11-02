@@ -1,9 +1,11 @@
 //! Pictures for the image viewer built into Files: PNG, JPEG, GIF
-//! (animated), BMP and ICO, decoded to straight-alpha RGBA frames.
+//! (animated), BMP, ICO, JBIG2, JPEG 2000 and WebP (animated too), decoded
+//! to straight-alpha RGBA frames.
 
 mod bmp;
 mod gif;
 mod png;
+mod webp;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -49,9 +51,45 @@ pub fn decode(data: &[u8]) -> Result<Picture, String> {
         bmp::decode(data, false)
     } else if data.len() >= 6 && data[..4] == [0, 0, 1, 0] {
         ico(data)
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        webp::decode(data)
+    } else if data.starts_with(&[0x97, 0x4A, 0x42, 0x32, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        jbig2(data)
+    } else if data.starts_with(&[0, 0, 0, 0x0C, b'j', b'P', b' ', b' ', 0x0D, 0x0A, 0x87, 0x0A])
+        || data.starts_with(&[0xFF, 0x4F, 0xFF, 0x51])
+    {
+        jpeg2000(data)
     } else {
-        Err(String::from("not a picture OSyx can show (PNG, JPEG, GIF, BMP and ICO are supported)"))
+        Err(String::from(
+            "not a picture OSyx can show (PNG, JPEG, GIF, BMP, ICO, JBIG2, JPEG 2000 and WebP are supported)",
+        ))
     }
+}
+
+fn jpeg2000(data: &[u8]) -> Result<Picture, String> {
+    let img = crate::jpx::decode(data).map_err(|e| alloc::format!("damaged JPEG 2000: {e}"))?;
+    check_size(img.w, img.h)?;
+    let kind = match img.space {
+        crate::jpx::Space::Gray => "grey",
+        crate::jpx::Space::Rgb => "RGB",
+        crate::jpx::Space::Cmyk => "CMYK",
+    };
+    let alpha = if img.alpha.is_some() { " with alpha" } else { "" };
+    let format = alloc::format!("JPEG 2000, {kind}{alpha}");
+    Ok(Picture { w: img.w, h: img.h, frames: alloc::vec![Frame { px: img.to_rgba(), delay_ms: 0 }], format })
+}
+
+/// The first page of a JBIG2 file, black on white.
+fn jbig2(data: &[u8]) -> Result<Picture, String> {
+    let pages = crate::jbig2::decode(data, None, false).map_err(|e| alloc::format!("damaged JBIG2: {e}"))?;
+    let page = pages.first().ok_or("JBIG2 file without pages")?;
+    check_size(page.w, page.h)?;
+    let px = page.px.iter().map(|&b| if b != 0 { [0, 0, 0, 255] } else { [255, 255, 255, 255] }).collect();
+    let format = match pages.len() {
+        1 => String::from("JBIG2"),
+        n => alloc::format!("JBIG2, page 1 of {n}"),
+    };
+    Ok(Picture { w: page.w, h: page.h, frames: alloc::vec![Frame { px, delay_ms: 0 }], format })
 }
 
 fn jpeg(data: &[u8]) -> Result<Picture, String> {

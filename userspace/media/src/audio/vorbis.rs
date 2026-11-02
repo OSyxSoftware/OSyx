@@ -5,6 +5,7 @@
 //! positions, so the start and the end of the stream are trimmed exactly
 //! and seeking lands on the requested sample.
 
+use super::mdct::Imdct;
 use super::ogg::Packets;
 use super::vorbis_table::FLOOR1_INVERSE_DB;
 use super::{Decoder, Info};
@@ -758,85 +759,6 @@ fn residue_partitions(
     }
 }
 
-/// In-place radix-2 FFT of `re`/`im` (length a power of two),
-/// exp(-2 pi i jk / n).
-fn fft(re: &mut [f32], im: &mut [f32]) {
-    let n = re.len();
-    let mut j = 0;
-    for i in 1..n {
-        let mut bit = n >> 1;
-        while j & bit != 0 {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j |= bit;
-        if i < j {
-            re.swap(i, j);
-            im.swap(i, j);
-        }
-    }
-    let mut len = 2;
-    while len <= n {
-        let ang = -2.0 * core::f64::consts::PI / len as f64;
-        let (wr, wi) = (libm::cos(ang), libm::sin(ang));
-        for start in (0..n).step_by(len) {
-            let (mut cr, mut ci) = (1.0f64, 0.0f64);
-            for k in 0..len / 2 {
-                let (a, b) = (start + k, start + k + len / 2);
-                let tr = re[b] * cr as f32 - im[b] * ci as f32;
-                let ti = re[b] * ci as f32 + im[b] * cr as f32;
-                re[b] = re[a] - tr;
-                im[b] = im[a] - ti;
-                re[a] += tr;
-                im[a] += ti;
-                let nr = cr * wr - ci * wi;
-                ci = cr * wi + ci * wr;
-                cr = nr;
-            }
-        }
-        len <<= 1;
-    }
-}
-
-/// The inverse MDCT of the Vorbis specification:
-/// y[n] = sum X[k] cos(2 pi / N (n + 1/2 + N/4)(k + 1/2)), n < N = 2 X.len().
-pub fn imdct(x: &[f32]) -> Vec<f32> {
-    let m = x.len();
-    let h = m / 2;
-    // DCT-IV of size m through a complex FFT of size m / 2.
-    let mut re = vec![0.0f32; h];
-    let mut im = vec![0.0f32; h];
-    for k in 0..h {
-        let (a, b) = (x[2 * k], x[m - 1 - 2 * k]);
-        let ang = -core::f64::consts::PI * (4 * k + 1) as f64 / (4 * m) as f64;
-        let (c, s) = (libm::cos(ang) as f32, libm::sin(ang) as f32);
-        re[k] = a * c - b * s;
-        im[k] = a * s + b * c;
-    }
-    fft(&mut re, &mut im);
-    let mut u = vec![0.0f32; m];
-    for j in 0..h {
-        let ang = -core::f64::consts::PI * j as f64 / m as f64;
-        let (c, s) = (libm::cos(ang) as f32, libm::sin(ang) as f32);
-        let tr = re[j] * c - im[j] * s;
-        let ti = re[j] * s + im[j] * c;
-        u[2 * j] = tr;
-        u[m - 1 - 2 * j] = -ti;
-    }
-    let mut y = vec![0.0f32; 2 * m];
-    for (n, out) in y.iter_mut().enumerate() {
-        let k = n + m / 2;
-        *out = if k < m {
-            u[k]
-        } else if k < 2 * m {
-            -u[2 * m - 1 - k]
-        } else {
-            -u[k - 2 * m]
-        };
-    }
-    y
-}
-
 /// Vorbis channel order to the WAVE order (FL FR FC LFE BL BR SL SR).
 fn wave_order(ch: usize) -> &'static [usize] {
     match ch {
@@ -868,6 +790,8 @@ pub struct VorbisDecoder {
     total: u64,
     /// Windows by block size and the sizes of the neighbouring blocks.
     window_cache: Vec<(usize, bool, bool, bool, Vec<f32>)>,
+    /// Inverse MDCTs for short and long blocks.
+    imdct: [Imdct; 2],
 }
 
 impl VorbisDecoder {
@@ -904,9 +828,65 @@ impl VorbisDecoder {
             want: 0,
             total,
             window_cache: Vec::new(),
+            imdct: [Imdct::new(bs[0] / 2, 1.0), Imdct::new(bs[1] / 2, 1.0)],
         };
         dec.restart();
         Ok(dec)
+    }
+
+    /// A decoder fed packets from another container (WebM): the three
+    /// header packets now, audio packets later through `decode_raw`.
+    pub fn from_headers(id: &[u8], comment: &[u8], setup: &[u8]) -> Result<VorbisDecoder, String> {
+        let d = id;
+        if d.len() < 30 || d[0] != 1 || &d[1..7] != b"vorbis" || u32::from_le_bytes(d[7..11].try_into().unwrap()) != 0 {
+            return Err(String::from("unsupported Vorbis identification header"));
+        }
+        let channels = d[11] as usize;
+        let rate = u32::from_le_bytes(d[12..16].try_into().unwrap());
+        let bs = [1usize << (d[28] & 15), 1usize << (d[28] >> 4)];
+        if channels == 0 || rate == 0 || bs[0] < 64 || bs[1] < bs[0] || bs[1] > 8192 {
+            return Err(String::from("invalid Vorbis identification header"));
+        }
+        if comment.first() != Some(&3) {
+            return Err(String::from("Vorbis comment header missing"));
+        }
+        let setup = read_setup(setup, channels, bs)?;
+        Ok(VorbisDecoder {
+            info: Info { rate, channels, frames: None, codec: String::from("Vorbis") },
+            packets: Packets::new(&[], 0),
+            data: Vec::new(),
+            setup,
+            first_audio_page: 0,
+            prev: None,
+            pending: Vec::new(),
+            pos: None,
+            want: 0,
+            total: 0,
+            window_cache: Vec::new(),
+            imdct: [Imdct::new(bs[0] / 2, 1.0), Imdct::new(bs[1] / 2, 1.0)],
+        })
+    }
+
+    /// Decodes one audio packet given directly: the samples it finishes
+    /// (none for the first after `reset_raw`).
+    pub fn decode_raw(&mut self, packet: &[u8]) -> Vec<f32> {
+        self.decode_packet(packet)
+    }
+
+    /// The block size of an audio packet, from its mode.
+    pub fn blocksize_of(&self, packet: &[u8]) -> Option<usize> {
+        let s = &self.setup;
+        let mut r = LsbReader::new(packet);
+        if r.read(1) != Some(0) {
+            return None;
+        }
+        let m = r.read(ilog(s.modes.len() as u32 - 1))?;
+        Some(s.blocksize[s.modes.get(m as usize)?.long as usize])
+    }
+
+    /// Forgets the overlap, before decoding from another place.
+    pub fn reset_raw(&mut self) {
+        self.prev = None;
     }
 
     /// Starts over at the first audio packet.
@@ -1013,9 +993,9 @@ impl VorbisDecoder {
         for c in 0..ch {
             let Some(fl) = &floors[c] else { continue };
             let spec: Vec<f32> = spectra[c].iter().zip(fl).map(|(a, b)| a * b).collect();
-            let t = imdct(&spec);
-            for i in 0..n {
-                cur[c][i] = t[i] * window[i];
+            self.imdct[long as usize].run(&spec, &mut cur[c]);
+            for (v, w) in cur[c].iter_mut().zip(&window) {
+                *v *= w;
             }
         }
         // Overlap-add: from the centre of the previous window to the
@@ -1170,27 +1150,6 @@ impl Decoder for VorbisDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn imdct_matches_the_definition() {
-        for m in [32usize, 128] {
-            let x: Vec<f32> = (0..m).map(|i| libm::sinf(i as f32 * 0.37) + (i % 5) as f32 * 0.1).collect();
-            let fast = imdct(&x);
-            let n = 2 * m;
-            for (j, &y) in fast.iter().enumerate() {
-                let mut s = 0.0f64;
-                for (k, &v) in x.iter().enumerate() {
-                    s += v as f64
-                        * libm::cos(
-                            2.0 * core::f64::consts::PI / n as f64
-                                * (j as f64 + 0.5 + n as f64 / 4.0)
-                                * (k as f64 + 0.5),
-                        );
-                }
-                assert!((s - y as f64).abs() < 1e-3, "m {m} n {j}: {s} vs {y}");
-            }
-        }
-    }
 
     #[test]
     fn helpers() {
