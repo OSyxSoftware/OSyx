@@ -86,11 +86,12 @@ impl Pdf {
     }
 
     /// Renders page `i` at `scale` pixels per point. `fonts` supplies the
-    /// system fonts used for fonts a file does not embed.
-    pub fn render(&self, i: usize, scale: f64, fonts: FontSource) -> Bitmap {
+    /// system fonts used for fonts a file does not embed. Fails when the
+    /// bitmap would be unreasonably large.
+    pub fn render(&self, i: usize, scale: f64, fonts: FontSource) -> Result<Bitmap, String> {
         let page = &self.doc.pages[i.min(self.doc.pages.len() - 1)];
-        let mut r = render::Renderer::new(&self.doc, page, scale, fonts);
+        let mut r = render::Renderer::new(&self.doc, page, scale, fonts)?;
         r.render_page(page);
-        Bitmap { w: r.canvas.w, h: r.canvas.h, px: r.canvas.px }
+        Ok(Bitmap { w: r.canvas.w, h: r.canvas.h, px: r.canvas.px })
     }
 }

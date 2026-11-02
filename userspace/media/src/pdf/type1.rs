@@ -337,7 +337,7 @@ impl Type1 {
                         }
                         16 => {
                             let other = st.stack.pop().unwrap_or(0.0) as i64;
-                            let n = st.stack.pop().unwrap_or(0.0).max(0.0) as usize;
+                            let n = (st.stack.pop().unwrap_or(0.0).max(0.0) as usize).min(st.stack.len());
                             let args: Vec<f64> = (0..n).map(|_| st.stack.pop().unwrap_or(0.0)).collect();
                             match other {
                                 1 => {

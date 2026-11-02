@@ -77,7 +77,15 @@ fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Key>, shared: Arc<Shared>) {
             continue;
         }
         let start = os_std::time::Instant::now();
-        let bmp = pdf.render(key.0, key.1 as f64 / 1000.0, &lookup);
+        let bmp = match pdf.render(key.0, key.1 as f64 / 1000.0, &lookup) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("files: page {} not rendered: {e}", key.0 + 1);
+                *shared.error.lock().unwrap() = Some(e);
+                shared.generation.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+        };
         println!("files: rendered page {} at {}% in {} ms", key.0 + 1, key.1 / 10, start.elapsed().as_millis());
         shared.done.lock().unwrap().insert(key, Arc::new(bmp));
         shared.generation.fetch_add(1, Ordering::Relaxed);
@@ -165,7 +173,7 @@ impl PdfView {
         let z = (self.view.w as f64 - 2.0 * GAP as f64) / widest;
         if z > 0.0 {
             // Round so equal views reuse rendered pages.
-            self.zoom = (z * 100.0) as i64 as f64 / 100.0;
+            self.zoom = (z.clamp(0.2, 6.0) * 100.0) as i64 as f64 / 100.0;
         }
     }
 
@@ -265,7 +273,9 @@ impl PdfView {
                 }
                 key::DIGIT0 => {
                     self.fit = true;
+                    let page = self.current_page();
                     self.fit_zoom();
+                    self.go_to(page);
                     return true;
                 }
                 _ => {}

@@ -31,6 +31,8 @@ pub struct Document {
     objstms: RefCell<BTreeMap<u32, Rc<(Vec<(u32, usize)>, Vec<u8>)>>>,
     crypt: Option<Decryptor>,
     pub pages: Vec<Page>,
+    /// An indirect stream /Length is being looked up.
+    resolving_length: core::cell::Cell<bool>,
 }
 
 /// One page with its inherited attributes resolved.
@@ -61,6 +63,7 @@ impl Document {
             objstms: RefCell::new(BTreeMap::new()),
             crypt: None,
             pages: Vec::new(),
+            resolving_length: core::cell::Cell::new(false),
         };
         let ok = doc.read_xref_chain();
         if !ok || doc.trailer.get(&b"Root"[..]).is_none() || doc.catalog().is_none() {
@@ -110,7 +113,9 @@ impl Document {
             }
             // Hybrid files: an xref stream for the same revision.
             if let Some(x) = key(&trailer, "XRefStm").and_then(Object::as_i64) {
-                let _ = self.read_xref_at(x as usize);
+                if x > 0 && (x as usize) < self.data.len() {
+                    let _ = self.read_xref_at(x as usize);
+                }
             }
             off = key(&trailer, "Prev").and_then(Object::as_i64).unwrap_or(0);
         }
@@ -122,7 +127,7 @@ impl Document {
     fn read_xref_at(&mut self, off: usize) -> Option<Dict> {
         let mut lx = Lexer::at(&self.data, off);
         lx.skip_white();
-        if self.data[lx.pos..].starts_with(b"xref") {
+        if self.data.get(lx.pos..)?.starts_with(b"xref") {
             lx.pos += 4;
             loop {
                 match lx.next()? {
@@ -300,7 +305,16 @@ impl Document {
                     p += 1;
                 }
                 let declared = match key(d, "Length") {
-                    Some(Object::Ref(lr)) if lr.num != r.num => self.get(lr.num).and_then(|o| o.as_i64()),
+                    // One level only: a /Length whose object is itself a
+                    // stream with an indirect /Length (or a cycle through an
+                    // object stream) falls back to the endstream scan.
+                    Some(Object::Ref(lr)) if lr.num != r.num && !self.resolving_length.get() => {
+                        self.resolving_length.set(true);
+                        let l = self.get(lr.num).and_then(|o| o.as_i64());
+                        self.resolving_length.set(false);
+                        l
+                    }
+                    Some(Object::Ref(_)) => None,
                     Some(o) => o.as_i64(),
                     None => None,
                 };

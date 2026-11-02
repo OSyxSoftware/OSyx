@@ -261,7 +261,7 @@ pub fn function(doc: &Document, o: &Object, depth: u32) -> Option<Function> {
             let size: Vec<usize> = nums(doc, key(d, "Size")).into_iter().map(|v| v.max(1.0) as usize).collect();
             let range = nums(doc, key(d, "Range"));
             let mut encode = nums(doc, key(d, "Encode"));
-            if encode.is_empty() {
+            if encode.len() < 2 * size.len() {
                 encode = size.iter().flat_map(|&s| [0.0, (s - 1) as f64]).collect();
             }
             let mut decode = nums(doc, key(d, "Decode"));
@@ -389,14 +389,14 @@ fn run_ps(code: &[Ps], st: &mut Vec<f64>, depth: u32) {
                             }
                             b"idiv" => {
                                 if b as i64 != 0 {
-                                    ((a as i64) / (b as i64)) as f64
+                                    ((a as i64 as i128) / (b as i64 as i128)) as f64
                                 } else {
                                     0.0
                                 }
                             }
                             b"mod" => {
                                 if b as i64 != 0 {
-                                    ((a as i64) % (b as i64)) as f64
+                                    ((a as i64 as i128) % (b as i64 as i128)) as f64
                                 } else {
                                     0.0
                                 }

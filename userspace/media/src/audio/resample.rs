@@ -101,18 +101,13 @@ impl Converter {
                 1 => [f[0], f[0]],
                 2 => [f[0], f[1]],
                 _ => {
-                    // FL FR FC LFE BL BR SL SR (WAVE order); the LFE is left out.
-                    const K: f32 = core::f32::consts::FRAC_1_SQRT_2;
-                    let get = |i: usize| f.get(i).copied().unwrap_or(0.0);
-                    let c = get(2) * K;
-                    let (bl, br) = (get(4) * K, get(5) * K);
-                    let (sl, sr) = (get(6) * K, get(7) * K);
-                    let norm = 1.0 / (1.0 + K + if ch > 4 { K } else { 0.0 } + if ch > 6 { K } else { 0.0 });
-                    let (l, r) = if ch == 3 || ch == 4 {
-                        (f[0] + c, f[1] + c)
-                    } else {
-                        (f[0] + c + bl + sl, f[1] + c + br + sr)
-                    };
+                    let w = downmix_weights(ch);
+                    let (mut l, mut r) = (0.0, 0.0);
+                    for (x, (wl, wr)) in f.iter().zip(w) {
+                        l += x * wl;
+                        r += x * wr;
+                    }
+                    let norm = 1.0 / w.iter().map(|p| p.0).sum::<f32>();
                     [l * norm, r * norm]
                 }
             };
@@ -164,6 +159,23 @@ impl Converter {
     }
 }
 
+/// (left, right) weights of each input channel, ITU-R BS.775 style, for
+/// the layouts the decoders produce by channel count (WAVE and FLAC order;
+/// Vorbis is reordered to match): 3 FL FR FC, 4 FL FR BL BR, 5 FL FR FC BL
+/// BR, 6 FL FR FC LFE BL BR, 7 FL FR FC LFE BC SL SR, 8 FL FR FC LFE BL BR
+/// SL SR. The LFE is left out.
+fn downmix_weights(ch: usize) -> &'static [(f32, f32)] {
+    const K: f32 = core::f32::consts::FRAC_1_SQRT_2;
+    match ch {
+        3 => &[(1.0, 0.0), (0.0, 1.0), (K, K)],
+        4 => &[(1.0, 0.0), (0.0, 1.0), (K, 0.0), (0.0, K)],
+        5 => &[(1.0, 0.0), (0.0, 1.0), (K, K), (K, 0.0), (0.0, K)],
+        6 => &[(1.0, 0.0), (0.0, 1.0), (K, K), (0.0, 0.0), (K, 0.0), (0.0, K)],
+        7 => &[(1.0, 0.0), (0.0, 1.0), (K, K), (0.0, 0.0), (0.5, 0.5), (K, 0.0), (0.0, K)],
+        _ => &[(1.0, 0.0), (0.0, 1.0), (K, K), (0.0, 0.0), (K, 0.0), (0.0, K), (K, 0.0), (0.0, K)],
+    }
+}
+
 /// Blackman-windowed sinc with cutoff `fc` (relative to the input
 /// Nyquist frequency), at distance `x` input samples from the centre.
 fn kernel(x: f64, fc: f64) -> f64 {
@@ -180,6 +192,18 @@ fn kernel(x: f64, fc: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downmix_keeps_sides_apart() {
+        // Quad: back left only reaches the left side.
+        let mut c = Converter::new(48_000, 4);
+        let out = c.push(&[0.0, 0.0, 0.5, 0.0]);
+        assert!(out[0] > 0 && out[1] == 0, "{out:?}");
+        // 5 channels: back right only reaches the right side.
+        let mut c = Converter::new(48_000, 5);
+        let out = c.push(&[0.0, 0.0, 0.0, 0.0, 0.5]);
+        assert!(out[0] == 0 && out[1] > 0, "{out:?}");
+    }
 
     #[test]
     fn same_rate_is_exact() {

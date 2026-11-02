@@ -140,10 +140,17 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn next(&mut self) -> Option<Token> {
-        self.skip_white();
         let d = self.data;
-        let c = *d.get(self.pos)?;
-        self.pos += 1;
+        let c = loop {
+            self.skip_white();
+            let c = *d.get(self.pos)?;
+            self.pos += 1;
+            // A stray ')' or a single '>' is skipped.
+            if c == b')' || (c == b'>' && d.get(self.pos) != Some(&b'>')) {
+                continue;
+            }
+            break c;
+        };
         Some(match c {
             b'[' => Token::ArrayStart,
             b']' => Token::ArrayEnd,
@@ -203,7 +210,6 @@ impl<'a> Lexer<'a> {
                 }
                 Token::Name(out)
             }
-            b')' | b'>' => return self.next(),
             _ => {
                 let start = self.pos - 1;
                 while let Some(&c) = d.get(self.pos) {
@@ -410,6 +416,13 @@ mod tests {
         assert_eq!(key(d, "S").unwrap().as_str(), Some(&b"a(b)A\nc"[..]));
         assert_eq!(key(d, "H").unwrap().as_str(), Some(&b"He`"[..]));
         assert_eq!(key(d, "E x").unwrap().as_i64(), Some(1));
+    }
+
+    #[test]
+    fn stray_closers_do_not_recurse() {
+        let mut src = alloc::vec![b')'; 300_000];
+        src.extend_from_slice(b"> 7");
+        assert_eq!(Lexer::new(&src).next(), Some(Token::Int(7)));
     }
 
     #[test]

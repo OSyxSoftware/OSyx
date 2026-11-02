@@ -154,6 +154,12 @@ impl Choices {
     }
 }
 
+/// Sound files the built-in player decodes (Ogg may still hold Opus; the
+/// player says so).
+fn player_plays(ext: Option<&str>) -> bool {
+    matches!(ext, Some("mp3" | "wav" | "flac" | "ogg" | "oga"))
+}
+
 /// One entry of the "Open with" menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
@@ -180,7 +186,9 @@ pub fn candidates(name: &str, kind: Kind, handlers: &[Handler], browser: bool) -
         }
         Kind::Archive(_) => add("Extract here", Target::Builtin(Builtin::Extract)),
         Kind::Audio => {
-            add("Audio player", Target::Builtin(Builtin::Player));
+            if player_plays(ext.as_deref()) {
+                add("Audio player", Target::Builtin(Builtin::Player));
+            }
             add("Hex viewer", Target::Builtin(Builtin::Hex));
         }
         Kind::Pdf => {
@@ -212,6 +220,7 @@ pub fn default_target(name: &str, kind: Kind, handlers: &[Handler], choices: &Ch
     let app = handlers.iter().find(|h| h.handles(ext.as_deref(), kind)).map(|h| Target::Exec(h.exec.clone()));
     match kind {
         Kind::Video => app,
+        Kind::Audio if !player_plays(ext.as_deref()) => app,
         _ => list.into_iter().next().map(|c| c.target),
     }
 }
@@ -244,6 +253,8 @@ mod tests {
         mine.set("song.mp3", Kind::Audio, Target::Exec("/opt/player".into()));
         assert_eq!(default_target("x.mp3", Kind::Audio, &handlers, &mine, true), Some(Target::Exec("/opt/player".into())), "unless the user chose otherwise");
         assert_eq!(default_target("movie.avi", classify("movie.avi"), &handlers, &choices, true), None, "nothing handles avi");
+        assert_eq!(default_target("a.wma", classify("a.wma"), &handlers, &choices, true), Some(Target::Exec("/opt/player".into())), "a format the player cannot decode");
+        assert_eq!(default_target("a.wma", classify("a.wma"), &[], &choices, true), None);
         assert_eq!(default_target("a.pdf", Kind::Pdf, &[], &choices, true), Some(Target::Builtin(Builtin::Pdf)));
         // Still openable as hex through the menu.
         let list = candidates("a.pdf", Kind::Pdf, &[], true);

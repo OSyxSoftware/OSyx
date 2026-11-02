@@ -68,6 +68,9 @@ pub fn decode(data: &[u8], d: &Dict) -> (Vec<u8>, Option<(Vec<u8>, Option<Dict>)
     (cur, None)
 }
 
+/// Largest decoded size of one stream.
+const MAX_INFLATE: usize = 256 << 20;
+
 /// zlib data; damaged streams give what could be recovered.
 pub fn inflate(data: &[u8]) -> Vec<u8> {
     use miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
@@ -84,7 +87,11 @@ pub fn inflate(data: &[u8]) -> Vec<u8> {
         outp += used_out;
         match status {
             TINFLStatus::HasMoreOutput => {
-                let n = out.len() * 2;
+                // A deflate bomb: keep what fits.
+                if out.len() >= MAX_INFLATE {
+                    break;
+                }
+                let n = (out.len() * 2).min(MAX_INFLATE);
                 out.resize(n, 0);
             }
             _ => break,

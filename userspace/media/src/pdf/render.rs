@@ -188,6 +188,9 @@ struct Tile {
     origin: (f64, f64),
 }
 
+/// Largest page bitmap (about 64 million pixels, 192 MiB of RGB).
+const MAX_PIXELS: usize = 1 << 26;
+
 pub struct Renderer<'a> {
     doc: &'a Document,
     fonts: FontSource<'a>,
@@ -213,11 +216,20 @@ fn n(o: &[Object], i: usize) -> f64 {
 
 impl<'a> Renderer<'a> {
     /// A renderer for `page` at `scale` device pixels per point.
-    pub fn new(doc: &'a Document, page: &Page, scale: f64, fonts: FontSource<'a>) -> Renderer<'a> {
+    pub fn new(
+        doc: &'a Document,
+        page: &Page,
+        scale: f64,
+        fonts: FontSource<'a>,
+    ) -> Result<Renderer<'a>, alloc::string::String> {
         let b = page.bbox;
         let (pw, ph) = (b[2] - b[0], b[3] - b[1]);
         let (w, h) = if page.rotate % 180 == 0 { (pw, ph) } else { (ph, pw) };
-        let (cw, ch) = ((w * scale).ceil().max(1.0) as usize, (h * scale).ceil().max(1.0) as usize);
+        let (cw, ch) = ((w * scale).ceil().max(1.0), (h * scale).ceil().max(1.0));
+        if !(cw * ch <= MAX_PIXELS as f64) {
+            return Err(alloc::format!("the page is too large to draw at this zoom ({cw} x {ch} pixels)"));
+        }
+        let (cw, ch) = (cw as usize, ch as usize);
         // User space (y up, origin at the box corner) to device (y down),
         // with the page rotation.
         let base = Matrix([1.0, 0.0, 0.0, 1.0, -b[0], -b[1]]);
@@ -229,7 +241,7 @@ impl<'a> Renderer<'a> {
         };
         let flip = Matrix([scale, 0.0, 0.0, -scale, 0.0, h * scale]);
         let ctm = base.then(&rot).then(&flip);
-        Renderer {
+        Ok(Renderer {
             doc,
             fonts,
             canvas: Canvas::new(cw, ch),
@@ -245,7 +257,7 @@ impl<'a> Renderer<'a> {
             font_by_ref: BTreeMap::new(),
             depth: 0,
             ops: 0,
-        }
+        })
     }
 
     /// Draws the page's contents and annotation appearances.

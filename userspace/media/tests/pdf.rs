@@ -34,7 +34,7 @@ fn dump(name: &str, w: usize, h: usize, rgb: &[u8]) {
 fn compare(stem: &str) -> (f64, f64) {
     let pdf = Pdf::open(std::fs::read(path(&format!("{stem}.pdf"))).unwrap()).unwrap();
     let fonts = |n: &str| system_font(n);
-    let bmp = pdf.render(0, 1.0, &fonts);
+    let bmp = pdf.render(0, 1.0, &fonts).unwrap();
     let (w, h, want) = reference(stem, 0);
     assert!(bmp.w.abs_diff(w) <= 1 && bmp.h.abs_diff(h) <= 1, "{stem}: {}x{} against {w}x{h}", bmp.w, bmp.h);
     let got: Vec<u8> = bmp.px.iter().flatten().copied().collect();
@@ -86,6 +86,24 @@ fn damaged_files_are_rebuilt() {
     let pdf = Pdf::open(data).unwrap();
     assert_eq!(pdf.pages(), 1);
     let fonts = |n: &str| system_font(n);
-    let bmp = pdf.render(0, 0.5, &fonts);
+    let bmp = pdf.render(0, 0.5, &fonts).unwrap();
     assert!(bmp.px.iter().any(|p| p[2] > 150 && p[0] < 80), "the blue rectangle is drawn");
+}
+
+#[test]
+fn hostile_inputs_fail_cleanly() {
+    let fonts = |n: &str| system_font(n);
+    // A page far too large to draw.
+    let mut data = std::fs::read(path("shapes.pdf")).unwrap();
+    let i = data.windows(9).position(|w| w == b"/MediaBox").unwrap();
+    let end = i + data[i..].iter().position(|&c| c == b']').unwrap() + 1;
+    let huge = b"/MediaBox [0 0 300 9999999]";
+    data.splice(i..end, huge.iter().copied());
+    let pdf = Pdf::open(data).unwrap();
+    assert!(pdf.render(0, 1.0, &fonts).is_err());
+    // A /XRefStm offset past the end of the file.
+    let mut data = std::fs::read(path("standard-fonts.pdf")).unwrap();
+    let t = data.windows(7).rposition(|w| w == b"trailer").unwrap();
+    data.splice(t + 7..t + 7, b" << /XRefStm 99999999 >> ".iter().copied());
+    assert_eq!(Pdf::open(data).unwrap().pages(), 1);
 }

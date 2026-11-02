@@ -132,9 +132,7 @@ fn mask_alpha(doc: &Document, m: &Object, w: usize, h: usize, soft: bool) -> Opt
 pub fn decode(doc: &Document, d: &Dict, raw: &[u8], resolve_space: &dyn Fn(&Object) -> Option<Space>) -> Option<Image> {
     let w = get(d, "Width", "W").map(|o| doc.resolve(o)).and_then(|o| o.as_i64())?.max(1) as usize;
     let h = get(d, "Height", "H").map(|o| doc.resolve(o)).and_then(|o| o.as_i64())?.max(1) as usize;
-    if w * h > 40_000_000 {
-        return None;
-    }
+    w.checked_mul(h).filter(|&n| n <= 40_000_000)?;
     let is_mask = matches!(get(d, "ImageMask", "IM").map(|o| doc.resolve(o)), Some(Object::Bool(true)));
     let bpc = if is_mask {
         1

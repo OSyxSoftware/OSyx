@@ -414,7 +414,8 @@ pub struct StrokeStyle {
 /// Splits polylines by the dash pattern.
 fn dashed(lines: Vec<(Vec<(f64, f64)>, bool)>, dash: &[f64], phase: f64) -> Vec<(Vec<(f64, f64)>, bool)> {
     let total: f64 = dash.iter().sum();
-    if dash.is_empty() || total <= 0.0 || dash.iter().any(|d| *d < 0.0) {
+    // Sub-pixel patterns would make millions of pieces: draw them solid.
+    if dash.is_empty() || total < 0.1 || dash.iter().any(|d| *d < 0.0) {
         return lines;
     }
     let mut out = Vec::new();

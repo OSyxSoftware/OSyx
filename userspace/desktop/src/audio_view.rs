@@ -52,6 +52,7 @@ pub struct AudioView {
     dragging: Option<u64>,
     /// Paused, finished and failed as last drawn.
     shown: (bool, bool, bool),
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 /// m:ss or h:mm:ss.
@@ -88,7 +89,7 @@ impl AudioView {
             error: Mutex::new(None),
         });
         let s = shared.clone();
-        thread::spawn(move || play(dec, s));
+        let thread = Some(thread::spawn(move || play(dec, s)));
         println!("files: playing {path} ({}, {} Hz, {})", info.codec, info.rate, channels_name(info.channels));
         Ok(AudioView {
             path: String::from(path),
@@ -103,6 +104,7 @@ impl AudioView {
             bar: Rect::EMPTY,
             dragging: None,
             shown: (false, false, false),
+            thread,
         })
     }
 
@@ -123,7 +125,7 @@ impl AudioView {
     }
 
     fn seek_to(&mut self, frame: u64) {
-        let f = frame.min(self.total());
+        let f = self.info.frames.map_or(frame, |t| frame.min(t));
         self.shared.seek.store(f + 1, Ordering::Relaxed);
         self.shared.written.store(f, Ordering::Relaxed);
         if self.shared.finished.swap(false, Ordering::Relaxed) {
@@ -202,7 +204,10 @@ impl AudioView {
         }
         let grab = Rect::new(self.bar.x - 6, self.bar.y - 10, self.bar.w + 12, self.bar.h + 20);
         match *ev {
-            Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && contains(&grab, x, y) => {
+            // Without a known length the bar cannot map to positions.
+            Ui::PointerDown { x, y, button: b, .. }
+                if b == button::LEFT && contains(&grab, x, y) && self.total() > 0 =>
+            {
                 self.dragging = Some(self.frame_at(x));
                 return true;
             }
@@ -342,6 +347,11 @@ impl AudioView {
 impl Drop for AudioView {
     fn drop(&mut self) {
         self.shared.quit.store(true, Ordering::Relaxed);
+        // Wait for the thread so no old sound is queued after a new file
+        // starts (a blocked write returns within the card's 200 ms queue).
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 

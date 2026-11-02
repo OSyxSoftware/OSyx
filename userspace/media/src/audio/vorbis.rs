@@ -14,6 +14,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::f32::consts::PI;
 
+/// Entries of one codebook, and values of its expanded vector table.
+const MAX_ENTRIES: usize = 1 << 20;
+const MAX_VQ: usize = 1 << 22;
+
 fn ilog(v: u32) -> u32 {
     32 - v.leading_zeros()
 }
@@ -59,6 +63,11 @@ impl Codebook {
         }
         let dim = r.read(16).ok_or_else(bad)? as usize;
         let entries = r.read(24).ok_or_else(bad)? as usize;
+        // Real codebooks stay far below these; they keep a crafted setup
+        // header from asking for gigabytes.
+        if entries > MAX_ENTRIES || entries.saturating_mul(dim) > MAX_VQ {
+            return Err(bad());
+        }
         let mut lens = vec![0u32; entries];
         if r.bit().ok_or_else(bad)? {
             // Ordered: runs of increasing lengths.
@@ -84,11 +93,17 @@ impl Codebook {
         let lookup = r.read(4).ok_or_else(bad)?;
         let mut vq = Vec::new();
         if lookup == 1 || lookup == 2 {
+            if dim == 0 {
+                return Err(bad());
+            }
             let min = float32_unpack(r.read(32).ok_or_else(bad)?);
             let delta = float32_unpack(r.read(32).ok_or_else(bad)?);
             let bits = r.read(4).ok_or_else(bad)? + 1;
             let seq = r.bit().ok_or_else(bad)?;
             let values = if lookup == 1 { lookup1_values(entries as u32, dim as u32) as usize } else { entries * dim };
+            if values.saturating_mul(bits as usize) > r.bits_left() {
+                return Err(bad());
+            }
             let mut mult = Vec::with_capacity(values);
             for _ in 0..values {
                 mult.push(r.read(bits).ok_or_else(bad)? as f32);
@@ -305,6 +320,10 @@ fn read_setup(packet: &[u8], channels: usize, blocksize: [usize; 2]) -> Result<S
                 }
                 let mut sorted: Vec<usize> = (0..xs.len()).collect();
                 sorted.sort_by_key(|&i| xs[i]);
+                // The X values must be unique (a zero-width line divides by 0).
+                if sorted.windows(2).any(|w| xs[w[0]] == xs[w[1]]) {
+                    return Err(bad());
+                }
                 let mut neighbours = vec![(0, 0); xs.len()];
                 for i in 2..xs.len() {
                     let (mut lo, mut hi) = (0usize, 1usize);

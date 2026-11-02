@@ -16,7 +16,7 @@ const PAD: [u8; 32] = [
     0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Method {
     Identity,
     Rc4,
@@ -94,7 +94,7 @@ pub fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
 
 /// AES-CBC decryption with the IV in front and PKCS#7 padding removed.
 fn aes_cbc_decrypt(key: &[u8], data: &[u8], unpad: bool) -> Vec<u8> {
-    if data.len() < 32 {
+    if data.len() < 32 || key.len() < 16 {
         return Vec::new();
     }
     let (iv, body) = data.split_at(16);
@@ -195,6 +195,16 @@ fn crypt_filter_method(d: &Dict, name: Option<&[u8]>) -> Method {
     }
 }
 
+/// The key length in bytes of the stream crypt filter (StmF), if declared.
+fn crypt_filter_length(d: &Dict) -> Option<usize> {
+    let name = key(d, "StmF").and_then(Object::as_name)?;
+    let cf = key(d, "CF").and_then(Object::as_dict)?.get(name)?.as_dict()?;
+    let l = key(cf, "Length").and_then(Object::as_i64)?;
+    // Producers write it in bytes or, like the top-level /Length, in bits.
+    let bytes = if l > 16 { l / 8 } else { l };
+    Some(bytes.clamp(5, 16) as usize)
+}
+
 impl Decryptor {
     pub fn new(d: &Dict, id: &[u8]) -> Result<Decryptor, String> {
         if key(d, "Filter").and_then(Object::as_name) != Some(b"Standard") {
@@ -230,6 +240,13 @@ impl Decryptor {
         } else {
             let n = if r == 2 {
                 5
+            } else if v >= 4 {
+                // The key length of revision 4 belongs to the crypt filter:
+                // 16 bytes for AESV2, its /Length (bits or bytes) for V2.
+                match streams.max(strings) {
+                    Method::Aes128 | Method::Aes256 => 16,
+                    _ => crypt_filter_length(d).unwrap_or(16),
+                }
             } else {
                 (key(d, "Length").and_then(Object::as_i64).unwrap_or(40) / 8).clamp(5, 16) as usize
             };

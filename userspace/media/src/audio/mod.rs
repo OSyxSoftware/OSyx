@@ -68,15 +68,15 @@ pub fn sniff(data: &[u8]) -> Option<Format> {
     if data.starts_with(b"OggS") {
         return Some(Format::Ogg);
     }
-    // MP3: an ID3v2 tag, or a frame header right at the start.
-    if data.starts_with(b"ID3") || mp3::find_frame(data, 0) == Some(0) {
-        return Some(Format::Mp3);
-    }
     // FLAC with an ID3v2 tag in front.
     if let Some(skip) = id3v2_len(data) {
         if data.get(skip..skip + 4) == Some(b"fLaC") {
             return Some(Format::Flac);
         }
+    }
+    // MP3: an ID3v2 tag, or a frame header right at the start.
+    if data.starts_with(b"ID3") || mp3::find_frame(data, 0) == Some(0) {
+        return Some(Format::Mp3);
     }
     None
 }

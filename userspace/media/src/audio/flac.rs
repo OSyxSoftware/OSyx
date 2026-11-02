@@ -249,7 +249,14 @@ impl FlacDecoder {
             // The side channel has one more bit.
             let side = matches!((h.assignment, c), (8, 1) | (9, 0) | (10, 1));
             let bits = h.bits + side as u32;
-            chans.push(subframe(&mut r, h.block, bits).ok_or("corrupt FLAC subframe")?);
+            match subframe(&mut r, h.block, bits) {
+                Some(s) => chans.push(s),
+                None => {
+                    // A damaged frame or a false sync: skip and resynchronise.
+                    self.pos = at + 1;
+                    return Ok(Some(vec![0.0; h.block * ch]));
+                }
+            }
         }
         r.align();
         let end = r.byte_pos() + 2;

@@ -1075,7 +1075,7 @@ impl Decoder for Mp3Decoder {
     fn seek(&mut self, frame: u64) -> Result<u64, String> {
         let frame = frame.min(self.info.frames.unwrap_or(0));
         let target = frame + self.start_skip;
-        let k = (target / self.spf as u64) as usize;
+        let k = ((target / self.spf as u64) as usize).min(self.frames.len());
         // Prime from far enough back that the reservoir holds what frame
         // k - 1 needs (at most 511 bytes) and the filter banks have
         // settled, then drop everything before the target.
