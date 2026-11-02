@@ -37,7 +37,9 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 33] = [
+    // A slice, not a counted array: merges that each add a test do not
+    // have to agree on the count.
+    let tests: &[(&str, &dyn Fn() -> TestResult)] = &[
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
