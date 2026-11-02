@@ -353,14 +353,31 @@ fn removed_open_files_and_the_orphan_list() {
     let mut fs = rw(img);
     let g = fs.create(ROOT_INO, "open2.bin", NewKind::File, 0o644, 0, 0).unwrap();
     write_all(&mut fs, g, 0, &pattern(100_000, 3));
+    fs.sync().unwrap();
     let (free_before, _) = fs.free_counts();
     fs.open(g);
     fs.unlink(ROOT_INO, "open2.bin").unwrap();
+    // Committed: the crash leaves the file on the orphan list.
+    fs.sync().unwrap();
     let img = fs.into_device_unclean();
     let fs = rw(img);
     assert!(fs.free_counts().0 >= free_before + 24, "orphan freed at mount");
     let img = fs.unmount().unwrap();
     e2fsck("orphan-crash", &img);
+    // Unmounted while the removed file is still open: the clean unmount
+    // frees it, and that release is on disk, not left pending.
+    let mut fs = rw(img);
+    let h = fs.create(ROOT_INO, "open3.bin", NewKind::File, 0o644, 0, 0).unwrap();
+    write_all(&mut fs, h, 0, &pattern(100_000, 4));
+    fs.sync().unwrap();
+    let (free_before, _) = fs.free_counts();
+    fs.open(h);
+    fs.unlink(ROOT_INO, "open3.bin").unwrap();
+    let img = fs.unmount().unwrap();
+    let mut fs = ro(img.clone());
+    assert!(fs.free_counts().0 >= free_before + 24, "orphan freed by the clean unmount");
+    fs.check().unwrap();
+    e2fsck("orphan-unmount", &img);
 }
 
 #[test]
@@ -386,6 +403,9 @@ fn unsupported_writes_are_refused() {
     let many = fs.resolve("/many").unwrap();
     assert!(fs.inode(many).unwrap().flags & osyx_ext4::inode::FL_INDEX != 0, "fixture has an htree directory");
     assert_eq!(fs.create(many, "new", NewKind::File, 0o644, 0, 0), Err(Error::Unsupported("adding entries to a hashed (dir_index) directory")));
+    // The refused create allocated an inode first: the pending transaction
+    // must not keep that bit (counters and bitmaps agree).
+    fs.check().unwrap();
     // Removing from it is fine.
     fs.unlink(many, "file-7.txt").unwrap();
     let img = fs.unmount().unwrap();
@@ -430,7 +450,51 @@ fn workload<D: BlockDevice>(fs: &mut Ext4<D>) -> Result<(), Error> {
     let hello = fs.resolve("/hello.txt")?;
     fs.truncate(hello, 3)?;
     fs.unlink(ROOT_INO, "small.bin")?;
+    // The operations are one pending transaction until this commits it, so
+    // the power cuts below land inside the commit too.
+    fs.sync()?;
     Ok(())
+}
+
+/// Metadata operations are grouped into one journal commit at `sync`, and
+/// a crash before it loses all of them together.
+#[test]
+fn operations_are_committed_together() {
+    let mut fs = rw(fixture("ext4-4k"));
+    let before = fs.journal_commits();
+    let d = fs.create(ROOT_INO, "pkg", NewKind::Dir, 0o755, 0, 0).unwrap();
+    for i in 0..200 {
+        let f = fs.create(d, &format!("f{i}.tmp"), NewKind::File, 0o644, 0, 0).unwrap();
+        fs.write(f, 0, &pattern(3000, i)).unwrap();
+        fs.rename(d, &format!("f{i}.tmp"), d, &format!("f{i}")).unwrap();
+    }
+    fs.unlink(d, "f7").unwrap();
+    assert_eq!(fs.journal_commits(), before, "nothing commits before sync");
+    // The pending transaction is visible to readers already.
+    let f3 = fs.resolve("/pkg/f3").unwrap();
+    assert_eq!(read_all(&mut fs, f3), pattern(3000, 3));
+
+    // A crash now: after recovery none of it happened.
+    let mut crashed = rw(fs.into_device_unclean());
+    assert!(crashed.resolve("/pkg").is_err(), "an uncommitted group leaves nothing behind");
+    crashed.check().unwrap();
+
+    let mut fs = rw(fixture("ext4-4k"));
+    let d = fs.create(ROOT_INO, "pkg", NewKind::Dir, 0o755, 0, 0).unwrap();
+    for i in 0..200 {
+        let f = fs.create(d, &format!("f{i}"), NewKind::File, 0o644, 0, 0).unwrap();
+        fs.write(f, 0, &pattern(3000, i)).unwrap();
+    }
+    fs.sync().unwrap();
+    assert!(fs.journal_commits() <= 2, "{} commits for 200 files", fs.journal_commits());
+    let mut synced = rw(fs.into_device_unclean());
+    for i in [0usize, 99, 199] {
+        let f = synced.resolve(&format!("/pkg/f{i}")).unwrap();
+        assert_eq!(read_all(&mut synced, f), pattern(3000, i));
+    }
+    synced.check().unwrap();
+    let img = synced.unmount().unwrap();
+    e2fsck("grouped", &img);
 }
 
 /// Power is cut after every possible number of device writes during a

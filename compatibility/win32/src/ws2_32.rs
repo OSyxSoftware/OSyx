@@ -33,12 +33,21 @@ const SO_SNDTIMEO: i32 = 0x1005;
 const SO_RCVTIMEO: i32 = 0x1006;
 const SO_ERROR: i32 = 0x1007;
 const SO_TYPE: i32 = 0x1008;
+const SO_SNDBUF: i32 = 0x1001;
+const SO_RCVBUF: i32 = 0x1002;
 const IPPROTO_TCP: i32 = 6;
 const IPPROTO_UDP: i32 = 17;
 const TCP_NODELAY: i32 = 1;
 /// Hands out AcceptEx, ConnectEx and the other extension functions.
 const SIO_GET_EXTENSION_FUNCTION_POINTER: u32 = 0xC800_0006;
 const FIONBIO: u32 = 0x8004_667E;
+const SIO_KEEPALIVE_VALS: u32 = 0x9800_0004;
+const SIO_LOOPBACK_FAST_PATH: u32 = 0x9800_0010;
+const SIO_IDEAL_SEND_BACKLOG_QUERY: u32 = 0x4004_747B;
+/// The stack's per-connection send buffer (network/net/src/tcp.rs).
+const SEND_BACKLOG: u32 = 64 * 1024;
+/// The stack's per-connection receive buffer (network/net/src/tcp.rs).
+const RECV_BUFFER_SIZE: u32 = 256 * 1024;
 const MSG_PEEK: i32 = 2;
 const MSG_WAITALL: i32 = 8;
 
@@ -122,6 +131,11 @@ struct Sock {
     /// SO_REUSEADDR/SO_KEEPALIVE, accepted as no-ops but reported back.
     reuseaddr: bool,
     keepalive: bool,
+    /// SO_RCVBUF/SO_SNDBUF as set (None: never set; zero is a valid
+    /// setting). The stack's buffers have fixed sizes; the values are kept
+    /// so getsockopt reports them back.
+    rcvbuf: Option<u32>,
+    sndbuf: Option<u32>,
     /// `shutdown(SD_RECEIVE)` / `shutdown(SD_SEND)` were called.
     read_shutdown: bool,
     write_shutdown: bool,
@@ -269,6 +283,8 @@ extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
                 send_timeout: 0,
                 reuseaddr: false,
                 keepalive: false,
+                rcvbuf: None,
+                sndbuf: None,
                 read_shutdown: false,
                 write_shutdown: false,
             });
@@ -291,6 +307,7 @@ extern "win64" fn closesocket(s: u64) -> i32 {
     }
 }
 
+#[track_caller]
 fn result(r: Result<(), u32>) -> i32 {
     match r {
         Ok(()) => 0,
@@ -357,6 +374,9 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
             send_timeout: 0,
             reuseaddr: false,
             keepalive: false,
+            // An accepted socket inherits the listener's buffer sizes.
+            rcvbuf: listener.rcvbuf,
+            sndbuf: listener.sndbuf,
             read_shutdown: false,
             write_shutdown: false,
         });
@@ -514,6 +534,13 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
                 Ok(())
             }
             (IPPROTO_TCP, TCP_NODELAY) => int().map(|_| ()),
+            (SOL_SOCKET, SO_RCVBUF) | (SOL_SOCKET, SO_SNDBUF) => {
+                let size = int()?;
+                let mut sockets = SOCKETS.lock().unwrap();
+                let sock = sockets.get_mut(&s).ok_or(WSAENOTSOCK)?;
+                if name == SO_RCVBUF { sock.rcvbuf = Some(size) } else { sock.sndbuf = Some(size) }
+                Ok(())
+            }
             // Linger 0 closes abortively, which the kernel can do; a positive
             // linger only records the value (close never leaves data behind).
             (SOL_SOCKET, SO_LINGER) => {
@@ -573,6 +600,9 @@ extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *
             (SOL_SOCKET, SO_KEEPALIVE) => st.keepalive as u32,
             (SOL_SOCKET, SO_RCVTIMEO) => st.recv_timeout,
             (SOL_SOCKET, SO_SNDTIMEO) => st.send_timeout,
+            // The stack's buffer sizes unless the program set its own.
+            (SOL_SOCKET, SO_RCVBUF) => st.rcvbuf.unwrap_or(RECV_BUFFER_SIZE),
+            (SOL_SOCKET, SO_SNDBUF) => st.sndbuf.unwrap_or(SEND_BACKLOG),
             (IPPROTO_TCP, TCP_NODELAY) if stream => 1,
             _ => return Err(WSAENOPROTOOPT),
         };
@@ -606,7 +636,12 @@ extern "win64" fn ioctlsocket(s: u64, cmd: u32, arg: *mut u32) -> i32 {
                 // SAFETY: the caller's 4-byte out argument.
                 unsafe { core::ptr::write_unaligned(arg, n as u32) };
             }
-            _ => return Err(WSAEINVAL),
+            _ => {
+                if crate::VERBOSE.load(Ordering::Relaxed) {
+                    os_std::eprintln!("winrun: ioctlsocket {s:#x} unsupported command {cmd:#x}");
+                }
+                return Err(WSAEINVAL);
+            }
         }
         Ok(())
     })())
@@ -1011,7 +1046,47 @@ extern "win64" fn WSAIoctl(
                     8
                 }
             }
-            _ => return Err(WSAEINVAL),
+            // struct tcp_keepalive { onoff, keepalivetime, keepaliveinterval }:
+            // the switch is kept like SO_KEEPALIVE's (the stack sends no
+            // keep-alive probes, so the timings have nothing to drive).
+            SIO_KEEPALIVE_VALS => {
+                if input.is_null() || in_len < 12 {
+                    return Err(WSAEFAULT);
+                }
+                // SAFETY: the caller's 12-byte input.
+                let on = unsafe { core::ptr::read_unaligned(input as *const u32) } != 0;
+                SOCKETS.lock().unwrap().get_mut(&s).ok_or(WSAENOTSOCK)?.keepalive = on;
+                0
+            }
+            // Loopback connections already stay inside the stack: the fast
+            // path a program asks for is the only path there is.
+            SIO_LOOPBACK_FAST_PATH => {
+                if input.is_null() || in_len < 4 {
+                    return Err(WSAEFAULT);
+                }
+                0
+            }
+            // How much to keep queued for sending: the stack's send buffer.
+            // Only a connected stream socket has a send backlog.
+            SIO_IDEAL_SEND_BACKLOG_QUERY => {
+                if output.is_null() || out_len < 4 {
+                    return Err(WSAEFAULT);
+                }
+                if !socket_state(s)?.stream {
+                    return Err(WSAEOPNOTSUPP);
+                }
+                let mut peer = SockAddr::default();
+                os_sys::sock_ctl(fd, net::ctl::PEER_ADDR, &mut peer as *mut SockAddr as u64).map_err(|_| WSAENOTCONN)?;
+                // SAFETY: the caller's 4-byte output buffer.
+                unsafe { core::ptr::write_unaligned(output as *mut u32, SEND_BACKLOG) };
+                4
+            }
+            _ => {
+                if crate::VERBOSE.load(Ordering::Relaxed) {
+                    os_std::eprintln!("winrun: WSAIoctl {s:#x} unsupported code {code:#x}");
+                }
+                return Err(WSAEINVAL);
+            }
         };
         if !returned.is_null() {
             // SAFETY: the caller's out count.
