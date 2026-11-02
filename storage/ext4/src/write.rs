@@ -1096,8 +1096,10 @@ impl<D: BlockDevice> Ext4<D> {
                 return Ok(());
             }
         }
-        // No room. A full one-block directory becomes hashed, like Linux.
-        if blocks == 1 && self.sb.has_compat(feature::COMPAT_DIR_INDEX) {
+        // No room. A full one-block directory becomes hashed, like Linux,
+        // when OSyx knows the volume's default hash; otherwise it grows
+        // linearly (still valid).
+        if blocks == 1 && self.sb.has_compat(feature::COMPAT_DIR_INDEX) && self.default_hash_known() {
             return self.make_indexed(dir, name.as_bytes(), ino, ft);
         }
         let filetype = self.filetype();

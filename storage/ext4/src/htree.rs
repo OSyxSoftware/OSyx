@@ -223,6 +223,12 @@ impl<D: BlockDevice> Ext4<D> {
         }
     }
 
+    /// Whether new hashed directories can use the volume's default hash.
+    pub(crate) fn default_hash_known(&self) -> bool {
+        let version = self.effective_version(self.sb.raw[SB_DEF_HASH_VERSION]);
+        dirhash(b"", version, &[0; 4]).is_some()
+    }
+
     /// Whether `dir` is a usable hashed directory.
     pub(crate) fn is_indexed(&self, dir: &Inode) -> bool {
         dir.flags & FL_INDEX != 0 && self.sb.has_compat(feature::COMPAT_DIR_INDEX)
