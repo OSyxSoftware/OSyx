@@ -439,15 +439,17 @@ fn parse_mp4(d: &[u8]) -> Result<Mp4, String> {
                 if time == -1 {
                     continue; // an empty edit: a delay before the track
                 }
-                skip = time as u64;
+                skip = u64::try_from(time).unwrap_or(0);
                 if movie_scale > 0 && dur > 0 {
-                    keep = Some(dur * timescale as u64 / movie_scale as u64);
+                    keep = Some(dur.saturating_mul(timescale as u64) / movie_scale as u64);
                 }
                 break;
             }
         } else if let Some((pre, pad, total)) = itunsmpb(d, moov.2, moov.3) {
             skip = pre;
-            keep = Some(total).filter(|&t| t > 0).or(Some((frames.len() as u64 * 1024).saturating_sub(pre + pad)));
+            keep = Some(total)
+                .filter(|&t| t > 0)
+                .or(Some((frames.len() as u64 * 1024).saturating_sub(pre.saturating_add(pad))));
         }
         return Ok(Mp4 { asc, frames, timescale, skip, keep });
     }
@@ -490,8 +492,15 @@ fn sample_table(d: &[u8], s: usize, e: usize) -> Option<Vec<(usize, usize)>> {
                     return Some(frames);
                 }
                 let n = size(sample)?;
-                frames.push((at, n));
-                at += n;
+                // Samples past the end of the file end the table (and keep
+                // a lying count from filling memory).
+                match at.checked_add(n) {
+                    Some(end) if end <= d.len() => {
+                        frames.push((at, n));
+                        at = end;
+                    }
+                    _ => return Some(frames),
+                }
                 sample += 1;
             }
         }
@@ -539,8 +548,14 @@ fn fragment(
         let stride = [0x100, 0x200, 0x400, 0x800].iter().filter(|&&b| f & b != 0).count() * 4;
         for i in 0..n.min(1 << 24) {
             let sz = if f & 0x200 != 0 { be32(d, q + i * stride + if f & 0x100 != 0 { 4 } else { 0 })? } else { size };
-            out.push((at, sz as usize));
-            at += sz as usize;
+            // Empty samples or ones past the end of the file end the run.
+            match at.checked_add(sz as usize) {
+                Some(end) if sz > 0 && end <= d.len() => {
+                    out.push((at, sz as usize));
+                    at = end;
+                }
+                _ => return Some(()),
+            }
         }
     }
     Some(())
@@ -1190,7 +1205,7 @@ impl Core {
                 ID_FIL => {
                     let mut n = r.read(4).ok_or("frame ends early")? as usize;
                     if n == 15 {
-                        n += r.read(8).ok_or("frame ends early")? as usize - 1;
+                        n = 14 + r.read(8).ok_or("frame ends early")? as usize;
                     }
                     r.skip(n * 8).ok_or("frame ends early")?;
                 }
@@ -1250,7 +1265,8 @@ impl AacDecoder {
                 .filter(|&&(at, len)| at.checked_add(len).is_some_and(|e| e <= data.len()))
                 .map(|&(at, len)| Frame { at, len })
                 .collect();
-            let scale = |v: u64| if m.timescale > 0 { v * cfg.rate as u64 / m.timescale as u64 } else { v };
+            let scale =
+                |v: u64| if m.timescale > 0 { v.saturating_mul(cfg.rate as u64) / m.timescale as u64 } else { v };
             (cfg, frames, false, scale(m.skip), m.keep.map(scale))
         } else {
             let mut p = id3v2_len(&data).unwrap_or(0);
@@ -1316,7 +1332,7 @@ impl AacDecoder {
         };
         let decoded = blocks * 1024;
         let start_skip = start_skip.min(decoded);
-        let stream_end = keep.map_or(decoded, |k| (start_skip + k).min(decoded));
+        let stream_end = keep.map_or(decoded, |k| start_skip.saturating_add(k).min(decoded));
         let profile = if cfg.sbr { "HE-AAC, played without SBR" } else { "AAC-LC" };
         let container = if adts { "ADTS" } else { "MP4" };
         Ok(AacDecoder {

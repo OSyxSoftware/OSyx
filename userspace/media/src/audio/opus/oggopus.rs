@@ -278,7 +278,9 @@ impl Decoder for OggOpusDecoder {
             let mid = (lo + hi) / 2;
             let g = pages[..=mid].iter().rev().find(|p| p.granule >= 0).map_or(-1, |p| p.granule);
             if g >= 0 && g <= want {
-                start = Some(mid);
+                // Start after the page that has that granule, not `mid`
+                // (whose own granule may be -1).
+                start = pages[..=mid].iter().rposition(|p| p.granule >= 0);
                 lo = mid + 1;
             } else {
                 hi = mid;

@@ -102,6 +102,7 @@ pub fn parse_packet(packet: &[u8], self_delimited: bool) -> Option<(Toc, Vec<&[u
     let mut data = &packet[1..];
     let mut sizes = Vec::new();
     let mut cbr = false;
+    let mut pad = 0;
     let count;
     let mut last = data.len();
     match packet[0] & 3 {
@@ -141,7 +142,9 @@ pub fn parse_packet(packet: &[u8], self_delimited: bool) -> Option<(Toc, Vec<&[u
                     let p = *data.first()?;
                     data = &data[1..];
                     len -= 1;
-                    len -= if p == 255 { 254 } else { p as isize };
+                    let n = if p == 255 { 254 } else { p as usize };
+                    len -= n as isize;
+                    pad += n;
                     if p != 255 {
                         break;
                     }
@@ -198,7 +201,8 @@ pub fn parse_packet(packet: &[u8], self_delimited: bool) -> Option<(Toc, Vec<&[u
     sizes.push(last);
     let header = packet.len() - data.len();
     let mut out = Vec::with_capacity(sizes.len());
-    let mut used = header;
+    // The padding follows the frames; the next stream starts after it.
+    let mut used = header + pad;
     for s in sizes {
         out.push(data.get(..s)?);
         data = &data[s..];
@@ -500,5 +504,19 @@ impl OpusDecoder {
         self.prev_mode = Some(mode);
         self.prev_redundancy = redundancy && !celt_to_silk;
         Ok(audiosize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn self_delimited_padding_is_consumed() {
+        // Code 3, one CBR frame, 2 bytes of padding; self-delimited size 3.
+        let p = [0x83, 0x41, 0x02, 0x03, 7, 8, 9, 0, 0, 0xAA];
+        let (_, f, used) = parse_packet(&p, true).unwrap();
+        assert_eq!(f, vec![&[7u8, 8, 9][..]]);
+        assert_eq!(used, 9, "the next stream starts after the padding");
     }
 }
