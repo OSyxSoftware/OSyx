@@ -632,6 +632,26 @@ extern "win64" fn SHGetSpecialFolderPathA(_hwnd: u64, out: *mut u8, csidl: u32, 
     }
 }
 
+extern "win64" fn SHGetSpecialFolderPathW(_hwnd: u64, out: *mut u16, csidl: u32, create: i32) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's MAX_PATH buffer.
+    unsafe { *out = 0 };
+    let id = match csidl & !(CSIDL_FLAG_CREATE | CSIDL_FLAG_DONT_VERIFY) {
+        0 => 0x10,
+        id => id,
+    };
+    let Some(&(_, _, base)) = FOLDERS.iter().find(|f| f.1 == id) else { return 0 };
+    match resolve(base, create != 0 || csidl & CSIDL_FLAG_CREATE != 0, csidl & CSIDL_FLAG_DONT_VERIFY == 0) {
+        Ok(p) => {
+            kernel32::out_w(&p, out, MAX_PATH as u32);
+            1
+        }
+        Err(_) => 0,
+    }
+}
+
 // ---- Shell functions without a shell ---------------------------------------
 //
 // Firefox delay-loads these; before they existed here, the first call raised
@@ -1403,6 +1423,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         SHGetKnownFolderPath,
         SHGetFolderPathW,
         SHGetSpecialFolderPathA,
+        SHGetSpecialFolderPathW,
         SHGetSpecialFolderLocation,
         SHGetFileInfoW,
         SHFileOperationW,

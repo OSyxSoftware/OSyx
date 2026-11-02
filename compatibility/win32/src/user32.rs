@@ -5541,6 +5541,10 @@ extern "win64" fn GetQueueStatus(flags: u32) -> u32 {
 /// count, as on Windows. Returns WAIT_OBJECT_0 + n for input.
 pub(crate) extern "win64" fn MsgWaitForMultipleObjectsEx(n: u32, hs: *const u64, ms: u32, mask: u32, flags: u32) -> u32 {
     use crate::objects::{INFINITE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    const MWMO_ALERTABLE: u32 = 0x2;
+    if flags & MWMO_ALERTABLE != 0 {
+        return crate::apc::alertable_wait(ms, WAIT_TIMEOUT, |slice| MsgWaitForMultipleObjectsEx(n, hs, slice, mask, flags & !MWMO_ALERTABLE));
+    }
     diag(|d| {
         d.msgwait += 1;
         d.msgwait_masks.add(mask as u64);

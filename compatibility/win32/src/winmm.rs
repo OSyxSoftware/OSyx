@@ -8,6 +8,8 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use os_std::sync::Mutex;
 
+mod mixer;
+
 const TIMERR_NOERROR: u32 = 0;
 const TIMERR_NOCANDO: u32 = 97;
 /// The kernel tick, in milliseconds.
@@ -1559,7 +1561,8 @@ extern "win64" fn midiInGetErrorTextW(code: u32, out: *mut u8, chars: u32) -> u3
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![
+    let mut e = mixer::exports();
+    e.extend(export_table![
         timeGetTime,
         timeBeginPeriod,
         timeEndPeriod,
@@ -1625,5 +1628,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         midiInMessage,
         midiInGetErrorTextA,
         midiInGetErrorTextW,
-    ]
+    ]);
+    e
 }

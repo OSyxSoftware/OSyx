@@ -799,7 +799,7 @@ pub(crate) extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u
     }
 }
 
-extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: *mut u32, ov: *const u8) -> Bool {
+pub(crate) extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: *mut u32, ov: *const u8) -> Bool {
     if let Some(Object::Pipe(p)) = objects::get(h) {
         return crate::pipes::write_file(p, buf, n, written, ov as u64);
     }
@@ -1990,9 +1990,17 @@ extern "win64" fn Sleep(ms: u32) {
     }
 }
 
-extern "win64" fn SleepEx(ms: u32, _alertable: Bool) -> u32 {
-    Sleep(ms);
-    0
+/// SleepEx: an alertable sleep ends early, with WAIT_IO_COMPLETION, when
+/// queued APCs ran.
+extern "win64" fn SleepEx(ms: u32, alertable: Bool) -> u32 {
+    if alertable == 0 {
+        Sleep(ms);
+        return 0;
+    }
+    crate::apc::alertable_wait(ms, 0, |slice| {
+        Sleep(slice);
+        0
+    })
 }
 
 extern "win64" fn SwitchToThread() -> Bool {
@@ -2313,7 +2321,7 @@ pub(crate) fn new_event(manual: bool, initial: bool) -> u64 {
     objects::insert(Object::Event(EventObj::new(initial, manual, None)))
 }
 
-fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
+pub(crate) fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
     if let Some(o @ Object::Event(_)) = name.as_deref().and_then(objects::find_named) {
         teb::set_last_error(ERROR_ALREADY_EXISTS);
         return objects::insert(o);
@@ -2411,7 +2419,7 @@ pub(crate) extern "win64" fn SetEvent(h: u64) -> Bool {
     event_op(h, true)
 }
 
-extern "win64" fn ResetEvent(h: u64) -> Bool {
+pub(crate) extern "win64" fn ResetEvent(h: u64) -> Bool {
     event_op(h, false)
 }
 
@@ -2496,8 +2504,11 @@ pub(crate) extern "win64" fn WaitForSingleObject(h: u64, ms: u32) -> u32 {
     objects::wait(&[h], false, ms).unwrap_or_else(|e| fail(e, objects::WAIT_FAILED))
 }
 
-extern "win64" fn WaitForSingleObjectEx(h: u64, ms: u32, _alertable: Bool) -> u32 {
-    WaitForSingleObject(h, ms)
+extern "win64" fn WaitForSingleObjectEx(h: u64, ms: u32, alertable: Bool) -> u32 {
+    if alertable == 0 {
+        return WaitForSingleObject(h, ms);
+    }
+    crate::apc::alertable_wait(ms, objects::WAIT_TIMEOUT, |slice| WaitForSingleObject(h, slice))
 }
 
 pub(crate) extern "win64" fn WaitForMultipleObjects(n: u32, hs: *const u64, all: Bool, ms: u32) -> u32 {
@@ -2509,8 +2520,11 @@ pub(crate) extern "win64" fn WaitForMultipleObjects(n: u32, hs: *const u64, all:
     objects::wait(list, all != 0, ms).unwrap_or_else(|e| fail(e, objects::WAIT_FAILED))
 }
 
-pub(crate) extern "win64" fn WaitForMultipleObjectsEx(n: u32, hs: *const u64, all: Bool, ms: u32, _alertable: Bool) -> u32 {
-    WaitForMultipleObjects(n, hs, all, ms)
+pub(crate) extern "win64" fn WaitForMultipleObjectsEx(n: u32, hs: *const u64, all: Bool, ms: u32, alertable: Bool) -> u32 {
+    if alertable == 0 {
+        return WaitForMultipleObjects(n, hs, all, ms);
+    }
+    crate::apc::alertable_wait(ms, objects::WAIT_TIMEOUT, |slice| WaitForMultipleObjects(n, hs, all, slice))
 }
 
 // TLS slots (TlsAlloc): 64 in the TEB, 1024 more in an expansion array.

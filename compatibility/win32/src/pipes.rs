@@ -495,6 +495,7 @@ fn complete(p: &PipeObj, ov: u64, event: u64, status: u64, bytes: u32) {
     if event & !1 != 0 {
         kernel32::set_event(event & !1);
     }
+    crate::apc::completed(ov, if status == 0 { 0 } else { error_of(status) }, bytes);
     if event & 1 == 0 {
         if let Some((port, key)) = *p.port.lock().unwrap() {
             crate::threadpool::post(port, bytes, key, ov, if status == 0 { 0 } else { error_of(status) });

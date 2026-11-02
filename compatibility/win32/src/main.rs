@@ -24,6 +24,7 @@ macro_rules! export_table {
     };
 }
 
+mod apc;
 mod apiextra;
 mod clientapi;
 mod client64;
@@ -40,6 +41,7 @@ mod files;
 mod fibers;
 mod fls;
 mod heaps;
+mod imagehlp;
 mod ini;
 mod ktm;
 mod iphlpapi;

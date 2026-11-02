@@ -463,66 +463,17 @@ extern "win64" fn WSASocketA(af: i32, kind: i32, proto: i32, info: *const u8, gr
     crate::ws2_32::WSASocketW(af, kind, proto, core::ptr::null(), group, flags)
 }
 
-/// GetAcceptExSockaddrs (wsock32 #1142): the local and remote addresses
-/// AcceptEx stores after the received data, each in a slot of
-/// `local_len` / `remote_len` bytes. (AcceptEx itself is not offered,
-/// so this only parses what a caller laid out.)
-#[allow(clippy::too_many_arguments)] // the Win32 signature
-extern "win64" fn GetAcceptExSockaddrs(
-    buf: u64, recv_len: u32, local_len: u32, remote_len: u32, local: *mut u64, local_size: *mut i32, remote: *mut u64,
-    remote_size: *mut i32,
-) {
-    let l = buf + recv_len as u64;
-    let r = l + local_len as u64;
-    // SAFETY: the caller's out pointers (OutWide on 32-bit callers).
-    unsafe {
-        if !local.is_null() {
-            *local = l;
-        }
-        if !local_size.is_null() {
-            *local_size = local_len.saturating_sub(16) as i32;
-        }
-        if !remote.is_null() {
-            *remote = r;
-        }
-        if !remote_size.is_null() {
-            *remote_size = remote_len.saturating_sub(16) as i32;
-        }
-    }
-}
-
-const WSAEOPNOTSUPP_P: u32 = 10045;
-
-/// AcceptEx, ConnectEx and DisconnectEx (the Winsock extension functions
-/// SIO_GET_EXTENSION_FUNCTION_POINTER hands out). They are overlapped
-/// operations, which winrun's sockets do not offer: they fail with
-/// WSAEOPNOTSUPP, so callers fall back to accept/connect.
-#[allow(clippy::too_many_arguments)] // the Win32 signature
-extern "win64" fn AcceptEx(_l: u64, _a: u64, _buf: u64, _recv: u32, _local: u32, _remote: u32, _got: *mut u32, _ov: u64) -> Bool {
-    crate::teb::set_last_error(WSAEOPNOTSUPP_P);
-    FALSE
-}
-
-extern "win64" fn ConnectEx(_s: u64, _name: u64, _len: i32, _buf: u64, _n: u32, _sent: *mut u32, _ov: u64) -> Bool {
-    crate::teb::set_last_error(WSAEOPNOTSUPP_P);
-    FALSE
-}
-
-extern "win64" fn DisconnectEx(_s: u64, _ov: u64, _flags: u32, _reserved: u32) -> Bool {
-    crate::teb::set_last_error(WSAEOPNOTSUPP_P);
-    FALSE
-}
-
 /// The extension function a SIO_GET_EXTENSION_FUNCTION_POINTER GUID
 /// names: (name, Win64 address).
 pub(crate) fn extension_function(guid: &[u8; 16]) -> Option<(&'static str, u64)> {
+    use crate::ws2_32::mswsock;
     let d1 = u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]);
     let f = |p: *const ()| p as u64;
     match d1 {
-        0xb536_7df1 => Some(("AcceptEx", f(AcceptEx as *const ()))),
-        0xb536_7df2 => Some(("GetAcceptExSockaddrs", f(GetAcceptExSockaddrs as *const ()))),
-        0x25a2_07b9 => Some(("ConnectEx", f(ConnectEx as *const ()))),
-        0x7fda_2e11 => Some(("DisconnectEx", f(DisconnectEx as *const ()))),
+        0xb536_7df1 => Some(("AcceptEx", f(mswsock::AcceptEx as *const ()))),
+        0xb536_7df2 => Some(("GetAcceptExSockaddrs", f(mswsock::GetAcceptExSockaddrs as *const ()))),
+        0x25a2_07b9 => Some(("ConnectEx", f(mswsock::ConnectEx as *const ()))),
+        0x7fda_2e11 => Some(("DisconnectEx", f(mswsock::DisconnectEx as *const ()))),
         _ => None,
     }
 }
@@ -530,13 +481,30 @@ pub(crate) fn extension_function(guid: &[u8; 16]) -> Option<(&'static str, u64)>
 /// WSOCK32 exports AcceptEx (#1141) and GetAcceptExSockaddrs (#1142)
 /// directly, also by ordinal.
 pub fn wsock32_extra() -> (Vec<(&'static str, u64)>, Vec<(u16, u64)>) {
-    let a = GetAcceptExSockaddrs as *const () as u64;
-    let x = AcceptEx as *const () as u64;
+    use crate::ws2_32::mswsock;
+    let a = mswsock::GetAcceptExSockaddrs as *const () as u64;
+    let x = mswsock::AcceptEx as *const () as u64;
     (alloc::vec![("GetAcceptExSockaddrs", a), ("AcceptEx", x)], alloc::vec![(1141, x), (1142, a)])
+}
+
+/// SetSystemPowerState: suspend (TRUE) or hibernate (FALSE). It needs
+/// SeShutdownPrivilege enabled; OSyx has no sleeping state to enter, so
+/// a permitted request fails with ERROR_NOT_SUPPORTED.
+extern "win64" fn SetSystemPowerState(_suspend: Bool, _force: Bool) -> Bool {
+    const SE_SHUTDOWN_PRIVILEGE: u32 = 19;
+    let held = crate::tokens::effective_data()
+        .privileges
+        .iter()
+        .any(|(id, flags)| *id == SE_SHUTDOWN_PRIVILEGE && *flags & crate::tokens::SE_PRIVILEGE_ENABLED != 0);
+    if !held {
+        return fail(1314, FALSE); // ERROR_PRIVILEGE_NOT_HELD
+    }
+    fail(ERROR_NOT_SUPPORTED, FALSE)
 }
 
 pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
     export_table![
+        SetSystemPowerState,
         ReadConsoleA,
         ReadConsoleW,
         SetConsoleCtrlHandler,

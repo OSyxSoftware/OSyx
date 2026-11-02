@@ -210,6 +210,7 @@ fn builtin(name: &'static str, mut exports: Vec<(&'static str, u64)>, mut ordina
 fn builtins() -> Vec<Arc<Builtin>> {
     let k32 = [
         crate::kernel32::exports(),
+        crate::apc::exports(),
         crate::apiextra::kernel32_exports(),
         crate::clientapi::kernel32_exports(),
         crate::ktm::kernel32_exports(),
@@ -224,6 +225,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("gdi32.dll", [crate::user32::gdi_exports(), crate::apiextra::gdi32_exports()].concat(), Vec::new()),
         builtin("ws2_32.dll", [crate::ws2_32::exports(), crate::apiextra::ws2_32_exports()].concat(), crate::ws2_32::ordinals()),
         builtin("wsock32.dll", [crate::ws2_32::exports(), crate::apiextra::wsock32_extra().0].concat(), [crate::ws2_32::legacy_ordinals(), crate::apiextra::wsock32_extra().1].concat()),
+        builtin("mswsock.dll", crate::ws2_32::mswsock::exports(), Vec::new()),
+        builtin("imagehlp.dll", crate::imagehlp::exports(), Vec::new()),
         builtin("setupapi.dll", crate::setupapi::exports(), Vec::new()),
         builtin("iphlpapi.dll", [crate::iphlpapi::exports(), crate::client64::iphlpapi_exports()].concat(), Vec::new()),
         builtin("hid.dll", crate::client64::hid_exports(), Vec::new()),

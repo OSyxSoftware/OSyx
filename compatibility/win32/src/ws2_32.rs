@@ -15,6 +15,9 @@ use os_std::sync::Mutex;
 use os_sys::net::{self, SockAddr};
 use osyx_abi::Errno;
 
+mod events;
+pub(crate) mod mswsock;
+
 const INVALID_SOCKET: u64 = u64::MAX;
 const SOCKET_ERROR: i32 = -1;
 const AF_INET: u16 = 2;
@@ -164,6 +167,9 @@ fn fd(s: u64) -> Result<(u64, bool), u32> {
 /// Reject I/O after the matching half of the socket was shut down.
 fn check_shutdown(s: u64, read: bool) -> Result<(), u32> {
     let st = socket_state(s)?;
+    // Every receive and send passes here: they re-enable FD_READ and
+    // FD_WRITE for WSAEventSelect.
+    events::rearm(s, if read { 0x05 } else { 0x02 });
     if (read && st.read_shutdown) || (!read && st.write_shutdown) {
         return Err(WSAESHUTDOWN);
     }
@@ -300,6 +306,7 @@ extern "win64" fn closesocket(s: u64) -> i32 {
     }
     match SOCKETS.lock().unwrap().remove(&s) {
         Some(k) => {
+            events::forget(s);
             let _ = os_sys::close(k.fd);
             0
         }
@@ -337,7 +344,9 @@ extern "win64" fn listen(s: u64, backlog: i32) -> i32 {
         if !stream {
             return Err(WSAEOPNOTSUPP);
         }
-        os_sys::sock_listen(fd, backlog.clamp(1, 128) as u32).map_err(wsa)
+        os_sys::sock_listen(fd, backlog.clamp(1, 128) as u32).map_err(wsa)?;
+        events::listening(s);
+        Ok(())
     })())
 }
 
@@ -352,6 +361,7 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
         if !addr.is_null() && (len.is_null() || unsafe { *len } < 16) {
             return Err(WSAEFAULT);
         }
+        events::rearm(s, 0x08);
         let (nfd, peer) = os_sys::sock_accept(listener.fd).map_err(wsa)?;
         // Winsock accept inherits the listener's blocking mode. OSyx's
         // native accept creates a blocking endpoint, so apply it here.
@@ -1076,9 +1086,9 @@ pub(crate) extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *c
 
 const FIONREAD: u32 = 0x4004_667F;
 
-/// WSAIoctl: FIONBIO and FIONREAD, synchronously. Extension functions
-/// (SIO_GET_EXTENSION_FUNCTION_POINTER: ConnectEx, AcceptEx, ...) need
-/// overlapped I/O and are reported unsupported, so callers fall back.
+/// WSAIoctl: FIONBIO, FIONREAD and the extension functions
+/// (SIO_GET_EXTENSION_FUNCTION_POINTER: AcceptEx, ConnectEx, ...), which
+/// complete synchronously (mswsock.rs).
 #[allow(clippy::too_many_arguments)]
 extern "win64" fn WSAIoctl(
     s: u64,
@@ -1712,7 +1722,8 @@ pub(crate) extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *m
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![
+    let mut e = events::exports();
+    e.extend(export_table![
         WSAStartup,
         WSACleanup,
         WSAGetLastError,
@@ -1762,7 +1773,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         WSCEnumProtocols,
         WSCGetProviderInfo,
         WSCGetProviderPath,
-    ]
+    ]);
+    e
 }
 
 /// Winsock 2 export ordinals. The legacy DLL differs at ordinals 10-12.

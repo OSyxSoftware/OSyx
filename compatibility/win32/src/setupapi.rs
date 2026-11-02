@@ -389,7 +389,7 @@ extern "win64" fn CM_Get_DevNode_Status(status: *mut u32, problem: *mut u32, dev
         return CR_INVALID_FLAG;
     }
     let count = system::devices().map_or(0, |l| l.len());
-    if devinst == 0 || devinst as usize > count {
+    if devinst != ROOT_DEVNODE && (devinst == 0 || devinst as usize > count) {
         return CR_NO_SUCH_DEVNODE;
     }
     // SAFETY: the caller's out values.
@@ -400,8 +400,55 @@ extern "win64" fn CM_Get_DevNode_Status(status: *mut u32, problem: *mut u32, dev
     CR_SUCCESS
 }
 
+/// The root of the device tree (HTREE\\ROOT\\0).
+const ROOT_DEVNODE: u32 = 0x7FFF_FFFF;
+
+/// CM_Locate_DevNode: the device node of a device instance ID as
+/// SetupDiGetDeviceInstanceId gives it ("HARDWARE_ID\\n"); none (or the
+/// root's own ID) is the root of the tree.
+fn locate(id: Option<alloc::string::String>, out: *mut u32, flags: u32) -> u32 {
+    const CR_SUCCESS: u32 = 0;
+    const CR_INVALID_POINTER: u32 = 0x3;
+    const CR_INVALID_FLAG: u32 = 0x4;
+    const CR_NO_SUCH_DEVNODE: u32 = 0xD;
+    if out.is_null() {
+        return CR_INVALID_POINTER;
+    }
+    if flags & !0x7 != 0 {
+        return CR_INVALID_FLAG;
+    }
+    let node = match id.as_deref().map(str::trim) {
+        None | Some("") => ROOT_DEVNODE,
+        Some(r) if r.eq_ignore_ascii_case("HTREE\\ROOT\\0") => ROOT_DEVNODE,
+        Some(want) => {
+            let list = system::devices().unwrap_or_default();
+            match list.iter().enumerate().position(|(i, d)| {
+                alloc::format!("{}\\{}", system::field_str(&d.hardware_id), i + 1).eq_ignore_ascii_case(want)
+            }) {
+                Some(i) => i as u32 + 1,
+                None => return CR_NO_SUCH_DEVNODE,
+            }
+        }
+    };
+    // SAFETY: the caller's out value.
+    unsafe { *out = node };
+    CR_SUCCESS
+}
+
+extern "win64" fn CM_Locate_DevNodeA(out: *mut u32, id: *const u8, flags: u32) -> u32 {
+    // SAFETY: NULL or a NUL-terminated ID.
+    locate(unsafe { crate::path::ansi_to_string(id) }, out, flags)
+}
+
+extern "win64" fn CM_Locate_DevNodeW(out: *mut u32, id: *const u16, flags: u32) -> u32 {
+    // SAFETY: NULL or a NUL-terminated ID.
+    locate(unsafe { crate::path::wide_to_string(id) }, out, flags)
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        CM_Locate_DevNodeA,
+        CM_Locate_DevNodeW,
         SetupDiGetClassDevsA,
         SetupDiGetDeviceInterfaceDetailA,
         SetupDiGetDeviceRegistryPropertyA,

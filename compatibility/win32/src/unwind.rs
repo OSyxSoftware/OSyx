@@ -582,6 +582,60 @@ extern "win64" fn GetThreadContext(thread: u64, ctx: u64) -> i32 {
     1
 }
 
+/// SetThreadContext: only the calling thread, as with GetThreadContext.
+/// With CONTEXT_CONTROL its control, integer and floating-point state
+/// are replaced and execution continues at the new Rip. Debug registers need the
+/// kernel, which does not offer them: setting a breakpoint fails with
+/// ERROR_NOT_SUPPORTED, clearing them is what they already are.
+extern "win64" fn SetThreadContext(thread: u64, ctx: u64) -> i32 {
+    let own = thread == objects::CURRENT_THREAD
+        || matches!(objects::get(thread), Some(objects::Object::Thread(t)) if t.tid.load(core::sync::atomic::Ordering::SeqCst) as u64 == os_sys::gettid());
+    if ctx == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if !own {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    let flags: u32 = rd(ctx + CTX_FLAGS as u64);
+    if flags & 0x10 != 0 && (0..6).any(|i| rd::<u64>(ctx + 0x48 + 8 * i) != 0) {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    if flags & 0xF == 0 {
+        return 1;
+    }
+    // Without new control state the thread would resume inside this
+    // call with other registers, which compiled code cannot survive.
+    if flags & 0x1 == 0 {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    #[repr(C, align(16))]
+    struct Aligned([u8; 0x4d0]);
+    let mut cur = Aligned([0; 0x4d0]);
+    let base = cur.0.as_mut_ptr() as u64;
+    // SAFETY: a 16-byte aligned CONTEXT-sized buffer.
+    unsafe { RtlCaptureContext(base) };
+    let copy = |from: u64, len: u64| {
+        // SAFETY: fields of the caller's CONTEXT and of the copy.
+        unsafe { core::ptr::copy_nonoverlapping((ctx + from) as *const u8, (base + from) as *mut u8, len as usize) };
+    };
+    copy(0x38, 2); // SegCs
+    copy(0x42, 2); // SegSs
+    copy(0x44, 4); // EFlags
+    copy(0x98, 8); // Rsp
+    copy(0xA0, 8); // Rbp
+    copy(0xF8, 8); // Rip
+    if flags & 0x2 != 0 {
+        copy(0x78, 0x20); // Rax, Rcx, Rdx, Rbx
+        copy(0xA8, 0x50); // Rsi, Rdi, R8 to R15
+    }
+    if flags & 0x8 != 0 {
+        copy(0x34, 4); // MxCsr
+        copy(0x100, 0x200); // FltSave
+    }
+    // SAFETY: a complete CONTEXT for this thread.
+    crate::seh::RtlRestoreContext(base as *const _, core::ptr::null())
+}
+
 pub fn ntdll_exports() -> Vec<(&'static str, u64)> {
     alloc::vec![
         ("RtlLookupFunctionEntry", RtlLookupFunctionEntry as *const () as u64),
@@ -600,5 +654,6 @@ pub fn ntdll_exports() -> Vec<(&'static str, u64)> {
 pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
     let mut e = ntdll_exports();
     e.push(("GetThreadContext", GetThreadContext as *const () as u64));
+    e.push(("SetThreadContext", SetThreadContext as *const () as u64));
     e
 }

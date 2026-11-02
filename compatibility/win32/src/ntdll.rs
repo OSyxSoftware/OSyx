@@ -474,19 +474,36 @@ pub(crate) fn timeout_ms(t: *const i64) -> Result<u32, NtStatus> {
     Ok(units.div_ceil(10_000).min(objects::INFINITE as u64 - 1) as u32)
 }
 
-extern "win64" fn NtWaitForSingleObject(h: u64, _alertable: u8, timeout: *const i64) -> NtStatus {
+extern "win64" fn NtWaitForSingleObject(h: u64, alertable: u8, timeout: *const i64) -> NtStatus {
     let ms = match timeout_ms(timeout) {
         Ok(ms) => ms,
         Err(s) => return s,
     };
-    match objects::wait(&[h], false, ms) {
+    let r = if alertable != 0 {
+        // STATUS_USER_APC has WAIT_IO_COMPLETION's value.
+        Ok(crate::apc::alertable_wait(ms, objects::WAIT_TIMEOUT, |slice| objects::wait(&[h], false, slice).unwrap_or(objects::WAIT_FAILED)))
+            .and_then(|r| if r == objects::WAIT_FAILED { Err(()) } else { Ok(r) })
+    } else {
+        objects::wait(&[h], false, ms).map_err(|_| ())
+    };
+    match r {
         Ok(objects::WAIT_TIMEOUT) => STATUS_TIMEOUT,
         Ok(r) => r,
         Err(_) => STATUS_INVALID_HANDLE,
     }
 }
 
-extern "win64" fn NtDelayExecution(_alertable: u8, interval: *const i64) -> NtStatus {
+extern "win64" fn NtDelayExecution(alertable: u8, interval: *const i64) -> NtStatus {
+    if alertable != 0 {
+        let ms = match timeout_ms(interval) {
+            Ok(ms) => ms,
+            Err(s) => return s,
+        };
+        return crate::apc::alertable_wait(ms, STATUS_SUCCESS, |slice| {
+            os_std::thread::sleep(core::time::Duration::from_millis(slice as u64));
+            STATUS_SUCCESS
+        });
+    }
     match timeout_ms(interval) {
         Ok(objects::INFINITE) => loop {
             os_std::thread::sleep(core::time::Duration::from_secs(3600));
