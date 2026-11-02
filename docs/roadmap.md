@@ -51,16 +51,17 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
    `_CID` or (when the table is only partly readable) by name and `_BST`;
    `batteryd` stays resident and rescans the namespace every 30 s until a
    battery device appears. Still open: verification on real ThinkPads.
-4. **File formats and multiple files in Files**: partly done. Multi-selection
+4. **File formats and multiple files in Files**: done. Multi-selection
    (copy, move, delete, pack into tar), Extract here for tar/tar.gz/zip/7z/gz,
    a viewer and hex viewer, and "Open with" with per-extension choices are
    implemented (`userspace/desktop/src/bin/files.rs`,
-   `userspace/filekit/src/openwith.rs`). Files plays WAV, FLAC, MP3 and Ogg
-   Vorbis itself (`userspace/desktop/src/audio_view.rs`) and shows PDF
-   documents (`userspace/desktop/src/pdf_view.rs`), both decoded by
-   `userspace/media`. Still open: a built-in video player (video files
-   still need a registered application) and Opus, AAC, JPEG 2000, JBIG2
-   and CCITT fax data.
+   `userspace/filekit/src/openwith.rs`). Files plays WAV, FLAC, MP3, AAC/M4A,
+   Ogg Vorbis and Opus (`userspace/desktop/src/audio_view.rs`), WebM and
+   Matroska video with VP8 (`userspace/desktop/src/video_view.rs`), shows
+   PNG, JPEG, GIF, BMP, ICO, WebP, JPEG 2000 and JBIG2 pictures and PDF
+   documents with CCITT, JBIG2 and JPEG 2000 images, all decoded by
+   `userspace/media`. Still open: H.264/MP4, VP9 and AV1 video (those files
+   still need a registered application), TIFF, and thumbnails.
 5. **Release hygiene**: partly done. CodSpeed benchmarks run on every pull
    request. Still open: the release workflow builds and signs only; it runs
    neither the host tests nor the Win32, SMP, desktop and Zen QEMU suites.
@@ -154,13 +155,14 @@ the browser from starting.
     imports of Steam and Zen are listed under
     [Steam and Zen API gaps](#steam-and-zen-api-gaps). Windows 11 API-set
     research with REA (`research/windows11-apiset-and-forwarding.md`).
-13. **Storage**: ext4 htree insertion and deeper extent trees, page cache with
-    delayed writes, interrupt-driven virtio (queues are polled). Done: FAT
-    entries are stamped with the wall clock on create and write, and `stat`
-    reports the stored time (2-second DOS resolution); the write-back thread
-    flushes ext4 after 5 s and exFAT after 2 s of quiet. Still open: FAT
-    writes its metadata through on every change, and ext4 has no htree
-    insertion yet.
+13. **Storage**: page cache with delayed writes. Done: ext4 htree insertion
+    (splitting leaves and index nodes, hash collisions across nodes),
+    deeper extent trees, completion interrupts for virtio-blk, AHCI and NVMe
+    (MSI-X or MSI, polling fallback); FAT entries are stamped with the wall
+    clock on create and write, and `stat` reports the stored time (2-second
+    DOS resolution); the write-back thread flushes ext4 after 5 s and exFAT
+    after 2 s of quiet. Still open: FAT writes its metadata through on every
+    change.
 14. **SMP**: finer-grained kernel locking (still one kernel entry lock and
     `TABLE` for mappings and page faults) and load balancing policies.
 15. **OSyx Std**: `thread`, futex-based `Mutex`, `Condvar`, `RwLock`,
