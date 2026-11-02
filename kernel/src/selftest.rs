@@ -37,7 +37,7 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 32] = [
+    let tests: [(&str, &dyn Fn() -> TestResult); 33] = [
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -49,6 +49,7 @@ pub fn run(boot: &BootData) -> Summary {
         ("timer interrupts", &timer),
         ("user copy validation", &user_copy),
         ("address space lifecycle", &address_space),
+        ("per-process memory locks", &crate::process::memory_lock_selftest),
         ("preemptive kernel threads", &preemption),
         ("sleep and join", &sleep_join),
         ("FPU/SSE state per thread", &fpu_state),

@@ -42,6 +42,8 @@ use os_std::{env, thread};
 mod fault_checks;
 #[path = "../filemap_checks.rs"]
 mod filemap_checks;
+#[path = "../memory_lock_checks.rs"]
+mod memory_lock_checks;
 
 #[path = "../fpu.rs"]
 mod fpu;
@@ -56,6 +58,7 @@ fn main() -> i32 {
     let args: Vec<String> = env::args().collect();
     let pid = process::id().unwrap_or(0);
     match args.get(1).map(String::as_str) {
+        Some("memory-locks") => memory_lock_checks::worker(),
         Some("suspend-test") => {
             if os_sys::resume_child(pid) != Err(osyx_abi::Errno::PermissionDenied) { return 53; }
             let marker = "/tmp/suspended-process-test";

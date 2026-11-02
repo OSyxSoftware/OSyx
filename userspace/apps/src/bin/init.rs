@@ -55,6 +55,8 @@ mod win_checks;
 mod smp_checks;
 #[path = "../prio_checks.rs"]
 mod prio_checks;
+#[path = "../memory_lock_checks.rs"]
+mod memory_lock_checks;
 
 os_std::entry!(main);
 
@@ -257,6 +259,7 @@ fn main() -> i32 {
             println!("smp checks: {} passed, {} failed",t.passed,t.failed);
             return t.failed as i32;
         }
+        Some("memory-locks") => return memory_lock_checks::run(),
         Some("crash-prep") => {
             // Leave a removed-but-open file on the ext4 root, then exit
             // (the kernel's test.power-cut stops the machine right after).
