@@ -131,10 +131,11 @@ struct Sock {
     /// SO_REUSEADDR/SO_KEEPALIVE, accepted as no-ops but reported back.
     reuseaddr: bool,
     keepalive: bool,
-    /// SO_RCVBUF/SO_SNDBUF as set (0: never set). The stack's buffers have
-    /// fixed sizes; the values are kept so getsockopt reports them back.
-    rcvbuf: u32,
-    sndbuf: u32,
+    /// SO_RCVBUF/SO_SNDBUF as set (None: never set; zero is a valid
+    /// setting). The stack's buffers have fixed sizes; the values are kept
+    /// so getsockopt reports them back.
+    rcvbuf: Option<u32>,
+    sndbuf: Option<u32>,
     /// `shutdown(SD_RECEIVE)` / `shutdown(SD_SEND)` were called.
     read_shutdown: bool,
     write_shutdown: bool,
@@ -282,8 +283,8 @@ extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
                 send_timeout: 0,
                 reuseaddr: false,
                 keepalive: false,
-                rcvbuf: 0,
-                sndbuf: 0,
+                rcvbuf: None,
+                sndbuf: None,
                 read_shutdown: false,
                 write_shutdown: false,
             });
@@ -537,7 +538,7 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
                 let size = int()?;
                 let mut sockets = SOCKETS.lock().unwrap();
                 let sock = sockets.get_mut(&s).ok_or(WSAENOTSOCK)?;
-                if name == SO_RCVBUF { sock.rcvbuf = size } else { sock.sndbuf = size }
+                if name == SO_RCVBUF { sock.rcvbuf = Some(size) } else { sock.sndbuf = Some(size) }
                 Ok(())
             }
             // Linger 0 closes abortively, which the kernel can do; a positive
@@ -600,8 +601,8 @@ extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *
             (SOL_SOCKET, SO_RCVTIMEO) => st.recv_timeout,
             (SOL_SOCKET, SO_SNDTIMEO) => st.send_timeout,
             // The stack's buffer sizes unless the program set its own.
-            (SOL_SOCKET, SO_RCVBUF) => if st.rcvbuf != 0 { st.rcvbuf } else { RECV_BUFFER_SIZE },
-            (SOL_SOCKET, SO_SNDBUF) => if st.sndbuf != 0 { st.sndbuf } else { SEND_BACKLOG },
+            (SOL_SOCKET, SO_RCVBUF) => st.rcvbuf.unwrap_or(RECV_BUFFER_SIZE),
+            (SOL_SOCKET, SO_SNDBUF) => st.sndbuf.unwrap_or(SEND_BACKLOG),
             (IPPROTO_TCP, TCP_NODELAY) if stream => 1,
             _ => return Err(WSAENOPROTOOPT),
         };
@@ -1066,10 +1067,16 @@ extern "win64" fn WSAIoctl(
                 0
             }
             // How much to keep queued for sending: the stack's send buffer.
+            // Only a connected stream socket has a send backlog.
             SIO_IDEAL_SEND_BACKLOG_QUERY => {
                 if output.is_null() || out_len < 4 {
                     return Err(WSAEFAULT);
                 }
+                if !socket_state(s)?.stream {
+                    return Err(WSAEOPNOTSUPP);
+                }
+                let mut peer = SockAddr::default();
+                os_sys::sock_ctl(fd, net::ctl::PEER_ADDR, &mut peer as *mut SockAddr as u64).map_err(|_| WSAENOTCONN)?;
                 // SAFETY: the caller's 4-byte output buffer.
                 unsafe { core::ptr::write_unaligned(output as *mut u32, SEND_BACKLOG) };
                 4

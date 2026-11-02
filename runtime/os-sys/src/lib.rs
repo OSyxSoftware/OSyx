@@ -282,9 +282,9 @@ mod imp {
         if start == 0 {
             return None;
         }
-        // A request larger than the window fails here, before any
-        // arithmetic on it can overflow.
-        let size = (len as u64).checked_next_multiple_of(4096).filter(|&s| s <= LOW_END);
+        // A request larger than the window (with its two guard pages) fails
+        // here, before any arithmetic on it can overflow.
+        let size = (len as u64).checked_next_multiple_of(4096).filter(|&s| s.checked_add(8192).is_some_and(|span| span <= LOW_END));
         let Some(size) = size else { return Some(Err(Errno::NoMemory)) };
         if size >= LOW_LARGE {
             // Top down in 1 MiB steps; the rising search below is the

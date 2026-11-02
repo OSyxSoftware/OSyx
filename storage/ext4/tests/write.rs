@@ -353,9 +353,12 @@ fn removed_open_files_and_the_orphan_list() {
     let mut fs = rw(img);
     let g = fs.create(ROOT_INO, "open2.bin", NewKind::File, 0o644, 0, 0).unwrap();
     write_all(&mut fs, g, 0, &pattern(100_000, 3));
+    fs.sync().unwrap();
     let (free_before, _) = fs.free_counts();
     fs.open(g);
     fs.unlink(ROOT_INO, "open2.bin").unwrap();
+    // Committed: the crash leaves the file on the orphan list.
+    fs.sync().unwrap();
     let img = fs.into_device_unclean();
     let fs = rw(img);
     assert!(fs.free_counts().0 >= free_before + 24, "orphan freed at mount");
@@ -400,6 +403,9 @@ fn unsupported_writes_are_refused() {
     let many = fs.resolve("/many").unwrap();
     assert!(fs.inode(many).unwrap().flags & osyx_ext4::inode::FL_INDEX != 0, "fixture has an htree directory");
     assert_eq!(fs.create(many, "new", NewKind::File, 0o644, 0, 0), Err(Error::Unsupported("adding entries to a hashed (dir_index) directory")));
+    // The refused create allocated an inode first: the pending transaction
+    // must not keep that bit (counters and bitmaps agree).
+    fs.check().unwrap();
     // Removing from it is fine.
     fs.unlink(many, "file-7.txt").unwrap();
     let img = fs.unmount().unwrap();

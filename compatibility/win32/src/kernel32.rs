@@ -1440,8 +1440,9 @@ extern "win64" fn DuplicateHandle(
             let tid = teb::current_tid() as u32;
             match thread_object(tid) {
                 Some(t) => Object::Thread(t),
-                // A thread the runtime did not start (the main thread):
-                // one object, shared by every later duplicate.
+                // Windows threads have one (the main thread's is made at
+                // start-up); a helper thread of winrun's own that runs a
+                // Windows callback gets one now, found again by its id.
                 None => {
                     let t = Arc::new(ThreadObj {
                         tid: AtomicU32::new(tid),
@@ -1449,14 +1450,11 @@ extern "win64" fn DuplicateHandle(
                         exit_code: AtomicU32::new(259), // STILL_ACTIVE
                         suspended: AtomicU32::new(0),
                         teb: AtomicU64::new(teb::current()),
-                        created_ns: AtomicU64::new(crate::sysext::process_start_ns()),
+                        created_ns: AtomicU64::new(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0)),
                         exited_ns: AtomicU64::new(0),
                         final_ticks: AtomicU64::new(0),
                     });
                     register_thread(tid, &t);
-                    // It lives as long as the process: OpenThread must find
-                    // it after its last handle closes too.
-                    MAIN_THREAD.lock().unwrap().get_or_insert_with(|| t.clone());
                     Object::Thread(t)
                 }
             }
@@ -1597,8 +1595,27 @@ pub(crate) fn thread_object(tid: u32) -> Option<Arc<ThreadObj>> {
     THREADS.lock().unwrap().get(&tid).and_then(alloc::sync::Weak::upgrade)
 }
 
-/// Records the object of a thread that did not start through
-/// [`spawn_thread`] (the main thread), so later lookups find the same one.
+/// Makes the calling thread's object, owned for the process lifetime: the
+/// program's main thread, which did not start through [`spawn_thread`].
+/// Called when its TEB is installed, so DuplicateHandle(GetCurrentThread())
+/// and OpenThread find it from the first instruction on.
+pub(crate) fn register_main_thread() {
+    let tid = teb::current_tid() as u32;
+    let t = Arc::new(ThreadObj {
+        tid: AtomicU32::new(tid),
+        done: AtomicBool::new(false),
+        exit_code: AtomicU32::new(259), // STILL_ACTIVE
+        suspended: AtomicU32::new(0),
+        teb: AtomicU64::new(teb::current()),
+        created_ns: AtomicU64::new(crate::sysext::process_start_ns()),
+        exited_ns: AtomicU64::new(0),
+        final_ticks: AtomicU64::new(0),
+    });
+    register_thread(tid, &t);
+    *MAIN_THREAD.lock().unwrap() = Some(t);
+}
+
+/// Records a thread's object by id, so later lookups find the same one.
 pub(crate) fn register_thread(tid: u32, obj: &Arc<ThreadObj>) {
     let mut threads = THREADS.lock().unwrap();
     threads.retain(|_, w| w.strong_count() > 0);

@@ -207,11 +207,13 @@ impl<D: BlockDevice> Ext4<D> {
     }
 
     /// Metadata blocks the pending transaction may collect before it is
-    /// committed: [`PENDING_LIMIT`], or less when half the journal is
-    /// smaller (a commit also needs descriptor blocks).
+    /// committed: [`PENDING_LIMIT`], or a quarter of the journal when that
+    /// is smaller. The check runs after each operation, so the next one
+    /// starts with at least three quarters of the journal free for its own
+    /// blocks and the descriptors (an operation alone always had to fit).
     fn pending_limit(&self) -> usize {
-        let half_journal = self.journal_capacity().map_or(usize::MAX, |c| c as usize / 2);
-        PENDING_LIMIT.min(half_journal).max(1)
+        let quarter_journal = self.journal_capacity().map_or(usize::MAX, |c| c as usize / 4);
+        PENDING_LIMIT.min(quarter_journal).max(1)
     }
 
     /// Runs a file write against the pending transaction: no journal commit
@@ -337,6 +339,16 @@ impl<D: BlockDevice> Ext4<D> {
             self.tx.undo.entry(b).or_insert(prev);
         }
         self.tx.blocks.insert(b, data);
+    }
+
+    /// Drops block `b` from the pending transaction, recording it for
+    /// rollback like [`Ext4::tx_put`].
+    fn tx_remove(&mut self, b: u64) {
+        if let Some(prev) = self.tx.blocks.remove(&b) {
+            if self.tx.recording {
+                self.tx.undo.entry(b).or_insert(Some(prev));
+            }
+        }
     }
 
     fn store_groups(&mut self) -> Result<()> {
@@ -544,7 +556,7 @@ impl<D: BlockDevice> Ext4<D> {
                 }
                 bm[i / 8] &= !(1 << (i % 8));
                 self.tx.freed.insert(x);
-                self.tx.blocks.remove(&x);
+                self.tx_remove(x);
                 self.pending.remove(&x);
                 self.forget_cached(x);
             }
@@ -593,8 +605,10 @@ impl<D: BlockDevice> Ext4<D> {
             }
             bm[(i / 8) as usize] |= 1 << (i % 8);
             let track_unused = self.has_group_csums_w();
+            // Through tx_put, so a failing operation undoes the bit.
+            let ibm = self.groups[g as usize].inode_bitmap;
+            self.tx_put(ibm, bm);
             let gd = &mut self.groups[g as usize];
-            self.tx.blocks.insert(gd.inode_bitmap, bm);
             gd.free_inodes -= 1;
             if dir {
                 gd.used_dirs += 1;
