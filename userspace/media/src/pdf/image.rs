@@ -38,6 +38,21 @@ fn expand_space(o: &Object) -> Object {
     }
 }
 
+/// CCITT fax data as packed 1-bit rows (DecodeParms of the filter).
+fn fax(doc: &Document, data: &[u8], parms: Option<&Dict>, w: usize, h: usize) -> Vec<u8> {
+    let get = |k: &str| parms.and_then(|p| key(p, k)).map(|o| doc.resolve(o));
+    let int = |k: &str, def: i64| get(k).and_then(|o| o.as_i64()).unwrap_or(def);
+    let flag = |k: &str| matches!(get(k), Some(Object::Bool(true)));
+    let p = super::ccitt::Params {
+        k: int("K", 0),
+        columns: int("Columns", w as i64).max(1) as usize,
+        rows: Some(int("Rows", h as i64).max(1) as usize),
+        byte_align: flag("EncodedByteAlign"),
+        black_is_1: flag("BlackIs1"),
+    };
+    super::ccitt::decode(data, &p)
+}
+
 /// Decodes the JPEG in `data` to (w, h, components, samples).
 fn jpeg(data: &[u8], gray: bool) -> Option<(usize, usize, usize, Vec<u8>)> {
     use zune_core::bytestream::ZCursor;
@@ -94,7 +109,13 @@ fn mask_alpha(doc: &Document, m: &Object, w: usize, h: usize, soft: bool) -> Opt
     let mw = doc.get_key(d, "Width").as_i64()?.max(1) as usize;
     let mh = doc.get_key(d, "Height").as_i64()?.max(1) as usize;
     mw.checked_mul(mh).filter(|&n| n <= MAX_PIXELS)?;
-    let (data, codec) = filter::decode(&s.data, d);
+    let (mut data, mut codec) = filter::decode(&s.data, d);
+    if let Some((name, parms)) = &codec {
+        if name == b"CCITTFaxDecode" {
+            data = fax(doc, &data, parms.as_ref(), mw, mh);
+            codec = None;
+        }
+    }
     let bpc = if soft { doc.get_key(d, "BitsPerComponent").as_i64().unwrap_or(8) as u32 } else { 1 };
     let vals: Vec<u8> = match codec {
         Some((name, _)) if name == b"DCTDecode" => jpeg(&data, true)?.3,
@@ -158,7 +179,13 @@ pub fn decode(doc: &Document, d: &Dict, raw: &[u8], resolve_space: &dyn Fn(&Obje
     if let Some(p) = key(d, "DP") {
         fd.insert(b"DecodeParms".to_vec(), p.clone());
     }
-    let (data, codec) = filter::decode(raw, &fd);
+    let (mut data, mut codec) = filter::decode(raw, &fd);
+    if let Some((name, parms)) = &codec {
+        if name == b"CCITTFaxDecode" {
+            data = fax(doc, &data, parms.as_ref(), w, h);
+            codec = None;
+        }
+    }
     if is_mask {
         let inverted = decode_arr.first().copied() == Some(1.0);
         let bits = unpack(&data, w, h, 1, 1);
