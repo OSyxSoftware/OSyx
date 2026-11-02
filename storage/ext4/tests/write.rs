@@ -481,9 +481,27 @@ fn full_directories_become_hashed() {
     for i in 0..700 {
         assert!(fs.lookup(d, &long_name(i)).is_ok());
     }
+    // Moving the hashed directory rewrites ".." in its index root, which
+    // carries its own checksum.
+    let parent = fs.create(ROOT_INO, "parent", NewKind::Dir, 0o755, 0, 0).unwrap();
+    fs.rename(ROOT_INO, "grows", parent, "grows").unwrap();
     fs.check().unwrap();
     let img = fs.unmount().unwrap();
     e2fsck("made-hashed", &img);
+    // Emptied, the hashed directory can be removed with its index blocks.
+    let mut fs = rw(img);
+    let parent = fs.resolve("/parent").unwrap();
+    let d = fs.lookup(parent, "grows").unwrap();
+    let free_before = fs.free_counts().0;
+    for i in 0..700 {
+        fs.unlink(d, &long_name(i)).unwrap();
+    }
+    fs.rmdir(d, "subdir-back").unwrap();
+    fs.rmdir(parent, "grows").unwrap();
+    assert!(fs.free_counts().0 > free_before);
+    fs.check().unwrap();
+    let img = fs.unmount().unwrap();
+    e2fsck("hashed-removed", &img);
 }
 
 #[test]
