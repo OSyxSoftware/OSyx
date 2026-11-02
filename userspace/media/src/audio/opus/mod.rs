@@ -5,6 +5,7 @@ pub mod celt;
 mod celt_tables;
 pub mod range;
 pub mod silk;
+mod silk_tables;
 
 use alloc::vec;
 use alloc::vec::Vec;
