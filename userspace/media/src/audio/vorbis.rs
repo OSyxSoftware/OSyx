@@ -72,9 +72,8 @@ impl Codebook {
         if entries > MAX_ENTRIES || entries.saturating_mul(dim) > MAX_VQ {
             return Err(bad());
         }
-        // Lengths, tree nodes and the expanded vectors of this book.
-        let cost = entries.saturating_mul(3).saturating_add(entries.saturating_mul(dim));
-        *budget = budget.checked_sub(cost).ok_or_else(bad)?;
+        // Lengths and tree nodes; a vector table is charged below, if any.
+        *budget = budget.checked_sub(entries.saturating_mul(3)).ok_or_else(bad)?;
         let mut lens = vec![0u32; entries];
         if r.bit().ok_or_else(bad)? {
             // Ordered: runs of increasing lengths.
@@ -103,6 +102,7 @@ impl Codebook {
             if dim == 0 {
                 return Err(bad());
             }
+            *budget = budget.checked_sub(entries.saturating_mul(dim)).ok_or_else(bad)?;
             let min = float32_unpack(r.read(32).ok_or_else(bad)?);
             let delta = float32_unpack(r.read(32).ok_or_else(bad)?);
             let bits = r.read(4).ok_or_else(bad)? + 1;

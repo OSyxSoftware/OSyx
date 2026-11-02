@@ -11,6 +11,9 @@ use super::Float;
 use alloc::vec;
 use alloc::vec::Vec;
 
+/// Largest image or mask, in pixels.
+const MAX_PIXELS: usize = 40_000_000;
+
 pub struct Image {
     pub w: usize,
     pub h: usize,
@@ -47,10 +50,13 @@ fn jpeg(data: &[u8], gray: bool) -> Option<(usize, usize, usize, Vec<u8>)> {
         .set_max_width(1 << 15)
         .set_max_height(1 << 15);
     let mut d = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(data), opts);
-    let px = d.decode().ok()?;
+    // The size from the headers, within the image budget, before decoding.
+    d.decode_headers().ok()?;
     let info = d.info()?;
-    let comps = if gray { 1 } else { 3 };
     let (w, h) = (info.width as usize, info.height as usize);
+    w.checked_mul(h).filter(|&n| n <= MAX_PIXELS)?;
+    let px = d.decode().ok()?;
+    let comps = if gray { 1 } else { 3 };
     (px.len() >= w * h * comps).then_some((w, h, comps, px))
 }
 
@@ -87,7 +93,7 @@ fn mask_alpha(doc: &Document, m: &Object, w: usize, h: usize, soft: bool) -> Opt
     let d = &s.dict;
     let mw = doc.get_key(d, "Width").as_i64()?.max(1) as usize;
     let mh = doc.get_key(d, "Height").as_i64()?.max(1) as usize;
-    mw.checked_mul(mh).filter(|&n| n <= 40_000_000)?;
+    mw.checked_mul(mh).filter(|&n| n <= MAX_PIXELS)?;
     let (data, codec) = filter::decode(&s.data, d);
     let bpc = if soft { doc.get_key(d, "BitsPerComponent").as_i64().unwrap_or(8) as u32 } else { 1 };
     let vals: Vec<u8> = match codec {
@@ -133,7 +139,7 @@ fn mask_alpha(doc: &Document, m: &Object, w: usize, h: usize, soft: bool) -> Opt
 pub fn decode(doc: &Document, d: &Dict, raw: &[u8], resolve_space: &dyn Fn(&Object) -> Option<Space>) -> Option<Image> {
     let w = get(d, "Width", "W").map(|o| doc.resolve(o)).and_then(|o| o.as_i64())?.max(1) as usize;
     let h = get(d, "Height", "H").map(|o| doc.resolve(o)).and_then(|o| o.as_i64())?.max(1) as usize;
-    w.checked_mul(h).filter(|&n| n <= 40_000_000)?;
+    w.checked_mul(h).filter(|&n| n <= MAX_PIXELS)?;
     let is_mask = matches!(get(d, "ImageMask", "IM").map(|o| doc.resolve(o)), Some(Object::Bool(true)));
     let bpc = if is_mask {
         1
@@ -233,11 +239,12 @@ pub fn decode(doc: &Document, d: &Dict, raw: &[u8], resolve_space: &dyn Fn(&Obje
     };
     px.resize(w * h, [0, 0, 0, 255]);
     // Masks.
+    // An image whose mask cannot be read is left out rather than drawn
+    // opaque over what the mask should have let through.
     if let Some(sm) = key(d, "SMask") {
-        if let Some(a) = mask_alpha(doc, sm, w, h, true) {
-            for (p, a) in px.iter_mut().zip(a) {
-                p[3] = a;
-            }
+        let a = mask_alpha(doc, sm, w, h, true)?;
+        for (p, a) in px.iter_mut().zip(a) {
+            p[3] = a;
         }
     } else if let Some(m) = key(d, "Mask") {
         match doc.resolve(m) {
@@ -257,13 +264,14 @@ pub fn decode(doc: &Document, d: &Dict, raw: &[u8], resolve_space: &dyn Fn(&Obje
                     }
                 }
             }
-            other => {
-                if let Some(a) = mask_alpha(doc, &other, w, h, false) {
-                    for (p, a) in px.iter_mut().zip(a) {
-                        p[3] = a;
-                    }
+            other @ Object::Stream(_) => {
+                let a = mask_alpha(doc, &other, w, h, false)?;
+                for (p, a) in px.iter_mut().zip(a) {
+                    p[3] = a;
                 }
             }
+            // Not a mask after all (null, a broken reference): no masking.
+            _ => {}
         }
     }
     Some(Image { w, h, px, stencil: false })
