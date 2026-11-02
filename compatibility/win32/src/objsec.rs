@@ -1061,6 +1061,10 @@ fn sddl_ace(text: &str) -> Result<Ace, u32> {
     };
     let mut flags = 0u8;
     let fl = f[1].to_ascii_uppercase();
+    // Two-byte tokens are sliced by byte: other text cannot be valid.
+    if !fl.is_ascii() {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
     let mut rest = fl.as_str();
     while rest.len() >= 2 {
         flags |= match &rest[..2] {
@@ -1085,6 +1089,9 @@ fn sddl_ace(text: &str) -> Result<Ace, u32> {
         r.parse().map_err(|_| ERROR_INVALID_PARAMETER)?
     } else {
         let up = r.to_ascii_uppercase();
+        if !up.is_ascii() {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
         let mut m = 0u32;
         let mut s = up.as_str();
         while s.len() >= 2 {

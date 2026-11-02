@@ -967,6 +967,11 @@ extern "win64" fn CreateProcessA32(
     let (app, mut cmd, cwd) = unsafe {
         (crate::path::ansi_to_wide(app), crate::path::ansi_to_wide(cmdline), crate::path::ansi_to_wide(cwd))
     };
+    // A command line that does not convert (longer than a path may be) is
+    // an error, not a missing command line.
+    if !cmdline.is_null() && cmd.is_none() {
+        return crate::kernel32::fail(206, 0); // ERROR_FILENAME_EXCED_RANGE
+    }
     let ptr = |v: &Option<Vec<u16>>| v.as_ref().map_or(core::ptr::null(), |w| w.as_ptr());
     let cmd_ptr = cmd.as_mut().map_or(core::ptr::null_mut(), |w| w.as_mut_ptr());
     CreateProcessW32(ptr(&app), cmd_ptr, psa, tsa, inherit, flags, env, ptr(&cwd), startup, info)

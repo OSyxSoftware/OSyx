@@ -66,8 +66,31 @@ pub(crate) extern "win64" fn AcceptEx(
             return Err(WSAEFAULT);
         }
         events::rearm(listen_s, 0x08);
-        let (nfd, peer) = os_sys::sock_accept(listener.fd).map_err(wsa)?;
-        // The accepted connection takes over the caller's socket.
+        // AcceptEx waits for a connection even on a non-blocking listener.
+        let (nfd, peer) = blocking(listen_s, |fd| os_sys::sock_accept(fd).map_err(wsa))?;
+        // The first block arrives while the new endpoint is still blocking;
+        // a failure leaves the caller's socket as it was.
+        let mut n = 0;
+        if recv_len > 0 {
+            // SAFETY: the caller's buffer of recv_len + local_len +
+            // remote_len bytes.
+            let data = unsafe { core::slice::from_raw_parts_mut(out, recv_len as usize) };
+            n = match os_sys::sock_recv(nfd, data, 0) {
+                Ok((n, _)) => n,
+                Err(e) => {
+                    let _ = os_sys::close(nfd);
+                    return Err(wsa(e));
+                }
+            };
+        }
+        if target.nonblocking {
+            if let Err(e) = os_sys::sock_ctl(nfd, net::ctl::NONBLOCK, 1) {
+                let _ = os_sys::close(nfd);
+                return Err(wsa(e));
+            }
+        }
+        // The accepted connection takes over the caller's socket, which a
+        // DisconnectEx may have shut down before its reuse.
         {
             let mut socks = SOCKETS.lock().unwrap();
             let Some(k) = socks.get_mut(&accept_s) else {
@@ -76,16 +99,8 @@ pub(crate) extern "win64" fn AcceptEx(
             };
             let _ = os_sys::close(k.fd);
             k.fd = nfd;
-        }
-        if target.nonblocking {
-            os_sys::sock_ctl(nfd, net::ctl::NONBLOCK, 1).map_err(wsa)?;
-        }
-        let mut n = 0;
-        if recv_len > 0 {
-            // SAFETY: the caller's buffer of recv_len + local_len +
-            // remote_len bytes.
-            let data = unsafe { core::slice::from_raw_parts_mut(out, recv_len as usize) };
-            n = os_sys::sock_recv(nfd, data, 0).map_err(wsa)?.0;
+            k.read_shutdown = false;
+            k.write_shutdown = false;
         }
         let mut local = SockAddr::default();
         let _ = os_sys::sock_ctl(nfd, net::ctl::LOCAL_ADDR, &mut local as *mut SockAddr as u64);
@@ -165,6 +180,11 @@ pub(crate) extern "win64" fn ConnectEx(
         let a = read_addr(name, name_len)?;
         blocking(s, |fd| {
             os_sys::sock_connect(fd, &a).map_err(wsa)?;
+            // A socket reused after DisconnectEx is open again.
+            if let Some(k) = SOCKETS.lock().unwrap().get_mut(&s) {
+                k.read_shutdown = false;
+                k.write_shutdown = false;
+            }
             if len == 0 || buf.is_null() {
                 return Ok(0);
             }

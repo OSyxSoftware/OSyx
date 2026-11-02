@@ -149,6 +149,13 @@ fn aside(win: &str) -> String {
     alloc::format!("{dir}\\.~tx{}-{n}-{file}", crate::kernel32::pid())
 }
 
+/// Whether an existing OSyx path is a directory: transactions delete and
+/// replace files only, and Windows refuses a directory with
+/// ERROR_ACCESS_DENIED.
+fn is_dir(path: &str) -> bool {
+    os_sys::stat(path).is_ok_and(|st| st.kind == osyx_abi::KIND_DIR)
+}
+
 fn win_name(p: *const u16) -> Option<String> {
     // SAFETY: NULL or a NUL-terminated name.
     unsafe { crate::path::wide_to_string(p) }
@@ -163,6 +170,7 @@ extern "win64" fn DeleteFileTransactedW(name: *const u16, tx: u64) -> i32 {
     };
     let Some(n) = win_name(name) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     match crate::kernel32::locate(&n) {
+        Ok((p, true)) if is_dir(&p) => return fail(ERROR_ACCESS_DENIED, 0),
         Ok((_, true)) => {}
         Ok((_, false)) => return fail(ERROR_FILE_NOT_FOUND, 0),
         Err(e) => return fail(e, 0),
@@ -190,9 +198,12 @@ extern "win64" fn MoveFileTransactedW(from: *const u16, to: *const u16, _progres
     };
     let (Some(f), Some(dst)) = (win_name(from), win_name(to)) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let mut held = None;
-    if matches!(crate::kernel32::locate(&dst), Ok((_, true))) {
+    if let Ok((p, true)) = crate::kernel32::locate(&dst) {
         if flags & MOVEFILE_REPLACE_EXISTING == 0 {
             return fail(ERROR_ALREADY_EXISTS, 0);
+        }
+        if is_dir(&p) {
+            return fail(ERROR_ACCESS_DENIED, 0);
         }
         let a = aside(&dst);
         if crate::kernel32::move_file(Some(dst.clone()), Some(a.clone()), 0) == 0 {

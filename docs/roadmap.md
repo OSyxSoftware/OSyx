@@ -14,7 +14,7 @@ on 2026-10-30.
 | 7 | User-space foundations (ring 3, syscalls, exit, console) | Done |
 | 7b | Scheduler, kernel threads, preemption, FPU state, spawn/wait | Done (SMP) |
 | 7c | Threads per process, futexes, FS-base TLS, OSyx Std `thread`/`Mutex`/`Condvar` | Done (SMP) |
-| 7d | Storage: PCI, virtio-blk, block layer, FAT32, VFS, file handles, OSyx Std `fs` | Done (polled I/O; SMP) |
+| 7d | Storage: PCI, virtio-blk, block layer, FAT32, VFS, file handles, OSyx Std `fs` | Done (completion interrupts with a polling fallback; SMP) |
 | 7e | File system architecture: ext4 root (journalled), FAT32 `/boot`, tmpfs, devfs, GPT, permissions, cwd, symlinks, mount/umount | Done (see storage.md for limits) |
 | 7f | Native executable loader: ELF64 from the VFS (`/bin`, `/usr/bin`), `execve`, argv/envp/auxv, OSyx Std environment | Done (static `ET_EXEC` only; see kernel.md) |
 | 7g | Kernel objects and IPC: pipes, channels, shared memory, wait_handles (ABI v7) | Done |
@@ -200,7 +200,7 @@ and starts its `steam.exe`, which loads `steamui.dll`, `steamclient64.dll`,
 
 ## Real hardware: current scope and limits
 
-NVMe, AHCI, physical Ethernet and Intel Wi-Fi drivers are present. The README lists the ThinkPad T495 as tested hardware; support on other machines and firmware varies. NVMe and AHCI use polled I/O.
+NVMe, AHCI, physical Ethernet and Intel Wi-Fi drivers are present. The README lists the ThinkPad T495 as tested hardware; support on other machines and firmware varies. NVMe and AHCI complete requests by interrupt (MSI-X or MSI) and fall back to polling.
 
 - **Display**: GOP on physical hardware; VirtIO-GPU under QEMU with EDID
   preferred-mode selection. AMD display functions and their VBIOS are

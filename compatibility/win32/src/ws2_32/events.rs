@@ -34,6 +34,8 @@ struct Selection {
     pending: i32,
     /// iErrorCode per FD_*_BIT.
     errors: [i32; 10],
+    /// FD_CLOSE was recorded: Windows reports it once.
+    closed: bool,
 }
 
 static SELECTIONS: Mutex<BTreeMap<u64, Selection>> = Mutex::new(BTreeMap::new());
@@ -54,8 +56,14 @@ pub(super) fn forget(s: u64) {
 }
 
 /// The re-enabling functions: the consumed event may be recorded again.
+/// A receive also re-enables FD_CLOSE until it has been reported, so a
+/// close after data is not lost.
 pub(super) fn rearm(s: u64, bits: i32) {
     if let Some(sel) = SELECTIONS.lock().unwrap().get_mut(&s) {
+        let mut bits = bits;
+        if bits & FD_READ != 0 && !sel.closed {
+            bits |= FD_CLOSE;
+        }
         sel.armed |= bits & sel.mask;
     }
 }
@@ -70,6 +78,7 @@ fn record(s: u64, bits: i32, error: Option<(usize, i32)>) {
         }
         sel.armed &= !bits;
         sel.pending |= bits;
+        sel.closed |= bits & FD_CLOSE != 0;
         if let Some((bit, code)) = error {
             sel.errors[bit] = code;
         }
@@ -181,9 +190,10 @@ extern "win64" fn WSAEventSelect(s: u64, event: u64, mask: i32) -> i32 {
         sels.insert(s, Selection {
             event,
             mask,
-            armed: mask,
+            armed: if old.is_some_and(|o| o.closed) { mask & !FD_CLOSE } else { mask },
             pending: old.map_or(0, |o| o.pending & mask),
             errors: old.map_or([0; 10], |o| o.errors),
+            closed: old.is_some_and(|o| o.closed),
         });
         drop(sels);
         if old.is_some_and(|o| o.pending & mask != 0) {

@@ -123,8 +123,18 @@ struct Key {
     export_policy: u32,
     key_usage: u32,
     material: Option<Material>,
+    /// NCryptFinalizeKey ran (or the key was opened or imported finished):
+    /// only then is it usable and persisted.
+    finalized: bool,
     /// Properties set by the caller that the provider does not interpret.
     props: BTreeMap<String, Vec<u8>>,
+}
+
+impl Key {
+    /// The material of a finished key.
+    fn ready(&self) -> Result<&Material, SecStatus> {
+        self.material.as_ref().filter(|_| self.finalized).ok_or(NTE_BAD_KEY_STATE)
+    }
 }
 
 enum Object {
@@ -269,7 +279,7 @@ fn from_pkcs8(der: &[u8]) -> Result<(Algo, Material), SecStatus> {
 
 fn save(k: &Key) -> Result<(), SecStatus> {
     let Some(name) = &k.name else { return Ok(()) };
-    let m = k.material.as_ref().ok_or(NTE_BAD_KEY_STATE)?;
+    let m = k.ready()?;
     let mut data = FILE_MAGIC.to_vec();
     data.push(Algo::ALL.iter().position(|&a| a == k.algo).unwrap_or(0) as u8);
     for v in [k.export_policy, k.key_usage, k.length] {
@@ -296,6 +306,7 @@ fn load(name: &str, machine: bool) -> Result<Key, SecStatus> {
         key_usage: word(13),
         length: word(17),
         material: Some(m),
+        finalized: true,
         props: BTreeMap::new(),
     })
 }
@@ -351,7 +362,7 @@ fn rsa_header(magic: u32, n: &RsaPublicKey, prime: usize) -> (Vec<u8>, usize) {
 }
 
 fn export(k: &Key, kind: &str) -> Result<Vec<u8>, SecStatus> {
-    let m = k.material.as_ref().ok_or(NTE_BAD_KEY_STATE)?;
+    let m = k.ready()?;
     let rsa = k.algo == Algo::Rsa;
     let kind = match kind {
         "PUBLICBLOB" if rsa => "RSAPUBLICBLOB",
@@ -557,7 +568,7 @@ pub(crate) struct Facts {
 
 pub(crate) fn facts(h: u64) -> Result<Facts, SecStatus> {
     with_key(h, |k| {
-        let m = k.material.as_ref().ok_or(NTE_BAD_KEY_STATE)?;
+        let m = k.ready()?;
         let (alg_oid, alg_params, public) = match rsa_public(m) {
             Some(p) => {
                 // RSAPublicKey ::= SEQUENCE { modulus, publicExponent }
@@ -580,7 +591,7 @@ pub(crate) fn facts(h: u64) -> Result<Facts, SecStatus> {
 /// PKCS #1 v1.5, ECDSA as r || s.
 pub(crate) fn sign_hash(h: u64, hash_alg: &str, hash: &[u8]) -> Result<Vec<u8>, SecStatus> {
     with_key(h, |k| {
-        let m = k.material.as_ref().ok_or(NTE_BAD_KEY_STATE)?;
+        let m = k.ready()?;
         sign(m, if k.algo == Algo::Rsa { Padding::Pkcs1(Some(hash_alg)) } else { Padding::None }, hash)
     })
 }
@@ -626,7 +637,7 @@ extern "win64" fn NCryptCreatePersistedKey(provider: u64, out: *mut u64, alg: *c
         return NTE_EXISTS;
     }
     let length = if algo == Algo::Rsa { 1024 } else { algo.curve_bits() };
-    let key = Key { algo, name, machine, length, export_policy: 0, key_usage: 0, material: None, props: BTreeMap::new() };
+    let key = Key { algo, name, machine, length, export_policy: 0, key_usage: 0, material: None, finalized: false, props: BTreeMap::new() };
     // SAFETY: the caller's out pointer.
     unsafe { *out = insert(Object::Key(Box::new(key))) };
     0
@@ -652,10 +663,14 @@ extern "win64" fn NCryptOpenKey(provider: u64, out: *mut u64, name: *const u16, 
 
 extern "win64" fn NCryptFinalizeKey(key: u64, _flags: u32) -> SecStatus {
     status(with_key(key, |k| {
-        if k.material.is_some() {
+        if k.finalized {
             return Err(NTE_BAD_KEY_STATE);
         }
-        k.material = Some(generate(k.algo, k.length)?);
+        // An imported key keeps its material; a created one gets new.
+        if k.material.is_none() {
+            k.material = Some(generate(k.algo, k.length)?);
+        }
+        k.finalized = true;
         save(k)
     }))
 }
@@ -705,7 +720,7 @@ extern "win64" fn NCryptSetProperty(h: u64, name: *const u16, value: *const u8, 
             }
         }
         // A persisted key keeps its policy and usage.
-        if k.material.is_some() && matches!(name.as_str(), "Export Policy" | "Key Usage") {
+        if k.finalized && matches!(name.as_str(), "Export Policy" | "Key Usage") {
             save(k)?;
         }
         Ok(())
@@ -826,9 +841,10 @@ extern "win64" fn NCryptImportKey(
         export_policy: 0,
         key_usage: 0,
         material: Some(m),
+        finalized: flags & NCRYPT_DO_NOT_FINALIZE_FLAG == 0,
         props: BTreeMap::new(),
     };
-    if flags & NCRYPT_DO_NOT_FINALIZE_FLAG == 0 {
+    if key.finalized {
         if let Err(e) = save(&key) {
             return e;
         }
@@ -850,7 +866,7 @@ extern "win64" fn NCryptSignHash(
     flags: u32,
 ) -> SecStatus {
     let r = with_key(key, |k| {
-        let m = k.material.as_ref().ok_or(NTE_BAD_KEY_STATE)?;
+        let m = k.ready()?;
         if out.is_null() {
             return Ok(alloc::vec![0; signature_len(m)]);
         }

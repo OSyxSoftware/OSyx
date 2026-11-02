@@ -913,6 +913,7 @@ extern "win64" fn CancelIoEx(h: u64, _ov: *const u8) -> Bool {
     match objects::get(h) {
         None => fail(ERROR_INVALID_HANDLE, FALSE),
         Some(Object::Pipe(p)) if crate::pipes::cancel(&p) => TRUE,
+        Some(Object::File(_)) if crate::client64::cancel_dir_watch(h) => TRUE,
         Some(_) => fail(ERROR_NOT_FOUND, FALSE),
     }
 }
@@ -943,6 +944,10 @@ extern "win64" fn CancelIo(h: u64) -> Bool {
         None => fail(ERROR_INVALID_HANDLE, FALSE),
         Some(Object::Pipe(p)) => {
             crate::pipes::cancel(&p);
+            TRUE
+        }
+        Some(Object::File(_)) => {
+            crate::client64::cancel_dir_watch(h);
             TRUE
         }
         Some(_) => TRUE,

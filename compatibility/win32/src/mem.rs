@@ -319,7 +319,11 @@ pub fn image_page_protect(page: u64) -> Option<u32> {
 fn protect_image(addr: u64, size: usize, protect: u32) -> Result<u32, NtStatus> {
     let (base, len) = crate::loader::image_containing(addr).ok_or(STATUS_MEMORY_NOT_ALLOCATED)?;
     let start = addr & !(PAGE as u64 - 1);
-    let end = (addr + size.max(1) as u64).next_multiple_of(PAGE as u64);
+    // A range that wraps the address space is outside every image.
+    let end = addr
+        .checked_add(size.max(1) as u64)
+        .and_then(|e| e.checked_next_multiple_of(PAGE as u64))
+        .ok_or(STATUS_MEMORY_NOT_ALLOCATED)?;
     if end > base + len {
         return Err(STATUS_MEMORY_NOT_ALLOCATED);
     }
@@ -342,16 +346,18 @@ fn protect_image(addr: u64, size: usize, protect: u32) -> Result<u32, NtStatus> 
 /// of the first page. Pages of VirtualAlloc regions and of loaded images
 /// can be changed.
 pub fn virtual_protect(addr: u64, size: usize, protect: u32) -> Result<u32, NtStatus> {
-    let prot = private_prot(protect)?;
     let mut regions = REGIONS.lock().unwrap();
     let inside = regions.range(..=addr).next_back().is_some_and(|(&base, r)| addr < base + r.size as u64);
     if !inside {
         drop(regions);
+        // Image pages validate their own protections (write-copy and
+        // guard combinations included).
         return protect_image(addr, size, protect);
     }
+    let prot = private_prot(protect)?;
     let (&base, r) = regions.range_mut(..=addr).next_back().ok_or(STATUS_MEMORY_NOT_ALLOCATED)?;
     let first = (addr - base) as usize / PAGE;
-    let last = ((addr - base) as usize + size.max(1)).div_ceil(PAGE);
+    let last = ((addr - base) as usize).checked_add(size.max(1)).ok_or(STATUS_MEMORY_NOT_ALLOCATED)?.div_ceil(PAGE);
     if last > r.pages.len() || r.pages[first..last].contains(&0) {
         return Err(STATUS_MEMORY_NOT_ALLOCATED);
     }

@@ -1330,8 +1330,9 @@ pub(crate) fn resource_names(module: u64, kind: &ResId) -> Result<Vec<ResId>, u3
         let root = base + rsrc;
         // Entries of a directory: (name or id, offset of the entry's data).
         let entries = |dir: u64| -> Vec<(ResId, u32)> {
+            // Both counts are 16-bit: at most 131070 entries, all listed.
             let n = rd16(dir + 12) as u64 + rd16(dir + 14) as u64;
-            (0..n.min(4096))
+            (0..n)
                 .map(|i| {
                     let e = dir + 16 + 8 * i;
                     let name = rd32(e);

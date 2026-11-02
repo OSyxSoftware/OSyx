@@ -2315,10 +2315,14 @@ extern "win64" fn StretchBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64,
         for dy in r.y..r.y + r.h as i32 {
             for dx in r.x..r.x + r.w as i32 {
                 let c = if let Some(source) = &source {
-                    // Destination offset as a fraction of the destination
-                    // size, mapped into the (possibly mirrored) source.
-                    let fx = ((dx - x) as i64 * sw as i64).div_euclid(w as i64) as i32;
-                    let fy = ((dy - y) as i64 * sh as i64).div_euclid(h as i64) as i32;
+                    // Distance from the destination origin along its
+                    // direction, scaled to the source extent (truncated
+                    // toward zero), then laid along the source direction.
+                    let map = |d: i32, w: i32, sw: i32| {
+                        let along = d as i64 * w.signum() as i64;
+                        (along * sw.unsigned_abs() as i64 / w.unsigned_abs() as i64) as i32 * sw.signum()
+                    };
+                    let (fx, fy) = (map(dx - x, w, sw), map(dy - y, h, sh));
                     let Some(c) = source.pixel(sx + fx, sy + fy) else { continue };
                     c
                 } else if rop == 0x42 {

@@ -583,8 +583,9 @@ extern "win64" fn DialogBoxIndirectParamW(module: u64, template: *const u8, owne
     };
     // SAFETY: `len` readable bytes of the caller's template.
     let raw = unsafe { core::slice::from_raw_parts(template, len) };
+    let was_enabled = owner != 0 && IsWindowEnabled(owner) != 0;
     match create_dialog_from(raw, module, owner, proc_, param, true) {
-        Ok(hwnd) => run_modal(hwnd, owner),
+        Ok(hwnd) => run_modal(hwnd, owner, was_enabled),
         Err(e) => fail(e, -1),
     }
 }

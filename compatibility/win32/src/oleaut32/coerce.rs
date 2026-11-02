@@ -191,6 +191,19 @@ fn float_text(f: f64, digits: usize) -> String {
     trim(&alloc::format!("{:.*}", decimals, f))
 }
 
+/// A CURRENCY (a count of 1/10000 units) as text, exactly: the whole
+/// part and up to four decimals without trailing zeros.
+fn currency_text(c: i64) -> String {
+    let sign = if c < 0 { "-" } else { "" };
+    let a = c.unsigned_abs();
+    let (whole, frac) = (a / 10000, a % 10000);
+    if frac == 0 {
+        return alloc::format!("{sign}{whole}");
+    }
+    let digits = alloc::format!("{frac:04}");
+    alloc::format!("{sign}{whole}.{}", digits.trim_end_matches('0'))
+}
+
 /// The en-US short date and long time of an OLE date: "1/2/2003 12:00:00 PM";
 /// without a time part only the date, before day 1 only the time.
 fn date_text(d: f64) -> String {
@@ -225,7 +238,7 @@ fn to_text(v: &Value, flags: u16) -> Result<String, u32> {
         Value::Null | Value::Error(_) => return Err(DISP_E_TYPEMISMATCH),
         Value::Int(i) => alloc::format!("{i}"),
         Value::Float(f, single) => float_text(*f, if *single { 7 } else { 15 }),
-        Value::Cy(c) => float_text(*c as f64 / 10000.0, 19),
+        Value::Cy(c) => currency_text(*c),
         Value::Date(d) => date_text(*d),
         Value::Bool(b) => String::from(match (*b, flags & VARIANT_ALPHABOOL != 0) {
             (true, true) => "True",

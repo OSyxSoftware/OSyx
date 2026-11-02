@@ -1065,12 +1065,26 @@ fn prop_key(ctx: u64) -> Option<(u64, u64)> {
     Some(if c.store == 0 { (0, ctx) } else { (c.store, c.index as u64) })
 }
 
+/// Key handles CryptAcquireCertificatePrivateKey opened and cached
+/// (CRYPT_ACQUIRE_CACHE_FLAG): the certificate owns them.
+static CACHED: Mutex<BTreeMap<(u64, u64), u64>> = Mutex::new(BTreeMap::new());
+
 pub(super) fn forget_context(ctx: u64) {
     PROPS.lock().unwrap().remove(&(0, ctx));
+    if let Some(h) = CACHED.lock().unwrap().remove(&(0, ctx)) {
+        crate::ncrypt::free(h);
+    }
 }
 
 pub(super) fn forget_store(store: u64) {
     PROPS.lock().unwrap().retain(|k, _| k.0 != store);
+    let mut cached = CACHED.lock().unwrap();
+    let gone: Vec<(u64, u64)> = cached.keys().filter(|k| k.0 == store).copied().collect();
+    for k in gone {
+        if let Some(h) = cached.remove(&k) {
+            crate::ncrypt::free(h);
+        }
+    }
 }
 
 /// CertAddCertificateContextToStore copies the source's properties.
@@ -1228,10 +1242,18 @@ const CRYPT_MACHINE_KEYSET: u32 = 0x20;
 /// The certificate's private key: its CNG key container (opened anew),
 /// else a key handle set as a property.
 pub(super) fn acquire_private_key(ctx: u64, flags: u32, key: *mut u64, spec: *mut u32, caller_free: *mut i32) -> i32 {
+    let cache = flags & CRYPT_ACQUIRE_CACHE_FLAG != 0;
+    let slot = prop_key(ctx);
+    // A cached handle is reused; the container is opened once.
+    let cached = slot.and_then(|k| CACHED.lock().unwrap().get(&k).copied()).filter(|&h| crate::ncrypt::is_key(h));
     let (handle, free) = match get_prop(ctx, CERT_KEY_PROV_INFO_PROP_ID) {
+        Some(Prop::ProvInfo(_)) if cache && cached.is_some() => (cached.unwrap_or_default(), false),
         Some(Prop::ProvInfo(i)) if i.prov_type == 0 && i.container.is_some() => {
             match crate::ncrypt::open_named(i.container.as_deref().unwrap_or_default(), i.flags & CRYPT_MACHINE_KEYSET != 0) {
-                Ok(h) if flags & CRYPT_ACQUIRE_CACHE_FLAG != 0 => {
+                Ok(h) if cache => {
+                    if let Some(k) = slot {
+                        CACHED.lock().unwrap().insert(k, h);
+                    }
                     set_prop(ctx, CERT_NCRYPT_KEY_HANDLE_PROP_ID, Some(Prop::Bytes(h.to_le_bytes().to_vec())));
                     (h, false)
                 }

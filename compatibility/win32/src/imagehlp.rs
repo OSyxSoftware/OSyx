@@ -76,6 +76,10 @@ fn certificates(d: &[u8], l: &Layout) -> Result<Vec<(usize, usize)>, u32> {
         return Ok(out);
     }
     let end = start.checked_add(size).filter(|&e| e <= d.len()).ok_or(ERROR_BAD_EXE_FORMAT)?;
+    // The table follows the headers; one that overlaps them is damage.
+    if start < l.security + 8 {
+        return Err(ERROR_BAD_EXE_FORMAT);
+    }
     let mut at = start;
     while at + 8 <= end {
         let n = u32_at(d, at).ok_or(ERROR_BAD_EXE_FORMAT)? as usize;
@@ -107,6 +111,14 @@ fn checksum(d: &[u8], field: usize) -> u32 {
 /// Rewrites the table from `certs` (each a whole WIN_CERTIFICATE) at the
 /// end of the file, where the table lives.
 fn rewrite(h: u64, mut d: Vec<u8>, l: &Layout, existing: &[(usize, usize)], certs: &[Vec<u8>]) -> Result<(), u32> {
+    // Rewriting replaces everything from the table on: refuse a file with
+    // data after its table (beyond the 8-byte alignment padding).
+    if let Some(&(at, n)) = existing.last() {
+        let end = at.checked_add(n).and_then(|e| e.checked_next_multiple_of(8)).ok_or(ERROR_BAD_EXE_FORMAT)?;
+        if end < d.len() {
+            return Err(ERROR_BAD_EXE_FORMAT);
+        }
+    }
     let start = match existing.first() {
         Some(&(at, _)) => at,
         None => d.len().next_multiple_of(8),

@@ -365,6 +365,23 @@ type Listing = BTreeMap<String, (bool, u64, i64, u32)>;
 
 /// The last listing of each watched directory handle.
 static WATCHES: Mutex<BTreeMap<u64, Listing>> = Mutex::new(BTreeMap::new());
+/// Directory reads waiting for a change, by handle, and the handles whose
+/// waiting reads CancelIo/CancelIoEx ended.
+static PENDING: Mutex<BTreeMap<u64, u32>> = Mutex::new(BTreeMap::new());
+static CANCELLED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// CancelIo/CancelIoEx on a directory handle: ends its waiting reads;
+/// whether there was one.
+pub(crate) fn cancel_dir_watch(handle: u64) -> bool {
+    let waiting = PENDING.lock().unwrap().get(&handle).is_some_and(|&n| n > 0);
+    if waiting {
+        let mut c = CANCELLED.lock().unwrap();
+        if !c.contains(&handle) {
+            c.push(handle);
+        }
+    }
+    waiting
+}
 
 fn list_dir(root: &str, rel: &str, subtree: bool, depth: u32, out: &mut Listing) {
     let dir = if rel.is_empty() { String::from(root) } else { alloc::format!("{root}/{}", rel.replace('\\', "/")) };
@@ -458,24 +475,40 @@ fn records(list: &[(u32, String)], cap: usize) -> Option<Vec<u8>> {
 }
 
 /// Polls `dir` until its listing changes in a way `filter` reports; returns
-/// the new listing and the changes. Polling every 100 ms: OSyx has no
-/// file system change notification.
-fn wait_changes(handle: u64, dir: &str, subtree: bool, filter: u32) -> Vec<(u32, String)> {
-    loop {
+/// the changes. Polling every 100 ms: OSyx has no file system change
+/// notification. None when the handle was closed or the read cancelled:
+/// the operation is then aborted, as on Windows.
+fn wait_changes(handle: u64, dir: &str, subtree: bool, filter: u32) -> Option<Vec<(u32, String)>> {
+    *PENDING.lock().unwrap().entry(handle).or_insert(0) += 1;
+    let r = loop {
+        if objects::get(handle).is_none() {
+            WATCHES.lock().unwrap().remove(&handle);
+            break None;
+        }
+        if CANCELLED.lock().unwrap().contains(&handle) {
+            break None;
+        }
         let old = WATCHES.lock().unwrap().get(&handle).cloned().unwrap_or_default();
         let mut new = Listing::new();
         list_dir(dir, "", subtree, 0, &mut new);
         let found = changes(&old, &new, filter);
         WATCHES.lock().unwrap().insert(handle, new);
         if !found.is_empty() {
-            return found;
-        }
-        // A closed handle ends the watch.
-        if objects::get(handle).is_none() {
-            return Vec::new();
+            break Some(found);
         }
         os_std::thread::sleep(core::time::Duration::from_millis(100));
+    };
+    let mut pending = PENDING.lock().unwrap();
+    let left = pending.get_mut(&handle).map_or(0, |n| {
+        *n -= 1;
+        *n
+    });
+    if left == 0 {
+        pending.remove(&handle);
+        // The cancellation covered every read that was waiting.
+        CANCELLED.lock().unwrap().retain(|&h| h != handle);
     }
+    r
 }
 
 /// An overlapped directory read's work, run by a helper thread.
@@ -493,13 +526,15 @@ extern "win64" fn dir_read_thread(arg: u64) -> u32 {
     // SAFETY: the Box made by ReadDirectoryChangesW for this thread.
     let r = *unsafe { alloc::boxed::Box::from_raw(arg as *mut DirRead) };
     let list = wait_changes(r.handle, &r.dir, r.subtree, r.filter);
-    let bytes = records(&list, r.len as usize).unwrap_or_default();
+    let bytes = list.as_ref().and_then(|l| records(l, r.len as usize)).unwrap_or_default();
     // SAFETY: the caller's buffer and OVERLAPPED, valid until the
     // operation completes (the Windows contract).
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), r.buf as *mut u8, bytes.len());
         kernel32::overlapped::set_bytes(r.ov, bytes.len() as u64);
-        kernel32::overlapped::set_status(r.ov, 0);
+        // An ended watch completes with STATUS_CANCELLED
+        // (ERROR_OPERATION_ABORTED), not with an empty success.
+        kernel32::overlapped::set_status(r.ov, if list.is_some() { 0 } else { 0xC000_0120 });
         let event = kernel32::overlapped::event(r.ov) & !1;
         if event != 0 {
             kernel32::set_event(event);
@@ -555,7 +590,7 @@ extern "win64" fn ReadDirectoryChangesW(handle: u64, buf: *mut u8, len: u32, sub
         kernel32::CloseHandle(t);
         return fail(ERROR_IO_PENDING, FALSE);
     }
-    let list = wait_changes(handle, &dir, subtree, filter);
+    let Some(list) = wait_changes(handle, &dir, subtree, filter) else { return fail(995, FALSE) }; // ERROR_OPERATION_ABORTED
     let bytes = records(&list, len as usize).unwrap_or_default();
     // SAFETY: the caller's buffer of `len` bytes and out count.
     unsafe {

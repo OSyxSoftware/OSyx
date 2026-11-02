@@ -574,14 +574,21 @@ const TYMED_ISTREAM: u32 = 4;
 const TYMED_ISTORAGE: u32 = 8;
 
 /// STGMEDIUM: tymed, its handle or interface @8, pUnkForRelease @16.
+/// A 32-bit program passes the x86 layout.
 extern "win64" fn ReleaseStgMedium(m: *mut u8) {
+    release_stg_medium(m, crate::wow64::is_active());
+}
+
+/// Releases a STGMEDIUM in the x86 (`narrow`, 12 bytes) or x64 (24 bytes)
+/// layout; ole32's own media are always x64.
+fn release_stg_medium(m: *mut u8, narrow: bool) {
     if m.is_null() {
         return;
     }
     // SAFETY: the caller's STGMEDIUM (x86: the handle at 4 and
     // pUnkForRelease at 8, 4 bytes each).
     let (tymed, handle, unk) = unsafe {
-        if crate::wow64::is_active() {
+        if narrow {
             (*(m as *const u32), *(m.add(4) as *const u32) as u64, *(m.add(8) as *const u32) as u64)
         } else {
             (*(m as *const u32), *(m.add(8) as *const u64), *(m.add(16) as *const u64))
@@ -599,7 +606,7 @@ extern "win64" fn ReleaseStgMedium(m: *mut u8) {
         }
     }
     // SAFETY: as above.
-    unsafe { core::ptr::write_bytes(m, 0, 24) };
+    unsafe { core::ptr::write_bytes(m, 0, if narrow { 12 } else { 24 }) };
 }
 
 // ---- data transfer ----------------------------------------------------------------------
@@ -664,13 +671,13 @@ fn get_data(data: u64, format: u32) -> Option<Vec<u8>> {
         get(data, &f, &mut m)
     };
     if hr != S_OK || m.tymed != TYMED_HGLOBAL || m.handle == 0 {
-        ReleaseStgMedium(&mut m as *mut StgMedium as *mut u8);
+        release_stg_medium(&mut m as *mut StgMedium as *mut u8, false);
         return None;
     }
     let size = kernel32::heap_size(m.handle);
     // SAFETY: an HGLOBAL is a fixed block of `size` bytes.
     let bytes = unsafe { core::slice::from_raw_parts(m.handle as *const u8, size) }.to_vec();
-    ReleaseStgMedium(&mut m as *mut StgMedium as *mut u8);
+    release_stg_medium(&mut m as *mut StgMedium as *mut u8, false);
     if bytes.is_empty() { None } else { Some(bytes) }
 }
 

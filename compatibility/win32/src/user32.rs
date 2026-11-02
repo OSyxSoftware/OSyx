@@ -2895,9 +2895,9 @@ pub(crate) extern "win64" fn DialogBoxParamW(module: u64, name: u64, owner: u64,
 }
 
 /// The message loop of a modal dialog created with its owner disabled.
-fn run_modal(hwnd: u64, owner: u64) -> i64 {
-    // create_dialog_from disabled an enabled owner; it is enabled again.
-    let was_enabled = owner != 0 && is_window(owner);
+/// `was_enabled` is the owner's state before the dialog existed: an
+/// owner a nested modal dialog already disabled stays disabled.
+fn run_modal(hwnd: u64, owner: u64, was_enabled: bool) -> i64 {
     finish_modal(hwnd, owner, was_enabled)
 }
 
@@ -3577,7 +3577,7 @@ extern "win64" fn TrackMouseEvent(tme: *mut u8) -> Bool {
             // SAFETY: as above.
             unsafe {
                 teb::put(tme as u64, 4, if leave.is_some() { TME_LEAVE } else { 0u32 });
-                teb::put(tme as u64, 8, leave.unwrap_or(0));
+                client::put_ptr(tme as u64, 8, leave.unwrap_or(0));
             }
             return TRUE;
         }
