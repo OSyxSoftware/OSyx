@@ -1868,6 +1868,21 @@ extern "win64" fn GetClientRect(hwnd: u64, r: *mut i32) -> Bool {
     }
 }
 
+/// The client area's size of a window (opengl32 sizes its back buffer).
+pub(crate) fn client_size(hwnd: u64) -> Option<(u32, u32)> {
+    with(|g| g.windows.get(&hwnd).map(|w| w.size))
+}
+
+/// The window a DC draws into (0 for a memory DC), if the DC exists.
+pub(crate) fn dc_window(dc: u64) -> Option<u64> {
+    with(|g| g.dcs.get(&dc).map(|d| if d.memory { 0 } else { d.hwnd }))
+}
+
+/// msimg32.dll: AlphaBlend, TransparentBlt, GradientFill.
+pub fn msimg32_exports() -> Vec<(&'static str, u64)> {
+    gdi::msimg32_exports()
+}
+
 /// The window's RECT (left, top, right, bottom) in screen coordinates.
 pub(crate) fn window_rect(hwnd: u64) -> Option<[i32; 4]> {
     with(|g| g.windows.get(&hwnd).map(|w| [w.pos.0, w.pos.1, w.pos.0 + w.size.0 as i32, w.pos.1 + w.size.1 as i32]))
@@ -8389,5 +8404,6 @@ pub fn gdi_exports() -> Vec<(&'static str, u64)> {
     .into_iter()
     .chain(gdi::exports())
     .chain(gdi::client_exports())
+    .chain(gdi::blend_exports())
     .collect()
 }

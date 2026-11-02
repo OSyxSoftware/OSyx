@@ -2,6 +2,8 @@
 //! lives: applications may keep the pointer returned by CreateDIBSection.
 use super::*;
 
+mod blend;
+
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_BITMAP: u64 = STOCK_BASE + 21;
 const GDI_ERROR: u32 = u32::MAX;
@@ -2337,14 +2339,35 @@ pub(super) fn client_exports() -> Vec<(&'static str, u64)> {
     export_table![DescribePixelFormat, GetPixelFormat, GetBitmapBits, GetObjectA, SetBrushOrgEx, GetBrushOrgEx, StretchBlt]
 }
 
+/// SwapBuffers: an OpenGL context drawing into the window shows its back
+/// buffer; the window is then presented.
 extern "win64" fn SwapBuffers(dc: u64) -> Bool {
     let Some((hwnd, memory)) = with(|g| g.dcs.get(&dc).map(|d| (d.hwnd, d.memory))) else {
         return fail(ERROR_INVALID_HANDLE, FALSE);
     };
     if !memory && hwnd != 0 {
+        if let Some((w, h, px)) = crate::opengl32::frame(hwnd) {
+            draw(dc, |s, _, _, clip| {
+                let r = Rect::new(0, 0, w, h).intersect(&clip);
+                for y in r.y..r.y + r.h as i32 {
+                    for x in r.x..r.x + r.w as i32 {
+                        s.put(x, y, px[(y as u32 * w + x as u32) as usize]);
+                    }
+                }
+                ((), r)
+            });
+        }
         super::present(hwnd, None);
     }
     TRUE
+}
+
+pub(super) fn msimg32_exports() -> Vec<(&'static str, u64)> {
+    blend::msimg32_exports()
+}
+
+pub(super) fn blend_exports() -> Vec<(&'static str, u64)> {
+    blend::gdi32_exports()
 }
 /// Escapes are printer and driver commands; a display DC supports none
 /// (QUERYESCSUPPORT included), which Windows answers with 0.

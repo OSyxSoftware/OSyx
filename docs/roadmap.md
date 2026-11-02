@@ -113,6 +113,31 @@ Zen's partial rows are capabilities OSyx does not model (Windows jobs,
 logon sessions, the service database, certificate stores); none of them stops
 the browser from starting.
 
+#### The updated Steam client (2026-11-02)
+
+The scan above covers the installer. The client it installs is a different
+program: the 32-bit bootstrapper updates itself, installs the 64-bit client
+and starts its `steam.exe`, which loads `steamui.dll`, `steamclient64.dll`,
+`vgui2_s.dll`, `chromehtml.dll` and finally the CEF browser
+(`steamwebhelper.exe`, `libcef.dll`). Measured by running it in QEMU:
+
+- The bootstrapper update and the client install work.
+- `steamui.dll` and `steamclient64.dll` load: their imports are complete
+  (`ncrypt.dll`, the crypt32 encoders and self-signed certificates, SSPI,
+  `getnameinfo`, `WSAEventSelect`, `AcceptEx`, APCs with `ReadFileEx`, the
+  winmm mixer, `imagehlp.dll`, `GetIfEntry2` and others).
+- Next: `vgui2_s.dll` needs about 30 more GDI/user32/imm32/shell32
+  functions (font enumeration and loading, `Polyline`, viewport origins,
+  `SetDIBitsToDevice`, icon copies and drawing), `msimg32.dll`
+  (`AlphaBlend`, `GradientFill`, `TransparentBlt`) and `opengl32.dll`
+  (legacy immediate-mode GL 1.1 and WGL); `crashhandler64.dll` needs the
+  WinINet HTTP client (`InternetOpenW` to `InternetReadFile`).
+- After that, CEF: about 100 more imports plus `winhttp.dll` and
+  `dhcpcsvc.dll`, then Chromium's multi-process model on winrun.
+- SSPI has no security package yet: `AcquireCredentialsHandle` reports
+  `SEC_E_SECPKG_NOT_FOUND`. SChannel over rustls is the candidate if a
+  Steam component turns out to call it.
+
 ### Performance (see research/performance-profile.md)
 
 6. Split the global process table lock (handle tables, mappings, page

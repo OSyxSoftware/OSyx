@@ -42,11 +42,6 @@ fn queue(tid: u32, apc: Apc) {
     QUEUES.lock().unwrap().entry(tid).or_default().push_back(apc);
 }
 
-/// Whether the current thread has calls waiting.
-pub fn pending() -> bool {
-    QUEUES.lock().unwrap().get(&current()).is_some_and(|q| !q.is_empty())
-}
-
 /// Runs the current thread's queued calls in order; whether any ran.
 pub fn drain() -> bool {
     let tid = current();
