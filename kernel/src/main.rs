@@ -410,6 +410,7 @@ fn run_init(boot: &BootData, name: &str, summary: &mut Line) -> bool {
 /// (integration tests read these lines as evidence).
 fn log_subsystems() {
     drivers::ahci::log_stats();
+    drivers::virtio_blk::log_stats();
     drivers::nvme::log_stats();
     for i in 0..drivers::xhci::controllers() {
         kprintln!("usb: controller {} took {} interrupts", i, drivers::xhci::interrupts_of(i));

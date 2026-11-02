@@ -6,6 +6,8 @@
 //! through DMA pages owned by the driver (bounce buffers), so callers can
 //! pass any kernel buffer. A transfer larger than one chain is split into
 //! several chains submitted together, so the device overlaps them.
+//! MSI-X completion interrupts wake request waiters after a short spin.
+//! Devices without an accepted queue vector retain yielding polling.
 
 use super::virtio::{AsyncQueue, Buffer, Transport, VirtioError};
 use crate::arch::timer::Deadline;
@@ -14,6 +16,26 @@ use crate::mem::{alloc_frame, phys_to_virt, PAGE_SIZE};
 use crate::pci;
 use crate::sync::KMutex;
 use alloc::{format, string::String, vec::Vec};
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+const MAX_IRQ_DISKS: usize = 16;
+static DISKS: AtomicUsize = AtomicUsize::new(0);
+static COMPLETIONS: [crate::waitq::WaitQueue; MAX_IRQ_DISKS] = [const { crate::waitq::WaitQueue::new() }; MAX_IRQ_DISKS];
+static IRQ_COUNTS: [AtomicUsize; MAX_IRQ_DISKS] = [const { AtomicUsize::new(0) }; MAX_IRQ_DISKS];
+static SLEPT: [AtomicUsize; MAX_IRQ_DISKS] = [const { AtomicUsize::new(0) }; MAX_IRQ_DISKS];
+
+fn completion_interrupt(index: u64) {
+    if let Some(queue) = COMPLETIONS.get(index as usize) {
+        IRQ_COUNTS[index as usize].fetch_add(1, Ordering::Relaxed);
+        queue.wake_all();
+    }
+}
+
+pub fn log_stats() {
+    for index in 0..DISKS.load(Ordering::Relaxed).min(MAX_IRQ_DISKS) {
+        crate::kprintln!("virtio-blk{index}: {} completion interrupts, {} completions after sleeping", IRQ_COUNTS[index].load(Ordering::Relaxed), SLEPT[index].load(Ordering::Relaxed));
+    }
+}
 
 /// Transitional and modern virtio-blk PCI device ids.
 pub const DEVICE_IDS: [u16; 2] = [0x1001, 0x1042];
@@ -85,6 +107,7 @@ pub struct VirtioBlk {
     data_pages: usize,
     inner: KMutex<Inner>,
     _transport: Transport,
+    interrupt_index: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -98,7 +121,21 @@ impl VirtioBlk {
     pub fn probe(dev: &pci::Device, name: String) -> Result<VirtioBlk, VirtioError> {
         let t = Transport::new(dev)?;
         let features = t.negotiate(F_RO | F_FLUSH)?;
-        let queue = t.setup_async_queue(0, None)?;
+        let index = DISKS.fetch_add(1, Ordering::Relaxed);
+        let vector = if index < MAX_IRQ_DISKS {
+            crate::irq::allocate(completion_interrupt, index as u64).and_then(|vector| {
+                let (address, data) = crate::arch::apic::msi_message(vector);
+                if dev.enable_msix(address, data).is_ok() { Some(vector) }
+                else { crate::irq::free(vector); None }
+            })
+        } else { None };
+        let queue = t.setup_async_queue(0, vector.map(|_| 0))?;
+        let interrupt_index = vector.filter(|_| queue.has_interrupts()).map(|_| index);
+        if let Some(vector) = vector {
+            if interrupt_index.is_some() {
+                crate::kprintln!("virtio-blk{index}: completion interrupts via MSI-X on vector {vector:#x}");
+            } else { crate::irq::free(vector); }
+        }
         // Each slot owns a chain and a status byte; keep one chain's worth of
         // descriptors for every slot.
         let pages_per_slot = (queue.size() as usize - 2 * SLOTS) / SLOTS;
@@ -147,6 +184,7 @@ impl VirtioBlk {
                 failed: false,
             }),
             _transport: t,
+            interrupt_index,
         })
     }
 
@@ -210,8 +248,9 @@ impl VirtioBlk {
         let deadline = Deadline::after_ms(TIMEOUT_MS);
         let mut polls = 0;
         let mut done = 0;
+        let mut completed = None;
         while done < chunks {
-            if let Some((head, _len)) = inner.queue.pop_used() {
+            if let Some((head, _len)) = completed.take().or_else(|| inner.queue.pop_used()) {
                 if pending[..chunks].iter().any(|&(h, _)| h == head) {
                     done += 1;
                     polls = 0;
@@ -229,6 +268,19 @@ impl VirtioBlk {
             if polls < SPIN_POLLS {
                 polls += 1;
                 core::hint::spin_loop();
+            } else if let Some(index) = self.interrupt_index.filter(|_| crate::arch::timer::healthy() && crate::sched::current_tid() != 0 && crate::arch::cpu::interrupts_enabled()) {
+                let mut checks = 0;
+                let result = crate::waitq::block_on(&[&COMPLETIONS[index]], Some(deadline.tick()), || {
+                    checks += 1;
+                    inner.queue.pop_used()
+                });
+                match result {
+                    Ok(item) => {
+                        completed = Some(item);
+                        if checks > 2 { SLEPT[index].fetch_add(1, Ordering::Relaxed); }
+                    }
+                    Err(_) => { inner.failed = true; return Err(BlockError::Io); }
+                }
             } else {
                 crate::sched::yield_now();
             }

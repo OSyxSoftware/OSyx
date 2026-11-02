@@ -57,6 +57,22 @@ The minimal image omits worker, so process self-tests fail; this is not the
 full system suite. Physical SATA controllers, MSI-X and polling fallback,
 and error injection still require validation.
 
+## VirtIO-blk completion interrupts
+
+VirtIO-blk configures MSI-X and verifies that its request queue accepted the
+vector. After a short spin, the caller sleeps on the disk's completion wait
+queue. Rechecking the used ring after waiter registration avoids lost wakeups.
+Devices without MSI-X or with a rejected queue vector retain yielding polling.
+Requests remain serialized per disk, with up to four chains in flight.
+
+Run `scripts/virtio-blk-irq-test.ps1` with an existing `build/esp` loader to
+build the kernel and test disposable media in QEMU on two vCPUs. `-SkipBuild`
+reuses the kernel; `-NoMsix` tests polling with zero MSI-X vectors. The IRQ
+test requires read/write/flush, delivered interrupts and completions after a
+scheduler wait. The minimal image omits worker, so two process tests fail;
+this is not the full system suite. Physical devices and a device rejecting
+the queue vector after PCI MSI-X setup still need validation.
+
 ## NVMe completion interrupts
 
 NVMe configures MSI-X, falling back to MSI when available, and enables
