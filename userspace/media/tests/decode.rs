@@ -129,3 +129,96 @@ fn vorbis() {
         }
     }
 }
+
+#[test]
+fn aac() {
+    // FFmpeg's encoder with noise substitution: its noise matches only when
+    // decoded from the start, so that file is not seeked.
+    for (f, rate, ch, seekable) in [
+        ("aac-stereo-44100.m4a", 44100, 2, false),
+        ("aac-mono-22050.aac", 22050, 1, false),
+        ("aac-stereo-48000.aac", 48000, 2, true),
+        ("aac-5.1-48000.m4a", 48000, 6, true),
+        ("aac-mono-8000.mp4", 8000, 1, false),
+    ] {
+        let whole = check(f, rate, ch, 1);
+        if seekable {
+            let frames = (whole.len() / ch) as u64;
+            for at in [0, 1, 1023, 1024, 3000, frames / 2, frames - 3, frames] {
+                check_seek(f, &whole, ch, at);
+            }
+        }
+    }
+}
+
+#[test]
+fn opus() {
+    // SILK is bit-exact with libopus; CELT is floating point there too, so
+    // allow one step.
+    for (f, ch) in [
+        ("opus-mono-voip.opus", 1),
+        ("opus-stereo-audio.opus", 2),
+        ("opus-stereo-lowdelay.opus", 2),
+        ("opus-mono-16k-40ms.opus", 1),
+        ("opus-5.1.opus", 6),
+    ] {
+        let whole = check(f, 48000, ch, 1);
+        // Seeking pre-rolls 80 ms, so the decoder has settled but its
+        // state is not the straight decoding's: compare loosely.
+        let frames = (whole.len() / ch) as u64;
+        for at in [0, 1, 960, 7000, frames / 2, frames - 3, frames] {
+            let mut dec = audio::open(data(f)).unwrap();
+            assert_eq!(dec.seek(at).unwrap(), at);
+            let got = decode_all(dec.as_mut());
+            let want = &whole[at as usize * ch..];
+            assert_eq!(got.len(), want.len(), "{f}: length after seeking to {at}");
+            let (mut s, mut e) = (0.0f64, 0.0f64);
+            for (g, w) in got.iter().zip(want) {
+                s += (*w as f64).powi(2);
+                e += (*g as f64 - *w as f64).powi(2);
+            }
+            assert!(e <= s * 1e-3 + 1e-9, "{f}: after seeking to {at} error {e} of {s}");
+        }
+    }
+}
+
+/// Damaged and cut files may fail or play noise, but never panic.
+#[test]
+fn damaged_aac_and_opus() {
+    let files = [
+        "aac-stereo-44100.m4a",
+        "aac-mono-22050.aac",
+        "aac-5.1-48000.m4a",
+        "aac-mono-8000.mp4",
+        "opus-mono-voip.opus",
+        "opus-stereo-audio.opus",
+        "opus-5.1.opus",
+    ];
+    let mut seed = 0x1234_5678u32;
+    for f in files {
+        let good = data(f);
+        for round in 0..40 {
+            let mut d = good.clone();
+            if round % 4 == 0 {
+                d.truncate(d.len() * (round + 1) / 41);
+            } else {
+                for _ in 0..1 + round / 4 {
+                    seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                    let at = (seed >> 8) as usize % d.len();
+                    d[at] ^= (seed >> 24) as u8 | 1;
+                }
+            }
+            if let Ok(mut dec) = audio::open(d) {
+                let mut blocks = 0;
+                while let Ok(Some(_)) = dec.next_block() {
+                    blocks += 1;
+                    if blocks > 10_000 {
+                        break;
+                    }
+                }
+                let _ = dec.seek(1000);
+                while let Ok(Some(_)) = dec.next_block() {}
+            }
+        }
+    }
+}
