@@ -515,8 +515,13 @@ impl<'a> Renderer<'a> {
             return None;
         }
         let scale = m.scale().clamp(0.05, 8.0);
-        let (tw, th) = ((xs.abs() * scale).ceil() as usize, (ys.abs() * scale).ceil() as usize);
-        if tw == 0 || th == 0 || tw * th > 4_000_000 {
+        let (tw, th) = ((xs.abs() * scale).ceil(), (ys.abs() * scale).ceil());
+        // Checked in floating point, before any cast can wrap.
+        if !(tw >= 1.0 && th >= 1.0 && tw * th <= 4_000_000.0) {
+            return None;
+        }
+        let (tw, th) = (tw as usize, th as usize);
+        if tw == 0 || th == 0 {
             return None;
         }
         let data = self.doc.stream_data(s);

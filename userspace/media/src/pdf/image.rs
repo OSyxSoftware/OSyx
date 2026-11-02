@@ -87,6 +87,7 @@ fn mask_alpha(doc: &Document, m: &Object, w: usize, h: usize, soft: bool) -> Opt
     let d = &s.dict;
     let mw = doc.get_key(d, "Width").as_i64()?.max(1) as usize;
     let mh = doc.get_key(d, "Height").as_i64()?.max(1) as usize;
+    mw.checked_mul(mh).filter(|&n| n <= 40_000_000)?;
     let (data, codec) = filter::decode(&s.data, d);
     let bpc = if soft { doc.get_key(d, "BitsPerComponent").as_i64().unwrap_or(8) as u32 } else { 1 };
     let vals: Vec<u8> = match codec {

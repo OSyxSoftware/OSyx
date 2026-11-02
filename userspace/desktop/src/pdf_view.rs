@@ -28,8 +28,11 @@ type Key = (usize, u32);
 
 struct Shared {
     done: Mutex<BTreeMap<Key, Arc<Bitmap>>>,
+    /// Pages that could not be drawn, with the reason.
+    failed: Mutex<BTreeMap<Key, String>>,
     /// Bumped whenever a page is finished.
     generation: AtomicU64,
+    /// The document itself could not be read.
     error: Mutex<Option<String>>,
 }
 
@@ -81,7 +84,7 @@ fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Key>, shared: Arc<Shared>) {
             Ok(b) => b,
             Err(e) => {
                 println!("files: page {} not rendered: {e}", key.0 + 1);
-                *shared.error.lock().unwrap() = Some(e);
+                shared.failed.lock().unwrap().insert(key, e);
                 shared.generation.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
@@ -101,6 +104,7 @@ impl PdfView {
         drop(pdf);
         let shared = Arc::new(Shared {
             done: Mutex::new(BTreeMap::new()),
+            failed: Mutex::new(BTreeMap::new()),
             generation: AtomicU64::new(0),
             error: Mutex::new(None),
         });
@@ -344,7 +348,17 @@ impl PdfView {
                 Some(b) => blit(p, &b, page_rect.x, page_rect.y),
                 None => {
                     p.fill(page_rect, rgb(255, 255, 255));
-                    p.text_in(FontKind::Ui, page_rect, "Rendering...", rgb(140, 140, 140), Align::Center);
+                    let failed = self.shared.failed.lock().unwrap().get(&(i, zk)).cloned();
+                    match failed {
+                        Some(e) => p.text_in(
+                            FontKind::Ui,
+                            page_rect,
+                            &format!("Cannot draw this page: {e}"),
+                            t.danger_hover,
+                            Align::Center,
+                        ),
+                        None => p.text_in(FontKind::Ui, page_rect, "Rendering...", rgb(140, 140, 140), Align::Center),
+                    }
                 }
             }
         }
@@ -357,7 +371,9 @@ impl PdfView {
         }
         for &i in &visible {
             let k = (i, zk);
-            if !self.shared.done.lock().unwrap().contains_key(&k) && !self.requested.contains(&k) {
+            let settled = self.shared.done.lock().unwrap().contains_key(&k)
+                || self.shared.failed.lock().unwrap().contains_key(&k);
+            if !settled && !self.requested.contains(&k) {
                 self.requested.insert(k);
                 let _ = self.tx.send(k);
             }

@@ -17,6 +17,8 @@ use core::f32::consts::PI;
 /// Entries of one codebook, and values of its expanded vector table.
 const MAX_ENTRIES: usize = 1 << 20;
 const MAX_VQ: usize = 1 << 22;
+/// Entries and vector values of all codebooks of one stream together.
+const MAX_SETUP: usize = 1 << 24;
 
 fn ilog(v: u32) -> u32 {
     32 - v.leading_zeros()
@@ -56,7 +58,9 @@ struct Codebook {
 }
 
 impl Codebook {
-    fn read(r: &mut LsbReader) -> Result<Codebook, String> {
+    /// Reads a codebook; `budget` is what the setup header may still
+    /// allocate for entries and vector tables, shared by all its books.
+    fn read(r: &mut LsbReader, budget: &mut usize) -> Result<Codebook, String> {
         let bad = || String::from("corrupt Vorbis codebook");
         if r.read(24).ok_or_else(bad)? != 0x564342 {
             return Err(bad());
@@ -68,6 +72,9 @@ impl Codebook {
         if entries > MAX_ENTRIES || entries.saturating_mul(dim) > MAX_VQ {
             return Err(bad());
         }
+        // Lengths, tree nodes and the expanded vectors of this book.
+        let cost = entries.saturating_mul(3).saturating_add(entries.saturating_mul(dim));
+        *budget = budget.checked_sub(cost).ok_or_else(bad)?;
         let mut lens = vec![0u32; entries];
         if r.bit().ok_or_else(bad)? {
             // Ordered: runs of increasing lengths.
@@ -259,8 +266,9 @@ fn read_setup(packet: &[u8], channels: usize, blocksize: [usize; 2]) -> Result<S
     let mut r = LsbReader::new(&packet[7..]);
     let rd = |r: &mut LsbReader, n: u32| r.read(n).ok_or_else(bad);
     let mut books = Vec::new();
+    let mut budget = MAX_SETUP;
     for _ in 0..rd(&mut r, 8)? + 1 {
-        books.push(Codebook::read(&mut r)?);
+        books.push(Codebook::read(&mut r, &mut budget)?);
     }
     for _ in 0..rd(&mut r, 6)? + 1 {
         if rd(&mut r, 16)? != 0 {
