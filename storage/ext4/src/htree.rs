@@ -290,6 +290,10 @@ impl<D: BlockDevice> Ext4<D> {
         if !self.is_indexed(dir) {
             return Ok(None);
         }
+        // "." and ".." live only in the root block, outside the index.
+        if name == b"." || name == b".." {
+            return Ok(Some(vec![0]));
+        }
         let Some((path, hash)) = self.dx_probe(dir, name)? else { return Ok(None) };
         let bottom = path.levels.last().unwrap();
         let mut out = vec![bottom.entries[bottom.at].1 as u64];

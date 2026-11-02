@@ -439,6 +439,10 @@ fn hashed_directories_grow_split_and_stay_valid() {
             assert_eq!(fs.lookup(many, &long_name(i)).unwrap(), *ino, "{name}: {}", long_name(i));
         }
         assert_eq!(fs.lookup(many, "not-there"), Err(Error::NotFound));
+        // "." and ".." are in the root block, outside the index.
+        assert_eq!(fs.lookup(many, ".").unwrap(), many, "{name}");
+        assert_eq!(fs.lookup(many, "..").unwrap(), ROOT_INO, "{name}");
+        assert_eq!(fs.resolve("/many/../hello.txt").unwrap(), fs.resolve("/hello.txt").unwrap());
         // Removals, renames within and out of the directory.
         for i in (0..count).step_by(3) {
             fs.unlink(many, &long_name(i)).unwrap();
@@ -520,9 +524,11 @@ fn fragmented_files_get_deeper_extent_trees() {
     }
     fs.check().unwrap();
     let img = fs.unmount().unwrap();
-    e2fsck("fragmented", &img);
-    if let Some(stat) = debugfs_stat("fragmented", &img, "/fragmented") {
-        assert!(stat.contains("Level Entries") || stat.contains("EXTENTS"), "{stat}");
+    e2fsck("fragmented-depth", &img);
+    if let Some(stat) = debugfs_stat("fragmented-depth", &img, "/fragmented") {
+        // An index block at level 1 means a depth-2 tree.
+        assert!(stat.contains("(ETB1)"), "expected a depth-2 extent tree:
+{stat}");
     }
 }
 
