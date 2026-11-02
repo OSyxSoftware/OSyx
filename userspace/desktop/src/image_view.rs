@@ -59,11 +59,10 @@ fn load(path: String, loaded: Arc<Loaded>) {
         let r = os_std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}")).and_then(|d| image::decode(&d));
         match &r {
             Ok(p) => println!(
-                "files: opened picture {path} ({}x{}, {}, {} frame(s)) in {} ms",
+                "files: opened picture {path} ({}x{}, {}) in {} ms",
                 p.w,
                 p.h,
                 p.format,
-                p.frames.len(),
                 start.elapsed().as_millis()
             ),
             Err(e) => println!("files: cannot show {path}: {e}"),

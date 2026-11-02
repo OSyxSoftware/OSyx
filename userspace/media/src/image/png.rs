@@ -46,19 +46,39 @@ fn unfilter(raw: &[u8], w_bytes: usize, rows: usize, bpp: usize) -> Result<Vec<u
         let (done, cur) = out.split_at_mut(y * w_bytes);
         let prev = if y == 0 { None } else { Some(&done[(y - 1) * w_bytes..]) };
         let cur = &mut cur[..w_bytes];
-        for i in 0..w_bytes {
-            let a = if i >= bpp { cur[i - bpp] } else { 0 };
-            let b = prev.map_or(0, |p| p[i]);
-            let c = if i >= bpp { prev.map_or(0, |p| p[i - bpp]) } else { 0 };
-            let x = src[1 + i];
-            cur[i] = match kind {
-                0 => x,
-                1 => x.wrapping_add(a),
-                2 => x.wrapping_add(b),
-                3 => x.wrapping_add(((a as u16 + b as u16) / 2) as u8),
-                4 => x.wrapping_add(paeth(a, b, c)),
-                _ => return Err(format!("unknown PNG row filter {kind}")),
-            };
+        let src = &src[1..];
+        // One loop per filter type: the common byte-at-a-time work stays
+        // free of per-byte branching.
+        match (kind, prev) {
+            (0, _) => cur.copy_from_slice(src),
+            (1, _) => {
+                cur[..bpp.min(w_bytes)].copy_from_slice(&src[..bpp.min(w_bytes)]);
+                for i in bpp..w_bytes {
+                    cur[i] = src[i].wrapping_add(cur[i - bpp]);
+                }
+            }
+            (2, None) => cur.copy_from_slice(src),
+            (2, Some(up)) => {
+                for i in 0..w_bytes {
+                    cur[i] = src[i].wrapping_add(up[i]);
+                }
+            }
+            (3, _) => {
+                for i in 0..w_bytes {
+                    let a = if i >= bpp { cur[i - bpp] as u16 } else { 0 };
+                    let b = prev.map_or(0, |p| p[i] as u16);
+                    cur[i] = src[i].wrapping_add(((a + b) / 2) as u8);
+                }
+            }
+            (4, _) => {
+                for i in 0..w_bytes {
+                    let a = if i >= bpp { cur[i - bpp] } else { 0 };
+                    let b = prev.map_or(0, |p| p[i]);
+                    let c = if i >= bpp { prev.map_or(0, |p| p[i - bpp]) } else { 0 };
+                    cur[i] = src[i].wrapping_add(paeth(a, b, c));
+                }
+            }
+            _ => return Err(format!("unknown PNG row filter {kind}")),
         }
     }
     Ok(out)
@@ -168,8 +188,28 @@ pub fn decode(data: &[u8]) -> Result<Picture, String> {
     if interlace == 0 {
         let w_bytes = (w * bits).div_ceil(8);
         let img = unfilter(&raw, w_bytes, h, bpp)?;
-        for y in 0..h {
-            put_row(&img[y * w_bytes..(y + 1) * w_bytes], y, &mut (0..w));
+        // 8-bit pictures without a colour key: straight conversions.
+        match (color, depth, trns.is_empty()) {
+            (6, 8, _) => {
+                for (o, c) in px.iter_mut().zip(img.chunks_exact(4)) {
+                    *o = [c[0], c[1], c[2], c[3]];
+                }
+            }
+            (2, 8, true) => {
+                for (o, c) in px.iter_mut().zip(img.chunks_exact(3)) {
+                    *o = [c[0], c[1], c[2], 255];
+                }
+            }
+            (0, 8, true) => {
+                for (o, &g) in px.iter_mut().zip(img.iter()) {
+                    *o = [g, g, g, 255];
+                }
+            }
+            _ => {
+                for y in 0..h {
+                    put_row(&img[y * w_bytes..(y + 1) * w_bytes], y, &mut (0..w));
+                }
+            }
         }
     } else {
         // Adam7: seven passes of sub-images.
