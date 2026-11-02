@@ -4,8 +4,9 @@
 //! files they handle with a `Handles=` line of extensions and kind names
 //! (`Handles=mp4,mkv,video`). The user's choices per extension or kind live
 //! in `~/.config/osyx/openwith.conf` as `mp4=/opt/player` lines. Files shows
-//! images, text and source itself or through the default browser, unpacks
-//! archives itself, and hands everything else to a registered application.
+//! images, text and source itself or through the default browser, plays
+//! sound files and unpacks archives itself, and hands everything else to a
+//! registered application.
 
 use crate::kind::{extension, Kind};
 use alloc::string::String;
@@ -21,6 +22,8 @@ pub enum Builtin {
     Browser,
     /// Unpack an archive next to itself.
     Extract,
+    /// The audio player.
+    Player,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,7 +51,11 @@ impl Handler {
                 "Name" => name = String::from(v.trim()),
                 "Exec" => exec = String::from(v.trim()),
                 "Handles" => {
-                    handles = v.split(',').map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase()).filter(|s| !s.is_empty()).collect()
+                    handles = v
+                        .split(',')
+                        .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+                        .filter(|s| !s.is_empty())
+                        .collect()
                 }
                 _ => {}
             }
@@ -87,6 +94,7 @@ fn builtin_by_name(s: &str) -> Option<Builtin> {
         "builtin:hex" => Builtin::Hex,
         "builtin:browser" => Builtin::Browser,
         "builtin:extract" => Builtin::Extract,
+        "builtin:player" => Builtin::Player,
         _ => return None,
     })
 }
@@ -97,6 +105,7 @@ fn builtin_name(b: Builtin) -> &'static str {
         Builtin::Hex => "builtin:hex",
         Builtin::Browser => "builtin:browser",
         Builtin::Extract => "builtin:extract",
+        Builtin::Player => "builtin:player",
     }
 }
 
@@ -170,7 +179,11 @@ pub fn candidates(name: &str, kind: Kind, handlers: &[Handler], browser: bool) -
             add("Hex viewer", Target::Builtin(Builtin::Hex));
         }
         Kind::Archive(_) => add("Extract here", Target::Builtin(Builtin::Extract)),
-        Kind::Audio | Kind::Video | Kind::Pdf => add("Hex viewer", Target::Builtin(Builtin::Hex)),
+        Kind::Audio => {
+            add("Audio player", Target::Builtin(Builtin::Player));
+            add("Hex viewer", Target::Builtin(Builtin::Hex));
+        }
+        Kind::Video | Kind::Pdf => add("Hex viewer", Target::Builtin(Builtin::Hex)),
         Kind::Program => {}
     }
     for h in handlers.iter().filter(|h| h.handles(ext.as_deref(), kind)) {
@@ -182,7 +195,13 @@ pub fn candidates(name: &str, kind: Kind, handlers: &[Handler], browser: bool) -
 /// What a double click does: the user's choice if it is still possible,
 /// else a registered application for the exact extension, then for the
 /// kind, else the first built-in way. `None`: nothing can open it.
-pub fn default_target(name: &str, kind: Kind, handlers: &[Handler], choices: &Choices, browser: bool) -> Option<Target> {
+pub fn default_target(
+    name: &str,
+    kind: Kind,
+    handlers: &[Handler],
+    choices: &Choices,
+    browser: bool,
+) -> Option<Target> {
     let list = candidates(name, kind, handlers, browser);
     let ext = extension(name);
     if let Some(t) = choices.get(ext.as_deref(), kind) {
@@ -194,7 +213,7 @@ pub fn default_target(name: &str, kind: Kind, handlers: &[Handler], choices: &Ch
     // (the hex viewer is an explicit choice, not a default).
     let app = handlers.iter().find(|h| h.handles(ext.as_deref(), kind)).map(|h| Target::Exec(h.exec.clone()));
     match kind {
-        Kind::Audio | Kind::Video | Kind::Pdf => app,
+        Kind::Video | Kind::Pdf => app,
         _ => list.into_iter().next().map(|c| c.target),
     }
 }
@@ -221,9 +240,27 @@ mod tests {
         let handlers = [player()];
         let choices = Choices::default();
         let video = classify("clip.mp4");
-        assert_eq!(default_target("clip.mp4", video, &handlers, &choices, true), Some(Target::Exec("/opt/player".into())));
-        assert_eq!(default_target("song.mp3", classify("song.mp3"), &handlers, &choices, true), Some(Target::Exec("/opt/player".into())), "by kind");
-        assert_eq!(default_target("movie.avi", classify("movie.avi"), &handlers, &choices, true), None, "nothing handles avi");
+        assert_eq!(
+            default_target("clip.mp4", video, &handlers, &choices, true),
+            Some(Target::Exec("/opt/player".into()))
+        );
+        assert_eq!(
+            default_target("song.mp3", classify("song.mp3"), &handlers, &choices, true),
+            Some(Target::Builtin(Builtin::Player)),
+            "sound plays in Files"
+        );
+        let mut mine = Choices::default();
+        mine.set("song.mp3", Kind::Audio, Target::Exec("/opt/player".into()));
+        assert_eq!(
+            default_target("x.mp3", Kind::Audio, &handlers, &mine, true),
+            Some(Target::Exec("/opt/player".into())),
+            "unless the user chose otherwise"
+        );
+        assert_eq!(
+            default_target("movie.avi", classify("movie.avi"), &handlers, &choices, true),
+            None,
+            "nothing handles avi"
+        );
         assert_eq!(default_target("a.pdf", Kind::Pdf, &[], &choices, true), None);
         // Still openable as hex through the menu.
         let list = candidates("a.pdf", Kind::Pdf, &[], true);
@@ -236,7 +273,11 @@ mod tests {
         let none = Choices::default();
         assert_eq!(default_target("a.txt", Kind::Text, &[], &none, false), Some(Target::Builtin(Builtin::Viewer)));
         assert_eq!(default_target("a.png", Kind::Image, &[], &none, true), Some(Target::Builtin(Builtin::Browser)));
-        assert_eq!(default_target("a.png", Kind::Image, &[], &none, false), Some(Target::Builtin(Builtin::Hex)), "no browser: hex is all there is");
+        assert_eq!(
+            default_target("a.png", Kind::Image, &[], &none, false),
+            Some(Target::Builtin(Builtin::Hex)),
+            "no browser: hex is all there is"
+        );
         let z = classify("a.zip");
         assert_eq!(default_target("a.zip", z, &[], &none, false), Some(Target::Builtin(Builtin::Extract)));
     }
@@ -246,9 +287,15 @@ mod tests {
         let handlers = [Handler::parse("Name=Editor\nExec=/opt/edit\nHandles=txt,md\n").unwrap()];
         let mut choices = Choices::default();
         choices.set("notes.txt", Kind::Text, Target::Exec("/opt/edit".into()));
-        assert_eq!(default_target("x.txt", Kind::Text, &handlers, &choices, false), Some(Target::Exec("/opt/edit".into())));
+        assert_eq!(
+            default_target("x.txt", Kind::Text, &handlers, &choices, false),
+            Some(Target::Exec("/opt/edit".into()))
+        );
         // Another text extension is not affected.
-        assert_eq!(default_target("x.log", Kind::Text, &handlers, &choices, false), Some(Target::Builtin(Builtin::Viewer)));
+        assert_eq!(
+            default_target("x.log", Kind::Text, &handlers, &choices, false),
+            Some(Target::Builtin(Builtin::Viewer))
+        );
         // The program was uninstalled: back to the default.
         assert_eq!(default_target("x.txt", Kind::Text, &[], &choices, false), Some(Target::Builtin(Builtin::Viewer)));
     }

@@ -18,11 +18,14 @@
 //! whole selection. The context menu (right click) has "Open with": a file
 //! opens with the program the user chose for its type, else with what
 //! `/system/share/applications/*.app` registers (`Handles=`), else by itself
-//! (text viewer, hex viewer, default browser for images and pages).
+//! (text viewer, hex viewer, audio player, default browser for images and
+//! pages).
 
 #![no_std]
 #![no_main]
 
+#[path = "../audio_view.rs"]
+mod audio_view;
 #[path = "../fileops.rs"]
 mod fileops;
 #[path = "../shell_common.rs"]
@@ -179,6 +182,8 @@ struct Files {
     status_error: bool,
     dialog: Option<Dialog>,
     preview: Option<Preview>,
+    /// The audio player, shown in place of the list.
+    player: Option<audio_view::AudioView>,
     drag: Option<FileDrag>,
     pending_move: Option<(String, Instant)>,
     tz: Tz,
@@ -272,6 +277,7 @@ fn main() -> i32 {
         status_error: false,
         dialog: None,
         preview: None,
+        player: None,
         drag: None,
         pending_move: None,
         tz: system_tz(),
@@ -516,6 +522,19 @@ impl Files {
                 self.spawn(c, &name, path);
             }
             Target::Builtin(Builtin::Extract) => self.extract_paths(&[String::from(path)]),
+            Target::Builtin(Builtin::Player) => {
+                self.preview = None;
+                self.player = None;
+                match audio_view::AudioView::open(path) {
+                    Ok(v) => {
+                        self.player = Some(v);
+                        self.set_status(format!("Playing {path}"), false);
+                    }
+                    Err(e) => self.set_status(format!("Cannot play {path}: {e}"), true),
+                }
+                let (w, h) = self.size;
+                self.layout_inner(w, h);
+            }
             Target::Exec(exec) => {
                 let windows = is_win_program(exec);
                 let mut c = Command::new(if windows { "/bin/winrun" } else { exec });
@@ -530,7 +549,13 @@ impl Files {
         }
     }
 
+    /// A viewer (text, hex or the player) covers the list.
+    fn viewing(&self) -> bool {
+        self.preview.is_some() || self.player.is_some()
+    }
+
     fn preview(&mut self, path: String, force_hex: bool) {
+        self.player = None;
         let data = match fs::read(&path) {
             Ok(d) => d,
             Err(e) => {
@@ -796,6 +821,9 @@ impl Files {
         let _ = bar;
         self.hidden.rect = Rect::new(side.x + 14, side.bottom() as i32 - 40, side.w - 20, 28);
         self.list.rect = inset(main, 0);
+        if let Some(pl) = &mut self.player {
+            pl.layout(main);
+        }
         if let Some(p) = &mut self.preview {
             let (head, body) = split_top(main, 44);
             p.close.rect = Rect::new(head.right() as i32 - 96, head.y + 6, 84, 32);
@@ -1197,6 +1225,25 @@ impl App for Files {
                 r => return r.needs_redraw(),
             }
         }
+        if let Some(pl) = &mut self.player {
+            let mut close = false;
+            let redraw = pl.event(&ev, &mut close);
+            if close {
+                self.player = None;
+                let n = self.entries.len();
+                self.set_status(format!("{n} items"), false);
+                return true;
+            }
+            // The tool bar and side bar stay usable while playing.
+            if !matches!(ev, Ui::PointerDown { .. } | Ui::PointerUp { .. } | Ui::PointerMove { .. }) {
+                return redraw;
+            }
+            if let Some((x, y)) = ev.position() {
+                if contains(&self.list.rect, x, y) {
+                    return redraw;
+                }
+            }
+        }
         if let Some(p) = &mut self.preview {
             let mut close = false;
             let mut redraw = p.view.event(&ev).needs_redraw();
@@ -1403,6 +1450,7 @@ impl App for Files {
                 if let Some(i) = rects.iter().position(|r| contains(r, x, y)) {
                     let target = self.places[i].1.clone();
                     self.preview = None;
+                    self.player = None;
                     if self.navigate(&target, true) {
                         cx.title = Some(format!("Files — {}", self.cwd));
                     }
@@ -1420,7 +1468,7 @@ impl App for Files {
         // Right click: the context menu (the row under the pointer joins the
         // selection unless it is already part of it).
         if let Ui::PointerDown { x, y, button: b, .. } = ev {
-            if b == button::RIGHT && self.preview.is_none() && contains(&self.list.rect, x, y) {
+            if b == button::RIGHT && !self.viewing() && contains(&self.list.rect, x, y) {
                 match self.list.row_at(x, y) {
                     Some(i) => {
                         if !self.list.is_marked(i) {
@@ -1440,7 +1488,7 @@ impl App for Files {
         // A left press on a row: Ctrl toggles it, Shift selects a range,
         // otherwise it is a possible drag (the list also selects it).
         if let Ui::PointerDown { x, y, button: b, clicks } = ev {
-            if b == button::LEFT && clicks == 1 && self.preview.is_none() {
+            if b == button::LEFT && clicks == 1 && !self.viewing() {
                 match self.list.row_at(x, y) {
                     Some(i) => {
                         let (ctrl, shift) = (self.mods & modifier::CTRL != 0, self.mods & modifier::SHIFT != 0);
@@ -1522,21 +1570,28 @@ impl App for Files {
         redraw
     }
 
-    fn tick_ms(&self) -> Option<u64> { self.pending_move.as_ref().map(|_| 500) }
+    fn tick_ms(&self) -> Option<u64> {
+        if self.player.is_some() {
+            return Some(250);
+        }
+        self.pending_move.as_ref().map(|_| 500)
+    }
 
     fn tick(&mut self, _cx: &mut Ctx) -> bool {
-        let Some((path, since)) = &self.pending_move else { return false };
+        // The player's clock and seek bar move while it plays.
+        let playing = self.player.as_mut().is_some_and(|p| p.needs_redraw());
+        let Some((path, since)) = &self.pending_move else { return playing };
         if fs::symlink_metadata(path).is_err_and(|e| e.kind() == os_std::error::ErrorKind::NotFound) {
             self.pending_move = None;
             self.refresh();
             return true;
         }
         if since.elapsed() >= Duration::from_secs(10) { self.pending_move = None; }
-        false
+        playing
     }
 
     fn file_drop(&mut self, path: &str, x: i32, y: i32, _cx: &mut Ctx) -> bool {
-        if self.preview.is_some() || self.dialog.is_some() || !path.starts_with('/') { return false; }
+        if self.viewing() || self.dialog.is_some() || !path.starts_with('/') { return false; }
         let name = path.rsplit('/').next().unwrap_or("");
         if name.is_empty() || name == "." || name == ".." { return false; }
         let target = self.list.row_at(x, y).and_then(|i| self.entries.get(i))
@@ -1591,7 +1646,11 @@ impl App for Files {
         }
         self.hidden.draw(p, false);
         // Main area.
+        if let Some(pl) = &mut self.player {
+            pl.draw(p, main);
+        }
         match &self.preview {
+            _ if self.player.is_some() => {}
             Some(pv) => {
                 let (head, body) = split_top(main, 44);
                 p.fill(head, t.surface);

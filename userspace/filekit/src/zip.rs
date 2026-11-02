@@ -90,7 +90,8 @@ pub fn extract(data: &[u8], e: &Entry) -> Result<Vec<u8>, String> {
     let raw = data.get(start..start + e.compressed as usize).ok_or_else(|| alloc::format!("{}: truncated", e.path))?;
     let out = match e.method {
         0 => raw.to_vec(),
-        8 => miniz_oxide::inflate::decompress_to_vec_with_limit(raw, e.size as usize).map_err(|err| alloc::format!("{}: {:?}", e.path, err.status))?,
+        8 => miniz_oxide::inflate::decompress_to_vec_with_limit(raw, e.size as usize)
+            .map_err(|err| alloc::format!("{}: {:?}", e.path, err.status))?,
         m => return Err(alloc::format!("{}: compression method {m} is not supported", e.path)),
     };
     if out.len() != e.size as usize || crc32(&out) != e.crc {
