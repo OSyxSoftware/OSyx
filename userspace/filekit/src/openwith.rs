@@ -51,11 +51,7 @@ impl Handler {
                 "Name" => name = String::from(v.trim()),
                 "Exec" => exec = String::from(v.trim()),
                 "Handles" => {
-                    handles = v
-                        .split(',')
-                        .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
-                        .filter(|s| !s.is_empty())
-                        .collect()
+                    handles = v.split(',').map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase()).filter(|s| !s.is_empty()).collect()
                 }
                 _ => {}
             }
@@ -195,13 +191,7 @@ pub fn candidates(name: &str, kind: Kind, handlers: &[Handler], browser: bool) -
 /// What a double click does: the user's choice if it is still possible,
 /// else a registered application for the exact extension, then for the
 /// kind, else the first built-in way. `None`: nothing can open it.
-pub fn default_target(
-    name: &str,
-    kind: Kind,
-    handlers: &[Handler],
-    choices: &Choices,
-    browser: bool,
-) -> Option<Target> {
+pub fn default_target(name: &str, kind: Kind, handlers: &[Handler], choices: &Choices, browser: bool) -> Option<Target> {
     let list = candidates(name, kind, handlers, browser);
     let ext = extension(name);
     if let Some(t) = choices.get(ext.as_deref(), kind) {
@@ -240,27 +230,12 @@ mod tests {
         let handlers = [player()];
         let choices = Choices::default();
         let video = classify("clip.mp4");
-        assert_eq!(
-            default_target("clip.mp4", video, &handlers, &choices, true),
-            Some(Target::Exec("/opt/player".into()))
-        );
-        assert_eq!(
-            default_target("song.mp3", classify("song.mp3"), &handlers, &choices, true),
-            Some(Target::Builtin(Builtin::Player)),
-            "sound plays in Files"
-        );
+        assert_eq!(default_target("clip.mp4", video, &handlers, &choices, true), Some(Target::Exec("/opt/player".into())));
+        assert_eq!(default_target("song.mp3", classify("song.mp3"), &handlers, &choices, true), Some(Target::Builtin(Builtin::Player)), "sound plays in Files");
         let mut mine = Choices::default();
         mine.set("song.mp3", Kind::Audio, Target::Exec("/opt/player".into()));
-        assert_eq!(
-            default_target("x.mp3", Kind::Audio, &handlers, &mine, true),
-            Some(Target::Exec("/opt/player".into())),
-            "unless the user chose otherwise"
-        );
-        assert_eq!(
-            default_target("movie.avi", classify("movie.avi"), &handlers, &choices, true),
-            None,
-            "nothing handles avi"
-        );
+        assert_eq!(default_target("x.mp3", Kind::Audio, &handlers, &mine, true), Some(Target::Exec("/opt/player".into())), "unless the user chose otherwise");
+        assert_eq!(default_target("movie.avi", classify("movie.avi"), &handlers, &choices, true), None, "nothing handles avi");
         assert_eq!(default_target("a.pdf", Kind::Pdf, &[], &choices, true), None);
         // Still openable as hex through the menu.
         let list = candidates("a.pdf", Kind::Pdf, &[], true);
@@ -273,11 +248,7 @@ mod tests {
         let none = Choices::default();
         assert_eq!(default_target("a.txt", Kind::Text, &[], &none, false), Some(Target::Builtin(Builtin::Viewer)));
         assert_eq!(default_target("a.png", Kind::Image, &[], &none, true), Some(Target::Builtin(Builtin::Browser)));
-        assert_eq!(
-            default_target("a.png", Kind::Image, &[], &none, false),
-            Some(Target::Builtin(Builtin::Hex)),
-            "no browser: hex is all there is"
-        );
+        assert_eq!(default_target("a.png", Kind::Image, &[], &none, false), Some(Target::Builtin(Builtin::Hex)), "no browser: hex is all there is");
         let z = classify("a.zip");
         assert_eq!(default_target("a.zip", z, &[], &none, false), Some(Target::Builtin(Builtin::Extract)));
     }
@@ -287,15 +258,9 @@ mod tests {
         let handlers = [Handler::parse("Name=Editor\nExec=/opt/edit\nHandles=txt,md\n").unwrap()];
         let mut choices = Choices::default();
         choices.set("notes.txt", Kind::Text, Target::Exec("/opt/edit".into()));
-        assert_eq!(
-            default_target("x.txt", Kind::Text, &handlers, &choices, false),
-            Some(Target::Exec("/opt/edit".into()))
-        );
+        assert_eq!(default_target("x.txt", Kind::Text, &handlers, &choices, false), Some(Target::Exec("/opt/edit".into())));
         // Another text extension is not affected.
-        assert_eq!(
-            default_target("x.log", Kind::Text, &handlers, &choices, false),
-            Some(Target::Builtin(Builtin::Viewer))
-        );
+        assert_eq!(default_target("x.log", Kind::Text, &handlers, &choices, false), Some(Target::Builtin(Builtin::Viewer)));
         // The program was uninstalled: back to the default.
         assert_eq!(default_target("x.txt", Kind::Text, &[], &choices, false), Some(Target::Builtin(Builtin::Viewer)));
     }

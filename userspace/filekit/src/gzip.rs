@@ -17,10 +17,7 @@ pub fn decompress(data: &[u8], limit: usize) -> Result<(Vec<u8>, Option<String>)
     let flags = data[3];
     let mut p = 10;
     if flags & 4 != 0 {
-        let n = u16::from_le_bytes([
-            *data.get(p).ok_or("truncated gzip header")?,
-            *data.get(p + 1).ok_or("truncated gzip header")?,
-        ]) as usize;
+        let n = u16::from_le_bytes([*data.get(p).ok_or("truncated gzip header")?, *data.get(p + 1).ok_or("truncated gzip header")?]) as usize;
         p += 2 + n;
     }
     let mut name = None;
