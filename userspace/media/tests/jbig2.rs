@@ -166,3 +166,14 @@ fn pdf_jbig2decode_with_globals() {
     // Resampling may move a few edge pixels.
     assert!(off < want.w * want.h / 200, "{off} pixels differ");
 }
+
+#[test]
+fn jbig2_files_open_as_pictures() {
+    let data = std::fs::read(format!("{}/bitmap.jbig2", dir())).unwrap();
+    let pic = osyx_media::image::decode(&data).unwrap();
+    let want = reference();
+    assert_eq!((pic.w, pic.h, pic.format.as_str()), (want.w, want.h, "JBIG2"));
+    for (p, &b) in pic.frames[0].px.iter().zip(&want.px) {
+        assert_eq!(p[0] == 0, b == 1);
+    }
+}

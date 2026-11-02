@@ -18,7 +18,7 @@ use osyx_ui::widget::{Button, ButtonStyle};
 use osyx_ui::{Align, Event as Ui, FontKind, Painter, Response};
 
 /// Extensions the viewer decodes (lower case).
-pub const EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "bmp", "ico"];
+pub const EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "bmp", "ico", "jbig2", "jb2"];
 
 struct Loaded {
     /// The picture, or why it cannot be shown.

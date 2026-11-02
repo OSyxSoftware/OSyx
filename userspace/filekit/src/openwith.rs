@@ -160,7 +160,7 @@ impl Choices {
 
 /// Pictures the built-in viewer decodes.
 fn viewer_shows(ext: Option<&str>) -> bool {
-    matches!(ext, Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico"))
+    matches!(ext, Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "jbig2" | "jb2"))
 }
 
 /// Sound files the built-in player decodes (Ogg may still hold Opus; the
