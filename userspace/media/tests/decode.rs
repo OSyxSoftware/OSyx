@@ -129,3 +129,24 @@ fn vorbis() {
         }
     }
 }
+
+#[test]
+fn aac() {
+    // FFmpeg's encoder with noise substitution: its noise matches only when
+    // decoded from the start, so that file is not seeked.
+    for (f, rate, ch, seekable) in [
+        ("aac-stereo-44100.m4a", 44100, 2, false),
+        ("aac-mono-22050.aac", 22050, 1, false),
+        ("aac-stereo-48000.aac", 48000, 2, true),
+        ("aac-5.1-48000.m4a", 48000, 6, true),
+        ("aac-mono-8000.mp4", 8000, 1, false),
+    ] {
+        let whole = check(f, rate, ch, 1);
+        if seekable {
+            let frames = (whole.len() / ch) as u64;
+            for at in [0, 1, 1023, 1024, 3000, frames / 2, frames - 3, frames] {
+                check_seek(f, &whole, ch, at);
+            }
+        }
+    }
+}

@@ -2,6 +2,9 @@
 *.img binary
 *.pdf binary
 *.mp3 binary
+*.aac binary
+*.m4a binary
+*.mp4 binary
 *.flac binary
 *.ogg binary
 *.wav binary
