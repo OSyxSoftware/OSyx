@@ -69,7 +69,7 @@ impl Codebook {
         let entries = r.read(24).ok_or_else(bad)? as usize;
         // Real codebooks stay far below these; they keep a crafted setup
         // header from asking for gigabytes.
-        if entries > MAX_ENTRIES || entries.saturating_mul(dim) > MAX_VQ {
+        if entries > MAX_ENTRIES {
             return Err(bad());
         }
         // Lengths and tree nodes; a vector table is charged below, if any.
@@ -100,6 +100,10 @@ impl Codebook {
         let mut vq = Vec::new();
         if lookup == 1 || lookup == 2 {
             if dim == 0 {
+                return Err(bad());
+            }
+            // Only vector codebooks expand to entries x dim values.
+            if entries.saturating_mul(dim) > MAX_VQ {
                 return Err(bad());
             }
             *budget = budget.checked_sub(entries.saturating_mul(dim)).ok_or_else(bad)?;

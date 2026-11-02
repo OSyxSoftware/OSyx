@@ -241,7 +241,8 @@ pub fn decode(doc: &Document, d: &Dict, raw: &[u8], resolve_space: &dyn Fn(&Obje
     // Masks.
     // An image whose mask cannot be read is left out rather than drawn
     // opaque over what the mask should have let through.
-    if let Some(sm) = key(d, "SMask") {
+    // "/SMask null" (or a dangling reference) means no soft mask.
+    if let Some(sm) = key(d, "SMask").filter(|o| !matches!(doc.resolve(o), Object::Null)) {
         let a = mask_alpha(doc, sm, w, h, true)?;
         for (p, a) in px.iter_mut().zip(a) {
             p[3] = a;
