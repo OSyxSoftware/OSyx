@@ -23,18 +23,33 @@ use osyx_ui::{Align, Event as Ui, FontKind, Painter, Response};
 /// immediate, large enough to keep the card's 200 ms queue topped up.
 const CHUNK_FRAMES: usize = 4096;
 
-/// State shared by the view and the playback thread.
-struct Shared {
-    paused: AtomicBool,
-    quit: AtomicBool,
+/// State shared by the view and the playback thread (the video player
+/// uses it too).
+pub struct Shared {
+    pub paused: AtomicBool,
+    pub quit: AtomicBool,
     /// A seek request (source frames + 1; 0 for none).
-    seek: AtomicU64,
+    pub seek: AtomicU64,
     /// Source frames handed to the sound card.
-    written: AtomicU64,
-    finished: AtomicBool,
+    pub written: AtomicU64,
+    pub finished: AtomicBool,
     /// Volume in percent.
-    volume: AtomicU32,
-    error: Mutex<Option<String>>,
+    pub volume: AtomicU32,
+    pub error: Mutex<Option<String>>,
+}
+
+impl Shared {
+    pub fn new() -> Arc<Shared> {
+        Arc::new(Shared {
+            paused: AtomicBool::new(false),
+            quit: AtomicBool::new(false),
+            seek: AtomicU64::new(0),
+            written: AtomicU64::new(0),
+            finished: AtomicBool::new(false),
+            volume: AtomicU32::new(100),
+            error: Mutex::new(None),
+        })
+    }
 }
 
 pub struct AudioView {
@@ -79,15 +94,7 @@ impl AudioView {
         let data = os_std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
         let dec = audio::open(data)?;
         let info = dec.info().clone();
-        let shared = Arc::new(Shared {
-            paused: AtomicBool::new(false),
-            quit: AtomicBool::new(false),
-            seek: AtomicU64::new(0),
-            written: AtomicU64::new(0),
-            finished: AtomicBool::new(false),
-            volume: AtomicU32::new(100),
-            error: Mutex::new(None),
-        });
+        let shared = Shared::new();
         let s = shared.clone();
         let thread = Some(thread::spawn(move || play(dec, s)));
         println!("files: playing {path} ({}, {} Hz, {})", info.codec, info.rate, channels_name(info.channels));
@@ -356,7 +363,7 @@ impl Drop for AudioView {
 }
 
 /// The playback thread.
-fn play(mut dec: Box<dyn Decoder>, s: Arc<Shared>) {
+pub fn play(mut dec: Box<dyn Decoder>, s: Arc<Shared>) {
     let info = dec.info().clone();
     let mut conv = Converter::new(info.rate, info.channels);
     let mut card = None;
