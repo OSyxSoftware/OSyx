@@ -295,6 +295,8 @@ impl<D: BlockDevice> Ext4<D> {
             return Ok(Some(vec![0]));
         }
         let Some((path, hash)) = self.dx_probe(dir, name)? else { return Ok(None) };
+        let bs = self.sb.block_size as usize;
+        let nblocks = self.dir_blocks(dir)?;
         let mut levels = path.levels;
         let bottom = levels.last().unwrap();
         let mut out = vec![bottom.entries[bottom.at].1 as u64];
@@ -309,16 +311,24 @@ impl<D: BlockDevice> Ext4<D> {
             if h & 1 == 0 || h & !1 != hash {
                 break;
             }
+            // A damaged index anywhere on the way: search linearly, as
+            // dx_probe does, rather than miss names in later leaves.
             for lv in levels.iter_mut().skip(d + 1) {
-                let (_, nb) = self.dir_block(dir, blk as u64)?;
-                let Some(list) = read_entries(&nb, NODE_COUNT) else { return Ok(Some(out)) };
-                if list.is_empty() {
-                    return Ok(Some(out));
+                if blk as u64 >= nblocks || blk == 0 {
+                    return Ok(None);
                 }
+                let (_, nb) = self.dir_block(dir, blk as u64)?;
+                if le32(&nb, 0) != 0 || le16(&nb, 4) as usize != bs || nb[6] != 0 {
+                    return Ok(None);
+                }
+                let Some(list) = read_entries(&nb, NODE_COUNT) else { return Ok(None) };
                 lv.lblk = blk as u64;
                 blk = list[0].1;
                 lv.entries = list;
                 lv.at = 0;
+            }
+            if blk as u64 >= nblocks || blk == 0 {
+                return Ok(None);
             }
             out.push(blk as u64);
         }
