@@ -295,6 +295,7 @@ impl Transport {
             free: size,
             next,
             chain_len: alloc::vec![0; size as usize],
+            interrupts: irq,
         })
     }
 
@@ -459,12 +460,15 @@ pub struct AsyncQueue {
     free: u16,
     next: alloc::vec::Vec<u16>,
     chain_len: alloc::vec::Vec<u16>,
+    interrupts: bool,
 }
 
 // SAFETY: owned by one driver instance and only used under its lock.
 unsafe impl Send for AsyncQueue {}
 
 impl AsyncQueue {
+    /// Whether the device accepted this queue's MSI-X entry.
+    pub fn has_interrupts(&self) -> bool { self.interrupts }
     pub fn size(&self) -> u16 {
         self.size
     }
