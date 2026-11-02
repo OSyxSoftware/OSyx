@@ -118,3 +118,14 @@ fn mp3() {
         }
     }
 }
+
+#[test]
+fn vorbis() {
+    for (f, rate, ch) in [("vorbis-stereo-44100.ogg", 44100, 2), ("vorbis-mono-22050.ogg", 22050, 1)] {
+        let whole = check(f, rate, ch, 2);
+        let frames = (whole.len() / ch) as u64;
+        for at in [0, 1, 1023, 4100, frames / 2, frames - 3, frames].into_iter().filter(|&a| a <= frames) {
+            check_seek(f, &whole, ch, at);
+        }
+    }
+}

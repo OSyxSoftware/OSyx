@@ -1,7 +1,8 @@
 //! Tables of MPEG-1/2 Audio Layer III.
 //!
 //! The Huffman codes are those of ISO/IEC 11172-3, Annex B, Table B.7 (big
-//! values tables 1 to 24 and the count1 tables A and B); the synthesis
+//! values tables 1 to 24 and count1 table A; table B is the 4-bit
+//! complement of `vwxy`); the synthesis
 //! window is the D[i] window of Table B.3 (the reference decoder's values,
 //! with the sign convention of the standard). Generated, do not edit.
 
@@ -176,9 +177,6 @@ static BITS_24: [u8; 256] = [
 /// Count1 table A: entry `vwxy` (v the high bit).
 pub static QUAD_A: ([u32; 16], [u8; 16]) =
     ([1, 5, 4, 5, 6, 5, 4, 4, 7, 3, 6, 0, 7, 2, 3, 1], [1, 4, 4, 5, 4, 6, 5, 6, 4, 5, 5, 6, 5, 6, 6, 6]);
-/// Count1 table B: entry `vwxy` (v the high bit).
-pub static QUAD_B: ([u32; 16], [u8; 16]) =
-    ([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0], [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]);
 pub static LINBITS: [u32; 32] =
     [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 6, 8, 10, 13, 4, 5, 6, 7, 8, 9, 11, 13];
 /// The synthesis window D[i] (Table B.3).

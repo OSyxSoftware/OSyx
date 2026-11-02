@@ -9,9 +9,10 @@
 pub mod flac;
 pub mod mp3;
 mod mp3_tables;
-// pub mod ogg;
+pub mod ogg;
 pub mod resample;
-// pub mod vorbis;
+pub mod vorbis;
+mod vorbis_table;
 pub mod wav;
 
 use alloc::boxed::Box;
@@ -96,31 +97,7 @@ pub fn open(data: Vec<u8>) -> Result<Box<dyn Decoder>, String> {
         Some(Format::Wav) => Ok(Box::new(wav::WavDecoder::new(data)?)),
         Some(Format::Flac) => Ok(Box::new(flac::FlacDecoder::new(data)?)),
         Some(Format::Mp3) => Ok(Box::new(mp3::Mp3Decoder::new(data)?)),
-        _ if false => unreachable!(),
-        _ => Err(String::from("not a sound file OSyx can play (WAV, FLAC, MP3 and Ogg Vorbis are supported)")),
+        Some(Format::Ogg) => ogg::open(data),
+        None => Err(String::from("not a sound file OSyx can play (WAV, FLAC, MP3 and Ogg Vorbis are supported)")),
     }
-}
-
-/// Decodes and drops samples until `skip` frames are gone; the rest of
-/// the block it lands in is kept in `pending`.
-pub(crate) fn skip_frames(
-    dec: &mut dyn FnMut() -> Result<Option<Vec<f32>>, String>,
-    mut skip: u64,
-    channels: usize,
-    pending: &mut Vec<f32>,
-) -> Result<u64, String> {
-    let mut dropped = 0;
-    while skip > 0 {
-        let Some(block) = dec()? else { break };
-        let frames = (block.len() / channels.max(1)) as u64;
-        if frames <= skip {
-            skip -= frames;
-            dropped += frames;
-        } else {
-            *pending = block[skip as usize * channels..].to_vec();
-            dropped += skip;
-            skip = 0;
-        }
-    }
-    Ok(dropped)
 }

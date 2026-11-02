@@ -853,7 +853,7 @@ fn requantize(
 ) {
     let shift = if g.scalefac_scale { 2 } else { 1 };
     let gain = g.global_gain - 210;
-    let mut line = |i: usize, quarter: i32, xr: &mut [f32; 576]| {
+    let line = |i: usize, quarter: i32, xr: &mut [f32; 576]| {
         let v = is[i];
         if v == 0 {
             xr[i] = 0.0;

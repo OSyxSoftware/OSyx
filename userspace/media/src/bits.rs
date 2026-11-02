@@ -151,15 +151,6 @@ impl<'a> LsbReader<'a> {
         (v & ((1u64 << n) - 1)) as u32
     }
 
-    pub fn consume(&mut self, n: usize) -> Option<()> {
-        if self.bits_left() < n {
-            self.pos = self.data.len() * 8;
-            return None;
-        }
-        self.pos += n;
-        Some(())
-    }
-
     pub fn bit(&mut self) -> Option<bool> {
         self.read(1).map(|b| b != 0)
     }
