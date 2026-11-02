@@ -112,6 +112,20 @@ fn digest(alg: Alg, data: &[u8]) -> Vec<u8> {
     s.finish()
 }
 
+/// One-shot digest by CNG algorithm name, SHA-384 and SHA-512 included:
+/// crypt32 hashes certificates and signs with them.
+pub(crate) fn hash_named(name: &str, data: &[u8]) -> Option<Vec<u8>> {
+    use sha2::Digest;
+    match name.to_ascii_uppercase().as_str() {
+        "MD5" => Some(digest(Alg::Md5, data)),
+        "SHA1" => Some(digest(Alg::Sha1, data)),
+        "SHA256" => Some(digest(Alg::Sha256, data)),
+        "SHA384" => Some(sha2::Sha384::digest(data).to_vec()),
+        "SHA512" => Some(sha2::Sha512::digest(data).to_vec()),
+        _ => None,
+    }
+}
+
 /// MD5, SHA-1 and SHA-256 all work on 64-byte blocks.
 const BLOCK: usize = 64;
 

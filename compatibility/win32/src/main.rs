@@ -88,6 +88,8 @@ mod credman;
 mod accounts;
 mod capi;
 mod bcrypt;
+mod ncrypt;
+mod sspi;
 mod newlibs;
 mod minordlls;
 mod msi;

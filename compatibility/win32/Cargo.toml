@@ -31,3 +31,11 @@ webpki-roots = "1"
 rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc"] }
 # rustls-rustcrypto's key generation needs a source; winrun's is /dev/random.
 getrandom = { version = "0.2", features = ["custom"] }
+# ncrypt: RSA and NIST-curve keys (generation, signing, PKCS#8), the same
+# RustCrypto versions rustls-rustcrypto already builds.
+rsa = { version = "0.9", default-features = false }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "alloc"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "alloc"] }
+sha1 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+rand_core = { version = "0.6", default-features = false }
