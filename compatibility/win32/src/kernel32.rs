@@ -1538,7 +1538,7 @@ extern "win64" fn TerminateProcess(h: u64, code: u32) -> Bool {
     }
 }
 
-extern "win64" fn GetExitCodeProcess(h: u64, code: *mut u32) -> Bool {
+pub(crate) extern "win64" fn GetExitCodeProcess(h: u64, code: *mut u32) -> Bool {
     if h == objects::CURRENT_PROCESS && !code.is_null() {
         // SAFETY: the caller's out pointer.
         unsafe { *code = 259 }; // STILL_ACTIVE
@@ -2379,7 +2379,7 @@ extern "win64" fn ReleaseSemaphore(h: u64, n: i32, prev: *mut i32) -> Bool {
     TRUE
 }
 
-extern "win64" fn WaitForSingleObject(h: u64, ms: u32) -> u32 {
+pub(crate) extern "win64" fn WaitForSingleObject(h: u64, ms: u32) -> u32 {
     objects::wait(&[h], false, ms).unwrap_or_else(|e| fail(e, objects::WAIT_FAILED))
 }
 

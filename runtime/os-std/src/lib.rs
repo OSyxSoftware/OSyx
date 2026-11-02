@@ -41,6 +41,8 @@ mod sys;
 #[path = "sys/host.rs"]
 mod sys;
 
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub mod elevate;
 pub mod env;
 pub mod error;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

@@ -93,6 +93,7 @@ $programs = [ordered]@{
     'stubfix.exe' = @{ Src = @('stubfix.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lwininet', '-limm32', '-lshell32', '-lgdi32', '-luser32', '-lkernel32') }
     'thrdll.dll'  = @{ Src = @('thrdll.c'); Args = @('-shared', '-Wl,-e,DllMainCRTStartup', '-lkernel32') }
     'sysadmin.exe' = @{ Src = @('sysadmin.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-liphlpapi', '-lsetupapi', '-lkernel32') }
+    'runas.exe' = @{ Src = @('runas.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshell32', '-lkernel32') }
 }
 foreach ($name in $programs.Keys) {
     $p = $programs[$name]

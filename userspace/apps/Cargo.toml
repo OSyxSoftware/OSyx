@@ -56,6 +56,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "elevate"
+path = "src/bin/elevate.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "run-app"
 path = "src/bin/run-app.rs"
 test = false
