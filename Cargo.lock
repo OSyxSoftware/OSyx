@@ -1066,6 +1066,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "osyx-interrupts"
+version = "0.1.0"
+
+[[package]]
 name = "osyx-kernel"
 version = "0.1.0"
 dependencies = [
@@ -1081,6 +1085,7 @@ dependencies = [
  "osyx-gfx",
  "osyx-i2c",
  "osyx-input",
+ "osyx-interrupts",
  "osyx-mm",
  "osyx-net",
  "osyx-part",

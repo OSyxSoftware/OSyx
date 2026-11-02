@@ -208,6 +208,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     arch::timer::init(boot.option_value("timer"), boot.option_value("timer.calib"));
     cpu::enable_interrupts();
     arch::timer::verify();
+    arch::ioapic::init();
     sched::init();
     smp::start(boot);
     prof::init();

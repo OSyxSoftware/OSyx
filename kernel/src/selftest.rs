@@ -47,6 +47,7 @@ pub fn run(boot: &BootData) -> Summary {
         ("kernel heap", &heap_test),
         ("breakpoint exception", &breakpoint),
         ("timer interrupts", &timer),
+        ("I/O APIC wired interrupt routing", &|| if boot.has_option("test.ioapic") { crate::arch::ioapic::selftest() } else { Ok(()) }),
         ("user copy validation", &user_copy),
         ("address space lifecycle", &address_space),
         ("per-process memory locks", &crate::process::memory_lock_selftest),
