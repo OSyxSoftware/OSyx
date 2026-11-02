@@ -293,7 +293,7 @@ fn target(h: u64) -> Result<Target, u32> {
         Object::Process(a) => (PROCESS, true, weak(a)),
         Object::WindowStation(a) => (WINSTA, true, weak(a)),
         Object::Desktop(a) => (DESKTOP, true, weak(a)),
-        Object::File(_) | Object::Console(_) | Object::Null | Object::Pipe(_) | Object::Directory(_) | Object::Transaction(_) => return Err(ERROR_NOT_SUPPORTED),
+        Object::File(_) | Object::Console(_) | Object::Null | Object::Pipe(_) | Object::Directory(_) | Object::Transaction(_) | Object::Snapshot(_) => return Err(ERROR_NOT_SUPPORTED),
     };
     Ok(Target { key, alive, mapping, secured })
 }
@@ -1031,6 +1031,212 @@ pub fn string_sid(s: &str) -> Option<Vec<u8>> {
     (sub.len() <= 15).then(|| sid(authority, &sub))
 }
 
+// ---- SDDL ----------------------------------------------------------------------
+
+/// Rights abbreviations of SDDL ACE strings.
+const SDDL_RIGHTS: &[(&str, u32)] = &[
+    ("GA", 0x1000_0000), ("GR", 0x8000_0000), ("GW", 0x4000_0000), ("GX", 0x2000_0000),
+    ("RC", 0x0002_0000), ("SD", 0x0001_0000), ("WD", 0x0004_0000), ("WO", 0x0008_0000),
+    ("RP", 0x0010), ("WP", 0x0020), ("CC", 0x0001), ("DC", 0x0002), ("LC", 0x0004),
+    ("SW", 0x0008), ("LO", 0x0080), ("DT", 0x0040), ("CR", 0x0100),
+    ("FA", 0x001F_01FF), ("FR", 0x0012_0089), ("FW", 0x0012_0116), ("FX", 0x0012_00A0),
+    ("KA", 0x000F_003F), ("KR", 0x0002_0019), ("KW", 0x0002_0006), ("KX", 0x0002_0019),
+    ("NR", 0x1), ("NW", 0x2), ("NX", 0x4),
+];
+
+/// One SDDL ACE: "(type;flags;rights;object;inherited object;account)".
+/// Object ACEs (OA, OD, OU, OL) carry GUIDs the descriptor model here has
+/// no field for: ERROR_INVALID_PARAMETER.
+fn sddl_ace(text: &str) -> Result<Ace, u32> {
+    let f: Vec<&str> = text.split(';').collect();
+    if f.len() < 6 {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    let kind = match f[0].to_ascii_uppercase().as_str() {
+        "A" => ACCESS_ALLOWED,
+        "D" => ACCESS_DENIED,
+        "AU" => SYSTEM_AUDIT,
+        "ML" => MANDATORY_LABEL,
+        _ => return Err(ERROR_INVALID_PARAMETER),
+    };
+    let mut flags = 0u8;
+    let fl = f[1].to_ascii_uppercase();
+    let mut rest = fl.as_str();
+    while rest.len() >= 2 {
+        flags |= match &rest[..2] {
+            "OI" => 0x01,
+            "CI" => 0x02,
+            "NP" => 0x04,
+            "IO" => 0x08,
+            "ID" => 0x10,
+            "SA" => 0x40,
+            "FA" => 0x80,
+            _ => return Err(ERROR_INVALID_PARAMETER),
+        };
+        rest = &rest[2..];
+    }
+    if !rest.is_empty() {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    let r = f[2].trim();
+    let mask = if let Some(h) = r.strip_prefix("0x").or_else(|| r.strip_prefix("0X")) {
+        u32::from_str_radix(h, 16).map_err(|_| ERROR_INVALID_PARAMETER)?
+    } else if !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()) {
+        r.parse().map_err(|_| ERROR_INVALID_PARAMETER)?
+    } else {
+        let up = r.to_ascii_uppercase();
+        let mut m = 0u32;
+        let mut s = up.as_str();
+        while s.len() >= 2 {
+            m |= SDDL_RIGHTS.iter().find(|e| e.0 == &s[..2]).ok_or(ERROR_INVALID_PARAMETER)?.1;
+            s = &s[2..];
+        }
+        if !s.is_empty() {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        m
+    };
+    if !f[3].is_empty() || !f[4].is_empty() {
+        return Err(ERROR_INVALID_PARAMETER); // object GUIDs on a non-object ACE
+    }
+    let sid = string_sid(f[5].trim()).ok_or(ERROR_INVALID_SID)?;
+    Ok((kind, flags, mask, sid))
+}
+
+/// The flags and ACEs of an SDDL ACL: "P", "AI", "AR", "NO_ACCESS_CONTROL"
+/// (a NULL ACL), then "(...)(...)".
+fn sddl_acl(text: &str) -> Result<(u16, Option<Vec<Ace>>), u32> {
+    let open = text.find('(').unwrap_or(text.len());
+    let flags = text[..open].to_ascii_uppercase();
+    let mut control = 0u16;
+    let mut null = false;
+    let mut f = flags.as_str();
+    while !f.is_empty() {
+        if let Some(r) = f.strip_prefix("NO_ACCESS_CONTROL") {
+            null = true;
+            f = r;
+        } else if let Some(r) = f.strip_prefix("AI") {
+            control |= 0x0400; // SE_DACL_AUTO_INHERITED (the SACL bit is shifted by the caller)
+            f = r;
+        } else if let Some(r) = f.strip_prefix("AR") {
+            control |= 0x0100; // SE_DACL_AUTO_INHERIT_REQ
+            f = r;
+        } else if let Some(r) = f.strip_prefix('P') {
+            control |= 0x1000; // SE_DACL_PROTECTED
+            f = r;
+        } else {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+    }
+    let mut aces = Vec::new();
+    let mut rest = &text[open..];
+    while let Some(start) = rest.find('(') {
+        let end = rest[start..].find(')').ok_or(ERROR_INVALID_PARAMETER)? + start;
+        aces.push(sddl_ace(&rest[start + 1..end])?);
+        rest = &rest[end + 1..];
+    }
+    if !rest.trim().is_empty() {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    Ok((control, if null { None } else { Some(aces) }))
+}
+
+/// A self-relative SECURITY_DESCRIPTOR from SDDL ("O:..G:..D:..S:..").
+fn sddl_descriptor(text: &str) -> Result<Vec<u8>, u32> {
+    // Split at the component tags; ACE bodies cannot contain "O:" etc.
+    // outside parentheses.
+    let mut parts: Vec<(char, String)> = Vec::new();
+    let mut depth = 0;
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if depth == 0 && i + 1 < chars.len() && chars[i + 1] == ':' && matches!(c.to_ascii_uppercase(), 'O' | 'G' | 'D' | 'S') {
+            parts.push((c.to_ascii_uppercase(), String::new()));
+            i += 2;
+            continue;
+        }
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        match parts.last_mut() {
+            Some(p) => p.1.push(c),
+            None if c.is_whitespace() => {}
+            None => return Err(ERROR_INVALID_PARAMETER),
+        }
+        i += 1;
+    }
+    let mut v = alloc::vec![0u8; 20];
+    v[0] = 1;
+    let mut control = SE_SELF_RELATIVE;
+    let put = |v: &mut Vec<u8>, field: usize, data: &[u8]| {
+        let at = v.len() as u32;
+        v[4 + field * 4..8 + field * 4].copy_from_slice(&at.to_le_bytes());
+        v.extend_from_slice(data);
+    };
+    for (tag, body) in parts {
+        let body = body.trim();
+        match tag {
+            'O' => put(&mut v, 0, &string_sid(body).ok_or(ERROR_INVALID_SID)?),
+            'G' => put(&mut v, 1, &string_sid(body).ok_or(ERROR_INVALID_SID)?),
+            'D' => {
+                let (c, aces) = sddl_acl(body)?;
+                control |= SE_DACL_PRESENT | c;
+                if let Some(a) = aces {
+                    put(&mut v, 3, &build_acl(&a));
+                }
+            }
+            _ => {
+                let (c, aces) = sddl_acl(body)?;
+                // The SACL's flags are the DACL ones shifted by one bit.
+                control |= SE_SACL_PRESENT | (c & 0x1000) << 1 | (c & 0x0400) << 1 | (c & 0x0100) << 1;
+                put(&mut v, 2, &build_acl(&aces.unwrap_or_default()));
+            }
+        }
+    }
+    v[2..4].copy_from_slice(&control.to_le_bytes());
+    Ok(v)
+}
+
+/// ConvertStringSecurityDescriptorToSecurityDescriptorW (SDDL_REVISION_1):
+/// a self-relative descriptor in LocalAlloc memory and its size.
+extern "win64" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(text: *const u16, revision: u32, out: *mut u64, size: *mut u32) -> i32 {
+    const ERROR_UNKNOWN_REVISION: u32 = 1305;
+    if text.is_null() || out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if revision != 1 {
+        return fail(ERROR_UNKNOWN_REVISION, 0);
+    }
+    // SAFETY: a NUL-terminated string.
+    let Some(s) = (unsafe { path::wide_to_string(text) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let sd = match sddl_descriptor(&s) {
+        Ok(sd) => sd,
+        Err(e) => return fail(e, 0),
+    };
+    let Some(p) = heap_copy(&sd) else { return fail(ERROR_NOT_ENOUGH_MEMORY, 0) };
+    // SAFETY: the caller's out pointers.
+    unsafe {
+        if crate::wow64::is_active() {
+            core::ptr::write_unaligned(out as *mut u32, p as u32);
+        } else {
+            *out = p;
+        }
+        if !size.is_null() {
+            *size = sd.len() as u32;
+        }
+    }
+    1
+}
+
+extern "win64" fn ConvertStringSecurityDescriptorToSecurityDescriptorA(text: *const u8, revision: u32, out: *mut u64, size: *mut u32) -> i32 {
+    // SAFETY: a NUL-terminated string.
+    let Some(w) = (unsafe { path::ansi_to_wide(text) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(w.as_ptr(), revision, out, size)
+}
+
 /// A heap copy of `bytes` (LocalFree / FreeSid releases it).
 fn heap_copy(bytes: &[u8]) -> Option<u64> {
     let p = kernel32::heap_alloc(bytes.len(), false)?;
@@ -1287,6 +1493,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         MapGenericMask,
         ConvertStringSidToSidW,
         ConvertSidToStringSidW,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        ConvertStringSecurityDescriptorToSecurityDescriptorA,
         AllocateAndInitializeSid,
         FreeSid,
         AccessCheck,

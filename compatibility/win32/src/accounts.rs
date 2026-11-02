@@ -387,12 +387,41 @@ extern "win64" fn QueryServiceStatus(_h: u64, _status: *mut u8) -> i32 {
     fail(ERROR_INVALID_HANDLE, 0)
 }
 
+/// The other service calls take a service handle. OSyx's service database
+/// is empty (OpenServiceW finds no service), so none exists and each call
+/// fails as Windows fails for a handle that is not a service:
+/// ERROR_INVALID_HANDLE.
+extern "win64" fn QueryServiceStatusEx(_h: u64, level: u32, _buf: *mut u8, _size: u32, _needed: *mut u32) -> i32 {
+    if level != 0 {
+        return fail(ERROR_INVALID_LEVEL, 0);
+    }
+    fail(ERROR_INVALID_HANDLE, 0)
+}
+
+extern "win64" fn QueryServiceConfigW(_h: u64, _config: *mut u8, _size: u32, _needed: *mut u32) -> i32 {
+    fail(ERROR_INVALID_HANDLE, 0)
+}
+
+extern "win64" fn StartServiceW(_h: u64, _argc: u32, _argv: *const u64) -> i32 {
+    fail(ERROR_INVALID_HANDLE, 0)
+}
+
+extern "win64" fn ControlService(_h: u64, _control: u32, _status: *mut u8) -> i32 {
+    fail(ERROR_INVALID_HANDLE, 0)
+}
+
 extern "win64" fn CloseServiceHandle(h: u64) -> i32 {
     if MANAGERS.lock().unwrap().remove(&h) { 1 } else { fail(ERROR_INVALID_HANDLE, 0) }
 }
 
+const ERROR_INVALID_LEVEL: u32 = 124;
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        QueryServiceStatusEx,
+        QueryServiceConfigW,
+        StartServiceW,
+        ControlService,
         GetUserNameW,
         LookupAccountNameW,
         ConvertSidToStringSidA,

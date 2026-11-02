@@ -11,11 +11,12 @@
 //! everything 32-bit code can address directly:
 //!
 //! ```text
-//! 0x2000_0000  page 0       import stubs (12 bytes each; RX before entry)
-//! 0x2000_1000  page 1       TEB32, the FS base of compatibility mode
-//! 0x2000_2000  page 2       PEB32, its loader data and process parameters
-//! 0x2000_3000  page 3       stack guard (read-only; OSyx has no no-access page)
-//! 0x2000_4000  pages 4..    main 32-bit stack, 1 MiB
+//! 0x2000_0000  pages 0..7    import stubs (12 bytes each; RX before entry),
+//!                            the callback return stub in the last 16 bytes
+//! 0x2000_8000  page 8        TEB32, the FS base of compatibility mode
+//! 0x2000_9000  page 9        PEB32, its loader data and process parameters
+//! 0x2000_A000  page 10       stack guard (read-only; OSyx has no no-access page)
+//! 0x2000_B000  pages 11..    main 32-bit stack, 1 MiB
 //! ```
 //!
 //! FS is one register shared by both modes. Kernel system call 96
@@ -48,12 +49,16 @@ const _: () = assert!(USER_CS == 0x23 && USER_CS32 == 0x3B && USER_DS == 0x1B &&
 const ARENA_BASE: u32 = 0x2000_0000;
 const ARENA_SIZE: usize = 4 << 20; // stubs, TEB, PEB, guard, a 1 MiB stack and the fiber code
 const STUB_PAGE: u32 = ARENA_BASE;
+/// Pages of import stubs. The Steam client and its DLLs import close to a
+/// thousand distinct functions and look up more with GetProcAddress.
+const STUB_PAGES: usize = 8;
+const STUB_BYTES: usize = STUB_PAGES * PAGE;
 const STUB_SIZE: u32 = 12;
-/// The callback return stub: the last 16 bytes of the stub page.
-const RET_STUB: u32 = STUB_PAGE + PAGE as u32 - 16;
-/// Stubs that fit in one page (SteamSetup needs 166 imports).
-const MAX_IMPORTS: usize = (PAGE - 16) / STUB_SIZE as usize;
-const TEB32: u32 = ARENA_BASE + PAGE as u32;
+/// The callback return stub: the last 16 bytes of the stub pages.
+const RET_STUB: u32 = STUB_PAGE + STUB_BYTES as u32 - 16;
+/// Stubs that fit in front of the return stub.
+const MAX_IMPORTS: usize = (STUB_BYTES - 16) / STUB_SIZE as usize;
+const TEB32: u32 = STUB_PAGE + STUB_BYTES as u32;
 const PEB32: u32 = TEB32 + PAGE as u32;
 const GUARD32: u32 = PEB32 + PAGE as u32;
 const STACK_BASE: u32 = GUARD32 + PAGE as u32;
@@ -124,6 +129,7 @@ struct Signature {
     is_cdecl: bool,
 }
 
+mod code32;
 mod layouts;
 mod sigs;
 use sigs::SIGNATURES;
@@ -140,6 +146,15 @@ struct Entry {
 
 /// The bridge whose stubs are live; set once, just before `iretq`.
 static ACTIVE: AtomicPtr<Bridge> = AtomicPtr::new(core::ptr::null_mut());
+
+/// The TEB32 of every live thread that runs 32-bit code: a DLL loaded
+/// later gives each of them its static TLS block.
+static THREAD_TEBS32: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// The TEB32s of the live 32-bit threads.
+pub(crate) fn thread_tebs32() -> Vec<u32> {
+    THREAD_TEBS32.lock().unwrap().clone()
+}
 
 /// Per-thread bridge state; the gate and the callback landing use the
 /// offsets in the comments, keep them in sync with the assembly.
@@ -432,8 +447,8 @@ impl Bridge {
         // The callback return stub: jmp far USER_CS:osyx_wow64_callback_return.
         let landing = osyx_wow64_callback_return as *const () as usize;
         assert!(landing != 0 && landing < 1usize << 32, "wow64: callback landing is not below 4 GiB");
-        // SAFETY: the stub page is writable until `enter` protects it; the
-        // last 16 bytes are reserved for this stub (MAX_IMPORTS).
+        // SAFETY: the stub pages are writable until `prepare` protects them;
+        // the last 16 bytes are reserved for this stub (MAX_IMPORTS).
         unsafe {
             let p = RET_STUB as *mut u8;
             *p = 0xEA;
@@ -441,7 +456,7 @@ impl Bridge {
             core::ptr::write_unaligned(p.add(5).cast::<u16>(), USER_CS);
         }
 
-        // All gates are written before the page becomes executable. Later
+        // All gates are written before the pages become executable. Later
         // imports only publish an entry, so they never change RX memory.
         let gate = osyx_wow64_gate as *const () as usize;
         assert!(gate != 0 && gate < 1usize << 32, "wow64: gate is not below 4 GiB");
@@ -485,6 +500,10 @@ impl Bridge {
         if symbol == "SwitchToFiber" {
             return Some(FIBER_CODE);
         }
+        // Imports that read the caller's registers run as 32-bit code too.
+        if let Some(routine) = code32::routine(symbol) {
+            return Some(routine);
+        }
         let signature = SIGNATURES.iter().find(|s| s.name == symbol)?;
         let host = host_override(symbol).unwrap_or(host);
         assert!(signature.args.len() <= MAX_ARG_SLOTS, "wow64: import signature has too many arguments");
@@ -492,7 +511,10 @@ impl Bridge {
         if let Some(index) = entries.iter().position(|e| e.name == signature.name && e.host == host) {
             return Some(STUB_PAGE + index as u32 * STUB_SIZE);
         }
-        if entries.len() >= MAX_IMPORTS { return None; }
+        if entries.len() >= MAX_IMPORTS {
+            os_std::eprintln!("winrun: wow64: no import stub left for {symbol} ({MAX_IMPORTS} in use)");
+            return None;
+        }
         let index = entries.len() as u32;
         let stub = STUB_PAGE + index * STUB_SIZE;
         entries.push(Entry {
@@ -511,7 +533,7 @@ impl Bridge {
 
     /// Prepares the gate and main thread before delivering DLL callbacks.
     pub fn prepare(&mut self) -> Result<(), &'static str> {
-        if let Err(e) = mem::protect(STUB_PAGE as u64, PAGE, Prot::ExecuteRead) {
+        if let Err(e) = mem::protect(STUB_PAGE as u64, STUB_BYTES, Prot::ExecuteRead) {
             os_std::eprintln!("winrun: wow64: cannot make import stubs executable: {e:?}");
             return Err("wow64: cannot make import stubs executable");
         }
@@ -523,6 +545,7 @@ impl Bridge {
         // The main thread's Ctx: the static gate stack and the arena TEB32.
         let host_top = core::ptr::addr_of_mut!(BRIDGE_STACK) as u64 + BRIDGE_STACK_SIZE as u64;
         install_ctx(self.stack_top as u64, host_top, self.teb as u64);
+        THREAD_TEBS32.lock().unwrap().push(self.teb);
         Ok(())
     }
 
@@ -539,7 +562,7 @@ impl Bridge {
             os_std::eprintln!("winrun: wow64: cannot set the 32-bit FS base: {e:?}");
             os_std::process::exit(126);
         }
-        // SAFETY: the stub page is RX; the TEB and stack are mapped; the
+        // SAFETY: the stub pages are RX; the TEB and stack are mapped; the
         // IRETQ frame targets DPL-3 selectors from CPL 3.
         unsafe { osyx_wow64_enter32(entry, self.stack_top) }
     }
@@ -741,14 +764,52 @@ extern "win64" fn thread32_main(arg: u64) -> u32 {
     run_thread32(start, param)
 }
 
+/// Calls a callback the program handed to a host function: a 32-bit
+/// stdcall function when a 32-bit program runs (each argument becomes one
+/// 4-byte slot), the Win64 function otherwise. Returns EAX zero-extended
+/// for 32-bit callbacks.
+pub(crate) fn callback(f: u64, args: &[u64]) -> u64 {
+    if is_active() {
+        // A runtime thread (a winmm or timer worker) gets 32-bit state the
+        // first time it calls back into the program, and keeps it.
+        if ctx().is_null() && setup_thread32().is_none() {
+            os_std::eprintln!("winrun: wow64: no memory for a 32-bit callback thread");
+            return 0;
+        }
+        let slots: Vec<u32> = args.iter().map(|&a| a as u32).collect();
+        return call32(f as u32, &slots) as u64;
+    }
+    assert!(args.len() <= MAX_ARG_SLOTS, "wow64: callback has too many arguments");
+    // SAFETY: `f` is the caller's Win64 callback taking `args`.
+    unsafe { osyx_win64_invoke(f, args.as_ptr(), args.len() as u32) }
+}
+
 /// Set up a 32-bit callback thread and execute its start routine.
 pub(crate) fn run_thread32(start: u32, param: u32) -> u32 {
     if crate::VERBOSE.load(Ordering::Relaxed) {
         os_std::eprintln!("winrun: wow64 thread start {start:#x}({param:#x})");
     }
+    with_thread32(|| call32(start, &[param])).unwrap_or(0xC000_0017) // STATUS_NO_MEMORY
+}
+
+/// Gives the calling host thread (one the runtime started, with a TEB64)
+/// what 32-bit code needs, runs `f` (which may call 32-bit code with
+/// [`call32`]) between DLL_THREAD_ATTACH and DETACH, and returns its
+/// result; None without memory for the 32-bit stack.
+pub(crate) fn with_thread32<R>(f: impl FnOnce() -> R) -> Option<R> {
+    let teb = setup_thread32()?;
+    let r = f();
+    notify_dlls32(crate::loader::DLL_THREAD_DETACH);
+    THREAD_TEBS32.lock().unwrap().retain(|&t| t != teb);
+    Some(r)
+}
+
+/// Gives the calling host thread a 32-bit stack, TEB32, gate stack, static
+/// TLS blocks and its DLL_THREAD_ATTACH; returns the TEB32.
+fn setup_thread32() -> Option<u32> {
     let stack32 = mem::alloc_pages(THREAD_STACK32 + PAGE, Prot::ReadWrite);
     let host = mem::alloc_pages(THREAD_HOST_STACK, Prot::ReadWrite);
-    let (Some(stack32), Some(host)) = (stack32, host) else { return 0xC000_0017 }; // STATUS_NO_MEMORY
+    let (Some(stack32), Some(host)) = (stack32, host) else { return None };
     // The TEB32 is the stack mapping's first page (the low-memory window is
     // below 2 GiB, so both are addressable by 32-bit code).
     let teb = stack32 as u32;
@@ -764,11 +825,10 @@ pub(crate) fn run_thread32(start: u32, param: u32) -> u32 {
         poke32(teb + TEB_PEB, PEB32);
     }
     install_ctx(top as u64, host + THREAD_HOST_STACK as u64, teb as u64);
+    THREAD_TEBS32.lock().unwrap().push(teb);
     crate::loader::setup_thread_tls32(teb);
     notify_dlls32(crate::loader::DLL_THREAD_ATTACH);
-    let code = call32(start, &[param]);
-    notify_dlls32(crate::loader::DLL_THREAD_DETACH);
-    code
+    Some(teb)
 }
 
 /// DLL_THREAD_ATTACH / DETACH for the calling 32-bit thread: the TLS
@@ -887,6 +947,75 @@ extern "win64" fn CreateProcessW32(
     r
 }
 
+/// CreateProcessA for 32-bit callers: the strings become UTF-16 and the
+/// call continues as [`CreateProcessW32`] (STARTUPINFOA has the layout of
+/// STARTUPINFOW; its string pointers are not read).
+#[allow(non_snake_case, clippy::too_many_arguments)] // the Win32 name
+extern "win64" fn CreateProcessA32(
+    app: *const u8,
+    cmdline: *mut u8,
+    psa: u64,
+    tsa: u64,
+    inherit: i32,
+    flags: u32,
+    env: u64,
+    cwd: *const u8,
+    startup: *const u8,
+    info: *mut u32,
+) -> i32 {
+    // SAFETY: NULL or the caller's NUL-terminated strings.
+    let (app, mut cmd, cwd) = unsafe {
+        (crate::path::ansi_to_wide(app), crate::path::ansi_to_wide(cmdline), crate::path::ansi_to_wide(cwd))
+    };
+    let ptr = |v: &Option<Vec<u16>>| v.as_ref().map_or(core::ptr::null(), |w| w.as_ptr());
+    let cmd_ptr = cmd.as_mut().map_or(core::ptr::null_mut(), |w| w.as_mut_ptr());
+    CreateProcessW32(ptr(&app), cmd_ptr, psa, tsa, inherit, flags, env, ptr(&cwd), startup, info)
+}
+
+/// CreateProcessAsUserW for 32-bit callers: the token is checked by the
+/// host function with a 64-bit STARTUPINFOW and PROCESS_INFORMATION.
+#[allow(non_snake_case, clippy::too_many_arguments)] // the Win32 name
+extern "win64" fn CreateProcessAsUserW32(
+    token: u64,
+    app: *const u16,
+    cmdline: *mut u16,
+    psa: u64,
+    tsa: u64,
+    inherit: i32,
+    flags: u32,
+    env: u64,
+    cwd: *const u16,
+    startup: *const u8,
+    info: *mut u32,
+) -> i32 {
+    const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
+    if startup.is_null() || info.is_null() || flags & EXTENDED_STARTUPINFO_PRESENT != 0 {
+        return crate::kernel32::fail(if flags & EXTENDED_STARTUPINFO_PRESENT != 0 { crate::error::ERROR_NOT_SUPPORTED } else { crate::error::ERROR_INVALID_PARAMETER }, 0);
+    }
+    let Some(si) = startupinfo_to64(startup) else {
+        return crate::kernel32::fail(crate::error::ERROR_INVALID_PARAMETER, 0);
+    };
+    let mut pi = [0u64; 3];
+    let r = crate::tokens::CreateProcessAsUserW(token, app, cmdline, psa, tsa, inherit, flags, env, cwd, si.as_ptr(), pi.as_mut_ptr());
+    if r != 0 {
+        process_information32(&pi, info);
+    }
+    r
+}
+
+/// Writes the x86 PROCESS_INFORMATION (16 bytes: hProcess, hThread,
+/// dwProcessId, dwThreadId) from the host's 24-byte one.
+fn process_information32(pi: &[u64; 3], info: *mut u32) {
+    // SAFETY: the caller's 16-byte PROCESS_INFORMATION.
+    unsafe {
+        let ids = pi[2];
+        core::ptr::write_unaligned(info, pi[0] as u32);
+        core::ptr::write_unaligned(info.add(1), pi[1] as u32);
+        core::ptr::write_unaligned(info.add(2), ids as u32);
+        core::ptr::write_unaligned(info.add(3), (ids >> 32) as u32);
+    }
+}
+
 /// Host functions that replace the built-in one for 32-bit callers.
 #[allow(non_snake_case)]
 extern "win64" fn MsgWaitForMultipleObjects32(n: u32, handles: *const u32, wait_all: i32, ms: u32, mask: u32) -> u32 {
@@ -936,6 +1065,12 @@ fn host_override(symbol: &str) -> Option<u64> {
     match symbol {
         "CreateThread" => Some(CreateThread32 as *const () as u64),
         "CreateProcessW" => Some(CreateProcessW32 as *const () as u64),
+        "CreateProcessA" => Some(CreateProcessA32 as *const () as u64),
+        "CreateProcessAsUserW" => Some(CreateProcessAsUserW32 as *const () as u64),
+        "VirtualQueryEx" => Some(layouts::VirtualQueryEx32 as *const () as u64),
+        "AddVectoredExceptionHandler" => Some(layouts::AddVectoredExceptionHandler32 as *const () as u64),
+        "RemoveVectoredExceptionHandler" => Some(layouts::RemoveVectoredExceptionHandler32 as *const () as u64),
+        "GetThreadContext" => Some(layouts::GetThreadContext32 as *const () as u64),
         "MsgWaitForMultipleObjects" => Some(MsgWaitForMultipleObjects32 as *const () as u64),
         "MsgWaitForMultipleObjectsEx" => Some(MsgWaitForMultipleObjectsEx32 as *const () as u64),
         "WaitForMultipleObjects" => Some(WaitForMultipleObjects32 as *const () as u64),
@@ -944,7 +1079,7 @@ fn host_override(symbol: &str) -> Option<u64> {
         "__wgetmainargs" => Some(crate::ucrt::WGetMainArgs32 as *const () as u64),
         "ShellExecuteExW" => Some(crate::shell32::ShellExecuteExW32 as *const () as u64),
         "IUnknown_QueryService" => Some(crate::shlwapi::IUnknown_QueryService32 as *const () as u64),
-        "GetObjectW" => Some(crate::user32::GetObjectW32 as *const () as u64),
+        "GetObjectW" | "GetObjectA" => Some(crate::user32::GetObjectW32 as *const () as u64),
         "GetTokenInformation" => Some(crate::tokens::GetTokenInformation32 as *const () as u64),
         "EncodePointer" => Some(layouts::EncodePointer32 as *const () as u64),
         "DecodePointer" => Some(layouts::DecodePointer32 as *const () as u64),

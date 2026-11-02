@@ -374,6 +374,25 @@ pub(super) fn scaled_bitmap(g: &mut Gui, h: u64, w: i32, height: i32) -> Option<
     Some(insert_bitmap(g, out))
 }
 
+/// An icon's mask and colour bitmaps from top-down ARGB pixels: the
+/// colour bitmap keeps the alpha, the mask marks transparent pixels.
+pub(super) fn icon_bitmaps(g: &mut Gui, w: u32, h: u32, pixels: &[u32]) -> Option<(u64, u64)> {
+    if pixels.len() < (w * h) as usize {
+        return None;
+    }
+    let mut color = Bitmap::new(Dib::new(w as i32, h as i32, 32)?, false);
+    let mut mask = Bitmap::new(Dib::new(w as i32, h as i32, 1)?, false);
+    let (cd, md) = (color.dib.clone(), mask.dib.clone());
+    for y in 0..h {
+        for x in 0..w {
+            let p = pixels[(y * w + x) as usize];
+            cd.put(color.bits_mut(), x, y, p);
+            md.put(mask.bits_mut(), x, y, if p >> 24 == 0 { 0x00FF_FFFF } else { 0 });
+        }
+    }
+    Some((insert_bitmap(g, mask), insert_bitmap(g, color)))
+}
+
 fn insert_bitmap(g: &mut Gui, b: Bitmap) -> u64 {
     let h = g.handle();
     g.bitmaps.insert(h, b);
@@ -2146,6 +2165,178 @@ extern "win64" fn SetPixelFormat(dc: u64, format: i32, pfd: *const u8) -> Bool {
     formats.insert(dc, format);
     TRUE
 }
+/// DescribePixelFormat: the one format (1): 32-bit RGBA with 8 bits of
+/// alpha, drawn by GDI into a double-buffered window. Without a
+/// descriptor it returns how many formats exist.
+extern "win64" fn DescribePixelFormat(dc: u64, format: i32, size: u32, pfd: *mut u8) -> i32 {
+    if !with(|g| g.dcs.contains_key(&dc)) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    if pfd.is_null() {
+        return 1;
+    }
+    if format != 1 || size < 40 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's PIXELFORMATDESCRIPTOR of `size` >= 40 bytes.
+    unsafe {
+        core::ptr::write_bytes(pfd, 0, 40);
+        let p = pfd as u64;
+        teb::put(p, 0, 40u16); // nSize
+        teb::put(p, 2, 1u16); // nVersion
+        // PFD_DOUBLEBUFFER | PFD_DRAW_TO_WINDOW | PFD_SUPPORT_GDI
+        teb::put(p, 4, 0x1u32 | 0x4 | 0x10);
+        teb::put(p, 8, 0u8); // PFD_TYPE_RGBA
+        teb::put(p, 9, 32u8); // cColorBits
+        teb::put(p, 10, 8u8); // cRedBits
+        teb::put(p, 11, 16u8); // cRedShift
+        teb::put(p, 12, 8u8); // cGreenBits
+        teb::put(p, 13, 8u8); // cGreenShift
+        teb::put(p, 14, 8u8); // cBlueBits
+        teb::put(p, 15, 0u8); // cBlueShift
+        teb::put(p, 16, 8u8); // cAlphaBits
+        teb::put(p, 17, 24u8); // cAlphaShift
+    }
+    1
+}
+
+/// GetPixelFormat: the format SetPixelFormat chose for the DC (0 with
+/// ERROR_INVALID_PIXEL_FORMAT before that).
+extern "win64" fn GetPixelFormat(dc: u64) -> i32 {
+    if !with(|g| g.dcs.contains_key(&dc)) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    match PIXEL_FORMATS.lock().unwrap().get(&dc) {
+        Some(&f) => f,
+        None => fail(ERROR_INVALID_PIXEL_FORMAT, 0),
+    }
+}
+
+/// GetBitmapBits: up to `count` bytes of the bitmap's rows, top row first,
+/// each row padded to a 16-bit boundary (the device-dependent layout).
+extern "win64" fn GetBitmapBits(bmp: u64, count: i32, out: *mut u8) -> i32 {
+    with(|g| {
+        let Some(b) = g.bitmaps.get(&bmp) else { return 0 };
+        let d = &b.dib;
+        let row = (d.w as usize * d.bpp as usize).div_ceil(16) * 2;
+        let total = row * d.h as usize;
+        if out.is_null() {
+            return total as i32;
+        }
+        let want = (count.max(0) as usize).min(total);
+        let bits = b.bits();
+        let used = (d.w as usize * d.bpp as usize).div_ceil(8);
+        let mut done = 0;
+        for y in 0..d.h {
+            if done >= want {
+                break;
+            }
+            let src_row = if d.top { y } else { d.h - 1 - y } as usize * d.stride;
+            let n = row.min(want - done);
+            let take = n.min(used);
+            // SAFETY: the caller's buffer of `count` bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(bits[src_row..src_row + take].as_ptr(), out.add(done), take);
+                core::ptr::write_bytes(out.add(done + take), 0, n - take);
+            }
+            done += n;
+        }
+        done as i32
+    })
+}
+
+/// GetObjectA: bitmaps are the only GDI objects GetObject describes here,
+/// and their BITMAP has no strings: the same as GetObjectW.
+extern "win64" fn GetObjectA(obj: u64, size: i32, out: *mut u8) -> i32 {
+    GetObjectW(obj, size, out)
+}
+
+/// The brush origin of each DC (SetBrushOrgEx), relative to its origin.
+static BRUSH_ORIGINS: os_std::sync::Mutex<BTreeMap<u64, (i32, i32)>> = os_std::sync::Mutex::new(BTreeMap::new());
+
+/// SetBrushOrgEx: records the origin pattern brushes start at; returns the
+/// previous one. This GDI's brushes are solid, so drawing looks the same.
+extern "win64" fn SetBrushOrgEx(dc: u64, x: i32, y: i32, old: *mut i32) -> Bool {
+    if !with(|g| g.dcs.contains_key(&dc)) {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    let prev = BRUSH_ORIGINS.lock().unwrap().insert(dc, (x, y)).unwrap_or((0, 0));
+    if !old.is_null() {
+        // SAFETY: the caller's POINT.
+        unsafe {
+            *old = prev.0;
+            *old.add(1) = prev.1;
+        }
+    }
+    TRUE
+}
+
+extern "win64" fn GetBrushOrgEx(dc: u64, out: *mut i32) -> Bool {
+    if !with(|g| g.dcs.contains_key(&dc)) || out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let (x, y) = BRUSH_ORIGINS.lock().unwrap().get(&dc).copied().unwrap_or((0, 0));
+    // SAFETY: the caller's POINT.
+    unsafe {
+        *out = x;
+        *out.add(1) = y;
+    }
+    TRUE
+}
+
+/// StretchBlt: SRCCOPY scales the source rectangle to the destination
+/// (nearest pixel; negative sizes mirror), BLACKNESS and WHITENESS fill.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn StretchBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i32, sw: i32, sh: i32, rop: u32) -> Bool {
+    let rop = rop & !0x4000_0000;
+    if !matches!(rop, 0xcc0020 | 0x42 | 0xff0062) {
+        return fail(ERROR_NOT_SUPPORTED, FALSE);
+    }
+    if w == 0 || h == 0 || (rop == 0xcc0020 && (sw == 0 || sh == 0)) {
+        return TRUE;
+    }
+    if rop == 0xcc0020 && w == sw && h == sh && w > 0 && h > 0 {
+        return BitBlt(dst, x, y, w, h, src, sx, sy, rop);
+    }
+    // The source rectangle, normalised; mirroring is applied per pixel.
+    let (sx0, sw0) = if sw < 0 { (sx + sw + 1, -sw) } else { (sx, sw) };
+    let (sy0, sh0) = if sh < 0 { (sy + sh + 1, -sh) } else { (sy, sh) };
+    let source = if rop == 0xcc0020 {
+        let Some(s) = snapshot(src, Rect::new(sx0, sy0, sw0 as u32, sh0 as u32)) else { return FALSE };
+        Some(s)
+    } else {
+        None
+    };
+    draw(dst, |s, d, _, clip| {
+        let (x, y) = d.transform.point(x, y);
+        let r = Rect::new(x.min(x + w + 1), y.min(y + h + 1), w.unsigned_abs(), h.unsigned_abs()).intersect(&clip);
+        for dy in r.y..r.y + r.h as i32 {
+            for dx in r.x..r.x + r.w as i32 {
+                let c = if let Some(source) = &source {
+                    // Destination offset as a fraction of the destination
+                    // size, mapped into the (possibly mirrored) source.
+                    let fx = ((dx - x) as i64 * sw as i64).div_euclid(w as i64) as i32;
+                    let fy = ((dy - y) as i64 * sh as i64).div_euclid(h as i64) as i32;
+                    let Some(c) = source.pixel(sx + fx, sy + fy) else { continue };
+                    c
+                } else if rop == 0x42 {
+                    rgb(0, 0, 0)
+                } else {
+                    rgb(255, 255, 255)
+                };
+                s.put(dx, dy, c);
+            }
+        }
+        (TRUE, r)
+    })
+    .unwrap_or(FALSE)
+}
+
+/// GDI functions added for the Steam client and SDL3.
+pub(super) fn client_exports() -> Vec<(&'static str, u64)> {
+    export_table![DescribePixelFormat, GetPixelFormat, GetBitmapBits, GetObjectA, SetBrushOrgEx, GetBrushOrgEx, StretchBlt]
+}
+
 extern "win64" fn SwapBuffers(dc: u64) -> Bool {
     let Some((hwnd, memory)) = with(|g| g.dcs.get(&dc).map(|d| (d.hwnd, d.memory))) else {
         return fail(ERROR_INVALID_HANDLE, FALSE);

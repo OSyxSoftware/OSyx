@@ -135,6 +135,15 @@ pub(super) extern "win64" fn VirtualQuery32(addr: u64, out: *mut u8, len: usize)
     28
 }
 
+/// VirtualQueryEx: this process only, as [`VirtualQuery32`] (other
+/// processes' address spaces cannot be queried on OSyx).
+pub(super) extern "win64" fn VirtualQueryEx32(process: u64, addr: u64, out: *mut u8, len: usize) -> usize {
+    if process != crate::objects::CURRENT_PROCESS {
+        return fail(ERROR_ACCESS_DENIED, 0);
+    }
+    VirtualQuery32(addr, out, len)
+}
+
 /// GetSystemInfo: the 36-byte x86 SYSTEM_INFO of a 32-bit process on a
 /// 64-bit system (as GetSystemInfo reports under WoW64): x86 architecture,
 /// the 2 GiB user range.
@@ -430,6 +439,9 @@ fn set_exception_list(teb32: u32, frame: u32) {
 /// unwinds (RtlUnwind) and resumes the program in that frame.
 fn dispatch32(record: u64, context: u64) -> bool {
     let Some(teb32) = current_teb32() else { return false };
+    if vectored32(record, context) {
+        return true;
+    }
     let mut frame = exception_list(teb32);
     while frame != END_OF_CHAIN && frame != 0 {
         // SAFETY: an EXCEPTION_REGISTRATION_RECORD on the 32-bit stack.
@@ -441,6 +453,94 @@ fn dispatch32(record: u64, context: u64) -> bool {
         }
     }
     false
+}
+
+/// Vectored handlers of 32-bit code (AddVectoredExceptionHandler), in
+/// call order: (id, handler).
+static VECTORED32: os_std::sync::Mutex<Vec<(u64, u32)>> = os_std::sync::Mutex::new(Vec::new());
+static NEXT_VECTORED32: AtomicU64 = AtomicU64::new(1);
+
+/// AddVectoredExceptionHandler for 32-bit code: the handler is called as
+/// 32-bit code with an x86 EXCEPTION_POINTERS before the frame handlers.
+/// Returns the registration (a nonzero id) that removes it again.
+pub(super) extern "win64" fn AddVectoredExceptionHandler32(first: u32, handler: u64) -> u64 {
+    if handler == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // Ids stay below 2^31: the 32-bit caller keeps the low half.
+    let id = NEXT_VECTORED32.fetch_add(1, Ordering::Relaxed) << 4;
+    let mut list = VECTORED32.lock().unwrap();
+    if first != 0 {
+        list.insert(0, (id, handler as u32));
+    } else {
+        list.push((id, handler as u32));
+    }
+    id
+}
+
+pub(super) extern "win64" fn RemoveVectoredExceptionHandler32(id: u64) -> u32 {
+    let mut list = VECTORED32.lock().unwrap();
+    match list.iter().position(|e| e.0 == id as u32 as u64) {
+        Some(at) => {
+            list.remove(at);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Runs the vectored handlers; true when one returned
+/// EXCEPTION_CONTINUE_EXECUTION (-1).
+fn vectored32(record: u64, context: u64) -> bool {
+    let handlers: Vec<u32> = VECTORED32.lock().unwrap().iter().map(|e| e.1).collect();
+    if handlers.is_empty() {
+        return false;
+    }
+    let Some(pointers) = low_block(8) else { return false };
+    // SAFETY: the fresh EXCEPTION_POINTERS.
+    unsafe {
+        teb::put(pointers, 0, record as u32);
+        teb::put(pointers, 4, context as u32);
+    }
+    let resumed = handlers.into_iter().any(|h| call32(h, &[pointers as u32]) as i32 == -1);
+    crate::kernel32::heap_free(pointers);
+    resumed
+}
+
+/// GetThreadContext for 32-bit code. Only the calling thread can be read
+/// (OSyx cannot stop a running thread and read its registers); its x86
+/// context then has the control registers of the call: EIP is the return
+/// address, ESP the stack pointer after it, and the flat segments.
+/// ContextFlags reports CONTEXT_CONTROL | CONTEXT_SEGMENTS: the gate does
+/// not keep the integer registers.
+pub(super) extern "win64" fn GetThreadContext32(thread: u64, ctx: u64) -> i32 {
+    let own = thread == crate::objects::CURRENT_THREAD
+        || matches!(crate::objects::get(thread), Some(crate::objects::Object::Thread(t)) if t.tid.load(Ordering::SeqCst) as u64 == os_sys::gettid());
+    if ctx == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if !own {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    let Some((esp, eip)) = super::caller_frame32() else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let fs: u16;
+    // SAFETY: reads the FS selector, which both modes share.
+    unsafe { core::arch::asm!("mov {0:x}, fs", out(reg) fs) };
+    let (cs, ds) = (osyx_abi::wow64::USER_CS32 as u32, osyx_abi::wow64::USER_DS as u32);
+    // SAFETY: the caller's x86 CONTEXT (716 bytes).
+    unsafe {
+        teb::put(ctx, 0x8C, 0u32); // SegGs
+        teb::put(ctx, 0x90, fs as u32); // SegFs
+        teb::put(ctx, 0x94, ds); // SegEs
+        teb::put(ctx, 0x98, ds); // SegDs
+        teb::put(ctx, 0xB8, eip);
+        teb::put(ctx, 0xBC, cs); // SegCs
+        teb::put(ctx, 0xC0, osyx_abi::wow64::ENTRY_RFLAGS as u32); // EFlags
+        teb::put(ctx, 0xC4, esp + 12); // after `ret 8`
+        teb::put(ctx, 0xC8, ds); // SegSs
+        teb::put(ctx, 0, 0x0001_0005u32);
+    }
+    1
 }
 
 /// RaiseException for 32-bit code: builds the x86 EXCEPTION_RECORD and

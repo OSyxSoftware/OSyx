@@ -651,7 +651,7 @@ pub(crate) extern "win64" fn RegSetValueExW(hkey: u64, name: *const u16, _reserv
     }
 }
 
-extern "win64" fn RegDeleteValueW(hkey: u64, name: *const u16) -> u32 {
+pub(crate) extern "win64" fn RegDeleteValueW(hkey: u64, name: *const u16) -> u32 {
     let mut r = REG.lock().unwrap();
     let (hive, path, access) = match resolve(&mut r, hkey) {
         Ok(v) => v,
@@ -758,7 +758,7 @@ fn name_out(s: &str, buf: *mut u16, len: *mut u32) -> u32 {
 /// Subkeys in name order. Classes and write times are not kept: the class
 /// is empty and the time is zero.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn RegEnumKeyExW(
+pub(crate) extern "win64" fn RegEnumKeyExW(
     hkey: u64,
     index: u32,
     name: *mut u16,
@@ -805,7 +805,7 @@ extern "win64" fn RegEnumKeyW(hkey: u64, index: u32, name: *mut u16, mut name_le
 /// Values in name order (Windows keeps insertion order; neither is
 /// documented).
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn RegEnumValueW(
+pub(crate) extern "win64" fn RegEnumValueW(
     hkey: u64,
     index: u32,
     name: *mut u16,
@@ -897,7 +897,7 @@ extern "win64" fn RegQueryInfoKeyW(
 
 /// Deletes `sub` and everything below it; with no `sub`, the subkeys and
 /// values of the key itself (which stays).
-extern "win64" fn RegDeleteTreeW(hkey: u64, sub: *const u16) -> u32 {
+pub(crate) extern "win64" fn RegDeleteTreeW(hkey: u64, sub: *const u16) -> u32 {
     let mut r = REG.lock().unwrap();
     let (hive, base, access) = match resolve(&mut r, hkey) {
         Ok(v) => v,

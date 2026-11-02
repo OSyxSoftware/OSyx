@@ -362,6 +362,8 @@ pub enum Object {
     Directory(Arc<DirectoryObj>),
     /// A KTM transaction (CreateTransaction).
     Transaction(Arc<crate::ktm::TransactionObj>),
+    /// A Tool Help snapshot (CreateToolhelp32Snapshot).
+    Snapshot(Arc<crate::client64::Snapshot>),
 }
 
 /// An open object directory: `\\` or `\\BaseNamedObjects`.
@@ -470,6 +472,7 @@ pub fn kind_name(o: &Object) -> &'static str {
         Object::Pipe(_) => "pipe",
         Object::Directory(_) => "directory",
         Object::Transaction(_) => "transaction",
+        Object::Snapshot(_) => "toolhelp snapshot",
     }
 }
 
@@ -582,7 +585,7 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
         }
         Object::Console(_) | Object::File(_) | Object::Null | Object::Pipe(_) => true,
         Object::Process(p) => p.done.load(Ordering::SeqCst),
-        Object::KeyedEvent(_) | Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) | Object::WindowStation(_) | Object::Desktop(_) | Object::Directory(_) | Object::Transaction(_) => {
+        Object::KeyedEvent(_) | Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) | Object::WindowStation(_) | Object::Desktop(_) | Object::Directory(_) | Object::Transaction(_) | Object::Snapshot(_) => {
             return Err(ERROR_INVALID_HANDLE)
         }
     })
