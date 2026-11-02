@@ -59,6 +59,9 @@ pub(crate) struct Tx {
     pub freed: BTreeSet<u64>,
     /// Original contents of blocks this operation has changed, for rollback.
     undo: BTreeMap<u64, Option<Vec<u8>>>,
+    /// Staged file data this operation dropped (blocks it freed), put back
+    /// if it fails and the blocks stay allocated.
+    pending_undo: BTreeMap<u64, Vec<u8>>,
     recording: bool,
 }
 
@@ -231,6 +234,7 @@ impl<D: BlockDevice> Ext4<D> {
             Ok(v) => {
                 self.tx.recording = false;
                 self.tx.undo.clear();
+                self.tx.pending_undo.clear();
                 if self.tx.blocks.len() >= self.pending_limit() {
                     self.flush_pending()?;
                 }
@@ -238,6 +242,9 @@ impl<D: BlockDevice> Ext4<D> {
             }
             Err(e) => {
                 self.tx.recording = false;
+                for (b, d) in core::mem::take(&mut self.tx.pending_undo) {
+                    self.pending.insert(b, d);
+                }
                 let undo = core::mem::take(&mut self.tx.undo);
                 for (b, prev) in undo {
                     match prev {
@@ -557,7 +564,11 @@ impl<D: BlockDevice> Ext4<D> {
                 bm[i / 8] &= !(1 << (i % 8));
                 self.tx.freed.insert(x);
                 self.tx_remove(x);
-                self.pending.remove(&x);
+                if let Some(d) = self.pending.remove(&x) {
+                    if self.tx.recording {
+                        self.tx.pending_undo.entry(x).or_insert(d);
+                    }
+                }
                 self.forget_cached(x);
             }
             let bmb = self.groups[g as usize].block_bitmap;
@@ -1332,13 +1343,14 @@ impl<D: BlockDevice> Ext4<D> {
     fn destroy_inode(&mut self, ino: u32) -> Result<()> {
         let mut inode = self.tx_inode(ino)?;
         let is_dir = inode.is_dir();
+        // Refusals first, before anything is freed.
+        if inode.file_acl() != 0 {
+            return Err(Error::Unsupported("freeing inodes with extended attribute blocks"));
+        }
         if inode.uses_extents() {
             self.free_from(&mut inode, 0)?;
         } else if !inode.is_fast_symlink(self.sb.block_size) {
             return Err(Error::Unsupported("freeing block-mapped files"));
-        }
-        if inode.file_acl() != 0 {
-            return Err(Error::Unsupported("freeing inodes with extended attribute blocks"));
         }
         inode.links = 0;
         inode.size = 0;

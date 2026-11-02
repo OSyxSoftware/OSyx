@@ -140,17 +140,30 @@ struct Region {
 static REGIONS: Mutex<BTreeMap<u64, Region>> = Mutex::new(BTreeMap::new());
 
 /// A thread stack: committed read/write private memory, as VirtualQuery
-/// reports a Windows stack (its pages get frames when first touched).
+/// reports a Windows stack (its pages get frames when first touched),
+/// above a guard page of its own. The guard is read-only (OSyx has no
+/// no-access pages), which is enough: an overflowing stack writes, and
+/// the write faults instead of landing in whatever is mapped below. The
+/// guard belongs to the stack's mapping, so nothing else can take it.
+/// Returns the base of the usable part (the stack limit).
 pub fn alloc_stack(size: usize) -> Option<u64> {
-    let base = alloc_pages(size, Prot::ReadWrite)?;
     let size = size.next_multiple_of(PAGE);
-    REGIONS.lock().unwrap().insert(base, Region { size, pages: alloc::vec![PAGE_READWRITE; size / PAGE] });
-    Some(base)
+    let reserve = alloc_pages(size + PAGE, Prot::ReadWrite)?;
+    if protect(reserve, PAGE, Prot::ReadOnly).is_err() {
+        free_pages(reserve, size + PAGE);
+        return None;
+    }
+    let mut pages = alloc::vec![PAGE_READWRITE; size / PAGE + 1];
+    pages[0] = PAGE_READONLY;
+    REGIONS.lock().unwrap().insert(reserve, Region { size: size + PAGE, pages });
+    Some(reserve + PAGE as u64)
 }
 
+/// Frees a stack made by [`alloc_stack`] (its base and size as given).
 pub fn free_stack(base: u64, size: usize) {
-    REGIONS.lock().unwrap().remove(&base);
-    free_pages(base, size);
+    let reserve = base - PAGE as u64;
+    REGIONS.lock().unwrap().remove(&reserve);
+    free_pages(reserve, size.next_multiple_of(PAGE) + PAGE);
 }
 
 /// `NtAllocateVirtualMemory` / `VirtualAlloc`. Returns the base.

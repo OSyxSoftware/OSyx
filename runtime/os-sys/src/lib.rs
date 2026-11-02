@@ -350,7 +350,10 @@ mod imp {
         let a = addr as u64;
         if (len as u64) < LOW_LARGE && a >= LOW_WRAP && a < LOW_END {
             use core::sync::atomic::Ordering;
-            let _ = LOW_NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| (next != 0 && a < next).then_some(a));
+            // 0 means low mode is off (it is only switched on at start-up).
+            if LOW_NEXT.load(Ordering::Relaxed) != 0 {
+                LOW_NEXT.fetch_min(a, Ordering::Relaxed);
+            }
         }
         Ok(())
     }
