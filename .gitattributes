@@ -6,3 +6,5 @@
 *.ogg binary
 *.wav binary
 *.gz binary
+*.jbig2 binary
+*.bmp binary

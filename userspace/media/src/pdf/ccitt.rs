@@ -117,6 +117,19 @@ fn skip_eol(r: &mut MsbReader) -> bool {
 }
 
 pub fn decode(data: &[u8], p: &Params) -> Vec<u8> {
+    decode_with_end(data, p).0
+}
+
+/// MMR (Group 4) data of JBIG2: `rows` rows of `columns` pixels, 1 bits
+/// black, and the bytes taken, including an end-of-block code after the
+/// rows when there is one.
+pub fn decode_mmr(data: &[u8], columns: usize, rows: usize) -> (Vec<u8>, usize) {
+    let p = Params { k: -1, columns, rows: Some(rows), byte_align: false, black_is_1: true };
+    decode_with_end(data, &p)
+}
+
+/// `decode`, also returning how many bytes of `data` it used.
+fn decode_with_end(data: &[u8], p: &Params) -> (Vec<u8>, usize) {
     let cols = p.columns.clamp(1, 1 << 16);
     let row_bytes = cols.div_ceil(8);
     let white = Tree::new(&WHITE);
@@ -255,7 +268,12 @@ pub fn decode(data: &[u8], p: &Params) -> Vec<u8> {
             break;
         }
     }
-    out
+    // An end-of-block (two EOLs) after the last row belongs to this data.
+    if p.k < 0 && r.bits_left() >= 24 && r.peek_unchecked(24) == 0x001001 {
+        r.skip(24);
+    }
+    let used = r.bit_pos().div_ceil(8).min(data.len());
+    (out, used)
 }
 
 #[cfg(test)]

@@ -11,5 +11,7 @@ extern crate alloc;
 
 pub mod audio;
 mod bits;
+pub mod jbig2;
+mod mq;
 pub mod image;
 pub mod pdf;

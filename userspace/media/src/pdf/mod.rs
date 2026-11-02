@@ -1,7 +1,7 @@
 //! PDF documents for the viewer built into Files: parsing (including
 //! damaged and encrypted files), and rendering pages to RGB pixels.
 
-mod ccitt;
+pub(crate) mod ccitt;
 mod ccitt_tables;
 mod color;
 mod crypt;
