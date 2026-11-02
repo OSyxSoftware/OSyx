@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 use core::f64::consts::PI;
 
 #[derive(Clone, Copy, Default)]
-struct C {
-    re: f32,
-    im: f32,
+pub(crate) struct C {
+    pub re: f32,
+    pub im: f32,
 }
 
 impl C {
@@ -34,7 +34,7 @@ impl C {
 }
 
 /// A complex FFT of a fixed length, exp(-2 pi i jk / n).
-struct Fft {
+pub(crate) struct Fft {
     n: usize,
     /// (radix, length of each sub-transform), outermost first.
     factors: Vec<(usize, usize)>,
@@ -43,7 +43,7 @@ struct Fft {
 }
 
 impl Fft {
-    fn new(n: usize) -> Fft {
+    pub fn new(n: usize) -> Fft {
         let mut factors = Vec::new();
         let mut m = n;
         while m > 1 {
@@ -56,9 +56,20 @@ impl Fft {
         Fft { n, factors, tw }
     }
 
-    /// `out` = DFT of `inp[0], inp[stride], ...`.
-    fn run(&self, inp: &[C], out: &mut [C]) {
+    /// `out` = DFT of `inp`.
+    pub fn run(&self, inp: &[C], out: &mut [C]) {
         self.work(out, inp, 1, 0);
+    }
+
+    /// `out` = the unscaled inverse DFT of `inp` (which it conjugates).
+    pub fn run_inverse(&self, inp: &mut [C], out: &mut [C]) {
+        for v in inp.iter_mut() {
+            v.im = -v.im;
+        }
+        self.work(out, inp, 1, 0);
+        for v in out.iter_mut() {
+            v.im = -v.im;
+        }
     }
 
     fn work(&self, out: &mut [C], inp: &[C], fstride: usize, level: usize) {

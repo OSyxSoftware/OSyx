@@ -13,6 +13,7 @@ pub mod mdct;
 pub mod mp3;
 mod mp3_tables;
 pub mod ogg;
+pub mod opus;
 pub mod resample;
 pub mod vorbis;
 mod vorbis_table;
