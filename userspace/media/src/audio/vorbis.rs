@@ -834,6 +834,61 @@ impl VorbisDecoder {
         Ok(dec)
     }
 
+    /// A decoder fed packets from another container (WebM): the three
+    /// header packets now, audio packets later through `decode_raw`.
+    pub fn from_headers(id: &[u8], comment: &[u8], setup: &[u8]) -> Result<VorbisDecoder, String> {
+        let d = id;
+        if d.len() < 30 || d[0] != 1 || &d[1..7] != b"vorbis" || u32::from_le_bytes(d[7..11].try_into().unwrap()) != 0 {
+            return Err(String::from("unsupported Vorbis identification header"));
+        }
+        let channels = d[11] as usize;
+        let rate = u32::from_le_bytes(d[12..16].try_into().unwrap());
+        let bs = [1usize << (d[28] & 15), 1usize << (d[28] >> 4)];
+        if channels == 0 || rate == 0 || bs[0] < 64 || bs[1] < bs[0] || bs[1] > 8192 {
+            return Err(String::from("invalid Vorbis identification header"));
+        }
+        if comment.first() != Some(&3) {
+            return Err(String::from("Vorbis comment header missing"));
+        }
+        let setup = read_setup(setup, channels, bs)?;
+        Ok(VorbisDecoder {
+            info: Info { rate, channels, frames: None, codec: String::from("Vorbis") },
+            packets: Packets::new(&[], 0),
+            data: Vec::new(),
+            setup,
+            first_audio_page: 0,
+            prev: None,
+            pending: Vec::new(),
+            pos: None,
+            want: 0,
+            total: 0,
+            window_cache: Vec::new(),
+            imdct: [Imdct::new(bs[0] / 2, 1.0), Imdct::new(bs[1] / 2, 1.0)],
+        })
+    }
+
+    /// Decodes one audio packet given directly: the samples it finishes
+    /// (none for the first after `reset_raw`).
+    pub fn decode_raw(&mut self, packet: &[u8]) -> Vec<f32> {
+        self.decode_packet(packet)
+    }
+
+    /// The block size of an audio packet, from its mode.
+    pub fn blocksize_of(&self, packet: &[u8]) -> Option<usize> {
+        let s = &self.setup;
+        let mut r = LsbReader::new(packet);
+        if r.read(1) != Some(0) {
+            return None;
+        }
+        let m = r.read(ilog(s.modes.len() as u32 - 1))?;
+        Some(s.blocksize[s.modes.get(m as usize)?.long as usize])
+    }
+
+    /// Forgets the overlap, before decoding from another place.
+    pub fn reset_raw(&mut self) {
+        self.prev = None;
+    }
+
     /// Starts over at the first audio packet.
     fn restart(&mut self) {
         self.packets.seek_page(&self.data, self.first_audio_page);

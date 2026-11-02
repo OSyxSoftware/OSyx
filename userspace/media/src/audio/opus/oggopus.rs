@@ -133,6 +133,46 @@ impl OggOpusDecoder {
         Ok(dec)
     }
 
+    /// A decoder fed packets from another container (WebM): its OpusHead
+    /// now, audio packets later through `decode_raw`.
+    pub fn from_head(head: &[u8]) -> Result<OggOpusDecoder, String> {
+        let head = parse_head(head)?;
+        let decoders = (0..head.streams).map(|s| OpusDecoder::new(if s < head.coupled { 2 } else { 1 })).collect();
+        let gain = libm::powf(10.0, head.gain_db_q8 as f32 / (20.0 * 256.0));
+        Ok(OggOpusDecoder {
+            info: Info { rate: 48000, channels: head.channels, frames: None, codec: String::from("Opus") },
+            order: wave_order(head.family, head.channels),
+            scratch: (0..head.streams).map(|_| vec![0.0; MAX_PACKET_SAMPLES * 2]).collect(),
+            packets: Packets::new(&[], 0),
+            data: Vec::new(),
+            head,
+            first_audio_page: 0,
+            decoders,
+            gain,
+            queue: VecDeque::new(),
+            pos: None,
+            from: 0,
+            end: 0,
+        })
+    }
+
+    /// Samples to drop at the start of the stream.
+    pub fn pre_skip(&self) -> u64 {
+        self.head.pre_skip
+    }
+
+    /// Decodes one packet given directly into interleaved samples.
+    pub fn decode_raw(&mut self, packet: &[u8]) -> Result<Vec<f32>, String> {
+        self.decode_packet(packet)
+    }
+
+    /// Resets the decoder state, before decoding from another place.
+    pub fn reset_raw(&mut self) {
+        for d in &mut self.decoders {
+            d.reset();
+        }
+    }
+
     fn restart(&mut self) {
         self.packets.seek_page(&self.data, self.first_audio_page);
         self.queue.clear();

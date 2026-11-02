@@ -4,8 +4,10 @@ tests/video.rs:
 
     python userspace/media/tests/make_video_fixtures.py
 
-NAME.ivf (or NAME.webm) gets NAME.yuv.gz: gzip of width, height and frame
-count (u32 little-endian each), then each shown frame's I420 planes.
+NAME.ivf (or NAME.webm, NAME.mkv) gets NAME.yuv.gz: gzip of width, height
+and frame count (u32 little-endian each), then each shown frame's I420
+planes. Movies with sound also get NAME.pcm.gz: rate, channels and frame
+count (u32), then FFmpeg's decoded samples as interleaved 16-bit.
 """
 
 import gzip
@@ -69,6 +71,70 @@ def reference(name, data, fmt):
     print(name, w, h, len(frames), len(data))
 
 
+def encode_movie(name, fmt, acodec, rate, layout, w=80, h=48, n=25):
+    buf = io.BytesIO()
+    out = av.open(buf, "w", format=fmt)
+    vs = out.add_stream("libvpx", rate=25)
+    vs.width, vs.height, vs.pix_fmt = w, h, "yuv420p"
+    vs.options = {"b": "200k", "g": "10"}
+    st = out.add_stream(acodec, rate=rate, layout=layout)
+    st.options = {"strict": "-2"}
+    chans = 2 if layout == "stereo" else 1
+    total = rate * n // 25
+    t = np.arange(total) / rate
+    sig = np.stack([0.4 * np.sin(2 * np.pi * (220 + 300 * t) * t), 0.3 * np.sin(2 * np.pi * 660 * t)])[:chans]
+    sig = sig.astype(np.float32)
+    fmt_a = st.codec_context.format.name
+    step = st.codec_context.frame_size or 1024
+    pos = 0
+    frames = list(scene(w, h, n))
+    vi = 0
+    while pos < total or vi < len(frames):
+        # Interleave roughly in time.
+        if vi < len(frames) and (pos >= total or vi / 25 <= pos / rate):
+            for p in vs.encode(frames[vi].reformat(format="yuv420p")):
+                out.mux(p)
+            vi += 1
+            continue
+        chunk = sig[:, pos:pos + step]
+        if chunk.shape[1] < step:
+            chunk = np.pad(chunk, ((0, 0), (0, step - chunk.shape[1])))
+        arr = chunk if fmt_a.endswith("p") else chunk.T.reshape(1, -1)
+        if fmt_a.startswith("s16"):
+            arr = (arr * 32767).round().astype(np.int16)
+        af = av.AudioFrame.from_ndarray(arr, format=fmt_a, layout=layout)
+        af.sample_rate = rate
+        af.pts = pos
+        for p in st.encode(af):
+            out.mux(p)
+        pos += step
+    for p in vs.encode():
+        out.mux(p)
+    for p in st.encode():
+        out.mux(p)
+    out.close()
+    data = buf.getvalue()
+    ext = "mkv" if fmt == "matroska" else fmt
+    with open(os.path.join(OUT, f"{name}.{ext}"), "wb") as f:
+        f.write(data)
+    reference(name, data, fmt)
+    inp = av.open(io.BytesIO(data), format=fmt)
+    pcm = []
+    for fr in inp.decode(inp.streams.audio[0]):
+        a = fr.to_ndarray()
+        if fr.format.is_planar:
+            a = a.T
+        else:
+            a = a.reshape(-1, len(fr.layout.channels))
+        pcm.append(a.astype(np.float32))
+    pcm = np.concatenate(pcm)
+    pcm16 = (pcm * 32768).round().clip(-32768, 32767).astype("<i2")
+    ref = struct.pack("<3I", rate, pcm.shape[1], pcm.shape[0]) + pcm16.tobytes()
+    with open(os.path.join(OUT, name + ".pcm.gz"), "wb") as f:
+        f.write(gzip.compress(ref, 9, mtime=0))
+    print(name, "audio", rate, pcm.shape)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     # Golden and alternate reference frames, several token partitions.
@@ -81,6 +147,9 @@ def main():
     # High quality, sharpness and static threshold.
     d = encode_ivf("vp8-hq", 64, 48, 12, crf=4, b="2M", sharpness=5, **{"static-thresh": 100})
     reference("vp8-hq", d, "ivf")
+    encode_movie("movie-opus", "webm", "libopus", 48000, "stereo")
+    encode_movie("movie-vorbis", "webm", "vorbis", 44100, "stereo")
+    encode_movie("movie-mkv", "matroska", "libopus", 48000, "mono", w=64, h=36, n=15)
 
 
 main()

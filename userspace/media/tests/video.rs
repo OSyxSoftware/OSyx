@@ -76,3 +76,95 @@ fn vp8_streams_match_ffmpeg() {
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
+
+/// FFmpeg's decoded sound: rate, channels, 16-bit samples.
+fn pcm(name: &str) -> (u32, usize, Vec<i16>) {
+    let gz = read(&format!("{name}.pcm.gz"));
+    let raw = miniz_oxide::inflate::decompress_to_vec(&gz[10..gz.len() - 8]).unwrap();
+    let n = |i: usize| u32::from_le_bytes(raw[i..i + 4].try_into().unwrap()) as usize;
+    let s = raw[12..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+    (n(0) as u32, n(4), s)
+}
+
+/// WebM and Matroska movies: every picture matches FFmpeg's (through the
+/// same colour conversion), and the sound stays within a few steps of
+/// FFmpeg's decoders.
+#[test]
+fn movies_match_ffmpeg() {
+    use osyx_media::video::Movie;
+    let mut report = Vec::new();
+    for (file, name) in
+        [("movie-opus.webm", "movie-opus"), ("movie-vorbis.webm", "movie-vorbis"), ("movie-mkv.mkv", "movie-mkv")]
+    {
+        let movie = Movie::open(read(file)).unwrap();
+        let (w, h, want) = reference(name);
+        let mut video = movie.video().unwrap().unwrap();
+        let mut k = 0;
+        while let Some(p) = video.next_picture() {
+            let p = p.unwrap();
+            let planes = &want[k];
+            let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+            let yuv = vp8::Yuv {
+                w,
+                h,
+                y: &planes[..w * h],
+                u: &planes[w * h..w * h + cw * ch],
+                v: &planes[w * h + cw * ch..],
+                y_stride: w,
+                uv_stride: cw,
+            };
+            assert_eq!(p.px, vp8::to_rgba(&yuv), "{name} picture {k}");
+            assert_eq!(p.ms, k as u64 * 40, "{name} picture {k} time");
+            k += 1;
+        }
+        assert_eq!(k, want.len(), "{name}: pictures");
+        let (rate, ch, samples) = pcm(name);
+        let mut dec = movie.audio().unwrap().unwrap();
+        assert_eq!((dec.info().rate, dec.info().channels), (rate, ch), "{name}");
+        let mut got = Vec::new();
+        while let Some(b) = dec.next_block().unwrap() {
+            got.extend(b);
+        }
+        let n = got.len().min(samples.len());
+        let worst = (0..n).map(|i| ((got[i] * 32768.0).round() as i32 - samples[i] as i32).abs()).max().unwrap();
+        report.push(format!("{name}: {} samples against {}, worst {worst}", got.len() / ch, samples.len() / ch));
+        // FFmpeg's own Opus decoder is not libopus: a few steps apart.
+        assert!(worst <= 8 && got.len().abs_diff(samples.len()) <= ch, "{}", report.last().unwrap());
+    }
+    println!("{}", report.join("\n"));
+}
+
+/// Seeking lands on the right picture and sample.
+#[test]
+fn movie_seeking() {
+    use osyx_media::video::Movie;
+    let movie = Movie::open(read("movie-opus.webm")).unwrap();
+    let (w, h, want) = reference("movie-opus");
+    let mut video = movie.video().unwrap().unwrap();
+    video.seek(530);
+    let p = video.next_picture().unwrap().unwrap();
+    // The picture showing at 530 ms is the one from 520 ms.
+    assert_eq!(p.ms, 520);
+    let planes = &want[13];
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let yuv = vp8::Yuv {
+        w,
+        h,
+        y: &planes[..w * h],
+        u: &planes[w * h..w * h + cw * ch],
+        v: &planes[w * h + cw * ch..],
+        y_stride: w,
+        uv_stride: cw,
+    };
+    assert_eq!(p.px, vp8::to_rgba(&yuv));
+    let (rate, ch, samples) = pcm("movie-opus");
+    let mut dec = movie.audio().unwrap().unwrap();
+    let at = dec.seek(rate as u64 / 2).unwrap() as usize;
+    let b = dec.next_block().unwrap().unwrap();
+    let worst = (0..b.len().min(2000))
+        .map(|i| ((b[i] * 32768.0).round() as i32 - samples[at * ch + i] as i32).abs())
+        .max()
+        .unwrap();
+    // After the pre-roll the decoder has converged to FFmpeg's output.
+    assert!(worst <= 8, "worst {worst}");
+}
