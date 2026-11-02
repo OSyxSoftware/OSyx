@@ -55,7 +55,12 @@ pub(crate) fn index_entry(b: &[u8], i: usize) -> (u32, u64) {
 
 impl<D: BlockDevice> Ext4<D> {
     /// Reads and verifies an extent tree block of `inode`.
-    pub(crate) fn extent_block(&mut self, inode: &Inode, blk: u64, want_depth: u16) -> crate::Result<alloc::vec::Vec<u8>> {
+    pub(crate) fn extent_block(
+        &mut self,
+        inode: &Inode,
+        blk: u64,
+        want_depth: u16,
+    ) -> crate::Result<alloc::vec::Vec<u8>> {
         let b = self.read_block(blk)?;
         let h = parse_header(&b, b.len())?;
         if h.depth != want_depth {
@@ -74,7 +79,10 @@ impl<D: BlockDevice> Ext4<D> {
     }
 
     fn check_extent(&self, start: u64, len: u64) -> Result<()> {
-        if len == 0 || start < self.sb.first_data_block as u64 || start.checked_add(len).is_none_or(|e| e > self.sb.blocks_count) {
+        if len == 0
+            || start < self.sb.first_data_block as u64
+            || start.checked_add(len).is_none_or(|e| e > self.sb.blocks_count)
+        {
             return Err(Error::Corrupt("extent outside the file system"));
         }
         Ok(())
