@@ -26,10 +26,27 @@ pub enum Orient {
     HH,
 }
 
-const SIG: u8 = 1;
-const NEG: u8 = 2;
-const VISITED: u8 = 4;
-const REFINED: u8 = 8;
+// Per-coefficient flags: which neighbours are significant (and negative),
+// then the coefficient's own state.
+const W: u16 = 1;
+const E: u16 = 1 << 1;
+const N: u16 = 1 << 2;
+const S: u16 = 1 << 3;
+const NW: u16 = 1 << 4;
+const NE: u16 = 1 << 5;
+const SW: u16 = 1 << 6;
+const SE: u16 = 1 << 7;
+const W_NEG: u16 = 1 << 8;
+const E_NEG: u16 = 1 << 9;
+const N_NEG: u16 = 1 << 10;
+const S_NEG: u16 = 1 << 11;
+const SIG: u16 = 1 << 12;
+const NEG: u16 = 1 << 13;
+const VISITED: u16 = 1 << 14;
+const REFINED: u16 = 1 << 15;
+/// The neighbours below, which a vertically causal block ignores on the
+/// last row of a stripe.
+const BELOW: u16 = S | SW | SE | S_NEG;
 
 const RL: usize = 17;
 const UNI: usize = 18;
@@ -95,15 +112,81 @@ enum Coder<'a> {
     Raw(Raw<'a>),
 }
 
+/// Table D.1: zero coding contexts by the eight neighbour bits.
+fn zc_table(orient: Orient) -> [u8; 256] {
+    fn hv(h: u32, v: u32, d: u32) -> u8 {
+        match h {
+            2.. => 8,
+            1 if v >= 1 => 7,
+            1 if d >= 1 => 6,
+            1 => 5,
+            _ if v == 2 => 4,
+            _ if v == 1 => 3,
+            _ if d >= 2 => 2,
+            _ => d as u8,
+        }
+    }
+    let mut t = [0u8; 256];
+    for (f, e) in t.iter_mut().enumerate() {
+        let f = f as u16;
+        let bit = |m: u16| (f & m != 0) as u32;
+        let (h, v, d) = (bit(W) + bit(E), bit(N) + bit(S), bit(NW) + bit(NE) + bit(SW) + bit(SE));
+        *e = match orient {
+            Orient::LL | Orient::LH => hv(h, v, d),
+            Orient::HL => hv(v, h, d),
+            Orient::HH => match (d, h + v) {
+                (3.., _) => 8,
+                (2, 1..) => 7,
+                (2, _) => 6,
+                (1, 2..) => 5,
+                (1, 1) => 4,
+                (1, _) => 3,
+                (_, hv) => hv.min(2) as u8,
+            },
+        };
+    }
+    t
+}
+
+/// Table D.3: sign contexts and XOR bits by the four direct neighbours'
+/// significance (low nibble) and signs (high nibble).
+fn sc_table() -> [(u8, u8); 256] {
+    let mut t = [(0, 0); 256];
+    for (f, e) in t.iter_mut().enumerate() {
+        let c = |sig: usize, neg: usize| -> i32 {
+            match (f & sig != 0, f & neg != 0) {
+                (true, false) => 1,
+                (true, true) => -1,
+                _ => 0,
+            }
+        };
+        let h = (c(1, 16) + c(2, 32)).clamp(-1, 1);
+        let v = (c(4, 64) + c(8, 128)).clamp(-1, 1);
+        *e = match (h, v) {
+            (1, 1) => (13, 0),
+            (1, 0) => (12, 0),
+            (1, _) => (11, 0),
+            (0, 1) => (10, 0),
+            (0, 0) => (9, 0),
+            (0, _) => (10, 1),
+            (_, 1) => (11, 1),
+            (_, 0) => (12, 1),
+            _ => (13, 1),
+        };
+    }
+    t
+}
+
 struct Block {
     w: usize,
     h: usize,
     stride: usize,
-    flags: Vec<u8>,
+    flags: Vec<u16>,
     mag: Vec<i32>,
-    orient: Orient,
     vcausal: bool,
     ctx: [Cx; 19],
+    zc: [u8; 256],
+    sc: [(u8, u8); 256],
 }
 
 fn initial_contexts() -> [Cx; 19] {
@@ -116,98 +199,43 @@ fn initial_contexts() -> [Cx; 19] {
 
 impl Block {
     #[inline]
-    fn sig(&self, i: usize) -> u32 {
-        (self.flags[i] & SIG) as u32
-    }
-
-    /// Significant horizontal, vertical and diagonal neighbours; `last`:
-    /// the bottom row of a stripe, whose lower neighbours a vertically
-    /// causal block ignores.
-    #[inline]
-    fn neighbours(&self, i: usize, last: bool) -> (u32, u32, u32) {
-        let s = self.stride;
-        let h = self.sig(i - 1) + self.sig(i + 1);
-        let mut v = self.sig(i - s);
-        let mut d = self.sig(i - s - 1) + self.sig(i - s + 1);
-        if !(last && self.vcausal) {
-            v += self.sig(i + s);
-            d += self.sig(i + s - 1) + self.sig(i + s + 1);
-        }
-        (h, v, d)
-    }
-
-    /// Table D.1.
-    fn zc(&self, h: u32, v: u32, d: u32) -> usize {
-        fn hv(h: u32, v: u32, d: u32) -> usize {
-            match h {
-                2.. => 8,
-                1 if v >= 1 => 7,
-                1 if d >= 1 => 6,
-                1 => 5,
-                _ if v == 2 => 4,
-                _ if v == 1 => 3,
-                _ if d >= 2 => 2,
-                _ => d as usize,
-            }
-        }
-        match self.orient {
-            Orient::LL | Orient::LH => hv(h, v, d),
-            Orient::HL => hv(v, h, d),
-            Orient::HH => {
-                let hv = h + v;
-                match d {
-                    3.. => 8,
-                    2 if hv >= 1 => 7,
-                    2 => 6,
-                    1 if hv >= 2 => 5,
-                    1 if hv == 1 => 4,
-                    1 => 3,
-                    _ => hv.min(2) as usize,
-                }
-            }
-        }
-    }
-
-    /// Table D.3: the context and the XOR bit of a sign.
-    fn sc(&self, i: usize, last: bool) -> (usize, u32) {
-        let s = self.stride;
-        let c = |j: usize| -> i32 {
-            match self.flags[j] & (SIG | NEG) {
-                SIG => 1,
-                f if f & SIG != 0 => -1,
-                _ => 0,
-            }
-        };
-        let h = (c(i - 1) + c(i + 1)).clamp(-1, 1);
-        let below = if last && self.vcausal { 0 } else { c(i + s) };
-        let v = (c(i - s) + below).clamp(-1, 1);
-        match (h, v) {
-            (1, 1) => (13, 0),
-            (1, 0) => (12, 0),
-            (1, _) => (11, 0),
-            (0, 1) => (10, 0),
-            (0, 0) => (9, 0),
-            (0, _) => (10, 1),
-            (_, 1) => (11, 1),
-            (_, 0) => (12, 1),
-            _ => (13, 1),
-        }
-    }
-
-    #[inline]
     fn idx(&self, x: usize, y: usize) -> usize {
         (y + 1) * self.stride + x + 1
     }
 
-    fn decode_sign(&mut self, c: &mut Coder, i: usize, last: bool) {
-        let neg = match c {
-            Coder::Mq(m) => {
-                let (k, xor) = self.sc(i, last);
-                m.bit(&mut self.ctx[k]) ^ xor
-            }
-            Coder::Raw(r) => r.bit(),
-        };
-        self.flags[i] |= SIG | if neg != 0 { NEG } else { 0 };
+    /// The flags of coefficient `i` on row `y`, without the neighbours a
+    /// vertically causal block may not look at.
+    #[inline]
+    fn seen(&self, i: usize, y: usize) -> u16 {
+        let f = self.flags[i];
+        if self.vcausal && y % 4 == 3 {
+            f & !BELOW
+        } else {
+            f
+        }
+    }
+
+    /// Marks coefficient `i` significant and tells its neighbours.
+    #[inline]
+    fn set_sig(&mut self, i: usize, neg: bool, x: usize, y: usize, p: u32) {
+        let s = self.stride;
+        let f = &mut self.flags;
+        f[i] |= SIG | if neg { NEG } else { 0 };
+        f[i - 1] |= E | if neg { E_NEG } else { 0 };
+        f[i + 1] |= W | if neg { W_NEG } else { 0 };
+        f[i - s] |= S | if neg { S_NEG } else { 0 };
+        f[i + s] |= N | if neg { N_NEG } else { 0 };
+        f[i - s - 1] |= SE;
+        f[i - s + 1] |= SW;
+        f[i + s - 1] |= NE;
+        f[i + s + 1] |= NW;
+        self.mag[y * self.w + x] = 3 << p;
+    }
+
+    #[inline]
+    fn sign_mq(&mut self, m: &mut Mq, f: u16) -> bool {
+        let (k, xor) = self.sc[((f & 0xF) | ((f >> 4) & 0xF0)) as usize];
+        m.bit(&mut self.ctx[k as usize]) ^ xor as u32 != 0
     }
 
     fn propagation(&mut self, c: &mut Coder, p: u32) {
@@ -215,25 +243,23 @@ impl Block {
             for x in 0..self.w {
                 for y in y0..(y0 + 4).min(self.h) {
                     let i = self.idx(x, y);
-                    if self.flags[i] & SIG != 0 {
+                    let f = self.seen(i, y);
+                    if f & SIG != 0 || f & 0xFF == 0 {
                         continue;
                     }
-                    let last = y % 4 == 3;
-                    let (h, v, d) = self.neighbours(i, last);
-                    if h + v + d == 0 {
-                        continue;
-                    }
-                    let bit = match c {
+                    let neg = match c {
                         Coder::Mq(m) => {
-                            let k = self.zc(h, v, d);
-                            m.bit(&mut self.ctx[k])
+                            if m.bit(&mut self.ctx[self.zc[(f & 0xFF) as usize] as usize]) == 0 {
+                                None
+                            } else {
+                                Some(self.sign_mq(m, f))
+                            }
                         }
-                        Coder::Raw(r) => r.bit(),
+                        Coder::Raw(r) => (r.bit() != 0).then(|| r.bit() != 0),
                     };
                     self.flags[i] |= VISITED;
-                    if bit != 0 {
-                        self.decode_sign(c, i, last);
-                        self.mag[y * self.w + x] = 3 << p;
+                    if let Some(neg) = neg {
+                        self.set_sig(i, neg, x, y, p);
                     }
                 }
             }
@@ -245,41 +271,33 @@ impl Block {
             for x in 0..self.w {
                 for y in y0..(y0 + 4).min(self.h) {
                     let i = self.idx(x, y);
-                    if self.flags[i] & (SIG | VISITED) != SIG {
+                    let f = self.seen(i, y);
+                    if f & (SIG | VISITED) != SIG {
                         continue;
                     }
                     let bit = match c {
                         Coder::Mq(m) => {
-                            let k = if self.flags[i] & REFINED != 0 {
+                            let k = if f & REFINED != 0 {
                                 16
+                            } else if f & 0xFF != 0 {
+                                15
                             } else {
-                                let (h, v, d) = self.neighbours(i, y % 4 == 3);
-                                if h + v + d > 0 {
-                                    15
-                                } else {
-                                    14
-                                }
+                                14
                             };
                             m.bit(&mut self.ctx[k])
                         }
                         Coder::Raw(r) => r.bit(),
                     };
-                    let m = &mut self.mag[y * self.w + x];
+                    let v = &mut self.mag[y * self.w + x];
                     if bit != 0 {
-                        *m += 1 << p;
+                        *v += 1 << p;
                     } else {
-                        *m -= 1 << p;
+                        *v -= 1 << p;
                     }
                     self.flags[i] |= REFINED;
                 }
             }
         }
-    }
-
-    fn mq_sign(&mut self, m: &mut Mq, i: usize, last: bool) {
-        let (k, xor) = self.sc(i, last);
-        let neg = m.bit(&mut self.ctx[k]) ^ xor;
-        self.flags[i] |= SIG | if neg != 0 { NEG } else { 0 };
     }
 
     fn cleanup(&mut self, m: &mut Mq, p: u32) {
@@ -289,15 +307,7 @@ impl Block {
                 let mut first = y0;
                 // Run-length mode: a full column of four insignificant,
                 // unvisited coefficients without significant neighbours.
-                let quiet = rows == 4
-                    && (y0..y0 + 4).all(|y| {
-                        let i = self.idx(x, y);
-                        if self.flags[i] & (SIG | VISITED) != 0 {
-                            return false;
-                        }
-                        let (h, v, d) = self.neighbours(i, y % 4 == 3);
-                        h + v + d == 0
-                    });
+                let quiet = rows == 4 && (y0..y0 + 4).all(|y| self.seen(self.idx(x, y), y) & (SIG | VISITED | 0xFF) == 0);
                 if quiet {
                     if m.bit(&mut self.ctx[RL]) == 0 {
                         continue;
@@ -305,21 +315,20 @@ impl Block {
                     let r = (m.bit(&mut self.ctx[UNI]) << 1 | m.bit(&mut self.ctx[UNI])) as usize;
                     let y = y0 + r;
                     let i = self.idx(x, y);
-                    self.mq_sign(m, i, y % 4 == 3);
-                    self.mag[y * self.w + x] = 3 << p;
+                    let f = self.seen(i, y);
+                    let neg = self.sign_mq(m, f);
+                    self.set_sig(i, neg, x, y, p);
                     first = y + 1;
                 }
                 for y in first..y0 + rows {
                     let i = self.idx(x, y);
-                    if self.flags[i] & (SIG | VISITED) != 0 {
+                    let f = self.seen(i, y);
+                    if f & (SIG | VISITED) != 0 {
                         continue;
                     }
-                    let last = y % 4 == 3;
-                    let (h, v, d) = self.neighbours(i, last);
-                    let k = self.zc(h, v, d);
-                    if m.bit(&mut self.ctx[k]) != 0 {
-                        self.mq_sign(m, i, last);
-                        self.mag[y * self.w + x] = 3 << p;
+                    if m.bit(&mut self.ctx[self.zc[(f & 0xFF) as usize] as usize]) != 0 {
+                        let neg = self.sign_mq(m, f);
+                        self.set_sig(i, neg, x, y, p);
                     }
                 }
             }
@@ -349,9 +358,10 @@ pub fn decode(
         stride: w + 2,
         flags: vec![0; (w + 2) * (h + 2)],
         mag: vec![0; w * h],
-        orient,
         vcausal: style & VCAUSAL != 0,
         ctx: initial_contexts(),
+        zc: zc_table(orient),
+        sc: sc_table(),
     };
     if zero >= planes || planes > 30 {
         return b.mag;

@@ -217,11 +217,16 @@ pub fn decode(data: &[u8]) -> R<Image> {
     // Every channel at full size, 8 bits.
     let plane = |c: &codestream::Component, map: &dyn Fn(i32) -> u8| -> Vec<u8> {
         let mut out = vec![0u8; w * h];
+        if c.w == 0 || c.h == 0 {
+            return out;
+        }
+        let cols: Vec<usize> =
+            (0..w).map(|x| ((cs.x0 + x) / c.dx).saturating_sub(c.x0).min(c.w.saturating_sub(1))).collect();
         for y in 0..h {
             let sy = ((cs.y0 + y) / c.dy).saturating_sub(c.y0).min(c.h.saturating_sub(1));
-            for x in 0..w {
-                let sx = ((cs.x0 + x) / c.dx).saturating_sub(c.x0).min(c.w.saturating_sub(1));
-                out[y * w + x] = map(c.data.get(sy * c.w + sx).copied().unwrap_or(0));
+            let row = &c.data[sy * c.w..(sy + 1) * c.w];
+            for (o, &sx) in out[y * w..(y + 1) * w].iter_mut().zip(&cols) {
+                *o = map(row[sx]);
             }
         }
         out
