@@ -1,6 +1,7 @@
 //! Image XObjects and inline images (ISO 32000-1, 8.9): samples of 1 to 16
-//! bits in any colour space with Decode arrays, JPEG (DCTDecode), stencil
-//! masks, explicit and colour key masks, and soft masks.
+//! bits in any colour space with Decode arrays, JPEG (DCTDecode), CCITT fax
+//! and JBIG2 bi-level data, stencil masks, explicit and colour key masks, and
+//! soft masks.
 
 use super::color::{self, Space};
 use super::document::Document;
@@ -51,6 +52,28 @@ fn fax(doc: &Document, data: &[u8], parms: Option<&Dict>, w: usize, h: usize) ->
         black_is_1: flag("BlackIs1"),
     };
     super::ccitt::decode(data, &p)
+}
+
+/// JBIG2 data as packed 1-bit rows of `w` by `h`, 0 black, after the
+/// segments of the JBIG2Globals stream in the filter's DecodeParms. Undecodable
+/// data gives a white image.
+fn jbig2(doc: &Document, data: &[u8], parms: Option<&Dict>, w: usize, h: usize) -> Vec<u8> {
+    let globals = match parms.and_then(|p| key(p, "JBIG2Globals")).map(|o| doc.resolve(o)) {
+        Some(Object::Stream(g)) => Some(filter::decode(&g.data, &g.dict).0),
+        _ => None,
+    };
+    let rb = w.div_ceil(8);
+    let mut out = vec![0xFFu8; rb * h];
+    let Ok(pages) = crate::jbig2::decode(data, globals.as_deref(), true) else { return out };
+    let Some(page) = pages.first() else { return out };
+    for y in 0..h.min(page.h) {
+        for x in 0..w.min(page.w) {
+            if page.px[y * page.w + x] != 0 {
+                out[y * rb + x / 8] &= !(0x80 >> (x % 8));
+            }
+        }
+    }
+    out
 }
 
 /// Decodes the JPEG in `data` to (w, h, components, samples).
@@ -113,6 +136,9 @@ fn mask_alpha(doc: &Document, m: &Object, w: usize, h: usize, soft: bool) -> Opt
     if let Some((name, parms)) = &codec {
         if name == b"CCITTFaxDecode" {
             data = fax(doc, &data, parms.as_ref(), mw, mh);
+            codec = None;
+        } else if name == b"JBIG2Decode" {
+            data = jbig2(doc, &data, parms.as_ref(), mw, mh);
             codec = None;
         }
     }
@@ -183,6 +209,9 @@ pub fn decode(doc: &Document, d: &Dict, raw: &[u8], resolve_space: &dyn Fn(&Obje
     if let Some((name, parms)) = &codec {
         if name == b"CCITTFaxDecode" {
             data = fax(doc, &data, parms.as_ref(), w, h);
+            codec = None;
+        } else if name == b"JBIG2Decode" {
+            data = jbig2(doc, &data, parms.as_ref(), w, h);
             codec = None;
         }
     }

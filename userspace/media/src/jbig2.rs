@@ -88,21 +88,6 @@ impl Bitmap {
         }
         Ok(())
     }
-
-    /// Packed rows, most significant bit first, with 1 for white (the
-    /// sample values PDF's DeviceGray images expect).
-    pub fn to_pdf_samples(&self) -> Vec<u8> {
-        let rb = self.w.div_ceil(8);
-        let mut out = vec![0xFFu8; rb * self.h];
-        for y in 0..self.h {
-            for x in 0..self.w {
-                if self.px[y * self.w + x] != 0 {
-                    out[y * rb + x / 8] &= !(0x80 >> (x % 8));
-                }
-            }
-        }
-        out
-    }
 }
 
 // ---------------------------------------------------------------------------
