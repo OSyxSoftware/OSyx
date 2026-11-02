@@ -52,7 +52,9 @@ fn wsl_ok() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| {
         Command::new("wsl.exe")
-            .args(["-d", "Ubuntu-24.04", "--", "bash", "-lc", "command -v e2fsck debugfs"])
+            // No argument with spaces: wsl.exe splits quoted arguments
+            // again, which made this probe fail and every check skip.
+            .args(["-d", "Ubuntu-24.04", "--", "which", "e2fsck", "debugfs"])
             .output()
             .is_ok_and(|o| o.status.success())
     })
@@ -74,6 +76,11 @@ fn scratch(name: &str, img: &[u8]) -> PathBuf {
 
 /// e2fsck -fn must report a clean volume.
 fn e2fsck(name: &str, img: &[u8]) {
+    // OSYX_EXT4_KEEP=<dir> keeps every checked image for running e2fsck
+    // by hand where the test process cannot start WSL.
+    if let Ok(dir) = std::env::var("OSYX_EXT4_KEEP") {
+        std::fs::write(std::path::Path::new(&dir).join(format!("{name}.img")), img).unwrap();
+    }
     if !wsl_ok() {
         eprintln!("SKIPPED e2fsck for {name}: WSL with e2fsprogs not available");
         return;
@@ -88,31 +95,34 @@ fn e2fsck(name: &str, img: &[u8]) {
     let _ = std::fs::remove_file(p);
 }
 
-/// File contents as debugfs reads them.
-fn debugfs_cat(name: &str, img: &[u8], path: &str) -> Option<Vec<u8>> {
+/// Runs one debugfs request on `img`. The request goes through a command
+/// file (`-f`): wsl.exe would split a quoted `-R` argument.
+fn debugfs(name: &str, img: &[u8], request: &str) -> Option<Vec<u8>> {
     if !wsl_ok() {
         return None;
     }
     let p = scratch(name, img);
+    let cmd = p.with_extension("debugfs");
+    std::fs::write(&cmd, format!("{request}\n")).unwrap();
     let o = Command::new("wsl.exe")
-        .args(["-d", "Ubuntu-24.04", "--", "debugfs", "-R", &format!("cat \"{path}\""), &wsl_path(&p)])
+        .args(["-d", "Ubuntu-24.04", "--", "debugfs", "-f", &wsl_path(&cmd), &wsl_path(&p)])
         .output()
         .unwrap();
     let _ = std::fs::remove_file(p);
+    let _ = std::fs::remove_file(cmd);
     Some(o.stdout)
 }
 
+/// File contents as debugfs reads them.
+fn debugfs_cat(name: &str, img: &[u8], path: &str) -> Option<Vec<u8>> {
+    // debugfs echoes the request first ("debugfs: cat ...").
+    let out = debugfs(name, img, &format!("cat \"{path}\""))?;
+    let start = out.iter().position(|&b| b == b'\n').map_or(0, |p| p + 1);
+    Some(out[start..].to_vec())
+}
+
 fn debugfs_stat(name: &str, img: &[u8], path: &str) -> Option<String> {
-    if !wsl_ok() {
-        return None;
-    }
-    let p = scratch(name, img);
-    let o = Command::new("wsl.exe")
-        .args(["-d", "Ubuntu-24.04", "--", "debugfs", "-R", &format!("stat \"{path}\""), &wsl_path(&p)])
-        .output()
-        .unwrap();
-    let _ = std::fs::remove_file(p);
-    Some(String::from_utf8_lossy(&o.stdout).into_owned())
+    debugfs(name, img, &format!("stat \"{path}\"")).map(|o| String::from_utf8_lossy(&o).into_owned())
 }
 
 // ---- scenarios -----------------------------------------------------------------
@@ -396,20 +406,134 @@ fn writable_mount_replays_the_journal_to_disk() {
     }
 }
 
+/// Index levels below the root of a hashed directory, as debugfs reads it.
+fn htree_levels(name: &str, img: &[u8], path: &str) -> Option<u32> {
+    let out = debugfs(name, img, &format!("htree_dump \"{path}\""))?;
+    let text = String::from_utf8_lossy(&out);
+    text.lines().find_map(|l| l.trim().strip_prefix("Indirect levels:").and_then(|v| v.trim().parse().ok()))
+}
+
+fn long_name(i: usize) -> String {
+    format!("an-entry-with-a-fairly-long-name-to-fill-leaves-{i:05}.dat")
+}
+
+#[test]
+fn hashed_directories_grow_split_and_stay_valid() {
+    // ext4-1k: /many was indexed by e2fsck -D; 1 KiB blocks split leaves
+    // and index nodes early.
+    for name in ["ext4-1k", "ext4-nocsum"] {
+        let mut fs = rw(fixture(name));
+        let many = fs.resolve("/many").unwrap();
+        assert!(fs.inode(many).unwrap().flags & osyx_ext4::inode::FL_INDEX != 0, "{name}: fixture has an htree directory");
+        let count = if name == "ext4-1k" { 3000 } else { 1500 };
+        let mut inos = Vec::with_capacity(count);
+        for i in 0..count {
+            inos.push(fs.create(many, &long_name(i), NewKind::File, 0o644, 0, 0).unwrap());
+        }
+        fs.sync().unwrap();
+        // Every old and new name is found through the index.
+        for i in 0..400 {
+            fs.lookup(many, &format!("file-{i}.txt")).unwrap_or_else(|e| panic!("{name}: file-{i}.txt: {e}"));
+        }
+        for (i, ino) in inos.iter().enumerate() {
+            assert_eq!(fs.lookup(many, &long_name(i)).unwrap(), *ino, "{name}: {}", long_name(i));
+        }
+        assert_eq!(fs.lookup(many, "not-there"), Err(Error::NotFound));
+        // "." and ".." are in the root block, outside the index.
+        assert_eq!(fs.lookup(many, ".").unwrap(), many, "{name}");
+        assert_eq!(fs.lookup(many, "..").unwrap(), ROOT_INO, "{name}");
+        assert_eq!(fs.resolve("/many/../hello.txt").unwrap(), fs.resolve("/hello.txt").unwrap());
+        // Removals, renames within and out of the directory.
+        for i in (0..count).step_by(3) {
+            fs.unlink(many, &long_name(i)).unwrap();
+        }
+        fs.rename(many, &long_name(1), many, "renamed-in-place").unwrap();
+        fs.rename(many, &long_name(2), ROOT_INO, "moved-out").unwrap();
+        fs.rename(ROOT_INO, "hello.txt", many, "moved-in").unwrap();
+        assert_eq!(fs.lookup(many, &long_name(3)), Err(Error::NotFound));
+        assert!(fs.lookup(many, "renamed-in-place").is_ok() && fs.lookup(many, "moved-in").is_ok());
+        assert_eq!(fs.read_dir(many).unwrap().len(), 400 + count - count.div_ceil(3) - 1 + 1);
+        fs.check().unwrap();
+        let img = fs.unmount().unwrap();
+        e2fsck(&format!("{name}-htree"), &img);
+        if name == "ext4-1k" {
+            if let Some(levels) = htree_levels(name, &img, "/many") {
+                assert_eq!(levels, 1, "3000 long names need an index node level on 1 KiB blocks");
+            }
+        }
+        // The index survives a remount.
+        let mut fs = ro(img);
+        let many = fs.resolve("/many").unwrap();
+        assert!(fs.lookup(many, &long_name(count - 1)).is_ok());
+    }
+}
+
+#[test]
+fn full_directories_become_hashed() {
+    let mut fs = rw(fixture("ext4-4k"));
+    let d = fs.create(ROOT_INO, "grows", NewKind::Dir, 0o755, 0, 0).unwrap();
+    assert_eq!(fs.inode(d).unwrap().flags & osyx_ext4::inode::FL_INDEX, 0);
+    for i in 0..700 {
+        fs.create(d, &long_name(i), NewKind::File, 0o644, 0, 0).unwrap();
+    }
+    assert!(fs.inode(d).unwrap().flags & osyx_ext4::inode::FL_INDEX != 0, "a full one-block directory becomes hashed");
+    let sub = fs.create(d, "subdir", NewKind::Dir, 0o755, 0, 0).unwrap();
+    // Moving a directory between hashed directories rewrites "..".
+    fs.rename(d, "subdir", ROOT_INO, "subdir-moved").unwrap();
+    fs.rename(ROOT_INO, "subdir-moved", d, "subdir-back").unwrap();
+    assert_eq!(fs.lookup(d, "subdir-back").unwrap(), sub);
+    for i in 0..700 {
+        assert!(fs.lookup(d, &long_name(i)).is_ok());
+    }
+    // Moving the hashed directory rewrites ".." in its index root, which
+    // carries its own checksum.
+    let parent = fs.create(ROOT_INO, "parent", NewKind::Dir, 0o755, 0, 0).unwrap();
+    fs.rename(ROOT_INO, "grows", parent, "grows").unwrap();
+    fs.check().unwrap();
+    let img = fs.unmount().unwrap();
+    e2fsck("made-hashed", &img);
+    // Emptied, the hashed directory can be removed with its index blocks.
+    let mut fs = rw(img);
+    let parent = fs.resolve("/parent").unwrap();
+    let d = fs.lookup(parent, "grows").unwrap();
+    let free_before = fs.free_counts().0;
+    for i in 0..700 {
+        fs.unlink(d, &long_name(i)).unwrap();
+    }
+    fs.rmdir(d, "subdir-back").unwrap();
+    fs.rmdir(parent, "grows").unwrap();
+    assert!(fs.free_counts().0 > free_before);
+    fs.check().unwrap();
+    let img = fs.unmount().unwrap();
+    e2fsck("hashed-removed", &img);
+}
+
+#[test]
+fn fragmented_files_get_deeper_extent_trees() {
+    // Every other block written: each block is its own extent. On 1 KiB
+    // blocks 1000 extents need a depth-2 tree.
+    let mut fs = rw(fixture("ext4-1k"));
+    let f = fs.create(ROOT_INO, "fragmented", NewKind::File, 0o644, 0, 0).unwrap();
+    for i in 0..1000u64 {
+        fs.write(f, i * 2048, &pattern(1024, i as usize)).unwrap();
+    }
+    for i in (0..1000u64).step_by(97) {
+        let mut b = vec![0u8; 1024];
+        assert_eq!(fs.read(f, i * 2048, &mut b).unwrap(), 1024);
+        assert_eq!(b, pattern(1024, i as usize));
+    }
+    fs.check().unwrap();
+    let img = fs.unmount().unwrap();
+    e2fsck("fragmented-depth", &img);
+    if let Some(stat) = debugfs_stat("fragmented-depth", &img, "/fragmented") {
+        // An index block at level 1 means a depth-2 tree.
+        assert!(stat.contains("(ETB1)"), "expected a depth-2 extent tree:
+{stat}");
+    }
+}
+
 #[test]
 fn unsupported_writes_are_refused() {
-    // Hashed directory (indexed by e2fsck -D when the fixture was made).
-    let mut fs = rw(fixture("ext4-4k"));
-    let many = fs.resolve("/many").unwrap();
-    assert!(fs.inode(many).unwrap().flags & osyx_ext4::inode::FL_INDEX != 0, "fixture has an htree directory");
-    assert_eq!(fs.create(many, "new", NewKind::File, 0o644, 0, 0), Err(Error::Unsupported("adding entries to a hashed (dir_index) directory")));
-    // The refused create allocated an inode first: the pending transaction
-    // must not keep that bit (counters and bitmaps agree).
-    fs.check().unwrap();
-    // Removing from it is fine.
-    fs.unlink(many, "file-7.txt").unwrap();
-    let img = fs.unmount().unwrap();
-    e2fsck("htree-unlink", &img);
     // Block-mapped and checksum-less legacy volumes stay read-only.
     for name in ["ext3-1k", "ext2-4k", "ext4-metabg"] {
         assert!(matches!(Ext4::mount(fixture(name), MountOptions { read_only: false, clock: Some(clock) }), Err(Error::Unsupported(_))), "{name}");
@@ -603,4 +727,35 @@ fn randomised_operations_match_a_model() {
         assert_eq!(&read_all(&mut fs, ino), want, "{name}");
     }
     e2fsck("random", &img);
+}
+
+#[test]
+fn damaged_index_checksums_are_not_trusted() {
+    // ext4-1k has metadata_csum; corrupt the dx_tail of /many's root.
+    let mut img = fixture("ext4-1k");
+    let many = {
+        let mut fs = ro(img.clone());
+        fs.resolve("/many").unwrap()
+    };
+    let bs = 1024;
+    let root = (0..img.len() / bs)
+        .find(|&i| {
+            let b = &img[i * bs..(i + 1) * bs];
+            u32::from_le_bytes(b[0..4].try_into().unwrap()) == many
+                && u16::from_le_bytes([b[4], b[5]]) == 12
+                && b[8] == b'.'
+                && b[29] == 8
+        })
+        .expect("the index root of /many");
+    let b = &mut img[root * bs..(root + 1) * bs];
+    let limit = u16::from_le_bytes([b[32], b[33]]) as usize;
+    b[32 + limit * 8 + 4] ^= 0xFF;
+    let mut fs = rw(img);
+    // Lookups search linearly instead.
+    assert!(fs.lookup(many, "file-7.txt").is_ok());
+    assert_eq!(fs.lookup(many, "not-there"), Err(Error::NotFound));
+    // Insertions and moving the directory refuse.
+    assert!(matches!(fs.create(many, "new.txt", NewKind::File, 0o644, 0, 0), Err(Error::Unsupported(_))));
+    let sub = fs.create(ROOT_INO, "sub", NewKind::Dir, 0o755, 0, 0).unwrap();
+    assert!(matches!(fs.rename(ROOT_INO, "many", sub, "many"), Err(Error::Corrupt(_))));
 }

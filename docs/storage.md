@@ -57,6 +57,22 @@ The minimal image omits worker, so process self-tests fail; this is not the
 full system suite. Physical SATA controllers, MSI-X and polling fallback,
 and error injection still require validation.
 
+## NVMe completion interrupts
+
+NVMe configures MSI-X, falling back to MSI when available, and enables
+interrupts on its I/O completion queue. Callers sleep on a per-controller
+wait queue and check the completion phase again after registration to avoid
+missed wakeups. Early boot and controllers without MSI retain timer polling.
+Commands remain serialized per controller and retain a bounded timeout.
+
+Run `scripts/nvme-irq-test.ps1` with an existing `build/esp` boot loader to
+build the kernel and test a disposable NVMe disk in QEMU on two vCPUs.
+`-SkipBuild` reuses the compiled kernel. The test checks read/write/flush,
+delivered MSI-X interrupts and completions after returning from a scheduler
+wait. It intentionally omits user programs, so the process self-tests fail;
+this is a targeted storage check, not the complete system suite. Physical
+NVMe controllers and the MSI and polling fallback paths still need testing.
+
 ## VFS (`kernel/src/vfs`)
 
 - **Driver interface** (`Filesystem`): inode-style — `lookup(dir, name)`,

@@ -185,9 +185,9 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     // A not-present page in an anonymous region: give it its frame (zeroed,
     // or restored from compressed memory) and retry, whether user code or a
     // kernel copy to/from user memory touched it. User code holds no kernel
-    // lock, so its fault may wait for the process table instead of reporting
+    // lock, so its fault may wait for its memory lock instead of reporting
     // an access violation the process cannot fix. Both faults need only the
-    // process table, paging and frame locks, so they are resolved before the
+    // process memory, paging and frame locks, so they are resolved before the
     // entry lock: a browser starting up takes hundreds of thousands of them,
     // and a lock-free read or futex copy must not queue behind other CPUs'
     // system calls for one.

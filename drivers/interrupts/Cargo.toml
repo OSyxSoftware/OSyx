@@ -1,0 +1,6 @@
+[package]
+name = "osyx-interrupts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Host-tested MADT I/O APIC routing data"

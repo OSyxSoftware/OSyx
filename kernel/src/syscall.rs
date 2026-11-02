@@ -260,8 +260,30 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         crate::smp::note_tid_futex(crate::smp::cached_tid(), f.rax);
     }
     crate::smp::note_callsite(crate::smp::cached_tid(), f.rip, f.rax);
+    // Mapping metadata and page-table edits serialize with this process's
+    // memory lock. Faults, reclaim, exec and exit use the same lock. These
+    // scalar-only calls do not copy user buffers or touch unguarded drivers.
+    if matches!(f.rax, nr::MAP | nr::MAP_EX | nr::UNMAP | nr::PROTECT | nr::DISCARD) {
+        crate::smp::note_syscall(f.rax);
+        crate::smp::note_lock_free(f.rax);
+        cpu::enable_interrupts();
+        let r = match f.rax {
+            nr::MAP => process::map_anonymous(f.rdi, f.rsi),
+            nr::MAP_EX => process::map_ex(f.rdi, f.rsi, f.rdx, f.r10),
+            nr::UNMAP => process::unmap_region(f.rdi, f.rsi).map(|_| 0),
+            nr::PROTECT => process::protect(f.rdi, f.rsi, f.rdx).map(|_| 0),
+            nr::DISCARD => process::discard(f.rdi, f.rsi).map(|_| 0),
+            _ => unreachable!(),
+        };
+        if sched::current_kill_pending() {
+            let _entry = crate::smp::KernelEntry::new_yielding();
+            process::finish_current_thread(crate::sched::current_kill_code());
+        }
+        sched::park_if_suspended();
+        return osyx_abi::encode(r);
+    }
     // Bulk prefaulting maps and zeroes page runs with only its own locks
-    // (process table, paging, frames). Holding the entry lock for a whole run
+    // (process memory, paging, frames). Holding the entry lock for a whole run
     // makes the other CPU spin and starve host I/O, so it re-enters in small
     // chunks instead.
     if f.rax == nr::PREFAULT {

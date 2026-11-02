@@ -2,7 +2,8 @@
 //!
 //! One controller: an admin queue pair (Identify Controller and
 //! Namespace) and one I/O queue pair. Requests are serialised by a sleeping
-//! mutex and polled to completion: no interrupts are used. Data goes
+//! mutex. MSI-X/MSI completion interrupts wake sleeping I/O callers, with
+//! timer polling retained when interrupts are unavailable. Data goes
 //! through driver-owned DMA pages (bounce buffers) announced with PRP1,
 //! PRP2 or a PRP list, so callers can pass any kernel buffer.
 
@@ -46,6 +47,40 @@ const IO_READ: u32 = 0x02;
 const IO_FLUSH: u32 = 0x00;
 
 static CONTROLLERS: AtomicUsize = AtomicUsize::new(0);
+const MAX_IRQ_CONTROLLERS: usize = 8;
+// Stable addresses: an interrupt may arrive after a failed probe. Never
+// point an interrupt handler at the temporary controller allocation.
+static COMPLETIONS: [crate::waitq::WaitQueue; MAX_IRQ_CONTROLLERS] = [const { crate::waitq::WaitQueue::new() }; MAX_IRQ_CONTROLLERS];
+static IRQ_COUNTS: [AtomicUsize; MAX_IRQ_CONTROLLERS] = [const { AtomicUsize::new(0) }; MAX_IRQ_CONTROLLERS];
+static SLEEP_COMPLETIONS: [AtomicUsize; MAX_IRQ_CONTROLLERS] = [const { AtomicUsize::new(0) }; MAX_IRQ_CONTROLLERS];
+
+pub fn log_stats() {
+    for index in 0..CONTROLLERS.load(Ordering::Relaxed).min(MAX_IRQ_CONTROLLERS) {
+        crate::kprintln!("nvme{index}: {} completion interrupts, {} completions after sleeping", IRQ_COUNTS[index].load(Ordering::Relaxed), SLEEP_COMPLETIONS[index].load(Ordering::Relaxed));
+    }
+}
+
+fn completion_interrupt(index: u64) {
+    if let Some(queue) = COMPLETIONS.get(index as usize) {
+        IRQ_COUNTS[index as usize].fetch_add(1, Ordering::Relaxed);
+        queue.wake_all();
+    }
+}
+
+fn setup_interrupts(dev: &pci::Device, index: usize) -> bool {
+    if index >= MAX_IRQ_CONTROLLERS { return false; }
+    let Some(vector) = crate::irq::allocate(completion_interrupt, index as u64) else { return false };
+    let (address, data) = crate::arch::apic::msi_message(vector);
+    let mode = if dev.enable_msix(address, data).is_ok() { Some("MSI-X") }
+        else if dev.enable_msi(address, data).is_ok() { Some("MSI") } else { None };
+    if let Some(mode) = mode {
+        crate::kprintln!("nvme{index}: completion interrupts via {mode} on vector {vector:#x}");
+        true
+    } else {
+        crate::irq::free(vector);
+        false
+    }
+}
 
 #[derive(Debug)]
 enum NvmeError {
@@ -119,6 +154,7 @@ struct Inner {
 pub struct Nvme {
     mmio: Mmio,
     inner: KMutex<Inner>,
+    interrupt_index: Option<usize>,
 }
 
 /// One namespace, presented as a disk (`nvme0n1`, ...).
@@ -229,6 +265,7 @@ fn start(dev: &pci::Device, index: usize) -> Result<Vec<Arc<dyn BlockDev>>, Nvme
 
     let ctrl = Arc::new(Nvme {
         mmio: m,
+        interrupt_index: setup_interrupts(dev, index).then_some(index),
         inner: KMutex::new(Inner {
             admin: Queue { sq: admin_sq, cq: admin_cq, qsize, tail: 0, head: 0, phase: true, sq_doorbell: 0, cq_doorbell: stride },
             io: Queue { sq: io_sq, cq: io_cq, qsize, tail: 0, head: 0, phase: true, sq_doorbell: 2 * stride, cq_doorbell: 3 * stride },
@@ -280,7 +317,8 @@ fn start(dev: &pci::Device, index: usize) -> Result<Vec<Arc<dyn BlockDev>>, Nvme
         cmd[6] = io_cq as u32;
         cmd[7] = (io_cq >> 32) as u32;
         cmd[10] = 1 | ((qsize as u32 - 1) << 16);
-        cmd[11] = 1; // physically contiguous, enabled
+        // Physically contiguous; enable interrupts on MSI-X table entry 0.
+        cmd[11] = 1 | if ctrl.interrupt_index.is_some() { 2 } else { 0 };
         submit(&ctrl, &mut g.admin, &cmd)?;
         let mut cmd = [0u32; 16];
         cmd[0] = ADMIN_CREATE_SQ | ((g.cid as u32) << 16);
@@ -357,7 +395,8 @@ fn submit(ctrl: &Nvme, q: &mut Queue, cmd: &[u32; 16]) -> Result<(), NvmeError> 
     wait_completion(ctrl, q, (cmd[0] >> 16) as u16)
 }
 
-/// Polls the completion queue until the entry for `cid` arrives.
+/// Checks completion phase before sleeping and again after registration,
+/// so completion before the interrupt waiter is installed cannot be lost.
 fn wait_completion(ctrl: &Nvme, q: &mut Queue, cid: u16) -> Result<(), NvmeError> {
     let deadline = Deadline::after_ms(COMMAND_TIMEOUT_MS);
     let base = phys_to_virt(q.cq);
@@ -388,7 +427,21 @@ fn wait_completion(ctrl: &Nvme, q: &mut Queue, cid: u16) -> Result<(), NvmeError
         if deadline.expired() {
             return Err(NvmeError::Timeout("command completion"));
         }
-        timer::pause_tick();
+        if let Some(index) = ctrl.interrupt_index.filter(|_| timer::healthy() && crate::sched::current_tid() != 0 && crate::arch::cpu::interrupts_enabled()) {
+            let mut checks = 0usize;
+            let result = crate::waitq::block_on(&[&COMPLETIONS[index]], Some(deadline.tick()), || {
+                checks += 1;
+                // SAFETY: the driver owns the CQ frame throughout this wait.
+                let status = unsafe { read_volatile((entry + 12) as *const u32) };
+                (((status >> 16) & 1 != 0) == q.phase).then_some(())
+            });
+            if result.is_err() { return Err(NvmeError::Timeout("command completion interrupt")); }
+            // block_on checks twice before scheduling; a third check proves
+            // this request returned from the scheduler rather than spinning.
+            if checks > 2 { SLEEP_COMPLETIONS[index].fetch_add(1, Ordering::Relaxed); }
+        } else {
+            timer::pause_tick();
+        }
     }
 }
 

@@ -18,10 +18,10 @@
 //! * A file removed while open goes on the superblock's orphan list and is
 //!   freed on its last close; the list is processed at the next writable
 //!   mount if the machine stops before that.
-//! * Only extent-mapped files are written. Adding entries to hashed
-//!   (`dir_index`) directories is refused (`Unsupported`); extent trees are
-//!   kept at depth 0, 1 or 2 (up to 4 index blocks, each with a full page of
-//!   leaves).
+//! * Only extent-mapped files are written. Extent trees are rebuilt at the
+//!   depth their extents need, up to the format's limit of 5. Hashed
+//!   (`dir_index`) directories are kept indexed (see `htree.rs`), and a full
+//!   one-block directory becomes hashed when the volume has `dir_index`.
 
 use crate::dir::{entries, has_tail, TAIL};
 use crate::inode::{Inode, FL_EXTENTS, FL_INDEX, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
@@ -33,6 +33,9 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+
+#[path = "htree.rs"]
+mod htree;
 
 // Temporary I/O diagnostics.
 pub static WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -110,6 +113,9 @@ fn validate_name(name: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// Deepest extent tree the format allows (`EXT4_MAX_EXTENT_DEPTH`).
+const MAX_DEPTH: u16 = 5;
 
 fn rec_size(name_len: usize) -> usize {
     (8 + name_len + 3) & !3
@@ -716,7 +722,7 @@ impl<D: BlockDevice> Ext4<D> {
         Ok(b)
     }
 
-    /// Writes `list` back as an extent tree of depth 0, 1 or 2.
+    /// Writes `list` back as an extent tree of the depth it needs.
     fn store_extents(&mut self, inode: &mut Inode, list: Vec<Ext>, old_tree: Vec<u64>) -> Result<()> {
         // Merge neighbours and split oversized extents.
         let mut merged: Vec<Ext> = Vec::with_capacity(list.len());
@@ -773,12 +779,17 @@ impl<D: BlockDevice> Ext4<D> {
             inode.block = root;
             return Ok(());
         }
-        let leaves = flat.len().div_ceil(per_node);
-        if leaves > 4 * per_node {
-            return Err(Error::Unsupported("file too fragmented for a depth-2 extent tree"));
-        }
         let seed = inode.csum_seed(self.csum_seed);
-        let mut leaf_blocks: Vec<(u32, u64)> = Vec::with_capacity(leaves);
+        let csum = self.sb.metadata_csum();
+        let seal = |b: &mut [u8]| {
+            if csum {
+                let tail = 12 + 12 * per_node;
+                let c = crc::crc32c(seed, &b[..tail]);
+                put32(b, tail, c);
+            }
+        };
+        // Leaves, then index levels until the root's four slots suffice.
+        let mut level: Vec<(u32, u64)> = Vec::with_capacity(flat.len().div_ceil(per_node));
         for chunk in flat.chunks(per_node) {
             let blk = match reuse.pop() {
                 Some(b) => b,
@@ -789,46 +800,36 @@ impl<D: BlockDevice> Ext4<D> {
             for (i, e) in chunk.iter().enumerate() {
                 put_extent(&mut b, i, e);
             }
-            if self.sb.metadata_csum() {
-                let tail = 12 + 12 * per_node;
-                let c = crc::crc32c(seed, &b[..tail]);
-                put32(&mut b, tail, c);
-            }
+            seal(&mut b);
             self.tx_put(blk, b);
-            leaf_blocks.push((chunk[0].lblk as u32, blk));
+            level.push((chunk[0].lblk as u32, blk));
         }
-        if leaf_blocks.len() <= 4 {
-            header(&mut root, leaf_blocks.len(), 4, 1);
-            for (i, &(first, blk)) in leaf_blocks.iter().enumerate() {
-                put_index(&mut root, i, first, blk);
+        let mut depth = 1u16;
+        while level.len() > 4 {
+            if depth >= MAX_DEPTH {
+                return Err(Error::Unsupported("file too fragmented for an extent tree"));
             }
-        } else {
-            let mut index_blocks: Vec<(u32, u64)> = Vec::new();
-            for group in leaf_blocks.chunks(per_node) {
+            let mut up = Vec::with_capacity(level.len().div_ceil(per_node));
+            for group in level.chunks(per_node) {
                 let blk = match reuse.pop() {
                     Some(b) => b,
                     None => self.tree_block(group[0].1, inode)?,
                 };
                 let mut b = vec![0u8; bs];
-                header(&mut b, group.len(), per_node, 1);
+                header(&mut b, group.len(), per_node, depth);
                 for (i, &(first, child)) in group.iter().enumerate() {
                     put_index(&mut b, i, first, child);
                 }
-                if self.sb.metadata_csum() {
-                    let tail = 12 + 12 * per_node;
-                    let c = crc::crc32c(seed, &b[..tail]);
-                    put32(&mut b, tail, c);
-                }
+                seal(&mut b);
                 self.tx_put(blk, b);
-                index_blocks.push((group[0].0, blk));
+                up.push((group[0].0, blk));
             }
-            if index_blocks.len() > 4 {
-                return Err(Error::Unsupported("file too fragmented for a depth-2 extent tree"));
-            }
-            header(&mut root, index_blocks.len(), 4, 2);
-            for (i, &(first, blk)) in index_blocks.iter().enumerate() {
-                put_index(&mut root, i, first, blk);
-            }
+            level = up;
+            depth += 1;
+        }
+        header(&mut root, level.len(), 4, depth);
+        for (i, &(first, blk)) in level.iter().enumerate() {
+            put_index(&mut root, i, first, blk);
         }
         for b in reuse {
             self.free_blocks(b, 1)?;
@@ -1048,6 +1049,9 @@ impl<D: BlockDevice> Ext4<D> {
             let o = b.len() - TAIL;
             let c = crc::crc32c(dir.csum_seed(self.csum_seed), &b[..o]);
             put32(b, o + 8, c);
+        } else if let Some(count_off) = self.dx_count_off(dir, b) {
+            // An index block (the root's "..", say): its own checksum.
+            self.seal_dx(dir, b, count_off);
         }
     }
 
@@ -1058,7 +1062,11 @@ impl<D: BlockDevice> Ext4<D> {
     /// Finds `name` in `dir`: (logical block, offset, inode, file type).
     fn find_entry(&mut self, dir: &Inode, name: &str) -> Result<(u64, usize, u32, u8)> {
         let ft = self.filetype();
-        for lblk in 0..self.dir_blocks(dir)? {
+        let blocks: Vec<u64> = match self.dx_leaves(dir, name.as_bytes())? {
+            Some(leaves) => leaves,
+            None => (0..self.dir_blocks(dir)?).collect(),
+        };
+        for lblk in blocks {
             let (_, b) = self.dir_block(dir, lblk)?;
             for e in entries(&b, ft, self.sb.inodes_count)? {
                 if e.ino != 0 && e.name == name.as_bytes() {
@@ -1070,58 +1078,87 @@ impl<D: BlockDevice> Ext4<D> {
     }
 
     fn add_entry(&mut self, dir: &mut Inode, name: &str, ino: u32, ft: u8) -> Result<()> {
-        if dir.flags & FL_INDEX != 0 {
-            return Err(Error::Unsupported("adding entries to a hashed (dir_index) directory"));
+        if self.is_indexed(dir) {
+            return self.dx_add(dir, name.as_bytes(), ino, ft);
         }
-        let need = rec_size(name.len());
-        let filetype = self.filetype();
-        let bs = self.sb.block_size as usize;
-        let usable_end = if self.sb.metadata_csum() { bs - TAIL } else { bs };
-        for lblk in 0..self.dir_blocks(dir)? {
+        if dir.flags & FL_INDEX != 0 {
+            // Index flag without the volume feature: Linux keeps such a
+            // directory linear, and so do we (dropping the stale flag).
+            dir.flags &= !FL_INDEX;
+        }
+        let blocks = self.dir_blocks(dir)?;
+        for lblk in 0..blocks {
             let (phys, _) = self.dir_block(dir, lblk)?;
             let mut b = self.tx_read(phys)?;
-            let list: Vec<(usize, u32, usize, usize)> =
-                entries(&b, filetype, self.sb.inodes_count)?.iter().map(|e| (e.off, e.ino, e.rec_len, e.name.len())).collect();
-            for (off, eino, rec_len, nlen) in list {
-                if off >= usable_end {
-                    continue; // the checksum tail
-                }
-                let rec_end = (off + rec_len).min(usable_end);
-                let (slot, slot_len) = if eino == 0 {
-                    (off, rec_end - off)
-                } else {
-                    let used = rec_size(nlen);
-                    (off + used, rec_end.saturating_sub(off + used))
-                };
-                if slot_len < need {
-                    continue;
-                }
-                if eino != 0 {
-                    put16(&mut b, off + 4, (slot - off) as u16);
-                }
-                put32(&mut b, slot, ino);
-                put16(&mut b, slot + 4, (off + rec_len - slot) as u16);
-                b[slot + 6] = name.len() as u8;
-                b[slot + 7] = if filetype { ft } else { 0 };
-                b[slot + 8..slot + 8 + name.len()].copy_from_slice(name.as_bytes());
+            if self.place_entry(&mut b, name.as_bytes(), ino, ft)? {
                 self.seal_dir_block(dir, &mut b);
                 self.tx_put(phys, b);
                 return Ok(());
             }
         }
-        // No room: append a block.
-        let lblk = dir.size / bs as u64;
+        // No room. A full one-block directory becomes hashed, like Linux,
+        // when OSyx knows the volume's default hash; otherwise it grows
+        // linearly (still valid).
+        if blocks == 1 && self.sb.has_compat(feature::COMPAT_DIR_INDEX) && self.default_hash_known() {
+            return self.make_indexed(dir, name.as_bytes(), ino, ft);
+        }
+        let filetype = self.filetype();
         let mut b = self.new_dir_block(&[(ino, name.as_bytes(), if filetype { ft } else { 0 })]);
         self.seal_dir_block(dir, &mut b);
+        self.append_dir_block(dir, b)?;
+        Ok(())
+    }
+
+    /// Puts an entry into the free space of directory block `b`; false
+    /// when it does not fit.
+    fn place_entry(&self, b: &mut [u8], name: &[u8], ino: u32, ft: u8) -> Result<bool> {
+        let need = rec_size(name.len());
+        let filetype = self.filetype();
+        let bs = self.sb.block_size as usize;
+        let usable_end = if self.sb.metadata_csum() { bs - TAIL } else { bs };
+        let list: Vec<(usize, u32, usize, usize)> =
+            entries(b, filetype, self.sb.inodes_count)?.iter().map(|e| (e.off, e.ino, e.rec_len, e.name.len())).collect();
+        for (off, eino, rec_len, nlen) in list {
+            if off >= usable_end {
+                continue; // the checksum tail
+            }
+            let rec_end = (off + rec_len).min(usable_end);
+            let (slot, slot_len) = if eino == 0 {
+                (off, rec_end - off)
+            } else {
+                let used = rec_size(nlen);
+                (off + used, rec_end.saturating_sub(off + used))
+            };
+            if slot_len < need {
+                continue;
+            }
+            if eino != 0 {
+                put16(b, off + 4, (slot - off) as u16);
+            }
+            put32(b, slot, ino);
+            put16(b, slot + 4, (off + rec_len - slot) as u16);
+            b[slot + 6] = name.len() as u8;
+            b[slot + 7] = if filetype { ft } else { 0 };
+            b[slot + 8..slot + 8 + name.len()].copy_from_slice(name);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Adds block `contents` at the end of directory `dir`; returns its
+    /// logical block number.
+    fn append_dir_block(&mut self, dir: &mut Inode, contents: Vec<u8>) -> Result<u64> {
+        let bs = self.sb.block_size as u64;
+        let lblk = dir.size / bs;
         let (mut list, tree) = self.extents(dir)?;
         let goal = list.last().map_or(0, |e| e.phys + e.len);
         let (p, _) = self.alloc_blocks(goal, 1)?;
-        dir.blocks_512 += bs as u64 / 512;
+        dir.blocks_512 += bs / 512;
         list.push(Ext { lblk, len: 1, phys: p, uninit: false });
         self.store_extents(dir, list, tree)?;
-        self.tx_put(p, b);
-        dir.size += bs as u64;
-        Ok(())
+        self.tx_put(p, contents);
+        dir.size += bs;
+        Ok(lblk)
     }
 
     fn remove_entry(&mut self, dir: &Inode, lblk: u64, off: usize) -> Result<()> {
@@ -1145,6 +1182,13 @@ impl<D: BlockDevice> Ext4<D> {
     fn set_dotdot(&mut self, dir: &Inode, parent: u32) -> Result<()> {
         let (phys, _) = self.dir_block(dir, 0)?;
         let mut b = self.tx_read(phys)?;
+        // Resealing a damaged index root would hide the damage, as Linux
+        // refuses to.
+        if let Some(count_off) = self.dx_count_off(dir, &b) {
+            if !self.dx_csum_ok(dir, &b, count_off) {
+                return Err(Error::Corrupt("directory index checksum mismatch"));
+            }
+        }
         let filetype = self.filetype();
         let off = entries(&b, filetype, self.sb.inodes_count)?
             .iter()

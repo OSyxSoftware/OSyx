@@ -7,9 +7,14 @@
 //!   an interrupt handler on the same CPU and deadlock.
 //! * Lock order (outer to inner):
 //!   [`KMutex`]es (sleeping: open file -> volume -> block device) ->
-//!   BLOCK/MOUNTS registries -> process TABLE -> FUTEX -> KMutex state ->
+//!   BLOCK/MOUNTS registries -> process TABLE -> process memory ->
+//!   shared-memory key index -> FUTEX -> KMutex state ->
 //!   SCHED -> OUTPUT_TAIL -> HEAP -> PAGING -> MMIO -> FRAMES -> PCI -> SERIAL.
 //!   Never acquire an outer lock while holding an inner one.
+//!   The process memory index is held only for Arc lookup, insertion or
+//!   removal, never while acquiring a process memory lock. Faults and
+//!   mapping calls do not acquire TABLE. Independent processes have
+//!   independent memory locks; PAGING still serializes page-table edits.
 //! * Because every lock disables interrupts, a thread is never preempted while
 //!   holding one; the timer handler only takes SCHED (and, when it
 //!   reaps a dead thread, HEAP).
