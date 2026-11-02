@@ -8,3 +8,8 @@
 *.gz binary
 *.jbig2 binary
 *.bmp binary
+*.jp2 binary
+*.j2k binary
+*.jpf binary
+*.tif binary
+*.png binary

@@ -1,0 +1,8 @@
+The *.jp2 and *.jpf files and the ref-*.png and ref-cmyk.tif references
+come from SerenityOS (Tests/LibGfx/test-inputs/jpeg2000),
+https://github.com/SerenityOS/serenity, under the BSD 2-Clause license
+quoted in ../jbig2/README. ref-cmyk.raw.gz holds the CMYK samples of
+ref-cmyk.tif as Pillow reads them.
+
+gen/ holds files written by OpenJPEG 2.5.4 through Pillow, with OpenJPEG's
+decodings of them (make_jpx_fixtures.py).
