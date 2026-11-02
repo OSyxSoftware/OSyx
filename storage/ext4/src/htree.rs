@@ -262,6 +262,11 @@ impl<D: BlockDevice> Ext4<D> {
         let mut block = root;
         let nblocks = self.dir_blocks(dir)?;
         for depth in 0..=levels_below {
+            // A damaged index (by its dx_tail checksum) is not trusted:
+            // lookups search linearly, insertions refuse.
+            if !self.dx_csum_ok(dir, &block, count_off) {
+                return Ok(None);
+            }
             let Some(list) = read_entries(&block, count_off) else { return Ok(None) };
             let at = list.iter().rposition(|&(h, _)| h <= hash).unwrap_or(0);
             let child = list[at].1 as u64;
@@ -318,7 +323,8 @@ impl<D: BlockDevice> Ext4<D> {
                     return Ok(None);
                 }
                 let (_, nb) = self.dir_block(dir, blk as u64)?;
-                if le32(&nb, 0) != 0 || le16(&nb, 4) as usize != bs || nb[6] != 0 {
+                if le32(&nb, 0) != 0 || le16(&nb, 4) as usize != bs || nb[6] != 0 || !self.dx_csum_ok(dir, &nb, NODE_COUNT)
+                {
                     return Ok(None);
                 }
                 let Some(list) = read_entries(&nb, NODE_COUNT) else { return Ok(None) };
@@ -373,6 +379,24 @@ impl<D: BlockDevice> Ext4<D> {
         self.seal_dx(dir, &mut b, count_off);
         self.tx_put(phys, b);
         Ok(())
+    }
+
+    /// Whether an index block's `dx_tail` checksum holds (always without
+    /// `metadata_csum`).
+    pub(crate) fn dx_csum_ok(&self, dir: &Inode, b: &[u8], count_off: usize) -> bool {
+        if !self.sb.metadata_csum() {
+            return true;
+        }
+        let limit = le16(b, count_off) as usize;
+        let count = le16(b, count_off + 2) as usize;
+        let tail = count_off + limit * 8;
+        if count == 0 || count > limit || tail + 8 > b.len() {
+            return false;
+        }
+        let mut c = crc::crc32c(dir.csum_seed(self.csum_seed), &b[..count_off + count * 8]);
+        c = crc::crc32c(c, &b[tail..tail + 4]);
+        c = crc::crc32c(c, &[0; 4]);
+        c == le32(b, tail + 4)
     }
 
     /// The `dx_tail` checksum of an index block.

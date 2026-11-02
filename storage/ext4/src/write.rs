@@ -1182,6 +1182,13 @@ impl<D: BlockDevice> Ext4<D> {
     fn set_dotdot(&mut self, dir: &Inode, parent: u32) -> Result<()> {
         let (phys, _) = self.dir_block(dir, 0)?;
         let mut b = self.tx_read(phys)?;
+        // Resealing a damaged index root would hide the damage, as Linux
+        // refuses to.
+        if let Some(count_off) = self.dx_count_off(dir, &b) {
+            if !self.dx_csum_ok(dir, &b, count_off) {
+                return Err(Error::Corrupt("directory index checksum mismatch"));
+            }
+        }
         let filetype = self.filetype();
         let off = entries(&b, filetype, self.sb.inodes_count)?
             .iter()

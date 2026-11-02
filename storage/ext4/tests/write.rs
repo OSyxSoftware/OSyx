@@ -728,3 +728,34 @@ fn randomised_operations_match_a_model() {
     }
     e2fsck("random", &img);
 }
+
+#[test]
+fn damaged_index_checksums_are_not_trusted() {
+    // ext4-1k has metadata_csum; corrupt the dx_tail of /many's root.
+    let mut img = fixture("ext4-1k");
+    let many = {
+        let mut fs = ro(img.clone());
+        fs.resolve("/many").unwrap()
+    };
+    let bs = 1024;
+    let root = (0..img.len() / bs)
+        .find(|&i| {
+            let b = &img[i * bs..(i + 1) * bs];
+            u32::from_le_bytes(b[0..4].try_into().unwrap()) == many
+                && u16::from_le_bytes([b[4], b[5]]) == 12
+                && b[8] == b'.'
+                && b[29] == 8
+        })
+        .expect("the index root of /many");
+    let b = &mut img[root * bs..(root + 1) * bs];
+    let limit = u16::from_le_bytes([b[32], b[33]]) as usize;
+    b[32 + limit * 8 + 4] ^= 0xFF;
+    let mut fs = rw(img);
+    // Lookups search linearly instead.
+    assert!(fs.lookup(many, "file-7.txt").is_ok());
+    assert_eq!(fs.lookup(many, "not-there"), Err(Error::NotFound));
+    // Insertions and moving the directory refuse.
+    assert!(matches!(fs.create(many, "new.txt", NewKind::File, 0o644, 0, 0), Err(Error::Unsupported(_))));
+    let sub = fs.create(ROOT_INO, "sub", NewKind::Dir, 0o755, 0, 0).unwrap();
+    assert!(matches!(fs.rename(ROOT_INO, "many", sub, "many"), Err(Error::Corrupt(_))));
+}
