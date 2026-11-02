@@ -14,7 +14,8 @@ fn wsl_e2fsck(name: &str, img: &[u8]) {
         std::fs::write(std::path::Path::new(&dir).join(format!("{name}.img")), img).unwrap();
     }
     let ok = Command::new("wsl.exe")
-        .args(["-d", "Ubuntu-24.04", "--", "bash", "-lc", "command -v e2fsck"])
+        // No argument with spaces: wsl.exe splits them again.
+        .args(["-d", "Ubuntu-24.04", "--", "which", "e2fsck"])
         .output()
         .is_ok_and(|o| o.status.success());
     if !ok {

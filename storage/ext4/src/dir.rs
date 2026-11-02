@@ -1,5 +1,6 @@
-//! Directories: linear entry blocks (hashed `dir_index` directories are
-//! read linearly too: their index blocks look like empty entry blocks).
+//! Directories: linear entry blocks. Listing a hashed (`dir_index`)
+//! directory reads it linearly too (its index blocks look like empty entry
+//! blocks); lookups in it follow the index.
 
 use crate::inode::Inode;
 use crate::{crc, feature, le16, le32, BlockDevice, Error, Ext4, Result};
@@ -125,7 +126,12 @@ impl<D: BlockDevice> Ext4<D> {
     pub fn lookup(&mut self, dir: u32, name: &str) -> Result<u32> {
         let d = self.dir_inode(dir)?;
         let filetype = self.sb.has_incompat(feature::INCOMPAT_FILETYPE);
-        for lblk in 0..self.dir_blocks(&d)? {
+        // Hashed directories: only the leaves the index points at.
+        let blocks: Vec<u64> = match self.dx_leaves(&d, name.as_bytes())? {
+            Some(leaves) => leaves,
+            None => (0..self.dir_blocks(&d)?).collect(),
+        };
+        for lblk in blocks {
             let (_, b) = self.dir_block(&d, lblk)?;
             for e in entries(&b, filetype, self.sb.inodes_count)? {
                 if e.ino != 0 && e.name == name.as_bytes() {
