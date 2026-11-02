@@ -86,8 +86,10 @@ fn e2fsck(name: &str, img: &[u8]) {
         return;
     }
     let p = scratch(name, img);
-    let o =
-        Command::new("wsl.exe").args(["-d", "Ubuntu-24.04", "--", "e2fsck", "-fn", &wsl_path(&p)]).output().unwrap();
+    let o = Command::new("wsl.exe")
+        .args(["-d", "Ubuntu-24.04", "--", "e2fsck", "-fn", &wsl_path(&p)])
+        .output()
+        .unwrap();
     let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
     assert!(o.status.success(), "{name}: e2fsck found problems:\n{text}");
     let _ = std::fs::remove_file(p);
@@ -422,10 +424,7 @@ fn hashed_directories_grow_split_and_stay_valid() {
     for name in ["ext4-1k", "ext4-nocsum"] {
         let mut fs = rw(fixture(name));
         let many = fs.resolve("/many").unwrap();
-        assert!(
-            fs.inode(many).unwrap().flags & osyx_ext4::inode::FL_INDEX != 0,
-            "{name}: fixture has an htree directory"
-        );
+        assert!(fs.inode(many).unwrap().flags & osyx_ext4::inode::FL_INDEX != 0, "{name}: fixture has an htree directory");
         let count = if name == "ext4-1k" { 3000 } else { 1500 };
         let mut inos = Vec::with_capacity(count);
         for i in 0..count {
@@ -513,13 +512,7 @@ fn fragmented_files_get_deeper_extent_trees() {
 fn unsupported_writes_are_refused() {
     // Block-mapped and checksum-less legacy volumes stay read-only.
     for name in ["ext3-1k", "ext2-4k", "ext4-metabg"] {
-        assert!(
-            matches!(
-                Ext4::mount(fixture(name), MountOptions { read_only: false, clock: Some(clock) }),
-                Err(Error::Unsupported(_))
-            ),
-            "{name}"
-        );
+        assert!(matches!(Ext4::mount(fixture(name), MountOptions { read_only: false, clock: Some(clock) }), Err(Error::Unsupported(_))), "{name}");
     }
     // A read-only mount refuses changes.
     let mut fs = ro(fixture("ext4-4k"));
@@ -617,10 +610,7 @@ fn power_cut_at_every_write_recovers_consistently() {
     eprintln!("workload performs {total} device writes");
     let mut fsck_samples = 0;
     for cut in 0..total {
-        let mut fs = match Ext4::mount(
-            PowerCut { img: base.clone(), writes_left: cut },
-            MountOptions { read_only: false, clock: Some(clock) },
-        ) {
+        let mut fs = match Ext4::mount(PowerCut { img: base.clone(), writes_left: cut }, MountOptions { read_only: false, clock: Some(clock) }) {
             Ok(fs) => fs,
             Err(e) => panic!("mount with cut {cut}: {e}"),
         };

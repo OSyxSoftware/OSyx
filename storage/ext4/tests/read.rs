@@ -41,22 +41,7 @@ fn every_image_reads_the_same_tree() {
         assert_eq!(fs.label(), name);
         let mut names: Vec<String> = fs.read_dir(ROOT_INO).unwrap().into_iter().map(|e| e.name).collect();
         names.sort();
-        for want in [
-            "big.bin",
-            "dangling",
-            "dir",
-            "empty-dir",
-            "empty.txt",
-            "fast-link",
-            "hard-link.txt",
-            "hello.txt",
-            "lost+found",
-            "many",
-            "slow-link",
-            "small.bin",
-            "sparse.bin",
-            "zażółć.txt",
-        ] {
+        for want in ["big.bin", "dangling", "dir", "empty-dir", "empty.txt", "fast-link", "hard-link.txt", "hello.txt", "lost+found", "many", "slow-link", "small.bin", "sparse.bin", "zażółć.txt"] {
             assert!(names.iter().any(|n| n == want), "{name}: {want} missing from {names:?}");
         }
         let hello = fs.lookup(ROOT_INO, "hello.txt").unwrap();
@@ -92,10 +77,7 @@ fn every_image_reads_the_same_tree() {
         assert_eq!(fs.readlink(fast).unwrap(), "hello.txt");
         let slow = fs.lookup(ROOT_INO, "slow-link").unwrap();
         let target = fs.readlink(slow).unwrap();
-        assert!(
-            target.len() > 60 && target.starts_with("dir/a/b/c/") && target.ends_with(&"x".repeat(80)),
-            "{name}: {target}"
-        );
+        assert!(target.len() > 60 && target.starts_with("dir/a/b/c/") && target.ends_with(&"x".repeat(80)), "{name}: {target}");
         let dangling = fs.lookup(ROOT_INO, "dangling").unwrap();
         assert_eq!(fs.readlink(dangling).unwrap(), "/does/not/exist");
         assert_eq!(fs.readlink(hello), Err(Error::InvalidInput("not a symbolic link")));
@@ -143,10 +125,7 @@ fn unsupported_features_are_refused() {
     for name in ["ext3-1k", "ext2-4k"] {
         let fs = ro(fixture(name)).unwrap();
         assert!(fs.write_refusal().is_some(), "{name}");
-        assert!(matches!(
-            Ext4::mount(fixture(name), MountOptions { read_only: false, clock: None }),
-            Err(Error::Unsupported(_))
-        ));
+        assert!(matches!(Ext4::mount(fixture(name), MountOptions { read_only: false, clock: None }), Err(Error::Unsupported(_))));
     }
     assert!(matches!(ro(vec![0u8; 1 << 20]), Err(Error::NotExt)));
     assert!(matches!(ro(vec![0u8; 512]), Err(Error::NotExt)));

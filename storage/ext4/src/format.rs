@@ -279,10 +279,7 @@ pub fn format<D: BlockDevice>(dev: &mut D, opts: &FormatOptions<'_>) -> Result<F
     put32(
         &mut sb,
         100,
-        feature::RO_COMPAT_SPARSE_SUPER
-            | feature::RO_COMPAT_LARGE_FILE
-            | feature::RO_COMPAT_DIR_NLINK
-            | feature::RO_COMPAT_EXTRA_ISIZE,
+        feature::RO_COMPAT_SPARSE_SUPER | feature::RO_COMPAT_LARGE_FILE | feature::RO_COMPAT_DIR_NLINK | feature::RO_COMPAT_EXTRA_ISIZE,
     );
     sb[104..120].copy_from_slice(&opts.uuid);
     let label = opts.label.as_bytes();

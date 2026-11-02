@@ -665,15 +665,7 @@ impl<D: BlockDevice> Ext4<D> {
 
     // ---- extents ---------------------------------------------------------------
 
-    fn collect_extents(
-        &mut self,
-        inode: &Inode,
-        node: &[u8],
-        room: usize,
-        out: &mut Vec<Ext>,
-        tree: &mut Vec<u64>,
-        depth_left: u16,
-    ) -> Result<()> {
+    fn collect_extents(&mut self, inode: &Inode, node: &[u8], room: usize, out: &mut Vec<Ext>, tree: &mut Vec<u64>, depth_left: u16) -> Result<()> {
         let h = parse_header(node, room)?;
         if h.depth > depth_left {
             return Err(Error::Corrupt("extent tree too deep"));
@@ -736,9 +728,7 @@ impl<D: BlockDevice> Ext4<D> {
         let mut merged: Vec<Ext> = Vec::with_capacity(list.len());
         for e in list {
             match merged.last_mut() {
-                Some(p) if p.uninit == e.uninit && p.lblk + p.len == e.lblk && p.phys + p.len == e.phys => {
-                    p.len += e.len
-                }
+                Some(p) if p.uninit == e.uninit && p.lblk + p.len == e.lblk && p.phys + p.len == e.phys => p.len += e.len,
                 _ => merged.push(e),
             }
         }
@@ -874,11 +864,7 @@ impl<D: BlockDevice> Ext4<D> {
         self.write_op(|fs| {
             let mut inode = fs.tx_inode(ino)?;
             if inode.file_type() != S_IFREG {
-                return Err(if inode.is_dir() {
-                    Error::IsADirectory
-                } else {
-                    Error::InvalidInput("not a regular file")
-                });
+                return Err(if inode.is_dir() { Error::IsADirectory } else { Error::InvalidInput("not a regular file") });
             }
             fs.write_data(&mut inode, offset, data)?;
             inode.size = inode.size.max(end);
@@ -924,11 +910,7 @@ impl<D: BlockDevice> Ext4<D> {
                 None => {
                     let next = list.iter().filter(|e| e.lblk > l).map(|e| e.lblk).min().unwrap_or(u64::MAX);
                     let want = (last + 1).min(next) - l;
-                    let goal = list
-                        .iter()
-                        .filter(|e| e.lblk < l)
-                        .max_by_key(|e| e.lblk)
-                        .map_or(goal_default, |e| e.phys + e.len);
+                    let goal = list.iter().filter(|e| e.lblk < l).max_by_key(|e| e.lblk).map_or(goal_default, |e| e.phys + e.len);
                     let (p, n) = self.alloc_blocks(goal, want)?;
                     inode.blocks_512 += n * (bs / 512);
                     fresh.extend(p..p + n);
@@ -1008,11 +990,7 @@ impl<D: BlockDevice> Ext4<D> {
         self.op(|fs| {
             let mut inode = fs.tx_inode(ino)?;
             if inode.file_type() != S_IFREG {
-                return Err(if inode.is_dir() {
-                    Error::IsADirectory
-                } else {
-                    Error::InvalidInput("not a regular file")
-                });
+                return Err(if inode.is_dir() { Error::IsADirectory } else { Error::InvalidInput("not a regular file") });
             }
             let bs = fs.sb.block_size as u64;
             if size < inode.size {
@@ -1136,10 +1114,8 @@ impl<D: BlockDevice> Ext4<D> {
         let filetype = self.filetype();
         let bs = self.sb.block_size as usize;
         let usable_end = if self.sb.metadata_csum() { bs - TAIL } else { bs };
-        let list: Vec<(usize, u32, usize, usize)> = entries(b, filetype, self.sb.inodes_count)?
-            .iter()
-            .map(|e| (e.off, e.ino, e.rec_len, e.name.len()))
-            .collect();
+        let list: Vec<(usize, u32, usize, usize)> =
+            entries(b, filetype, self.sb.inodes_count)?.iter().map(|e| (e.off, e.ino, e.rec_len, e.name.len())).collect();
         for (off, eino, rec_len, nlen) in list {
             if off >= usable_end {
                 continue; // the checksum tail
@@ -1187,8 +1163,7 @@ impl<D: BlockDevice> Ext4<D> {
         let (phys, _) = self.dir_block(dir, lblk)?;
         let mut b = self.tx_read(phys)?;
         let filetype = self.filetype();
-        let list: Vec<(usize, usize)> =
-            entries(&b, filetype, self.sb.inodes_count)?.iter().map(|e| (e.off, e.rec_len)).collect();
+        let list: Vec<(usize, usize)> = entries(&b, filetype, self.sb.inodes_count)?.iter().map(|e| (e.off, e.rec_len)).collect();
         let i = list.iter().position(|&(o, _)| o == off).ok_or(Error::NotFound)?;
         if i == 0 {
             put32(&mut b, off, 0);
@@ -1222,10 +1197,7 @@ impl<D: BlockDevice> Ext4<D> {
         for lblk in 0..self.dir_blocks(dir)? {
             let (phys, _) = self.dir_block(dir, lblk)?;
             let b = self.tx_read(phys)?;
-            if entries(&b, filetype, self.sb.inodes_count)?
-                .iter()
-                .any(|e| e.ino != 0 && e.name != b"." && e.name != b"..")
-            {
+            if entries(&b, filetype, self.sb.inodes_count)?.iter().any(|e| e.ino != 0 && e.name != b"." && e.name != b"..") {
                 return Ok(false);
             }
         }
@@ -1687,10 +1659,7 @@ impl<D: BlockDevice> Ext4<D> {
     /// Whether file data or metadata changes are held in memory, not yet
     /// written to the device (see [`Ext4::sync`]).
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
-            || !self.tx.blocks.is_empty()
-            || !self.tx.dirty_groups.is_empty()
-            || !self.tx.freed.is_empty()
+        !self.pending.is_empty() || !self.tx.blocks.is_empty() || !self.tx.dirty_groups.is_empty() || !self.tx.freed.is_empty()
     }
 
     /// Writes the staged file data and commits the pending metadata, then
@@ -1718,8 +1687,7 @@ impl<D: BlockDevice> Ext4<D> {
                 let bm = self.read_block(gd.block_bitmap)?;
                 if self.sb.metadata_csum() {
                     let c = crc::crc32c(self.csum_seed, &bm[..self.sb.blocks_per_group as usize / 8]);
-                    let stored =
-                        if self.sb.desc_size >= 64 { gd.block_bitmap_csum } else { gd.block_bitmap_csum & 0xFFFF };
+                    let stored = if self.sb.desc_size >= 64 { gd.block_bitmap_csum } else { gd.block_bitmap_csum & 0xFFFF };
                     let cmp = if self.sb.desc_size >= 64 { c } else { c & 0xFFFF };
                     if cmp != stored {
                         return Err(Error::Corrupt("block bitmap checksum"));
@@ -1814,3 +1782,4 @@ impl<D: BlockDevice> Ext4<D> {
         ))
     }
 }
+

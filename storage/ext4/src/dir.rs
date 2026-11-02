@@ -116,11 +116,7 @@ impl<D: BlockDevice> Ext4<D> {
                 if e.ino == 0 || e.name == b"." || e.name == b".." {
                     continue;
                 }
-                out.push(DirEntry {
-                    name: String::from_utf8_lossy(e.name).into_owned(),
-                    ino: e.ino,
-                    file_type: e.file_type,
-                });
+                out.push(DirEntry { name: String::from_utf8_lossy(e.name).into_owned(), ino: e.ino, file_type: e.file_type });
             }
         }
         Ok(out)
