@@ -130,7 +130,8 @@ pub fn decode_mmr(data: &[u8], columns: usize, rows: usize) -> (Vec<u8>, usize) 
 
 /// `decode`, also returning how many bytes of `data` it used.
 fn decode_with_end(data: &[u8], p: &Params) -> (Vec<u8>, usize) {
-    let cols = p.columns.clamp(1, 1 << 16);
+    // JBIG2 collective bitmaps can be far wider than any page.
+    let cols = p.columns.clamp(1, 1 << 24);
     let row_bytes = cols.div_ceil(8);
     let white = Tree::new(&WHITE);
     let black = Tree::new(&BLACK);
@@ -139,7 +140,8 @@ fn decode_with_end(data: &[u8], p: &Params) -> (Vec<u8>, usize) {
     let mut out = Vec::new();
     // Changing elements of the reference line (an imaginary white line).
     let mut reference: Vec<usize> = vec![cols, cols];
-    let max_rows = p.rows.unwrap_or(usize::MAX).min(1 << 16);
+    // At most 2^28 pixels.
+    let max_rows = p.rows.unwrap_or(usize::MAX).min((1 << 28) / cols);
     let mut rows = 0;
     while rows < max_rows && r.bits_left() > 0 {
         if p.byte_align && p.k < 0 {

@@ -228,8 +228,11 @@ fn ceil_log2(n: usize) -> u32 {
 
 type At = (i8, i8);
 
-/// Context pixels, most significant first; `None` marks adaptive pixel n.
-const TEMPLATES: [&[(i8, i8, u8)]; 4] = [
+/// A context pixel: (dx, dy, n), where n > 0 takes adaptive pixel n instead.
+type Tap = (i8, i8, u8);
+
+/// Context pixels, most significant first.
+const TEMPLATES: [&[Tap]; 4] = [
     &[
         (0, 0, 4),
         (-1, -2, 0),
@@ -380,7 +383,7 @@ fn decode_mmr_bitmap(data: &[u8], w: usize, h: usize) -> R<(Bitmap, usize)> {
 
 /// Reference pixels (dx, dy, adaptive), most significant first, then the
 /// decoded-bitmap pixels.
-const REF_TEMPLATES: [(&[(i8, i8, u8)], &[(i8, i8, u8)]); 2] = [
+const REF_TEMPLATES: [(&[Tap], &[Tap]); 2] = [
     (
         &[(0, 0, 2), (0, -1, 0), (1, -1, 0), (-1, 0, 0), (0, 0, 0), (1, 0, 0), (-1, 1, 0), (0, 1, 0), (1, 1, 0)],
         &[(0, 0, 1), (0, -1, 0), (1, -1, 0), (-1, 0, 0)],
@@ -408,7 +411,7 @@ struct RefineParams<'a> {
 fn decode_refinement(mq: &mut Mq, gr: &mut [Cx], p: &RefineParams) -> R<Bitmap> {
     let mut b = Bitmap::new(p.w, p.h, 0)?;
     let t = (p.template & 1) as usize;
-    let pick = |&(x, y, a): &(i8, i8, u8)| -> (isize, isize) {
+    let pick = |&(x, y, a): &Tap| -> (isize, isize) {
         if a == 0 {
             (x as isize, y as isize)
         } else {
@@ -935,10 +938,8 @@ fn decode_text(coder: &mut Coder, st: &mut Stats, p: &TextParams) -> R<Bitmap> {
             if p.transposed && !bottom {
                 cur_s += hi - 1;
             }
+            // The strip still ends with OOB after the last instance.
             n += 1;
-            if n >= p.instances {
-                break;
-            }
         }
     }
     Ok(reg)
@@ -1015,7 +1016,6 @@ struct SymbolDict {
     rtemplate: u8,
     at: Vec<At>,
     rat: [At; 2],
-    exported: u32,
     new_symbols: u32,
 }
 
@@ -1478,7 +1478,7 @@ impl State {
             rtemplate,
             at,
             rat: [rat[0], rat[1]],
-            exported: be32(d, p)?,
+            // SDNUMEXSYMS is not needed: the export flags decide.
             new_symbols: be32(d, p + 4)?,
         };
         p += 8;
@@ -1547,7 +1547,6 @@ fn decode_symbols(
         }
         let mut width: i64 = 0;
         let mut total_width: usize = 0;
-        let first = new.len();
         widths.clear();
         loop {
             let dw = match &huff {
@@ -1608,12 +1607,13 @@ fn decode_symbols(
                     // One refined symbol (6.5.8.2.2).
                     let (id, rdx, rdy, chunk_mq);
                     match &huff {
-                        Some(t) => {
+                        Some(_) => {
                             id = r.read(code_len.max(1)).ok_or("JBIG2 data ends early")? as usize;
                             let b15 = standard(15);
                             rdx = b15.value(&mut r)?;
                             rdy = b15.value(&mut r)?;
-                            let size = t.2.value(&mut r)? as usize;
+                            // Table 18 sizes the refinement data with B.1.
+                            let size = standard(1).value(&mut r)? as usize;
                             r.align();
                             let at = r.byte_pos();
                             let chunk = data.get(at..at + size).ok_or("JBIG2 refinement data out of range")?;
@@ -1680,7 +1680,6 @@ fn decode_symbols(
                 new.push(Rc::new(all.sub(x, 0, w, hh)));
                 x += w;
             }
-            let _ = first;
         }
     }
     // 6.5.10: export flags as alternating runs.
@@ -1703,9 +1702,6 @@ fn decode_symbols(
         }
         i += run as usize;
         flag = !flag;
-    }
-    if out.len() != sd.exported as usize {
-        // Lenient: keep what was exported.
     }
     Ok(out)
 }
