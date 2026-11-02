@@ -336,13 +336,10 @@ enum Life {
     Zombie(i32),
 }
 
-pub struct Process {
-    pub pid: Pid,
-    pub name: String,
-    parent: Pid,
-    /// Set when the parent exited: released immediately on exit.
-    orphan: bool,
-    life: Life,
+/// Mapping state has its own lock per process. Never acquire TABLE while
+/// holding this lock. The independent index below only protects Arc lookup.
+struct ProcessMemory {
+    alive: bool,
     space: Space,
     /// Anonymous mappings by base address (demand-zero).
     regions: BTreeMap<u64, Region>,
@@ -353,6 +350,31 @@ pub struct Process {
     program_shared: BTreeMap<u64, (Arc<SharedMemory>, u64)>,
     next_map: u64,
     mapped_pages: u64,
+}
+
+impl ProcessMemory {
+    fn new(mut space: Space) -> Self {
+        let program_shared = core::mem::take(&mut space.program_shared);
+        Self {
+            alive: true,
+            space,
+            regions: BTreeMap::new(),
+            shared: BTreeMap::new(),
+            program_shared,
+            next_map: MAP_BASE,
+            mapped_pages: 0,
+        }
+    }
+}
+
+pub struct Process {
+    pub pid: Pid,
+    pub name: String,
+    parent: Pid,
+    /// Set when the parent exited: released immediately on exit.
+    orphan: bool,
+    life: Life,
+    memory: Arc<IrqSpinLock<ProcessMemory>>,
     line: Vec<u8>,
     /// Live threads; the process is finalised when the last one ends.
     threads: Vec<Tid>,
@@ -382,6 +404,57 @@ static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 // Once set, never cleared. Set before a filtered process becomes runnable.
 static SYSCALL_FILTERS_EXIST: AtomicBool = AtomicBool::new(false);
 static TABLE: IrqSpinLock<Table> = IrqSpinLock::new(Table { procs: BTreeMap::new(), waiters: Vec::new() });
+/// Published before the first thread can run, removed before teardown.
+/// Clone the Arc and release this index before taking a memory lock. Faults
+/// never acquire TABLE, including while exec, exit or proc_info holds it.
+static MEMORY: IrqSpinLock<BTreeMap<Pid, Arc<IrqSpinLock<ProcessMemory>>>> = IrqSpinLock::new(BTreeMap::new());
+
+fn process_memory(pid: Pid, wait: bool) -> Option<Arc<IrqSpinLock<ProcessMemory>>> {
+    let index = if wait { MEMORY.lock() } else { lock_briefly(&MEMORY)? };
+    index.get(&pid).cloned()
+}
+
+/// Exercise the real fault path while TABLE and another process's memory
+/// lock are held. Bounded kernel-fault acquisition turns regressions into a
+/// test failure instead of an unbounded recursive lock wait.
+pub fn memory_lock_selftest() -> Result<(), String> {
+    let space = Space::new().map_err(|e| alloc::format!("first space: {e:?}"))?;
+    let mut first = Process::new(KERNEL_PID, "memory-lock-a", Lookup::kernel(), None, space);
+    let space = match Space::new() {
+        Ok(space) => space,
+        Err(e) => {
+            first.release_memory();
+            return Err(alloc::format!("second space: {e:?}"));
+        }
+    };
+    let mut second = Process::new(KERNEL_PID, "memory-lock-b", Lookup::kernel(), None, space);
+    MEMORY.lock().insert(first.pid, first.memory.clone());
+    MEMORY.lock().insert(second.pid, second.memory.clone());
+    second.memory.lock().regions.insert(MAP_BASE, Region::new(1, osyx_abi::PROT_READ | osyx_abi::PROT_WRITE));
+    let retained = second.memory.clone();
+    let result = (|| {
+        let _table = TABLE.lock();
+        let _first = first.memory.lock();
+        if demand_fault_for(second.pid, MAP_BASE, true, false, false) != Demand::Mapped {
+            return Err("fault waited on unrelated process state".to_string());
+        }
+        let memory = retained.lock();
+        let page = paging::translate_in(memory.space.root, MAP_BASE).ok_or("fault left no page")?;
+        // SAFETY: the fresh anonymous frame is RAM owned by second's space.
+        let bytes = unsafe { core::slice::from_raw_parts(phys_to_virt(page.phys) as *const u8, PAGE_SIZE as usize) };
+        if !bytes.iter().all(|&b| b == 0) {
+            return Err("fault did not zero the page".to_string());
+        }
+        Ok(())
+    })();
+    first.release_memory();
+    second.release_memory();
+    if retained.lock().alive || process_memory(second.pid, false).is_some() {
+        return Err("released space remained available".to_string());
+    }
+    result
+}
+
 /// Open objects by process and handle number: 0-2 only if standard streams
 /// were redirected at spawn, the rest from `FIRST_FILE_HANDLE`. Separate from
 /// [`TABLE`]: channel and wait system calls look handles up on every message,
@@ -536,7 +609,7 @@ fn user_thread_entry(start: u64, _: u64) {
 /// interrupts disabled, so the tid is recorded before the thread can run).
 fn start_thread(p: &mut Process, rip: u64, rsp: u64, arg: u64, fs_base: u64, held: bool) -> Tid {
     let start = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(UserStart { rip, rsp, arg })) as u64;
-    let tid = sched::spawn_initial(&p.name, p.pid, p.space.root, user_thread_entry, start, 0, fs_base, held);
+    let tid = sched::spawn_initial(&p.name, p.pid, p.memory.lock().space.root, user_thread_entry, start, 0, fs_base, held);
     p.threads.push(tid);
     tid
 }
@@ -551,20 +624,14 @@ fn report_release(pid: Pid, name: &str, what: &str, (owned, freed): (u64, u64)) 
 }
 
 impl Process {
-    fn new(parent: Pid, name: &str, cx: Lookup, syscall_policy: Option<Arc<SyscallPolicy>>, mut space: Space) -> Process {
-        let program_shared = core::mem::take(&mut space.program_shared);
+    fn new(parent: Pid, name: &str, cx: Lookup, syscall_policy: Option<Arc<SyscallPolicy>>, space: Space) -> Process {
         Process {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
             name: name.to_string(),
             parent,
             orphan: false,
             life: Life::Running,
-            space,
-            regions: BTreeMap::new(),
-            shared: BTreeMap::new(),
-            program_shared,
-            next_map: MAP_BASE,
-            mapped_pages: 0,
+            memory: Arc::new(IrqSpinLock::new(ProcessMemory::new(space))),
             line: Vec::new(),
             threads: Vec::new(),
             exited_cpu_ticks: 0,
@@ -581,21 +648,20 @@ impl Process {
         Lookup { cred: self.cred, cwd: self.cwd.clone(), case_insensitive: false, path_policy: self.path_policy.clone() }
     }
 
-    /// Removes every shared memory mapping (the frames stay with their
-    /// objects; page tables stay with the address space).
-    fn unmap_shared(&mut self) {
-        shared_keys_clear(self.pid);
-        unmap_shared_from(self.space.root, core::mem::take(&mut self.shared));
-    }
-
-    /// Releases the address space and checks the frame accounting.
+    /// Releases an inactive address space. Outstanding Arc lookups must
+    /// take this lock and check alive before touching its released root.
     fn release_memory(&mut self) {
-        unmap_images_from(self.space.root, core::mem::take(&mut self.regions));
-        unmap_shared_from(self.space.root, core::mem::take(&mut self.program_shared));
-        self.unmap_shared();
-        // SAFETY: the address space is not active (the caller switched to the
-        // kernel root or never activated it).
-        let r = unsafe { self.space.release() };
+        MEMORY.lock().remove(&self.pid);
+        let mut memory = self.memory.lock();
+        let m = &mut *memory;
+        m.alive = false;
+        unmap_images_from(m.space.root, core::mem::take(&mut m.regions));
+        unmap_shared_from(m.space.root, core::mem::take(&mut m.program_shared));
+        shared_keys_clear(self.pid);
+        unmap_shared_from(m.space.root, core::mem::take(&mut m.shared));
+        // SAFETY: the caller left this root, and the last user thread ended.
+        // Reclaim and outstanding lookups serialize with this memory lock.
+        let r = unsafe { m.space.release() };
         report_release(self.pid, &self.name, "", r);
     }
 
@@ -789,6 +855,7 @@ fn spawn_impl(
     cpu::disable_interrupts();
     let tid = start_thread(&mut p, entry, rsp, 0, 0, true);
     p.primary_suspended = suspended;
+    MEMORY.lock().insert(pid, p.memory.clone());
     TABLE.lock().procs.insert(pid, p);
     if !suspended { sched::wake_boosted(tid, 0); }
     if were_enabled {
@@ -849,17 +916,19 @@ pub fn exec_current(req: ExecRequest) -> ExecError {
             None
         } else {
             let p = t.procs.get_mut(&pid).expect("current process exists");
-            core::mem::swap(&mut p.space, &mut space);
-            let old_regions = core::mem::take(&mut p.regions);
-            let new_program_shared = core::mem::take(&mut p.space.program_shared);
-            let old_program_shared = core::mem::replace(&mut p.program_shared, new_program_shared);
-            let old_shared = core::mem::take(&mut p.shared);
+            let mut memory = p.memory.lock();
+            let m = &mut *memory;
+            core::mem::swap(&mut m.space, &mut space);
+            let old_regions = core::mem::take(&mut m.regions);
+            let new_program_shared = core::mem::take(&mut m.space.program_shared);
+            let old_program_shared = core::mem::replace(&mut m.program_shared, new_program_shared);
+            let old_shared = core::mem::take(&mut m.shared);
             shared_keys_clear(pid);
-            p.next_map = MAP_BASE;
-            p.mapped_pages = 0;
+            m.next_map = MAP_BASE;
+            m.mapped_pages = 0;
             p.name = name.clone();
             kprintln!("process {} ({}): exec {}, entry {:#x}", pid, name, path, entry);
-            Some((p.space.root, old_shared, old_program_shared, old_regions))
+            Some((m.space.root, old_shared, old_program_shared, old_regions))
         }
     };
     let Some((root, old_shared, old_program_shared, old_regions)) = old else {
@@ -1121,11 +1190,11 @@ pub fn shared_key(addr: u64) -> Option<(usize, u64)> {
 }
 
 /// Every process's shared mappings as (pid, base) -> (object, offset of the
-/// base in it, pages): a copy of `Process::shared` for the futex fast path.
+/// base in it, pages): a copy of `ProcessMemory::shared` for the futex fast path.
 /// Futex wait and wake run on every contended Windows lock, and looking the
 /// word up under the process table lock made them queue behind page faults
 /// and mappings of all CPUs (the table lock was the top kernel cost in a
-/// Zen profile). Lock order: the process table, then this index.
+/// Zen profile). Lock order: process memory, then this index.
 static SHARED_KEYS: IrqSpinLock<BTreeMap<(Pid, u64), (usize, u64, u64)>> = IrqSpinLock::new(BTreeMap::new());
 
 fn shared_keys_add(pid: Pid, base: u64, shm: &SharedMemory, pages: u64) {
@@ -1159,8 +1228,10 @@ pub fn map_section(
     let prot = if writable { PROT_READ | PROT_WRITE } else { PROT_READ };
     let pages = len.div_ceil(PAGE_SIZE);
     let pid = sched::current_pid();
-    let mut t = TABLE.lock();
-    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
+    let mut guard = memory.lock();
+    let p = &mut *guard;
+    if !p.alive { return Err(Errno::Interrupted); }
     if p.mapped_pages + pages > MAP_LIMIT_PAGES {
         return Err(Errno::NoMemory);
     }
@@ -1177,8 +1248,10 @@ pub fn map_section(
 /// `writable`); returns the address.
 pub fn map_shared(shm: Arc<SharedMemory>, writable: bool) -> Result<u64, Errno> {
     let pid = sched::current_pid();
-    let mut t = TABLE.lock();
-    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
+    let mut guard = memory.lock();
+    let p = &mut *guard;
+    if !p.alive { return Err(Errno::Interrupted); }
     let pages = shm.pages();
     if p.mapped_pages + pages > MAP_LIMIT_PAGES {
         return Err(Errno::NoMemory);
@@ -1242,7 +1315,7 @@ fn make_info(p: &Process) -> osyx_abi::ipc::ProcInfo {
         gid: p.cred.gid,
         threads: p.threads.len() as u32,
         state: if p.life == Life::Running { osyx_abi::ipc::PROC_RUNNING } else { osyx_abi::ipc::PROC_ZOMBIE },
-        frames: p.space.frames,
+        frames: p.memory.lock().space.frames,
         name: [0; 32],
         cpu_ticks: p.exited_cpu_ticks.saturating_add(p.threads.iter().map(|&tid| sched::cpu_ticks(tid)).sum()),
     };
@@ -1259,7 +1332,8 @@ pub fn working_set_root(pid: Pid, caller: Pid) -> Result<u64, Errno> {
     if pid != caller && !me.is_root() && p.cred.uid != me.uid {
         return Err(Errno::PermissionDenied);
     }
-    Ok(p.space.root)
+    let root = p.memory.lock().space.root;
+    Ok(root)
 }
 
 /// The record for one process (for `proc_info`).
@@ -1344,8 +1418,10 @@ pub fn map_ex(addr: u64, len: u64, prot: u64, mflags: u64) -> Result<u64, Errno>
     prot_flags(prot)?;
     let pages = len.div_ceil(PAGE_SIZE);
     let pid = sched::current_pid();
-    let mut t = TABLE.lock();
-    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
+    let mut guard = memory.lock();
+    let p = &mut *guard;
+    if !p.alive { return Err(Errno::Interrupted); }
     if p.mapped_pages + pages > MAP_LIMIT_PAGES {
         return Err(Errno::NoMemory);
     }
@@ -1384,7 +1460,7 @@ pub fn map_ex(addr: u64, len: u64, prot: u64, mflags: u64) -> Result<u64, Errno>
 /// The first address at or above `from`, aligned to `align`, where `pages`
 /// pages and the guard page after them overlap no region or shared mapping
 /// (fixed mappings may lie above the cursor).
-fn free_run(p: &Process, from: u64, pages: u64, align: u64) -> Option<u64> {
+fn free_run(p: &ProcessMemory, from: u64, pages: u64, align: u64) -> Option<u64> {
     let mut at = from.next_multiple_of(align);
     loop {
         let end = at.checked_add((pages + 1) * PAGE_SIZE)?;
@@ -1412,8 +1488,10 @@ pub fn protect(addr: u64, len: u64, prot: u64) -> Result<(), Errno> {
     }
     let pages = len.div_ceil(PAGE_SIZE);
     let pid = sched::current_pid();
-    let mut t = TABLE.lock();
-    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
+    let mut guard = memory.lock();
+    let p = &mut *guard;
+    if !p.alive { return Err(Errno::Interrupted); }
     let root = p.space.root;
     let (&start, r) = p.regions.range_mut(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
     if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE {
@@ -1491,8 +1569,10 @@ pub fn discard(addr: u64, len: u64) -> Result<(), Errno> {
     }
     let pages = len.div_ceil(PAGE_SIZE);
     let pid = sched::current_pid();
-    let mut t = TABLE.lock();
-    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
+    let mut guard = memory.lock();
+    let p = &mut *guard;
+    if !p.alive { return Err(Errno::Interrupted); }
     let (&start, r) = p.regions.range_mut(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
     if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE || r.file.is_some() {
         return Err(Errno::InvalidArgument);
@@ -1508,13 +1588,12 @@ pub fn discard(addr: u64, len: u64) -> Result<(), Errno> {
     Ok(())
 }
 
-/// Pages mapped per chunk of a bulk prefault: each chunk takes the process
-/// table only for the pages it maps, so a long run never waits on the entry
-/// lock it does not need.
+/// Pages mapped per chunk of a bulk prefault. Each chunk holds only the
+/// current process's memory lock, not TABLE or the kernel entry lock.
 const PREFAULT_CHUNK_PAGES: u64 = 256;
 
 /// TEMP prefault diagnostics: pages requested, chunks whose pages were
-/// mapped, chunks skipped because the process table was busy, and TSC cycles
+/// mapped, chunks skipped because the memory index or process was busy, and TSC cycles
 /// spent inside prefault_write.
 pub static PF_STATS: [core::sync::atomic::AtomicU64; 4] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 4];
@@ -1526,7 +1605,7 @@ pub fn prefault_stats() -> [u64; 4] {
 /// Allocates the anonymous destination pages of a bulk copy without taking
 /// one user page-fault round trip per page. Invalid addresses and allocation
 /// failures are left for the copy's usual fault handling. Locks only what it
-/// touches (process table, paging, frames): the run is private to the calling
+/// touches (process memory, paging, frames): the run is private to the calling
 /// process, and the entry lock is what made an image prefault wait most of a
 /// second behind other CPUs' disk work.
 pub fn prefault_write(addr: u64, len: usize) {
@@ -1551,11 +1630,13 @@ pub fn prefault_write(addr: u64, len: usize) {
 }
 
 /// Maps the writable anonymous pages of `[page, end)` and returns the address
-/// to continue from (`end` if the process table is busy).
+/// to continue from (`end` if the memory index or process is busy).
 fn prefault_range(mut page: u64, end: u64) -> u64 {
     let pid = sched::current_pid();
-    let Some(mut t) = TABLE.try_lock() else { return end };
-    let Some(p) = t.procs.get_mut(&pid) else { return end };
+    let Some(memory) = MEMORY.try_lock().and_then(|index| index.get(&pid).cloned()) else { return end };
+    let Some(mut guard) = memory.try_lock() else { return end };
+    let p = &mut *guard;
+    if !p.alive { return end; }
     while page < end {
         let Some((&start, r)) = p.regions.range(..=page).next_back() else {
             page += PAGE_SIZE;
@@ -1605,14 +1686,14 @@ const FAULT_AROUND_PAGES: u64 = 16;
 /// A page fault on a not-present page at `va`: if it lies in an anonymous
 /// region or the main stack of the current process, maps zeroed frames there
 /// and returns true (the access is retried). False for any other address, an
-/// access the mapping's protection forbids, a busy process table (the faulting
+/// access the mapping's protection forbids, busy mapping state (the faulting
 /// code holds it) or exhausted memory: the fault then takes its usual path.
 pub fn demand_fault(va: u64, write: bool, fetch: bool) -> bool {
     demand_fault_in(va, write, fetch, false) == Demand::Mapped
 }
 
 /// [`demand_fault`] for a fault raised by user code. User code cannot hold the
-/// process table, so waiting for a busy one is safe — and necessary: another
+/// memory lock, so waiting for a busy one is safe — and necessary: another
 /// CPU entering the kernel must not turn a first touch of heap or stack into
 /// an access violation in the process.
 pub fn demand_fault_user(va: u64, write: bool, fetch: bool) -> bool {
@@ -1635,22 +1716,22 @@ pub fn demand_fault_user(va: u64, write: bool, fetch: bool) -> bool {
     false
 }
 
-/// How long a fault in a kernel copy waits for a busy process table. The
+/// How long a fault in a kernel copy waits for a busy mapping lock. The
 /// copy may run on behalf of the holder itself, so it must not wait without
 /// bound; every other holder (a fault on another CPU, the swap thread, a
 /// bulk prefault) releases it within a few milliseconds.
 const KERNEL_FAULT_WAIT_MS: u64 = 20;
 
-/// The process table for a fault in a kernel copy (see
+/// A mapping lock for a fault in a kernel copy (see
 /// [`KERNEL_FAULT_WAIT_MS`]); `None` when it stayed busy.
-fn lock_table_briefly() -> Option<crate::sync::IrqGuard<'static, Table>> {
-    if let Some(t) = TABLE.try_lock() {
+fn lock_briefly<T>(lock: &IrqSpinLock<T>) -> Option<crate::sync::IrqGuard<'_, T>> {
+    if let Some(t) = lock.try_lock() {
         return Some(t);
     }
     let deadline = crate::arch::timer::Deadline::after_ms(KERNEL_FAULT_WAIT_MS);
     loop {
         core::hint::spin_loop();
-        if let Some(t) = TABLE.try_lock() {
+        if let Some(t) = lock.try_lock() {
             return Some(t);
         }
         if deadline.expired() {
@@ -1666,7 +1747,7 @@ fn lock_table_briefly() -> Option<crate::sync::IrqGuard<'static, Table>> {
 /// and stops at twice that.
 const SWAP_LOW_DIVISOR: u64 = 16;
 const SWAP_MIN_LOW_FRAMES: u64 = 8192;
-/// Pages examined per process table hold.
+/// Pages examined per process memory lock hold.
 const SWAP_BATCH: u64 = 64;
 /// Bound a single scan, including pages that are hot or incompressible.
 const SWAP_SCAN_PAGES: u64 = 256;
@@ -1716,7 +1797,7 @@ pub fn swap_adaptive_stats() -> (u64, u64) {
 /// next access faults and `demand_fault` restores it.
 pub fn reclaim(want: u64) -> u64 {
     let mut done = 0u64;
-    let pids: Vec<Pid> = TABLE.lock().procs.keys().copied().collect();
+    let pids: Vec<Pid> = MEMORY.lock().keys().copied().collect();
     if pids.is_empty() {
         return 0;
     }
@@ -1729,11 +1810,10 @@ pub fn reclaim(want: u64) -> u64 {
             break;
         }
         let pid = pids[(first + k) % pids.len()];
-        let mut t = TABLE.lock();
-        let Some(p) = t.procs.get_mut(&pid) else { continue };
-        if !matches!(p.life, Life::Running) {
-            continue;
-        }
+        let Some(memory) = process_memory(pid, true) else { continue };
+        let mut guard = memory.lock();
+        let p = &mut *guard;
+        if !p.alive { continue; }
         let root = p.space.root;
         // File views are clean copies owned by their section: compressing
         // them would duplicate data and break the frame accounting.
@@ -1966,19 +2046,24 @@ enum Demand {
 }
 
 fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> Demand {
+    demand_fault_for(sched::current_pid(), va, write, fetch, wait)
+}
+
+fn demand_fault_for(pid: Pid, va: u64, write: bool, fetch: bool, wait: bool) -> Demand {
     if !(paging::USER_START..osyx_abi::USER_END).contains(&va) {
         return Demand::Refused;
     }
-    let pid = sched::current_pid();
-    let mut t = if wait {
-        TABLE.lock()
+    let Some(memory) = process_memory(pid, wait) else { return Demand::Refused };
+    let mut guard = if wait {
+        memory.lock()
     } else {
-        match lock_table_briefly() {
-            Some(t) => t,
+        match lock_briefly(&memory) {
+            Some(guard) => guard,
             None => return Demand::Refused,
         }
     };
-    let Some(p) = t.procs.get_mut(&pid) else { return Demand::Refused };
+    let p = &mut *guard;
+    if !p.alive { return Demand::Refused; }
     let page = va & !(PAGE_SIZE - 1);
     let around = page + FAULT_AROUND_PAGES * PAGE_SIZE;
     let (flags, run_end) = if (STACK_TOP - STACK_PAGES * PAGE_SIZE..STACK_TOP).contains(&page) {
@@ -1999,12 +2084,12 @@ fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> Demand {
             return Demand::Refused;
         }
         let index = (page - start) / PAGE_SIZE;
-        // A file view: load the page outside the process table, then map it
-        // under the table again (the region may have been unmapped meanwhile).
+        // A file view: load outside the memory lock, then revalidate the
+        // mapping under that lock (it may have been unmapped meanwhile).
         if let Some(f) = r.file.as_ref() {
             let first = f.first_page + index;
             let section = f.section.clone();
-            drop(t);
+            drop(guard);
             return file_fault(page, first, section, write, fetch, wait);
         }
         if r.swapped.contains_key(&index) {
@@ -2048,7 +2133,7 @@ fn demand_fault_in(va: u64, write: bool, fetch: bool, wait: bool) -> Demand {
 }
 
 /// Maps one page of a file view after loading it from the section. The disk
-/// read runs without the process table; the region is re-validated before the
+/// read runs without the memory lock; the region is re-validated before the
 /// frame goes in, so a concurrent `unmap` or `execve` wins.
 fn file_fault(page: u64, file_page: u64, section: Arc<crate::filemap::Section>, write: bool, fetch: bool, wait: bool) -> Demand {
     let shm = match section.page(file_page) {
@@ -2060,15 +2145,17 @@ fn file_fault(page: u64, file_page: u64, section: Arc<crate::filemap::Section>, 
         }
     };
     let pid = sched::current_pid();
-    let mut t = if wait {
-        TABLE.lock()
+    let Some(memory) = process_memory(pid, wait) else { return Demand::Refused };
+    let mut guard = if wait {
+        memory.lock()
     } else {
-        match lock_table_briefly() {
-            Some(t) => t,
+        match lock_briefly(&memory) {
+            Some(guard) => guard,
             None => return Demand::Refused,
         }
     };
-    let Some(p) = t.procs.get_mut(&pid) else { return Demand::Refused };
+    let p = &mut *guard;
+    if !p.alive { return Demand::Refused; }
     let Some((&start, r)) = p.regions.range(..=page).next_back() else { return Demand::Refused };
     // The section must still be there: the region may have been replaced.
     if !r.file.as_ref().is_some_and(|f| Arc::ptr_eq(&f.section, &section)) {
@@ -2102,8 +2189,10 @@ fn file_fault(page: u64, file_page: u64, section: Arc<crate::filemap::Section>, 
 /// `map` or `shm_map`.
 pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
     let pid = sched::current_pid();
-    let mut t = TABLE.lock();
-    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
+    let mut guard = memory.lock();
+    let p = &mut *guard;
+    if !p.alive { return Err(Errno::Interrupted); }
     if let Some((_, pages)) = p.shared.get(&addr) {
         if len.div_ceil(PAGE_SIZE) != *pages {
             return Err(Errno::InvalidArgument);
@@ -2135,21 +2224,23 @@ pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
 /// image frame in a region the process may write, it gets a private copy and
 /// the access is retried. False for every other protection fault. `wait`
 /// as in [`demand_fault_user`]: kernel copies must not wait for a process
-/// table they might hold.
+/// memory lock they might hold.
 pub fn cow_fault(va: u64, wait: bool) -> bool {
     if !(paging::USER_START..osyx_abi::USER_END).contains(&va) {
         return false;
     }
     let pid = sched::current_pid();
-    let mut t = if wait {
-        TABLE.lock()
+    let Some(memory) = process_memory(pid, wait) else { return false };
+    let mut guard = if wait {
+        memory.lock()
     } else {
-        match lock_table_briefly() {
-            Some(t) => t,
+        match lock_briefly(&memory) {
+            Some(guard) => guard,
             None => return false,
         }
     };
-    let Some(p) = t.procs.get_mut(&pid) else { return false };
+    let p = &mut *guard;
+    if !p.alive { return false; }
     let page = va & !(PAGE_SIZE - 1);
     let Some((&start, r)) = p.regions.range(..=page).next_back() else { return false };
     if r.image.is_none() || page >= start + r.pages * PAGE_SIZE {
@@ -2210,8 +2301,10 @@ fn image_region(regions: &mut BTreeMap<u64, Region>, addr: u64, len: u64) -> Res
 pub fn image_publish(key: image::Key) -> Result<Arc<ImageSection>, Errno> {
     let (addr, len) = (key.base, key.pages * PAGE_SIZE);
     let pid = sched::current_pid();
-    let mut t = TABLE.lock();
-    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
+    let mut guard = memory.lock();
+    let p = &mut *guard;
+    if !p.alive { return Err(Errno::Interrupted); }
     let root = p.space.root;
     let r = image_region(&mut p.regions, addr, len)?;
     let pages = r.pages;
@@ -2273,8 +2366,10 @@ pub fn image_map(section: Arc<ImageSection>) -> Result<(), Errno> {
     let key = *section.key();
     let (addr, len) = (key.base, key.pages * PAGE_SIZE);
     let pid = sched::current_pid();
-    let mut t = TABLE.lock();
-    let p = t.procs.get_mut(&pid).ok_or(Errno::NotSupported)?;
+    let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
+    let mut guard = memory.lock();
+    let p = &mut *guard;
+    if !p.alive { return Err(Errno::Interrupted); }
     let root = p.space.root;
     let r = image_region(&mut p.regions, addr, len)?;
     if (0..r.pages).any(|i| paging::translate_in(root, addr + i * PAGE_SIZE).is_some()) {

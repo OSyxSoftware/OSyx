@@ -37,7 +37,9 @@ macro_rules! ensure {
 }
 
 pub fn run(boot: &BootData) -> Summary {
-    let tests: [(&str, &dyn Fn() -> TestResult); 32] = [
+    // A slice, not a counted array: merges that each add a test do not
+    // have to agree on the count.
+    let tests: &[(&str, &dyn Fn() -> TestResult)] = &[
         ("boot memory map", &|| memory_map(boot)),
         ("frame allocator", &frame_allocator),
         ("page map/unmap", &map_unmap),
@@ -47,8 +49,10 @@ pub fn run(boot: &BootData) -> Summary {
         ("kernel heap", &heap_test),
         ("breakpoint exception", &breakpoint),
         ("timer interrupts", &timer),
+        ("I/O APIC wired interrupt routing", &|| if boot.has_option("test.ioapic") { crate::arch::ioapic::selftest() } else { Ok(()) }),
         ("user copy validation", &user_copy),
         ("address space lifecycle", &address_space),
+        ("per-process memory locks", &crate::process::memory_lock_selftest),
         ("preemptive kernel threads", &preemption),
         ("sleep and join", &sleep_join),
         ("FPU/SSE state per thread", &fpu_state),

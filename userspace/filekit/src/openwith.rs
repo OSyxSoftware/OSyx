@@ -4,8 +4,9 @@
 //! files they handle with a `Handles=` line of extensions and kind names
 //! (`Handles=mp4,mkv,video`). The user's choices per extension or kind live
 //! in `~/.config/osyx/openwith.conf` as `mp4=/opt/player` lines. Files shows
-//! images, text and source itself or through the default browser, unpacks
-//! archives itself, and hands everything else to a registered application.
+//! pictures, text and source itself (other pictures through the default
+//! browser), plays sound files and WebM/Matroska videos, shows PDF documents and unpacks archives itself, and hands
+//! everything else to a registered application.
 
 use crate::kind::{extension, Kind};
 use alloc::string::String;
@@ -21,6 +22,14 @@ pub enum Builtin {
     Browser,
     /// Unpack an archive next to itself.
     Extract,
+    /// The audio player.
+    Player,
+    /// The PDF viewer.
+    Pdf,
+    /// The image viewer.
+    Image,
+    /// The video player.
+    Video,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +96,10 @@ fn builtin_by_name(s: &str) -> Option<Builtin> {
         "builtin:hex" => Builtin::Hex,
         "builtin:browser" => Builtin::Browser,
         "builtin:extract" => Builtin::Extract,
+        "builtin:player" => Builtin::Player,
+        "builtin:pdf" => Builtin::Pdf,
+        "builtin:image" => Builtin::Image,
+        "builtin:video" => Builtin::Video,
         _ => return None,
     })
 }
@@ -97,6 +110,10 @@ fn builtin_name(b: Builtin) -> &'static str {
         Builtin::Hex => "builtin:hex",
         Builtin::Browser => "builtin:browser",
         Builtin::Extract => "builtin:extract",
+        Builtin::Player => "builtin:player",
+        Builtin::Pdf => "builtin:pdf",
+        Builtin::Image => "builtin:image",
+        Builtin::Video => "builtin:video",
     }
 }
 
@@ -145,6 +162,25 @@ impl Choices {
     }
 }
 
+/// Pictures the built-in viewer decodes.
+fn viewer_shows(ext: Option<&str>) -> bool {
+    matches!(
+        ext,
+        Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "jbig2" | "jb2" | "jp2" | "j2k" | "j2c" | "jpc" | "jpf" | "jpx" | "webp")
+    )
+}
+
+/// Sound files the built-in player decodes (Ogg may still hold Opus; the
+/// player says so).
+fn player_plays(ext: Option<&str>) -> bool {
+    matches!(ext, Some("mp3" | "wav" | "flac" | "ogg" | "oga" | "opus" | "aac" | "m4a" | "m4b"))
+}
+
+/// Videos the built-in player decodes (WebM and Matroska with VP8 video).
+fn video_plays(ext: Option<&str>) -> bool {
+    matches!(ext, Some("webm" | "mkv"))
+}
+
 /// One entry of the "Open with" menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
@@ -164,13 +200,31 @@ pub fn candidates(name: &str, kind: Kind, handlers: &[Handler], browser: bool) -
             add("Hex viewer", Target::Builtin(Builtin::Hex));
         }
         Kind::Html | Kind::Image => {
+            if kind == Kind::Image && viewer_shows(ext.as_deref()) {
+                add("Image viewer", Target::Builtin(Builtin::Image));
+            }
             if browser {
                 add("Web browser", Target::Builtin(Builtin::Browser));
             }
             add("Hex viewer", Target::Builtin(Builtin::Hex));
         }
         Kind::Archive(_) => add("Extract here", Target::Builtin(Builtin::Extract)),
-        Kind::Audio | Kind::Video | Kind::Pdf => add("Hex viewer", Target::Builtin(Builtin::Hex)),
+        Kind::Audio => {
+            if player_plays(ext.as_deref()) {
+                add("Audio player", Target::Builtin(Builtin::Player));
+            }
+            add("Hex viewer", Target::Builtin(Builtin::Hex));
+        }
+        Kind::Pdf => {
+            add("PDF viewer", Target::Builtin(Builtin::Pdf));
+            add("Hex viewer", Target::Builtin(Builtin::Hex));
+        }
+        Kind::Video => {
+            if video_plays(ext.as_deref()) {
+                add("Video player", Target::Builtin(Builtin::Video));
+            }
+            add("Hex viewer", Target::Builtin(Builtin::Hex));
+        }
         Kind::Program => {}
     }
     for h in handlers.iter().filter(|h| h.handles(ext.as_deref(), kind)) {
@@ -194,7 +248,8 @@ pub fn default_target(name: &str, kind: Kind, handlers: &[Handler], choices: &Ch
     // (the hex viewer is an explicit choice, not a default).
     let app = handlers.iter().find(|h| h.handles(ext.as_deref(), kind)).map(|h| Target::Exec(h.exec.clone()));
     match kind {
-        Kind::Audio | Kind::Video | Kind::Pdf => app,
+        Kind::Video if !video_plays(ext.as_deref()) => app,
+        Kind::Audio if !player_plays(ext.as_deref()) => app,
         _ => list.into_iter().next().map(|c| c.target),
     }
 }
@@ -222,21 +277,33 @@ mod tests {
         let choices = Choices::default();
         let video = classify("clip.mp4");
         assert_eq!(default_target("clip.mp4", video, &handlers, &choices, true), Some(Target::Exec("/opt/player".into())));
-        assert_eq!(default_target("song.mp3", classify("song.mp3"), &handlers, &choices, true), Some(Target::Exec("/opt/player".into())), "by kind");
+        // WebM plays in Files even with a video application installed.
+        assert_eq!(
+            default_target("clip.webm", classify("clip.webm"), &handlers, &choices, true),
+            Some(Target::Builtin(Builtin::Video))
+        );
+        assert_eq!(default_target("song.mp3", classify("song.mp3"), &handlers, &choices, true), Some(Target::Builtin(Builtin::Player)), "sound plays in Files");
+        assert_eq!(default_target("song.m4a", classify("song.m4a"), &handlers, &choices, true), Some(Target::Builtin(Builtin::Player)), "AAC too");
+        let mut mine = Choices::default();
+        mine.set("song.mp3", Kind::Audio, Target::Exec("/opt/player".into()));
+        assert_eq!(default_target("x.mp3", Kind::Audio, &handlers, &mine, true), Some(Target::Exec("/opt/player".into())), "unless the user chose otherwise");
         assert_eq!(default_target("movie.avi", classify("movie.avi"), &handlers, &choices, true), None, "nothing handles avi");
-        assert_eq!(default_target("a.pdf", Kind::Pdf, &[], &choices, true), None);
+        assert_eq!(default_target("a.wma", classify("a.wma"), &handlers, &choices, true), Some(Target::Exec("/opt/player".into())), "a format the player cannot decode");
+        assert_eq!(default_target("a.wma", classify("a.wma"), &[], &choices, true), None);
+        assert_eq!(default_target("a.pdf", Kind::Pdf, &[], &choices, true), Some(Target::Builtin(Builtin::Pdf)));
         // Still openable as hex through the menu.
         let list = candidates("a.pdf", Kind::Pdf, &[], true);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].target, Target::Builtin(Builtin::Hex));
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].target, Target::Builtin(Builtin::Hex));
     }
 
     #[test]
     fn built_in_defaults() {
         let none = Choices::default();
         assert_eq!(default_target("a.txt", Kind::Text, &[], &none, false), Some(Target::Builtin(Builtin::Viewer)));
-        assert_eq!(default_target("a.png", Kind::Image, &[], &none, true), Some(Target::Builtin(Builtin::Browser)));
-        assert_eq!(default_target("a.png", Kind::Image, &[], &none, false), Some(Target::Builtin(Builtin::Hex)), "no browser: hex is all there is");
+        assert_eq!(default_target("a.png", Kind::Image, &[], &none, true), Some(Target::Builtin(Builtin::Image)));
+        assert_eq!(default_target("a.svg", Kind::Image, &[], &none, true), Some(Target::Builtin(Builtin::Browser)), "pictures the viewer cannot decode");
+        assert_eq!(default_target("a.svg", Kind::Image, &[], &none, false), Some(Target::Builtin(Builtin::Hex)), "no browser: hex is all there is");
         let z = classify("a.zip");
         assert_eq!(default_target("a.zip", z, &[], &none, false), Some(Target::Builtin(Builtin::Extract)));
     }

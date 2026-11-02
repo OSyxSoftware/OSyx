@@ -208,6 +208,7 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     arch::timer::init(boot.option_value("timer"), boot.option_value("timer.calib"));
     cpu::enable_interrupts();
     arch::timer::verify();
+    arch::ioapic::init();
     sched::init();
     smp::start(boot);
     prof::init();
@@ -409,6 +410,7 @@ fn run_init(boot: &BootData, name: &str, summary: &mut Line) -> bool {
 /// (integration tests read these lines as evidence).
 fn log_subsystems() {
     drivers::virtio_blk::log_stats();
+    drivers::nvme::log_stats();
     for i in 0..drivers::xhci::controllers() {
         kprintln!("usb: controller {} took {} interrupts", i, drivers::xhci::interrupts_of(i));
     }
