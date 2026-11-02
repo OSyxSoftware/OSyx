@@ -1,12 +1,13 @@
 //! Writing: allocation, files, directories, links, truncation, deletion.
 //!
 //! Safety model:
-//! * Every public mutating call is one journal transaction: metadata
-//!   changes collect in `tx` (block -> new contents) and are committed
-//!   and checkpointed when the call succeeds ([`Ext4::commit`]); on error
-//!   they are dropped and the in-memory superblock and group descriptors
-//!   are restored, so a failed call changes nothing on disk except data
-//!   blocks that remain unallocated.
+//! * Mutating calls collect their metadata changes in one pending
+//!   transaction, `tx` (block -> new contents), which is committed and
+//!   checkpointed as a whole ([`Ext4::commit`]) by [`Ext4::sync`] or when it
+//!   grows past its limit, so after a crash either all of the grouped calls
+//!   happened or none. A call that fails has its own changes undone in
+//!   `tx` and the in-memory superblock and group descriptors restored, so
+//!   it changes nothing on disk except data blocks that remain unallocated.
 //! * File data is staged in memory and written out *before* the metadata
 //!   that makes it reachable is committed ("ordered" mode); reads see staged
 //!   blocks. Overwrites of existing data blocks are in place, as in Linux's
@@ -191,29 +192,28 @@ impl<D: BlockDevice> Ext4<D> {
         Snapshot { sb: self.sb.clone(), groups: self.groups.clone(), orphans: self.orphans.clone() }
     }
 
-    /// Runs one mutating operation as a transaction.
+    /// Runs one mutating operation (create, link, rename, unlink, truncate,
+    /// attribute changes) against the pending transaction, like a file
+    /// write. Operations are grouped into one journal commit, as jbd2 does:
+    /// committing each on its own cost two device flushes per file, and an
+    /// update that unpacks thousands of files (the Steam client) spent
+    /// minutes in flushes. The group stays atomic; `sync` (fsync, the
+    /// periodic write-back, unmount) or the size limit commits it.
     fn op<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        if self.read_only {
-            return Err(Error::ReadOnly);
-        }
-        self.flush_pending()?;
-        let snap = self.snapshot();
-        self.tx = Tx::default();
-        match f(self).and_then(|v| self.commit_tx().map(|_| v)) {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                self.tx = Tx::default();
-                self.sb = snap.sb;
-                self.groups = snap.groups;
-                self.orphans = snap.orphans;
-                Err(e)
-            }
-        }
+        self.write_op(f)
+    }
+
+    /// Metadata blocks the pending transaction may collect before it is
+    /// committed: [`PENDING_LIMIT`], or less when half the journal is
+    /// smaller (a commit also needs descriptor blocks).
+    fn pending_limit(&self) -> usize {
+        let half_journal = self.journal_capacity().map_or(usize::MAX, |c| c as usize / 2);
+        PENDING_LIMIT.min(half_journal).max(1)
     }
 
     /// Runs a file write against the pending transaction: no journal commit
-    /// unless it grows past [`PENDING_LIMIT`]. On error only this write's
-    /// metadata changes are rolled back.
+    /// unless it grows past [`Ext4::pending_limit`]. On error only this
+    /// write's metadata changes are rolled back.
     fn write_op<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         if self.read_only {
             return Err(Error::ReadOnly);
@@ -226,7 +226,7 @@ impl<D: BlockDevice> Ext4<D> {
             Ok(v) => {
                 self.tx.recording = false;
                 self.tx.undo.clear();
-                if self.tx.blocks.len() >= PENDING_LIMIT {
+                if self.tx.blocks.len() >= self.pending_limit() {
                     self.flush_pending()?;
                 }
                 Ok(v)

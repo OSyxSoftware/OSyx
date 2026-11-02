@@ -430,7 +430,51 @@ fn workload<D: BlockDevice>(fs: &mut Ext4<D>) -> Result<(), Error> {
     let hello = fs.resolve("/hello.txt")?;
     fs.truncate(hello, 3)?;
     fs.unlink(ROOT_INO, "small.bin")?;
+    // The operations are one pending transaction until this commits it, so
+    // the power cuts below land inside the commit too.
+    fs.sync()?;
     Ok(())
+}
+
+/// Metadata operations are grouped into one journal commit at `sync`, and
+/// a crash before it loses all of them together.
+#[test]
+fn operations_are_committed_together() {
+    let mut fs = rw(fixture("ext4-4k"));
+    let before = fs.journal_commits();
+    let d = fs.create(ROOT_INO, "pkg", NewKind::Dir, 0o755, 0, 0).unwrap();
+    for i in 0..200 {
+        let f = fs.create(d, &format!("f{i}.tmp"), NewKind::File, 0o644, 0, 0).unwrap();
+        fs.write(f, 0, &pattern(3000, i)).unwrap();
+        fs.rename(d, &format!("f{i}.tmp"), d, &format!("f{i}")).unwrap();
+    }
+    fs.unlink(d, "f7").unwrap();
+    assert_eq!(fs.journal_commits(), before, "nothing commits before sync");
+    // The pending transaction is visible to readers already.
+    let f3 = fs.resolve("/pkg/f3").unwrap();
+    assert_eq!(read_all(&mut fs, f3), pattern(3000, 3));
+
+    // A crash now: after recovery none of it happened.
+    let mut crashed = rw(fs.into_device_unclean());
+    assert!(crashed.resolve("/pkg").is_err(), "an uncommitted group leaves nothing behind");
+    crashed.check().unwrap();
+
+    let mut fs = rw(fixture("ext4-4k"));
+    let d = fs.create(ROOT_INO, "pkg", NewKind::Dir, 0o755, 0, 0).unwrap();
+    for i in 0..200 {
+        let f = fs.create(d, &format!("f{i}"), NewKind::File, 0o644, 0, 0).unwrap();
+        fs.write(f, 0, &pattern(3000, i)).unwrap();
+    }
+    fs.sync().unwrap();
+    assert!(fs.journal_commits() <= 2, "{} commits for 200 files", fs.journal_commits());
+    let mut synced = rw(fs.into_device_unclean());
+    for i in [0usize, 99, 199] {
+        let f = synced.resolve(&format!("/pkg/f{i}")).unwrap();
+        assert_eq!(read_all(&mut synced, f), pattern(3000, i));
+    }
+    synced.check().unwrap();
+    let img = synced.unmount().unwrap();
+    e2fsck("grouped", &img);
 }
 
 /// Power is cut after every possible number of device writes during a
