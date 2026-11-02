@@ -1,0 +1,18 @@
+[package]
+name = "osyx-media"
+description = "Audio and PDF decoding for the built-in viewers of Files: WAV, FLAC, MP3, Ogg Vorbis, resampling to the sound card rate, PDF rendering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libm = "0.2"
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+ttf-parser = { version = "0.25.1", default-features = false, features = ["no-std-float", "variable-fonts", "glyph-names"] }
+zune-jpeg = { version = "0.5", default-features = false }
+zune-core = { version = "0.5", default-features = false }
+aes = { version = "0.8", default-features = false }
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
+
+
+[dev-dependencies]
