@@ -66,12 +66,14 @@ pub struct Mq<'a> {
     c: u32,
     a: u32,
     ct: u32,
+    /// Bytes read past the end of the data.
+    past: u32,
 }
 
 impl<'a> Mq<'a> {
     /// INITDEC.
     pub fn new(data: &'a [u8]) -> Mq<'a> {
-        let mut d = Mq { data, bp: 0, c: 0, a: 0x8000, ct: 0 };
+        let mut d = Mq { data, bp: 0, c: 0, a: 0x8000, ct: 0, past: 0 };
         d.c = (d.byte(0) as u32) << 16;
         d.byte_in();
         d.c <<= 7;
@@ -84,7 +86,16 @@ impl<'a> Mq<'a> {
         *self.data.get(i).unwrap_or(&0xFF)
     }
 
+    /// Whether decoding has run well past the end of the data: what
+    /// follows is made up.
+    pub fn overrun(&self) -> bool {
+        self.past > 64
+    }
+
     fn byte_in(&mut self) {
+        if self.bp + 1 >= self.data.len() {
+            self.past = self.past.saturating_add(1);
+        }
         if self.byte(self.bp) == 0xFF {
             if self.byte(self.bp + 1) > 0x8F {
                 self.c += 0xFF00;

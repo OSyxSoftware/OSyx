@@ -308,6 +308,8 @@ fn decode_generic(mq: &mut Mq, gb: &mut [Cx], p: &GenericParams) -> R<Bitmap> {
     let min_x = tpl.iter().map(|t| t.0).min().unwrap_or(0).min(0);
     let max_x = tpl.iter().map(|t| t.0).max().unwrap_or(0).max(0);
     let min_y = tpl.iter().map(|t| t.1).min().unwrap_or(0).min(0);
+    // Adaptive pixels of damaged data may point below the current row.
+    let max_y = tpl.iter().map(|t| t.1).max().unwrap_or(0).max(0);
     let w = p.w as isize;
     let mut ltp = false;
     for y in 0..p.h {
@@ -332,7 +334,7 @@ fn decode_generic(mq: &mut Mq, gb: &mut [Cx], p: &GenericParams) -> R<Bitmap> {
             }
             let xi = x as isize;
             let mut ctx = 0usize;
-            if xi + min_x >= 0 && xi + max_x < w && yi + min_y >= 0 {
+            if xi + min_x >= 0 && xi + max_x < w && yi + min_y >= 0 && yi + max_y < p.h as isize {
                 for &(dx, dy) in &tpl {
                     let v = b.px[((yi + dy) * w + xi + dx) as usize];
                     ctx = (ctx << 1) | v as usize;
@@ -825,6 +827,11 @@ fn decode_text(coder: &mut Coder, st: &mut Stats, p: &TextParams) -> R<Bitmap> {
     let mut first_s: i64 = 0;
     let mut n = 0u32;
     while n < p.instances {
+        if let Coder::Arith(mq, _) = coder {
+            if mq.overrun() {
+                return Err("JBIG2 text region data ends early");
+            }
+        }
         let dt = match coder {
             Coder::Arith(mq, _) => st.iadt.decode(mq).ok_or("JBIG2 OOB")? as i64,
             Coder::Huff(r, t, _) => t.dt.value(r)? as i64,
@@ -1306,6 +1313,10 @@ impl State {
             .ok_or("JBIG2 halftone without a pattern dictionary")?;
         let (pw, ph) = (pats[0].w as i64, pats[0].h as i64);
         let bpp = ceil_log2(pats.len());
+        // Bound the work of damaged grids: every cell draws a pattern.
+        if (gw as u64 * gh as u64).saturating_mul((pw * ph) as u64) > 1 << 30 {
+            return Err("JBIG2 halftone grid too large");
+        }
         let mut reg = Bitmap::new(info.w as usize, info.h as usize, defpixel)?;
         if gw.checked_mul(gh).is_none_or(|n| n > MAX_PIXELS) {
             return Err("JBIG2 halftone grid too large");
@@ -1521,6 +1532,7 @@ fn decode_symbols(
     let mut new: Vec<Rc<Bitmap>> = Vec::with_capacity(sd.new_symbols as usize);
     let mut widths: Vec<usize> = Vec::new();
     let mut height: i64 = 0;
+    let mut budget: u64 = 1 << 28;
     while new.len() < sd.new_symbols as usize {
         let dh = match &huff {
             Some(t) => t.0.value(&mut r)? as i64,
@@ -1539,6 +1551,9 @@ fn decode_symbols(
                 None => st.iadw.decode(&mut mq),
             };
             let Some(dw) = dw else { break };
+            if huff.is_none() && mq.overrun() {
+                return Err("JBIG2 symbol dictionary data ends early");
+            }
             if new.len() + widths.len() >= sd.new_symbols as usize {
                 return Err("too many JBIG2 symbols in a height class");
             }
@@ -1548,6 +1563,11 @@ fn decode_symbols(
             }
             total_width += width as usize;
             let (w, hh) = (width as usize, height as usize);
+            // Bound the work of damaged dictionaries.
+            budget = budget.saturating_sub((w * hh) as u64 + 1);
+            if budget == 0 {
+                return Err("JBIG2 symbol dictionary too large");
+            }
             if sd.refagg {
                 let all: Vec<Rc<Bitmap>> = input.iter().chain(new.iter()).cloned().collect();
                 let n = match &huff {
