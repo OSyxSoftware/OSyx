@@ -6959,6 +6959,20 @@ extern "win64" fn EnumThreadWindows(thread: u32, proc_: u64, param: u64) -> Bool
 /// Windows here have no children to enumerate.
 /// Every descendant of `parent`, topmost (newest) first; the callback stops
 /// the enumeration by returning FALSE.
+/// Every descendant child window of `parent`.
+pub(crate) fn descendants(parent: u64) -> Vec<u64> {
+    with(|g| {
+        let mut out = Vec::new();
+        let mut todo = alloc::vec![parent];
+        while let Some(p) = todo.pop() {
+            let kids: Vec<u64> = g.windows.iter().filter(|(_, w)| w.style & WS_CHILD != 0 && w.owner == p).map(|(&h, _)| h).collect();
+            todo.extend(kids.iter().copied());
+            out.extend(kids);
+        }
+        out
+    })
+}
+
 extern "win64" fn EnumChildWindows(parent: u64, proc_: u64, param: u64) -> Bool {
     if proc_ == 0 {
         return fail(ERROR_INVALID_PARAMETER, FALSE);

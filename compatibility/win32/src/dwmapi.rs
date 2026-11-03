@@ -201,8 +201,33 @@ pub fn exports() -> Vec<(&'static str, u64)> {
 
 
 
-extern "win64" fn ImmAssociateContextEx(hwnd: u64, _himc: u64, _flags: u32) -> Bool {
-    crate::user32::is_window(hwnd) as Bool
+/// ImmAssociateContextEx: IACE_DEFAULT gives the window (and with
+/// IACE_CHILDREN its descendants) back its default context; otherwise
+/// they use `himc`, IACE_IGNORENOCONTEXT leaving windows associated with
+/// NULL as they are.
+extern "win64" fn ImmAssociateContextEx(hwnd: u64, himc: u64, flags: u32) -> Bool {
+    const IACE_CHILDREN: u32 = 0x1;
+    const IACE_DEFAULT: u32 = 0x10;
+    const IACE_IGNORENOCONTEXT: u32 = 0x20;
+    if !crate::user32::is_window(hwnd) {
+        return 0;
+    }
+    if flags & IACE_DEFAULT == 0 && himc != 0 && with_context(himc, |_| ()).is_none() {
+        return 0;
+    }
+    let mut windows = alloc::vec![hwnd];
+    if flags & IACE_CHILDREN != 0 {
+        windows.extend(crate::user32::descendants(hwnd));
+    }
+    let mut map = ASSOCIATED.lock().unwrap();
+    for w in windows {
+        if flags & IACE_DEFAULT != 0 {
+            map.remove(&w);
+        } else if !(flags & IACE_IGNORENOCONTEXT != 0 && map.get(&w) == Some(&0)) {
+            map.insert(w, himc);
+        }
+    }
+    1
 }
 
 
