@@ -284,6 +284,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("dnsapi.dll", crate::dwmapi::dnsapi_exports(), Vec::new()),
         builtin("wininet.dll", crate::minordlls::wininet_exports(), Vec::new()),
         builtin("winhttp.dll", crate::winhttp::exports(), Vec::new()),
+        builtin("powrprof.dll", crate::minordlls::powrprof_exports(), Vec::new()),
         builtin("dhcpcsvc.dll", crate::iphlpapi::dhcp_exports(), Vec::new()),
         builtin("wintrust.dll", crate::minordlls::wintrust_exports(), Vec::new()),
         builtin("dxgi.dll", crate::dwmapi::dxgi_exports(), Vec::new()),
@@ -345,6 +346,8 @@ fn schema() -> Vec<u8> {
     b.add("api-ms-win-core-rtlsupport-l1-1-0", "ntdll.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-registry-l1-1-0", "advapi32.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-winrt-l1-1-0", "combase.dll", &[]).expect("valid contract name");
+    b.add("api-ms-win-power-base-l1-1-0", "powrprof.dll", &[]).expect("valid contract name");
+    b.add("api-ms-win-power-setting-l1-1-0", "powrprof.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-winrt-string-l1-1-0", "combase.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-ntuser-window-l1-1-4", "user32.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-gdi-dc-l1-2-0", "gdi32.dll", &[]).expect("valid contract name");

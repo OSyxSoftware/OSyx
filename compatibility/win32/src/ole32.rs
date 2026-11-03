@@ -107,12 +107,109 @@ fn initialize_apartment(com: &mut Com, tid: u64, kind: Apartment) -> u32 {
     }
 }
 
+/// IInitializeSpy objects registered on each thread (CoRegisterInitializeSpy),
+/// with their cookies, in registration order.
+static SPIES: Mutex<BTreeMap<u64, Vec<(u64, u64)>>> = Mutex::new(BTreeMap::new());
+static NEXT_SPY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Method `slot` of COM object `obj`.
+///
+/// # Safety
+/// `obj` must be a live COM object with at least `slot + 1` methods.
+unsafe fn method(obj: u64, slot: usize) -> u64 {
+    // SAFETY: the caller's guarantee.
+    unsafe { *(*(obj as *const *const u64)).add(slot) }
+}
+
+/// The calling thread's spies, newest first (the order Windows calls
+/// them in).
+fn spies() -> Vec<u64> {
+    SPIES.lock().unwrap().get(&os_sys::gettid()).map_or(Vec::new(), |v| v.iter().rev().map(|&(_, s)| s).collect())
+}
+
+fn apartment_refs(tid: u64) -> u32 {
+    COM.lock().unwrap().threads.get(&tid).map_or(0, |&(_, n)| n)
+}
+
 extern "win64" fn CoInitializeEx(reserved: u64, flags: u32) -> u32 {
     if reserved != 0 || flags & !COINIT_KNOWN != 0 {
         return E_INVALIDARG;
     }
+    let tid = os_sys::gettid();
+    let spies = spies();
+    for &s in &spies {
+        // SAFETY: a registered IInitializeSpy: PreInitialize is slot 3.
+        let f: extern "win64" fn(u64, u32, u32) -> u32 = unsafe { core::mem::transmute(method(s, 3)) };
+        f(s, flags, apartment_refs(tid));
+    }
     let kind = if flags & COINIT_APARTMENTTHREADED != 0 { Apartment::Single } else { Apartment::Multi };
-    initialize_apartment(&mut COM.lock().unwrap(), os_sys::gettid(), kind)
+    let mut hr = initialize_apartment(&mut COM.lock().unwrap(), tid, kind);
+    for &s in &spies {
+        // SAFETY: as above: PostInitialize is slot 4, and may change the result.
+        let f: extern "win64" fn(u64, u32, u32, u32) -> u32 = unsafe { core::mem::transmute(method(s, 4)) };
+        hr = f(s, hr, flags, apartment_refs(tid));
+    }
+    hr
+}
+
+/// CoInitializeEx for other modules (RoInitialize): an STA or the MTA.
+pub(crate) fn co_initialize(sta: bool) -> u32 {
+    CoInitializeEx(0, if sta { COINIT_APARTMENTTHREADED } else { 0 })
+}
+
+pub(crate) fn co_uninitialize() {
+    CoUninitialize()
+}
+
+/// CoRegisterInitializeSpy: `spy` (an IInitializeSpy, held with AddRef)
+/// is told about this thread's CoInitialize and CoUninitialize calls.
+extern "win64" fn CoRegisterInitializeSpy(spy: u64, cookie: *mut u64) -> u32 {
+    const IID_IINITIALIZESPY: [u8; 16] = [0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46];
+    if spy == 0 || cookie.is_null() {
+        return E_INVALIDARG;
+    }
+    // The interface the caller hands may be any of the object's: ask for
+    // IInitializeSpy itself (QueryInterface also takes the reference).
+    let mut iface = 0u64;
+    // SAFETY: a COM object: QueryInterface is slot 0.
+    let qi: extern "win64" fn(u64, *const [u8; 16], *mut u64) -> u32 = unsafe { core::mem::transmute(method(spy, 0)) };
+    if qi(spy, &IID_IINITIALIZESPY, &mut iface) != S_OK || iface == 0 {
+        return E_NOINTERFACE;
+    }
+    let c = NEXT_SPY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    SPIES.lock().unwrap().entry(os_sys::gettid()).or_default().push((c, iface));
+    // SAFETY: the caller's ULARGE_INTEGER.
+    unsafe { *cookie = c };
+    S_OK
+}
+
+extern "win64" fn CoRevokeInitializeSpy(cookie: u64) -> u32 {
+    let removed = {
+        let mut all = SPIES.lock().unwrap();
+        let Some(list) = all.get_mut(&os_sys::gettid()) else { return E_INVALIDARG };
+        let Some(i) = list.iter().position(|&(c, _)| c == cookie) else { return E_INVALIDARG };
+        list.remove(i).1
+    };
+    // SAFETY: the reference taken at registration: Release is slot 2.
+    let release: extern "win64" fn(u64) -> u32 = unsafe { core::mem::transmute(method(removed, 2)) };
+    release(removed);
+    S_OK
+}
+
+/// CoCreateGuid: a random (version 4) GUID.
+extern "win64" fn CoCreateGuid(out: *mut [u8; 16]) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    let mut g = [0u8; 16];
+    if !crate::ucrt::entropy(&mut g) {
+        return 0x8000_4005; // E_FAIL
+    }
+    g[7] = (g[7] & 0x0f) | 0x40; // Data3's version nibble
+    g[8] = (g[8] & 0x3f) | 0x80; // RFC 4122 variant
+    // SAFETY: the caller's GUID.
+    unsafe { *out = g };
+    S_OK
 }
 
 extern "win64" fn CoInitialize(reserved: u64) -> u32 {
@@ -129,7 +226,19 @@ fn uninitialize_apartment(com: &mut Com, tid: u64) {
 }
 
 extern "win64" fn CoUninitialize() {
-    uninitialize_apartment(&mut COM.lock().unwrap(), os_sys::gettid());
+    let tid = os_sys::gettid();
+    let spies = spies();
+    for &s in &spies {
+        // SAFETY: a registered IInitializeSpy: PreUninitialize is slot 5.
+        let f: extern "win64" fn(u64, u32) -> u32 = unsafe { core::mem::transmute(method(s, 5)) };
+        f(s, apartment_refs(tid));
+    }
+    uninitialize_apartment(&mut COM.lock().unwrap(), tid);
+    for &s in &spies {
+        // SAFETY: as above: PostUninitialize is slot 6.
+        let f: extern "win64" fn(u64, u32) -> u32 = unsafe { core::mem::transmute(method(s, 6)) };
+        f(s, apartment_refs(tid));
+    }
 }
 
 // Windows also exposes these OLE Automation functions through ole32.
@@ -1593,6 +1702,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         CoTaskMemRealloc,
         CoInitializeEx,
         CoInitialize,
+        CoRegisterInitializeSpy,
+        CoRevokeInitializeSpy,
+        CoCreateGuid,
         CoUninitialize,
         GetErrorInfo,
         SetErrorInfo,

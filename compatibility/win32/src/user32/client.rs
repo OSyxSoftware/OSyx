@@ -670,8 +670,36 @@ extern "win64" fn IsProcessDPIAware() -> Bool {
             DPI_AWARE.store(if aware { 2 } else { 1 }, core::sync::atomic::Ordering::Relaxed);
             aware as Bool
         }
-        v => (v == 2) as Bool,
+        v => (v >= 2) as Bool,
     }
+}
+
+/// Whether the awareness was set by a call (it can be set once).
+static DPI_SET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// PROCESS_DPI_AWARENESS of the process: unaware (0), system aware (1)
+/// or per-monitor aware (2).
+pub(crate) fn process_dpi_awareness() -> u32 {
+    IsProcessDPIAware();
+    match DPI_AWARE.load(core::sync::atomic::Ordering::Relaxed) {
+        3 => 2,
+        2 => 1,
+        _ => 0,
+    }
+}
+
+/// SetProcessDpiAwareness: false if the awareness was already set (by a
+/// call or the manifest), as Windows refuses a second setting.
+pub(crate) fn set_process_dpi_awareness(level: u32) -> bool {
+    if DPI_SET.swap(true, core::sync::atomic::Ordering::Relaxed) || manifest_dpi_aware() {
+        return false;
+    }
+    DPI_AWARE.store(match level {
+        0 => 1,
+        1 => 2,
+        _ => 3,
+    }, core::sync::atomic::Ordering::Relaxed);
+    true
 }
 
 extern "win64" fn SetProcessDPIAware() -> Bool {

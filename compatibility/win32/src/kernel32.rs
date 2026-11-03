@@ -3408,6 +3408,23 @@ pub(crate) extern "win64" fn GetModuleFileNameW(h: u64, buf: *mut u16, size: u32
     }
 }
 
+/// CompareObjectHandles: whether two handles name the same kernel object.
+extern "win64" fn CompareObjectHandles(first: u64, second: u64) -> Bool {
+    let norm = |h: u64| match h {
+        objects::CURRENT_PROCESS | objects::CURRENT_THREAD => None,
+        h => Some(h),
+    };
+    match (norm(first), norm(second)) {
+        (None, None) => b(first == second),
+        (Some(x), Some(y)) => objects::same_object(x, y).map_or(FALSE, b),
+        _ => FALSE,
+    }
+}
+
+/// Failed lookups are reported (the first few): a missing function makes
+/// delay-loading callers crash far from the cause.
+static PROC_MISSES: AtomicU32 = AtomicU32::new(0);
+
 extern "win64" fn GetProcAddress(h: u64, name: *const u8) -> u64 {
     let sym_name;
     let sym = if (name as u64) < 0x10000 {
@@ -3421,7 +3438,7 @@ extern "win64" fn GetProcAddress(h: u64, name: *const u8) -> u64 {
         Symbol::Name(&sym_name)
     };
     loader::get_proc_address(h, sym).unwrap_or_else(|e| {
-        if crate::VERBOSE.load(Ordering::Relaxed) {
+        if crate::VERBOSE.load(Ordering::Relaxed) || PROC_MISSES.fetch_add(1, Ordering::Relaxed) < 32 {
             let module = loader::where_is(h).map_or_else(|| alloc::format!("{h:#x}"), |(m, _)| m);
             match sym {
                 Symbol::Name(n) => os_std::eprintln!("winrun: GetProcAddress({module}, {n}) failed"),
@@ -3603,6 +3620,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         SetLastError,
         IsDebuggerPresent,
         CheckRemoteDebuggerPresent,
+        CompareObjectHandles,
         FreeConsole,
         GetConsoleDisplayMode,
         ClearCommError,

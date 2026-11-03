@@ -28,7 +28,7 @@ use osyx_gfx::text::Font as MonoFont;
 use osyx_gfx::{Color, Rect, Surface};
 use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
-mod client;
+pub(crate) mod client;
 mod controls;
 mod extra;
 mod gdi;

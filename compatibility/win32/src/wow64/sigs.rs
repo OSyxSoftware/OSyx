@@ -39,6 +39,7 @@ macro_rules! cdecl_named {
 pub(super) static SIGNATURES: &[Signature] = &[
     // Steam's vgui2_s.dll, chromehtml.dll and steamclient64.dll imports
     // (PR 103), for 32-bit callers too.
+    sig!(K32EnumProcesses, [Ptr, Uint, Ptr], I32),
     sig!(CopyIcon, [Handle], Handle),
     sig!(CopyImage, [Handle, Uint, Int, Int, Uint], Handle),
     sig!(DrawIconEx, [Handle, Int, Int, Handle, Int, Int, Uint, Handle, Uint], I32),

@@ -315,8 +315,101 @@ extern "win64" fn GetScaleFactorForMonitor(monitor: u64, scale: *mut u32) -> u32
     0
 }
 
+const E_ACCESSDENIED: u32 = 0x8007_0005;
+
+extern "win64" fn SetProcessDpiAwareness(level: u32) -> u32 {
+    if level > 2 {
+        return E_INVALIDARG;
+    }
+    if crate::user32::client::set_process_dpi_awareness(level) { 0 } else { E_ACCESSDENIED }
+}
+
+/// Any process's awareness is this one's: the others run in their own
+/// winrun and are asked there.
+extern "win64" fn GetProcessDpiAwareness(_process: u64, out: *mut u32) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = crate::user32::client::process_dpi_awareness() };
+    0
+}
+
 pub fn shcore_exports() -> Vec<(&'static str, u64)> {
-    export_table![GetDpiForMonitor, GetScaleFactorForMonitor]
+    export_table![GetDpiForMonitor, GetScaleFactorForMonitor, SetProcessDpiAwareness, GetProcessDpiAwareness]
+}
+
+// ---- powrprof ----------------------------------------------------------------------------------
+
+const STATUS_SUCCESS_P: u32 = 0;
+const STATUS_BUFFER_TOO_SMALL_P: u32 = 0xC000_0023;
+const STATUS_INVALID_PARAMETER_P: u32 = 0xC000_000D;
+
+/// CallNtPowerInformation: the processors' power information (11: per CPU
+/// the number, maximum and current MHz from the measured TSC rate, the
+/// limit, idle states), the battery state (5: AC power, no battery) and
+/// the execution state (16: nothing requested).
+extern "win64" fn CallNtPowerInformation(level: u32, _input: *const u8, _in_len: u32, out: *mut u8, out_len: u32) -> u32 {
+    let data: Vec<u8> = match level {
+        11 => {
+            let cpus = os_sys::cpu_info().map_or(1, |(c, _)| c as u32);
+            let mhz = (crate::procinfo::tsc_hz() / 1_000_000) as u32;
+            (0..cpus).flat_map(|n| [n, mhz, mhz, mhz, 1, 0].into_iter().flat_map(u32::to_le_bytes)).collect()
+        }
+        5 => {
+            // SYSTEM_BATTERY_STATE: AcOnLine, BatteryPresent, Charging,
+            // Discharging, Spare1[3], Tag, MaxCapacity, RemainingCapacity,
+            // Rate, EstimatedTime, DefaultAlert1, DefaultAlert2.
+            let mut b = alloc::vec![0u8; 32];
+            b[0] = 1;
+            b
+        }
+        16 => 0u32.to_le_bytes().to_vec(),
+        _ => return STATUS_INVALID_PARAMETER_P,
+    };
+    if out.is_null() || (out_len as usize) < data.len() {
+        return STATUS_BUFFER_TOO_SMALL_P;
+    }
+    // SAFETY: the caller's buffer of `out_len` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), out, data.len()) };
+    STATUS_SUCCESS_P
+}
+
+/// A desktop computer (PlatformRoleDesktop): OSyx reports no battery.
+extern "win64" fn PowerDeterminePlatformRoleEx(version: u32) -> u32 {
+    if version == 1 || version == 2 { 1 } else { 0 }
+}
+
+/// The Balanced scheme {381b4222-f694-41f0-9685-ff5bb260df2e}, the one
+/// scheme here; LocalFree releases it.
+extern "win64" fn PowerGetActiveScheme(_root: u64, out: *mut u64) -> u32 {
+    const BALANCED: [u8; 16] = [0x22, 0x42, 0x1b, 0x38, 0x94, 0xf6, 0xf0, 0x41, 0x96, 0x85, 0xff, 0x5b, 0xb2, 0x60, 0xdf, 0x2e];
+    if out.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let Some(p) = crate::kernel32::heap_alloc(16, false) else { return 8 };
+    // SAFETY: a fresh 16-byte block; the caller's out pointer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(BALANCED.as_ptr(), p as *mut u8, 16);
+        *out = p;
+    }
+    ERROR_SUCCESS
+}
+
+/// The scheme has no stored setting values: OSyx's power policy is the
+/// scheduler's, not per-setting.
+extern "win64" fn PowerReadACValue(_root: u64, _scheme: u64, _subgroup: u64, _setting: u64, _kind: *mut u32, _buf: *mut u8, _size: *mut u32) -> u32 {
+    ERROR_FILE_NOT_FOUND_P
+}
+
+extern "win64" fn PowerReadDCValue(_root: u64, _scheme: u64, _subgroup: u64, _setting: u64, _kind: *mut u32, _buf: *mut u8, _size: *mut u32) -> u32 {
+    ERROR_FILE_NOT_FOUND_P
+}
+
+const ERROR_FILE_NOT_FOUND_P: u32 = 2;
+
+pub fn powrprof_exports() -> Vec<(&'static str, u64)> {
+    export_table![CallNtPowerInformation, PowerDeterminePlatformRoleEx, PowerGetActiveScheme, PowerReadACValue, PowerReadDCValue]
 }
 
 // ---- wininet -----------------------------------------------------------------------------------

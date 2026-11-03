@@ -685,6 +685,52 @@ extern "win64" fn WTSUnRegisterSessionNotification(hwnd: u64) -> Bool {
     if crate::user32::is_window(hwnd) { TRUE } else { fail(ERROR_INVALID_PARAMETER, FALSE) }
 }
 
+const WTS_CURRENT_SESSION: u32 = u32::MAX;
+const SESSION: u32 = 1;
+
+/// WTSQuerySessionInformationW of the one session (the console): its id,
+/// state (WTSActive), station name, user and domain names, connect state,
+/// client name and protocol (console). The buffer is freed with
+/// WTSFreeMemory.
+extern "win64" fn WTSQuerySessionInformationW(_server: u64, session: u32, class: u32, out: *mut u64, len: *mut u32) -> Bool {
+    if out.is_null() || len.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if session != WTS_CURRENT_SESSION && session != SESSION {
+        return fail(7022, FALSE); // ERROR_CTX_WINSTATION_NOT_FOUND
+    }
+    let text = |s: &str| -> Vec<u8> { s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect() };
+    let user = crate::kernel32::env_get("USERNAME").unwrap_or_else(|| alloc::string::String::from("user"));
+    let domain = crate::kernel32::env_get("COMPUTERNAME").unwrap_or_else(|| alloc::string::String::from("OSYX"));
+    let data: Vec<u8> = match class {
+        0..=3 | 10 | 11 => text(""),         // initial program, application, directories, OEM id, client name
+        4 => SESSION.to_le_bytes().to_vec(), // WTSSessionId
+        5 => text(&user),                    // WTSUserName
+        6 => text("Console"),                // WTSWinStationName
+        7 => text(&domain),                  // WTSDomainName
+        8 => 0i32.to_le_bytes().to_vec(),    // WTSConnectState: WTSActive
+        9 | 13 => 0u32.to_le_bytes().to_vec(), // client build number, hardware id
+        12 | 16 => 0u16.to_le_bytes().to_vec(), // client product id, protocol (console)
+        14 => alloc::vec![0; 24],            // WTS_CLIENT_ADDRESS: none (AF_UNSPEC)
+        15 => alloc::vec![0; 12],            // WTS_CLIENT_DISPLAY: no remote client
+        _ => return fail(ERROR_INVALID_PARAMETER, FALSE),
+    };
+    let Some(p) = crate::kernel32::heap_alloc(data.len(), false) else { return fail(ERROR_NOT_ENOUGH_MEMORY, FALSE) };
+    // SAFETY: a fresh block; the caller's out pointers.
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, data.len());
+        *out = p;
+        *len = data.len() as u32;
+    }
+    TRUE
+}
+
+extern "win64" fn WTSFreeMemory(p: u64) {
+    if p != 0 {
+        crate::kernel32::heap_free(p);
+    }
+}
+
 pub fn wtsapi32_exports() -> Vec<(&'static str, u64)> {
-    export_table![WTSRegisterSessionNotification, WTSUnRegisterSessionNotification]
+    export_table![WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, WTSQuerySessionInformationW, WTSFreeMemory]
 }

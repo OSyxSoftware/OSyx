@@ -476,6 +476,34 @@ pub fn kind_name(o: &Object) -> &'static str {
     }
 }
 
+/// Whether handles `a` and `b` name the same object (CompareObjectHandles).
+pub fn same_object(a: u64, b: u64) -> Option<bool> {
+    use alloc::sync::Arc as A;
+    Some(match (get(a)?, get(b)?) {
+        (Object::File(x), Object::File(y)) => A::ptr_eq(&x, &y),
+        (Object::Console(x), Object::Console(y)) => core::mem::discriminant(&x) == core::mem::discriminant(&y),
+        (Object::Null, Object::Null) => true,
+        (Object::Thread(x), Object::Thread(y)) => A::ptr_eq(&x, &y),
+        (Object::Event(x), Object::Event(y)) => A::ptr_eq(&x, &y),
+        (Object::KeyedEvent(x), Object::KeyedEvent(y)) => A::ptr_eq(&x, &y),
+        (Object::Timer(x), Object::Timer(y)) => A::ptr_eq(&x, &y),
+        (Object::Mutex(x), Object::Mutex(y)) => A::ptr_eq(&x, &y),
+        (Object::Semaphore(x), Object::Semaphore(y)) => A::ptr_eq(&x, &y),
+        (Object::Section(x), Object::Section(y)) => A::ptr_eq(&x, &y),
+        (Object::Token(x), Object::Token(y)) => A::ptr_eq(&x, &y),
+        (Object::Port(x), Object::Port(y)) => A::ptr_eq(&x, &y),
+        (Object::Process(x), Object::Process(y)) => A::ptr_eq(&x, &y) || x.pid == y.pid,
+        (Object::Job(x), Object::Job(y)) => A::ptr_eq(&x, &y),
+        (Object::WindowStation(x), Object::WindowStation(y)) => A::ptr_eq(&x, &y),
+        (Object::Desktop(x), Object::Desktop(y)) => A::ptr_eq(&x, &y),
+        (Object::Pipe(x), Object::Pipe(y)) => A::ptr_eq(&x, &y),
+        (Object::Directory(x), Object::Directory(y)) => x.path == y.path,
+        (Object::Transaction(x), Object::Transaction(y)) => A::ptr_eq(&x, &y),
+        (Object::Snapshot(x), Object::Snapshot(y)) => A::ptr_eq(&x, &y),
+        _ => false,
+    })
+}
+
 /// Open handles of this process.
 pub fn count() -> usize {
     TABLE.lock().unwrap().map.len()
