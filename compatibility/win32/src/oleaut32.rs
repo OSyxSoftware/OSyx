@@ -644,7 +644,98 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         LoadRegTypeLib,
         CreateStdDispatch,
         OleCreatePropertyFrame,
+        SafeArrayGetDim,
+        LoadTypeLib,
+        VariantTimeToSystemTime,
+        VarUI4FromStr,
+        VarBstrCmp,
     ]
+}
+
+extern "win64" fn SafeArrayGetDim(psa: u64) -> u32 {
+    if psa == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's SAFEARRAY: cDims first.
+    unsafe { *(psa as *const u16) as u32 }
+}
+
+const TYPE_E_CANTLOADLIBRARY: u32 = 0x8002_9C4A;
+
+/// There is no type-library reader (and no ITypeLib) in winrun, so no
+/// library loads, as LoadRegTypeLib finds none registered.
+extern "win64" fn LoadTypeLib(file: *const u16, out: *mut u64) -> u32 {
+    if out.is_null() || file.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = 0 };
+    TYPE_E_CANTLOADLIBRARY
+}
+
+/// A DATE (days since 1899-12-30; the fraction is the time of day, also
+/// for negative dates) as a SYSTEMTIME, to the nearest second. FALSE
+/// outside 100-01-01..9999-12-31.
+extern "win64" fn VariantTimeToSystemTime(date: f64, out: *mut [u16; 8]) -> i32 {
+    if out.is_null() || !(-657_434.0..2_958_466.0).contains(&date) {
+        return 0;
+    }
+    let mut days = date as i64;
+    let mut secs = ((date - days as f64).abs() * 86_400.0 + 0.5) as i64;
+    if secs >= 86_400 {
+        secs -= 86_400;
+        days += if date < 0.0 { -1 } else { 1 };
+    }
+    let day = osyx_ui::time::days_from_civil(1899, 12, 30) + days;
+    let (y, m, d) = osyx_ui::time::civil_from_days(day);
+    let weekday = osyx_ui::time::weekday(day) as u16;
+    // SAFETY: the caller's SYSTEMTIME.
+    unsafe { *out = [y as u16, m as u16, weekday, d as u16, (secs / 3600) as u16, (secs / 60 % 60) as u16, (secs % 60) as u16, 0] };
+    1
+}
+
+const DISP_E_TYPEMISMATCH: u32 = 0x8002_0005;
+const DISP_E_OVERFLOW: u32 = 0x8002_000A;
+
+/// VarUI4FromStr: number text (en-US) rounded half to even.
+extern "win64" fn VarUI4FromStr(s: *const u16, _lcid: u32, _flags: u32, out: *mut u32) -> u32 {
+    if s.is_null() || out.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's NUL-terminated string.
+    let Some(text) = (unsafe { crate::path::wide_to_string(s) }) else { return DISP_E_TYPEMISMATCH };
+    let Some(v) = coerce::parse_number(&text) else { return DISP_E_TYPEMISMATCH };
+    let v = coerce::round_even(v);
+    if !(0.0..=u32::MAX as f64).contains(&v) {
+        return DISP_E_OVERFLOW;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = v as u32 };
+    S_OK
+}
+
+/// VarBstrCmp: VARCMP_LT (0), _EQ (1), _GT (2). A NULL BSTR is an empty
+/// string. With LCID 0 the strings compare as UTF-16 units; otherwise as
+/// text, without case under NORM_IGNORECASE.
+extern "win64" fn VarBstrCmp(a: u64, b: u64, lcid: u32, flags: u32) -> u32 {
+    let units = |p: u64| -> Vec<u16> {
+        if p == 0 {
+            return Vec::new();
+        }
+        // SAFETY: a BSTR: its byte length precedes it.
+        unsafe { core::slice::from_raw_parts(p as *const u16, SysStringLen(p) as usize).to_vec() }
+    };
+    let (x, y) = (units(a), units(b));
+    let order = if lcid == 0 {
+        x.cmp(&y)
+    } else {
+        let text = |u: &[u16]| {
+            let s = alloc::string::String::from_utf16_lossy(u);
+            if flags & 1 != 0 { s.to_lowercase() } else { s }
+        };
+        text(&x).cmp(&text(&y))
+    };
+    order as i32 as u32 + 1
 }
 
 /// The ordinals programs import these by.
@@ -672,6 +763,11 @@ pub fn ordinals() -> Vec<(u16, u64)> {
         (29, f(DispGetIDsOfNames as *const ())),
         (32, f(CreateStdDispatch as *const ())),
         (77, f(SafeArrayGetVartype as *const ())),
+        (17, f(SafeArrayGetDim as *const ())),
+        (161, f(LoadTypeLib as *const ())),
+        (185, f(VariantTimeToSystemTime as *const ())),
+        (277, f(VarUI4FromStr as *const ())),
+        (314, f(VarBstrCmp as *const ())),
         (162, f(LoadRegTypeLib as *const ())),
         (411, f(SafeArrayCreateVector as *const ())),
         (417, f(OleCreatePropertyFrame as *const ())),
