@@ -541,6 +541,24 @@ impl AsyncQueue {
         unsafe { write_volatile(self.notify as *mut u16, self.index) };
     }
 
+    /// Asks the device to interrupt (or not) when it returns buffers
+    /// (`VIRTQ_AVAIL_F_NO_INTERRUPT`, a hint the device may ignore). A queue
+    /// without an MSI-X entry never interrupts.
+    pub fn set_interrupts(&self, on: bool) {
+        if self.interrupts {
+            // SAFETY: the avail ring (flags at offset 0) lies in the queue frame.
+            unsafe { write_volatile(self.avail as *mut u16, if on { 0 } else { AVAIL_F_NO_INTERRUPT }) };
+        }
+    }
+
+    /// Whether the device returned buffers `pop_used` has not collected.
+    pub fn has_used(&self) -> bool {
+        // A flag written just before must be visible before the index is read.
+        fence(Ordering::SeqCst);
+        // SAFETY: the used ring lies in the queue frame.
+        unsafe { read_volatile((self.used + 2) as *const u16) != self.used_idx }
+    }
+
     /// The next completed chain: (head token, bytes the device wrote). Its
     /// descriptors return to the free list.
     pub fn pop_used(&mut self) -> Option<(u16, u32)> {

@@ -145,6 +145,26 @@ pub fn copy_from_user(dst: &mut [u8], src: u64) -> Result<(), osyx_abi::Errno> {
     }
 }
 
+/// Copies `len` bytes from user address `src` into a new vector, which is
+/// not cleared first (the copy fills it).
+pub fn copy_vec_from_user(src: u64, len: usize) -> Result<alloc::vec::Vec<u8>, osyx_abi::Errno> {
+    if !user_range_ok(src, len as u64) {
+        return Err(osyx_abi::Errno::Fault);
+    }
+    let mut v = alloc::vec::Vec::with_capacity(len);
+    // SAFETY: the vector owns `len` bytes of capacity; faults on the user
+    // side are recovered through the fixup table. Only a complete copy
+    // makes the bytes part of the vector.
+    match unsafe { osyx_copy_bytes(v.as_mut_ptr(), src as *const u8, len) } {
+        0 => {
+            // SAFETY: the copy initialised all `len` bytes.
+            unsafe { v.set_len(len) };
+            Ok(v)
+        }
+        _ => Err(osyx_abi::Errno::Fault),
+    }
+}
+
 /// Copies `src` to user address `dst`. Fails on unmapped or read-only pages
 /// (CR0.WP makes read-only user pages read-only for the kernel too).
 pub fn copy_to_user(dst: u64, src: &[u8]) -> Result<(), osyx_abi::Errno> {

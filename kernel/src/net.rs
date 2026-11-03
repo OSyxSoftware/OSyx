@@ -16,7 +16,7 @@
 use crate::drivers::virtio_net::{self, VirtioNet};
 use crate::drivers::e1000::{self, E1000};
 use crate::drivers::rtl8168::{self, Rtl8168};
-use crate::fixup::{copy_from_user, copy_to_user, user_range_ok};
+use crate::fixup::{copy_from_user, copy_to_user, copy_vec_from_user, user_range_ok};
 use crate::object::Object;
 use crate::sync::{IrqSpinLock, KMutex};
 use crate::waitq::{block_on, deadline_after_ns, WaitQueue};
@@ -40,6 +40,9 @@ trait NetDevice: Send + Sync {
     fn transmit(&self, frames: &[Vec<u8>]) -> usize;
     fn recover(&self) -> bool;
     fn description(&self) -> String;
+    /// Called before the network thread sleeps; true if received frames
+    /// are already waiting (see `VirtioNet::arm`).
+    fn arm(&self) -> bool { false }
 }
 
 macro_rules! impl_net_device {
@@ -55,7 +58,16 @@ macro_rules! impl_net_device {
         }
     };
 }
-impl_net_device!(VirtioNet, "virtio-net");
+impl NetDevice for VirtioNet {
+    fn link_up(&self) -> bool { self.link_up() }
+    fn has_interrupts(&self) -> bool { self.has_interrupts() }
+    fn counters(&self) -> virtio_net::Counters { self.counters() }
+    fn receive(&self, frames: &mut Vec<Vec<u8>>) { self.receive(frames) }
+    fn transmit(&self, frames: &[Vec<u8>]) -> usize { self.transmit(frames) }
+    fn recover(&self) -> bool { self.recover() }
+    fn description(&self) -> String { alloc::format!("{} (virtio-net at {})", self.name, self.location) }
+    fn arm(&self) -> bool { self.arm() }
+}
 impl_net_device!(E1000, "e1000");
 impl_net_device!(Rtl8168, "rtl8168");
 impl NetDevice for crate::bsd::BsdNic {
@@ -105,19 +117,22 @@ fn with_stack<R>(f: impl FnOnce(&mut Stack) -> R) -> Option<R> {
         let s = g.as_mut()?;
         s.set_now(now_ms());
         let r = f(s);
-        let changed = s.take_changed();
-        refresh_readiness(s);
+        // Readiness may change without the stack flagging it (a socket's
+        // own operation), so a changed readiness bit counts as well.
+        let changed = s.take_changed() | refresh_readiness(s);
         (r, s.take_tx(), s.take_log(), changed)
     };
     for line in log {
         kprintln!("net: {}", line);
     }
     transmit(tx);
-    // Readiness may have changed even when the stack did not flag it (a
-    // socket's own operation), so waiters always re-check.
-    let _ = changed;
-    GENERATION.fetch_add(1, Ordering::Release);
-    CHANGED.wake_all();
+    // Waiters re-check only when something they could wait for changed.
+    // Waking them after every call made idle waiters wake each other in
+    // turn: each retry is itself a stack call, which woke the others again.
+    if changed {
+        GENERATION.fetch_add(1, Ordering::Release);
+        CHANGED.wake_all();
+    }
     Some(r)
 }
 
@@ -137,9 +152,11 @@ fn transmit(mut frames: Vec<(usize, Vec<u8>)>) {
     }
 }
 
-fn refresh_readiness(s: &Stack) {
+/// Copies every socket's readiness into its object; true if any changed.
+fn refresh_readiness(s: &Stack) -> bool {
     let mut list = SOCKETS.lock();
     list.retain(|w| w.strong_count() > 0);
+    let mut changed = false;
     for w in list.iter() {
         if let Some(obj) = w.upgrade() {
             let id = obj.state.lock().id;
@@ -151,9 +168,10 @@ fn refresh_readiness(s: &Stack) {
                 // Not yet bound/connected: sending binds implicitly.
                 None => WRITABLE,
             };
-            obj.ready.store(bits, Ordering::Release);
+            changed |= obj.ready.swap(bits, Ordering::AcqRel) != bits;
         }
     }
+    changed
 }
 
 /// Probes the network devices, builds the stack and starts its thread.
@@ -277,12 +295,23 @@ fn net_thread(_: u64, _: u64) {
         if polled {
             wait_ms = wait_ms.min(1);
         }
-        if wait_ms > 0 && !KICK.load(Ordering::Acquire) && CLOSING.lock().is_empty() {
-            let deadline = Some(interrupts::ticks() + crate::arch::timer::ms_to_ticks(wait_ms));
-            let _ = block_on(&[&WAKE], deadline, || KICK.load(Ordering::Acquire).then_some(()));
+        let devs = DEVICES.lock().clone();
+        if wait_ms > 0 && CLOSING.lock().is_empty() {
+            // Every device interrupts again from here on (not `any`: each
+            // one has to be armed); frames that came in meanwhile are
+            // handled without sleeping.
+            let pending = KICK.load(Ordering::Acquire) || devs.iter().fold(false, |w, (_, d)| d.arm() | w);
+            if pending {
+                // A flood keeps this thread busy: let the threads it woke
+                // (the readers) run before the next batch, or their socket
+                // queues overflow while it polls on.
+                sched::yield_now();
+            } else {
+                let deadline = Some(interrupts::ticks() + crate::arch::timer::ms_to_ticks(wait_ms));
+                let _ = block_on(&[&WAKE], deadline, || KICK.load(Ordering::Acquire).then_some(()));
+            }
         }
         KICK.store(false, Ordering::Release);
-        let devs = DEVICES.lock().clone();
         let mut rx: Vec<(usize, Vec<Vec<u8>>)> = Vec::new();
         let check_health = now_ms() >= last_health + 1000;
         for (iface, dev) in &devs {
@@ -306,9 +335,7 @@ fn net_thread(_: u64, _: u64) {
                 s.set_link(iface, up);
             }
             for (iface, frames) in &rx {
-                for f in frames {
-                    s.receive(*iface, f);
-                }
+                s.receive_burst(*iface, frames.iter().map(Vec::as_slice));
             }
             s.poll();
         });
@@ -383,6 +410,7 @@ fn errno(e: NetError) -> Errno {
         NetError::NameNotFound => Errno::NameNotFound,
         NetError::DnsFailure => Errno::DnsFailure,
         NetError::BadSocket => Errno::BadHandle,
+        NetError::BadAddress => Errno::Fault,
     }
 }
 
@@ -425,11 +453,12 @@ fn blocking<R>(s: &SocketObj, want: u32, timeout_ns: u64, mut op: impl FnMut(&mu
     let deadline = if timeout_ns == 0 { None } else { deadline_after_ns(timeout_ns) };
     loop {
         match stack_call(&mut op) {
+            // The readiness bits are refreshed under the stack lock after
+            // every call, and an operation only says WouldBlock while they
+            // lack `want`: a change elsewhere in the stack is no reason to
+            // retry (and take the stack lock) again.
             Err(Errno::WouldBlock) if !s.nonblock.load(Ordering::Relaxed) => {
-                let seen = GENERATION.load(Ordering::Acquire);
-                block_on(&[&CHANGED], deadline, || {
-                    (s.ready.load(Ordering::Acquire) & (want | HANGUP) != 0 || GENERATION.load(Ordering::Acquire) != seen).then_some(())
-                })?;
+                block_on(&[&CHANGED], deadline, || (s.ready.load(Ordering::Acquire) & (want | HANGUP) != 0).then_some(()))?;
             }
             r => return r,
         }
@@ -664,8 +693,7 @@ pub fn sys_send(h: u64, buf: u64, len: u64, to: u64, flags: u64) -> Result<u64, 
         abi::SOCK_STREAM => MAX_IO,
         _ => osyx_net::stack::MAX_UDP_PAYLOAD + 1,
     });
-    let mut data = alloc::vec![0u8; len];
-    copy_from_user(&mut data, buf)?;
+    let data = copy_vec_from_user(buf, len)?;
     let dest = if to != 0 { Some(get_user::<SockAddr>(to)?) } else { None };
     let nonblock = flags & abi::MSG_DONTWAIT != 0;
     match s.kind {
@@ -721,7 +749,13 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
     if len == 0 && s.kind == abi::SOCK_STREAM {
         return Ok(0);
     }
-    let mut k = alloc::vec![0u8; len];
+    // Sized to what is queued (below) rather than to the caller's buffer: a
+    // 64 KiB read that returns one segment should not clear 64 KiB first.
+    let mut k: Vec<u8> = Vec::new();
+    let fit = |k: &mut Vec<u8>, st: &mut Stack, id: u32| {
+        let queued = st.recv_available(id).unwrap_or(0).max(1);
+        k.resize(len.min(queued), 0);
+    };
     let run = |op: &mut RecvOp| {
         if nonblock {
             stack_call(op)
@@ -729,12 +763,25 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
             blocking(&s, READABLE, timeout, op)
         }
     };
+    // Data is copied straight from the stack's queues to the caller (under
+    // the stack lock; a fault stops the copy and leaves the rest queued),
+    // except for peeks and ICMP, which go through `k`.
+    let to_user = |at: u64| {
+        move |part: &[u8]| copy_to_user(at, part).is_ok()
+    };
+    let mut direct = true;
     let (n, addr) = match s.kind {
         abi::SOCK_DGRAM => {
             let id = ensure_udp(&s, None)?;
             let mut total = None;
+            direct = !peek;
             let r = run(&mut |st| {
-                let d = if peek { st.udp_peek_from(id, &mut k) } else { st.udp_recv_from(id, &mut k) };
+                let d = if peek {
+                    fit(&mut k, st, id);
+                    st.udp_peek_from(id, &mut k)
+                } else {
+                    st.udp_recv_with(id, len, to_user(buf))
+                };
                 d.map(|(f, n, len)| {
                     total = Some(len);
                     (n, Some(to_sa(f)))
@@ -749,9 +796,11 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
             if peek {
                 return Err(Errno::NotSupported);
             }
+            direct = false;
             let id = s.id().ok_or(Errno::BadHandle)?;
             run(&mut |st| match if peek { st.icmp_peek(id)? } else { st.icmp_recv(id)? } {
                 IcmpEvent::Reply { from, seq, ttl, data } => {
+                    k.resize(len.min(data.len()), 0);
                     let n = data.len().min(k.len());
                     k[..n].copy_from_slice(&data[..n]);
                     Ok((n, Some(SockAddr { addr: from.0, port: seq, ttl, reserved: 0 })))
@@ -761,18 +810,33 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
         }
         abi::SOCK_STREAM => {
             let id = s.id().ok_or(Errno::NotConnected)?;
-            if peek || !waitall {
-                run(&mut |st| if peek { st.tcp_peek(id, &mut k) } else { st.tcp_recv(id, &mut k) }.map(|n| (n, None)))?
+            // Takes up to `max` bytes into the caller's buffer at `at`.
+            let take = |st: &mut Stack, at: u64, max: usize| {
+                let mut off = 0;
+                st.tcp_recv_with(id, max, |part| {
+                    let ok = copy_to_user(at + off, part).is_ok();
+                    off += part.len() as u64;
+                    ok
+                })
+            };
+            if peek {
+                direct = false;
+                run(&mut |st| {
+                    fit(&mut k, st, id);
+                    st.tcp_peek(id, &mut k).map(|n| (n, None))
+                })?
+            } else if !waitall {
+                run(&mut |st| take(st, buf, len).map(|n| (n, None)))?
             } else {
                 // MSG_WAITALL: fill the buffer; EOF, an error or a
                 // non-blocking socket ends the wait early.
                 let mut done = 0;
                 let mut err = None;
-                while done < k.len() {
+                while done < len {
                     let r = if nonblock {
-                        stack_call(|st| st.tcp_recv(id, &mut k[done..]))
+                        stack_call(|st| take(st, buf + done as u64, len - done))
                     } else {
-                        blocking(&s, READABLE, timeout, |st| st.tcp_recv(id, &mut k[done..]))
+                        blocking(&s, READABLE, timeout, |st| take(st, buf + done as u64, len - done))
                     };
                     match r {
                         Ok(0) => break,
@@ -794,7 +858,9 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
         }
         _ => return Err(Errno::NotSupported),
     };
-    copy_to_user(buf, &k[..n])?;
+    if !direct {
+        copy_to_user(buf, &k[..n])?;
+    }
     if from != 0 {
         if let Some(a) = addr {
             put_user(from, &a)?;
