@@ -66,6 +66,37 @@ pub(crate) fn associate(s: u64, port: u64, key: u64) -> bool {
 
 pub(super) fn forget(s: u64) {
     PORTS.lock().unwrap().remove(&s);
+    SKIP.lock().unwrap().remove(&s);
+}
+
+/// Sockets with FILE_SKIP_COMPLETION_PORT_ON_SUCCESS.
+static SKIP: Mutex<alloc::collections::BTreeSet<u64>> = Mutex::new(alloc::collections::BTreeSet::new());
+
+pub(super) fn set_skip(s: u64, on: bool) {
+    let mut skip = SKIP.lock().unwrap();
+    if on {
+        skip.insert(s);
+    } else {
+        skip.remove(&s);
+    }
+}
+
+/// Completes an operation that finished in the call: as `finish`, without
+/// a packet when the socket skips them on success.
+pub(super) fn finish_now(s: u64, o: u64, bytes: usize) {
+    if SKIP.lock().unwrap().contains(&s) {
+        // SAFETY: the caller's OVERLAPPED.
+        let event = unsafe {
+            ov::set_bytes(o, bytes as u64);
+            ov::set_status(o, 0);
+            ov::event(o)
+        };
+        if event & !1 != 0 {
+            crate::kernel32::SetEvent(event & !1);
+        }
+        return;
+    }
+    finish(s, o, bytes, 0);
 }
 
 /// Completes overlapped operation `o` on socket `s` with `bytes`

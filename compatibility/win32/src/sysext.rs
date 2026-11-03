@@ -1262,6 +1262,15 @@ extern "win64" fn SetDefaultDllDirectories(flags: u32) -> i32 {
     1
 }
 
+extern "win64" fn SetDllDirectoryA(dir: *const u8) -> i32 {
+    if dir.is_null() {
+        return SetDllDirectoryW(core::ptr::null());
+    }
+    // SAFETY: a NUL-terminated name.
+    let Some(w) = (unsafe { crate::path::ansi_to_wide(dir) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    SetDllDirectoryW(w.as_ptr())
+}
+
 extern "win64" fn SetDllDirectoryW(dir: *const u16) -> i32 {
     // SAFETY: NULL or a NUL-terminated string.
     let d = unsafe { path::wide_to_string(dir) };
@@ -1419,6 +1428,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         AttachConsole,
         SetDefaultDllDirectories,
         SetDllDirectoryW,
+        SetDllDirectoryA,
         CreateSemaphoreExW,
     ]
 }

@@ -64,6 +64,7 @@ pub fn kernel_exports() -> Vec<(&'static str, u64)> {
 pub fn exports() -> Vec<(&'static str, u64)> {
     alloc::vec![
         ("EnumProcessModules", K32EnumProcessModules as *const () as u64),
-        ("EnumProcessModulesEx", K32EnumProcessModulesEx as *const () as u64)
+        ("EnumProcessModulesEx", K32EnumProcessModulesEx as *const () as u64),
+        ("EnumProcesses", K32EnumProcesses as *const () as u64)
     ]
 }

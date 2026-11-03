@@ -7839,6 +7839,73 @@ extern "win64" fn UnregisterPowerSettingNotification(notify: u64) -> Bool {
     unregister_notification(notify)
 }
 
+/// OSyx does not suspend, so a registered recipient (a window, or a
+/// DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS callback) is never told of one.
+extern "win64" fn RegisterSuspendResumeNotification(recipient: u64, flags: u32) -> u64 {
+    if recipient == 0 || flags & !2 != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    register_notification(recipient)
+}
+
+extern "win64" fn UnregisterSuspendResumeNotification(notify: u64) -> Bool {
+    unregister_notification(notify)
+}
+
+/// Pointer devices (pens, touch screens) are not exposed: the mouse is
+/// not one, and touch injection makes no device either.
+extern "win64" fn GetPointerDevices(count: *mut u32, _devices: *mut u8) -> Bool {
+    if count.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's in/out count.
+    unsafe { *count = 0 };
+    TRUE
+}
+
+extern "win64" fn GetPointerDevice(_device: u64, _info: *mut u8) -> Bool {
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
+extern "win64" fn GetPointerPenInfo(_pointer: u32, _info: *mut u8) -> Bool {
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
+/// Device arrival never happens (no pointer devices), so nothing is sent.
+extern "win64" fn RegisterPointerDeviceNotifications(hwnd: u64, _range: Bool) -> Bool {
+    if is_window(hwnd) { TRUE } else { fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) }
+}
+
+/// DPI_AWARENESS_CONTEXT pseudo-handles: unaware (-1), system aware (-2),
+/// per-monitor (-3), per-monitor v2 (-4), unaware GDI-scaled (-5).
+fn valid_dpi_context(ctx: u64) -> bool {
+    (1..=5).contains(&(ctx as i64).wrapping_neg())
+}
+
+extern "win64" fn IsValidDpiAwarenessContext(ctx: u64) -> Bool {
+    valid_dpi_context(ctx) as Bool
+}
+
+/// Each thread's awareness context (0: the process's).
+static THREAD_DPI: Mutex<alloc::collections::BTreeMap<u64, u64>> = Mutex::new(alloc::collections::BTreeMap::new());
+
+/// The process's context, from its PROCESS_DPI_AWARENESS.
+fn process_dpi_context() -> u64 {
+    match crate::user32::client::process_dpi_awareness() {
+        0 => -1i64 as u64,
+        1 => -2i64 as u64,
+        _ => -4i64 as u64,
+    }
+}
+
+extern "win64" fn SetThreadDpiAwarenessContext(ctx: u64) -> u64 {
+    if !valid_dpi_context(ctx) {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let old = THREAD_DPI.lock().unwrap().insert(os_sys::gettid(), ctx);
+    old.unwrap_or_else(process_dpi_context)
+}
+
 pub(crate) extern "win64" fn SendNotifyMessageW(wnd: u64, msg: u32, wparam: u64, lparam: i64) -> Bool {
     with(|g| g.post(wnd, msg, wparam, lparam));
     TRUE
@@ -8317,6 +8384,14 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RegisterDeviceNotificationW,
         UnregisterDeviceNotification,
         RegisterPowerSettingNotification,
+        RegisterSuspendResumeNotification,
+        UnregisterSuspendResumeNotification,
+        GetPointerDevices,
+        GetPointerDevice,
+        GetPointerPenInfo,
+        RegisterPointerDeviceNotifications,
+        IsValidDpiAwarenessContext,
+        SetThreadDpiAwarenessContext,
         UnregisterPowerSettingNotification,
         SendNotifyMessageW,
         SendMessageTimeoutW,

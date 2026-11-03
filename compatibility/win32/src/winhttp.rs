@@ -1269,6 +1269,20 @@ fn ie_settings() -> (bool, Option<String>, Option<String>, Option<String>) {
     r
 }
 
+/// WinHttpDetectAutoProxyConfigUrl: WPAD through DNS (WINHTTP_AUTO_DETECT_TYPE_DNS_A,
+/// 2): the host "wpad" serves wpad.dat. DHCP (1) carries no WPAD option here.
+extern "win64" fn WinHttpDetectAutoProxyConfigUrl(flags: u32, out: *mut u64) -> i32 {
+    if out.is_null() || flags & !3 != 0 || flags == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if flags & 2 == 0 || os_std::net::lookup_host("wpad").map_or(true, |a| a.is_empty()) {
+        return fail(ERROR_WINHTTP_AUTODETECTION_FAILED, 0);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = global_string("http://wpad/wpad.dat") };
+    1
+}
+
 extern "win64" fn WinHttpGetIEProxyConfigForCurrentUser(out: u64) -> i32 {
     if out == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -1591,6 +1605,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         WinHttpCloseHandle,
         WinHttpCrackUrl,
         WinHttpGetIEProxyConfigForCurrentUser,
+        WinHttpDetectAutoProxyConfigUrl,
         WinHttpGetProxyForUrl,
         WinHttpCreateProxyResolver,
         WinHttpGetProxyForUrlEx,

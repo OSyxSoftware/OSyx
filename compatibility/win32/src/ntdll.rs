@@ -565,6 +565,86 @@ extern "win64" fn NtQuerySystemTime(out: *mut u64) -> NtStatus {
     STATUS_SUCCESS
 }
 
+/// The loader lock of LdrLockLoaderLock: (owner thread, depth). It
+/// serialises callers that inspect the module list; winrun's own loading
+/// has its own lock and needs no exclusion from them.
+static LOADER_LOCK: os_std::sync::Mutex<(u64, u32)> = os_std::sync::Mutex::new((0, 0));
+static LOADER_COOKIE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// LdrLockLoaderLock: LDR_LOCK_LOADER_LOCK_FLAG_TRY_ONLY (2) does not
+/// wait; `state` is 1 when the lock was taken, 2 when it was busy.
+extern "win64" fn LdrLockLoaderLock(flags: u32, state: *mut u32, cookie: *mut u64) -> NtStatus {
+    if flags & !3 != 0 || (flags & 2 != 0 && state.is_null()) || cookie.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    let me = os_sys::gettid();
+    loop {
+        {
+            let mut l = LOADER_LOCK.lock().unwrap();
+            if l.1 == 0 || l.0 == me {
+                *l = (me, l.1 + 1);
+                break;
+            }
+        }
+        if flags & 2 != 0 {
+            // SAFETY: the caller's out pointers.
+            unsafe {
+                *state = 2;
+                *cookie = 0;
+            }
+            return STATUS_SUCCESS;
+        }
+        os_std::thread::sleep(core::time::Duration::from_millis(1));
+    }
+    // SAFETY: as above.
+    unsafe {
+        if !state.is_null() {
+            *state = 1;
+        }
+        *cookie = LOADER_COOKIE.fetch_add(1, Ordering::Relaxed);
+    }
+    STATUS_SUCCESS
+}
+
+extern "win64" fn LdrUnlockLoaderLock(flags: u32, cookie: u64) -> NtStatus {
+    if flags & !1 != 0 {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if cookie == 0 {
+        return STATUS_SUCCESS;
+    }
+    let mut l = LOADER_LOCK.lock().unwrap();
+    if l.0 != os_sys::gettid() || l.1 == 0 {
+        return STATUS_INVALID_PARAMETER;
+    }
+    l.1 -= 1;
+    STATUS_SUCCESS
+}
+
+/// The unload event trace: RTL_UNLOAD_EVENT_TRACE records of DLLs that
+/// were unloaded. Its size, count and (empty) array, as the variables
+/// Windows exposes: FreeLibrary keeps no history here.
+static UNLOAD_TRACE: [u64; 16] = [0; 16];
+static UNLOAD_TRACE_SIZE: u32 = 0x68; // sizeof(RTL_UNLOAD_EVENT_TRACE)
+static UNLOAD_TRACE_COUNT: u32 = 0;
+static UNLOAD_TRACE_PTR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+extern "win64" fn RtlGetUnloadEventTraceEx(size: *mut *const u32, count: *mut *const u32, trace: *mut *const u64) {
+    UNLOAD_TRACE_PTR.store(UNLOAD_TRACE.as_ptr() as u64, Ordering::Relaxed);
+    // SAFETY: the caller's out pointers.
+    unsafe {
+        if !size.is_null() {
+            *size = &UNLOAD_TRACE_SIZE;
+        }
+        if !count.is_null() {
+            *count = &UNLOAD_TRACE_COUNT;
+        }
+        if !trace.is_null() {
+            *trace = UNLOAD_TRACE_PTR.as_ptr() as *const u64;
+        }
+    }
+}
+
 /// TEB.LastStatusValue on x64.
 const LAST_STATUS: usize = 0x1250;
 
@@ -875,6 +955,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         NtQuerySystemTime,
         RtlNtStatusToDosError,
         RtlGetLastNtStatus,
+        LdrLockLoaderLock,
+        LdrUnlockLoaderLock,
+        RtlGetUnloadEventTraceEx,
         RtlGetLastWin32Error,
         RtlSetLastWin32Error,
         RtlGetCurrentPeb,

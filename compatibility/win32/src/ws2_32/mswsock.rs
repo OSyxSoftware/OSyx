@@ -26,7 +26,7 @@ fn complete(s: u64, r: Result<u32, u32>, done: *mut u32, overlapped: *mut u8) ->
                     *done = n;
                 }
                 if !overlapped.is_null() {
-                    super::overlapped::finish(s, overlapped as u64, n as usize, 0);
+                    super::overlapped::finish_now(s, overlapped as u64, n as usize);
                 }
                 1
             }

@@ -1423,6 +1423,11 @@ extern "win64" fn GetTempPathA(size: u32, buf: *mut u8) -> u32 {
     out_a("C:\\tmp\\", buf, size)
 }
 
+/// GetTempPath2W: for a process not running as SYSTEM, GetTempPathW's.
+extern "win64" fn GetTempPath2W(size: u32, buf: *mut u16) -> u32 {
+    GetTempPathW(size, buf)
+}
+
 extern "win64" fn GetTempPathW(size: u32, buf: *mut u16) -> u32 {
     out_w("C:\\tmp\\", buf, size)
 }
@@ -3408,6 +3413,24 @@ pub(crate) extern "win64" fn GetModuleFileNameW(h: u64, buf: *mut u16, size: u32
     }
 }
 
+/// SetFileCompletionNotificationModes: FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
+/// (1) and FILE_SKIP_SET_EVENT_ON_HANDLE (2). Sockets honour the first (an
+/// operation that completes in the call queues no packet); handles whose
+/// I/O completes synchronously have no packets to skip.
+extern "win64" fn SetFileCompletionNotificationModes(h: u64, flags: u8) -> Bool {
+    if flags & !3 != 0 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if crate::ws2_32::is_socket(h) {
+        crate::ws2_32::set_skip_on_success(h, flags & 1 != 0);
+        return TRUE;
+    }
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    TRUE
+}
+
 /// CompareObjectHandles: whether two handles name the same kernel object.
 extern "win64" fn CompareObjectHandles(first: u64, second: u64) -> Bool {
     let norm = |h: u64| match h {
@@ -3621,6 +3644,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         IsDebuggerPresent,
         CheckRemoteDebuggerPresent,
         CompareObjectHandles,
+        GetTempPath2W,
+        SetFileCompletionNotificationModes,
         FreeConsole,
         GetConsoleDisplayMode,
         ClearCommError,

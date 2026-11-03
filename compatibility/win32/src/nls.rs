@@ -308,6 +308,10 @@ extern "win64" fn LocaleNameToLCID(name: *const u16, _flags: u32) -> u32 {
     }
 }
 
+extern "win64" fn IsValidLocaleName(name: *const u16) -> i32 {
+    locale::locale(name).is_some() as i32
+}
+
 /// The supported locale closest to `name`: English names resolve to
 /// en-US; others have no match here and resolve to the empty name.
 extern "win64" fn ResolveLocaleName(name: *const u16, buf: *mut u16, size: i32) -> i32 {
@@ -861,6 +865,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetSystemDefaultLangID,
         GetThreadLocale,
         GetUserPreferredUILanguages,
+        IsValidLocaleName,
         GetThreadPreferredUILanguages,
         GetUserGeoID,
         GetGeoInfoW,

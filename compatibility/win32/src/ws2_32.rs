@@ -24,6 +24,11 @@ pub(crate) fn cancel_socket_io(s: u64, ov: u64) -> bool {
     overlapped::cancel(s, ov)
 }
 
+/// SetFileCompletionNotificationModes' FILE_SKIP_COMPLETION_PORT_ON_SUCCESS.
+pub(crate) fn set_skip_on_success(s: u64, on: bool) {
+    overlapped::set_skip(s, on);
+}
+
 /// Whether `s` is an open socket handle.
 pub(crate) fn is_socket(s: u64) -> bool {
     SOCKETS.lock().unwrap().contains_key(&s)
@@ -1297,7 +1302,7 @@ fn send_result(s: u64, r: Result<usize, u32>, sent: *mut u32, ov: *mut u8) -> i3
                 unsafe { *sent = n as u32 };
             }
             if !ov.is_null() {
-                overlapped::finish(s, ov as u64, n, 0);
+                overlapped::finish_now(s, ov as u64, n);
             }
             0
         }
