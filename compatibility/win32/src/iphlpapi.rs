@@ -883,6 +883,84 @@ extern "win64" fn CancelIPChangeNotify(ov: *mut u8) -> i32 {
     1
 }
 
+// ---- dhcpcsvc ------------------------------------------------------------------------------
+
+/// DhcpCApiInitialize: version 2 of the DHCP client API.
+extern "win64" fn DhcpCApiInitialize(version: *mut u32) -> u32 {
+    if !version.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *version = 2 };
+    }
+    0
+}
+
+extern "win64" fn DhcpCApiCleanup() {}
+
+/// The interface an adapter name names: its interface name, its GUID in
+/// braces, or the \DEVICE\TCPIP_ form.
+fn named_adapter(name: &str) -> Option<net::NetIface> {
+    let bare = name.rsplit('_').next().unwrap_or(name);
+    list().ok()?.into_iter().find(|i| {
+        net::field(&i.name).eq_ignore_ascii_case(name) || adapter_name(i.index).rsplit('_').next().is_some_and(|g| g.eq_ignore_ascii_case(bare))
+    })
+}
+
+/// DhcpRequestParams: the options the stack's DHCP client got for the
+/// adapter: subnet mask (1), routers (3), DNS servers (6) and the lease
+/// time (51). Others (such as the WPAD URL, 252) were not given: they come
+/// back with no data, as on Windows. DHCPCAPI_PARAMS (32 bytes): flags,
+/// option id, vendor flag, data pointer, data length.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn DhcpRequestParams(
+    _flags: u32, _reserved: u64, adapter: *const u16, _class: u64, _send: u64, recd: u64, buf: *mut u8, size: *mut u32, _request_id: *const u16,
+) -> u32 {
+    if adapter.is_null() || size.is_null() || recd == 0 {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's NUL-terminated adapter name.
+    let Some(name) = (unsafe { crate::path::wide_to_string(adapter) }) else { return ERROR_INVALID_PARAMETER };
+    let Some(i) = named_adapter(&name) else { return ERROR_FILE_NOT_FOUND };
+    // SAFETY: the caller's DHCPCAPI_PARAMS_ARRAY.
+    let (n, params): (u32, u64) = unsafe { (teb::get(recd, 0), teb::get(recd, 8)) };
+    let dhcp = i.method == net::CONFIG_DHCP;
+    let option = |id: u32| -> Vec<u8> {
+        match id {
+            1 if dhcp => mask(i.prefix).to_vec(),
+            3 if dhcp && i.gateway != [0; 4] => i.gateway.to_vec(),
+            6 if dhcp && i.dns != [0; 4] => i.dns.to_vec(),
+            51 if dhcp && i.lease_left != 0 => (i.lease_left.min(u32::MAX as u64) as u32).to_be_bytes().to_vec(),
+            _ => Vec::new(),
+        }
+    };
+    let values: Vec<Vec<u8>> = (0..n as u64).map(|k| option(unsafe { teb::get::<u32>(params + 32 * k, 4) })).collect();
+    let need: usize = values.iter().map(Vec::len).sum();
+    // SAFETY: the caller's in/out size, buffer and parameter array.
+    unsafe {
+        if buf.is_null() || (*size as usize) < need {
+            *size = need as u32;
+            return 234; // ERROR_MORE_DATA
+        }
+        let mut at = 0usize;
+        for (k, v) in values.iter().enumerate() {
+            let p = params + 32 * k as u64;
+            if v.is_empty() {
+                teb::put(p, 16, 0u64);
+            } else {
+                core::ptr::copy_nonoverlapping(v.as_ptr(), buf.add(at), v.len());
+                teb::put(p, 16, buf as u64 + at as u64);
+            }
+            teb::put(p, 24, v.len() as u32);
+            at += v.len();
+        }
+        *size = need as u32;
+    }
+    0
+}
+
+pub fn dhcp_exports() -> Vec<(&'static str, u64)> {
+    export_table![DhcpCApiInitialize, DhcpCApiCleanup, DhcpRequestParams]
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         GetBestInterface,

@@ -72,6 +72,7 @@ mod userenv;
 mod volumes;
 mod winmm;
 mod winsta;
+mod winhttp;
 mod version;
 mod synch;
 mod process;

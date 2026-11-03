@@ -29,6 +29,8 @@ rustls-webpki = { version = "0.103", default-features = false, features = ["allo
 rustls-pki-types = { version = "1", default-features = false, features = ["alloc"] }
 webpki-roots = "1"
 rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc"] }
+# winhttp: TLS client connections (the rustls osyx-web and the provider above use).
+rustls = { version = "0.23", default-features = false, features = ["tls12"] }
 # rustls-rustcrypto's key generation needs a source; winrun's is /dev/random.
 getrandom = { version = "0.2", features = ["custom"] }
 # ncrypt: RSA and NIST-curve keys (generation, signing, PKCS#8), the same

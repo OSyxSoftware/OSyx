@@ -283,6 +283,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("dwrite.dll", crate::dwrite::exports(), Vec::new()),
         builtin("dnsapi.dll", crate::dwmapi::dnsapi_exports(), Vec::new()),
         builtin("wininet.dll", crate::minordlls::wininet_exports(), Vec::new()),
+        builtin("winhttp.dll", crate::winhttp::exports(), Vec::new()),
+        builtin("dhcpcsvc.dll", crate::iphlpapi::dhcp_exports(), Vec::new()),
         builtin("wintrust.dll", crate::minordlls::wintrust_exports(), Vec::new()),
         builtin("dxgi.dll", crate::dwmapi::dxgi_exports(), Vec::new()),
         builtin("d3dcompiler_47.dll", crate::dwmapi::d3dcompiler_exports(), Vec::new()),
