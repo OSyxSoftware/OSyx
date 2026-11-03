@@ -512,7 +512,11 @@ extern "win64" fn SetDIBitsToDevice(
         return 0;
     }
     copy[8..12].copy_from_slice(&(if height < 0 { -rows } else { rows }).to_le_bytes());
-    let copied = StretchDIBits(dc, x, y, w as i32, h as i32, sx, sy - start as i32, w as i32, h as i32, bits, copy.as_ptr(), usage, 0xcc0020);
+    // StretchDIBits takes the source row from the top of the band. A
+    // bottom-up DIB gives ySrc as the rectangle's lower-left corner, in
+    // scan lines from the bottom of the whole DIB.
+    let top = if height < 0 { sy - start as i32 } else { start as i32 + rows - sy - h as i32 };
+    let copied = StretchDIBits(dc, x, y, w as i32, h as i32, sx, top, w as i32, h as i32, bits, copy.as_ptr(), usage, 0xcc0020);
     if copied == 0 { 0 } else { rows }
 }
 

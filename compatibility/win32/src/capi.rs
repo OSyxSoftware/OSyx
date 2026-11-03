@@ -389,9 +389,15 @@ extern "win64" fn CryptGenRandom(prov: u64, len: u32, buf: *mut u8) -> i32 {
     if buf.is_null() {
         return fail(crate::error::ERROR_INVALID_PARAMETER, 0);
     }
+    // The caller's buffer may be uninitialised: fill a buffer of ours and
+    // copy it out.
+    let mut bytes = alloc::vec![0u8; len as usize];
+    if !crate::ucrt::entropy(&mut bytes) {
+        return fail(0x8009_0020, 0); // NTE_FAIL
+    }
     // SAFETY: the caller's buffer of `len` bytes.
-    let out = unsafe { core::slice::from_raw_parts_mut(buf, len as usize) };
-    if crate::ucrt::entropy(out) { 1 } else { fail(0x8009_0020, 0) } // NTE_FAIL
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len()) };
+    1
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {

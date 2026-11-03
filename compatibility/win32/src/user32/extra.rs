@@ -95,7 +95,11 @@ extern "win64" fn DrawIconEx(dc: u64, x: i32, y: i32, icon: u64, w: i32, h: i32,
         (w, h, _) => (if w > 0 { w as u32 } else { iw }, if h > 0 { h as u32 } else { ih }),
     };
     if brush != 0 {
-        fill(dc, Rect::new(x, y, dw, dh), brush);
+        // fill() works in device pixels: the icon's origin through the DC's
+        // transform, as the drawing below uses it.
+        let origin = with(|g| g.dcs.get(&dc).map(|d| d.transform.point(x, y)));
+        let (ox, oy) = origin.unwrap_or((x, y));
+        fill(dc, Rect::new(ox, oy, dw, dh), brush);
     }
     let alpha = color.as_ref().is_some_and(|(_, _, px)| px.iter().any(|p| p >> 24 != 0));
     let want_mask = flags & DI_MASK != 0;

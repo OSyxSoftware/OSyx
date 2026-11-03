@@ -258,13 +258,17 @@ fn load_handlers() -> Vec<Handler> {
 }
 
 fn main() -> i32 {
+    // Relative arguments are the caller's: resolve them before
+    // become_user() changes the working directory.
+    let caller_dir = env::current_dir().map(|d| d.display().to_string()).unwrap_or_else(|_| String::from("/"));
     become_user();
     // `files --open-with FILE` opens FILE's folder with its open-with
     // choices (Windows programs ask for that through SHOpenWithDialog).
     let args: Vec<String> = env::args().collect();
     let (start, open_with) = match args.get(1).map(String::as_str) {
         Some("--open-with") if args.len() > 2 => {
-            let file = args[2].trim_end_matches('/');
+            let full = if args[2].starts_with('/') { args[2].clone() } else { join(&caller_dir, &args[2]) };
+            let file = full.trim_end_matches('/');
             let name = file.rsplit('/').next().unwrap_or(file);
             (parent(file), Some(String::from(name)))
         }
@@ -297,7 +301,8 @@ fn main() -> i32 {
         tools: TOOLS.iter().map(|(t, i, _)| (*t, Button::new(0, "", ButtonStyle::Flat).with_icon(*i))).collect(),
         places,
         place_hover: None,
-        hidden: Checkbox::new("Show hidden files", false),
+        // A hidden file asked for with --open-with must be listed.
+        hidden: Checkbox::new("Show hidden files", open_with.as_deref().is_some_and(|n| n.starts_with('.'))),
         status: String::new(),
         status_error: false,
         dialog: None,

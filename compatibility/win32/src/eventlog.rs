@@ -31,8 +31,10 @@ struct Record {
 }
 
 /// The Application log of this process, oldest first; record numbers
-/// start at 1.
+/// start at 1. Like a Windows log of fixed size that does not overwrite,
+/// it stops keeping records when full (they still reach the error stream).
 static LOG: Mutex<Vec<Record>> = Mutex::new(Vec::new());
+const LOG_LIMIT: usize = 4096;
 
 /// Open logs: (is the Application log, next record to read forwards, or
 /// backwards when reading back).
@@ -82,7 +84,10 @@ pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: 
     // The low 16 bits are the event code; the high bits severity and facility.
     os_std::eprintln!("[event] {source} {kind} {}: {}", id & 0xffff, text.join(" | "));
     let time = (os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0) / 1_000_000_000) as u32;
-    LOG.lock().unwrap().push(Record { source, kind: code, id, category, strings: text, time });
+    let mut log = LOG.lock().unwrap();
+    if log.len() < LOG_LIMIT {
+        log.push(Record { source, kind: code, id, category, strings: text, time });
+    }
     1
 }
 

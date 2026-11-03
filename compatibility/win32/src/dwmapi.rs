@@ -263,6 +263,10 @@ extern "win64" fn ImmGetContext(hwnd: u64) -> u64 {
     if !crate::user32::is_window(hwnd) {
         return fail(1400, 0); // ERROR_INVALID_WINDOW_HANDLE
     }
+    // A context ImmAssociateContext gave the window (NULL: none).
+    if let Some(&h) = ASSOCIATED.lock().unwrap().get(&hwnd) {
+        return h;
+    }
     let himc = 0x4000_0000 | hwnd;
     CONTEXTS.lock().unwrap().entry(himc).or_insert(InputContext { wnd: hwnd, open: false, composition_window: [0; 28], font: [0; 92], candidates: [[0; 32]; 4], conversion: 0, sentence: 0 });
     himc

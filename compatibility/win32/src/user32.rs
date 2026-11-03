@@ -6277,8 +6277,22 @@ extern "win64" fn GetClassWord(wnd: u64, index: i32) -> u16 {
     })
 }
 
+/// FindWindowW: the class by name or by the atom RegisterClass returned
+/// (0xC000 + its position).
 extern "win64" fn FindWindowW(class: *const u16, title: *const u16) -> u64 {
-    let (c, t) = (wide(class), wide(title));
+    if !title.is_null() && (title as u64) < 0x10000 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let c = if !class.is_null() && (class as u64) < 0x10000 {
+        let atom = class as usize;
+        match with(|g| atom.checked_sub(0xC001).and_then(|i| g.classes.get(i)).map(|k| k.name.clone())) {
+            Some(name) => Some(name),
+            None => return fail(1407, 0), // ERROR_CANNOT_FIND_WND_CLASS
+        }
+    } else {
+        wide(class)
+    };
+    let t = wide(title);
     with(|g| {
         g.windows
             .iter()
