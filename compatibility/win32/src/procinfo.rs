@@ -284,7 +284,7 @@ extern "win64" fn SetPriorityClass(h: u64, class: u32) -> i32 {
     const CLASSES: [u32; 6] = [0x20, 0x40, 0x80, 0x100, 0x4000, 0x8000];
     match class {
         c if CLASSES.contains(&c) => {
-            if h == objects::CURRENT_PROCESS {
+            if crate::process::handle_pid(h) == Some(kernel32::pid()) {
                 PRIORITY_CLASS.store(c, Ordering::Relaxed);
             }
             1
@@ -300,7 +300,7 @@ extern "win64" fn GetPriorityClass(h: u64) -> u32 {
         return fail(ERROR_INVALID_HANDLE, 0);
     }
     // Another process's class lives in its own winrun.
-    if h == objects::CURRENT_PROCESS { PRIORITY_CLASS.load(Ordering::Relaxed) } else { 0x20 }
+    if crate::process::handle_pid(h) == Some(kernel32::pid()) { PRIORITY_CLASS.load(Ordering::Relaxed) } else { 0x20 }
 }
 
 /// SetProcessInformation settings OSyx's memory manager and scheduler have
@@ -316,7 +316,7 @@ const PROCESS_POWER_THROTTLING: u32 = 4;
 const PROCESS_LEAP_SECOND_INFO: u32 = 8;
 
 extern "win64" fn SetProcessInformation(h: u64, class: u32, info: *const u8, size: u32) -> i32 {
-    if h != objects::CURRENT_PROCESS {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
         return fail(if is_process(h) { ERROR_ACCESS_DENIED } else { ERROR_INVALID_HANDLE }, 0);
     }
     if info.is_null() {
@@ -356,7 +356,7 @@ extern "win64" fn SetProcessInformation(h: u64, class: u32, info: *const u8, siz
 }
 
 extern "win64" fn GetProcessInformation(h: u64, class: u32, info: *mut u8, size: u32) -> i32 {
-    if h != objects::CURRENT_PROCESS {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
         return fail(if is_process(h) { ERROR_ACCESS_DENIED } else { ERROR_INVALID_HANDLE }, 0);
     }
     if info.is_null() {
@@ -560,7 +560,7 @@ extern "win64" fn UnregisterApplicationRestart() -> i32 {
 }
 
 extern "win64" fn GetApplicationRestartSettings(process: u64, buf: *mut u16, size: *mut u32, flags: *mut u32) -> i32 {
-    if process != objects::CURRENT_PROCESS || size.is_null() {
+    if crate::process::handle_pid(process) != Some(kernel32::pid()) || size.is_null() {
         return E_INVALIDARG;
     }
     let Some((line, f)) = RESTART.lock().unwrap().clone() else { return 0x8007_0490u32 as i32 }; // ERROR_NOT_FOUND
@@ -604,7 +604,7 @@ fn own_frames() -> Option<u64> {
 /// (OSyx neither pages out nor shares anonymous memory); page faults and
 /// pool usage are not counted.
 pub(crate) extern "win64" fn K32GetProcessMemoryInfo(h: u64, out: *mut u8, cb: u32) -> i32 {
-    if h != objects::CURRENT_PROCESS {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
         return fail(ERROR_ACCESS_DENIED, 0);
     }
     if out.is_null() || cb < 72 {
@@ -731,7 +731,7 @@ extern "win64" fn K32QueryWorkingSetEx(h: u64, buf: *mut u8, len: u32) -> i32 {
 /// of a file. Private memory maps no file.
 extern "win64" fn K32GetMappedFileNameW(h: u64, addr: u64, buf: *mut u16, size: u32) -> u32 {
     const ERROR_FILE_INVALID: u32 = 1006;
-    if h != objects::CURRENT_PROCESS {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
         return fail(if is_process(h) { ERROR_ACCESS_DENIED } else { ERROR_INVALID_HANDLE }, 0);
     }
     let win = if let Some((base, _)) = crate::loader::image_containing(addr) {
@@ -847,7 +847,7 @@ extern "win64" fn NtQueryInformationThread(h: u64, class: u32, buf: *mut u8, len
 
 /// The image path in NT device form (\Device\HarddiskVolume1\...).
 extern "win64" fn K32GetProcessImageFileNameW(h: u64, buf: *mut u16, size: u32) -> u32 {
-    if h != objects::CURRENT_PROCESS {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
         return fail(ERROR_ACCESS_DENIED, 0);
     }
     let Some(name) = kernel32::module_name(0) else { return fail(ERROR_GEN_FAILURE, 0) };
@@ -882,7 +882,7 @@ extern "win64" fn QueryFullProcessImageNameA(h: u64, flags: u32, buf: *mut u8, s
 }
 
 extern "win64" fn VirtualQueryEx(h: u64, addr: u64, out: *mut u8, len: usize) -> usize {
-    if h != objects::CURRENT_PROCESS {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
         return fail(ERROR_ACCESS_DENIED, 0);
     }
     kernel32::VirtualQuery(addr, out, len)

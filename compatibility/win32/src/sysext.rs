@@ -120,21 +120,24 @@ extern "win64" fn QueryUnbiasedInterruptTimePrecise(out: *mut u64) {
 /// Creation time is when winrun started the process. CPU time comes from
 /// the kernel's per-process scheduler samples (1 kHz); OSyx does not
 /// separate kernel from user time, so it is all reported as user time.
+/// GetProcessTimes of this or another process: the CPU time from the
+/// kernel's process record (all of it user time: the scheduler samples
+/// without telling the modes apart). Only this process's start is known;
+/// another's creation time is reported as 0.
 extern "win64" fn GetProcessTimes(process: u64, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32 {
-    if process != objects::CURRENT_PROCESS {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
+    let Some(pid) = crate::process::handle_pid(process) else { return fail(ERROR_INVALID_HANDLE, 0) };
     if creation.is_null() || exit.is_null() || kernel.is_null() || user.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let info = match os_sys::proc_info(kernel32::pid()) {
+    let own = pid == kernel32::pid();
+    let info = match os_sys::proc_info(pid) {
         Ok(info) => info,
         Err(osyx_abi::Errno::NotFound) => return fail(ERROR_GEN_FAILURE, 0),
         Err(e) => return fail(errno_to_win32(e), 0),
     };
     // SAFETY: the caller's FILETIMEs.
     unsafe {
-        core::ptr::write_unaligned(creation, kernel32::filetime(START_NS.load(Ordering::Relaxed) as i64));
+        core::ptr::write_unaligned(creation, if own { kernel32::filetime(START_NS.load(Ordering::Relaxed) as i64) } else { 0 });
         core::ptr::write_unaligned(exit, 0);
         core::ptr::write_unaligned(kernel, 0);
         core::ptr::write_unaligned(user, info.cpu_ticks * 10_000);
@@ -846,7 +849,7 @@ extern "win64" fn IsWow64Process2(process: u64, process_machine: *mut u16, nativ
 }
 
 extern "win64" fn GetProcessHandleCount(process: u64, out: *mut u32) -> i32 {
-    if process != objects::CURRENT_PROCESS || out.is_null() {
+    if crate::process::handle_pid(process) != Some(kernel32::pid()) || out.is_null() {
         return fail(if out.is_null() { ERROR_INVALID_PARAMETER } else { ERROR_ACCESS_DENIED }, 0);
     }
     // SAFETY: the caller's out pointer.

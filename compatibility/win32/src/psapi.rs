@@ -1,10 +1,10 @@
 //! Module enumeration of the current Windows process, using real loader
 //! handles. Remote process memory/querying is not supported.
 #![allow(non_snake_case)]
-use crate::{error::*, kernel32::fail, loader, objects::CURRENT_PROCESS};
+use crate::{error::*, kernel32::fail, loader};
 use alloc::vec::Vec;
 extern "win64" fn K32EnumProcessModules(process: u64, modules: *mut u64, bytes: u32, needed: *mut u32) -> i32 {
-    if process != CURRENT_PROCESS {
+    if crate::process::handle_pid(process) != Some(crate::kernel32::pid()) {
         return fail(ERROR_INVALID_HANDLE, 0);
     }
     if needed.is_null() || (modules.is_null() && bytes != 0) {
