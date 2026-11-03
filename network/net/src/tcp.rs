@@ -69,6 +69,12 @@ pub const MAX_RETRIES: u32 = 8;
 /// SYN retransmissions before `connect` fails.
 pub const MAX_SYN_RETRIES: u32 = 5;
 pub const TIME_WAIT_MS: u64 = 20_000;
+/// How long a connection the application has closed waits in FIN-WAIT-2
+/// for the peer's FIN (Linux `tcp_fin_timeout`). Without a limit a peer
+/// that never closes keeps the connection, and its socket slot, forever.
+pub const ORPHAN_FIN_WAIT_MS: u64 = 60_000;
+/// Zero-window probes a closed connection sends before it gives up.
+pub const MAX_ORPHAN_PROBES: u32 = 8;
 /// Out-of-order segments kept at most.
 pub const MAX_OOO_SEGMENTS: usize = 64;
 
@@ -436,6 +442,11 @@ pub struct Tcb {
     /// Fast recovery until this sequence number is acknowledged.
     recover: Option<u32>,
     time_wait_until: Option<u64>,
+    /// The application released the connection (see `orphan`).
+    orphan: bool,
+    orphan_fin_wait_until: Option<u64>,
+    /// Zero-window probes since the window was last open.
+    persist_probes: u32,
     ack_pending: bool,
     /// Data segments received since the last ACK went out.
     unacked_segments: u32,
@@ -488,6 +499,9 @@ impl Tcb {
             dup_acks: 0,
             recover: None,
             time_wait_until: None,
+            orphan: false,
+            orphan_fin_wait_until: None,
+            persist_probes: 0,
             ack_pending: false,
             unacked_segments: 0,
             ack_now: false,
@@ -742,6 +756,26 @@ impl Tcb {
 
     /// Drops the connection with a reset (returned for sending, if the
     /// peer knows the connection).
+    /// The application closed its socket: nobody will read or wait for
+    /// this connection any more, so it may not linger without bound
+    /// ([`ORPHAN_FIN_WAIT_MS`], [`MAX_ORPHAN_PROBES`]).
+    pub fn orphan(&mut self) {
+        self.orphan = true;
+    }
+
+    pub fn is_orphan(&self) -> bool {
+        self.orphan
+    }
+
+    /// The connection cannot continue (its local address went away): it
+    /// fails with a reset, so the application sees an error instead of
+    /// waiting on it for minutes.
+    pub fn lost(&mut self) {
+        if self.state != State::Closed {
+            self.fail(TcpError::Reset);
+        }
+    }
+
     pub fn abort(&mut self) -> Option<OutSegment> {
         let rst = self.state.synchronized().then(|| OutSegment {
             seq: self.snd_nxt,
@@ -947,6 +981,9 @@ impl Tcb {
             self.max_snd_wnd = self.max_snd_wnd.max(self.snd_wnd);
             self.snd_wl1 = seg.seq;
             self.snd_wl2 = seg.ack;
+            if self.snd_wnd > 0 {
+                self.persist_probes = 0;
+            }
             if old == 0 && self.snd_wnd > 0 {
                 self.persist_at = None;
             }
@@ -1165,6 +1202,20 @@ impl Tcb {
 
     /// Runs the timers. Returns true if output may be needed.
     pub fn poll(&mut self, now: u64) -> bool {
+        if self.orphan && self.state == State::FinWait2 {
+            match self.orphan_fin_wait_until {
+                None => self.orphan_fin_wait_until = Some(now + ORPHAN_FIN_WAIT_MS),
+                Some(t) if now >= t => {
+                    self.set_state(State::Closed);
+                    return false;
+                }
+                Some(_) => {}
+            }
+        }
+        if self.orphan && self.persist_probes > MAX_ORPHAN_PROBES {
+            self.fail(TcpError::TimedOut);
+            return true;
+        }
         if let Some(t) = self.time_wait_until {
             if self.state == State::TimeWait && now >= t {
                 self.set_state(State::Closed);
@@ -1216,7 +1267,8 @@ impl Tcb {
 
     /// Earliest time `poll` has work to do.
     pub fn next_deadline(&self) -> Option<u64> {
-        [self.retransmit_at, self.persist_at, self.time_wait_until].into_iter().flatten().min()
+        let orphan_wait = self.orphan_fin_wait_until.filter(|_| self.state == State::FinWait2);
+        [self.retransmit_at, self.persist_at, self.time_wait_until, orphan_wait].into_iter().flatten().min()
     }
 
     // ----- output ------------------------------------------------------------
@@ -1344,6 +1396,7 @@ impl Tcb {
                             emit(seg, a, b);
                             self.after_send(seq, 1, now);
                             self.persist_at = Some(now + (self.rto * 2).min(MAX_RTO_MS));
+                            self.persist_probes += 1;
                         }
                         Some(_) => {}
                     }

@@ -1047,3 +1047,53 @@ fn receiving_in_place_keeps_what_the_caller_could_not_take() {
     assert_eq!((k, len, &d[..]), (3, 12, &b"one"[..]));
     assert_eq!(n.b.udp_recv_with(ub, 64, |_| true), Err(NetError::WouldBlock));
 }
+
+#[test]
+fn a_closed_connection_whose_peer_never_closes_is_freed() {
+    let mut n = Net::new();
+    let (c, _s) = connect(&mut n, 6400);
+    // A closes; B keeps its end open and never sends a FIN.
+    n.a.close(c, false);
+    assert!(n.run_until(5_000, |n| n.a.sockets().iter().any(|s| s.id == c && s.state == "FIN-WAIT-2")));
+    assert!(
+        n.run_until(osyx_net::tcp::ORPHAN_FIN_WAIT_MS + 5_000, |n| n.a.sockets().iter().all(|s| s.id != c)),
+        "the orphan left FIN-WAIT-2: {:?}",
+        n.a.sockets().iter().map(|s| s.state).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_full_socket_table_gives_closed_connections_slots_to_new_sockets() {
+    use osyx_net::stack::MAX_SOCKETS;
+    let mut n = Net::new();
+    let l = n.b.tcp_listen(Endpoint::new(Ipv4Addr::UNSPECIFIED, 6500), 32).unwrap();
+    // A few connections A closed but B never closes (FIN-WAIT-2 on A).
+    for _ in 0..8 {
+        let c = n.a.tcp_connect(None, Endpoint::new(B_IP, 6500)).unwrap();
+        n.run(5);
+        while n.b.tcp_accept(l).is_ok() {}
+        n.a.close(c, false);
+    }
+    n.run(50);
+    // Programs hold every other slot.
+    while n.a.socket_count() < MAX_SOCKETS {
+        n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    }
+    // New sockets still work: the closed connections give up their slots.
+    for _ in 0..8 {
+        let u = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0));
+        assert!(u.is_ok(), "{u:?}");
+    }
+    assert_eq!(n.a.stats.sockets_reclaimed, 8);
+    // Sockets programs hold are never taken.
+    assert_eq!(n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)), Err(NetError::NoBuffers));
+}
+
+#[test]
+fn a_new_address_fails_the_connections_of_the_old_one() {
+    let mut n = Net::new();
+    let (c, _s) = connect(&mut n, 6600);
+    n.a.configure_static(1, Ipv4Addr::new(10, 0, 0, 9), 24, None).unwrap();
+    let mut buf = [0u8; 8];
+    assert_eq!(n.a.tcp_recv(c, &mut buf), Err(NetError::ConnReset));
+}

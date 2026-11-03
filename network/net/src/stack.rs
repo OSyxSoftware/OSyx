@@ -100,7 +100,11 @@ fn tcp_error(e: TcpError) -> NetError {
 }
 
 /// Limits.
-pub const MAX_SOCKETS: usize = 256;
+/// Sockets at most. When the table is full, connections the applications
+/// already closed (TIME-WAIT first) give up their slots to new sockets
+/// ([`Stack::reclaim_slot`]), so lingering connections cannot lock every
+/// program out of the network.
+pub const MAX_SOCKETS: usize = 1024;
 pub const UDP_QUEUE_DATAGRAMS: usize = 256;
 pub const UDP_QUEUE_BYTES: usize = 512 * 1024;
 pub const ICMP_QUEUE: usize = 32;
@@ -253,6 +257,8 @@ pub struct Stats {
     pub frames_bad: u64,
     pub dns_queries: u64,
     pub dns_rejected: u64,
+    /// Slots of closed connections given to new sockets (table full).
+    pub sockets_reclaimed: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -489,6 +495,19 @@ impl Stack {
 
     fn set_address(&mut self, iface: usize, addr: Option<(Ipv4Addr, u8)>, gateway: Option<Ipv4Addr>, origin: RouteOrigin) {
         self.routes.retain(|r| r.iface != iface);
+        let old = self.ifaces[iface].addr.map(|a| a.0);
+        if old.is_some() && old != addr.map(|a| a.0) {
+            // Connections on an address the interface no longer has are
+            // dead: fail them now rather than after minutes of retries.
+            let old = old.unwrap_or_default();
+            for s in self.sockets.values_mut() {
+                if let Socket::Tcp(t) = s {
+                    if t.tcb.local.addr == old {
+                        t.tcb.lost();
+                    }
+                }
+            }
+        }
         let i = &mut self.ifaces[iface];
         i.addr = addr;
         i.arp.flush();
@@ -535,6 +554,9 @@ impl Stack {
             return Err(NetError::InvalidArgument);
         }
         let seed = self.rand() as u32;
+        // A new lease may come from another network: forget old answers.
+        self.dns_cache.flush();
+        self.reasm = Reassembler::new();
         let i = &mut self.ifaces[iface];
         i.dhcp = Some(dhcp::Client::new(i.mac, seed, &self.hostname));
         i.method = ConfigMethod::Dhcp;
@@ -1083,7 +1105,7 @@ impl Stack {
         });
         if let (Some((lid, backlog)), true) = (listener, seg.has(tcp::SYN) && !seg.has(tcp::ACK) && !seg.has(tcp::RST)) {
             let queued = self.sockets.values().filter(|s| matches!(s, Socket::Tcp(t) if t.parent == Some(lid))).count();
-            if queued >= backlog || self.sockets.len() >= MAX_SOCKETS {
+            if queued >= backlog || (self.sockets.len() >= MAX_SOCKETS && !self.reclaim_slot()) {
                 return; // the peer retransmits its SYN later
             }
             let iss = self.isn(local, remote);
@@ -1390,7 +1412,7 @@ impl Stack {
     }
 
     fn insert(&mut self, s: Socket) -> Result<SocketId, NetError> {
-        if self.sockets.len() >= MAX_SOCKETS {
+        if self.sockets.len() >= MAX_SOCKETS && !self.reclaim_slot() {
             return Err(NetError::NoBuffers);
         }
         let id = self.alloc_id();
@@ -1817,6 +1839,7 @@ impl Stack {
                     }
                 }
                 t.released = true;
+                t.tcb.orphan();
             }
             Some(Socket::Listener(l)) => {
                 children.extend(l.ready.iter().copied());
@@ -1836,6 +1859,7 @@ impl Stack {
                 if let Some(Socket::Tcp(t)) = self.sockets.get_mut(&c) {
                     rst = t.tcb.abort().map(|s| (t.tcb.local, t.tcb.remote, s));
                     t.released = true;
+                    t.tcb.orphan();
                 }
                 if let Some((l, r, s)) = rst {
                     let bytes = s.encode(l, r);
@@ -1849,6 +1873,35 @@ impl Stack {
             let _ = self.send_ip(l.addr, r.addr, PROTO_TCP, &bytes, false);
         }
         self.flush();
+    }
+
+    /// Frees one socket slot when the table is full: the oldest connection
+    /// in TIME-WAIT that the application already closed (its only purpose
+    /// is to absorb stray segments), else the oldest other closed one
+    /// still finishing (reset, as Linux does with orphans over its limit).
+    /// False if every slot belongs to a socket an application still holds.
+    fn reclaim_slot(&mut self) -> bool {
+        let orphan = |s: &Socket, time_wait: bool| {
+            matches!(s, Socket::Tcp(t) if t.released && (t.tcb.state() == tcp::State::TimeWait) == time_wait)
+        };
+        let victim = self
+            .sockets
+            .iter()
+            .find(|(_, s)| orphan(s, true))
+            .or_else(|| self.sockets.iter().find(|(_, s)| orphan(s, false)))
+            .map(|(id, _)| *id);
+        let Some(id) = victim else { return false };
+        if let Some(Socket::Tcp(mut t)) = self.sockets.remove(&id) {
+            if t.tcb.state() != tcp::State::TimeWait {
+                if let Some(rst) = t.tcb.abort() {
+                    self.stats.tcp_resets_sent += 1;
+                    let bytes = rst.encode(t.tcb.local, t.tcb.remote);
+                    let _ = self.send_ip(t.tcb.local.addr, t.tcb.remote.addr, PROTO_TCP, &bytes, false);
+                }
+            }
+        }
+        self.stats.sockets_reclaimed += 1;
+        true
     }
 
     pub fn socket_count(&self) -> usize {
