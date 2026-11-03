@@ -103,8 +103,8 @@ const NO_EXECUTE_UP: u32 = 0x4;
 /// GENERIC_MAPPING: read, write, execute, all.
 pub type Mapping = [u32; 4];
 const FILE: Mapping = [0x0012_0089, 0x0012_0116, 0x0012_00a0, 0x001f_01ff];
-const EVENT: Mapping = [0x0002_0001, 0x0002_0002, 0x0010_0000, 0x001f_0003];
-const MUTEX: Mapping = [0x0002_0001, 0x0002_0000, 0x0010_0000, 0x001f_0001];
+pub const EVENT: Mapping = [0x0002_0001, 0x0002_0002, 0x0010_0000, 0x001f_0003];
+pub const MUTEX: Mapping = [0x0002_0001, 0x0002_0000, 0x0010_0000, 0x001f_0001];
 pub const SECTION: Mapping = [0x0002_0005, 0x0002_0002, 0x0002_0008, 0x000f_001f];
 const PROCESS: Mapping = [0x0002_0410, 0x0002_0bea, 0x0012_1000, 0x001f_ffff];
 const THREAD: Mapping = [0x0002_0048, 0x0002_0037, 0x0012_1400, 0x001f_ffff];
@@ -477,9 +477,16 @@ pub fn initial_sd(sa: u64, mapping: &Mapping) -> Result<Option<Sd>, u32> {
     if sa == 0 {
         return Ok(None);
     }
-    // SAFETY: the caller's SECURITY_ATTRIBUTES (24 bytes).
-    let (len, sd, inherit) = unsafe { (*(sa as *const u32), *((sa + 8) as *const u64), *((sa + 16) as *const i32)) };
-    if len != 24 {
+    // SAFETY: the caller's SECURITY_ATTRIBUTES (12 bytes for a 32-bit
+    // caller, 24 for a 64-bit one).
+    let (len, sd, inherit, want) = unsafe {
+        if crate::wow64::is_active() {
+            (*(sa as *const u32), *((sa + 4) as *const u32) as u64, *((sa + 8) as *const i32), 12)
+        } else {
+            (*(sa as *const u32), *((sa + 8) as *const u64), *((sa + 16) as *const i32), 24)
+        }
+    };
+    if len != want {
         return Err(ERROR_INVALID_PARAMETER);
     }
     let _ = inherit; // callers decide whether their handles can be inherited

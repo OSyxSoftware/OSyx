@@ -4,11 +4,10 @@
 //! AcceptEx accepts a connection on the listening socket into the
 //! caller's unconnected socket, optionally receives the first block of
 //! data, and stores both addresses after it; ConnectEx connects and sends
-//! a first block; DisconnectEx shuts the connection down. Socket I/O
-//! completes synchronously in winrun, so they return TRUE when done; with
-//! an OVERLAPPED they also fill Internal/InternalHigh and signal hEvent,
-//! so a caller that goes on to GetOverlappedResult or waits on the event
-//! sees the completed operation.
+//! a first block; DisconnectEx shuts the connection down. They complete
+//! in the call, so they return TRUE when done; with an OVERLAPPED they
+//! also fill Internal/InternalHigh, signal hEvent and queue a packet to
+//! the socket's completion port (overlapped.rs).
 use super::*;
 
 /// sizeof(sockaddr_in) + 16: the address room AcceptEx asks for.
@@ -16,7 +15,9 @@ const MIN_ADDR_ROOM: u32 = 32;
 
 /// Reports a finished operation: the out count and the OVERLAPPED
 /// {Internal, InternalHigh, Offset, OffsetHigh, hEvent}.
-fn complete(r: Result<u32, u32>, done: *mut u32, overlapped: *mut u8) -> i32 {
+/// A completed operation also queues a packet to the completion port
+/// socket `s` is associated with.
+fn complete(s: u64, r: Result<u32, u32>, done: *mut u32, overlapped: *mut u8) -> i32 {
     // SAFETY: the caller's out count and OVERLAPPED.
     unsafe {
         match r {
@@ -25,13 +26,7 @@ fn complete(r: Result<u32, u32>, done: *mut u32, overlapped: *mut u8) -> i32 {
                     *done = n;
                 }
                 if !overlapped.is_null() {
-                    let ov = overlapped as u64;
-                    crate::kernel32::overlapped::set_status(ov, 0);
-                    crate::kernel32::overlapped::set_bytes(ov, n as u64);
-                    let event = crate::kernel32::overlapped::event(ov) & !1;
-                    if event != 0 {
-                        crate::kernel32::SetEvent(event);
-                    }
+                    super::overlapped::finish(s, overlapped as u64, n as usize, 0);
                 }
                 1
             }
@@ -113,7 +108,7 @@ pub(crate) extern "win64" fn AcceptEx(
         }
         Ok(n as u32)
     })();
-    complete(r, received, overlapped)
+    complete(listen_s, r, received, overlapped)
 }
 
 /// The addresses AcceptEx stored after the received data.
@@ -193,7 +188,7 @@ pub(crate) extern "win64" fn ConnectEx(
             os_sys::sock_send(fd, data, None, 0).map(|n| n as u32).map_err(wsa)
         })
     })();
-    complete(r, sent, overlapped)
+    complete(s, r, sent, overlapped)
 }
 
 /// DisconnectEx: ends the connection (both directions); TF_REUSE_SOCKET
@@ -208,7 +203,7 @@ pub(crate) extern "win64" fn DisconnectEx(s: u64, overlapped: *mut u8, _flags: u
         }
         Ok(0)
     })();
-    complete(r, core::ptr::null_mut(), overlapped)
+    complete(s, r, core::ptr::null_mut(), overlapped)
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {

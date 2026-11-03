@@ -16,7 +16,23 @@ use os_sys::net::{self, SockAddr};
 use osyx_abi::Errno;
 
 mod events;
+mod overlapped;
 mod service;
+
+/// CancelIoEx/CancelIo on a socket handle (see overlapped.rs).
+pub(crate) fn cancel_socket_io(s: u64, ov: u64) -> bool {
+    overlapped::cancel(s, ov)
+}
+
+/// Whether `s` is an open socket handle.
+pub(crate) fn is_socket(s: u64) -> bool {
+    SOCKETS.lock().unwrap().contains_key(&s)
+}
+
+/// CreateIoCompletionPort for a socket handle: false if `s` is not one.
+pub(crate) fn associate_socket(s: u64, port: u64, key: u64) -> bool {
+    overlapped::associate(s, port, key)
+}
 pub(crate) mod mswsock;
 
 const INVALID_SOCKET: u64 = u64::MAX;
@@ -310,6 +326,7 @@ extern "win64" fn closesocket(s: u64) -> i32 {
     match SOCKETS.lock().unwrap().remove(&s) {
         Some(k) => {
             events::forget(s);
+            overlapped::forget(s);
             // A socket duplicated with WSADuplicateSocket stays open
             // until its last handle is closed.
             if service::release_fd(k.fd) {
@@ -1269,28 +1286,39 @@ fn wsa_receive(fd: u64, bufs: *const u8, count: u32, fl: u64, stream: bool) -> R
     Ok((n, from, truncated))
 }
 
-/// WSASend: gathers the WSABUFs into one stream write or datagram.
-/// Completion ports are not offered, so only the synchronous form works.
-pub(crate) extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, overlapped: *mut u8, completion: u64) -> i32 {
-    let r = (|| {
-        let (fd, _) = fd(s)?;
-        check_shutdown(s, false)?;
-        if f != 0 || !overlapped.is_null() || completion != 0 {
-            return Err(WSAEOPNOTSUPP);
-        }
-        let data = wsa_gather(bufs, count)?;
-        os_sys::sock_send(fd, &data, None, 0).map_err(wsa)
-    })();
+/// The result of a WSASend-style call: the count, and for an overlapped
+/// call the completion (sends complete in the call; a failure that
+/// happens at once queues no packet, as on Windows).
+fn send_result(s: u64, r: Result<usize, u32>, sent: *mut u32, ov: *mut u8) -> i32 {
     match r {
         Ok(n) => {
             if !sent.is_null() {
                 // SAFETY: the caller's out count.
                 unsafe { *sent = n as u32 };
             }
+            if !ov.is_null() {
+                overlapped::finish(s, ov as u64, n, 0);
+            }
             0
         }
         Err(e) => err(e, SOCKET_ERROR),
     }
+}
+
+/// WSASend: gathers the WSABUFs into one stream write or datagram.
+/// Completion routines are not supported; an OVERLAPPED completes in the
+/// call (see overlapped.rs).
+pub(crate) extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, ov: *mut u8, completion: u64) -> i32 {
+    let r = (|| {
+        let (fd, _) = fd(s)?;
+        check_shutdown(s, false)?;
+        if f != 0 || completion != 0 {
+            return Err(WSAEOPNOTSUPP);
+        }
+        let data = wsa_gather(bufs, count)?;
+        os_sys::sock_send(fd, &data, None, 0).map_err(wsa)
+    })();
+    send_result(s, r, sent, ov)
 }
 
 /// WSASendTo: like WSASend, with the destination of a datagram.
@@ -1303,29 +1331,20 @@ pub(crate) extern "win64" fn WSASendTo(
     f: u32,
     to: *const u8,
     tolen: i32,
-    overlapped: *mut u8,
+    ov: *mut u8,
     completion: u64,
 ) -> i32 {
     let r = (|| {
         let (fd, _) = fd(s)?;
         check_shutdown(s, false)?;
-        if f != 0 || !overlapped.is_null() || completion != 0 {
+        if f != 0 || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
         let to = if to.is_null() { None } else { Some(read_addr(to, tolen)?) };
         let data = wsa_gather(bufs, count)?;
         os_sys::sock_send(fd, &data, to.as_ref(), 0).map_err(wsa)
     })();
-    match r {
-        Ok(n) => {
-            if !sent.is_null() {
-                // SAFETY: the caller's out count.
-                unsafe { *sent = n as u32 };
-            }
-            0
-        }
-        Err(e) => err(e, SOCKET_ERROR),
-    }
+    send_result(s, r, sent, ov)
 }
 
 /// The received count and in/out flags of a WSARecv-style call.
@@ -1371,16 +1390,23 @@ pub(crate) extern "win64" fn WSARecv(
     let r = (|| {
         let (fd, stream) = fd(s)?;
         check_shutdown(s, true)?;
-        if !overlapped.is_null() || completion != 0 {
+        if completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
         // SAFETY: the caller's in/out flags.
         let user_flags = if f.is_null() { 0 } else { unsafe { *f as i32 } };
         let fl = flags(user_flags)?;
+        if !overlapped.is_null() {
+            return Ok(Err(fl));
+        }
         let (n, _, truncated) = wsa_receive(fd, bufs, count, fl, stream)?;
-        Ok((n, f, truncated))
+        Ok(Ok((n, f, truncated)))
     })();
-    recv_result(r, received)
+    match r {
+        Ok(Err(fl)) => overlapped::receive(s, bufs, count, fl, overlapped, core::ptr::null_mut(), core::ptr::null_mut()),
+        Ok(Ok(v)) => recv_result(Ok(v), received),
+        Err(e) => recv_result(Err(e), received),
+    }
 }
 
 /// WSARecvFrom: like WSARecv, also returning the sender's address.
@@ -1399,7 +1425,7 @@ pub(crate) extern "win64" fn WSARecvFrom(
     let r = (|| {
         let (fd, stream) = fd(s)?;
         check_shutdown(s, true)?;
-        if !overlapped.is_null() || completion != 0 {
+        if completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
         if !from.is_null() && (fromlen.is_null() || unsafe { *fromlen } < 16) {
@@ -1408,11 +1434,18 @@ pub(crate) extern "win64" fn WSARecvFrom(
         // SAFETY: the caller's in/out flags.
         let user_flags = if f.is_null() { 0 } else { unsafe { *f as i32 } };
         let fl = flags(user_flags)?;
+        if !overlapped.is_null() {
+            return Ok(Err(fl));
+        }
         let (n, peer, truncated) = wsa_receive(fd, bufs, count, fl, stream)?;
         write_addr(&peer, from, fromlen);
-        Ok((n, f, truncated))
+        Ok(Ok((n, f, truncated)))
     })();
-    recv_result(r, received)
+    match r {
+        Ok(Err(fl)) => overlapped::receive(s, bufs, count, fl, overlapped, from, fromlen),
+        Ok(Ok(v)) => recv_result(Ok(v), received),
+        Err(e) => recv_result(Err(e), received),
+    }
 }
 
 /// WSASendMsg: WSAMSG { name, namelen, lpBuffers, dwBufferCount, Control,

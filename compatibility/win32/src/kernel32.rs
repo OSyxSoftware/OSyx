@@ -954,10 +954,13 @@ extern "win64" fn GetOverlappedResult(h: u64, ov: *const u8, n: *mut u32, wait: 
     TRUE
 }
 
-/// Nothing is ever pending (see complete_overlapped): for CancelIoEx,
-/// as on Windows, that is ERROR_NOT_FOUND.
-extern "win64" fn CancelIoEx(h: u64, _ov: *const u8) -> Bool {
+/// Pipe operations, directory watches and socket receives can be pending;
+/// with nothing to cancel, as on Windows, the result is ERROR_NOT_FOUND.
+extern "win64" fn CancelIoEx(h: u64, ov: *const u8) -> Bool {
     match objects::get(h) {
+        None if crate::ws2_32::is_socket(h) => {
+            if crate::ws2_32::cancel_socket_io(h, ov as u64) { TRUE } else { fail(ERROR_NOT_FOUND, FALSE) }
+        }
         None => fail(ERROR_INVALID_HANDLE, FALSE),
         Some(Object::Pipe(p)) if crate::pipes::cancel(&p) => TRUE,
         Some(Object::File(_)) if crate::client64::cancel_dir_watch(h) => TRUE,
@@ -984,10 +987,14 @@ extern "win64" fn DeviceIoControl(h: u64, _code: u32, _i: u64, _il: u32, _o: u64
     fail(ERROR_INVALID_FUNCTION, FALSE)
 }
 
-/// Nothing is ever pending (see complete_overlapped): there is nothing to
-/// cancel for a valid handle.
+/// Cancels the handle's pending operations (pipes, directory watches,
+/// socket receives); a valid handle with none succeeds too.
 extern "win64" fn CancelIo(h: u64) -> Bool {
     match objects::get(h) {
+        None if crate::ws2_32::is_socket(h) => {
+            crate::ws2_32::cancel_socket_io(h, 0);
+            TRUE
+        }
         None => fail(ERROR_INVALID_HANDLE, FALSE),
         Some(Object::Pipe(p)) => {
             crate::pipes::cancel(&p);
@@ -2489,6 +2496,29 @@ pub(crate) fn new_event(manual: bool, initial: bool) -> u64 {
     objects::insert(Object::Event(EventObj::new(initial, manual, None)))
 }
 
+/// The SECURITY_ATTRIBUTES of a new event, mutex or semaphore: whether its
+/// handle is inheritable, and the descriptor it keeps (objsec.rs reports
+/// it back; these objects live in this process, so a descriptor that
+/// restricts other users has no one else to restrict).
+pub(crate) fn sync_attributes(attributes: u64, mapping: &crate::objsec::Mapping) -> Result<(bool, Option<crate::objsec::Sd>), u32> {
+    let sd = crate::objsec::initial_sd(attributes, mapping)?;
+    Ok((crate::security::inherit_flag(attributes), sd))
+}
+
+/// Applies the attributes to a new object's handle `h`: a named object
+/// that already existed keeps its own descriptor, as on Windows.
+pub(crate) fn finish_sync(h: u64, inherit: bool, sd: Option<crate::objsec::Sd>) -> u64 {
+    if h != 0 {
+        if teb::last_error() != ERROR_ALREADY_EXISTS {
+            crate::objsec::set_initial(h, sd);
+        }
+        if inherit {
+            objects::set_inheritable(h, true);
+        }
+    }
+    h
+}
+
 pub(crate) fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
     if let Some(o @ Object::Event(_)) = name.as_deref().and_then(objects::find_named) {
         teb::set_last_error(ERROR_ALREADY_EXISTS);
@@ -2534,33 +2564,21 @@ extern "win64" fn OpenFileMappingA(_access: u32, inherit: Bool, name: *const u8)
 }
 
 extern "win64" fn CreateEventA(attributes: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
-    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, 0) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT) { Ok(v) => v, Err(e) => return fail(e, 0) };
     // SAFETY: NULL or NUL-terminated name.
-    let h = create_event(manual != 0, initial != 0, unsafe { sa(name) });
-    if inherit && h != 0 {
-        objects::set_inheritable(h, true);
-    }
-    h
+    finish_sync(create_event(manual != 0, initial != 0, unsafe { sa(name) }), inherit, sd)
 }
 
 extern "win64" fn CreateEventW(attributes: u64, manual: Bool, initial: Bool, name: *const u16) -> u64 {
-    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, 0) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT) { Ok(v) => v, Err(e) => return fail(e, 0) };
     // SAFETY: as above.
-    let h = create_event(manual != 0, initial != 0, unsafe { sw(name) });
-    if inherit && h != 0 {
-        objects::set_inheritable(h, true);
-    }
-    h
+    finish_sync(create_event(manual != 0, initial != 0, unsafe { sw(name) }), inherit, sd)
 }
 
 extern "win64" fn CreateEventExW(attributes: u64, name: *const u16, flags: u32, _access: u32) -> u64 {
-    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, 0) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT) { Ok(v) => v, Err(e) => return fail(e, 0) };
     // SAFETY: as above.
-    let h = create_event(flags & 1 != 0, flags & 2 != 0, unsafe { sw(name) });
-    if inherit && h != 0 {
-        objects::set_inheritable(h, true);
-    }
-    h
+    finish_sync(create_event(flags & 1 != 0, flags & 2 != 0, unsafe { sw(name) }), inherit, sd)
 }
 
 /// Signals an event for code that is not a Windows caller (registry
@@ -2602,15 +2620,15 @@ fn create_mutex(owned: bool, name: Option<String>) -> u64 {
 }
 
 extern "win64" fn CreateMutexA(attributes: u64, owned: Bool, name: *const u8) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX) { Ok(v) => v, Err(e) => return fail(e, 0) };
     // SAFETY: NULL or NUL-terminated name.
-    create_mutex(owned != 0, unsafe { sa(name) })
+    finish_sync(create_mutex(owned != 0, unsafe { sa(name) }), inherit, sd)
 }
 
 extern "win64" fn CreateMutexW(attributes: u64, owned: Bool, name: *const u16) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX) { Ok(v) => v, Err(e) => return fail(e, 0) };
     // SAFETY: as above.
-    create_mutex(owned != 0, unsafe { sw(name) })
+    finish_sync(create_mutex(owned != 0, unsafe { sw(name) }), inherit, sd)
 }
 
 extern "win64" fn ReleaseMutex(h: u64) -> Bool {
@@ -2631,11 +2649,12 @@ extern "win64" fn ReleaseMutex(h: u64) -> Bool {
 }
 
 pub(crate) extern "win64" fn CreateSemaphoreA(attributes: u64, initial: i32, max: i32, _name: *const u8) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT) { Ok(v) => v, Err(e) => return fail(e, 0) };
     if max <= 0 || initial < 0 || initial > max {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    objects::insert(Object::Semaphore(Arc::new(SemaphoreObj { count: Mutex::new(initial), max })))
+    teb::set_last_error(ERROR_SUCCESS);
+    finish_sync(objects::insert(Object::Semaphore(Arc::new(SemaphoreObj { count: Mutex::new(initial), max }))), inherit, sd)
 }
 
 extern "win64" fn CreateSemaphoreW(sa_: u64, initial: i32, max: i32, _name: *const u16) -> u64 {

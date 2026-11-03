@@ -266,7 +266,7 @@ extern "win64" fn WSAGetOverlappedResult(s: u64, ov: *const u8, transfer: *mut u
     }
     match status() {
         0 => 1,
-        s => err(crate::pipes::error_of(s), 0),
+        s => err(super::overlapped::error_of(s), 0),
     }
 }
 
