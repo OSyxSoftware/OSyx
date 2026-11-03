@@ -7,6 +7,8 @@ TCP: one command byte and a little-endian u64 length.
   U  read that many bytes, answer with the u64 count received
   D  send that many bytes, then close
   E  echo until the guest closes
+  H  read until the guest closes, then hold the connection open without
+     closing it (a peer that never sends its FIN; net-stress.ps1)
 UDP: the first byte of each datagram.
   E  echo the datagram
   B  reset the sink counter
@@ -25,6 +27,7 @@ import time
 
 tcp_port, udp_port, log_path = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 lock = threading.Lock()
+held = []
 
 
 def log(msg):
@@ -77,20 +80,32 @@ def serve_tcp(conn, peer):
                 conn.sendall(data)
                 total += len(data)
             detail = f"echoed {total} bytes"
+        elif cmd == b"H":
+            total = 0
+            while True:
+                data = conn.recv(65536)
+                if not data:
+                    break
+                total += len(data)
+            # Never close: the guest's side waits in FIN-WAIT-2.
+            held.append(conn)
+            conn = None
+            detail = f"holding after {total} bytes"
         else:
             detail = f"unknown command {cmd!r}"
         log(f"tcp {peer[0]}:{peer[1]} {detail} in {time.perf_counter() - start:.3f} s")
     except OSError as e:
         log(f"tcp {peer}: error {e}")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def tcp_server():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("127.0.0.1", tcp_port))
-    s.listen(16)
+    s.listen(256)
     log(f"tcp bench listening on 127.0.0.1:{tcp_port}")
     while True:
         conn, peer = s.accept()
@@ -101,13 +116,26 @@ def udp_server():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
     s.bind(("127.0.0.1", udp_port))
+    if hasattr(socket, "SIO_UDP_CONNRESET"):
+        # Windows turns an ICMP port unreachable (a guest socket that is
+        # gone) into an error on the next recvfrom; ignore it.
+        s.ioctl(socket.SIO_UDP_CONNRESET, False)
     log(f"udp bench listening on 127.0.0.1:{udp_port}")
     sink = 0
     while True:
-        data, peer = s.recvfrom(65536)
+        try:
+            data, peer = s.recvfrom(65536)
+        except ConnectionResetError:
+            continue
+        except OSError as e:
+            log(f"udp recvfrom: {e}")
+            continue
         cmd = data[0:1]
         if cmd == b"E":
-            s.sendto(data, peer)
+            try:
+                s.sendto(data, peer)
+            except OSError as e:
+                log(f"udp echo to {peer[0]}:{peer[1]}: {e}")
         elif cmd == b"S":
             sink += 1
         elif cmd == b"B":
