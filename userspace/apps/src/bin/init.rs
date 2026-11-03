@@ -17,6 +17,8 @@
 //! * `crash-prep`:  leave an open, removed file on / for the power-cut test
 //! * `net,<tcp>,<udp>`: network checks against the host's echo servers on
 //!   10.0.2.2 (see `net_checks.rs`); exit status = failed checks
+//! * `netbench,<tcp>,<udp>[,<MiB>[,<only>]]`: network throughput and latency against
+//!   scripts/net-bench-host.py (see `net_bench.rs`)
 //! * `media`:      USB stick automount / eject / unplug checks (see
 //!   `media_checks.rs`); exit status = failed checks
 //! * `win,<tcp>,<udp>`: Windows PE32+ programs under /bin/winrun (see
@@ -49,6 +51,8 @@ mod ipc_checks;
 mod media_checks;
 #[path = "../net_checks.rs"]
 mod net_checks;
+#[path = "../net_bench.rs"]
+mod net_bench;
 #[path = "../win_checks.rs"]
 mod win_checks;
 #[path = "../smp_checks.rs"]
@@ -237,6 +241,12 @@ fn main() -> i32 {
             net_checks::run(&mut t, port(2, 7101), port(3, 7102));
             println!("net checks: {} passed, {} failed", t.passed, t.failed);
             return t.failed as i32;
+        }
+        Some("netbench") => {
+            let port = |i: usize, d: u16| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+            let mib = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(16);
+            let only = args.get(5).map(String::as_str).unwrap_or("");
+            return net_bench::run(port(2, 7103), port(3, 7104), mib, only);
         }
         // Sound cards, driven by scripts/audio-test.ps1.
         Some("audio") => {
