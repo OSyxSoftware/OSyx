@@ -167,7 +167,8 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
     let write = access & FILE_MAP_WRITE != 0;
     let copy = !write && access & FILE_MAP_COPY != 0;
     let exec = access & FILE_MAP_EXECUTE != 0;
-    if (write && !s.writable) || (exec && !s.executable) {
+    let rights = objects::section_access(section).unwrap_or(objects::SECTION_ALL_ACCESS);
+    if (write && rights & objects::SECTION_MAP_WRITE == 0) || (exec && rights & objects::SECTION_MAP_EXECUTE == 0) {
         return Err(STATUS_ACCESS_DENIED);
     }
     if exec && (write || copy) {

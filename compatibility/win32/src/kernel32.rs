@@ -1611,7 +1611,29 @@ extern "win64" fn DuplicateHandle(
         if rights & !token.access != 0 { return fail(ERROR_ACCESS_DENIED,FALSE); }
         o=Object::Token(Arc::new(crate::security::Token {access:rights,..(**token).clone()}));
     }
+    // A section handle gets the rights asked for, never more than the
+    // source handle has (DUPLICATE_SAME_ACCESS: the same).
+    let section_rights = match &o {
+        Object::Section(_) => {
+            let have = objects::section_access(src).unwrap_or(objects::SECTION_ALL_ACCESS);
+            let want = if options & 2 != 0 {
+                have
+            } else if access & 0x0200_0000 != 0 {
+                have // MAXIMUM_ALLOWED
+            } else {
+                crate::objsec::map_generic(access, &crate::objsec::SECTION) & objects::SECTION_ALL_ACCESS
+            };
+            if want & !have != 0 {
+                return fail(ERROR_ACCESS_DENIED, FALSE);
+            }
+            Some(want)
+        }
+        _ => None,
+    };
     let h = objects::insert(o);
+    if let Some(r) = section_rights {
+        objects::set_section_access(h, r);
+    }
     if inherit != 0 {
         objects::set_inheritable(h, true);
     }

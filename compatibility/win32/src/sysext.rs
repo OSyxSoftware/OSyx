@@ -130,10 +130,9 @@ extern "win64" fn GetProcessTimes(process: u64, creation: *mut u64, exit: *mut u
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let own = pid == kernel32::pid();
-    let info = match os_sys::proc_info(pid) {
+    let info = match crate::procinfo::process_info(pid) {
         Ok(info) => info,
-        Err(osyx_abi::Errno::NotFound) => return fail(ERROR_GEN_FAILURE, 0),
-        Err(e) => return fail(errno_to_win32(e), 0),
+        Err(e) => return fail(e, 0),
     };
     // SAFETY: the caller's FILETIMEs.
     unsafe {

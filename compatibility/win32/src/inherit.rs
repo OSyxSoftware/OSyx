@@ -86,14 +86,20 @@ struct Item {
 
 fn item(h: u64) -> Result<Item, u32> {
     match objects::get(h) {
-        Some(Object::Section(s)) if s.shm != 0 && (s.file.is_none() || s.file_mapping) => Ok(Item {
-            handle: h,
-            kernel: Some(s.shm),
-            kind: KIND_SECTION,
-            flags: if s.writable { SECTION_WRITABLE } else { 0 } | if s.executable { SECTION_EXECUTABLE } else { 0 }
-                | if s.file_mapping { SECTION_FILE } else { 0 },
-            size: s.size,
-        }),
+        // The handle's own rights cross: a read-only handle to a writable
+        // section arrives read-only.
+        Some(Object::Section(s)) if s.shm != 0 && (s.file.is_none() || s.file_mapping) => {
+            let rights = objects::section_access(h).unwrap_or(objects::SECTION_ALL_ACCESS);
+            Ok(Item {
+                handle: h,
+                kernel: Some(s.shm),
+                kind: KIND_SECTION,
+                flags: if rights & objects::SECTION_MAP_WRITE != 0 { SECTION_WRITABLE } else { 0 }
+                    | if rights & objects::SECTION_MAP_EXECUTE != 0 { SECTION_EXECUTABLE } else { 0 }
+                    | if s.file_mapping { SECTION_FILE } else { 0 },
+                size: s.size,
+            })
+        }
         Some(Object::Event(e)) => Ok(Item {
             handle: h,
             kernel: Some(e.share()?),

@@ -378,6 +378,9 @@ struct Table {
     inheritable: alloc::collections::BTreeSet<u64>,
     /// Handles marked HANDLE_FLAG_PROTECT_FROM_CLOSE.
     protected: alloc::collections::BTreeSet<u64>,
+    /// Section handles opened with less than full access (by
+    /// DuplicateHandle): their granted SECTION_* rights.
+    access: BTreeMap<u64, u32>,
 }
 
 static TABLE: Mutex<Table> = Mutex::new(Table {
@@ -385,7 +388,34 @@ static TABLE: Mutex<Table> = Mutex::new(Table {
     next: 0x100,
     inheritable: alloc::collections::BTreeSet::new(),
     protected: alloc::collections::BTreeSet::new(),
+    access: BTreeMap::new(),
 });
+
+/// SECTION_ALL_ACCESS.
+pub const SECTION_ALL_ACCESS: u32 = 0x000f_001f;
+pub const SECTION_MAP_WRITE: u32 = 0x2;
+pub const SECTION_MAP_EXECUTE: u32 = 0x8;
+
+/// The rights handle `h` grants to its section: what DuplicateHandle gave
+/// it, else what the section allows (all of it, without map-write for a
+/// read-only section or map-execute for a non-executable one).
+pub fn section_access(h: u64) -> Option<u32> {
+    let t = TABLE.lock().unwrap();
+    let Some(Object::Section(s)) = t.map.get(&h) else { return None };
+    let mut full = SECTION_ALL_ACCESS;
+    if !s.writable {
+        full &= !SECTION_MAP_WRITE;
+    }
+    if !s.executable {
+        full &= !SECTION_MAP_EXECUTE;
+    }
+    Some(t.access.get(&h).map_or(full, |&a| a & full))
+}
+
+/// Records the rights of a section handle.
+pub fn set_section_access(h: u64, access: u32) {
+    TABLE.lock().unwrap().access.insert(h, access);
+}
 
 /// Puts `o` at the handle value `h` (an inherited handle keeps its value);
 /// false if `h` is taken or not a handle value.
@@ -525,6 +555,7 @@ pub fn close(h: u64) -> bool {
         return false;
     }
     t.inheritable.remove(&h);
+    t.access.remove(&h);
     let removed = t.map.remove(&h);
     drop(t);
     removed.is_some()

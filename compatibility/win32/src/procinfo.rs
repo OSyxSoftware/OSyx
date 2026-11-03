@@ -17,6 +17,22 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use os_std::sync::Mutex;
 
+/// The last process record read for each process: a handle to a process
+/// that has ended still answers with its final counters, as on Windows.
+static LAST_INFO: Mutex<BTreeMap<u64, osyx_abi::ipc::ProcInfo>> = Mutex::new(BTreeMap::new());
+
+/// The kernel's record of process `pid`, or the last one read once it ended.
+pub(crate) fn process_info(pid: u64) -> Result<osyx_abi::ipc::ProcInfo, u32> {
+    match os_sys::proc_info(pid) {
+        Ok(i) => {
+            LAST_INFO.lock().unwrap().insert(pid, i);
+            Ok(i)
+        }
+        Err(osyx_abi::Errno::NotFound) => LAST_INFO.lock().unwrap().get(&pid).copied().ok_or(ERROR_INVALID_HANDLE),
+        Err(e) => Err(errno_to_win32(e)),
+    }
+}
+
 /// The session every OSyx process runs in (the interactive console).
 const SESSION: u32 = 1;
 
@@ -163,9 +179,9 @@ extern "win64" fn QueryProcessCycleTime(h: u64, cycles: *mut u64) -> i32 {
         Some(Object::Process(p)) => p.pid,
         _ => kernel32::pid(),
     };
-    let info = match os_sys::proc_info(pid) {
+    let info = match process_info(pid) {
         Ok(i) => i,
-        Err(e) => return fail(errno_to_win32(e), 0),
+        Err(e) => return fail(e, 0),
     };
     // SAFETY: the caller's out pointer.
     unsafe { *cycles = (info.cpu_ticks as u128 * tsc_hz() as u128 / 1000) as u64 };
