@@ -173,7 +173,10 @@ fn record_bytes(number: u32, r: &Record) -> Vec<u8> {
 /// a buffer too small for the next record reports the size it needs.
 #[allow(clippy::too_many_arguments)]
 extern "win64" fn ReadEventLogW(h: u64, flags: u32, offset: u32, buf: *mut u8, size: u32, read: *mut u32, needed: *mut u32) -> i32 {
-    let Some((application, pos)) = READERS.lock().unwrap().get(&h).copied() else { return fail(ERROR_INVALID_HANDLE, 0) };
+    // The handle's position is read and advanced under one lock, so two
+    // threads reading through it never return the same records.
+    let mut readers = READERS.lock().unwrap();
+    let Some((application, pos)) = readers.get(&h).copied() else { return fail(ERROR_INVALID_HANDLE, 0) };
     let forwards = flags & EVENTLOG_FORWARDS_READ != 0;
     let backwards = flags & EVENTLOG_BACKWARDS_READ != 0;
     let seek = flags & EVENTLOG_SEEK_READ != 0;
@@ -211,7 +214,8 @@ extern "win64" fn ReadEventLogW(h: u64, flags: u32, offset: u32, buf: *mut u8, s
         next = if forwards { next + 1 } else { next - 1 };
     }
     drop(log);
-    READERS.lock().unwrap().insert(h, (application, Some(next)));
+    readers.insert(h, (application, Some(next)));
+    drop(readers);
     if out.is_empty() {
         return fail(ERROR_HANDLE_EOF, 0);
     }

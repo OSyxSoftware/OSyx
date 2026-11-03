@@ -5128,8 +5128,9 @@ extern "win64" fn Rectangle(dc: u64, l: i32, t: i32, r: i32, b: i32) -> Bool {
 }
 
 extern "win64" fn RoundRect(dc: u64, l: i32, t: i32, r: i32, b: i32, w: i32, _h: i32) -> Bool {
-    let rect = Rect::new(l, t, (r - l).max(0) as u32, (b - t).max(0) as u32);
     draw(dc, |s, d, gdi, clip| {
+        // Device pixels, as Rectangle draws them.
+        let rect = d.transform.rect((l, t, l.max(r), t.max(b)));
         if let Some(c) = brush_color(gdi, d.brush) {
             if clip.intersect(&rect) == rect {
                 s.rounded_rect(rect, (w / 2).max(0) as u32, c, 255);

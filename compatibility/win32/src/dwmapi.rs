@@ -416,7 +416,9 @@ extern "win64" fn ImmAssociateContext(hwnd: u64, himc: u64) -> u64 {
     // What the window used until now: its association, else its default
     // context (made on demand as ImmGetContext does), taken before the new
     // association hides it.
-    let previous = match ASSOCIATED.lock().unwrap().get(&hwnd).copied() {
+    // The lookup ends its lock before ImmGetContext takes it again.
+    let current = ASSOCIATED.lock().unwrap().get(&hwnd).copied();
+    let previous = match current {
         Some(p) => p,
         None => ImmGetContext(hwnd),
     };
