@@ -378,8 +378,36 @@ impl Sha1 {
     }
 }
 
+/// CryptGenRandom: bytes from the kernel's random number generator.
+extern "win64" fn CryptGenRandom(prov: u64, len: u32, buf: *mut u8) -> i32 {
+    if !CONTEXTS.lock().unwrap().contains_key(&prov) {
+        return fail(crate::error::ERROR_INVALID_HANDLE, 0);
+    }
+    if len == 0 {
+        return 1;
+    }
+    if buf.is_null() {
+        return fail(crate::error::ERROR_INVALID_PARAMETER, 0);
+    }
+    // The caller's buffer may be uninitialised: fill a scratch block of
+    // ours at a time and copy it out (no allocation of the request's size).
+    let mut chunk = [0u8; 256];
+    let mut done = 0usize;
+    while done < len as usize {
+        let n = (len as usize - done).min(chunk.len());
+        if !crate::ucrt::entropy(&mut chunk[..n]) {
+            return fail(0x8009_0020, 0); // NTE_FAIL
+        }
+        // SAFETY: the caller's buffer of `len` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(chunk.as_ptr(), buf.add(done), n) };
+        done += n;
+    }
+    1
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        CryptGenRandom,
         CryptAcquireContextW,
         CryptReleaseContext,
         CryptCreateHash,

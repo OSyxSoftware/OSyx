@@ -1372,6 +1372,177 @@ extern "win64" fn DragQueryFileW(drop: u64, index: u32, buf: *mut u16, count: u3
     file.len() as u32
 }
 
+/// DragQueryFileA: the wide names in the ANSI code page (UTF-8).
+extern "win64" fn DragQueryFileA(drop: u64, index: u32, buf: *mut u8, count: u32) -> u32 {
+    if index == u32::MAX {
+        return DragQueryFileW(drop, index, core::ptr::null_mut(), 0);
+    }
+    let n = DragQueryFileW(drop, index, core::ptr::null_mut(), 0);
+    if n == 0 {
+        return 0;
+    }
+    let mut wide = alloc::vec![0u16; n as usize + 1];
+    DragQueryFileW(drop, index, wide.as_mut_ptr(), n + 1);
+    let name = String::from_utf16_lossy(&wide[..n as usize]);
+    if buf.is_null() || count == 0 {
+        return name.len() as u32;
+    }
+    let k = name.len().min(count as usize - 1);
+    // SAFETY: the caller's buffer of `count` bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), buf, k);
+        *buf.add(k) = 0;
+    }
+    k as u32
+}
+
+// ---- application desktop toolbars -------------------------------------------------
+//
+// OSyx's taskbar is the desktop's panel along the bottom of the screen
+// (PANEL_H in desktop.rs). Application bars register with ABM_NEW; their
+// proposed rectangles are kept clear of the taskbar and of each other.
+
+const PANEL_H: i32 = 52;
+const ABE_LEFT: u32 = 0;
+const ABE_TOP: u32 = 1;
+const ABE_RIGHT: u32 = 2;
+const ABE_BOTTOM: u32 = 3;
+const ABS_ALWAYSONTOP: u64 = 0x2;
+
+/// Registered bars: window -> (callback message, edge, rectangle).
+static APPBARS: Mutex<Vec<(u64, u32, u32, [i32; 4])>> = Mutex::new(Vec::new());
+
+fn taskbar_rect() -> [i32; 4] {
+    let (w, h) = crate::user32::screen_size();
+    [0, h - PANEL_H, w, h]
+}
+
+/// Moves `rc` off the taskbar and the other bars along its edge.
+fn appbar_fit(wnd: u64, edge: u32, mut rc: [i32; 4]) -> [i32; 4] {
+    let mut taken = alloc::vec![(ABE_BOTTOM, taskbar_rect())];
+    taken.extend(APPBARS.lock().unwrap().iter().filter(|b| b.0 != wnd).map(|b| (b.2, b.3)));
+    for (e, r) in taken {
+        if e != edge {
+            continue;
+        }
+        let overlap = rc[0] < r[2] && rc[2] > r[0] && rc[1] < r[3] && rc[3] > r[1];
+        if !overlap {
+            continue;
+        }
+        let (w, h) = (rc[2] - rc[0], rc[3] - rc[1]);
+        match edge {
+            ABE_BOTTOM => {
+                rc[3] = r[1];
+                rc[1] = rc[3] - h;
+            }
+            ABE_TOP => {
+                rc[1] = r[3];
+                rc[3] = rc[1] + h;
+            }
+            ABE_LEFT => {
+                rc[0] = r[2];
+                rc[2] = rc[0] + w;
+            }
+            ABE_RIGHT => {
+                rc[2] = r[0];
+                rc[0] = rc[2] - w;
+            }
+            _ => {}
+        }
+    }
+    rc
+}
+
+/// SHAppBarMessage: APPBARDATA (x64: cbSize, hWnd @8, uCallbackMessage
+/// @16, uEdge @20, rc @24, lParam @40; x86: hWnd @4, message @8, edge
+/// @12, rc @16, lParam @32).
+extern "win64" fn SHAppBarMessage(message: u32, data: *mut u8) -> u64 {
+    if data.is_null() {
+        return 0;
+    }
+    let narrow = crate::wow64::is_active();
+    let (wnd_at, msg_at, edge_at, rc_at, lp_at) = if narrow { (4, 8, 12, 16, 32) } else { (8, 16, 20, 24, 40) };
+    let p = data as u64;
+    // SAFETY: the caller's APPBARDATA.
+    let (wnd, cb, edge, rc, lparam) = unsafe {
+        let rd = |o: u64| core::ptr::read_unaligned((p + o) as *const i32);
+        let wnd = if narrow { rd(wnd_at) as u32 as u64 } else { core::ptr::read_unaligned((p + wnd_at) as *const u64) };
+        let lparam = if narrow { rd(lp_at) as u32 as u64 } else { core::ptr::read_unaligned((p + lp_at) as *const u64) };
+        (wnd, rd(msg_at) as u32, rd(edge_at) as u32, [rd(rc_at), rd(rc_at + 4), rd(rc_at + 8), rd(rc_at + 12)], lparam)
+    };
+    let write_rc = |r: [i32; 4]| {
+        for (i, v) in r.iter().enumerate() {
+            // SAFETY: as above.
+            unsafe { core::ptr::write_unaligned((p + rc_at + 4 * i as u64) as *mut i32, *v) };
+        }
+    };
+    match message {
+        0 => {
+            // ABM_NEW
+            let mut bars = APPBARS.lock().unwrap();
+            if bars.iter().any(|b| b.0 == wnd) {
+                return 0;
+            }
+            bars.push((wnd, cb, ABE_TOP, [0; 4]));
+            1
+        }
+        1 => {
+            // ABM_REMOVE
+            APPBARS.lock().unwrap().retain(|b| b.0 != wnd);
+            1
+        }
+        2 | 3 => {
+            // ABM_QUERYPOS / ABM_SETPOS
+            if edge > ABE_BOTTOM {
+                return 0;
+            }
+            let fitted = appbar_fit(wnd, edge, rc);
+            write_rc(fitted);
+            if message == 3 {
+                if let Some(b) = APPBARS.lock().unwrap().iter_mut().find(|b| b.0 == wnd) {
+                    b.2 = edge;
+                    b.3 = fitted;
+                }
+            }
+            1
+        }
+        4 => ABS_ALWAYSONTOP, // ABM_GETSTATE: always on top, never hidden
+        5 => {
+            // ABM_GETTASKBARPOS
+            write_rc(taskbar_rect());
+            // SAFETY: as above.
+            unsafe { core::ptr::write_unaligned((p + edge_at) as *mut u32, ABE_BOTTOM) };
+            1
+        }
+        6 | 9 => 1,  // ABM_ACTIVATE, ABM_WINDOWPOSCHANGED
+        7 | 11 => 0, // ABM_GETAUTOHIDEBAR(EX): no auto-hide bars
+        // ABM_SETAUTOHIDEBAR(EX): registering one fails, unregistering works.
+        8 | 12 => (lparam == 0) as u64,
+        10 => ABS_ALWAYSONTOP, // ABM_SETSTATE: the taskbar's state is fixed
+        _ => 0,
+    }
+}
+
+/// SHOpenWithDialog: Files shows the file's open-with choices (the
+/// handlers that can open it, and making one the default). OPENASINFO:
+/// pcszFile, pcszClass @8, oaifInFlags @16.
+extern "win64" fn SHOpenWithDialog(_parent: u64, info: *const u8) -> u32 {
+    if info.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's OPENASINFO; its file name is NUL-terminated.
+    let file = unsafe {
+        let ptr = if crate::wow64::is_active() { *(info as *const u32) as u64 } else { *(info as *const u64) };
+        path::wide_to_string(ptr as *const u16)
+    };
+    let Some(file) = file.filter(|f| !f.is_empty()) else { return E_INVALIDARG };
+    let Ok((osyx, true)) = kernel32::locate(&file) else { return hresult(ERROR_FILE_NOT_FOUND) };
+    match spawn_line(&format!("/system/bin/files --open-with {}", quote_win_arg(&osyx)), None) {
+        Ok(_) => S_OK,
+        Err(e) => hresult(e),
+    }
+}
+
 extern "win64" fn ILCreateFromPathW(path: *const u16) -> u64 {
     // SAFETY: NULL or NUL-terminated path from the caller.
     let Some(win) = (unsafe { path::wide_to_string(path) }) else { return 0 };
@@ -1442,6 +1613,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ShellExecuteExW,
         Shell_NotifyIconW,
         DragQueryFileW,
+        DragQueryFileA,
+        SHAppBarMessage,
+        SHOpenWithDialog,
         CommandLineToArgvW,
         GetCurrentProcessExplicitAppUserModelID,
         SetCurrentProcessExplicitAppUserModelID,

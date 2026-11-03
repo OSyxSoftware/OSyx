@@ -201,8 +201,33 @@ pub fn exports() -> Vec<(&'static str, u64)> {
 
 
 
-extern "win64" fn ImmAssociateContextEx(hwnd: u64, _himc: u64, _flags: u32) -> Bool {
-    crate::user32::is_window(hwnd) as Bool
+/// ImmAssociateContextEx: IACE_DEFAULT gives the window (and with
+/// IACE_CHILDREN its descendants) back its default context; otherwise
+/// they use `himc`, IACE_IGNORENOCONTEXT leaving windows associated with
+/// NULL as they are.
+extern "win64" fn ImmAssociateContextEx(hwnd: u64, himc: u64, flags: u32) -> Bool {
+    const IACE_CHILDREN: u32 = 0x1;
+    const IACE_DEFAULT: u32 = 0x10;
+    const IACE_IGNORENOCONTEXT: u32 = 0x20;
+    if !crate::user32::is_window(hwnd) {
+        return 0;
+    }
+    if flags & IACE_DEFAULT == 0 && himc != 0 && with_context(himc, |_| ()).is_none() {
+        return 0;
+    }
+    let mut windows = alloc::vec![hwnd];
+    if flags & IACE_CHILDREN != 0 {
+        windows.extend(crate::user32::descendants(hwnd));
+    }
+    let mut map = ASSOCIATED.lock().unwrap();
+    for w in windows {
+        if flags & IACE_DEFAULT != 0 {
+            map.remove(&w);
+        } else if !(flags & IACE_IGNORENOCONTEXT != 0 && map.get(&w) == Some(&0)) {
+            map.insert(w, himc);
+        }
+    }
+    1
 }
 
 
@@ -247,6 +272,9 @@ struct InputContext {
     composition_window: [u8; 28],
     font: [u8; 92],
     candidates: [[u8; 32]; 4],
+    /// IME_CMODE_* and IME_SMODE_* (ImmSetConversionStatus).
+    conversion: u32,
+    sentence: u32,
 }
 
 static CONTEXTS: Mutex<BTreeMap<u64, InputContext>> = Mutex::new(BTreeMap::new());
@@ -260,8 +288,12 @@ extern "win64" fn ImmGetContext(hwnd: u64) -> u64 {
     if !crate::user32::is_window(hwnd) {
         return fail(1400, 0); // ERROR_INVALID_WINDOW_HANDLE
     }
+    // A context ImmAssociateContext gave the window (NULL: none).
+    if let Some(&h) = ASSOCIATED.lock().unwrap().get(&hwnd) {
+        return h;
+    }
     let himc = 0x4000_0000 | hwnd;
-    CONTEXTS.lock().unwrap().entry(himc).or_insert(InputContext { wnd: hwnd, open: false, composition_window: [0; 28], font: [0; 92], candidates: [[0; 32]; 4] });
+    CONTEXTS.lock().unwrap().entry(himc).or_insert(InputContext { wnd: hwnd, open: false, composition_window: [0; 28], font: [0; 92], candidates: [[0; 32]; 4], conversion: 0, sentence: 0 });
     himc
 }
 
@@ -271,7 +303,8 @@ extern "win64" fn ImmReleaseContext(hwnd: u64, himc: u64) -> i32 {
     if himc == 0 {
         return 1;
     }
-    with_context(himc, |c| c.wnd == hwnd).unwrap_or(false) as i32
+    let associated = ASSOCIATED.lock().unwrap().get(&hwnd) == Some(&himc);
+    (associated || with_context(himc, |c| c.wnd == hwnd).unwrap_or(false)) as i32
 }
 
 extern "win64" fn ImmGetOpenStatus(himc: u64) -> i32 {
@@ -405,12 +438,26 @@ extern "win64" fn ImmAssociateContext(hwnd: u64, himc: u64) -> u64 {
     if himc != 0 && with_context(himc, |_| ()).is_none() {
         return 0;
     }
-    let previous = ASSOCIATED.lock().unwrap().insert(hwnd, himc);
-    match previous {
+    // What the window used until now: its association, else its default
+    // context (made on demand as ImmGetContext does), taken before the new
+    // association hides it.
+    // The lookup ends its lock before ImmGetContext takes it again.
+    let current = ASSOCIATED.lock().unwrap().get(&hwnd).copied();
+    let previous = match current {
         Some(p) => p,
-        // The default context, made on demand as ImmGetContext does.
         None => ImmGetContext(hwnd),
+    };
+    // NULL leaves the window without a context (ImmGetContext answers
+    // NULL), as on Windows; ImmAssociateContextEx restores the default.
+    if himc != 0 {
+        with_context(himc, |c| {
+            if c.wnd == 0 {
+                c.wnd = hwnd;
+            }
+        });
     }
+    ASSOCIATED.lock().unwrap().insert(hwnd, himc);
+    previous
 }
 
 /// ImmGetCandidateListW: nothing is ever composed (the only layout has no
@@ -434,8 +481,74 @@ extern "win64" fn ImmGetIMEFileNameA(hkl: u64, _buf: *mut u8, _len: u32) -> u32 
     0
 }
 
+/// ImmCreateContext: a context of its own, not tied to a window until
+/// ImmAssociateContext.
+static NEXT_CONTEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x5000_0000);
+
+extern "win64" fn ImmCreateContext() -> u64 {
+    let himc = NEXT_CONTEXT.fetch_add(0x10, core::sync::atomic::Ordering::Relaxed);
+    CONTEXTS.lock().unwrap().insert(himc, InputContext { wnd: 0, open: false, composition_window: [0; 28], font: [0; 92], candidates: [[0; 32]; 4], conversion: 0, sentence: 0 });
+    himc
+}
+
+extern "win64" fn ImmDestroyContext(himc: u64) -> i32 {
+    if CONTEXTS.lock().unwrap().remove(&himc).is_none() {
+        return 0;
+    }
+    ASSOCIATED.lock().unwrap().retain(|_, h| *h != himc);
+    1
+}
+
+extern "win64" fn ImmGetConversionStatus(himc: u64, conversion: *mut u32, sentence: *mut u32) -> i32 {
+    with_context(himc, |c| {
+        // SAFETY: the caller's optional out values.
+        unsafe {
+            if !conversion.is_null() {
+                *conversion = c.conversion;
+            }
+            if !sentence.is_null() {
+                *sentence = c.sentence;
+            }
+        }
+        1
+    })
+    .unwrap_or(0)
+}
+
+extern "win64" fn ImmSetConversionStatus(himc: u64, conversion: u32, sentence: u32) -> i32 {
+    with_context(himc, |c| {
+        c.conversion = conversion;
+        c.sentence = sentence;
+        1
+    })
+    .unwrap_or(0)
+}
+
+/// ImmGetCandidateListCount: no context has candidates (nothing is ever
+/// composed), so the count is 0 and the lists need no bytes.
+extern "win64" fn ImmGetCandidateListCountW(himc: u64, count: *mut u32) -> u32 {
+    if with_context(himc, |_| ()).is_none() {
+        return 0;
+    }
+    if !count.is_null() {
+        // SAFETY: the caller's out value.
+        unsafe { *count = 0 };
+    }
+    0
+}
+
+extern "win64" fn ImmGetCandidateListCountA(himc: u64, count: *mut u32) -> u32 {
+    ImmGetCandidateListCountW(himc, count)
+}
+
 pub fn imm32_exports() -> Vec<(&'static str, u64)> {
     export_table![
+        ImmCreateContext,
+        ImmDestroyContext,
+        ImmGetConversionStatus,
+        ImmSetConversionStatus,
+        ImmGetCandidateListCountW,
+        ImmGetCandidateListCountA,
         ImmAssociateContext,
         ImmGetCandidateListW,
         ImmSetCompositionStringW,

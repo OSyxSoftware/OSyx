@@ -30,6 +30,7 @@ use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
 mod client;
 mod controls;
+mod extra;
 mod gdi;
 mod keyboard;
 mod dialog_template;
@@ -335,7 +336,15 @@ struct Dc {
     bitmap: u64,
     memory: bool,
     clip: Option<Region>,
+    /// World transform, then the window and viewport origins (MM_TEXT):
+    /// `transform` is what drawing uses.
     transform: Xform,
+    world: Xform,
+    viewport_org: (i32, i32),
+    window_org: (i32, i32),
+    /// The colours of the DC_BRUSH and DC_PEN stock objects in this DC.
+    dc_brush: Color,
+    dc_pen: Color,
     align: u32,
     graphics_mode: i32,
     map_mode: i32,
@@ -423,6 +432,8 @@ const NULL_PEN: u32 = 8;
 const ANSI_FIXED_FONT: u32 = 11;
 const DEFAULT_GUI_FONT: u32 = 17;
 const SYSTEM_FONT: u32 = 13;
+const DC_BRUSH: u32 = 18;
+const DC_PEN: u32 = 19;
 
 fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
     let mut g = GUI.lock().unwrap();
@@ -445,6 +456,9 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             (15, Gdi::Font(FontKind::Sans)),
             (16, Gdi::Font(FontKind::Mono)),
             (DEFAULT_GUI_FONT, Gdi::Font(FontKind::Sans)),
+            // DC_BRUSH and DC_PEN: their colour is each DC's (draw_dc).
+            (DC_BRUSH, Gdi::Brush(rgb(255, 255, 255))),
+            (DC_PEN, Gdi::Pen(rgb(0, 0, 0), 1)),
         ] {
             gdi.insert(STOCK_BASE + i as u64, o);
         }
@@ -4203,8 +4217,9 @@ extern "win64" fn LoadIconW(inst: u64, id: u64) -> u64 {
     LoadCursorA(inst, id)
 }
 
+/// SetCursor: returns the previous cursor (GetCursor reads the current).
 extern "win64" fn SetCursor(c: u64) -> u64 {
-    c
+    extra::set_cursor(c)
 }
 
 extern "win64" fn GetSysColor(i: i32) -> u32 {
@@ -4285,6 +4300,11 @@ fn new_dc(g: &mut Gui, hwnd: u64, paint: Rect) -> u64 {
             memory: false,
             clip: None,
             transform: Xform::IDENTITY,
+            world: Xform::IDENTITY,
+            viewport_org: (0, 0),
+            window_org: (0, 0),
+            dc_brush: rgb(255, 255, 255),
+            dc_pen: rgb(0, 0, 0),
             align: 0,
             graphics_mode: 1,
             map_mode: 1,
@@ -5108,8 +5128,9 @@ extern "win64" fn Rectangle(dc: u64, l: i32, t: i32, r: i32, b: i32) -> Bool {
 }
 
 extern "win64" fn RoundRect(dc: u64, l: i32, t: i32, r: i32, b: i32, w: i32, _h: i32) -> Bool {
-    let rect = Rect::new(l, t, (r - l).max(0) as u32, (b - t).max(0) as u32);
     draw(dc, |s, d, gdi, clip| {
+        // Device pixels, as Rectangle draws them.
+        let rect = d.transform.rect((l, t, l.max(r), t.max(b)));
         if let Some(c) = brush_color(gdi, d.brush) {
             if clip.intersect(&rect) == rect {
                 s.rounded_rect(rect, (w / 2).max(0) as u32, c, 255);
@@ -5992,6 +6013,12 @@ pub(crate) extern "win64" fn GetClassNameW(wnd: u64, buf: *mut u16, size: i32) -
 
 // ---- monitors ------------------------------------------------------------------------------
 
+/// The screen's size in pixels.
+pub(crate) fn screen_size() -> (i32, i32) {
+    let r = screen_rect();
+    (r.2, r.3)
+}
+
 fn screen_rect() -> Rect4 {
     let (w, h) = with(|g| g.conn().map(|c| (c.screen_width as i32, c.screen_height as i32)).unwrap_or((1024, 768)));
     (0, 0, w, h)
@@ -6127,17 +6154,15 @@ fn wide(p: *const u16) -> Option<String> {
     if p.is_null() {
         return None;
     }
-    let mut s = String::new();
-    let mut i = 0;
+    let mut n = 0;
     // SAFETY: a NUL-terminated string from the caller.
-    loop {
-        let c = unsafe { *p.add(i) };
-        if c == 0 {
-            return Some(s);
-        }
-        s.push(char::from_u32(c as u32).unwrap_or('\u{fffd}'));
-        i += 1;
+    while unsafe { *p.add(n) } != 0 {
+        n += 1;
     }
+    // SAFETY: the `n` units before the NUL. Surrogate pairs become one
+    // character; an unpaired surrogate becomes U+FFFD.
+    let units = unsafe { core::slice::from_raw_parts(p, n) };
+    Some(char::decode_utf16(units.iter().copied()).map(|c| c.unwrap_or('\u{fffd}')).collect())
 }
 
 pub(crate) extern "win64" fn GetClassInfoW(_inst: u64, name: *const u16, out: *mut u8) -> Bool {
@@ -6251,15 +6276,31 @@ extern "win64" fn GetClassWord(wnd: u64, index: i32) -> u16 {
     })
 }
 
+/// FindWindowW: the class by name or by the atom RegisterClass returned
+/// (0xC000 + its position).
 extern "win64" fn FindWindowW(class: *const u16, title: *const u16) -> u64 {
-    let (c, t) = (wide(class), wide(title));
+    if !title.is_null() && (title as u64) < 0x10000 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let c = if !class.is_null() && (class as u64) < 0x10000 {
+        let atom = class as usize;
+        match with(|g| atom.checked_sub(0xC001).and_then(|i| g.classes.get(i)).map(|k| k.name.clone())) {
+            Some(name) => Some(name),
+            None => return fail(1407, 0), // ERROR_CANNOT_FIND_WND_CLASS
+        }
+    } else {
+        wide(class)
+    };
+    let t = wide(title);
     with(|g| {
         g.windows
             .iter()
             .find(|(_, w)| {
+                // Top-level windows only; names and titles match without case.
+                let top = w.style & WS_CHILD == 0;
                 let class_ok = c.as_ref().is_none_or(|want| g.classes.get(w.class).is_some_and(|k| k.name.eq_ignore_ascii_case(want)));
-                let title_ok = t.as_ref().is_none_or(|want| w.title == *want);
-                class_ok && title_ok
+                let title_ok = t.as_ref().is_none_or(|want| w.title.to_lowercase() == want.to_lowercase());
+                top && class_ok && title_ok
             })
             .map(|(h, _)| *h)
             .unwrap_or(0)
@@ -6918,6 +6959,20 @@ extern "win64" fn EnumThreadWindows(thread: u32, proc_: u64, param: u64) -> Bool
 /// Windows here have no children to enumerate.
 /// Every descendant of `parent`, topmost (newest) first; the callback stops
 /// the enumeration by returning FALSE.
+/// Every descendant child window of `parent`.
+pub(crate) fn descendants(parent: u64) -> Vec<u64> {
+    with(|g| {
+        let mut out = Vec::new();
+        let mut todo = alloc::vec![parent];
+        while let Some(p) = todo.pop() {
+            let kids: Vec<u64> = g.windows.iter().filter(|(_, w)| w.style & WS_CHILD != 0 && w.owner == p).map(|(&h, _)| h).collect();
+            todo.extend(kids.iter().copied());
+            out.extend(kids);
+        }
+        out
+    })
+}
+
 extern "win64" fn EnumChildWindows(parent: u64, proc_: u64, param: u64) -> Bool {
     if proc_ == 0 {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
@@ -8300,6 +8355,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ("SetWindowLongW", SetWindowLongW as *const () as usize as u64),
     ])
     .chain(client::exports())
+    .chain(extra::exports())
     .collect()
 }
 

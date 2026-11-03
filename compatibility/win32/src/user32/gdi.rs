@@ -2,6 +2,8 @@
 //! lives: applications may keep the pointer returned by CreateDIBSection.
 use super::*;
 
+mod extra;
+
 mod blend;
 
 const MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -45,6 +47,9 @@ impl Xform {
             x: self.x * n.a + self.y * n.c + n.x,
             y: self.x * n.b + self.y * n.d + n.y,
         }
+    }
+    fn translate(x: i32, y: i32) -> Self {
+        Self { x: x as f32, y: y as f32, ..Self::IDENTITY }
     }
     fn valid(self) -> bool {
         [self.a, self.b, self.c, self.d, self.x, self.y].iter().all(|v| v.is_finite())
@@ -711,6 +716,10 @@ pub(super) fn draw_dc<R>(
     mut f: impl FnMut(&mut Surface, &Dc, &BTreeMap<u64, Gdi>, Rect) -> (R, Rect),
 ) -> Option<R> {
     with(|g| {
+        // The DC_BRUSH and DC_PEN stock objects draw in this DC's colours.
+        let (brush, pen) = g.dcs.get(&dc).map(|d| (d.dc_brush, d.dc_pen))?;
+        g.gdi.insert(STOCK_BASE + DC_BRUSH as u64, Gdi::Brush(brush));
+        g.gdi.insert(STOCK_BASE + DC_PEN as u64, Gdi::Pen(pen, 1));
         let d = g.dcs.get(&dc)?;
         // A child window never draws outside its ancestors' client areas.
         let limit = if d.memory { None } else { Some(ancestor_clip(&g.windows, d.hwnd)) };
@@ -1636,12 +1645,19 @@ extern "win64" fn SetMiterLimit() {
 extern "win64" fn GetGraphicsMode(dc: u64) -> i32 {
     with(|g| g.dcs.get(&dc).map(|d| d.graphics_mode).unwrap_or(0))
 }
+/// The device transform: the world transform, then the window origin to
+/// the viewport origin (MM_TEXT has no scaling).
+fn retransform(d: &mut Dc) {
+    let (v, w) = (d.viewport_org, d.window_org);
+    d.transform = d.world.then(Xform::translate(v.0 - w.0, v.1 - w.1));
+}
+
 extern "win64" fn SetGraphicsMode(dc: u64, mode: i32) -> i32 {
     if !matches!(mode, 1 | 2) {
         return 0;
     }
     dc_set(dc, |d| {
-        if mode == 1 && d.transform != Xform::IDENTITY {
+        if mode == 1 && d.world != Xform::IDENTITY {
             return 0;
         }
         core::mem::replace(&mut d.graphics_mode, mode)
@@ -1661,7 +1677,8 @@ extern "win64" fn SetWorldTransform(dc: u64, transform: *const Xform) -> Bool {
         if d.graphics_mode != 2 {
             return FALSE;
         }
-        d.transform = t;
+        d.world = t;
+        retransform(d);
         TRUE
     })
     .unwrap_or(FALSE)
@@ -1673,7 +1690,7 @@ extern "win64" fn GetWorldTransform(dc: u64, out: *mut Xform) -> Bool {
     dc_set(dc, |d| {
         /* SAFETY: caller's XFORM. */
         unsafe {
-            core::ptr::write_unaligned(out, d.transform);
+            core::ptr::write_unaligned(out, d.world);
         }
         TRUE
     })
@@ -1696,12 +1713,13 @@ extern "win64" fn ModifyWorldTransform(dc: u64, transform: *const Xform, mode: u
         if d.graphics_mode != 2 {
             return FALSE;
         }
-        d.transform = match mode {
+        d.world = match mode {
             1 => Xform::IDENTITY,
-            2 => t.then(d.transform),
-            3 => d.transform.then(t),
+            2 => t.then(d.world),
+            3 => d.world.then(t),
             _ => return FALSE,
         };
+        retransform(d);
         TRUE
     })
     .unwrap_or(FALSE)
@@ -2371,7 +2389,9 @@ pub(super) fn msimg32_exports() -> Vec<(&'static str, u64)> {
 }
 
 pub(super) fn blend_exports() -> Vec<(&'static str, u64)> {
-    blend::gdi32_exports()
+    let mut e = blend::gdi32_exports();
+    e.extend(extra::exports());
+    e
 }
 /// Escapes are printer and driver commands; a display DC supports none
 /// (QUERYESCSUPPORT included), which Windows answers with 0.

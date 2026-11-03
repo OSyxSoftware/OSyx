@@ -839,8 +839,14 @@ extern "win64" fn glGenTextures(n: i32, out: *mut u32) {
         }
         let mut store = c.textures.lock().unwrap();
         for i in 0..n as usize {
-            store.next += 1;
-            let name = store.next;
+            // Names bound without glGenTextures stay theirs: skip them
+            // (and 0, which is no texture).
+            let name = loop {
+                store.next = store.next.wrapping_add(1);
+                if store.next != 0 && !store.map.contains_key(&store.next) {
+                    break store.next;
+                }
+            };
             store.map.insert(name, Texture::new());
             // SAFETY: the caller's array of `n` names.
             unsafe { *out.add(i) = name };
