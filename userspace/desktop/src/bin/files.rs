@@ -216,6 +216,8 @@ struct Files {
     band: Option<Band>,
     /// Names a pending delete dialog is about.
     delete_names: Vec<String>,
+    /// `--open-with FILE`: the file whose open-with menu shows at start.
+    open_with: Option<String>,
 }
 
 const CHOICES_FILE: &str = "/home/user/.config/osyx/openwith.conf";
@@ -257,7 +259,18 @@ fn load_handlers() -> Vec<Handler> {
 
 fn main() -> i32 {
     become_user();
-    let start = env::args().nth(1).unwrap_or_else(|| String::from(USER_HOME));
+    // `files --open-with FILE` opens FILE's folder with its open-with
+    // choices (Windows programs ask for that through SHOpenWithDialog).
+    let args: Vec<String> = env::args().collect();
+    let (start, open_with) = match args.get(1).map(String::as_str) {
+        Some("--open-with") if args.len() > 2 => {
+            let file = args[2].trim_end_matches('/');
+            let name = file.rsplit('/').next().unwrap_or(file);
+            (parent(file), Some(String::from(name)))
+        }
+        Some(dir) => (String::from(dir), None),
+        None => (String::from(USER_HOME), None),
+    };
     let mut list = ListView::new(vec![
         Column::new("Name", 0, Align::Left),
         Column::new("Size", 86, Align::Right),
@@ -307,6 +320,7 @@ fn main() -> i32 {
         menu: None,
         band: None,
         delete_names: Vec::new(),
+        open_with,
     };
     f.navigate(&start, false);
     let spec = WindowSpec::normal(&format!("Files — {}", f.cwd), 860, 540);
@@ -1240,9 +1254,22 @@ fn remove_any(p: &str) -> Result<(), String> {
 }
 
 impl App for Files {
-    fn layout(&mut self, w: u32, h: u32, _cx: &mut Ctx) {
+    fn layout(&mut self, w: u32, h: u32, cx: &mut Ctx) {
         self.size = (w, h);
         self.layout_inner(w, h);
+        // `--open-with`: select the file and show its menu once the list
+        // has its place.
+        if let Some(name) = self.open_with.take() {
+            if let Some(i) = self.entries.iter().position(|e| e.name == name) {
+                self.list.clear_marks();
+                self.list.select(Some(i));
+                let r = self.list.rect;
+                let fonts = cx.fonts;
+                self.open_context_menu(r.x + r.w as i32 / 3, r.y + 40, &fonts);
+            } else {
+                self.set_status(format!("{name}: not found"), true);
+            }
+        }
     }
 
     fn event(&mut self, ev: Ui, cx: &mut Ctx) -> bool {
