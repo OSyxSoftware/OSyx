@@ -1,8 +1,10 @@
 //! The event log. OSyx has no event log service; an event source writes
 //! each report as one line to the process's error stream (the system
 //! console when nothing else is attached), the way OutputDebugString does:
-//! `[event] <source> <type> <id>: <strings>`. Remote event logs are not
-//! supported.
+//! `[event] <source> <type> <id>: <strings>`. The process also keeps its
+//! reports as the Application log that OpenEventLog/ReadEventLog read
+//! back as EVENTLOGRECORDs; other logs are empty. Remote event logs are
+//! not supported.
 #![allow(non_snake_case)]
 use crate::{
     error::*,
@@ -16,6 +18,25 @@ use os_std::sync::Mutex;
 /// handles on Windows either: they are closed with DeregisterEventSource.
 static SOURCES: Mutex<BTreeMap<u64, String>> = Mutex::new(BTreeMap::new());
 static NEXT: Mutex<u64> = Mutex::new(0x7e00_0004);
+
+/// A reported event: source, type, id, category, strings, time (seconds
+/// since 1970).
+struct Record {
+    source: String,
+    kind: u16,
+    id: u32,
+    category: u16,
+    strings: Vec<String>,
+    time: u32,
+}
+
+/// The Application log of this process, oldest first; record numbers
+/// start at 1.
+static LOG: Mutex<Vec<Record>> = Mutex::new(Vec::new());
+
+/// Open logs: (is the Application log, next record to read forwards, or
+/// backwards when reading back).
+static READERS: Mutex<BTreeMap<u64, (bool, Option<u32>)>> = Mutex::new(BTreeMap::new());
 
 extern "win64" fn RegisterEventSourceW(server: *const u16, source: *const u16) -> u64 {
     // SAFETY: NULL or NUL-terminated strings.
@@ -39,8 +60,9 @@ extern "win64" fn DeregisterEventSource(h: u64) -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, _category: u16, id: u32, _user: *const u8, count: u16, _size: u32, strings: *const u64, _data: *const u8) -> i32 {
+pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: u32, _user: *const u8, count: u16, _size: u32, strings: *const u64, _data: *const u8) -> i32 {
     let Some(source) = SOURCES.lock().unwrap().get(&h).cloned() else { return fail(ERROR_INVALID_HANDLE, 0) };
+    let code = kind;
     let kind = match kind {
         0 => "success",
         1 => "error",
@@ -59,9 +81,127 @@ pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, _category: u16, id:
         .collect();
     // The low 16 bits are the event code; the high bits severity and facility.
     os_std::eprintln!("[event] {source} {kind} {}: {}", id & 0xffff, text.join(" | "));
+    let time = (os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0) / 1_000_000_000) as u32;
+    LOG.lock().unwrap().push(Record { source, kind: code, id, category, strings: text, time });
+    1
+}
+
+fn open_log(server: Option<String>, source: Option<String>) -> u64 {
+    if server.is_some_and(|s| !s.is_empty()) {
+        return fail(ERROR_NOT_SUPPORTED, 0);
+    }
+    let Some(source) = source.filter(|s| !s.is_empty()) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    // Unknown names open the Application log, as on Windows.
+    let application = !["system", "security", "setup"].contains(&source.to_ascii_lowercase().as_str());
+    let mut next = NEXT.lock().unwrap();
+    let h = *next;
+    *next += 4;
+    READERS.lock().unwrap().insert(h, (application, None));
+    h
+}
+
+extern "win64" fn OpenEventLogW(server: *const u16, source: *const u16) -> u64 {
+    // SAFETY: NULL or NUL-terminated strings.
+    unsafe { open_log(path::wide_to_string(server), path::wide_to_string(source)) }
+}
+
+extern "win64" fn OpenEventLogA(server: *const u8, source: *const u8) -> u64 {
+    // SAFETY: NULL or NUL-terminated strings.
+    unsafe { open_log(path::ansi_to_string(server), path::ansi_to_string(source)) }
+}
+
+extern "win64" fn CloseEventLog(h: u64) -> i32 {
+    match READERS.lock().unwrap().remove(&h) {
+        Some(_) => 1,
+        None => fail(ERROR_INVALID_HANDLE, 0),
+    }
+}
+
+const EVENTLOG_SEQUENTIAL_READ: u32 = 1;
+const EVENTLOG_SEEK_READ: u32 = 2;
+const EVENTLOG_FORWARDS_READ: u32 = 4;
+const EVENTLOG_BACKWARDS_READ: u32 = 8;
+const ERROR_HANDLE_EOF: u32 = 38;
+
+/// EVENTLOGRECORD: the 56-byte header, source and computer names, the
+/// strings, no SID or data, and the length again at the end.
+fn record_bytes(number: u32, r: &Record) -> Vec<u8> {
+    let wide = |s: &str| -> Vec<u8> { s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect() };
+    let mut names = wide(&r.source);
+    names.extend(wide(&crate::accounts::computer_name()));
+    while names.len() % 4 != 0 {
+        names.push(0);
+    }
+    let strings: Vec<u8> = r.strings.iter().flat_map(|s| wide(s)).collect();
+    let string_offset = 56 + names.len();
+    let mut total = string_offset + strings.len() + 4;
+    total = total.next_multiple_of(4);
+    let mut b = Vec::with_capacity(total);
+    for v in [total as u32, 0x654c_664c, number, r.time, r.time, r.id] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [r.kind, r.strings.len() as u16, r.category, 0] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    // ClosingRecordNumber, StringOffset, UserSidLength, UserSidOffset,
+    // DataLength, DataOffset.
+    let data_offset = (string_offset + strings.len()) as u32;
+    for v in [0, string_offset as u32, 0, 0, 0, data_offset] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b.extend_from_slice(&names);
+    b.extend_from_slice(&strings);
+    b.resize(total - 4, 0);
+    b.extend_from_slice(&(total as u32).to_le_bytes());
+    b
+}
+
+/// ReadEventLogW: whole records into the buffer, sequentially or from a
+/// record number, forwards or backwards. ERROR_HANDLE_EOF past the last;
+/// a buffer too small for the next record reports the size it needs.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn ReadEventLogW(h: u64, flags: u32, offset: u32, buf: *mut u8, size: u32, read: *mut u32, needed: *mut u32) -> i32 {
+    let Some((application, pos)) = READERS.lock().unwrap().get(&h).copied() else { return fail(ERROR_INVALID_HANDLE, 0) };
+    let forwards = flags & EVENTLOG_FORWARDS_READ != 0;
+    let backwards = flags & EVENTLOG_BACKWARDS_READ != 0;
+    let seek = flags & EVENTLOG_SEEK_READ != 0;
+    if forwards == backwards || seek == (flags & EVENTLOG_SEQUENTIAL_READ != 0) || buf.is_null() || read.is_null() || needed.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let log = LOG.lock().unwrap();
+    let count = if application { log.len() as u32 } else { 0 };
+    let mut next = if seek { offset } else { pos.unwrap_or(if forwards { 1 } else { count }) };
+    let mut out = Vec::new();
+    while (1..=count).contains(&next) {
+        let r = record_bytes(next, &log[next as usize - 1]);
+        if out.len() + r.len() > size as usize {
+            if out.is_empty() {
+                // SAFETY: the caller's out values.
+                unsafe {
+                    *read = 0;
+                    *needed = r.len() as u32;
+                }
+                return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+            }
+            break;
+        }
+        out.extend_from_slice(&r);
+        next = if forwards { next + 1 } else { next - 1 };
+    }
+    drop(log);
+    READERS.lock().unwrap().insert(h, (application, Some(next)));
+    if out.is_empty() {
+        return fail(ERROR_HANDLE_EOF, 0);
+    }
+    // SAFETY: the caller's buffer of `size` bytes and out values.
+    unsafe {
+        core::ptr::copy_nonoverlapping(out.as_ptr(), buf, out.len());
+        *read = out.len() as u32;
+        *needed = 0;
+    }
     1
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![RegisterEventSourceW, DeregisterEventSource, ReportEventW]
+    export_table![RegisterEventSourceW, DeregisterEventSource, ReportEventW, OpenEventLogW, OpenEventLogA, CloseEventLog, ReadEventLogW]
 }

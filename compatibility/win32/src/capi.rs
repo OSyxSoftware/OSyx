@@ -378,8 +378,25 @@ impl Sha1 {
     }
 }
 
+/// CryptGenRandom: bytes from the kernel's random number generator.
+extern "win64" fn CryptGenRandom(prov: u64, len: u32, buf: *mut u8) -> i32 {
+    if !CONTEXTS.lock().unwrap().contains_key(&prov) {
+        return fail(crate::error::ERROR_INVALID_HANDLE, 0);
+    }
+    if len == 0 {
+        return 1;
+    }
+    if buf.is_null() {
+        return fail(crate::error::ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's buffer of `len` bytes.
+    let out = unsafe { core::slice::from_raw_parts_mut(buf, len as usize) };
+    if crate::ucrt::entropy(out) { 1 } else { fail(0x8009_0020, 0) } // NTE_FAIL
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        CryptGenRandom,
         CryptAcquireContextW,
         CryptReleaseContext,
         CryptCreateHash,
