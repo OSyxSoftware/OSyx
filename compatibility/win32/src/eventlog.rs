@@ -38,10 +38,16 @@ struct Record {
 struct Log {
     records: alloc::collections::VecDeque<Record>,
     first: u32,
+    /// Binary data bytes the kept records hold.
+    data_bytes: usize,
 }
 
-static LOG: Mutex<Log> = Mutex::new(Log { records: alloc::collections::VecDeque::new(), first: 1 });
+static LOG: Mutex<Log> = Mutex::new(Log { records: alloc::collections::VecDeque::new(), first: 1, data_bytes: 0 });
 const LOG_LIMIT: usize = 4096;
+/// Binary data per event (Windows' records hold at most 64 KiB) and in all
+/// kept records together.
+const DATA_LIMIT: usize = 0xFF00;
+const DATA_BUDGET: usize = 16 << 20;
 
 /// Open logs: (is the Application log, next record to read forwards, or
 /// backwards when reading back).
@@ -81,7 +87,7 @@ pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: 
         0x10 => "audit-failure",
         _ => return fail(ERROR_INVALID_PARAMETER, 0),
     };
-    if (count != 0 && strings.is_null()) || (size != 0 && data.is_null()) {
+    if (count != 0 && strings.is_null()) || (size != 0 && data.is_null()) || size as usize > DATA_LIMIT {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's `size` bytes of binary data.
@@ -94,10 +100,14 @@ pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: 
     os_std::eprintln!("[event] {source} {kind} {}: {}", id & 0xffff, text.join(" | "));
     let time = (os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0) / 1_000_000_000) as u32;
     let mut log = LOG.lock().unwrap();
-    if log.records.len() == LOG_LIMIT {
-        log.records.pop_front();
+    // The oldest records make room, by count and by data size.
+    while log.records.len() == LOG_LIMIT || (!log.records.is_empty() && log.data_bytes + data.len() > DATA_BUDGET) {
+        if let Some(old) = log.records.pop_front() {
+            log.data_bytes -= old.data.len();
+        }
         log.first += 1;
     }
+    log.data_bytes += data.len();
     log.records.push_back(Record { source, kind: code, id, category, strings: text, data, time });
     1
 }

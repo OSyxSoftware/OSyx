@@ -338,18 +338,26 @@ extern "win64" fn ExtTextOutA(dc: u64, x: i32, y: i32, flags: u32, rect: *const 
     }
     // SAFETY: the caller's `n` bytes and optional advances.
     let bytes = if n == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(text, n as usize) } };
-    let s = String::from_utf8_lossy(bytes);
-    let units: Vec<u16> = s.encode_utf16().collect();
+    // Each character with the bytes it came from: an invalid sequence is
+    // one U+FFFD covering its bytes, as from_utf8_lossy makes it.
+    let mut chars: Vec<(char, usize)> = Vec::new();
+    for chunk in bytes.utf8_chunks() {
+        chars.extend(chunk.valid().chars().map(|c| (c, c.len_utf8())));
+        if !chunk.invalid().is_empty() {
+            chars.push(('\u{fffd}', chunk.invalid().len()));
+        }
+    }
+    let units: Vec<u16> = chars.iter().flat_map(|&(c, _)| c.encode_utf16(&mut [0; 2]).to_vec()).collect();
     let advances: Option<Vec<i32>> = (!dx.is_null() && flags & 0x10 == 0).then(|| {
         // SAFETY: as above: one advance per byte (two with ETO_PDY).
         let pdy = flags & 0x2000 != 0;
         let src = unsafe { core::slice::from_raw_parts(dx, n as usize * if pdy { 2 } else { 1 }) };
         let mut out = Vec::new();
         let mut at = 0;
-        for c in s.chars() {
-            let len = if s.len() == bytes.len() { c.len_utf8() } else { 1 };
+        // A character's advance is the sum of its bytes' advances.
+        for &(c, len) in &chars {
             let (mut ax, mut ay) = (0, 0);
-            for k in at..(at + len).min(n as usize) {
+            for k in at..at + len {
                 if pdy {
                     ax += src[2 * k];
                     ay += src[2 * k + 1];
@@ -358,7 +366,7 @@ extern "win64" fn ExtTextOutA(dc: u64, x: i32, y: i32, flags: u32, rect: *const 
                 }
             }
             at += len;
-            for (i, _) in c.encode_utf16(&mut [0; 2]).iter().enumerate() {
+            for i in 0..c.len_utf16() {
                 let (vx, vy) = if i == 0 { (ax, ay) } else { (0, 0) };
                 out.push(vx);
                 if pdy {
