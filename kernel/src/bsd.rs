@@ -446,6 +446,7 @@ fn wifi_housekeeping(last_conf: &mut Option<(i64, u64)>, last_reconnect: &mut Op
         if let Some((ssid, pass)) = target {
             memory.rejected.retain(|s| *s != ssid);
             wifi_join(&nic, &ssid, &pass, watch, memory, "reconnect requested");
+            crate::net::renew_wireless();
         } else {
             watch.last_error = Some(String::from("No saved network to reconnect"));
         }

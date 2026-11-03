@@ -43,6 +43,10 @@ trait NetDevice: Send + Sync {
     /// Called before the network thread sleeps; true if received frames
     /// are already waiting (see `VirtioNet::arm`).
     fn arm(&self) -> bool { false }
+    /// Brings a wedged device back (a reconnect, or a transmit queue that
+    /// stopped moving). Drivers without a full reset restart what their
+    /// `recover` restarts.
+    fn reset(&self) -> bool { self.recover() }
 }
 
 macro_rules! impl_net_device {
@@ -67,6 +71,7 @@ impl NetDevice for VirtioNet {
     fn recover(&self) -> bool { self.recover() }
     fn description(&self) -> String { alloc::format!("{} (virtio-net at {})", self.name, self.location) }
     fn arm(&self) -> bool { self.arm() }
+    fn reset(&self) -> bool { self.reset() }
 }
 impl_net_device!(E1000, "e1000");
 impl_net_device!(Rtl8168, "rtl8168");
@@ -92,6 +97,8 @@ static SOCKETS: IrqSpinLock<Vec<Weak<SocketObj>>> = IrqSpinLock::new(Vec::new())
 /// Stack sockets whose handles were closed: (id, reset).
 static CLOSING: IrqSpinLock<Vec<(u32, bool)>> = IrqSpinLock::new(Vec::new());
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// A reconnect asked for the devices to be reset (`sys_config`).
+static RESET_DEVICES: AtomicBool = AtomicBool::new(false);
 
 const READABLE: u32 = osyx_abi::ipc::WAIT_READABLE;
 const WRITABLE: u32 = osyx_abi::ipc::WAIT_WRITABLE;
@@ -282,6 +289,10 @@ pub fn debug_lines() -> Vec<String> {
 
 fn net_thread(_: u64, _: u64) {
     let mut last_health = 0;
+    // Per device at the last health check: (frames sent, transmit-ring-full
+    // events). Frames that keep finding the ring full while none go out
+    // mean the device stopped sending; it is reset.
+    let mut tx_seen: Vec<(u64, u64)> = Vec::new();
     loop {
         let (deadline_ms, polled) = {
             let g = STACK.lock();
@@ -314,9 +325,22 @@ fn net_thread(_: u64, _: u64) {
         KICK.store(false, Ordering::Release);
         let mut rx: Vec<(usize, Vec<Vec<u8>>)> = Vec::new();
         let check_health = now_ms() >= last_health + 1000;
-        for (iface, dev) in &devs {
-            if check_health {
+        let reset_all = RESET_DEVICES.swap(false, Ordering::AcqRel);
+        tx_seen.resize(devs.len(), (0, 0));
+        for (n, (iface, dev)) in devs.iter().enumerate() {
+            if reset_all {
+                if !dev.reset() {
+                    kprintln!("net: {}: reset on reconnect did not complete", dev.description());
+                }
+            } else if check_health {
                 dev.recover();
+                let c = dev.counters();
+                let (sent, full) = tx_seen[n];
+                if c.tx_full > full && c.tx_frames == sent {
+                    kprintln!("net: {}: transmit queue stalled ({} frames refused, none sent), resetting", dev.description(), c.tx_full - full);
+                    dev.reset();
+                }
+                tx_seen[n] = (c.tx_frames, c.tx_full);
             }
             let mut frames = Vec::new();
             dev.receive(&mut frames);
@@ -1180,8 +1204,27 @@ pub fn sys_config(args: u64) -> Result<u64, Errno> {
         Ok(())
     });
     r.ok_or(Errno::NotSupported)?.map_err(errno)?;
+    // A reconnect starts the devices afresh too: a NIC that wedged under
+    // load is what the user is trying to get out of.
+    if c.method as u8 != abi::CONFIG_DOWN {
+        RESET_DEVICES.store(true, Ordering::Release);
+    }
     wake();
     Ok(0)
+}
+
+/// After a Wi-Fi rejoin: the wireless interfaces that use DHCP ask for a
+/// lease again. A quick rejoin may never show the link as down, so the old
+/// lease, routes and ARP entries (possibly of another network) would stay.
+pub fn renew_wireless() {
+    let wireless: Vec<usize> = DEVICES.lock().iter().filter(|(_, d)| d.is_wireless()).map(|(i, _)| *i).collect();
+    with_stack(|s| {
+        for i in wireless {
+            if s.interfaces().get(i).is_some_and(|f| f.method == osyx_net::stack::ConfigMethod::Dhcp) {
+                let _ = s.enable_dhcp(i);
+            }
+        }
+    });
 }
 
 /// Summary for the boot log once init finished.

@@ -310,6 +310,17 @@ impl VirtioNet {
             return false;
         }
         crate::kprintln!("virtio-net {}: device needs reset (status {:#x}), reinitialising", self.name, self.transport.status());
+        self.reinit()
+    }
+
+    /// Resets the device and rebuilds its queues (a reconnect, or a
+    /// transmit queue that stopped moving). True if it came back.
+    pub fn reset(&self) -> bool {
+        crate::kprintln!("virtio-net {}: resetting the device", self.name);
+        self.reinit()
+    }
+
+    fn reinit(&self) -> bool {
         let entry = self.vector.map(|_| 0u16);
         let r = self.transport.negotiate(self.features).and_then(|_| {
             if entry.is_some() && self.features & F_STATUS != 0 {
