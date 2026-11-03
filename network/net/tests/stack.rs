@@ -437,8 +437,9 @@ fn tcp_reset_aborts_the_peer() {
 fn tcp_flow_control_stops_and_resumes_on_a_full_window() {
     let mut n = Net::new();
     let (c, s) = connect(&mut n, 6100);
-    // The receiver does not read: the sender fills the window and stalls.
-    let data = pattern(osyx_net::tcp::RECV_BUFFER + 100_000, 6);
+    // The receiver does not read: the sender fills the window and its own
+    // buffer, and stalls.
+    let data = pattern(osyx_net::tcp::RECV_BUFFER + osyx_net::tcp::SEND_BUFFER + 100_000, 6);
     let mut sent = 0;
     n.run_until(5000, |n| {
         if let Ok(k) = n.a.tcp_send(c, &data[sent..]) {
@@ -450,7 +451,11 @@ fn tcp_flow_control_stops_and_resumes_on_a_full_window() {
     assert!(receiver_queue.is_some());
     assert!(sent < data.len(), "the sender is blocked by the window");
     let rx = n.b.sockets().into_iter().find(|i| i.id == s).unwrap().rx_queue;
-    assert_eq!(rx, osyx_net::tcp::RECV_BUFFER, "the receive buffer is full, not overrun");
+    // Full to within one unit of the scaled window field (the sender sees
+    // less as no room), never overrun. Silly window avoidance keeps the
+    // sender from trickling the last bytes in one by one.
+    assert!(rx <= osyx_net::tcp::RECV_BUFFER, "the receive buffer is not overrun");
+    assert!(osyx_net::tcp::RECV_BUFFER - rx < 1 << osyx_net::tcp::WINDOW_SCALE, "the receive buffer is full: {rx}");
     // Reading reopens the window and the rest flows.
     let rest = transfer(&mut n, true, c, s, &data[sent..], 60_000);
     let _ = rest;
@@ -942,4 +947,153 @@ fn udp_peek_does_not_consume_the_pending_error() {
     // ICMP unreachable stays pending until a real recv consumes it.
     assert_eq!(n.a.udp_peek_from(client, &mut buf), Err(NetError::PortUnreachable));
     assert_eq!(n.a.udp_recv_from(client, &mut buf), Err(NetError::PortUnreachable));
+}
+
+/// TCP segments without payload (pure ACKs) among frames a stack sent.
+fn pure_acks(frames: &[(usize, Vec<u8>)]) -> usize {
+    frames
+        .iter()
+        .filter(|(_, f)| {
+            if f.len() < 54 || f[12..14] != [8, 0] || f[23] != 6 {
+                return false;
+            }
+            let ihl = (f[14] & 15) as usize * 4;
+            let tcp = &f[14 + ihl..];
+            let total = u16::from_be_bytes([f[16], f[17]]) as usize;
+            total == ihl + (tcp[12] >> 4) as usize * 4 && tcp[13] & osyx_net::tcp::ACK != 0 && tcp[13] & 0x07 == 0
+        })
+        .count()
+}
+
+#[test]
+fn a_burst_of_segments_is_acknowledged_every_second_segment() {
+    let mut n = Net::new();
+    let (c, s) = connect(&mut n, 6200);
+    n.run(20);
+    // Ten full segments (the initial window) leave A at once.
+    let data = pattern(10 * 1460, 4);
+    assert_eq!(n.a.tcp_send(c, &data), Ok(data.len()));
+    let burst = n.a.take_tx();
+    assert_eq!(burst.len(), 10);
+    let _ = n.b.take_tx();
+    n.b.receive_burst(1, burst.iter().map(|(_, f)| f.as_slice()));
+    let acks = n.b.take_tx();
+    assert_eq!(pure_acks(&acks), 5, "one ACK per two full segments, not one per segment");
+    let mut got = vec![0u8; data.len()];
+    assert_eq!(n.b.tcp_recv(s, &mut got), Ok(data.len()));
+    assert_eq!(got, data);
+}
+
+#[test]
+fn the_sender_waits_for_a_full_segment_instead_of_filling_the_window_bytewise() {
+    use osyx_net::tcp::{Segment, Tcb, ACK, SYN};
+    let local = Endpoint::new(A_IP, 40000);
+    let remote = Endpoint::new(B_IP, 80);
+    let mut t = Tcb::connect(local, remote, 1000, 1460);
+    assert_eq!(t.output(0).len(), 1); // SYN
+    // A peer without window scaling: 65535 is not a multiple of the MSS.
+    let seg = |ack: u32, flags: u8| Segment {
+        src_port: 80,
+        dst_port: 40000,
+        // The SYN takes sequence number 5000.
+        seq: if flags & SYN != 0 { 5000 } else { 5001 },
+        ack,
+        flags,
+        window: 65535,
+        mss: Some(1460),
+        ws: None,
+        payload: &[],
+    };
+    t.input(&seg(1001, SYN | ACK), 1);
+    let data = vec![7u8; 1 << 20];
+    let mut queued = t.send(&data).unwrap();
+    for round in 0..12 {
+        let out: Vec<_> = t.output(2 + round).into_iter().filter(|s| !s.payload.is_empty()).collect();
+        assert!(!out.is_empty(), "round {round} sent nothing");
+        for s in &out {
+            assert_eq!(s.payload.len(), 1460, "round {round}: a {}-byte segment", s.payload.len());
+        }
+        // Every segment is acknowledged (slow start doubles the window
+        // until the peer's 65535 bytes limit it); the application keeps
+        // the buffer full.
+        for s in &out {
+            t.input(&seg(s.seq.wrapping_add(s.payload.len() as u32), ACK), 3 + round);
+        }
+        queued += t.send(&data[queued..]).unwrap_or(0);
+    }
+}
+
+#[test]
+fn receiving_in_place_keeps_what_the_caller_could_not_take() {
+    let mut n = Net::new();
+    let (c, s) = connect(&mut n, 6300);
+    let data = pattern(3000, 5);
+    assert_eq!(n.a.tcp_send(c, &data), Ok(data.len()));
+    assert!(n.run_until(1000, |n| n.b.recv_available(s) == Ok(data.len())));
+    // A sink that faults takes nothing; the data stays queued.
+    assert_eq!(n.b.tcp_recv_with(s, 4096, |_| false), Err(NetError::BadAddress));
+    let mut got = Vec::new();
+    assert_eq!(n.b.tcp_recv_with(s, 1000, |part| { got.extend_from_slice(part); true }), Ok(1000));
+    assert_eq!(n.b.tcp_recv_with(s, 4096, |part| { got.extend_from_slice(part); true }), Ok(2000));
+    assert_eq!(got, data);
+
+    let ua = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let ub = n.b.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 6301)).unwrap();
+    n.a.udp_send_to(ua, Some(Endpoint::new(B_IP, 6301)), b"one datagram").unwrap();
+    assert!(n.run_until(1000, |n| n.b.recv_available(ub) == Ok(12)));
+    assert_eq!(n.b.udp_recv_with(ub, 64, |_| false), Err(NetError::BadAddress));
+    let mut d = Vec::new();
+    let (_, k, len) = n.b.udp_recv_with(ub, 3, |p| { d.extend_from_slice(p); true }).unwrap();
+    assert_eq!((k, len, &d[..]), (3, 12, &b"one"[..]));
+    assert_eq!(n.b.udp_recv_with(ub, 64, |_| true), Err(NetError::WouldBlock));
+}
+
+#[test]
+fn a_closed_connection_whose_peer_never_closes_is_freed() {
+    let mut n = Net::new();
+    let (c, _s) = connect(&mut n, 6400);
+    // A closes; B keeps its end open and never sends a FIN.
+    n.a.close(c, false);
+    assert!(n.run_until(5_000, |n| n.a.sockets().iter().any(|s| s.id == c && s.state == "FIN-WAIT-2")));
+    assert!(
+        n.run_until(osyx_net::tcp::ORPHAN_FIN_WAIT_MS + 5_000, |n| n.a.sockets().iter().all(|s| s.id != c)),
+        "the orphan left FIN-WAIT-2: {:?}",
+        n.a.sockets().iter().map(|s| s.state).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_full_socket_table_gives_closed_connections_slots_to_new_sockets() {
+    use osyx_net::stack::MAX_SOCKETS;
+    let mut n = Net::new();
+    let l = n.b.tcp_listen(Endpoint::new(Ipv4Addr::UNSPECIFIED, 6500), 32).unwrap();
+    // A few connections A closed but B never closes (FIN-WAIT-2 on A).
+    for _ in 0..8 {
+        let c = n.a.tcp_connect(None, Endpoint::new(B_IP, 6500)).unwrap();
+        n.run(5);
+        while n.b.tcp_accept(l).is_ok() {}
+        n.a.close(c, false);
+    }
+    n.run(50);
+    // Programs hold every other slot.
+    while n.a.socket_count() < MAX_SOCKETS {
+        n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    }
+    // New sockets still work: the closed connections give up their slots.
+    for _ in 0..8 {
+        let u = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0));
+        assert!(u.is_ok(), "{u:?}");
+    }
+    assert_eq!(n.a.stats.sockets_reclaimed, 8);
+    // Sockets programs hold are never taken.
+    assert_eq!(n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)), Err(NetError::NoBuffers));
+}
+
+#[test]
+fn a_new_address_fails_the_connections_of_the_old_one() {
+    let mut n = Net::new();
+    let (c, _s) = connect(&mut n, 6600);
+    n.a.configure_static(1, Ipv4Addr::new(10, 0, 0, 9), 24, None).unwrap();
+    let mut buf = [0u8; 8];
+    assert_eq!(n.a.tcp_recv(c, &mut buf), Err(NetError::ConnReset));
 }

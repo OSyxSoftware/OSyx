@@ -6,6 +6,12 @@
 //! (milliseconds); frames to transmit accumulate in an outbox that the
 //! caller drains with [`Stack::take_tx`] after releasing the lock, so no
 //! device I/O ever happens inside the stack.
+//!
+//! Hot paths: a TCP segment or UDP datagram is built once, behind room for
+//! the IP and Ethernet headers ([`HEADROOM`]), which are then written in
+//! place; [`Stack::receive_burst`] handles the frames of one interrupt
+//! together and sends the TCP output (ACKs, window updates) once at the
+//! end, except for acknowledgements that cannot wait (`Tcb::ack_urgent`).
 
 use crate::arp::{self, Lookup};
 use crate::dhcp;
@@ -51,6 +57,8 @@ pub enum NetError {
     /// DNS: no server, a server failure or an unusable answer.
     DnsFailure,
     BadSocket,
+    /// The caller's buffer could not take the data (`*_recv_with`).
+    BadAddress,
 }
 
 impl NetError {
@@ -75,6 +83,7 @@ impl NetError {
             NetError::NameNotFound => "name not found",
             NetError::DnsFailure => "DNS failure",
             NetError::BadSocket => "bad socket",
+            NetError::BadAddress => "bad address",
         }
     }
 }
@@ -91,15 +100,21 @@ fn tcp_error(e: TcpError) -> NetError {
 }
 
 /// Limits.
-pub const MAX_SOCKETS: usize = 256;
-pub const UDP_QUEUE_DATAGRAMS: usize = 64;
-pub const UDP_QUEUE_BYTES: usize = 256 * 1024;
+/// Sockets at most. When the table is full, connections the applications
+/// already closed (TIME-WAIT first) give up their slots to new sockets
+/// ([`Stack::reclaim_slot`]), so lingering connections cannot lock every
+/// program out of the network.
+pub const MAX_SOCKETS: usize = 1024;
+pub const UDP_QUEUE_DATAGRAMS: usize = 256;
+pub const UDP_QUEUE_BYTES: usize = 512 * 1024;
 pub const ICMP_QUEUE: usize = 32;
 pub const MAX_BACKLOG: usize = 32;
 pub const MAX_TX_QUEUE: usize = 1024;
 pub const MAX_UDP_PAYLOAD: usize = ipv4::MAX_DATAGRAM - ipv4::MIN_HEADER - udp::HEADER_LEN;
 const EPHEMERAL: core::ops::RangeInclusive<u16> = 49152..=65535;
 const LOOPBACK_MTU: usize = 16384;
+/// Room in front of a transport segment for its IP and Ethernet headers.
+pub const HEADROOM: usize = ethernet::HEADER_LEN + ipv4::MIN_HEADER;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IfStats {
@@ -242,6 +257,8 @@ pub struct Stats {
     pub frames_bad: u64,
     pub dns_queries: u64,
     pub dns_rejected: u64,
+    /// Slots of closed connections given to new sockets (table full).
+    pub sockets_reclaimed: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,7 +309,12 @@ pub struct Stack {
     secret: u64,
     now: u64,
     tx: VecDeque<(usize, Vec<u8>)>,
-    loopback: VecDeque<Vec<u8>>,
+    /// IP packets to ourselves: (buffer, offset of the packet in it).
+    loopback: VecDeque<(Vec<u8>, usize)>,
+    /// Inside `receive_burst`: TCP output waits for the end of the burst.
+    in_burst: bool,
+    /// The connection the last TCP segment belonged to (checked first).
+    tcp_hint: Option<SocketId>,
     reasm: Reassembler,
     pub stats: Stats,
     changed: bool,
@@ -326,6 +348,8 @@ impl Stack {
             now: 0,
             tx: VecDeque::new(),
             loopback: VecDeque::new(),
+            in_burst: false,
+            tcp_hint: None,
             reasm: Reassembler::new(),
             stats: Stats::default(),
             changed: false,
@@ -471,6 +495,19 @@ impl Stack {
 
     fn set_address(&mut self, iface: usize, addr: Option<(Ipv4Addr, u8)>, gateway: Option<Ipv4Addr>, origin: RouteOrigin) {
         self.routes.retain(|r| r.iface != iface);
+        let old = self.ifaces[iface].addr.map(|a| a.0);
+        if old.is_some() && old != addr.map(|a| a.0) {
+            // Connections on an address the interface no longer has are
+            // dead: fail them now rather than after minutes of retries.
+            let old = old.unwrap_or_default();
+            for s in self.sockets.values_mut() {
+                if let Socket::Tcp(t) = s {
+                    if t.tcb.local.addr == old {
+                        t.tcb.lost();
+                    }
+                }
+            }
+        }
         let i = &mut self.ifaces[iface];
         i.addr = addr;
         i.arp.flush();
@@ -517,6 +554,9 @@ impl Stack {
             return Err(NetError::InvalidArgument);
         }
         let seed = self.rand() as u32;
+        // A new lease may come from another network: forget old answers.
+        self.dns_cache.flush();
+        self.reasm = Reassembler::new();
         let i = &mut self.ifaces[iface];
         i.dhcp = Some(dhcp::Client::new(i.mac, seed, &self.hostname));
         i.method = ConfigMethod::Dhcp;
@@ -627,7 +667,7 @@ impl Stack {
                     let lo = &mut self.ifaces[0].stats;
                     lo.tx_packets += 1;
                     lo.tx_bytes += p.len() as u64;
-                    self.loopback.push_back(p);
+                    self.loopback.push_back((p, 0));
                 }
             }
             return Ok(());
@@ -662,6 +702,47 @@ impl Stack {
         self.ident = self.ident.wrapping_add(1);
         let packets = ipv4::build(src, dst, proto, ipv4::DEFAULT_TTL, self.ident, payload, mtu, df).ok_or(NetError::MessageTooLong)?;
         self.send_ip_packets(dst, packets, None)
+    }
+
+    /// Sends a transport segment that was built behind [`HEADROOM`] bytes:
+    /// the IP header and, once the next hop's address is known, the
+    /// Ethernet header are written in front of it, so the segment is not
+    /// copied again. Segments that need fragments, broadcasts and
+    /// unresolved next hops take the general path.
+    fn send_ip_in_place(&mut self, src: Ipv4Addr, dst: Ipv4Addr, proto: u8, mut frame: Vec<u8>) -> Result<(), NetError> {
+        let len = frame.len() - HEADROOM;
+        let local = self.is_local(dst);
+        let route = if local { None } else { Some(self.route(dst).ok_or(NetError::NoRoute)?) };
+        let mtu = route.map_or(LOOPBACK_MTU, |(i, _)| self.ifaces[i].mtu);
+        if len + ipv4::MIN_HEADER > mtu {
+            return self.send_ip(src, dst, proto, &frame[HEADROOM..], false);
+        }
+        self.ident = self.ident.wrapping_add(1);
+        ipv4::write_header(&mut frame[ethernet::HEADER_LEN..HEADROOM], src, dst, proto, ipv4::DEFAULT_TTL, self.ident, len, 0, false, false);
+        self.stats.ip_out += 1;
+        let Some((iface, hop)) = route else {
+            if self.loopback.len() < MAX_TX_QUEUE {
+                let lo = &mut self.ifaces[0].stats;
+                lo.tx_packets += 1;
+                lo.tx_bytes += (frame.len() - ethernet::HEADER_LEN) as u64;
+                self.loopback.push_back((frame, ethernet::HEADER_LEN));
+            }
+            return Ok(());
+        };
+        let now = self.now;
+        let i = &self.ifaces[iface];
+        let directed = i.addr.is_some_and(|(a, p)| hop.is_subnet_broadcast(a, p));
+        if !hop.is_broadcast() && !directed {
+            if let Some(mac) = i.arp.get(hop, now) {
+                let own = i.mac;
+                ethernet::write_header(&mut frame, mac, own, ETHERTYPE_IPV4);
+                self.push_frame(iface, frame);
+                return Ok(());
+            }
+        }
+        let packet = frame[ethernet::HEADER_LEN..].to_vec();
+        self.send_packet_on(iface, hop, packet, false);
+        Ok(())
     }
 
     /// Limited broadcast out of one interface (DHCP before configuration).
@@ -704,6 +785,25 @@ impl Stack {
 
     /// Processes a frame received on `iface`.
     pub fn receive(&mut self, iface: usize, frame: &[u8]) {
+        self.receive_frame(iface, frame);
+        self.flush();
+    }
+
+    /// Processes frames received on `iface` together (what one interrupt
+    /// brought in). TCP output is sent once at the end, so a burst of
+    /// segments is acknowledged by one ACK, except where a connection must
+    /// acknowledge at once (every second full segment, data out of order,
+    /// FIN: `Tcb::ack_urgent`).
+    pub fn receive_burst<'a>(&mut self, iface: usize, frames: impl IntoIterator<Item = &'a [u8]>) {
+        self.in_burst = true;
+        for f in frames {
+            self.receive_frame(iface, f);
+        }
+        self.in_burst = false;
+        self.flush();
+    }
+
+    fn receive_frame(&mut self, iface: usize, frame: &[u8]) {
         let Some(i) = self.ifaces.get_mut(iface) else { return };
         i.stats.rx_packets += 1;
         i.stats.rx_bytes += frame.len() as u64;
@@ -724,7 +824,6 @@ impl Stack {
             ETHERTYPE_IPV4 => self.receive_ipv4(iface, payload),
             _ => self.ifaces[iface].stats.rx_dropped += 1,
         }
-        self.flush();
     }
 
     fn receive_arp(&mut self, iface: usize, payload: &[u8]) {
@@ -978,14 +1077,22 @@ impl Stack {
         let local = Endpoint::new(h.dst, seg.dst_port);
         let remote = Endpoint::new(h.src, seg.src_port);
         let now = self.now;
-        let conn = self.sockets.iter_mut().find_map(|(id, s)| match s {
-            Socket::Tcp(t) if t.tcb.local == local && t.tcb.remote == remote && !t.tcb.finished() => Some((*id, t)),
-            _ => None,
-        });
-        if let Some((_, t)) = conn {
+        let matches = |s: &Socket| matches!(s, Socket::Tcp(t) if t.tcb.local == local && t.tcb.remote == remote && !t.tcb.finished());
+        // Segments come in runs for one connection: try the last one first.
+        let conn = self
+            .tcp_hint
+            .filter(|id| self.sockets.get(id).is_some_and(matches))
+            .or_else(|| self.sockets.iter().find_map(|(id, s)| matches(s).then_some(*id)));
+        if let Some(id) = conn {
+            let Some(Socket::Tcp(t)) = self.sockets.get_mut(&id) else { return };
             t.tcb.input(&seg, now);
             if t.tcb.changed {
                 self.changed = true;
+            }
+            let urgent = t.tcb.ack_urgent();
+            self.tcp_hint = Some(id);
+            if self.in_burst && urgent {
+                self.output_tcp(id);
             }
             return;
         }
@@ -998,7 +1105,7 @@ impl Stack {
         });
         if let (Some((lid, backlog)), true) = (listener, seg.has(tcp::SYN) && !seg.has(tcp::ACK) && !seg.has(tcp::RST)) {
             let queued = self.sockets.values().filter(|s| matches!(s, Socket::Tcp(t) if t.parent == Some(lid))).count();
-            if queued >= backlog || self.sockets.len() >= MAX_SOCKETS {
+            if queued >= backlog || (self.sockets.len() >= MAX_SOCKETS && !self.reclaim_slot()) {
                 return; // the peer retransmits its SYN later
             }
             let iss = self.isn(local, remote);
@@ -1105,7 +1212,10 @@ impl Stack {
         self.reasm.expire(now);
         for s in self.sockets.values_mut() {
             if let Socket::Tcp(t) = s {
+                // Timeouts retransmit here, not in `output`.
+                let before = t.tcb.stats.retransmits;
                 t.tcb.poll(now);
+                self.stats.tcp_retransmits += t.tcb.stats.retransmits - before;
             }
         }
         self.dns_poll();
@@ -1139,38 +1249,26 @@ impl Stack {
     fn flush(&mut self) {
         for _ in 0..4 {
             let mut rounds = 0;
-            while let Some(p) = self.loopback.pop_front() {
+            while let Some((p, off)) = self.loopback.pop_front() {
                 let lo = &mut self.ifaces[0].stats;
                 lo.rx_packets += 1;
-                lo.rx_bytes += p.len() as u64;
-                self.receive_ipv4(0, &p);
+                lo.rx_bytes += (p.len() - off) as u64;
+                self.receive_ipv4(0, &p[off..]);
                 rounds += 1;
                 if rounds > 256 {
                     break;
                 }
             }
             let now = self.now;
-            let mut out: Vec<(Endpoint, Endpoint, tcp::OutSegment)> = Vec::new();
+            let mut out: Vec<(Ipv4Addr, Ipv4Addr, Vec<u8>)> = Vec::new();
             for s in self.sockets.values_mut() {
                 if let Socket::Tcp(t) = s {
-                    let before = t.tcb.stats.retransmits + t.tcb.stats.fast_retransmits;
-                    for seg in t.tcb.output(now) {
-                        out.push((t.tcb.local, t.tcb.remote, seg));
-                    }
-                    self.stats.tcp_retransmits += t.tcb.stats.retransmits + t.tcb.stats.fast_retransmits - before;
-                    if t.tcb.changed {
-                        t.tcb.changed = false;
-                        self.changed = true;
-                    }
+                    let changed = Self::collect_output(&mut t.tcb, now, &mut out, &mut self.stats);
+                    self.changed |= changed;
                 }
             }
-            if out.is_empty() && self.loopback.is_empty() {
-                break;
-            }
-            for (l, r, seg) in out {
-                self.stats.tcp_out += 1;
-                let bytes = seg.encode(l, r);
-                let _ = self.send_ip(l.addr, r.addr, PROTO_TCP, &bytes, false);
+            for (src, dst, frame) in out {
+                let _ = self.send_ip_in_place(src, dst, PROTO_TCP, frame);
             }
             if self.loopback.is_empty() {
                 break;
@@ -1178,6 +1276,32 @@ impl Stack {
         }
         self.promote_accepted();
         self.reap();
+    }
+
+    /// Encodes a connection's output into frames (behind [`HEADROOM`],
+    /// the data straight from its send buffer): (source, destination,
+    /// frame). True if its state changed.
+    fn collect_output(tcb: &mut Tcb, now: u64, out: &mut Vec<(Ipv4Addr, Ipv4Addr, Vec<u8>)>, stats: &mut Stats) -> bool {
+        let before = tcb.stats.fast_retransmits;
+        let (l, r) = (tcb.local, tcb.remote);
+        tcb.output_with(now, &mut |seg, a, b| {
+            stats.tcp_out += 1;
+            out.push((l.addr, r.addr, seg.encode_parts_with_headroom(l, r, a, b, HEADROOM)));
+        });
+        stats.tcp_retransmits += tcb.stats.fast_retransmits - before;
+        core::mem::take(&mut tcb.changed)
+    }
+
+    /// Sends what one connection has to send now.
+    fn output_tcp(&mut self, id: SocketId) {
+        let now = self.now;
+        let Some(Socket::Tcp(t)) = self.sockets.get_mut(&id) else { return };
+        let mut out = Vec::new();
+        let changed = Self::collect_output(&mut t.tcb, now, &mut out, &mut self.stats);
+        self.changed |= changed;
+        for (src, dst, frame) in out {
+            let _ = self.send_ip_in_place(src, dst, PROTO_TCP, frame);
+        }
     }
 
     fn promote_accepted(&mut self) {
@@ -1288,7 +1412,7 @@ impl Stack {
     }
 
     fn insert(&mut self, s: Socket) -> Result<SocketId, NetError> {
-        if self.sockets.len() >= MAX_SOCKETS {
+        if self.sockets.len() >= MAX_SOCKETS && !self.reclaim_slot() {
             return Err(NetError::NoBuffers);
         }
         let id = self.alloc_id();
@@ -1367,13 +1491,14 @@ impl Stack {
         } else {
             local.addr
         };
-        let dgram = udp::build(src, remote.addr, local.port, remote.port, data);
         self.stats.udp_out += 1;
         if remote.addr.is_broadcast() {
+            let dgram = udp::build(src, remote.addr, local.port, remote.port, data);
             let iface = self.ifaces.iter().position(|i| i.kind == IfaceKind::Ethernet && i.link_up).ok_or(NetError::NoRoute)?;
             self.send_broadcast(iface, src, PROTO_UDP, &dgram)?;
         } else {
-            self.send_ip(src, remote.addr, PROTO_UDP, &dgram, false)?;
+            let frame = udp::build_with_headroom(src, remote.addr, local.port, remote.port, data, HEADROOM);
+            self.send_ip_in_place(src, remote.addr, PROTO_UDP, frame)?;
         }
         self.flush();
         Ok(data.len())
@@ -1393,6 +1518,24 @@ impl Stack {
             return Err(e);
         }
         Err(NetError::WouldBlock)
+    }
+
+    /// `udp_recv_from` without an intermediate buffer: `sink` gets the
+    /// datagram (cut to `max` bytes) and returns false if it could not take
+    /// it, which leaves the datagram queued.
+    pub fn udp_recv_with(&mut self, id: SocketId, max: usize, sink: impl FnOnce(&[u8]) -> bool) -> Result<(Endpoint, usize, usize), NetError> {
+        let u = self.udp(id)?;
+        let Some((from, d)) = u.rx.front() else {
+            return Err(u.error.take().unwrap_or(NetError::WouldBlock));
+        };
+        let (from, len) = (*from, d.len());
+        let n = len.min(max);
+        if !sink(&d[..n]) {
+            return Err(NetError::BadAddress);
+        }
+        u.rx.pop_front();
+        u.rx_bytes -= len;
+        Ok((from, n, len))
     }
 
     /// The next datagram without removing it (MSG_PEEK).
@@ -1628,6 +1771,14 @@ impl Stack {
         Ok(n)
     }
 
+    /// `tcp_recv` without an intermediate buffer: `sink` takes the data in
+    /// place (see `Tcb::recv_with`); `BadAddress` if it took none.
+    pub fn tcp_recv_with(&mut self, id: SocketId, max: usize, sink: impl FnMut(&[u8]) -> bool) -> Result<usize, NetError> {
+        let n = self.tcb(id)?.recv_with(max, sink).map_err(tcp_error)?.ok_or(NetError::BadAddress)?;
+        self.flush(); // window updates
+        Ok(n)
+    }
+
     /// Received stream bytes without consuming them (MSG_PEEK).
     pub fn tcp_peek(&mut self, id: SocketId, buf: &mut [u8]) -> Result<usize, NetError> {
         self.tcb(id)?.peek(buf).map_err(tcp_error)
@@ -1688,6 +1839,7 @@ impl Stack {
                     }
                 }
                 t.released = true;
+                t.tcb.orphan();
             }
             Some(Socket::Listener(l)) => {
                 children.extend(l.ready.iter().copied());
@@ -1707,6 +1859,7 @@ impl Stack {
                 if let Some(Socket::Tcp(t)) = self.sockets.get_mut(&c) {
                     rst = t.tcb.abort().map(|s| (t.tcb.local, t.tcb.remote, s));
                     t.released = true;
+                    t.tcb.orphan();
                 }
                 if let Some((l, r, s)) = rst {
                     let bytes = s.encode(l, r);
@@ -1720,6 +1873,35 @@ impl Stack {
             let _ = self.send_ip(l.addr, r.addr, PROTO_TCP, &bytes, false);
         }
         self.flush();
+    }
+
+    /// Frees one socket slot when the table is full: the oldest connection
+    /// in TIME-WAIT that the application already closed (its only purpose
+    /// is to absorb stray segments), else the oldest other closed one
+    /// still finishing (reset, as Linux does with orphans over its limit).
+    /// False if every slot belongs to a socket an application still holds.
+    fn reclaim_slot(&mut self) -> bool {
+        let orphan = |s: &Socket, time_wait: bool| {
+            matches!(s, Socket::Tcp(t) if t.released && (t.tcb.state() == tcp::State::TimeWait) == time_wait)
+        };
+        let victim = self
+            .sockets
+            .iter()
+            .find(|(_, s)| orphan(s, true))
+            .or_else(|| self.sockets.iter().find(|(_, s)| orphan(s, false)))
+            .map(|(id, _)| *id);
+        let Some(id) = victim else { return false };
+        if let Some(Socket::Tcp(mut t)) = self.sockets.remove(&id) {
+            if t.tcb.state() != tcp::State::TimeWait {
+                if let Some(rst) = t.tcb.abort() {
+                    self.stats.tcp_resets_sent += 1;
+                    let bytes = rst.encode(t.tcb.local, t.tcb.remote);
+                    let _ = self.send_ip(t.tcb.local.addr, t.tcb.remote.addr, PROTO_TCP, &bytes, false);
+                }
+            }
+        }
+        self.stats.sockets_reclaimed += 1;
+        true
     }
 
     pub fn socket_count(&self) -> usize {

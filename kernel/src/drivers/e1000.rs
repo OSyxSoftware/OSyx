@@ -250,6 +250,9 @@ impl E1000 {
         }
         let mut r = self.rings.lock();
         let mut c = self.counters.lock();
+        // The tail moves once for the whole batch: each register write is
+        // an exit to the hypervisor.
+        let mut returned = None;
         loop {
             let d = Self::rx_desc(&r, r.rx_next);
             // SAFETY: descriptor memory of this device.
@@ -260,9 +263,14 @@ impl E1000 {
             // SAFETY: as above.
             let (len, errors) = unsafe { (read_volatile((d + 8) as *const u16) as usize, read_volatile((d + 13) as *const u8)) };
             if status & RX_EOP != 0 && errors == 0 && len > 0 && len <= RX_BUF {
-                let mut f = alloc::vec![0u8; len];
-                // SAFETY: the buffer page holds `len` received bytes.
-                unsafe { core::ptr::copy_nonoverlapping(phys_to_virt(r.rx_buf[r.rx_next]) as *const u8, f.as_mut_ptr(), len) };
+                // Filled by the copy below, so not zeroed first.
+                let mut f = Vec::with_capacity(len);
+                // SAFETY: the buffer page holds `len` received bytes; the
+                // copy initialises all `len` bytes of the vector's capacity.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(phys_to_virt(r.rx_buf[r.rx_next]) as *const u8, f.as_mut_ptr(), len);
+                    f.set_len(len);
+                }
                 c.rx_frames += 1;
                 c.rx_bytes += len as u64;
                 out.push(f);
@@ -275,8 +283,10 @@ impl E1000 {
                 write_volatile((d + 8) as *mut u64, 0);
                 write_volatile(d as *mut u64, r.rx_buf[r.rx_next]);
             }
-            let done = r.rx_next;
+            returned = Some(r.rx_next);
             r.rx_next = (r.rx_next + 1) % RING;
+        }
+        if let Some(done) = returned {
             self.write(RDT, done as u32);
         }
     }

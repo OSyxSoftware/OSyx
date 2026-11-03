@@ -57,6 +57,17 @@ pub fn parse(frame: &[u8]) -> Result<(Header, &[u8]), FrameError> {
 }
 
 /// Builds a frame: header, payload, zero padding to the minimum size.
+/// Fills in the header of `frame`, whose payload already follows
+/// [`HEADER_LEN`] reserved bytes, and pads it to [`MIN_FRAME`].
+pub fn write_header(frame: &mut alloc::vec::Vec<u8>, dst: MacAddr, src: MacAddr, ethertype: u16) {
+    if frame.len() < MIN_FRAME {
+        frame.resize(MIN_FRAME, 0);
+    }
+    frame[0..6].copy_from_slice(&dst.0);
+    frame[6..12].copy_from_slice(&src.0);
+    put16(frame, 12, ethertype);
+}
+
 pub fn build(dst: MacAddr, src: MacAddr, ethertype: u16, payload: &[u8]) -> alloc::vec::Vec<u8> {
     let len = (HEADER_LEN + payload.len()).max(MIN_FRAME);
     let mut f = alloc::vec![0u8; len];

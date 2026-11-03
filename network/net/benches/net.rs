@@ -1,5 +1,6 @@
 //! Benchmarks for the TCP/IP packet paths: checksums, IPv4 and TCP
-//! encoding/decoding and fragment reassembly.
+//! encoding/decoding, fragment reassembly, and whole-stack loopback TCP and
+//! UDP (segmenting, copies, checksums and ACKs without a device).
 
 use divan::{black_box, Bencher};
 use osyx_net::wire::{checksum, transport_checksum};
@@ -77,4 +78,64 @@ fn tcp_parse_segment_1460(bencher: Bencher) {
 #[divan::bench]
 fn parse_endpoint() -> Option<Endpoint> {
     Endpoint::parse(black_box("192.168.100.254:65535"))
+}
+
+/// A stack with a loopback connection: (stack, client, server).
+fn loopback_pair() -> (osyx_net::stack::Stack, u32, u32) {
+    let mut s = osyx_net::stack::Stack::new(7);
+    let l = s.tcp_listen(Endpoint::new(Ipv4Addr::LOOPBACK, 80), 4).unwrap();
+    let c = s.tcp_connect(None, Endpoint::new(Ipv4Addr::LOOPBACK, 80)).unwrap();
+    let (a, _) = s.tcp_accept(l).unwrap();
+    (s, c, a)
+}
+
+/// One mebibyte through a loopback TCP connection: segmenting, checksums,
+/// copies and acknowledgements of the whole stack, without a device.
+#[divan::bench]
+fn stack_loopback_tcp_1mib(bencher: Bencher) {
+    let data = payload(1 << 20);
+    // One connection for every iteration: steady state, as in a long
+    // transfer, not the first growth of its buffers.
+    let (mut s, c, a) = loopback_pair();
+    let mut buf = vec![0u8; 64 * 1024];
+    bencher.bench_local(|| {
+        let (mut sent, mut got) = (0, 0);
+        while got < data.len() {
+            if sent < data.len() {
+                sent += s.tcp_send(c, &data[sent..(sent + 64 * 1024).min(data.len())]).unwrap_or(0);
+            }
+            while let Ok(n) = s.tcp_recv(a, &mut buf) {
+                got += n;
+            }
+        }
+        got
+    });
+}
+
+/// Request and response of 64 bytes over a loopback TCP connection.
+#[divan::bench]
+fn stack_loopback_tcp_round_trip(bencher: Bencher) {
+    let (mut s, c, a) = loopback_pair();
+    let msg = [0x42u8; 64];
+    let mut buf = [0u8; 64];
+    bencher.bench_local(|| {
+        s.tcp_send(c, &msg).unwrap();
+        let n = s.tcp_recv(a, &mut buf).unwrap();
+        s.tcp_send(a, &buf[..n]).unwrap();
+        s.tcp_recv(c, &mut buf).unwrap()
+    });
+}
+
+/// A 1400-byte datagram to ourselves and back out of the socket.
+#[divan::bench]
+fn stack_loopback_udp_datagram(bencher: Bencher) {
+    let mut s = osyx_net::stack::Stack::new(7);
+    let rx = s.udp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 5000)).unwrap();
+    let tx = s.udp_bind(Endpoint::new(Ipv4Addr::LOOPBACK, 0)).unwrap();
+    let data = payload(1400);
+    let mut buf = vec![0u8; 2048];
+    bencher.bench_local(|| {
+        s.udp_send_to(tx, Some(Endpoint::new(Ipv4Addr::LOOPBACK, 5000)), black_box(&data)).unwrap();
+        s.udp_recv_from(rx, &mut buf).unwrap().1
+    });
 }

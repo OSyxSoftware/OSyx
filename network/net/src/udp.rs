@@ -42,16 +42,23 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<(Header, &[u8]), 
 }
 
 pub fn build(src: Ipv4Addr, dst: Ipv4Addr, src_port: u16, dst_port: u16, data: &[u8]) -> Vec<u8> {
-    let mut d = alloc::vec![0u8; HEADER_LEN + data.len()];
-    put16(&mut d, 0, src_port);
-    put16(&mut d, 2, dst_port);
+    build_with_headroom(src, dst, src_port, dst_port, data, 0)
+}
+
+/// [`build`] behind `headroom` unused bytes (room for the IP and Ethernet
+/// headers, so the datagram is not copied again below).
+pub fn build_with_headroom(src: Ipv4Addr, dst: Ipv4Addr, src_port: u16, dst_port: u16, data: &[u8], headroom: usize) -> Vec<u8> {
+    let mut frame = alloc::vec![0u8; headroom + HEADER_LEN + data.len()];
+    let d = &mut frame[headroom..];
+    put16(d, 0, src_port);
+    put16(d, 2, dst_port);
     let len = d.len() as u16;
-    put16(&mut d, 4, len);
+    put16(d, 4, len);
     d[HEADER_LEN..].copy_from_slice(data);
-    let mut c = transport_checksum(src, dst, PROTO_UDP, &d);
+    let mut c = transport_checksum(src, dst, PROTO_UDP, d);
     if c == 0 {
         c = 0xFFFF; // 0 would mean "no checksum"
     }
-    put16(&mut d, 6, c);
-    d
+    put16(d, 6, c);
+    frame
 }

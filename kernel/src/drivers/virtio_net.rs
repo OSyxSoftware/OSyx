@@ -16,7 +16,12 @@
 //!
 //! Interrupts: one MSI-X vector for both queues and configuration changes;
 //! the handler only wakes the network thread. Without MSI-X the thread
-//! polls every timer tick.
+//! polls every timer tick. Sent buffers are reclaimed when the next frames
+//! go out, so the transmit queue never asks for interrupts, and the receive
+//! queue only does while the network thread sleeps ([`VirtioNet::arm`]):
+//! while it is working through a burst, every frame would otherwise cost an
+//! interrupt (an exit to the hypervisor and back) for a thread that is
+//! already awake.
 
 use super::virtio::{AsyncQueue, Buffer, Transport, VirtioError};
 use crate::mem::{alloc_frame, phys_to_virt, PAGE_SIZE};
@@ -157,6 +162,7 @@ impl VirtioNet {
     fn build_queues(t: &Transport, entry: Option<u16>) -> Result<Queues, VirtioError> {
         let mut rx = t.setup_async_queue(RX_QUEUE, entry)?;
         let tx = t.setup_async_queue(TX_QUEUE, entry)?;
+        tx.set_interrupts(false);
         let mut rx_frames = alloc::vec![0u64; rx.size() as usize];
         // Post every receive slot.
         for _ in 0..rx.size() {
@@ -189,6 +195,8 @@ impl VirtioNet {
     /// the buffers are posted again.
     pub fn receive(&self, out: &mut Vec<Vec<u8>>) {
         let mut q = self.queues.lock();
+        // The network thread is awake and polls until it sleeps again.
+        q.rx.set_interrupts(false);
         let mut c = self.counters.lock();
         let mut reposted = false;
         while let Some((head, len)) = q.rx.pop_used() {
@@ -220,6 +228,15 @@ impl VirtioNet {
         if reposted {
             q.rx.kick();
         }
+    }
+
+    /// Before the network thread sleeps: interrupts on for received frames.
+    /// True if frames already arrived (the thread should not sleep); one
+    /// that arrives after the check finds interrupts enabled.
+    pub fn arm(&self) -> bool {
+        let q = self.queues.lock();
+        q.rx.set_interrupts(true);
+        q.rx.has_used()
     }
 
     /// Queues frames for transmission; returns how many were accepted
@@ -293,6 +310,17 @@ impl VirtioNet {
             return false;
         }
         crate::kprintln!("virtio-net {}: device needs reset (status {:#x}), reinitialising", self.name, self.transport.status());
+        self.reinit()
+    }
+
+    /// Resets the device and rebuilds its queues (a reconnect, or a
+    /// transmit queue that stopped moving). True if it came back.
+    pub fn reset(&self) -> bool {
+        crate::kprintln!("virtio-net {}: resetting the device", self.name);
+        self.reinit()
+    }
+
+    fn reinit(&self) -> bool {
         let entry = self.vector.map(|_| 0u16);
         let r = self.transport.negotiate(self.features).and_then(|_| {
             if entry.is_some() && self.features & F_STATUS != 0 {

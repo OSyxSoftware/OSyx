@@ -17,14 +17,21 @@
 //! * Reno congestion control (RFC 5681: slow start, congestion avoidance,
 //!   fast retransmit after three duplicate ACKs, fast recovery)
 //! * flow control: the advertised receive window tracks free buffer space,
-//!   window updates when the application reads, zero-window probing
+//!   window updates when the application reads, zero-window probing, and
+//!   sender-side silly window avoidance (RFC 9293 3.8.6.2.1): a window
+//!   that opens by a few bytes waits for a full segment instead of being
+//!   filled byte by byte
 //! * out-of-order segments buffered (bounded by the window) and merged,
 //!   duplicates and old segments discarded with an ACK
 //! * RFC 5961 checks for RST and SYN in synchronised states (challenge ACK)
 //!
+//! * acknowledgements: at least every second full-sized segment at once
+//!   ([`Tcb::ack_urgent`], RFC 9293 3.8.6.3), the rest when the stack next
+//!   flushes output, so a burst of segments handled together is
+//!   acknowledged once
+//!
 //! Not implemented: timestamps, SACK, urgent data (the URG flag is
-//! ignored), delayed ACKs (every data segment is acknowledged when the
-//! stack next flushes output), keep-alive.
+//! ignored), delayed-ACK timers, keep-alive.
 
 use crate::ipv4::PROTO_TCP;
 use crate::wire::{be16, be32, put16, put32, transport_checksum, Endpoint, Ipv4Addr};
@@ -45,8 +52,12 @@ pub const DEFAULT_MSS: u16 = 536;
 /// Bytes buffered in each direction. The receive buffer is larger than the
 /// 64 KiB a window field can express; the window scale option advertises it,
 /// so a busy application (a browser parsing a page) does not stall the peer.
-pub const SEND_BUFFER: usize = 64 * 1024;
+pub const SEND_BUFFER: usize = 256 * 1024;
 pub const RECV_BUFFER: usize = 256 * 1024;
+/// A blocked writer is woken once this much of the send buffer is free,
+/// not for every acknowledged segment (as Linux wakes at a third of its
+/// buffer): one wakeup then moves a useful amount of data.
+pub const SEND_LOW_WATER: usize = SEND_BUFFER / 4;
 /// Window scale shift announced in our SYN (RFC 7323). A larger receive
 /// buffer needs a larger shift: the field is `window >> shift`.
 pub const WINDOW_SCALE: u8 = 8;
@@ -58,6 +69,12 @@ pub const MAX_RETRIES: u32 = 8;
 /// SYN retransmissions before `connect` fails.
 pub const MAX_SYN_RETRIES: u32 = 5;
 pub const TIME_WAIT_MS: u64 = 20_000;
+/// How long a connection the application has closed waits in FIN-WAIT-2
+/// for the peer's FIN (Linux `tcp_fin_timeout`). Without a limit a peer
+/// that never closes keeps the connection, and its socket slot, forever.
+pub const ORPHAN_FIN_WAIT_MS: u64 = 60_000;
+/// Zero-window probes a closed connection sends before it gives up.
+pub const MAX_ORPHAN_PROBES: u32 = 8;
 /// Out-of-order segments kept at most.
 pub const MAX_OOO_SEGMENTS: usize = 64;
 
@@ -185,6 +202,19 @@ impl OutSegment {
     pub fn encode(&self, local: Endpoint, remote: Endpoint) -> Vec<u8> {
         build(local, remote, self.seq, self.ack, self.flags, self.window, self.mss, self.ws, &self.payload)
     }
+
+    /// Like [`encode`](Self::encode), with `headroom` bytes in front of the
+    /// segment for the headers below it (the stack fills in IP and
+    /// Ethernet there instead of copying the segment twice more).
+    pub fn encode_with_headroom(&self, local: Endpoint, remote: Endpoint, headroom: usize) -> Vec<u8> {
+        self.encode_parts_with_headroom(local, remote, &self.payload, &[], headroom)
+    }
+
+    /// Encodes this segment's header with the payload `a` followed by `b`
+    /// (in place of `payload`), behind `headroom` bytes.
+    pub fn encode_parts_with_headroom(&self, local: Endpoint, remote: Endpoint, a: &[u8], b: &[u8], headroom: usize) -> Vec<u8> {
+        build_parts(local, remote, self.seq, self.ack, self.flags, self.window, self.mss, self.ws, (a, b), headroom)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -199,6 +229,40 @@ pub fn build(
     ws: Option<u8>,
     payload: &[u8],
 ) -> Vec<u8> {
+    build_with_headroom(local, remote, seq, ack, flags, window, mss, ws, payload, 0)
+}
+
+/// [`build`] behind `headroom` unused bytes.
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_headroom(
+    local: Endpoint,
+    remote: Endpoint,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    mss: Option<u16>,
+    ws: Option<u8>,
+    payload: &[u8],
+    headroom: usize,
+) -> Vec<u8> {
+    build_parts(local, remote, seq, ack, flags, window, mss, ws, (payload, &[]), headroom)
+}
+
+/// [`build_with_headroom`] with the payload in two parts.
+#[allow(clippy::too_many_arguments)]
+fn build_parts(
+    local: Endpoint,
+    remote: Endpoint,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    mss: Option<u16>,
+    ws: Option<u8>,
+    (a, b): (&[u8], &[u8]),
+    headroom: usize,
+) -> Vec<u8> {
     // MSS (4 bytes) + WS (3 bytes) + END (1 byte) always fits the 4-byte
     // option alignment.
     let opt_len = if mss.is_some() && ws.is_some() {
@@ -209,19 +273,20 @@ pub fn build(
         0
     };
     let hl = HEADER_LEN + opt_len;
-    let mut s = alloc::vec![0u8; hl + payload.len()];
-    put16(&mut s, 0, local.port);
-    put16(&mut s, 2, remote.port);
-    put32(&mut s, 4, seq);
-    put32(&mut s, 8, ack);
+    let mut frame = alloc::vec![0u8; headroom + hl + a.len() + b.len()];
+    let s = &mut frame[headroom..];
+    put16(s, 0, local.port);
+    put16(s, 2, remote.port);
+    put32(s, 4, seq);
+    put32(s, 8, ack);
     s[12] = ((hl / 4) as u8) << 4;
     s[13] = flags;
-    put16(&mut s, 14, window);
+    put16(s, 14, window);
     let mut o = HEADER_LEN;
     if let Some(m) = mss {
         s[o] = 2;
         s[o + 1] = 4;
-        put16(&mut s, o + 2, m);
+        put16(s, o + 2, m);
         o += 4;
     }
     if let Some(shift) = ws {
@@ -233,10 +298,23 @@ pub fn build(
             s[o] = 0;
         }
     }
-    s[hl..].copy_from_slice(payload);
-    let c = transport_checksum(local.addr, remote.addr, PROTO_TCP, &s);
-    put16(&mut s, 16, c);
-    s
+    s[hl..hl + a.len()].copy_from_slice(a);
+    s[hl + a.len()..].copy_from_slice(b);
+    let c = transport_checksum(local.addr, remote.addr, PROTO_TCP, s);
+    put16(s, 16, c);
+    frame
+}
+
+/// `n` bytes of `buf` from `off`, as slices of the ring's two halves.
+fn ring_range(buf: &VecDeque<u8>, off: usize, n: usize) -> (&[u8], &[u8]) {
+    let (a, b) = buf.as_slices();
+    if off < a.len() {
+        let k = n.min(a.len() - off);
+        (&a[off..off + k], &b[..n - k])
+    } else {
+        let o = off - a.len();
+        (&b[o..o + n], &[])
+    }
 }
 
 /// The reset answering a segment that belongs to no connection (RFC 9293
@@ -327,6 +405,8 @@ pub struct Tcb {
     /// Highest sequence number sent (snd_nxt may be rewound on timeout).
     snd_max: u32,
     snd_wnd: u32,
+    /// Largest window the peer offered (for silly window avoidance).
+    max_snd_wnd: u32,
     snd_wl1: u32,
     snd_wl2: u32,
     irs: u32,
@@ -362,7 +442,16 @@ pub struct Tcb {
     /// Fast recovery until this sequence number is acknowledged.
     recover: Option<u32>,
     time_wait_until: Option<u64>,
+    /// The application released the connection (see `orphan`).
+    orphan: bool,
+    orphan_fin_wait_until: Option<u64>,
+    /// Zero-window probes since the window was last open.
+    persist_probes: u32,
     ack_pending: bool,
+    /// Data segments received since the last ACK went out.
+    unacked_segments: u32,
+    /// Something arrived that must be acknowledged at once (see `ack_urgent`).
+    ack_now: bool,
     last_adv_wnd: u32,
     /// A reset to send in reply to an unacceptable segment.
     reset_reply: Option<OutSegment>,
@@ -383,6 +472,7 @@ impl Tcb {
             snd_nxt: iss,
             snd_max: iss,
             snd_wnd: 0,
+            max_snd_wnd: 0,
             snd_wl1: 0,
             snd_wl2: 0,
             irs: 0,
@@ -409,7 +499,12 @@ impl Tcb {
             dup_acks: 0,
             recover: None,
             time_wait_until: None,
+            orphan: false,
+            orphan_fin_wait_until: None,
+            persist_probes: 0,
             ack_pending: false,
+            unacked_segments: 0,
+            ack_now: false,
             last_adv_wnd: RECV_BUFFER as u32,
             reset_reply: None,
             error: None,
@@ -437,6 +532,7 @@ impl Tcb {
         }
         // RFC 7323 2.2: the window in the SYN itself is not scaled.
         t.snd_wnd = syn.window as u32;
+        t.max_snd_wnd = t.snd_wnd;
         t.snd_wl1 = syn.seq;
         t.init_cwnd();
         t.stats.segments_in += 1;
@@ -445,9 +541,10 @@ impl Tcb {
     }
 
     fn init_cwnd(&mut self) {
-        // RFC 5681 initial window: up to four segments for small MSS.
+        // RFC 6928 initial window: ten segments, at most 14600 bytes unless
+        // that is less than two segments.
         let mss = self.mss() as u32;
-        self.cwnd = if mss > 2190 { 2 * mss } else if mss > 1095 { 3 * mss } else { 4 * mss };
+        self.cwnd = (10 * mss).min((2 * mss).max(14_600));
     }
 
     pub fn state(&self) -> State {
@@ -566,33 +663,57 @@ impl Tcb {
     /// Takes received data. `Ok(0)` is the end of the stream (the peer
     /// closed and everything was read).
     pub fn recv(&mut self, out: &mut [u8]) -> Result<usize, TcpError> {
-        if !self.recv_buf.is_empty() {
-            let n = out.len().min(self.recv_buf.len());
-            // Copy from the ring's two halves, then drop what was read.
-            let (a, b) = self.recv_buf.as_slices();
-            let k = n.min(a.len());
-            out[..k].copy_from_slice(&a[..k]);
-            out[k..n].copy_from_slice(&b[..n - k]);
-            self.recv_buf.drain(..n);
-            // Window update once a useful amount of space opened up
-            // (receiver-side silly window avoidance, RFC 9293 3.8.6.2.2).
-            let mss = self.mss() as u32;
-            let w = self.rcv_wnd();
-            if w >= self.last_adv_wnd + mss.max(RECV_BUFFER as u32 / 4) || (self.last_adv_wnd < mss && w >= mss) {
-                self.ack_pending = true;
-            }
-            return Ok(n);
+        let mut at = 0;
+        let taken = self.recv_with(out.len(), |part| {
+            out[at..at + part.len()].copy_from_slice(part);
+            at += part.len();
+            true
+        })?;
+        Ok(taken.unwrap_or(0))
+    }
+
+    /// Takes received data in place, without an intermediate buffer: `sink`
+    /// gets at most `max` queued bytes, as up to two slices of the ring, and
+    /// returns false if it could not take a slice (a user buffer that
+    /// faulted). `Some(n)`: `n` bytes were taken; `None`: the first slice
+    /// was refused and nothing was. With nothing queued this reports what
+    /// `recv` does (end of stream, an error, or `WouldBlock`).
+    pub fn recv_with(&mut self, max: usize, mut sink: impl FnMut(&[u8]) -> bool) -> Result<Option<usize>, TcpError> {
+        if self.recv_buf.is_empty() {
+            return self.recv_outcome().map(Some);
         }
-        self.recv_outcome()
+        let n = max.min(self.recv_buf.len());
+        let (a, b) = self.recv_buf.as_slices();
+        let k = n.min(a.len());
+        let mut taken = 0;
+        if sink(&a[..k]) {
+            taken = k;
+            if n > k && sink(&b[..n - k]) {
+                taken = n;
+            }
+        }
+        if taken == 0 && n > 0 {
+            return Ok(None);
+        }
+        self.recv_buf.drain(..taken);
+        // Window update once a useful amount of space opened up
+        // (receiver-side silly window avoidance, RFC 9293 3.8.6.2.2).
+        let mss = self.mss() as u32;
+        let w = self.rcv_wnd();
+        if w >= self.last_adv_wnd + mss.max(RECV_BUFFER as u32 / 4) || (self.last_adv_wnd < mss && w >= mss) {
+            self.ack_pending = true;
+        }
+        Ok(Some(taken))
     }
 
     /// Copies received data without consuming it (MSG_PEEK).
     pub fn peek(&self, out: &mut [u8]) -> Result<usize, TcpError> {
         if !self.recv_buf.is_empty() {
             let n = out.len().min(self.recv_buf.len());
-            for (o, b) in out.iter_mut().zip(self.recv_buf.iter()) {
-                *o = *b;
-            }
+            let (a, b) = self.recv_buf.as_slices();
+            let k = n.min(a.len());
+            out[..k].copy_from_slice(&a[..k]);
+            out[k..n].copy_from_slice(&b[..n - k]);
             return Ok(n);
         }
         self.recv_outcome()
@@ -635,6 +756,26 @@ impl Tcb {
 
     /// Drops the connection with a reset (returned for sending, if the
     /// peer knows the connection).
+    /// The application closed its socket: nobody will read or wait for
+    /// this connection any more, so it may not linger without bound
+    /// ([`ORPHAN_FIN_WAIT_MS`], [`MAX_ORPHAN_PROBES`]).
+    pub fn orphan(&mut self) {
+        self.orphan = true;
+    }
+
+    pub fn is_orphan(&self) -> bool {
+        self.orphan
+    }
+
+    /// The connection cannot continue (its local address went away): it
+    /// fails with a reset, so the application sees an error instead of
+    /// waiting on it for minutes.
+    pub fn lost(&mut self) {
+        if self.state != State::Closed {
+            self.fail(TcpError::Reset);
+        }
+    }
+
     pub fn abort(&mut self) -> Option<OutSegment> {
         let rst = self.state.synchronized().then(|| OutSegment {
             seq: self.snd_nxt,
@@ -676,7 +817,17 @@ impl Tcb {
 
     pub fn writable(&self) -> bool {
         self.error.is_some()
-            || (matches!(self.state, State::Established | State::CloseWait) && !self.fin_queued && self.send_buf.len() < SEND_BUFFER)
+            || (matches!(self.state, State::Established | State::CloseWait)
+                && !self.fin_queued
+                && SEND_BUFFER - self.send_buf.len() >= SEND_LOW_WATER)
+    }
+
+    /// The segments just received have to be acknowledged before the stack
+    /// finishes the batch they came in: a second full-sized segment (RFC
+    /// 9293 3.8.6.3), data out of order or a duplicate (the duplicate ACK
+    /// tells the peer to retransmit), a FIN, or a reply to a probe.
+    pub fn ack_urgent(&self) -> bool {
+        self.ack_pending && (self.ack_now || self.unacked_segments >= 2)
     }
 
     /// The handshake is done (or failed).
@@ -728,12 +879,14 @@ impl Tcb {
         }
         self.init_cwnd();
         self.snd_wnd = seg.window as u32;
+        self.max_snd_wnd = self.snd_wnd;
         self.snd_wl1 = seg.seq;
         self.snd_wl2 = seg.ack;
         if seg.has(ACK) {
             self.ack_advance(seg.ack, now);
             self.set_state(State::Established);
             self.ack_pending = true;
+            self.ack_now = true;
         } else {
             // Simultaneous open: answer with SYN-ACK (retransmit the SYN).
             self.set_state(State::SynReceived);
@@ -762,6 +915,7 @@ impl Tcb {
                     self.stats.duplicates += 1;
                 }
                 self.ack_pending = true;
+                self.ack_now = true;
             }
             // A zero-window probe still carries a window update.
             if seg.has(ACK) && self.state.synchronized() {
@@ -781,6 +935,7 @@ impl Tcb {
                 }
             } else {
                 self.ack_pending = true;
+                self.ack_now = true;
             }
             return;
         }
@@ -792,6 +947,7 @@ impl Tcb {
             }
             // RFC 5961 4.2: challenge ACK.
             self.ack_pending = true;
+            self.ack_now = true;
             return;
         }
         if !seg.has(ACK) {
@@ -801,6 +957,7 @@ impl Tcb {
             if seq_lt(self.snd_una, seg.ack) && seq_le(seg.ack, self.snd_max) {
                 self.set_state(State::Established);
                 self.snd_wnd = self.peer_window(seg.window);
+                self.max_snd_wnd = self.max_snd_wnd.max(self.snd_wnd);
                 self.snd_wl1 = seg.seq;
                 self.snd_wl2 = seg.ack;
             } else {
@@ -821,8 +978,12 @@ impl Tcb {
         if seq_lt(self.snd_wl1, seg.seq) || (self.snd_wl1 == seg.seq && seq_le(self.snd_wl2, seg.ack)) {
             let old = self.snd_wnd;
             self.snd_wnd = self.peer_window(seg.window);
+            self.max_snd_wnd = self.max_snd_wnd.max(self.snd_wnd);
             self.snd_wl1 = seg.seq;
             self.snd_wl2 = seg.ack;
+            if self.snd_wnd > 0 {
+                self.persist_probes = 0;
+            }
             if old == 0 && self.snd_wnd > 0 {
                 self.persist_at = None;
             }
@@ -880,6 +1041,7 @@ impl Tcb {
         if seq_gt(seg.ack, self.snd_max) {
             // Acknowledges something never sent.
             self.ack_pending = true;
+            self.ack_now = true;
             return;
         }
         if seq_gt(seg.ack, self.snd_una) {
@@ -930,6 +1092,7 @@ impl Tcb {
         if self.state == State::TimeWait && seg.has(FIN) {
             // Retransmitted FIN: acknowledge and restart the timer.
             self.ack_pending = true;
+            self.ack_now = true;
             self.time_wait_until = Some(now + TIME_WAIT_MS);
         }
     }
@@ -944,6 +1107,7 @@ impl Tcb {
         if !matches!(self.state, State::Established | State::FinWait1 | State::FinWait2) {
             if seg.has(FIN) || !seg.payload.is_empty() {
                 self.ack_pending = true;
+                self.ack_now = true;
             }
             return;
         }
@@ -958,6 +1122,7 @@ impl Tcb {
             if skip_data >= data.len() && !(seg.has(FIN) && skip_data == data.len()) {
                 self.stats.duplicates += 1;
                 self.ack_pending = true;
+                self.ack_now = true;
                 return;
             }
             data = &data[skip_data.min(data.len())..];
@@ -973,10 +1138,16 @@ impl Tcb {
             fin = false;
         }
         self.ack_pending = true;
+        self.unacked_segments += 1;
         if seq == self.rcv_nxt {
+            // A segment that fills a hole is acknowledged at once (RFC 5681
+            // 4.2), as is a FIN.
+            self.ack_now |= fin || !self.ooo.is_empty();
             self.deliver(data, fin, now);
             self.drain_ooo(now);
         } else {
+            // Out of order: the duplicate ACK starts fast retransmit.
+            self.ack_now = true;
             self.stats.out_of_order += 1;
             if self.ooo.len() < MAX_OOO_SEGMENTS && !self.ooo.iter().any(|(s, d, _)| *s == seq && d.len() >= data.len()) {
                 self.ooo.push((seq, data.to_vec(), fin));
@@ -1031,6 +1202,20 @@ impl Tcb {
 
     /// Runs the timers. Returns true if output may be needed.
     pub fn poll(&mut self, now: u64) -> bool {
+        if self.orphan && self.state == State::FinWait2 {
+            match self.orphan_fin_wait_until {
+                None => self.orphan_fin_wait_until = Some(now + ORPHAN_FIN_WAIT_MS),
+                Some(t) if now >= t => {
+                    self.set_state(State::Closed);
+                    return false;
+                }
+                Some(_) => {}
+            }
+        }
+        if self.orphan && self.persist_probes > MAX_ORPHAN_PROBES {
+            self.fail(TcpError::TimedOut);
+            return true;
+        }
         if let Some(t) = self.time_wait_until {
             if self.state == State::TimeWait && now >= t {
                 self.set_state(State::Closed);
@@ -1082,7 +1267,8 @@ impl Tcb {
 
     /// Earliest time `poll` has work to do.
     pub fn next_deadline(&self) -> Option<u64> {
-        [self.retransmit_at, self.persist_at, self.time_wait_until].into_iter().flatten().min()
+        let orphan_wait = self.orphan_fin_wait_until.filter(|_| self.state == State::FinWait2);
+        [self.retransmit_at, self.persist_at, self.time_wait_until, orphan_wait].into_iter().flatten().min()
     }
 
     // ----- output ------------------------------------------------------------
@@ -1098,6 +1284,8 @@ impl Tcb {
         let mss = (flags & SYN != 0).then_some(self.our_mss);
         let ws = (flags & SYN != 0).then_some(self.our_scale);
         self.ack_pending = false;
+        self.ack_now = false;
+        self.unacked_segments = 0;
         self.stats.segments_out += 1;
         // The SYN's own window is unscaled (RFC 7323 2.2).
         let window = if flags & SYN != 0 {
@@ -1112,16 +1300,31 @@ impl Tcb {
     /// Segments to transmit now (SYN, data, FIN, retransmissions, ACKs).
     pub fn output(&mut self, now: u64) -> Vec<OutSegment> {
         let mut out = Vec::new();
+        self.output_with(now, &mut |mut seg, a, b| {
+            if !a.is_empty() || !b.is_empty() {
+                seg.payload = [a, b].concat();
+            }
+            out.push(seg);
+        });
+        out
+    }
+
+    /// Like [`output`](Self::output), handing each segment to `emit` as it
+    /// is made. The data of a data segment is not copied into the segment:
+    /// it comes as up to two slices of the send buffer (`payload` is empty),
+    /// so the caller can encode it straight into a frame
+    /// ([`OutSegment::encode_parts_with_headroom`]).
+    pub fn output_with(&mut self, now: u64, emit: &mut dyn FnMut(OutSegment, &[u8], &[u8])) {
         if let Some(r) = self.reset_reply.take() {
-            out.push(r);
+            emit(r, &[], &[]);
         }
         match self.state {
-            State::Closed | State::Listen => return out,
+            State::Closed | State::Listen => return,
             State::SynSent | State::SynReceived => {
                 if self.snd_nxt == self.iss {
                     let flags = if self.state == State::SynSent { SYN } else { SYN | ACK };
                     let seg = self.segment(self.iss, flags, Vec::new());
-                    out.push(seg);
+                    emit(seg, &[], &[]);
                     self.snd_nxt = self.iss.wrapping_add(1);
                     if seq_gt(self.snd_nxt, self.snd_max) {
                         self.snd_max = self.snd_nxt;
@@ -1134,9 +1337,9 @@ impl Tcb {
                     }
                 } else if self.ack_pending && self.state == State::SynReceived {
                     let seg = self.segment(self.snd_nxt, 0, Vec::new());
-                    out.push(seg);
+                    emit(seg, &[], &[]);
                 }
-                return out;
+                return;
             }
             _ => {}
         }
@@ -1150,9 +1353,13 @@ impl Tcb {
                 let in_flight = self.snd_nxt.wrapping_sub(self.snd_una);
                 let room = window.saturating_sub(in_flight) as usize;
                 let pending = self.send_buf.len().saturating_sub(off);
-                if pending > 0 && room > 0 {
-                    let n = pending.min(mss).min(room);
-                    let payload: Vec<u8> = self.send_buf.range(off..off + n).copied().collect();
+                // Silly window avoidance: a segment the window cuts short of
+                // both a full MSS and the queued data waits for more room,
+                // unless it is at least half the largest window the peer
+                // offered or nothing is in flight (no ACK would come).
+                let n = pending.min(mss).min(room);
+                let silly = n < mss && n < pending && in_flight > 0 && (n as u32) < self.max_snd_wnd / 2;
+                if pending > 0 && room > 0 && !silly {
                     let last = off + n == self.send_buf.len();
                     let seq = self.snd_nxt;
                     let mut flags = if last { PSH } else { 0 };
@@ -1160,9 +1367,10 @@ impl Tcb {
                     if fin_now {
                         flags |= FIN;
                     }
-                    let seg = self.segment(seq, flags, payload);
+                    let seg = self.segment(seq, flags, Vec::new());
                     self.stats.bytes_out += n as u64;
-                    out.push(seg);
+                    let (a, b) = ring_range(&self.send_buf, off, n);
+                    emit(seg, a, b);
                     if fin_now {
                         self.fin_sent = Some(seq.wrapping_add(n as u32));
                     }
@@ -1172,7 +1380,7 @@ impl Tcb {
                 if pending == 0 && self.fin_pending() {
                     let seq = self.snd_nxt;
                     let seg = self.segment(seq, FIN, Vec::new());
-                    out.push(seg);
+                    emit(seg, &[], &[]);
                     self.fin_sent = Some(seq);
                     self.after_send(seq, 1, now);
                     continue;
@@ -1183,11 +1391,12 @@ impl Tcb {
                         None => self.persist_at = Some(now + self.rto),
                         Some(t) if now >= t => {
                             let seq = self.snd_nxt;
-                            let payload = alloc::vec![self.send_buf[off]];
-                            let seg = self.segment(seq, 0, payload);
-                            out.push(seg);
+                            let seg = self.segment(seq, 0, Vec::new());
+                            let (a, b) = ring_range(&self.send_buf, off, 1);
+                            emit(seg, a, b);
                             self.after_send(seq, 1, now);
                             self.persist_at = Some(now + (self.rto * 2).min(MAX_RTO_MS));
+                            self.persist_probes += 1;
                         }
                         Some(_) => {}
                     }
@@ -1197,9 +1406,8 @@ impl Tcb {
         }
         if self.ack_pending {
             let seg = self.segment(self.snd_nxt, 0, Vec::new());
-            out.push(seg);
+            emit(seg, &[], &[]);
         }
-        out
     }
 
     fn after_send(&mut self, seq: u32, len: u32, now: u64) {
