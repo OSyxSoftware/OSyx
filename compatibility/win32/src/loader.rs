@@ -692,6 +692,26 @@ struct ModState {
     tls_callbacks: Vec<u64>,
     /// DisableThreadLibraryCalls: no DLL_THREAD_ATTACH/DETACH to DllMain.
     no_thread_calls: bool,
+    /// The writable sections of a DLL that LoadLibrary loaded, as they were
+    /// before its first DLL_PROCESS_ATTACH: when the last FreeLibrary has
+    /// detached it, loading it again starts from these, as a freshly
+    /// mapped image would (the image itself stays mapped).
+    pristine: Vec<(u64, Vec<u8>)>,
+}
+
+/// The writable sections of the PE image `file` mapped at `base`, copied.
+fn writable_sections(file: &[u8], base: u64) -> Vec<(u64, Vec<u8>)> {
+    const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
+    let Ok(pe) = PeFile::parse_any(file) else { return Vec::new() };
+    pe.sections()
+        .filter(|s| s.characteristics & IMAGE_SCN_MEM_WRITE != 0 && s.virtual_size != 0)
+        .map(|s| {
+            let at = base + s.virtual_address as u64;
+            // SAFETY: a section of the mapped image (the parser checked it
+            // against SizeOfImage); writable sections are readable.
+            (at, unsafe { core::slice::from_raw_parts(at as *const u8, s.virtual_size as usize) }.to_vec())
+        })
+        .collect()
 }
 
 struct Loader {
@@ -734,7 +754,8 @@ fn module_by_handle(l: &Loader, h: u64) -> Option<usize> {
 fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> {
     let order = l.linker.init_order(root);
     while l.state.len() < l.linker.modules.len() {
-        l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false });
+        // Held by whatever imports it until LoadLibrary says otherwise.
+        l.state.push(ModState { ldr: 0, refs: 1, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new() });
     }
     let mut todo = Vec::new();
     for i in order {
@@ -742,6 +763,19 @@ fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> 
             continue;
         }
         l.state[i].attached = true;
+        if l.state[i].ldr != 0 {
+            // Loaded again after the last FreeLibrary detached it: its data
+            // goes back to what it was before the first attach; the loader
+            // entry and TLS slot it had are still there.
+            for (at, bytes) in &l.state[i].pristine {
+                // SAFETY: the module's own writable sections, as copied.
+                unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), *at as *mut u8, bytes.len()) };
+            }
+            let m = &l.linker.modules[i];
+            let is_dll = matches!(m.kind, Kind::Pe { is_dll: true, .. });
+            todo.push((m.base, if is_dll { m.entry() } else { 0 }, l.state[i].tls_callbacks.clone(), is_dll));
+            continue;
+        }
         let m = &l.linker.modules[i];
         let Kind::Pe { file, size, is_dll, .. } = &m.kind else { continue };
         let (base, size, is_dll) = (m.base, *size, *is_dll);
@@ -879,7 +913,7 @@ pub fn disable_thread_calls(h: u64) -> Result<(), u32> {
     with(|l| {
         let i = module_by_handle(l, h).ok_or(ERROR_MOD_NOT_FOUND)?;
         while l.state.len() <= i {
-            l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false });
+            l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new() });
         }
         l.state[i].no_thread_calls = true;
         Ok(())
@@ -1151,7 +1185,7 @@ pub fn run_pe32(bytes: Vec<u8>, args: &[String], cmd: &str, env: &[String]) -> R
     }).collect();
     // Keep the PE32 linker for GetProcAddress and LoadLibrary.
     let mut state: Vec<ModState> = (0..linker.modules.len()).map(|_| ModState {
-        ldr: 0, refs: 1, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false,
+        ldr: 0, refs: 1, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new(),
     }).collect();
     let mut process_callbacks = Vec::new();
     for (i, cbs) in tls_callbacks {
@@ -1416,9 +1450,28 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         })?;
         let todo = register_new(l, i);
         while l.state.len() < l.linker.modules.len() {
-            l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false });
+            l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new() });
         }
-        l.state[i].refs += 1;
+        // The DLLs linked with this one are held by it: only the DLL
+        // LoadLibrary named is released by the matching FreeLibrary.
+        let base = l.linker.modules[i].base;
+        for (b, ..) in &todo {
+            if *b != base {
+                if let Some(k) = (0..l.linker.modules.len()).find(|&k| l.linker.modules[k].base == *b) {
+                    l.state[k].refs = l.state[k].refs.max(1);
+                }
+            }
+        }
+        if todo.iter().any(|t| t.0 == base) {
+            if l.state[i].pristine.is_empty() {
+                if let Kind::Pe { file, .. } = &l.linker.modules[i].kind {
+                    l.state[i].pristine = writable_sections(file.as_ref(), base);
+                }
+            }
+            l.state[i].refs = 1;
+        } else {
+            l.state[i].refs += 1;
+        }
         (todo, module_handle(l, i))
     };
     if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
@@ -1482,8 +1535,9 @@ pub fn add_module_reference(h: u64, pin: bool) {
     })
 }
 
-/// `FreeLibrary`: drops a reference. The image stays mapped (OSyx does not
-/// unload DLLs yet); the last reference delivers DLL_PROCESS_DETACH.
+/// `FreeLibrary`: drops a reference. The image stays mapped; the last
+/// reference delivers DLL_PROCESS_DETACH, and a later LoadLibrary restores
+/// its data before attaching it again (see `ModState::pristine`).
 pub fn free_library(h: u64) -> Result<(), u32> {
     let detach = {
         let mut g = LOADER.lock().unwrap();
