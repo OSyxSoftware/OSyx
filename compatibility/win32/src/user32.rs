@@ -7898,6 +7898,19 @@ fn process_dpi_context() -> u64 {
     }
 }
 
+/// SetProcessDpiAwarenessContext: once per process, as Windows allows.
+extern "win64" fn SetProcessDpiAwarenessContext(ctx: u64) -> Bool {
+    if !valid_dpi_context(ctx) {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    let level = match (ctx as i64).wrapping_neg() {
+        2 => 1,
+        3 | 4 => 2,
+        _ => 0,
+    };
+    if crate::user32::client::set_process_dpi_awareness(level) { TRUE } else { fail(ERROR_ACCESS_DENIED, FALSE) }
+}
+
 extern "win64" fn SetThreadDpiAwarenessContext(ctx: u64) -> u64 {
     if !valid_dpi_context(ctx) {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -8392,6 +8405,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RegisterPointerDeviceNotifications,
         IsValidDpiAwarenessContext,
         SetThreadDpiAwarenessContext,
+        SetProcessDpiAwarenessContext,
         UnregisterPowerSettingNotification,
         SendNotifyMessageW,
         SendMessageTimeoutW,

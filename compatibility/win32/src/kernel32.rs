@@ -1585,11 +1585,16 @@ extern "win64" fn DuplicateHandle(
                 }
             }
         }
+        // A process handle to this process: an open one's object, or a new
+        // one (as OpenProcess makes for its own id).
         objects::CURRENT_PROCESS => {
             let id = pid();
             match objects::find(|o| matches!(o, Object::Process(p) if p.pid == id)) {
                 Some(o) => o,
-                None => return fail(ERROR_INVALID_HANDLE, FALSE),
+                None => match crate::process::process_for_pid(id) {
+                    Some(p) => Object::Process(p),
+                    None => return fail(ERROR_INVALID_HANDLE, FALSE),
+                },
             }
         }
         _ => match objects::get(src) {
