@@ -27,6 +27,8 @@ struct Record {
     id: u32,
     category: u16,
     strings: Vec<String>,
+    /// The event's binary data (ReportEvent's lpRawData).
+    data: Vec<u8>,
     time: u32,
 }
 
@@ -67,7 +69,7 @@ extern "win64" fn DeregisterEventSource(h: u64) -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: u32, _user: *const u8, count: u16, _size: u32, strings: *const u64, _data: *const u8) -> i32 {
+pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: u32, _user: *const u8, count: u16, size: u32, strings: *const u64, data: *const u8) -> i32 {
     let Some(source) = SOURCES.lock().unwrap().get(&h).cloned() else { return fail(ERROR_INVALID_HANDLE, 0) };
     let code = kind;
     let kind = match kind {
@@ -79,9 +81,11 @@ pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: 
         0x10 => "audit-failure",
         _ => return fail(ERROR_INVALID_PARAMETER, 0),
     };
-    if count != 0 && strings.is_null() {
+    if (count != 0 && strings.is_null()) || (size != 0 && data.is_null()) {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
+    // SAFETY: the caller's `size` bytes of binary data.
+    let data = if size == 0 { Vec::new() } else { unsafe { core::slice::from_raw_parts(data, size as usize) }.to_vec() };
     let text: Vec<String> = (0..count as usize)
         // SAFETY: the caller's array of `count` NUL-terminated strings.
         .filter_map(|i| unsafe { path::wide_to_string(*strings.add(i) as *const u16) })
@@ -94,7 +98,7 @@ pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: 
         log.records.pop_front();
         log.first += 1;
     }
-    log.records.push_back(Record { source, kind: code, id, category, strings: text, time });
+    log.records.push_back(Record { source, kind: code, id, category, strings: text, data, time });
     1
 }
 
@@ -146,7 +150,8 @@ fn record_bytes(number: u32, r: &Record) -> Vec<u8> {
     }
     let strings: Vec<u8> = r.strings.iter().flat_map(|s| wide(s)).collect();
     let string_offset = 56 + names.len();
-    let mut total = string_offset + strings.len() + 4;
+    let data_offset = string_offset + strings.len();
+    let mut total = data_offset + r.data.len() + 4;
     total = total.next_multiple_of(4);
     let mut b = Vec::with_capacity(total);
     for v in [total as u32, 0x654c_664c, number, r.time, r.time, r.id] {
@@ -157,12 +162,12 @@ fn record_bytes(number: u32, r: &Record) -> Vec<u8> {
     }
     // ClosingRecordNumber, StringOffset, UserSidLength, UserSidOffset,
     // DataLength, DataOffset.
-    let data_offset = (string_offset + strings.len()) as u32;
-    for v in [0, string_offset as u32, 0, 0, 0, data_offset] {
+    for v in [0, string_offset as u32, 0, 0, r.data.len() as u32, data_offset as u32] {
         b.extend_from_slice(&v.to_le_bytes());
     }
     b.extend_from_slice(&names);
     b.extend_from_slice(&strings);
+    b.extend_from_slice(&r.data);
     b.resize(total - 4, 0);
     b.extend_from_slice(&(total as u32).to_le_bytes());
     b
@@ -214,11 +219,13 @@ extern "win64" fn ReadEventLogW(h: u64, flags: u32, offset: u32, buf: *mut u8, s
         next = if forwards { next + 1 } else { next - 1 };
     }
     drop(log);
-    readers.insert(h, (application, Some(next)));
-    drop(readers);
+    // Only a read that returns records moves the position: an empty log
+    // read backwards must not leave the reader past events reported later.
     if out.is_empty() {
         return fail(ERROR_HANDLE_EOF, 0);
     }
+    readers.insert(h, (application, Some(next)));
+    drop(readers);
     // SAFETY: the caller's buffer of `size` bytes and out values.
     unsafe {
         core::ptr::copy_nonoverlapping(out.as_ptr(), buf, out.len());

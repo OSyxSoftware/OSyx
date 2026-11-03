@@ -268,7 +268,17 @@ fn call_enum(proc_: u64, elf: &[u8], ntm: &[u8], lparam: u64) -> i32 {
     const TRUETYPE_FONTTYPE: u32 = 4;
     if crate::wow64::is_active() {
         // LOGFONT and TEXTMETRIC hold no pointers: x86 shares the layout.
-        crate::wow64::call32(proc_ as u32, &[elf.as_ptr() as u32, ntm.as_ptr() as u32, TRUETYPE_FONTTYPE, lparam as u32]) as i32
+        // The records go to the program's heap, which 32-bit code reaches.
+        let (Some(e), Some(n)) = (crate::kernel32::heap_alloc(elf.len(), false), crate::kernel32::heap_alloc(ntm.len(), false)) else { return 0 };
+        // SAFETY: fresh blocks of the records' sizes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(elf.as_ptr(), e as *mut u8, elf.len());
+            core::ptr::copy_nonoverlapping(ntm.as_ptr(), n as *mut u8, ntm.len());
+        }
+        let r = crate::wow64::call32(proc_ as u32, &[e as u32, n as u32, TRUETYPE_FONTTYPE, lparam as u32]) as i32;
+        crate::kernel32::heap_free(e);
+        crate::kernel32::heap_free(n);
+        r
     } else {
         // SAFETY: the program's FONTENUMPROC.
         let f: extern "win64" fn(*const u8, *const u8, u32, u64) -> i32 = unsafe { core::mem::transmute(proc_) };
