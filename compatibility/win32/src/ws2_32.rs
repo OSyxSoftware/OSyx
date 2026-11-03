@@ -16,6 +16,7 @@ use os_sys::net::{self, SockAddr};
 use osyx_abi::Errno;
 
 mod events;
+mod service;
 pub(crate) mod mswsock;
 
 const INVALID_SOCKET: u64 = u64::MAX;
@@ -78,6 +79,8 @@ const WSAETIMEDOUT: u32 = 10060;
 const WSAECONNREFUSED: u32 = 10061;
 const WSAEHOSTUNREACH: u32 = 10065;
 const WSANOTINITIALISED: u32 = 10093;
+const WSA_INVALID_HANDLE: u32 = 6;
+const WSA_IO_INCOMPLETE: u32 = 996;
 const WSAHOST_NOT_FOUND: u32 = 11001;
 const WSATRY_AGAIN: u32 = 11002;
 const WSAVERNOTSUPPORTED: u32 = 10092;
@@ -307,7 +310,11 @@ extern "win64" fn closesocket(s: u64) -> i32 {
     match SOCKETS.lock().unwrap().remove(&s) {
         Some(k) => {
             events::forget(s);
-            let _ = os_sys::close(k.fd);
+            // A socket duplicated with WSADuplicateSocket stays open
+            // until its last handle is closed.
+            if service::release_fd(k.fd) {
+                let _ = os_sys::close(k.fd);
+            }
             0
         }
         None => err(WSAENOTSOCK, SOCKET_ERROR),
@@ -1078,8 +1085,14 @@ pub(crate) extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *c
     if crate::VERBOSE.load(Ordering::Relaxed) {
         os_std::eprintln!("winrun: WSASocket family {af}, kind {kind}, protocol {proto}, provider {}, group {group}, flags {_flags:#x}", !info.is_null());
     }
-    if !info.is_null() || group != 0 {
+    if group != 0 {
         return err(WSAEINVAL, INVALID_SOCKET);
+    }
+    if !info.is_null() {
+        if !started() {
+            return err(WSANOTINITIALISED, INVALID_SOCKET);
+        }
+        return service::socket_from_info(info);
     }
     socket(af, kind, proto)
 }
@@ -1723,6 +1736,7 @@ pub(crate) extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *m
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     let mut e = events::exports();
+    e.extend(service::exports());
     e.extend(export_table![
         WSAStartup,
         WSACleanup,

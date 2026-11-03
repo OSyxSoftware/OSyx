@@ -708,6 +708,130 @@ extern "win64" fn GetIfEntry2(row: *mut u8) -> u32 {
     0
 }
 
+/// GetIfTable2: a MIB_IF_TABLE2 (count, then MIB_IF_ROW2 rows of 1352
+/// bytes from offset 8) of every interface, freed with FreeMibTable.
+extern "win64" fn GetIfTable2(table: *mut u64) -> u32 {
+    if table.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let ifs = match list() {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(base) = crate::kernel32::heap_alloc(8 + ifs.len() * 1352, true) else {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    };
+    let mut n = 0u32;
+    for i in &ifs {
+        let row = base + 8 + n as u64 * 1352;
+        // SAFETY: a row of the fresh table; GetIfEntry2 fills it by LUID.
+        unsafe { teb::put(row, 0, iface_luid(i.flags, i.index)) };
+        if GetIfEntry2(row as *mut u8) == 0 {
+            n += 1;
+        }
+    }
+    // SAFETY: the fresh table; the caller's out pointer.
+    unsafe {
+        teb::put(base, 0, n);
+        *table = base;
+    }
+    0
+}
+
+/// GetIfTable2Ex: both levels (normal, and without statistics) are the
+/// same rows here: the statistics are counters the stack keeps anyway.
+extern "win64" fn GetIfTable2Ex(level: u32, table: *mut u64) -> u32 {
+    if level > 1 {
+        return ERROR_INVALID_PARAMETER;
+    }
+    GetIfTable2(table)
+}
+
+const ERROR_INSUFFICIENT_BUFFER_IP: u32 = 122;
+const ERROR_NO_DATA: u32 = 232;
+
+/// The adapter name IP_ADAPTER_INDEX_MAP and the DHCP calls use.
+fn adapter_name(index: u8) -> alloc::string::String {
+    let g = iface_guid(index);
+    format!(
+        "\\DEVICE\\TCPIP_{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        u32::from_le_bytes([g[0], g[1], g[2], g[3]]),
+        u16::from_le_bytes([g[4], g[5]]),
+        u16::from_le_bytes([g[6], g[7]]),
+        g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]
+    )
+}
+
+/// GetInterfaceInfo: IP_INTERFACE_INFO, the count and an
+/// IP_ADAPTER_INDEX_MAP (index, WCHAR[128] name) per adapter, loopback
+/// excepted, as on Windows.
+extern "win64" fn GetInterfaceInfo(out: *mut u8, len: *mut u32) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let ifs: Vec<_> = match list() {
+        Ok(v) => v.into_iter().filter(|i| i.flags & net::IFF_LOOPBACK == 0).collect(),
+        Err(e) => return e,
+    };
+    let need = 4 + ifs.len() * 260;
+    // SAFETY: the caller's in/out size and buffer of that size.
+    unsafe {
+        if out.is_null() || (*len as usize) < need {
+            *len = need as u32;
+            return ERROR_INSUFFICIENT_BUFFER_IP;
+        }
+        core::ptr::write_bytes(out, 0, need);
+        teb::put(out as u64, 0, ifs.len() as i32);
+        for (k, i) in ifs.iter().enumerate() {
+            let m = out as u64 + 4 + k as u64 * 260;
+            teb::put(m, 0, i.index as u32);
+            out_w(&adapter_name(i.index), (m + 4) as *mut u16, 128);
+        }
+    }
+    if ifs.is_empty() { ERROR_NO_DATA } else { 0 }
+}
+
+/// The interface of an IP_ADAPTER_INDEX_MAP, configured by DHCP.
+fn dhcp_adapter(map: *const u8) -> Result<net::NetIface, u32> {
+    if map.is_null() {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    // SAFETY: the caller's IP_ADAPTER_INDEX_MAP.
+    let index: u32 = unsafe { teb::get(map as u64, 0) };
+    let i = list()?.into_iter().find(|i| i.index as u32 == index).ok_or(ERROR_INVALID_PARAMETER)?;
+    if i.method != net::CONFIG_DHCP {
+        return Err(ERROR_NOT_SUPPORTED);
+    }
+    Ok(i)
+}
+
+/// IpReleaseAddress: gives the DHCP lease up; the adapter has no address
+/// until IpRenewAddress.
+extern "win64" fn IpReleaseAddress(map: *const u8) -> u32 {
+    let i = match dhcp_adapter(map) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let c = net::NetConfig { iface: i.index as u32, method: net::CONFIG_DOWN as u32, ..Default::default() };
+    match net::configure(&c) {
+        Ok(()) => 0,
+        Err(_) => ERROR_ACCESS_DENIED,
+    }
+}
+
+/// IpRenewAddress: restarts DHCP on the adapter.
+extern "win64" fn IpRenewAddress(map: *const u8) -> u32 {
+    let i = match dhcp_adapter(map) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let c = net::NetConfig { iface: i.index as u32, method: net::CONFIG_DHCP as u32, ..Default::default() };
+    match net::configure(&c) {
+        Ok(()) => 0,
+        Err(_) => ERROR_ACCESS_DENIED,
+    }
+}
+
 /// NotifyAddrChange/NotifyRouteChange: OSyx's addresses and routes are
 /// fixed for the boot (see CHANGES), so a change never comes. With an
 /// OVERLAPPED the request stays pending (ERROR_IO_PENDING) until
@@ -765,6 +889,11 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ConvertInterfaceGuidToLuid,
         ConvertInterfaceLuidToGuid,
         GetIfEntry2,
+        GetIfTable2,
+        GetIfTable2Ex,
+        GetInterfaceInfo,
+        IpReleaseAddress,
+        IpRenewAddress,
         NotifyAddrChange,
         NotifyRouteChange,
         CancelIPChangeNotify,
