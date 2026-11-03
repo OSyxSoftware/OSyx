@@ -647,8 +647,198 @@ extern "win64" fn WTHelperProvDataFromStateData(state: u64) -> *mut u8 {
     state as *mut u8
 }
 
+// CRYPT_PROVIDER_DATA: csSigners at 120, pasSigners at 128.
+const CPD_SIGNER_COUNT: usize = 120;
+const CPD_SIGNERS: usize = 128;
+// CRYPT_PROVIDER_SGNR (64 bytes): csCertChain at 12, pasCertChain at 16,
+// csCounterSigners at 44, pasCounterSigners at 48.
+const SGNR_SIZE: u64 = 64;
+
+/// Signer `index` (or its counter-signer `counter`) of verified provider
+/// data. A state OSyx made has no signers, so this finds none there.
+extern "win64" fn WTHelperGetProvSignerFromChain(data: u64, index: u32, counter_signer: i32, counter: u32) -> u64 {
+    if data == 0 || !PROVIDER_STATES.lock().unwrap().contains(&data) {
+        return 0;
+    }
+    // SAFETY: a CRYPT_PROVIDER_DATA made by provider_state, and the signer
+    // array its counts describe.
+    unsafe {
+        if index >= teb::get::<u32>(data, CPD_SIGNER_COUNT) {
+            return 0;
+        }
+        let signer = teb::get::<u64>(data, CPD_SIGNERS) + index as u64 * SGNR_SIZE;
+        if counter_signer == 0 {
+            return signer;
+        }
+        if counter >= teb::get::<u32>(signer, 44) {
+            return 0;
+        }
+        teb::get::<u64>(signer, 48) + counter as u64 * SGNR_SIZE
+    }
+}
+
+/// Certificate `index` of a signer's chain (CRYPT_PROVIDER_CERT entries,
+/// each as large as its cbStruct says).
+extern "win64" fn WTHelperGetProvCertFromChain(signer: u64, index: u32) -> u64 {
+    if signer == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's CRYPT_PROVIDER_SGNR and its certificate array.
+    unsafe {
+        if index >= teb::get::<u32>(signer, 12) {
+            return 0;
+        }
+        let certs = teb::get::<u64>(signer, 16);
+        certs + index as u64 * teb::get::<u32>(certs, 0) as u64
+    }
+}
+
+// ---- catalog administration ------------------------------------------------------------
+//
+// OSyx installs no security catalogs, so no file hash is ever found in
+// one: catalog contexts exist and hashes are computed, but enumeration
+// finds nothing and there is never catalog info to read.
+
+const ERROR_NOT_FOUND: u32 = 1168;
+const ERROR_READ_FAULT: u32 = 30;
+
+/// Catalog admin contexts handed out, by handle.
+static CAT_ADMINS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static NEXT_CAT_ADMIN: AtomicU64 = AtomicU64::new(0x5ca0_0010);
+
+extern "win64" fn CryptCATAdminAcquireContext(out: *mut u64, _subsystem: *const u8, flags: u32) -> i32 {
+    if out.is_null() || flags != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let h = NEXT_CAT_ADMIN.fetch_add(0x10, Ordering::Relaxed);
+    CAT_ADMINS.lock().unwrap().push(h);
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = h };
+    1
+}
+
+extern "win64" fn CryptCATAdminReleaseContext(h: u64, _flags: u32) -> i32 {
+    let mut admins = CAT_ADMINS.lock().unwrap();
+    match admins.iter().position(|&a| a == h) {
+        Some(i) => {
+            admins.remove(i);
+            1
+        }
+        None => fail(ERROR_INVALID_PARAMETER, 0),
+    }
+}
+
+/// The SHA-1 a catalog lists a file by: the Authenticode digest of a PE
+/// image (everything but the checksum, the certificate table entry and
+/// the certificate table), the plain digest of any other file.
+fn catalog_hash(f: &mut os_std::fs::File) -> Option<[u8; 20]> {
+    use sha1::Digest as _;
+    let len = f.metadata().ok()?.len();
+    // Ranges of the file to leave out.
+    let mut skip: Vec<(u64, u64)> = Vec::new();
+    let mut dos = [0u8; 64];
+    if read_at(f, 0, &mut dos) && &dos[..2] == b"MZ" {
+        let pe = u32::from_le_bytes([dos[0x3c], dos[0x3d], dos[0x3e], dos[0x3f]]) as u64;
+        let mut head = [0u8; 26];
+        if read_at(f, pe, &mut head) && &head[..4] == b"PE\0\0" {
+            let opt = pe + 24;
+            let dirs = match u16::from_le_bytes([head[24], head[25]]) {
+                0x10b => Some(96),
+                0x20b => Some(112),
+                _ => None,
+            };
+            if let Some(dirs) = dirs {
+                let cert_entry = opt + dirs + 4 * 8;
+                let mut d = [0u8; 8];
+                skip.push((opt + 64, 4));
+                skip.push((cert_entry, 8));
+                if read_at(f, cert_entry, &mut d) {
+                    let (at, size) = (u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as u64, u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as u64);
+                    if size != 0 && at.checked_add(size).is_some_and(|e| e <= len) {
+                        skip.push((at, size));
+                    }
+                }
+            }
+        }
+    }
+    skip.sort_unstable();
+    let mut h = sha1::Sha1::new();
+    let mut buf = alloc::vec![0u8; 64 * 1024];
+    let mut at = 0u64;
+    let mut ranges = skip.into_iter().peekable();
+    while at < len {
+        let mut end = len;
+        if let Some(&(s, n)) = ranges.peek() {
+            if at >= s {
+                at = at.max(s + n);
+                ranges.next();
+                continue;
+            }
+            end = end.min(s);
+        }
+        let n = ((end - at) as usize).min(buf.len());
+        if !read_at(f, at, &mut buf[..n]) {
+            return None;
+        }
+        h.update(&buf[..n]);
+        at += n as u64;
+    }
+    Some(h.finalize().into())
+}
+
+extern "win64" fn CryptCATAdminCalcHashFromFileHandle(file: u64, size: *mut u32, hash: *mut u8, flags: u32) -> i32 {
+    if size.is_null() || flags != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's in/out size.
+    if hash.is_null() || unsafe { *size } < 20 {
+        unsafe { *size = 20 };
+        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    let f = match crate::objects::file(file) {
+        Ok(f) if !f.path.is_empty() && !f.is_dir => f,
+        Ok(_) => return fail(ERROR_INVALID_PARAMETER, 0),
+        Err(e) => return fail(e, 0),
+    };
+    let Ok(mut file) = os_std::fs::File::open(&f.path) else { return fail(ERROR_INVALID_HANDLE, 0) };
+    let Some(digest) = catalog_hash(&mut file) else { return fail(ERROR_READ_FAULT, 0) };
+    // SAFETY: the caller's buffer of at least 20 bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(digest.as_ptr(), hash, 20);
+        *size = 20;
+    }
+    1
+}
+
+extern "win64" fn CryptCATAdminEnumCatalogFromHash(admin: u64, hash: *const u8, len: u32, _flags: u32, _prev: *mut u64) -> u64 {
+    if !CAT_ADMINS.lock().unwrap().contains(&admin) || hash.is_null() || len == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    fail(ERROR_NOT_FOUND, 0)
+}
+
+/// No catalog info is ever handed out, so none can be released or read.
+extern "win64" fn CryptCATAdminReleaseCatalogContext(_admin: u64, _info: u64, _flags: u32) -> i32 {
+    fail(ERROR_INVALID_PARAMETER, 0)
+}
+
+extern "win64" fn CryptCATCatalogInfoFromContext(_info: u64, _out: *mut u8, _flags: u32) -> i32 {
+    fail(ERROR_INVALID_PARAMETER, 0)
+}
+
 pub fn wintrust_exports() -> Vec<(&'static str, u64)> {
-    export_table![WinVerifyTrust, WTHelperProvDataFromStateData]
+    export_table![
+        WinVerifyTrust,
+        WTHelperProvDataFromStateData,
+        WTHelperGetProvSignerFromChain,
+        WTHelperGetProvCertFromChain,
+        CryptCATAdminAcquireContext,
+        CryptCATAdminReleaseContext,
+        CryptCATAdminCalcHashFromFileHandle,
+        CryptCATAdminEnumCatalogFromHash,
+        CryptCATAdminReleaseCatalogContext,
+        CryptCATCatalogInfoFromContext,
+    ]
 }
 
 // ---- avrt ----------------------------------------------------------------------------
