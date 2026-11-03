@@ -55,11 +55,13 @@ const STACK_LIMIT: u64 = STACK_TOP - (STACK_PAGES + 1) * PAGE_SIZE;
 const MAP_BASE: u64 = 0x0000_1000_0000_0000;
 /// Where program segments may lie: above the null guard, below `MAP_BASE`.
 const PROGRAM_RANGE: AddressRange = AddressRange { start: osyx_elf::USER_RANGE.start, end: MAP_BASE };
-/// Per-process cap on anonymous address space (64 GiB). Anonymous memory
-/// is demand-zero: a frame is taken on the first access to a page, so this
-/// bounds reservations (a browser reserves far more than it touches), and
-/// physical memory bounds what is actually used.
-const MAP_LIMIT_PAGES: u64 = 16 * 1024 * 1024;
+/// Per-process cap on anonymous address space (32 TiB of the ~112 TiB
+/// above `MAP_BASE`). Anonymous memory is demand-zero: a frame is taken on
+/// the first access to a page, and a region costs the same bookkeeping
+/// whatever its size, so this only bounds reservations (a browser reserves
+/// far more than it touches: Chromium's allocator pools and V8's 1 TiB
+/// sandbox), and physical memory bounds what is actually used.
+const MAP_LIMIT_PAGES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_PROCESSES: usize = 512;
 const OUTPUT_TAIL_LINES: usize = 3;
 
@@ -1437,7 +1439,7 @@ pub fn map_ex(addr: u64, len: u64, prot: u64, mflags: u64) -> Result<u64, Errno>
         let shared: BTreeMap<u64, u64> = p.shared.range(..end).next_back().map(|(&b, s)| (b, s.1)).into_iter().collect();
         if overlaps(&regions)
             || overlaps(&shared)
-            || (0..pages).any(|i| paging::translate_in(p.space.root, addr + i * PAGE_SIZE).is_some())
+            || paging::any_present_in(p.space.root, addr, end)
         {
             return Err(Errno::AlreadyExists);
         }

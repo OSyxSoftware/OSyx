@@ -12,6 +12,9 @@
 //! needs a PAC script to run, and OSyx has no JavaScript engine for it: an
 //! auto-detection with no WPAD host fails as on Windows, and a script that
 //! exists cannot be run (ERROR_WINHTTP_BAD_AUTO_PROXY_SCRIPT).
+//!
+//! WinINet's HTTP functions (wininet.dll) are the same sessions, connections
+//! and requests: their handles are these handles.
 #![allow(non_snake_case)]
 use crate::{
     error::*,
@@ -300,6 +303,8 @@ struct Request {
     body: Body,
     /// Received bytes not yet consumed.
     buffered: Vec<u8>,
+    /// Body bytes read ahead by InternetQueryDataAvailable.
+    peeked: Vec<u8>,
 }
 
 enum Kind {
@@ -474,7 +479,7 @@ extern "win64" fn WinHttpOpenRequest(connect: u64, verb: *const u16, object: *co
     if !accepts.is_empty() {
         headers.push((String::from("Accept"), accepts.join(", ")));
     }
-    let r = Request { host: host.clone(), port, secure, verb, path, headers, stream: None, to_write: 0, response: None, body: Body::None, buffered: Vec::new() };
+    let r = Request { host: host.clone(), port, secure, verb, path, headers, stream: None, to_write: 0, response: None, body: Body::None, buffered: Vec::new(), peeked: Vec::new() };
     new_handle(Kind::Request(Mutex::new(r)), connect)
 }
 
@@ -613,6 +618,7 @@ fn send_request(r: &mut Request, via: &Route, optional: &[u8], total: u64) -> Re
     r.stream = Some(stream);
     r.response = None;
     r.buffered.clear();
+    r.peeked.clear();
     Ok(())
 }
 
@@ -898,6 +904,12 @@ extern "win64" fn WinHttpReadData(h: u64, buf: *mut u8, n: u32, read: *mut u32) 
             }
             // SAFETY: the caller's buffer of `n` bytes, theirs until the read completes.
             let out = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, n as usize) };
+            if !r.peeked.is_empty() {
+                let k = out.len().min(r.peeked.len());
+                out[..k].copy_from_slice(&r.peeked[..k]);
+                r.peeked.drain(..k);
+                return Ok(k);
+            }
             read_body(r, out)
         })
     };
@@ -1427,6 +1439,140 @@ extern "win64" fn WinHttpFreeProxyResult(result: u64) {
         teb::put(result, 0, 0u32);
         teb::put(result, 8, 0u64);
     }
+}
+
+// ---- WinINet -------------------------------------------------------------------------
+
+/// WinINet's last error is the thread's; its codes are WinHTTP's (both
+/// number HTTP errors from 12000).
+extern "win64" fn InternetOpenW(agent: *const u16, access: u32, proxy: *const u16, bypass: *const u16, flags: u32) -> u64 {
+    // INTERNET_OPEN_TYPE_PRECONFIG (0) and _DIRECT (1) connect directly;
+    // _PROXY (3) uses the proxy given, as WINHTTP_ACCESS_TYPE_NAMED_PROXY.
+    // INTERNET_FLAG_ASYNC is WINHTTP_FLAG_ASYNC; there is no WinINet
+    // status callback here, so requests run synchronously.
+    WinHttpOpen(agent, if access == 3 { 3 } else { 1 }, proxy, bypass, flags & !(WINHTTP_FLAG_ASYNC | 0x0100_0000))
+}
+
+extern "win64" fn InternetConnectW(session: u64, server: *const u16, port: u16, _user: *const u16, _password: *const u16, service: u32, _flags: u32, _context: u64) -> u64 {
+    if service != 3 {
+        return fail(ERROR_NOT_SUPPORTED, 0); // INTERNET_SERVICE_HTTP only (no FTP or Gopher)
+    }
+    WinHttpConnect(session, server, port, 0)
+}
+
+extern "win64" fn HttpOpenRequestW(connect: u64, verb: *const u16, object: *const u16, version: *const u16, referrer: *const u16, accept: *const u64, flags: u32, _context: u64) -> u64 {
+    WinHttpOpenRequest(connect, verb, object, version, referrer, accept, flags & WINHTTP_FLAG_SECURE)
+}
+
+extern "win64" fn HttpAddRequestHeadersW(h: u64, headers: *const u16, len: u32, modifiers: u32) -> i32 {
+    WinHttpAddRequestHeaders(h, headers, len, modifiers)
+}
+
+/// HttpSendRequestW sends the request and reads the response headers.
+extern "win64" fn HttpSendRequestW(h: u64, headers: *const u16, hlen: u32, optional: *const u8, olen: u32) -> i32 {
+    if WinHttpSendRequest(h, headers, hlen, optional, olen, olen, 0) == 0 {
+        return 0;
+    }
+    WinHttpReceiveResponse(h, 0)
+}
+
+const HTTP_QUERY_CUSTOM: u32 = 65535;
+
+/// HttpQueryInfoW: WinHTTP's query levels and flags; a custom header's
+/// name comes in the buffer.
+extern "win64" fn HttpQueryInfoW(h: u64, level: u32, buf: *mut u8, len: *mut u32, index: *mut u32) -> i32 {
+    let name: Vec<u16> = if level & 0xFFFF == HTTP_QUERY_CUSTOM && !buf.is_null() {
+        // SAFETY: the caller's NUL-terminated header name in the buffer.
+        unsafe { ws(buf as *const u16) }.unwrap_or_default().encode_utf16().chain([0]).collect()
+    } else {
+        Vec::new()
+    };
+    let name_ptr = if name.is_empty() { core::ptr::null() } else { name.as_ptr() };
+    WinHttpQueryHeaders(h, level, name_ptr, buf, len, index)
+}
+
+extern "win64" fn InternetReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u32) -> i32 {
+    if read.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    WinHttpReadData(h, buf, n, read)
+}
+
+/// The body bytes that can be read without waiting: those read ahead, or
+/// (waiting for them) the next block; 0 at the end of the body.
+extern "win64" fn InternetQueryDataAvailable(h: u64, avail: *mut u32, _flags: u32, _context: u64) -> i32 {
+    let o = match request(h) {
+        Ok(o) => o,
+        Err(e) => return fail(e, 0),
+    };
+    let r = with_request(&o, |r| {
+        if r.response.is_none() {
+            return Err(ERROR_WINHTTP_INCORRECT_HANDLE_STATE);
+        }
+        if r.peeked.is_empty() {
+            let mut block = [0u8; 16 * 1024];
+            let n = read_body(r, &mut block)?;
+            r.peeked.extend_from_slice(&block[..n]);
+        }
+        Ok(r.peeked.len() as u32)
+    });
+    match r {
+        Ok(n) => {
+            if !avail.is_null() {
+                // SAFETY: the caller's out pointer.
+                unsafe { *avail = n };
+            }
+            1
+        }
+        Err(e) => fail(e, 0),
+    }
+}
+
+/// InternetCrackUrlW: WinHttpCrackUrl, with WinINet's scheme numbers
+/// (INTERNET_SCHEME_HTTP 3, _HTTPS 4).
+extern "win64" fn InternetCrackUrlW(url: *const u16, len: u32, flags: u32, out: u64) -> i32 {
+    if WinHttpCrackUrl(url, len, flags, out) == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's URL_COMPONENTSW, filled above.
+    unsafe {
+        let scheme: u32 = teb::get(out, 20);
+        teb::put(out, 20, scheme + 2);
+    }
+    1
+}
+
+/// InternetCloseHandle of a session, connection or request.
+pub(crate) fn close(h: u64) -> bool {
+    get(h).is_some() && WinHttpCloseHandle(h) != 0
+}
+
+/// InternetSetOptionW on a handle: the timeouts (connect 2, send 5 and 7,
+/// receive 6 and 8, in milliseconds). False if `h` is not a handle here.
+pub(crate) fn set_option(h: u64, option: u32, value: u32) -> Option<bool> {
+    let o = get(h)?;
+    let slot = match option {
+        2 => 1,
+        5 | 7 => 2,
+        6 | 8 => 3,
+        _ => return Some(false),
+    };
+    o.timeouts.lock().unwrap()[slot] = value;
+    Some(true)
+}
+
+pub fn wininet_exports() -> Vec<(&'static str, u64)> {
+    export_table![
+        InternetOpenW,
+        InternetConnectW,
+        HttpOpenRequestW,
+        HttpAddRequestHeadersW,
+        HttpSendRequestW,
+        HttpQueryInfoW,
+        InternetReadFile,
+        InternetQueryDataAvailable,
+        InternetCrackUrlW,
+    ]
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {

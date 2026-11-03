@@ -406,13 +406,23 @@ extern "win64" fn InternetQueryOptionW(_session: u64, _option: u32, _buffer: *mu
     crate::kernel32::fail(ERROR_INVALID_PARAMETER, crate::kernel32::FALSE)
 }
 
-/// OSyx has no WinINet sessions: only the process-wide options (handle
-/// NULL) INTERNET_OPTION_REFRESH (37) and INTERNET_OPTION_SETTINGS_CHANGED
-/// (39) exist, and with no cached proxy or settings state they have nothing
-/// to refresh. Anything else is an invalid handle or option.
-extern "win64" fn InternetSetOptionW(session: u64, option: u32, _buffer: *const u8, _len: u32) -> crate::kernel32::Bool {
+/// The process-wide options (handle NULL) INTERNET_OPTION_REFRESH (37)
+/// and INTERNET_OPTION_SETTINGS_CHANGED (39) have no cached proxy or
+/// settings state to refresh. On a session, connection or request
+/// (winhttp.rs) the timeouts can be set.
+extern "win64" fn InternetSetOptionW(session: u64, option: u32, buffer: *const u8, len: u32) -> crate::kernel32::Bool {
     if session != 0 {
-        return crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE);
+        let value = if buffer.is_null() || len < 4 {
+            return crate::kernel32::fail(ERROR_INVALID_PARAMETER, crate::kernel32::FALSE);
+        } else {
+            // SAFETY: the caller's DWORD option value.
+            unsafe { core::ptr::read_unaligned(buffer as *const u32) }
+        };
+        return match crate::winhttp::set_option(session, option, value) {
+            None => crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE),
+            Some(false) => crate::kernel32::fail(12009, crate::kernel32::FALSE),
+            Some(true) => crate::kernel32::TRUE,
+        };
     }
     match option {
         37 | 39 => crate::kernel32::TRUE,
@@ -420,13 +430,18 @@ extern "win64" fn InternetSetOptionW(session: u64, option: u32, _buffer: *const 
     }
 }
 
-/// No WinINet function here creates a handle, so every handle is invalid.
-extern "win64" fn InternetCloseHandle(_session: u64) -> crate::kernel32::Bool {
-    crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE)
+/// Closes a session, connection or request (winhttp.rs).
+extern "win64" fn InternetCloseHandle(h: u64) -> crate::kernel32::Bool {
+    if crate::winhttp::close(h) {
+        crate::kernel32::TRUE
+    } else {
+        crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE)
+    }
 }
 
 pub fn wininet_exports() -> Vec<(&'static str, u64)> {
-    export_table![
+    let mut e = crate::winhttp::wininet_exports();
+    e.extend(export_table![
         InternetGetConnectedState,
         InternetGetConnectedStateExW,
         InternetGetConnectedStateExA,
@@ -435,7 +450,8 @@ pub fn wininet_exports() -> Vec<(&'static str, u64)> {
         InternetQueryOptionW,
         InternetSetOptionW,
         InternetCloseHandle,
-    ]
+    ]);
+    e
 }
 
 // ---- wintrust -----------------------------------------------------------------------
