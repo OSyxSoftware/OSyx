@@ -6153,17 +6153,15 @@ fn wide(p: *const u16) -> Option<String> {
     if p.is_null() {
         return None;
     }
-    let mut s = String::new();
-    let mut i = 0;
+    let mut n = 0;
     // SAFETY: a NUL-terminated string from the caller.
-    loop {
-        let c = unsafe { *p.add(i) };
-        if c == 0 {
-            return Some(s);
-        }
-        s.push(char::from_u32(c as u32).unwrap_or('\u{fffd}'));
-        i += 1;
+    while unsafe { *p.add(n) } != 0 {
+        n += 1;
     }
+    // SAFETY: the `n` units before the NUL. Surrogate pairs become one
+    // character; an unpaired surrogate becomes U+FFFD.
+    let units = unsafe { core::slice::from_raw_parts(p, n) };
+    Some(char::decode_utf16(units.iter().copied()).map(|c| c.unwrap_or('\u{fffd}')).collect())
 }
 
 pub(crate) extern "win64" fn GetClassInfoW(_inst: u64, name: *const u16, out: *mut u8) -> Bool {
@@ -6297,9 +6295,11 @@ extern "win64" fn FindWindowW(class: *const u16, title: *const u16) -> u64 {
         g.windows
             .iter()
             .find(|(_, w)| {
+                // Top-level windows only; names and titles match without case.
+                let top = w.style & WS_CHILD == 0;
                 let class_ok = c.as_ref().is_none_or(|want| g.classes.get(w.class).is_some_and(|k| k.name.eq_ignore_ascii_case(want)));
-                let title_ok = t.as_ref().is_none_or(|want| w.title == *want);
-                class_ok && title_ok
+                let title_ok = t.as_ref().is_none_or(|want| w.title.to_lowercase() == want.to_lowercase());
+                top && class_ok && title_ok
             })
             .map(|(h, _)| *h)
             .unwrap_or(0)

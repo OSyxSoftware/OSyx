@@ -389,14 +389,19 @@ extern "win64" fn CryptGenRandom(prov: u64, len: u32, buf: *mut u8) -> i32 {
     if buf.is_null() {
         return fail(crate::error::ERROR_INVALID_PARAMETER, 0);
     }
-    // The caller's buffer may be uninitialised: fill a buffer of ours and
-    // copy it out.
-    let mut bytes = alloc::vec![0u8; len as usize];
-    if !crate::ucrt::entropy(&mut bytes) {
-        return fail(0x8009_0020, 0); // NTE_FAIL
+    // The caller's buffer may be uninitialised: fill a scratch block of
+    // ours at a time and copy it out (no allocation of the request's size).
+    let mut chunk = [0u8; 256];
+    let mut done = 0usize;
+    while done < len as usize {
+        let n = (len as usize - done).min(chunk.len());
+        if !crate::ucrt::entropy(&mut chunk[..n]) {
+            return fail(0x8009_0020, 0); // NTE_FAIL
+        }
+        // SAFETY: the caller's buffer of `len` bytes.
+        unsafe { core::ptr::copy_nonoverlapping(chunk.as_ptr(), buf.add(done), n) };
+        done += n;
     }
-    // SAFETY: the caller's buffer of `len` bytes.
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len()) };
     1
 }
 

@@ -278,7 +278,8 @@ extern "win64" fn ImmReleaseContext(hwnd: u64, himc: u64) -> i32 {
     if himc == 0 {
         return 1;
     }
-    with_context(himc, |c| c.wnd == hwnd).unwrap_or(false) as i32
+    let associated = ASSOCIATED.lock().unwrap().get(&hwnd) == Some(&himc);
+    (associated || with_context(himc, |c| c.wnd == hwnd).unwrap_or(false)) as i32
 }
 
 extern "win64" fn ImmGetOpenStatus(himc: u64) -> i32 {
@@ -412,12 +413,24 @@ extern "win64" fn ImmAssociateContext(hwnd: u64, himc: u64) -> u64 {
     if himc != 0 && with_context(himc, |_| ()).is_none() {
         return 0;
     }
-    let previous = ASSOCIATED.lock().unwrap().insert(hwnd, himc);
-    match previous {
+    // What the window used until now: its association, else its default
+    // context (made on demand as ImmGetContext does), taken before the new
+    // association hides it.
+    let previous = match ASSOCIATED.lock().unwrap().get(&hwnd).copied() {
         Some(p) => p,
-        // The default context, made on demand as ImmGetContext does.
         None => ImmGetContext(hwnd),
+    };
+    // NULL leaves the window without a context (ImmGetContext answers
+    // NULL), as on Windows; ImmAssociateContextEx restores the default.
+    if himc != 0 {
+        with_context(himc, |c| {
+            if c.wnd == 0 {
+                c.wnd = hwnd;
+            }
+        });
     }
+    ASSOCIATED.lock().unwrap().insert(hwnd, himc);
+    previous
 }
 
 /// ImmGetCandidateListW: nothing is ever composed (the only layout has no

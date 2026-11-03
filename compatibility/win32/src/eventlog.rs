@@ -30,10 +30,15 @@ struct Record {
     time: u32,
 }
 
-/// The Application log of this process, oldest first; record numbers
-/// start at 1. Like a Windows log of fixed size that does not overwrite,
-/// it stops keeping records when full (they still reach the error stream).
-static LOG: Mutex<Vec<Record>> = Mutex::new(Vec::new());
+/// The Application log of this process, oldest first. Like a Windows log
+/// that overwrites as needed, it keeps the newest LOG_LIMIT records; record
+/// numbers stay those they were given (the oldest kept is `first`).
+struct Log {
+    records: alloc::collections::VecDeque<Record>,
+    first: u32,
+}
+
+static LOG: Mutex<Log> = Mutex::new(Log { records: alloc::collections::VecDeque::new(), first: 1 });
 const LOG_LIMIT: usize = 4096;
 
 /// Open logs: (is the Application log, next record to read forwards, or
@@ -85,9 +90,11 @@ pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: 
     os_std::eprintln!("[event] {source} {kind} {}: {}", id & 0xffff, text.join(" | "));
     let time = (os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0) / 1_000_000_000) as u32;
     let mut log = LOG.lock().unwrap();
-    if log.len() < LOG_LIMIT {
-        log.push(Record { source, kind: code, id, category, strings: text, time });
+    if log.records.len() == LOG_LIMIT {
+        log.records.pop_front();
+        log.first += 1;
     }
+    log.records.push_back(Record { source, kind: code, id, category, strings: text, time });
     1
 }
 
@@ -174,11 +181,21 @@ extern "win64" fn ReadEventLogW(h: u64, flags: u32, offset: u32, buf: *mut u8, s
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let log = LOG.lock().unwrap();
-    let count = if application { log.len() as u32 } else { 0 };
-    let mut next = if seek { offset } else { pos.unwrap_or(if forwards { 1 } else { count }) };
+    // Records first..=last exist; ones overwritten since cannot be read.
+    let (first, count) = (log.first, if application { log.records.len() as u32 } else { 0 });
+    let last = first + count - 1;
+    if seek && count > 0 && !(first..=last).contains(&offset) {
+        drop(log);
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut next = if seek { offset } else { pos.unwrap_or(if forwards { first } else { last }) };
+    // A sequential reader overtaken by overwriting resumes at the oldest.
+    if forwards && next < first {
+        next = first;
+    }
     let mut out = Vec::new();
-    while (1..=count).contains(&next) {
-        let r = record_bytes(next, &log[next as usize - 1]);
+    while count > 0 && (first..=last).contains(&next) {
+        let r = record_bytes(next, &log.records[(next - first) as usize]);
         if out.len() + r.len() > size as usize {
             if out.is_empty() {
                 // SAFETY: the caller's out values.
