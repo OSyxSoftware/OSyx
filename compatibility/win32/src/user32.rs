@@ -30,6 +30,7 @@ use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
 mod client;
 mod controls;
+mod extra;
 mod gdi;
 mod keyboard;
 mod dialog_template;
@@ -335,7 +336,15 @@ struct Dc {
     bitmap: u64,
     memory: bool,
     clip: Option<Region>,
+    /// World transform, then the window and viewport origins (MM_TEXT):
+    /// `transform` is what drawing uses.
     transform: Xform,
+    world: Xform,
+    viewport_org: (i32, i32),
+    window_org: (i32, i32),
+    /// The colours of the DC_BRUSH and DC_PEN stock objects in this DC.
+    dc_brush: Color,
+    dc_pen: Color,
     align: u32,
     graphics_mode: i32,
     map_mode: i32,
@@ -423,6 +432,8 @@ const NULL_PEN: u32 = 8;
 const ANSI_FIXED_FONT: u32 = 11;
 const DEFAULT_GUI_FONT: u32 = 17;
 const SYSTEM_FONT: u32 = 13;
+const DC_BRUSH: u32 = 18;
+const DC_PEN: u32 = 19;
 
 fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
     let mut g = GUI.lock().unwrap();
@@ -445,6 +456,9 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
             (15, Gdi::Font(FontKind::Sans)),
             (16, Gdi::Font(FontKind::Mono)),
             (DEFAULT_GUI_FONT, Gdi::Font(FontKind::Sans)),
+            // DC_BRUSH and DC_PEN: their colour is each DC's (draw_dc).
+            (DC_BRUSH, Gdi::Brush(rgb(255, 255, 255))),
+            (DC_PEN, Gdi::Pen(rgb(0, 0, 0), 1)),
         ] {
             gdi.insert(STOCK_BASE + i as u64, o);
         }
@@ -4203,8 +4217,9 @@ extern "win64" fn LoadIconW(inst: u64, id: u64) -> u64 {
     LoadCursorA(inst, id)
 }
 
+/// SetCursor: returns the previous cursor (GetCursor reads the current).
 extern "win64" fn SetCursor(c: u64) -> u64 {
-    c
+    extra::set_cursor(c)
 }
 
 extern "win64" fn GetSysColor(i: i32) -> u32 {
@@ -4285,6 +4300,11 @@ fn new_dc(g: &mut Gui, hwnd: u64, paint: Rect) -> u64 {
             memory: false,
             clip: None,
             transform: Xform::IDENTITY,
+            world: Xform::IDENTITY,
+            viewport_org: (0, 0),
+            window_org: (0, 0),
+            dc_brush: rgb(255, 255, 255),
+            dc_pen: rgb(0, 0, 0),
             align: 0,
             graphics_mode: 1,
             map_mode: 1,
@@ -5991,6 +6011,12 @@ pub(crate) extern "win64" fn GetClassNameW(wnd: u64, buf: *mut u16, size: i32) -
 }
 
 // ---- monitors ------------------------------------------------------------------------------
+
+/// The screen's size in pixels.
+pub(crate) fn screen_size() -> (i32, i32) {
+    let r = screen_rect();
+    (r.2, r.3)
+}
 
 fn screen_rect() -> Rect4 {
     let (w, h) = with(|g| g.conn().map(|c| (c.screen_width as i32, c.screen_height as i32)).unwrap_or((1024, 768)));
@@ -8300,6 +8326,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ("SetWindowLongW", SetWindowLongW as *const () as usize as u64),
     ])
     .chain(client::exports())
+    .chain(extra::exports())
     .collect()
 }
 

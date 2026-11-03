@@ -50,7 +50,7 @@ fn stretch(
 /// The source rectangle must lie inside the source surface.
 fn source(src: u64, sx: i32, sy: i32, sw: i32, sh: i32) -> Result<Snapshot, u32> {
     let s = snapshot(src, Rect::new(sx, sy, sw as u32, sh as u32)).ok_or(ERROR_INVALID_HANDLE)?;
-    if sx < 0 || sy < 0 || sx + sw > s.width as i32 || sy + sh > s.height as i32 {
+    if sx < 0 || sy < 0 || sx as i64 + sw as i64 > s.width as i64 || sy as i64 + sh as i64 > s.height as i64 {
         return Err(ERROR_INVALID_PARAMETER);
     }
     Ok(s)
@@ -78,7 +78,8 @@ extern "win64" fn AlphaBlend(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64,
         let src_a = if per_pixel { chan(c, 24) * k / 255 } else { k };
         let mut out = 0u32;
         for shift in [0, 8, 16, 24] {
-            let sc = chan(c, shift);
+            // Without AC_SRC_ALPHA the source counts as opaque.
+            let sc = if shift == 24 && !per_pixel { 255 } else { chan(c, shift) };
             // Premultiplied colour channels scale by the constant alpha;
             // without per-pixel alpha the constant alone weighs them.
             let v = sc * k / 255 + chan(under, shift) * (255 - src_a) / 255;
