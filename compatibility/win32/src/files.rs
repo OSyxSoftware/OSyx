@@ -374,7 +374,7 @@ extern "win64" fn CreateSymbolicLinkW(link: *const u16, target: *const u16, flag
 /// FINDEX_INFO_LEVELS: standard (0) and basic (1, no short names, which
 /// OSyx never has); FINDEX_SEARCH_OPS: name match (0) and the advisory
 /// directory filter (1).
-extern "win64" fn FindFirstFileExW(pattern: *const u16, level: u32, data: u64, op: u32, filter: u64, flags: u32) -> u64 {
+pub(crate) extern "win64" fn FindFirstFileExW(pattern: *const u16, level: u32, data: u64, op: u32, filter: u64, flags: u32) -> u64 {
     if level > 1 || op > 1 || filter != 0 || flags & !0x7 != 0 {
         return fail(ERROR_INVALID_PARAMETER, u64::MAX);
     }

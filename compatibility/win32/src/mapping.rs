@@ -251,6 +251,17 @@ pub fn unmap(addr: u64) -> Result<(), NtStatus> {
     unsafe { os_sys::unmap(base as *mut u8, (v.size as usize).next_multiple_of(PAGE)) }.map_err(errno_to_status)
 }
 
+/// The OSyx path of the file mapped at `addr`, for a view of a file.
+pub fn view_path(addr: u64) -> Option<String> {
+    let views = VIEWS.lock().unwrap();
+    let (&base, v) = views.range(..=addr).next_back()?;
+    let size = (v.size as usize).next_multiple_of(PAGE) as u64;
+    if addr >= base + size {
+        return None;
+    }
+    v.section.file.as_ref().map(|f| f.path.clone()).filter(|p| !p.is_empty())
+}
+
 /// What VirtualQuery reports for an address inside a view.
 pub fn query(addr: u64) -> Option<mem::Info> {
     let views = VIEWS.lock().unwrap();

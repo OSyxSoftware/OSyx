@@ -329,6 +329,21 @@ extern "win64" fn GetThreadLocale() -> u32 {
 const MUI_LANGUAGE_ID: u32 = 0x4;
 const MUI_LANGUAGE_NAME: u32 = 0x8;
 
+/// The thread's UI languages: no thread sets its own, so they are the
+/// user's, with or without the fallback merges and filters asked for (the
+/// one language needs no fallback and passes every filter).
+extern "win64" fn GetThreadPreferredUILanguages(flags: u32, count: *mut u32, buf: *mut u16, size: *mut u32) -> i32 {
+    const KNOWN: u32 = 0x1 | MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | 0x10 | 0x20 | 0x40 | 0x100 | 0x200;
+    if flags & !KNOWN != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let form = match flags & (MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME) {
+        0 => MUI_LANGUAGE_NAME,
+        f => f,
+    };
+    GetUserPreferredUILanguages(form, count, buf, size)
+}
+
 /// A double-NUL-terminated list with the one UI language.
 extern "win64" fn GetUserPreferredUILanguages(flags: u32, count: *mut u32, buf: *mut u16, size: *mut u32) -> i32 {
     if count.is_null() || size.is_null() || flags & !(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | 0x40) != 0
@@ -846,6 +861,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetSystemDefaultLangID,
         GetThreadLocale,
         GetUserPreferredUILanguages,
+        GetThreadPreferredUILanguages,
         GetUserGeoID,
         GetGeoInfoW,
         GetDateFormatEx,

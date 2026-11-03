@@ -419,6 +419,23 @@ extern "win64" fn GetVolumePathNameW(name: *const u16, buf: *mut u16, len: u32) 
     }
     1
 }
+/// FindFirstFileExW's search with the result in WIN32_FIND_DATAA: both
+/// info levels (standard, basic) fill the same structure.
+extern "win64" fn FindFirstFileExA(pattern: *const u8, level: u32, data: u64, op: u32, filter: u64, flags: u32) -> u64 {
+    if data == 0 {
+        return fail(ERROR_INVALID_PARAMETER, u64::MAX);
+    }
+    // SAFETY: a NUL-terminated pattern.
+    let Some(p) = (unsafe { path::ansi_to_wide(pattern) }) else { return fail(ERROR_INVALID_PARAMETER, u64::MAX) };
+    let mut w = [0u8; 592];
+    let h = crate::files::FindFirstFileExW(p.as_ptr(), level, w.as_mut_ptr() as u64, op, filter, flags);
+    if h != u64::MAX && find_data_to_ansi(&w, data) == 0 {
+        FindClose(h);
+        return u64::MAX;
+    }
+    h
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         GetLogicalDriveStringsW,
@@ -435,6 +452,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         FindFirstFileA,
         FindNextFileA,
         FindNextFileW,
-        FindClose
+        FindClose,
+        FindFirstFileExA,
     ]
 }

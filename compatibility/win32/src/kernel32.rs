@@ -191,6 +191,20 @@ extern "win64" fn IsDebuggerPresent() -> Bool {
     FALSE
 }
 
+/// No process is debugged: OSyx has no debugger attach for Windows
+/// processes.
+extern "win64" fn CheckRemoteDebuggerPresent(h: u64, present: *mut Bool) -> Bool {
+    if h != objects::CURRENT_PROCESS && !matches!(objects::get(h), Some(Object::Process(_))) {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    if present.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *present = FALSE };
+    TRUE
+}
+
 extern "win64" fn OutputDebugStringA(s: *const u8) {
     // SAFETY: the caller passes a NUL-terminated string.
     if let Some(s) = unsafe { sa(s) } {
@@ -244,6 +258,23 @@ extern "win64" fn AllocConsole() -> Bool {
     fail(ERROR_ACCESS_DENIED, FALSE)
 }
 
+/// The process's console is its standard output stream, which OSyx keeps
+/// for the process's life: detaching succeeds and leaves the standard
+/// handles as they are, as Windows does.
+extern "win64" fn FreeConsole() -> Bool {
+    TRUE
+}
+
+/// The console is a window-less text stream, never full screen.
+extern "win64" fn GetConsoleDisplayMode(flags: *mut u32) -> Bool {
+    if flags.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *flags = 0 };
+    TRUE
+}
+
 /// CONSOLE_SCREEN_BUFFER_INFO for the text console: OSyx's console is a
 /// stream with no cursor or size to query, so the classic 80x25 window on
 /// an 80x300 buffer is reported.
@@ -288,6 +319,22 @@ extern "win64" fn SetCommState(h: u64, _dcb: *const u8) -> Bool {
 }
 
 extern "win64" fn SetCommTimeouts(h: u64, _t: *const u8) -> Bool {
+    comm(h)
+}
+
+extern "win64" fn ClearCommError(h: u64, _errors: *mut u32, _stat: *mut u8) -> Bool {
+    comm(h)
+}
+
+extern "win64" fn EscapeCommFunction(h: u64, _function: u32) -> Bool {
+    comm(h)
+}
+
+extern "win64" fn GetCommModemStatus(h: u64, _status: *mut u32) -> Bool {
+    comm(h)
+}
+
+extern "win64" fn PurgeComm(h: u64, _flags: u32) -> Bool {
     comm(h)
 }
 
@@ -1909,12 +1956,128 @@ extern "win64" fn OsyxThreadPriorityInfo(tid: u32) -> u64 {
     os_sys::thread_priority(tid as u64, osyx_abi::priority::INFO).unwrap_or(0)
 }
 
-extern "win64" fn GetThreadPriority(h: u64) -> i32 {
+pub(crate) extern "win64" fn GetThreadPriority(h: u64) -> i32 {
     let tid = GetThreadId(h);
     if tid == 0 {
         return 0x7FFF_FFFF; // THREAD_PRIORITY_ERROR_RETURN
     }
     PRIORITIES.lock().unwrap().get(&tid).copied().unwrap_or(0)
+}
+
+/// Threads whose dynamic priority boost is disabled, by thread id. OSyx's
+/// scheduler boosts waking threads itself; the setting is kept so it reads
+/// back.
+static BOOST_DISABLED: Mutex<alloc::collections::BTreeSet<u32>> = Mutex::new(alloc::collections::BTreeSet::new());
+
+extern "win64" fn SetThreadPriorityBoost(h: u64, disable: Bool) -> Bool {
+    let tid = GetThreadId(h);
+    if tid == 0 {
+        return FALSE;
+    }
+    let mut set = BOOST_DISABLED.lock().unwrap();
+    if disable != FALSE {
+        set.insert(tid);
+    } else {
+        set.remove(&tid);
+    }
+    TRUE
+}
+
+extern "win64" fn GetThreadPriorityBoost(h: u64, disabled: *mut Bool) -> Bool {
+    let tid = GetThreadId(h);
+    if tid == 0 {
+        return FALSE;
+    }
+    if disabled.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *disabled = b(BOOST_DISABLED.lock().unwrap().contains(&tid)) };
+    TRUE
+}
+
+/// A 64-bit thread has no WOW64 context: this process runs x64 code on its
+/// own threads (32-bit code runs through crate::wow64, not as a WOW64
+/// thread of another process).
+extern "win64" fn Wow64GetThreadContext(h: u64, ctx: *mut u8) -> Bool {
+    if GetThreadId(h) == 0 {
+        return FALSE;
+    }
+    if ctx.is_null() {
+        return fail(ERROR_NOACCESS, FALSE);
+    }
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
+const ALL_PROCESSOR_GROUPS: u16 = 0xFFFF;
+
+/// The CPUs OSyx schedules on, all in group 0.
+fn processor_count() -> u32 {
+    os_sys::cpu_info().map_or(1, |(count, _)| count as u32)
+}
+
+extern "win64" fn GetActiveProcessorCount(group: u16) -> u32 {
+    match group {
+        0 | ALL_PROCESSOR_GROUPS => processor_count(),
+        _ => fail(ERROR_INVALID_PARAMETER, 0),
+    }
+}
+
+extern "win64" fn GetMaximumProcessorCount(group: u16) -> u32 {
+    GetActiveProcessorCount(group)
+}
+
+extern "win64" fn GetActiveProcessorGroupCount() -> u16 {
+    1
+}
+
+extern "win64" fn GetMaximumProcessorGroupCount() -> u16 {
+    1
+}
+
+/// OSyx boots through UEFI only.
+extern "win64" fn GetFirmwareType(kind: *mut u32) -> Bool {
+    if kind.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *kind = 2 }; // FirmwareTypeUefi
+    TRUE
+}
+
+/// DiscardVirtualMemory: the contents of committed private pages are no
+/// longer needed. The frames go back to the system and the pages stay
+/// committed; a later access sees zeros. Returns a Win32 error code.
+extern "win64" fn DiscardVirtualMemory(addr: u64, size: usize) -> u32 {
+    let page = mem::PAGE as u64;
+    if addr == 0 || size == 0 || addr % page != 0 {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let end = addr.saturating_add(size as u64).next_multiple_of(page);
+    let mut at = addr;
+    while at < end {
+        match mem::virtual_query(at) {
+            Some(i) if i.state == mem::MEM_COMMIT && i.kind == mem::MEM_PRIVATE => at = i.base + i.size,
+            _ => return ERROR_INVALID_PARAMETER,
+        }
+    }
+    // SAFETY: committed private pages whose contents the caller discards.
+    match unsafe { os_sys::discard(addr as *mut u8, (end - addr) as usize) } {
+        Ok(()) => ERROR_SUCCESS,
+        Err(e) => errno_to_win32(e),
+    }
+}
+
+/// OSyx never pages memory out, so every committed page is resident and
+/// there is nothing to read ahead.
+extern "win64" fn PrefetchVirtualMemory(process: u64, count: usize, entries: *const u8, _flags: u32) -> Bool {
+    if process != objects::CURRENT_PROCESS && !matches!(objects::get(process), Some(Object::Process(_))) {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    if count == 0 || entries.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    TRUE
 }
 
 /// Thread descriptions (SetThreadDescription) by thread id, as UTF-16.
@@ -3420,6 +3583,23 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetLastError,
         SetLastError,
         IsDebuggerPresent,
+        CheckRemoteDebuggerPresent,
+        FreeConsole,
+        GetConsoleDisplayMode,
+        ClearCommError,
+        EscapeCommFunction,
+        GetCommModemStatus,
+        PurgeComm,
+        SetThreadPriorityBoost,
+        GetThreadPriorityBoost,
+        Wow64GetThreadContext,
+        GetActiveProcessorCount,
+        GetMaximumProcessorCount,
+        GetActiveProcessorGroupCount,
+        GetMaximumProcessorGroupCount,
+        GetFirmwareType,
+        DiscardVirtualMemory,
+        PrefetchVirtualMemory,
         OutputDebugStringA,
         OutputDebugStringW,
         SetUnhandledExceptionFilter,

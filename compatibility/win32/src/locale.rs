@@ -447,6 +447,11 @@ extern "win64" fn EnumSystemLocalesEx(proc_: u64, flags: u32, param: u64, reserv
     1
 }
 
+/// The system locale is the user's: OSyx has one locale for everything.
+extern "win64" fn GetSystemDefaultLCID() -> u32 {
+    GetUserDefaultLCID()
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         CompareStringEx,
@@ -457,6 +462,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetUserDefaultLangID,
         GetUserDefaultUILanguage,
         GetUserDefaultLCID,
+        GetSystemDefaultLCID,
         GetUserDefaultLocaleName,
         EnumSystemLocalesEx,
     ]

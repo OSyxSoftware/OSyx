@@ -1207,6 +1207,10 @@ extern "win64" fn GetWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
     kernel32::out_w("C:\\Windows", buf, size)
 }
 
+extern "win64" fn GetWindowsDirectoryA(buf: *mut u8, size: u32) -> u32 {
+    kernel32::out_a("C:\\Windows", buf, size)
+}
+
 /// One installation, no per-session Windows directory.
 extern "win64" fn GetSystemWindowsDirectoryW(buf: *mut u16, size: u32) -> u32 {
     GetWindowsDirectoryW(buf, size)
@@ -1408,6 +1412,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetProductInfo,
         GetSystemDirectoryW,
         GetWindowsDirectoryW,
+        GetWindowsDirectoryA,
         GetSystemWindowsDirectoryW,
         ExpandEnvironmentStringsW,
         DebugBreak,

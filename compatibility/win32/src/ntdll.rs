@@ -235,7 +235,7 @@ extern "win64" fn NtQueryInformationFile(h: u64, io: u64, out: *mut u8, len: u32
 }
 
 extern "win64" fn NtClose(h: u64) -> NtStatus {
-    if objects::close(h) {
+    if objects::close(h) || crate::registry::close_key(h) {
         STATUS_SUCCESS
     } else {
         STATUS_INVALID_HANDLE
@@ -565,8 +565,23 @@ extern "win64" fn NtQuerySystemTime(out: *mut u64) -> NtStatus {
     STATUS_SUCCESS
 }
 
+/// TEB.LastStatusValue on x64.
+const LAST_STATUS: usize = 0x1250;
+
+/// Also records `s` as the thread's last NTSTATUS, as Windows does.
 extern "win64" fn RtlNtStatusToDosError(s: NtStatus) -> u32 {
+    let t = teb::current();
+    if t != 0 {
+        // SAFETY: the calling thread's TEB (TEB_SIZE bytes).
+        unsafe { teb::put(t, LAST_STATUS, s) };
+    }
     status_to_win32(s)
+}
+
+extern "win64" fn RtlGetLastNtStatus() -> NtStatus {
+    let t = teb::current();
+    // SAFETY: as above.
+    if t == 0 { STATUS_SUCCESS } else { unsafe { teb::get(t, LAST_STATUS) } }
 }
 
 extern "win64" fn RtlGetLastWin32Error() -> u32 {
@@ -859,6 +874,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         NtTerminateProcess,
         NtQuerySystemTime,
         RtlNtStatusToDosError,
+        RtlGetLastNtStatus,
         RtlGetLastWin32Error,
         RtlSetLastWin32Error,
         RtlGetCurrentPeb,
@@ -877,5 +893,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::seh::ntdll_exports());
     exports.extend(crate::process::ntdll_exports());
     exports.extend(crate::keyed::exports());
+    exports.extend(crate::ntreg::exports());
+    exports.extend(crate::procinfo::ntdll_exports());
     exports
 }

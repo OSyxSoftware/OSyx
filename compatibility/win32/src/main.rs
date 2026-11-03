@@ -52,6 +52,7 @@ mod locale;
 mod mapping;
 mod mem;
 mod ntdll;
+mod ntreg;
 mod objects;
 mod objsec;
 mod path;
