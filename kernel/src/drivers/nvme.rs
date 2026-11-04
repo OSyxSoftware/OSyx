@@ -435,7 +435,14 @@ fn wait_completion(ctrl: &Nvme, q: &mut Queue, cid: u16) -> Result<(), NvmeError
                 let status = unsafe { read_volatile((entry + 12) as *const u32) };
                 (((status >> 16) & 1 != 0) == q.phase).then_some(())
             });
-            if result.is_err() { return Err(NvmeError::Timeout("command completion interrupt")); }
+            // A thread being killed, or a slice that ended, still has a
+            // command the controller owns: it waits on, bounded by the
+            // deadline above, rather than reuse buffers the device may write.
+            match result {
+                Ok(()) => {}
+                Err(osyx_abi::Errno::Interrupted) => crate::sched::yield_now(),
+                Err(_) => continue,
+            }
             // block_on checks twice before scheduling; a third check proves
             // this request returned from the scheduler rather than spinning.
             if checks > 2 { SLEEP_COMPLETIONS[index].fetch_add(1, Ordering::Relaxed); }
