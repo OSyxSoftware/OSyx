@@ -677,7 +677,27 @@ pub fn close(h: u64) -> bool {
     t.access.remove(&h);
     let removed = t.map.remove(&h);
     drop(t);
+    // The last handle to a named object ends this process's hold on the name.
+    if let Some(o) = &removed {
+        crate::namespace::released(o);
+    }
     removed.is_some()
+}
+
+/// Whether two handles' objects are the same kernel object (sections,
+/// events and mutexes, the kinds that carry a name across processes).
+pub fn same_kernel_object(a: &Object, b: &Object) -> bool {
+    match (a, b) {
+        (Object::Section(x), Object::Section(y)) => Arc::ptr_eq(x, y),
+        (Object::Event(x), Object::Event(y)) => Arc::ptr_eq(x, y),
+        (Object::Mutex(x), Object::Mutex(y)) => Arc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+/// How many handles of this process refer to the object `o` is.
+pub fn handle_count(o: &Object) -> usize {
+    TABLE.lock().unwrap().map.values().filter(|x| same_kernel_object(x, o)).count()
 }
 
 pub fn file(h: u64) -> Result<Arc<FileObj>, u32> {
