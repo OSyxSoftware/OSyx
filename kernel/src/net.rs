@@ -590,7 +590,7 @@ pub fn sys_listen(h: u64, backlog: u64) -> Result<u64, Errno> {
     Ok(0)
 }
 
-pub fn sys_accept(h: u64, peer: u64) -> Result<u64, Errno> {
+pub fn sys_accept(h: u64, peer: u64, flags: u64) -> Result<u64, Errno> {
     let s = socket_of(h)?;
     let (id, listening) = {
         let g = s.state.lock();
@@ -600,7 +600,11 @@ pub fn sys_accept(h: u64, peer: u64) -> Result<u64, Errno> {
     if peer != 0 && !user_range_ok(peer, 8) {
         return Err(Errno::Fault);
     }
-    let (conn, remote) = blocking(&s, READABLE, s.recv_timeout.load(Ordering::Relaxed), |st| st.tcp_accept(id))?;
+    let (conn, remote) = if flags & abi::MSG_DONTWAIT != 0 {
+        stack_call(|st| st.tcp_accept(id))?
+    } else {
+        blocking(&s, READABLE, s.recv_timeout.load(Ordering::Relaxed), |st| st.tcp_accept(id))?
+    };
     let obj = Arc::new(SocketObj {
         kind: abi::SOCK_STREAM,
         state: IrqSpinLock::new(SockState { id: Some(conn), bound: None, listening: false }),

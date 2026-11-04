@@ -135,6 +135,49 @@ fn finish_to(port: Option<(u64, u64)>, o: u64, bytes: usize, error: u32) {
     }
 }
 
+/// Runs `op` for OVERLAPPED `o`, issued on socket `s`, on a helper thread
+/// that holds kernel socket `hold` meanwhile: the operation is pending
+/// and its result completes `o` (and goes to the port `s` is associated
+/// with). `op` is told, between its bounded waits, whether the operation
+/// was cancelled or `s` closed. False if no helper thread could start;
+/// nothing is then pending.
+pub(super) fn run<F>(s: u64, hold: u64, o: *mut u8, op: F) -> bool
+where
+    F: FnOnce(&dyn Fn() -> bool) -> Result<u32, u32> + Send + 'static,
+{
+    let o = o as u64;
+    // SAFETY: the caller's OVERLAPPED.
+    unsafe { ov::set_status(o, STATUS_PENDING) };
+    PENDING.lock().unwrap().insert(o, (s, os_sys::gettid(), false));
+    let port = PORTS.lock().unwrap().get(&s).copied();
+    super::service::hold_fd(hold);
+    let started = os_std::thread::Builder::new().spawn(move || {
+        let stop = move || PENDING.lock().unwrap().get(&o).is_none_or(|p| p.2) || !SOCKETS.lock().unwrap().contains_key(&s);
+        let r = op(&stop);
+        PENDING.lock().unwrap().remove(&o);
+        if super::service::release_fd(hold) {
+            let _ = os_sys::close(hold);
+        }
+        match r {
+            Ok(n) => finish_to(port, o, n as usize, 0),
+            Err(e) => finish_to(port, o, 0, e),
+        }
+    });
+    if started.is_err() {
+        PENDING.lock().unwrap().remove(&o);
+        super::service::release_fd(hold);
+        return false;
+    }
+    true
+}
+
+/// Waits up to 200 ms for `events` on kernel socket `fd`: a bounded wait,
+/// so a helper notices cancellation and closing between them.
+pub(super) fn wait_ready(fd: u64, events: u32) {
+    let mut item = [os_sys::ipc::WaitItem { handle: fd, events, revents: 0 }];
+    let _ = os_sys::wait_handles(&mut item, 200_000_000);
+}
+
 /// An overlapped receive: the WSABUFs are copied now (their memory stays
 /// the caller's until completion); the data is received on a helper
 /// thread, waiting for it on a non-blocking socket.

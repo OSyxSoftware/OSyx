@@ -1032,8 +1032,14 @@ mod imp {
     }
 
     pub fn sock_accept(h: u64) -> Result<(u64, SockAddr), Errno> {
+        sock_accept_flags(h, 0)
+    }
+
+    /// `sock_accept` with `flags`: `MSG_DONTWAIT` returns `WouldBlock` at
+    /// once when no connection is pending.
+    pub fn sock_accept_flags(h: u64, flags: u64) -> Result<(u64, SockAddr), Errno> {
         let mut peer = SockAddr::default();
-        let c = decode(syscall2(nr::SOCK_ACCEPT, h, &mut peer as *mut SockAddr as u64))?;
+        let c = decode(syscall3(nr::SOCK_ACCEPT, h, &mut peer as *mut SockAddr as u64, flags))?;
         Ok((c, peer))
     }
 

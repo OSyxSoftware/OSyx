@@ -266,7 +266,9 @@ pub mod nr {
     pub const SOCK_CONNECT: u64 = 62;
     /// `sock_listen(h, backlog) -> 0` (TCP, after `sock_bind`).
     pub const SOCK_LISTEN: u64 = 63;
-    /// `sock_accept(h, peer: *mut SockAddr) -> handle` of the next connection.
+    /// `sock_accept(h, peer: *mut SockAddr, flags) -> handle` of the next
+    /// connection. With `MSG_DONTWAIT` in `flags` it does not wait, even on
+    /// a blocking listener: `WouldBlock` when none is pending.
     pub const SOCK_ACCEPT: u64 = 64;
     /// `sock_send(h, buf, len, to: *const SockAddr | 0, flags) -> bytes`.
     pub const SOCK_SEND: u64 = 65;
