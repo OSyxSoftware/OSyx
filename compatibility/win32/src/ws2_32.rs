@@ -54,6 +54,7 @@ const AF_INET6: i32 = 23;
 const AI_PASSIVE: i32 = 1;
 const AI_NUMERICHOST: i32 = 4;
 const AI_NUMERICSERV: i32 = 8;
+const AI_V4MAPPED: i32 = 0x800;
 const SOCK_STREAM: i32 = 1;
 const SOCK_DGRAM: i32 = 2;
 const SOL_SOCKET: i32 = 0xFFFF;
@@ -69,6 +70,8 @@ const SO_SNDBUF: i32 = 0x1001;
 const SO_RCVBUF: i32 = 0x1002;
 const IPPROTO_TCP: i32 = 6;
 const IPPROTO_UDP: i32 = 17;
+const IPPROTO_IPV6: i32 = 41;
+const IPV6_V6ONLY: i32 = 27;
 const TCP_NODELAY: i32 = 1;
 /// Hands out AcceptEx, ConnectEx and the other extension functions.
 const SIO_GET_EXTENSION_FUNCTION_POINTER: u32 = 0xC800_0006;
@@ -173,6 +176,12 @@ struct Sock {
     /// `shutdown(SD_RECEIVE)` / `shutdown(SD_SEND)` were called.
     read_shutdown: bool,
     write_shutdown: bool,
+    /// An AF_INET6 socket: its addresses are sockaddr_in6, carried by the
+    /// IPv4 stack (see `v6_to_v4`).
+    v6: bool,
+    /// IPV6_V6ONLY, on by default as on Windows: IPv4-mapped addresses are
+    /// refused.
+    v6only: bool,
 }
 
 static SOCKETS: Mutex<BTreeMap<u64, Sock>> = Mutex::new(BTreeMap::new());
@@ -222,36 +231,103 @@ fn socket_state(s: u64) -> Result<Sock, u32> {
     SOCKETS.lock().unwrap().get(&s).copied().ok_or(WSAENOTSOCK)
 }
 
-/// sockaddr_in (family, port big-endian, address, zero[8]) → SockAddr.
-fn read_addr(p: *const u8, len: i32) -> Result<SockAddr, u32> {
-    if p.is_null() || len < 16 {
-        return Err(WSAEFAULT);
+/// The IPv4 address an IPv6 address stands for. OSyx has only the IPv4
+/// stack, so an AF_INET6 socket reaches what IPv4 can: ::1 is 127.0.0.1,
+/// :: is 0.0.0.0 and ::ffff:a.b.c.d is a.b.c.d (the bool: this mapped
+/// form). Any other address is beyond this host, as on a Windows machine
+/// without IPv6 connectivity.
+fn v6_to_v4(a: &[u8; 16]) -> Option<([u8; 4], bool)> {
+    if a[..15].iter().all(|&b| b == 0) && a[15] <= 1 {
+        return Some((if a[15] == 1 { [127, 0, 0, 1] } else { [0; 4] }, false));
     }
-    // SAFETY: the caller's sockaddr of at least 16 bytes.
-    let b = unsafe { core::slice::from_raw_parts(p, 16) };
-    if u16::from_le_bytes([b[0], b[1]]) != AF_INET {
-        return Err(WSAEAFNOSUPPORT);
+    if a[..10].iter().all(|&b| b == 0) && a[10] == 0xFF && a[11] == 0xFF {
+        return Some(([a[12], a[13], a[14], a[15]], true));
     }
-    Ok(SockAddr::new([b[4], b[5], b[6], b[7]], u16::from_be_bytes([b[2], b[3]])))
+    None
 }
 
-fn write_addr(a: &SockAddr, p: *mut u8, len: *mut i32) {
+/// The IPv6 form an AF_INET6 socket reports for an IPv4 address of the
+/// stack: 127.0.0.1 is ::1, 0.0.0.0 is ::, others are IPv4-mapped.
+fn v4_to_v6(a: [u8; 4]) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    match a {
+        [127, 0, 0, 1] => b[15] = 1,
+        [0, 0, 0, 0] => {}
+        _ => {
+            b[10] = 0xFF;
+            b[11] = 0xFF;
+            b[12..].copy_from_slice(&a);
+        }
+    }
+    b
+}
+
+/// The sockaddr size of socket `s`'s family.
+fn addr_size(s: u64) -> i32 {
+    if socket_state(s).is_ok_and(|k| k.v6) { 28 } else { 16 }
+}
+
+/// The address the caller gives socket `s`: a sockaddr_in (family, port
+/// big-endian, address, zero[8]), or a sockaddr_in6 (family, port, flow
+/// information, address, scope) for an AF_INET6 socket. An IPv6 address
+/// IPv4 cannot carry (see `v6_to_v4`) is unreachable.
+fn read_addr(p: *const u8, len: i32, s: u64) -> Result<SockAddr, u32> {
+    let k = socket_state(s)?;
+    let (v6, v6only) = (k.v6, k.v6only);
+    if p.is_null() || len < if v6 { 28 } else { 16 } {
+        return Err(WSAEFAULT);
+    }
+    // SAFETY: the caller's sockaddr of at least 16 (28) bytes.
+    let b = unsafe { core::slice::from_raw_parts(p, if v6 { 28 } else { 16 }) };
+    let port = u16::from_be_bytes([b[2], b[3]]);
+    let family = u16::from_le_bytes([b[0], b[1]]);
+    if !v6 {
+        if family != AF_INET {
+            return Err(WSAEAFNOSUPPORT);
+        }
+        return Ok(SockAddr::new([b[4], b[5], b[6], b[7]], port));
+    }
+    if family != AF_INET6 as u16 {
+        return Err(WSAEAFNOSUPPORT);
+    }
+    let raw: [u8; 16] = b[8..24].try_into().expect("16 bytes");
+    match v6_to_v4(&raw) {
+        Some((a, mapped)) if !(mapped && v6only) => Ok(SockAddr::new(a, port)),
+        _ => Err(WSAENETUNREACH),
+    }
+}
+
+/// Writes `a` as socket `s`'s family gives it (see `put_addr`).
+fn write_addr(a: &SockAddr, p: *mut u8, len: *mut i32, s: u64) {
+    put_addr(a, p, len, socket_state(s).is_ok_and(|k| k.v6));
+}
+
+/// Writes `a` as a sockaddr_in, or as a sockaddr_in6 (`v6`). `len` (when
+/// given) is the buffer's size, then the address's.
+fn put_addr(a: &SockAddr, p: *mut u8, len: *mut i32, v6: bool) {
     if p.is_null() {
         return;
     }
-    // SAFETY: the caller's buffer; `len` (when given) says it holds 16 bytes.
+    let size = if v6 { 28 } else { 16 };
+    // SAFETY: the caller's buffer; `len` (when given) says it holds `size`
+    // bytes.
     unsafe {
         if !len.is_null() {
-            if *len < 16 {
+            if *len < size {
                 return;
             }
-            *len = 16;
+            *len = size;
         }
-        let mut b = [0u8; 16];
-        b[..2].copy_from_slice(&AF_INET.to_le_bytes());
+        let mut b = [0u8; 28];
         b[2..4].copy_from_slice(&a.port.to_be_bytes());
-        b[4..8].copy_from_slice(&a.addr);
-        core::ptr::copy_nonoverlapping(b.as_ptr(), p, 16);
+        if v6 {
+            b[..2].copy_from_slice(&(AF_INET6 as u16).to_le_bytes());
+            b[8..24].copy_from_slice(&v4_to_v6(a.addr));
+        } else {
+            b[..2].copy_from_slice(&AF_INET.to_le_bytes());
+            b[4..8].copy_from_slice(&a.addr);
+        }
+        core::ptr::copy_nonoverlapping(b.as_ptr(), p, size as usize);
     }
 }
 
@@ -306,7 +382,7 @@ extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
     if !started() {
         return err(WSANOTINITIALISED, INVALID_SOCKET);
     }
-    if af != AF_INET as i32 {
+    if af != AF_INET as i32 && af != AF_INET6 {
         return err(WSAEAFNOSUPPORT, INVALID_SOCKET);
     }
     let (k, stream) = match (kind, proto) {
@@ -332,6 +408,8 @@ extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
                 sndbuf: None,
                 read_shutdown: false,
                 write_shutdown: false,
+                v6: af == AF_INET6,
+                v6only: true,
             });
             s
         }
@@ -369,7 +447,8 @@ fn result(r: Result<(), u32>) -> i32 {
 extern "win64" fn bind(s: u64, addr: *const u8, len: i32) -> i32 {
     result((|| {
         let (fd, _) = fd(s)?;
-        let a = read_addr(addr, len)?;
+        // An address beyond the IPv4 stack is not one of this host's.
+        let a = read_addr(addr, len, s).map_err(|e| if e == WSAENETUNREACH { WSAEADDRNOTAVAIL } else { e })?;
         os_sys::sock_bind(fd, &a).map_err(wsa)
     })())
 }
@@ -377,7 +456,7 @@ extern "win64" fn bind(s: u64, addr: *const u8, len: i32) -> i32 {
 extern "win64" fn connect(s: u64, addr: *const u8, len: i32) -> i32 {
     result((|| {
         let (fd, _) = fd(s)?;
-        let a = read_addr(addr, len)?;
+        let a = read_addr(addr, len, s)?;
         let _blocked = crate::stall::waiting("connect", s, 0);
         os_sys::sock_connect(fd, &a).map_err(wsa)
     })())
@@ -401,9 +480,9 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
         if !listener.stream {
             return Err(WSAEOPNOTSUPP);
         }
-        // A caller-supplied address needs room for sockaddr_in; Windows
-        // rejects the call before taking a pending connection.
-        if !addr.is_null() && (len.is_null() || unsafe { *len } < 16) {
+        // A caller-supplied address needs room for the family's sockaddr;
+        // Windows rejects the call before taking a pending connection.
+        if !addr.is_null() && (len.is_null() || unsafe { *len } < addr_size(s)) {
             return Err(WSAEFAULT);
         }
         events::rearm(s, 0x08);
@@ -419,7 +498,7 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
                 return Err(wsa(e));
             }
         }
-        write_addr(&peer, addr, len);
+        write_addr(&peer, addr, len, s);
         let mut n = NEXT.lock().unwrap();
         let ns = *n;
         *n += 4;
@@ -437,6 +516,8 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
             sndbuf: listener.sndbuf,
             read_shutdown: false,
             write_shutdown: false,
+            v6: listener.v6,
+            v6only: listener.v6only,
         });
         Ok(ns)
     })();
@@ -482,7 +563,7 @@ extern "win64" fn sendto(s: u64, buf: *const u8, len: i32, f: i32, to: *const u8
         if f != 0 {
             return Err(WSAEOPNOTSUPP);
         }
-        let a = if to.is_null() { None } else { Some(read_addr(to, tolen)?) };
+        let a = if to.is_null() { None } else { Some(read_addr(to, tolen, s)?) };
         // SAFETY: the caller's buffer of `len` bytes; a zero-length send may
         // pass a NULL pointer, which never becomes a real slice.
         let (n, p) = (len.max(0) as usize, if len > 0 { buf } else { core::ptr::NonNull::dangling().as_ptr() });
@@ -503,7 +584,7 @@ extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8
         check_shutdown(s, true)?;
         // Reject a too-small peer address buffer before the datagram is
         // consumed, as Windows does.
-        if !from.is_null() && (fromlen.is_null() || unsafe { *fromlen } < 16) {
+        if !from.is_null() && (fromlen.is_null() || unsafe { *fromlen } < addr_size(s)) {
             return Err(WSAEFAULT);
         }
         let fl = flags(f)?;
@@ -513,7 +594,7 @@ extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8
         let data = unsafe { core::slice::from_raw_parts_mut(p, n) };
         let _blocked = crate::stall::waiting("recv", s, 0);
         let (n, peer) = os_sys::sock_recv(fd, data, fl).map_err(wsa)?;
-        write_addr(&peer, from, fromlen);
+        write_addr(&peer, from, fromlen, s);
         // A datagram longer than the buffer was truncated; the bytes are
         // delivered, but Winsock reports the original size.
         if datagram_truncated(fd, stream, n)? {
@@ -593,6 +674,16 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
                 Ok(())
             }
             (IPPROTO_TCP, TCP_NODELAY) => int().map(|_| ()),
+            (IPPROTO_IPV6, IPV6_V6ONLY) => {
+                let on = int()? != 0;
+                let mut sockets = SOCKETS.lock().unwrap();
+                let sock = sockets.get_mut(&s).ok_or(WSAENOTSOCK)?;
+                if !sock.v6 {
+                    return Err(WSAENOPROTOOPT);
+                }
+                sock.v6only = on;
+                Ok(())
+            }
             (SOL_SOCKET, SO_RCVBUF) | (SOL_SOCKET, SO_SNDBUF) => {
                 let size = int()?;
                 let mut sockets = SOCKETS.lock().unwrap();
@@ -663,6 +754,7 @@ extern "win64" fn getsockopt(s: u64, level: i32, name: i32, val: *mut u8, len: *
             (SOL_SOCKET, SO_RCVBUF) => st.rcvbuf.unwrap_or(RECV_BUFFER_SIZE),
             (SOL_SOCKET, SO_SNDBUF) => st.sndbuf.unwrap_or(SEND_BACKLOG),
             (IPPROTO_TCP, TCP_NODELAY) if stream => 1,
+            (IPPROTO_IPV6, IPV6_V6ONLY) if st.v6 => st.v6only as u32,
             _ => return Err(WSAENOPROTOOPT),
         };
         // SAFETY: the caller's value buffer of `*len` bytes.
@@ -721,12 +813,12 @@ extern "win64" fn getpeername(s: u64, addr: *mut u8, len: *mut i32) -> i32 {
 fn sock_name(s: u64, op: u64, addr: *mut u8, len: *mut i32) -> i32 {
     result((|| {
         let (fd, _) = fd(s)?;
-        if addr.is_null() || len.is_null() || unsafe { *len } < 16 {
+        if addr.is_null() || len.is_null() || unsafe { *len } < addr_size(s) {
             return Err(WSAEFAULT);
         }
         let mut a = SockAddr::default();
         os_sys::sock_ctl(fd, op, &mut a as *mut SockAddr as u64).map_err(wsa)?;
-        write_addr(&a, addr, len);
+        write_addr(&a, addr, len, s);
         Ok(())
     })())
 }
@@ -939,8 +1031,10 @@ extern "win64" fn gethostname(buf: *mut u8, len: i32) -> i32 {
     0
 }
 
-/// ADDRINFOA (48 bytes) + sockaddr_in per address, one heap block each;
-/// freed by freeaddrinfo.
+/// ADDRINFOA (48 bytes) + sockaddr_in (sockaddr_in6) per address, one heap
+/// block each; freed by freeaddrinfo. AF_INET6 gives this host's IPv6
+/// addresses (loopback and wildcard), numeric IPv6 addresses, and IPv4
+/// addresses mapped when AI_V4MAPPED asks; OSyx resolves no IPv6 names.
 pub(crate) extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hints: *const u8, res: *mut u64) -> i32 {
     if !started() {
         return WSANOTINITIALISED as i32;
@@ -950,13 +1044,13 @@ pub(crate) extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hi
     }
     // SAFETY: NULL or NUL-terminated strings.
     let (n, svc) = unsafe { (crate::path::ansi_to_string(node), crate::path::ansi_to_string(service)) };
-    let (mut flags, mut socktype, mut proto) = (0i32, 0i32, 0i32);
+    let (mut flags, mut family, mut socktype, mut proto) = (0i32, 0i32, 0i32, 0i32);
     if !hints.is_null() {
         // SAFETY: the caller's ADDRINFOA hints.
         unsafe {
             flags = teb::get(hints as u64, 0);
-            let family: i32 = teb::get(hints as u64, 4);
-            if family != 0 && family != AF_INET as i32 {
+            family = teb::get(hints as u64, 4);
+            if family != 0 && family != AF_INET as i32 && family != AF_INET6 {
                 return WSAEAFNOSUPPORT as i32;
             }
             socktype = teb::get(hints as u64, 8);
@@ -982,31 +1076,72 @@ pub(crate) extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hi
     if proto == 0 {
         proto = if socktype == SOCK_DGRAM { IPPROTO_UDP } else { IPPROTO_TCP };
     }
-    let addrs = match n {
-        // AI_NUMERICHOST: never fall back to a name lookup.
-        Some(n) if flags & AI_NUMERICHOST != 0 => match parse_ipv4(&n) {
-            Some(a) => alloc::vec![a],
-            None => return WSAHOST_NOT_FOUND as i32,
-        },
-        Some(n) => match resolve(&n) {
-            Ok(a) => a,
-            Err(e) => return e as i32,
-        },
-        // AI_PASSIVE asks for the wildcard address a server can bind.
-        None if flags & AI_PASSIVE != 0 => alloc::vec![[0, 0, 0, 0]],
-        None => alloc::vec![[127, 0, 0, 1]],
-    };
+    // A numeric IPv6 address, for AF_INET6 or no family.
+    let numeric6 = n.as_deref().and_then(|s| s.parse::<core::net::Ipv6Addr>().ok()).filter(|_| family != AF_INET as i32);
+    // Addresses: IPv4, or IPv6 (16 bytes) for AF_INET6 and numeric IPv6.
+    let mut addrs: Vec<([u8; 4], Option<[u8; 16]>)> = Vec::new();
+    if let Some(a) = numeric6 {
+        addrs.push(([0; 4], Some(a.octets())));
+    } else if family == AF_INET6 {
+        let local = n.as_deref().is_none_or(|s| s.eq_ignore_ascii_case("localhost") || s.eq_ignore_ascii_case(&host_name()));
+        if local && flags & AI_NUMERICHOST == 0 {
+            // This host's IPv6 addresses: loopback, or the wildcard a
+            // server binds (AI_PASSIVE with no name).
+            let a = if n.is_none() && flags & AI_PASSIVE != 0 { [0; 4] } else { [127, 0, 0, 1] };
+            addrs.push(([0; 4], Some(v4_to_v6(a))));
+        } else if flags & AI_V4MAPPED != 0 {
+            let v4 = match n.as_deref() {
+                Some(s) if flags & AI_NUMERICHOST != 0 => parse_ipv4(s).map(|a| alloc::vec![a]).ok_or(WSAHOST_NOT_FOUND),
+                Some(s) => resolve(s),
+                None => Ok(alloc::vec![[127, 0, 0, 1]]),
+            };
+            match v4 {
+                Ok(v) => addrs.extend(v.into_iter().map(|a| ([0; 4], Some(v4_to_v6(a))))),
+                Err(e) => return e as i32,
+            }
+        } else if n.as_deref().is_some_and(|s| parse_ipv4(s).is_some()) || flags & AI_NUMERICHOST != 0 {
+            return WSAHOST_NOT_FOUND as i32;
+        } else {
+            // A name with no IPv6 address OSyx can give.
+            return WSANO_DATA as i32;
+        }
+    } else {
+        let v4 = match n {
+            // AI_NUMERICHOST: never fall back to a name lookup.
+            Some(n) if flags & AI_NUMERICHOST != 0 => match parse_ipv4(&n) {
+                Some(a) => alloc::vec![a],
+                None => return WSAHOST_NOT_FOUND as i32,
+            },
+            Some(n) => match resolve(&n) {
+                Ok(a) => a,
+                Err(e) => return e as i32,
+            },
+            // AI_PASSIVE asks for the wildcard address a server can bind.
+            None if flags & AI_PASSIVE != 0 => alloc::vec![[0, 0, 0, 0]],
+            None => alloc::vec![[127, 0, 0, 1]],
+        };
+        addrs.extend(v4.into_iter().map(|a| (a, None)));
+    }
     let mut head = 0u64;
-    for a in addrs.iter().rev() {
-        let Some(block) = crate::kernel32::heap_alloc(48 + 16, true) else { return WSAENOBUFS as i32 };
+    for (a, six) in addrs.iter().rev() {
+        let size: u64 = if six.is_some() { 28 } else { 16 };
+        let Some(block) = crate::kernel32::heap_alloc(48 + size as usize, true) else { return WSAENOBUFS as i32 };
         let sa = block + 48;
-        write_addr(&SockAddr::new(*a, port), sa as *mut u8, core::ptr::null_mut());
-        // SAFETY: a fresh zeroed 64-byte block.
+        match six {
+            // SAFETY: the block's 28 zeroed bytes after the ADDRINFOA.
+            Some(b) => unsafe {
+                teb::put(sa, 0, AF_INET6 as u16);
+                teb::put(sa, 2, port.to_be());
+                core::ptr::copy_nonoverlapping(b.as_ptr(), (sa + 8) as *mut u8, 16);
+            },
+            None => put_addr(&SockAddr::new(*a, port), sa as *mut u8, core::ptr::null_mut(), false),
+        }
+        // SAFETY: a fresh zeroed block of 48 + `size` bytes.
         unsafe {
-            teb::put(block, 4, AF_INET as i32);
+            teb::put(block, 4, if six.is_some() { AF_INET6 } else { AF_INET as i32 });
             teb::put(block, 8, socktype);
             teb::put(block, 12, proto);
-            teb::put(block, 16, 16u64);
+            teb::put(block, 16, size);
             teb::put(block, 32, sa);
             teb::put(block, 40, head);
         }
@@ -1025,10 +1160,11 @@ const NI_NAMEREQD: i32 = 4;
 const NI_NUMERICSERV: i32 = 8;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
-/// The host and service names getnameinfo gives for a sockaddr_in. A
-/// loopback address names this machine; other addresses have no reverse
-/// lookup in OSyx's resolver and stay numeric, unless NI_NAMEREQD asks
-/// for a name. The service is a known name or the decimal port.
+/// The host and service names getnameinfo gives for a sockaddr_in or
+/// sockaddr_in6. A loopback address names this machine; other addresses
+/// have no reverse lookup in OSyx's resolver and stay numeric, unless
+/// NI_NAMEREQD asks for a name. The service is a known name or the
+/// decimal port.
 fn name_info(sa: *const u8, salen: i32, flags: i32) -> Result<(String, String), u32> {
     if !started() {
         return Err(WSANOTINITIALISED);
@@ -1036,11 +1172,28 @@ fn name_info(sa: *const u8, salen: i32, flags: i32) -> Result<(String, String), 
     if sa.is_null() || salen < 16 {
         return Err(WSAEFAULT);
     }
-    let a = read_addr(sa, salen)?;
-    let numeric = alloc::format!("{}.{}.{}.{}", a.addr[0], a.addr[1], a.addr[2], a.addr[3]);
+    // SAFETY: the caller's sockaddr of at least 16 bytes.
+    let (family, port) = unsafe { (core::ptr::read_unaligned(sa as *const u16), u16::from_be(core::ptr::read_unaligned(sa.add(2) as *const u16))) };
+    let (numeric, loopback) = if family == AF_INET6 as u16 {
+        if salen < 28 {
+            return Err(WSAEFAULT);
+        }
+        let mut b = [0u8; 16];
+        // SAFETY: as above, 28 bytes.
+        unsafe { core::ptr::copy_nonoverlapping(sa.add(8), b.as_mut_ptr(), 16) };
+        let ip = core::net::Ipv6Addr::from(b);
+        (alloc::format!("{ip}"), ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v| v.is_loopback()))
+    } else if family == AF_INET {
+        // SAFETY: as above.
+        let b = unsafe { core::slice::from_raw_parts(sa.add(4), 4) };
+        (alloc::format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]), b[0] == 127)
+    } else {
+        return Err(WSAEAFNOSUPPORT);
+    };
+    let a = SockAddr::new([0; 4], port);
     let host = if flags & NI_NUMERICHOST != 0 {
         numeric
-    } else if a.addr[0] == 127 {
+    } else if loopback {
         host_name()
     } else if flags & NI_NAMEREQD != 0 {
         return Err(WSAHOST_NOT_FOUND);
@@ -1377,7 +1530,7 @@ pub(crate) extern "win64" fn WSASendTo(
         if f != 0 || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
-        let to = if to.is_null() { None } else { Some(read_addr(to, tolen)?) };
+        let to = if to.is_null() { None } else { Some(read_addr(to, tolen, s)?) };
         let data = wsa_gather(bufs, count)?;
         if !ov.is_null() {
             return Ok(Err((fd, data, to)));
@@ -1472,7 +1625,7 @@ pub(crate) extern "win64" fn WSARecvFrom(
         if completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
-        if !from.is_null() && (fromlen.is_null() || unsafe { *fromlen } < 16) {
+        if !from.is_null() && (fromlen.is_null() || unsafe { *fromlen } < addr_size(s)) {
             return Err(WSAEFAULT);
         }
         // SAFETY: the caller's in/out flags.
@@ -1482,7 +1635,7 @@ pub(crate) extern "win64" fn WSARecvFrom(
             return Ok(Err(fl));
         }
         let (n, peer, truncated) = wsa_receive(fd, bufs, count, fl, stream)?;
-        write_addr(&peer, from, fromlen);
+        write_addr(&peer, from, fromlen, s);
         Ok(Ok((n, f, truncated)))
     })();
     match r {
@@ -1516,7 +1669,7 @@ extern "win64" fn WSASendMsg(s: u64, msg: *const u8, f: u32, sent: *mut u32, ove
             if teb::get::<u32>(m, 32) != 0 {
                 return Err(WSAEINVAL);
             }
-            let to = if name == 0 { None } else { Some(read_addr(name as *const u8, name_len)?) };
+            let to = if name == 0 { None } else { Some(read_addr(name as *const u8, name_len, s)?) };
             (to, bufs, count)
         };
         let data = wsa_gather(bufs as *const u8, count)?;
