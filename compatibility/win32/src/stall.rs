@@ -97,6 +97,11 @@ impl Drop for Guard {
     }
 }
 
+/// Forgets the waits of a thread that ends inside one (TerminateThread).
+pub fn thread_ended(tid: u64) {
+    WAITS.lock().unwrap().remove(&tid);
+}
+
 /// Notes that the calling thread is about to block in `api` on `what`.
 pub fn waiting(api: &'static str, what: u64, extra: u64) -> Guard {
     if !WATCHDOG.swap(true, Ordering::Relaxed) {

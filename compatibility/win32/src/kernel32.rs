@@ -1831,7 +1831,7 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
             register_thread(tid as u32, &me);
             me.tid.store(tid as u32, Ordering::SeqCst);
             while me.suspended.load(Ordering::SeqCst) > 0 {
-                let _ = os_sys::futex_wait(me.suspended.as_ptr(), me.suspended.load(Ordering::SeqCst), 0);
+                let _ = crate::objects::futex_sleep(me.suspended.as_ptr(), me.suspended.load(Ordering::SeqCst), 0);
             }
             // DllMain, the start routine and DLL_THREAD_DETACH are Windows
             // code: they run on the thread's Windows stack, not this one.
@@ -2503,7 +2503,7 @@ pub(crate) extern "win64" fn AcquireSRWLockExclusive(l: u64) {
         let old = w.load(Ordering::Relaxed);
         if old != 0 {
             let _blocked = crate::stall::waiting("AcquireSRWLockExclusive", l, old as u64);
-            let _ = os_sys::futex_wait(w.as_ptr(), old, 0);
+            let _ = crate::objects::futex_sleep(w.as_ptr(), old, 0);
         }
     }
 }
@@ -2532,7 +2532,7 @@ pub(crate) extern "win64" fn AcquireSRWLockShared(l: u64) {
         let old = w.load(Ordering::Relaxed);
         if old & SRW_WRITER != 0 {
             let _blocked = crate::stall::waiting("AcquireSRWLockShared", l, old as u64);
-            let _ = os_sys::futex_wait(w.as_ptr(), old, 0);
+            let _ = crate::objects::futex_sleep(w.as_ptr(), old, 0);
         }
     }
 }

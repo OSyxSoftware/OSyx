@@ -208,6 +208,9 @@ pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
     let suspend = |op| os_sys::thread_suspend(tid as u64, op);
     let started = os_std::time::Instant::now();
     let mut state = [0u64; 6];
+    let gone = || os_sys::thread_times(tid as u64) == Err(osyx_abi::Errno::NotFound);
+    let mut asked = false;
+    let mut ended = false;
     loop {
         if suspend(osyx_abi::suspend::SUSPEND).is_err() {
             break;
@@ -217,6 +220,32 @@ pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
         let stopped = os_sys::thread_state(tid as u64, &mut state).is_ok_and(|_| state[0] == osyx_abi::thread_state::BLOCKED);
         let held = os_std::sync::locks_held_by(tid as u64);
         if stopped && held == 0 && !os_std::sync::allocator_busy() {
+            let nr = state[1];
+            if nr == osyx_abi::nr::FUTEX_WAIT_OWNED {
+                // Waiting to take a lock: let it take and drop it first.
+                let _ = suspend(osyx_abi::suspend::RESUME);
+                os_std::thread::sleep(core::time::Duration::from_millis(1));
+                continue;
+            }
+            if nr == osyx_abi::nr::FUTEX_WAIT && !asked {
+                // A kill would wake it and let it run on (see
+                // objects::TERMINATE): it is asked to end itself on waking.
+                asked = true;
+                objects::request_terminate(tid as u64, code);
+                os_sys::futex_wake(state[4] as *const u32, u32::MAX);
+                let _ = suspend(osyx_abi::suspend::RESUME);
+                let waited = os_std::time::Instant::now();
+                while !gone() && waited.elapsed() < core::time::Duration::from_millis(500) {
+                    os_std::thread::sleep(core::time::Duration::from_millis(2));
+                }
+                if gone() || !objects::cancel_terminate(tid as u64) {
+                    // It ended, or is ending, by itself.
+                    ended = true;
+                    break;
+                }
+                // Its wait does not check the request: it is killed below.
+                continue;
+            }
             // Killed while suspended: the kill ends the thread instead of
             // resuming it.
             break;
@@ -228,10 +257,12 @@ pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
         let _ = suspend(osyx_abi::suspend::RESUME);
         os_std::thread::sleep(core::time::Duration::from_millis(1));
     }
-    match os_sys::thread_kill(tid as u64, code as i32) {
-        Ok(_) => {}
-        Err(osyx_abi::Errno::NotFound) => return fail(ERROR_INVALID_HANDLE, 0),
-        Err(e) => return fail(errno_to_win32(e), 0),
+    if !ended {
+        match os_sys::thread_kill(tid as u64, code as i32) {
+            Ok(_) => {}
+            Err(osyx_abi::Errno::NotFound) => return fail(ERROR_INVALID_HANDLE, 0),
+            Err(e) => return fail(errno_to_win32(e), 0),
+        }
     }
     if let Some(t) = obj {
         t.exit_code.store(code, Ordering::SeqCst);

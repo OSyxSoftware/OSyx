@@ -590,6 +590,67 @@ static WAITERS: AtomicU32 = AtomicU32::new(0);
 /// mutex ownership, semaphore counts, wait-all).
 static WAIT_LOCK: Mutex<()> = Mutex::new(());
 
+/// TerminateThread requests for threads asleep in a futex wait: (thread
+/// id, exit code). The kernel ends a killed thread only at its next return
+/// to user mode outside a futex wait, so a thread woken from one by a kill
+/// would run on and could take a lock before it ends. Such a thread ends
+/// itself instead, in `exit_if_terminated`, right after it wakes and while
+/// it holds no lock.
+static TERMINATE: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
+static TERMINATE_PENDING: AtomicU32 = AtomicU32::new(0);
+
+/// Asks thread `tid` to end with `code` when its futex wait wakes.
+pub fn request_terminate(tid: u64, code: u32) {
+    let mut t = TERMINATE.lock().unwrap();
+    if !t.iter().any(|e| e.0 == tid) {
+        t.push((tid, code));
+        TERMINATE_PENDING.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Withdraws a request the thread has not acted on; true if there was one.
+pub fn cancel_terminate(tid: u64) -> bool {
+    let mut t = TERMINATE.lock().unwrap();
+    match t.iter().position(|e| e.0 == tid) {
+        Some(i) => {
+            t.remove(i);
+            TERMINATE_PENDING.fetch_sub(1, Ordering::SeqCst);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Ends the calling thread if TerminateThread asked for it. Called where
+/// the thread holds no lock (after a futex wait of a blocking call).
+pub fn exit_if_terminated() {
+    if TERMINATE_PENDING.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    let me = os_sys::gettid();
+    let code = {
+        let mut t = TERMINATE.lock().unwrap();
+        let i = t.iter().position(|e| e.0 == me);
+        i.map(|i| {
+            TERMINATE_PENDING.fetch_sub(1, Ordering::SeqCst);
+            t.remove(i).1
+        })
+    };
+    if let Some(code) = code {
+        crate::stall::thread_ended(me);
+        // As TerminateThread does: no DLL_THREAD_DETACH, no handlers.
+        let _ = os_sys::thread_kill(0, code as i32);
+    }
+}
+
+/// The futex wait of a Windows thread's blocking call: a thread that
+/// TerminateThread ends while it sleeps here ends on waking.
+pub fn futex_sleep(word: *const u32, expected: u32, ns: u64) -> Result<(), osyx_abi::Errno> {
+    let r = os_sys::futex_wait(word, expected, ns);
+    exit_if_terminated();
+    r
+}
+
 /// How many `signal_all` calls have run (`OSYX_WINRUN_COUNT` diagnostics).
 pub static SIGNALS: AtomicU64 = AtomicU64::new(0);
 
@@ -613,7 +674,7 @@ pub fn sequence() -> u32 {
 pub fn wait_for_change(seq: u32, timeout: Duration) -> bool {
     WAITERS.fetch_add(1, Ordering::SeqCst);
     let ns = timeout.as_nanos().max(1) as u64;
-    let r = os_sys::futex_wait(SEQ.as_ptr(), seq, ns);
+    let r = futex_sleep(SEQ.as_ptr(), seq, ns);
     WAITERS.fetch_sub(1, Ordering::SeqCst);
     matches!(r, Err(osyx_abi::Errno::WouldBlock))
 }
@@ -744,17 +805,17 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
         });
         match (shared.next(), shared.next()) {
             (Some(e), _) if objs.len() == 1 => {
-                let _ = os_sys::futex_wait(e.futex_word(), 0, wait_ns);
+                let _ = futex_sleep(e.futex_word(), 0, wait_ns);
             }
             (None, _) => {
                 WAITERS.fetch_add(1, Ordering::SeqCst);
-                let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, wait_ns);
+                let _ = futex_sleep(SEQ.as_ptr(), seq, wait_ns);
                 WAITERS.fetch_sub(1, Ordering::SeqCst);
             }
             _ => {
                 let slice = if wait_ns == 0 { SHARED_POLL_NS } else { wait_ns.min(SHARED_POLL_NS) };
                 WAITERS.fetch_add(1, Ordering::SeqCst);
-                let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, slice);
+                let _ = futex_sleep(SEQ.as_ptr(), seq, slice);
                 WAITERS.fetch_sub(1, Ordering::SeqCst);
             }
         }
