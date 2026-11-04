@@ -705,6 +705,41 @@ static void stock_icons_display_and_transactions(void) {
     CloseHandle(t4);
 }
 
+/* atlthunk.dll: a thunk called as a window procedure passes the value it
+ * was set up with in place of the HWND. */
+static void *thunk_seen;
+static UINT thunk_msg;
+static LRESULT CALLBACK thunk_target(HWND first, UINT msg, WPARAM wp, LPARAM lp) {
+    thunk_seen = (void *)first;
+    thunk_msg = msg;
+    return (LRESULT)(wp + lp);
+}
+
+static void atl_thunks(void) {
+    HMODULE atl = LoadLibraryA("atlthunk.dll");
+    check("atlthunk.dll loads", atl != NULL);
+    if (!atl) return;
+    void *(WINAPI *alloc_data)(void) = (void *)GetProcAddress(atl, "AtlThunk_AllocateData");
+    void (WINAPI *init_data)(void *, void *, size_t) = (void *)GetProcAddress(atl, "AtlThunk_InitData");
+    WNDPROC (WINAPI *to_code)(void *) = (void *)GetProcAddress(atl, "AtlThunk_DataToCode");
+    void (WINAPI *free_data)(void *) = (void *)GetProcAddress(atl, "AtlThunk_FreeData");
+    check("atlthunk exports the four functions", alloc_data && init_data && to_code && free_data);
+    if (!(alloc_data && init_data && to_code && free_data)) return;
+    void *a = alloc_data(), *b = alloc_data();
+    check("AtlThunk_AllocateData hands out distinct thunks", a && b && a != b);
+    int object = 0;
+    init_data(a, (void *)thunk_target, (size_t)&object);
+    WNDPROC code = to_code(a);
+    LRESULT r = code((HWND)0x1234, WM_USER + 7, 40, 2);
+    check("the thunk calls the procedure with its value for the HWND",
+          r == 42 && thunk_seen == (void *)&object && thunk_msg == WM_USER + 7);
+    init_data(b, (void *)thunk_target, 77);
+    check("a second thunk passes its own value",
+          to_code(b)((HWND)1, WM_USER, 1, 1) == 2 && thunk_seen == (void *)77);
+    free_data(a);
+    free_data(b);
+}
+
 void __stdcall start(void) {
     hashes();
     randomness();
@@ -717,5 +752,6 @@ void __stdcall start(void) {
     kernel_apis();
     security_and_namespace();
     stock_icons_display_and_transactions();
+    atl_thunks();
     finish("newlibs");
 }
