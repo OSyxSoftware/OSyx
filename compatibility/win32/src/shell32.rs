@@ -1270,6 +1270,12 @@ extern "win64" fn Shell_NotifyIconW(_message: u32, _data: u64) -> i32 {
     crate::kernel32::fail(crate::error::ERROR_NOT_SUPPORTED, 0)
 }
 
+/// Shell_NotifyIconA: as Shell_NotifyIconW (there is no notification area
+/// to read the NOTIFYICONDATAA for).
+extern "win64" fn Shell_NotifyIconA(message: u32, data: u64) -> i32 {
+    Shell_NotifyIconW(message, data)
+}
+
 /// ShellExecuteA: the strings in UTF-16, as ShellExecuteW.
 extern "win64" fn ShellExecuteA(hwnd: u64, op: *const u8, file: *const u8, params: *const u8, dir: *const u8, show: i32) -> u64 {
     // SAFETY: NULL or NUL-terminated strings.
@@ -1611,6 +1617,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ILCreateFromPathA,
         ShellExecuteW,
         ShellExecuteExW,
+        Shell_NotifyIconA,
         Shell_NotifyIconW,
         DragQueryFileW,
         DragQueryFileA,
