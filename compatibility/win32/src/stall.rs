@@ -187,6 +187,34 @@ fn watchdog() {
         if images.is_none() {
             os_std::eprintln!("winrun:   (the loader is busy: stacks shown as raw code addresses are not resolved)");
         }
+        // Where the kernel last saw a thread: the system call it is in (or
+        // made last), the code addresses on its stack and winrun's own
+        // frames (for addr2line on this build's binary). Returns the owner
+        // of a lock the thread waits for.
+        let describe = |tid: u64, words: &mut Vec<u64>| -> Option<u64> {
+            let n = os_sys::thread_state(tid, words).ok()?;
+            let state = ["ready", "running", "blocked", "dead"].get(words[0] as usize).copied().unwrap_or("?");
+            os_std::eprintln!("winrun:     {state}, {} (from {:#x})", syscall_text(words[1], words[4], words[5]), words[2]);
+            if let Some(chain) = images.as_ref().and_then(|i| crate::exceptions::chain_of(&words[STATE_WORDS.min(n)..n], i)) {
+                os_std::eprintln!("winrun:     stack: {chain}");
+            }
+            let (lo, hi) = own_code();
+            let mut own: Vec<u64> = Vec::new();
+            for &v in &words[STATE_WORDS.min(n)..n] {
+                if v >= lo && v < hi && !own.contains(&v) {
+                    own.push(v);
+                    if own.len() == 24 {
+                        break;
+                    }
+                }
+            }
+            if !own.is_empty() {
+                let list: Vec<String> = own.iter().map(|v| format!("{v:#x}")).collect();
+                os_std::eprintln!("winrun:     winrun frames: {}", list.join(" "));
+            }
+            (words[1] == osyx_abi::nr::FUTEX_WAIT_OWNED && words[5] != 0).then_some(words[5])
+        };
+        let mut owners: Vec<u64> = Vec::new();
         for (i, &(tid, _)) in threads.iter().enumerate() {
             let busy = after[i].saturating_sub(before[i]);
             let waiting = snapshot.iter().any(|w| w.0 == tid as u64);
@@ -195,29 +223,21 @@ fn watchdog() {
                 None => String::from("no tracked wait yet"),
             };
             os_std::eprintln!("winrun:   thread {tid}: {busy} ticks{} — {tail}", if waiting { ", waiting" } else { "" });
-            // Where the kernel last saw the thread: the system call it is in
-            // (or made last) and the code addresses on its stack.
-            if let Ok(n) = os_sys::thread_state(tid as u64, &mut words) {
-                let state = ["ready", "running", "blocked", "dead"].get(words[0] as usize).copied().unwrap_or("?");
-                os_std::eprintln!("winrun:     {state}, {} (from {:#x})", syscall_text(words[1], words[4], words[5]), words[2]);
-                if let Some(chain) = images.as_ref().and_then(|i| crate::exceptions::chain_of(&words[STATE_WORDS.min(n)..n], i)) {
-                    os_std::eprintln!("winrun:     stack: {chain}");
+            if let Some(owner) = describe(tid as u64, &mut words) {
+                if !owners.contains(&owner) {
+                    owners.push(owner);
                 }
-                // winrun's own frames, for addr2line on this build's binary.
-                let (lo, hi) = own_code();
-                let mut own: Vec<u64> = Vec::new();
-                for &v in &words[STATE_WORDS.min(n)..n] {
-                    if v >= lo && v < hi && !own.contains(&v) {
-                        own.push(v);
-                        if own.len() == 24 {
-                            break;
-                        }
-                    }
-                }
-                if !own.is_empty() {
-                    let list: Vec<String> = own.iter().map(|v| format!("{v:#x}")).collect();
-                    os_std::eprintln!("winrun:     winrun frames: {}", list.join(" "));
-                }
+            }
+        }
+        // Lock holders that are not Windows threads (winrun's own helpers),
+        // or no longer are: what they are doing explains the waits above.
+        for owner in owners {
+            if threads.iter().any(|&(t, _)| t as u64 == owner) {
+                continue;
+            }
+            os_std::eprintln!("winrun:   lock holder thread {owner} (not a live Windows thread):");
+            if describe(owner, &mut words).is_none() && os_sys::thread_state(owner, &mut words).is_err() {
+                os_std::eprintln!("winrun:     no such thread: it ended holding the lock");
             }
         }
         os_std::eprintln!("winrun: stalled waits ({} thread waits under way):", snapshot.len());
