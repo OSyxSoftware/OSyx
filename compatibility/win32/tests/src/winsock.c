@@ -186,11 +186,13 @@ void __stdcall start(void) {
     check_eq("... now zero", soerr, 0);
     closesocket(s);
 
-    /* select with nothing to watch waits out its timeout; bad arguments fail. */
+    /* select with nothing to watch is an invalid call (as on Windows 11); bad
+     * arguments fail. */
     fd_set none;
     FD_ZERO(&none);
     struct timeval wait_tv = {0, 20000};
-    check_eq("select over empty sets waits out the timeout", select(0, &none, &none, NULL, &wait_tv), 0);
+    check_eq("select over empty sets fails", select(0, &none, &none, NULL, &wait_tv), SOCKET_ERROR);
+    check_eq("... with WSAEINVAL", WSAGetLastError(), WSAEINVAL);
     struct timeval bad_tv = {0, 1000000};
     check_eq("select rejects tv_usec >= 1000000", select(0, &none, &none, NULL, &bad_tv), SOCKET_ERROR);
     check_eq("... with WSAEINVAL", WSAGetLastError(), WSAEINVAL);

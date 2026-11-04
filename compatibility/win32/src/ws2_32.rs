@@ -495,8 +495,13 @@ extern "win64" fn connect(s: u64, addr: *const u8, len: i32) -> i32 {
         // fails with WSAEWOULDBLOCK and reports the connection through
         // FD_CONNECT and select's writability (Chromium relies on it). The
         // stack connects loopback at once; that is reported the same way.
+        // A connection that fails at once is reported the same way: the
+        // call says WSAEWOULDBLOCK and SO_ERROR (FD_CONNECT, select) the
+        // failure.
+        let nonblocking = socket_state(s).is_ok_and(|k| k.nonblocking);
         let r = match r {
-            Ok(()) if socket_state(s).is_ok_and(|k| k.nonblocking) => Err(WSAEWOULDBLOCK),
+            Ok(()) if nonblocking => Err(WSAEWOULDBLOCK),
+            Err(WSAETIMEDOUT | WSAECONNREFUSED | WSAEHOSTUNREACH | WSAENETUNREACH | WSAECONNRESET) if nonblocking => Err(WSAEWOULDBLOCK),
             r => r,
         };
         if traced() {
@@ -1969,10 +1974,16 @@ pub(crate) extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *m
     let (r, w) = (read_set(rd), read_set(wr));
     // The exception set is always reported empty (OSyx has no OOB data), but
     // an invalid handle in it is still an error, as on Windows.
-    for s in read_set(ex) {
+    let ex_set = read_set(ex);
+    for &s in &ex_set {
         if let Err(e) = fd(s) {
             return err(e, SOCKET_ERROR);
         }
+    }
+    // Nothing to watch at all is an invalid call on Windows (WSAEINVAL),
+    // not a sleep.
+    if r.is_empty() && w.is_empty() && ex_set.is_empty() {
+        return err(WSAEINVAL, SOCKET_ERROR);
     }
     let mut items = Vec::new();
     for (&s, ev) in
