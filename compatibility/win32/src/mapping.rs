@@ -264,9 +264,33 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
     Ok((base, size))
 }
 
-/// The last views unmapped (base, size, file path), newest last: a fault
-/// report names an address that lies in one (a use after UnmapViewOfFile).
-static UNMAPPED: Mutex<alloc::collections::VecDeque<(u64, u64, String)>> = Mutex::new(alloc::collections::VecDeque::new());
+/// The last views unmapped (base, size, file path, who unmapped it),
+/// newest last: a fault report names an address that lies in one (a use
+/// after UnmapViewOfFile) and the code that unmapped it.
+static UNMAPPED: Mutex<alloc::collections::VecDeque<(u64, u64, String, String)>> = Mutex::new(alloc::collections::VecDeque::new());
+
+/// The calling thread and the code addresses on its stack, for a record
+/// of who unmapped a view (Windows threads only: they have a TEB). It never
+/// waits for the loader: a thread inside LoadLibrary may unmap views.
+fn caller() -> String {
+    let tid = os_sys::gettid();
+    let images = match crate::kernel32::thread_object(tid as u32).and_then(|_| crate::loader::try_images()) {
+        Some(i) => i,
+        None => return alloc::format!("thread {tid}"),
+    };
+    let rsp: u64;
+    // SAFETY: reads the stack pointer only.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+    let t = crate::teb::current();
+    // SAFETY: this thread's TEB.
+    let (base, limit): (u64, u64) = unsafe { (crate::teb::get(t, crate::teb::TEB_STACK_BASE), crate::teb::get(t, crate::teb::TEB_STACK_LIMIT)) };
+    let start = rsp.max(limit).min(base);
+    let end = start.saturating_add(16 << 10).min(base);
+    // SAFETY: inside this thread's stack, between its limit and base.
+    let words: Vec<u64> = (start..end).step_by(8).map(|a| unsafe { core::ptr::read_volatile(a as *const u64) }).collect();
+    let chain = crate::exceptions::chain_of(&words, &images).unwrap_or_default();
+    alloc::format!("thread {tid} from {chain}")
+}
 
 /// For a fault report: the view or recently unmapped view holding `addr`,
 /// in words; None without waiting if the calling thread holds the table.
@@ -285,12 +309,13 @@ pub fn describe_for_report(addr: u64) -> Option<String> {
     }
     let unmapped = UNMAPPED.lock().unwrap();
     unmapped.iter().rev().find(|u| addr >= u.0 && addr < u.0 + u.1).map(|u| {
-        alloc::format!("a view {:#x}+{:#x} of {} that was unmapped", u.0, u.1, if u.2.is_empty() { "shared memory" } else { &u.2 })
+        alloc::format!("a view {:#x}+{:#x} of {} that was unmapped by {}", u.0, u.1, if u.2.is_empty() { "shared memory" } else { &u.2 }, u.3)
     })
 }
 
 /// Unmaps the view containing `addr`.
 pub fn unmap(addr: u64) -> Result<(), NtStatus> {
+    let who = caller();
     let mut views = VIEWS.lock().unwrap();
     let base = match views.range(..=addr).next_back() {
         Some((&b, v)) if addr < b + v.size => b,
@@ -303,7 +328,7 @@ pub fn unmap(addr: u64) -> Result<(), NtStatus> {
             unmapped.pop_front();
         }
         let path = v.section.file.as_ref().map_or(String::new(), |f| f.path.clone());
-        unmapped.push_back((base, (v.size as usize).next_multiple_of(PAGE) as u64, path));
+        unmapped.push_back((base, (v.size as usize).next_multiple_of(PAGE) as u64, path, who));
     }
     // SAFETY: a whole view made by `map`.
     unsafe { os_sys::unmap(base as *mut u8, (v.size as usize).next_multiple_of(PAGE)) }.map_err(errno_to_status)

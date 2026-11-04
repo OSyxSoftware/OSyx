@@ -6,12 +6,16 @@
 //! Font faces answer metrics, glyph indices, tables and outlines from the
 //! font file (ttf.rs); glyph-run analysis rasterizes outlines with
 //! grayscale coverage (raster.rs), handed out as the ClearType 3x1 texture
-//! with equal channels, or as a bilevel 1x1 texture for aliased rendering.
+//! with equal channels, as a bilevel 1x1 texture for aliased rendering, or
+//! as an 8-bit 1x1 texture for grayscale antialiasing.
 //! There is no hinting and no ClearType filtering. CreateFontFromLOGFONT
-//! applies HKLM\...\FontSubstitutes as GDI does. Text layout, text
-//! analysis and newer factory versions are not provided: QueryInterface
-//! for them fails, which programs check. An interface method that is not
-//! implemented returns E_NOTIMPL and, under -v, names itself.
+//! applies HKLM\...\FontSubstitutes as GDI does. The factory answers as
+//! IDWriteFactory3, as on Windows 10 (Chromium uses it without checking):
+//! the version 1-3 glyph-run analyses and rendering parameters work; font
+//! sets, font fallback and color glyph layers do not. Text layout and text
+//! analysis are not provided: QueryInterface for them fails, which programs
+//! check. An interface method that is not implemented returns E_NOTIMPL
+//! and, under -v, names itself.
 #![allow(non_snake_case)]
 mod iids;
 pub mod raster;
@@ -47,6 +51,7 @@ const DWRITE_E_FILEFORMAT: u32 = 0x8898_5000;
 const DWRITE_E_NOFONT: u32 = 0x8898_5002;
 const DWRITE_E_FILENOTFOUND: u32 = 0x8898_5003;
 const DWRITE_E_ALREADYREGISTERED: u32 = 0x8898_5006;
+const DWRITE_E_NOCOLOR: u32 = 0x8898_500C;
 
 /// Floats travel in xmm registers, which soft-float winrun code cannot
 /// read: these entry points move them to integer registers (as raw bits)
@@ -1290,18 +1295,32 @@ extern "win64" fn StreamGetLastWriteTime(this: u64, out: *mut u64) -> u32 {
 struct Params {
     gamma: u32,
     contrast: u32,
+    /// Grayscale enhanced contrast (IDWriteRenderingParams1).
+    gray_contrast: u32,
     cleartype: u32,
     geometry: u32,
+    /// DWRITE_RENDERING_MODE1 (NATURAL_SYMMETRIC_DOWNSAMPLED is 7).
     mode: u32,
+    /// DWRITE_GRID_FIT_MODE (IDWriteRenderingParams2).
+    grid_fit: u32,
 }
 
-/// Windows' defaults: gamma 1.8, enhanced contrast 0.5, ClearType level
-/// 1.0, RGB stripes, default mode.
+/// Windows' defaults: gamma 1.8, enhanced contrast 0.5, grayscale enhanced
+/// contrast 1.0, ClearType level 1.0, RGB stripes, default mode and grid
+/// fitting.
 fn default_params() -> Params {
-    Params { gamma: 1.8f32.to_bits(), contrast: 0.5f32.to_bits(), cleartype: 1.0f32.to_bits(), geometry: 1, mode: 0 }
+    Params {
+        gamma: 1.8f32.to_bits(),
+        contrast: 0.5f32.to_bits(),
+        gray_contrast: 1.0f32.to_bits(),
+        cleartype: 1.0f32.to_bits(),
+        geometry: 1,
+        mode: 0,
+        grid_fit: 0,
+    }
 }
 
-static PARAMS_VT: Slots<8> = Slots([
+static PARAMS_VT: Slots<11> = Slots([
     qi as *const (),
     add_ref as _,
     release::<Params> as _,
@@ -1310,8 +1329,11 @@ static PARAMS_VT: Slots<8> = Slots([
     ParamsGetClearTypeLevel as _,
     ParamsGetPixelGeometry as _,
     ParamsGetRenderingMode as _,
+    ParamsGetGrayscaleEnhancedContrast as _,
+    ParamsGetGridFitMode as _,
+    ParamsGetRenderingMode1 as _,
 ]);
-static PARAMS_IIDS: [Guid; 1] = [iids::RENDERING_PARAMS];
+static PARAMS_IIDS: [Guid; 4] = [iids::RENDERING_PARAMS, iids::RENDERING_PARAMS1, iids::RENDERING_PARAMS2, iids::RENDERING_PARAMS3];
 
 fn params(p: Params) -> u64 {
     new(&PARAMS_VT, "IDWriteRenderingParams", &PARAMS_IIDS, p)
@@ -1329,17 +1351,35 @@ extern "win64" fn params_cleartype(this: u64) -> u32 {
     data::<Params>(this).cleartype
 }
 
+extern "win64" fn params_gray_contrast(this: u64) -> u32 {
+    data::<Params>(this).gray_contrast
+}
+
 xmm_ret! {
     ParamsGetGamma => params_gamma;
     ParamsGetEnhancedContrast => params_contrast;
     ParamsGetClearTypeLevel => params_cleartype;
+    ParamsGetGrayscaleEnhancedContrast => params_gray_contrast;
 }
 
 extern "win64" fn ParamsGetPixelGeometry(this: u64) -> u32 {
     data::<Params>(this).geometry
 }
 
+/// DWRITE_RENDERING_MODE has no NATURAL_SYMMETRIC_DOWNSAMPLED: it reads
+/// as NATURAL_SYMMETRIC.
 extern "win64" fn ParamsGetRenderingMode(this: u64) -> u32 {
+    match data::<Params>(this).mode {
+        DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED => DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+        m => m,
+    }
+}
+
+extern "win64" fn ParamsGetGridFitMode(this: u64) -> u32 {
+    data::<Params>(this).grid_fit
+}
+
+extern "win64" fn ParamsGetRenderingMode1(this: u64) -> u32 {
     data::<Params>(this).mode
 }
 
@@ -1349,7 +1389,11 @@ struct Analysis {
     /// (left, top, right, bottom) in pixels; None when nothing is drawn.
     bounds: Option<(i32, i32, i32, i32)>,
     coverage: Vec<u8>,
-    aliased: bool,
+    /// The texture type it provides: ALIASED_1x1 for aliased rendering and
+    /// for grayscale antialiasing, CLEARTYPE_3x1 otherwise.
+    texture: u32,
+    /// Aliased rendering: coverage is thresholded to 0 or 255.
+    bilevel: bool,
 }
 
 static ANALYSIS_VT: Slots<6> = Slots([
@@ -1363,13 +1407,17 @@ static ANALYSIS_VT: Slots<6> = Slots([
 static ANALYSIS_IIDS: [Guid; 1] = [iids::GLYPH_RUN_ANALYSIS];
 
 const DWRITE_RENDERING_MODE_ALIASED: u32 = 1;
+const DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC: u32 = 5;
 const DWRITE_RENDERING_MODE_OUTLINE: u32 = 6;
+const DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED: u32 = 7;
+const DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE: u32 = 1;
+const DWRITE_GRID_FIT_MODE_ENABLED: u32 = 2;
 const DWRITE_TEXTURE_ALIASED_1X1: u32 = 0;
 const DWRITE_TEXTURE_CLEARTYPE_3X1: u32 = 1;
 
 /// The texture type this analysis provides.
 fn texture_ok(a: &Analysis, kind: u32) -> bool {
-    kind == if a.aliased { DWRITE_TEXTURE_ALIASED_1X1 } else { DWRITE_TEXTURE_CLEARTYPE_3X1 }
+    kind == a.texture
 }
 
 extern "win64" fn AnaGetAlphaTextureBounds(this: u64, kind: u32, out: *mut [i32; 4]) -> u32 {
@@ -1408,7 +1456,7 @@ extern "win64" fn AnaCreateAlphaTexture(this: u64, kind: u32, rect: *const [i32;
     for y in t.max(bt)..b.min(bb) {
         for x in l.max(bl)..r.min(br) {
             let c = a.coverage[(y - bt) as usize * bw + (x - bl) as usize];
-            let c = if a.aliased { if c >= 128 { 255 } else { 0 } } else { c };
+            let c = if a.bilevel { if c >= 128 { 255 } else { 0 } } else { c };
             let at = ((y - t) as usize * w + (x - l) as usize) * bpp;
             out[at..at + bpp].fill(c);
         }
@@ -1441,6 +1489,41 @@ extern "win64" fn factory_glyph_run_analysis(
     by_bits: u32,
     out: *mut u64,
 ) -> u32 {
+    glyph_run_analysis(run, ppd_bits, transform, mode, false, bx_bits, by_bits, out)
+}
+
+/// IDWriteFactory2/3::CreateGlyphRunAnalysis: the transform carries the
+/// scale (no pixels per DIP); there is no hinting, so the grid-fit mode
+/// changes nothing; grayscale antialiasing gives an 8-bit ALIASED_1x1
+/// texture, as on Windows. DWRITE_RENDERING_MODE1 matches
+/// DWRITE_RENDERING_MODE up to NATURAL_SYMMETRIC_DOWNSAMPLED, drawn as
+/// NATURAL_SYMMETRIC.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn FactoryCreateGlyphRunAnalysis2(
+    _this: u64,
+    run: *const u8,
+    transform: *const [u32; 6],
+    mode: u32,
+    _measuring: u32,
+    grid_fit: u32,
+    antialias: u32,
+    bx_bits: u32,
+    by_bits: u32,
+    out: *mut u64,
+) -> u32 {
+    if grid_fit > DWRITE_GRID_FIT_MODE_ENABLED || antialias > DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE || mode > DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED {
+        if !out.is_null() {
+            put(out, 0);
+        }
+        return E_INVALIDARG;
+    }
+    glyph_run_analysis(run, 1.0f32.to_bits(), transform, mode, antialias == DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, bx_bits, by_bits, out)
+}
+
+/// A glyph-run analysis drawn at `ppd_bits` pixels per DIP; `grayscale`
+/// asks for the 8-bit 1x1 texture instead of the ClearType one.
+#[allow(clippy::too_many_arguments)]
+fn glyph_run_analysis(run: *const u8, ppd_bits: u32, transform: *const [u32; 6], mode: u32, grayscale: bool, bx_bits: u32, by_bits: u32, out: *mut u64) -> u32 {
     if run.is_null() || out.is_null() {
         return E_INVALIDARG;
     }
@@ -1509,7 +1592,9 @@ extern "win64" fn factory_glyph_run_analysis(
     }
     let bounds = raster::bounds(&lines);
     let coverage = bounds.map(|b| raster::coverage(&lines, b)).unwrap_or_default();
-    put(out, new(&ANALYSIS_VT, "IDWriteGlyphRunAnalysis", &ANALYSIS_IIDS, Analysis { bounds, coverage, aliased: mode == DWRITE_RENDERING_MODE_ALIASED }));
+    let aliased = mode == DWRITE_RENDERING_MODE_ALIASED;
+    let texture = if aliased || grayscale { DWRITE_TEXTURE_ALIASED_1X1 } else { DWRITE_TEXTURE_CLEARTYPE_3X1 };
+    put(out, new(&ANALYSIS_VT, "IDWriteGlyphRunAnalysis", &ANALYSIS_IIDS, Analysis { bounds, coverage, texture, bilevel: aliased }));
     S_OK
 }
 
@@ -1596,7 +1681,7 @@ extern "win64" fn GdiConvertFontFaceToLOGFONT(_this: u64, face: u64, lf: *mut u8
 
 // ---- the factory -------------------------------------------------------------------------------
 
-static FACTORY_VT: Slots<24> = Slots([
+static FACTORY_VT: Slots<40> = Slots([
     qi as *const (),
     add_ref as _,
     release::<Mutex<Vec<u64>>> as _,
@@ -1621,8 +1706,27 @@ static FACTORY_VT: Slots<24> = Slots([
     stub::<21> as _,
     stub::<22> as _,
     FactoryCreateGlyphRunAnalysis as _,
+    // IDWriteFactory1
+    FactoryGetEudcFontCollection as _,
+    FactoryCreateCustomRenderingParams1 as _,
+    // IDWriteFactory2
+    stub::<26> as _, // GetSystemFontFallback
+    stub::<27> as _, // CreateFontFallbackBuilder
+    FactoryTranslateColorGlyphRun as _,
+    FactoryCreateCustomRenderingParams2 as _,
+    FactoryCreateGlyphRunAnalysis2 as _,
+    // IDWriteFactory3
+    FactoryCreateGlyphRunAnalysis2 as _,
+    FactoryCreateCustomRenderingParams2 as _,
+    stub::<33> as _, // CreateFontFaceReference (file)
+    stub::<34> as _, // CreateFontFaceReference (path)
+    stub::<35> as _, // GetSystemFontSet
+    stub::<36> as _, // CreateFontSetBuilder
+    stub::<37> as _, // CreateFontCollectionFromFontSet
+    stub::<38> as _, // GetSystemFontCollection (IDWriteFontCollection1)
+    stub::<39> as _, // GetFontDownloadQueue
 ]);
-static FACTORY_IIDS: [Guid; 1] = [iids::FACTORY];
+static FACTORY_IIDS: [Guid; 4] = [iids::FACTORY, iids::FACTORY1, iids::FACTORY2, iids::FACTORY3];
 
 /// The registered font file and font collection loaders (factory data).
 fn loaders(this: u64) -> &'static Mutex<Vec<u64>> {
@@ -1809,17 +1913,87 @@ extern "win64" fn FactoryCreateMonitorRenderingParams(_this: u64, _monitor: u64,
 }
 
 extern "win64" fn factory_custom_rendering_params(_this: u64, gamma: u32, contrast: u32, cleartype: u32, geometry: u32, mode: u32, out: *mut u64) -> u32 {
-    let (g, c, t) = (f32::from_bits(gamma), f32::from_bits(contrast), f32::from_bits(cleartype));
-    if out.is_null() || !(g > 0.0 && g <= 256.0) || c < 0.0 || !(0.0..=1.0).contains(&t) || geometry > 2 || mode > 6 {
+    let p = Params { gamma, contrast, gray_contrast: 1.0f32.to_bits(), cleartype, geometry, mode, grid_fit: 0 };
+    custom_params(p, DWRITE_RENDERING_MODE_OUTLINE, out)
+}
+
+/// IDWriteFactory1::CreateCustomRenderingParams: adds the grayscale
+/// enhanced contrast.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn factory_custom_rendering_params1(_this: u64, gamma: u32, contrast: u32, gray_contrast: u32, cleartype: u32, geometry: u32, mode: u32, out: *mut u64) -> u32 {
+    let p = Params { gamma, contrast, gray_contrast, cleartype, geometry, mode, grid_fit: 0 };
+    custom_params(p, DWRITE_RENDERING_MODE_OUTLINE, out)
+}
+
+/// IDWriteFactory2/3::CreateCustomRenderingParams: adds the grid-fit mode;
+/// version 3 takes DWRITE_RENDERING_MODE1 (one more mode).
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn factory_custom_rendering_params2(
+    _this: u64,
+    gamma: u32,
+    contrast: u32,
+    gray_contrast: u32,
+    cleartype: u32,
+    geometry: u32,
+    mode: u32,
+    grid_fit: u32,
+    out: *mut u64,
+) -> u32 {
+    if grid_fit > DWRITE_GRID_FIT_MODE_ENABLED {
         return E_INVALIDARG;
     }
-    put(out, params(Params { gamma, contrast, cleartype, geometry, mode }));
+    let p = Params { gamma, contrast, gray_contrast, cleartype, geometry, mode, grid_fit };
+    custom_params(p, DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED, out)
+}
+
+/// Checks custom rendering parameters as Windows does and makes the object.
+fn custom_params(p: Params, max_mode: u32, out: *mut u64) -> u32 {
+    let (g, c, gc, t) = (f32::from_bits(p.gamma), f32::from_bits(p.contrast), f32::from_bits(p.gray_contrast), f32::from_bits(p.cleartype));
+    if out.is_null() || !(g > 0.0 && g <= 256.0) || c < 0.0 || gc < 0.0 || !(0.0..=1.0).contains(&t) || p.geometry > 2 || p.mode > max_mode {
+        return E_INVALIDARG;
+    }
+    put(out, params(p));
     S_OK
 }
 
 xmm_jmp! {
     FactoryCreateCustomRenderingParams => factory_custom_rendering_params ["movd edx, xmm1", "movd r8d, xmm2", "movd r9d, xmm3"];
+    FactoryCreateCustomRenderingParams1 => factory_custom_rendering_params1 ["movd edx, xmm1", "movd r8d, xmm2", "movd r9d, xmm3"];
+    FactoryCreateCustomRenderingParams2 => factory_custom_rendering_params2 ["movd edx, xmm1", "movd r8d, xmm2", "movd r9d, xmm3"];
     FactoryCreateGlyphRunAnalysis => factory_glyph_run_analysis ["movd r8d, xmm2"];
+}
+
+/// The EUDC (end-user defined characters) collection: there are no EUDC
+/// fonts, so it is empty, as on a Windows system without any.
+extern "win64" fn FactoryGetEudcFontCollection(_this: u64, out: *mut u64, _check: i32) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, collection(Arc::new(build(&[]))));
+    S_OK
+}
+
+/// IDWriteFactory2::TranslateColorGlyphRun: a run in a font without color
+/// layers (no COLR table) answers DWRITE_E_NOCOLOR, which tells the caller
+/// to draw it as ordinary glyphs. Color layers themselves are not provided.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn FactoryTranslateColorGlyphRun(_this: u64, _x: u32, _y: u32, run: *const u8, _desc: u64, _measuring: u32, _transform: u64, _palette: u32, out: *mut u64) -> u32 {
+    if run.is_null() || out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, 0);
+    // SAFETY: the caller's DWRITE_GLYPH_RUN (font face first).
+    let fface = unsafe { crate::teb::get::<u64>(run as u64, 0) };
+    if !is(fface, &FACE_VT) {
+        return E_INVALIDARG;
+    }
+    if face_of(fface).face.table(b"COLR").is_none() {
+        return DWRITE_E_NOCOLOR;
+    }
+    if crate::VERBOSE.load(Ordering::Relaxed) {
+        os_std::eprintln!("winrun: dwrite: color glyph layers are not implemented");
+    }
+    E_NOTIMPL
 }
 
 extern "win64" fn FactoryRegisterFontFileLoader(this: u64, loader: u64) -> u32 {

@@ -1527,8 +1527,17 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         os_std::eprintln!("winrun: loaded {name} at {h:#x}");
     }
     if !todo.is_empty() && !wow64::is_active() {
-        // New TLS indices need blocks for this thread too.
+        // New TLS indices need blocks in every thread, not only this one:
+        // Windows gives one to each existing thread, and a DLL's TLS
+        // callback reads its block in whichever thread ends (libGLESv2's
+        // DLL_THREAD_DETACH faulted on a missing one). A thread that has not
+        // started yet (no TEB) sets up its own blocks when it runs.
         setup_thread_tls(teb::current());
+        for (_, t) in crate::kernel32::thread_list() {
+            if t != 0 {
+                setup_thread_tls(t);
+            }
+        }
     } else if !todo.is_empty() {
         // A 32-bit DLL with static TLS gets a block in every thread that
         // runs 32-bit code, as Windows gives one to every existing thread.
