@@ -132,6 +132,17 @@ extern "win64" fn qi(this: u64, riid: *const Guid, out: *mut u64) -> u32 {
             return S_OK;
         }
         *out = 0;
+        if traced() {
+            let g = &*riid;
+            os_std::eprintln!(
+                "winrun: dwrite: {} has no interface {:08x}-{:04x}-{:04x}-{:02x?}",
+                header(this).name,
+                u32::from_le_bytes([g[0], g[1], g[2], g[3]]),
+                u16::from_le_bytes([g[4], g[5]]),
+                u16::from_le_bytes([g[6], g[7]]),
+                &g[8..]
+            );
+        }
     }
     E_NOINTERFACE
 }
@@ -150,8 +161,13 @@ extern "win64" fn release<T>(this: u64) -> u32 {
 }
 
 /// A method this implementation does not provide.
+/// -v or OSYX_WINRUN_FAILTRACE: interfaces and methods programs miss.
+fn traced() -> bool {
+    crate::VERBOSE.load(Ordering::Relaxed) || crate::kernel32::TRACE.load(Ordering::Relaxed)
+}
+
 extern "win64" fn stub<const N: usize>(this: u64) -> u32 {
-    if crate::VERBOSE.load(Ordering::Relaxed) {
+    if traced() {
         os_std::eprintln!("winrun: dwrite: {} method {} is not implemented", header(this).name, N);
     }
     E_NOTIMPL
