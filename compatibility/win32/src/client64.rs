@@ -318,6 +318,67 @@ extern "win64" fn GetVolumeNameForVolumeMountPointW(mount: *const u16, out: *mut
     TRUE
 }
 
+/// The GUID paths of the mounted volumes: the root's first, then each other
+/// volume of the mount table once.
+fn volume_names() -> Vec<String> {
+    let mut devs: Vec<u64> = Vec::new();
+    if let Ok(st) = os_sys::stat("/") {
+        devs.push(st.dev);
+    }
+    for m in os_std::system::mounts().unwrap_or_default() {
+        if !devs.contains(&m.dev) {
+            devs.push(m.dev);
+        }
+    }
+    devs.into_iter().map(volume_guid_path).collect()
+}
+
+/// Volume searches: the names found at FindFirstVolumeW and the next index.
+static VOLUME_SEARCHES: Mutex<BTreeMap<u64, (Vec<String>, usize)>> = Mutex::new(BTreeMap::new());
+static NEXT_VOLUME_SEARCH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x5600_0000);
+
+/// Writes volume name `name` to the caller's buffer of `len` units.
+fn volume_out(name: &str, out: *mut u16, len: u32) -> Bool {
+    let r = kernel32::out_w(name, out, len);
+    if r >= len {
+        return fail(ERROR_FILENAME_EXCED_RANGE, FALSE);
+    }
+    TRUE
+}
+
+extern "win64" fn FindFirstVolumeW(out: *mut u16, len: u32) -> u64 {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, u64::MAX);
+    }
+    let names = volume_names();
+    let Some(first) = names.first() else { return fail(ERROR_NO_MORE_FILES, u64::MAX) };
+    if volume_out(first, out, len) == FALSE {
+        return u64::MAX;
+    }
+    let h = NEXT_VOLUME_SEARCH.fetch_add(4, Ordering::Relaxed);
+    VOLUME_SEARCHES.lock().unwrap().insert(h, (names, 1));
+    h
+}
+
+extern "win64" fn FindNextVolumeW(h: u64, out: *mut u16, len: u32) -> Bool {
+    let mut searches = VOLUME_SEARCHES.lock().unwrap();
+    let Some((names, next)) = searches.get_mut(&h) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
+    let Some(name) = names.get(*next) else { return fail(ERROR_NO_MORE_FILES, FALSE) };
+    if volume_out(name, out, len) == FALSE {
+        return FALSE;
+    }
+    *next += 1;
+    TRUE
+}
+
+extern "win64" fn FindVolumeClose(h: u64) -> Bool {
+    if VOLUME_SEARCHES.lock().unwrap().remove(&h).is_some() {
+        TRUE
+    } else {
+        fail(ERROR_INVALID_HANDLE, FALSE)
+    }
+}
+
 /// GetVolumePathNamesForVolumeNameW: the drive letter and folder paths a
 /// volume is mounted at, as a double-NUL-terminated list.
 extern "win64" fn GetVolumePathNamesForVolumeNameW(volume: *const u16, out: *mut u16, len: u32, needed: *mut u32) -> Bool {
@@ -914,7 +975,42 @@ extern "win64" fn HidD_FreePreparsedData(_data: u64) -> u8 {
 
 /// HIDP_STATUS_INVALID_PREPARSED_DATA: no preparsed data exists.
 extern "win64" fn HidP_GetCaps(_data: u64, _caps: *mut u8) -> u32 {
-    0xC011_0001
+    HIDP_STATUS_INVALID_PREPARSED_DATA
+}
+
+const HIDP_STATUS_INVALID_PREPARSED_DATA: u32 = 0xC011_0001;
+
+/// The strings of a HID device: no handle is one (see HidD_GetAttributes).
+fn hid_string(h: u64) -> u8 {
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    fail(ERROR_INVALID_FUNCTION, 0)
+}
+
+extern "win64" fn HidD_GetManufacturerString(h: u64, _buf: *mut u16, _len: u32) -> u8 {
+    hid_string(h)
+}
+
+extern "win64" fn HidD_GetProductString(h: u64, _buf: *mut u16, _len: u32) -> u8 {
+    hid_string(h)
+}
+
+extern "win64" fn HidP_GetButtonCaps(_kind: u32, _caps: *mut u8, _len: *mut u16, _data: u64) -> u32 {
+    HIDP_STATUS_INVALID_PREPARSED_DATA
+}
+
+extern "win64" fn HidP_GetValueCaps(_kind: u32, _caps: *mut u8, _len: *mut u16, _data: u64) -> u32 {
+    HIDP_STATUS_INVALID_PREPARSED_DATA
+}
+
+/// 0: the length for preparsed data that does not exist.
+extern "win64" fn HidP_MaxDataListLength(_kind: u32, _data: u64) -> u32 {
+    0
+}
+
+extern "win64" fn HidP_GetData(_kind: u32, _list: *mut u8, _len: *mut u32, _data: u64, _report: *mut u8, _report_len: u32) -> u32 {
+    HIDP_STATUS_INVALID_PREPARSED_DATA
 }
 
 pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
@@ -931,6 +1027,9 @@ pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
         GetVolumeNameForVolumeMountPointW,
         GetVolumePathNamesForVolumeNameW,
         ReadDirectoryChangesW,
+        FindFirstVolumeW,
+        FindNextVolumeW,
+        FindVolumeClose,
     ]
 }
 
@@ -947,5 +1046,17 @@ pub fn shell32_exports() -> Vec<(&'static str, u64)> {
 }
 
 pub fn hid_exports() -> Vec<(&'static str, u64)> {
-    export_table![HidD_GetHidGuid, HidD_GetAttributes, HidD_GetPreparsedData, HidD_FreePreparsedData, HidP_GetCaps]
+    export_table![
+        HidD_GetHidGuid,
+        HidD_GetAttributes,
+        HidD_GetPreparsedData,
+        HidD_FreePreparsedData,
+        HidD_GetManufacturerString,
+        HidD_GetProductString,
+        HidP_GetCaps,
+        HidP_GetButtonCaps,
+        HidP_GetValueCaps,
+        HidP_MaxDataListLength,
+        HidP_GetData,
+    ]
 }

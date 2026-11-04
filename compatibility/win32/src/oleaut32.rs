@@ -644,7 +644,135 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         LoadRegTypeLib,
         CreateStdDispatch,
         OleCreatePropertyFrame,
+        SafeArrayGetDim,
+        LoadTypeLib,
+        VariantTimeToSystemTime,
+        VarUI4FromStr,
+        VarBstrCmp,
     ]
+}
+
+extern "win64" fn SafeArrayGetDim(psa: u64) -> u32 {
+    if psa == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's SAFEARRAY: cDims first.
+    unsafe { *(psa as *const u16) as u32 }
+}
+
+const TYPE_E_CANTLOADLIBRARY: u32 = 0x8002_9C4A;
+
+/// There is no type-library reader (and no ITypeLib) in winrun, so no
+/// library loads, as LoadRegTypeLib finds none registered.
+extern "win64" fn LoadTypeLib(file: *const u16, out: *mut u64) -> u32 {
+    if out.is_null() || file.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = 0 };
+    TYPE_E_CANTLOADLIBRARY
+}
+
+/// A DATE (days since 1899-12-30; the fraction is the time of day, also
+/// for negative dates) as a SYSTEMTIME, to the nearest second. FALSE
+/// outside 100-01-01..9999-12-31.
+extern "win64" fn VariantTimeToSystemTime(date: f64, out: *mut [u16; 8]) -> i32 {
+    if out.is_null() || !(-657_434.0..2_958_466.0).contains(&date) {
+        return 0;
+    }
+    let mut days = date as i64;
+    let mut secs = ((date - days as f64).abs() * 86_400.0 + 0.5) as i64;
+    if secs >= 86_400 {
+        secs -= 86_400;
+        days += if date < 0.0 { -1 } else { 1 };
+    }
+    let day = osyx_ui::time::days_from_civil(1899, 12, 30) + days;
+    let (y, m, d) = osyx_ui::time::civil_from_days(day);
+    let weekday = osyx_ui::time::weekday(day) as u16;
+    // SAFETY: the caller's SYSTEMTIME.
+    unsafe { *out = [y as u16, m as u16, weekday, d as u16, (secs / 3600) as u16, (secs / 60 % 60) as u16, (secs % 60) as u16, 0] };
+    1
+}
+
+/// VariantTimeToSystemTime for a 32-bit caller: the DATE as its bits.
+pub(crate) extern "win64" fn VariantTimeToSystemTime32(date: u64, out: *mut [u16; 8]) -> i32 {
+    VariantTimeToSystemTime(f64::from_bits(date), out)
+}
+
+const DISP_E_TYPEMISMATCH: u32 = 0x8002_0005;
+const DISP_E_OVERFLOW: u32 = 0x8002_000A;
+
+/// The locales OSyx has formats for: en-US (also the user and system
+/// default) and the invariant locale, both with "." decimals and ","
+/// thousands. Any other LCID has no data here.
+fn known_lcid(lcid: u32) -> bool {
+    matches!(lcid & 0xffff, 0x0409 | 0x0400 | 0x0800 | 0x007f | 0x0009)
+}
+
+/// VarUI4FromStr: number text in the locale's format, rounded half to
+/// even. An LCID OSyx has no formats for is E_INVALIDARG rather than a
+/// guess at its separators.
+extern "win64" fn VarUI4FromStr(s: *const u16, lcid: u32, _flags: u32, out: *mut u32) -> u32 {
+    if s.is_null() || out.is_null() || !known_lcid(lcid) {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's NUL-terminated string.
+    let Some(text) = (unsafe { crate::path::wide_to_string(s) }) else { return DISP_E_TYPEMISMATCH };
+    let Some(v) = coerce::parse_number(&text) else { return DISP_E_TYPEMISMATCH };
+    let v = coerce::round_even(v);
+    if !(0.0..=u32::MAX as f64).contains(&v) {
+        return DISP_E_OVERFLOW;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = v as u32 };
+    S_OK
+}
+
+const NORM_IGNORECASE: u32 = 0x1;
+const NORM_IGNORESYMBOLS: u32 = 0x4;
+
+/// VarBstrCmp: VARCMP_LT (0), _EQ (1), _GT (2). A NULL BSTR is an empty
+/// string. With LCID 0 the strings compare byte by byte (all of
+/// SysStringByteLen); otherwise in CompareString order for the locale,
+/// without case under NORM_IGNORECASE and without symbols under
+/// NORM_IGNORESYMBOLS.
+extern "win64" fn VarBstrCmp(a: u64, b: u64, lcid: u32, flags: u32) -> u32 {
+    let order = if lcid == 0 {
+        let bytes = |p: u64| -> Vec<u8> {
+            if p == 0 {
+                return Vec::new();
+            }
+            // SAFETY: a BSTR: its byte length precedes it.
+            unsafe { core::slice::from_raw_parts(p as *const u8, SysStringByteLen(p) as usize).to_vec() }
+        };
+        bytes(a).cmp(&bytes(b))
+    } else {
+        if !known_lcid(lcid) {
+            return E_INVALIDARG;
+        }
+        let units = |p: u64| -> Vec<u16> {
+            if p == 0 {
+                return Vec::new();
+            }
+            // SAFETY: a BSTR of SysStringLen units.
+            let u = unsafe { core::slice::from_raw_parts(p as *const u16, SysStringLen(p) as usize) };
+            if flags & NORM_IGNORESYMBOLS != 0 {
+                char::decode_utf16(u.iter().copied())
+                    .filter_map(Result::ok)
+                    .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+                    .flat_map(|c| { let mut b = [0u16; 2]; c.encode_utf16(&mut b).to_vec() })
+                    .collect()
+            } else {
+                u.to_vec()
+            }
+        };
+        crate::locale::compare_text(&units(a), &units(b), flags & NORM_IGNORECASE != 0)
+    };
+    match order {
+        core::cmp::Ordering::Less => 0,
+        core::cmp::Ordering::Equal => 1,
+        core::cmp::Ordering::Greater => 2,
+    }
 }
 
 /// The ordinals programs import these by.
@@ -672,6 +800,11 @@ pub fn ordinals() -> Vec<(u16, u64)> {
         (29, f(DispGetIDsOfNames as *const ())),
         (32, f(CreateStdDispatch as *const ())),
         (77, f(SafeArrayGetVartype as *const ())),
+        (17, f(SafeArrayGetDim as *const ())),
+        (161, f(LoadTypeLib as *const ())),
+        (185, f(VariantTimeToSystemTime as *const ())),
+        (277, f(VarUI4FromStr as *const ())),
+        (314, f(VarBstrCmp as *const ())),
         (162, f(LoadRegTypeLib as *const ())),
         (411, f(SafeArrayCreateVector as *const ())),
         (417, f(OleCreatePropertyFrame as *const ())),

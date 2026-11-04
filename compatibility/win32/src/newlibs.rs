@@ -339,6 +339,29 @@ extern "win64" fn DocumentPropertiesW(_hwnd: u64, _printer: u64, _device: *const
     fail(ERROR_INVALID_PRINTER_NAME, -1)
 }
 
+/// No printer can be opened, so no handle names one.
+extern "win64" fn GetPrinterW(_handle: u64, level: u32, _buf: *mut u8, _size: u32, needed: *mut u32) -> i32 {
+    if level > 9 {
+        return fail(ERROR_INVALID_LEVEL, 0);
+    }
+    if !needed.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *needed = 0 };
+    }
+    fail(ERROR_INVALID_HANDLE, 0)
+}
+
+extern "win64" fn GetPrinterDriverW(_handle: u64, _env: *const u16, level: u32, _buf: *mut u8, _size: u32, needed: *mut u32) -> i32 {
+    if !matches!(level, 1..=8 | 101) {
+        return fail(ERROR_INVALID_LEVEL, 0);
+    }
+    if !needed.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *needed = 0 };
+    }
+    fail(ERROR_INVALID_HANDLE, 0)
+}
+
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 
 /// Ordinal 203 on Windows. No printer is installed, so there is no default
@@ -353,7 +376,7 @@ extern "win64" fn GetDefaultPrinterW(_buf: *mut u16, size: *mut u32) -> i32 {
 }
 
 pub fn winspool_exports() -> Vec<(&'static str, u64)> {
-    export_table![OpenPrinterW, ClosePrinter, EnumPrintersW, DeviceCapabilitiesW, DocumentPropertiesW, GetDefaultPrinterW]
+    export_table![OpenPrinterW, ClosePrinter, EnumPrintersW, DeviceCapabilitiesW, DocumentPropertiesW, GetDefaultPrinterW, GetPrinterW, GetPrinterDriverW]
 }
 
 /// Windows exports GetDefaultPrinterW only by ordinal.

@@ -129,6 +129,14 @@ pub fn thread_exit() {
     }
 }
 
+/// FlsGetValue2: FlsGetValue without setting the last error.
+extern "win64" fn FlsGetValue2(index: u32) -> u64 {
+    let e = crate::teb::last_error();
+    let v = FlsGetValue(index);
+    crate::teb::set_last_error(e);
+    v
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![FlsAlloc, FlsGetValue, FlsSetValue, FlsFree]
+    export_table![FlsAlloc, FlsGetValue, FlsSetValue, FlsFree, FlsGetValue2]
 }

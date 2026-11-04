@@ -283,6 +283,9 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("dwrite.dll", crate::dwrite::exports(), Vec::new()),
         builtin("dnsapi.dll", crate::dwmapi::dnsapi_exports(), Vec::new()),
         builtin("wininet.dll", crate::minordlls::wininet_exports(), Vec::new()),
+        builtin("winhttp.dll", crate::winhttp::exports(), Vec::new()),
+        builtin("powrprof.dll", crate::minordlls::powrprof_exports(), Vec::new()),
+        builtin("dhcpcsvc.dll", crate::iphlpapi::dhcp_exports(), Vec::new()),
         builtin("wintrust.dll", crate::minordlls::wintrust_exports(), Vec::new()),
         builtin("dxgi.dll", crate::dwmapi::dxgi_exports(), Vec::new()),
         builtin("d3dcompiler_47.dll", crate::dwmapi::d3dcompiler_exports(), Vec::new()),
@@ -343,6 +346,8 @@ fn schema() -> Vec<u8> {
     b.add("api-ms-win-core-rtlsupport-l1-1-0", "ntdll.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-registry-l1-1-0", "advapi32.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-winrt-l1-1-0", "combase.dll", &[]).expect("valid contract name");
+    b.add("api-ms-win-power-base-l1-1-0", "powrprof.dll", &[]).expect("valid contract name");
+    b.add("api-ms-win-power-setting-l1-1-0", "powrprof.dll", &[]).expect("valid contract name");
     b.add("api-ms-win-core-winrt-string-l1-1-0", "combase.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-ntuser-window-l1-1-4", "user32.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-gdi-dc-l1-2-0", "gdi32.dll", &[]).expect("valid contract name");
@@ -679,6 +684,21 @@ struct TlsModule {
     zero_fill: usize,
 }
 
+/// The reference count of a module that is never unloaded (a static
+/// import, or one pinned by GetModuleHandleEx): references neither add to
+/// nor drop it.
+const PINNED: u32 = u32::MAX;
+
+/// One more reference: a pinned count stays pinned, others stop below it.
+fn add_ref(refs: u32) -> u32 {
+    if refs == PINNED { PINNED } else { refs.saturating_add(1).min(PINNED - 1) }
+}
+
+/// One reference less: a pinned count stays pinned.
+fn drop_ref(refs: u32) -> u32 {
+    if refs == PINNED { PINNED } else { refs.saturating_sub(1) }
+}
+
 struct ModState {
     /// Loader entry in the PEB lists (0 for built-ins).
     ldr: u64,
@@ -687,6 +707,26 @@ struct ModState {
     tls_callbacks: Vec<u64>,
     /// DisableThreadLibraryCalls: no DLL_THREAD_ATTACH/DETACH to DllMain.
     no_thread_calls: bool,
+    /// The writable sections of a DLL that LoadLibrary loaded, as they were
+    /// before its first DLL_PROCESS_ATTACH: when the last FreeLibrary has
+    /// detached it, loading it again starts from these, as a freshly
+    /// mapped image would (the image itself stays mapped).
+    pristine: Vec<(u64, Vec<u8>)>,
+}
+
+/// The writable sections of the PE image `file` mapped at `base`, copied.
+fn writable_sections(file: &[u8], base: u64) -> Vec<(u64, Vec<u8>)> {
+    const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
+    let Ok(pe) = PeFile::parse_any(file) else { return Vec::new() };
+    pe.sections()
+        .filter(|s| s.characteristics & IMAGE_SCN_MEM_WRITE != 0 && s.virtual_size != 0)
+        .map(|s| {
+            let at = base + s.virtual_address as u64;
+            // SAFETY: a section of the mapped image (the parser checked it
+            // against SizeOfImage); writable sections are readable.
+            (at, unsafe { core::slice::from_raw_parts(at as *const u8, s.virtual_size as usize) }.to_vec())
+        })
+        .collect()
 }
 
 struct Loader {
@@ -729,7 +769,8 @@ fn module_by_handle(l: &Loader, h: u64) -> Option<usize> {
 fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> {
     let order = l.linker.init_order(root);
     while l.state.len() < l.linker.modules.len() {
-        l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false });
+        // Held by whatever imports it until LoadLibrary says otherwise.
+        l.state.push(ModState { ldr: 0, refs: 1, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new() });
     }
     let mut todo = Vec::new();
     for i in order {
@@ -737,6 +778,19 @@ fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> 
             continue;
         }
         l.state[i].attached = true;
+        if l.state[i].ldr != 0 {
+            // Loaded again after the last FreeLibrary detached it: its data
+            // goes back to what it was before the first attach; the loader
+            // entry and TLS slot it had are still there.
+            for (at, bytes) in &l.state[i].pristine {
+                // SAFETY: the module's own writable sections, as copied.
+                unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), *at as *mut u8, bytes.len()) };
+            }
+            let m = &l.linker.modules[i];
+            let is_dll = matches!(m.kind, Kind::Pe { is_dll: true, .. });
+            todo.push((m.base, if is_dll { m.entry() } else { 0 }, l.state[i].tls_callbacks.clone(), is_dll));
+            continue;
+        }
         let m = &l.linker.modules[i];
         let Kind::Pe { file, size, is_dll, .. } = &m.kind else { continue };
         let (base, size, is_dll) = (m.base, *size, *is_dll);
@@ -874,7 +928,7 @@ pub fn disable_thread_calls(h: u64) -> Result<(), u32> {
     with(|l| {
         let i = module_by_handle(l, h).ok_or(ERROR_MOD_NOT_FOUND)?;
         while l.state.len() <= i {
-            l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false });
+            l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new() });
         }
         l.state[i].no_thread_calls = true;
         Ok(())
@@ -1032,8 +1086,10 @@ pub fn start(exe_path: &str, command_line: &str, environment: &[String]) -> Resu
     crate::kernel32::register_main_thread();
     let mut l = Loader { linker, exe, state: Vec::new(), tls: Vec::new() };
     let todo = register_new(&mut l, exe);
+    // The program and the DLLs linked with it are never unloaded, as
+    // Windows pins static imports: FreeLibrary does not detach them.
     for s in l.state.iter_mut() {
-        s.refs = 1;
+        s.refs = PINNED;
     }
     *LOADER.lock().unwrap() = Some(l);
     setup_thread_tls(main_teb);
@@ -1146,7 +1202,7 @@ pub fn run_pe32(bytes: Vec<u8>, args: &[String], cmd: &str, env: &[String]) -> R
     }).collect();
     // Keep the PE32 linker for GetProcAddress and LoadLibrary.
     let mut state: Vec<ModState> = (0..linker.modules.len()).map(|_| ModState {
-        ldr: 0, refs: 1, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false,
+        ldr: 0, refs: 1, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new(),
     }).collect();
     let mut process_callbacks = Vec::new();
     for (i, cbs) in tls_callbacks {
@@ -1378,7 +1434,7 @@ pub(crate) fn numeric_resource(module: u64, kind: u16, name: u64) -> Result<Vec<
 
 /// `LoadLibrary`: a DLL name or a Windows path. Returns its handle.
 pub fn load_library(name: &str) -> Result<u64, u32> {
-    let (todo, h) = {
+    let (todo, h, loaded) = {
         let mut g = LOADER.lock().unwrap();
         let l = g.as_mut().expect("loader initialised");
         let file = name.rsplit(['\\', '/']).next().unwrap_or(name);
@@ -1411,10 +1467,37 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         })?;
         let todo = register_new(l, i);
         while l.state.len() < l.linker.modules.len() {
-            l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false });
+            l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new() });
         }
-        l.state[i].refs += 1;
-        (todo, module_handle(l, i))
+        // The DLLs linked with this one are held by it: only the DLL
+        // LoadLibrary named is released by the matching FreeLibrary.
+        let base = l.linker.modules[i].base;
+        for (b, ..) in &todo {
+            if *b != base {
+                if let Some(k) = (0..l.linker.modules.len()).find(|&k| l.linker.modules[k].base == *b) {
+                    l.state[k].refs = l.state[k].refs.max(1);
+                }
+            }
+        }
+        if todo.iter().any(|t| t.0 == base) {
+            if l.state[i].pristine.is_empty() {
+                if let Kind::Pe { file, .. } = &l.linker.modules[i].kind {
+                    l.state[i].pristine = writable_sections(file.as_ref(), base);
+                }
+            }
+            if l.state[i].refs != PINNED {
+                l.state[i].refs = 1;
+            }
+        } else {
+            l.state[i].refs = add_ref(l.state[i].refs);
+        }
+        // The loader entries of the DLLs this load maps, for the
+        // notification callbacks.
+        let loaded: Vec<(u64, u64)> = todo
+            .iter()
+            .filter_map(|t| (0..l.linker.modules.len()).find(|&k| l.linker.modules[k].base == t.0).map(|k| (l.state[k].ldr, t.0)))
+            .collect();
+        (todo, module_handle(l, i), loaded)
     };
     if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
         os_std::eprintln!("winrun: loaded {name} at {h:#x}");
@@ -1429,6 +1512,9 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
             setup_thread_tls32(teb32);
         }
     }
+    // Notification callbacks run once the images are mapped, before their
+    // initialization, as on Windows.
+    notify_dlls(1, &loaded);
     let attached = if wow64::is_active() {
         todo.iter().all(|(base, entry, callbacks, _)| {
             for &callback in callbacks { wow64::call32(callback as u32, &[*base as u32, DLL_PROCESS_ATTACH, 0]); }
@@ -1444,7 +1530,7 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
                     l.state[i].attached = false;
                 }
             }
-            if let Some(i) = module_by_handle(l, h) { l.state[i].refs = l.state[i].refs.saturating_sub(1); }
+            if let Some(i) = module_by_handle(l, h) { l.state[i].refs = drop_ref(l.state[i].refs); }
         });
         return Err(ERROR_DLL_INIT_FAILED);
     }
@@ -1471,14 +1557,63 @@ pub fn add_module_reference(h: u64, pin: bool) {
     with(|l| {
         if let Some(i) = module_by_handle(l, h) {
             if let Some(s) = l.state.get_mut(i) {
-                s.refs = if pin { u32::MAX } else { s.refs.saturating_add(1) };
+                s.refs = if pin { PINNED } else { add_ref(s.refs) };
             }
         }
     })
 }
 
-/// `FreeLibrary`: drops a reference. The image stays mapped (OSyx does not
-/// unload DLLs yet); the last reference delivers DLL_PROCESS_DETACH.
+/// LdrRegisterDllNotification callbacks: (cookie, callback, context).
+static DLL_NOTIFICATIONS: Mutex<Vec<(u64, u64, u64)>> = Mutex::new(Vec::new());
+static NEXT_NOTIFICATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+pub fn register_dll_notification(callback: u64, context: u64) -> u64 {
+    let cookie = NEXT_NOTIFICATION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    DLL_NOTIFICATIONS.lock().unwrap().push((cookie, callback, context));
+    cookie
+}
+
+pub fn unregister_dll_notification(cookie: u64) -> bool {
+    let mut list = DLL_NOTIFICATIONS.lock().unwrap();
+    let before = list.len();
+    list.retain(|n| n.0 != cookie);
+    list.len() != before
+}
+
+/// LDR_DLL_NOTIFICATION_DATA (loaded and unloaded have the same layout).
+#[repr(C)]
+struct DllNotificationData {
+    flags: u32,
+    full_name: u64,
+    base_name: u64,
+    base: u64,
+    size: u32,
+}
+
+/// Runs the registered callbacks for DLLs loaded (reason 1) or unloaded
+/// (2), given by their PEB loader entries and bases. 64-bit programs
+/// only: a 32-bit program's callbacks would need its own entry layout.
+fn notify_dlls(reason: u32, dlls: &[(u64, u64)]) {
+    let callbacks = DLL_NOTIFICATIONS.lock().unwrap().clone();
+    if callbacks.is_empty() || wow64::is_active() {
+        return;
+    }
+    for &(ldr, base) in dlls.iter().filter(|d| d.0 != 0) {
+        // SAFETY: a PEB loader entry (layout in teb.rs): SizeOfImage at
+        // 0x40, FullDllName at 0x48, BaseDllName at 0x58.
+        let size = unsafe { *((ldr + 0x40) as *const u32) };
+        let data = DllNotificationData { flags: 0, full_name: ldr + 0x48, base_name: ldr + 0x58, base, size };
+        for &(_, callback, context) in &callbacks {
+            // SAFETY: a callback the program registered, with its context.
+            let f: extern "win64" fn(u32, *const DllNotificationData, u64) = unsafe { core::mem::transmute(callback as usize) };
+            f(reason, &data, context);
+        }
+    }
+}
+
+/// `FreeLibrary`: drops a reference. The image stays mapped; the last
+/// reference delivers DLL_PROCESS_DETACH, and a later LoadLibrary restores
+/// its data before attaching it again (see `ModState::pristine`).
 pub fn free_library(h: u64) -> Result<(), u32> {
     let detach = {
         let mut g = LOADER.lock().unwrap();
@@ -1488,16 +1623,16 @@ pub fn free_library(h: u64) -> Result<(), u32> {
             return Ok(());
         }
         let s = &mut l.state[i];
-        s.refs = s.refs.saturating_sub(1);
+        s.refs = drop_ref(s.refs);
         if s.refs == 0 && s.attached {
             s.attached = false;
             let m = &l.linker.modules[i];
-            Some((m.base, m.entry()))
+            Some((m.base, m.entry(), s.ldr))
         } else {
             None
         }
     };
-    if let Some((base, entry)) = detach {
+    if let Some((base, entry, ldr)) = detach {
         if entry != 0 {
             // SAFETY: the entry point of a mapped DLL image.
             if wow64::is_active() {
@@ -1507,6 +1642,8 @@ pub fn free_library(h: u64) -> Result<(), u32> {
                 f(base, DLL_PROCESS_DETACH, 0);
             }
         }
+        // The image stays mapped, but to the program it is unloaded.
+        notify_dlls(2, &[(ldr, base)]);
     }
     Ok(())
 }

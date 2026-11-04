@@ -378,6 +378,14 @@ mod imp {
         decode(syscall1(nr::THREAD_TIMES, tid))
     }
 
+    /// What a thread of this process is doing: its state, the number,
+    /// return address and stack pointer of its last system call, then its
+    /// user stack words (see `nr::THREAD_STATE`). Returns how many entries
+    /// of `buf` were written.
+    pub fn thread_state(tid: u64, buf: &mut [u64]) -> Result<usize, Errno> {
+        decode(syscall3(nr::THREAD_STATE, tid, buf.as_mut_ptr() as u64, buf.len() as u64)).map(|n| n as usize)
+    }
+
     /// Ends a thread of this process (tid 0: the caller, which never returns
     /// from the call) at its next safe point, with `code` as its status.
     pub fn thread_kill(tid: u64, code: i32) -> Result<u64, Errno> {
@@ -1024,8 +1032,14 @@ mod imp {
     }
 
     pub fn sock_accept(h: u64) -> Result<(u64, SockAddr), Errno> {
+        sock_accept_flags(h, 0)
+    }
+
+    /// `sock_accept` with `flags`: `MSG_DONTWAIT` returns `WouldBlock` at
+    /// once when no connection is pending.
+    pub fn sock_accept_flags(h: u64, flags: u64) -> Result<(u64, SockAddr), Errno> {
         let mut peer = SockAddr::default();
-        let c = decode(syscall2(nr::SOCK_ACCEPT, h, &mut peer as *mut SockAddr as u64))?;
+        let c = decode(syscall3(nr::SOCK_ACCEPT, h, &mut peer as *mut SockAddr as u64, flags))?;
         Ok((c, peer))
     }
 

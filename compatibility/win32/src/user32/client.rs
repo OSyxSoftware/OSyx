@@ -649,33 +649,143 @@ extern "win64" fn DisplayConfigSetDeviceInfo(packet: *const u8) -> u32 {
     ERROR_NOT_SUPPORTED_P
 }
 
-/// Whether the process is system DPI aware: declared by SetProcessDPIAware
-/// or by the program's manifest (<dpiAware> true or per-monitor,
-/// <dpiAwareness>). PRISM draws every window at 96 DPI, so this changes
-/// no coordinates.
-static DPI_AWARE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// The process's DPI awareness: its DPI_AWARENESS_CONTEXT (1 unaware,
+/// 2 system aware, 3 per-monitor, 4 per-monitor v2, 5 unaware GDI-scaled:
+/// the negated pseudo-handle) in the low byte, and `DPI_DECLARED` once the
+/// manifest or a call has set it (it can be set once). 0 until first read.
+/// PRISM draws every window at 96 DPI, so this changes no coordinates.
+static DPI_STATE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+const DPI_DECLARED: u32 = 0x100;
 
-fn manifest_dpi_aware() -> bool {
-    let Ok(m) = crate::loader::numeric_resource(0, 24, 1) else { return false };
-    let text = String::from_utf8_lossy(&m).to_ascii_lowercase();
-    let value = |tag: &str| text.split(tag).nth(1).and_then(|r| r.split('<').next()).map(|v| v.trim_start_matches('>').trim().to_ascii_lowercase());
-    value("<dpiaware").is_some_and(|v| v.contains("true") || v.contains("per monitor"))
-        || value("<dpiawareness").is_some_and(|v| v.contains("permonitor") || v.contains("system"))
+/// The text of the first element of `xml` whose local name is `name`
+/// (any namespace prefix, any attributes on its start tag), trimmed.
+fn element_text(xml: &str, name: &str) -> Option<String> {
+    let mut rest = xml;
+    while let Some(open) = rest.find('<') {
+        rest = &rest[open + 1..];
+        if rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('!') {
+            continue;
+        }
+        let end = rest.find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/').unwrap_or(rest.len());
+        let tag = &rest[..end];
+        let local = tag.rsplit(':').next().unwrap_or(tag);
+        // The start tag ends at the first '>' outside a quoted attribute.
+        let mut quote = None;
+        let close = rest.char_indices().find(|&(_, c)| match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+                false
+            }
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                false
+            }
+            None => c == '>',
+        })?;
+        if local == name && !rest[..close.0].ends_with('/') {
+            let body = &rest[close.0 + 1..];
+            return Some(String::from(body[..body.find('<').unwrap_or(body.len())].trim()));
+        }
+        rest = &rest[close.0 + 1..];
+    }
+    None
 }
 
-extern "win64" fn IsProcessDPIAware() -> Bool {
-    match DPI_AWARE.load(core::sync::atomic::Ordering::Relaxed) {
-        0 => {
-            let aware = manifest_dpi_aware();
-            DPI_AWARE.store(if aware { 2 } else { 1 }, core::sync::atomic::Ordering::Relaxed);
-            aware as Bool
+/// The awareness the manifest declares (<dpiAwareness>, else <dpiAware>),
+/// as a context; None when it declares none.
+fn manifest_dpi_context() -> Option<u32> {
+    let Ok(m) = crate::loader::numeric_resource(0, 24, 1) else { return None };
+    let text = String::from_utf8_lossy(&m).to_ascii_lowercase();
+    let value = |tag: &str| element_text(&text, tag);
+    if let Some(list) = value("dpiawareness") {
+        // A list in order of preference: the first value this OS knows.
+        for v in list.split(',').map(|v| v.trim().replace(' ', "")) {
+            match v.as_str() {
+                "permonitorv2" => return Some(4),
+                "permonitor" => return Some(3),
+                "system" => return Some(2),
+                "unaware" => return Some(1),
+                "gdiscaling" | "unawaregdiscaled" => return Some(5),
+                _ => {}
+            }
         }
-        v => (v == 2) as Bool,
+    }
+    match value("dpiaware").as_deref().map(str::trim) {
+        Some(v) if v.contains("per monitor") || v.contains("true/pm") => Some(3),
+        Some(v) if v.starts_with("true") => Some(2),
+        Some(v) if v.starts_with("false") => Some(1),
+        _ => None,
     }
 }
 
+/// The current state, read from the manifest the first time.
+fn dpi_state() -> u32 {
+    use core::sync::atomic::Ordering;
+    let now = DPI_STATE.load(Ordering::Acquire);
+    if now != 0 {
+        return now;
+    }
+    let initial = match manifest_dpi_context() {
+        Some(c) => c | DPI_DECLARED,
+        None => 1,
+    };
+    // Whoever set it meanwhile (a call on another thread) wins.
+    match DPI_STATE.compare_exchange(0, initial, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => initial,
+        Err(v) => v,
+    }
+}
+
+/// The process's DPI_AWARENESS_CONTEXT, negated (1..=5).
+pub(crate) fn process_dpi_context() -> u32 {
+    dpi_state() & 0xff
+}
+
+/// Sets the process's context (negated, 1..=5) unless the manifest or an
+/// earlier call already did: false then, as Windows refuses a second
+/// setting.
+pub(crate) fn set_process_dpi_context(ctx: u32) -> bool {
+    use core::sync::atomic::Ordering;
+    loop {
+        let now = dpi_state();
+        if now & DPI_DECLARED != 0 {
+            return false;
+        }
+        if DPI_STATE.compare_exchange(now, ctx | DPI_DECLARED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            return true;
+        }
+    }
+}
+
+extern "win64" fn IsProcessDPIAware() -> Bool {
+    matches!(process_dpi_context(), 2..=4) as Bool
+}
+
+/// PROCESS_DPI_AWARENESS of the process: unaware (0), system aware (1)
+/// or per-monitor aware (2).
+pub(crate) fn process_dpi_awareness() -> u32 {
+    match process_dpi_context() {
+        3 | 4 => 2,
+        2 => 1,
+        _ => 0,
+    }
+}
+
+/// SetProcessDpiAwareness (PROCESS_DPI_AWARENESS 0..=2).
+pub(crate) fn set_process_dpi_awareness(level: u32) -> bool {
+    set_process_dpi_context(match level {
+        0 => 1,
+        1 => 2,
+        _ => 3,
+    })
+}
+
+/// SetProcessDPIAware: system aware, unless the awareness is already set
+/// (it still succeeds then, as on Windows).
 extern "win64" fn SetProcessDPIAware() -> Bool {
-    DPI_AWARE.store(2, core::sync::atomic::Ordering::Relaxed);
+    set_process_dpi_context(2);
     TRUE
 }
 

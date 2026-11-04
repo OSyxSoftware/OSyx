@@ -28,7 +28,7 @@ use osyx_gfx::text::Font as MonoFont;
 use osyx_gfx::{Color, Rect, Surface};
 use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
-mod client;
+pub(crate) mod client;
 mod controls;
 mod extra;
 mod gdi;
@@ -2285,7 +2285,9 @@ impl Drop for IdleGuard {
 /// when input or a frame callback arrives.
 /// The caller registered in [`IDLE_WAITERS`] while the GUI lock was held.
 fn idle(seq: u32, timeout: Duration) {
+    let blocked = crate::stall::waiting("MessageWait", 0, 0);
     let woken = crate::objects::wait_for_change(seq, timeout);
+    drop(blocked);
     diag(|d| {
         d.idle += 1;
         if woken {
@@ -7839,6 +7841,126 @@ extern "win64" fn UnregisterPowerSettingNotification(notify: u64) -> Bool {
     unregister_notification(notify)
 }
 
+/// OSyx does not suspend, so a registered recipient (a window, or a
+/// DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS callback) is never told of one.
+extern "win64" fn RegisterSuspendResumeNotification(recipient: u64, flags: u32) -> u64 {
+    if recipient == 0 || flags & !2 != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    register_notification(recipient)
+}
+
+extern "win64" fn UnregisterSuspendResumeNotification(notify: u64) -> Bool {
+    unregister_notification(notify)
+}
+
+/// Pointer devices (pens, touch screens) are not exposed: the mouse is
+/// not one, and touch injection makes no device either.
+extern "win64" fn GetPointerDevices(count: *mut u32, _devices: *mut u8) -> Bool {
+    if count.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's in/out count.
+    unsafe { *count = 0 };
+    TRUE
+}
+
+extern "win64" fn GetPointerDevice(_device: u64, _info: *mut u8) -> Bool {
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
+/// No pointer device exists (see GetPointerDevices), so no handle names one.
+extern "win64" fn GetPointerDeviceRects(_device: u64, _device_rect: *mut i32, _display_rect: *mut i32) -> Bool {
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
+extern "win64" fn GetPointerPenInfo(_pointer: u32, _info: *mut u8) -> Bool {
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
+/// Device arrival never happens (no pointer devices), so nothing is sent.
+extern "win64" fn RegisterPointerDeviceNotifications(hwnd: u64, _range: Bool) -> Bool {
+    if is_window(hwnd) { TRUE } else { fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) }
+}
+
+/// DPI_AWARENESS_CONTEXT pseudo-handles: unaware (-1), system aware (-2),
+/// per-monitor (-3), per-monitor v2 (-4), unaware GDI-scaled (-5).
+fn valid_dpi_context(ctx: u64) -> bool {
+    (1..=5).contains(&(ctx as i64).wrapping_neg())
+}
+
+extern "win64" fn IsValidDpiAwarenessContext(ctx: u64) -> Bool {
+    valid_dpi_context(ctx) as Bool
+}
+
+/// Each thread's awareness context (0: the process's).
+static THREAD_DPI: Mutex<alloc::collections::BTreeMap<u64, u64>> = Mutex::new(alloc::collections::BTreeMap::new());
+
+/// The process's context, exactly as set.
+fn process_dpi_context() -> u64 {
+    (crate::user32::client::process_dpi_context() as i64).wrapping_neg() as u64
+}
+
+/// SetProcessDpiAwarenessContext: once per process, as Windows allows.
+extern "win64" fn SetProcessDpiAwarenessContext(ctx: u64) -> Bool {
+    if !valid_dpi_context(ctx) {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if crate::user32::client::set_process_dpi_context((ctx as i64).wrapping_neg() as u32) { TRUE } else { fail(ERROR_ACCESS_DENIED, FALSE) }
+}
+
+/// The calling thread's context: the one it set, or the process's.
+extern "win64" fn GetThreadDpiAwarenessContext() -> u64 {
+    THREAD_DPI.lock().unwrap().get(&os_sys::gettid()).copied().unwrap_or_else(process_dpi_context)
+}
+
+/// DPI_AWARENESS of a context: unaware (0) for unaware and GDI-scaled,
+/// system aware (1), per-monitor aware (2) for both per-monitor versions;
+/// DPI_AWARENESS_INVALID (-1) for anything else.
+extern "win64" fn GetAwarenessFromDpiAwarenessContext(ctx: u64) -> i32 {
+    match (ctx as i64).wrapping_neg() {
+        1 | 5 => 0,
+        2 => 1,
+        3 | 4 => 2,
+        _ => -1,
+    }
+}
+
+extern "win64" fn AreDpiAwarenessContextsEqual(a: u64, b: u64) -> Bool {
+    if !valid_dpi_context(a) || !valid_dpi_context(b) {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    (a == b) as Bool
+}
+
+/// PRISM draws every window at 96 DPI; 0 for a handle that is no window.
+extern "win64" fn GetDpiForWindow(hwnd: u64) -> u32 {
+    if is_window(hwnd) { 96 } else { fail(ERROR_INVALID_WINDOW_HANDLE, 0) }
+}
+
+/// Non-client areas are drawn at 96 DPI already: nothing to scale.
+extern "win64" fn EnableNonClientDpiScaling(hwnd: u64) -> Bool {
+    if is_window(hwnd) { TRUE } else { fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) }
+}
+
+/// AdjustWindowRectEx at a given DPI: the frame added is the same at
+/// every DPI, since windows here have no non-client area (see
+/// AdjustWindowRectEx).
+extern "win64" fn AdjustWindowRectExForDpi(r: *mut i32, style: u32, menu: Bool, ex: u32, dpi: u32) -> Bool {
+    if dpi == 0 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    AdjustWindowRectEx(r, style, menu, ex)
+}
+
+extern "win64" fn SetThreadDpiAwarenessContext(ctx: u64) -> u64 {
+    if !valid_dpi_context(ctx) {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let old = THREAD_DPI.lock().unwrap().insert(os_sys::gettid(), ctx);
+    old.unwrap_or_else(process_dpi_context)
+}
+
 pub(crate) extern "win64" fn SendNotifyMessageW(wnd: u64, msg: u32, wparam: u64, lparam: i64) -> Bool {
     with(|g| g.post(wnd, msg, wparam, lparam));
     TRUE
@@ -8317,6 +8439,22 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RegisterDeviceNotificationW,
         UnregisterDeviceNotification,
         RegisterPowerSettingNotification,
+        RegisterSuspendResumeNotification,
+        UnregisterSuspendResumeNotification,
+        GetPointerDevices,
+        GetPointerDevice,
+        GetPointerPenInfo,
+        RegisterPointerDeviceNotifications,
+        IsValidDpiAwarenessContext,
+        SetThreadDpiAwarenessContext,
+        GetThreadDpiAwarenessContext,
+        GetAwarenessFromDpiAwarenessContext,
+        AreDpiAwarenessContextsEqual,
+        GetDpiForWindow,
+        EnableNonClientDpiScaling,
+        AdjustWindowRectExForDpi,
+        GetPointerDeviceRects,
+        SetProcessDpiAwarenessContext,
         UnregisterPowerSettingNotification,
         SendNotifyMessageW,
         SendMessageTimeoutW,

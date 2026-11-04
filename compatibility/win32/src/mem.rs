@@ -134,7 +134,68 @@ pub fn arena_alloc(size: usize, align: usize) -> u64 {
 struct Region {
     size: usize,
     /// Per page: Windows protection (0 = reserved, not committed).
-    pages: Vec<u32>,
+    pages: Pages,
+}
+
+/// The per-page states of a region as runs (page index where a run starts
+/// -> its state, to the next key): a reservation of a terabyte costs a few
+/// entries, not a word per page.
+struct Pages {
+    len: usize,
+    runs: BTreeMap<usize, u32>,
+}
+
+impl Pages {
+    fn new(len: usize, state: u32) -> Pages {
+        let mut runs = BTreeMap::new();
+        runs.insert(0, state);
+        Pages { len, runs }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn get(&self, i: usize) -> Option<u32> {
+        (i < self.len).then(|| self.runs.range(..=i).next_back().map_or(0, |(_, &s)| s))
+    }
+
+    /// The state of page `i` (below `len`) and how many pages from `i` have it.
+    fn run(&self, i: usize) -> (u32, usize) {
+        let state = self.get(i).unwrap_or(0);
+        let end = self.runs.range(i + 1..).find(|(_, &s)| s != state).map_or(self.len, |(&k, _)| k);
+        (state, end - i)
+    }
+
+    /// Whether a page of `[first, last)` has `state`.
+    fn contains(&self, first: usize, last: usize, state: u32) -> bool {
+        first < last && (self.get(first) == Some(state) || self.runs.range(first + 1..last).any(|(_, &s)| s == state))
+    }
+
+    /// Gives pages `[first, last)` `state`, merging equal neighbours.
+    fn set(&mut self, first: usize, last: usize, state: u32) {
+        if first >= last {
+            return;
+        }
+        let after = if last < self.len { self.get(last) } else { None };
+        let inside: Vec<usize> = self.runs.range(first..last).map(|(&k, _)| k).collect();
+        for k in inside {
+            self.runs.remove(&k);
+        }
+        self.runs.insert(first, state);
+        match after {
+            Some(a) if a == state => {
+                self.runs.remove(&last);
+            }
+            Some(a) => {
+                self.runs.insert(last, a);
+            }
+            None => {}
+        }
+        if first > 0 && self.get(first - 1) == Some(state) {
+            self.runs.remove(&first);
+        }
+    }
 }
 
 static REGIONS: Mutex<BTreeMap<u64, Region>> = Mutex::new(BTreeMap::new());
@@ -153,8 +214,8 @@ pub fn alloc_stack(size: usize) -> Option<u64> {
         free_pages(reserve, size + PAGE);
         return None;
     }
-    let mut pages = alloc::vec![PAGE_READWRITE; size / PAGE + 1];
-    pages[0] = PAGE_READONLY;
+    let mut pages = Pages::new(size / PAGE + 1, PAGE_READWRITE);
+    pages.set(0, 1, PAGE_READONLY);
     REGIONS.lock().unwrap().insert(reserve, Region { size: size + PAGE, pages });
     Some(reserve + PAGE as u64)
 }
@@ -186,9 +247,7 @@ pub fn virtual_alloc(addr: u64, size: usize, kind: u32, protect: u32) -> Result<
         let start = base + (first * PAGE) as u64;
         // SAFETY: the caller declared the contents no longer needed.
         unsafe { os_sys::discard(start as *mut u8, (last - first) * PAGE) }.map_err(errno_to_status)?;
-        for p in &mut r.pages[first..last] {
-            *p = 0;
-        }
+        r.pages.set(first, last, 0);
         return Ok(start);
     }
     if size == 0
@@ -209,9 +268,7 @@ pub fn virtual_alloc(addr: u64, size: usize, kind: u32, protect: u32) -> Result<
         }
         let start = base + (first * PAGE) as u64;
         protect_range(start, (last - first) * PAGE, prot).map_err(errno_to_status)?;
-        for p in &mut r.pages[first..last] {
-            *p = protect;
-        }
+        r.pages.set(first, last, protect);
         return Ok(start);
     }
     let size = size.next_multiple_of(PAGE);
@@ -222,7 +279,7 @@ pub fn virtual_alloc(addr: u64, size: usize, kind: u32, protect: u32) -> Result<
         alloc_pages(size, prot).ok_or(STATUS_NO_MEMORY)?
     };
     let state = if kind & MEM_COMMIT != 0 { protect } else { 0 };
-    regions.insert(base, Region { size, pages: alloc::vec![state; size / PAGE] });
+    regions.insert(base, Region { size, pages: Pages::new(size / PAGE, state) });
     Ok(base)
 }
 
@@ -253,7 +310,7 @@ pub fn jit_fault(n: &osyx_abi::fault::Context) -> bool {
     let regions = REGIONS.lock().unwrap();
     let private = regions.range(..=n.address).next_back().is_some_and(|(&base, r)| {
         let index = ((n.address - base) / PAGE as u64) as usize;
-        r.pages.get(index) == Some(&PAGE_EXECUTE_READWRITE)
+        r.pages.get(index) == Some(PAGE_EXECUTE_READWRITE)
     });
     drop(regions);
     // Image pages VirtualProtect made writable and executable switch the
@@ -289,9 +346,7 @@ pub fn virtual_free(addr: u64, size: usize, kind: u32) -> Result<(), NtStatus> {
             let start = base + (first * PAGE) as u64;
             // SAFETY: decommitted pages may no longer be used by the program.
             unsafe { os_sys::discard(start as *mut u8, (last - first) * PAGE) }.map_err(errno_to_status)?;
-            for p in &mut r.pages[first..last] {
-                *p = 0;
-            }
+            r.pages.set(first, last, 0);
             Ok(())
         }
         _ => Err(STATUS_INVALID_PARAMETER),
@@ -358,15 +413,13 @@ pub fn virtual_protect(addr: u64, size: usize, protect: u32) -> Result<u32, NtSt
     let (&base, r) = regions.range_mut(..=addr).next_back().ok_or(STATUS_MEMORY_NOT_ALLOCATED)?;
     let first = (addr - base) as usize / PAGE;
     let last = ((addr - base) as usize).checked_add(size.max(1)).ok_or(STATUS_MEMORY_NOT_ALLOCATED)?.div_ceil(PAGE);
-    if last > r.pages.len() || r.pages[first..last].contains(&0) {
+    if last > r.pages.len() || r.pages.contains(first, last, 0) {
         return Err(STATUS_MEMORY_NOT_ALLOCATED);
     }
-    let old = r.pages[first];
+    let old = r.pages.get(first).unwrap_or(0);
     let start = base + (first * PAGE) as u64;
     protect_range(start, (last - first) * PAGE, prot).map_err(errno_to_status)?;
-    for p in &mut r.pages[first..last] {
-        *p = protect;
-    }
+    r.pages.set(first, last, protect);
     Ok(old)
 }
 
@@ -388,12 +441,11 @@ pub fn virtual_query(addr: u64) -> Option<Info> {
     if let Some((&base, r)) = regions.range(..=addr).next_back() {
         if addr < base + r.size as u64 {
             let i = (addr - base) as usize / PAGE;
-            let state = r.pages[i];
-            let run = r.pages[i..].iter().take_while(|&&p| p == state).count();
+            let (state, run) = r.pages.run(i);
             return Some(Info {
                 base: base + (i * PAGE) as u64,
                 allocation_base: base,
-                allocation_protect: r.pages[0].max(PAGE_READWRITE),
+                allocation_protect: r.pages.get(0).unwrap_or(0).max(PAGE_READWRITE),
                 size: (run * PAGE) as u64,
                 state: if state == 0 { MEM_RESERVE } else { MEM_COMMIT },
                 protect: state,

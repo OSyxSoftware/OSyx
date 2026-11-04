@@ -30,6 +30,23 @@ fn uuid_text(u: *const u8) -> String {
     )
 }
 
+/// A random (version 4) UUID; RPC_S_OK.
+extern "win64" fn UuidCreate(out: *mut u8) -> u32 {
+    if out.is_null() {
+        return 87; // RPC_S_INVALID_ARG
+    }
+    let mut u = [0u8; 16];
+    if !crate::ucrt::entropy(&mut u) {
+        return 1739; // RPC_S_UUID_NO_ADDRESS: no source of uniqueness
+    }
+    // Data3's high nibble is the version; Data4[0]'s top bits the variant.
+    u[7] = (u[7] & 0x0f) | 0x40;
+    u[8] = (u[8] & 0x3f) | 0x80;
+    // SAFETY: the caller's 16-byte UUID.
+    unsafe { core::ptr::copy_nonoverlapping(u.as_ptr(), out, 16) };
+    0
+}
+
 extern "win64" fn UuidToStringA(u: *const u8, out: *mut u64) -> u32 {
     if u.is_null() || out.is_null() {
         return ERROR_INVALID_PARAMETER;
@@ -107,7 +124,7 @@ extern "win64" fn RpcStringFreeW(p: *mut u64) -> u32 {
 }
 
 pub fn rpcrt4_exports() -> Vec<(&'static str, u64)> {
-    export_table![UuidToStringA, UuidToStringW, UuidFromStringW, RpcStringFreeA, RpcStringFreeW]
+    export_table![UuidCreate, UuidToStringA, UuidToStringW, UuidFromStringW, RpcStringFreeA, RpcStringFreeW]
 }
 
 // ---- cfgmgr32 --------------------------------------------------------------------------
@@ -315,8 +332,101 @@ extern "win64" fn GetScaleFactorForMonitor(monitor: u64, scale: *mut u32) -> u32
     0
 }
 
+const E_ACCESSDENIED: u32 = 0x8007_0005;
+
+extern "win64" fn SetProcessDpiAwareness(level: u32) -> u32 {
+    if level > 2 {
+        return E_INVALIDARG;
+    }
+    if crate::user32::client::set_process_dpi_awareness(level) { 0 } else { E_ACCESSDENIED }
+}
+
+/// Any process's awareness is this one's: the others run in their own
+/// winrun and are asked there.
+extern "win64" fn GetProcessDpiAwareness(_process: u64, out: *mut u32) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = crate::user32::client::process_dpi_awareness() };
+    0
+}
+
 pub fn shcore_exports() -> Vec<(&'static str, u64)> {
-    export_table![GetDpiForMonitor, GetScaleFactorForMonitor]
+    export_table![GetDpiForMonitor, GetScaleFactorForMonitor, SetProcessDpiAwareness, GetProcessDpiAwareness]
+}
+
+// ---- powrprof ----------------------------------------------------------------------------------
+
+const STATUS_SUCCESS_P: u32 = 0;
+const STATUS_BUFFER_TOO_SMALL_P: u32 = 0xC000_0023;
+const STATUS_INVALID_PARAMETER_P: u32 = 0xC000_000D;
+
+/// CallNtPowerInformation: the processors' power information (11: per CPU
+/// the number, maximum and current MHz from the measured TSC rate, the
+/// limit, idle states), the battery state (5: AC power, no battery) and
+/// the execution state (16: nothing requested).
+extern "win64" fn CallNtPowerInformation(level: u32, _input: *const u8, _in_len: u32, out: *mut u8, out_len: u32) -> u32 {
+    let data: Vec<u8> = match level {
+        11 => {
+            let cpus = os_sys::cpu_info().map_or(1, |(c, _)| c as u32);
+            let mhz = (crate::procinfo::tsc_hz() / 1_000_000) as u32;
+            (0..cpus).flat_map(|n| [n, mhz, mhz, mhz, 1, 0].into_iter().flat_map(u32::to_le_bytes)).collect()
+        }
+        5 => {
+            // SYSTEM_BATTERY_STATE: AcOnLine, BatteryPresent, Charging,
+            // Discharging, Spare1[3], Tag, MaxCapacity, RemainingCapacity,
+            // Rate, EstimatedTime, DefaultAlert1, DefaultAlert2.
+            let mut b = alloc::vec![0u8; 32];
+            b[0] = 1;
+            b
+        }
+        16 => 0u32.to_le_bytes().to_vec(),
+        _ => return STATUS_INVALID_PARAMETER_P,
+    };
+    if out.is_null() || (out_len as usize) < data.len() {
+        return STATUS_BUFFER_TOO_SMALL_P;
+    }
+    // SAFETY: the caller's buffer of `out_len` bytes.
+    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), out, data.len()) };
+    STATUS_SUCCESS_P
+}
+
+/// A desktop computer (PlatformRoleDesktop): OSyx reports no battery.
+extern "win64" fn PowerDeterminePlatformRoleEx(version: u32) -> u32 {
+    if version == 1 || version == 2 { 1 } else { 0 }
+}
+
+/// The Balanced scheme {381b4222-f694-41f0-9685-ff5bb260df2e}, the one
+/// scheme here; LocalFree releases it.
+extern "win64" fn PowerGetActiveScheme(_root: u64, out: *mut u64) -> u32 {
+    const BALANCED: [u8; 16] = [0x22, 0x42, 0x1b, 0x38, 0x94, 0xf6, 0xf0, 0x41, 0x96, 0x85, 0xff, 0x5b, 0xb2, 0x60, 0xdf, 0x2e];
+    if out.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let Some(p) = crate::kernel32::heap_alloc(16, false) else { return 8 };
+    // SAFETY: a fresh 16-byte block; the caller's out pointer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(BALANCED.as_ptr(), p as *mut u8, 16);
+        *out = p;
+    }
+    ERROR_SUCCESS
+}
+
+/// The scheme has no stored setting values: OSyx's power policy is the
+/// scheduler's, not per-setting.
+extern "win64" fn PowerReadACValue(_root: u64, _scheme: u64, _subgroup: u64, _setting: u64, _kind: *mut u32, _buf: *mut u8, _size: *mut u32) -> u32 {
+    ERROR_FILE_NOT_FOUND_P
+}
+
+extern "win64" fn PowerReadDCValue(_root: u64, _scheme: u64, _subgroup: u64, _setting: u64, _kind: *mut u32, _buf: *mut u8, _size: *mut u32) -> u32 {
+    ERROR_FILE_NOT_FOUND_P
+}
+
+const ERROR_FILE_NOT_FOUND_P: u32 = 2;
+
+pub fn powrprof_exports() -> Vec<(&'static str, u64)> {
+    export_table![CallNtPowerInformation, PowerDeterminePlatformRoleEx, PowerGetActiveScheme, PowerReadACValue, PowerReadDCValue]
 }
 
 // ---- wininet -----------------------------------------------------------------------------------
@@ -406,13 +516,25 @@ extern "win64" fn InternetQueryOptionW(_session: u64, _option: u32, _buffer: *mu
     crate::kernel32::fail(ERROR_INVALID_PARAMETER, crate::kernel32::FALSE)
 }
 
-/// OSyx has no WinINet sessions: only the process-wide options (handle
-/// NULL) INTERNET_OPTION_REFRESH (37) and INTERNET_OPTION_SETTINGS_CHANGED
-/// (39) exist, and with no cached proxy or settings state they have nothing
-/// to refresh. Anything else is an invalid handle or option.
-extern "win64" fn InternetSetOptionW(session: u64, option: u32, _buffer: *const u8, _len: u32) -> crate::kernel32::Bool {
+/// The process-wide options (handle NULL) INTERNET_OPTION_REFRESH (37)
+/// and INTERNET_OPTION_SETTINGS_CHANGED (39) have no cached proxy or
+/// settings state to refresh. On a session, connection or request
+/// (winhttp.rs) the timeouts can be set.
+extern "win64" fn InternetSetOptionW(session: u64, option: u32, buffer: *const u8, len: u32) -> crate::kernel32::Bool {
     if session != 0 {
-        return crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE);
+        if !crate::winhttp::is_handle(session) {
+            return crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE);
+        }
+        if buffer.is_null() || len < 4 {
+            return crate::kernel32::fail(ERROR_INVALID_PARAMETER, crate::kernel32::FALSE);
+        }
+        // SAFETY: the caller's DWORD option value.
+        let value = unsafe { core::ptr::read_unaligned(buffer as *const u32) };
+        return match crate::winhttp::set_option(session, option, value) {
+            None => crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE),
+            Some(false) => crate::kernel32::fail(12009, crate::kernel32::FALSE),
+            Some(true) => crate::kernel32::TRUE,
+        };
     }
     match option {
         37 | 39 => crate::kernel32::TRUE,
@@ -420,13 +542,18 @@ extern "win64" fn InternetSetOptionW(session: u64, option: u32, _buffer: *const 
     }
 }
 
-/// No WinINet function here creates a handle, so every handle is invalid.
-extern "win64" fn InternetCloseHandle(_session: u64) -> crate::kernel32::Bool {
-    crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE)
+/// Closes a session, connection or request (winhttp.rs).
+extern "win64" fn InternetCloseHandle(h: u64) -> crate::kernel32::Bool {
+    if crate::winhttp::close(h) {
+        crate::kernel32::TRUE
+    } else {
+        crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE)
+    }
 }
 
 pub fn wininet_exports() -> Vec<(&'static str, u64)> {
-    export_table![
+    let mut e = crate::winhttp::wininet_exports();
+    e.extend(export_table![
         InternetGetConnectedState,
         InternetGetConnectedStateExW,
         InternetGetConnectedStateExA,
@@ -435,7 +562,8 @@ pub fn wininet_exports() -> Vec<(&'static str, u64)> {
         InternetQueryOptionW,
         InternetSetOptionW,
         InternetCloseHandle,
-    ]
+    ]);
+    e
 }
 
 // ---- wintrust -----------------------------------------------------------------------
@@ -647,8 +775,198 @@ extern "win64" fn WTHelperProvDataFromStateData(state: u64) -> *mut u8 {
     state as *mut u8
 }
 
+// CRYPT_PROVIDER_DATA: csSigners at 120, pasSigners at 128.
+const CPD_SIGNER_COUNT: usize = 120;
+const CPD_SIGNERS: usize = 128;
+// CRYPT_PROVIDER_SGNR (64 bytes): csCertChain at 12, pasCertChain at 16,
+// csCounterSigners at 44, pasCounterSigners at 48.
+const SGNR_SIZE: u64 = 64;
+
+/// Signer `index` (or its counter-signer `counter`) of verified provider
+/// data. A state OSyx made has no signers, so this finds none there.
+extern "win64" fn WTHelperGetProvSignerFromChain(data: u64, index: u32, counter_signer: i32, counter: u32) -> u64 {
+    if data == 0 || !PROVIDER_STATES.lock().unwrap().contains(&data) {
+        return 0;
+    }
+    // SAFETY: a CRYPT_PROVIDER_DATA made by provider_state, and the signer
+    // array its counts describe.
+    unsafe {
+        if index >= teb::get::<u32>(data, CPD_SIGNER_COUNT) {
+            return 0;
+        }
+        let signer = teb::get::<u64>(data, CPD_SIGNERS) + index as u64 * SGNR_SIZE;
+        if counter_signer == 0 {
+            return signer;
+        }
+        if counter >= teb::get::<u32>(signer, 44) {
+            return 0;
+        }
+        teb::get::<u64>(signer, 48) + counter as u64 * SGNR_SIZE
+    }
+}
+
+/// Certificate `index` of a signer's chain (CRYPT_PROVIDER_CERT entries,
+/// each as large as its cbStruct says).
+extern "win64" fn WTHelperGetProvCertFromChain(signer: u64, index: u32) -> u64 {
+    if signer == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's CRYPT_PROVIDER_SGNR and its certificate array.
+    unsafe {
+        if index >= teb::get::<u32>(signer, 12) {
+            return 0;
+        }
+        let certs = teb::get::<u64>(signer, 16);
+        certs + index as u64 * teb::get::<u32>(certs, 0) as u64
+    }
+}
+
+// ---- catalog administration ------------------------------------------------------------
+//
+// OSyx installs no security catalogs, so no file hash is ever found in
+// one: catalog contexts exist and hashes are computed, but enumeration
+// finds nothing and there is never catalog info to read.
+
+const ERROR_NOT_FOUND: u32 = 1168;
+const ERROR_READ_FAULT: u32 = 30;
+
+/// Catalog admin contexts handed out, by handle.
+static CAT_ADMINS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static NEXT_CAT_ADMIN: AtomicU64 = AtomicU64::new(0x5ca0_0010);
+
+extern "win64" fn CryptCATAdminAcquireContext(out: *mut u64, _subsystem: *const u8, flags: u32) -> i32 {
+    if out.is_null() || flags != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let h = NEXT_CAT_ADMIN.fetch_add(0x10, Ordering::Relaxed);
+    CAT_ADMINS.lock().unwrap().push(h);
+    // SAFETY: the caller's out pointer.
+    unsafe { *out = h };
+    1
+}
+
+extern "win64" fn CryptCATAdminReleaseContext(h: u64, _flags: u32) -> i32 {
+    let mut admins = CAT_ADMINS.lock().unwrap();
+    match admins.iter().position(|&a| a == h) {
+        Some(i) => {
+            admins.remove(i);
+            1
+        }
+        None => fail(ERROR_INVALID_PARAMETER, 0),
+    }
+}
+
+/// The SHA-1 a catalog lists a file by: the Authenticode digest of a PE
+/// image (everything but the checksum, the certificate table entry and
+/// the certificate table), the plain digest of any other file.
+fn catalog_hash(f: &mut os_std::fs::File) -> Option<[u8; 20]> {
+    use sha1::Digest as _;
+    let len = f.metadata().ok()?.len();
+    // Ranges of the file to leave out.
+    let mut skip: Vec<(u64, u64)> = Vec::new();
+    let mut dos = [0u8; 64];
+    if read_at(f, 0, &mut dos) && &dos[..2] == b"MZ" {
+        let pe = u32::from_le_bytes([dos[0x3c], dos[0x3d], dos[0x3e], dos[0x3f]]) as u64;
+        let mut head = [0u8; 26];
+        if read_at(f, pe, &mut head) && &head[..4] == b"PE\0\0" {
+            let opt = pe + 24;
+            let dirs = match u16::from_le_bytes([head[24], head[25]]) {
+                0x10b => Some(96),
+                0x20b => Some(112),
+                _ => None,
+            };
+            if let Some(dirs) = dirs {
+                let cert_entry = opt + dirs + 4 * 8;
+                let mut d = [0u8; 8];
+                skip.push((opt + 64, 4));
+                skip.push((cert_entry, 8));
+                if read_at(f, cert_entry, &mut d) {
+                    let (at, size) = (u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as u64, u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as u64);
+                    if size != 0 && at.checked_add(size).is_some_and(|e| e <= len) {
+                        skip.push((at, size));
+                    }
+                }
+            }
+        }
+    }
+    skip.sort_unstable();
+    let mut h = sha1::Sha1::new();
+    let mut buf = alloc::vec![0u8; 64 * 1024];
+    let mut at = 0u64;
+    let mut ranges = skip.into_iter().peekable();
+    while at < len {
+        let mut end = len;
+        if let Some(&(s, n)) = ranges.peek() {
+            if at >= s {
+                at = at.max(s + n);
+                ranges.next();
+                continue;
+            }
+            end = end.min(s);
+        }
+        let n = ((end - at) as usize).min(buf.len());
+        if !read_at(f, at, &mut buf[..n]) {
+            return None;
+        }
+        h.update(&buf[..n]);
+        at += n as u64;
+    }
+    Some(h.finalize().into())
+}
+
+extern "win64" fn CryptCATAdminCalcHashFromFileHandle(file: u64, size: *mut u32, hash: *mut u8, flags: u32) -> i32 {
+    if size.is_null() || flags != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's in/out size.
+    if hash.is_null() || unsafe { *size } < 20 {
+        unsafe { *size = 20 };
+        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    let f = match crate::objects::file(file) {
+        Ok(f) if !f.path.is_empty() && !f.is_dir => f,
+        Ok(_) => return fail(ERROR_INVALID_PARAMETER, 0),
+        Err(e) => return fail(e, 0),
+    };
+    let Ok(mut file) = os_std::fs::File::open(&f.path) else { return fail(ERROR_INVALID_HANDLE, 0) };
+    let Some(digest) = catalog_hash(&mut file) else { return fail(ERROR_READ_FAULT, 0) };
+    // SAFETY: the caller's buffer of at least 20 bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(digest.as_ptr(), hash, 20);
+        *size = 20;
+    }
+    1
+}
+
+extern "win64" fn CryptCATAdminEnumCatalogFromHash(admin: u64, hash: *const u8, len: u32, _flags: u32, _prev: *mut u64) -> u64 {
+    if !CAT_ADMINS.lock().unwrap().contains(&admin) || hash.is_null() || len == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    fail(ERROR_NOT_FOUND, 0)
+}
+
+/// No catalog info is ever handed out, so none can be released or read.
+extern "win64" fn CryptCATAdminReleaseCatalogContext(_admin: u64, _info: u64, _flags: u32) -> i32 {
+    fail(ERROR_INVALID_PARAMETER, 0)
+}
+
+extern "win64" fn CryptCATCatalogInfoFromContext(_info: u64, _out: *mut u8, _flags: u32) -> i32 {
+    fail(ERROR_INVALID_PARAMETER, 0)
+}
+
 pub fn wintrust_exports() -> Vec<(&'static str, u64)> {
-    export_table![WinVerifyTrust, WTHelperProvDataFromStateData]
+    export_table![
+        WinVerifyTrust,
+        WTHelperProvDataFromStateData,
+        WTHelperGetProvSignerFromChain,
+        WTHelperGetProvCertFromChain,
+        CryptCATAdminAcquireContext,
+        CryptCATAdminReleaseContext,
+        CryptCATAdminCalcHashFromFileHandle,
+        CryptCATAdminEnumCatalogFromHash,
+        CryptCATAdminReleaseCatalogContext,
+        CryptCATCatalogInfoFromContext,
+    ]
 }
 
 // ---- avrt ----------------------------------------------------------------------------

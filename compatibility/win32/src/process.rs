@@ -490,6 +490,15 @@ extern "win64" fn OpenProcess(_access: u32, inherit: i32, pid: u32) -> u64 {
     h
 }
 
+/// The process a process handle (or GetCurrentProcess) names.
+pub fn handle_pid(h: u64) -> Option<u64> {
+    match objects::get(h) {
+        Some(Object::Process(p)) => Some(p.pid),
+        _ if h == objects::CURRENT_PROCESS => Some(kernel32::pid()),
+        _ => None,
+    }
+}
+
 /// The process id a process handle names, if it is not this process.
 pub fn other_pid(h: u64) -> Result<Option<u64>, u32> {
     process_of(h).map(|p| p.map(|p| p.pid))

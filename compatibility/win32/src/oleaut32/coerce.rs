@@ -108,7 +108,7 @@ fn floor(f: f64) -> f64 {
 }
 
 /// Round half to even, as the VarXxxFromR8 functions do.
-fn round_even(f: f64) -> f64 {
+pub(super) fn round_even(f: f64) -> f64 {
     let low = floor(f);
     let diff = f - low;
     if diff > 0.5 || (diff == 0.5 && (low as i64) % 2 != 0) { low + 1.0 } else { low }
@@ -117,7 +117,7 @@ fn round_even(f: f64) -> f64 {
 /// Parses number text as VarR8FromStr does for en-US: blanks around it,
 /// an optional sign, digits with "," thousands separators and "." decimals,
 /// an exponent, or "&H" / "&O" for hexadecimal and octal integers.
-fn parse_number(s: &str) -> Option<f64> {
+pub(super) fn parse_number(s: &str) -> Option<f64> {
     let t = s.trim_matches(|c: char| c == ' ' || c == '\t');
     let lower = t.to_ascii_lowercase();
     if let Some(h) = lower.strip_prefix("&h") {

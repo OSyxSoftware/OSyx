@@ -266,7 +266,9 @@ pub mod nr {
     pub const SOCK_CONNECT: u64 = 62;
     /// `sock_listen(h, backlog) -> 0` (TCP, after `sock_bind`).
     pub const SOCK_LISTEN: u64 = 63;
-    /// `sock_accept(h, peer: *mut SockAddr) -> handle` of the next connection.
+    /// `sock_accept(h, peer: *mut SockAddr, flags) -> handle` of the next
+    /// connection. With `MSG_DONTWAIT` in `flags` it does not wait, even on
+    /// a blocking listener: `WouldBlock` when none is pending.
     pub const SOCK_ACCEPT: u64 = 64;
     /// `sock_send(h, buf, len, to: *const SockAddr | 0, flags) -> bytes`.
     pub const SOCK_SEND: u64 = 65;
@@ -434,6 +436,21 @@ pub mod nr {
     /// `display_cursor_move(x, y) -> 0`: moves the hardware cursor's hot spot
     /// to screen position (`x`, `y`).
     pub const DISPLAY_CURSOR_MOVE: u64 = 110;
+    /// `thread_state(tid, buf, cap) -> count`: what thread `tid` of the
+    /// caller's process is doing, for stall reports. Writes up to `cap` u64
+    /// entries to `buf`: its state ([`thread_state`]), the number, return
+    /// address and user stack pointer of its last system call, then the
+    /// words of its user stack from that stack pointer up. Returns the
+    /// number of entries written.
+    pub const THREAD_STATE: u64 = 111;
+}
+
+/// The state entry of `nr::THREAD_STATE`.
+pub mod thread_state {
+    pub const READY: u64 = 0;
+    pub const RUNNING: u64 = 1;
+    pub const BLOCKED: u64 = 2;
+    pub const DEAD: u64 = 3;
 }
 
 /// Field mask of `nr::FUTIMES`.

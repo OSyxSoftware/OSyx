@@ -344,6 +344,10 @@ extern "win64" fn FindNextFileW(h: u64, out: u64) -> i32 {
 /// WIN32_FIND_DATAW (592 bytes) → WIN32_FIND_DATAA (320 bytes): the same
 /// 44-byte head, then cFileName[260] and cAlternateFileName[14] in the
 /// ANSI code page (UTF-8).
+/// A WIN32_FIND_DATAW, aligned for its UTF-16 file names.
+#[repr(C, align(8))]
+struct FindDataW([u8; 592]);
+
 fn find_data_to_ansi(w: &[u8; 592], out: u64) -> i32 {
     // SAFETY: the name at offset 44 is NUL-terminated within 260 units.
     let name = unsafe { path::wide_to_string(w.as_ptr().add(44) as *const u16) }.unwrap_or_default();
@@ -364,9 +368,9 @@ extern "win64" fn FindFirstFileA(pattern: *const u8, out: u64) -> u64 {
     }
     // SAFETY: a NUL-terminated pattern.
     let Some(p) = (unsafe { path::ansi_to_wide(pattern) }) else { return fail(ERROR_INVALID_PARAMETER, u64::MAX) };
-    let mut w = [0u8; 592];
-    let h = FindFirstFileW(p.as_ptr(), w.as_mut_ptr() as u64);
-    if h != u64::MAX && find_data_to_ansi(&w, out) == 0 {
+    let mut w = FindDataW([0u8; 592]);
+    let h = FindFirstFileW(p.as_ptr(), w.0.as_mut_ptr() as u64);
+    if h != u64::MAX && find_data_to_ansi(&w.0, out) == 0 {
         FindClose(h);
         return u64::MAX;
     }
@@ -376,11 +380,11 @@ extern "win64" fn FindNextFileA(h: u64, out: u64) -> i32 {
     if out == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let mut w = [0u8; 592];
-    if FindNextFileW(h, w.as_mut_ptr() as u64) == 0 {
+    let mut w = FindDataW([0u8; 592]);
+    if FindNextFileW(h, w.0.as_mut_ptr() as u64) == 0 {
         return 0;
     }
-    find_data_to_ansi(&w, out)
+    find_data_to_ansi(&w.0, out)
 }
 extern "win64" fn FindClose(h: u64) -> i32 {
     if SEARCHES.lock().unwrap().remove(&h).is_some() {
@@ -419,6 +423,23 @@ extern "win64" fn GetVolumePathNameW(name: *const u16, buf: *mut u16, len: u32) 
     }
     1
 }
+/// FindFirstFileExW's search with the result in WIN32_FIND_DATAA: both
+/// info levels (standard, basic) fill the same structure.
+extern "win64" fn FindFirstFileExA(pattern: *const u8, level: u32, data: u64, op: u32, filter: u64, flags: u32) -> u64 {
+    if data == 0 {
+        return fail(ERROR_INVALID_PARAMETER, u64::MAX);
+    }
+    // SAFETY: a NUL-terminated pattern.
+    let Some(p) = (unsafe { path::ansi_to_wide(pattern) }) else { return fail(ERROR_INVALID_PARAMETER, u64::MAX) };
+    let mut w = FindDataW([0u8; 592]);
+    let h = crate::files::FindFirstFileExW(p.as_ptr(), level, w.0.as_mut_ptr() as u64, op, filter, flags);
+    if h != u64::MAX && find_data_to_ansi(&w.0, data) == 0 {
+        FindClose(h);
+        return u64::MAX;
+    }
+    h
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         GetLogicalDriveStringsW,
@@ -435,6 +456,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         FindFirstFileA,
         FindNextFileA,
         FindNextFileW,
-        FindClose
+        FindClose,
+        FindFirstFileExA,
     ]
 }

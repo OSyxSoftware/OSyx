@@ -176,6 +176,10 @@ pub struct EventObj {
     shared: Mutex<Option<(u64, u64)>>,
     pub manual: bool,
     pub name: Option<String>,
+    /// The thread that last set the event in this process, and when
+    /// (monotonic ns), for stall reports; 0 if none has.
+    pub last_set_by: AtomicU64,
+    pub last_set_at: AtomicU64,
 }
 
 impl EventObj {
@@ -186,6 +190,8 @@ impl EventObj {
             shared: Mutex::new(None),
             manual,
             name,
+            last_set_by: AtomicU64::new(0),
+            last_set_at: AtomicU64::new(0),
         });
         e.word.store(&e.local as *const AtomicU32 as *mut AtomicU32, Ordering::SeqCst);
         e
@@ -200,6 +206,8 @@ impl EventObj {
             shared: Mutex::new(Some((shm, base))),
             manual,
             name: None,
+            last_set_by: AtomicU64::new(0),
+            last_set_at: AtomicU64::new(0),
         });
         Some(e)
     }
@@ -220,6 +228,8 @@ impl EventObj {
     pub fn set(&self, on: bool) {
         self.word().store(on as u32, Ordering::SeqCst);
         if on {
+            self.last_set_by.store(os_sys::gettid(), Ordering::Relaxed);
+            self.last_set_at.store(os_sys::clock(osyx_abi::CLOCK_MONOTONIC).unwrap_or(0), Ordering::Relaxed);
             if self.is_shared() {
                 os_sys::futex_wake(self.word().as_ptr(), u32::MAX);
             }
@@ -378,6 +388,9 @@ struct Table {
     inheritable: alloc::collections::BTreeSet<u64>,
     /// Handles marked HANDLE_FLAG_PROTECT_FROM_CLOSE.
     protected: alloc::collections::BTreeSet<u64>,
+    /// Section handles opened with less than full access (by
+    /// DuplicateHandle): their granted SECTION_* rights.
+    access: BTreeMap<u64, u32>,
 }
 
 static TABLE: Mutex<Table> = Mutex::new(Table {
@@ -385,7 +398,35 @@ static TABLE: Mutex<Table> = Mutex::new(Table {
     next: 0x100,
     inheritable: alloc::collections::BTreeSet::new(),
     protected: alloc::collections::BTreeSet::new(),
+    access: BTreeMap::new(),
 });
+
+/// SECTION_ALL_ACCESS.
+pub const SECTION_ALL_ACCESS: u32 = 0x000f_001f;
+pub const SECTION_MAP_WRITE: u32 = 0x2;
+pub const SECTION_MAP_READ: u32 = 0x4;
+pub const SECTION_MAP_EXECUTE: u32 = 0x8;
+
+/// The rights handle `h` grants to its section: what DuplicateHandle gave
+/// it, else what the section allows (all of it, without map-write for a
+/// read-only section or map-execute for a non-executable one).
+pub fn section_access(h: u64) -> Option<u32> {
+    let t = TABLE.lock().unwrap();
+    let Some(Object::Section(s)) = t.map.get(&h) else { return None };
+    let mut full = SECTION_ALL_ACCESS;
+    if !s.writable {
+        full &= !SECTION_MAP_WRITE;
+    }
+    if !s.executable {
+        full &= !SECTION_MAP_EXECUTE;
+    }
+    Some(t.access.get(&h).map_or(full, |&a| a & full))
+}
+
+/// Records the rights of a section handle.
+pub fn set_section_access(h: u64, access: u32) {
+    TABLE.lock().unwrap().access.insert(h, access);
+}
 
 /// Puts `o` at the handle value `h` (an inherited handle keeps its value);
 /// false if `h` is taken or not a handle value.
@@ -476,6 +517,34 @@ pub fn kind_name(o: &Object) -> &'static str {
     }
 }
 
+/// Whether handles `a` and `b` name the same object (CompareObjectHandles).
+pub fn same_object(a: u64, b: u64) -> Option<bool> {
+    use alloc::sync::Arc as A;
+    Some(match (get(a)?, get(b)?) {
+        (Object::File(x), Object::File(y)) => A::ptr_eq(&x, &y),
+        (Object::Console(x), Object::Console(y)) => core::mem::discriminant(&x) == core::mem::discriminant(&y),
+        (Object::Null, Object::Null) => true,
+        (Object::Thread(x), Object::Thread(y)) => A::ptr_eq(&x, &y),
+        (Object::Event(x), Object::Event(y)) => A::ptr_eq(&x, &y),
+        (Object::KeyedEvent(x), Object::KeyedEvent(y)) => A::ptr_eq(&x, &y),
+        (Object::Timer(x), Object::Timer(y)) => A::ptr_eq(&x, &y),
+        (Object::Mutex(x), Object::Mutex(y)) => A::ptr_eq(&x, &y),
+        (Object::Semaphore(x), Object::Semaphore(y)) => A::ptr_eq(&x, &y),
+        (Object::Section(x), Object::Section(y)) => A::ptr_eq(&x, &y),
+        (Object::Token(x), Object::Token(y)) => A::ptr_eq(&x, &y),
+        (Object::Port(x), Object::Port(y)) => A::ptr_eq(&x, &y),
+        (Object::Process(x), Object::Process(y)) => A::ptr_eq(&x, &y) || x.pid == y.pid,
+        (Object::Job(x), Object::Job(y)) => A::ptr_eq(&x, &y),
+        (Object::WindowStation(x), Object::WindowStation(y)) => A::ptr_eq(&x, &y),
+        (Object::Desktop(x), Object::Desktop(y)) => A::ptr_eq(&x, &y),
+        (Object::Pipe(x), Object::Pipe(y)) => A::ptr_eq(&x, &y),
+        (Object::Directory(x), Object::Directory(y)) => x.path == y.path,
+        (Object::Transaction(x), Object::Transaction(y)) => A::ptr_eq(&x, &y),
+        (Object::Snapshot(x), Object::Snapshot(y)) => A::ptr_eq(&x, &y),
+        _ => false,
+    })
+}
+
 /// Open handles of this process.
 pub fn count() -> usize {
     TABLE.lock().unwrap().map.len()
@@ -497,6 +566,7 @@ pub fn close(h: u64) -> bool {
         return false;
     }
     t.inheritable.remove(&h);
+    t.access.remove(&h);
     let removed = t.map.remove(&h);
     drop(t);
     removed.is_some()
@@ -610,6 +680,8 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
         objs.push(o);
     }
     let deadline = (timeout_ms != INFINITE).then(|| Instant::now() + Duration::from_millis(timeout_ms as u64));
+    // Noted once the wait actually blocks (stall.rs).
+    let mut _blocked = None;
     loop {
         let seq = SEQ.load(Ordering::SeqCst);
         {
@@ -660,6 +732,9 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
                 (d - now).as_nanos().max(1) as u64
             }
         };
+        if _blocked.is_none() {
+            _blocked = Some(crate::stall::waiting("WaitForObjects", handles[0], handles.len() as u64));
+        }
         // Another process sets a shared event without touching SEQ: one
         // shared event is waited for on its own word, several objects
         // including one are polled.

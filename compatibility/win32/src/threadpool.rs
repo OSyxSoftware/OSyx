@@ -508,10 +508,11 @@ pub struct PortObj {
     word: AtomicU32,
 }
 
-/// Pipes are the handles with overlapped I/O (pipes.rs): associating one
-/// queues its completions to the port. Any other open handle may be
-/// associated too, as on Windows; operations on it complete synchronously,
-/// so no packet is ever queued for it.
+/// Pipes (pipes.rs) and sockets (ws2_32/overlapped.rs) are the handles
+/// with overlapped I/O: associating one queues its completions to the
+/// port. Any other open handle may be associated too, as on Windows;
+/// operations on it complete synchronously, so no packet is ever queued
+/// for it.
 extern "win64" fn CreateIoCompletionPort(file: u64, existing: u64, key: u64, _threads: u32) -> u64 {
     if file == INVALID_HANDLE_VALUE {
         if existing != 0 {
@@ -519,7 +520,15 @@ extern "win64" fn CreateIoCompletionPort(file: u64, existing: u64, key: u64, _th
         }
         return new_port();
     }
-    let Some(object) = objects::get(file) else { return fail(ERROR_INVALID_HANDLE, 0) };
+    let object = objects::get(file);
+    if object.is_none() && !crate::ws2_32::is_socket(file) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    // A socket already associated with another port keeps that one: checked
+    // before a new port is made, so a refused call leaves nothing behind.
+    if object.is_none() && crate::ws2_32::socket_port(file).is_some_and(|p| p != existing) {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
     let port = if existing == 0 {
         new_port()
     } else if matches!(objects::get(existing), Some(Object::Port(_))) {
@@ -527,8 +536,14 @@ extern "win64" fn CreateIoCompletionPort(file: u64, existing: u64, key: u64, _th
     } else {
         return fail(ERROR_INVALID_PARAMETER, 0);
     };
-    if let Object::Pipe(p) = object {
-        crate::pipes::associate(&p, port, key);
+    match object {
+        Some(Object::Pipe(p)) => crate::pipes::associate(&p, port, key),
+        None => {
+            if let Err(e) = crate::ws2_32::associate_socket(file, port, key) {
+                return fail(e, 0);
+            }
+        }
+        Some(_) => {}
     }
     port
 }
@@ -583,6 +598,7 @@ extern "win64" fn GetQueuedCompletionStatus(port: u64, bytes: *mut u32, key: *mu
                 left.as_nanos() as u64
             }
         };
+        let _blocked = crate::stall::waiting("GetQueuedCompletionStatus", port, 0);
         let _ = os_sys::futex_wait(p.word.as_ptr(), seq, timeout);
     }
 }

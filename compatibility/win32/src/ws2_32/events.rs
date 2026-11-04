@@ -179,9 +179,7 @@ extern "win64" fn WSAEventSelect(s: u64, event: u64, mask: i32) -> i32 {
         }
         if !st.nonblocking {
             os_sys::sock_ctl(st.fd, net::ctl::NONBLOCK, 1).map_err(wsa)?;
-            if let Some(k) = SOCKETS.lock().unwrap().get_mut(&s) {
-                k.nonblocking = true;
-            }
+            super::set_nonblocking(&mut SOCKETS.lock().unwrap(), st.fd, true);
         }
         start_watcher()?;
         // A new selection keeps what was recorded, as Windows does.

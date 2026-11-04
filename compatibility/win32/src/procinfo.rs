@@ -17,6 +17,22 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use os_std::sync::Mutex;
 
+/// The last process record read for each process: a handle to a process
+/// that has ended still answers with its final counters, as on Windows.
+static LAST_INFO: Mutex<BTreeMap<u64, osyx_abi::ipc::ProcInfo>> = Mutex::new(BTreeMap::new());
+
+/// The kernel's record of process `pid`, or the last one read once it ended.
+pub(crate) fn process_info(pid: u64) -> Result<osyx_abi::ipc::ProcInfo, u32> {
+    match os_sys::proc_info(pid) {
+        Ok(i) => {
+            LAST_INFO.lock().unwrap().insert(pid, i);
+            Ok(i)
+        }
+        Err(osyx_abi::Errno::NotFound) => LAST_INFO.lock().unwrap().get(&pid).copied().ok_or(ERROR_INVALID_HANDLE),
+        Err(e) => Err(errno_to_win32(e)),
+    }
+}
+
 /// The session every OSyx process runs in (the interactive console).
 const SESSION: u32 = 1;
 
@@ -163,9 +179,9 @@ extern "win64" fn QueryProcessCycleTime(h: u64, cycles: *mut u64) -> i32 {
         Some(Object::Process(p)) => p.pid,
         _ => kernel32::pid(),
     };
-    let info = match os_sys::proc_info(pid) {
+    let info = match process_info(pid) {
         Ok(i) => i,
-        Err(e) => return fail(errno_to_win32(e), 0),
+        Err(e) => return fail(e, 0),
     };
     // SAFETY: the caller's out pointer.
     unsafe { *cycles = (info.cpu_ticks as u128 * tsc_hz() as u128 / 1000) as u64 };
@@ -284,7 +300,7 @@ extern "win64" fn SetPriorityClass(h: u64, class: u32) -> i32 {
     const CLASSES: [u32; 6] = [0x20, 0x40, 0x80, 0x100, 0x4000, 0x8000];
     match class {
         c if CLASSES.contains(&c) => {
-            if h == objects::CURRENT_PROCESS {
+            if crate::process::handle_pid(h) == Some(kernel32::pid()) {
                 PRIORITY_CLASS.store(c, Ordering::Relaxed);
             }
             1
@@ -293,6 +309,92 @@ extern "win64" fn SetPriorityClass(h: u64, class: u32) -> i32 {
         0x0010_0000 | 0x0020_0000 if h == objects::CURRENT_PROCESS => 1,
         _ => fail(ERROR_INVALID_PARAMETER, 0),
     }
+}
+
+extern "win64" fn GetPriorityClass(h: u64) -> u32 {
+    if !is_process(h) {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    // Another process's class lives in its own winrun.
+    if crate::process::handle_pid(h) == Some(kernel32::pid()) { PRIORITY_CLASS.load(Ordering::Relaxed) } else { 0x20 }
+}
+
+/// SetProcessInformation settings OSyx's memory manager and scheduler have
+/// no levels for, kept so they read back: the memory priority
+/// (MEMORY_PRIORITY_INFORMATION), power throttling (version, control mask,
+/// state mask) and leap-second flags.
+static MEMORY_PRIORITY: AtomicU32 = AtomicU32::new(5); // MEMORY_PRIORITY_NORMAL
+static POWER_THROTTLING: Mutex<(u32, u32)> = Mutex::new((0, 0));
+static LEAP_SECONDS: AtomicU32 = AtomicU32::new(0);
+
+const PROCESS_MEMORY_PRIORITY: u32 = 0;
+const PROCESS_POWER_THROTTLING: u32 = 4;
+const PROCESS_LEAP_SECOND_INFO: u32 = 8;
+
+extern "win64" fn SetProcessInformation(h: u64, class: u32, info: *const u8, size: u32) -> i32 {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
+        return fail(if is_process(h) { ERROR_ACCESS_DENIED } else { ERROR_INVALID_HANDLE }, 0);
+    }
+    if info.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let p = info as u64;
+    match class {
+        PROCESS_MEMORY_PRIORITY if size == 4 => {
+            // SAFETY: the caller's 4-byte structure.
+            let v: u32 = unsafe { teb::get(p, 0) };
+            if !(1..=5).contains(&v) {
+                return fail(ERROR_INVALID_PARAMETER, 0);
+            }
+            MEMORY_PRIORITY.store(v, Ordering::Relaxed);
+        }
+        PROCESS_POWER_THROTTLING if size == 12 => {
+            // SAFETY: the caller's 12-byte structure.
+            let (version, control, state): (u32, u32, u32) = unsafe { (teb::get(p, 0), teb::get(p, 4), teb::get(p, 8)) };
+            // EXECUTION_SPEED 1, IGNORE_TIMER_RESOLUTION 4.
+            if version != 1 || control & !5 != 0 || state & !control != 0 {
+                return fail(ERROR_INVALID_PARAMETER, 0);
+            }
+            *POWER_THROTTLING.lock().unwrap() = (control, state);
+        }
+        PROCESS_LEAP_SECOND_INFO if size == 8 => {
+            // SAFETY: the caller's 8-byte structure.
+            let flags: u32 = unsafe { teb::get(p, 0) };
+            if flags & !1 != 0 {
+                return fail(ERROR_INVALID_PARAMETER, 0);
+            }
+            LEAP_SECONDS.store(flags, Ordering::Relaxed);
+        }
+        PROCESS_MEMORY_PRIORITY | PROCESS_POWER_THROTTLING | PROCESS_LEAP_SECOND_INFO => return fail(ERROR_BAD_LENGTH_P, 0),
+        _ => return fail(ERROR_INVALID_PARAMETER, 0),
+    }
+    1
+}
+
+extern "win64" fn GetProcessInformation(h: u64, class: u32, info: *mut u8, size: u32) -> i32 {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
+        return fail(if is_process(h) { ERROR_ACCESS_DENIED } else { ERROR_INVALID_HANDLE }, 0);
+    }
+    if info.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let p = info as u64;
+    // SAFETY (each arm): the caller's structure of the size checked.
+    match class {
+        PROCESS_MEMORY_PRIORITY if size == 4 => unsafe { teb::put(p, 0, MEMORY_PRIORITY.load(Ordering::Relaxed)) },
+        PROCESS_POWER_THROTTLING if size == 12 => {
+            let (control, state) = *POWER_THROTTLING.lock().unwrap();
+            unsafe {
+                teb::put(p, 0, 1u32);
+                teb::put(p, 4, control);
+                teb::put(p, 8, state);
+            }
+        }
+        PROCESS_LEAP_SECOND_INFO if size == 8 => unsafe { teb::put(p, 0, [LEAP_SECONDS.load(Ordering::Relaxed), 0]) },
+        PROCESS_MEMORY_PRIORITY | PROCESS_POWER_THROTTLING | PROCESS_LEAP_SECOND_INFO => return fail(ERROR_BAD_LENGTH_P, 0),
+        _ => return fail(ERROR_INVALID_PARAMETER, 0),
+    }
+    1
 }
 
 static SHUTDOWN: AtomicU64 = AtomicU64::new(0x280 << 32);
@@ -474,7 +576,7 @@ extern "win64" fn UnregisterApplicationRestart() -> i32 {
 }
 
 extern "win64" fn GetApplicationRestartSettings(process: u64, buf: *mut u16, size: *mut u32, flags: *mut u32) -> i32 {
-    if process != objects::CURRENT_PROCESS || size.is_null() {
+    if crate::process::handle_pid(process) != Some(kernel32::pid()) || size.is_null() {
         return E_INVALIDARG;
     }
     let Some((line, f)) = RESTART.lock().unwrap().clone() else { return 0x8007_0490u32 as i32 }; // ERROR_NOT_FOUND
@@ -518,7 +620,7 @@ fn own_frames() -> Option<u64> {
 /// (OSyx neither pages out nor shares anonymous memory); page faults and
 /// pool usage are not counted.
 pub(crate) extern "win64" fn K32GetProcessMemoryInfo(h: u64, out: *mut u8, cb: u32) -> i32 {
-    if h != objects::CURRENT_PROCESS {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
         return fail(ERROR_ACCESS_DENIED, 0);
     }
     if out.is_null() || cb < 72 {
@@ -594,9 +696,174 @@ extern "win64" fn K32QueryWorkingSet(h: u64, buf: *mut u8, len: u32) -> i32 {
 
 const ERROR_BAD_LENGTH_P: u32 = 24;
 
+/// K32QueryWorkingSetEx: for each PSAPI_WORKING_SET_EX_INFORMATION (an
+/// address and its attributes) whether the page is resident, and its
+/// protection. Resident pages are unshared, as in K32QueryWorkingSet.
+extern "win64" fn K32QueryWorkingSetEx(h: u64, buf: *mut u8, len: u32) -> i32 {
+    let pid = match objects::get(h) {
+        Some(Object::Process(p)) => p.pid,
+        _ if h == objects::CURRENT_PROCESS => kernel32::pid(),
+        _ => return fail(ERROR_INVALID_HANDLE, 0),
+    };
+    if buf.is_null() || len < 16 {
+        return fail(ERROR_BAD_LENGTH_P, 0);
+    }
+    let total = match os_sys::working_set(pid, &mut []) {
+        Ok(n) => n as usize,
+        Err(e) => return fail(errno_to_win32(e), 0),
+    };
+    // The set can grow between the two calls: room for some more pages.
+    let mut pages = alloc::vec![0u64; total + 256];
+    let n = match os_sys::working_set(pid, &mut pages) {
+        Ok(n) => (n as usize).min(pages.len()),
+        Err(e) => return fail(errno_to_win32(e), 0),
+    };
+    let resident: BTreeMap<u64, u64> = pages[..n].iter().map(|e| (e & !0xFFF, *e)).collect();
+    for i in 0..len as usize / 16 {
+        // SAFETY: the caller's array of `len` bytes.
+        unsafe {
+            let entry = buf as u64 + (i * 16) as u64;
+            let addr: u64 = teb::get(entry, 0);
+            let attributes = match resident.get(&(addr & !0xFFF)) {
+                // Valid, and Win32Protection (a PAGE_* value) from bit 4.
+                Some(e) => {
+                    let protect: u64 = match (e & 1 != 0, e & 2 != 0) {
+                        (false, false) => 0x02, // PAGE_READONLY
+                        (false, true) => 0x20,  // PAGE_EXECUTE_READ
+                        (true, false) => 0x04,  // PAGE_READWRITE
+                        (true, true) => 0x40,   // PAGE_EXECUTE_READWRITE
+                    };
+                    1 | protect << 4
+                }
+                None => 0,
+            };
+            teb::put(entry, 8, attributes);
+        }
+    }
+    1
+}
+
+/// The file mapped at `addr` in NT device form: a loaded image or a view
+/// of a file. Private memory maps no file.
+extern "win64" fn K32GetMappedFileNameW(h: u64, addr: u64, buf: *mut u16, size: u32) -> u32 {
+    const ERROR_FILE_INVALID: u32 = 1006;
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
+        return fail(if is_process(h) { ERROR_ACCESS_DENIED } else { ERROR_INVALID_HANDLE }, 0);
+    }
+    let win = if let Some((base, _)) = crate::loader::image_containing(addr) {
+        kernel32::module_name(base)
+    } else {
+        crate::mapping::view_path(addr).map(|p| crate::path::to_windows(&p))
+    };
+    let Some(win) = win else { return fail(ERROR_FILE_INVALID, 0) };
+    let nt = alloc::format!("\\Device\\HarddiskVolume1{}", win.get(2..).unwrap_or(""));
+    let r = kernel32::out_w(&nt, buf, size);
+    if r >= size {
+        return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+    }
+    r
+}
+
+/// PERFORMANCE_INFORMATION (104 bytes) in pages: commit and physical memory
+/// from the kernel's counters (OSyx does not page, so the commit limit is
+/// physical memory and committed memory is what is in use), and the
+/// processes and threads of the process table.
+extern "win64" fn K32GetPerformanceInfo(out: *mut u8, cb: u32) -> i32 {
+    if out.is_null() || cb < 104 {
+        return fail(ERROR_BAD_LENGTH_P, 0);
+    }
+    let s = match os_sys::sysinfo() {
+        Ok(s) => s,
+        Err(e) => return fail(errno_to_win32(e), 0),
+    };
+    let page = s.page_size.max(4096) as u64;
+    let (total, free) = (s.total_memory / page, s.free_memory.min(s.total_memory) / page);
+    let mut procs = alloc::vec![osyx_abi::ipc::ProcInfo::default(); 512];
+    let n = os_sys::proc_list(&mut procs).unwrap_or(0);
+    let threads: u64 = procs[..n].iter().map(|p| p.threads as u64).sum();
+    // SAFETY: the caller's structure of `cb` bytes.
+    unsafe {
+        core::ptr::write_bytes(out, 0, 104);
+        let p = out as u64;
+        teb::put(p, 0, 104u32);
+        teb::put(p, 8, total - free); // CommitTotal
+        teb::put(p, 16, total); // CommitLimit
+        teb::put(p, 24, total - free); // CommitPeak (no history kept)
+        teb::put(p, 32, total); // PhysicalTotal
+        teb::put(p, 40, free); // PhysicalAvailable
+        teb::put(p, 80, page); // PageSize
+        teb::put(p, 88, objects::count() as u32); // HandleCount (this process)
+        teb::put(p, 92, n as u32);
+        teb::put(p, 96, threads as u32);
+    }
+    1
+}
+
+/// NtQueryInformationThread: THREAD_BASIC_INFORMATION (0), the thread's
+/// times (1), whether it is the process's last thread (12), whether it has
+/// I/O pending (16, never: I/O completes in the call or in its own thread)
+/// and whether it has ended (20).
+extern "win64" fn NtQueryInformationThread(h: u64, class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> crate::error::NtStatus {
+    let Some((tid, obj)) = thread_of(h) else { return STATUS_INVALID_HANDLE };
+    let need: u32 = match class {
+        0 => 48,
+        1 => 32,
+        12 | 16 | 20 => 4,
+        _ => return STATUS_INVALID_INFO_CLASS,
+    };
+    if !ret.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *ret = need };
+    }
+    if len != need {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+    if buf.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    let p = buf as u64;
+    let done = obj.as_ref().is_some_and(|t| t.done.load(Ordering::SeqCst));
+    // SAFETY (each arm): the caller's buffer of `need` bytes.
+    match class {
+        0 => {
+            let teb = match &obj {
+                Some(t) => t.teb.load(Ordering::SeqCst),
+                None => teb::current(),
+            };
+            let exit = if done { obj.as_ref().map_or(0, |t| t.exit_code.load(Ordering::SeqCst)) } else { 259 };
+            let priority = kernel32::GetThreadPriority(h);
+            unsafe {
+                core::ptr::write_bytes(buf, 0, 48);
+                teb::put(p, 0, exit);
+                teb::put(p, 8, teb);
+                teb::put(p, 16, kernel32::pid());
+                teb::put(p, 24, tid as u64);
+                teb::put(p, 32, os_sys::cpu_info().map_or(1, |(c, _)| (1u64 << c.min(63)) - 1));
+                teb::put(p, 40, 8 + priority); // NORMAL_PRIORITY_CLASS base 8
+                teb::put(p, 44, 8 + priority);
+            }
+        }
+        1 => {
+            let (mut c, mut e, mut k, mut u) = (0u64, 0u64, 0u64, 0u64);
+            if GetThreadTimes(h, &mut c, &mut e, &mut k, &mut u) == 0 {
+                return STATUS_INVALID_HANDLE;
+            }
+            unsafe { teb::put(p, 0, [c, e, k, u]) };
+        }
+        12 => {
+            let me = kernel32::pid();
+            let alone = os_sys::proc_info(me).is_ok_and(|i| i.threads <= 1);
+            unsafe { teb::put(p, 0, alone as u32) };
+        }
+        16 => unsafe { teb::put(p, 0, 0u32) },
+        _ => unsafe { teb::put(p, 0, done as u32) },
+    }
+    STATUS_SUCCESS
+}
+
 /// The image path in NT device form (\Device\HarddiskVolume1\...).
 extern "win64" fn K32GetProcessImageFileNameW(h: u64, buf: *mut u16, size: u32) -> u32 {
-    if h != objects::CURRENT_PROCESS {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
         return fail(ERROR_ACCESS_DENIED, 0);
     }
     let Some(name) = kernel32::module_name(0) else { return fail(ERROR_GEN_FAILURE, 0) };
@@ -631,7 +898,7 @@ extern "win64" fn QueryFullProcessImageNameA(h: u64, flags: u32, buf: *mut u8, s
 }
 
 extern "win64" fn VirtualQueryEx(h: u64, addr: u64, out: *mut u8, len: usize) -> usize {
-    if h != objects::CURRENT_PROCESS {
+    if crate::process::handle_pid(h) != Some(kernel32::pid()) {
         return fail(ERROR_ACCESS_DENIED, 0);
     }
     kernel32::VirtualQuery(addr, out, len)
@@ -701,6 +968,10 @@ extern "win64" fn GetComputerNameExW(kind: u32, buf: *mut u16, size: *mut u32) -
     name_out(&w, buf, size, 0, ERROR_MORE_DATA)
 }
 
+pub fn ntdll_exports() -> Vec<(&'static str, u64)> {
+    export_table![NtQueryInformationThread]
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         GetComputerNameExW,
@@ -718,6 +989,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ProcessIdToSessionId,
         WTSGetActiveConsoleSessionId,
         SetPriorityClass,
+        GetPriorityClass,
+        SetProcessInformation,
+        GetProcessInformation,
         SetProcessShutdownParameters,
         SetErrorMode,
         GetErrorMode,
@@ -735,6 +1009,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetCurrentApplicationUserModelId,
         K32GetProcessMemoryInfo,
         K32QueryWorkingSet,
+        K32QueryWorkingSetEx,
+        K32GetMappedFileNameW,
+        K32GetPerformanceInfo,
         K32GetProcessImageFileNameW,
         QueryFullProcessImageNameA,
         VirtualQueryEx,

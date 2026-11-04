@@ -1086,6 +1086,8 @@ fn host_override(symbol: &str) -> Option<u64> {
         "IUnknown_QueryService" => Some(crate::shlwapi::IUnknown_QueryService32 as *const () as u64),
         "GetObjectW" | "GetObjectA" => Some(crate::user32::GetObjectW32 as *const () as u64),
         "GetTokenInformation" => Some(crate::tokens::GetTokenInformation32 as *const () as u64),
+        // The DATE argument arrives as two 32-bit stack slots, not in XMM0.
+        "VariantTimeToSystemTime" => Some(crate::oleaut32::VariantTimeToSystemTime32 as *const () as u64),
         "EncodePointer" => Some(layouts::EncodePointer32 as *const () as u64),
         "DecodePointer" => Some(layouts::DecodePointer32 as *const () as u64),
         "InitializeSListHead" => Some(layouts::InitializeSListHead32 as *const () as u64),

@@ -148,7 +148,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
     if !process::syscall_allowed(f.rax) {
         return osyx_abi::encode(Err(Errno::PermissionDenied));
     }
-    crate::smp::note_last_syscall(crate::smp::cached_tid(), f.rip, f.rax);
+    crate::smp::note_last_syscall(crate::smp::cached_tid(), f.rip, f.rax, f.rsp);
     crate::prof::note_syscall(crate::smp::cached_tid(), f.rax);
     // Read-only queries that touch nothing but scheduler state or atomics
     // skip the global entry lock: user timers call CLOCK very frequently.
@@ -323,6 +323,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::THREAD_PRIORITY => sched::set_priority(f.rdi, f.rsi),
         nr::THREAD_SUSPEND => sched::thread_suspend(f.rdi, f.rsi),
         nr::THREAD_TIMES => sched::thread_times(f.rdi),
+        nr::THREAD_STATE => sched::thread_state(f.rdi, f.rsi, f.rdx),
         nr::THREAD_KILL => sched::thread_kill(f.rdi, f.rsi as i32),
         nr::WORKING_SET => sys_objects::working_set(f.rdi, f.rsi, f.rdx),
         nr::PROCESS_WRITE_BARRIER => {
@@ -489,7 +490,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::SOCK_BIND => crate::net::sys_bind(f.rdi, f.rsi),
         nr::SOCK_CONNECT => crate::net::sys_connect(f.rdi, f.rsi),
         nr::SOCK_LISTEN => crate::net::sys_listen(f.rdi, f.rsi),
-        nr::SOCK_ACCEPT => crate::net::sys_accept(f.rdi, f.rsi),
+        nr::SOCK_ACCEPT => crate::net::sys_accept(f.rdi, f.rsi, f.rdx),
         nr::SOCK_SEND => crate::net::sys_send(f.rdi, f.rsi, f.rdx, f.r10, f.r8),
         nr::SOCK_RECV => crate::net::sys_recv(f.rdi, f.rsi, f.rdx, f.r10, f.r8),
         nr::SOCK_CTL => crate::net::sys_ctl(f.rdi, f.rsi, f.rdx),

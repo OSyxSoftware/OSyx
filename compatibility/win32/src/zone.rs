@@ -256,6 +256,61 @@ extern "win64" fn CompareFileTime(a: *const u64, b: *const u64) -> i32 {
     a.cmp(&b) as i32
 }
 
+/// The current offset of local time from UTC, in FILETIME units: Windows
+/// converts file times with the bias in effect now, not at the file time.
+fn current_shift() -> i64 {
+    let secs = (sysext::now_filetime() / 10_000_000) as i64 - 11_644_473_600;
+    tz::system().offset_at(secs).0 * 10_000_000
+}
+
+extern "win64" fn FileTimeToLocalFileTime(ft: *const u64, local: *mut u64) -> i32 {
+    if ft.is_null() || local.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's FILETIMEs (4-byte aligned on Windows).
+    let v = unsafe { core::ptr::read_unaligned(ft) } as i64;
+    let Some(r) = v.checked_add(current_shift()).filter(|r| *r >= 0) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    // SAFETY: as above.
+    unsafe { core::ptr::write_unaligned(local, r as u64) };
+    1
+}
+
+extern "win64" fn LocalFileTimeToFileTime(local: *const u64, ft: *mut u64) -> i32 {
+    if ft.is_null() || local.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's FILETIMEs.
+    let v = unsafe { core::ptr::read_unaligned(local) } as i64;
+    let Some(r) = v.checked_sub(current_shift()).filter(|r| *r >= 0) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    // SAFETY: as above.
+    unsafe { core::ptr::write_unaligned(ft, r as u64) };
+    1
+}
+
+/// Local SYSTEMTIME under `tzi` (NULL: the current zone) → UTC. A local
+/// time is daylight time when, read as standard time, it falls in the
+/// daylight period; a time repeated at the fall-back transition resolves
+/// to standard time, as on Windows.
+extern "win64" fn TzSpecificLocalTimeToSystemTime(tzi: u64, local: *const [u16; 8], utc: *mut [u16; 8]) -> i32 {
+    if local.is_null() || utc.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let mut ft = 0u64;
+    if sysext::SystemTimeToFileTime(local, &mut ft) == 0 {
+        return 0;
+    }
+    // SAFETY: NULL or the caller's TIME_ZONE_INFORMATION.
+    let t = if tzi == 0 { current() } else { unsafe { read_tzi(tzi) } };
+    let l = (ft / 10_000_000) as i64 - 11_644_473_600;
+    let std = l + (t.bias + t.std_bias) as i64 * 60;
+    let bias = if in_daylight(&t, std) { t.bias + t.dst_bias } else { t.bias + t.std_bias };
+    let shift = bias as i64 * 60 * 10_000_000;
+    let Some(uft) = (ft as i64).checked_add(shift).filter(|v| *v >= 0) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    // SAFETY: the caller's SYSTEMTIME.
+    unsafe { *utc = sysext::system_time(uft as u64) };
+    1
+}
+
 pub fn exports() -> alloc::vec::Vec<(&'static str, u64)> {
     export_table![
         GetTimeZoneInformation,
@@ -265,5 +320,8 @@ pub fn exports() -> alloc::vec::Vec<(&'static str, u64)> {
         GetLocalTime,
         FileTimeToSystemTime,
         CompareFileTime,
+        FileTimeToLocalFileTime,
+        LocalFileTimeToFileTime,
+        TzSpecificLocalTimeToSystemTime,
     ]
 }

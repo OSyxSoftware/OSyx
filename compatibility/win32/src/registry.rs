@@ -723,6 +723,32 @@ extern "win64" fn RegDeleteKeyW(hkey: u64, sub: *const u16) -> u32 {
     }
 }
 
+/// NtClose of a key handle: true if `h` was an open key.
+pub(crate) fn close_key(h: u64) -> bool {
+    root(h).is_none() && REG.lock().unwrap().handles.remove(&h).is_some()
+}
+
+/// NtDeleteKey: deletes the key `h` is open on (it must have no subkeys),
+/// through RegDeleteKeyW from the root of its hive.
+pub(crate) fn delete_key(h: u64) -> u32 {
+    if root(h).is_some() {
+        return ERROR_ACCESS_DENIED;
+    }
+    let (hive, path) = {
+        let mut r = REG.lock().unwrap();
+        match resolve(&mut r, h) {
+            Ok((hive, path, _)) => (hive, path),
+            Err(e) => return e,
+        }
+    };
+    if path.is_empty() {
+        return ERROR_ACCESS_DENIED;
+    }
+    let top = 0xFFFF_FFFF_0000_0000 | if hive as usize == Hive::Machine as usize { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+    let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    RegDeleteKeyW(top, wide.as_ptr())
+}
+
 const ERROR_NOACCESS: u32 = 998;
 
 /// The direct subkeys of `path` (lower-case), in name order.

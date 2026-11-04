@@ -139,6 +139,7 @@ pub fn pipe_name(win: &str) -> Option<&str> {
 
 fn wait(fd: u64, events: u32, timeout: u64) -> Result<bool, u32> {
     let mut items = [os_sys::ipc::WaitItem { handle: fd, events: events | osyx_abi::ipc::WAIT_HANGUP, revents: 0 }];
+    let _blocked = crate::stall::waiting("PipeWait", fd, events as u64);
     match os_sys::wait_handles(&mut items, timeout) {
         Ok(_) => Ok(items[0].revents != 0),
         Err(Errno::TimedOut) => Ok(false),
@@ -959,6 +960,29 @@ extern "win64" fn GetNamedPipeServerProcessId(h: u64, pid: *mut u32) -> i32 {
     1
 }
 
+/// The client's process: the peer of the connection for a server instance,
+/// this process for a client.
+extern "win64" fn GetNamedPipeClientProcessId(h: u64, pid: *mut u32) -> i32 {
+    let p = match pipe(h) {
+        Ok(p) => p,
+        Err(e) => return fail(e, 0),
+    };
+    if pid.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let id = if p.server {
+        match p.chan().and_then(|c| os_sys::channel_peer(c.0).map_err(errno_to_win32)) {
+            Ok((id, _)) => id,
+            Err(e) => return fail(e, 0),
+        }
+    } else {
+        kernel32::pid()
+    };
+    // SAFETY: the caller's out pointer.
+    unsafe { *pid = id as u32 };
+    1
+}
+
 /// Writes one message and reads the reply, in message read mode.
 #[allow(clippy::too_many_arguments)]
 extern "win64" fn TransactNamedPipe(h: u64, input: *const u8, in_len: u32, output: *mut u8, out_len: u32, read: *mut u32, ov: u64) -> i32 {
@@ -1153,6 +1177,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         DisconnectNamedPipe,
         SetNamedPipeHandleState,
         GetNamedPipeServerProcessId,
+        GetNamedPipeClientProcessId,
         TransactNamedPipe,
         WaitNamedPipeW,
     ]

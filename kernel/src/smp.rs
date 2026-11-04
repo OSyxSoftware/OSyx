@@ -432,12 +432,22 @@ pub fn rip_samples() -> [(u64, u64, u64); SAMPLE_SLOTS] {
 const LAST_SYSCALL_SLOTS: usize = 256;
 static LAST_SYSCALL_NR: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::new(0) }; LAST_SYSCALL_SLOTS];
 static LAST_SYSCALL_RIP: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::new(0) }; LAST_SYSCALL_SLOTS];
+static LAST_SYSCALL_RSP: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::new(0) }; LAST_SYSCALL_SLOTS];
 
-pub fn note_last_syscall(tid: u64, rip: u64, nr: u64) {
+pub fn note_last_syscall(tid: u64, rip: u64, nr: u64, rsp: u64) {
     if tid != 0 && (tid as usize) < LAST_SYSCALL_SLOTS {
         LAST_SYSCALL_RIP[tid as usize].store(rip, Ordering::Relaxed);
+        LAST_SYSCALL_RSP[tid as usize].store(rsp, Ordering::Relaxed);
         LAST_SYSCALL_NR[tid as usize].store(nr, Ordering::Relaxed);
     }
+}
+
+/// The user stack pointer of thread `tid`'s last system call.
+pub fn last_syscall_rsp(tid: u64) -> u64 {
+    if tid == 0 || tid as usize >= LAST_SYSCALL_SLOTS {
+        return 0;
+    }
+    LAST_SYSCALL_RSP[tid as usize].load(Ordering::Relaxed)
 }
 
 pub fn last_syscall(tid: u64) -> (u64, u64) {

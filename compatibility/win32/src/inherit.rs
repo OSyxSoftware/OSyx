@@ -67,6 +67,8 @@ const MAX_PATH_BYTES: usize = 4096;
 const SECTION_WRITABLE: u32 = 1;
 const SECTION_EXECUTABLE: u32 = 2;
 const SECTION_FILE: u32 = 4;
+/// The handle may not map views to read (no SECTION_MAP_READ).
+const SECTION_UNREADABLE: u32 = 8;
 /// One record: handle value, kind, flags, size.
 const RECORD: usize = 24;
 /// How long the parent waits for the child to collect its handles.
@@ -86,14 +88,21 @@ struct Item {
 
 fn item(h: u64) -> Result<Item, u32> {
     match objects::get(h) {
-        Some(Object::Section(s)) if s.shm != 0 && (s.file.is_none() || s.file_mapping) => Ok(Item {
-            handle: h,
-            kernel: Some(s.shm),
-            kind: KIND_SECTION,
-            flags: if s.writable { SECTION_WRITABLE } else { 0 } | if s.executable { SECTION_EXECUTABLE } else { 0 }
-                | if s.file_mapping { SECTION_FILE } else { 0 },
-            size: s.size,
-        }),
+        // The handle's own rights cross: a read-only handle to a writable
+        // section arrives read-only.
+        Some(Object::Section(s)) if s.shm != 0 && (s.file.is_none() || s.file_mapping) => {
+            let rights = objects::section_access(h).unwrap_or(objects::SECTION_ALL_ACCESS);
+            Ok(Item {
+                handle: h,
+                kernel: Some(s.shm),
+                kind: KIND_SECTION,
+                flags: if rights & objects::SECTION_MAP_WRITE != 0 { SECTION_WRITABLE } else { 0 }
+                    | if rights & objects::SECTION_MAP_EXECUTE != 0 { SECTION_EXECUTABLE } else { 0 }
+                    | if rights & objects::SECTION_MAP_READ == 0 { SECTION_UNREADABLE } else { 0 }
+                    | if s.file_mapping { SECTION_FILE } else { 0 },
+                size: s.size,
+            })
+        }
         Some(Object::Event(e)) => Ok(Item {
             handle: h,
             kernel: Some(e.share()?),
@@ -257,6 +266,11 @@ pub fn receive(name: &str) -> Result<usize, String> {
         let Some(o) = object(r, k, &[], direct) else { return Err(alloc::format!("unknown inherited object for {handle:#x}")) };
         if !objects::insert_at(handle, o) {
             return Err(alloc::format!("handle {handle:#x} is already taken"));
+        }
+        // A section handle keeps the parent handle's lack of read access.
+        let flags = u32::from_le_bytes(r[12..16].try_into().unwrap());
+        if u32::from_le_bytes(r[8..12].try_into().unwrap()) == KIND_SECTION && flags & SECTION_UNREADABLE != 0 {
+            objects::set_section_access(handle, objects::SECTION_ALL_ACCESS & !objects::SECTION_MAP_READ);
         }
         // Still inheritable in the child, as on Windows.
         objects::set_inheritable(handle, true);

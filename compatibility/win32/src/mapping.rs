@@ -167,7 +167,13 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
     let write = access & FILE_MAP_WRITE != 0;
     let copy = !write && access & FILE_MAP_COPY != 0;
     let exec = access & FILE_MAP_EXECUTE != 0;
-    if (write && !s.writable) || (exec && !s.executable) {
+    // Every view reads its pages: read, copy and write views need
+    // SECTION_MAP_READ, as on Windows; write and execute their own rights.
+    let rights = objects::section_access(section).unwrap_or(objects::SECTION_ALL_ACCESS);
+    if rights & objects::SECTION_MAP_READ == 0
+        || (write && rights & objects::SECTION_MAP_WRITE == 0)
+        || (exec && rights & objects::SECTION_MAP_EXECUTE == 0)
+    {
         return Err(STATUS_ACCESS_DENIED);
     }
     if exec && (write || copy) {
@@ -249,6 +255,17 @@ pub fn unmap(addr: u64) -> Result<(), NtStatus> {
     let v = views.remove(&base).unwrap();
     // SAFETY: a whole view made by `map`.
     unsafe { os_sys::unmap(base as *mut u8, (v.size as usize).next_multiple_of(PAGE)) }.map_err(errno_to_status)
+}
+
+/// The OSyx path of the file mapped at `addr`, for a view of a file.
+pub fn view_path(addr: u64) -> Option<String> {
+    let views = VIEWS.lock().unwrap();
+    let (&base, v) = views.range(..=addr).next_back()?;
+    let size = (v.size as usize).next_multiple_of(PAGE) as u64;
+    if addr >= base + size {
+        return None;
+    }
+    v.section.file.as_ref().map(|f| f.path.clone()).filter(|p| !p.is_empty())
 }
 
 /// What VirtualQuery reports for an address inside a view.

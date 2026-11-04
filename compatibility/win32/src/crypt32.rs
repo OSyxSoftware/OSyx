@@ -6,8 +6,8 @@
 //! names. CertGetCertificateChain builds and verifies chains against the
 //! Mozilla root store (rustls-webpki); WinVerifyTrust's Authenticode
 //! checks are not here. Stores are in-memory collections of the certificates read;
-//! OSyx has no Windows system certificate stores (CERT_STORE_PROV_SYSTEM
-//! fails with ERROR_FILE_NOT_FOUND). Also CryptBinaryToString.
+//! OSyx has no Windows system certificate stores, so system stores start
+//! empty and live for the process (extra.rs). Also CryptBinaryToString.
 #![allow(non_snake_case)]
 use crate::{
     error::*,
@@ -18,6 +18,7 @@ use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use os_std::sync::Mutex;
 
 mod encode;
+mod extra;
 pub(crate) use encode::{der, der_oid, der_uint};
 
 /// rustls-rustcrypto (whose signature verifiers the chain checks use) is
@@ -418,6 +419,23 @@ pub(crate) fn authenticode_has_signer(der: &[u8]) -> bool {
 
 struct Store {
     certs: Mutex<Vec<Vec<u8>>>,
+    /// A collection's member stores with their priorities, highest first.
+    members: Mutex<Vec<(u32, Arc<Store>)>>,
+}
+
+impl Store {
+    fn new(certs: Vec<Vec<u8>>) -> Store {
+        Store { certs: Mutex::new(certs), members: Mutex::new(Vec::new()) }
+    }
+}
+
+/// The store's own certificates, then its members' in priority order.
+fn all_certs(s: &Store) -> Vec<Vec<u8>> {
+    let mut v = s.certs.lock().unwrap().clone();
+    for (_, m) in s.members.lock().unwrap().iter() {
+        v.extend(all_certs(m));
+    }
+    v
 }
 
 struct Msg {
@@ -458,7 +476,7 @@ fn new_handle(h: &mut Handles) -> u64 {
 fn new_store(certs: Vec<Vec<u8>>) -> u64 {
     let mut h = HANDLES.lock().unwrap();
     let id = new_handle(&mut h);
-    h.stores.insert(id, Arc::new(Store { certs: Mutex::new(certs) }));
+    h.stores.insert(id, Arc::new(Store::new(certs)));
     id
 }
 
@@ -540,10 +558,11 @@ fn cert_info(b: &mut Block, at: usize, c: &Cert) {
     b.put32(at + 136, c.key.1 as u32);
     b.put32(at + 192, c.extensions.len() as u32);
     if !c.extensions.is_empty() {
-        let ext = b.reserve(24 * c.extensions.len());
+        // CERT_EXTENSION: pszObjId, fCritical (padded), Value: 32 bytes.
+        let ext = b.reserve(32 * c.extensions.len());
         b.fixups.push((at + 200, ext));
         for (i, (oid, critical, value)) in c.extensions.iter().enumerate() {
-            let e = ext + 24 * i;
+            let e = ext + 32 * i;
             let mut s = oid.clone().into_bytes();
             s.push(0);
             b.point(e, &s);
@@ -860,9 +879,11 @@ const CERT_STORE_PROV_PKCS7: u64 = 5;
 const CERT_STORE_PROV_SYSTEM_A: u64 = 9;
 const CERT_STORE_PROV_SYSTEM_W: u64 = 10;
 
-extern "win64" fn CertOpenStore(provider: u64, _encoding: u32, _prov: u64, _flags: u32, para: u64) -> u64 {
+const CERT_STORE_PROV_COLLECTION: u64 = 11;
+
+extern "win64" fn CertOpenStore(provider: u64, _encoding: u32, _prov: u64, flags: u32, para: u64) -> u64 {
     match provider {
-        CERT_STORE_PROV_MEMORY => new_store(Vec::new()),
+        CERT_STORE_PROV_MEMORY | CERT_STORE_PROV_COLLECTION => new_store(Vec::new()),
         CERT_STORE_PROV_MSG => {
             let h = HANDLES.lock().unwrap();
             let certs = h.msgs.get(&para).and_then(|m| m.decoded.as_ref()).map(|s| s.certs.clone());
@@ -886,8 +907,16 @@ extern "win64" fn CertOpenStore(provider: u64, _encoding: u32, _prov: u64, _flag
                 Err(e) => fail(e, 0),
             }
         }
-        // OSyx has no Windows system certificate stores.
-        CERT_STORE_PROV_SYSTEM_A | CERT_STORE_PROV_SYSTEM_W => fail(ERROR_FILE_NOT_FOUND, 0),
+        CERT_STORE_PROV_SYSTEM_A => {
+            // SAFETY: NULL or the caller's NUL-terminated store name.
+            let name = unsafe { path::ansi_to_string(para as *const u8) }.unwrap_or_default();
+            extra::open_system(&name, flags)
+        }
+        CERT_STORE_PROV_SYSTEM_W => {
+            // SAFETY: as above, in UTF-16.
+            let name = unsafe { path::wide_to_string(para as *const u16) }.unwrap_or_default();
+            extra::open_system(&name, flags)
+        }
         _ => fail(ERROR_NOT_SUPPORTED, 0),
     }
 }
@@ -956,7 +985,7 @@ extern "win64" fn CertFindCertificateInStore(store: u64, _encoding: u32, _flags:
     };
     // SAFETY: a CERT_NAME_BLOB / CERT_INFO / CERT_CONTEXT, per the find type.
     let blob = |p: *const u8| unsafe { core::slice::from_raw_parts(*(p.add(8) as *const u64) as *const u8, *(p as *const u32) as usize).to_vec() };
-    let certs = s.certs.lock().unwrap().clone();
+    let certs = all_certs(&s);
     for (i, der) in certs.iter().enumerate().skip(start) {
         let Ok(c) = parse_cert(der) else { continue };
         let hit = match kind {
@@ -1468,7 +1497,7 @@ extern "win64" fn CertGetCertificateChain(
     // SAFETY: the caller's out pointer.
     unsafe { *out = 0 };
     let Some(end) = context_der(ctx) else { return fail(ERROR_INVALID_PARAMETER, 0) };
-    let extra = HANDLES.lock().unwrap().stores.get(&store).map(|s| s.certs.lock().unwrap().clone()).unwrap_or_default();
+    let extra = HANDLES.lock().unwrap().stores.get(&store).map(|s| all_certs(s)).unwrap_or_default();
     let narrow = crate::wow64::is_active();
     let usage = requested_usage(para, narrow);
     let (certs, error) = build_chain(&end, &extra, chain_time(time), &usage);
@@ -1558,6 +1587,7 @@ extern "win64" fn CertFreeCertificateChain(chain: u64) {
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     let mut e = encode::exports();
+    e.extend(extra::exports());
     e.extend(export_table![
         CertCreateCertificateContext,
         CertAddCertificateContextToStore,

@@ -1069,6 +1069,50 @@ pub fn thread_suspend(tid: Tid, op: u64) -> Result<u64, osyx_abi::Errno> {
     Ok(previous)
 }
 
+/// `nr::THREAD_STATE`: a thread's state, last system call and the user
+/// stack words above its stack pointer (copied with fault fixups, so a
+/// stack that is gone ends the copy instead of faulting).
+pub fn thread_state(tid: Tid, buf: u64, cap: u64) -> Result<u64, osyx_abi::Errno> {
+    use osyx_abi::{thread_state as ts, Errno};
+    const MAX_WORDS: u64 = 4096;
+    let pid = current_pid();
+    let state = {
+        let guard = SCHED.lock();
+        let s = guard.as_ref().ok_or(Errno::NotSupported)?;
+        let t = s.threads.get(&tid).ok_or(Errno::NotFound)?;
+        if t.pid != pid {
+            return Err(Errno::PermissionDenied);
+        }
+        match t.state {
+            State::Ready => ts::READY,
+            State::Running => ts::RUNNING,
+            State::Blocked => ts::BLOCKED,
+            State::Dead => ts::DEAD,
+        }
+    };
+    let cap = cap.min(MAX_WORDS);
+    if cap < 4 {
+        return Err(Errno::InvalidArgument);
+    }
+    let (nr, rip) = crate::smp::last_syscall(tid);
+    let rsp = crate::smp::last_syscall_rsp(tid);
+    let mut out: alloc::vec::Vec<u64> = alloc::vec![state, nr, rip, rsp];
+    // The target shares the caller's address space: its stack is user
+    // memory here too. The stack pointer is the user's own value, so only
+    // user addresses are read: a pointer into the kernel copies nothing.
+    let mut at = rsp & !7;
+    while (out.len() as u64) < cap && rsp != 0 && crate::fixup::user_range_ok(at, 8) {
+        match crate::fixup::probe_read_u64(at) {
+            Ok(v) => out.push(v),
+            Err(_) => break,
+        }
+        at += 8;
+    }
+    let bytes: alloc::vec::Vec<u8> = out.iter().flat_map(|w| w.to_le_bytes()).collect();
+    crate::fixup::copy_to_user(buf, &bytes)?;
+    Ok(out.len() as u64)
+}
+
 /// `nr::THREAD_TIMES`: scheduler samples the thread has used.
 pub fn thread_times(tid: Tid) -> Result<u64, osyx_abi::Errno> {
     use osyx_abi::Errno;

@@ -462,6 +462,44 @@ pub fn age_range_in(root: u64, start: u64, end: u64, mut f: impl FnMut(u64, u64,
     }
 }
 
+/// Whether any page of `[start, end)` is mapped: tables that are absent
+/// skip their whole span, so a check of a large unmapped range costs a few
+/// lookups, not one per page.
+pub fn any_present_in(root: u64, start: u64, end: u64) -> bool {
+    if start >= end {
+        return false;
+    }
+    let _g = PAGING.lock();
+    let mut va = start;
+    while va < end {
+        let mut t = root;
+        let mut skipped = false;
+        for shift in [39u64, 30, 21] {
+            // SAFETY: page table pages reachable through the HHDM.
+            let val = unsafe { *table(t).add(((va >> shift) & 511) as usize) };
+            if val & PRESENT == 0 {
+                let span = 1u64 << shift;
+                va = ((va & !(span - 1)) + span).max(va + PAGE_SIZE);
+                skipped = true;
+                break;
+            }
+            if val & HUGE != 0 {
+                return true;
+            }
+            t = val & ADDR_MASK;
+        }
+        if skipped {
+            continue;
+        }
+        // SAFETY: as above.
+        if unsafe { *table(t).add(((va >> 12) & 511) as usize) } & PRESENT != 0 {
+            return true;
+        }
+        va += PAGE_SIZE;
+    }
+    false
+}
+
 /// Replaces the leaf at `va` (present, 4 KiB) with frame `pa` under `flags`
 /// in one step, so other threads never see the page absent. Returns the
 /// previous frame, which the caller owns afterwards.

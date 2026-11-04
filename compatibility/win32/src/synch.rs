@@ -17,6 +17,7 @@ fn wait(p: u64, expected: u32, ms: u32) -> i32 {
         return fail(ERROR_TIMEOUT, 0);
     }
     let ns = if ms == u32::MAX { 0 } else { ms as u64 * 1_000_000 };
+    let _blocked = crate::stall::waiting("ConditionOrAddressWait", p, 0);
     match os_sys::futex_wait(word(p).as_ptr(), expected, ns) {
         Ok(()) | Err(Errno::WouldBlock) => 1,
         Err(e) => fail(errno_to_win32(e), 0),

@@ -16,6 +16,35 @@ use os_sys::net::{self, SockAddr};
 use osyx_abi::Errno;
 
 mod events;
+mod overlapped;
+mod service;
+
+/// CancelIoEx (every thread's operations) and CancelIo (the calling
+/// thread's) on a socket handle (see overlapped.rs).
+pub(crate) fn cancel_socket_io(s: u64, ov: u64, own_thread_only: bool) -> bool {
+    overlapped::cancel(s, ov, own_thread_only.then(os_sys::gettid))
+}
+
+/// SetFileCompletionNotificationModes' FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
+/// (it cannot be turned off again).
+pub(crate) fn set_skip_on_success(s: u64) {
+    overlapped::set_skip(s);
+}
+
+/// Whether `s` is an open socket handle.
+pub(crate) fn is_socket(s: u64) -> bool {
+    SOCKETS.lock().unwrap().contains_key(&s)
+}
+
+/// The completion port a socket handle is associated with.
+pub(crate) fn socket_port(s: u64) -> Option<u64> {
+    overlapped::port_of(s)
+}
+
+/// CreateIoCompletionPort for a socket handle.
+pub(crate) fn associate_socket(s: u64, port: u64, key: u64) -> Result<(), u32> {
+    overlapped::associate(s, port, key)
+}
 pub(crate) mod mswsock;
 
 const INVALID_SOCKET: u64 = u64::MAX;
@@ -78,6 +107,8 @@ const WSAETIMEDOUT: u32 = 10060;
 const WSAECONNREFUSED: u32 = 10061;
 const WSAEHOSTUNREACH: u32 = 10065;
 const WSANOTINITIALISED: u32 = 10093;
+const WSA_INVALID_HANDLE: u32 = 6;
+const WSA_IO_INCOMPLETE: u32 = 996;
 const WSAHOST_NOT_FOUND: u32 = 11001;
 const WSATRY_AGAIN: u32 = 11002;
 const WSAVERNOTSUPPORTED: u32 = 10092;
@@ -145,6 +176,14 @@ struct Sock {
 }
 
 static SOCKETS: Mutex<BTreeMap<u64, Sock>> = Mutex::new(BTreeMap::new());
+
+/// Sets the blocking mode of kernel socket `fd` in every handle to it:
+/// duplicated handles (WSADuplicateSocket) share the socket's state.
+fn set_nonblocking(socks: &mut BTreeMap<u64, Sock>, fd: u64, on: bool) {
+    for k in socks.values_mut().filter(|k| k.fd == fd) {
+        k.nonblocking = on;
+    }
+}
 static NEXT: Mutex<u64> = Mutex::new(0x1000);
 static STARTED: AtomicU32 = AtomicU32::new(0);
 
@@ -307,7 +346,12 @@ extern "win64" fn closesocket(s: u64) -> i32 {
     match SOCKETS.lock().unwrap().remove(&s) {
         Some(k) => {
             events::forget(s);
-            let _ = os_sys::close(k.fd);
+            overlapped::forget(s);
+            // A socket duplicated with WSADuplicateSocket stays open
+            // until its last handle is closed.
+            if service::release_fd(k.fd) {
+                let _ = os_sys::close(k.fd);
+            }
             0
         }
         None => err(WSAENOTSOCK, SOCKET_ERROR),
@@ -334,6 +378,7 @@ extern "win64" fn connect(s: u64, addr: *const u8, len: i32) -> i32 {
     result((|| {
         let (fd, _) = fd(s)?;
         let a = read_addr(addr, len)?;
+        let _blocked = crate::stall::waiting("connect", s, 0);
         os_sys::sock_connect(fd, &a).map_err(wsa)
     })())
 }
@@ -362,7 +407,10 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
             return Err(WSAEFAULT);
         }
         events::rearm(s, 0x08);
-        let (nfd, peer) = os_sys::sock_accept(listener.fd).map_err(wsa)?;
+        let blocked = crate::stall::waiting("accept", s, 0);
+        let accepted = os_sys::sock_accept(listener.fd);
+        drop(blocked);
+        let (nfd, peer) = accepted.map_err(wsa)?;
         // Winsock accept inherits the listener's blocking mode. OSyx's
         // native accept creates a blocking endpoint, so apply it here.
         if listener.nonblocking {
@@ -463,6 +511,7 @@ extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8
         // may pass a NULL pointer, which never becomes a real slice.
         let (n, p) = (len.max(0) as usize, if len > 0 { buf } else { core::ptr::NonNull::dangling().as_ptr() });
         let data = unsafe { core::slice::from_raw_parts_mut(p, n) };
+        let _blocked = crate::stall::waiting("recv", s, 0);
         let (n, peer) = os_sys::sock_recv(fd, data, fl).map_err(wsa)?;
         write_addr(&peer, from, fromlen);
         // A datagram longer than the buffer was truncated; the bytes are
@@ -639,7 +688,11 @@ extern "win64" fn ioctlsocket(s: u64, cmd: u32, arg: *mut u32) -> i32 {
                 // SAFETY: the caller's argument.
                 let on = unsafe { *arg } != 0;
                 os_sys::sock_ctl(fd, net::ctl::NONBLOCK, on as u64).map_err(wsa)?;
-                SOCKETS.lock().unwrap().get_mut(&s).ok_or(WSAENOTSOCK)?.nonblocking = on;
+                let mut socks = SOCKETS.lock().unwrap();
+                if !socks.contains_key(&s) {
+                    return Err(WSAENOTSOCK);
+                }
+                set_nonblocking(&mut socks, fd, on);
             }
             FIONREAD => {
                 let n = os_sys::sock_ctl(fd, net::ctl::AVAILABLE, 0).map_err(wsa)?;
@@ -734,6 +787,7 @@ fn resolve(name: &str) -> Result<Vec<[u8; 4]>, u32> {
         return Ok(alloc::vec![a]);
     }
     let mut out = [[0u8; 4]; 8];
+    let _blocked = crate::stall::waiting("resolve", name.len() as u64, 0);
     let n = os_sys::resolve(name, &mut out).map_err(wsa)?;
     Ok(out[..n].to_vec())
 }
@@ -1078,8 +1132,14 @@ pub(crate) extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *c
     if crate::VERBOSE.load(Ordering::Relaxed) {
         os_std::eprintln!("winrun: WSASocket family {af}, kind {kind}, protocol {proto}, provider {}, group {group}, flags {_flags:#x}", !info.is_null());
     }
-    if !info.is_null() || group != 0 {
+    if group != 0 {
         return err(WSAEINVAL, INVALID_SOCKET);
+    }
+    if !info.is_null() {
+        if !started() {
+            return err(WSANOTINITIALISED, INVALID_SOCKET);
+        }
+        return service::socket_from_info(info);
     }
     socket(af, kind, proto)
 }
@@ -1256,27 +1316,45 @@ fn wsa_receive(fd: u64, bufs: *const u8, count: u32, fl: u64, stream: bool) -> R
     Ok((n, from, truncated))
 }
 
-/// WSASend: gathers the WSABUFs into one stream write or datagram.
-/// Completion ports are not offered, so only the synchronous form works.
-pub(crate) extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, overlapped: *mut u8, completion: u64) -> i32 {
-    let r = (|| {
-        let (fd, _) = fd(s)?;
-        check_shutdown(s, false)?;
-        if f != 0 || !overlapped.is_null() || completion != 0 {
-            return Err(WSAEOPNOTSUPP);
-        }
-        let data = wsa_gather(bufs, count)?;
-        os_sys::sock_send(fd, &data, None, 0).map_err(wsa)
-    })();
+/// The result of a WSASend-style call: the count, and for an overlapped
+/// call the completion (sends complete in the call; a failure that
+/// happens at once queues no packet, as on Windows).
+fn send_result(s: u64, r: Result<usize, u32>, sent: *mut u32, ov: *mut u8) -> i32 {
     match r {
         Ok(n) => {
             if !sent.is_null() {
                 // SAFETY: the caller's out count.
                 unsafe { *sent = n as u32 };
             }
+            if !ov.is_null() {
+                overlapped::finish_now(s, ov as u64, n);
+            }
             0
         }
         Err(e) => err(e, SOCKET_ERROR),
+    }
+}
+
+/// WSASend: gathers the WSABUFs into one stream write or datagram.
+/// Completion routines are not supported; an OVERLAPPED completes in the
+/// call (see overlapped.rs).
+pub(crate) extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, ov: *mut u8, completion: u64) -> i32 {
+    let r = (|| {
+        let (fd, _) = fd(s)?;
+        check_shutdown(s, false)?;
+        if f != 0 || completion != 0 {
+            return Err(WSAEOPNOTSUPP);
+        }
+        let data = wsa_gather(bufs, count)?;
+        if !ov.is_null() {
+            return Ok(Err((fd, data)));
+        }
+        os_sys::sock_send(fd, &data, None, 0).map_err(wsa).map(Ok)
+    })();
+    match r {
+        Ok(Err((fd, data))) => overlapped::send(s, fd, data, None, ov, sent),
+        Ok(Ok(n)) => send_result(s, Ok(n), sent, core::ptr::null_mut()),
+        Err(e) => send_result(s, Err(e), sent, core::ptr::null_mut()),
     }
 }
 
@@ -1290,28 +1368,26 @@ pub(crate) extern "win64" fn WSASendTo(
     f: u32,
     to: *const u8,
     tolen: i32,
-    overlapped: *mut u8,
+    ov: *mut u8,
     completion: u64,
 ) -> i32 {
     let r = (|| {
         let (fd, _) = fd(s)?;
         check_shutdown(s, false)?;
-        if f != 0 || !overlapped.is_null() || completion != 0 {
+        if f != 0 || completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
         let to = if to.is_null() { None } else { Some(read_addr(to, tolen)?) };
         let data = wsa_gather(bufs, count)?;
-        os_sys::sock_send(fd, &data, to.as_ref(), 0).map_err(wsa)
+        if !ov.is_null() {
+            return Ok(Err((fd, data, to)));
+        }
+        os_sys::sock_send(fd, &data, to.as_ref(), 0).map_err(wsa).map(Ok)
     })();
     match r {
-        Ok(n) => {
-            if !sent.is_null() {
-                // SAFETY: the caller's out count.
-                unsafe { *sent = n as u32 };
-            }
-            0
-        }
-        Err(e) => err(e, SOCKET_ERROR),
+        Ok(Err((fd, data, to))) => overlapped::send(s, fd, data, to, ov, sent),
+        Ok(Ok(n)) => send_result(s, Ok(n), sent, core::ptr::null_mut()),
+        Err(e) => send_result(s, Err(e), sent, core::ptr::null_mut()),
     }
 }
 
@@ -1358,16 +1434,23 @@ pub(crate) extern "win64" fn WSARecv(
     let r = (|| {
         let (fd, stream) = fd(s)?;
         check_shutdown(s, true)?;
-        if !overlapped.is_null() || completion != 0 {
+        if completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
         // SAFETY: the caller's in/out flags.
         let user_flags = if f.is_null() { 0 } else { unsafe { *f as i32 } };
         let fl = flags(user_flags)?;
+        if !overlapped.is_null() {
+            return Ok(Err(fl));
+        }
         let (n, _, truncated) = wsa_receive(fd, bufs, count, fl, stream)?;
-        Ok((n, f, truncated))
+        Ok(Ok((n, f, truncated)))
     })();
-    recv_result(r, received)
+    match r {
+        Ok(Err(fl)) => overlapped::receive(s, bufs, count, fl, overlapped, core::ptr::null_mut(), core::ptr::null_mut()),
+        Ok(Ok(v)) => recv_result(Ok(v), received),
+        Err(e) => recv_result(Err(e), received),
+    }
 }
 
 /// WSARecvFrom: like WSARecv, also returning the sender's address.
@@ -1386,7 +1469,7 @@ pub(crate) extern "win64" fn WSARecvFrom(
     let r = (|| {
         let (fd, stream) = fd(s)?;
         check_shutdown(s, true)?;
-        if !overlapped.is_null() || completion != 0 {
+        if completion != 0 {
             return Err(WSAEOPNOTSUPP);
         }
         if !from.is_null() && (fromlen.is_null() || unsafe { *fromlen } < 16) {
@@ -1395,11 +1478,18 @@ pub(crate) extern "win64" fn WSARecvFrom(
         // SAFETY: the caller's in/out flags.
         let user_flags = if f.is_null() { 0 } else { unsafe { *f as i32 } };
         let fl = flags(user_flags)?;
+        if !overlapped.is_null() {
+            return Ok(Err(fl));
+        }
         let (n, peer, truncated) = wsa_receive(fd, bufs, count, fl, stream)?;
         write_addr(&peer, from, fromlen);
-        Ok((n, f, truncated))
+        Ok(Ok((n, f, truncated)))
     })();
-    recv_result(r, received)
+    match r {
+        Ok(Err(fl)) => overlapped::receive(s, bufs, count, fl, overlapped, from, fromlen),
+        Ok(Ok(v)) => recv_result(Ok(v), received),
+        Err(e) => recv_result(Err(e), received),
+    }
 }
 
 /// WSASendMsg: WSAMSG { name, namelen, lpBuffers, dwBufferCount, Control,
@@ -1671,7 +1761,10 @@ pub(crate) extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *m
         }
     };
     let mut raw: Vec<os_sys::ipc::WaitItem> = items.iter().map(|(_, i)| *i).collect();
-    if let Err(e) = os_sys::wait_handles(&mut raw, ns) {
+    let blocked = crate::stall::waiting("select", raw.len() as u64, 0);
+    let waited = os_sys::wait_handles(&mut raw, ns);
+    drop(blocked);
+    if let Err(e) = waited {
         if e != Errno::TimedOut {
             return err(wsa(e), SOCKET_ERROR);
         }
@@ -1723,6 +1816,7 @@ pub(crate) extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *m
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     let mut e = events::exports();
+    e.extend(service::exports());
     e.extend(export_table![
         WSAStartup,
         WSACleanup,

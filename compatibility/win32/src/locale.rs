@@ -97,6 +97,11 @@ pub(crate) fn compare_ansi(a: *const u8, b: *const u8, ignore_case: bool) -> Ord
     compare(&decode(a), &decode(b), ignore_case)
 }
 
+/// Two UTF-16 strings in CompareString order.
+pub(crate) fn compare_text(a: &[u16], b: &[u16], ignore_case: bool) -> Ordering {
+    compare(&chars(a), &chars(b), ignore_case)
+}
+
 pub(crate) fn compare_wide(a: *const u16, b: *const u16, ignore_case: bool) -> Ordering {
     let (Some(x), Some(y)) = (units(a, -1), units(b, -1)) else { return Ordering::Equal };
     compare(&chars(&x), &chars(&y), ignore_case)
@@ -447,6 +452,11 @@ extern "win64" fn EnumSystemLocalesEx(proc_: u64, flags: u32, param: u64, reserv
     1
 }
 
+/// The system locale is the user's: OSyx has one locale for everything.
+extern "win64" fn GetSystemDefaultLCID() -> u32 {
+    GetUserDefaultLCID()
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         CompareStringEx,
@@ -457,6 +467,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetUserDefaultLangID,
         GetUserDefaultUILanguage,
         GetUserDefaultLCID,
+        GetSystemDefaultLCID,
         GetUserDefaultLocaleName,
         EnumSystemLocalesEx,
     ]

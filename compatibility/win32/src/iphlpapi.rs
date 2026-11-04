@@ -708,6 +708,152 @@ extern "win64" fn GetIfEntry2(row: *mut u8) -> u32 {
     0
 }
 
+/// GetIfTable2: a MIB_IF_TABLE2 (count, then MIB_IF_ROW2 rows of 1352
+/// bytes from offset 8) of every interface, freed with FreeMibTable.
+extern "win64" fn GetIfTable2(table: *mut u64) -> u32 {
+    if table.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let ifs = match list() {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(base) = crate::kernel32::heap_alloc(8 + ifs.len() * 1352, true) else {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    };
+    let mut n = 0u32;
+    for i in &ifs {
+        let row = base + 8 + n as u64 * 1352;
+        // SAFETY: a row of the fresh table; GetIfEntry2 fills it by LUID.
+        unsafe { teb::put(row, 0, iface_luid(i.flags, i.index)) };
+        if GetIfEntry2(row as *mut u8) == 0 {
+            n += 1;
+        }
+    }
+    // SAFETY: the fresh table; the caller's out pointer.
+    unsafe {
+        teb::put(base, 0, n);
+        *table = base;
+    }
+    0
+}
+
+/// GetIfTable2Ex: MibIfTableNormal (0) and MibIfTableRaw (1) are the same
+/// rows here; MibIfTableNormalWithoutStatistics (2) leaves the counters
+/// (from InOctets on, offset 1208 of each row) zero.
+extern "win64" fn GetIfTable2Ex(level: u32, table: *mut u64) -> u32 {
+    if level > 2 {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let r = GetIfTable2(table);
+    if r == 0 && level == 2 {
+        // SAFETY: the table GetIfTable2 just made: a count and its rows.
+        unsafe {
+            let base = *table;
+            let n: u32 = teb::get(base, 0);
+            for k in 0..n as u64 {
+                core::ptr::write_bytes((base + 8 + k * 1352 + 1208) as *mut u8, 0, 1352 - 1208);
+            }
+        }
+    }
+    r
+}
+
+const ERROR_INSUFFICIENT_BUFFER_IP: u32 = 122;
+const ERROR_NO_DATA: u32 = 232;
+
+/// The adapter name IP_ADAPTER_INDEX_MAP and the DHCP calls use.
+fn adapter_name(index: u8) -> alloc::string::String {
+    let g = iface_guid(index);
+    format!(
+        "\\DEVICE\\TCPIP_{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        u32::from_le_bytes([g[0], g[1], g[2], g[3]]),
+        u16::from_le_bytes([g[4], g[5]]),
+        u16::from_le_bytes([g[6], g[7]]),
+        g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]
+    )
+}
+
+/// GetInterfaceInfo: IP_INTERFACE_INFO, the count and an
+/// IP_ADAPTER_INDEX_MAP (index, WCHAR[128] name) per adapter, loopback
+/// excepted, as on Windows.
+extern "win64" fn GetInterfaceInfo(out: *mut u8, len: *mut u32) -> u32 {
+    if len.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    let ifs: Vec<_> = match list() {
+        Ok(v) => v.into_iter().filter(|i| i.flags & net::IFF_LOOPBACK == 0).collect(),
+        Err(e) => return e,
+    };
+    let need = 4 + ifs.len() * 260;
+    // SAFETY: the caller's in/out size and buffer of that size.
+    unsafe {
+        if out.is_null() || (*len as usize) < need {
+            *len = need as u32;
+            return ERROR_INSUFFICIENT_BUFFER_IP;
+        }
+        core::ptr::write_bytes(out, 0, need);
+        teb::put(out as u64, 0, ifs.len() as i32);
+        for (k, i) in ifs.iter().enumerate() {
+            let m = out as u64 + 4 + k as u64 * 260;
+            teb::put(m, 0, i.index as u32);
+            out_w(&adapter_name(i.index), (m + 4) as *mut u16, 128);
+        }
+    }
+    if ifs.is_empty() { ERROR_NO_DATA } else { 0 }
+}
+
+/// Interfaces whose lease IpReleaseAddress gave up: still DHCP adapters,
+/// so IpRenewAddress can start DHCP on them again.
+static RELEASED: Mutex<alloc::collections::BTreeSet<u8>> = Mutex::new(alloc::collections::BTreeSet::new());
+
+/// The interface of an IP_ADAPTER_INDEX_MAP, configured by DHCP.
+fn dhcp_adapter(map: *const u8) -> Result<net::NetIface, u32> {
+    if map.is_null() {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    // SAFETY: the caller's IP_ADAPTER_INDEX_MAP.
+    let index: u32 = unsafe { teb::get(map as u64, 0) };
+    let i = list()?.into_iter().find(|i| i.index as u32 == index).ok_or(ERROR_INVALID_PARAMETER)?;
+    if i.method != net::CONFIG_DHCP && !RELEASED.lock().unwrap().contains(&i.index) {
+        return Err(ERROR_NOT_SUPPORTED);
+    }
+    Ok(i)
+}
+
+/// IpReleaseAddress: gives the DHCP lease up; the adapter has no address
+/// until IpRenewAddress.
+extern "win64" fn IpReleaseAddress(map: *const u8) -> u32 {
+    let i = match dhcp_adapter(map) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let c = net::NetConfig { iface: i.index as u32, method: net::CONFIG_DOWN as u32, ..Default::default() };
+    match net::configure(&c) {
+        Ok(()) => {
+            RELEASED.lock().unwrap().insert(i.index);
+            0
+        }
+        Err(_) => ERROR_ACCESS_DENIED,
+    }
+}
+
+/// IpRenewAddress: restarts DHCP on the adapter.
+extern "win64" fn IpRenewAddress(map: *const u8) -> u32 {
+    let i = match dhcp_adapter(map) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let c = net::NetConfig { iface: i.index as u32, method: net::CONFIG_DHCP as u32, ..Default::default() };
+    match net::configure(&c) {
+        Ok(()) => {
+            RELEASED.lock().unwrap().remove(&i.index);
+            0
+        }
+        Err(_) => ERROR_ACCESS_DENIED,
+    }
+}
+
 /// NotifyAddrChange/NotifyRouteChange: OSyx's addresses and routes are
 /// fixed for the boot (see CHANGES), so a change never comes. With an
 /// OVERLAPPED the request stays pending (ERROR_IO_PENDING) until
@@ -759,12 +905,95 @@ extern "win64" fn CancelIPChangeNotify(ov: *mut u8) -> i32 {
     1
 }
 
+// ---- dhcpcsvc ------------------------------------------------------------------------------
+
+/// DhcpCApiInitialize: version 2 of the DHCP client API.
+extern "win64" fn DhcpCApiInitialize(version: *mut u32) -> u32 {
+    if !version.is_null() {
+        // SAFETY: the caller's out pointer.
+        unsafe { *version = 2 };
+    }
+    0
+}
+
+extern "win64" fn DhcpCApiCleanup() {}
+
+/// The interface an adapter name names: its interface name, its GUID in
+/// braces, or the \DEVICE\TCPIP_ form.
+fn named_adapter(name: &str) -> Option<net::NetIface> {
+    let bare = name.rsplit('_').next().unwrap_or(name);
+    list().ok()?.into_iter().find(|i| {
+        net::field(&i.name).eq_ignore_ascii_case(name) || adapter_name(i.index).rsplit('_').next().is_some_and(|g| g.eq_ignore_ascii_case(bare))
+    })
+}
+
+/// DhcpRequestParams: the options the stack's DHCP client got for the
+/// adapter: subnet mask (1), routers (3), DNS servers (6) and the lease
+/// time (51). Others (such as the WPAD URL, 252) were not given: they come
+/// back with no data, as on Windows. DHCPCAPI_PARAMS (32 bytes): flags,
+/// option id, vendor flag, data pointer, data length.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn DhcpRequestParams(
+    _flags: u32, _reserved: u64, adapter: *const u16, _class: u64, _send: u64, recd: u64, buf: *mut u8, size: *mut u32, _request_id: *const u16,
+) -> u32 {
+    if adapter.is_null() || size.is_null() || recd == 0 {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // SAFETY: the caller's NUL-terminated adapter name.
+    let Some(name) = (unsafe { crate::path::wide_to_string(adapter) }) else { return ERROR_INVALID_PARAMETER };
+    let Some(i) = named_adapter(&name) else { return ERROR_FILE_NOT_FOUND };
+    // SAFETY: the caller's DHCPCAPI_PARAMS_ARRAY.
+    let (n, params): (u32, u64) = unsafe { (teb::get(recd, 0), teb::get(recd, 8)) };
+    let dhcp = i.method == net::CONFIG_DHCP;
+    let option = |id: u32| -> Vec<u8> {
+        match id {
+            1 if dhcp => mask(i.prefix).to_vec(),
+            3 if dhcp && i.gateway != [0; 4] => i.gateway.to_vec(),
+            6 if dhcp && i.dns != [0; 4] => i.dns.to_vec(),
+            51 if dhcp && i.lease_left != 0 => (i.lease_left.min(u32::MAX as u64) as u32).to_be_bytes().to_vec(),
+            _ => Vec::new(),
+        }
+    };
+    let values: Vec<Vec<u8>> = (0..n as u64).map(|k| option(unsafe { teb::get::<u32>(params + 32 * k, 4) })).collect();
+    let need: usize = values.iter().map(Vec::len).sum();
+    // SAFETY: the caller's in/out size, buffer and parameter array.
+    unsafe {
+        if buf.is_null() || (*size as usize) < need {
+            *size = need as u32;
+            return 234; // ERROR_MORE_DATA
+        }
+        let mut at = 0usize;
+        for (k, v) in values.iter().enumerate() {
+            let p = params + 32 * k as u64;
+            if v.is_empty() {
+                teb::put(p, 16, 0u64);
+            } else {
+                core::ptr::copy_nonoverlapping(v.as_ptr(), buf.add(at), v.len());
+                teb::put(p, 16, buf as u64 + at as u64);
+            }
+            teb::put(p, 24, v.len() as u32);
+            at += v.len();
+        }
+        *size = need as u32;
+    }
+    0
+}
+
+pub fn dhcp_exports() -> Vec<(&'static str, u64)> {
+    export_table![DhcpCApiInitialize, DhcpCApiCleanup, DhcpRequestParams]
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         GetBestInterface,
         ConvertInterfaceGuidToLuid,
         ConvertInterfaceLuidToGuid,
         GetIfEntry2,
+        GetIfTable2,
+        GetIfTable2Ex,
+        GetInterfaceInfo,
+        IpReleaseAddress,
+        IpRenewAddress,
         NotifyAddrChange,
         NotifyRouteChange,
         CancelIPChangeNotify,

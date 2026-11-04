@@ -191,6 +191,20 @@ extern "win64" fn IsDebuggerPresent() -> Bool {
     FALSE
 }
 
+/// No process is debugged: OSyx has no debugger attach for Windows
+/// processes.
+extern "win64" fn CheckRemoteDebuggerPresent(h: u64, present: *mut Bool) -> Bool {
+    if h != objects::CURRENT_PROCESS && !matches!(objects::get(h), Some(Object::Process(_))) {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    if present.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *present = FALSE };
+    TRUE
+}
+
 extern "win64" fn OutputDebugStringA(s: *const u8) {
     // SAFETY: the caller passes a NUL-terminated string.
     if let Some(s) = unsafe { sa(s) } {
@@ -244,6 +258,23 @@ extern "win64" fn AllocConsole() -> Bool {
     fail(ERROR_ACCESS_DENIED, FALSE)
 }
 
+/// The process's console is its standard output stream, which OSyx keeps
+/// for the process's life: detaching succeeds and leaves the standard
+/// handles as they are, as Windows does.
+extern "win64" fn FreeConsole() -> Bool {
+    TRUE
+}
+
+/// The console is a window-less text stream, never full screen.
+extern "win64" fn GetConsoleDisplayMode(flags: *mut u32) -> Bool {
+    if flags.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *flags = 0 };
+    TRUE
+}
+
 /// CONSOLE_SCREEN_BUFFER_INFO for the text console: OSyx's console is a
 /// stream with no cursor or size to query, so the classic 80x25 window on
 /// an 80x300 buffer is reported.
@@ -288,6 +319,22 @@ extern "win64" fn SetCommState(h: u64, _dcb: *const u8) -> Bool {
 }
 
 extern "win64" fn SetCommTimeouts(h: u64, _t: *const u8) -> Bool {
+    comm(h)
+}
+
+extern "win64" fn ClearCommError(h: u64, _errors: *mut u32, _stat: *mut u8) -> Bool {
+    comm(h)
+}
+
+extern "win64" fn EscapeCommFunction(h: u64, _function: u32) -> Bool {
+    comm(h)
+}
+
+extern "win64" fn GetCommModemStatus(h: u64, _status: *mut u32) -> Bool {
+    comm(h)
+}
+
+extern "win64" fn PurgeComm(h: u64, _flags: u32) -> Bool {
     comm(h)
 }
 
@@ -907,10 +954,13 @@ extern "win64" fn GetOverlappedResult(h: u64, ov: *const u8, n: *mut u32, wait: 
     TRUE
 }
 
-/// Nothing is ever pending (see complete_overlapped): for CancelIoEx,
-/// as on Windows, that is ERROR_NOT_FOUND.
-extern "win64" fn CancelIoEx(h: u64, _ov: *const u8) -> Bool {
+/// Pipe operations, directory watches and socket receives can be pending;
+/// with nothing to cancel, as on Windows, the result is ERROR_NOT_FOUND.
+extern "win64" fn CancelIoEx(h: u64, ov: *const u8) -> Bool {
     match objects::get(h) {
+        None if crate::ws2_32::is_socket(h) => {
+            if crate::ws2_32::cancel_socket_io(h, ov as u64, false) { TRUE } else { fail(ERROR_NOT_FOUND, FALSE) }
+        }
         None => fail(ERROR_INVALID_HANDLE, FALSE),
         Some(Object::Pipe(p)) if crate::pipes::cancel(&p) => TRUE,
         Some(Object::File(_)) if crate::client64::cancel_dir_watch(h) => TRUE,
@@ -937,10 +987,15 @@ extern "win64" fn DeviceIoControl(h: u64, _code: u32, _i: u64, _il: u32, _o: u64
     fail(ERROR_INVALID_FUNCTION, FALSE)
 }
 
-/// Nothing is ever pending (see complete_overlapped): there is nothing to
-/// cancel for a valid handle.
+/// Cancels the handle's pending operations (pipes, directory watches,
+/// socket receives); a valid handle with none succeeds too.
 extern "win64" fn CancelIo(h: u64) -> Bool {
     match objects::get(h) {
+        // CancelIo cancels the calling thread's operations only.
+        None if crate::ws2_32::is_socket(h) => {
+            crate::ws2_32::cancel_socket_io(h, 0, true);
+            TRUE
+        }
         None => fail(ERROR_INVALID_HANDLE, FALSE),
         Some(Object::Pipe(p)) => {
             crate::pipes::cancel(&p);
@@ -1369,6 +1424,11 @@ extern "win64" fn GetTempPathA(size: u32, buf: *mut u8) -> u32 {
     out_a("C:\\tmp\\", buf, size)
 }
 
+/// GetTempPath2W: for a process not running as SYSTEM, GetTempPathW's.
+extern "win64" fn GetTempPath2W(size: u32, buf: *mut u16) -> u32 {
+    GetTempPathW(size, buf)
+}
+
 extern "win64" fn GetTempPathW(size: u32, buf: *mut u16) -> u32 {
     out_w("C:\\tmp\\", buf, size)
 }
@@ -1526,11 +1586,16 @@ extern "win64" fn DuplicateHandle(
                 }
             }
         }
+        // A process handle to this process: an open one's object, or a new
+        // one (as OpenProcess makes for its own id).
         objects::CURRENT_PROCESS => {
             let id = pid();
             match objects::find(|o| matches!(o, Object::Process(p) if p.pid == id)) {
                 Some(o) => o,
-                None => return fail(ERROR_INVALID_HANDLE, FALSE),
+                None => match crate::process::process_for_pid(id) {
+                    Some(p) => Object::Process(p),
+                    None => return fail(ERROR_INVALID_HANDLE, FALSE),
+                },
             }
         }
         _ => match objects::get(src) {
@@ -1547,7 +1612,29 @@ extern "win64" fn DuplicateHandle(
         if rights & !token.access != 0 { return fail(ERROR_ACCESS_DENIED,FALSE); }
         o=Object::Token(Arc::new(crate::security::Token {access:rights,..(**token).clone()}));
     }
+    // A section handle gets the rights asked for, never more than the
+    // source handle has (DUPLICATE_SAME_ACCESS: the same).
+    let section_rights = match &o {
+        Object::Section(_) => {
+            let have = objects::section_access(src).unwrap_or(objects::SECTION_ALL_ACCESS);
+            let want = if options & 2 != 0 {
+                have
+            } else if access & 0x0200_0000 != 0 {
+                have // MAXIMUM_ALLOWED
+            } else {
+                crate::objsec::map_generic(access, &crate::objsec::SECTION) & objects::SECTION_ALL_ACCESS
+            };
+            if want & !have != 0 {
+                return fail(ERROR_ACCESS_DENIED, FALSE);
+            }
+            Some(want)
+        }
+        _ => None,
+    };
     let h = objects::insert(o);
+    if let Some(r) = section_rights {
+        objects::set_section_access(h, r);
+    }
     if inherit != 0 {
         objects::set_inheritable(h, true);
     }
@@ -1680,6 +1767,16 @@ pub(crate) fn register_main_thread() {
     });
     register_thread(tid, &t);
     *MAIN_THREAD.lock().unwrap() = Some(t);
+}
+
+/// The live Windows threads of this process: (thread id, TEB).
+pub(crate) fn thread_list() -> Vec<(u32, u64)> {
+    THREADS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(&tid, w)| w.upgrade().filter(|t| !t.done.load(Ordering::SeqCst)).map(|t| (tid, t.teb.load(Ordering::SeqCst))))
+        .collect()
 }
 
 /// Records a thread's object by id, so later lookups find the same one.
@@ -1909,12 +2006,129 @@ extern "win64" fn OsyxThreadPriorityInfo(tid: u32) -> u64 {
     os_sys::thread_priority(tid as u64, osyx_abi::priority::INFO).unwrap_or(0)
 }
 
-extern "win64" fn GetThreadPriority(h: u64) -> i32 {
+pub(crate) extern "win64" fn GetThreadPriority(h: u64) -> i32 {
     let tid = GetThreadId(h);
     if tid == 0 {
         return 0x7FFF_FFFF; // THREAD_PRIORITY_ERROR_RETURN
     }
     PRIORITIES.lock().unwrap().get(&tid).copied().unwrap_or(0)
+}
+
+/// Threads whose dynamic priority boost is disabled, by thread id. OSyx's
+/// scheduler boosts waking threads itself; the setting is kept so it reads
+/// back.
+static BOOST_DISABLED: Mutex<alloc::collections::BTreeSet<u32>> = Mutex::new(alloc::collections::BTreeSet::new());
+
+extern "win64" fn SetThreadPriorityBoost(h: u64, disable: Bool) -> Bool {
+    let tid = GetThreadId(h);
+    if tid == 0 {
+        return FALSE;
+    }
+    let mut set = BOOST_DISABLED.lock().unwrap();
+    if disable != FALSE {
+        set.insert(tid);
+    } else {
+        set.remove(&tid);
+    }
+    TRUE
+}
+
+extern "win64" fn GetThreadPriorityBoost(h: u64, disabled: *mut Bool) -> Bool {
+    let tid = GetThreadId(h);
+    if tid == 0 {
+        return FALSE;
+    }
+    if disabled.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *disabled = b(BOOST_DISABLED.lock().unwrap().contains(&tid)) };
+    TRUE
+}
+
+/// A 64-bit thread has no WOW64 context: this process runs x64 code on its
+/// own threads (32-bit code runs through crate::wow64, not as a WOW64
+/// thread of another process).
+extern "win64" fn Wow64GetThreadContext(h: u64, ctx: *mut u8) -> Bool {
+    if GetThreadId(h) == 0 {
+        return FALSE;
+    }
+    if ctx.is_null() {
+        return fail(ERROR_NOACCESS, FALSE);
+    }
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
+const ALL_PROCESSOR_GROUPS: u16 = 0xFFFF;
+
+/// The CPUs OSyx schedules on, all in group 0.
+fn processor_count() -> u32 {
+    os_sys::cpu_info().map_or(1, |(count, _)| count as u32)
+}
+
+extern "win64" fn GetActiveProcessorCount(group: u16) -> u32 {
+    match group {
+        0 | ALL_PROCESSOR_GROUPS => processor_count(),
+        _ => fail(ERROR_INVALID_PARAMETER, 0),
+    }
+}
+
+extern "win64" fn GetMaximumProcessorCount(group: u16) -> u32 {
+    GetActiveProcessorCount(group)
+}
+
+extern "win64" fn GetActiveProcessorGroupCount() -> u16 {
+    1
+}
+
+extern "win64" fn GetMaximumProcessorGroupCount() -> u16 {
+    1
+}
+
+/// OSyx boots through UEFI only.
+extern "win64" fn GetFirmwareType(kind: *mut u32) -> Bool {
+    if kind.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    // SAFETY: the caller's out pointer.
+    unsafe { *kind = 2 }; // FirmwareTypeUefi
+    TRUE
+}
+
+/// DiscardVirtualMemory: the contents of committed private pages are no
+/// longer needed. The frames go back to the system and the pages stay
+/// committed; a later access sees zeros. Returns a Win32 error code.
+extern "win64" fn DiscardVirtualMemory(addr: u64, size: usize) -> u32 {
+    let page = mem::PAGE as u64;
+    if addr == 0 || size == 0 || addr % page != 0 {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // A range that wraps the address space is invalid.
+    let Some(end) = addr.checked_add(size as u64).and_then(|e| e.checked_next_multiple_of(page)) else { return ERROR_INVALID_PARAMETER };
+    let mut at = addr;
+    while at < end {
+        match mem::virtual_query(at) {
+            Some(i) if i.state == mem::MEM_COMMIT && i.kind == mem::MEM_PRIVATE => at = i.base + i.size,
+            _ => return ERROR_INVALID_PARAMETER,
+        }
+    }
+    // SAFETY: committed private pages whose contents the caller discards.
+    match unsafe { os_sys::discard(addr as *mut u8, (end - addr) as usize) } {
+        Ok(()) => ERROR_SUCCESS,
+        Err(e) => errno_to_win32(e),
+    }
+}
+
+/// OSyx never pages memory out, so every committed page is resident and
+/// there is nothing to read ahead.
+extern "win64" fn PrefetchVirtualMemory(process: u64, count: usize, entries: *const u8, _flags: u32) -> Bool {
+    if process != objects::CURRENT_PROCESS && !matches!(objects::get(process), Some(Object::Process(_))) {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    if count == 0 || entries.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    TRUE
 }
 
 /// Thread descriptions (SetThreadDescription) by thread id, as UTF-16.
@@ -1986,7 +2200,10 @@ extern "win64" fn GetThreadDescription(h: u64, out: *mut u64) -> u32 {
 extern "win64" fn Sleep(ms: u32) {
     if ms == 0 {
         os_std::thread::yield_now();
-    } else if ms == u32::MAX {
+        return;
+    }
+    let _blocked = crate::stall::waiting("Sleep", ms as u64, 0);
+    if ms == u32::MAX {
         loop {
             os_std::thread::sleep(core::time::Duration::from_secs(3600));
         }
@@ -2231,6 +2448,7 @@ pub(crate) extern "win64" fn EnterCriticalSection(cs: u64) {
         while w.swap(2, Ordering::Acquire) != 0 {
             // The holder (an OSyx thread id, as in the TEB) inherits this
             // thread's priority while it waits.
+            let _blocked = crate::stall::waiting("EnterCriticalSection", cs, cs_owner(cs) as u64);
             let _ = os_sys::futex_wait_owned(w.as_ptr(), 2, 0, cs_owner(cs));
         }
     }
@@ -2284,6 +2502,7 @@ pub(crate) extern "win64" fn AcquireSRWLockExclusive(l: u64) {
         if w.compare_exchange(0, SRW_WRITER, Ordering::Acquire, Ordering::Relaxed).is_ok() { return; }
         let old = w.load(Ordering::Relaxed);
         if old != 0 {
+            let _blocked = crate::stall::waiting("AcquireSRWLockExclusive", l, old as u64);
             let _ = os_sys::futex_wait(w.as_ptr(), old, 0);
         }
     }
@@ -2312,6 +2531,7 @@ pub(crate) extern "win64" fn AcquireSRWLockShared(l: u64) {
     while TryAcquireSRWLockShared(l) == 0 {
         let old = w.load(Ordering::Relaxed);
         if old & SRW_WRITER != 0 {
+            let _blocked = crate::stall::waiting("AcquireSRWLockShared", l, old as u64);
             let _ = os_sys::futex_wait(w.as_ptr(), old, 0);
         }
     }
@@ -2324,6 +2544,35 @@ pub(crate) extern "win64" fn ReleaseSRWLockShared(l: u64) {
 /// An unnamed event, for objects that are waitable events on Windows too.
 pub(crate) fn new_event(manual: bool, initial: bool) -> u64 {
     objects::insert(Object::Event(EventObj::new(initial, manual, None)))
+}
+
+/// The SECURITY_ATTRIBUTES of a new event, mutex or semaphore: whether its
+/// handle is inheritable, and the descriptor it keeps (objsec.rs reports
+/// it back; these objects live in this process, so a descriptor that
+/// restricts other users has no one else to restrict).
+///
+/// Opening an existing named object ignores the descriptor, as on Windows.
+pub(crate) fn sync_attributes(attributes: u64, mapping: &crate::objsec::Mapping, name: Option<&str>) -> Result<(bool, Option<crate::objsec::Sd>), u32> {
+    let inherit = crate::security::inherit_flag(attributes);
+    if name.is_some_and(|n| objects::find_named(n).is_some()) {
+        return Ok((inherit, None));
+    }
+    let sd = crate::objsec::initial_sd(attributes, mapping)?;
+    Ok((inherit, sd))
+}
+
+/// Applies the attributes to a new object's handle `h`: a named object
+/// that already existed keeps its own descriptor, as on Windows.
+pub(crate) fn finish_sync(h: u64, inherit: bool, sd: Option<crate::objsec::Sd>) -> u64 {
+    if h != 0 {
+        if teb::last_error() != ERROR_ALREADY_EXISTS {
+            crate::objsec::set_initial(h, sd);
+        }
+        if inherit {
+            objects::set_inheritable(h, true);
+        }
+    }
+    h
 }
 
 pub(crate) fn create_event(manual: bool, initial: bool, name: Option<String>) -> u64 {
@@ -2371,33 +2620,24 @@ extern "win64" fn OpenFileMappingA(_access: u32, inherit: Bool, name: *const u8)
 }
 
 extern "win64" fn CreateEventA(attributes: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
-    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, 0) };
     // SAFETY: NULL or NUL-terminated name.
-    let h = create_event(manual != 0, initial != 0, unsafe { sa(name) });
-    if inherit && h != 0 {
-        objects::set_inheritable(h, true);
-    }
-    h
+    let name = unsafe { sa(name) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    finish_sync(create_event(manual != 0, initial != 0, name), inherit, sd)
 }
 
 extern "win64" fn CreateEventW(attributes: u64, manual: Bool, initial: Bool, name: *const u16) -> u64 {
-    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, 0) };
     // SAFETY: as above.
-    let h = create_event(manual != 0, initial != 0, unsafe { sw(name) });
-    if inherit && h != 0 {
-        objects::set_inheritable(h, true);
-    }
-    h
+    let name = unsafe { sw(name) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    finish_sync(create_event(manual != 0, initial != 0, name), inherit, sd)
 }
 
 extern "win64" fn CreateEventExW(attributes: u64, name: *const u16, flags: u32, _access: u32) -> u64 {
-    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, 0) };
     // SAFETY: as above.
-    let h = create_event(flags & 1 != 0, flags & 2 != 0, unsafe { sw(name) });
-    if inherit && h != 0 {
-        objects::set_inheritable(h, true);
-    }
-    h
+    let name = unsafe { sw(name) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    finish_sync(create_event(flags & 1 != 0, flags & 2 != 0, name), inherit, sd)
 }
 
 /// Signals an event for code that is not a Windows caller (registry
@@ -2439,15 +2679,17 @@ fn create_mutex(owned: bool, name: Option<String>) -> u64 {
 }
 
 extern "win64" fn CreateMutexA(attributes: u64, owned: Bool, name: *const u8) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     // SAFETY: NULL or NUL-terminated name.
-    create_mutex(owned != 0, unsafe { sa(name) })
+    let name = unsafe { sa(name) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    finish_sync(create_mutex(owned != 0, name), inherit, sd)
 }
 
 extern "win64" fn CreateMutexW(attributes: u64, owned: Bool, name: *const u16) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
     // SAFETY: as above.
-    create_mutex(owned != 0, unsafe { sw(name) })
+    let name = unsafe { sw(name) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    finish_sync(create_mutex(owned != 0, name), inherit, sd)
 }
 
 extern "win64" fn ReleaseMutex(h: u64) -> Bool {
@@ -2468,11 +2710,12 @@ extern "win64" fn ReleaseMutex(h: u64) -> Bool {
 }
 
 pub(crate) extern "win64" fn CreateSemaphoreA(attributes: u64, initial: i32, max: i32, _name: *const u8) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, None) { Ok(v) => v, Err(e) => return fail(e, 0) };
     if max <= 0 || initial < 0 || initial > max {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    objects::insert(Object::Semaphore(Arc::new(SemaphoreObj { count: Mutex::new(initial), max })))
+    teb::set_last_error(ERROR_SUCCESS);
+    finish_sync(objects::insert(Object::Semaphore(Arc::new(SemaphoreObj { count: Mutex::new(initial), max }))), inherit, sd)
 }
 
 extern "win64" fn CreateSemaphoreW(sa_: u64, initial: i32, max: i32, _name: *const u16) -> u64 {
@@ -3226,6 +3469,55 @@ pub(crate) extern "win64" fn GetModuleFileNameW(h: u64, buf: *mut u16, size: u32
     }
 }
 
+/// SetFileCompletionNotificationModes: FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
+/// (1) and FILE_SKIP_SET_EVENT_ON_HANDLE (2). Sockets honour the first (an
+/// operation that completes in the call queues no packet); handles whose
+/// I/O completes synchronously have no packets to skip.
+extern "win64" fn SetFileCompletionNotificationModes(h: u64, flags: u8) -> Bool {
+    if flags & !3 != 0 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    if crate::ws2_32::is_socket(h) {
+        // A mode once set stays set: a later call without it changes nothing.
+        if flags & 1 != 0 {
+            crate::ws2_32::set_skip_on_success(h);
+        }
+        return TRUE;
+    }
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    }
+    TRUE
+}
+
+/// CompareObjectHandles: whether two handles name the same kernel object.
+/// A pseudo-handle names this process or thread: a real handle to it is
+/// the same object.
+extern "win64" fn CompareObjectHandles(first: u64, second: u64) -> Bool {
+    let me = |h: u64| -> Option<bool> {
+        match h {
+            objects::CURRENT_PROCESS => Some(true),
+            objects::CURRENT_THREAD => Some(false),
+            _ => None,
+        }
+    };
+    let names_me = |pseudo: bool, h: u64| match objects::get(h) {
+        Some(Object::Process(p)) if pseudo => p.pid == pid(),
+        Some(Object::Thread(t)) if !pseudo => t.tid.load(Ordering::SeqCst) as u64 == teb::current_tid(),
+        _ => false,
+    };
+    match (me(first), me(second)) {
+        (Some(a), Some(c)) => b(a == c),
+        (Some(a), None) => b(names_me(a, second)),
+        (None, Some(c)) => b(names_me(c, first)),
+        (None, None) => objects::same_object(first, second).map_or(FALSE, b),
+    }
+}
+
+/// Failed lookups are reported (the first few): a missing function makes
+/// delay-loading callers crash far from the cause.
+static PROC_MISSES: AtomicU32 = AtomicU32::new(0);
+
 extern "win64" fn GetProcAddress(h: u64, name: *const u8) -> u64 {
     let sym_name;
     let sym = if (name as u64) < 0x10000 {
@@ -3239,7 +3531,7 @@ extern "win64" fn GetProcAddress(h: u64, name: *const u8) -> u64 {
         Symbol::Name(&sym_name)
     };
     loader::get_proc_address(h, sym).unwrap_or_else(|e| {
-        if crate::VERBOSE.load(Ordering::Relaxed) {
+        if crate::VERBOSE.load(Ordering::Relaxed) || PROC_MISSES.fetch_add(1, Ordering::Relaxed) < 32 {
             let module = loader::where_is(h).map_or_else(|| alloc::format!("{h:#x}"), |(m, _)| m);
             match sym {
                 Symbol::Name(n) => os_std::eprintln!("winrun: GetProcAddress({module}, {n}) failed"),
@@ -3420,6 +3712,26 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetLastError,
         SetLastError,
         IsDebuggerPresent,
+        CheckRemoteDebuggerPresent,
+        CompareObjectHandles,
+        GetTempPath2W,
+        SetFileCompletionNotificationModes,
+        FreeConsole,
+        GetConsoleDisplayMode,
+        ClearCommError,
+        EscapeCommFunction,
+        GetCommModemStatus,
+        PurgeComm,
+        SetThreadPriorityBoost,
+        GetThreadPriorityBoost,
+        Wow64GetThreadContext,
+        GetActiveProcessorCount,
+        GetMaximumProcessorCount,
+        GetActiveProcessorGroupCount,
+        GetMaximumProcessorGroupCount,
+        GetFirmwareType,
+        DiscardVirtualMemory,
+        PrefetchVirtualMemory,
         OutputDebugStringA,
         OutputDebugStringW,
         SetUnhandledExceptionFilter,

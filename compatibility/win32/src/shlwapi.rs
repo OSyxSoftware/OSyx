@@ -640,8 +640,24 @@ extern "win64" fn WindowsCompareStringOrdinal(a: u64, b: u64, out: *mut i32) -> 
     S_OK
 }
 
+/// RoInitialize: COM for the Windows Runtime: RO_INIT_SINGLETHREADED (0)
+/// is an STA, RO_INIT_MULTITHREADED (1) the MTA.
+extern "win64" fn RoInitialize(kind: u32) -> u32 {
+    match kind {
+        0 => crate::ole32::co_initialize(true),
+        1 => crate::ole32::co_initialize(false),
+        _ => 0x8007_0057, // E_INVALIDARG
+    }
+}
+
+extern "win64" fn RoUninitialize() {
+    crate::ole32::co_uninitialize();
+}
+
 pub fn combase_exports() -> Vec<(&'static str, u64)> {
     export_table![
+        RoInitialize,
+        RoUninitialize,
         WindowsCreateStringReference,
         WindowsCreateString,
         WindowsDeleteString,
