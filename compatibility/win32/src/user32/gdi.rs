@@ -1308,6 +1308,10 @@ extern "win64" fn ExtCreateRegion(transform: *const Xform, size: u32, data: *con
         insert_region(region)
     }
 }
+/// PtInRegion: whether the point is inside the region.
+extern "win64" fn PtInRegion(rgn: u64, x: i32, y: i32) -> i32 {
+    with(|g| g.regions.get(&rgn).is_some_and(|r| r.contains(x, y)) as i32)
+}
 extern "win64" fn GetRgnBox(rgn: u64, out: *mut u8) -> i32 {
     if out.is_null() {
         return 0;
@@ -2510,6 +2514,7 @@ pub(super) fn exports() -> Vec<(&'static str, u64)> {
         ExtCreateRegion,
         GetClipRgn,
         GetRgnBox,
+        PtInRegion,
         GetRegionData,
         GetRandomRgn,
         OffsetRgn,

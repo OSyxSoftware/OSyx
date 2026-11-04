@@ -8010,6 +8010,13 @@ pub(crate) extern "win64" fn SendMessageTimeoutW(wnd: u64, msg: u32, wparam: u64
     1
 }
 
+/// CallWindowProcA: as CallWindowProcW, since windows of this runtime
+/// process messages the same way for both character sets (SendMessageA is
+/// SendMessageW too).
+extern "win64" fn CallWindowProcA(proc_: u64, wnd: u64, msg: u32, wparam: u64, lparam: i64) -> i64 {
+    CallWindowProcW(proc_, wnd, msg, wparam, lparam)
+}
+
 extern "win64" fn CallWindowProcW(proc_: u64, wnd: u64, msg: u32, wparam: u64, lparam: i64) -> i64 {
     if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && matches!(msg, WM_CHAR | WM_KEYDOWN | WM_KEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP) {
         os_std::eprintln!("winrun: callwndproc msg={msg:#x} hwnd={wnd:#x} w={wparam:#x}");
@@ -8490,6 +8497,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         UnregisterPowerSettingNotification,
         SendNotifyMessageW,
         SendMessageTimeoutW,
+        CallWindowProcA,
         CallWindowProcW,
         GetDisplayConfigBufferSizes,
         QueryDisplayConfig,
