@@ -501,7 +501,10 @@ pub fn initial_sd(sa: u64, mapping: &Mapping) -> Result<Option<Sd>, u32> {
         // that may own objects; any other owner is ERROR_INVALID_OWNER.
         let token = tokens::effective();
         let data = tokens::effective_data();
-        let assignable = o == tokens::user_sid(token.uid)
+        // An enabled SeRestorePrivilege (LUID 18) may name any owner.
+        let restore = data.privileges.iter().any(|&(l, a)| l == 18 && a & tokens::SE_PRIVILEGE_ENABLED != 0);
+        let assignable = restore
+            || o == tokens::user_sid(token.uid)
             || tokens::groups(token.uid, token.gid, &data).iter().any(|(s, a)| *s == o && a & tokens::SE_GROUP_OWNER != 0);
         if !assignable {
             return Err(ERROR_INVALID_OWNER);

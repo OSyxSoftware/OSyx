@@ -288,9 +288,9 @@ extern "win64" fn LocalFileTimeToFileTime(local: *const u64, ft: *mut u64) -> i3
 }
 
 /// Local SYSTEMTIME under `tzi` (NULL: the current zone) → UTC. A local
-/// time is standard time unless the instant it names under the daylight
-/// bias falls in daylight time; a time skipped or repeated at a transition
-/// resolves to standard time, as on Windows.
+/// time is daylight time when, read as standard time, it falls in the
+/// daylight period; a time repeated at the fall-back transition resolves
+/// to standard time, as on Windows.
 extern "win64" fn TzSpecificLocalTimeToSystemTime(tzi: u64, local: *const [u16; 8], utc: *mut [u16; 8]) -> i32 {
     if local.is_null() || utc.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -303,8 +303,7 @@ extern "win64" fn TzSpecificLocalTimeToSystemTime(tzi: u64, local: *const [u16; 
     let t = if tzi == 0 { current() } else { unsafe { read_tzi(tzi) } };
     let l = (ft / 10_000_000) as i64 - 11_644_473_600;
     let std = l + (t.bias + t.std_bias) as i64 * 60;
-    let dst = l + (t.bias + t.dst_bias) as i64 * 60;
-    let bias = if !in_daylight(&t, std) && in_daylight(&t, dst) { t.bias + t.dst_bias } else { t.bias + t.std_bias };
+    let bias = if in_daylight(&t, std) { t.bias + t.dst_bias } else { t.bias + t.std_bias };
     let shift = bias as i64 * 60 * 10_000_000;
     let Some(uft) = (ft as i64).checked_add(shift).filter(|v| *v >= 0) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     // SAFETY: the caller's SYSTEMTIME.

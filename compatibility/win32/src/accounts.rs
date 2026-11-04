@@ -20,7 +20,7 @@ const ERROR_INVALID_SID: u32 = 1337;
 const ERROR_SERVICE_DOES_NOT_EXIST: u32 = 1060;
 const SID_TYPE_USER: u32 = 1;
 
-fn user_name(uid: u32) -> String {
+pub(crate) fn user_name(uid: u32) -> String {
     if uid == 0 {
         return String::from("root");
     }

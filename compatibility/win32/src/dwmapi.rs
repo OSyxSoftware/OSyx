@@ -700,8 +700,8 @@ extern "win64" fn WTSQuerySessionInformationW(_server: u64, session: u32, class:
         return fail(7022, FALSE); // ERROR_CTX_WINSTATION_NOT_FOUND
     }
     let text = |s: &str| -> Vec<u8> { s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect() };
-    let user = crate::kernel32::env_get("USERNAME").unwrap_or_else(|| alloc::string::String::from("user"));
-    let domain = crate::kernel32::env_get("COMPUTERNAME").unwrap_or_else(|| alloc::string::String::from("OSYX"));
+    let user = crate::accounts::current_user_name();
+    let domain = crate::accounts::computer_name();
     let data: Vec<u8> = match class {
         0..=3 | 10 | 11 => text(""),         // initial program, application, directories, OEM id, client name
         4 => SESSION.to_le_bytes().to_vec(), // WTSSessionId

@@ -805,7 +805,14 @@ fn receive_response(r: &mut Request, via: &Route) -> Result<(), u32> {
         return Err(ERROR_WINHTTP_INCORRECT_HANDLE_STATE);
     }
     for _ in 0..=MAX_REDIRECTS {
-        let resp = read_head(r)?;
+        // Interim responses (100 Continue, 103 Early Hints) precede the
+        // final one; 101 switches protocols and is final.
+        let resp = loop {
+            let head = read_head(r)?;
+            if !(100..200).contains(&head.status) || head.status == 101 {
+                break head;
+            }
+        };
         let no_body = r.verb == "HEAD" || resp.status == 204 || resp.status == 304 || (100..200).contains(&resp.status);
         r.body = if no_body {
             Body::None

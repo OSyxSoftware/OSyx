@@ -738,13 +738,25 @@ extern "win64" fn GetIfTable2(table: *mut u64) -> u32 {
     0
 }
 
-/// GetIfTable2Ex: both levels (normal, and without statistics) are the
-/// same rows here: the statistics are counters the stack keeps anyway.
+/// GetIfTable2Ex: MibIfTableNormal (0) and MibIfTableRaw (1) are the same
+/// rows here; MibIfTableNormalWithoutStatistics (2) leaves the counters
+/// (from InOctets on, offset 1208 of each row) zero.
 extern "win64" fn GetIfTable2Ex(level: u32, table: *mut u64) -> u32 {
-    if level > 1 {
+    if level > 2 {
         return ERROR_INVALID_PARAMETER;
     }
-    GetIfTable2(table)
+    let r = GetIfTable2(table);
+    if r == 0 && level == 2 {
+        // SAFETY: the table GetIfTable2 just made: a count and its rows.
+        unsafe {
+            let base = *table;
+            let n: u32 = teb::get(base, 0);
+            for k in 0..n as u64 {
+                core::ptr::write_bytes((base + 8 + k * 1352 + 1208) as *mut u8, 0, 1352 - 1208);
+            }
+        }
+    }
+    r
 }
 
 const ERROR_INSUFFICIENT_BUFFER_IP: u32 = 122;
@@ -791,6 +803,10 @@ extern "win64" fn GetInterfaceInfo(out: *mut u8, len: *mut u32) -> u32 {
     if ifs.is_empty() { ERROR_NO_DATA } else { 0 }
 }
 
+/// Interfaces whose lease IpReleaseAddress gave up: still DHCP adapters,
+/// so IpRenewAddress can start DHCP on them again.
+static RELEASED: Mutex<alloc::collections::BTreeSet<u8>> = Mutex::new(alloc::collections::BTreeSet::new());
+
 /// The interface of an IP_ADAPTER_INDEX_MAP, configured by DHCP.
 fn dhcp_adapter(map: *const u8) -> Result<net::NetIface, u32> {
     if map.is_null() {
@@ -799,7 +815,7 @@ fn dhcp_adapter(map: *const u8) -> Result<net::NetIface, u32> {
     // SAFETY: the caller's IP_ADAPTER_INDEX_MAP.
     let index: u32 = unsafe { teb::get(map as u64, 0) };
     let i = list()?.into_iter().find(|i| i.index as u32 == index).ok_or(ERROR_INVALID_PARAMETER)?;
-    if i.method != net::CONFIG_DHCP {
+    if i.method != net::CONFIG_DHCP && !RELEASED.lock().unwrap().contains(&i.index) {
         return Err(ERROR_NOT_SUPPORTED);
     }
     Ok(i)
@@ -814,7 +830,10 @@ extern "win64" fn IpReleaseAddress(map: *const u8) -> u32 {
     };
     let c = net::NetConfig { iface: i.index as u32, method: net::CONFIG_DOWN as u32, ..Default::default() };
     match net::configure(&c) {
-        Ok(()) => 0,
+        Ok(()) => {
+            RELEASED.lock().unwrap().insert(i.index);
+            0
+        }
         Err(_) => ERROR_ACCESS_DENIED,
     }
 }
@@ -827,7 +846,10 @@ extern "win64" fn IpRenewAddress(map: *const u8) -> u32 {
     };
     let c = net::NetConfig { iface: i.index as u32, method: net::CONFIG_DHCP as u32, ..Default::default() };
     match net::configure(&c) {
-        Ok(()) => 0,
+        Ok(()) => {
+            RELEASED.lock().unwrap().remove(&i.index);
+            0
+        }
         Err(_) => ERROR_ACCESS_DENIED,
     }
 }

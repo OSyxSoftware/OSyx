@@ -208,6 +208,9 @@ extern "win64" fn WSADuplicateSocketW(s: u64, pid: u32, info: u64) -> i32 {
     protocol_info(info, kind, proto);
     // SAFETY: the caller's 628-byte WSAPROTOCOL_INFOW.
     unsafe { teb::put(info, PROVIDER_RESERVED as usize, token) };
+    // The duplicate holds the kernel socket from now on: closing the
+    // source before WSASocketW opens it must not close the descriptor.
+    *FD_REFS.lock().unwrap().entry(k.fd).or_insert(1) += 1;
     DUPLICATES.lock().unwrap().insert(token, k);
     0
 }
@@ -225,8 +228,8 @@ pub(super) fn socket_from_info(info: *const u8) -> u64 {
     if token == 0 {
         return socket(af, kind, proto);
     }
+    // The reference WSADuplicateSocketW took becomes this handle's.
     let Some(k) = DUPLICATES.lock().unwrap().remove(&token) else { return err(WSAEINVAL, INVALID_SOCKET) };
-    *FD_REFS.lock().unwrap().entry(k.fd).or_insert(1) += 1;
     let mut n = NEXT.lock().unwrap();
     let s = *n;
     *n += 4;

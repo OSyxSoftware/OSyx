@@ -122,9 +122,25 @@ unsafe fn method(obj: u64, slot: usize) -> u64 {
 }
 
 /// The calling thread's spies, newest first (the order Windows calls
-/// them in).
+/// them in), each with a reference taken: a spy may revoke itself or
+/// another one from its callback. Only this thread changes its own list.
 fn spies() -> Vec<u64> {
-    SPIES.lock().unwrap().get(&os_sys::gettid()).map_or(Vec::new(), |v| v.iter().rev().map(|&(_, s)| s).collect())
+    let list: Vec<u64> = SPIES.lock().unwrap().get(&os_sys::gettid()).map_or(Vec::new(), |v| v.iter().rev().map(|&(_, s)| s).collect());
+    for &s in &list {
+        // SAFETY: a registered IInitializeSpy: AddRef is slot 1.
+        let add_ref: extern "win64" fn(u64) -> u32 = unsafe { core::mem::transmute(method(s, 1)) };
+        add_ref(s);
+    }
+    list
+}
+
+/// Drops the references `spies` took.
+fn release_spies(list: &[u64]) {
+    for &s in list {
+        // SAFETY: a reference taken by `spies`: Release is slot 2.
+        let release: extern "win64" fn(u64) -> u32 = unsafe { core::mem::transmute(method(s, 2)) };
+        release(s);
+    }
 }
 
 fn apartment_refs(tid: u64) -> u32 {
@@ -149,6 +165,7 @@ extern "win64" fn CoInitializeEx(reserved: u64, flags: u32) -> u32 {
         let f: extern "win64" fn(u64, u32, u32, u32) -> u32 = unsafe { core::mem::transmute(method(s, 4)) };
         hr = f(s, hr, flags, apartment_refs(tid));
     }
+    release_spies(&spies);
     hr
 }
 
@@ -239,6 +256,7 @@ extern "win64" fn CoUninitialize() {
         let f: extern "win64" fn(u64, u32) -> u32 = unsafe { core::mem::transmute(method(s, 6)) };
         f(s, apartment_refs(tid));
     }
+    release_spies(&spies);
 }
 
 // Windows also exposes these OLE Automation functions through ole32.

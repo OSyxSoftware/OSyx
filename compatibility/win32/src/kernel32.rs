@@ -2092,7 +2092,8 @@ extern "win64" fn DiscardVirtualMemory(addr: u64, size: usize) -> u32 {
     if addr == 0 || size == 0 || addr % page != 0 {
         return ERROR_INVALID_PARAMETER;
     }
-    let end = addr.saturating_add(size as u64).next_multiple_of(page);
+    // A range that wraps the address space is invalid.
+    let Some(end) = addr.checked_add(size as u64).and_then(|e| e.checked_next_multiple_of(page)) else { return ERROR_INVALID_PARAMETER };
     let mut at = addr;
     while at < end {
         match mem::virtual_query(at) {
@@ -2535,9 +2536,15 @@ pub(crate) fn new_event(manual: bool, initial: bool) -> u64 {
 /// handle is inheritable, and the descriptor it keeps (objsec.rs reports
 /// it back; these objects live in this process, so a descriptor that
 /// restricts other users has no one else to restrict).
-pub(crate) fn sync_attributes(attributes: u64, mapping: &crate::objsec::Mapping) -> Result<(bool, Option<crate::objsec::Sd>), u32> {
+///
+/// Opening an existing named object ignores the descriptor, as on Windows.
+pub(crate) fn sync_attributes(attributes: u64, mapping: &crate::objsec::Mapping, name: Option<&str>) -> Result<(bool, Option<crate::objsec::Sd>), u32> {
+    let inherit = crate::security::inherit_flag(attributes);
+    if name.is_some_and(|n| objects::find_named(n).is_some()) {
+        return Ok((inherit, None));
+    }
     let sd = crate::objsec::initial_sd(attributes, mapping)?;
-    Ok((crate::security::inherit_flag(attributes), sd))
+    Ok((inherit, sd))
 }
 
 /// Applies the attributes to a new object's handle `h`: a named object
@@ -2599,21 +2606,24 @@ extern "win64" fn OpenFileMappingA(_access: u32, inherit: Bool, name: *const u8)
 }
 
 extern "win64" fn CreateEventA(attributes: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT) { Ok(v) => v, Err(e) => return fail(e, 0) };
     // SAFETY: NULL or NUL-terminated name.
-    finish_sync(create_event(manual != 0, initial != 0, unsafe { sa(name) }), inherit, sd)
+    let name = unsafe { sa(name) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    finish_sync(create_event(manual != 0, initial != 0, name), inherit, sd)
 }
 
 extern "win64" fn CreateEventW(attributes: u64, manual: Bool, initial: Bool, name: *const u16) -> u64 {
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT) { Ok(v) => v, Err(e) => return fail(e, 0) };
     // SAFETY: as above.
-    finish_sync(create_event(manual != 0, initial != 0, unsafe { sw(name) }), inherit, sd)
+    let name = unsafe { sw(name) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    finish_sync(create_event(manual != 0, initial != 0, name), inherit, sd)
 }
 
 extern "win64" fn CreateEventExW(attributes: u64, name: *const u16, flags: u32, _access: u32) -> u64 {
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT) { Ok(v) => v, Err(e) => return fail(e, 0) };
     // SAFETY: as above.
-    finish_sync(create_event(flags & 1 != 0, flags & 2 != 0, unsafe { sw(name) }), inherit, sd)
+    let name = unsafe { sw(name) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    finish_sync(create_event(flags & 1 != 0, flags & 2 != 0, name), inherit, sd)
 }
 
 /// Signals an event for code that is not a Windows caller (registry
@@ -2655,15 +2665,17 @@ fn create_mutex(owned: bool, name: Option<String>) -> u64 {
 }
 
 extern "win64" fn CreateMutexA(attributes: u64, owned: Bool, name: *const u8) -> u64 {
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX) { Ok(v) => v, Err(e) => return fail(e, 0) };
     // SAFETY: NULL or NUL-terminated name.
-    finish_sync(create_mutex(owned != 0, unsafe { sa(name) }), inherit, sd)
+    let name = unsafe { sa(name) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    finish_sync(create_mutex(owned != 0, name), inherit, sd)
 }
 
 extern "win64" fn CreateMutexW(attributes: u64, owned: Bool, name: *const u16) -> u64 {
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX) { Ok(v) => v, Err(e) => return fail(e, 0) };
     // SAFETY: as above.
-    finish_sync(create_mutex(owned != 0, unsafe { sw(name) }), inherit, sd)
+    let name = unsafe { sw(name) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    finish_sync(create_mutex(owned != 0, name), inherit, sd)
 }
 
 extern "win64" fn ReleaseMutex(h: u64) -> Bool {
@@ -2684,7 +2696,7 @@ extern "win64" fn ReleaseMutex(h: u64) -> Bool {
 }
 
 pub(crate) extern "win64" fn CreateSemaphoreA(attributes: u64, initial: i32, max: i32, _name: *const u8) -> u64 {
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, None) { Ok(v) => v, Err(e) => return fail(e, 0) };
     if max <= 0 || initial < 0 || initial > max {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }

@@ -7891,13 +7891,9 @@ extern "win64" fn IsValidDpiAwarenessContext(ctx: u64) -> Bool {
 /// Each thread's awareness context (0: the process's).
 static THREAD_DPI: Mutex<alloc::collections::BTreeMap<u64, u64>> = Mutex::new(alloc::collections::BTreeMap::new());
 
-/// The process's context, from its PROCESS_DPI_AWARENESS.
+/// The process's context, exactly as set.
 fn process_dpi_context() -> u64 {
-    match crate::user32::client::process_dpi_awareness() {
-        0 => -1i64 as u64,
-        1 => -2i64 as u64,
-        _ => -4i64 as u64,
-    }
+    (crate::user32::client::process_dpi_context() as i64).wrapping_neg() as u64
 }
 
 /// SetProcessDpiAwarenessContext: once per process, as Windows allows.
@@ -7905,12 +7901,7 @@ extern "win64" fn SetProcessDpiAwarenessContext(ctx: u64) -> Bool {
     if !valid_dpi_context(ctx) {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let level = match (ctx as i64).wrapping_neg() {
-        2 => 1,
-        3 | 4 => 2,
-        _ => 0,
-    };
-    if crate::user32::client::set_process_dpi_awareness(level) { TRUE } else { fail(ERROR_ACCESS_DENIED, FALSE) }
+    if crate::user32::client::set_process_dpi_context((ctx as i64).wrapping_neg() as u32) { TRUE } else { fail(ERROR_ACCESS_DENIED, FALSE) }
 }
 
 extern "win64" fn SetThreadDpiAwarenessContext(ctx: u64) -> u64 {

@@ -345,6 +345,28 @@ extern "win64" fn GetThreadPreferredUILanguages(flags: u32, count: *mut u32, buf
         0 => MUI_LANGUAGE_NAME,
         f => f,
     };
+    // MUI_THREAD_LANGUAGES alone: the thread's own list, which is empty
+    // (an empty double-NUL-terminated list). The merge flags add the user
+    // languages to it.
+    if flags & 0x40 != 0 && flags & 0x30 == 0 {
+        if count.is_null() || size.is_null() {
+            return fail(ERROR_INVALID_PARAMETER, 0);
+        }
+        // SAFETY: the caller's out pointers and buffer of `*size` units.
+        unsafe {
+            let room = *size;
+            *count = 0;
+            *size = 2;
+            if !buf.is_null() {
+                if room < 2 {
+                    return fail(ERROR_INSUFFICIENT_BUFFER, 0);
+                }
+                *buf = 0;
+                *buf.add(1) = 0;
+            }
+        }
+        return 1;
+    }
     GetUserPreferredUILanguages(form, count, buf, size)
 }
 

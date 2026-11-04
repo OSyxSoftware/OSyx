@@ -211,9 +211,12 @@ extern "win64" fn StackWalk64(machine: u32, process: u64, _thread: u64, frame: u
             return 0;
         }
         // The return address: where the frame above resumes.
-        let mut above = [0u8; CONTEXT_SIZE];
-        core::ptr::copy_nonoverlapping(ctx as *const u8, above.as_mut_ptr(), CONTEXT_SIZE);
-        let ret = if unwind_frame(above.as_mut_ptr() as u64) { get::<u64>(above.as_ptr() as u64, CTX_RIP) } else { 0 };
+        // CONTEXT is 16-byte aligned (its XMM registers).
+        #[repr(C, align(16))]
+        struct Context([u8; CONTEXT_SIZE]);
+        let mut above = Context([0u8; CONTEXT_SIZE]);
+        core::ptr::copy_nonoverlapping(ctx as *const u8, above.0.as_mut_ptr(), CONTEXT_SIZE);
+        let ret = if unwind_frame(above.0.as_mut_ptr() as u64) { get::<u64>(above.0.as_ptr() as u64, CTX_RIP) } else { 0 };
         for (at, v) in [(SF_PC, rip), (SF_RETURN, ret), (SF_FRAME, if started == 0 && get::<u64>(frame, SF_FRAME) != 0 { get(frame, SF_FRAME) } else { rsp }), (SF_STACK, rsp)] {
             put(frame, at, v);
             put(frame, at + 8, 0u16);
@@ -221,7 +224,7 @@ extern "win64" fn StackWalk64(machine: u32, process: u64, _thread: u64, frame: u
         }
         put(frame, SF_FUNCTION, crate::unwind::lookup(rip).map_or(0, |(e, _)| e));
         // The four argument home slots of the frame's caller.
-        let caller_rsp: u64 = get(above.as_ptr() as u64, CTX_RSP);
+        let caller_rsp: u64 = get(above.0.as_ptr() as u64, CTX_RSP);
         for i in 0..4u64 {
             let slot = caller_rsp + 8 * i;
             put(frame, SF_PARAMS + 8 * i as usize, if readable(slot) { get::<u64>(slot, 0) } else { 0 });

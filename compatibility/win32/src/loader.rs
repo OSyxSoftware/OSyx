@@ -1071,8 +1071,10 @@ pub fn start(exe_path: &str, command_line: &str, environment: &[String]) -> Resu
     crate::kernel32::register_main_thread();
     let mut l = Loader { linker, exe, state: Vec::new(), tls: Vec::new() };
     let todo = register_new(&mut l, exe);
+    // The program and the DLLs linked with it are never unloaded, as
+    // Windows pins static imports: FreeLibrary does not detach them.
     for s in l.state.iter_mut() {
-        s.refs = 1;
+        s.refs = u32::MAX;
     }
     *LOADER.lock().unwrap() = Some(l);
     setup_thread_tls(main_teb);

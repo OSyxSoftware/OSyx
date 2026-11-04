@@ -694,12 +694,26 @@ extern "win64" fn VariantTimeToSystemTime(date: f64, out: *mut [u16; 8]) -> i32 
     1
 }
 
+/// VariantTimeToSystemTime for a 32-bit caller: the DATE as its bits.
+pub(crate) extern "win64" fn VariantTimeToSystemTime32(date: u64, out: *mut [u16; 8]) -> i32 {
+    VariantTimeToSystemTime(f64::from_bits(date), out)
+}
+
 const DISP_E_TYPEMISMATCH: u32 = 0x8002_0005;
 const DISP_E_OVERFLOW: u32 = 0x8002_000A;
 
-/// VarUI4FromStr: number text (en-US) rounded half to even.
-extern "win64" fn VarUI4FromStr(s: *const u16, _lcid: u32, _flags: u32, out: *mut u32) -> u32 {
-    if s.is_null() || out.is_null() {
+/// The locales OSyx has formats for: en-US (also the user and system
+/// default) and the invariant locale, both with "." decimals and ","
+/// thousands. Any other LCID has no data here.
+fn known_lcid(lcid: u32) -> bool {
+    matches!(lcid & 0xffff, 0x0409 | 0x0400 | 0x0800 | 0x007f | 0x0009)
+}
+
+/// VarUI4FromStr: number text in the locale's format, rounded half to
+/// even. An LCID OSyx has no formats for is E_INVALIDARG rather than a
+/// guess at its separators.
+extern "win64" fn VarUI4FromStr(s: *const u16, lcid: u32, _flags: u32, out: *mut u32) -> u32 {
+    if s.is_null() || out.is_null() || !known_lcid(lcid) {
         return E_INVALIDARG;
     }
     // SAFETY: the caller's NUL-terminated string.
@@ -714,28 +728,51 @@ extern "win64" fn VarUI4FromStr(s: *const u16, _lcid: u32, _flags: u32, out: *mu
     S_OK
 }
 
+const NORM_IGNORECASE: u32 = 0x1;
+const NORM_IGNORESYMBOLS: u32 = 0x4;
+
 /// VarBstrCmp: VARCMP_LT (0), _EQ (1), _GT (2). A NULL BSTR is an empty
-/// string. With LCID 0 the strings compare as UTF-16 units; otherwise as
-/// text, without case under NORM_IGNORECASE.
+/// string. With LCID 0 the strings compare byte by byte (all of
+/// SysStringByteLen); otherwise in CompareString order for the locale,
+/// without case under NORM_IGNORECASE and without symbols under
+/// NORM_IGNORESYMBOLS.
 extern "win64" fn VarBstrCmp(a: u64, b: u64, lcid: u32, flags: u32) -> u32 {
-    let units = |p: u64| -> Vec<u16> {
-        if p == 0 {
-            return Vec::new();
-        }
-        // SAFETY: a BSTR: its byte length precedes it.
-        unsafe { core::slice::from_raw_parts(p as *const u16, SysStringLen(p) as usize).to_vec() }
-    };
-    let (x, y) = (units(a), units(b));
     let order = if lcid == 0 {
-        x.cmp(&y)
-    } else {
-        let text = |u: &[u16]| {
-            let s = alloc::string::String::from_utf16_lossy(u);
-            if flags & 1 != 0 { s.to_lowercase() } else { s }
+        let bytes = |p: u64| -> Vec<u8> {
+            if p == 0 {
+                return Vec::new();
+            }
+            // SAFETY: a BSTR: its byte length precedes it.
+            unsafe { core::slice::from_raw_parts(p as *const u8, SysStringByteLen(p) as usize).to_vec() }
         };
-        text(&x).cmp(&text(&y))
+        bytes(a).cmp(&bytes(b))
+    } else {
+        if !known_lcid(lcid) {
+            return E_INVALIDARG;
+        }
+        let units = |p: u64| -> Vec<u16> {
+            if p == 0 {
+                return Vec::new();
+            }
+            // SAFETY: a BSTR of SysStringLen units.
+            let u = unsafe { core::slice::from_raw_parts(p as *const u16, SysStringLen(p) as usize) };
+            if flags & NORM_IGNORESYMBOLS != 0 {
+                char::decode_utf16(u.iter().copied())
+                    .filter_map(Result::ok)
+                    .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+                    .flat_map(|c| { let mut b = [0u16; 2]; c.encode_utf16(&mut b).to_vec() })
+                    .collect()
+            } else {
+                u.to_vec()
+            }
+        };
+        crate::locale::compare_text(&units(a), &units(b), flags & NORM_IGNORECASE != 0)
     };
-    order as i32 as u32 + 1
+    match order {
+        core::cmp::Ordering::Less => 0,
+        core::cmp::Ordering::Equal => 1,
+        core::cmp::Ordering::Greater => 2,
+    }
 }
 
 /// The ordinals programs import these by.

@@ -9,7 +9,6 @@
 #![allow(non_snake_case)]
 use crate::{error::*, kernel32::{self, fail}, objects, path, security::sid};
 use alloc::{string::String, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
 use os_std::sync::Mutex;
 
 const E_INVALIDARG: u32 = 0x8007_0057;
@@ -45,6 +44,7 @@ extern "win64" fn DeriveAppContainerSidFromAppContainerName(name: *const u16, ou
 }
 
 const HRESULT_ALREADY_EXISTS: u32 = 0x8007_00B7;
+const ERROR_NOT_OWNER: u32 = 288;
 
 /// CreateAppContainerProfile: the profile's folder,
 /// %LOCALAPPDATA%\Packages\<name>, and the container's SID. An existing
@@ -58,7 +58,10 @@ extern "win64" fn CreateAppContainerProfile(name: *const u16, display: *const u1
         return E_INVALIDARG;
     };
     let base = kernel32::env_get("LOCALAPPDATA").unwrap_or_else(|| String::from("C:\\Users\\user\\AppData\\Local"));
-    let Ok((dir, _)) = kernel32::locate(&alloc::format!("{base}\\Packages\\{name}")) else { return E_INVALIDARG };
+    // The Packages folder may not exist yet: resolve the profile below the
+    // local application data folder itself.
+    let Ok((local, _)) = kernel32::locate(&base) else { return E_INVALIDARG };
+    let dir = alloc::format!("{}/Packages/{name}", local.trim_end_matches('/'));
     if os_sys::stat(&dir).is_ok() {
         return HRESULT_ALREADY_EXISTS;
     }
@@ -68,27 +71,69 @@ extern "win64" fn CreateAppContainerProfile(name: *const u16, display: *const u1
     DeriveAppContainerSidFromAppContainerName(name.encode_utf16().chain([0]).collect::<Vec<u16>>().as_ptr(), out)
 }
 
-/// Variables of a new user environment: the system's and the user's,
-/// taken from this process (OSyx sets them up per login).
-const USER_VARIABLES: [&str; 22] = [
-    "ALLUSERSPROFILE", "APPDATA", "CommonProgramFiles", "COMPUTERNAME", "ComSpec", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA",
-    "NUMBER_OF_PROCESSORS", "OS", "Path", "PATHEXT", "PROCESSOR_ARCHITECTURE", "ProgramData", "ProgramFiles", "PUBLIC",
-    "SystemDrive", "SystemRoot", "TEMP", "TMP", "USERNAME", "USERPROFILE",
+/// The system's variables (the same for every user), taken from this
+/// process, which OSyx starts with them.
+const SYSTEM_VARIABLES: [&str; 15] = [
+    "ALLUSERSPROFILE", "CommonProgramFiles", "COMPUTERNAME", "ComSpec", "NUMBER_OF_PROCESSORS", "OS", "Path", "PATHEXT",
+    "PROCESSOR_ARCHITECTURE", "ProgramData", "ProgramFiles", "PUBLIC", "SystemDrive", "SystemRoot", "windir",
 ];
 
-/// CreateEnvironmentBlock: a sorted UTF-16 NAME=value block: this
-/// process's environment when inheriting, else the user's default
-/// variables. Freed with DestroyEnvironmentBlock.
-extern "win64" fn CreateEnvironmentBlock(out: *mut u64, _token: u64, inherit: i32) -> i32 {
+/// The variables of the user a token names: this process's for its own
+/// user, and the profile folders under C:\Users for another.
+fn user_variables(uid: u32) -> Vec<(String, String)> {
+    let name = crate::accounts::user_name(uid);
+    let own = |k: &str| kernel32::env_get(k);
+    let profile = if uid == os_sys::getuid().0 { own("USERPROFILE") } else { None }.unwrap_or_else(|| alloc::format!("C:\\Users\\{name}"));
+    let mine = uid == os_sys::getuid().0;
+    let pick = |k: &str, default: String| if mine { own(k).unwrap_or(default) } else { default };
+    let local = pick("LOCALAPPDATA", alloc::format!("{profile}\\AppData\\Local"));
+    let temp = pick("TEMP", alloc::format!("{local}\\Temp"));
+    alloc::vec![
+        (String::from("USERNAME"), name),
+        (String::from("USERDOMAIN"), crate::accounts::computer_name()),
+        (String::from("USERPROFILE"), profile.clone()),
+        (String::from("HOMEDRIVE"), String::from("C:")),
+        (String::from("HOMEPATH"), String::from(profile.get(2..).unwrap_or("\\"))),
+        (String::from("APPDATA"), pick("APPDATA", alloc::format!("{profile}\\AppData\\Roaming"))),
+        (String::from("LOCALAPPDATA"), local),
+        (String::from("TEMP"), temp.clone()),
+        (String::from("TMP"), temp),
+    ]
+}
+
+/// CreateEnvironmentBlock: a sorted UTF-16 NAME=value block: the system's
+/// variables, with a token the variables of its user, and when inheriting
+/// this process's environment over them. Freed with
+/// DestroyEnvironmentBlock.
+extern "win64" fn CreateEnvironmentBlock(out: *mut u64, token: u64, inherit: i32) -> i32 {
     if out.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let mut vars: Vec<(String, String)> = if inherit != 0 {
-        kernel32::env_vars()
-    } else {
-        let all = kernel32::env_vars();
-        USER_VARIABLES.iter().filter_map(|k| all.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).cloned()).collect()
+    let all = kernel32::env_vars();
+    let mut vars: Vec<(String, String)> = SYSTEM_VARIABLES.iter().filter_map(|k| all.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).cloned()).collect();
+    let set = |vars: &mut Vec<(String, String)>, (k, v): (String, String)| {
+        vars.retain(|(n, _)| !n.eq_ignore_ascii_case(&k));
+        vars.push((k, v));
     };
+    if token == 0 {
+        // Without a user, the system's temporary folder.
+        let root = all.iter().find(|(n, _)| n.eq_ignore_ascii_case("SystemRoot")).map_or(String::from("C:\\Windows"), |(_, v)| v.clone());
+        set(&mut vars, (String::from("TEMP"), alloc::format!("{root}\\TEMP")));
+        set(&mut vars, (String::from("TMP"), alloc::format!("{root}\\TEMP")));
+    } else {
+        let t = match crate::tokens::token(token) {
+            Ok(t) => t,
+            Err(e) => return fail(e, 0),
+        };
+        for v in user_variables(t.uid) {
+            set(&mut vars, v);
+        }
+    }
+    if inherit != 0 {
+        for v in all {
+            set(&mut vars, v);
+        }
+    }
     vars.sort_by_key(|(k, _)| k.to_uppercase());
     let mut units: Vec<u16> = Vec::new();
     for (k, v) in &vars {
@@ -118,24 +163,35 @@ extern "win64" fn DestroyEnvironmentBlock(block: u64) -> i32 {
     1
 }
 
-/// The machine and user policy critical sections: held by one caller at
-/// a time, from Enter to Leave (any thread may leave).
-static POLICY_LOCKS: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+/// The machine and user policy critical sections, mutexes as on Windows:
+/// (owning thread, acquisitions). The owner may enter again; each enter
+/// has its leave.
+static POLICY_LOCKS: [Mutex<(u64, u32)>; 2] = [Mutex::new((0, 0)), Mutex::new((0, 0))];
 const POLICY_HANDLES: [u64; 2] = [0x9011_0000, 0x9011_0004];
 
 extern "win64" fn EnterCriticalPolicySection(machine: i32) -> u64 {
     let i = (machine != 0) as usize;
-    while POLICY_LOCKS[i].swap(true, Ordering::Acquire) {
+    let me = os_sys::gettid();
+    loop {
+        {
+            let mut l = POLICY_LOCKS[i].lock().unwrap();
+            if l.1 == 0 || l.0 == me {
+                *l = (me, l.1 + 1);
+                return POLICY_HANDLES[i];
+            }
+        }
         os_std::thread::sleep(core::time::Duration::from_millis(1));
     }
-    POLICY_HANDLES[i]
 }
 
 extern "win64" fn LeaveCriticalPolicySection(h: u64) -> i32 {
-    match POLICY_HANDLES.iter().position(|&p| p == h) {
-        Some(i) if POLICY_LOCKS[i].swap(false, Ordering::Release) => 1,
-        _ => fail(ERROR_INVALID_HANDLE, 0),
+    let Some(i) = POLICY_HANDLES.iter().position(|&p| p == h) else { return fail(ERROR_INVALID_HANDLE, 0) };
+    let mut l = POLICY_LOCKS[i].lock().unwrap();
+    if l.1 == 0 || l.0 != os_sys::gettid() {
+        return fail(ERROR_NOT_OWNER, 0);
     }
+    l.1 -= 1;
+    1
 }
 
 /// Events registered for policy changes, with machine or user policy.

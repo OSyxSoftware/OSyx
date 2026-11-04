@@ -223,10 +223,10 @@ extern "win64" fn CertGetIntendedKeyUsage(_encoding: u32, info: u64, out: *mut u
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's CERT_INFO: cExtension at 192, rgExtension at 200;
-    // each CERT_EXTENSION is (pszObjId, fCritical, Value) in 24 bytes.
+    // each CERT_EXTENSION is (pszObjId, fCritical, Value) in 32 bytes.
     let value = unsafe {
         let (n, rg): (u32, u64) = (teb::get(info, 192), teb::get(info, 200));
-        (0..n as u64).map(|i| rg + 24 * i).find(|&e| c_string(teb::get(e, 0)) == OID_KEY_USAGE).map(|e| blob_at(e + 16))
+        (0..n as u64).map(|i| rg + 32 * i).find(|&e| c_string(teb::get(e, 0)) == OID_KEY_USAGE).map(|e| blob_at(e + 16))
     };
     let Some(value) = value else {
         teb::set_last_error(0);
@@ -363,9 +363,10 @@ unsafe fn blob_at_parts(n: u32, p: u64) -> Vec<u8> {
 // ---- DPAPI -------------------------------------------------------------------------------
 
 /// The 32-byte master key of the user (in their home) or of the machine,
-/// made on first use. Data protected under it can be read by the same
-/// user (or any user, for the machine key) and nobody else: the file is
-/// readable by its owner only.
+/// made on first use. Data protected under the user's key can be read by
+/// that user only (the file is readable by its owner only); under the
+/// machine key, by any local user, as DPAPI's machine scope promises (the
+/// file is readable by everyone and written by whoever may create it).
 fn master_key(machine: bool) -> Result<[u8; 32], u32> {
     static KEYS: Mutex<[Option<[u8; 32]>; 2]> = Mutex::new([None, None]);
     let mut keys = KEYS.lock().unwrap();
@@ -388,7 +389,8 @@ fn master_key(machine: bool) -> Result<[u8; 32], u32> {
             }
             // Exclusive creation: of two processes making the key at once,
             // one writes it and the other reads that one.
-            match os_sys::open(&file, osyx_abi::OPEN_WRITE | osyx_abi::OPEN_CREATE | osyx_abi::OPEN_EXCLUSIVE, 0o600) {
+            let mode = if machine { 0o644 } else { 0o600 };
+            match os_sys::open(&file, osyx_abi::OPEN_WRITE | osyx_abi::OPEN_CREATE | osyx_abi::OPEN_EXCLUSIVE, mode) {
                 Ok(fd) => {
                     let written = os_sys::write_raw(fd, k.as_ptr() as usize, k.len());
                     let synced = os_sys::fsync(fd);

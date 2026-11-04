@@ -102,6 +102,13 @@ pub(super) fn finish_now(s: u64, o: u64, bytes: usize) {
 /// Completes overlapped operation `o` on socket `s` with `bytes`
 /// transferred and Winsock error `error` (0: success).
 pub(super) fn finish(s: u64, o: u64, bytes: usize, error: u32) {
+    let port = PORTS.lock().unwrap().get(&s).copied();
+    finish_to(port, o, bytes, error);
+}
+
+/// `finish` with the (port, key) the operation was issued under: a socket
+/// closed meanwhile still gets the packet for its aborted operation.
+fn finish_to(port: Option<(u64, u64)>, o: u64, bytes: usize, error: u32) {
     let status = if error == 0 { 0 } else { status_of(error) };
     // SAFETY: the caller's OVERLAPPED, which stays valid until it completes.
     let event = unsafe {
@@ -113,7 +120,6 @@ pub(super) fn finish(s: u64, o: u64, bytes: usize, error: u32) {
         crate::kernel32::SetEvent(event & !1);
     }
     if event & 1 == 0 {
-        let port = PORTS.lock().unwrap().get(&s).copied();
         if let Some((port, key)) = port {
             crate::threadpool::post(port, bytes as u32, key, o, error);
         }
@@ -136,6 +142,7 @@ pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, 
     // SAFETY: the caller's OVERLAPPED.
     unsafe { ov::set_status(o, STATUS_PENDING) };
     PENDING.lock().unwrap().insert(o, (s, false));
+    let port = PORTS.lock().unwrap().get(&s).copied();
     os_std::thread::spawn(move || {
         let total: usize = parts.iter().map(|p| p.0 as usize).sum();
         let mut data = alloc::vec![0u8; total];
@@ -144,7 +151,9 @@ pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, 
             if cancelled || !SOCKETS.lock().unwrap().contains_key(&s) {
                 break (0, WSA_OPERATION_ABORTED);
             }
-            match os_sys::sock_recv(fd, &mut data, fl) {
+            // Each attempt is non-blocking, so cancellation and closing are
+            // seen between the bounded waits below.
+            match os_sys::sock_recv(fd, &mut data, fl | net::MSG_DONTWAIT) {
                 Err(Errno::WouldBlock) => {
                     let mut item = [os_sys::ipc::WaitItem { handle: fd, events: osyx_abi::ipc::WAIT_READABLE, revents: 0 }];
                     // A bounded wait, so a socket closed meanwhile is noticed.
@@ -171,7 +180,7 @@ pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, 
             }
         };
         PENDING.lock().unwrap().remove(&o);
-        finish(s, o, bytes, error);
+        finish_to(port, o, bytes, error);
     });
     err(WSA_IO_PENDING, SOCKET_ERROR)
 }

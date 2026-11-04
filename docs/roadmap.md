@@ -148,9 +148,10 @@ Status on 2026-11-04 (`fix/steam-vgui2`):
 - Fixed on the way: 64 GiB per-process reservation cap (now 32 TiB) and a
   word of state per reserved page in winrun; DuplicateHandle of the
   current process and per-handle section rights; process queries on real
-  and ended process handles; a DLL loaded again after FreeLibrary now
-  restarts from its original data; IInitializeSpy; overlapped sockets on
-  completion ports.
+  and ended process handles; a DLL that LoadLibrary loaded and the last
+  FreeLibrary detached restarts from its original data when loaded again
+  (DLLs linked at start-up are never detached, as on Windows);
+  IInitializeSpy; overlapped sockets on completion ports.
 - Open: the GPU process does not start (`GPU process launch failed:
   error_code=49`). It runs in Chromium's sandbox, whose broker writes into
   the suspended child (VirtualAllocEx, WriteProcessMemory, ntdll

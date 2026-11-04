@@ -558,10 +558,11 @@ fn cert_info(b: &mut Block, at: usize, c: &Cert) {
     b.put32(at + 136, c.key.1 as u32);
     b.put32(at + 192, c.extensions.len() as u32);
     if !c.extensions.is_empty() {
-        let ext = b.reserve(24 * c.extensions.len());
+        // CERT_EXTENSION: pszObjId, fCritical (padded), Value: 32 bytes.
+        let ext = b.reserve(32 * c.extensions.len());
         b.fixups.push((at + 200, ext));
         for (i, (oid, critical, value)) in c.extensions.iter().enumerate() {
-            let e = ext + 24 * i;
+            let e = ext + 32 * i;
             let mut s = oid.clone().into_bytes();
             s.push(0);
             b.point(e, &s);
