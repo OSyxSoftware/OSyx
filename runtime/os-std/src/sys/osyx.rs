@@ -317,6 +317,13 @@ pub fn current_tid() -> u64 {
     os_sys::gettid()
 }
 
+/// Whether some thread is inside the allocator. The heap lock records no
+/// owner: it is taken before the first thread has its TCB, when the
+/// thread id cannot be read yet.
+pub fn heap_busy() -> bool {
+    HEAP.locked.load(Ordering::Relaxed)
+}
+
 // ---- start-up -------------------------------------------------------------
 
 static ARGC: AtomicUsize = AtomicUsize::new(0);

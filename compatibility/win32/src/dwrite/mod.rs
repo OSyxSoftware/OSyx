@@ -6,12 +6,17 @@
 //! Font faces answer metrics, glyph indices, tables and outlines from the
 //! font file (ttf.rs); glyph-run analysis rasterizes outlines with
 //! grayscale coverage (raster.rs), handed out as the ClearType 3x1 texture
-//! with equal channels, or as a bilevel 1x1 texture for aliased rendering.
+//! with equal channels, as a bilevel 1x1 texture for aliased rendering, or
+//! as an 8-bit 1x1 texture for grayscale antialiasing.
 //! There is no hinting and no ClearType filtering. CreateFontFromLOGFONT
-//! applies HKLM\...\FontSubstitutes as GDI does. Text layout, text
-//! analysis and newer factory versions are not provided: QueryInterface
-//! for them fails, which programs check. An interface method that is not
-//! implemented returns E_NOTIMPL and, under -v, names itself.
+//! applies HKLM\...\FontSubstitutes as GDI does. The factory answers as
+//! IDWriteFactory3, as on Windows 10 (Chromium uses it without checking):
+//! the version 1-3 glyph-run analyses, rendering parameters and the system
+//! font fallback work; font sets, fallback builders and color glyph layers
+//! do not. Text layout and text
+//! analysis are not provided: QueryInterface for them fails, which programs
+//! check. An interface method that is not implemented returns E_NOTIMPL
+//! and, under -v, names itself.
 #![allow(non_snake_case)]
 mod iids;
 pub mod raster;
@@ -47,6 +52,7 @@ const DWRITE_E_FILEFORMAT: u32 = 0x8898_5000;
 const DWRITE_E_NOFONT: u32 = 0x8898_5002;
 const DWRITE_E_FILENOTFOUND: u32 = 0x8898_5003;
 const DWRITE_E_ALREADYREGISTERED: u32 = 0x8898_5006;
+const DWRITE_E_NOCOLOR: u32 = 0x8898_500C;
 
 /// Floats travel in xmm registers, which soft-float winrun code cannot
 /// read: these entry points move them to integer registers (as raw bits)
@@ -126,6 +132,17 @@ extern "win64" fn qi(this: u64, riid: *const Guid, out: *mut u64) -> u32 {
             return S_OK;
         }
         *out = 0;
+        if traced() {
+            let g = &*riid;
+            os_std::eprintln!(
+                "winrun: dwrite: {} has no interface {:08x}-{:04x}-{:04x}-{:02x?}",
+                header(this).name,
+                u32::from_le_bytes([g[0], g[1], g[2], g[3]]),
+                u16::from_le_bytes([g[4], g[5]]),
+                u16::from_le_bytes([g[6], g[7]]),
+                &g[8..]
+            );
+        }
     }
     E_NOINTERFACE
 }
@@ -144,8 +161,13 @@ extern "win64" fn release<T>(this: u64) -> u32 {
 }
 
 /// A method this implementation does not provide.
+/// -v or OSYX_WINRUN_FAILTRACE: interfaces and methods programs miss.
+fn traced() -> bool {
+    crate::VERBOSE.load(Ordering::Relaxed) || crate::kernel32::TRACE.load(Ordering::Relaxed)
+}
+
 extern "win64" fn stub<const N: usize>(this: u64) -> u32 {
-    if crate::VERBOSE.load(Ordering::Relaxed) {
+    if traced() {
         os_std::eprintln!("winrun: dwrite: {} method {} is not implemented", header(this).name, N);
     }
     E_NOTIMPL
@@ -334,6 +356,9 @@ extern "win64" fn StrFindLocaleName(this: u64, name: *const u16, index: *mut u32
             put(exists, 1);
         }
         None => {
+            if traced() {
+                os_std::eprintln!("winrun: dwrite: no family {want:?} among {} families", data::<Arc<System>>(this).families.len());
+            }
             put(index, u32::MAX);
             put(exists, 0);
         }
@@ -1290,18 +1315,32 @@ extern "win64" fn StreamGetLastWriteTime(this: u64, out: *mut u64) -> u32 {
 struct Params {
     gamma: u32,
     contrast: u32,
+    /// Grayscale enhanced contrast (IDWriteRenderingParams1).
+    gray_contrast: u32,
     cleartype: u32,
     geometry: u32,
+    /// DWRITE_RENDERING_MODE1 (NATURAL_SYMMETRIC_DOWNSAMPLED is 7).
     mode: u32,
+    /// DWRITE_GRID_FIT_MODE (IDWriteRenderingParams2).
+    grid_fit: u32,
 }
 
-/// Windows' defaults: gamma 1.8, enhanced contrast 0.5, ClearType level
-/// 1.0, RGB stripes, default mode.
+/// Windows' defaults: gamma 1.8, enhanced contrast 0.5, grayscale enhanced
+/// contrast 1.0, ClearType level 1.0, RGB stripes, default mode and grid
+/// fitting.
 fn default_params() -> Params {
-    Params { gamma: 1.8f32.to_bits(), contrast: 0.5f32.to_bits(), cleartype: 1.0f32.to_bits(), geometry: 1, mode: 0 }
+    Params {
+        gamma: 1.8f32.to_bits(),
+        contrast: 0.5f32.to_bits(),
+        gray_contrast: 1.0f32.to_bits(),
+        cleartype: 1.0f32.to_bits(),
+        geometry: 1,
+        mode: 0,
+        grid_fit: 0,
+    }
 }
 
-static PARAMS_VT: Slots<8> = Slots([
+static PARAMS_VT: Slots<11> = Slots([
     qi as *const (),
     add_ref as _,
     release::<Params> as _,
@@ -1310,8 +1349,11 @@ static PARAMS_VT: Slots<8> = Slots([
     ParamsGetClearTypeLevel as _,
     ParamsGetPixelGeometry as _,
     ParamsGetRenderingMode as _,
+    ParamsGetGrayscaleEnhancedContrast as _,
+    ParamsGetGridFitMode as _,
+    ParamsGetRenderingMode1 as _,
 ]);
-static PARAMS_IIDS: [Guid; 1] = [iids::RENDERING_PARAMS];
+static PARAMS_IIDS: [Guid; 4] = [iids::RENDERING_PARAMS, iids::RENDERING_PARAMS1, iids::RENDERING_PARAMS2, iids::RENDERING_PARAMS3];
 
 fn params(p: Params) -> u64 {
     new(&PARAMS_VT, "IDWriteRenderingParams", &PARAMS_IIDS, p)
@@ -1329,17 +1371,35 @@ extern "win64" fn params_cleartype(this: u64) -> u32 {
     data::<Params>(this).cleartype
 }
 
+extern "win64" fn params_gray_contrast(this: u64) -> u32 {
+    data::<Params>(this).gray_contrast
+}
+
 xmm_ret! {
     ParamsGetGamma => params_gamma;
     ParamsGetEnhancedContrast => params_contrast;
     ParamsGetClearTypeLevel => params_cleartype;
+    ParamsGetGrayscaleEnhancedContrast => params_gray_contrast;
 }
 
 extern "win64" fn ParamsGetPixelGeometry(this: u64) -> u32 {
     data::<Params>(this).geometry
 }
 
+/// DWRITE_RENDERING_MODE has no NATURAL_SYMMETRIC_DOWNSAMPLED: it reads
+/// as NATURAL_SYMMETRIC.
 extern "win64" fn ParamsGetRenderingMode(this: u64) -> u32 {
+    match data::<Params>(this).mode {
+        DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED => DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+        m => m,
+    }
+}
+
+extern "win64" fn ParamsGetGridFitMode(this: u64) -> u32 {
+    data::<Params>(this).grid_fit
+}
+
+extern "win64" fn ParamsGetRenderingMode1(this: u64) -> u32 {
     data::<Params>(this).mode
 }
 
@@ -1349,7 +1409,11 @@ struct Analysis {
     /// (left, top, right, bottom) in pixels; None when nothing is drawn.
     bounds: Option<(i32, i32, i32, i32)>,
     coverage: Vec<u8>,
-    aliased: bool,
+    /// The texture type it provides: ALIASED_1x1 for aliased rendering and
+    /// for grayscale antialiasing, CLEARTYPE_3x1 otherwise.
+    texture: u32,
+    /// Aliased rendering: coverage is thresholded to 0 or 255.
+    bilevel: bool,
 }
 
 static ANALYSIS_VT: Slots<6> = Slots([
@@ -1363,13 +1427,17 @@ static ANALYSIS_VT: Slots<6> = Slots([
 static ANALYSIS_IIDS: [Guid; 1] = [iids::GLYPH_RUN_ANALYSIS];
 
 const DWRITE_RENDERING_MODE_ALIASED: u32 = 1;
+const DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC: u32 = 5;
 const DWRITE_RENDERING_MODE_OUTLINE: u32 = 6;
+const DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED: u32 = 7;
+const DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE: u32 = 1;
+const DWRITE_GRID_FIT_MODE_ENABLED: u32 = 2;
 const DWRITE_TEXTURE_ALIASED_1X1: u32 = 0;
 const DWRITE_TEXTURE_CLEARTYPE_3X1: u32 = 1;
 
 /// The texture type this analysis provides.
 fn texture_ok(a: &Analysis, kind: u32) -> bool {
-    kind == if a.aliased { DWRITE_TEXTURE_ALIASED_1X1 } else { DWRITE_TEXTURE_CLEARTYPE_3X1 }
+    kind == a.texture
 }
 
 extern "win64" fn AnaGetAlphaTextureBounds(this: u64, kind: u32, out: *mut [i32; 4]) -> u32 {
@@ -1408,7 +1476,7 @@ extern "win64" fn AnaCreateAlphaTexture(this: u64, kind: u32, rect: *const [i32;
     for y in t.max(bt)..b.min(bb) {
         for x in l.max(bl)..r.min(br) {
             let c = a.coverage[(y - bt) as usize * bw + (x - bl) as usize];
-            let c = if a.aliased { if c >= 128 { 255 } else { 0 } } else { c };
+            let c = if a.bilevel { if c >= 128 { 255 } else { 0 } } else { c };
             let at = ((y - t) as usize * w + (x - l) as usize) * bpp;
             out[at..at + bpp].fill(c);
         }
@@ -1441,6 +1509,41 @@ extern "win64" fn factory_glyph_run_analysis(
     by_bits: u32,
     out: *mut u64,
 ) -> u32 {
+    glyph_run_analysis(run, ppd_bits, transform, mode, false, bx_bits, by_bits, out)
+}
+
+/// IDWriteFactory2/3::CreateGlyphRunAnalysis: the transform carries the
+/// scale (no pixels per DIP); there is no hinting, so the grid-fit mode
+/// changes nothing; grayscale antialiasing gives an 8-bit ALIASED_1x1
+/// texture, as on Windows. DWRITE_RENDERING_MODE1 matches
+/// DWRITE_RENDERING_MODE up to NATURAL_SYMMETRIC_DOWNSAMPLED, drawn as
+/// NATURAL_SYMMETRIC.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn FactoryCreateGlyphRunAnalysis2(
+    _this: u64,
+    run: *const u8,
+    transform: *const [u32; 6],
+    mode: u32,
+    _measuring: u32,
+    grid_fit: u32,
+    antialias: u32,
+    bx_bits: u32,
+    by_bits: u32,
+    out: *mut u64,
+) -> u32 {
+    if grid_fit > DWRITE_GRID_FIT_MODE_ENABLED || antialias > DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE || mode > DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED {
+        if !out.is_null() {
+            put(out, 0);
+        }
+        return E_INVALIDARG;
+    }
+    glyph_run_analysis(run, 1.0f32.to_bits(), transform, mode, antialias == DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, bx_bits, by_bits, out)
+}
+
+/// A glyph-run analysis drawn at `ppd_bits` pixels per DIP; `grayscale`
+/// asks for the 8-bit 1x1 texture instead of the ClearType one.
+#[allow(clippy::too_many_arguments)]
+fn glyph_run_analysis(run: *const u8, ppd_bits: u32, transform: *const [u32; 6], mode: u32, grayscale: bool, bx_bits: u32, by_bits: u32, out: *mut u64) -> u32 {
     if run.is_null() || out.is_null() {
         return E_INVALIDARG;
     }
@@ -1509,7 +1612,9 @@ extern "win64" fn factory_glyph_run_analysis(
     }
     let bounds = raster::bounds(&lines);
     let coverage = bounds.map(|b| raster::coverage(&lines, b)).unwrap_or_default();
-    put(out, new(&ANALYSIS_VT, "IDWriteGlyphRunAnalysis", &ANALYSIS_IIDS, Analysis { bounds, coverage, aliased: mode == DWRITE_RENDERING_MODE_ALIASED }));
+    let aliased = mode == DWRITE_RENDERING_MODE_ALIASED;
+    let texture = if aliased || grayscale { DWRITE_TEXTURE_ALIASED_1X1 } else { DWRITE_TEXTURE_CLEARTYPE_3X1 };
+    put(out, new(&ANALYSIS_VT, "IDWriteGlyphRunAnalysis", &ANALYSIS_IIDS, Analysis { bounds, coverage, texture, bilevel: aliased }));
     S_OK
 }
 
@@ -1526,6 +1631,138 @@ static GDI_VT: Slots<8> = Slots([
     stub::<7> as _,
 ]);
 static GDI_IIDS: [Guid; 1] = [iids::GDI_INTEROP];
+
+// ---- font fallback -----------------------------------------------------------------------------
+
+/// IDWriteFontFallback (IDWriteFactory2::GetSystemFontFallback): maps text
+/// to fonts that have its characters. A run stays in the requested family
+/// while that family has the characters; a character it lacks goes to the
+/// first system family that has it, trying first the family Windows' UI
+/// font (Segoe UI) resolves to, then every family in collection order. The
+/// scale is always 1: fallback fonts are not resized.
+static FALLBACK_VT: Slots<4> = Slots([qi as *const (), add_ref as _, release::<()> as _, FallbackMapCharacters as _]);
+static FALLBACK_IIDS: [Guid; 1] = [iids::FONT_FALLBACK];
+
+extern "win64" fn FactoryGetSystemFontFallback(_this: u64, out: *mut u64) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, new(&FALLBACK_VT, "IDWriteFontFallback", &FALLBACK_IIDS, ()));
+    S_OK
+}
+
+/// The text an IDWriteTextAnalysisSource holds from `pos`, up to `len` code
+/// units (GetTextAtPosition may hand it out in pieces).
+fn source_text(source: u64, pos: u32, len: u32) -> Result<Vec<u16>, u32> {
+    let mut text = Vec::new();
+    while (text.len() as u32) < len {
+        let (mut p, mut n): (*const u16, u32) = (core::ptr::null(), 0);
+        // SAFETY: GetTextAtPosition (slot 3) of the caller's analysis source.
+        let hr = unsafe {
+            let f: extern "win64" fn(u64, u32, *mut *const u16, *mut u32) -> u32 = core::mem::transmute(method(source, 3));
+            f(source, pos + text.len() as u32, &mut p, &mut n)
+        };
+        if hr != S_OK {
+            return Err(hr);
+        }
+        if p.is_null() || n == 0 {
+            break;
+        }
+        let take = n.min(len - text.len() as u32) as usize;
+        // SAFETY: the source's text of at least `take` code units.
+        text.extend_from_slice(unsafe { core::slice::from_raw_parts(p, take) });
+    }
+    Ok(text)
+}
+
+/// The font of family `fi` that best matches weight, stretch and style.
+fn best_in(s: &System, fi: usize, weight: u32, stretch: u32, style: u32) -> Option<&Arc<FontEntry>> {
+    s.families[fi].1.iter().min_by_key(|f| distance(f, weight, stretch, style))
+}
+
+fn has_char(f: &FontEntry, c: u32) -> bool {
+    f.face.face.glyph_index(c) != 0
+}
+
+/// Characters that take the font around them (spaces, joiners, combining
+/// marks, variation selectors), so they never start or end a run.
+fn neutral(c: u32) -> bool {
+    matches!(c, 0x09 | 0x20 | 0xA0 | 0x0300..=0x036F | 0x200B..=0x200D | 0xFE00..=0xFE0F)
+}
+
+/// The system font a character falls back to.
+fn fallback_for(sys: &System, c: u32, weight: u32, stretch: u32, style: u32) -> Option<Arc<FontEntry>> {
+    let preferred = find_family(sys, "Segoe UI");
+    preferred.into_iter().chain(0..sys.families.len()).filter_map(|fi| best_in(sys, fi, weight, stretch, style)).find(|f| has_char(f, c)).cloned()
+}
+
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn FallbackMapCharacters(
+    _this: u64,
+    source: u64,
+    pos: u32,
+    len: u32,
+    base_collection: u64,
+    base_family: *const u16,
+    weight: u32,
+    style: u32,
+    stretch: u32,
+    mapped_len: *mut u32,
+    mapped_font: *mut u64,
+    scale: *mut u32,
+) -> u32 {
+    if source == 0 || mapped_len.is_null() || mapped_font.is_null() || scale.is_null() {
+        return E_INVALIDARG;
+    }
+    put(mapped_len, 0);
+    put(mapped_font, 0);
+    put(scale, 1.0f32.to_bits());
+    let text = match source_text(source, pos, len) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    // Each character with its length in UTF-16 code units.
+    let chars: Vec<(u32, u32)> = char::decode_utf16(text.iter().copied())
+        .map(|r| r.map_or((0xFFFD, 1), |c| (c as u32, c.len_utf16() as u32)))
+        .collect();
+    let Some(&(first, _)) = chars.iter().find(|c| !neutral(c.0)).or(chars.first()) else { return S_OK };
+    let sys = system();
+    // A collection of another implementation is searched as the system's.
+    let base_sys = if is(base_collection, &COLLECTION_VT) { data::<Arc<System>>(base_collection).clone() } else { sys.clone() };
+    let base = if base_family.is_null() {
+        None
+    } else {
+        // SAFETY: a NUL-terminated family name.
+        let name = unsafe { path::wide_to_string(base_family) }.unwrap_or_default();
+        base_sys.families.iter().position(|f| f.0.eq_ignore_ascii_case(&name)).and_then(|fi| best_in(&base_sys, fi, weight, stretch, style).cloned())
+    };
+    let base_has = |c: u32| base.as_ref().is_some_and(|b| has_char(b, c));
+    let (owner, chosen) = if base_has(first) {
+        (base_sys.clone(), base.clone())
+    } else {
+        (sys.clone(), fallback_for(&sys, first, weight, stretch, style))
+    };
+    let from_base = base_has(first);
+    let mut n = 0u32;
+    for &(c, units) in &chars {
+        let keep = neutral(c)
+            || match &chosen {
+                // A fallback run ends where the base family can draw again.
+                Some(f) => has_char(f, c) && (from_base || !base_has(c)),
+                // An unmapped run ends at the first character a font has.
+                None => !base_has(c) && fallback_for(&sys, c, weight, stretch, style).is_none(),
+            };
+        if !keep && n > 0 {
+            break;
+        }
+        n += units;
+    }
+    put(mapped_len, n);
+    if let Some(f) = chosen {
+        put(mapped_font, font(owner, f));
+    }
+    S_OK
+}
 
 /// A family by name, or by its HKLM FontSubstitutes replacement.
 fn find_family(s: &System, name: &str) -> Option<usize> {
@@ -1596,7 +1833,7 @@ extern "win64" fn GdiConvertFontFaceToLOGFONT(_this: u64, face: u64, lf: *mut u8
 
 // ---- the factory -------------------------------------------------------------------------------
 
-static FACTORY_VT: Slots<24> = Slots([
+static FACTORY_VT: Slots<40> = Slots([
     qi as *const (),
     add_ref as _,
     release::<Mutex<Vec<u64>>> as _,
@@ -1619,10 +1856,29 @@ static FACTORY_VT: Slots<24> = Slots([
     stub::<19> as _,
     stub::<20> as _,
     stub::<21> as _,
-    stub::<22> as _,
+    FactoryCreateNumberSubstitution as _,
     FactoryCreateGlyphRunAnalysis as _,
+    // IDWriteFactory1
+    FactoryGetEudcFontCollection as _,
+    FactoryCreateCustomRenderingParams1 as _,
+    // IDWriteFactory2
+    FactoryGetSystemFontFallback as _,
+    stub::<27> as _, // CreateFontFallbackBuilder
+    FactoryTranslateColorGlyphRun as _,
+    FactoryCreateCustomRenderingParams2 as _,
+    FactoryCreateGlyphRunAnalysis2 as _,
+    // IDWriteFactory3
+    FactoryCreateGlyphRunAnalysis2 as _,
+    FactoryCreateCustomRenderingParams2 as _,
+    stub::<33> as _, // CreateFontFaceReference (file)
+    stub::<34> as _, // CreateFontFaceReference (path)
+    stub::<35> as _, // GetSystemFontSet
+    stub::<36> as _, // CreateFontSetBuilder
+    stub::<37> as _, // CreateFontCollectionFromFontSet
+    stub::<38> as _, // GetSystemFontCollection (IDWriteFontCollection1)
+    stub::<39> as _, // GetFontDownloadQueue
 ]);
-static FACTORY_IIDS: [Guid; 1] = [iids::FACTORY];
+static FACTORY_IIDS: [Guid; 4] = [iids::FACTORY, iids::FACTORY1, iids::FACTORY2, iids::FACTORY3];
 
 /// The registered font file and font collection loaders (factory data).
 fn loaders(this: u64) -> &'static Mutex<Vec<u64>> {
@@ -1809,17 +2065,113 @@ extern "win64" fn FactoryCreateMonitorRenderingParams(_this: u64, _monitor: u64,
 }
 
 extern "win64" fn factory_custom_rendering_params(_this: u64, gamma: u32, contrast: u32, cleartype: u32, geometry: u32, mode: u32, out: *mut u64) -> u32 {
-    let (g, c, t) = (f32::from_bits(gamma), f32::from_bits(contrast), f32::from_bits(cleartype));
-    if out.is_null() || !(g > 0.0 && g <= 256.0) || c < 0.0 || !(0.0..=1.0).contains(&t) || geometry > 2 || mode > 6 {
+    let p = Params { gamma, contrast, gray_contrast: 1.0f32.to_bits(), cleartype, geometry, mode, grid_fit: 0 };
+    custom_params(p, DWRITE_RENDERING_MODE_OUTLINE, out)
+}
+
+/// IDWriteFactory1::CreateCustomRenderingParams: adds the grayscale
+/// enhanced contrast.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn factory_custom_rendering_params1(_this: u64, gamma: u32, contrast: u32, gray_contrast: u32, cleartype: u32, geometry: u32, mode: u32, out: *mut u64) -> u32 {
+    let p = Params { gamma, contrast, gray_contrast, cleartype, geometry, mode, grid_fit: 0 };
+    custom_params(p, DWRITE_RENDERING_MODE_OUTLINE, out)
+}
+
+/// IDWriteFactory2/3::CreateCustomRenderingParams: adds the grid-fit mode;
+/// version 3 takes DWRITE_RENDERING_MODE1 (one more mode).
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn factory_custom_rendering_params2(
+    _this: u64,
+    gamma: u32,
+    contrast: u32,
+    gray_contrast: u32,
+    cleartype: u32,
+    geometry: u32,
+    mode: u32,
+    grid_fit: u32,
+    out: *mut u64,
+) -> u32 {
+    if grid_fit > DWRITE_GRID_FIT_MODE_ENABLED {
         return E_INVALIDARG;
     }
-    put(out, params(Params { gamma, contrast, cleartype, geometry, mode }));
+    let p = Params { gamma, contrast, gray_contrast, cleartype, geometry, mode, grid_fit };
+    custom_params(p, DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC_DOWNSAMPLED, out)
+}
+
+/// Checks custom rendering parameters as Windows does and makes the object.
+fn custom_params(p: Params, max_mode: u32, out: *mut u64) -> u32 {
+    let (g, c, gc, t) = (f32::from_bits(p.gamma), f32::from_bits(p.contrast), f32::from_bits(p.gray_contrast), f32::from_bits(p.cleartype));
+    if out.is_null() || !(g > 0.0 && g <= 256.0) || c < 0.0 || gc < 0.0 || !(0.0..=1.0).contains(&t) || p.geometry > 2 || p.mode > max_mode {
+        return E_INVALIDARG;
+    }
+    put(out, params(p));
     S_OK
 }
 
 xmm_jmp! {
     FactoryCreateCustomRenderingParams => factory_custom_rendering_params ["movd edx, xmm1", "movd r8d, xmm2", "movd r9d, xmm3"];
+    FactoryCreateCustomRenderingParams1 => factory_custom_rendering_params1 ["movd edx, xmm1", "movd r8d, xmm2", "movd r9d, xmm3"];
+    FactoryCreateCustomRenderingParams2 => factory_custom_rendering_params2 ["movd edx, xmm1", "movd r8d, xmm2", "movd r9d, xmm3"];
     FactoryCreateGlyphRunAnalysis => factory_glyph_run_analysis ["movd r8d, xmm2"];
+}
+
+/// IDWriteNumberSubstitution: an opaque object (IUnknown only) that text
+/// analysis reads digits through. Text analysis is not provided, so the
+/// method, locale and override choice are only checked and kept.
+struct NumberSubstitution {
+    _method: u32,
+    _locale: String,
+    _ignore_user_override: bool,
+}
+
+static NUMBER_SUBSTITUTION_VT: Slots<3> = Slots([qi as *const (), add_ref as _, release::<NumberSubstitution> as _]);
+static NUMBER_SUBSTITUTION_IIDS: [Guid; 1] = [iids::NUMBER_SUBSTITUTION];
+
+/// DWRITE_NUMBER_SUBSTITUTION_METHOD_TRADITIONAL, the last method.
+const NUMBER_SUBSTITUTION_TRADITIONAL: u32 = 5;
+
+extern "win64" fn FactoryCreateNumberSubstitution(_this: u64, method: u32, locale: *const u16, ignore: i32, out: *mut u64) -> u32 {
+    if out.is_null() || locale.is_null() || method > NUMBER_SUBSTITUTION_TRADITIONAL {
+        return E_INVALIDARG;
+    }
+    // SAFETY: a NUL-terminated locale name.
+    let locale = unsafe { path::wide_to_string(locale) }.unwrap_or_default();
+    let s = NumberSubstitution { _method: method, _locale: locale, _ignore_user_override: ignore != 0 };
+    put(out, new(&NUMBER_SUBSTITUTION_VT, "IDWriteNumberSubstitution", &NUMBER_SUBSTITUTION_IIDS, s));
+    S_OK
+}
+
+/// The EUDC (end-user defined characters) collection: there are no EUDC
+/// fonts, so it is empty, as on a Windows system without any.
+extern "win64" fn FactoryGetEudcFontCollection(_this: u64, out: *mut u64, _check: i32) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, collection(Arc::new(build(&[]))));
+    S_OK
+}
+
+/// IDWriteFactory2::TranslateColorGlyphRun: a run in a font without color
+/// layers (no COLR table) answers DWRITE_E_NOCOLOR, which tells the caller
+/// to draw it as ordinary glyphs. Color layers themselves are not provided.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn FactoryTranslateColorGlyphRun(_this: u64, _x: u32, _y: u32, run: *const u8, _desc: u64, _measuring: u32, _transform: u64, _palette: u32, out: *mut u64) -> u32 {
+    if run.is_null() || out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, 0);
+    // SAFETY: the caller's DWRITE_GLYPH_RUN (font face first).
+    let fface = unsafe { crate::teb::get::<u64>(run as u64, 0) };
+    if !is(fface, &FACE_VT) {
+        return E_INVALIDARG;
+    }
+    if face_of(fface).face.table(b"COLR").is_none() {
+        return DWRITE_E_NOCOLOR;
+    }
+    if crate::VERBOSE.load(Ordering::Relaxed) {
+        os_std::eprintln!("winrun: dwrite: color glyph layers are not implemented");
+    }
+    E_NOTIMPL
 }
 
 extern "win64" fn FactoryRegisterFontFileLoader(this: u64, loader: u64) -> u32 {

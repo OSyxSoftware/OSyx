@@ -450,11 +450,18 @@ impl osyx_ext4::BlockDevice for Disk {
     }
 
     fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> osyx_ext4::Result<()> {
-        read(&*self.0, lba, buf).map_err(|_| osyx_ext4::Error::Io)
+        read(&*self.0, lba, buf).map_err(|e| {
+            // Which request failed, and why: ext4 sees only "I/O error".
+            crate::kprintln!("ext4: read of {} sectors at LBA {lba} (device has {}) failed: {e:?}", buf.len() / SECTOR_SIZE, self.0.sector_count());
+            osyx_ext4::Error::Io
+        })
     }
 
     fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> osyx_ext4::Result<()> {
-        write(&*self.0, lba, buf).map_err(|_| osyx_ext4::Error::Io)
+        write(&*self.0, lba, buf).map_err(|e| {
+            crate::kprintln!("ext4: write of {} sectors at LBA {lba} (device has {}) failed: {e:?}", buf.len() / SECTOR_SIZE, self.0.sector_count());
+            osyx_ext4::Error::Io
+        })
     }
 
     fn flush(&mut self) -> osyx_ext4::Result<()> {

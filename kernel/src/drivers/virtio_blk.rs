@@ -279,7 +279,18 @@ impl VirtioBlk {
                         completed = Some(item);
                         if checks > 2 { SLEPT[index].fetch_add(1, Ordering::Relaxed); }
                     }
-                    Err(_) => { inner.failed = true; return Err(BlockError::Io); }
+                    // A thread being killed (its process exiting) or a slice
+                    // that ended still has a request the device owns: it
+                    // keeps waiting for the completion, bounded by the
+                    // deadline above, instead of disabling the disk for every
+                    // other process.
+                    Err(osyx_abi::Errno::Interrupted) => crate::sched::yield_now(),
+                    Err(osyx_abi::Errno::TimedOut) => {}
+                    Err(e) => {
+                        crate::kprintln!("virtio-blk {}: waiting for a completion failed ({e:?}); disk disabled", self.name);
+                        inner.failed = true;
+                        return Err(BlockError::Io);
+                    }
                 }
             } else {
                 crate::sched::yield_now();

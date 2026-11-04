@@ -67,6 +67,33 @@ extern "win64" fn RegisterEventSourceW(server: *const u16, source: *const u16) -
     h
 }
 
+/// RegisterEventSourceA: ANSI is UTF-8.
+extern "win64" fn RegisterEventSourceA(server: *const u8, source: *const u8) -> u64 {
+    // SAFETY: NULL or NUL-terminated strings.
+    let (server, source) = unsafe { (path::ansi_to_string(server), path::ansi_to_string(source)) };
+    let wide = |s: Option<String>| s.map(|s| s.encode_utf16().chain([0]).collect::<Vec<u16>>());
+    let (server, source) = (wide(server), wide(source));
+    RegisterEventSourceW(server.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()), source.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()))
+}
+
+/// ReportEventA: the strings widened (ANSI is UTF-8), then ReportEventW.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn ReportEventA(h: u64, kind: u16, category: u16, id: u32, user: *const u8, count: u16, size: u32, strings: *const u64, data: *const u8) -> i32 {
+    if count > 0 && strings.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let wide: Vec<Vec<u16>> = (0..count as usize)
+        .map(|i| {
+            // SAFETY: the caller's array of `count` string pointers.
+            let p = unsafe { *strings.add(i) } as *const u8;
+            // SAFETY: a NUL-terminated string.
+            unsafe { path::ansi_to_string(p) }.unwrap_or_default().encode_utf16().chain([0]).collect()
+        })
+        .collect();
+    let ptrs: Vec<u64> = wide.iter().map(|w| w.as_ptr() as u64).collect();
+    ReportEventW(h, kind, category, id, user, count, size, if count > 0 { ptrs.as_ptr() } else { core::ptr::null() }, data)
+}
+
 extern "win64" fn DeregisterEventSource(h: u64) -> i32 {
     match SOURCES.lock().unwrap().remove(&h) {
         Some(_) => 1,
@@ -245,6 +272,36 @@ extern "win64" fn ReadEventLogW(h: u64, flags: u32, offset: u32, buf: *mut u8, s
     1
 }
 
+/// An event of the Application log as wevtapi.rs reads it.
+#[derive(Clone)]
+pub(crate) struct EventView {
+    pub number: u32,
+    pub source: String,
+    pub kind: u16,
+    pub id: u32,
+    pub category: u16,
+    pub strings: Vec<String>,
+    pub time: u32,
+}
+
+/// The kept Application log records, oldest first.
+pub(crate) fn application_events() -> Vec<EventView> {
+    let log = LOG.lock().unwrap();
+    log.records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| EventView {
+            number: log.first + i as u32,
+            source: r.source.clone(),
+            kind: r.kind,
+            id: r.id,
+            category: r.category,
+            strings: r.strings.clone(),
+            time: r.time,
+        })
+        .collect()
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![RegisterEventSourceW, DeregisterEventSource, ReportEventW, OpenEventLogW, OpenEventLogA, CloseEventLog, ReadEventLogW]
+    export_table![RegisterEventSourceW, RegisterEventSourceA, DeregisterEventSource, ReportEventW, ReportEventA, OpenEventLogW, OpenEventLogA, CloseEventLog, ReadEventLogW]
 }

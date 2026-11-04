@@ -36,6 +36,8 @@ pub const ERROR_NOT_LOCKED: u32 = 158;
 pub const ERROR_MORE_DATA: u32 = 234;
 pub const ERROR_INVALID_FUNCTION: u32 = 1;
 pub const ERROR_NOT_FOUND: u32 = 1168;
+/// The file has mapped views that a size change would cut short.
+pub const ERROR_USER_MAPPED_FILE: u32 = 1224;
 pub const ERROR_REQUEST_ABORTED: u32 = 1235;
 pub const ERROR_NOACCESS: u32 = 998;
 pub const ERROR_IO_INCOMPLETE: u32 = 996;

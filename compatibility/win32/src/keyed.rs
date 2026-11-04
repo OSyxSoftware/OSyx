@@ -45,7 +45,7 @@ impl KeyedEvent {
                 return STATUS_TIMEOUT;
             }
             let ns = remaining.map_or(0, |r| r.as_nanos().min(u64::MAX as u128) as u64);
-            let _ = os_sys::futex_wait(done.as_ptr(), 0, ns);
+            let _ = crate::objects::futex_sleep(done.as_ptr(), 0, ns);
         }
     }
 }

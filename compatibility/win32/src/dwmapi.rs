@@ -193,8 +193,20 @@ extern "win64" fn DwmInvalidateIconicBitmaps(hwnd: u64) -> u32 {
     if crate::user32::is_window(hwnd) { S_OK } else { E_INVALIDARG }
 }
 
+/// DwmDefWindowProc: DWM handles a message itself only for the caption
+/// buttons it draws in an extended frame, and OSyx's compositor draws none,
+/// so it never handles one: FALSE with a zero result.
+extern "win64" fn DwmDefWindowProc(_wnd: u64, _msg: u32, _wparam: u64, _lparam: i64, result: *mut i64) -> Bool {
+    if !result.is_null() {
+        // SAFETY: the caller's LRESULT.
+        unsafe { *result = 0 };
+    }
+    FALSE
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        DwmDefWindowProc,
         DwmEnableBlurBehindWindow,
         DwmIsCompositionEnabled,
         DwmSetWindowAttribute,

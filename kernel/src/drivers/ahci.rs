@@ -489,7 +489,14 @@ impl AhciDisk {
                     let done = m.r32(p + PX_CI) & 1 == 0 && m.r32(p + PX_TFD) & TFD_BSY == 0;
                     (done || state.pending[self.port as usize].load(Ordering::Acquire) & IS_ERRORS != 0).then_some(())
                 });
-                if result.is_err() { g.failed = true; return Err(BlockError::Io); }
+                // A thread being killed, or a slice that ended, still has a
+                // command the controller owns: it waits on (the deadline
+                // above bounds it) instead of disabling the disk.
+                match result {
+                    Ok(()) => {}
+                    Err(osyx_abi::Errno::Interrupted) => crate::sched::yield_now(),
+                    Err(_) => continue,
+                }
                 if checks > 2 { state.slept.fetch_add(1, Ordering::Relaxed); }
                 if state.pending[self.port as usize].load(Ordering::Acquire) & IS_ERRORS != 0 { break; }
             } else { timer::pause_tick(); }

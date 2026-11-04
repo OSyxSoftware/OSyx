@@ -31,7 +31,12 @@ fn checks(path: &str) -> Result<(), Errno> {
         && raw::filemap_map(ro, 4096, 8192, false) == Err(Errno::InvalidArgument)
         && raw::filemap_flush(section, 8191, 2) == Err(Errno::InvalidArgument)
         && raw::ftruncate(fd, 0) == Err(Errno::Busy)
-        && raw::open(path, raw::OPEN_WRITE | raw::OPEN_TRUNCATE, 0) == Err(Errno::Busy);
+        && raw::ftruncate(fd, 4096) == Err(Errno::Busy)
+        && raw::open(path, raw::OPEN_WRITE | raw::OPEN_TRUNCATE, 0) == Err(Errno::Busy)
+        // A mapped file may grow, and shrink back to the mapped extent.
+        && raw::ftruncate(fd, 12288).is_ok()
+        && raw::fstat(fd).is_ok_and(|s| s.size == 12288)
+        && raw::ftruncate(fd, 8192).is_ok();
     // SAFETY: alias is a readable mapping of the second file page.
     let shared = unsafe { alias.add(5).read() == 0x52 };
     raw::close(section)?;

@@ -357,6 +357,46 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
     }
     let mut context = windows_context(n);
     let mut record = record(n);
+    // A fault inside the loader (winrun relocating or linking an image)
+    // cannot be dispatched: finding handlers takes the loader lock this
+    // thread holds, and waiting for it would hang the process. It ends the
+    // process with a report instead.
+    if crate::loader::held_by_current_thread() {
+        os_std::eprintln!(
+            "winrun: fault {:#x} at {:#x} (rsp {:#x}), {} {:#x}, inside the loader while loading {:?}: not dispatched",
+            record.code,
+            n.rip,
+            n.gpr[fault::RSP],
+            if record.info[0] == 1 { "writing" } else if record.info[0] == 8 { "executing" } else { "reading" },
+            record.info[1],
+            crate::loader::loading(),
+        );
+        // winrun's frames above the fault, within this thread's stack: a
+        // Windows thread's from its TEB, otherwise the rest of the page.
+        let rsp = n.gpr[fault::RSP];
+        let tid = os_sys::gettid();
+        let top = if crate::kernel32::thread_object(tid as u32).is_some() {
+            // SAFETY: this thread's TEB.
+            unsafe { crate::teb::get::<u64>(crate::teb::current(), crate::teb::TEB_STACK_BASE) }
+        } else {
+            (rsp | 0xfff) + 1
+        };
+        let (lo, hi) = crate::stall::own_code();
+        let mut frames = alloc::string::String::new();
+        let mut at = rsp & !7;
+        let mut found = 0;
+        while at + 8 <= top.min(rsp.saturating_add(32 << 10)) && found < 24 {
+            // SAFETY: a word of this thread's own stack, below its top.
+            let v = unsafe { core::ptr::read(at as *const u64) };
+            if v >= lo && v < hi {
+                frames.push_str(&alloc::format!(" {v:#x}"));
+                found += 1;
+            }
+            at += 8;
+        }
+        os_std::eprintln!("winrun: ... winrun frames:{frames}");
+        os_std::process::exit(record.code as i32);
+    }
     let software = n.vector == 6 && n.rip == osyx_windows_raise_trap as *const () as u64;
     if software {
         if let Some(s) = SOFTWARE.lock().unwrap().remove(&os_sys::gettid()) {
@@ -414,25 +454,32 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         os_std::eprintln!("winrun: exception continuation rejected: {error:?}");
         os_std::process::exit(0xc000000du32 as i32);
     }
+    // The faulting access goes on the first line: the process may be ended
+    // from outside (a crash handler's server) while the rest is printed.
+    let access = match (record.code, record.count >= 2, record.info[0]) {
+        (0xc000_0005, true, 0) => alloc::format!(", reading {:#x}", record.info[1]),
+        (0xc000_0005, true, 1) => alloc::format!(", writing {:#x}", record.info[1]),
+        (0xc000_0005, true, _) => alloc::format!(", executing {:#x}", record.info[1]),
+        _ => alloc::string::String::new(),
+    };
     os_std::eprintln!(
-        "winrun: unhandled Windows exception {:#x} at {:#x} ({}) in thread {}",
+        "winrun: unhandled Windows exception {:#x} at {:#x} ({}) in thread {}{access}",
         record.code,
         record.address,
         where_text(record.address),
         os_sys::gettid()
     );
-    crate::kernel32::print_failures();
     if record.code == 0x8000_0003 {
-        // MOZ_CRASH-style helpers pass the reason text in R8 before int3.
+        // MOZ_CRASH-style helpers pass the reason text in R8 before int3;
+        // Chromium's pass a pointer to (text, length) there.
         let r8 = context.regs[8];
-        if let Some(info) = crate::mem::virtual_query(r8).filter(|i| i.state == crate::mem::MEM_COMMIT && i.protect != 0 && i.protect != 1) {
-            let len = ((info.base + info.size - r8) as usize).min(256);
-            // SAFETY: committed, accessible memory of at least `len` bytes.
-            let bytes = unsafe { core::slice::from_raw_parts(r8 as *const u8, len) };
-            let text = bytes.split(|&b| b == 0).next().unwrap_or(&[]);
-            if !text.is_empty() && text.iter().all(|&b| (0x20..0x7f).contains(&b)) {
-                os_std::eprintln!("winrun: ... reason in r8: {}", core::str::from_utf8(text).unwrap_or(""));
-            }
+        if let Some(text) = text_at(r8, 1) {
+            os_std::eprintln!("winrun: ... reason in r8: {text}");
+        } else if let Some(text) = readable(r8, 8).filter(|b| b.len() == 8).and_then(|b| text_at(u64::from_le_bytes(b.try_into().unwrap()), 8)) {
+            os_std::eprintln!("winrun: ... reason at [r8]: {text}");
+        } else if let Some(text) = (0..64u64).map(|i| context.regs[4] + 8 * i).find_map(|a| text_at(a, 24)) {
+            // A message formatted into a stack buffer just before the trap.
+            os_std::eprintln!("winrun: ... text on the stack: {text}");
         }
         print_rust_locations(context.regs[4]);
     }
@@ -447,6 +494,23 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         // SAFETY: this thread's TEB.
         let (base, limit): (u64, u64) = unsafe { (crate::teb::get(t, crate::teb::TEB_STACK_BASE), crate::teb::get(t, crate::teb::TEB_STACK_LIMIT)) };
         os_std::eprintln!("winrun: ... {kind} {:#x} (stack {limit:#x}..{base:#x})", record.info[1]);
+        // The memory the access hit, as VirtualQuery sees it.
+        match crate::mem::virtual_query_for_report(record.info[1]) {
+            Some(i) => os_std::eprintln!(
+                "winrun: ... in region {:#x}+{:#x} (allocation {:#x}, state {:#x}, protect {:#x}, allocated as {:#x}, type {:#x})",
+                i.base,
+                i.size,
+                i.allocation_base,
+                i.state,
+                i.protect,
+                i.allocation_protect,
+                i.kind
+            ),
+            None => match crate::mapping::describe_for_report(record.info[1]) {
+                Some(what) => os_std::eprintln!("winrun: ... in {what}"),
+                None => os_std::eprintln!("winrun: ... in no region winrun knows"),
+            },
+        }
         if record.info[1] < limit && record.info[1] + 0x10000 >= limit {
             report_overflow(limit, base, n.gpr[fault::RSP], n.gpr[fault::RBP]);
         } else {
@@ -456,7 +520,16 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
     if let Some(what) = delay_load_failure(&record) {
         os_std::eprintln!("winrun: delay load failed: {what}");
     }
+    // Last: under OSYX_WINRUN_FAILTRACE these are many lines.
+    crate::kernel32::print_failures();
     os_std::process::exit(record.code as i32)
+}
+
+/// The printable ASCII text (NUL-terminated, at most 256 bytes) at `addr`,
+/// if there are at least `min` characters of it.
+fn text_at(addr: u64, min: usize) -> Option<alloc::string::String> {
+    let text = readable(addr, 256)?.split(|&b| b == 0).next().unwrap_or(&[]);
+    (text.len() >= min && text.iter().all(|&b| (0x20..0x7f).contains(&b))).then(|| alloc::string::String::from(core::str::from_utf8(text).unwrap_or("")))
 }
 
 /// `module+offset` for a code address, for crash reports.
@@ -487,15 +560,17 @@ fn trace(limit: u64, base: u64, rsp: u64) {
 }
 
 /// The code addresses among copied stack words, as module+offset, in
-/// order; None if there are none.
-pub(crate) fn chain_of(words: &[u64]) -> Option<alloc::string::String> {
+/// order, given the loaded images (base, size, name); None if there are
+/// none.
+pub(crate) fn chain_of(words: &[u64], images: &[(u64, u64, alloc::string::String)]) -> Option<alloc::string::String> {
     let mut found: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     for &v in words {
         if found.len() >= 12 {
             break;
         }
-        if let Some((module, offset)) = crate::loader::where_is(v).filter(|_| crate::loader::is_executable(v)) {
-            let entry = alloc::format!("{module}+{offset:#x}");
+        let Some((base, _, module)) = images.iter().find(|i| v >= i.0 && v < i.0 + i.1) else { continue };
+        if crate::loader::in_code(*base, v) {
+            let entry = alloc::format!("{module}+{:#x}", v - base);
             if found.last() != Some(&entry) {
                 found.push(entry);
             }

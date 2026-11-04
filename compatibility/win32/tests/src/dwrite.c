@@ -1,13 +1,16 @@
 /* DirectWrite: font files, faces, metrics, glyph indices and tables,
-   glyph-run analysis, the system collection and GDI interop; also runs on
+   glyph-run analysis, the system collection, GDI interop and the
+   IDWriteFactory2 additions (font fallback, grayscale analysis, rendering
+   parameters); also runs on
    Windows, where the expected values were taken from DirectWrite itself.
    The font is OSyx's Lato Regular (graphics/assets/fonts/windows), at
    C:\Windows\Fonts on OSyx or named by OSYX_TEST_FONT elsewhere. */
 #define COBJMACROS
 #include "common.h"
-#include <dwrite.h>
+#include <dwrite_2.h>
 
 static const GUID iid_factory={0xb859ee5a,0xd838,0x4b5b,{0xa2,0xe8,0x1a,0xdc,0x7d,0x93,0xdb,0x48}};
+static const GUID iid_factory2={0x0439fc60,0xca44,0x4994,{0x8d,0xee,0x3a,0x9a,0xf7,0xb7,0x32,0xec}};
 static const GUID iid_local_loader={0xb2d9f3ec,0xc9fe,0x4a11,{0xa2,0xec,0xd8,0x62,0x08,0xf7,0xc0,0xa2}};
 
 static int wide_eq(const WCHAR *a, const WCHAR *b) { while(*a && *a==*b){a++;b++;} return *a==*b; }
@@ -124,6 +127,85 @@ static void analysis_checks(IDWriteFactory *f, IDWriteFontFace *face) {
     check("outline mode cannot be rasterized",IDWriteFactory_CreateGlyphRunAnalysis(f,&run,1.0f,NULL,DWRITE_RENDERING_MODE_OUTLINE,DWRITE_MEASURING_MODE_NATURAL,0.0f,0.0f,&a)!=S_OK);
 }
 
+/* An IDWriteTextAnalysisSource over a fixed string, for MapCharacters. */
+typedef struct { IDWriteTextAnalysisSource iface; const WCHAR *text; UINT32 len; } Source;
+static const GUID iid_unknown={0,0,0,{0xc0,0,0,0,0,0,0,0x46}};
+static const GUID iid_source={0x688e1a58,0x5094,0x47c8,{0xad,0xc8,0xfb,0xce,0xa6,0x0a,0xe9,0x2b}};
+static int same_guid(const GUID *a, const GUID *b) { const BYTE *x=(const BYTE *)a, *y=(const BYTE *)b; for(int i=0;i<16;i++) if(x[i]!=y[i]) return 0; return 1; }
+/* Only IDWriteTextAnalysisSource itself: DirectWrite asks for the newer
+   versions and calls their methods when it gets them. */
+static HRESULT STDMETHODCALLTYPE src_qi(IDWriteTextAnalysisSource *s, REFIID r, void **o) {
+    if(same_guid(r,&iid_unknown) || same_guid(r,&iid_source)) { *o=s; return S_OK; }
+    *o=NULL; return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE src_ref(IDWriteTextAnalysisSource *s) { (void)s; return 1; }
+static HRESULT STDMETHODCALLTYPE src_at(IDWriteTextAnalysisSource *s, UINT32 pos, const WCHAR **text, UINT32 *len) {
+    Source *me=(Source *)s;
+    if(pos>=me->len){ *text=NULL; *len=0; } else { *text=me->text+pos; *len=me->len-pos; }
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE src_before(IDWriteTextAnalysisSource *s, UINT32 pos, const WCHAR **text, UINT32 *len) {
+    Source *me=(Source *)s; *text=pos?me->text:NULL; *len=pos; return S_OK;
+}
+static DWRITE_READING_DIRECTION STDMETHODCALLTYPE src_dir(IDWriteTextAnalysisSource *s) { (void)s; return DWRITE_READING_DIRECTION_LEFT_TO_RIGHT; }
+static HRESULT STDMETHODCALLTYPE src_locale(IDWriteTextAnalysisSource *s, UINT32 pos, UINT32 *len, const WCHAR **name) {
+    Source *me=(Source *)s; *len=me->len-pos; *name=L"en-us"; return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE src_numbers(IDWriteTextAnalysisSource *s, UINT32 pos, UINT32 *len, IDWriteNumberSubstitution **sub) {
+    Source *me=(Source *)s; *len=me->len-pos; *sub=NULL; return S_OK;
+}
+static IDWriteTextAnalysisSourceVtbl src_vtbl={src_qi,src_ref,src_ref,src_at,src_before,src_dir,src_locale,src_numbers};
+
+static void factory2_checks(IDWriteFactory *f, IDWriteFontFace *face) {
+    IDWriteFactory2 *f2=NULL;
+    check("IDWriteFactory2",IDWriteFactory_QueryInterface(f,&iid_factory2,(void **)&f2)==S_OK && f2);
+    if(!f2) return;
+    IDWriteFontFallback *fb=NULL;
+    check("system font fallback",IDWriteFactory2_GetSystemFontFallback(f2,&fb)==S_OK && fb);
+    if(fb) {
+        Source s={{&src_vtbl},L"ab c",4};
+        UINT32 mapped=0; IDWriteFont *font=NULL; FLOAT scale=0.0f;
+        check("map Latin text",IDWriteFontFallback_MapCharacters(fb,&s.iface,0,4,NULL,NULL,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,&mapped,&font,&scale)==S_OK);
+        check("one font for the whole run",mapped==4 && font && scale==1.0f);
+        if(font) {
+            BOOL has=FALSE;
+            check("the mapped font has 'c'",IDWriteFont_HasCharacter(font,'c',&has)==S_OK && has);
+            IDWriteFont_Release(font);
+        }
+        IDWriteFontFallback_Release(fb);
+    }
+    UINT32 cp='H'; UINT16 g=0; IDWriteFontFace_GetGlyphIndices(face,&cp,1,&g);
+    FLOAT adv=10.0f; DWRITE_GLYPH_OFFSET off={0,0};
+    DWRITE_GLYPH_RUN run={face,20.0f,1,&g,&adv,&off,FALSE,0};
+    IDWriteGlyphRunAnalysis *a=NULL;
+    check("grayscale glyph run analysis",IDWriteFactory2_CreateGlyphRunAnalysis(f2,&run,NULL,DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,DWRITE_MEASURING_MODE_NATURAL,
+          DWRITE_GRID_FIT_MODE_DISABLED,DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,10.0f,30.0f,&a)==S_OK && a);
+    if(a) {
+        RECT r={0}, ct={1,1,1,1};
+        check("grayscale gives the 1x1 texture",IDWriteGlyphRunAnalysis_GetAlphaTextureBounds(a,DWRITE_TEXTURE_ALIASED_1x1,&r)==S_OK && r.left>=10 && r.left<=13 && r.bottom>=29 && r.bottom<=31);
+        check("no ClearType texture in grayscale",IDWriteGlyphRunAnalysis_GetAlphaTextureBounds(a,DWRITE_TEXTURE_CLEARTYPE_3x1,&ct)==S_OK && ct.left==ct.right);
+        int w=r.right-r.left, h=r.bottom-r.top;
+        static BYTE tex[64*64];
+        if(w>0 && h>0 && w*h<=(int)sizeof tex) {
+            check("grayscale texture",IDWriteGlyphRunAnalysis_CreateAlphaTexture(a,DWRITE_TEXTURE_ALIASED_1x1,&r,tex,(UINT32)(w*h))==S_OK);
+            int full=0, partial=0;
+            for(int i=0;i<w*h;i++){ if(tex[i]>=250) full++; else if(tex[i]>0) partial++; }
+            check("antialiased, not bilevel",full>=2*10 && partial>0);
+        } else check("grayscale texture size",0);
+        IDWriteGlyphRunAnalysis_Release(a);
+    }
+    IDWriteRenderingParams2 *p=NULL;
+    check("rendering parameters 2",IDWriteFactory2_CreateCustomRenderingParams(f2,2.2f,0.75f,1.5f,0.5f,DWRITE_PIXEL_GEOMETRY_BGR,DWRITE_RENDERING_MODE_NATURAL,
+          DWRITE_GRID_FIT_MODE_ENABLED,&p)==S_OK && p);
+    if(p) {
+        check("grayscale enhanced contrast",IDWriteRenderingParams2_GetGrayscaleEnhancedContrast(p)==1.5f);
+        check("grid fit mode",IDWriteRenderingParams2_GetGridFitMode(p)==DWRITE_GRID_FIT_MODE_ENABLED);
+        check("ClearType level of parameters 2",IDWriteRenderingParams2_GetClearTypeLevel(p)==0.5f);
+        IDWriteRenderingParams2_Release(p);
+    }
+    IDWriteFactory2_Release(f2);
+}
+
 static void system_checks(IDWriteFactory *f) {
     IDWriteFontCollection *c=NULL;
     check("system collection",IDWriteFactory_GetSystemFontCollection(f,&c,FALSE)==S_OK && c);
@@ -215,6 +297,7 @@ void __stdcall start(void) {
     if(face) {
         face_checks(face);
         analysis_checks(f,face);
+        factory2_checks(f,face);
         IDWriteFontFace_Release(face);
     }
     system_checks(f);

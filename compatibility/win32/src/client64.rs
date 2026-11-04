@@ -996,6 +996,10 @@ extern "win64" fn HidD_GetProductString(h: u64, _buf: *mut u16, _len: u32) -> u8
     hid_string(h)
 }
 
+extern "win64" fn HidD_GetSerialNumberString(h: u64, _buf: *mut u16, _len: u32) -> u8 {
+    hid_string(h)
+}
+
 extern "win64" fn HidP_GetButtonCaps(_kind: u32, _caps: *mut u8, _len: *mut u16, _data: u64) -> u32 {
     HIDP_STATUS_INVALID_PREPARSED_DATA
 }
@@ -1053,6 +1057,7 @@ pub fn hid_exports() -> Vec<(&'static str, u64)> {
         HidD_FreePreparsedData,
         HidD_GetManufacturerString,
         HidD_GetProductString,
+        HidD_GetSerialNumberString,
         HidP_GetCaps,
         HidP_GetButtonCaps,
         HidP_GetValueCaps,

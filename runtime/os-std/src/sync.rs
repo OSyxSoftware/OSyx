@@ -44,6 +44,38 @@ pub enum TryLockError<G> {
 
 pub type TryLockResult<G> = Result<G, TryLockError<G>>;
 
+/// How many locks (Mutex, RwLock) each thread holds, by thread
+/// id modulo the table size. A thread killed while it holds one leaves it
+/// locked for good, so a thread killer waits until [`locks_held_by`] its
+/// target is 0. Threads whose ids share a slot add up, which can only make
+/// such a wait longer.
+const HELD_SLOTS: usize = 8192;
+static HELD: [AtomicU32; HELD_SLOTS] = [const { AtomicU32::new(0) }; HELD_SLOTS];
+
+fn held_slot(tid: u64) -> &'static AtomicU32 {
+    &HELD[(tid as usize) % HELD_SLOTS]
+}
+
+pub(crate) fn note_acquired() {
+    held_slot(sys::current_tid()).fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn note_released() {
+    held_slot(sys::current_tid()).fetch_sub(1, Ordering::Relaxed);
+}
+
+/// The number of locks thread `tid` of this process holds (see `HELD`).
+/// The heap is not counted (see [`allocator_busy`]).
+pub fn locks_held_by(tid: u64) -> u32 {
+    held_slot(tid).load(Ordering::Relaxed)
+}
+
+/// Whether some thread of this process is inside the allocator: a thread
+/// killer waits until it is not, since the target may be that thread.
+pub fn allocator_busy() -> bool {
+    sys::heap_busy()
+}
+
 const UNLOCKED: u32 = 0;
 const LOCKED: u32 = 1;
 /// Locked, and at least one thread may be sleeping on the futex.
@@ -84,6 +116,9 @@ impl<T> Mutex<T> {
 
 impl<T: ?Sized> Mutex<T> {
     fn raw_lock(&self) {
+        // Counted before the thread can own the lock (see `HELD`), until
+        // after it no longer does (`raw_unlock`).
+        note_acquired();
         self.acquire();
         self.owner.store(sys::current_tid(), Ordering::Relaxed);
     }
@@ -114,6 +149,7 @@ impl<T: ?Sized> Mutex<T> {
         if self.futex.swap(UNLOCKED, Ordering::Release) == CONTENDED {
             sys::futex_wake(&self.futex, 1);
         }
+        note_released();
     }
 
     pub fn lock(&self) -> LockResult<MutexGuard<'_, T>> {
@@ -121,13 +157,39 @@ impl<T: ?Sized> Mutex<T> {
         Ok(MutexGuard { lock: self, _not_send: PhantomData })
     }
 
+    /// Releases the lock if thread `tid`, which has ended, still holds it
+    /// (a thread killed inside the critical section). Returns whether it
+    /// did. The caller knows the thread is gone; what the lock guards is left
+    /// as the thread left it.
+    pub fn release_if_owner_gone(&self, tid: u64) -> bool {
+        if tid == 0 || self.futex.load(Ordering::Relaxed) == UNLOCKED || self.owner.load(Ordering::Relaxed) != tid {
+            return false;
+        }
+        held_slot(tid).fetch_sub(1, Ordering::Relaxed);
+        self.owner.store(0, Ordering::Relaxed);
+        if self.futex.swap(UNLOCKED, Ordering::Release) == CONTENDED {
+            sys::futex_wake(&self.futex, u32::MAX);
+        }
+        true
+    }
+
+    /// Whether the calling thread holds the lock: for code that may run
+    /// while it does (a fault handler) and must not wait for it.
+    pub fn is_held_by_current_thread(&self) -> bool {
+        self.futex.load(Ordering::Relaxed) != UNLOCKED && self.owner.load(Ordering::Relaxed) == sys::current_tid()
+    }
+
     pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, T>> {
+        note_acquired();
         match self.futex.compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed) {
             Ok(_) => {
                 self.owner.store(sys::current_tid(), Ordering::Relaxed);
                 Ok(MutexGuard { lock: self, _not_send: PhantomData })
             }
-            Err(_) => Err(TryLockError::WouldBlock),
+            Err(_) => {
+                note_released();
+                Err(TryLockError::WouldBlock)
+            }
         }
     }
 
@@ -336,6 +398,9 @@ impl<T: ?Sized> RwLock<T> {
     }
 
     pub fn read(&self) -> LockResult<RwLockReadGuard<'_, T>> {
+        // Counted before the thread can hold the lock (see `HELD`), until
+        // after the guard has released it.
+        note_acquired();
         loop {
             if self.read_acquire() {
                 return Ok(RwLockReadGuard { lock: self, _not_send: PhantomData });
@@ -345,14 +410,17 @@ impl<T: ?Sized> RwLock<T> {
     }
 
     pub fn try_read(&self) -> TryLockResult<RwLockReadGuard<'_, T>> {
+        note_acquired();
         if self.read_acquire() {
             Ok(RwLockReadGuard { lock: self, _not_send: PhantomData })
         } else {
+            note_released();
             Err(TryLockError::WouldBlock)
         }
     }
 
     pub fn write(&self) -> LockResult<RwLockWriteGuard<'_, T>> {
+        note_acquired();
         loop {
             let s = self.state.load(Ordering::Relaxed);
             if s & WRITER == 0 && s & READERS_MASK == 0 {
@@ -372,9 +440,13 @@ impl<T: ?Sized> RwLock<T> {
     }
 
     pub fn try_write(&self) -> TryLockResult<RwLockWriteGuard<'_, T>> {
+        note_acquired();
         match self.state.compare_exchange(0, WRITER, Ordering::Acquire, Ordering::Relaxed) {
             Ok(_) => Ok(RwLockWriteGuard { lock: self, _not_send: PhantomData }),
-            Err(_) => Err(TryLockError::WouldBlock),
+            Err(_) => {
+                note_released();
+                Err(TryLockError::WouldBlock)
+            }
         }
     }
 
@@ -409,6 +481,7 @@ impl<T: ?Sized> Drop for RwLockReadGuard<'_, T> {
             // Last reader: a writer may be waiting.
             sys::futex_wake(&self.lock.state, u32::MAX);
         }
+        note_released();
     }
 }
 
@@ -416,6 +489,7 @@ impl<T: ?Sized> Drop for RwLockWriteGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.state.store(0, Ordering::Release);
         sys::futex_wake(&self.lock.state, u32::MAX);
+        note_released();
     }
 }
 

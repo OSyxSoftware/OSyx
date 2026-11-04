@@ -227,9 +227,54 @@ impl Dib {
     }
 }
 
+/// The pixels of a bitmap: owned words, or a view of a file mapping
+/// (CreateDIBSection with a section), unmapped when the bitmap goes away.
+pub(super) enum Storage {
+    Owned(Vec<u32>),
+    View(ViewMem),
+}
+
+/// A mapped view holding a DIB section's bits: the view's base (to unmap)
+/// and the bits at an offset in it.
+pub(super) struct ViewMem {
+    base: u64,
+    bits: *mut u32,
+    words: usize,
+}
+// SAFETY: the view is process memory owned by this bitmap; access goes
+// through the GDI state lock like owned storage.
+unsafe impl Send for ViewMem {}
+
+impl Drop for ViewMem {
+    fn drop(&mut self) {
+        let _ = crate::mapping::unmap(self.base);
+    }
+}
+
+impl core::ops::Deref for Storage {
+    type Target = [u32];
+    fn deref(&self) -> &[u32] {
+        match self {
+            Storage::Owned(v) => v,
+            // SAFETY: the mapped view holds `words` words while this lives.
+            Storage::View(m) => unsafe { core::slice::from_raw_parts(m.bits, m.words) },
+        }
+    }
+}
+
+impl core::ops::DerefMut for Storage {
+    fn deref_mut(&mut self) -> &mut [u32] {
+        match self {
+            Storage::Owned(v) => v,
+            // SAFETY: as above, writable (mapped with write access).
+            Storage::View(m) => unsafe { core::slice::from_raw_parts_mut(m.bits, m.words) },
+        }
+    }
+}
+
 pub(super) struct Bitmap {
     dib: Dib,
-    storage: Vec<u32>,
+    storage: Storage,
     section: bool,
 }
 impl Bitmap {
@@ -244,10 +289,14 @@ impl Bitmap {
         } else {
             storage.truncate(words);
         }
-        Self { dib, storage, section }
+        Self { dib, storage: Storage::Owned(storage), section }
     }
+    /// Owned words for reuse; a section's view is unmapped instead.
     pub(super) fn into_storage(self) -> Vec<u32> {
-        self.storage
+        match self.storage {
+            Storage::Owned(v) => v,
+            Storage::View(_) => Vec::new(),
+        }
     }
     fn bits(&self) -> &[u8] {
         // SAFETY: owned word storage is large enough for the DIB.
@@ -274,7 +323,7 @@ impl Bitmap {
 /// An independent copy of a bitmap (icons keep their own), or None.
 pub(super) fn duplicate_bitmap(g: &mut Gui, h: u64) -> Option<u64> {
     let b = g.bitmaps.get(&h)?;
-    let copy = Bitmap { dib: b.dib.clone(), storage: b.storage.clone(), section: false };
+    let copy = Bitmap { dib: b.dib.clone(), storage: Storage::Owned(b.storage.to_vec()), section: false };
     Some(insert_bitmap(g, copy))
 }
 
@@ -501,10 +550,10 @@ extern "win64" fn CreateDIBSection(
     unsafe {
         *out = core::ptr::null_mut();
     }
-    if section != 0 {
-        return fail(ERROR_NOT_SUPPORTED, 0);
-    }
     let Some(dib) = Dib::read(info, usage) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    if section != 0 {
+        return dib_in_section(dib, out, section, _offset);
+    }
     let words = dib.bytes().div_ceil(4);
     let storage = with(|g| g.take_bitmap_storage(words));
     let mut b = Bitmap::with_storage(dib, true, storage);
@@ -514,6 +563,34 @@ extern "win64" fn CreateDIBSection(
     }
     with(|g| insert_bitmap(g, b))
 }
+/// CreateDIBSection over a file mapping: the bits are a view of `section`
+/// at `offset` (a DWORD multiple), so the program and other processes that
+/// map the same section see and draw the same pixels.
+fn dib_in_section(dib: Dib, out: *mut *mut u8, section: u64, offset: u32) -> u64 {
+    if offset % 4 != 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    const FILE_MAP_WRITE: u32 = 0x2;
+    const FILE_MAP_READ: u32 = 0x4;
+    let aligned = offset as u64 & !(crate::mem::GRANULARITY as u64 - 1);
+    let skip = (offset as u64 - aligned) as usize;
+    let bytes = dib.bytes();
+    let (base, size) = match crate::mapping::map(section, FILE_MAP_READ | FILE_MAP_WRITE, aligned, (skip + bytes) as u64) {
+        Ok(v) => v,
+        Err(s) => return fail(crate::error::status_to_win32(s), 0),
+    };
+    if (size as usize) < skip + bytes {
+        let _ = crate::mapping::unmap(base);
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let bits = (base + skip as u64) as *mut u32;
+    let b = Bitmap { dib, storage: Storage::View(ViewMem { base, bits, words: bytes / 4 }), section: true };
+    // SAFETY: the caller's out pointer; the view stays mapped until
+    // DeleteObject.
+    unsafe { *out = bits.cast() };
+    with(|g| insert_bitmap(g, b))
+}
+
 extern "win64" fn CreateDIBitmap(
     dc: u64,
     header: *const u8,
@@ -1179,13 +1256,13 @@ fn insert_region(region: Region) -> u64 {
         h
     })
 }
-extern "win64" fn CreateRectRgn(l: i32, t: i32, r: i32, b: i32) -> u64 {
+pub(super) extern "win64" fn CreateRectRgn(l: i32, t: i32, r: i32, b: i32) -> u64 {
     let rect = Rect::new(l.min(r), t.min(b), l.abs_diff(r), t.abs_diff(b));
     insert_region(Region::from_rect(rect))
 }
 /// `dest = a <mode> b` (RGN_AND 1, OR 2, XOR 3, DIFF 4, COPY 5: just `a`);
 /// the result's complexity, or ERROR (0).
-extern "win64" fn CombineRgn(dest: u64, a: u64, b: u64, mode: i32) -> i32 {
+pub(super) extern "win64" fn CombineRgn(dest: u64, a: u64, b: u64, mode: i32) -> i32 {
     with(|g| {
         let Some(first) = g.regions.get(&a).cloned() else { return 0 };
         let result = if mode == 5 {

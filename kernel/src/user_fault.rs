@@ -21,6 +21,63 @@ struct Pending {
     fs32: u64,
 }
 
+/// Reports a fault taken while the thread's previous fault is still being
+/// handled: both instruction pointers and the code addresses of the
+/// handler's own image (winrun, linked at 0x4000_0000) on the stack, for
+/// addr2line.
+fn report_nested(tid: u64, first: u64, f: &TrapFrame) {
+    crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} while handling its fault at rip {first:#x}; handler frames:{}", f.rip, stack_frames(f.rsp, 2048, false));
+}
+
+/// The code addresses seen most often in the user stack above `rsp` (up
+/// to `len` bytes, or where it stops being readable), with their counts and
+/// how far the readable stack reached: a recursion shows as a few
+/// addresses repeated many times.
+fn frequent_frames(rsp: u64, len: usize) -> alloc::string::String {
+    let mut counts: BTreeMap<u64, u32> = BTreeMap::new();
+    let mut chunk = [0u8; 512];
+    let mut read = 0;
+    while read < len && fixup::copy_from_user(&mut chunk, rsp + read as u64).is_ok() {
+        for word in chunk.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().unwrap())) {
+            if (0x4000_0000..0x4100_0000).contains(&word) || (0x1_4000_0000..0x2_0000_0000).contains(&word) {
+                *counts.entry(word).or_insert(0) += 1;
+            }
+        }
+        read += chunk.len();
+    }
+    let mut top: alloc::vec::Vec<(u64, u32)> = counts.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out = alloc::format!(" ({read:#x} bytes readable)");
+    for (addr, n) in top.into_iter().take(16) {
+        out.push_str(&alloc::format!(" {addr:#x}x{n}"));
+    }
+    out
+}
+
+/// Code addresses among the user stack words above `rsp` (`len` bytes at
+/// most): the handler's image (winrun, linked at 0x4000_0000) and, with
+/// `images`, also addresses where Windows images load (0x1_4000_0000 up
+/// to 0x2_0000_0000), for addr2line and module offsets.
+fn stack_frames(rsp: u64, len: usize, images: bool) -> alloc::string::String {
+    let mut frames = alloc::string::String::new();
+    let mut count = 0;
+    let mut chunk = [0u8; 512];
+    for i in 0..len / 512 {
+        if fixup::copy_from_user(&mut chunk, rsp + i as u64 * 512).is_err() {
+            break;
+        }
+        for word in chunk.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().unwrap())) {
+            let ours = (0x4000_0000..0x4100_0000).contains(&word);
+            let image = images && (0x1_4000_0000..0x2_0000_0000).contains(&word);
+            if (ours || image) && count < 48 {
+                frames.push_str(&alloc::format!(" {word:#x}"));
+                count += 1;
+            }
+        }
+    }
+    frames
+}
+
 /// True when `cs` is the compatibility-mode code selector.
 fn compat(cs: u64) -> bool {
     (cs as u16) & !3 == wow64::USER_CS32 & !3
@@ -122,8 +179,20 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
     let pid = sched::current_pid();
     let tid = sched::current_tid();
     let mut registry = REG.lock();
-    let Some(r) = registry.get_mut(&pid) else { return false };
+    let Some(r) = registry.get_mut(&pid) else {
+        drop(registry);
+        crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} with no fault handler registered", f.rip);
+        return false;
+    };
     if r.entry == 0 || r.active.contains_key(&tid) {
+        // A fault while this thread's previous one is still being handled
+        // ends the process: say where both happened.
+        let first = r.active.get(&tid).map(|p| p.frame.rip);
+        drop(registry);
+        match first {
+            Some(first) => report_nested(tid, first, f),
+            None => crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} with no fault handler entry", f.rip),
+        }
         return false;
     }
     let mut c = from_frame(f);
@@ -140,12 +209,24 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
     }
     let mask = u32::from_le_bytes(c.fx[28..32].try_into().unwrap());
     let Some(addr) = f.rsp.checked_sub(128 + core::mem::size_of::<Context>() as u64).map(|n| n & !63) else {
+        drop(registry);
+        crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} with rsp {:#x}: no room for its context", f.rip, f.rsp);
         return false;
     };
     let Some(stack) = addr.checked_sub(8) else { return false };
     let bytes =
         unsafe { core::slice::from_raw_parts(&c as *const Context as *const u8, core::mem::size_of::<Context>()) };
     if fixup::copy_to_user(addr, bytes).is_err() || fixup::copy_to_user(stack, &0u64.to_le_bytes()).is_err() {
+        drop(registry);
+        // Most often a stack overflow: say what fills the stack, the
+        // innermost frames and the addresses found most often in it.
+        crate::kprintln!(
+            "user fault: thread {tid} faulted at rip {:#x}: its context cannot be written below rsp {:#x}; frames:{}",
+            f.rip,
+            f.rsp,
+            stack_frames(f.rsp, 16 << 10, true)
+        );
+        crate::kprintln!("user fault: thread {tid}: most frequent code addresses on its stack:{}", frequent_frames(f.rsp, 8 << 20));
         return false;
     }
     let fs32 = if compat { sched::current_fs32_base() } else { 0 };

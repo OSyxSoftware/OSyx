@@ -623,6 +623,19 @@ extern "win64" fn NCryptOpenStorageProvider(out: *mut u64, name: *const u16, _fl
     0
 }
 
+/// NCryptIsAlgSupported: whether the provider makes keys of the algorithm
+/// (RSA, ECDSA and ECDH on P-256 and P-384); NTE_NOT_SUPPORTED otherwise.
+extern "win64" fn NCryptIsAlgSupported(provider: u64, alg: *const u16, _flags: u32) -> SecStatus {
+    if !is_provider(provider) {
+        return NTE_INVALID_HANDLE;
+    }
+    match wide(alg) {
+        None => NTE_INVALID_PARAMETER,
+        Some(a) if Algo::from_name(&a).is_some() => 0,
+        Some(_) => NTE_NOT_SUPPORTED,
+    }
+}
+
 extern "win64" fn NCryptCreatePersistedKey(provider: u64, out: *mut u64, alg: *const u16, name: *const u16, _spec: u32, flags: u32) -> SecStatus {
     if !is_provider(provider) {
         return NTE_INVALID_HANDLE;
@@ -895,6 +908,7 @@ extern "win64" fn NCryptSignHash(
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        NCryptIsAlgSupported,
         NCryptOpenStorageProvider,
         NCryptCreatePersistedKey,
         NCryptOpenKey,

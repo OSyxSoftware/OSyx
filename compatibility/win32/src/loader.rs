@@ -289,6 +289,8 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("wintrust.dll", crate::minordlls::wintrust_exports(), Vec::new()),
         builtin("dxgi.dll", crate::dwmapi::dxgi_exports(), Vec::new()),
         builtin("d3dcompiler_47.dll", crate::dwmapi::d3dcompiler_exports(), Vec::new()),
+        builtin("wevtapi.dll", crate::wevtapi::exports(), Vec::new()),
+        builtin("netapi32.dll", crate::netapi32::exports(), Vec::new()),
     ]
 }
 
@@ -714,7 +716,26 @@ struct ModState {
     pristine: Vec<(u64, Vec<u8>)>,
 }
 
+/// Gives every page of the image at `base` the protection the initial load
+/// gave it again (the page plan `WinHost::commit` applied, where a page two
+/// sections share has the union of their flags), undoing what the module's
+/// VirtualProtect calls changed: MSVC's CRT, for one, makes its .fptable
+/// section read-only after initialization.
+fn reset_section_protection(file: &[u8], base: u64) {
+    let Ok(pe) = PeFile::parse_any(file) else { return };
+    let Ok(plan) = image::protections(&pe) else { return };
+    for p in &plan {
+        let prot = match (p.write, p.execute) {
+            (true, _) => mem::Prot::ReadWrite,
+            (false, true) => mem::Prot::ExecuteRead,
+            (false, false) => mem::Prot::ReadOnly,
+        };
+        let _ = mem::reset_image_pages(base + p.rva as u64, p.size as usize, prot);
+    }
+}
+
 /// The writable sections of the PE image `file` mapped at `base`, copied.
+
 fn writable_sections(file: &[u8], base: u64) -> Vec<(u64, Vec<u8>)> {
     const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
     let Ok(pe) = PeFile::parse_any(file) else { return Vec::new() };
@@ -737,6 +758,10 @@ struct Loader {
 }
 
 static LOADER: Mutex<Option<Loader>> = Mutex::new(None);
+
+pub(crate) fn release_if_owner_gone(tid: u64) -> bool {
+    LOADER.release_if_owner_gone(tid)
+}
 
 fn with<R>(f: impl FnOnce(&mut Loader) -> R) -> R {
     let mut g = LOADER.lock().unwrap();
@@ -779,9 +804,13 @@ fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> 
         }
         l.state[i].attached = true;
         if l.state[i].ldr != 0 {
-            // Loaded again after the last FreeLibrary detached it: its data
-            // goes back to what it was before the first attach; the loader
-            // entry and TLS slot it had are still there.
+            // Loaded again after the last FreeLibrary detached it: its
+            // sections get their original protection and its data goes back
+            // to what it was before the first attach; the loader entry and
+            // TLS slot it had are still there.
+            if let Kind::Pe { file, .. } = &l.linker.modules[i].kind {
+                reset_section_protection(file.as_ref(), l.linker.modules[i].base);
+            }
             for (at, bytes) in &l.state[i].pristine {
                 // SAFETY: the module's own writable sections, as copied.
                 unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), *at as *mut u8, bytes.len()) };
@@ -857,32 +886,50 @@ const TLS_SLOTS: usize = 256;
 /// missing ones. Rebuilding the array would silently wipe every thread-local
 /// the program had stored (jemalloc's thread cache, NSS's, Gecko's).
 pub fn setup_thread_tls(teb_addr: u64) {
+    with_loaded(|l| fill_tls(l, teb_addr));
+}
+
+/// Static TLS blocks for the calling thread and every other live thread:
+/// Windows gives a DLL loaded later a block in each existing thread. Other
+/// threads' TEBs are filled under `TEB_LIFETIME`, which an ending thread
+/// takes to retire its TEB before freeing it, so none is written after.
+fn setup_tls_everywhere() {
     with_loaded(|l| {
-        if l.tls.is_empty() {
-            return;
-        }
-        // SAFETY: `teb_addr` is a TEB; its TLS pointer is either 0 or an array
-        // this function allocated with TLS_SLOTS entries.
-        let existing = unsafe { teb::get::<u64>(teb_addr, teb::TEB_TLS_POINTER) };
-        let array: &'static mut [u64] = if existing == 0 {
-            let a = Vec::leak(alloc::vec![0u64; TLS_SLOTS]);
-            // SAFETY: as above.
-            unsafe { teb::put(teb_addr, teb::TEB_TLS_POINTER, a.as_mut_ptr() as u64) };
-            a
-        } else {
-            // SAFETY: as above.
-            unsafe { core::slice::from_raw_parts_mut(existing as *mut u64, TLS_SLOTS) }
-        };
-        for (i, t) in l.tls.iter().enumerate() {
-            if i >= TLS_SLOTS || array[i] != 0 {
-                continue;
+        fill_tls(l, teb::current());
+        let _alive = crate::kernel32::TEB_LIFETIME.lock().unwrap();
+        for (_, t) in crate::kernel32::thread_list() {
+            if t != 0 {
+                fill_tls(l, t);
             }
-            let mut b = t.template.clone();
-            b.resize(t.template.len() + t.zero_fill, 0);
-            // Leaked deliberately: the block lives as long as the thread.
-            array[i] = Vec::leak(b).as_mut_ptr() as u64;
         }
     });
+}
+
+fn fill_tls(l: &Loader, teb_addr: u64) {
+    if l.tls.is_empty() {
+        return;
+    }
+    // SAFETY: `teb_addr` is a TEB; its TLS pointer is either 0 or an array
+    // this function allocated with TLS_SLOTS entries.
+    let existing = unsafe { teb::get::<u64>(teb_addr, teb::TEB_TLS_POINTER) };
+    let array: &'static mut [u64] = if existing == 0 {
+        let a = Vec::leak(alloc::vec![0u64; TLS_SLOTS]);
+        // SAFETY: as above.
+        unsafe { teb::put(teb_addr, teb::TEB_TLS_POINTER, a.as_mut_ptr() as u64) };
+        a
+    } else {
+        // SAFETY: as above.
+        unsafe { core::slice::from_raw_parts_mut(existing as *mut u64, TLS_SLOTS) }
+    };
+    for (i, t) in l.tls.iter().enumerate() {
+        if i >= TLS_SLOTS || array[i] != 0 {
+            continue;
+        }
+        let mut b = t.template.clone();
+        b.resize(t.template.len() + t.zero_fill, 0);
+        // Leaked deliberately: the block lives as long as the thread.
+        array[i] = Vec::leak(b).as_mut_ptr() as u64;
+    }
 }
 
 /// TEB32 offset of ThreadLocalStoragePointer.
@@ -1448,7 +1495,9 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         }
         let importer = l.linker.modules[l.exe].name.clone();
         let started = Instant::now();
+        *LOADING.lock().unwrap() = String::from(name);
         let r = l.linker.load_dll(&n, &importer);
+        LOADING.lock().unwrap().clear();
         let elapsed = started.elapsed().as_millis();
         if elapsed >= 100 {
             os_std::eprintln!("winrun: LoadLibrary({name}) took {elapsed} ms");
@@ -1499,12 +1548,16 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
             .collect();
         (todo, module_handle(l, i), loaded)
     };
-    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) || crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
         os_std::eprintln!("winrun: loaded {name} at {h:#x}");
     }
     if !todo.is_empty() && !wow64::is_active() {
-        // New TLS indices need blocks for this thread too.
-        setup_thread_tls(teb::current());
+        // New TLS indices need blocks in every thread, not only this one:
+        // Windows gives one to each existing thread, and a DLL's TLS
+        // callback reads its block in whichever thread ends (libGLESv2's
+        // DLL_THREAD_DETACH faulted on a missing one). A thread that has not
+        // started yet (no TEB) sets up its own blocks when it runs.
+        setup_tls_everywhere();
     } else if !todo.is_empty() {
         // A 32-bit DLL with static TLS gets a block in every thread that
         // runs 32-bit code, as Windows gives one to every existing thread.
@@ -1690,6 +1743,65 @@ pub fn image_containing(addr: u64) -> Option<(u64, u64)> {
     Some((img.base, img.size))
 }
 
+/// Whether the calling thread is inside the loader (holds its lock): a
+/// fault there must not be dispatched, since every handler lookup needs the
+/// loader.
+pub fn held_by_current_thread() -> bool {
+    LOADER.is_held_by_current_thread()
+}
+
+/// The DLL a LoadLibrary is loading, for a report of a fault inside it.
+static LOADING: Mutex<String> = Mutex::new(String::new());
+
+pub fn loading() -> String {
+    LOADING.try_lock().map(|n| n.clone()).unwrap_or_default()
+}
+
+/// Whether `name` (a file name, any case) is one of winrun's built-in
+/// system DLLs.
+pub fn is_builtin_dll(name: &str) -> bool {
+    let n = normalize(name);
+    with_loaded(|l| l.linker.host.builtins.iter().any(|b| b.name == n)).unwrap_or(false)
+}
+
+/// The loaded images (base, size, module name), or None while the loader
+/// is busy: for reports that must not wait for it (a stalled thread may
+/// hold it).
+pub fn try_images() -> Option<Vec<(u64, u64, String)>> {
+    let g = LOADER.try_lock().ok()?;
+    let l = g.as_ref()?;
+    Some(
+        l.linker
+            .host
+            .images
+            .iter()
+            .filter_map(|i| l.linker.modules.iter().find(|m| m.base == i.base).map(|m| (i.base, i.size, m.name.clone())))
+            .collect(),
+    )
+}
+
+/// Whether `addr` is the loader's own lock: a thread blocked on it waits
+/// for a LoadLibrary or FreeLibrary in progress.
+pub fn is_loader_lock(addr: u64) -> bool {
+    let start = &LOADER as *const _ as u64;
+    addr >= start && addr < start + core::mem::size_of_val(&LOADER) as u64
+}
+
+/// Whether `addr` lies in an executable section of the image at `base`.
+pub fn in_code(base: u64, addr: u64) -> bool {
+    // SAFETY: the headers of a mapped image.
+    let rd32 = |a: u64| unsafe { core::ptr::read_unaligned(a as *const u32) };
+    let rd16 = |a: u64| unsafe { core::ptr::read_unaligned(a as *const u16) };
+    let nt = base + rd32(base + 0x3c) as u64;
+    let count = rd16(nt + 6) as u64;
+    let sections = nt + 24 + rd16(nt + 20) as u64;
+    let rva = addr - base;
+    (0..count).map(|i| sections + i * 40).any(|s| {
+        let (va, size, flags) = (rd32(s + 12) as u64, rd32(s + 8).max(rd32(s + 16)) as u64, rd32(s + 36));
+        rva >= va && rva < va + size && flags & 0x2000_0000 != 0
+    })
+}
+
 /// The module a code address belongs to, as its name and offset — the form
 /// crash reports use. Only PE images (not built-in DLLs) have code here.
 pub fn where_is(addr: u64) -> Option<(String, u64)> {
@@ -1714,23 +1826,27 @@ pub fn image_section_protect(addr: u64) -> Option<u32> {
         let nt = base + rd32(base + 0x3C) as u64;
         let count = rd16(nt + 6) as u64;
         let sections = nt + 24 + rd16(nt + 20) as u64;
+        // A page two sections share has the union of their flags, as the
+        // load mapped it.
+        let page = rva & !(mem::PAGE as u64 - 1);
+        let (mut exec, mut write) = (false, false);
         for i in 0..count.min(96) {
             let s = sections + 40 * i;
             let va = rd32(s + 12) as u64;
-            let size = (rd32(s + 8).max(rd32(s + 16)) as u64).next_multiple_of(mem::PAGE as u64);
-            if rva >= va && rva < va + size {
+            let size = rd32(s + 8).max(rd32(s + 16)) as u64;
+            if size != 0 && page < va + size && va < page + mem::PAGE as u64 {
                 let c = rd32(s + 36);
-                let (exec, write) = (c & 0x2000_0000 != 0, c & 0x8000_0000 != 0);
-                return Some(match (exec, write) {
-                    (true, true) => mem::PAGE_EXECUTE_WRITECOPY,
-                    (true, false) => mem::PAGE_EXECUTE_READ,
-                    (false, true) => mem::PAGE_WRITECOPY,
-                    (false, false) => mem::PAGE_READONLY,
-                });
+                exec |= c & 0x2000_0000 != 0;
+                write |= c & 0x8000_0000 != 0;
             }
         }
+        Some(match (exec, write) {
+            (true, true) => mem::PAGE_EXECUTE_WRITECOPY,
+            (true, false) => mem::PAGE_EXECUTE_READ,
+            (false, true) => mem::PAGE_WRITECOPY,
+            (false, false) => mem::PAGE_READONLY,
+        })
     }
-    Some(mem::PAGE_READONLY)
 }
 
 /// `VirtualQuery` for addresses inside loaded images: the run of pages

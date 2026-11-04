@@ -26,7 +26,8 @@ pub const INVALID_HANDLE_VALUE: u64 = u64::MAX;
 #[track_caller]
 pub fn fail<T>(err: u32, v: T) -> T {
     teb::set_last_error(err);
-    if crate::VERBOSE.load(Ordering::Relaxed) {
+    // OSYX_WINRUN_FAILTRACE sets TRACE without -v: it prints each failure.
+    if crate::VERBOSE.load(Ordering::Relaxed) || TRACE.load(Ordering::Relaxed) {
         note_failure(core::panic::Location::caller(), err);
     }
     v
@@ -1109,11 +1110,13 @@ extern "win64" fn SetFilePointerEx(h: u64, off: i64, newpos: *mut i64, method: u
     }
 }
 
+/// A file with mapped views may grow; cutting into a view fails with
+/// ERROR_USER_MAPPED_FILE, as on Windows.
 extern "win64" fn SetEndOfFile(h: u64) -> Bool {
     let r = (|| {
         let f = objects::file(h)?;
         let pos = os_sys::seek(f.fd, 0, osyx_abi::SEEK_CUR).map_err(errno_to_win32)?;
-        os_sys::ftruncate(f.fd, pos).map_err(errno_to_win32)
+        os_sys::ftruncate(f.fd, pos).map_err(|e| if e == osyx_abi::Errno::Busy { ERROR_USER_MAPPED_FILE } else { errno_to_win32(e) })
     })();
     r.map_or_else(|e| fail(e, FALSE), |_| TRUE)
 }
@@ -1487,7 +1490,34 @@ pub(crate) extern "win64" fn CloseHandle(h: u64) -> Bool {
     }
 }
 
+/// DuplicateHandle; a failure across processes is reported (which
+/// processes, which handle, what object), since programs that talk through
+/// duplicated handles fail in ways hard to trace back.
 extern "win64" fn DuplicateHandle(
+    src_process: u64,
+    src: u64,
+    dst_process: u64,
+    dst: *mut u64,
+    access: u32,
+    inherit: Bool,
+    options: u32,
+) -> Bool {
+    let ok = duplicate_handle(src_process, src, dst_process, dst, access, inherit, options);
+    let other = |p: u64| crate::process::other_pid(p).ok().flatten();
+    if ok == FALSE && (other(src_process).is_some() || other(dst_process).is_some()) {
+        let what = objects::get(src).map_or("not a handle here", |o| objects::kind_name(&o));
+        os_std::eprintln!(
+            "winrun: DuplicateHandle({:?}:{src:#x} -> {:?}) failed with {} ({what}, options {options:#x})",
+            other(src_process),
+            other(dst_process),
+            teb::last_error()
+        );
+    }
+    ok
+}
+
+#[allow(clippy::too_many_arguments)]
+fn duplicate_handle(
     src_process: u64,
     src: u64,
     dst_process: u64,
@@ -1531,7 +1561,7 @@ extern "win64" fn DuplicateHandle(
             return match crate::inherit::put(pid, src) {
                 Ok(h) => {
                     if options & 1 != 0 {
-                        objects::close(src); // DUPLICATE_CLOSE_SOURCE
+                        crate::inherit::close_moved(src); // DUPLICATE_CLOSE_SOURCE
                     }
                     // SAFETY: the caller's out pointer.
                     unsafe { *dst = h };
@@ -1673,7 +1703,8 @@ extern "win64" fn GetCurrentThreadId() -> u32 {
 
 /// Ends the process: DLL_PROCESS_DETACH notifications, then exit.
 pub extern "win64" fn ExitProcess(code: u32) -> ! {
-    if crate::VERBOSE.load(Ordering::Relaxed) {
+    // A failing exit is always reported, with where it was called from.
+    if crate::VERBOSE.load(Ordering::Relaxed) || code != 0 {
         os_std::eprintln!("winrun: ExitProcess({code:#x}) in thread {}", os_sys::gettid());
         if code != 0 { crate::exceptions::trace_current(); }
     }
@@ -1685,7 +1716,7 @@ pub extern "win64" fn ExitProcess(code: u32) -> ! {
 
 extern "win64" fn TerminateProcess(h: u64, code: u32) -> Bool {
     if h == objects::CURRENT_PROCESS {
-        if crate::VERBOSE.load(Ordering::Relaxed) {
+        if crate::VERBOSE.load(Ordering::Relaxed) || code != 0 {
             os_std::eprintln!("winrun: TerminateProcess(current, {code:#x}) in thread {}", os_sys::gettid());
             if code != 0 { crate::exceptions::trace_current(); }
         }
@@ -1769,7 +1800,13 @@ pub(crate) fn register_main_thread() {
     *MAIN_THREAD.lock().unwrap() = Some(t);
 }
 
-/// The live Windows threads of this process: (thread id, TEB).
+/// Held while a thread's TEB is written by another thread (LoadLibrary
+/// filling TLS slots) and while an ending thread retires its TEB, so a TEB
+/// is never written after it is freed (its pages may hold the heap by then).
+pub(crate) static TEB_LIFETIME: Mutex<()> = Mutex::new(());
+
+/// The live Windows threads of this process: (thread id, TEB; 0 once the
+/// thread has retired it).
 pub(crate) fn thread_list() -> Vec<(u32, u64)> {
     THREADS
         .lock()
@@ -1831,7 +1868,7 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
             register_thread(tid as u32, &me);
             me.tid.store(tid as u32, Ordering::SeqCst);
             while me.suspended.load(Ordering::SeqCst) > 0 {
-                let _ = os_sys::futex_wait(me.suspended.as_ptr(), me.suspended.load(Ordering::SeqCst), 0);
+                let _ = crate::objects::futex_sleep(me.suspended.as_ptr(), me.suspended.load(Ordering::SeqCst), 0);
             }
             // DllMain, the start routine and DLL_THREAD_DETACH are Windows
             // code: they run on the thread's Windows stack, not this one.
@@ -1839,6 +1876,10 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
             let code = loader::run_thread(&env, stack + size as u64) as u32;
             let _ = os_sys::set_gs_base(0);
             mem::free_stack(stack, size);
+            {
+                let _alive = TEB_LIFETIME.lock().unwrap();
+                me.teb.store(0, Ordering::SeqCst);
+            }
             mem::free_pages(t, teb::TEB_SIZE);
             me.exit_code.store(code, Ordering::SeqCst);
             me.final_ticks.store(os_sys::thread_times(0).unwrap_or(0), Ordering::SeqCst);
@@ -1885,7 +1926,7 @@ fn kernel_suspend_count(tid: u32) -> u64 {
 
 const ERROR_SIGNAL_REFUSED_W: u32 = 156;
 
-extern "win64" fn ResumeThread(h: u64) -> u32 {
+pub(crate) extern "win64" fn ResumeThread(h: u64) -> u32 {
     match objects::get(h) {
         Some(Object::Thread(t)) => {
             let tid = t.tid.load(Ordering::SeqCst);
@@ -2503,7 +2544,7 @@ pub(crate) extern "win64" fn AcquireSRWLockExclusive(l: u64) {
         let old = w.load(Ordering::Relaxed);
         if old != 0 {
             let _blocked = crate::stall::waiting("AcquireSRWLockExclusive", l, old as u64);
-            let _ = os_sys::futex_wait(w.as_ptr(), old, 0);
+            let _ = crate::objects::futex_sleep(w.as_ptr(), old, 0);
         }
     }
 }
@@ -2532,7 +2573,7 @@ pub(crate) extern "win64" fn AcquireSRWLockShared(l: u64) {
         let old = w.load(Ordering::Relaxed);
         if old & SRW_WRITER != 0 {
             let _blocked = crate::stall::waiting("AcquireSRWLockShared", l, old as u64);
-            let _ = os_sys::futex_wait(w.as_ptr(), old, 0);
+            let _ = crate::objects::futex_sleep(w.as_ptr(), old, 0);
         }
     }
 }
@@ -2580,18 +2621,36 @@ pub(crate) fn create_event(manual: bool, initial: bool, name: Option<String>) ->
         teb::set_last_error(ERROR_ALREADY_EXISTS);
         return objects::insert(o);
     }
+    // A name another process holds: the same event (the object namespace
+    // spans processes, as on Windows).
+    if let Some(n) = name.as_deref() {
+        if let Some(h) = crate::namespace::open(n, crate::namespace::Kind::Event) {
+            teb::set_last_error(ERROR_ALREADY_EXISTS);
+            return h;
+        }
+        if crate::namespace::taken_by_other_kind(n, crate::namespace::Kind::Event) {
+            return fail(ERROR_INVALID_HANDLE, 0);
+        }
+    }
     teb::set_last_error(ERROR_SUCCESS);
-    objects::insert(Object::Event(EventObj::new(initial, manual, name)))
+    let h = objects::insert(Object::Event(EventObj::new(initial, manual, name.clone())));
+    if let Some(n) = name.as_deref() {
+        crate::namespace::register(n, crate::namespace::Kind::Event, h);
+    }
+    h
 }
 
-/// Opens a named object of this process (names are process-local here,
-/// like the objects themselves).
-fn open_named(name: Option<String>, inherit: bool, want: fn(&Object) -> bool) -> u64 {
+/// Opens a named object: this process's own, or for the kinds that can be
+/// shared (`kind`), one another process holds under the name.
+fn open_named_kind(name: Option<String>, inherit: bool, want: fn(&Object) -> bool, kind: Option<crate::namespace::Kind>) -> u64 {
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let h = match objects::find_named(&name) {
         Some(o) if want(&o) => objects::insert(o),
         Some(_) => return fail(ERROR_INVALID_HANDLE, 0),
-        None => return fail(ERROR_FILE_NOT_FOUND, 0),
+        None => match kind.and_then(|k| crate::namespace::open(&name, k)) {
+            Some(h) => h,
+            None => return fail(ERROR_FILE_NOT_FOUND, 0),
+        },
     };
     if inherit {
         objects::set_inheritable(h, true);
@@ -2601,22 +2660,27 @@ fn open_named(name: Option<String>, inherit: bool, want: fn(&Object) -> bool) ->
 
 extern "win64" fn OpenEventA(_access: u32, inherit: Bool, name: *const u8) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Event(_)))
+    open_named_kind(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Event(_)), Some(crate::namespace::Kind::Event))
+}
+
+extern "win64" fn OpenEventW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
+    // SAFETY: a NUL-terminated name.
+    open_named_kind(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Event(_)), Some(crate::namespace::Kind::Event))
 }
 
 pub(crate) extern "win64" fn OpenMutexW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Mutex(_)))
+    open_named_kind(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Mutex(_)), Some(crate::namespace::Kind::Mutex))
 }
 
 pub(crate) extern "win64" fn OpenFileMappingW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Section(_)))
+    open_named_kind(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Section(_)), Some(crate::namespace::Kind::Section))
 }
 
 extern "win64" fn OpenFileMappingA(_access: u32, inherit: Bool, name: *const u8) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Section(_)))
+    open_named_kind(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Section(_)), Some(crate::namespace::Kind::Section))
 }
 
 extern "win64" fn CreateEventA(attributes: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
@@ -2673,9 +2737,25 @@ fn create_mutex(owned: bool, name: Option<String>) -> u64 {
         teb::set_last_error(ERROR_ALREADY_EXISTS);
         return objects::insert(o);
     }
+    // A name another process holds: the same mutex (bInitialOwner does not
+    // apply to an existing one, as on Windows).
+    if let Some(n) = name.as_deref() {
+        if let Some(h) = crate::namespace::open(n, crate::namespace::Kind::Mutex) {
+            teb::set_last_error(ERROR_ALREADY_EXISTS);
+            return h;
+        }
+        if crate::namespace::taken_by_other_kind(n, crate::namespace::Kind::Mutex) {
+            return fail(ERROR_INVALID_HANDLE, 0);
+        }
+    }
     teb::set_last_error(ERROR_SUCCESS);
     let owner = if owned { (teb::current_tid() as u32, 1) } else { (0, 0) };
-    objects::insert(Object::Mutex(Arc::new(MutexObj { state: Mutex::new(owner), name })))
+    let h = objects::insert(Object::Mutex(MutexObj::new(owner, name.clone())));
+    // Other processes find a named mutex through the namespace.
+    if let Some(n) = name.as_deref() {
+        crate::namespace::register(n, crate::namespace::Kind::Mutex, h);
+    }
+    h
 }
 
 extern "win64" fn CreateMutexA(attributes: u64, owned: Bool, name: *const u8) -> u64 {
@@ -2695,15 +2775,8 @@ extern "win64" fn CreateMutexW(attributes: u64, owned: Bool, name: *const u16) -
 extern "win64" fn ReleaseMutex(h: u64) -> Bool {
     let Some(Object::Mutex(m)) = objects::get(h) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
     let me = teb::current_tid() as u32;
-    {
-        let mut s = m.state.lock().unwrap();
-        if s.0 != me {
-            return fail(288, FALSE); // ERROR_NOT_OWNER
-        }
-        s.1 -= 1;
-        if s.1 == 0 {
-            s.0 = 0;
-        }
+    if m.release(me).is_err() {
+        return fail(288, FALSE); // ERROR_NOT_OWNER
     }
     objects::signal_all();
     TRUE
@@ -2750,6 +2823,24 @@ extern "win64" fn ReleaseSemaphore(h: u64, n: i32, prev: *mut i32) -> Bool {
 
 pub(crate) extern "win64" fn WaitForSingleObject(h: u64, ms: u32) -> u32 {
     objects::wait(&[h], false, ms).unwrap_or_else(|e| fail(e, objects::WAIT_FAILED))
+}
+
+/// SignalObjectAndWait: signals `signal` (an event is set, a semaphore
+/// released by one, a mutex released) and then waits for `wait`. A signal
+/// that fails (a mutex not owned, a semaphore at its maximum) fails the
+/// call before any wait.
+extern "win64" fn SignalObjectAndWait(signal: u64, wait: u64, ms: u32, alertable: Bool) -> u32 {
+    let signalled = match objects::get(signal) {
+        Some(Object::Event(_)) => SetEvent(signal),
+        Some(Object::Semaphore(_)) => ReleaseSemaphore(signal, 1, core::ptr::null_mut()),
+        Some(Object::Mutex(_)) => ReleaseMutex(signal),
+        Some(_) => return fail(ERROR_INVALID_HANDLE, objects::WAIT_FAILED),
+        None => return fail(ERROR_INVALID_HANDLE, objects::WAIT_FAILED),
+    };
+    if signalled == FALSE {
+        return objects::WAIT_FAILED;
+    }
+    WaitForSingleObjectEx(wait, ms, alertable)
 }
 
 extern "win64" fn WaitForSingleObjectEx(h: u64, ms: u32, alertable: Bool) -> u32 {
@@ -3393,13 +3484,24 @@ extern "win64" fn GetSystemTimePreciseAsFileTime(out: *mut u64) {
 extern "win64" fn GetModuleHandleA(name: *const u8) -> u64 {
     // SAFETY: NULL or a NUL-terminated name.
     let n = unsafe { sa(name) };
-    loader::get_module_handle(n.as_deref()).unwrap_or_else(|| fail(ERROR_MOD_NOT_FOUND, 0))
+    module_handle_or_trace(n)
 }
 
 extern "win64" fn GetModuleHandleW(name: *const u16) -> u64 {
     // SAFETY: as above.
     let n = unsafe { sw(name) };
-    loader::get_module_handle(n.as_deref()).unwrap_or_else(|| fail(ERROR_MOD_NOT_FOUND, 0))
+    module_handle_or_trace(n)
+}
+
+/// A module that is not loaded is named under FAILTRACE: programs probe
+/// for DLLs this way before choosing a path.
+fn module_handle_or_trace(n: Option<String>) -> u64 {
+    loader::get_module_handle(n.as_deref()).unwrap_or_else(|| {
+        if TRACE.load(Ordering::Relaxed) {
+            os_std::eprintln!("winrun: GetModuleHandle({}) found no module", n.as_deref().unwrap_or("NULL"));
+        }
+        fail(ERROR_MOD_NOT_FOUND, 0)
+    })
 }
 
 pub(crate) extern "win64" fn GetModuleHandleExW(flags: u32, name: *const u16, out: *mut u64) -> Bool {
@@ -3757,6 +3859,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         OpenEventA,
         OpenMutexW,
         OpenFileMappingW,
+        OpenEventW,
         OpenFileMappingA,
         lstrcpyW,
         lstrcpyA,
@@ -3883,6 +3986,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ReleaseSemaphore,
         WaitForSingleObject,
         WaitForSingleObjectEx,
+        SignalObjectAndWait,
         WaitForMultipleObjects,
         WaitForMultipleObjectsEx,
         TlsAlloc,

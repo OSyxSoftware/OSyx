@@ -29,7 +29,7 @@ pub fn mark_start() {
 // ---- calendar time ----------------------------------------------------------------
 
 /// Days since 1970-01-01 → (year, month, day), proleptic Gregorian.
-fn civil(days: i64) -> (i64, u32, u32) {
+pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -160,6 +160,11 @@ const ERROR_OLD_WIN_VERSION: u32 = 1150;
 /// VER_PLATFORM_WIN32_NT, no service pack, workstation, no suites.
 const OS: [u32; 8] = [0, 10, 19041, 2, 0, 0, 0, 1];
 
+/// The Windows version winrun reports: (major, minor, build).
+pub(crate) fn windows_version() -> (u32, u32, u32) {
+    (OS[1], OS[0], OS[2])
+}
+
 /// Bit index of a VER_* type → its slot in the condition mask.
 fn slot(type_bit: u32) -> Option<usize> {
     [VER_MINORVERSION, VER_MAJORVERSION, VER_BUILDNUMBER, VER_PLATFORMID, VER_SERVICEPACKMINOR, VER_SERVICEPACKMAJOR, VER_SUITENAME, VER_PRODUCT_TYPE]
@@ -186,6 +191,30 @@ fn compare(have: u32, want: u32, condition: u64) -> Option<bool> {
         5 => have <= want,
         _ => return None,
     })
+}
+
+/// VerifyVersionInfoA: the OSVERSIONINFOEXA (156 bytes) is checked as
+/// its OSVERSIONINFOEXW form (the CSD string is not compared).
+extern "win64" fn VerifyVersionInfoA(info: *const u8, type_mask: u32, mask: u64) -> i32 {
+    if info.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's OSVERSIONINFOEXA.
+    let w = unsafe {
+        if teb::get::<u32>(info as u64, 0) < 156 {
+            return fail(ERROR_INVALID_PARAMETER, 0);
+        }
+        let mut w = [0u8; 284];
+        w[0..4].copy_from_slice(&284u32.to_le_bytes());
+        // Major, minor, build and platform: the same offsets.
+        core::ptr::copy_nonoverlapping(info.add(4), w.as_mut_ptr().add(4), 16);
+        // Service pack major/minor, suite mask, product type and reserved
+        // follow the 128-byte CSD string in the A form, the 256-byte one
+        // in the W form.
+        core::ptr::copy_nonoverlapping(info.add(148), w.as_mut_ptr().add(276), 8);
+        w
+    };
+    VerifyVersionInfoW(w.as_ptr(), type_mask, mask)
 }
 
 extern "win64" fn VerifyVersionInfoW(info: *const u8, type_mask: u32, mask: u64) -> i32 {
@@ -801,7 +830,17 @@ extern "win64" fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, 
     1
 }
 
-extern "win64" fn SetThreadAffinityMask(thread: u64, mask: u64) -> u64 {
+/// One NUMA node (node 0) holds every processor and all memory.
+extern "win64" fn GetNumaHighestNodeNumber(out: *mut u32) -> i32 {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's out value.
+    unsafe { *out = 0 };
+    1
+}
+
+pub(crate) extern "win64" fn SetThreadAffinityMask(thread: u64, mask: u64) -> u64 {
     if mask==0 {return fail(ERROR_INVALID_PARAMETER,0);}
     if !(thread == objects::CURRENT_THREAD || matches!(objects::get(thread), Some(objects::Object::Thread(_)))) {
         return fail(ERROR_INVALID_HANDLE, 0);
@@ -1385,6 +1424,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         QueryUnbiasedInterruptTimePrecise,
         GetProcessTimes,
         VerSetConditionMask,
+        VerifyVersionInfoA,
+        GetNumaHighestNodeNumber,
         VerifyVersionInfoW,
         IsBadReadPtr,
         WerRegisterRuntimeExceptionModule,

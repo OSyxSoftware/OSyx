@@ -17,6 +17,8 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use os_std::sync::Mutex;
 
+const ERROR_BUSY: u32 = 170;
+
 /// The last process record read for each process: a handle to a process
 /// that has ended still answers with its final counters, as on Windows.
 static LAST_INFO: Mutex<BTreeMap<u64, osyx_abi::ipc::ProcInfo>> = Mutex::new(BTreeMap::new());
@@ -191,16 +193,108 @@ extern "win64" fn QueryProcessCycleTime(h: u64, cycles: *mut u64) -> i32 {
 /// Ends a thread of this process at its next safe point, with `code` as its
 /// exit status (as on Windows, no thread exit handlers run). The thread
 /// handle becomes signalled once the thread has really stopped.
-extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
+pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
     let Some((tid, obj)) = thread_of(h) else { return fail(ERROR_INVALID_HANDLE, 0) };
     if tid == os_sys::gettid() as u32 {
         kernel32::ExitThread(code);
     }
     let ticks = os_sys::thread_times(tid as u64).unwrap_or(0);
-    match os_sys::thread_kill(tid as u64, code as i32) {
-        Ok(_) => {}
-        Err(osyx_abi::Errno::NotFound) => return fail(ERROR_INVALID_HANDLE, 0),
-        Err(e) => return fail(errno_to_win32(e), 0),
+    // Rare, and a cause of hangs when it goes wrong: always reported.
+    os_std::eprintln!("winrun: TerminateThread(thread {tid}, {code:#x}) from thread {}", os_sys::gettid());
+    // The thread may be inside winrun, holding one of its locks (the
+    // object-wait lock, the loader, the heap): killed there, it would leave
+    // the lock held for good, as Windows' own kernel locks never are. It is
+    // stopped where it holds none: suspended, checked, and let run on for a
+    // moment if it holds one. Suspensions the program made (SuspendThread)
+    // are dropped while it runs on, since a thread suspended inside a lock
+    // never leaves it; it ends here anyway. A thread that reaches no such
+    // point in two seconds is not killed: the call fails, and the program's
+    // suspensions come back.
+    let suspend = |op| os_sys::thread_suspend(tid as u64, op);
+    let started = os_std::time::Instant::now();
+    let mut state = [0u64; 6];
+    let gone = || os_sys::thread_times(tid as u64) == Err(osyx_abi::Errno::NotFound);
+    let mut asked = false;
+    let mut ended = false;
+    // The program's suspensions dropped so far.
+    let mut dropped = 0u64;
+    // Lets the thread run: this loop's suspension and the program's
+    // (`prev`, the count before it) go.
+    let run_on = |prev: u64, dropped: &mut u64| {
+        for _ in 0..=prev {
+            let _ = suspend(osyx_abi::suspend::RESUME);
+        }
+        *dropped += prev;
+    };
+    loop {
+        let Ok(prev) = suspend(osyx_abi::suspend::SUSPEND) else { break };
+        // Stopped for certain (the kernel's suspend waits a few ticks at
+        // most), holding no lock and with the allocator free.
+        let stopped = os_sys::thread_state(tid as u64, &mut state).is_ok_and(|_| state[0] == osyx_abi::thread_state::BLOCKED);
+        let held = os_std::sync::locks_held_by(tid as u64);
+        let busy = os_std::sync::allocator_busy();
+        if stopped && held == 0 && !busy {
+            let nr = state[1];
+            if nr == osyx_abi::nr::FUTEX_WAIT && !asked {
+                // A kill would wake it and let it run on (see
+                // objects::TERMINATE): it is asked to end itself on waking.
+                asked = true;
+                objects::request_terminate(tid as u64, code);
+                os_sys::futex_wake(state[4] as *const u32, u32::MAX);
+                run_on(prev, &mut dropped);
+                let waited = os_std::time::Instant::now();
+                while !gone() && waited.elapsed() < core::time::Duration::from_millis(500) {
+                    os_std::thread::sleep(core::time::Duration::from_millis(2));
+                }
+                if gone() || !objects::cancel_terminate(tid as u64) {
+                    // It ended, or is ending, by itself.
+                    ended = true;
+                    break;
+                }
+                // Its wait does not check the request: it is killed below.
+                continue;
+            }
+            // Waiting to take a lock (FUTEX_WAIT_OWNED): it runs on below,
+            // to take and drop it first.
+            if nr != osyx_abi::nr::FUTEX_WAIT_OWNED {
+                // Killed while suspended: the kill ends the thread instead
+                // of resuming it.
+                break;
+            }
+        }
+        if started.elapsed() >= core::time::Duration::from_secs(2) {
+            // Killed now, it would leave a lock or the heap held, and every
+            // thread that needs it later would hang.
+            os_std::eprintln!("winrun: TerminateThread: thread {tid} still holds {held} lock(s) (stopped: {stopped}, allocator busy: {busy}) after 2 s; not ended");
+            let _ = suspend(osyx_abi::suspend::RESUME);
+            for _ in 0..dropped {
+                let _ = suspend(osyx_abi::suspend::SUSPEND);
+            }
+            return fail(ERROR_BUSY, 0);
+        }
+        run_on(prev, &mut dropped);
+        os_std::thread::sleep(core::time::Duration::from_millis(1));
+    }
+    os_std::eprintln!("winrun: TerminateThread: thread {tid} {}", if ended { "ended itself on waking" } else { "killed" });
+    if !ended {
+        match os_sys::thread_kill(tid as u64, code as i32) {
+            Ok(_) => {}
+            Err(osyx_abi::Errno::NotFound) => return fail(ERROR_INVALID_HANDLE, 0),
+            Err(e) => return fail(errno_to_win32(e), 0),
+        }
+    }
+    // A kill wakes a thread blocked in some system calls and lets it run a
+    // little user code before it ends, which may take a lock: once it is
+    // gone, winrun's locks it still holds are released.
+    let waited = os_std::time::Instant::now();
+    while !gone() && waited.elapsed() < core::time::Duration::from_millis(500) {
+        os_std::thread::sleep(core::time::Duration::from_millis(2));
+    }
+    if gone() {
+        let held = objects::recover_locks(tid as u64);
+        if !held.is_empty() {
+            os_std::eprintln!("winrun: TerminateThread: thread {tid} ended holding {held:?}; released");
+        }
     }
     if let Some(t) = obj {
         t.exit_code.store(code, Ordering::SeqCst);
@@ -208,6 +302,8 @@ extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
             while os_sys::thread_times(tid as u64) != Err(osyx_abi::Errno::NotFound) {
                 os_std::thread::sleep(core::time::Duration::from_millis(10));
             }
+            // Ended later than the wait above: its locks too.
+            let _ = objects::recover_locks(tid as u64);
             t.final_ticks.store(ticks, Ordering::SeqCst);
             t.exited_ns.store(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(1).max(1), Ordering::SeqCst);
             t.done.store(true, Ordering::SeqCst);

@@ -222,7 +222,7 @@ impl RLock {
         }
         if self.word.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
             while self.word.swap(2, Ordering::Acquire) != 0 {
-                let _ = os_sys::futex_wait(self.word.as_ptr(), 2, 0);
+                let _ = crate::objects::futex_sleep(self.word.as_ptr(), 2, 0);
             }
         }
         self.owner.store(me, Ordering::Release);

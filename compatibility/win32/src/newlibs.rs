@@ -474,6 +474,14 @@ extern "win64" fn UiaRaiseAutomationPropertyChangedEvent(_provider: u64, _proper
     S_OK
 }
 
+extern "win64" fn UiaRaiseNotificationEvent(_provider: u64, _kind: i32, _processing: i32, _text: u64, _activity: u64) -> u32 {
+    S_OK
+}
+
+extern "win64" fn UiaRaiseStructureChangedEvent(_provider: u64, _change: i32, _runtime_id: *const i32, _len: i32) -> u32 {
+    S_OK
+}
+
 /// UI Automation hosting of a window needs the UIA runtime: not available.
 extern "win64" fn UiaHostProviderFromHwnd(_hwnd: u64, out: *mut u64) -> u32 {
     if !out.is_null() {
@@ -491,6 +499,8 @@ pub fn uiautomationcore_exports() -> Vec<(&'static str, u64)> {
         UiaReturnRawElementProvider,
         UiaRaiseAutomationEvent,
         UiaRaiseAutomationPropertyChangedEvent,
+        UiaRaiseNotificationEvent,
+        UiaRaiseStructureChangedEvent,
         UiaHostProviderFromHwnd,
     ]
 }

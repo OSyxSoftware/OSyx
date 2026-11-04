@@ -264,6 +264,57 @@ void __stdcall start(void) {
     WCHAR path[MAX_PATH];
     int plen = MAX_PATH;
     check("WSCGetProviderPath of an unknown provider fails", WSCGetProviderPath(&bogus, path, &plen, &err) == SOCKET_ERROR);
+
+    /* AF_INET6 over loopback: a listener on [::1], a client, addresses
+     * as sockaddr_in6, IPV6_V6ONLY on by default. */
+    SOCKET l6 = socket(AF_INET6, SOCK_STREAM, 0);
+    check("socket(AF_INET6, SOCK_STREAM)", l6 != INVALID_SOCKET);
+    DWORD v6only = 0;
+    int v6len = sizeof v6only;
+    check("IPV6_V6ONLY is on by default",
+          getsockopt(l6, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&v6only, &v6len) == 0 && v6only == 1);
+    struct sockaddr_in6 sa6 = {0};
+    sa6.sin6_family = AF_INET6;
+    sa6.sin6_port = htons(8131);
+    sa6.sin6_addr.s6_addr[15] = 1;
+    check_eq("bind [::1]:8131", bind(l6, (struct sockaddr *)&sa6, sizeof sa6), 0);
+    check_eq("listen [::1]:8131", listen(l6, 4), 0);
+    struct sockaddr_in6 n6 = {0};
+    int n6len = sizeof n6;
+    static const unsigned char loop6[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    check("getsockname gives sockaddr_in6 [::1]:8131",
+          getsockname(l6, (struct sockaddr *)&n6, &n6len) == 0 && n6len == sizeof n6 && n6.sin6_family == AF_INET6 &&
+              n6.sin6_port == htons(8131) && mem_eq(n6.sin6_addr.s6_addr, loop6, 16));
+    SOCKET c6 = socket(AF_INET6, SOCK_STREAM, 0);
+    check_eq("connect [::1]:8131", connect(c6, (struct sockaddr *)&sa6, sizeof sa6), 0);
+    n6len = sizeof n6;
+    SOCKET s6 = accept(l6, (struct sockaddr *)&n6, &n6len);
+    check("accept gives a [::1] peer",
+          s6 != INVALID_SOCKET && n6len == sizeof n6 && n6.sin6_family == AF_INET6 && mem_eq(n6.sin6_addr.s6_addr, loop6, 16));
+    char six[3] = {0};
+    check("IPv6 loopback data", send(c6, "six", 3, 0) == 3 && recv(s6, six, 3, 0) == 3 && mem_eq(six, "six", 3));
+    SOCKET b6 = socket(AF_INET6, SOCK_STREAM, 0);
+    check_eq("a sockaddr_in on an AF_INET6 socket fails", connect(b6, (struct sockaddr *)&ta, sizeof ta), SOCKET_ERROR);
+    check_eq("... with WSAEFAULT", WSAGetLastError(), WSAEFAULT);
+    closesocket(b6);
+    closesocket(s6);
+    closesocket(c6);
+    closesocket(l6);
+    struct addrinfo h6 = {0}, *r6 = NULL;
+    h6.ai_family = AF_INET6;
+    h6.ai_socktype = SOCK_STREAM;
+    check("getaddrinfo(localhost, AF_INET6) is [::1]",
+          getaddrinfo("localhost", "80", &h6, &r6) == 0 && r6 && r6->ai_family == AF_INET6 && r6->ai_addrlen == sizeof sa6 &&
+              mem_eq(((struct sockaddr_in6 *)r6->ai_addr)->sin6_addr.s6_addr, loop6, 16) &&
+              ((struct sockaddr_in6 *)r6->ai_addr)->sin6_port == htons(80));
+    if (r6) freeaddrinfo(r6);
+    r6 = NULL;
+    h6.ai_flags = AI_PASSIVE;
+    static const unsigned char any6[16] = {0};
+    check("getaddrinfo(NULL, AF_INET6, AI_PASSIVE) is [::]",
+          getaddrinfo(NULL, "8131", &h6, &r6) == 0 && r6 && r6->ai_family == AF_INET6 &&
+              mem_eq(((struct sockaddr_in6 *)r6->ai_addr)->sin6_addr.s6_addr, any6, 16));
+    if (r6) freeaddrinfo(r6);
     check_eq("WSACleanup", WSACleanup(), 0);
     finish("wsaext");
 }

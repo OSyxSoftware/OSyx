@@ -18,7 +18,7 @@ fn wait(p: u64, expected: u32, ms: u32) -> i32 {
     }
     let ns = if ms == u32::MAX { 0 } else { ms as u64 * 1_000_000 };
     let _blocked = crate::stall::waiting("ConditionOrAddressWait", p, 0);
-    match os_sys::futex_wait(word(p).as_ptr(), expected, ns) {
+    match crate::objects::futex_sleep(word(p).as_ptr(), expected, ns) {
         Ok(()) | Err(Errno::WouldBlock) => 1,
         Err(e) => fail(errno_to_win32(e), 0),
     }
@@ -119,7 +119,7 @@ pub(crate) extern "win64" fn InitOnceExecuteOnce(once: u64, callback: u64, param
             }
             return 1;
         }
-        let _ = os_sys::futex_wait(word(once).as_ptr(), 1, 0);
+        let _ = crate::objects::futex_sleep(word(once).as_ptr(), 1, 0);
     }
 }
 /// The caller initializes: a synchronous caller owns the object until
@@ -160,7 +160,7 @@ extern "win64" fn InitOnceBeginInitialize(once: u64, flags: u32, pending: *mut i
         if want == ONCE_ASYNC || old == ONCE_ASYNC {
             return fail(ERROR_INVALID_PARAMETER, 0); // synchronous and asynchronous mixed
         }
-        let _ = os_sys::futex_wait(word(once).as_ptr(), ONCE_SYNC as u32, 0);
+        let _ = crate::objects::futex_sleep(word(once).as_ptr(), ONCE_SYNC as u32, 0);
     }
 }
 extern "win64" fn InitOnceComplete(once: u64, flags: u32, context: u64) -> i32 {

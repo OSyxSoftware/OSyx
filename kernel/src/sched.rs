@@ -1091,12 +1091,16 @@ pub fn thread_state(tid: Tid, buf: u64, cap: u64) -> Result<u64, osyx_abi::Errno
         }
     };
     let cap = cap.min(MAX_WORDS);
+    // Four entries (state, number, return address, stack pointer) is the
+    // smallest request; a shorter buffer gets the header cut to fit.
     if cap < 4 {
         return Err(Errno::InvalidArgument);
     }
     let (nr, rip) = crate::smp::last_syscall(tid);
     let rsp = crate::smp::last_syscall_rsp(tid);
-    let mut out: alloc::vec::Vec<u64> = alloc::vec![state, nr, rip, rsp];
+    let [arg0, arg3] = crate::smp::last_syscall_args(tid);
+    let mut out: alloc::vec::Vec<u64> = alloc::vec![state, nr, rip, rsp, arg0, arg3];
+    out.truncate(cap as usize);
     // The target shares the caller's address space: its stack is user
     // memory here too. The stack pointer is the user's own value, so only
     // user addresses are read: a pointer into the kernel copies nothing.
@@ -1143,8 +1147,10 @@ pub fn thread_kill(tid: Tid, code: i32) -> Result<u64, osyx_abi::Errno> {
             return Err(Errno::PermissionDenied);
         }
     }
+    // The caller alone ends, as `nr::THREAD_KILL` says (the process ends
+    // with its last thread).
     if tid == me {
-        crate::process::exit_current(code);
+        crate::process::finish_current_thread(code);
     }
     request_kill_with(tid, code);
     Ok(0)

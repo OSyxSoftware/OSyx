@@ -60,6 +60,10 @@ struct View {
 
 static VIEWS: Mutex<BTreeMap<u64, View>> = Mutex::new(BTreeMap::new());
 
+pub(crate) fn release_if_owner_gone(tid: u64) -> bool {
+    VIEWS.release_if_owner_gone(tid)
+}
+
 /// A new section. `file` is None for page-file memory of `size` bytes;
 /// with a file, `size` 0 means the file's size.
 pub fn create(file: Option<u64>, protect: u32, size: u64, name: Option<String>) -> Result<(u64, bool), NtStatus> {
@@ -92,6 +96,13 @@ fn create_section(file: Option<u64>, protect: u32, size: u64, name: Option<Strin
                 Object::Section(_) => Ok((objects::insert(old), true)),
                 _ => Err(STATUS_OBJECT_NAME_COLLISION),
             };
+        }
+        // A section another process made under the name: the same pages.
+        if let Some(h) = crate::namespace::open(n, crate::namespace::Kind::Section) {
+            return Ok((h, true));
+        }
+        if crate::namespace::taken_by_other_kind(n, crate::namespace::Kind::Section) {
+            return Err(STATUS_OBJECT_NAME_COLLISION);
         }
     }
     let section = match file {
@@ -135,7 +146,14 @@ fn create_section(file: Option<u64>, protect: u32, size: u64, name: Option<Strin
             }
         }
     };
-    Ok((objects::insert(Object::Section(Arc::new(section))), false))
+    let shareable = section.shm != 0 && (section.file.is_none() || section.file_mapping);
+    let named = section.name.clone();
+    let h = objects::insert(Object::Section(Arc::new(section)));
+    // Other processes find a named section through the namespace.
+    if let (Some(n), true) = (named, shareable) {
+        crate::namespace::register(&n, crate::namespace::Kind::Section, h);
+    }
+    Ok((h, false))
 }
 
 /// Reads `len` bytes at `offset` of `fd` into `dst` without moving the
@@ -178,6 +196,11 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
     }
     if exec && (write || copy) {
         return Err(STATUS_NOT_SUPPORTED); // W^X
+    }
+    // A write view of a section made read-only (PAGE_READONLY) is refused,
+    // as on Windows, instead of handing out pages that fault on write.
+    if write && !s.writable {
+        return Err(STATUS_ACCESS_DENIED);
     }
     if offset >= s.size {
         return Err(STATUS_INVALID_VIEW_SIZE);
@@ -245,14 +268,88 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
     Ok((base, size))
 }
 
+/// The last views unmapped (base, size, file path, who unmapped it),
+/// newest last: a fault report names an address that lies in one (a use
+/// after UnmapViewOfFile) and the code that unmapped it.
+static UNMAPPED: Mutex<alloc::collections::VecDeque<(u64, u64, String, String)>> = Mutex::new(alloc::collections::VecDeque::new());
+
+/// The calling thread and the code addresses on its stack, for a record
+/// of who unmapped a view: only while a Windows thread runs on its Windows
+/// stack (an ending thread frees pages on winrun's own stack, after its
+/// TEB has left the GS base). It never waits for the loader: a thread
+/// inside LoadLibrary may unmap views.
+fn caller() -> String {
+    let tid = os_sys::gettid();
+    let t = crate::kernel32::thread_object(tid as u32).map_or(0, |o| o.teb.load(core::sync::atomic::Ordering::SeqCst));
+    let images = match (t != 0).then(crate::loader::try_images).flatten() {
+        Some(i) => i,
+        None => return alloc::format!("thread {tid}"),
+    };
+    let rsp: u64;
+    // SAFETY: reads the stack pointer only.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+    // SAFETY: this thread's TEB, which it frees only after this.
+    let (base, limit): (u64, u64) = unsafe { (crate::teb::get(t, crate::teb::TEB_STACK_BASE), crate::teb::get(t, crate::teb::TEB_STACK_LIMIT)) };
+    if !(limit..base).contains(&rsp) {
+        return alloc::format!("thread {tid}");
+    }
+    let start = rsp;
+    let end = start.saturating_add(16 << 10).min(base);
+    // SAFETY: inside this thread's stack, between its limit and base.
+    let words: Vec<u64> = (start..end).step_by(8).map(|a| unsafe { core::ptr::read_volatile(a as *const u64) }).collect();
+    let chain = crate::exceptions::chain_of(&words, &images).unwrap_or_default();
+    alloc::format!("thread {tid} from {chain}")
+}
+
+/// For a fault report: the view or recently unmapped view holding `addr`,
+/// in words; None without waiting if the calling thread holds the table.
+pub fn describe_for_report(addr: u64) -> Option<String> {
+    if VIEWS.is_held_by_current_thread() || UNMAPPED.is_held_by_current_thread() {
+        return None;
+    }
+    {
+        let views = VIEWS.lock().unwrap();
+        if let Some((&base, v)) = views.range(..=addr).next_back() {
+            if addr < base + (v.size as usize).next_multiple_of(PAGE) as u64 {
+                let path = String::from(v.section.file.as_ref().map_or("", |f| f.path.as_str()));
+                return Some(alloc::format!("a view {base:#x}+{:#x} (protect {:#x}) of {}", v.size, v.protect, if path.is_empty() { "shared memory" } else { &path }));
+            }
+        }
+    }
+    let unmapped = UNMAPPED.lock().unwrap();
+    unmapped.iter().rev().find(|u| addr >= u.0 && addr < u.0 + u.1).map(|u| {
+        alloc::format!("a view {:#x}+{:#x} of {} that was unmapped by {}", u.0, u.1, if u.2.is_empty() { "shared memory" } else { &u.2 }, u.3)
+    })
+}
+
+/// Records pages winrun freed (`what` names them) for fault reports, as
+/// unmapped views are.
+pub fn note_freed(base: u64, size: u64, what: &str) {
+    let who = caller();
+    let mut unmapped = UNMAPPED.lock().unwrap();
+    if unmapped.len() >= 64 {
+        unmapped.pop_front();
+    }
+    unmapped.push_back((base, size, String::from(what), who));
+}
+
 /// Unmaps the view containing `addr`.
 pub fn unmap(addr: u64) -> Result<(), NtStatus> {
+    let who = caller();
     let mut views = VIEWS.lock().unwrap();
     let base = match views.range(..=addr).next_back() {
         Some((&b, v)) if addr < b + v.size => b,
         _ => return Err(STATUS_NOT_MAPPED_VIEW),
     };
     let v = views.remove(&base).unwrap();
+    {
+        let mut unmapped = UNMAPPED.lock().unwrap();
+        if unmapped.len() >= 64 {
+            unmapped.pop_front();
+        }
+        let path = v.section.file.as_ref().map_or(String::new(), |f| f.path.clone());
+        unmapped.push_back((base, (v.size as usize).next_multiple_of(PAGE) as u64, path, who));
+    }
     // SAFETY: a whole view made by `map`.
     unsafe { os_sys::unmap(base as *mut u8, (v.size as usize).next_multiple_of(PAGE)) }.map_err(errno_to_status)
 }
@@ -293,7 +390,11 @@ fn create_common(file: u64, attributes: u64, protect: u32, high: u32, low: u32, 
     };
     let named = name.is_some();
     let file = (file != INVALID_HANDLE_VALUE).then_some(file);
-    match create(file, protect, (high as u64) << 32 | low as u64, name) {
+    let r = create(file, protect, (high as u64) << 32 | low as u64, name);
+    if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: CreateFileMapping(file {file:x?}, protect {protect:#x}, size {:#x}) -> {r:x?}", (high as u64) << 32 | low as u64);
+    }
+    match r {
         Ok((h, existed)) => {
             if named && !existed {
                 crate::objsec::set_initial(h, sd);
@@ -319,7 +420,11 @@ extern "win64" fn CreateFileMappingA(file: u64, attributes: u64, protect: u32, h
 }
 
 extern "win64" fn MapViewOfFile(section: u64, access: u32, high: u32, low: u32, len: usize) -> u64 {
-    match map(section, access, (high as u64) << 32 | low as u64, len as u64) {
+    let r = map(section, access, (high as u64) << 32 | low as u64, len as u64);
+    if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: MapViewOfFile({section:#x}, access {access:#x}, offset {:#x}, len {len:#x}) -> {r:x?}", (high as u64) << 32 | low as u64);
+    }
+    match r {
         // A 32-bit caller cannot use a view the kernel placed above 2 GiB
         // (shared and coherent file sections go wherever it puts them):
         // fail instead of handing back a truncated pointer.

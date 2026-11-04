@@ -117,6 +117,49 @@ extern "win64" fn GetTraceLoggerHandle(_buffer: *const u8) -> u64 {
     fail(ERROR_INVALID_HANDLE, u64::MAX)
 }
 
+/// Logger handles come only from GetTraceLoggerHandle, which has none.
+extern "win64" fn GetTraceEnableFlags(_logger: u64) -> u32 {
+    fail(ERROR_INVALID_HANDLE, 0)
+}
+
+extern "win64" fn GetTraceEnableLevel(_logger: u64) -> u8 {
+    fail(ERROR_INVALID_HANDLE, 0)
+}
+
+const ERROR_WMI_INSTANCE_NOT_FOUND: u32 = 4201;
+
+/// OSyx has no ETW sessions to start: a controller cannot create one.
+extern "win64" fn StartTraceW(handle: *mut u64, _name: *const u16, props: *mut u8) -> u32 {
+    if handle.is_null() || props.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    ERROR_NOT_SUPPORTED
+}
+
+/// No session exists for ControlTraceW to query, update, flush or stop.
+extern "win64" fn ControlTraceW(_handle: u64, _name: *const u16, props: *mut u8, _code: u32) -> u32 {
+    if props.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    ERROR_WMI_INSTANCE_NOT_FOUND
+}
+
+/// A consumer finds neither a real-time session nor log file support.
+extern "win64" fn OpenTraceW(logfile: *mut u8) -> u64 {
+    if logfile.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, u64::MAX);
+    }
+    fail(ERROR_WMI_INSTANCE_NOT_FOUND, u64::MAX)
+}
+
+extern "win64" fn ProcessTrace(_handles: *const u64, _count: u32, _start: *const u64, _end: *const u64) -> u32 {
+    ERROR_INVALID_HANDLE
+}
+
+extern "win64" fn CloseTrace(_handle: u64) -> u32 {
+    ERROR_INVALID_HANDLE
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         EventRegister,
@@ -128,5 +171,12 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         UnregisterTraceGuids,
         TraceEvent,
         GetTraceLoggerHandle,
+        GetTraceEnableFlags,
+        GetTraceEnableLevel,
+        StartTraceW,
+        ControlTraceW,
+        OpenTraceW,
+        ProcessTrace,
+        CloseTrace,
     ]
 }

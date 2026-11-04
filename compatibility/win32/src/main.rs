@@ -36,6 +36,8 @@ mod dbghelp;
 mod error;
 mod elevation;
 mod eventlog;
+mod wevtapi;
+mod netapi32;
 mod exceptions;
 mod files;
 mod fibers;
@@ -50,6 +52,7 @@ mod keyed;
 mod loader;
 mod locale;
 mod mapping;
+mod namespace;
 mod mem;
 mod ntdll;
 mod ntreg;
@@ -164,7 +167,9 @@ fn main() -> i32 {
     if COUNT.load(core::sync::atomic::Ordering::Relaxed) {
         user32::start_counter();
     }
-    if verbose && os_std::env::var("OSYX_WINRUN_TRACE").is_ok_and(|v| v == "1") {
+    // OSYX_WINRUN_FAILTRACE=1 logs every failing Win32 call (with where in
+    // winrun it failed) without the rest of -v's log.
+    if (verbose && os_std::env::var("OSYX_WINRUN_TRACE").is_ok_and(|v| v == "1")) || os_std::env::var("OSYX_WINRUN_FAILTRACE").is_ok_and(|v| v == "1") {
         kernel32::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
     if verbose {
@@ -174,6 +179,10 @@ fn main() -> i32 {
         eprintln!("usage: winrun [-v] program.exe [arguments...]");
         return 2;
     };
+    // The whole command line, which the kernel's process log shortens.
+    if kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+        eprintln!("winrun: command line: {}", args.join(" "));
+    }
     // The program may be named with an OSyx path or a Windows path.
     let cwd = os_std::env::current_dir().map(|p| path::to_windows(p.as_str())).unwrap_or_else(|_| String::from("C:\\"));
     let osyx = if program.starts_with('/') {

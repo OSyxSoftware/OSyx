@@ -878,6 +878,11 @@ const CERT_STORE_PROV_MEMORY: u64 = 2;
 const CERT_STORE_PROV_PKCS7: u64 = 5;
 const CERT_STORE_PROV_SYSTEM_A: u64 = 9;
 const CERT_STORE_PROV_SYSTEM_W: u64 = 10;
+/// The registry part of a system store (Chromium's TrustStoreWin reads
+/// each location's ROOT, CA, TrustedPeople and Disallowed through it).
+/// System stores here have no other parts, so it is the same store.
+const CERT_STORE_PROV_SYSTEM_REGISTRY_A: u64 = 12;
+const CERT_STORE_PROV_SYSTEM_REGISTRY_W: u64 = 13;
 
 const CERT_STORE_PROV_COLLECTION: u64 = 11;
 
@@ -907,12 +912,12 @@ extern "win64" fn CertOpenStore(provider: u64, _encoding: u32, _prov: u64, flags
                 Err(e) => fail(e, 0),
             }
         }
-        CERT_STORE_PROV_SYSTEM_A => {
+        CERT_STORE_PROV_SYSTEM_A | CERT_STORE_PROV_SYSTEM_REGISTRY_A => {
             // SAFETY: NULL or the caller's NUL-terminated store name.
             let name = unsafe { path::ansi_to_string(para as *const u8) }.unwrap_or_default();
             extra::open_system(&name, flags)
         }
-        CERT_STORE_PROV_SYSTEM_W => {
+        CERT_STORE_PROV_SYSTEM_W | CERT_STORE_PROV_SYSTEM_REGISTRY_W => {
             // SAFETY: as above, in UTF-16.
             let name = unsafe { path::wide_to_string(para as *const u16) }.unwrap_or_default();
             extra::open_system(&name, flags)

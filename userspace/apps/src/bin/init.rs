@@ -193,18 +193,32 @@ fn main() -> i32 {
             thread::sleep(Duration::from_secs(2));
             // `--user` starts the program the way the desktop does: through
             // run-app, as the desktop user (uid 1000). `--quiet` leaves out
-            // winrun's -v log; `--events` adds its window and paint events.
+            // winrun's -v log; `--events` adds its window and paint events;
+            // `--env=KEY=VALUE` sets a variable for winrun and its children.
             let mut first = 2;
             let (mut as_user, mut quiet, mut events) = (false, false, false);
+            let mut extra_env: Vec<(String, String)> = Vec::new();
             while let Some(flag) = args.get(first).map(String::as_str) {
                 match flag {
                     "--user" => as_user = true,
                     "--quiet" => quiet = true,
                     // winrun's window/paint event log (OSYX_WINRUN_EVENTS).
                     "--events" => events = true,
+                    f if f.starts_with("--env=") => match f["--env=".len()..].split_once('=') {
+                        Some((k, v)) => extra_env.push((String::from(k), String::from(v))),
+                        None => break,
+                    },
                     _ => break,
                 }
                 first += 1;
+            }
+            // run-app sets these for the desktop user: a value given here
+            // would never reach winrun.
+            if as_user {
+                if let Some((k, _)) = extra_env.iter().find(|(k, _)| k == "HOME" || k == "USER") {
+                    println!("winapp: {k} cannot be set with --user; run-app sets it");
+                    return 1;
+                }
             }
             let mut c = if as_user {
                 Command::new("/system/bin/run-app")
@@ -219,6 +233,9 @@ fn main() -> i32 {
             c.env("OSYX_WINRUN_TRACE", "1");
             if events {
                 c.env("OSYX_WINRUN_EVENTS", "1");
+            }
+            for (k, v) in &extra_env {
+                c.env(k, v);
             }
             for a in &args[first..] {
                 c.arg(a);

@@ -224,7 +224,8 @@ pub mod nr {
     /// `shm_create(size) -> handle`: zeroed shared memory (at most `MAX_SHM` bytes).
     pub const SHM_CREATE: u64 = 49;
     /// `shm_map(handle, prot) -> addr`: maps the whole object (`PROT_READ`,
-    /// optionally `PROT_WRITE`); `unmap` releases the mapping.
+    /// optionally `PROT_WRITE`) at a 64 KiB aligned address; `unmap`
+    /// releases the mapping.
     pub const SHM_MAP: u64 = 50;
     /// `shm_size(handle) -> bytes`
     pub const SHM_SIZE: u64 = 51;
@@ -321,6 +322,7 @@ pub mod nr {
     pub const FILEMAP_CREATE: u64 = 80;
     /// `filemap_map(section, offset, len, writable) -> address`: page-aligned
     /// offset, nonzero view length; permissions cannot exceed the section.
+    /// The view starts on a 64 KiB boundary.
     pub const FILEMAP_MAP: u64 = 81;
     /// `filemap_flush(section, offset, len) -> 0`: writes the requested range
     /// to the file without changing the open file position.
@@ -439,9 +441,9 @@ pub mod nr {
     /// `thread_state(tid, buf, cap) -> count`: what thread `tid` of the
     /// caller's process is doing, for stall reports. Writes up to `cap` u64
     /// entries to `buf`: its state ([`thread_state`]), the number, return
-    /// address and user stack pointer of its last system call, then the
-    /// words of its user stack from that stack pointer up. Returns the
-    /// number of entries written.
+    /// address and user stack pointer of its last system call, that call's
+    /// first and fourth argument, then the words of its user stack from
+    /// that stack pointer up. Returns the number of entries written.
     pub const THREAD_STATE: u64 = 111;
 }
 

@@ -100,6 +100,7 @@ pub fn protect(addr: u64, size: usize, prot: Prot) -> Result<(), osyx_abi::Errno
 }
 
 pub fn free_pages(addr: u64, size: usize) {
+    crate::mapping::note_freed(addr, size.next_multiple_of(PAGE) as u64, "pages winrun freed");
     // SAFETY: `addr`/`size` describe one whole mapping made by this module.
     let _ = unsafe { os_sys::unmap(addr as *mut u8, size.next_multiple_of(PAGE)) };
 }
@@ -200,6 +201,10 @@ impl Pages {
 
 static REGIONS: Mutex<BTreeMap<u64, Region>> = Mutex::new(BTreeMap::new());
 
+pub(crate) fn release_if_owner_gone(tid: u64) -> bool {
+    REGIONS.release_if_owner_gone(tid)
+}
+
 /// A thread stack: committed read/write private memory, as VirtualQuery
 /// reports a Windows stack (its pages get frames when first touched),
 /// above a guard page of its own. The guard is read-only (OSyx has no
@@ -223,6 +228,7 @@ pub fn alloc_stack(size: usize) -> Option<u64> {
 /// Frees a stack made by [`alloc_stack`] (its base and size as given).
 pub fn free_stack(base: u64, size: usize) {
     let reserve = base - PAGE as u64;
+    crate::mapping::note_freed(reserve, (size.next_multiple_of(PAGE) + PAGE) as u64, "a freed thread stack");
     REGIONS.lock().unwrap().remove(&reserve);
     free_pages(reserve, size.next_multiple_of(PAGE) + PAGE);
 }
@@ -366,6 +372,18 @@ pub fn image_page_protect(page: u64) -> Option<u32> {
     crate::loader::image_section_protect(page)
 }
 
+/// Gives pages of a loaded image the protection `prot` and forgets what
+/// VirtualProtect set on them, so they read as their section's again: an
+/// image loaded again after FreeLibrary starts as a fresh mapping would.
+/// Takes no loader lock (the loader calls it).
+pub fn reset_image_pages(start: u64, size: usize, prot: Prot) -> Result<(), osyx_abi::Errno> {
+    let end = (start + size as u64).next_multiple_of(PAGE as u64);
+    let start = start & !(PAGE as u64 - 1);
+    protect_range(start, (end - start) as usize, prot)?;
+    IMAGE_PAGES.lock().unwrap().retain(|&p, _| p < start || p >= end);
+    Ok(())
+}
+
 /// VirtualProtect on pages of a loaded image. Writable protections map
 /// the pages writable; the kernel copies a shared image page on its first
 /// write, so other processes keep the original. PAGE_EXECUTE_READWRITE
@@ -432,6 +450,15 @@ pub struct Info {
     pub state: u32,
     pub protect: u32,
     pub kind: u32,
+}
+
+/// `virtual_query` for a fault report: None (no wait) when the calling
+/// thread is inside the region table already.
+pub fn virtual_query_for_report(addr: u64) -> Option<Info> {
+    if REGIONS.is_held_by_current_thread() {
+        return None;
+    }
+    virtual_query(addr)
 }
 
 /// `NtQueryVirtualMemory` / `VirtualQuery` for regions made by

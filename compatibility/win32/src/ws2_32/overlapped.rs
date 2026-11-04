@@ -227,7 +227,7 @@ pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, 
                         }
                     }
                     if from != 0 {
-                        write_addr(&peer, from as *mut u8, fromlen as *mut i32);
+                        write_addr(&peer, from as *mut u8, fromlen as *mut i32, s);
                     }
                     // A datagram larger than the buffers: what fit, and WSAEMSGSIZE.
                     break (done, if truncated { 10040 } else { 0 });

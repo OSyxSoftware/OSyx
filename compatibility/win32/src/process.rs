@@ -212,6 +212,23 @@ const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x80000;
 const STARTF_USESTDHANDLES: u32 = 0x100;
 pub(crate) const STD_HANDLES_ENV: &str = "OSYX_WINRUN_STD_HANDLES";
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: u64 = 0x20002;
+const PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY: u64 = 0x20007;
+const PROC_THREAD_ATTRIBUTE_JOB_LIST: u64 = 0x2000D;
+
+/// Whether OSyx gives a child what a PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY
+/// value asks for. The first word starts with three flags (DEP, DEP ATL
+/// thunk emulation, SEHOP); after them, and in the second and third words,
+/// each policy is a 2-bit field: 0 defer, 1 always on, 2 always off, 3
+/// reserved. OSyx enforces no-execute memory always and offers none of the
+/// other mitigations, so a policy may be deferred or turned off, and only
+/// DEP may be asked for (SEHOP does not apply to 64-bit code). Turning on a
+/// mitigation OSyx does not enforce is refused rather than silently ignored.
+fn mitigations_supported(words: &[u64]) -> bool {
+    words.iter().enumerate().all(|(i, &w)| {
+        let fields = if i == 0 { w & !0x7 } else { w };
+        (0..32).all(|f| matches!((fields >> (2 * f)) & 3, 0 | 2))
+    })
+}
 
 /// STARTUPINFOA differs from STARTUPINFOW only in the string pointers
 /// (lpReserved, lpDesktop, lpTitle), which CreateProcessW does not read; an
@@ -272,20 +289,55 @@ pub(crate) extern "win64" fn CreateProcessW(
     // With bInheritHandles, the child gets the handle list's handles (each
     // must be inheritable), or else every inheritable handle.
     let mut handle_list: Option<Vec<u64>> = None;
+    // Jobs the child starts in (PROC_THREAD_ATTRIBUTE_JOB_LIST).
+    let mut jobs: Vec<Arc<JobObj>> = Vec::new();
     if attrs != 0 {
         // SAFETY: a list made by InitializeProcThreadAttributeList below.
         let list = unsafe { &*(attrs as *const AttributeList) };
         for &(attribute, value, size) in &list.entries[..list.used as usize] {
-            if attribute != PROC_THREAD_ATTRIBUTE_HANDLE_LIST {
-                if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: unsupported process attribute {attribute:#x}"); }
-                return fail(ERROR_NOT_SUPPORTED, 0);
-            }
-            if value == 0 || size % 8 != 0 {
+            if value == 0 {
                 return fail(ERROR_INVALID_PARAMETER, 0);
             }
-            // SAFETY: the caller's array of `size` bytes of HANDLEs.
-            let hs = unsafe { core::slice::from_raw_parts(value as *const u64, size as usize / 8) };
-            handle_list.get_or_insert_with(Vec::new).extend_from_slice(hs);
+            match attribute {
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST | PROC_THREAD_ATTRIBUTE_JOB_LIST => {
+                    if size == 0 || size % 8 != 0 {
+                        return fail(ERROR_INVALID_PARAMETER, 0);
+                    }
+                    // SAFETY: the caller's array of `size` bytes of HANDLEs.
+                    let hs = unsafe { core::slice::from_raw_parts(value as *const u64, size as usize / 8) };
+                    if attribute == PROC_THREAD_ATTRIBUTE_HANDLE_LIST {
+                        handle_list.get_or_insert_with(Vec::new).extend_from_slice(hs);
+                    } else {
+                        for &h in hs {
+                            match job(h) {
+                                // A job named twice (two handles, or two
+                                // lists) holds the child once.
+                                Ok(j) => {
+                                    if !jobs.iter().any(|x| Arc::ptr_eq(x, &j)) {
+                                        jobs.push(j);
+                                    }
+                                }
+                                Err(e) => return fail(e, 0),
+                            }
+                        }
+                    }
+                }
+                PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY => {
+                    if !matches!(size, 8 | 16 | 24) {
+                        return fail(ERROR_INVALID_PARAMETER, 0);
+                    }
+                    // SAFETY: the caller's `size` bytes of policy words.
+                    let words = unsafe { core::slice::from_raw_parts(value as *const u64, size as usize / 8) };
+                    if !mitigations_supported(words) {
+                        if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: unsupported mitigation policy {words:x?}"); }
+                        return fail(ERROR_NOT_SUPPORTED, 0);
+                    }
+                }
+                _ => {
+                    if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: unsupported process attribute {attribute:#x}"); }
+                    return fail(ERROR_NOT_SUPPORTED, 0);
+                }
+            }
         }
     }
     let inherited: Vec<u64> = if inherit == 0 {
@@ -428,6 +480,14 @@ pub(crate) extern "win64" fn CreateProcessW(
     let p = Arc::new(ProcessObj { pid, child: true, done: AtomicBool::new(false), exit_code: AtomicU32::new(STILL_ACTIVE), jobbed: AtomicBool::new(false) });
     if let Some(channel) = broker { crate::inherit::register_broker(pid, channel); }
     CHILDREN.lock().unwrap().push(p.clone());
+    // The child is in its jobs from the start, as AssignProcessToJobObject
+    // would put it.
+    if !jobs.is_empty() {
+        p.jobbed.store(true, Ordering::SeqCst);
+        for j in &jobs {
+            j.processes.lock().unwrap().push(p.clone());
+        }
+    }
     let watcher = p.clone();
     let watching = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
         if let Ok((_, status)) = os_sys::wait(watcher.pid) {
@@ -653,6 +713,61 @@ extern "win64" fn CreateRemoteThread(h: u64, sa: u64, stack: usize, start: u64, 
         return fail(e, 0);
     }
     kernel32::CreateThread(sa, stack, start, param, flags, tid)
+}
+
+const PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY: u64 = 0x30003;
+const PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR: u64 = 0x30005;
+
+/// CreateRemoteThreadEx in this process. A GROUP_AFFINITY attribute (group
+/// 0, the only one) applies before the thread runs; an IDEAL_PROCESSOR is
+/// a scheduling hint, which the OSyx scheduler does not take.
+#[allow(clippy::too_many_arguments)]
+pub(crate) extern "win64" fn CreateRemoteThreadEx(h: u64, sa: u64, stack: usize, start: u64, param: u64, flags: u32, attrs: u64, tid: *mut u32) -> u64 {
+    if let Err(e) = local(h) {
+        return fail(e, 0);
+    }
+    let mut mask = None;
+    if attrs != 0 {
+        // SAFETY: a list made by InitializeProcThreadAttributeList.
+        let list = unsafe { &*(attrs as *const AttributeList) };
+        for &(attribute, value, size) in &list.entries[..list.used as usize] {
+            match attribute {
+                PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY => {
+                    if value == 0 || size < 16 {
+                        return fail(ERROR_INVALID_PARAMETER, 0);
+                    }
+                    // SAFETY: the caller's GROUP_AFFINITY {Mask, Group, Reserved}.
+                    let (m, group) = unsafe { (core::ptr::read_unaligned(value as *const u64), core::ptr::read_unaligned((value + 8) as *const u16)) };
+                    if group != 0 || m == 0 {
+                        return fail(ERROR_INVALID_PARAMETER, 0);
+                    }
+                    mask = Some(m);
+                }
+                PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR => {
+                    if value == 0 || size < 4 {
+                        return fail(ERROR_INVALID_PARAMETER, 0);
+                    }
+                }
+                _ => return fail(ERROR_NOT_SUPPORTED, 0),
+            }
+        }
+    }
+    let Some(mask) = mask else { return kernel32::CreateThread(sa, stack, start, param, flags, tid) };
+    let t = kernel32::CreateThread(sa, stack, start, param, flags | CREATE_SUSPENDED, tid);
+    if t == 0 {
+        return 0;
+    }
+    if crate::sysext::SetThreadAffinityMask(t, mask) == 0 {
+        // The thread never ran: it ends here, and the call fails.
+        let e = crate::teb::last_error();
+        crate::procinfo::TerminateThread(t, 0);
+        kernel32::CloseHandle(t);
+        return fail(e, 0);
+    }
+    if flags & CREATE_SUSPENDED == 0 {
+        kernel32::ResumeThread(t);
+    }
+    t
 }
 
 extern "win64" fn GetProcessId(h: u64) -> u32 {
@@ -894,6 +1009,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         VirtualFreeEx,
         VirtualProtectEx,
         CreateRemoteThread,
+        CreateRemoteThreadEx,
         GetProcessId,
         InitializeProcThreadAttributeList,
         UpdateProcThreadAttribute,

@@ -318,9 +318,117 @@ impl TimerObj {
 }
 
 pub struct MutexObj {
-    /// Owning thread id (0: free) and recursion count, under one lock.
-    pub state: Mutex<(u32, u32)>,
+    /// Owning thread id (0: free) and recursion count, under one lock,
+    /// while the mutex is this process's alone.
+    local: Mutex<(u32, u32)>,
+    /// Once shared with another process (`share`): the page holding the
+    /// owner (word 0) and the count (word 1), and its shared memory object.
+    /// Thread ids are system-wide, so the owner means the same everywhere.
+    shared: AtomicU64,
+    shm: AtomicU64,
     pub name: Option<String>,
+}
+
+impl MutexObj {
+    pub fn new(owner: (u32, u32), name: Option<String>) -> Arc<MutexObj> {
+        Arc::new(MutexObj { local: Mutex::new(owner), shared: AtomicU64::new(0), shm: AtomicU64::new(0), name })
+    }
+
+    /// A mutex whose state is the first two words of shared memory `shm`.
+    pub fn from_shared(shm: u64) -> Option<Arc<MutexObj>> {
+        let base = os_sys::shm_map(shm, true).ok()? as u64;
+        Some(Arc::new(MutexObj { local: Mutex::new((0, 0)), shared: AtomicU64::new(base), shm: AtomicU64::new(shm), name: None }))
+    }
+
+    fn words(base: u64) -> (&'static AtomicU32, &'static AtomicU32) {
+        // SAFETY: the shared page this object keeps mapped.
+        unsafe { (&*(base as *const AtomicU32), &*((base + 4) as *const AtomicU32)) }
+    }
+
+    pub fn is_shared(&self) -> bool {
+        self.shared.load(Ordering::SeqCst) != 0
+    }
+
+    /// Whether thread `me` may own it now; with `consume`, takes it (or
+    /// one more level of it).
+    pub fn acquire(&self, me: u32, consume: bool) -> bool {
+        let g = self.local.lock().unwrap();
+        let base = self.shared.load(Ordering::SeqCst);
+        if base == 0 {
+            let mut s = g;
+            let free = s.0 == 0 || s.0 == me;
+            if free && consume {
+                s.0 = me;
+                s.1 += 1;
+            }
+            return free;
+        }
+        drop(g);
+        let (owner, count) = Self::words(base);
+        if owner.load(Ordering::SeqCst) == me {
+            if consume {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            return true;
+        }
+        if !consume {
+            return owner.load(Ordering::SeqCst) == 0;
+        }
+        if owner.compare_exchange(0, me, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            count.store(1, Ordering::SeqCst);
+            return true;
+        }
+        false
+    }
+
+    /// ReleaseMutex by thread `me`: Err if it does not own the mutex.
+    pub fn release(&self, me: u32) -> Result<(), ()> {
+        let g = self.local.lock().unwrap();
+        let base = self.shared.load(Ordering::SeqCst);
+        if base == 0 {
+            let mut s = g;
+            if s.0 != me {
+                return Err(());
+            }
+            s.1 -= 1;
+            if s.1 == 0 {
+                s.0 = 0;
+            }
+            return Ok(());
+        }
+        drop(g);
+        let (owner, count) = Self::words(base);
+        if owner.load(Ordering::SeqCst) != me {
+            return Err(());
+        }
+        if count.fetch_sub(1, Ordering::SeqCst) == 1 {
+            owner.store(0, Ordering::SeqCst);
+            os_sys::futex_wake(owner.as_ptr(), u32::MAX);
+        }
+        Ok(())
+    }
+
+    /// The shared memory object holding the state, moving it there first.
+    pub fn share(&self) -> Result<u64, u32> {
+        let g = self.local.lock().unwrap();
+        if self.shared.load(Ordering::SeqCst) != 0 {
+            return Ok(self.shm.load(Ordering::SeqCst));
+        }
+        let shm = os_sys::shm_create(4096).map_err(errno_to_win32)?;
+        let base = match os_sys::shm_map(shm, true) {
+            Ok(b) => b as u64,
+            Err(e) => {
+                let _ = os_sys::close(shm);
+                return Err(errno_to_win32(e));
+            }
+        };
+        let (owner, count) = Self::words(base);
+        owner.store(g.0, Ordering::SeqCst);
+        count.store(g.1, Ordering::SeqCst);
+        self.shm.store(shm, Ordering::SeqCst);
+        self.shared.store(base, Ordering::SeqCst);
+        Ok(shm)
+    }
 }
 
 pub struct SemaphoreObj {
@@ -569,7 +677,27 @@ pub fn close(h: u64) -> bool {
     t.access.remove(&h);
     let removed = t.map.remove(&h);
     drop(t);
+    // The last handle to a named object ends this process's hold on the name.
+    if let Some(o) = &removed {
+        crate::namespace::released(o);
+    }
     removed.is_some()
+}
+
+/// Whether two handles' objects are the same kernel object (sections,
+/// events and mutexes, the kinds that carry a name across processes).
+pub fn same_kernel_object(a: &Object, b: &Object) -> bool {
+    match (a, b) {
+        (Object::Section(x), Object::Section(y)) => Arc::ptr_eq(x, y),
+        (Object::Event(x), Object::Event(y)) => Arc::ptr_eq(x, y),
+        (Object::Mutex(x), Object::Mutex(y)) => Arc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+/// How many handles of this process refer to the object `o` is.
+pub fn handle_count(o: &Object) -> usize {
+    TABLE.lock().unwrap().map.values().filter(|x| same_kernel_object(x, o)).count()
 }
 
 pub fn file(h: u64) -> Result<Arc<FileObj>, u32> {
@@ -589,6 +717,89 @@ static WAITERS: AtomicU32 = AtomicU32::new(0);
 /// Serialises check-and-consume of wait conditions (auto-reset events,
 /// mutex ownership, semaphore counts, wait-all).
 static WAIT_LOCK: Mutex<()> = Mutex::new(());
+
+/// After thread `tid` was killed: winrun's process-wide locks it still held
+/// are released, so the other threads do not wait for a dead owner. Returns
+/// the names of those it held.
+pub(crate) fn recover_locks(tid: u64) -> Vec<&'static str> {
+    let mut held = Vec::new();
+    for (name, released) in [
+        ("object-wait", WAIT_LOCK.release_if_owner_gone(tid)),
+        ("handle table", TABLE.release_if_owner_gone(tid)),
+        ("loader", crate::loader::release_if_owner_gone(tid)),
+        ("views", crate::mapping::release_if_owner_gone(tid)),
+        ("regions", crate::mem::release_if_owner_gone(tid)),
+        ("gui", crate::user32::release_if_owner_gone(tid)),
+    ] {
+        if released {
+            held.push(name);
+        }
+    }
+    held
+}
+
+/// TerminateThread requests for threads asleep in a futex wait: (thread
+/// id, exit code). The kernel ends a killed thread only at its next return
+/// to user mode outside a futex wait, so a thread woken from one by a kill
+/// would run on and could take a lock before it ends. Such a thread ends
+/// itself instead, in `exit_if_terminated`, right after it wakes and while
+/// it holds no lock.
+static TERMINATE: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
+static TERMINATE_PENDING: AtomicU32 = AtomicU32::new(0);
+
+/// Asks thread `tid` to end with `code` when its futex wait wakes.
+pub fn request_terminate(tid: u64, code: u32) {
+    let mut t = TERMINATE.lock().unwrap();
+    if !t.iter().any(|e| e.0 == tid) {
+        t.push((tid, code));
+        TERMINATE_PENDING.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Withdraws a request the thread has not acted on; true if there was one.
+pub fn cancel_terminate(tid: u64) -> bool {
+    let mut t = TERMINATE.lock().unwrap();
+    match t.iter().position(|e| e.0 == tid) {
+        Some(i) => {
+            t.remove(i);
+            TERMINATE_PENDING.fetch_sub(1, Ordering::SeqCst);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Ends the calling thread if TerminateThread asked for it. Called where
+/// the thread holds no lock (after a futex wait of a blocking call).
+pub fn exit_if_terminated() {
+    if TERMINATE_PENDING.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    let me = os_sys::gettid();
+    let code = {
+        let mut t = TERMINATE.lock().unwrap();
+        let i = t.iter().position(|e| e.0 == me);
+        i.map(|i| {
+            TERMINATE_PENDING.fetch_sub(1, Ordering::SeqCst);
+            t.remove(i).1
+        })
+    };
+    if let Some(code) = code {
+        os_std::eprintln!("winrun: thread {me} ends on TerminateThread's request");
+        crate::stall::thread_ended(me);
+        // As TerminateThread does: no DLL_THREAD_DETACH, no handlers; the
+        // thread alone ends.
+        os_sys::thread_exit(code as i32, core::ptr::null());
+    }
+}
+
+/// The futex wait of a Windows thread's blocking call: a thread that
+/// TerminateThread ends while it sleeps here ends on waking.
+pub fn futex_sleep(word: *const u32, expected: u32, ns: u64) -> Result<(), osyx_abi::Errno> {
+    let r = os_sys::futex_wait(word, expected, ns);
+    exit_if_terminated();
+    r
+}
 
 /// How many `signal_all` calls have run (`OSYX_WINRUN_COUNT` diagnostics).
 pub static SIGNALS: AtomicU64 = AtomicU64::new(0);
@@ -613,7 +824,7 @@ pub fn sequence() -> u32 {
 pub fn wait_for_change(seq: u32, timeout: Duration) -> bool {
     WAITERS.fetch_add(1, Ordering::SeqCst);
     let ns = timeout.as_nanos().max(1) as u64;
-    let r = os_sys::futex_wait(SEQ.as_ptr(), seq, ns);
+    let r = futex_sleep(SEQ.as_ptr(), seq, ns);
     WAITERS.fetch_sub(1, Ordering::SeqCst);
     matches!(r, Err(osyx_abi::Errno::WouldBlock))
 }
@@ -636,15 +847,7 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
                 e.take()
             }
         }
-        Object::Mutex(m) => {
-            let mut s = m.state.lock().unwrap();
-            let free = s.0 == 0 || s.0 == me;
-            if free && consume {
-                s.0 = me;
-                s.1 += 1;
-            }
-            free
-        }
+        Object::Mutex(m) => m.acquire(me, consume),
         Object::Semaphore(s) => {
             let mut c = s.count.lock().unwrap();
             let free = *c > 0;
@@ -735,26 +938,34 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
         if _blocked.is_none() {
             _blocked = Some(crate::stall::waiting("WaitForObjects", handles[0], handles.len() as u64));
         }
-        // Another process sets a shared event without touching SEQ: one
-        // shared event is waited for on its own word, several objects
-        // including one are polled.
+        // Another process sets a shared event or releases a shared mutex
+        // without touching SEQ: one shared event is waited for on its own
+        // word, several objects including one (or a shared mutex) are
+        // polled.
+        let shared_mutex = objs.iter().any(|o| matches!(o, Some(Object::Mutex(m)) if m.is_shared()));
         let mut shared = objs.iter().filter_map(|o| match o {
             Some(Object::Event(e)) if e.is_shared() => Some(e),
             _ => None,
         });
         match (shared.next(), shared.next()) {
+            _ if shared_mutex => {
+                let slice = if wait_ns == 0 { SHARED_POLL_NS } else { wait_ns.min(SHARED_POLL_NS) };
+                WAITERS.fetch_add(1, Ordering::SeqCst);
+                let _ = futex_sleep(SEQ.as_ptr(), seq, slice);
+                WAITERS.fetch_sub(1, Ordering::SeqCst);
+            }
             (Some(e), _) if objs.len() == 1 => {
-                let _ = os_sys::futex_wait(e.futex_word(), 0, wait_ns);
+                let _ = futex_sleep(e.futex_word(), 0, wait_ns);
             }
             (None, _) => {
                 WAITERS.fetch_add(1, Ordering::SeqCst);
-                let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, wait_ns);
+                let _ = futex_sleep(SEQ.as_ptr(), seq, wait_ns);
                 WAITERS.fetch_sub(1, Ordering::SeqCst);
             }
             _ => {
                 let slice = if wait_ns == 0 { SHARED_POLL_NS } else { wait_ns.min(SHARED_POLL_NS) };
                 WAITERS.fetch_add(1, Ordering::SeqCst);
-                let _ = os_sys::futex_wait(SEQ.as_ptr(), seq, slice);
+                let _ = futex_sleep(SEQ.as_ptr(), seq, slice);
                 WAITERS.fetch_sub(1, Ordering::SeqCst);
             }
         }

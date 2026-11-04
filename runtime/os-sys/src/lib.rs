@@ -379,9 +379,9 @@ mod imp {
     }
 
     /// What a thread of this process is doing: its state, the number,
-    /// return address and stack pointer of its last system call, then its
-    /// user stack words (see `nr::THREAD_STATE`). Returns how many entries
-    /// of `buf` were written.
+    /// return address and stack pointer of its last system call, that
+    /// call's first and fourth argument, then its user stack words (see
+    /// `nr::THREAD_STATE`). Returns how many entries of `buf` were written.
     pub fn thread_state(tid: u64, buf: &mut [u64]) -> Result<usize, Errno> {
         decode(syscall3(nr::THREAD_STATE, tid, buf.as_mut_ptr() as u64, buf.len() as u64)).map(|n| n as usize)
     }

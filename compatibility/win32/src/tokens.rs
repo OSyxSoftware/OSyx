@@ -65,6 +65,10 @@ const POLICY_NO_WRITE_UP: u32 = 1;
 /// The mutable state of one token, shared by all its handles.
 pub struct TokenState {
     pub data: Mutex<TokenData>,
+    /// Another process's primary token, as that process started: this
+    /// process cannot reach the token the other one changes, so it refuses
+    /// changes that would only reach this copy.
+    pub remote: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -181,7 +185,7 @@ pub fn process_state() -> Arc<TokenState> {
     let mut p = PROCESS.lock().unwrap();
     p.get_or_insert_with(|| {
         let (uid, gid) = os_sys::getuid();
-        Arc::new(TokenState { data: Mutex::new(initial(uid, gid)) })
+        Arc::new(TokenState { data: Mutex::new(initial(uid, gid)), remote: false })
     })
     .clone()
 }
@@ -350,23 +354,36 @@ fn token_information(h: u64, class: u32, out: *mut u8, size: u32, needed: *mut u
 // ---- opening and duplicating ------------------------------------------------------------
 
 pub(crate) fn new_handle(uid: u32, gid: u32, access: u32, d: TokenData) -> u64 {
-    objects::insert(Object::Token(Arc::new(Token { uid, gid, access, state: Arc::new(TokenState { data: Mutex::new(d) }) })))
+    objects::insert(Object::Token(Arc::new(Token { uid, gid, access, state: Arc::new(TokenState { data: Mutex::new(d), remote: false }) })))
 }
 
 pub(crate) extern "win64" fn OpenProcessToken(process: u64, access: u32, out: *mut u64) -> i32 {
     if out.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    if process != objects::CURRENT_PROCESS {
-        return fail(ERROR_INVALID_HANDLE, 0);
-    }
+    let Some(pid) = crate::process::handle_pid(process) else { return fail(ERROR_INVALID_HANDLE, 0) };
     let access = match security::token_access(access) {
         Ok(v) => v,
         Err(e) => return fail(e, 0),
     };
-    let (uid, gid) = os_sys::getuid();
+    let (me, my_gid) = os_sys::getuid();
+    let token = if pid == crate::kernel32::pid() {
+        // This process's token, shared by every handle to it.
+        Token { uid: me, gid: my_gid, access, state: process_state() }
+    } else {
+        // Another process: its user's primary token, as it started. Only
+        // the same user, or root, may open it.
+        let info = match os_sys::proc_info(pid) {
+            Ok(i) => i,
+            Err(_) => return fail(ERROR_INVALID_HANDLE, 0),
+        };
+        if info.uid != me && me != 0 {
+            return fail(ERROR_ACCESS_DENIED, 0);
+        }
+        Token { uid: info.uid, gid: info.gid, access, state: Arc::new(TokenState { data: Mutex::new(initial(info.uid, info.gid)), remote: true }) }
+    };
     // SAFETY: the caller's out pointer.
-    unsafe { *out = objects::insert(Object::Token(Arc::new(Token { uid, gid, access, state: process_state() }))) };
+    unsafe { *out = objects::insert(Object::Token(Arc::new(token))) };
     1
 }
 
@@ -518,6 +535,9 @@ fn sid_at(p: *const u8) -> Result<Vec<u8>, u32> {
 }
 
 fn set_info(t: &Token, class: u32, info: *const u8, len: u32) -> Result<(), u32> {
+    if t.state.remote {
+        return Err(ERROR_ACCESS_DENIED);
+    }
     let is_process = Arc::ptr_eq(&t.state, &process_state());
     let mut d = t.state.data.lock().unwrap();
     let need_len = |n: u32| if len < n || info.is_null() { Err(ERROR_BAD_LENGTH) } else { Ok(()) };
@@ -597,6 +617,9 @@ extern "win64" fn AdjustTokenPrivileges(h: u64, disable_all: i32, new: *const u8
     }
     if disable_all == 0 && new.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if t.state.remote {
+        return fail(ERROR_ACCESS_DENIED, 0);
     }
     let mut d = t.state.data.lock().unwrap();
     // (luid, new attributes) requested.

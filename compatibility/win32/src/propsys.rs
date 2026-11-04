@@ -601,6 +601,88 @@ extern "win64" fn VariantCompare(a: *const PropVariant, b: *const PropVariant) -
     order as i32
 }
 
+/// ole32's PropVariantCopy for the types this module copies (see the
+/// module comment); others fail with E_INVALIDARG and leave `dst` alone.
+pub(crate) extern "win64" fn PropVariantCopy(dst: *mut PropVariant, src: *const PropVariant) -> u32 {
+    if dst.is_null() || src.is_null() || crate::wow64::is_active() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: the caller's PROPVARIANTs.
+    match copy(unsafe { &*src }) {
+        Ok(v) => {
+            // SAFETY: as above.
+            unsafe { *dst = v };
+            S_OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// A VT_CLSID PROPVARIANT holding a CoTaskMemAlloc copy of the GUID.
+extern "win64" fn InitPropVariantFromCLSID(clsid: *const [u8; 16], out: *mut PropVariant) -> u32 {
+    if clsid.is_null() || out.is_null() {
+        return E_INVALIDARG;
+    }
+    let d = crate::ole32::CoTaskMemAlloc(16);
+    if d == 0 {
+        return E_OUTOFMEMORY;
+    }
+    let mut v: PropVariant = [0; 24];
+    v[0..2].copy_from_slice(&VT_CLSID.to_le_bytes());
+    v[8..16].copy_from_slice(&d.to_le_bytes());
+    // SAFETY: the caller's GUID into the fresh 16-byte block; the caller's
+    // PROPVARIANT.
+    unsafe {
+        core::ptr::copy_nonoverlapping(clsid as *const u8, d as *mut u8, 16);
+        *out = v;
+    }
+    S_OK
+}
+
+const TYPE_E_ELEMENTNOTFOUND: u32 = 0x8002_802B;
+
+/// The canonical names of the property keys programs look up by name:
+/// (name, format id, property id).
+const KEY_NAMES: [(&str, [u8; 16], u32); 12] = [
+    ("System.Title", FMTID_SUMMARY, 2),
+    ("System.Author", FMTID_SUMMARY, 4),
+    ("System.Comment", FMTID_SUMMARY, 6),
+    ("System.AppUserModel.RelaunchCommand", FMTID_APPUSERMODEL, 2),
+    ("System.AppUserModel.RelaunchIconResource", FMTID_APPUSERMODEL, 3),
+    ("System.AppUserModel.RelaunchDisplayNameResource", FMTID_APPUSERMODEL, 4),
+    ("System.AppUserModel.ID", FMTID_APPUSERMODEL, 5),
+    ("System.AppUserModel.IsDestListSeparator", FMTID_APPUSERMODEL, 6),
+    ("System.AppUserModel.ExcludeFromShowInNewInstall", FMTID_APPUSERMODEL, 8),
+    ("System.AppUserModel.PreventPinning", FMTID_APPUSERMODEL, 9),
+    ("System.AppUserModel.IsDualMode", FMTID_APPUSERMODEL, 11),
+    ("System.AppUserModel.ToastActivatorCLSID", FMTID_APPUSERMODEL, 26),
+];
+/// {F29F85E0-4FF9-1068-AB91-08002B27B3D9}
+const FMTID_SUMMARY: [u8; 16] = [0xE0, 0x85, 0x9F, 0xF2, 0xF9, 0x4F, 0x68, 0x10, 0xAB, 0x91, 0x08, 0x00, 0x2B, 0x27, 0xB3, 0xD9];
+/// {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}
+const FMTID_APPUSERMODEL: [u8; 16] = [0x55, 0x28, 0x4C, 0x9F, 0x79, 0x9F, 0x39, 0x4B, 0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3];
+
+/// PSGetPropertyKeyFromName: the PROPERTYKEY (format id, property id) of a
+/// canonical property name, for the properties listed above.
+extern "win64" fn PSGetPropertyKeyFromName(name: *const u16, key: *mut u8) -> u32 {
+    if name.is_null() || key.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: a NUL-terminated name.
+    let n = unsafe { path::wide_to_string(name) }.unwrap_or_default();
+    match KEY_NAMES.iter().find(|k| k.0.eq_ignore_ascii_case(&n)) {
+        Some((_, fmtid, pid)) => {
+            // SAFETY: the caller's 20-byte PROPERTYKEY.
+            unsafe {
+                core::ptr::copy_nonoverlapping(fmtid.as_ptr(), key, 16);
+                core::ptr::write_unaligned(key.add(16) as *mut u32, *pid);
+            }
+            S_OK
+        }
+        None => TYPE_E_ELEMENTNOTFOUND,
+    }
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![PSCreateMemoryPropertyStore, PropVariantToString, VariantCompare]
+    export_table![PSCreateMemoryPropertyStore, PropVariantToString, VariantCompare, InitPropVariantFromCLSID, PSGetPropertyKeyFromName, PropVariantCopy]
 }

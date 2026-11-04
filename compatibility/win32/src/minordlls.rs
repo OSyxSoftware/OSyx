@@ -551,9 +551,19 @@ extern "win64" fn InternetCloseHandle(h: u64) -> crate::kernel32::Bool {
     }
 }
 
+/// winrun's wininet keeps no URL cache: every lookup finds no entry.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn GetUrlCacheEntryInfoExW(url: *const u16, _info: *mut u8, _size: *mut u32, _redirect: *mut u16, _redirect_size: *mut u32, _reserved: u64, _flags: u32) -> i32 {
+    if url.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    fail(ERROR_FILE_NOT_FOUND, 0)
+}
+
 pub fn wininet_exports() -> Vec<(&'static str, u64)> {
     let mut e = crate::winhttp::wininet_exports();
     e.extend(export_table![
+        GetUrlCacheEntryInfoExW,
         InternetGetConnectedState,
         InternetGetConnectedStateExW,
         InternetGetConnectedStateExA,

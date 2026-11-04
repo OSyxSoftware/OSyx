@@ -104,12 +104,13 @@ impl Accept {
         let mut local = SockAddr::default();
         let _ = os_sys::sock_ctl(nfd, net::ctl::LOCAL_ADDR, &mut local as *mut SockAddr as u64);
         let out = self.out as *mut u8;
-        let mut room = 16i32;
+        let size = addr_size(self.accept_s);
+        let mut room = size;
         // SAFETY: as above: the address areas follow the data.
         unsafe {
-            write_addr(&local, out.add(self.recv_len as usize), &mut room);
-            room = 16;
-            write_addr(&peer, out.add((self.recv_len + self.local_len) as usize), &mut room);
+            write_addr(&local, out.add(self.recv_len as usize), &mut room, self.accept_s);
+            room = size;
+            write_addr(&peer, out.add((self.recv_len + self.local_len) as usize), &mut room, self.accept_s);
         }
         Ok(n as u32)
     }
@@ -140,7 +141,9 @@ pub(crate) extern "win64" fn AcceptEx(
         if !listener.stream || !target.stream {
             return Err(WSAEOPNOTSUPP);
         }
-        if out.is_null() || local_len < MIN_ADDR_ROOM || remote_len < MIN_ADDR_ROOM {
+        // A sockaddr_in6 is 12 bytes longer.
+        let min = MIN_ADDR_ROOM + if target.v6 { 12 } else { 0 };
+        if out.is_null() || local_len < min || remote_len < min {
             return Err(WSAEFAULT);
         }
         events::rearm(listen_s, 0x08);
@@ -203,14 +206,16 @@ pub(crate) extern "win64" fn GetAcceptExSockaddrs(
         if !local.is_null() {
             *local = out.add(recv_len as usize);
         }
+        // The family AcceptEx wrote says the size.
+        let size = |p: *const u8| if core::ptr::read_unaligned(p as *const u16) == AF_INET6 as u16 { 28 } else { 16 };
         if !local_size.is_null() {
-            *local_size = 16;
+            *local_size = size(out.add(recv_len as usize));
         }
         if !remote.is_null() {
             *remote = out.add((recv_len + local_len) as usize);
         }
         if !remote_size.is_null() {
-            *remote_size = 16;
+            *remote_size = size(out.add((recv_len + local_len) as usize));
         }
     }
 }
@@ -244,7 +249,7 @@ pub(crate) extern "win64" fn ConnectEx(
         if !st.stream {
             return Err(WSAEOPNOTSUPP);
         }
-        let a = read_addr(name, name_len)?;
+        let a = read_addr(name, name_len, s)?;
         // The first block is copied now: the caller's buffer is theirs
         // again once the call returns.
         let data = if len == 0 || buf.is_null() {

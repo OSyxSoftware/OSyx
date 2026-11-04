@@ -29,6 +29,7 @@ use osyx_gfx::{Color, Rect, Surface};
 use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
 pub(crate) mod client;
+mod cefui;
 mod controls;
 mod extra;
 mod gdi;
@@ -417,6 +418,10 @@ struct Gui {
 }
 
 static GUI: Mutex<Option<Gui>> = Mutex::new(None);
+
+pub(crate) fn release_if_owner_gone(tid: u64) -> bool {
+    GUI.release_if_owner_gone(tid)
+}
 
 // Stock objects: fixed handle values.
 const STOCK_BASE: u64 = 0x9000;
@@ -3855,6 +3860,25 @@ extern "win64" fn MapWindowPoints(from: u64, to: u64, pts: *mut i32, n: u32) -> 
     ((dx as u16 as u32) | ((dy as u16 as u32) << 16)) as i32
 }
 
+/// GetSystemMetrics at a DPI: the metrics that are sizes of window parts
+/// (borders, captions, scroll bars, icons, menus) scale with it, as on
+/// Windows; screen sizes, counts and flags do not.
+extern "win64" fn GetSystemMetricsForDpi(i: i32, dpi: u32) -> i32 {
+    if dpi == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    const SCALED: &[i32] = &[
+        2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20, 21, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 45, 46, 47, 48, 49, 50, 51, 52, 53,
+        54, 55, 57, 58, 71, 72, 83, 84, 92,
+    ];
+    let v = GetSystemMetrics(i);
+    if SCALED.contains(&i) {
+        ((v as i64 * dpi as i64 + 48) / 96) as i32
+    } else {
+        v
+    }
+}
+
 extern "win64" fn GetSystemMetrics(i: i32) -> i32 {
     let v = with(|g| {
         let (w, h) = g.conn().map(|c| (c.screen_width as i32, c.screen_height as i32)).unwrap_or((1024, 768));
@@ -4487,6 +4511,12 @@ extern "win64" fn GetDC(hwnd: u64) -> u64 {
         wait_drawable(hwnd);
     }
     with(|g| new_dc(g, hwnd, Rect::new(0, 0, size.0, size.1)))
+}
+
+/// The window a DC from GetDC, GetWindowDC or BeginPaint draws on; NULL for
+/// a memory DC, the screen DC or a handle that is no DC.
+extern "win64" fn WindowFromDC(dc: u64) -> u64 {
+    with(|g| g.dcs.get(&dc).map_or(0, |d| d.hwnd))
 }
 
 extern "win64" fn ReleaseDC(hwnd: u64, dc: u64) -> i32 {
@@ -8448,6 +8478,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         IsValidDpiAwarenessContext,
         SetThreadDpiAwarenessContext,
         GetThreadDpiAwarenessContext,
+        WindowFromDC,
+        GetSystemMetricsForDpi,
         GetAwarenessFromDpiAwarenessContext,
         AreDpiAwarenessContextsEqual,
         GetDpiForWindow,
@@ -8494,6 +8526,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     ])
     .chain(client::exports())
     .chain(extra::exports())
+    .chain(cefui::exports())
     .collect()
 }
 
@@ -8599,5 +8632,6 @@ pub fn gdi_exports() -> Vec<(&'static str, u64)> {
     .chain(gdi::exports())
     .chain(gdi::client_exports())
     .chain(gdi::blend_exports())
+    .chain(cefui::gdi_exports())
     .collect()
 }
