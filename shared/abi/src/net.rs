@@ -203,7 +203,9 @@ pub struct NetSocket {
     pub tx_queue: u32,
     /// 1: owned by the kernel (the DNS resolver).
     pub internal: u32,
-    pub reserved: u32,
+    /// The process that made the socket (socket or accept); 0 for the
+    /// kernel's own.
+    pub pid: u32,
 }
 
 /// Number of counters in `NetStats`.

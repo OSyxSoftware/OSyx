@@ -387,6 +387,9 @@ pub struct SocketObj {
     connect_timeout: AtomicU64,
     /// Original size of the datagram the last `recv` returned.
     last_msg_len: AtomicU64,
+    /// The process that made the socket (`sys_socket` or accept), for the
+    /// socket list.
+    owner: u64,
 }
 
 impl SocketObj {
@@ -508,6 +511,7 @@ pub fn sys_socket(kind: u64) -> Result<u64, Errno> {
         send_timeout: AtomicU64::new(0),
         connect_timeout: AtomicU64::new(0),
         last_msg_len: AtomicU64::new(0),
+        owner: crate::sched::current_pid(),
     });
     SOCKETS.lock().push(Arc::downgrade(&obj));
     process::add_object(Object::Socket(obj))
@@ -616,6 +620,7 @@ pub fn sys_accept(h: u64, peer: u64, flags: u64) -> Result<u64, Errno> {
         send_timeout: AtomicU64::new(0),
         connect_timeout: AtomicU64::new(0),
         last_msg_len: AtomicU64::new(0),
+        owner: crate::sched::current_pid(),
     });
     SOCKETS.lock().push(Arc::downgrade(&obj));
     // Readiness of the new socket.
@@ -1099,6 +1104,14 @@ pub fn sys_query(kind: u64, buf: u64, len: u64) -> Result<u64, Errno> {
                 put_records(buf, len, &list)
             }
             abi::query::SOCKETS => {
+                // The process behind each stack socket a socket object holds
+                // (the stack's own sockets have none).
+                let owners: Vec<(u32, u64)> = SOCKETS
+                    .lock()
+                    .iter()
+                    .filter_map(|w| w.upgrade())
+                    .filter_map(|o| o.state.lock().id.map(|id| (id, o.owner)))
+                    .collect();
                 let list: Vec<abi::NetSocket> = s
                     .sockets()
                     .iter()
@@ -1109,6 +1122,7 @@ pub fn sys_query(kind: u64, buf: u64, len: u64) -> Result<u64, Errno> {
                             rx_queue: i.rx_queue as u32,
                             tx_queue: i.tx_queue as u32,
                             internal: i.internal as u32,
+                            pid: owners.iter().find(|o| o.0 == i.id).map_or(0, |o| o.1 as u32),
                             ..Default::default()
                         };
                         osyx_abi::ipc::fill_field(&mut r.kind, i.kind);
