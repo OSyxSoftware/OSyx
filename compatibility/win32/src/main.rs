@@ -179,6 +179,10 @@ fn main() -> i32 {
         eprintln!("usage: winrun [-v] program.exe [arguments...]");
         return 2;
     };
+    // The whole command line, which the kernel's process log shortens.
+    if kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+        eprintln!("winrun: command line: {}", args.join(" "));
+    }
     // The program may be named with an OSyx path or a Windows path.
     let cwd = os_std::env::current_dir().map(|p| path::to_windows(p.as_str())).unwrap_or_else(|_| String::from("C:\\"));
     let osyx = if program.starts_with('/') {
