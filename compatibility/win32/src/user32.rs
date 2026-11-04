@@ -7869,6 +7869,11 @@ extern "win64" fn GetPointerDevice(_device: u64, _info: *mut u8) -> Bool {
     fail(ERROR_INVALID_PARAMETER, FALSE)
 }
 
+/// No pointer device exists (see GetPointerDevices), so no handle names one.
+extern "win64" fn GetPointerDeviceRects(_device: u64, _device_rect: *mut i32, _display_rect: *mut i32) -> Bool {
+    fail(ERROR_INVALID_PARAMETER, FALSE)
+}
+
 extern "win64" fn GetPointerPenInfo(_pointer: u32, _info: *mut u8) -> Bool {
     fail(ERROR_INVALID_PARAMETER, FALSE)
 }
@@ -7902,6 +7907,50 @@ extern "win64" fn SetProcessDpiAwarenessContext(ctx: u64) -> Bool {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
     if crate::user32::client::set_process_dpi_context((ctx as i64).wrapping_neg() as u32) { TRUE } else { fail(ERROR_ACCESS_DENIED, FALSE) }
+}
+
+/// The calling thread's context: the one it set, or the process's.
+extern "win64" fn GetThreadDpiAwarenessContext() -> u64 {
+    THREAD_DPI.lock().unwrap().get(&os_sys::gettid()).copied().unwrap_or_else(process_dpi_context)
+}
+
+/// DPI_AWARENESS of a context: unaware (0) for unaware and GDI-scaled,
+/// system aware (1), per-monitor aware (2) for both per-monitor versions;
+/// DPI_AWARENESS_INVALID (-1) for anything else.
+extern "win64" fn GetAwarenessFromDpiAwarenessContext(ctx: u64) -> i32 {
+    match (ctx as i64).wrapping_neg() {
+        1 | 5 => 0,
+        2 => 1,
+        3 | 4 => 2,
+        _ => -1,
+    }
+}
+
+extern "win64" fn AreDpiAwarenessContextsEqual(a: u64, b: u64) -> Bool {
+    if !valid_dpi_context(a) || !valid_dpi_context(b) {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    (a == b) as Bool
+}
+
+/// PRISM draws every window at 96 DPI; 0 for a handle that is no window.
+extern "win64" fn GetDpiForWindow(hwnd: u64) -> u32 {
+    if is_window(hwnd) { 96 } else { fail(ERROR_INVALID_WINDOW_HANDLE, 0) }
+}
+
+/// Non-client areas are drawn at 96 DPI already: nothing to scale.
+extern "win64" fn EnableNonClientDpiScaling(hwnd: u64) -> Bool {
+    if is_window(hwnd) { TRUE } else { fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) }
+}
+
+/// AdjustWindowRectEx at a given DPI: the frame added is the same at
+/// every DPI, since windows here have no non-client area (see
+/// AdjustWindowRectEx).
+extern "win64" fn AdjustWindowRectExForDpi(r: *mut i32, style: u32, menu: Bool, ex: u32, dpi: u32) -> Bool {
+    if dpi == 0 {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    }
+    AdjustWindowRectEx(r, style, menu, ex)
 }
 
 extern "win64" fn SetThreadDpiAwarenessContext(ctx: u64) -> u64 {
@@ -8398,6 +8447,13 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RegisterPointerDeviceNotifications,
         IsValidDpiAwarenessContext,
         SetThreadDpiAwarenessContext,
+        GetThreadDpiAwarenessContext,
+        GetAwarenessFromDpiAwarenessContext,
+        AreDpiAwarenessContextsEqual,
+        GetDpiForWindow,
+        EnableNonClientDpiScaling,
+        AdjustWindowRectExForDpi,
+        GetPointerDeviceRects,
         SetProcessDpiAwarenessContext,
         UnregisterPowerSettingNotification,
         SendNotifyMessageW,

@@ -48,6 +48,18 @@ static ATTRS: Mutex<BTreeMap<(u64, u32), u32>> = Mutex::new(BTreeMap::new());
 /// One refresh of the composition clock, in performance-counter units (ns).
 const REFRESH_NS: u64 = 1_000_000_000 / 60;
 
+/// DWM_BLURBEHIND is accepted for a window: PRISM composes the window's
+/// alpha over what is behind it, without the blur.
+extern "win64" fn DwmEnableBlurBehindWindow(hwnd: u64, blur: *const u8) -> u32 {
+    if blur.is_null() {
+        return E_INVALIDARG;
+    }
+    if !crate::user32::is_window(hwnd) {
+        return E_HANDLE;
+    }
+    S_OK
+}
+
 extern "win64" fn DwmIsCompositionEnabled(out: *mut Bool) -> u32 {
     if out.is_null() {
         return E_INVALIDARG;
@@ -183,6 +195,7 @@ extern "win64" fn DwmInvalidateIconicBitmaps(hwnd: u64) -> u32 {
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        DwmEnableBlurBehindWindow,
         DwmIsCompositionEnabled,
         DwmSetWindowAttribute,
         DwmGetWindowAttribute,

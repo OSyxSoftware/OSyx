@@ -606,6 +606,23 @@ extern "win64" fn LdrLockLoaderLock(flags: u32, state: *mut u32, cookie: *mut u6
     STATUS_SUCCESS
 }
 
+/// LdrRegisterDllNotification: `callback(reason, data, context)` runs for
+/// every DLL loaded (reason 1) or unloaded (2) from now on; the cookie
+/// unregisters it.
+extern "win64" fn LdrRegisterDllNotification(flags: u32, callback: u64, context: u64, cookie: *mut u64) -> NtStatus {
+    if flags != 0 || callback == 0 || cookie.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    let c = crate::loader::register_dll_notification(callback, context);
+    // SAFETY: the caller's out pointer.
+    unsafe { *cookie = c };
+    STATUS_SUCCESS
+}
+
+extern "win64" fn LdrUnregisterDllNotification(cookie: u64) -> NtStatus {
+    if crate::loader::unregister_dll_notification(cookie) { STATUS_SUCCESS } else { STATUS_DLL_NOT_FOUND }
+}
+
 extern "win64" fn LdrUnlockLoaderLock(flags: u32, cookie: u64) -> NtStatus {
     if flags & !1 != 0 {
         return STATUS_INVALID_PARAMETER;
@@ -956,6 +973,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RtlNtStatusToDosError,
         RtlGetLastNtStatus,
         LdrLockLoaderLock,
+        LdrRegisterDllNotification,
+        LdrUnregisterDllNotification,
         LdrUnlockLoaderLock,
         RtlGetUnloadEventTraceEx,
         RtlGetLastWin32Error,

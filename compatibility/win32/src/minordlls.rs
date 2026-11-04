@@ -30,6 +30,23 @@ fn uuid_text(u: *const u8) -> String {
     )
 }
 
+/// A random (version 4) UUID; RPC_S_OK.
+extern "win64" fn UuidCreate(out: *mut u8) -> u32 {
+    if out.is_null() {
+        return 87; // RPC_S_INVALID_ARG
+    }
+    let mut u = [0u8; 16];
+    if !crate::ucrt::entropy(&mut u) {
+        return 1739; // RPC_S_UUID_NO_ADDRESS: no source of uniqueness
+    }
+    // Data3's high nibble is the version; Data4[0]'s top bits the variant.
+    u[7] = (u[7] & 0x0f) | 0x40;
+    u[8] = (u[8] & 0x3f) | 0x80;
+    // SAFETY: the caller's 16-byte UUID.
+    unsafe { core::ptr::copy_nonoverlapping(u.as_ptr(), out, 16) };
+    0
+}
+
 extern "win64" fn UuidToStringA(u: *const u8, out: *mut u64) -> u32 {
     if u.is_null() || out.is_null() {
         return ERROR_INVALID_PARAMETER;
@@ -107,7 +124,7 @@ extern "win64" fn RpcStringFreeW(p: *mut u64) -> u32 {
 }
 
 pub fn rpcrt4_exports() -> Vec<(&'static str, u64)> {
-    export_table![UuidToStringA, UuidToStringW, UuidFromStringW, RpcStringFreeA, RpcStringFreeW]
+    export_table![UuidCreate, UuidToStringA, UuidToStringW, UuidFromStringW, RpcStringFreeA, RpcStringFreeW]
 }
 
 // ---- cfgmgr32 --------------------------------------------------------------------------

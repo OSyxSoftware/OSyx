@@ -1434,7 +1434,7 @@ pub(crate) fn numeric_resource(module: u64, kind: u16, name: u64) -> Result<Vec<
 
 /// `LoadLibrary`: a DLL name or a Windows path. Returns its handle.
 pub fn load_library(name: &str) -> Result<u64, u32> {
-    let (todo, h) = {
+    let (todo, h, loaded) = {
         let mut g = LOADER.lock().unwrap();
         let l = g.as_mut().expect("loader initialised");
         let file = name.rsplit(['\\', '/']).next().unwrap_or(name);
@@ -1491,7 +1491,13 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         } else {
             l.state[i].refs = add_ref(l.state[i].refs);
         }
-        (todo, module_handle(l, i))
+        // The loader entries of the DLLs this load maps, for the
+        // notification callbacks.
+        let loaded: Vec<(u64, u64)> = todo
+            .iter()
+            .filter_map(|t| (0..l.linker.modules.len()).find(|&k| l.linker.modules[k].base == t.0).map(|k| (l.state[k].ldr, t.0)))
+            .collect();
+        (todo, module_handle(l, i), loaded)
     };
     if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
         os_std::eprintln!("winrun: loaded {name} at {h:#x}");
@@ -1506,6 +1512,9 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
             setup_thread_tls32(teb32);
         }
     }
+    // Notification callbacks run once the images are mapped, before their
+    // initialization, as on Windows.
+    notify_dlls(1, &loaded);
     let attached = if wow64::is_active() {
         todo.iter().all(|(base, entry, callbacks, _)| {
             for &callback in callbacks { wow64::call32(callback as u32, &[*base as u32, DLL_PROCESS_ATTACH, 0]); }
@@ -1554,6 +1563,54 @@ pub fn add_module_reference(h: u64, pin: bool) {
     })
 }
 
+/// LdrRegisterDllNotification callbacks: (cookie, callback, context).
+static DLL_NOTIFICATIONS: Mutex<Vec<(u64, u64, u64)>> = Mutex::new(Vec::new());
+static NEXT_NOTIFICATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+pub fn register_dll_notification(callback: u64, context: u64) -> u64 {
+    let cookie = NEXT_NOTIFICATION.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    DLL_NOTIFICATIONS.lock().unwrap().push((cookie, callback, context));
+    cookie
+}
+
+pub fn unregister_dll_notification(cookie: u64) -> bool {
+    let mut list = DLL_NOTIFICATIONS.lock().unwrap();
+    let before = list.len();
+    list.retain(|n| n.0 != cookie);
+    list.len() != before
+}
+
+/// LDR_DLL_NOTIFICATION_DATA (loaded and unloaded have the same layout).
+#[repr(C)]
+struct DllNotificationData {
+    flags: u32,
+    full_name: u64,
+    base_name: u64,
+    base: u64,
+    size: u32,
+}
+
+/// Runs the registered callbacks for DLLs loaded (reason 1) or unloaded
+/// (2), given by their PEB loader entries and bases. 64-bit programs
+/// only: a 32-bit program's callbacks would need its own entry layout.
+fn notify_dlls(reason: u32, dlls: &[(u64, u64)]) {
+    let callbacks = DLL_NOTIFICATIONS.lock().unwrap().clone();
+    if callbacks.is_empty() || wow64::is_active() {
+        return;
+    }
+    for &(ldr, base) in dlls.iter().filter(|d| d.0 != 0) {
+        // SAFETY: a PEB loader entry (layout in teb.rs): SizeOfImage at
+        // 0x40, FullDllName at 0x48, BaseDllName at 0x58.
+        let size = unsafe { *((ldr + 0x40) as *const u32) };
+        let data = DllNotificationData { flags: 0, full_name: ldr + 0x48, base_name: ldr + 0x58, base, size };
+        for &(_, callback, context) in &callbacks {
+            // SAFETY: a callback the program registered, with its context.
+            let f: extern "win64" fn(u32, *const DllNotificationData, u64) = unsafe { core::mem::transmute(callback as usize) };
+            f(reason, &data, context);
+        }
+    }
+}
+
 /// `FreeLibrary`: drops a reference. The image stays mapped; the last
 /// reference delivers DLL_PROCESS_DETACH, and a later LoadLibrary restores
 /// its data before attaching it again (see `ModState::pristine`).
@@ -1570,12 +1627,12 @@ pub fn free_library(h: u64) -> Result<(), u32> {
         if s.refs == 0 && s.attached {
             s.attached = false;
             let m = &l.linker.modules[i];
-            Some((m.base, m.entry()))
+            Some((m.base, m.entry(), s.ldr))
         } else {
             None
         }
     };
-    if let Some((base, entry)) = detach {
+    if let Some((base, entry, ldr)) = detach {
         if entry != 0 {
             // SAFETY: the entry point of a mapped DLL image.
             if wow64::is_active() {
@@ -1585,6 +1642,8 @@ pub fn free_library(h: u64) -> Result<(), u32> {
                 f(base, DLL_PROCESS_DETACH, 0);
             }
         }
+        // The image stays mapped, but to the program it is unloaded.
+        notify_dlls(2, &[(ldr, base)]);
     }
     Ok(())
 }

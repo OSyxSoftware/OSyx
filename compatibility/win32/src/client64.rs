@@ -975,7 +975,42 @@ extern "win64" fn HidD_FreePreparsedData(_data: u64) -> u8 {
 
 /// HIDP_STATUS_INVALID_PREPARSED_DATA: no preparsed data exists.
 extern "win64" fn HidP_GetCaps(_data: u64, _caps: *mut u8) -> u32 {
-    0xC011_0001
+    HIDP_STATUS_INVALID_PREPARSED_DATA
+}
+
+const HIDP_STATUS_INVALID_PREPARSED_DATA: u32 = 0xC011_0001;
+
+/// The strings of a HID device: no handle is one (see HidD_GetAttributes).
+fn hid_string(h: u64) -> u8 {
+    if objects::get(h).is_none() {
+        return fail(ERROR_INVALID_HANDLE, 0);
+    }
+    fail(ERROR_INVALID_FUNCTION, 0)
+}
+
+extern "win64" fn HidD_GetManufacturerString(h: u64, _buf: *mut u16, _len: u32) -> u8 {
+    hid_string(h)
+}
+
+extern "win64" fn HidD_GetProductString(h: u64, _buf: *mut u16, _len: u32) -> u8 {
+    hid_string(h)
+}
+
+extern "win64" fn HidP_GetButtonCaps(_kind: u32, _caps: *mut u8, _len: *mut u16, _data: u64) -> u32 {
+    HIDP_STATUS_INVALID_PREPARSED_DATA
+}
+
+extern "win64" fn HidP_GetValueCaps(_kind: u32, _caps: *mut u8, _len: *mut u16, _data: u64) -> u32 {
+    HIDP_STATUS_INVALID_PREPARSED_DATA
+}
+
+/// 0: the length for preparsed data that does not exist.
+extern "win64" fn HidP_MaxDataListLength(_kind: u32, _data: u64) -> u32 {
+    0
+}
+
+extern "win64" fn HidP_GetData(_kind: u32, _list: *mut u8, _len: *mut u32, _data: u64, _report: *mut u8, _report_len: u32) -> u32 {
+    HIDP_STATUS_INVALID_PREPARSED_DATA
 }
 
 pub fn kernel32_exports() -> Vec<(&'static str, u64)> {
@@ -1011,5 +1046,17 @@ pub fn shell32_exports() -> Vec<(&'static str, u64)> {
 }
 
 pub fn hid_exports() -> Vec<(&'static str, u64)> {
-    export_table![HidD_GetHidGuid, HidD_GetAttributes, HidD_GetPreparsedData, HidD_FreePreparsedData, HidP_GetCaps]
+    export_table![
+        HidD_GetHidGuid,
+        HidD_GetAttributes,
+        HidD_GetPreparsedData,
+        HidD_FreePreparsedData,
+        HidD_GetManufacturerString,
+        HidD_GetProductString,
+        HidP_GetCaps,
+        HidP_GetButtonCaps,
+        HidP_GetValueCaps,
+        HidP_MaxDataListLength,
+        HidP_GetData,
+    ]
 }
