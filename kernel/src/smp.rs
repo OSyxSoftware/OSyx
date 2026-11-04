@@ -429,7 +429,9 @@ pub fn rip_samples() -> [(u64, u64, u64); SAMPLE_SLOTS] {
 }
 
 // TEMP last syscall per thread, including threads blocked outside futexes.
-const LAST_SYSCALL_SLOTS: usize = 256;
+// By thread id: a Windows program built on Chromium starts threads past id
+// 1000 in a few minutes, and stall reports need them too (320 KiB of .bss).
+const LAST_SYSCALL_SLOTS: usize = 8192;
 static LAST_SYSCALL_NR: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::new(0) }; LAST_SYSCALL_SLOTS];
 static LAST_SYSCALL_RIP: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::new(0) }; LAST_SYSCALL_SLOTS];
 static LAST_SYSCALL_RSP: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::new(0) }; LAST_SYSCALL_SLOTS];
