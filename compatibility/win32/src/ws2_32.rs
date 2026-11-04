@@ -68,6 +68,10 @@ const SO_ERROR: i32 = 0x1007;
 const SO_TYPE: i32 = 0x1008;
 const SO_SNDBUF: i32 = 0x1001;
 const SO_RCVBUF: i32 = 0x1002;
+/// mswsock: the socket AcceptEx accepted on takes the listening socket's
+/// properties; ConnectEx's socket becomes an ordinary connected one.
+const SO_UPDATE_ACCEPT_CONTEXT: i32 = 0x700B;
+const SO_UPDATE_CONNECT_CONTEXT: i32 = 0x7010;
 const IPPROTO_TCP: i32 = 6;
 const IPPROTO_UDP: i32 = 17;
 const IPPROTO_IPV6: i32 = 41;
@@ -146,9 +150,14 @@ fn wsa(e: Errno) -> u32 {
 }
 
 #[track_caller]
+/// Whether Winsock calls are logged: under -v, or OSYX_WINRUN_FAILTRACE.
+fn traced() -> bool {
+    crate::VERBOSE.load(Ordering::Relaxed) || crate::kernel32::TRACE.load(Ordering::Relaxed)
+}
+
 fn err<T>(code: u32, v: T) -> T {
     static ERRORS: AtomicU32 = AtomicU32::new(0);
-    if code != WSAEWOULDBLOCK && crate::VERBOSE.load(Ordering::Relaxed) && ERRORS.fetch_add(1, Ordering::Relaxed) < 128 {
+    if code != WSAEWOULDBLOCK && traced() && ERRORS.fetch_add(1, Ordering::Relaxed) < 128 {
         os_std::eprintln!("winrun: Winsock error {code} in thread {} at {}", os_sys::gettid(), core::panic::Location::caller());
     }
     teb::set_last_error(code);
@@ -376,7 +385,7 @@ extern "win64" fn WSASetLastError(e: i32) {
 }
 
 extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
-    if crate::VERBOSE.load(Ordering::Relaxed) {
+    if traced() {
         os_std::eprintln!("winrun: socket family {af}, kind {kind}, protocol {proto}, started {}", started());
     }
     if !started() {
@@ -449,7 +458,11 @@ extern "win64" fn bind(s: u64, addr: *const u8, len: i32) -> i32 {
         let (fd, _) = fd(s)?;
         // An address beyond the IPv4 stack is not one of this host's.
         let a = read_addr(addr, len, s).map_err(|e| if e == WSAENETUNREACH { WSAEADDRNOTAVAIL } else { e })?;
-        os_sys::sock_bind(fd, &a).map_err(wsa)
+        let r = os_sys::sock_bind(fd, &a).map_err(wsa);
+        if traced() {
+            os_std::eprintln!("winrun: bind {s:#x} to {:?}:{}: {r:?}", a.addr, a.port);
+        }
+        r
     })())
 }
 
@@ -458,7 +471,11 @@ extern "win64" fn connect(s: u64, addr: *const u8, len: i32) -> i32 {
         let (fd, _) = fd(s)?;
         let a = read_addr(addr, len, s)?;
         let _blocked = crate::stall::waiting("connect", s, 0);
-        os_sys::sock_connect(fd, &a).map_err(wsa)
+        let r = os_sys::sock_connect(fd, &a).map_err(wsa);
+        if traced() {
+            os_std::eprintln!("winrun: connect {s:#x} to {:?}:{}: {r:?}", a.addr, a.port);
+        }
+        r
     })())
 }
 
@@ -469,6 +486,9 @@ extern "win64" fn listen(s: u64, backlog: i32) -> i32 {
             return Err(WSAEOPNOTSUPP);
         }
         os_sys::sock_listen(fd, backlog.clamp(1, 128) as u32).map_err(wsa)?;
+        if traced() {
+            os_std::eprintln!("winrun: listen {s:#x}");
+        }
         events::listening(s);
         Ok(())
     })())
@@ -490,6 +510,9 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
         let accepted = os_sys::sock_accept(listener.fd);
         drop(blocked);
         let (nfd, peer) = accepted.map_err(wsa)?;
+        if traced() {
+            os_std::eprintln!("winrun: accept {s:#x}: peer {:?}:{}", peer.addr, peer.port);
+        }
         // Winsock accept inherits the listener's blocking mode. OSyx's
         // native accept creates a blocking endpoint, so apply it here.
         if listener.nonblocking {
@@ -627,7 +650,7 @@ extern "win64" fn shutdown(s: u64, how: i32) -> i32 {
 }
 
 extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len: i32) -> i32 {
-    if crate::VERBOSE.load(Ordering::Relaxed) {
+    if traced() {
         os_std::eprintln!("winrun: setsockopt {s:#x} level {level:#x}, option {name:#x}, len {len}");
     }
     result((|| {
@@ -674,6 +697,31 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
                 Ok(())
             }
             (IPPROTO_TCP, TCP_NODELAY) => int().map(|_| ()),
+            // The value is the listening SOCKET. The accepted socket takes
+            // its buffer sizes, as accept gives them; the kernel endpoint is
+            // complete already, so getsockname and getpeername work on it.
+            (SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT) => {
+                if val.is_null() || len < 8 {
+                    return Err(WSAEFAULT);
+                }
+                // SAFETY: the caller's SOCKET value.
+                let l = unsafe { core::ptr::read_unaligned(val as *const u64) };
+                let listener = socket_state(l)?;
+                if !listener.stream {
+                    return Err(WSAEINVAL);
+                }
+                let mut sockets = SOCKETS.lock().unwrap();
+                let sock = sockets.get_mut(&s).ok_or(WSAENOTSOCK)?;
+                sock.rcvbuf = listener.rcvbuf;
+                sock.sndbuf = listener.sndbuf;
+                Ok(())
+            }
+            // Takes no value: a socket ConnectEx connected already works
+            // with every call.
+            (SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT) => {
+                let mut peer = SockAddr::default();
+                os_sys::sock_ctl(fd, net::ctl::PEER_ADDR, &mut peer as *mut SockAddr as u64).map(|_| ()).map_err(|_| WSAENOTCONN)
+            }
             (IPPROTO_IPV6, IPV6_V6ONLY) => {
                 let on = int()? != 0;
                 let mut sockets = SOCKETS.lock().unwrap();
@@ -792,7 +840,7 @@ extern "win64" fn ioctlsocket(s: u64, cmd: u32, arg: *mut u32) -> i32 {
                 unsafe { core::ptr::write_unaligned(arg, n as u32) };
             }
             _ => {
-                if crate::VERBOSE.load(Ordering::Relaxed) {
+                if traced() {
                     os_std::eprintln!("winrun: ioctlsocket {s:#x} unsupported command {cmd:#x}");
                 }
                 return Err(WSAEINVAL);
@@ -1282,7 +1330,7 @@ pub(crate) extern "win64" fn freeaddrinfo(mut p: u64) {
 /// or fail with WSAEWOULDBLOCK), so WSA_FLAG_OVERLAPPED changes nothing;
 /// a specific provider (WSAPROTOCOL_INFOW) is not supported.
 pub(crate) extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *const u8, group: u32, _flags: u32) -> u64 {
-    if crate::VERBOSE.load(Ordering::Relaxed) {
+    if traced() {
         os_std::eprintln!("winrun: WSASocket family {af}, kind {kind}, protocol {proto}, provider {}, group {group}, flags {_flags:#x}", !info.is_null());
     }
     if group != 0 {
@@ -1401,7 +1449,7 @@ extern "win64" fn WSAIoctl(
                 4
             }
             _ => {
-                if crate::VERBOSE.load(Ordering::Relaxed) {
+                if traced() {
                     os_std::eprintln!("winrun: WSAIoctl {s:#x} unsupported code {code:#x}");
                 }
                 return Err(WSAEINVAL);

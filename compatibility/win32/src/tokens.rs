@@ -336,6 +336,13 @@ fn token_information(h: u64, class: u32, out: *mut u8, size: u32, needed: *mut u
     if needed.is_null() || out.is_null() && size != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
+    // Another process's token is its start state (see `TokenState::remote`):
+    // what that process can change in its token (privileges, owner, primary
+    // group, default DACL, integrity level) is refused rather than reported
+    // as it was at its start. Its user and groups never change.
+    if t.state.remote && matches!(class, 3 | 4 | 5 | 6 | 25) {
+        return fail(ERROR_ACCESS_DENIED, 0);
+    }
     let d = t.state.data.lock().unwrap().clone();
     let data = match token_info(&t, &d, class, out as u64, ptr) {
         Ok(v) => v,
