@@ -1690,6 +1690,44 @@ pub fn image_containing(addr: u64) -> Option<(u64, u64)> {
     Some((img.base, img.size))
 }
 
+/// The loaded images (base, size, module name), or None while the loader
+/// is busy: for reports that must not wait for it (a stalled thread may
+/// hold it).
+pub fn try_images() -> Option<Vec<(u64, u64, String)>> {
+    let g = LOADER.try_lock().ok()?;
+    let l = g.as_ref()?;
+    Some(
+        l.linker
+            .host
+            .images
+            .iter()
+            .filter_map(|i| l.linker.modules.iter().find(|m| m.base == i.base).map(|m| (i.base, i.size, m.name.clone())))
+            .collect(),
+    )
+}
+
+/// Whether `addr` is the loader's own lock: a thread blocked on it waits
+/// for a LoadLibrary or FreeLibrary in progress.
+pub fn is_loader_lock(addr: u64) -> bool {
+    let start = &LOADER as *const _ as u64;
+    addr >= start && addr < start + core::mem::size_of_val(&LOADER) as u64
+}
+
+/// Whether `addr` lies in an executable section of the image at `base`.
+pub fn in_code(base: u64, addr: u64) -> bool {
+    // SAFETY: the headers of a mapped image.
+    let rd32 = |a: u64| unsafe { core::ptr::read_unaligned(a as *const u32) };
+    let rd16 = |a: u64| unsafe { core::ptr::read_unaligned(a as *const u16) };
+    let nt = base + rd32(base + 0x3c) as u64;
+    let count = rd16(nt + 6) as u64;
+    let sections = nt + 24 + rd16(nt + 20) as u64;
+    let rva = addr - base;
+    (0..count).map(|i| sections + i * 40).any(|s| {
+        let (va, size, flags) = (rd32(s + 12) as u64, rd32(s + 8).max(rd32(s + 16)) as u64, rd32(s + 36));
+        rva >= va && rva < va + size && flags & 0x2000_0000 != 0
+    })
+}
+
 /// The module a code address belongs to, as its name and offset — the form
 /// crash reports use. Only PE images (not built-in DLLs) have code here.
 pub fn where_is(addr: u64) -> Option<(String, u64)> {

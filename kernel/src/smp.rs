@@ -433,13 +433,27 @@ const LAST_SYSCALL_SLOTS: usize = 256;
 static LAST_SYSCALL_NR: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::new(0) }; LAST_SYSCALL_SLOTS];
 static LAST_SYSCALL_RIP: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::new(0) }; LAST_SYSCALL_SLOTS];
 static LAST_SYSCALL_RSP: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::new(0) }; LAST_SYSCALL_SLOTS];
+/// The first and fourth argument (rdi, r10) of each thread's last system
+/// call: what a blocking call waits on (a futex and its owner, a handle).
+static LAST_SYSCALL_ARGS: [[AtomicU64; 2]; LAST_SYSCALL_SLOTS] = [const { [const { AtomicU64::new(0) }; 2] }; LAST_SYSCALL_SLOTS];
 
-pub fn note_last_syscall(tid: u64, rip: u64, nr: u64, rsp: u64) {
+pub fn note_last_syscall(tid: u64, rip: u64, nr: u64, rsp: u64, args: [u64; 2]) {
     if tid != 0 && (tid as usize) < LAST_SYSCALL_SLOTS {
         LAST_SYSCALL_RIP[tid as usize].store(rip, Ordering::Relaxed);
         LAST_SYSCALL_RSP[tid as usize].store(rsp, Ordering::Relaxed);
+        LAST_SYSCALL_ARGS[tid as usize][0].store(args[0], Ordering::Relaxed);
+        LAST_SYSCALL_ARGS[tid as usize][1].store(args[1], Ordering::Relaxed);
         LAST_SYSCALL_NR[tid as usize].store(nr, Ordering::Relaxed);
     }
+}
+
+/// The first and fourth argument of thread `tid`'s last system call.
+pub fn last_syscall_args(tid: u64) -> [u64; 2] {
+    if tid == 0 || tid as usize >= LAST_SYSCALL_SLOTS {
+        return [0, 0];
+    }
+    let a = &LAST_SYSCALL_ARGS[tid as usize];
+    [a[0].load(Ordering::Relaxed), a[1].load(Ordering::Relaxed)]
 }
 
 /// The user stack pointer of thread `tid`'s last system call.

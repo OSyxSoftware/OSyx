@@ -439,9 +439,9 @@ pub mod nr {
     /// `thread_state(tid, buf, cap) -> count`: what thread `tid` of the
     /// caller's process is doing, for stall reports. Writes up to `cap` u64
     /// entries to `buf`: its state ([`thread_state`]), the number, return
-    /// address and user stack pointer of its last system call, then the
-    /// words of its user stack from that stack pointer up. Returns the
-    /// number of entries written.
+    /// address and user stack pointer of its last system call, that call's
+    /// first and fourth argument, then the words of its user stack from
+    /// that stack pointer up. Returns the number of entries written.
     pub const THREAD_STATE: u64 = 111;
 }
 

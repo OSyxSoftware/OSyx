@@ -716,6 +716,8 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(SystemTimeToFileTime, [Ptr, Ptr], U32),
     sig!(VerSetConditionMask, [U64, Uint, Uint], I64),
     sig!(VerifyVersionInfoW, [Ptr, Uint, U64], U32),
+    sig!(VerifyVersionInfoA, [Ptr, Uint, U64], U32),
+    sig!(SignalObjectAndWait, [Handle, Handle, Uint, Int], U32),
     sig!(GlobalReAlloc, [Handle, Uint, Uint], U32),
     sig!(CreateFileMappingW, [Handle, Ptr, Uint, Uint, Uint, Ptr], Handle),
     sig!(MapViewOfFile, [Handle, Uint, Uint, Uint, Uint], Ptr),

@@ -2752,6 +2752,24 @@ pub(crate) extern "win64" fn WaitForSingleObject(h: u64, ms: u32) -> u32 {
     objects::wait(&[h], false, ms).unwrap_or_else(|e| fail(e, objects::WAIT_FAILED))
 }
 
+/// SignalObjectAndWait: signals `signal` (an event is set, a semaphore
+/// released by one, a mutex released) and then waits for `wait`. A signal
+/// that fails (a mutex not owned, a semaphore at its maximum) fails the
+/// call before any wait.
+extern "win64" fn SignalObjectAndWait(signal: u64, wait: u64, ms: u32, alertable: Bool) -> u32 {
+    let signalled = match objects::get(signal) {
+        Some(Object::Event(_)) => SetEvent(signal),
+        Some(Object::Semaphore(_)) => ReleaseSemaphore(signal, 1, core::ptr::null_mut()),
+        Some(Object::Mutex(_)) => ReleaseMutex(signal),
+        Some(_) => return fail(ERROR_INVALID_HANDLE, objects::WAIT_FAILED),
+        None => return fail(ERROR_INVALID_HANDLE, objects::WAIT_FAILED),
+    };
+    if signalled == FALSE {
+        return objects::WAIT_FAILED;
+    }
+    WaitForSingleObjectEx(wait, ms, alertable)
+}
+
 extern "win64" fn WaitForSingleObjectEx(h: u64, ms: u32, alertable: Bool) -> u32 {
     if alertable == 0 {
         return WaitForSingleObject(h, ms);
@@ -3883,6 +3901,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         ReleaseSemaphore,
         WaitForSingleObject,
         WaitForSingleObjectEx,
+        SignalObjectAndWait,
         WaitForMultipleObjects,
         WaitForMultipleObjectsEx,
         TlsAlloc,

@@ -188,6 +188,30 @@ fn compare(have: u32, want: u32, condition: u64) -> Option<bool> {
     })
 }
 
+/// VerifyVersionInfoA: the OSVERSIONINFOEXA (156 bytes) is checked as
+/// its OSVERSIONINFOEXW form (the CSD string is not compared).
+extern "win64" fn VerifyVersionInfoA(info: *const u8, type_mask: u32, mask: u64) -> i32 {
+    if info.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's OSVERSIONINFOEXA.
+    let w = unsafe {
+        if teb::get::<u32>(info as u64, 0) < 156 {
+            return fail(ERROR_INVALID_PARAMETER, 0);
+        }
+        let mut w = [0u8; 284];
+        w[0..4].copy_from_slice(&284u32.to_le_bytes());
+        // Major, minor, build and platform: the same offsets.
+        core::ptr::copy_nonoverlapping(info.add(4), w.as_mut_ptr().add(4), 16);
+        // Service pack major/minor, suite mask, product type and reserved
+        // follow the 128-byte CSD string in the A form, the 256-byte one
+        // in the W form.
+        core::ptr::copy_nonoverlapping(info.add(148), w.as_mut_ptr().add(276), 8);
+        w
+    };
+    VerifyVersionInfoW(w.as_ptr(), type_mask, mask)
+}
+
 extern "win64" fn VerifyVersionInfoW(info: *const u8, type_mask: u32, mask: u64) -> i32 {
     if info.is_null() || type_mask == 0 || mask == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -1385,6 +1409,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         QueryUnbiasedInterruptTimePrecise,
         GetProcessTimes,
         VerSetConditionMask,
+        VerifyVersionInfoA,
         VerifyVersionInfoW,
         IsBadReadPtr,
         WerRegisterRuntimeExceptionModule,

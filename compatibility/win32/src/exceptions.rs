@@ -487,15 +487,17 @@ fn trace(limit: u64, base: u64, rsp: u64) {
 }
 
 /// The code addresses among copied stack words, as module+offset, in
-/// order; None if there are none.
-pub(crate) fn chain_of(words: &[u64]) -> Option<alloc::string::String> {
+/// order, given the loaded images (base, size, name); None if there are
+/// none.
+pub(crate) fn chain_of(words: &[u64], images: &[(u64, u64, alloc::string::String)]) -> Option<alloc::string::String> {
     let mut found: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     for &v in words {
         if found.len() >= 12 {
             break;
         }
-        if let Some((module, offset)) = crate::loader::where_is(v).filter(|_| crate::loader::is_executable(v)) {
-            let entry = alloc::format!("{module}+{offset:#x}");
+        let Some((base, _, module)) = images.iter().find(|i| v >= i.0 && v < i.0 + i.1) else { continue };
+        if crate::loader::in_code(*base, v) {
+            let entry = alloc::format!("{module}+{:#x}", v - base);
             if found.last() != Some(&entry) {
                 found.push(entry);
             }

@@ -14,8 +14,26 @@ use os_std::sync::Mutex;
 /// on its own message or I/O threads, shorter than Steam's 180 s limit.
 const REPORT_AFTER_NS: u64 = 90_000_000_000;
 const SCAN_EVERY_MS: u64 = 10_000;
-/// Entries read per thread: four state entries, then 32 KiB of stack.
-const STACK_WORDS: usize = 4 + 4096;
+/// Entries read per thread: six state entries, then 32 KiB of stack.
+const STATE_WORDS: usize = 6;
+const STACK_WORDS: usize = STATE_WORDS + 4096;
+
+/// A system call a blocked thread is in, in words.
+fn syscall_text(nr: u64, arg0: u64, arg3: u64) -> String {
+    use osyx_abi::nr;
+    match nr {
+        nr::FUTEX_WAIT_OWNED => {
+            let what = if crate::loader::is_loader_lock(arg0) { " (the loader lock)" } else { "" };
+            format!("waits for lock {arg0:#x}{what} held by thread {arg3}")
+        }
+        nr::FUTEX_WAIT => format!("futex_wait on {arg0:#x}"),
+        nr::SLEEP => String::from("sleep"),
+        nr::SOCK_ACCEPT => format!("sock_accept on handle {arg0:#x}"),
+        nr::SOCK_RECV => format!("sock_recv on handle {arg0:#x}"),
+        nr::SOCK_CONNECT => format!("sock_connect on handle {arg0:#x}"),
+        _ => format!("system call {nr:#x} ({arg0:#x}, ..., {arg3:#x})"),
+    }
+}
 
 struct Wait {
     api: &'static str,
@@ -131,6 +149,12 @@ fn watchdog() {
         let now = now_ns();
         os_std::eprintln!("winrun: threads ({}), CPU ticks in 2 s, and their last finished wait:", threads.len());
         let mut words: Vec<u64> = alloc::vec![0; STACK_WORDS];
+        // The image list, if the loader is free: a stalled thread may hold
+        // its lock, and the report must not wait for it.
+        let images = crate::loader::try_images();
+        if images.is_none() {
+            os_std::eprintln!("winrun:   (the loader is busy: stacks shown as raw code addresses are not resolved)");
+        }
         for (i, &(tid, _)) in threads.iter().enumerate() {
             let busy = after[i].saturating_sub(before[i]);
             let waiting = snapshot.iter().any(|w| w.0 == tid as u64);
@@ -143,8 +167,8 @@ fn watchdog() {
             // (or made last) and the code addresses on its stack.
             if let Ok(n) = os_sys::thread_state(tid as u64, &mut words) {
                 let state = ["ready", "running", "blocked", "dead"].get(words[0] as usize).copied().unwrap_or("?");
-                os_std::eprintln!("winrun:     {state}, system call {:#x} from {:#x}", words[1], words[2]);
-                if let Some(chain) = crate::exceptions::chain_of(&words[4..n]) {
+                os_std::eprintln!("winrun:     {state}, {} (from {:#x})", syscall_text(words[1], words[4], words[5]), words[2]);
+                if let Some(chain) = images.as_ref().and_then(|i| crate::exceptions::chain_of(&words[STATE_WORDS.min(n)..n], i)) {
                     os_std::eprintln!("winrun:     stack: {chain}");
                 }
             }
