@@ -29,6 +29,31 @@ fn report_nested(tid: u64, first: u64, f: &TrapFrame) {
     crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} while handling its fault at rip {first:#x}; handler frames:{}", f.rip, stack_frames(f.rsp, 2048, false));
 }
 
+/// The code addresses seen most often in the user stack above `rsp` (up
+/// to `len` bytes, or where it stops being readable), with their counts and
+/// how far the readable stack reached: a recursion shows as a few
+/// addresses repeated many times.
+fn frequent_frames(rsp: u64, len: usize) -> alloc::string::String {
+    let mut counts: BTreeMap<u64, u32> = BTreeMap::new();
+    let mut chunk = [0u8; 512];
+    let mut read = 0;
+    while read < len && fixup::copy_from_user(&mut chunk, rsp + read as u64).is_ok() {
+        for word in chunk.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().unwrap())) {
+            if (0x4000_0000..0x4100_0000).contains(&word) || (0x1_4000_0000..0x2_0000_0000).contains(&word) {
+                *counts.entry(word).or_insert(0) += 1;
+            }
+        }
+        read += chunk.len();
+    }
+    let mut top: alloc::vec::Vec<(u64, u32)> = counts.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out = alloc::format!(" ({read:#x} bytes readable)");
+    for (addr, n) in top.into_iter().take(16) {
+        out.push_str(&alloc::format!(" {addr:#x}x{n}"));
+    }
+    out
+}
+
 /// Code addresses among the user stack words above `rsp` (`len` bytes at
 /// most): the handler's image (winrun, linked at 0x4000_0000) and, with
 /// `images`, also addresses where Windows images load (0x1_4000_0000 up
@@ -193,13 +218,15 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
         unsafe { core::slice::from_raw_parts(&c as *const Context as *const u8, core::mem::size_of::<Context>()) };
     if fixup::copy_to_user(addr, bytes).is_err() || fixup::copy_to_user(stack, &0u64.to_le_bytes()).is_err() {
         drop(registry);
-        // Most often a stack overflow: say what fills the stack.
+        // Most often a stack overflow: say what fills the stack, the
+        // innermost frames and the addresses found most often in it.
         crate::kprintln!(
             "user fault: thread {tid} faulted at rip {:#x}: its context cannot be written below rsp {:#x}; frames:{}",
             f.rip,
             f.rsp,
             stack_frames(f.rsp, 16 << 10, true)
         );
+        crate::kprintln!("user fault: thread {tid}: most frequent code addresses on its stack:{}", frequent_frames(f.rsp, 8 << 20));
         return false;
     }
     let fs32 = if compat { sched::current_fs32_base() } else { 0 };
