@@ -1179,13 +1179,13 @@ fn insert_region(region: Region) -> u64 {
         h
     })
 }
-extern "win64" fn CreateRectRgn(l: i32, t: i32, r: i32, b: i32) -> u64 {
+pub(super) extern "win64" fn CreateRectRgn(l: i32, t: i32, r: i32, b: i32) -> u64 {
     let rect = Rect::new(l.min(r), t.min(b), l.abs_diff(r), t.abs_diff(b));
     insert_region(Region::from_rect(rect))
 }
 /// `dest = a <mode> b` (RGN_AND 1, OR 2, XOR 3, DIFF 4, COPY 5: just `a`);
 /// the result's complexity, or ERROR (0).
-extern "win64" fn CombineRgn(dest: u64, a: u64, b: u64, mode: i32) -> i32 {
+pub(super) extern "win64" fn CombineRgn(dest: u64, a: u64, b: u64, mode: i32) -> i32 {
     with(|g| {
         let Some(first) = g.regions.get(&a).cloned() else { return 0 };
         let result = if mode == 5 {

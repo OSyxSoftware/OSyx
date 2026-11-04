@@ -298,6 +298,40 @@ extern "win64" fn PathCombineW(dest: *mut u16, dir: *const u16, file: *const u16
     dest
 }
 
+/// The extension of the last element: its last '.', or the terminating
+/// NUL when it has none. A '\' or a space after the dot means no extension,
+/// as in shlwapi.
+extern "win64" fn PathFindExtensionW(p: *const u16) -> *const u16 {
+    if p.is_null() {
+        return p;
+    }
+    let mut dot = None;
+    let mut i = 0;
+    // SAFETY: the caller's NUL-terminated path.
+    unsafe {
+        loop {
+            match *p.add(i) {
+                0 => break,
+                c if c == b'.' as u16 => dot = Some(i),
+                c if c == BS || c == b' ' as u16 => dot = None,
+                _ => {}
+            }
+            i += 1;
+        }
+        p.add(dot.unwrap_or(i))
+    }
+}
+
+/// Removes the extension PathFindExtensionW finds, in place.
+extern "win64" fn PathRemoveExtensionW(p: *mut u16) {
+    if p.is_null() {
+        return;
+    }
+    let ext = PathFindExtensionW(p) as *mut u16;
+    // SAFETY: inside the caller's string, at its extension or its end.
+    unsafe { *ext = 0 };
+}
+
 /// The last element: what follows the last '\', '/' or ':' that has a
 /// non-separator after it (so "C:\a\b\" gives "b\").
 extern "win64" fn PathFindFileNameW(p: *const u16) -> *const u16 {
@@ -496,6 +530,8 @@ pub fn ordinals() -> Vec<(u16, u64)> {
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        PathFindExtensionW,
+        PathRemoveExtensionW,
         PathRemoveFileSpecW,
         PathAppendW,
         PathMatchSpecW,

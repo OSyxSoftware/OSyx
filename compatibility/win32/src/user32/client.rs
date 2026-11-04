@@ -125,7 +125,7 @@ extern "win64" fn GetMenuItemInfoW(menu: u64, item: u32, by_pos: Bool, info: *mu
 
 /// InsertMenuW: a new item before `position` (by position, or before the
 /// item with that command id); position -1 by position appends.
-extern "win64" fn InsertMenuW(menu: u64, position: u32, flags: u32, id: u64, item: *const u16) -> Bool {
+pub(super) extern "win64" fn InsertMenuW(menu: u64, position: u32, flags: u32, id: u64, item: *const u16) -> Bool {
     let at = with(|g| {
         let m = g.menus.get(&menu)?;
         if flags & MF_BYPOSITION != 0 {

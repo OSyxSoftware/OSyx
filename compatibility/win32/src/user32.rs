@@ -29,6 +29,7 @@ use osyx_gfx::{Color, Rect, Surface};
 use prism_client::{proto, Connection, Event, Window, WindowSpec};
 
 pub(crate) mod client;
+mod cefui;
 mod controls;
 mod extra;
 mod gdi;
@@ -8521,6 +8522,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     ])
     .chain(client::exports())
     .chain(extra::exports())
+    .chain(cefui::exports())
     .collect()
 }
 
@@ -8626,5 +8628,6 @@ pub fn gdi_exports() -> Vec<(&'static str, u64)> {
     .chain(gdi::exports())
     .chain(gdi::client_exports())
     .chain(gdi::blend_exports())
+    .chain(cefui::gdi_exports())
     .collect()
 }
