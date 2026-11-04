@@ -464,9 +464,22 @@ pub fn start_service() {
 }
 
 fn connect(pid: u64) -> Result<u64, u32> {
-    // A process without a handle service is not a winrun process: its
-    // handle table is not Windows handles.
-    os_sys::channel_connect(&service_name(pid)).map_err(|_| ERROR_NOT_SUPPORTED)
+    // A process just started may not serve its handle table yet: a parent
+    // duplicates handles into a child right after CreateProcess, as
+    // Windows allows. A live process gets a few seconds to start serving;
+    // one that never does is not a winrun process (its handle table is not
+    // Windows handles).
+    let name = service_name(pid);
+    let started = os_std::time::Instant::now();
+    loop {
+        match os_sys::channel_connect(&name) {
+            Ok(c) => return Ok(c),
+            Err(_) if os_sys::proc_info(pid).is_ok() && started.elapsed() < core::time::Duration::from_secs(3) => {
+                os_std::thread::sleep(core::time::Duration::from_millis(5));
+            }
+            Err(_) => return Err(ERROR_NOT_SUPPORTED),
+        }
+    }
 }
 
 /// DuplicateHandle of `h` from this process into process `pid`.
