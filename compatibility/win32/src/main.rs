@@ -165,7 +165,9 @@ fn main() -> i32 {
     if COUNT.load(core::sync::atomic::Ordering::Relaxed) {
         user32::start_counter();
     }
-    if verbose && os_std::env::var("OSYX_WINRUN_TRACE").is_ok_and(|v| v == "1") {
+    // OSYX_WINRUN_FAILTRACE=1 logs every failing Win32 call (with where in
+    // winrun it failed) without the rest of -v's log.
+    if (verbose && os_std::env::var("OSYX_WINRUN_TRACE").is_ok_and(|v| v == "1")) || os_std::env::var("OSYX_WINRUN_FAILTRACE").is_ok_and(|v| v == "1") {
         kernel32::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
     if verbose {
