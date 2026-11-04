@@ -50,6 +50,8 @@ const KIND_PIPE_CHANNEL: u32 = 5;
 const KIND_PROCESS: u32 = 6;
 /// A mutex: its state moves to shared memory (the kernel object).
 const KIND_MUTEX: u32 = 7;
+/// An end of an anonymous pipe (CreatePipe): the kernel pipe itself.
+const KIND_ANON_PIPE: u32 = 8;
 pub struct OwnedChannel(pub u64);
 impl Drop for OwnedChannel { fn drop(&mut self) { let _ = os_sys::close(self.0); } }
 struct Broker { channel: OwnedChannel, lock: Mutex<()> }
@@ -118,6 +120,13 @@ fn item(h: u64) -> Result<Item, u32> {
         }
         Some(Object::Process(p)) => Ok(Item { handle: h, kernel: None, kind: KIND_PROCESS, flags: 0, size: p.pid }),
         Some(Object::Mutex(m)) => Ok(Item { handle: h, kernel: Some(m.share()?), kind: KIND_MUTEX, flags: 0, size: 0 }),
+        Some(Object::File(f)) if f.key.0 == objects::PIPE_DEV => Ok(Item {
+            handle: h,
+            kernel: Some(f.fd),
+            kind: KIND_ANON_PIPE,
+            flags: if f.access.0 { FILE_READ } else { 0 } | if f.access.1 { FILE_WRITE } else { 0 },
+            size: 0,
+        }),
         Some(o) => {
             os_std::eprintln!("winrun: cannot hand handle {h:#x} ({}) to another process", objects::kind_name(&o));
             Err(ERROR_NOT_SUPPORTED)
@@ -320,7 +329,7 @@ fn file_item(h: u64) -> Result<Option<(Item, String)>, u32> {
 
 /// Whether a record's object comes with a kernel object.
 fn has_kernel(r: &[u8]) -> bool {
-    matches!(u32::from_le_bytes(r[8..12].try_into().unwrap()), KIND_SECTION | KIND_EVENT)
+    matches!(u32::from_le_bytes(r[8..12].try_into().unwrap()), KIND_SECTION | KIND_EVENT | KIND_MUTEX | KIND_ANON_PIPE)
 }
 
 /// The object a record and its kernel object describe.
@@ -341,6 +350,11 @@ fn object(r: &[u8], kernel: Option<u64>, extra: &[u8], direct: bool) -> Option<O
         KIND_EVENT => crate::objects::EventObj::from_shared(kernel?, half(12) & EVENT_MANUAL != 0).map(Object::Event),
         KIND_PROCESS => crate::process::process_for_pid(size).map(Object::Process),
         KIND_MUTEX => crate::objects::MutexObj::from_shared(kernel?).map(Object::Mutex),
+        KIND_ANON_PIPE => {
+            let fd = kernel?;
+            let access = (half(12) & FILE_READ != 0, half(12) & FILE_WRITE != 0, false);
+            Some(Object::File(Arc::new(crate::objects::FileObj::new(fd, String::new(), access, (objects::PIPE_DEV, fd), 0, false, false, false))))
+        }
         KIND_SECTION => Some(Object::Section(Arc::new(SectionObj {
             shm: kernel?,
             file_mapping: half(12) & SECTION_FILE != 0,
@@ -377,6 +391,7 @@ fn serve(c: u64, direct: bool) -> bool {
             let h = match object(&buf[4..4 + RECORD], (k == 1).then_some(hs[0]), &buf[4 + RECORD..n], direct) {
                 Some(o) => objects::insert(o),
                 None => {
+                    os_std::eprintln!("winrun: handle service: cannot make an object of kind {} handed in", u32::from_le_bytes(buf[12..16].try_into().unwrap()));
                     if k == 1 {
                         let _ = os_sys::close(hs[0]);
                     }
@@ -405,10 +420,12 @@ fn serve(c: u64, direct: bool) -> bool {
                     }
                 }
                 Err(e) => {
+                    os_std::eprintln!("winrun: handle service: handle {h:#x} cannot be taken: error {e}");
                     let _ = os_sys::channel_send(c, &e.to_le_bytes(), &[]);
                 }
             }
         }
+        PUT => os_std::eprintln!("winrun: handle service: malformed hand-over ({n} bytes, {k} kernel object(s))"),
         _ => {}
     }
     true
