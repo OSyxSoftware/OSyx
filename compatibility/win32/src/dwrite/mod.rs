@@ -356,6 +356,9 @@ extern "win64" fn StrFindLocaleName(this: u64, name: *const u16, index: *mut u32
             put(exists, 1);
         }
         None => {
+            if traced() {
+                os_std::eprintln!("winrun: dwrite: no family {want:?} among {} families", data::<Arc<System>>(this).families.len());
+            }
             put(index, u32::MAX);
             put(exists, 0);
         }
@@ -1853,7 +1856,7 @@ static FACTORY_VT: Slots<40> = Slots([
     stub::<19> as _,
     stub::<20> as _,
     stub::<21> as _,
-    stub::<22> as _,
+    FactoryCreateNumberSubstitution as _,
     FactoryCreateGlyphRunAnalysis as _,
     // IDWriteFactory1
     FactoryGetEudcFontCollection as _,
@@ -2110,6 +2113,32 @@ xmm_jmp! {
     FactoryCreateCustomRenderingParams1 => factory_custom_rendering_params1 ["movd edx, xmm1", "movd r8d, xmm2", "movd r9d, xmm3"];
     FactoryCreateCustomRenderingParams2 => factory_custom_rendering_params2 ["movd edx, xmm1", "movd r8d, xmm2", "movd r9d, xmm3"];
     FactoryCreateGlyphRunAnalysis => factory_glyph_run_analysis ["movd r8d, xmm2"];
+}
+
+/// IDWriteNumberSubstitution: an opaque object (IUnknown only) that text
+/// analysis reads digits through. Text analysis is not provided, so the
+/// method, locale and override choice are only checked and kept.
+struct NumberSubstitution {
+    _method: u32,
+    _locale: String,
+    _ignore_user_override: bool,
+}
+
+static NUMBER_SUBSTITUTION_VT: Slots<3> = Slots([qi as *const (), add_ref as _, release::<NumberSubstitution> as _]);
+static NUMBER_SUBSTITUTION_IIDS: [Guid; 1] = [iids::NUMBER_SUBSTITUTION];
+
+/// DWRITE_NUMBER_SUBSTITUTION_METHOD_TRADITIONAL, the last method.
+const NUMBER_SUBSTITUTION_TRADITIONAL: u32 = 5;
+
+extern "win64" fn FactoryCreateNumberSubstitution(_this: u64, method: u32, locale: *const u16, ignore: i32, out: *mut u64) -> u32 {
+    if out.is_null() || locale.is_null() || method > NUMBER_SUBSTITUTION_TRADITIONAL {
+        return E_INVALIDARG;
+    }
+    // SAFETY: a NUL-terminated locale name.
+    let locale = unsafe { path::wide_to_string(locale) }.unwrap_or_default();
+    let s = NumberSubstitution { _method: method, _locale: locale, _ignore_user_override: ignore != 0 };
+    put(out, new(&NUMBER_SUBSTITUTION_VT, "IDWriteNumberSubstitution", &NUMBER_SUBSTITUTION_IIDS, s));
+    S_OK
 }
 
 /// The EUDC (end-user defined characters) collection: there are no EUDC
