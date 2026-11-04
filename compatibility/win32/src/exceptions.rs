@@ -456,10 +456,12 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
     }
     // The faulting access goes on the first line: the process may be ended
     // from outside (a crash handler's server) while the rest is printed.
+    // With the page fault's error code (bit 0: the page was present, 1: a
+    // write, 4: an instruction fetch), which says why no handler took it.
     let access = match (record.code, record.count >= 2, record.info[0]) {
-        (0xc000_0005, true, 0) => alloc::format!(", reading {:#x}", record.info[1]),
-        (0xc000_0005, true, 1) => alloc::format!(", writing {:#x}", record.info[1]),
-        (0xc000_0005, true, _) => alloc::format!(", executing {:#x}", record.info[1]),
+        (0xc000_0005, true, 0) => alloc::format!(", reading {:#x} (fault error {:#x})", record.info[1], n.error),
+        (0xc000_0005, true, 1) => alloc::format!(", writing {:#x} (fault error {:#x})", record.info[1], n.error),
+        (0xc000_0005, true, _) => alloc::format!(", executing {:#x} (fault error {:#x})", record.info[1], n.error),
         _ => alloc::string::String::new(),
     };
     os_std::eprintln!(

@@ -17,7 +17,7 @@
 //!   Executable writable sections (`PAGE_EXECUTE_WRITECOPY`) are refused.
 
 use crate::error::*;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use os_std::sync::Mutex;
 use osyx_abi::{PROT_EXEC, PROT_READ, PROT_WRITE};
@@ -237,8 +237,8 @@ pub fn free_stack(base: u64, size: usize) {
 pub fn virtual_alloc(addr: u64, size: usize, kind: u32, protect: u32) -> Result<u64, NtStatus> {
     // MEM_RESET says the pages' contents are no longer needed; it is what an
     // allocator calls when it returns memory to the system (jemalloc's
-    // purge). OSyx hands the frames back and the region stays reserved, so a
-    // later read sees zeros, exactly as Windows promises.
+    // purge). OSyx hands the frames back; the pages stay committed with
+    // their protection, as on Windows, and a later access sees zeros.
     if kind == MEM_RESET {
         if addr == 0 || size == 0 {
             return Err(STATUS_INVALID_PARAMETER);
@@ -253,7 +253,6 @@ pub fn virtual_alloc(addr: u64, size: usize, kind: u32, protect: u32) -> Result<
         let start = base + (first * PAGE) as u64;
         // SAFETY: the caller declared the contents no longer needed.
         unsafe { os_sys::discard(start as *mut u8, (last - first) * PAGE) }.map_err(errno_to_status)?;
-        r.pages.set(first, last, 0);
         return Ok(start);
     }
     if size == 0
@@ -290,18 +289,24 @@ pub fn virtual_alloc(addr: u64, size: usize, kind: u32, protect: u32) -> Result<
 }
 
 fn protect_range(addr: u64, size: usize, prot: Prot) -> Result<(), osyx_abi::Errno> {
-    protect(addr, size, prot)
+    protect(addr, size, prot)?;
+    // The pages have the protection just set, not one a fault gave them.
+    JIT_EXEC.lock().unwrap().retain(|&p| p < addr || p >= addr + size as u64);
+    Ok(())
 }
+
+/// Pages of `PAGE_EXECUTE_READWRITE` memory (private or image) that
+/// `jit_fault` made read-execute; the others of such memory are mapped
+/// read-write.
+static JIT_EXEC: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 
 /// Emulates private RWX pages without granting simultaneous write and
 /// execute permission. Other faults retain normal Windows SEH handling.
 pub fn jit_fault(n: &osyx_abi::fault::Context) -> bool {
-    // Only a resident page's permission fault is a JIT transition.
-    // A non-present fault may be real memory exhaustion and must retain
-    // the kernel's normal failure/Windows exception path.
-    if n.vector != 14 || n.error & 1 == 0 {
+    if n.vector != 14 {
         return false;
     }
+    let present = n.error & 1 != 0;
     let execute = n.error & 16 != 0;
     let write = n.error & 2 != 0;
     if !execute && !write {
@@ -325,7 +330,23 @@ pub fn jit_fault(n: &osyx_abi::fault::Context) -> bool {
     if !private && !image {
         return false;
     }
-    protect(page, PAGE, if execute { Prot::ExecuteRead } else { Prot::ReadWrite }).is_ok()
+    let mut exec = JIT_EXEC.lock().unwrap();
+    // A page that is not present (never touched, or discarded) faults the
+    // same way when its mapping forbids the access. When it allows it, the
+    // fault is the kernel failing to give it a frame (memory exhaustion),
+    // which keeps its normal Windows exception path.
+    if !present && exec.contains(&page) == execute {
+        return false;
+    }
+    if protect(page, PAGE, if execute { Prot::ExecuteRead } else { Prot::ReadWrite }).is_err() {
+        return false;
+    }
+    if execute {
+        exec.insert(page);
+    } else {
+        exec.remove(&page);
+    }
+    true
 }
 
 /// `NtFreeVirtualMemory` / `VirtualFree`.
