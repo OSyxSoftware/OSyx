@@ -100,6 +100,7 @@ pub fn protect(addr: u64, size: usize, prot: Prot) -> Result<(), osyx_abi::Errno
 }
 
 pub fn free_pages(addr: u64, size: usize) {
+    crate::mapping::note_freed(addr, size.next_multiple_of(PAGE) as u64, "pages winrun freed");
     // SAFETY: `addr`/`size` describe one whole mapping made by this module.
     let _ = unsafe { os_sys::unmap(addr as *mut u8, size.next_multiple_of(PAGE)) };
 }
@@ -223,6 +224,7 @@ pub fn alloc_stack(size: usize) -> Option<u64> {
 /// Frees a stack made by [`alloc_stack`] (its base and size as given).
 pub fn free_stack(base: u64, size: usize) {
     let reserve = base - PAGE as u64;
+    crate::mapping::note_freed(reserve, (size.next_multiple_of(PAGE) + PAGE) as u64, "a freed thread stack");
     REGIONS.lock().unwrap().remove(&reserve);
     free_pages(reserve, size.next_multiple_of(PAGE) + PAGE);
 }

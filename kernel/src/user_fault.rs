@@ -138,14 +138,19 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
     let pid = sched::current_pid();
     let tid = sched::current_tid();
     let mut registry = REG.lock();
-    let Some(r) = registry.get_mut(&pid) else { return false };
+    let Some(r) = registry.get_mut(&pid) else {
+        drop(registry);
+        crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} with no fault handler registered", f.rip);
+        return false;
+    };
     if r.entry == 0 || r.active.contains_key(&tid) {
         // A fault while this thread's previous one is still being handled
         // ends the process: say where both happened.
         let first = r.active.get(&tid).map(|p| p.frame.rip);
         drop(registry);
-        if let Some(first) = first {
-            report_nested(tid, first, f);
+        match first {
+            Some(first) => report_nested(tid, first, f),
+            None => crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} with no fault handler entry", f.rip),
         }
         return false;
     }
@@ -163,12 +168,16 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
     }
     let mask = u32::from_le_bytes(c.fx[28..32].try_into().unwrap());
     let Some(addr) = f.rsp.checked_sub(128 + core::mem::size_of::<Context>() as u64).map(|n| n & !63) else {
+        drop(registry);
+        crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} with rsp {:#x}: no room for its context", f.rip, f.rsp);
         return false;
     };
     let Some(stack) = addr.checked_sub(8) else { return false };
     let bytes =
         unsafe { core::slice::from_raw_parts(&c as *const Context as *const u8, core::mem::size_of::<Context>()) };
     if fixup::copy_to_user(addr, bytes).is_err() || fixup::copy_to_user(stack, &0u64.to_le_bytes()).is_err() {
+        drop(registry);
+        crate::kprintln!("user fault: thread {tid} faulted at rip {:#x}: its context cannot be written below rsp {:#x}", f.rip, f.rsp);
         return false;
     }
     let fs32 = if compat { sched::current_fs32_base() } else { 0 };

@@ -313,6 +313,17 @@ pub fn describe_for_report(addr: u64) -> Option<String> {
     })
 }
 
+/// Records pages winrun freed (`what` names them) for fault reports, as
+/// unmapped views are.
+pub fn note_freed(base: u64, size: u64, what: &str) {
+    let who = caller();
+    let mut unmapped = UNMAPPED.lock().unwrap();
+    if unmapped.len() >= 64 {
+        unmapped.pop_front();
+    }
+    unmapped.push_back((base, size, String::from(what), who));
+}
+
 /// Unmaps the view containing `addr`.
 pub fn unmap(addr: u64) -> Result<(), NtStatus> {
     let who = caller();
