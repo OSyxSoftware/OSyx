@@ -11,8 +11,9 @@
 //! There is no hinting and no ClearType filtering. CreateFontFromLOGFONT
 //! applies HKLM\...\FontSubstitutes as GDI does. The factory answers as
 //! IDWriteFactory3, as on Windows 10 (Chromium uses it without checking):
-//! the version 1-3 glyph-run analyses and rendering parameters work; font
-//! sets, font fallback and color glyph layers do not. Text layout and text
+//! the version 1-3 glyph-run analyses, rendering parameters and the system
+//! font fallback work; font sets, fallback builders and color glyph layers
+//! do not. Text layout and text
 //! analysis are not provided: QueryInterface for them fails, which programs
 //! check. An interface method that is not implemented returns E_NOTIMPL
 //! and, under -v, names itself.
@@ -1612,6 +1613,138 @@ static GDI_VT: Slots<8> = Slots([
 ]);
 static GDI_IIDS: [Guid; 1] = [iids::GDI_INTEROP];
 
+// ---- font fallback -----------------------------------------------------------------------------
+
+/// IDWriteFontFallback (IDWriteFactory2::GetSystemFontFallback): maps text
+/// to fonts that have its characters. A run stays in the requested family
+/// while that family has the characters; a character it lacks goes to the
+/// first system family that has it, trying first the family Windows' UI
+/// font (Segoe UI) resolves to, then every family in collection order. The
+/// scale is always 1: fallback fonts are not resized.
+static FALLBACK_VT: Slots<4> = Slots([qi as *const (), add_ref as _, release::<()> as _, FallbackMapCharacters as _]);
+static FALLBACK_IIDS: [Guid; 1] = [iids::FONT_FALLBACK];
+
+extern "win64" fn FactoryGetSystemFontFallback(_this: u64, out: *mut u64) -> u32 {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
+    put(out, new(&FALLBACK_VT, "IDWriteFontFallback", &FALLBACK_IIDS, ()));
+    S_OK
+}
+
+/// The text an IDWriteTextAnalysisSource holds from `pos`, up to `len` code
+/// units (GetTextAtPosition may hand it out in pieces).
+fn source_text(source: u64, pos: u32, len: u32) -> Result<Vec<u16>, u32> {
+    let mut text = Vec::new();
+    while (text.len() as u32) < len {
+        let (mut p, mut n): (*const u16, u32) = (core::ptr::null(), 0);
+        // SAFETY: GetTextAtPosition (slot 3) of the caller's analysis source.
+        let hr = unsafe {
+            let f: extern "win64" fn(u64, u32, *mut *const u16, *mut u32) -> u32 = core::mem::transmute(method(source, 3));
+            f(source, pos + text.len() as u32, &mut p, &mut n)
+        };
+        if hr != S_OK {
+            return Err(hr);
+        }
+        if p.is_null() || n == 0 {
+            break;
+        }
+        let take = n.min(len - text.len() as u32) as usize;
+        // SAFETY: the source's text of at least `take` code units.
+        text.extend_from_slice(unsafe { core::slice::from_raw_parts(p, take) });
+    }
+    Ok(text)
+}
+
+/// The font of family `fi` that best matches weight, stretch and style.
+fn best_in(s: &System, fi: usize, weight: u32, stretch: u32, style: u32) -> Option<&Arc<FontEntry>> {
+    s.families[fi].1.iter().min_by_key(|f| distance(f, weight, stretch, style))
+}
+
+fn has_char(f: &FontEntry, c: u32) -> bool {
+    f.face.face.glyph_index(c) != 0
+}
+
+/// Characters that take the font around them (spaces, joiners, combining
+/// marks, variation selectors), so they never start or end a run.
+fn neutral(c: u32) -> bool {
+    matches!(c, 0x09 | 0x20 | 0xA0 | 0x0300..=0x036F | 0x200B..=0x200D | 0xFE00..=0xFE0F)
+}
+
+/// The system font a character falls back to.
+fn fallback_for(sys: &System, c: u32, weight: u32, stretch: u32, style: u32) -> Option<Arc<FontEntry>> {
+    let preferred = find_family(sys, "Segoe UI");
+    preferred.into_iter().chain(0..sys.families.len()).filter_map(|fi| best_in(sys, fi, weight, stretch, style)).find(|f| has_char(f, c)).cloned()
+}
+
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn FallbackMapCharacters(
+    _this: u64,
+    source: u64,
+    pos: u32,
+    len: u32,
+    base_collection: u64,
+    base_family: *const u16,
+    weight: u32,
+    style: u32,
+    stretch: u32,
+    mapped_len: *mut u32,
+    mapped_font: *mut u64,
+    scale: *mut u32,
+) -> u32 {
+    if source == 0 || mapped_len.is_null() || mapped_font.is_null() || scale.is_null() {
+        return E_INVALIDARG;
+    }
+    put(mapped_len, 0);
+    put(mapped_font, 0);
+    put(scale, 1.0f32.to_bits());
+    let text = match source_text(source, pos, len) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    // Each character with its length in UTF-16 code units.
+    let chars: Vec<(u32, u32)> = char::decode_utf16(text.iter().copied())
+        .map(|r| r.map_or((0xFFFD, 1), |c| (c as u32, c.len_utf16() as u32)))
+        .collect();
+    let Some(&(first, _)) = chars.iter().find(|c| !neutral(c.0)).or(chars.first()) else { return S_OK };
+    let sys = system();
+    // A collection of another implementation is searched as the system's.
+    let base_sys = if is(base_collection, &COLLECTION_VT) { data::<Arc<System>>(base_collection).clone() } else { sys.clone() };
+    let base = if base_family.is_null() {
+        None
+    } else {
+        // SAFETY: a NUL-terminated family name.
+        let name = unsafe { path::wide_to_string(base_family) }.unwrap_or_default();
+        base_sys.families.iter().position(|f| f.0.eq_ignore_ascii_case(&name)).and_then(|fi| best_in(&base_sys, fi, weight, stretch, style).cloned())
+    };
+    let base_has = |c: u32| base.as_ref().is_some_and(|b| has_char(b, c));
+    let (owner, chosen) = if base_has(first) {
+        (base_sys.clone(), base.clone())
+    } else {
+        (sys.clone(), fallback_for(&sys, first, weight, stretch, style))
+    };
+    let from_base = base_has(first);
+    let mut n = 0u32;
+    for &(c, units) in &chars {
+        let keep = neutral(c)
+            || match &chosen {
+                // A fallback run ends where the base family can draw again.
+                Some(f) => has_char(f, c) && (from_base || !base_has(c)),
+                // An unmapped run ends at the first character a font has.
+                None => !base_has(c) && fallback_for(&sys, c, weight, stretch, style).is_none(),
+            };
+        if !keep && n > 0 {
+            break;
+        }
+        n += units;
+    }
+    put(mapped_len, n);
+    if let Some(f) = chosen {
+        put(mapped_font, font(owner, f));
+    }
+    S_OK
+}
+
 /// A family by name, or by its HKLM FontSubstitutes replacement.
 fn find_family(s: &System, name: &str) -> Option<usize> {
     let by = |n: &str| s.families.iter().position(|f| f.0.eq_ignore_ascii_case(n));
@@ -1710,7 +1843,7 @@ static FACTORY_VT: Slots<40> = Slots([
     FactoryGetEudcFontCollection as _,
     FactoryCreateCustomRenderingParams1 as _,
     // IDWriteFactory2
-    stub::<26> as _, // GetSystemFontFallback
+    FactoryGetSystemFontFallback as _,
     stub::<27> as _, // CreateFontFallbackBuilder
     FactoryTranslateColorGlyphRun as _,
     FactoryCreateCustomRenderingParams2 as _,
