@@ -208,7 +208,8 @@ pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
         if suspend(osyx_abi::suspend::SUSPEND).is_err() {
             break;
         }
-        if os_std::sync::locks_held_by(tid as u64) == 0 || started.elapsed() >= core::time::Duration::from_secs(2) {
+        let free = os_std::sync::locks_held_by(tid as u64) == 0 && !os_std::sync::allocator_busy();
+        if free || started.elapsed() >= core::time::Duration::from_secs(2) {
             // Killed while suspended: the kill ends the thread instead of
             // resuming it.
             break;

@@ -401,6 +401,11 @@ pub fn set_tcb(p: usize) {
     TCB.with(|t| t.set(p));
 }
 
+/// The host allocator keeps its own locks; nothing to report.
+pub fn heap_busy() -> bool {
+    false
+}
+
 pub fn current_tid() -> u64 {
     static NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
     TID.with(|t| {

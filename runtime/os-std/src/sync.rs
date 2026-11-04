@@ -44,7 +44,7 @@ pub enum TryLockError<G> {
 
 pub type TryLockResult<G> = Result<G, TryLockError<G>>;
 
-/// How many locks (Mutex, RwLock, the heap) each thread holds, by thread
+/// How many locks (Mutex, RwLock) each thread holds, by thread
 /// id modulo the table size. A thread killed while it holds one leaves it
 /// locked for good, so a thread killer waits until [`locks_held_by`] its
 /// target is 0. Threads whose ids share a slot add up, which can only make
@@ -65,8 +65,15 @@ pub(crate) fn note_released() {
 }
 
 /// The number of locks thread `tid` of this process holds (see `HELD`).
+/// The heap is not counted (see [`allocator_busy`]).
 pub fn locks_held_by(tid: u64) -> u32 {
     held_slot(tid).load(Ordering::Relaxed)
+}
+
+/// Whether some thread of this process is inside the allocator: a thread
+/// killer waits until it is not, since the target may be that thread.
+pub fn allocator_busy() -> bool {
+    sys::heap_busy()
 }
 
 const UNLOCKED: u32 = 0;

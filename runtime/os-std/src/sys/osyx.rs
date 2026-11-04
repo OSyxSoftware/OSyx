@@ -317,6 +317,13 @@ pub fn current_tid() -> u64 {
     os_sys::gettid()
 }
 
+/// Whether some thread is inside the allocator. The heap lock records no
+/// owner: it is taken before the first thread has its TCB, when the
+/// thread id cannot be read yet.
+pub fn heap_busy() -> bool {
+    HEAP.locked.load(Ordering::Relaxed)
+}
+
 // ---- start-up -------------------------------------------------------------
 
 static ARGC: AtomicUsize = AtomicUsize::new(0);
@@ -451,13 +458,10 @@ impl UserHeap {
         while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             core::hint::spin_loop();
         }
-        // Counted like any lock: a thread must not be killed inside the heap.
-        crate::sync::note_acquired();
         let heap = if low { &self.low } else { &self.heap };
         // SAFETY: the lock gives exclusive access.
         let r = f(unsafe { &mut *heap.get() });
         self.locked.store(false, Ordering::Release);
-        crate::sync::note_released();
         r
     }
 }
