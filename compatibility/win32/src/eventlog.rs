@@ -245,6 +245,36 @@ extern "win64" fn ReadEventLogW(h: u64, flags: u32, offset: u32, buf: *mut u8, s
     1
 }
 
+/// An event of the Application log as wevtapi.rs reads it.
+#[derive(Clone)]
+pub(crate) struct EventView {
+    pub number: u32,
+    pub source: String,
+    pub kind: u16,
+    pub id: u32,
+    pub category: u16,
+    pub strings: Vec<String>,
+    pub time: u32,
+}
+
+/// The kept Application log records, oldest first.
+pub(crate) fn application_events() -> Vec<EventView> {
+    let log = LOG.lock().unwrap();
+    log.records
+        .iter()
+        .enumerate()
+        .map(|(i, r)| EventView {
+            number: log.first + i as u32,
+            source: r.source.clone(),
+            kind: r.kind,
+            id: r.id,
+            category: r.category,
+            strings: r.strings.clone(),
+            time: r.time,
+        })
+        .collect()
+}
+
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![RegisterEventSourceW, DeregisterEventSource, ReportEventW, OpenEventLogW, OpenEventLogA, CloseEventLog, ReadEventLogW]
 }

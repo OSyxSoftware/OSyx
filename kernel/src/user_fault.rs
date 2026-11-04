@@ -21,6 +21,22 @@ struct Pending {
     fs32: u64,
 }
 
+/// Reports a fault taken while the thread's previous fault is still being
+/// handled: both instruction pointers and the code addresses of the
+/// handler's own image (winrun, linked at 0x4000_0000) on the stack, for
+/// addr2line.
+fn report_nested(tid: u64, first: u64, f: &TrapFrame) {
+    let mut bytes = [0u8; 2048];
+    let n = (0..bytes.len() / 512).take_while(|&i| fixup::copy_from_user(&mut bytes[i * 512..(i + 1) * 512], f.rsp + i as u64 * 512).is_ok()).count();
+    let mut frames = alloc::string::String::new();
+    for word in bytes[..n * 512].chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().unwrap())) {
+        if (0x4000_0000..0x4100_0000).contains(&word) && frames.matches(' ').count() < 24 {
+            frames.push_str(&alloc::format!(" {word:#x}"));
+        }
+    }
+    crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} while handling its fault at rip {first:#x}; handler frames:{frames}", f.rip);
+}
+
 /// True when `cs` is the compatibility-mode code selector.
 fn compat(cs: u64) -> bool {
     (cs as u16) & !3 == wow64::USER_CS32 & !3
@@ -124,6 +140,13 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
     let mut registry = REG.lock();
     let Some(r) = registry.get_mut(&pid) else { return false };
     if r.entry == 0 || r.active.contains_key(&tid) {
+        // A fault while this thread's previous one is still being handled
+        // ends the process: say where both happened.
+        let first = r.active.get(&tid).map(|p| p.frame.rip);
+        drop(registry);
+        if let Some(first) = first {
+            report_nested(tid, first, f);
+        }
         return false;
     }
     let mut c = from_frame(f);

@@ -36,6 +36,7 @@ mod dbghelp;
 mod error;
 mod elevation;
 mod eventlog;
+mod wevtapi;
 mod exceptions;
 mod files;
 mod fibers;
