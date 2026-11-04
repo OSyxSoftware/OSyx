@@ -1098,9 +1098,10 @@ pub fn thread_state(tid: Tid, buf: u64, cap: u64) -> Result<u64, osyx_abi::Errno
     let rsp = crate::smp::last_syscall_rsp(tid);
     let mut out: alloc::vec::Vec<u64> = alloc::vec![state, nr, rip, rsp];
     // The target shares the caller's address space: its stack is user
-    // memory here too.
+    // memory here too. The stack pointer is the user's own value, so only
+    // user addresses are read: a pointer into the kernel copies nothing.
     let mut at = rsp & !7;
-    while (out.len() as u64) < cap && rsp != 0 {
+    while (out.len() as u64) < cap && rsp != 0 && crate::fixup::user_range_ok(at, 8) {
         match crate::fixup::probe_read_u64(at) {
             Ok(v) => out.push(v),
             Err(_) => break,
