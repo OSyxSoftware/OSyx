@@ -197,6 +197,9 @@ pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
         kernel32::ExitThread(code);
     }
     let ticks = os_sys::thread_times(tid as u64).unwrap_or(0);
+    if crate::VERBOSE.load(Ordering::Relaxed) || crate::kernel32::TRACE.load(Ordering::Relaxed) {
+        os_std::eprintln!("winrun: TerminateThread(thread {tid}, {code:#x})");
+    }
     // The thread may be inside winrun, holding one of its locks (the
     // object-wait lock, the loader, the heap): killed there, it would leave
     // the lock held for good, as Windows' own kernel locks never are. It is
@@ -204,14 +207,22 @@ pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
     // moment if it holds one. After two seconds it is killed regardless.
     let suspend = |op| os_sys::thread_suspend(tid as u64, op);
     let started = os_std::time::Instant::now();
+    let mut state = [0u64; 6];
     loop {
         if suspend(osyx_abi::suspend::SUSPEND).is_err() {
             break;
         }
-        let free = os_std::sync::locks_held_by(tid as u64) == 0 && !os_std::sync::allocator_busy();
-        if free || started.elapsed() >= core::time::Duration::from_secs(2) {
+        // Stopped for certain (the kernel's suspend waits a few ticks at
+        // most), holding no lock and with the allocator free.
+        let stopped = os_sys::thread_state(tid as u64, &mut state).is_ok_and(|_| state[0] == osyx_abi::thread_state::BLOCKED);
+        let held = os_std::sync::locks_held_by(tid as u64);
+        if stopped && held == 0 && !os_std::sync::allocator_busy() {
             // Killed while suspended: the kill ends the thread instead of
             // resuming it.
+            break;
+        }
+        if started.elapsed() >= core::time::Duration::from_secs(2) {
+            os_std::eprintln!("winrun: TerminateThread: thread {tid} still holds {held} lock(s) (stopped: {stopped}) after 2 s; ending it anyway");
             break;
         }
         let _ = suspend(osyx_abi::suspend::RESUME);
