@@ -66,6 +66,10 @@ pub fn unregister_broker(pid: u64) {
 }
 const FILE_READ: u32 = 1;
 const FILE_WRITE: u32 = 2;
+/// The handle appends (FILE_APPEND_DATA without FILE_WRITE_DATA).
+const FILE_APPEND: u32 = 4;
+/// The file goes away with the handle (FILE_FLAG_DELETE_ON_CLOSE).
+const FILE_DELETE: u32 = 8;
 /// Longest path a duplicated file may carry.
 const MAX_PATH_BYTES: usize = 4096;
 const SECTION_WRITABLE: u32 = 1;
@@ -320,11 +324,20 @@ fn file_item(h: u64) -> Result<Option<(Item, String)>, u32> {
     if f.is_dir || f.key.0 == objects::PIPE_DEV || f.path.is_empty() || f.path.len() > MAX_PATH_BYTES {
         return Ok(None);
     }
-    if f.delete_on_close.load(Ordering::Relaxed) || f.append {
-        return Err(ERROR_NOT_SUPPORTED);
-    }
-    let flags = if f.access.0 { FILE_READ } else { 0 } | if f.access.1 { FILE_WRITE } else { 0 };
+    let flags = if f.access.0 { FILE_READ } else { 0 }
+        | if f.access.1 { FILE_WRITE } else { 0 }
+        | if f.append { FILE_APPEND } else { 0 }
+        | if f.delete_on_close.load(Ordering::Relaxed) { FILE_DELETE } else { 0 };
     Ok(Some((Item { handle: h, kernel: None, kind: KIND_FILE, flags, size: f.path.len() as u64 }, f.path.clone())))
+}
+
+/// Closes a handle that DUPLICATE_CLOSE_SOURCE moved to another process:
+/// a delete-on-close file is now the copy's to delete.
+pub fn close_moved(h: u64) {
+    if let Some(Object::File(f)) = objects::get(h) {
+        f.delete_on_close.store(false, Ordering::SeqCst);
+    }
+    objects::close(h);
 }
 
 /// Whether a record's object comes with a kernel object.
@@ -342,10 +355,23 @@ fn object(r: &[u8], kernel: Option<u64>, extra: &[u8], direct: bool) -> Option<O
         KIND_FILE => {
             let path = core::str::from_utf8(extra.get(..size as usize)?).ok()?;
             let flags = half(12);
-            let access = if flags & FILE_WRITE != 0 { objects::GENERIC_READ | objects::GENERIC_WRITE } else { objects::GENERIC_READ };
+            let access = if flags & FILE_APPEND != 0 {
+                objects::GENERIC_READ | objects::FILE_APPEND_DATA
+            } else if flags & FILE_WRITE != 0 {
+                objects::GENERIC_READ | objects::GENERIC_WRITE
+            } else {
+                objects::GENERIC_READ
+            };
             let share = objects::FILE_SHARE_READ | objects::FILE_SHARE_WRITE | objects::FILE_SHARE_DELETE;
             let (h, _) = crate::kernel32::create_file(&crate::path::to_windows(path), access, share, crate::kernel32::OPEN_EXISTING, 0).ok()?;
-            objects::get(h)
+            let o = objects::get(h);
+            // The copy is a second handle to the same file object on Windows,
+            // which goes away with the last handle: the copy deletes the file
+            // when it closes (an open handle keeps the data either way).
+            if let Some(Object::File(f)) = &o {
+                f.delete_on_close.store(flags & FILE_DELETE != 0, Ordering::SeqCst);
+            }
+            o
         }
         KIND_EVENT => crate::objects::EventObj::from_shared(kernel?, half(12) & EVENT_MANUAL != 0).map(Object::Event),
         KIND_PROCESS => crate::process::process_for_pid(size).map(Object::Process),
@@ -416,7 +442,7 @@ fn serve(c: u64, direct: bool) -> bool {
                 Ok((msg, kernel)) => {
                     let _ = os_sys::channel_send(c, &msg, kernel.as_slice());
                     if close {
-                        objects::close(h);
+                        close_moved(h);
                     }
                 }
                 Err(e) => {

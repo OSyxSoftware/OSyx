@@ -1561,7 +1561,7 @@ fn duplicate_handle(
             return match crate::inherit::put(pid, src) {
                 Ok(h) => {
                     if options & 1 != 0 {
-                        objects::close(src); // DUPLICATE_CLOSE_SOURCE
+                        crate::inherit::close_moved(src); // DUPLICATE_CLOSE_SOURCE
                     }
                     // SAFETY: the caller's out pointer.
                     unsafe { *dst = h };
