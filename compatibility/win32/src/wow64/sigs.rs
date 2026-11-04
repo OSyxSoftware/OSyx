@@ -721,6 +721,7 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(VerifyVersionInfoA, [Ptr, Uint, U64], U32),
     sig!(SignalObjectAndWait, [Handle, Handle, Uint, Int], U32),
     sig!(CreateTimerQueue, [], Handle),
+    sig!(OpenEventW, [Uint, Int, Ptr], Handle),
     sig!(CreateTimerQueueTimer, [Ptr, Handle, Ptr, Ptr, Uint, Uint, Uint], I32),
     sig!(ChangeTimerQueueTimer, [Handle, Handle, Uint, Uint], I32),
     sig!(DeleteTimerQueueTimer, [Handle, Handle, Handle], I32),

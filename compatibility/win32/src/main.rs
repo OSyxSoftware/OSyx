@@ -50,6 +50,7 @@ mod keyed;
 mod loader;
 mod locale;
 mod mapping;
+mod namespace;
 mod mem;
 mod ntdll;
 mod ntreg;

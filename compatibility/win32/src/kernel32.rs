@@ -2580,18 +2580,40 @@ pub(crate) fn create_event(manual: bool, initial: bool, name: Option<String>) ->
         teb::set_last_error(ERROR_ALREADY_EXISTS);
         return objects::insert(o);
     }
+    // A name another process holds: the same event (the object namespace
+    // spans processes, as on Windows).
+    if let Some(n) = name.as_deref() {
+        if let Some(h) = crate::namespace::open(n, crate::namespace::Kind::Event) {
+            teb::set_last_error(ERROR_ALREADY_EXISTS);
+            return h;
+        }
+        if crate::namespace::taken_by_other_kind(n, crate::namespace::Kind::Event) {
+            return fail(ERROR_INVALID_HANDLE, 0);
+        }
+    }
     teb::set_last_error(ERROR_SUCCESS);
-    objects::insert(Object::Event(EventObj::new(initial, manual, name)))
+    let h = objects::insert(Object::Event(EventObj::new(initial, manual, name.clone())));
+    if let Some(n) = name.as_deref() {
+        crate::namespace::register(n, crate::namespace::Kind::Event, h);
+    }
+    h
 }
 
-/// Opens a named object of this process (names are process-local here,
-/// like the objects themselves).
+/// Opens a named object: this process's own, or for the kinds that can be
+/// shared (`kind`), one another process holds under the name.
 fn open_named(name: Option<String>, inherit: bool, want: fn(&Object) -> bool) -> u64 {
+    open_named_kind(name, inherit, want, None)
+}
+
+fn open_named_kind(name: Option<String>, inherit: bool, want: fn(&Object) -> bool, kind: Option<crate::namespace::Kind>) -> u64 {
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let h = match objects::find_named(&name) {
         Some(o) if want(&o) => objects::insert(o),
         Some(_) => return fail(ERROR_INVALID_HANDLE, 0),
-        None => return fail(ERROR_FILE_NOT_FOUND, 0),
+        None => match kind.and_then(|k| crate::namespace::open(&name, k)) {
+            Some(h) => h,
+            None => return fail(ERROR_FILE_NOT_FOUND, 0),
+        },
     };
     if inherit {
         objects::set_inheritable(h, true);
@@ -2601,7 +2623,12 @@ fn open_named(name: Option<String>, inherit: bool, want: fn(&Object) -> bool) ->
 
 extern "win64" fn OpenEventA(_access: u32, inherit: Bool, name: *const u8) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Event(_)))
+    open_named_kind(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Event(_)), Some(crate::namespace::Kind::Event))
+}
+
+extern "win64" fn OpenEventW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
+    // SAFETY: a NUL-terminated name.
+    open_named_kind(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Event(_)), Some(crate::namespace::Kind::Event))
 }
 
 pub(crate) extern "win64" fn OpenMutexW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
@@ -2611,12 +2638,12 @@ pub(crate) extern "win64" fn OpenMutexW(_access: u32, inherit: Bool, name: *cons
 
 pub(crate) extern "win64" fn OpenFileMappingW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Section(_)))
+    open_named_kind(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Section(_)), Some(crate::namespace::Kind::Section))
 }
 
 extern "win64" fn OpenFileMappingA(_access: u32, inherit: Bool, name: *const u8) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Section(_)))
+    open_named_kind(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Section(_)), Some(crate::namespace::Kind::Section))
 }
 
 extern "win64" fn CreateEventA(attributes: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
@@ -3775,6 +3802,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         OpenEventA,
         OpenMutexW,
         OpenFileMappingW,
+        OpenEventW,
         OpenFileMappingA,
         lstrcpyW,
         lstrcpyA,

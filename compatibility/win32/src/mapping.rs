@@ -93,6 +93,13 @@ fn create_section(file: Option<u64>, protect: u32, size: u64, name: Option<Strin
                 _ => Err(STATUS_OBJECT_NAME_COLLISION),
             };
         }
+        // A section another process made under the name: the same pages.
+        if let Some(h) = crate::namespace::open(n, crate::namespace::Kind::Section) {
+            return Ok((h, true));
+        }
+        if crate::namespace::taken_by_other_kind(n, crate::namespace::Kind::Section) {
+            return Err(STATUS_OBJECT_NAME_COLLISION);
+        }
     }
     let section = match file {
         None => {
@@ -135,7 +142,14 @@ fn create_section(file: Option<u64>, protect: u32, size: u64, name: Option<Strin
             }
         }
     };
-    Ok((objects::insert(Object::Section(Arc::new(section))), false))
+    let shareable = section.shm != 0 && (section.file.is_none() || section.file_mapping);
+    let named = section.name.clone();
+    let h = objects::insert(Object::Section(Arc::new(section)));
+    // Other processes find a named section through the namespace.
+    if let (Some(n), true) = (named, shareable) {
+        crate::namespace::register(&n, crate::namespace::Kind::Section, h);
+    }
+    Ok((h, false))
 }
 
 /// Reads `len` bytes at `offset` of `fd` into `dst` without moving the
