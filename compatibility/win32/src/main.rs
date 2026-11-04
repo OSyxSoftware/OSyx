@@ -37,6 +37,7 @@ mod error;
 mod elevation;
 mod eventlog;
 mod wevtapi;
+mod netapi32;
 mod exceptions;
 mod files;
 mod fibers;
