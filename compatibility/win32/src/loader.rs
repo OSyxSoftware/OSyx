@@ -879,32 +879,50 @@ const TLS_SLOTS: usize = 256;
 /// missing ones. Rebuilding the array would silently wipe every thread-local
 /// the program had stored (jemalloc's thread cache, NSS's, Gecko's).
 pub fn setup_thread_tls(teb_addr: u64) {
+    with_loaded(|l| fill_tls(l, teb_addr));
+}
+
+/// Static TLS blocks for the calling thread and every other live thread:
+/// Windows gives a DLL loaded later a block in each existing thread. Other
+/// threads' TEBs are filled under `TEB_LIFETIME`, which an ending thread
+/// takes to retire its TEB before freeing it, so none is written after.
+fn setup_tls_everywhere() {
     with_loaded(|l| {
-        if l.tls.is_empty() {
-            return;
-        }
-        // SAFETY: `teb_addr` is a TEB; its TLS pointer is either 0 or an array
-        // this function allocated with TLS_SLOTS entries.
-        let existing = unsafe { teb::get::<u64>(teb_addr, teb::TEB_TLS_POINTER) };
-        let array: &'static mut [u64] = if existing == 0 {
-            let a = Vec::leak(alloc::vec![0u64; TLS_SLOTS]);
-            // SAFETY: as above.
-            unsafe { teb::put(teb_addr, teb::TEB_TLS_POINTER, a.as_mut_ptr() as u64) };
-            a
-        } else {
-            // SAFETY: as above.
-            unsafe { core::slice::from_raw_parts_mut(existing as *mut u64, TLS_SLOTS) }
-        };
-        for (i, t) in l.tls.iter().enumerate() {
-            if i >= TLS_SLOTS || array[i] != 0 {
-                continue;
+        fill_tls(l, teb::current());
+        let _alive = crate::kernel32::TEB_LIFETIME.lock().unwrap();
+        for (_, t) in crate::kernel32::thread_list() {
+            if t != 0 {
+                fill_tls(l, t);
             }
-            let mut b = t.template.clone();
-            b.resize(t.template.len() + t.zero_fill, 0);
-            // Leaked deliberately: the block lives as long as the thread.
-            array[i] = Vec::leak(b).as_mut_ptr() as u64;
         }
     });
+}
+
+fn fill_tls(l: &Loader, teb_addr: u64) {
+    if l.tls.is_empty() {
+        return;
+    }
+    // SAFETY: `teb_addr` is a TEB; its TLS pointer is either 0 or an array
+    // this function allocated with TLS_SLOTS entries.
+    let existing = unsafe { teb::get::<u64>(teb_addr, teb::TEB_TLS_POINTER) };
+    let array: &'static mut [u64] = if existing == 0 {
+        let a = Vec::leak(alloc::vec![0u64; TLS_SLOTS]);
+        // SAFETY: as above.
+        unsafe { teb::put(teb_addr, teb::TEB_TLS_POINTER, a.as_mut_ptr() as u64) };
+        a
+    } else {
+        // SAFETY: as above.
+        unsafe { core::slice::from_raw_parts_mut(existing as *mut u64, TLS_SLOTS) }
+    };
+    for (i, t) in l.tls.iter().enumerate() {
+        if i >= TLS_SLOTS || array[i] != 0 {
+            continue;
+        }
+        let mut b = t.template.clone();
+        b.resize(t.template.len() + t.zero_fill, 0);
+        // Leaked deliberately: the block lives as long as the thread.
+        array[i] = Vec::leak(b).as_mut_ptr() as u64;
+    }
 }
 
 /// TEB32 offset of ThreadLocalStoragePointer.
@@ -1532,12 +1550,7 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         // callback reads its block in whichever thread ends (libGLESv2's
         // DLL_THREAD_DETACH faulted on a missing one). A thread that has not
         // started yet (no TEB) sets up its own blocks when it runs.
-        setup_thread_tls(teb::current());
-        for (_, t) in crate::kernel32::thread_list() {
-            if t != 0 {
-                setup_thread_tls(t);
-            }
-        }
+        setup_tls_everywhere();
     } else if !todo.is_empty() {
         // A 32-bit DLL with static TLS gets a block in every thread that
         // runs 32-bit code, as Windows gives one to every existing thread.

@@ -1800,7 +1800,13 @@ pub(crate) fn register_main_thread() {
     *MAIN_THREAD.lock().unwrap() = Some(t);
 }
 
-/// The live Windows threads of this process: (thread id, TEB).
+/// Held while a thread's TEB is written by another thread (LoadLibrary
+/// filling TLS slots) and while an ending thread retires its TEB, so a TEB
+/// is never written after it is freed (its pages may hold the heap by then).
+pub(crate) static TEB_LIFETIME: Mutex<()> = Mutex::new(());
+
+/// The live Windows threads of this process: (thread id, TEB; 0 once the
+/// thread has retired it).
 pub(crate) fn thread_list() -> Vec<(u32, u64)> {
     THREADS
         .lock()
@@ -1870,6 +1876,10 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
             let code = loader::run_thread(&env, stack + size as u64) as u32;
             let _ = os_sys::set_gs_base(0);
             mem::free_stack(stack, size);
+            {
+                let _alive = TEB_LIFETIME.lock().unwrap();
+                me.teb.store(0, Ordering::SeqCst);
+            }
             mem::free_pages(t, teb::TEB_SIZE);
             me.exit_code.store(code, Ordering::SeqCst);
             me.final_ticks.store(os_sys::thread_times(0).unwrap_or(0), Ordering::SeqCst);
