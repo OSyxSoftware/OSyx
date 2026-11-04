@@ -20,7 +20,7 @@ const STACK_WORDS: usize = STATE_WORDS + 4096;
 
 /// winrun's own code: the executable PT_LOAD segment of the ELF image
 /// mapped at 0x40000000 (its headers are part of the first segment).
-fn own_code() -> (u64, u64) {
+pub(crate) fn own_code() -> (u64, u64) {
     const BASE: u64 = 0x4000_0000;
     // SAFETY: the ELF header and program headers of winrun's own image.
     unsafe {

@@ -371,6 +371,30 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
             record.info[1],
             crate::loader::loading(),
         );
+        // winrun's frames above the fault, within this thread's stack: a
+        // Windows thread's from its TEB, otherwise the rest of the page.
+        let rsp = n.gpr[fault::RSP];
+        let tid = os_sys::gettid();
+        let top = if crate::kernel32::thread_object(tid as u32).is_some() {
+            // SAFETY: this thread's TEB.
+            unsafe { crate::teb::get::<u64>(crate::teb::current(), crate::teb::TEB_STACK_BASE) }
+        } else {
+            (rsp | 0xfff) + 1
+        };
+        let (lo, hi) = crate::stall::own_code();
+        let mut frames = alloc::string::String::new();
+        let mut at = rsp & !7;
+        let mut found = 0;
+        while at + 8 <= top.min(rsp.saturating_add(32 << 10)) && found < 24 {
+            // SAFETY: a word of this thread's own stack, below its top.
+            let v = unsafe { core::ptr::read(at as *const u64) };
+            if v >= lo && v < hi {
+                frames.push_str(&alloc::format!(" {v:#x}"));
+                found += 1;
+            }
+            at += 8;
+        }
+        os_std::eprintln!("winrun: ... winrun frames:{frames}");
         os_std::process::exit(record.code as i32);
     }
     let software = n.vector == 6 && n.rip == osyx_windows_raise_trap as *const () as u64;
