@@ -3855,6 +3855,25 @@ extern "win64" fn MapWindowPoints(from: u64, to: u64, pts: *mut i32, n: u32) -> 
     ((dx as u16 as u32) | ((dy as u16 as u32) << 16)) as i32
 }
 
+/// GetSystemMetrics at a DPI: the metrics that are sizes of window parts
+/// (borders, captions, scroll bars, icons, menus) scale with it, as on
+/// Windows; screen sizes, counts and flags do not.
+extern "win64" fn GetSystemMetricsForDpi(i: i32, dpi: u32) -> i32 {
+    if dpi == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    const SCALED: &[i32] = &[
+        2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20, 21, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 45, 46, 47, 48, 49, 50, 51, 52, 53,
+        54, 55, 57, 58, 71, 72, 83, 84, 92,
+    ];
+    let v = GetSystemMetrics(i);
+    if SCALED.contains(&i) {
+        ((v as i64 * dpi as i64 + 48) / 96) as i32
+    } else {
+        v
+    }
+}
+
 extern "win64" fn GetSystemMetrics(i: i32) -> i32 {
     let v = with(|g| {
         let (w, h) = g.conn().map(|c| (c.screen_width as i32, c.screen_height as i32)).unwrap_or((1024, 768));
@@ -8455,6 +8474,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         SetThreadDpiAwarenessContext,
         GetThreadDpiAwarenessContext,
         WindowFromDC,
+        GetSystemMetricsForDpi,
         GetAwarenessFromDpiAwarenessContext,
         AreDpiAwarenessContextsEqual,
         GetDpiForWindow,
