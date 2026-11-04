@@ -2602,10 +2602,6 @@ pub(crate) fn create_event(manual: bool, initial: bool, name: Option<String>) ->
 
 /// Opens a named object: this process's own, or for the kinds that can be
 /// shared (`kind`), one another process holds under the name.
-fn open_named(name: Option<String>, inherit: bool, want: fn(&Object) -> bool) -> u64 {
-    open_named_kind(name, inherit, want, None)
-}
-
 fn open_named_kind(name: Option<String>, inherit: bool, want: fn(&Object) -> bool, kind: Option<crate::namespace::Kind>) -> u64 {
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let h = match objects::find_named(&name) {
@@ -2634,7 +2630,7 @@ extern "win64" fn OpenEventW(_access: u32, inherit: Bool, name: *const u16) -> u
 
 pub(crate) extern "win64" fn OpenMutexW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Mutex(_)))
+    open_named_kind(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Mutex(_)), Some(crate::namespace::Kind::Mutex))
 }
 
 pub(crate) extern "win64" fn OpenFileMappingW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
@@ -2701,9 +2697,25 @@ fn create_mutex(owned: bool, name: Option<String>) -> u64 {
         teb::set_last_error(ERROR_ALREADY_EXISTS);
         return objects::insert(o);
     }
+    // A name another process holds: the same mutex (bInitialOwner does not
+    // apply to an existing one, as on Windows).
+    if let Some(n) = name.as_deref() {
+        if let Some(h) = crate::namespace::open(n, crate::namespace::Kind::Mutex) {
+            teb::set_last_error(ERROR_ALREADY_EXISTS);
+            return h;
+        }
+        if crate::namespace::taken_by_other_kind(n, crate::namespace::Kind::Mutex) {
+            return fail(ERROR_INVALID_HANDLE, 0);
+        }
+    }
     teb::set_last_error(ERROR_SUCCESS);
     let owner = if owned { (teb::current_tid() as u32, 1) } else { (0, 0) };
-    objects::insert(Object::Mutex(Arc::new(MutexObj { state: Mutex::new(owner), name })))
+    let h = objects::insert(Object::Mutex(MutexObj::new(owner, name.clone())));
+    // Other processes find a named mutex through the namespace.
+    if let Some(n) = name.as_deref() {
+        crate::namespace::register(n, crate::namespace::Kind::Mutex, h);
+    }
+    h
 }
 
 extern "win64" fn CreateMutexA(attributes: u64, owned: Bool, name: *const u8) -> u64 {
@@ -2723,15 +2735,8 @@ extern "win64" fn CreateMutexW(attributes: u64, owned: Bool, name: *const u16) -
 extern "win64" fn ReleaseMutex(h: u64) -> Bool {
     let Some(Object::Mutex(m)) = objects::get(h) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
     let me = teb::current_tid() as u32;
-    {
-        let mut s = m.state.lock().unwrap();
-        if s.0 != me {
-            return fail(288, FALSE); // ERROR_NOT_OWNER
-        }
-        s.1 -= 1;
-        if s.1 == 0 {
-            s.0 = 0;
-        }
+    if m.release(me).is_err() {
+        return fail(288, FALSE); // ERROR_NOT_OWNER
     }
     objects::signal_all();
     TRUE

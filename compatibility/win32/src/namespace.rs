@@ -17,6 +17,7 @@ const ROOT: &str = "/run/winrun-objects";
 pub enum Kind {
     Section,
     Event,
+    Mutex,
 }
 
 impl Kind {
@@ -24,6 +25,7 @@ impl Kind {
         match self {
             Kind::Section => "section",
             Kind::Event => "event",
+            Kind::Mutex => "mutex",
         }
     }
 }

@@ -318,9 +318,117 @@ impl TimerObj {
 }
 
 pub struct MutexObj {
-    /// Owning thread id (0: free) and recursion count, under one lock.
-    pub state: Mutex<(u32, u32)>,
+    /// Owning thread id (0: free) and recursion count, under one lock,
+    /// while the mutex is this process's alone.
+    local: Mutex<(u32, u32)>,
+    /// Once shared with another process (`share`): the page holding the
+    /// owner (word 0) and the count (word 1), and its shared memory object.
+    /// Thread ids are system-wide, so the owner means the same everywhere.
+    shared: AtomicU64,
+    shm: AtomicU64,
     pub name: Option<String>,
+}
+
+impl MutexObj {
+    pub fn new(owner: (u32, u32), name: Option<String>) -> Arc<MutexObj> {
+        Arc::new(MutexObj { local: Mutex::new(owner), shared: AtomicU64::new(0), shm: AtomicU64::new(0), name })
+    }
+
+    /// A mutex whose state is the first two words of shared memory `shm`.
+    pub fn from_shared(shm: u64) -> Option<Arc<MutexObj>> {
+        let base = os_sys::shm_map(shm, true).ok()? as u64;
+        Some(Arc::new(MutexObj { local: Mutex::new((0, 0)), shared: AtomicU64::new(base), shm: AtomicU64::new(shm), name: None }))
+    }
+
+    fn words(base: u64) -> (&'static AtomicU32, &'static AtomicU32) {
+        // SAFETY: the shared page this object keeps mapped.
+        unsafe { (&*(base as *const AtomicU32), &*((base + 4) as *const AtomicU32)) }
+    }
+
+    pub fn is_shared(&self) -> bool {
+        self.shared.load(Ordering::SeqCst) != 0
+    }
+
+    /// Whether thread `me` may own it now; with `consume`, takes it (or
+    /// one more level of it).
+    pub fn acquire(&self, me: u32, consume: bool) -> bool {
+        let g = self.local.lock().unwrap();
+        let base = self.shared.load(Ordering::SeqCst);
+        if base == 0 {
+            let mut s = g;
+            let free = s.0 == 0 || s.0 == me;
+            if free && consume {
+                s.0 = me;
+                s.1 += 1;
+            }
+            return free;
+        }
+        drop(g);
+        let (owner, count) = Self::words(base);
+        if owner.load(Ordering::SeqCst) == me {
+            if consume {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            return true;
+        }
+        if !consume {
+            return owner.load(Ordering::SeqCst) == 0;
+        }
+        if owner.compare_exchange(0, me, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            count.store(1, Ordering::SeqCst);
+            return true;
+        }
+        false
+    }
+
+    /// ReleaseMutex by thread `me`: Err if it does not own the mutex.
+    pub fn release(&self, me: u32) -> Result<(), ()> {
+        let g = self.local.lock().unwrap();
+        let base = self.shared.load(Ordering::SeqCst);
+        if base == 0 {
+            let mut s = g;
+            if s.0 != me {
+                return Err(());
+            }
+            s.1 -= 1;
+            if s.1 == 0 {
+                s.0 = 0;
+            }
+            return Ok(());
+        }
+        drop(g);
+        let (owner, count) = Self::words(base);
+        if owner.load(Ordering::SeqCst) != me {
+            return Err(());
+        }
+        if count.fetch_sub(1, Ordering::SeqCst) == 1 {
+            owner.store(0, Ordering::SeqCst);
+            os_sys::futex_wake(owner.as_ptr(), u32::MAX);
+        }
+        Ok(())
+    }
+
+    /// The shared memory object holding the state, moving it there first.
+    pub fn share(&self) -> Result<u64, u32> {
+        let g = self.local.lock().unwrap();
+        if self.shared.load(Ordering::SeqCst) != 0 {
+            return Ok(self.shm.load(Ordering::SeqCst));
+        }
+        let shm = os_sys::shm_create(4096).map_err(errno_to_win32)?;
+        let base = match os_sys::shm_map(shm, true) {
+            Ok(b) => b as u64,
+            Err(e) => {
+                let _ = os_sys::close(shm);
+                return Err(errno_to_win32(e));
+            }
+        };
+        let (owner, count) = Self::words(base);
+        owner.store(g.0, Ordering::SeqCst);
+        count.store(g.1, Ordering::SeqCst);
+        self.shm.store(shm, Ordering::SeqCst);
+        self.shared.store(base, Ordering::SeqCst);
+        Ok(shm)
+    }
 }
 
 pub struct SemaphoreObj {
@@ -698,15 +806,7 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
                 e.take()
             }
         }
-        Object::Mutex(m) => {
-            let mut s = m.state.lock().unwrap();
-            let free = s.0 == 0 || s.0 == me;
-            if free && consume {
-                s.0 = me;
-                s.1 += 1;
-            }
-            free
-        }
+        Object::Mutex(m) => m.acquire(me, consume),
         Object::Semaphore(s) => {
             let mut c = s.count.lock().unwrap();
             let free = *c > 0;
@@ -797,14 +897,22 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
         if _blocked.is_none() {
             _blocked = Some(crate::stall::waiting("WaitForObjects", handles[0], handles.len() as u64));
         }
-        // Another process sets a shared event without touching SEQ: one
-        // shared event is waited for on its own word, several objects
-        // including one are polled.
+        // Another process sets a shared event or releases a shared mutex
+        // without touching SEQ: one shared event is waited for on its own
+        // word, several objects including one (or a shared mutex) are
+        // polled.
+        let shared_mutex = objs.iter().any(|o| matches!(o, Some(Object::Mutex(m)) if m.is_shared()));
         let mut shared = objs.iter().filter_map(|o| match o {
             Some(Object::Event(e)) if e.is_shared() => Some(e),
             _ => None,
         });
         match (shared.next(), shared.next()) {
+            _ if shared_mutex => {
+                let slice = if wait_ns == 0 { SHARED_POLL_NS } else { wait_ns.min(SHARED_POLL_NS) };
+                WAITERS.fetch_add(1, Ordering::SeqCst);
+                let _ = futex_sleep(SEQ.as_ptr(), seq, slice);
+                WAITERS.fetch_sub(1, Ordering::SeqCst);
+            }
             (Some(e), _) if objs.len() == 1 => {
                 let _ = futex_sleep(e.futex_word(), 0, wait_ns);
             }
