@@ -270,21 +270,26 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
 static UNMAPPED: Mutex<alloc::collections::VecDeque<(u64, u64, String, String)>> = Mutex::new(alloc::collections::VecDeque::new());
 
 /// The calling thread and the code addresses on its stack, for a record
-/// of who unmapped a view (Windows threads only: they have a TEB). It never
-/// waits for the loader: a thread inside LoadLibrary may unmap views.
+/// of who unmapped a view: only while a Windows thread runs on its Windows
+/// stack (an ending thread frees pages on winrun's own stack, after its
+/// TEB has left the GS base). It never waits for the loader: a thread
+/// inside LoadLibrary may unmap views.
 fn caller() -> String {
     let tid = os_sys::gettid();
-    let images = match crate::kernel32::thread_object(tid as u32).and_then(|_| crate::loader::try_images()) {
+    let t = crate::kernel32::thread_object(tid as u32).map_or(0, |o| o.teb.load(core::sync::atomic::Ordering::SeqCst));
+    let images = match (t != 0).then(crate::loader::try_images).flatten() {
         Some(i) => i,
         None => return alloc::format!("thread {tid}"),
     };
     let rsp: u64;
     // SAFETY: reads the stack pointer only.
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
-    let t = crate::teb::current();
-    // SAFETY: this thread's TEB.
+    // SAFETY: this thread's TEB, which it frees only after this.
     let (base, limit): (u64, u64) = unsafe { (crate::teb::get(t, crate::teb::TEB_STACK_BASE), crate::teb::get(t, crate::teb::TEB_STACK_LIMIT)) };
-    let start = rsp.max(limit).min(base);
+    if !(limit..base).contains(&rsp) {
+        return alloc::format!("thread {tid}");
+    }
+    let start = rsp;
     let end = start.saturating_add(16 << 10).min(base);
     // SAFETY: inside this thread's stack, between its limit and base.
     let words: Vec<u64> = (start..end).step_by(8).map(|a| unsafe { core::ptr::read_volatile(a as *const u64) }).collect();
