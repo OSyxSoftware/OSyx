@@ -118,6 +118,12 @@ pub(super) fn finish(s: u64, o: u64, bytes: usize, error: u32) {
 /// `finish` with the (port, key) the operation was issued under: a socket
 /// closed meanwhile still gets the packet for its aborted operation.
 fn finish_to(port: Option<(u64, u64)>, o: u64, bytes: usize, error: u32) {
+    // Under OSYX_WINRUN_FAILTRACE (or -v): the first completions, to follow
+    // a program's socket traffic.
+    static TRACED: AtomicU32 = AtomicU32::new(0);
+    if traced() && TRACED.fetch_add(1, Ordering::Relaxed) < 400 {
+        os_std::eprintln!("winrun: overlapped socket I/O {o:#x} done: {bytes} byte(s), error {error}, port {}", port.is_some());
+    }
     let status = if error == 0 { 0 } else { status_of(error) };
     // SAFETY: the caller's OVERLAPPED, which stays valid until it completes.
     let event = unsafe {

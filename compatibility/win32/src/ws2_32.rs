@@ -472,6 +472,14 @@ extern "win64" fn connect(s: u64, addr: *const u8, len: i32) -> i32 {
         let a = read_addr(addr, len, s)?;
         let _blocked = crate::stall::waiting("connect", s, 0);
         let r = os_sys::sock_connect(fd, &a).map_err(wsa);
+        // A non-blocking connect never completes in the call on Windows: it
+        // fails with WSAEWOULDBLOCK and reports the connection through
+        // FD_CONNECT and select's writability (Chromium relies on it). The
+        // stack connects loopback at once; that is reported the same way.
+        let r = match r {
+            Ok(()) if socket_state(s).is_ok_and(|k| k.nonblocking) => Err(WSAEWOULDBLOCK),
+            r => r,
+        };
         if traced() {
             os_std::eprintln!("winrun: connect {s:#x} to {:?}:{}: {r:?}", a.addr, a.port);
         }
