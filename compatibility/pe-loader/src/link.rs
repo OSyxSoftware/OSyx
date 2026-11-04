@@ -388,6 +388,14 @@ impl<'s, H: Host> Linker<'s, H> {
             return Err(bad(&name, ImageError::Subsystem(pe.optional().subsystem)));
         }
         let pe32 = pe.is_pe32();
+        // A process runs code of one width: its first image's. As on
+        // Windows, a 64-bit process cannot load a 32-bit DLL (or the
+        // reverse), whether or not the DLL's imports would resolve.
+        if let Some(first) = self.modules.iter().find(|m| m.is_pe32().is_some()) {
+            if first.is_pe32() != Some(pe32) {
+                return Err(LinkError::WidthMismatch { importer: first.name.clone(), module: name });
+            }
+        }
         let size = pe.size_of_image();
         let prot = image::protections(&pe).map_err(|e| bad(&name, e))?;
         let m0 = self.host.mark();
