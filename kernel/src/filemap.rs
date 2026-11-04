@@ -19,13 +19,23 @@ static WORKER: AtomicBool = AtomicBool::new(false);
 
 /// Serialize explicit file truncation against creation and delayed writeback.
 /// Callers must not hold an open-file lock: the cache precedes file locks.
+///
+/// While sections of the file exist, the size may change only outside the
+/// mapped extent (as Windows lets a mapped file grow, and refuses to cut a
+/// view short): the backing stays cached, so the sections and any made
+/// later keep sharing its pages. Cutting into the extent is `Busy`.
 pub fn truncate<T>(key: (u64, u64), size: u64, operation: impl FnOnce() -> Result<T, Errno>) -> Result<T, Errno> {
     crate::filecache::forget(key);
     crate::exec::invalidate(key);
     let mut cache = CACHE.lock();
     if let Some(backing) = cache.get(&key) {
         if Arc::strong_count(backing) != 1 {
-            return Err(Errno::Busy);
+            if size < backing.state.lock().size {
+                return Err(Errno::Busy);
+            }
+            let result = operation()?;
+            crate::exec::invalidate(key);
+            return Ok(result);
         }
         if size != 0 {
             let old_size = backing.state.lock().size;

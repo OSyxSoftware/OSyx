@@ -1110,11 +1110,13 @@ extern "win64" fn SetFilePointerEx(h: u64, off: i64, newpos: *mut i64, method: u
     }
 }
 
+/// A file with mapped views may grow; cutting into a view fails with
+/// ERROR_USER_MAPPED_FILE, as on Windows.
 extern "win64" fn SetEndOfFile(h: u64) -> Bool {
     let r = (|| {
         let f = objects::file(h)?;
         let pos = os_sys::seek(f.fd, 0, osyx_abi::SEEK_CUR).map_err(errno_to_win32)?;
-        os_sys::ftruncate(f.fd, pos).map_err(errno_to_win32)
+        os_sys::ftruncate(f.fd, pos).map_err(|e| if e == osyx_abi::Errno::Busy { ERROR_USER_MAPPED_FILE } else { errno_to_win32(e) })
     })();
     r.map_or_else(|e| fail(e, FALSE), |_| TRUE)
 }

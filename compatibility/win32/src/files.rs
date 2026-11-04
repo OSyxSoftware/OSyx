@@ -670,7 +670,8 @@ extern "win64" fn SetFileInformationByHandle(h: u64, class: u32, data: u64, size
                 let st = os_sys::fstat(f.fd).map_err(errno_to_win32)?;
                 // Allocation is advisory: it only truncates when smaller.
                 if class == FILE_END_OF_FILE_INFO || len < st.size {
-                    os_sys::ftruncate(f.fd, len).map_err(errno_to_win32)?;
+                    // A mapped file may grow, not be cut into a view.
+                    os_sys::ftruncate(f.fd, len).map_err(|e| if e == osyx_abi::Errno::Busy { ERROR_USER_MAPPED_FILE } else { errno_to_win32(e) })?;
                 }
                 Ok(())
             }),
