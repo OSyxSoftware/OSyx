@@ -451,10 +451,13 @@ impl UserHeap {
         while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             core::hint::spin_loop();
         }
+        // Counted like any lock: a thread must not be killed inside the heap.
+        crate::sync::note_acquired();
         let heap = if low { &self.low } else { &self.heap };
         // SAFETY: the lock gives exclusive access.
         let r = f(unsafe { &mut *heap.get() });
         self.locked.store(false, Ordering::Release);
+        crate::sync::note_released();
         r
     }
 }

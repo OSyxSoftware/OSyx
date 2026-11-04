@@ -197,6 +197,25 @@ pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
         kernel32::ExitThread(code);
     }
     let ticks = os_sys::thread_times(tid as u64).unwrap_or(0);
+    // The thread may be inside winrun, holding one of its locks (the
+    // object-wait lock, the loader, the heap): killed there, it would leave
+    // the lock held for good, as Windows' own kernel locks never are. It is
+    // stopped where it holds none: suspended, checked, and let run on for a
+    // moment if it holds one. After two seconds it is killed regardless.
+    let suspend = |op| os_sys::thread_suspend(tid as u64, op);
+    let started = os_std::time::Instant::now();
+    loop {
+        if suspend(osyx_abi::suspend::SUSPEND).is_err() {
+            break;
+        }
+        if os_std::sync::locks_held_by(tid as u64) == 0 || started.elapsed() >= core::time::Duration::from_secs(2) {
+            // Killed while suspended: the kill ends the thread instead of
+            // resuming it.
+            break;
+        }
+        let _ = suspend(osyx_abi::suspend::RESUME);
+        os_std::thread::sleep(core::time::Duration::from_millis(1));
+    }
     match os_sys::thread_kill(tid as u64, code as i32) {
         Ok(_) => {}
         Err(osyx_abi::Errno::NotFound) => return fail(ERROR_INVALID_HANDLE, 0),
