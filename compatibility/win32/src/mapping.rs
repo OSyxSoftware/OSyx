@@ -179,6 +179,11 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
     if exec && (write || copy) {
         return Err(STATUS_NOT_SUPPORTED); // W^X
     }
+    // A write view of a section made read-only (PAGE_READONLY) is refused,
+    // as on Windows, instead of handing out pages that fault on write.
+    if write && !s.writable {
+        return Err(STATUS_ACCESS_DENIED);
+    }
     if offset >= s.size {
         return Err(STATUS_INVALID_VIEW_SIZE);
     }
@@ -245,6 +250,31 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
     Ok((base, size))
 }
 
+/// The last views unmapped (base, size, file path), newest last: a fault
+/// report names an address that lies in one (a use after UnmapViewOfFile).
+static UNMAPPED: Mutex<alloc::collections::VecDeque<(u64, u64, String)>> = Mutex::new(alloc::collections::VecDeque::new());
+
+/// For a fault report: the view or recently unmapped view holding `addr`,
+/// in words; None without waiting if the calling thread holds the table.
+pub fn describe_for_report(addr: u64) -> Option<String> {
+    if VIEWS.is_held_by_current_thread() || UNMAPPED.is_held_by_current_thread() {
+        return None;
+    }
+    {
+        let views = VIEWS.lock().unwrap();
+        if let Some((&base, v)) = views.range(..=addr).next_back() {
+            if addr < base + (v.size as usize).next_multiple_of(PAGE) as u64 {
+                let path = String::from(v.section.file.as_ref().map_or("", |f| f.path.as_str()));
+                return Some(alloc::format!("a view {base:#x}+{:#x} (protect {:#x}) of {}", v.size, v.protect, if path.is_empty() { "shared memory" } else { &path }));
+            }
+        }
+    }
+    let unmapped = UNMAPPED.lock().unwrap();
+    unmapped.iter().rev().find(|u| addr >= u.0 && addr < u.0 + u.1).map(|u| {
+        alloc::format!("a view {:#x}+{:#x} of {} that was unmapped", u.0, u.1, if u.2.is_empty() { "shared memory" } else { &u.2 })
+    })
+}
+
 /// Unmaps the view containing `addr`.
 pub fn unmap(addr: u64) -> Result<(), NtStatus> {
     let mut views = VIEWS.lock().unwrap();
@@ -253,6 +283,14 @@ pub fn unmap(addr: u64) -> Result<(), NtStatus> {
         _ => return Err(STATUS_NOT_MAPPED_VIEW),
     };
     let v = views.remove(&base).unwrap();
+    {
+        let mut unmapped = UNMAPPED.lock().unwrap();
+        if unmapped.len() >= 64 {
+            unmapped.pop_front();
+        }
+        let path = v.section.file.as_ref().map_or(String::new(), |f| f.path.clone());
+        unmapped.push_back((base, (v.size as usize).next_multiple_of(PAGE) as u64, path));
+    }
     // SAFETY: a whole view made by `map`.
     unsafe { os_sys::unmap(base as *mut u8, (v.size as usize).next_multiple_of(PAGE)) }.map_err(errno_to_status)
 }

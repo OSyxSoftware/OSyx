@@ -499,7 +499,10 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
                 i.allocation_protect,
                 i.kind
             ),
-            None => os_std::eprintln!("winrun: ... in no region winrun knows"),
+            None => match crate::mapping::describe_for_report(record.info[1]) {
+                Some(what) => os_std::eprintln!("winrun: ... in {what}"),
+                None => os_std::eprintln!("winrun: ... in no region winrun knows"),
+            },
         }
         if record.info[1] < limit && record.info[1] + 0x10000 >= limit {
             report_overflow(limit, base, n.gpr[fault::RSP], n.gpr[fault::RBP]);
