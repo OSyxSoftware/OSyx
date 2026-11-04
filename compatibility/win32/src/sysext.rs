@@ -160,6 +160,11 @@ const ERROR_OLD_WIN_VERSION: u32 = 1150;
 /// VER_PLATFORM_WIN32_NT, no service pack, workstation, no suites.
 const OS: [u32; 8] = [0, 10, 19041, 2, 0, 0, 0, 1];
 
+/// The Windows version winrun reports: (major, minor, build).
+pub(crate) fn windows_version() -> (u32, u32, u32) {
+    (OS[1], OS[0], OS[2])
+}
+
 /// Bit index of a VER_* type → its slot in the condition mask.
 fn slot(type_bit: u32) -> Option<usize> {
     [VER_MINORVERSION, VER_MAJORVERSION, VER_BUILDNUMBER, VER_PLATFORMID, VER_SERVICEPACKMINOR, VER_SERVICEPACKMAJOR, VER_SUITENAME, VER_PRODUCT_TYPE]

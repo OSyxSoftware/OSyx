@@ -1728,6 +1728,13 @@ pub fn loading() -> String {
     LOADING.try_lock().map(|n| n.clone()).unwrap_or_default()
 }
 
+/// Whether `name` (a file name, any case) is one of winrun's built-in
+/// system DLLs.
+pub fn is_builtin_dll(name: &str) -> bool {
+    let n = normalize(name);
+    with_loaded(|l| l.linker.host.builtins.iter().any(|b| b.name == n)).unwrap_or(false)
+}
+
 /// The loaded images (base, size, module name), or None while the loader
 /// is busy: for reports that must not wait for it (a stalled thread may
 /// hold it).
