@@ -15,7 +15,13 @@ use osyx_vfs::{Cred, DirEntry, FsUsage, NewNode};
 pub fn errno(e: Error) -> Errno {
     match e {
         Error::Io => Errno::Io,
-        Error::NotExt | Error::Corrupt(_) => Errno::Io,
+        Error::NotExt => Errno::Io,
+        Error::Corrupt(what) => {
+            // Reported, since an I/O error alone says nothing of which
+            // structure the driver found inconsistent.
+            crate::kprintln!("ext4: corrupt: {what}");
+            Errno::Io
+        }
         Error::Unsupported(_) => Errno::Unsupported,
         Error::NotFound => Errno::NotFound,
         Error::NotADirectory => Errno::NotADirectory,
