@@ -747,8 +747,9 @@ pub fn exit_if_terminated() {
     if let Some(code) = code {
         os_std::eprintln!("winrun: thread {me} ends on TerminateThread's request");
         crate::stall::thread_ended(me);
-        // As TerminateThread does: no DLL_THREAD_DETACH, no handlers.
-        let _ = os_sys::thread_kill(0, code as i32);
+        // As TerminateThread does: no DLL_THREAD_DETACH, no handlers; the
+        // thread alone ends.
+        os_sys::thread_exit(code as i32, core::ptr::null());
     }
 }
 

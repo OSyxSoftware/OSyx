@@ -1144,8 +1144,10 @@ pub fn thread_kill(tid: Tid, code: i32) -> Result<u64, osyx_abi::Errno> {
             return Err(Errno::PermissionDenied);
         }
     }
+    // The caller alone ends, as `nr::THREAD_KILL` says (the process ends
+    // with its last thread).
     if tid == me {
-        crate::process::exit_current(code);
+        crate::process::finish_current_thread(code);
     }
     request_kill_with(tid, code);
     Ok(0)
