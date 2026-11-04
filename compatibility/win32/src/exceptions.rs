@@ -357,6 +357,22 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
     }
     let mut context = windows_context(n);
     let mut record = record(n);
+    // A fault inside the loader (winrun relocating or linking an image)
+    // cannot be dispatched: finding handlers takes the loader lock this
+    // thread holds, and waiting for it would hang the process. It ends the
+    // process with a report instead.
+    if crate::loader::held_by_current_thread() {
+        os_std::eprintln!(
+            "winrun: fault {:#x} at {:#x} (rsp {:#x}), {} {:#x}, inside the loader while loading {:?}: not dispatched",
+            record.code,
+            n.rip,
+            n.gpr[fault::RSP],
+            if record.info[0] == 1 { "writing" } else if record.info[0] == 8 { "executing" } else { "reading" },
+            record.info[1],
+            crate::loader::loading(),
+        );
+        os_std::process::exit(record.code as i32);
+    }
     let software = n.vector == 6 && n.rip == osyx_windows_raise_trap as *const () as u64;
     if software {
         if let Some(s) = SOFTWARE.lock().unwrap().remove(&os_sys::gettid()) {

@@ -121,6 +121,12 @@ impl<T: ?Sized> Mutex<T> {
         Ok(MutexGuard { lock: self, _not_send: PhantomData })
     }
 
+    /// Whether the calling thread holds the lock: for code that may run
+    /// while it does (a fault handler) and must not wait for it.
+    pub fn is_held_by_current_thread(&self) -> bool {
+        self.futex.load(Ordering::Relaxed) != UNLOCKED && self.owner.load(Ordering::Relaxed) == sys::current_tid()
+    }
+
     pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, T>> {
         match self.futex.compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed) {
             Ok(_) => {

@@ -1448,7 +1448,9 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         }
         let importer = l.linker.modules[l.exe].name.clone();
         let started = Instant::now();
+        *LOADING.lock().unwrap() = String::from(name);
         let r = l.linker.load_dll(&n, &importer);
+        LOADING.lock().unwrap().clear();
         let elapsed = started.elapsed().as_millis();
         if elapsed >= 100 {
             os_std::eprintln!("winrun: LoadLibrary({name}) took {elapsed} ms");
@@ -1688,6 +1690,20 @@ pub fn image_containing(addr: u64) -> Option<(u64, u64)> {
     let l = g.as_ref()?;
     let img = l.linker.host.images.iter().find(|i| addr >= i.base && addr < i.base + i.size)?;
     Some((img.base, img.size))
+}
+
+/// Whether the calling thread is inside the loader (holds its lock): a
+/// fault there must not be dispatched, since every handler lookup needs the
+/// loader.
+pub fn held_by_current_thread() -> bool {
+    LOADER.is_held_by_current_thread()
+}
+
+/// The DLL a LoadLibrary is loading, for a report of a fault inside it.
+static LOADING: Mutex<String> = Mutex::new(String::new());
+
+pub fn loading() -> String {
+    LOADING.try_lock().map(|n| n.clone()).unwrap_or_default()
 }
 
 /// The loaded images (base, size, module name), or None while the loader
