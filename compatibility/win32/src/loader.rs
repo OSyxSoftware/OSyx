@@ -715,6 +715,24 @@ struct ModState {
 }
 
 /// The writable sections of the PE image `file` mapped at `base`, copied.
+/// Gives every section of the image at `base` its protection from the
+/// section header again (as `WinHost::commit` set it), undoing what the
+/// module's VirtualProtect calls changed: MSVC's CRT, for one, makes its
+/// .fptable section read-only after initialization.
+fn reset_section_protection(file: &[u8], base: u64) {
+    const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+    const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
+    let Ok(pe) = PeFile::parse_any(file) else { return };
+    for s in pe.sections().filter(|s| s.virtual_size != 0) {
+        let prot = match (s.characteristics & IMAGE_SCN_MEM_WRITE != 0, s.characteristics & IMAGE_SCN_MEM_EXECUTE != 0) {
+            (true, _) => mem::Prot::ReadWrite,
+            (false, true) => mem::Prot::ExecuteRead,
+            (false, false) => mem::Prot::ReadOnly,
+        };
+        let _ = mem::reset_image_pages(base + s.virtual_address as u64, s.virtual_size as usize, prot);
+    }
+}
+
 fn writable_sections(file: &[u8], base: u64) -> Vec<(u64, Vec<u8>)> {
     const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
     let Ok(pe) = PeFile::parse_any(file) else { return Vec::new() };
@@ -779,9 +797,13 @@ fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> 
         }
         l.state[i].attached = true;
         if l.state[i].ldr != 0 {
-            // Loaded again after the last FreeLibrary detached it: its data
-            // goes back to what it was before the first attach; the loader
-            // entry and TLS slot it had are still there.
+            // Loaded again after the last FreeLibrary detached it: its
+            // sections get their original protection and its data goes back
+            // to what it was before the first attach; the loader entry and
+            // TLS slot it had are still there.
+            if let Kind::Pe { file, .. } = &l.linker.modules[i].kind {
+                reset_section_protection(file.as_ref(), l.linker.modules[i].base);
+            }
             for (at, bytes) in &l.state[i].pristine {
                 // SAFETY: the module's own writable sections, as copied.
                 unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), *at as *mut u8, bytes.len()) };
