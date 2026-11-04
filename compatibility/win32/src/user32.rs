@@ -510,6 +510,30 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
     f(gui)
 }
 
+/// Window handles: `WINDOW_BASE + pid * WINDOW_SPAN + 4 * slot`, for
+/// processes below `WINDOW_PROCESSES` (see `Gui::window_handle`).
+const WINDOW_BASE: u64 = 0x2000_0000;
+const WINDOW_SPAN: u64 = 0x1_0000;
+const WINDOW_PROCESSES: u64 = 0x2000;
+
+/// The process whose window `hwnd` is, when it is a window handle.
+pub(crate) fn window_process(hwnd: u64) -> Option<u64> {
+    let range = WINDOW_BASE..WINDOW_BASE + WINDOW_PROCESSES * WINDOW_SPAN;
+    (range.contains(&hwnd) && hwnd % 4 == 0 && hwnd % WINDOW_SPAN != 0).then(|| (hwnd - WINDOW_BASE) / WINDOW_SPAN)
+}
+
+/// A window of another (live) process: drawing on a DC of it goes to that
+/// process (`gdi::blit_to_other_process`).
+fn foreign_window(hwnd: u64) -> Option<u64> {
+    window_process(hwnd).filter(|&pid| pid != crate::kernel32::pid() && os_sys::proc_info(pid).is_ok())
+}
+
+/// Pixels another process drew on a DC of window `hwnd` of this process,
+/// through its handle service: drawn there and presented.
+pub(crate) fn blit_from_other_process(hwnd: u64, x: i32, y: i32, w: u32, h: u32, pixels: &[Color]) -> bool {
+    gdi::blit_from_other_process(hwnd, x, y, w, h, pixels)
+}
+
 fn rgb(r: u8, g: u8, b: u8) -> Color {
     osyx_gfx::rgb(r, g, b)
 }
@@ -553,6 +577,30 @@ impl Gui {
     fn handle(&mut self) -> u64 {
         self.next += 4;
         self.next
+    }
+
+    /// A handle for a new window. Window handles name their process
+    /// (`WINDOW_BASE + pid * WINDOW_SPAN + 4 * slot`), as Windows' handles
+    /// are valid in every process: a handle one process passes to another
+    /// leads back to its window (Chromium's GPU process draws into the
+    /// browser process's windows with GetDC and BitBlt). Slots go round, so
+    /// a destroyed window's handle is not reused at once.
+    fn window_handle(&mut self) -> u64 {
+        static SLOT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let pid = crate::kernel32::pid();
+        if pid >= WINDOW_PROCESSES {
+            return self.handle();
+        }
+        let base = WINDOW_BASE + pid * WINDOW_SPAN;
+        let slots = WINDOW_SPAN / 4;
+        for _ in 1..slots {
+            let slot = SLOT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % slots;
+            let h = base + 4 * slot;
+            if slot != 0 && !self.windows.contains_key(&h) {
+                return h;
+            }
+        }
+        self.handle()
     }
 
     /// Zeroed pixel storage for a bitmap. Deleted large buffers are reused so
@@ -1490,7 +1538,7 @@ fn create_window(
         } else {
             Some(g.conn()?.create_window(spec).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?)
         };
-        let hwnd = g.handle();
+        let hwnd = g.window_handle();
         if let Some(win) = &win {
             g.by_prism.insert(win.id, hwnd);
         }
@@ -1659,9 +1707,12 @@ pub(crate) fn is_window(hwnd: u64) -> bool {
     with(|g| g.windows.contains_key(&hwnd))
 }
 
+/// IsWindow: a window of this process, or one of another process that
+/// still has it.
 extern "win64" fn IsWindow(hwnd: u64) -> Bool {
-    is_window(hwnd) as Bool
+    (is_window(hwnd) || foreign_window(hwnd).is_some_and(|pid| crate::inherit::window_exists_in(pid, hwnd))) as Bool
 }
+
 
 extern "win64" fn IsWindowVisible(hwnd: u64) -> Bool {
     with(|g| g.windows.get(&hwnd).is_some_and(|w| w.visible)) as Bool
@@ -4503,7 +4554,13 @@ extern "win64" fn GetDC(hwnd: u64) -> u64 {
         return gdi::display_dc();
     }
     let state = with(|g| g.windows.get(&hwnd).map(|w| (w.size, w.configured())));
-    let Some((size, configured)) = state else { return 0 };
+    let Some((size, configured)) = state else {
+        // A window of another process: a DC whose BitBlt draws there.
+        if foreign_window(hwnd).is_some() {
+            return with(|g| new_dc(g, hwnd, Rect::new(0, 0, 0, 0)));
+        }
+        return 0;
+    };
     // A configured window may still be presenting the previous frame, the
     // same wait BeginPaint does; a hidden window gets its DC at once (its
     // drawing lands in the buffer and shows on ShowWindow).

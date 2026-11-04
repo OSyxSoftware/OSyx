@@ -81,6 +81,7 @@ $programs = [ordered]@{
     'windll.dll'  = @{ Src = @('windll.c', 'windll.def'); Args = @('-shared', '-Wl,-e,DllMainCRTStartup', $apisetLib, '-lkernel32') }
     'gdi2.exe'    = @{ Src = @('gdi2.c'); Args = @('-mno-stack-arg-probe', '-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lgdi32', '-lkernel32') }
     'gui.exe'     = @{ Src = @('gui.c'); Args = @('-Wl,--subsystem,windows', '-Wl,-e,start', '-limm32', '-luser32', '-lgdi32', '-lkernel32') }
+    'xwindow.exe' = @{ Src = @('xwindow.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lgdi32', '-lkernel32') }
     'winsock.exe' = @{ Src = @('winsock.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lws2_32', '-lkernel32') }
     'wsock32.exe' = @{ Src = @('wsock32.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lwsock32', '-lkernel32') }
     'wsaext.exe'  = @{ Src = @('wsaext.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lws2_32', '-lkernel32') }
