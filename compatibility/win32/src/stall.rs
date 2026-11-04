@@ -236,7 +236,8 @@ fn watchdog() {
                 Some((api, what, at)) => format!("last {api} on {what:#x} {} ms ago", now.saturating_sub(*at) / 1_000_000),
                 None => String::from("no tracked wait yet"),
             };
-            os_std::eprintln!("winrun:   thread {tid}: {busy} ticks{} — {tail}", if waiting { ", waiting" } else { "" });
+            let name = crate::kernel32::thread_description(tid as u32).map(|n| format!(" \"{n}\"")).unwrap_or_default();
+            os_std::eprintln!("winrun:   thread {tid}{name}: {busy} ticks{} — {tail}", if waiting { ", waiting" } else { "" });
             if let Some(owner) = describe(tid as u64, &mut words) {
                 if !owners.contains(&owner) {
                     owners.push(owner);

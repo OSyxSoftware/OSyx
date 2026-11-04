@@ -88,6 +88,19 @@ pub fn terminate(p: &ProcessObj, _code: u32) -> Result<(), u32> {
 
 /// CommandLineToArgvW rules: whitespace separates, quotes group, 2n
 /// backslashes before a quote → n and a quote toggle, 2n+1 → n and a quote.
+/// OSYX_WINRUN_APPEND_ARGS=<part>:<args>: arguments added to a child whose
+/// program path contains <part> (ignoring case), for diagnostics (Chromium's
+/// --enable-logging and --vmodule, say). In <args>, '+' separates arguments
+/// and '~' stands for ',' (the variable often travels in a comma list).
+fn append_debug_args(exe: &str, mut rest: Vec<String>) -> Vec<String> {
+    let Ok(v) = os_std::env::var("OSYX_WINRUN_APPEND_ARGS") else { return rest };
+    let Some((part, args)) = v.split_once(':') else { return rest };
+    if !part.is_empty() && exe.to_ascii_lowercase().contains(&part.to_ascii_lowercase()) {
+        rest.extend(args.split('+').filter(|a| !a.is_empty()).map(|a| a.replace('~', ",")));
+    }
+    rest
+}
+
 fn split_command_line(s: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut cur = String::new();
@@ -361,6 +374,7 @@ pub(crate) extern "win64" fn CreateProcessW(
     let Some(program) = app.clone().or_else(|| args.first().cloned()) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let Some(exe) = find_program(&program) else { return fail(ERROR_FILE_NOT_FOUND, 0) };
     let rest: Vec<String> = if app.is_some() { args.iter().skip(1).cloned().collect() } else { args.into_iter().skip(1).collect() };
+    let rest = append_debug_args(&exe, rest);
     let restricted = exe.eq_ignore_ascii_case("/opt/zen/zen.exe")
         && rest.iter().any(|arg| arg.eq_ignore_ascii_case("-contentproc"))
         && os_std::env::var("OSYX_EXPERIMENTAL_CONTENT_SANDBOX").is_ok_and(|v| v == "1");
