@@ -19,14 +19,16 @@ mod events;
 mod overlapped;
 mod service;
 
-/// CancelIoEx/CancelIo on a socket handle (see overlapped.rs).
-pub(crate) fn cancel_socket_io(s: u64, ov: u64) -> bool {
-    overlapped::cancel(s, ov)
+/// CancelIoEx (every thread's operations) and CancelIo (the calling
+/// thread's) on a socket handle (see overlapped.rs).
+pub(crate) fn cancel_socket_io(s: u64, ov: u64, own_thread_only: bool) -> bool {
+    overlapped::cancel(s, ov, own_thread_only.then(os_sys::gettid))
 }
 
-/// SetFileCompletionNotificationModes' FILE_SKIP_COMPLETION_PORT_ON_SUCCESS.
-pub(crate) fn set_skip_on_success(s: u64, on: bool) {
-    overlapped::set_skip(s, on);
+/// SetFileCompletionNotificationModes' FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
+/// (it cannot be turned off again).
+pub(crate) fn set_skip_on_success(s: u64) {
+    overlapped::set_skip(s);
 }
 
 /// Whether `s` is an open socket handle.
@@ -34,8 +36,13 @@ pub(crate) fn is_socket(s: u64) -> bool {
     SOCKETS.lock().unwrap().contains_key(&s)
 }
 
-/// CreateIoCompletionPort for a socket handle: false if `s` is not one.
-pub(crate) fn associate_socket(s: u64, port: u64, key: u64) -> bool {
+/// The completion port a socket handle is associated with.
+pub(crate) fn socket_port(s: u64) -> Option<u64> {
+    overlapped::port_of(s)
+}
+
+/// CreateIoCompletionPort for a socket handle.
+pub(crate) fn associate_socket(s: u64, port: u64, key: u64) -> Result<(), u32> {
     overlapped::associate(s, port, key)
 }
 pub(crate) mod mswsock;
@@ -1327,9 +1334,16 @@ pub(crate) extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: 
             return Err(WSAEOPNOTSUPP);
         }
         let data = wsa_gather(bufs, count)?;
-        os_sys::sock_send(fd, &data, None, 0).map_err(wsa)
+        if !ov.is_null() {
+            return Ok(Err((fd, data)));
+        }
+        os_sys::sock_send(fd, &data, None, 0).map_err(wsa).map(Ok)
     })();
-    send_result(s, r, sent, ov)
+    match r {
+        Ok(Err((fd, data))) => overlapped::send(s, fd, data, None, ov, sent),
+        Ok(Ok(n)) => send_result(s, Ok(n), sent, core::ptr::null_mut()),
+        Err(e) => send_result(s, Err(e), sent, core::ptr::null_mut()),
+    }
 }
 
 /// WSASendTo: like WSASend, with the destination of a datagram.
@@ -1353,9 +1367,16 @@ pub(crate) extern "win64" fn WSASendTo(
         }
         let to = if to.is_null() { None } else { Some(read_addr(to, tolen)?) };
         let data = wsa_gather(bufs, count)?;
-        os_sys::sock_send(fd, &data, to.as_ref(), 0).map_err(wsa)
+        if !ov.is_null() {
+            return Ok(Err((fd, data, to)));
+        }
+        os_sys::sock_send(fd, &data, to.as_ref(), 0).map_err(wsa).map(Ok)
     })();
-    send_result(s, r, sent, ov)
+    match r {
+        Ok(Err((fd, data, to))) => overlapped::send(s, fd, data, to, ov, sent),
+        Ok(Ok(n)) => send_result(s, Ok(n), sent, core::ptr::null_mut()),
+        Err(e) => send_result(s, Err(e), sent, core::ptr::null_mut()),
+    }
 }
 
 /// The received count and in/out flags of a WSARecv-style call.

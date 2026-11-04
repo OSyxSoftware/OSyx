@@ -394,6 +394,7 @@ static TABLE: Mutex<Table> = Mutex::new(Table {
 /// SECTION_ALL_ACCESS.
 pub const SECTION_ALL_ACCESS: u32 = 0x000f_001f;
 pub const SECTION_MAP_WRITE: u32 = 0x2;
+pub const SECTION_MAP_READ: u32 = 0x4;
 pub const SECTION_MAP_EXECUTE: u32 = 0x8;
 
 /// The rights handle `h` grants to its section: what DuplicateHandle gave

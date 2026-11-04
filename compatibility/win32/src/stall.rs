@@ -57,13 +57,18 @@ impl Drop for Guard {
 /// Notes that the calling thread is about to block in `api` on `what`.
 pub fn waiting(api: &'static str, what: u64, extra: u64) -> Guard {
     if !WATCHDOG.swap(true, Ordering::Relaxed) {
-        os_std::thread::spawn(watchdog);
+        // Diagnostics only: if the thread cannot start, waits go on
+        // without reports.
+        let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(watchdog);
     }
     let tid = os_sys::gettid();
     let rsp: u64;
     // SAFETY: reads the stack pointer only.
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
-    let wait = Wait { api, what, extra, since: now_ns(), teb: crate::teb::current(), rsp, reported: false };
+    // Helper threads of winrun's own (thread-pool timers and waits) have no
+    // TEB: only registered Windows threads do, and only theirs is read.
+    let teb = if crate::kernel32::thread_object(tid as u32).is_some() { crate::teb::current() } else { 0 };
+    let wait = Wait { api, what, extra, since: now_ns(), teb, rsp, reported: false };
     WAITS.lock().unwrap().entry(tid).or_default().push(wait);
     Guard(tid)
 }
@@ -84,7 +89,11 @@ fn watchdog() {
     loop {
         os_std::thread::sleep(core::time::Duration::from_millis(SCAN_EVERY_MS));
         let now = now_ns();
-        // Copied out, so the report below runs without the lock.
+        // Copied out, so the report below runs without the lock. The stack
+        // of a newly stalled thread is copied while the lock is held: the
+        // thread cannot leave its wait (and exit, freeing its stack) before
+        // the lock is released.
+        let mut stacks: Vec<(u64, u64, u64, Vec<u64>)> = Vec::new();
         let snapshot: Vec<(u64, &'static str, String, u64, u64, u64, bool)> = {
             let mut waits = WAITS.lock().unwrap();
             let stalled = waits.values().flatten().any(|w| !w.reported && now.saturating_sub(w.since) > REPORT_AFTER_NS);
@@ -97,6 +106,17 @@ fn watchdog() {
                     let fresh = !w.reported && now.saturating_sub(w.since) > REPORT_AFTER_NS;
                     if fresh {
                         w.reported = true;
+                        if w.teb != 0 {
+                            // SAFETY: the waiting thread's TEB and stack, alive while it
+                            // waits (it cannot drop its guard while WAITS is held).
+                            unsafe {
+                                let (limit, base) = (crate::teb::get::<u64>(w.teb, crate::teb::TEB_STACK_LIMIT), crate::teb::get::<u64>(w.teb, crate::teb::TEB_STACK_BASE));
+                                let start = w.rsp.max(limit).min(base) & !7;
+                                let end = start.saturating_add(32 << 10).min(base);
+                                let words = core::slice::from_raw_parts(start as *const u64, ((end - start) / 8) as usize).to_vec();
+                                stacks.push((tid, start, end, words));
+                            }
+                        }
                     }
                     out.push((tid, w.api, describe(w), now.saturating_sub(w.since) / 1_000_000_000, w.teb, w.rsp, fresh));
                 }
@@ -125,11 +145,12 @@ fn watchdog() {
         os_std::eprintln!("winrun: stalled waits ({} thread waits under way):", snapshot.len());
         for (tid, api, what, secs, teb, rsp, fresh) in snapshot {
             os_std::eprintln!("winrun:   thread {tid}{} {api} for {secs} s on {what}", if fresh { " STALLED" } else { "" });
-            if fresh && teb != 0 {
-                // SAFETY: the waiting thread's TEB (it is blocked, so alive).
-                let (limit, base) = unsafe { (crate::teb::get::<u64>(teb, crate::teb::TEB_STACK_LIMIT), crate::teb::get::<u64>(teb, crate::teb::TEB_STACK_BASE)) };
-                if let Some(chain) = crate::exceptions::chain(limit, base, rsp) {
-                    os_std::eprintln!("winrun:     called from: {chain}");
+            let _ = (teb, rsp);
+            if fresh {
+                if let Some((_, _, _, words)) = stacks.iter().find(|s| s.0 == tid) {
+                    if let Some(chain) = crate::exceptions::chain_of(words) {
+                        os_std::eprintln!("winrun:     called from: {chain}");
+                    }
                 }
             }
         }

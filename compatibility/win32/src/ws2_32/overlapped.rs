@@ -8,21 +8,23 @@
 //! OVERLAPPED (Internal: the NTSTATUS, InternalHigh: the bytes), signals
 //! its event, and queues a packet unless the event's low bit is set.
 use super::*;
+use crate::error::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER};
 use crate::kernel32::overlapped as ov;
 
 /// Sockets associated with a completion port: (port, key).
 static PORTS: Mutex<BTreeMap<u64, (u64, u64)>> = Mutex::new(BTreeMap::new());
-/// Receives under way, by OVERLAPPED: their socket, and whether they were
-/// cancelled.
-static PENDING: Mutex<BTreeMap<u64, (u64, bool)>> = Mutex::new(BTreeMap::new());
+/// Operations under way, by OVERLAPPED: their socket, the thread that
+/// issued them, and whether they were cancelled.
+static PENDING: Mutex<BTreeMap<u64, (u64, u64, bool)>> = Mutex::new(BTreeMap::new());
 
-/// CancelIoEx on a socket: the receives under way on it (all, or the one
-/// with OVERLAPPED `o`) end with WSA_OPERATION_ABORTED. False if there was
-/// none.
-pub(crate) fn cancel(s: u64, o: u64) -> bool {
+/// Cancels operations under way on a socket so they end with
+/// WSA_OPERATION_ABORTED: the one with OVERLAPPED `o`, or all of them
+/// (`o` 0), or with `thread` only those that thread issued (CancelIo).
+/// False if there was none.
+pub(crate) fn cancel(s: u64, o: u64, thread: Option<u64>) -> bool {
     let mut found = false;
-    for (k, (sock, cancelled)) in PENDING.lock().unwrap().iter_mut() {
-        if *sock == s && (o == 0 || *k == o) {
+    for (k, (sock, issuer, cancelled)) in PENDING.lock().unwrap().iter_mut() {
+        if *sock == s && (o == 0 || *k == o) && thread.is_none_or(|t| t == *issuer) {
             *cancelled = true;
             found = true;
         }
@@ -55,13 +57,25 @@ pub(super) fn error_of(status: u64) -> u32 {
     STATUSES.iter().find(|(_, s)| *s == status).map_or(WSAEINVAL, |(w, _)| *w)
 }
 
-/// CreateIoCompletionPort for a socket: false if `s` is not one.
-pub(crate) fn associate(s: u64, port: u64, key: u64) -> bool {
+pub(super) fn port_of(s: u64) -> Option<u64> {
+    PORTS.lock().unwrap().get(&s).map(|&(port, _)| port)
+}
+
+/// CreateIoCompletionPort for a socket. A socket stays with the first port
+/// it was associated with until it is closed: another port is refused
+/// (ERROR_INVALID_PARAMETER), as on Windows.
+pub(crate) fn associate(s: u64, port: u64, key: u64) -> Result<(), u32> {
     if !SOCKETS.lock().unwrap().contains_key(&s) {
-        return false;
+        return Err(ERROR_INVALID_HANDLE);
     }
-    PORTS.lock().unwrap().insert(s, (port, key));
-    true
+    let mut ports = PORTS.lock().unwrap();
+    match ports.get(&s) {
+        Some(&(p, _)) if p != port => Err(ERROR_INVALID_PARAMETER),
+        _ => {
+            ports.insert(s, (port, key));
+            Ok(())
+        }
+    }
 }
 
 pub(super) fn forget(s: u64) {
@@ -69,16 +83,11 @@ pub(super) fn forget(s: u64) {
     SKIP.lock().unwrap().remove(&s);
 }
 
-/// Sockets with FILE_SKIP_COMPLETION_PORT_ON_SUCCESS.
+/// Sockets with FILE_SKIP_COMPLETION_PORT_ON_SUCCESS (once set, it stays).
 static SKIP: Mutex<alloc::collections::BTreeSet<u64>> = Mutex::new(alloc::collections::BTreeSet::new());
 
-pub(super) fn set_skip(s: u64, on: bool) {
-    let mut skip = SKIP.lock().unwrap();
-    if on {
-        skip.insert(s);
-    } else {
-        skip.remove(&s);
-    }
+pub(super) fn set_skip(s: u64) {
+    SKIP.lock().unwrap().insert(s);
 }
 
 /// Completes an operation that finished in the call: as `finish`, without
@@ -141,13 +150,16 @@ pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, 
     let (o, from, fromlen) = (o as u64, from as u64, fromlen as u64);
     // SAFETY: the caller's OVERLAPPED.
     unsafe { ov::set_status(o, STATUS_PENDING) };
-    PENDING.lock().unwrap().insert(o, (s, false));
+    PENDING.lock().unwrap().insert(o, (s, os_sys::gettid(), false));
     let port = PORTS.lock().unwrap().get(&s).copied();
+    // The helper holds the descriptor: closesocket meanwhile does not close
+    // it (or let the number be reused) until the helper is done.
+    super::service::hold_fd(fd);
     os_std::thread::spawn(move || {
         let total: usize = parts.iter().map(|p| p.0 as usize).sum();
         let mut data = alloc::vec![0u8; total];
         let (bytes, error) = loop {
-            let cancelled = PENDING.lock().unwrap().get(&o).is_none_or(|p| p.1);
+            let cancelled = PENDING.lock().unwrap().get(&o).is_none_or(|p| p.2);
             if cancelled || !SOCKETS.lock().unwrap().contains_key(&s) {
                 break (0, WSA_OPERATION_ABORTED);
             }
@@ -180,7 +192,61 @@ pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, 
             }
         };
         PENDING.lock().unwrap().remove(&o);
+        if super::service::release_fd(fd) {
+            let _ = os_sys::close(fd);
+        }
         finish_to(port, o, bytes, error);
+    });
+    err(WSA_IO_PENDING, SOCKET_ERROR)
+}
+
+/// An overlapped send: what can be sent at once is, and the operation
+/// completes in the call (0); the rest is sent from a helper thread as the
+/// socket becomes writable, and the call returns WSA_IO_PENDING.
+pub(super) fn send(s: u64, fd: u64, data: Vec<u8>, to: Option<SockAddr>, o: *mut u8, sent: *mut u32) -> i32 {
+    let o = o as u64;
+    let first = match os_sys::sock_send(fd, &data, to.as_ref(), net::MSG_DONTWAIT) {
+        Ok(n) => n,
+        Err(Errno::WouldBlock) => 0,
+        Err(e) => return err(wsa(e), SOCKET_ERROR),
+    };
+    if first == data.len() {
+        if !sent.is_null() {
+            // SAFETY: the caller's out count.
+            unsafe { *sent = first as u32 };
+        }
+        finish_now(s, o, first);
+        return 0;
+    }
+    // SAFETY: the caller's OVERLAPPED.
+    unsafe { ov::set_status(o, STATUS_PENDING) };
+    PENDING.lock().unwrap().insert(o, (s, os_sys::gettid(), false));
+    let port = PORTS.lock().unwrap().get(&s).copied();
+    super::service::hold_fd(fd);
+    os_std::thread::spawn(move || {
+        let mut done = first;
+        let error = loop {
+            if done == data.len() {
+                break 0;
+            }
+            let cancelled = PENDING.lock().unwrap().get(&o).is_none_or(|p| p.2);
+            if cancelled || !SOCKETS.lock().unwrap().contains_key(&s) {
+                break WSA_OPERATION_ABORTED;
+            }
+            match os_sys::sock_send(fd, &data[done..], to.as_ref(), net::MSG_DONTWAIT) {
+                Ok(n) => done += n,
+                Err(Errno::WouldBlock) => {
+                    let mut item = [os_sys::ipc::WaitItem { handle: fd, events: osyx_abi::ipc::WAIT_WRITABLE, revents: 0 }];
+                    let _ = os_sys::wait_handles(&mut item, 200_000_000);
+                }
+                Err(e) => break wsa(e),
+            }
+        };
+        PENDING.lock().unwrap().remove(&o);
+        if super::service::release_fd(fd) {
+            let _ = os_sys::close(fd);
+        }
+        finish_to(port, o, done, error);
     });
     err(WSA_IO_PENDING, SOCKET_ERROR)
 }

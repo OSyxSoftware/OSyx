@@ -959,7 +959,7 @@ extern "win64" fn GetOverlappedResult(h: u64, ov: *const u8, n: *mut u32, wait: 
 extern "win64" fn CancelIoEx(h: u64, ov: *const u8) -> Bool {
     match objects::get(h) {
         None if crate::ws2_32::is_socket(h) => {
-            if crate::ws2_32::cancel_socket_io(h, ov as u64) { TRUE } else { fail(ERROR_NOT_FOUND, FALSE) }
+            if crate::ws2_32::cancel_socket_io(h, ov as u64, false) { TRUE } else { fail(ERROR_NOT_FOUND, FALSE) }
         }
         None => fail(ERROR_INVALID_HANDLE, FALSE),
         Some(Object::Pipe(p)) if crate::pipes::cancel(&p) => TRUE,
@@ -991,8 +991,9 @@ extern "win64" fn DeviceIoControl(h: u64, _code: u32, _i: u64, _il: u32, _o: u64
 /// socket receives); a valid handle with none succeeds too.
 extern "win64" fn CancelIo(h: u64) -> Bool {
     match objects::get(h) {
+        // CancelIo cancels the calling thread's operations only.
         None if crate::ws2_32::is_socket(h) => {
-            crate::ws2_32::cancel_socket_io(h, 0);
+            crate::ws2_32::cancel_socket_io(h, 0, true);
             TRUE
         }
         None => fail(ERROR_INVALID_HANDLE, FALSE),
@@ -3477,7 +3478,10 @@ extern "win64" fn SetFileCompletionNotificationModes(h: u64, flags: u8) -> Bool 
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
     if crate::ws2_32::is_socket(h) {
-        crate::ws2_32::set_skip_on_success(h, flags & 1 != 0);
+        // A mode once set stays set: a later call without it changes nothing.
+        if flags & 1 != 0 {
+            crate::ws2_32::set_skip_on_success(h);
+        }
         return TRUE;
     }
     if objects::get(h).is_none() {
@@ -3487,15 +3491,26 @@ extern "win64" fn SetFileCompletionNotificationModes(h: u64, flags: u8) -> Bool 
 }
 
 /// CompareObjectHandles: whether two handles name the same kernel object.
+/// A pseudo-handle names this process or thread: a real handle to it is
+/// the same object.
 extern "win64" fn CompareObjectHandles(first: u64, second: u64) -> Bool {
-    let norm = |h: u64| match h {
-        objects::CURRENT_PROCESS | objects::CURRENT_THREAD => None,
-        h => Some(h),
+    let me = |h: u64| -> Option<bool> {
+        match h {
+            objects::CURRENT_PROCESS => Some(true),
+            objects::CURRENT_THREAD => Some(false),
+            _ => None,
+        }
     };
-    match (norm(first), norm(second)) {
-        (None, None) => b(first == second),
-        (Some(x), Some(y)) => objects::same_object(x, y).map_or(FALSE, b),
-        _ => FALSE,
+    let names_me = |pseudo: bool, h: u64| match objects::get(h) {
+        Some(Object::Process(p)) if pseudo => p.pid == pid(),
+        Some(Object::Thread(t)) if !pseudo => t.tid.load(Ordering::SeqCst) as u64 == teb::current_tid(),
+        _ => false,
+    };
+    match (me(first), me(second)) {
+        (Some(a), Some(c)) => b(a == c),
+        (Some(a), None) => b(names_me(a, second)),
+        (None, Some(c)) => b(names_me(c, first)),
+        (None, None) => objects::same_object(first, second).map_or(FALSE, b),
     }
 }
 

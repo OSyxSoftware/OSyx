@@ -524,6 +524,11 @@ extern "win64" fn CreateIoCompletionPort(file: u64, existing: u64, key: u64, _th
     if object.is_none() && !crate::ws2_32::is_socket(file) {
         return fail(ERROR_INVALID_HANDLE, 0);
     }
+    // A socket already associated with another port keeps that one: checked
+    // before a new port is made, so a refused call leaves nothing behind.
+    if object.is_none() && crate::ws2_32::socket_port(file).is_some_and(|p| p != existing) {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
     let port = if existing == 0 {
         new_port()
     } else if matches!(objects::get(existing), Some(Object::Port(_))) {
@@ -534,7 +539,9 @@ extern "win64" fn CreateIoCompletionPort(file: u64, existing: u64, key: u64, _th
     match object {
         Some(Object::Pipe(p)) => crate::pipes::associate(&p, port, key),
         None => {
-            crate::ws2_32::associate_socket(file, port, key);
+            if let Err(e) = crate::ws2_32::associate_socket(file, port, key) {
+                return fail(e, 0);
+            }
         }
         Some(_) => {}
     }

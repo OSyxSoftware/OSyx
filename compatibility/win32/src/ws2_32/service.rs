@@ -173,6 +173,12 @@ static NEXT_TOKEN: AtomicU32 = AtomicU32::new(1);
 static FD_REFS: Mutex<BTreeMap<u64, u32>> = Mutex::new(BTreeMap::new());
 const PROVIDER_RESERVED: u64 = 112;
 
+/// One more user of kernel socket `fd` (a pending overlapped operation),
+/// released with `release_fd`.
+pub(super) fn hold_fd(fd: u64) {
+    *FD_REFS.lock().unwrap().entry(fd).or_insert(1) += 1;
+}
+
 /// Releases one handle's share of kernel socket `fd`: true when it was
 /// the last and the socket is to be closed.
 pub(super) fn release_fd(fd: u64) -> bool {
