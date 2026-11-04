@@ -1684,6 +1684,9 @@ fn duplicate_handle(
                 crate::objsec::map_generic(access, &crate::objsec::SECTION) & objects::SECTION_ALL_ACCESS
             };
             if want & !have != 0 {
+                if TRACE.load(Ordering::Relaxed) {
+                    os_std::eprintln!("winrun: DuplicateHandle of section {src:#x}: rights {want:#x} (asked {access:#x}, options {options:#x}) exceed the handle's {have:#x}");
+                }
                 return fail(ERROR_ACCESS_DENIED, FALSE);
             }
             Some(want)

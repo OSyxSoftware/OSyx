@@ -178,6 +178,9 @@ struct Win {
     props: BTreeMap<String, u64>,
     /// The window's menu bar (SetMenu; the CreateWindow menu of a top-level window).
     menu: u64,
+    /// Place in the Z order among this process's windows: higher is nearer
+    /// the top (see `raise`).
+    z: u64,
 }
 
 impl Win {
@@ -1573,6 +1576,7 @@ fn create_window(
                 drawn: None,
                 props: BTreeMap::new(),
                 menu: if style & WS_CHILD == 0 && g.menus.contains_key(&menu) { menu } else { 0 },
+                z: next_z(),
             },
         );
         Ok(hwnd)
@@ -1736,6 +1740,11 @@ extern "win64" fn ShowWindow(hwnd: u64, cmd: i32) -> Bool {
     }
     let r = with(|g| {
         g.synchronize();
+        // Showing (anything but SW_HIDE, SW_SHOWNA, SW_SHOWNOACTIVATE and
+        // the minimizing commands) brings the window to the top.
+        if g.windows.contains_key(&hwnd) && !matches!(cmd, 0 | 2 | 4 | 6 | 7 | 8 | 11) {
+            raise(g, hwnd);
+        }
         let w = g.windows.get_mut(&hwnd)?;
         let was = w.visible;
         let previous_state = w.style & (WS_MINIMIZE | WS_MAXIMIZE);
@@ -1993,6 +2002,20 @@ extern "win64" fn SetWindowPos(hwnd: u64, after: u64, x: i32, y: i32, cx: i32, c
         }
     }
     let Some(proc) = wndproc_of(hwnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+    // The Z order: HWND_TOP and HWND_TOPMOST bring the window up, HWND_BOTTOM
+    // sends it down (SWP_NOZORDER keeps it).
+    const SWP_NOZORDER: u32 = 0x4;
+    if flags & SWP_NOZORDER == 0 {
+        with(|g| match after as i64 {
+            0 | -1 => raise(g, hwnd),
+            1 => {
+                if let Some(w) = g.windows.get_mut(&hwnd) {
+                    w.z = 0;
+                }
+            }
+            _ => {}
+        });
+    }
     let mut position = WindowPos { hwnd, after, x, y, cx, cy, flags, padding: 0 };
     if flags & 0x400 == 0 { call_window_pos(proc, hwnd, WM_WINDOWPOSCHANGING, &mut position); }
     let WindowPos { x, y, cx, cy, flags, .. } = position;
@@ -5953,19 +5976,39 @@ extern "win64" fn GetWindow(wnd: u64, cmd: u32) -> u64 {
     } else { 0 }
 }
 
-/// The topmost child of `wnd` (the most recently created one: new windows
-/// go on top), or of the desktop when `wnd` is NULL. 0 if there is none.
+/// The topmost child of `wnd`, or of the desktop when `wnd` is NULL (this
+/// process's top-level windows, message-only ones aside). 0 if there is none.
 extern "win64" fn GetTopWindow(wnd: u64) -> u64 {
     with(|g| {
         if wnd != 0 && !g.windows.contains_key(&wnd) {
             return fail(ERROR_INVALID_WINDOW_HANDLE, 0);
         }
         g.windows.iter()
-            .filter(|(_, w)| if wnd == 0 { w.style & WS_CHILD == 0 } else { w.style & WS_CHILD != 0 && w.owner == wnd })
-            .map(|(&h, _)| h)
-            .max()
-            .unwrap_or(0)
+            .filter(|(_, w)| if wnd == 0 { is_top_level(w) } else { w.style & WS_CHILD != 0 && w.owner == wnd })
+            .max_by_key(|(_, w)| w.z)
+            .map_or(0, |(&h, _)| h)
     })
+}
+
+/// The next place on top of the Z order (see `Win::z`).
+fn next_z() -> u64 {
+    static Z: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+    Z.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
+/// A window EnumWindows lists: a top-level one, not message-only.
+fn is_top_level(w: &Win) -> bool {
+    w.style & WS_CHILD == 0 && w.owner != (-3i64) as u64
+}
+
+/// Brings `wnd`'s top-level window to the top of the Z order (it was
+/// created, shown, activated or placed at HWND_TOP).
+fn raise(g: &mut Gui, wnd: u64) {
+    if let Some(root) = root_window(g, wnd) {
+        if let Some(w) = g.windows.get_mut(&root) {
+            w.z = next_z();
+        }
+    }
 }
 
 extern "win64" fn SetParent(wnd: u64, _parent: u64) -> u64 {
@@ -5990,6 +6033,7 @@ fn root_window(g: &Gui, wnd: u64) -> Option<u64> {
 extern "win64" fn SetForegroundWindow(wnd: u64) -> Bool {
     with(|g| {
         let Some(root) = root_window(g, wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+        raise(g, root);
         if let Some(c) = g.conn.as_mut() {
             if let Some(w) = g.windows.get_mut(&root) {
                 if let Some(win) = w.win.as_mut() { let _ = win.action(c, proto::Action::Activate); }
@@ -6023,6 +6067,9 @@ extern "win64" fn GetForegroundWindow() -> u64 {
     /// it); a child control has no stacking order of its own here.
 extern "win64" fn BringWindowToTop(wnd: u64) -> Bool {
     with(|g| {
+        if g.windows.contains_key(&wnd) {
+            raise(g, wnd);
+        }
         let Some(w) = g.windows.get(&wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
         if w.style & WS_CHILD == 0 {
             if let Some(c) = g.conn.as_mut() {
@@ -7103,7 +7150,23 @@ extern "win64" fn EnumWindows(proc_: u64, param: u64) -> Bool {
     if proc_ == 0 {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let list: Vec<u64> = with(|g| g.windows.keys().copied().collect());
+    // Top-level windows from the top of the Z order down, as Windows lists
+    // them (Chromium's occlusion tracking takes each listed window as
+    // covering the ones after it).
+    let list: Vec<u64> = with(|g| {
+        let mut l: Vec<(u64, u64)> = g.windows.iter().filter(|(_, w)| is_top_level(w)).map(|(&h, w)| (w.z, h)).collect();
+        l.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        l.into_iter().map(|(_, h)| h).collect()
+    });
+    static TRACED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) && TRACED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
+        let rows: Vec<String> = with(|g| {
+            list.iter()
+                .filter_map(|h| g.windows.get(h).map(|w| alloc::format!("{h:#x} {:?} visible {} at {:?} {:?} ex {:#x}", w.title, w.visible, w.pos, w.size, w.ex_style)))
+                .collect()
+        });
+        os_std::eprintln!("winrun: EnumWindows lists {} window(s): {}", rows.len(), rows.join("; "));
+    }
     // A 32-bit program's WNDENUMPROC is 32-bit code: it runs through the bridge.
     if crate::wow64::is_active() {
         for h in list {
