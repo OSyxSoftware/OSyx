@@ -26,7 +26,8 @@ pub const INVALID_HANDLE_VALUE: u64 = u64::MAX;
 #[track_caller]
 pub fn fail<T>(err: u32, v: T) -> T {
     teb::set_last_error(err);
-    if crate::VERBOSE.load(Ordering::Relaxed) {
+    // OSYX_WINRUN_FAILTRACE sets TRACE without -v: it prints each failure.
+    if crate::VERBOSE.load(Ordering::Relaxed) || TRACE.load(Ordering::Relaxed) {
         note_failure(core::panic::Location::caller(), err);
     }
     v
