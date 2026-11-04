@@ -191,7 +191,7 @@ extern "win64" fn QueryProcessCycleTime(h: u64, cycles: *mut u64) -> i32 {
 /// Ends a thread of this process at its next safe point, with `code` as its
 /// exit status (as on Windows, no thread exit handlers run). The thread
 /// handle becomes signalled once the thread has really stopped.
-extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
+pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
     let Some((tid, obj)) = thread_of(h) else { return fail(ERROR_INVALID_HANDLE, 0) };
     if tid == os_sys::gettid() as u32 {
         kernel32::ExitThread(code);

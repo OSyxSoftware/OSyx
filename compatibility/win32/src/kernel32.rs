@@ -1885,7 +1885,7 @@ fn kernel_suspend_count(tid: u32) -> u64 {
 
 const ERROR_SIGNAL_REFUSED_W: u32 = 156;
 
-extern "win64" fn ResumeThread(h: u64) -> u32 {
+pub(crate) extern "win64" fn ResumeThread(h: u64) -> u32 {
     match objects::get(h) {
         Some(Object::Thread(t)) => {
             let tid = t.tid.load(Ordering::SeqCst);

@@ -4489,6 +4489,12 @@ extern "win64" fn GetDC(hwnd: u64) -> u64 {
     with(|g| new_dc(g, hwnd, Rect::new(0, 0, size.0, size.1)))
 }
 
+/// The window a DC from GetDC, GetWindowDC or BeginPaint draws on; NULL for
+/// a memory DC, the screen DC or a handle that is no DC.
+extern "win64" fn WindowFromDC(dc: u64) -> u64 {
+    with(|g| g.dcs.get(&dc).map_or(0, |d| d.hwnd))
+}
+
 extern "win64" fn ReleaseDC(hwnd: u64, dc: u64) -> i32 {
     let info = with(|g| g.dcs.remove(&dc).map(|d| (d.made, d.paint)));
     let had = info.is_some();
@@ -8448,6 +8454,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         IsValidDpiAwarenessContext,
         SetThreadDpiAwarenessContext,
         GetThreadDpiAwarenessContext,
+        WindowFromDC,
         GetAwarenessFromDpiAwarenessContext,
         AreDpiAwarenessContextsEqual,
         GetDpiForWindow,

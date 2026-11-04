@@ -406,6 +406,14 @@ static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 // Once set, never cleared. Set before a filtered process becomes runnable.
 static SYSCALL_FILTERS_EXIST: AtomicBool = AtomicBool::new(false);
 static TABLE: IrqSpinLock<Table> = IrqSpinLock::new(Table { procs: BTreeMap::new(), waiters: Vec::new() });
+
+/// The final records of reaped children, readable by their parent: an
+/// ended Windows process keeps its accounting (exit time, CPU time) while
+/// handles to it are open, and a parent that reaps a child at once still
+/// answers for it. Bounded: the oldest record goes first. Process ids are
+/// not reused, so a record never names a newer process.
+static REAPED: IrqSpinLock<alloc::collections::VecDeque<osyx_abi::ipc::ProcInfo>> = IrqSpinLock::new(alloc::collections::VecDeque::new());
+const REAPED_KEEP: usize = 256;
 /// Published before the first thread can run, removed before teardown.
 /// Clone the Arc and release this index before taking a memory lock. Faults
 /// never acquire TABLE, including while exec, exit or proc_info holds it.
@@ -982,7 +990,13 @@ pub fn wait(parent: Pid, target: Pid) -> Result<(Pid, i32), Errno> {
             match (any, done) {
                 (false, _) => Some(Err(Errno::NoChild)),
                 (true, Some((pid, status))) => {
-                    t.procs.remove(&pid);
+                    if let Some(p) = t.procs.remove(&pid) {
+                        let mut reaped = REAPED.lock();
+                        if reaped.len() >= REAPED_KEEP {
+                            reaped.pop_front();
+                        }
+                        reaped.push_back(make_info(&p));
+                    }
                     Some(Ok((pid, status)))
                 }
                 (true, None) if sched::current_kill_pending() => Some(Err(Errno::Interrupted)),
@@ -1340,7 +1354,12 @@ pub fn working_set_root(pid: Pid, caller: Pid) -> Result<u64, Errno> {
 
 /// The record for one process (for `proc_info`).
 pub fn info(pid: Pid) -> Result<osyx_abi::ipc::ProcInfo, Errno> {
-    TABLE.lock().procs.get(&pid).map(make_info).ok_or(Errno::NotFound)
+    if let Some(info) = TABLE.lock().procs.get(&pid).map(make_info) {
+        return Ok(info);
+    }
+    // A child the caller has reaped: its final record.
+    let me = sched::current_pid();
+    REAPED.lock().iter().rev().find(|i| i.pid == pid && i.parent == me).copied().ok_or(Errno::NotFound)
 }
 
 /// One record per process (for `proc_list`).

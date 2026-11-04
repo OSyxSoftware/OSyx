@@ -62,6 +62,8 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(IsValidDpiAwarenessContext, [Handle], I32),
     sig!(SetThreadDpiAwarenessContext, [Handle], Handle),
     sig!(GetThreadDpiAwarenessContext, [], Handle),
+    sig!(WindowFromDC, [Handle], Handle),
+    sig!(CreateRemoteThreadEx, [Handle, Ptr, Uint, Ptr, Ptr, Uint, Ptr, Ptr], Handle),
     sig!(GetAwarenessFromDpiAwarenessContext, [Handle], I32),
     sig!(AreDpiAwarenessContextsEqual, [Handle, Handle], I32),
     sig!(GetDpiForWindow, [Handle], U32),

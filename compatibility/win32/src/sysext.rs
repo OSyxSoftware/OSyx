@@ -825,7 +825,7 @@ extern "win64" fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, 
     1
 }
 
-extern "win64" fn SetThreadAffinityMask(thread: u64, mask: u64) -> u64 {
+pub(crate) extern "win64" fn SetThreadAffinityMask(thread: u64, mask: u64) -> u64 {
     if mask==0 {return fail(ERROR_INVALID_PARAMETER,0);}
     if !(thread == objects::CURRENT_THREAD || matches!(objects::get(thread), Some(objects::Object::Thread(_)))) {
         return fail(ERROR_INVALID_HANDLE, 0);

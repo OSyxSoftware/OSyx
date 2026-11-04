@@ -709,6 +709,61 @@ extern "win64" fn CreateRemoteThread(h: u64, sa: u64, stack: usize, start: u64, 
     kernel32::CreateThread(sa, stack, start, param, flags, tid)
 }
 
+const PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY: u64 = 0x30003;
+const PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR: u64 = 0x30005;
+
+/// CreateRemoteThreadEx in this process. A GROUP_AFFINITY attribute (group
+/// 0, the only one) applies before the thread runs; an IDEAL_PROCESSOR is
+/// a scheduling hint, which the OSyx scheduler does not take.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn CreateRemoteThreadEx(h: u64, sa: u64, stack: usize, start: u64, param: u64, flags: u32, attrs: u64, tid: *mut u32) -> u64 {
+    if let Err(e) = local(h) {
+        return fail(e, 0);
+    }
+    let mut mask = None;
+    if attrs != 0 {
+        // SAFETY: a list made by InitializeProcThreadAttributeList.
+        let list = unsafe { &*(attrs as *const AttributeList) };
+        for &(attribute, value, size) in &list.entries[..list.used as usize] {
+            match attribute {
+                PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY => {
+                    if value == 0 || size < 16 {
+                        return fail(ERROR_INVALID_PARAMETER, 0);
+                    }
+                    // SAFETY: the caller's GROUP_AFFINITY {Mask, Group, Reserved}.
+                    let (m, group) = unsafe { (core::ptr::read_unaligned(value as *const u64), core::ptr::read_unaligned((value + 8) as *const u16)) };
+                    if group != 0 || m == 0 {
+                        return fail(ERROR_INVALID_PARAMETER, 0);
+                    }
+                    mask = Some(m);
+                }
+                PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR => {
+                    if value == 0 || size < 4 {
+                        return fail(ERROR_INVALID_PARAMETER, 0);
+                    }
+                }
+                _ => return fail(ERROR_NOT_SUPPORTED, 0),
+            }
+        }
+    }
+    let Some(mask) = mask else { return kernel32::CreateThread(sa, stack, start, param, flags, tid) };
+    let t = kernel32::CreateThread(sa, stack, start, param, flags | CREATE_SUSPENDED, tid);
+    if t == 0 {
+        return 0;
+    }
+    if crate::sysext::SetThreadAffinityMask(t, mask) == 0 {
+        // The thread never ran: it ends here, and the call fails.
+        let e = crate::teb::last_error();
+        crate::procinfo::TerminateThread(t, 0);
+        kernel32::CloseHandle(t);
+        return fail(e, 0);
+    }
+    if flags & CREATE_SUSPENDED == 0 {
+        kernel32::ResumeThread(t);
+    }
+    t
+}
+
 extern "win64" fn GetProcessId(h: u64) -> u32 {
     match process_of(h) {
         Ok(None) => kernel32::pid() as u32,
@@ -948,6 +1003,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         VirtualFreeEx,
         VirtualProtectEx,
         CreateRemoteThread,
+        CreateRemoteThreadEx,
         GetProcessId,
         InitializeProcThreadAttributeList,
         UpdateProcThreadAttribute,
