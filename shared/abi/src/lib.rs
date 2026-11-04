@@ -701,8 +701,10 @@ pub struct FsStat {
     pub fstype: [u8; 16],
 }
 
-/// Maximum number of threads per process.
-pub const MAX_THREADS: usize = 256;
+/// Maximum number of threads per process. Windows programs built on
+/// Chromium run a hundred threads and more, and winrun adds a helper thread
+/// for each registered wait and pending overlapped socket operation.
+pub const MAX_THREADS: usize = 2048;
 
 /// Largest argument + environment block of `spawn` / `execve` (bytes).
 pub const MAX_EXEC_ARGS: usize = 128 * 1024;

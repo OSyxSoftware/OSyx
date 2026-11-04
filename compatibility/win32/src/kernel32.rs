@@ -1953,6 +1953,13 @@ pub(crate) extern "win64" fn ResumeThread(h: u64) -> u32 {
 /// `thread_suspend`); a thread waiting inside the kernel stops when its wait
 /// ends. At the maximum count of 127 it fails with ERROR_SIGNAL_REFUSED, and
 /// a thread that has ended with ERROR_ACCESS_DENIED.
+///
+/// A thread is not left stopped inside winrun while it holds one of
+/// winrun's locks or the heap: the suspender (a stack sampler calling
+/// VirtualQuery, say) and every other thread would wait for it, while
+/// Windows never suspends a thread inside a kernel lock. The thread runs on
+/// to a point where it holds none (half a second at most) before the call
+/// returns.
 extern "win64" fn SuspendThread(h: u64) -> u32 {
     let (tid, created) = match objects::get(h) {
         Some(Object::Thread(t)) => {
@@ -1964,11 +1971,23 @@ extern "win64" fn SuspendThread(h: u64) -> u32 {
         _ if h == objects::CURRENT_THREAD => (teb::current_tid() as u32, 0),
         _ => return fail(ERROR_INVALID_HANDLE, u32::MAX),
     };
-    match os_sys::thread_suspend(tid as u64, osyx_abi::suspend::SUSPEND) {
-        Ok(previous) => (previous + created) as u32,
-        Err(osyx_abi::Errno::Busy) => fail(ERROR_SIGNAL_REFUSED_W, u32::MAX),
-        Err(osyx_abi::Errno::NotFound) => fail(ERROR_ACCESS_DENIED, u32::MAX),
-        Err(e) => fail(errno_to_win32(e), u32::MAX),
+    let me = tid == teb::current_tid() as u32;
+    let started = os_std::time::Instant::now();
+    loop {
+        let previous = match os_sys::thread_suspend(tid as u64, osyx_abi::suspend::SUSPEND) {
+            Ok(p) => p,
+            Err(osyx_abi::Errno::Busy) => return fail(ERROR_SIGNAL_REFUSED_W, u32::MAX),
+            Err(osyx_abi::Errno::NotFound) => return fail(ERROR_ACCESS_DENIED, u32::MAX),
+            Err(e) => return fail(errno_to_win32(e), u32::MAX),
+        };
+        // Already stopped (at such a point), or the caller itself (it stops
+        // on its way back to the program).
+        let safe = os_std::sync::locks_held_by(tid as u64) == 0 && !os_std::sync::allocator_busy();
+        if me || previous > 0 || safe || started.elapsed() >= core::time::Duration::from_millis(500) {
+            return (previous + created) as u32;
+        }
+        let _ = os_sys::thread_suspend(tid as u64, osyx_abi::suspend::RESUME);
+        os_std::thread::sleep(core::time::Duration::from_millis(1));
     }
 }
 

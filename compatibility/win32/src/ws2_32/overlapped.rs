@@ -118,6 +118,12 @@ pub(super) fn finish(s: u64, o: u64, bytes: usize, error: u32) {
 /// `finish` with the (port, key) the operation was issued under: a socket
 /// closed meanwhile still gets the packet for its aborted operation.
 fn finish_to(port: Option<(u64, u64)>, o: u64, bytes: usize, error: u32) {
+    // Under OSYX_WINRUN_FAILTRACE (or -v): the first completions, to follow
+    // a program's socket traffic.
+    static TRACED: AtomicU32 = AtomicU32::new(0);
+    if traced() && TRACED.fetch_add(1, Ordering::Relaxed) < 400 {
+        os_std::eprintln!("winrun: overlapped socket I/O {o:#x} done: {bytes} byte(s), error {error}, port {}", port.is_some());
+    }
     let status = if error == 0 { 0 } else { status_of(error) };
     // SAFETY: the caller's OVERLAPPED, which stays valid until it completes.
     let event = unsafe {
@@ -151,7 +157,7 @@ where
     PENDING.lock().unwrap().insert(o, (s, os_sys::gettid(), false));
     let port = PORTS.lock().unwrap().get(&s).copied();
     super::service::hold_fd(hold);
-    let started = os_std::thread::Builder::new().spawn(move || {
+    let started = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
         let stop = move || PENDING.lock().unwrap().get(&o).is_none_or(|p| p.2) || !SOCKETS.lock().unwrap().contains_key(&s);
         let r = op(&stop);
         PENDING.lock().unwrap().remove(&o);
@@ -198,7 +204,7 @@ pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, 
     // The helper holds the descriptor: closesocket meanwhile does not close
     // it (or let the number be reused) until the helper is done.
     super::service::hold_fd(fd);
-    os_std::thread::spawn(move || {
+    let started = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
         let total: usize = parts.iter().map(|p| p.0 as usize).sum();
         let mut data = alloc::vec![0u8; total];
         let (bytes, error) = loop {
@@ -240,6 +246,15 @@ pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, 
         }
         finish_to(port, o, bytes, error);
     });
+    // No thread for the operation: it fails now, as Windows fails it without
+    // the resources to queue it.
+    if started.is_err() {
+        PENDING.lock().unwrap().remove(&o);
+        if super::service::release_fd(fd) {
+            let _ = os_sys::close(fd);
+        }
+        return err(WSAENOBUFS, SOCKET_ERROR);
+    }
     err(WSA_IO_PENDING, SOCKET_ERROR)
 }
 
@@ -266,7 +281,7 @@ pub(super) fn send(s: u64, fd: u64, data: Vec<u8>, to: Option<SockAddr>, o: *mut
     PENDING.lock().unwrap().insert(o, (s, os_sys::gettid(), false));
     let port = PORTS.lock().unwrap().get(&s).copied();
     super::service::hold_fd(fd);
-    os_std::thread::spawn(move || {
+    let started = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
         let mut done = first;
         let error = loop {
             if done == data.len() {
@@ -291,5 +306,14 @@ pub(super) fn send(s: u64, fd: u64, data: Vec<u8>, to: Option<SockAddr>, o: *mut
         }
         finish_to(port, o, done, error);
     });
+    // No thread for the operation: it fails now, as Windows fails it without
+    // the resources to queue it.
+    if started.is_err() {
+        PENDING.lock().unwrap().remove(&o);
+        if super::service::release_fd(fd) {
+            let _ = os_sys::close(fd);
+        }
+        return err(WSAENOBUFS, SOCKET_ERROR);
+    }
     err(WSA_IO_PENDING, SOCKET_ERROR)
 }
