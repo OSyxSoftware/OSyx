@@ -26,15 +26,31 @@ struct Pending {
 /// handler's own image (winrun, linked at 0x4000_0000) on the stack, for
 /// addr2line.
 fn report_nested(tid: u64, first: u64, f: &TrapFrame) {
-    let mut bytes = [0u8; 2048];
-    let n = (0..bytes.len() / 512).take_while(|&i| fixup::copy_from_user(&mut bytes[i * 512..(i + 1) * 512], f.rsp + i as u64 * 512).is_ok()).count();
+    crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} while handling its fault at rip {first:#x}; handler frames:{}", f.rip, stack_frames(f.rsp, 2048, false));
+}
+
+/// Code addresses among the user stack words above `rsp` (`len` bytes at
+/// most): the handler's image (winrun, linked at 0x4000_0000) and, with
+/// `images`, also addresses where Windows images load (0x1_4000_0000 up
+/// to 0x2_0000_0000), for addr2line and module offsets.
+fn stack_frames(rsp: u64, len: usize, images: bool) -> alloc::string::String {
     let mut frames = alloc::string::String::new();
-    for word in bytes[..n * 512].chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().unwrap())) {
-        if (0x4000_0000..0x4100_0000).contains(&word) && frames.matches(' ').count() < 24 {
-            frames.push_str(&alloc::format!(" {word:#x}"));
+    let mut count = 0;
+    let mut chunk = [0u8; 512];
+    for i in 0..len / 512 {
+        if fixup::copy_from_user(&mut chunk, rsp + i as u64 * 512).is_err() {
+            break;
+        }
+        for word in chunk.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().unwrap())) {
+            let ours = (0x4000_0000..0x4100_0000).contains(&word);
+            let image = images && (0x1_4000_0000..0x2_0000_0000).contains(&word);
+            if (ours || image) && count < 48 {
+                frames.push_str(&alloc::format!(" {word:#x}"));
+                count += 1;
+            }
         }
     }
-    crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} while handling its fault at rip {first:#x}; handler frames:{frames}", f.rip);
+    frames
 }
 
 /// True when `cs` is the compatibility-mode code selector.
@@ -177,7 +193,13 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
         unsafe { core::slice::from_raw_parts(&c as *const Context as *const u8, core::mem::size_of::<Context>()) };
     if fixup::copy_to_user(addr, bytes).is_err() || fixup::copy_to_user(stack, &0u64.to_le_bytes()).is_err() {
         drop(registry);
-        crate::kprintln!("user fault: thread {tid} faulted at rip {:#x}: its context cannot be written below rsp {:#x}", f.rip, f.rsp);
+        // Most often a stack overflow: say what fills the stack.
+        crate::kprintln!(
+            "user fault: thread {tid} faulted at rip {:#x}: its context cannot be written below rsp {:#x}; frames:{}",
+            f.rip,
+            f.rsp,
+            stack_frames(f.rsp, 16 << 10, true)
+        );
         return false;
     }
     let fs32 = if compat { sched::current_fs32_base() } else { 0 };
