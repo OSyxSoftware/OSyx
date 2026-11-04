@@ -1673,7 +1673,8 @@ extern "win64" fn GetCurrentThreadId() -> u32 {
 
 /// Ends the process: DLL_PROCESS_DETACH notifications, then exit.
 pub extern "win64" fn ExitProcess(code: u32) -> ! {
-    if crate::VERBOSE.load(Ordering::Relaxed) {
+    // A failing exit is always reported, with where it was called from.
+    if crate::VERBOSE.load(Ordering::Relaxed) || code != 0 {
         os_std::eprintln!("winrun: ExitProcess({code:#x}) in thread {}", os_sys::gettid());
         if code != 0 { crate::exceptions::trace_current(); }
     }
@@ -1685,7 +1686,7 @@ pub extern "win64" fn ExitProcess(code: u32) -> ! {
 
 extern "win64" fn TerminateProcess(h: u64, code: u32) -> Bool {
     if h == objects::CURRENT_PROCESS {
-        if crate::VERBOSE.load(Ordering::Relaxed) {
+        if crate::VERBOSE.load(Ordering::Relaxed) || code != 0 {
             os_std::eprintln!("winrun: TerminateProcess(current, {code:#x}) in thread {}", os_sys::gettid());
             if code != 0 { crate::exceptions::trace_current(); }
         }
