@@ -758,6 +758,10 @@ struct Loader {
 
 static LOADER: Mutex<Option<Loader>> = Mutex::new(None);
 
+pub(crate) fn release_if_owner_gone(tid: u64) -> bool {
+    LOADER.release_if_owner_gone(tid)
+}
+
 fn with<R>(f: impl FnOnce(&mut Loader) -> R) -> R {
     let mut g = LOADER.lock().unwrap();
     f(g.as_mut().expect("loader initialised"))

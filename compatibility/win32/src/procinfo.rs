@@ -264,12 +264,27 @@ pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
             Err(e) => return fail(errno_to_win32(e), 0),
         }
     }
+    // A kill wakes a thread blocked in some system calls and lets it run a
+    // little user code before it ends, which may take a lock: once it is
+    // gone, winrun's locks it still holds are released.
+    let waited = os_std::time::Instant::now();
+    while !gone() && waited.elapsed() < core::time::Duration::from_millis(500) {
+        os_std::thread::sleep(core::time::Duration::from_millis(2));
+    }
+    if gone() {
+        let held = objects::recover_locks(tid as u64);
+        if !held.is_empty() {
+            os_std::eprintln!("winrun: TerminateThread: thread {tid} ended holding {held:?}; released");
+        }
+    }
     if let Some(t) = obj {
         t.exit_code.store(code, Ordering::SeqCst);
         let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
             while os_sys::thread_times(tid as u64) != Err(osyx_abi::Errno::NotFound) {
                 os_std::thread::sleep(core::time::Duration::from_millis(10));
             }
+            // Ended later than the wait above: its locks too.
+            let _ = objects::recover_locks(tid as u64);
             t.final_ticks.store(ticks, Ordering::SeqCst);
             t.exited_ns.store(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(1).max(1), Ordering::SeqCst);
             t.done.store(true, Ordering::SeqCst);

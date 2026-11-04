@@ -419,6 +419,10 @@ struct Gui {
 
 static GUI: Mutex<Option<Gui>> = Mutex::new(None);
 
+pub(crate) fn release_if_owner_gone(tid: u64) -> bool {
+    GUI.release_if_owner_gone(tid)
+}
+
 // Stock objects: fixed handle values.
 const STOCK_BASE: u64 = 0x9000;
 const WHITE_BRUSH: u32 = 0;

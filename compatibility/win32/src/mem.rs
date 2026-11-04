@@ -201,6 +201,10 @@ impl Pages {
 
 static REGIONS: Mutex<BTreeMap<u64, Region>> = Mutex::new(BTreeMap::new());
 
+pub(crate) fn release_if_owner_gone(tid: u64) -> bool {
+    REGIONS.release_if_owner_gone(tid)
+}
+
 /// A thread stack: committed read/write private memory, as VirtualQuery
 /// reports a Windows stack (its pages get frames when first touched),
 /// above a guard page of its own. The guard is read-only (OSyx has no

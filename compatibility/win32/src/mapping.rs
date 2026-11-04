@@ -60,6 +60,10 @@ struct View {
 
 static VIEWS: Mutex<BTreeMap<u64, View>> = Mutex::new(BTreeMap::new());
 
+pub(crate) fn release_if_owner_gone(tid: u64) -> bool {
+    VIEWS.release_if_owner_gone(tid)
+}
+
 /// A new section. `file` is None for page-file memory of `size` bytes;
 /// with a file, `size` 0 means the file's size.
 pub fn create(file: Option<u64>, protect: u32, size: u64, name: Option<String>) -> Result<(u64, bool), NtStatus> {

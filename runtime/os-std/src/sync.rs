@@ -155,6 +155,22 @@ impl<T: ?Sized> Mutex<T> {
         Ok(MutexGuard { lock: self, _not_send: PhantomData })
     }
 
+    /// Releases the lock if thread `tid`, which has ended, still holds it
+    /// (a thread killed inside the critical section). Returns whether it
+    /// did. The caller knows the thread is gone; what the lock guards is left
+    /// as the thread left it.
+    pub fn release_if_owner_gone(&self, tid: u64) -> bool {
+        if tid == 0 || self.futex.load(Ordering::Relaxed) == UNLOCKED || self.owner.load(Ordering::Relaxed) != tid {
+            return false;
+        }
+        held_slot(tid).fetch_sub(1, Ordering::Relaxed);
+        self.owner.store(0, Ordering::Relaxed);
+        if self.futex.swap(UNLOCKED, Ordering::Release) == CONTENDED {
+            sys::futex_wake(&self.futex, u32::MAX);
+        }
+        true
+    }
+
     /// Whether the calling thread holds the lock: for code that may run
     /// while it does (a fault handler) and must not wait for it.
     pub fn is_held_by_current_thread(&self) -> bool {

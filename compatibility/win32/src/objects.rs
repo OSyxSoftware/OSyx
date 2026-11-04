@@ -718,6 +718,26 @@ static WAITERS: AtomicU32 = AtomicU32::new(0);
 /// mutex ownership, semaphore counts, wait-all).
 static WAIT_LOCK: Mutex<()> = Mutex::new(());
 
+/// After thread `tid` was killed: winrun's process-wide locks it still held
+/// are released, so the other threads do not wait for a dead owner. Returns
+/// the names of those it held.
+pub(crate) fn recover_locks(tid: u64) -> Vec<&'static str> {
+    let mut held = Vec::new();
+    for (name, released) in [
+        ("object-wait", WAIT_LOCK.release_if_owner_gone(tid)),
+        ("handle table", TABLE.release_if_owner_gone(tid)),
+        ("loader", crate::loader::release_if_owner_gone(tid)),
+        ("views", crate::mapping::release_if_owner_gone(tid)),
+        ("regions", crate::mem::release_if_owner_gone(tid)),
+        ("gui", crate::user32::release_if_owner_gone(tid)),
+    ] {
+        if released {
+            held.push(name);
+        }
+    }
+    held
+}
+
 /// TerminateThread requests for threads asleep in a futex wait: (thread
 /// id, exit code). The kernel ends a killed thread only at its next return
 /// to user mode outside a futex wait, so a thread woken from one by a kill
