@@ -95,6 +95,7 @@ mod capi;
 mod bcrypt;
 mod ncrypt;
 mod sspi;
+mod stall;
 mod newlibs;
 mod minordlls;
 mod msi;

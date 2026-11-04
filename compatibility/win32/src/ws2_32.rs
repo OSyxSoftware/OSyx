@@ -492,6 +492,7 @@ extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8
         // may pass a NULL pointer, which never becomes a real slice.
         let (n, p) = (len.max(0) as usize, if len > 0 { buf } else { core::ptr::NonNull::dangling().as_ptr() });
         let data = unsafe { core::slice::from_raw_parts_mut(p, n) };
+        let _blocked = crate::stall::waiting("recv", s, 0);
         let (n, peer) = os_sys::sock_recv(fd, data, fl).map_err(wsa)?;
         write_addr(&peer, from, fromlen);
         // A datagram longer than the buffer was truncated; the bytes are
@@ -1722,7 +1723,10 @@ pub(crate) extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *m
         }
     };
     let mut raw: Vec<os_sys::ipc::WaitItem> = items.iter().map(|(_, i)| *i).collect();
-    if let Err(e) = os_sys::wait_handles(&mut raw, ns) {
+    let blocked = crate::stall::waiting("select", raw.len() as u64, 0);
+    let waited = os_sys::wait_handles(&mut raw, ns);
+    drop(blocked);
+    if let Err(e) = waited {
         if e != Errno::TimedOut {
             return err(wsa(e), SOCKET_ERROR);
         }

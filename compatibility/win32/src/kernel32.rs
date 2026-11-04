@@ -2433,6 +2433,7 @@ pub(crate) extern "win64" fn EnterCriticalSection(cs: u64) {
         while w.swap(2, Ordering::Acquire) != 0 {
             // The holder (an OSyx thread id, as in the TEB) inherits this
             // thread's priority while it waits.
+            let _blocked = crate::stall::waiting("EnterCriticalSection", cs, cs_owner(cs) as u64);
             let _ = os_sys::futex_wait_owned(w.as_ptr(), 2, 0, cs_owner(cs));
         }
     }
@@ -2486,6 +2487,7 @@ pub(crate) extern "win64" fn AcquireSRWLockExclusive(l: u64) {
         if w.compare_exchange(0, SRW_WRITER, Ordering::Acquire, Ordering::Relaxed).is_ok() { return; }
         let old = w.load(Ordering::Relaxed);
         if old != 0 {
+            let _blocked = crate::stall::waiting("AcquireSRWLockExclusive", l, old as u64);
             let _ = os_sys::futex_wait(w.as_ptr(), old, 0);
         }
     }
@@ -2514,6 +2516,7 @@ pub(crate) extern "win64" fn AcquireSRWLockShared(l: u64) {
     while TryAcquireSRWLockShared(l) == 0 {
         let old = w.load(Ordering::Relaxed);
         if old & SRW_WRITER != 0 {
+            let _blocked = crate::stall::waiting("AcquireSRWLockShared", l, old as u64);
             let _ = os_sys::futex_wait(w.as_ptr(), old, 0);
         }
     }

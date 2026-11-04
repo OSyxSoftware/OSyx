@@ -669,6 +669,8 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
         objs.push(o);
     }
     let deadline = (timeout_ms != INFINITE).then(|| Instant::now() + Duration::from_millis(timeout_ms as u64));
+    // Noted once the wait actually blocks (stall.rs).
+    let mut _blocked = None;
     loop {
         let seq = SEQ.load(Ordering::SeqCst);
         {
@@ -719,6 +721,9 @@ pub fn wait(handles: &[u64], all: bool, timeout_ms: u32) -> Result<u32, u32> {
                 (d - now).as_nanos().max(1) as u64
             }
         };
+        if _blocked.is_none() {
+            _blocked = Some(crate::stall::waiting("WaitForObjects", handles[0], handles.len() as u64));
+        }
         // Another process sets a shared event without touching SEQ: one
         // shared event is waited for on its own word, several objects
         // including one are polled.

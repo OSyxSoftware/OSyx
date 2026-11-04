@@ -591,6 +591,7 @@ extern "win64" fn GetQueuedCompletionStatus(port: u64, bytes: *mut u32, key: *mu
                 left.as_nanos() as u64
             }
         };
+        let _blocked = crate::stall::waiting("GetQueuedCompletionStatus", port, 0);
         let _ = os_sys::futex_wait(p.word.as_ptr(), seq, timeout);
     }
 }

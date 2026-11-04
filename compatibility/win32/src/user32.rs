@@ -2285,7 +2285,9 @@ impl Drop for IdleGuard {
 /// when input or a frame callback arrives.
 /// The caller registered in [`IDLE_WAITERS`] while the GUI lock was held.
 fn idle(seq: u32, timeout: Duration) {
+    let blocked = crate::stall::waiting("MessageWait", 0, 0);
     let woken = crate::objects::wait_for_change(seq, timeout);
+    drop(blocked);
     diag(|d| {
         d.idle += 1;
         if woken {

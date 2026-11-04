@@ -481,8 +481,16 @@ pub(crate) fn trace_current() {
 }
 
 fn trace(limit: u64, base: u64, rsp: u64) {
+    if let Some(chain) = chain(limit, base, rsp) {
+        os_std::eprintln!("winrun: call chain guesses (innermost first): {chain}");
+    }
+}
+
+/// The code addresses on a stack above `rsp` (within `limit`..`base`), as
+/// module+offset, innermost first; None if there are none.
+pub(crate) fn chain(limit: u64, base: u64, rsp: u64) -> Option<alloc::string::String> {
     let start = rsp.max(limit).min(base);
-    let end = start.saturating_add(16 << 10).min(base);
+    let end = start.saturating_add(32 << 10).min(base);
     let mut found: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     let mut at = start;
     while at + 8 <= end && found.len() < 12 {
@@ -496,10 +504,7 @@ fn trace(limit: u64, base: u64, rsp: u64) {
         }
         at += 8;
     }
-    if found.is_empty() {
-        return;
-    }
-    os_std::eprintln!("winrun: call chain guesses (innermost first): {}", found.join(", "));
+    (!found.is_empty()).then(|| found.join(", "))
 }
 
 /// A stack overflow: the code addresses found in the used part of the
