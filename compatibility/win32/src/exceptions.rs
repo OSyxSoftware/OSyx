@@ -463,6 +463,20 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         // SAFETY: this thread's TEB.
         let (base, limit): (u64, u64) = unsafe { (crate::teb::get(t, crate::teb::TEB_STACK_BASE), crate::teb::get(t, crate::teb::TEB_STACK_LIMIT)) };
         os_std::eprintln!("winrun: ... {kind} {:#x} (stack {limit:#x}..{base:#x})", record.info[1]);
+        // The memory the access hit, as VirtualQuery sees it.
+        match crate::mem::virtual_query_for_report(record.info[1]) {
+            Some(i) => os_std::eprintln!(
+                "winrun: ... in region {:#x}+{:#x} (allocation {:#x}, state {:#x}, protect {:#x}, allocated as {:#x}, type {:#x})",
+                i.base,
+                i.size,
+                i.allocation_base,
+                i.state,
+                i.protect,
+                i.allocation_protect,
+                i.kind
+            ),
+            None => os_std::eprintln!("winrun: ... in no region winrun knows"),
+        }
         if record.info[1] < limit && record.info[1] + 0x10000 >= limit {
             report_overflow(limit, base, n.gpr[fault::RSP], n.gpr[fault::RBP]);
         } else {

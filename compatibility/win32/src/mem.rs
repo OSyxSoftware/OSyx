@@ -434,6 +434,15 @@ pub struct Info {
     pub kind: u32,
 }
 
+/// `virtual_query` for a fault report: None (no wait) when the calling
+/// thread is inside the region table already.
+pub fn virtual_query_for_report(addr: u64) -> Option<Info> {
+    if REGIONS.is_held_by_current_thread() {
+        return None;
+    }
+    virtual_query(addr)
+}
+
 /// `NtQueryVirtualMemory` / `VirtualQuery` for regions made by
 /// `virtual_alloc` and for loaded images.
 pub fn virtual_query(addr: u64) -> Option<Info> {
