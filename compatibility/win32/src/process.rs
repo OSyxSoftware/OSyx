@@ -310,7 +310,13 @@ pub(crate) extern "win64" fn CreateProcessW(
                     } else {
                         for &h in hs {
                             match job(h) {
-                                Ok(j) => jobs.push(j),
+                                // A job named twice (two handles, or two
+                                // lists) holds the child once.
+                                Ok(j) => {
+                                    if !jobs.iter().any(|x| Arc::ptr_eq(x, &j)) {
+                                        jobs.push(j);
+                                    }
+                                }
                                 Err(e) => return fail(e, 0),
                             }
                         }
@@ -716,7 +722,7 @@ const PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR: u64 = 0x30005;
 /// 0, the only one) applies before the thread runs; an IDEAL_PROCESSOR is
 /// a scheduling hint, which the OSyx scheduler does not take.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn CreateRemoteThreadEx(h: u64, sa: u64, stack: usize, start: u64, param: u64, flags: u32, attrs: u64, tid: *mut u32) -> u64 {
+pub(crate) extern "win64" fn CreateRemoteThreadEx(h: u64, sa: u64, stack: usize, start: u64, param: u64, flags: u32, attrs: u64, tid: *mut u32) -> u64 {
     if let Err(e) = local(h) {
         return fail(e, 0);
     }

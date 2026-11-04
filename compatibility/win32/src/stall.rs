@@ -149,10 +149,19 @@ fn watchdog() {
     // OSYX_WINRUN_REPORT_EVERY=<seconds>: a full report that often even
     // when nothing stalls (every thread's system call and stack), for a
     // process that is idle in untracked waits.
-    let every_ns = os_std::env::var("OSYX_WINRUN_REPORT_EVERY").ok().and_then(|v| v.parse::<u64>().ok()).filter(|&s| s > 0).map(|s| s * 1_000_000_000);
+    // An interval too long to count in nanoseconds is ignored.
+    let every_ns = os_std::env::var("OSYX_WINRUN_REPORT_EVERY").ok().and_then(|v| v.parse::<u64>().ok()).filter(|&s| s > 0).and_then(|s| s.checked_mul(1_000_000_000));
     let mut last_report = now_ns();
     loop {
-        os_std::thread::sleep(core::time::Duration::from_millis(SCAN_EVERY_MS));
+        // Until the next scan, or the next periodic report if that comes
+        // first. A report takes two seconds (its CPU sample), which bounds
+        // how often reports can start.
+        let mut nap = SCAN_EVERY_MS;
+        if let Some(e) = every_ns {
+            let due = last_report.saturating_add(e).saturating_sub(now_ns()) / 1_000_000;
+            nap = nap.min(due.max(1));
+        }
+        os_std::thread::sleep(core::time::Duration::from_millis(nap));
         let now = now_ns();
         let periodic = every_ns.is_some_and(|e| now.saturating_sub(last_report) >= e);
         // Copied out, so the report below runs without the lock.

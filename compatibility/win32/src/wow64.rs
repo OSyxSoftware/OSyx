@@ -758,6 +758,19 @@ extern "win64" fn CreateThread32(attributes: u64, stack: usize, start: u64, para
     h
 }
 
+/// CreateRemoteThreadEx for 32-bit callers (this process only, as the host
+/// call): the start routine is 32-bit code, run as CreateThread32 runs it.
+#[allow(non_snake_case, clippy::too_many_arguments)] // the Win32 name
+extern "win64" fn CreateRemoteThreadEx32(process: u64, attributes: u64, stack: usize, start: u64, param: u64, flags: u32, list: u64, tid: *mut u32) -> u64 {
+    let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ThreadStart { start: start as u32, param: param as u32 }));
+    let h = crate::process::CreateRemoteThreadEx(process, attributes, stack, thread32_main as *const () as u64, arg as u64, flags, list, tid);
+    if h == 0 {
+        // SAFETY: not handed to any thread.
+        drop(unsafe { alloc::boxed::Box::from_raw(arg) });
+    }
+    h
+}
+
 extern "win64" fn thread32_main(arg: u64) -> u32 {
     // SAFETY: the Box made by CreateThread32 for this thread.
     let ThreadStart { start, param } = *unsafe { alloc::boxed::Box::from_raw(arg as *mut ThreadStart) };
@@ -1069,6 +1082,7 @@ extern "win64" fn WaitForMultipleObjectsEx32(n: u32, handles: *const u32, all: i
 fn host_override(symbol: &str) -> Option<u64> {
     match symbol {
         "CreateThread" => Some(CreateThread32 as *const () as u64),
+        "CreateRemoteThreadEx" => Some(CreateRemoteThreadEx32 as *const () as u64),
         "CreateProcessW" => Some(CreateProcessW32 as *const () as u64),
         "CreateProcessA" => Some(CreateProcessA32 as *const () as u64),
         "CreateProcessAsUserW" => Some(CreateProcessAsUserW32 as *const () as u64),

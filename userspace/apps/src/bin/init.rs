@@ -212,6 +212,14 @@ fn main() -> i32 {
                 }
                 first += 1;
             }
+            // run-app sets these for the desktop user: a value given here
+            // would never reach winrun.
+            if as_user {
+                if let Some((k, _)) = extra_env.iter().find(|(k, _)| k == "HOME" || k == "USER") {
+                    println!("winapp: {k} cannot be set with --user; run-app sets it");
+                    return 1;
+                }
+            }
             let mut c = if as_user {
                 Command::new("/system/bin/run-app")
             } else {

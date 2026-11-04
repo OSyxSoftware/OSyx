@@ -64,6 +64,7 @@ pub(super) static SIGNATURES: &[Signature] = &[
     sig!(GetThreadDpiAwarenessContext, [], Handle),
     sig!(WindowFromDC, [Handle], Handle),
     sig!(GetSystemMetricsForDpi, [Int, Uint], I32),
+    // Bound to wow64::CreateRemoteThreadEx32: the start routine is 32-bit code.
     sig!(CreateRemoteThreadEx, [Handle, Ptr, Uint, Ptr, Ptr, Uint, Ptr, Ptr], Handle),
     sig!(GetAwarenessFromDpiAwarenessContext, [Handle], I32),
     sig!(AreDpiAwarenessContextsEqual, [Handle, Handle], I32),

@@ -716,24 +716,25 @@ struct ModState {
     pristine: Vec<(u64, Vec<u8>)>,
 }
 
-/// The writable sections of the PE image `file` mapped at `base`, copied.
-/// Gives every section of the image at `base` its protection from the
-/// section header again (as `WinHost::commit` set it), undoing what the
-/// module's VirtualProtect calls changed: MSVC's CRT, for one, makes its
-/// .fptable section read-only after initialization.
+/// Gives every page of the image at `base` the protection the initial load
+/// gave it again (the page plan `WinHost::commit` applied, where a page two
+/// sections share has the union of their flags), undoing what the module's
+/// VirtualProtect calls changed: MSVC's CRT, for one, makes its .fptable
+/// section read-only after initialization.
 fn reset_section_protection(file: &[u8], base: u64) {
-    const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
-    const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
     let Ok(pe) = PeFile::parse_any(file) else { return };
-    for s in pe.sections().filter(|s| s.virtual_size != 0) {
-        let prot = match (s.characteristics & IMAGE_SCN_MEM_WRITE != 0, s.characteristics & IMAGE_SCN_MEM_EXECUTE != 0) {
+    let Ok(plan) = image::protections(&pe) else { return };
+    for p in &plan {
+        let prot = match (p.write, p.execute) {
             (true, _) => mem::Prot::ReadWrite,
             (false, true) => mem::Prot::ExecuteRead,
             (false, false) => mem::Prot::ReadOnly,
         };
-        let _ = mem::reset_image_pages(base + s.virtual_address as u64, s.virtual_size as usize, prot);
+        let _ = mem::reset_image_pages(base + p.rva as u64, p.size as usize, prot);
     }
 }
+
+/// The writable sections of the PE image `file` mapped at `base`, copied.
 
 fn writable_sections(file: &[u8], base: u64) -> Vec<(u64, Vec<u8>)> {
     const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
@@ -1825,23 +1826,27 @@ pub fn image_section_protect(addr: u64) -> Option<u32> {
         let nt = base + rd32(base + 0x3C) as u64;
         let count = rd16(nt + 6) as u64;
         let sections = nt + 24 + rd16(nt + 20) as u64;
+        // A page two sections share has the union of their flags, as the
+        // load mapped it.
+        let page = rva & !(mem::PAGE as u64 - 1);
+        let (mut exec, mut write) = (false, false);
         for i in 0..count.min(96) {
             let s = sections + 40 * i;
             let va = rd32(s + 12) as u64;
-            let size = (rd32(s + 8).max(rd32(s + 16)) as u64).next_multiple_of(mem::PAGE as u64);
-            if rva >= va && rva < va + size {
+            let size = rd32(s + 8).max(rd32(s + 16)) as u64;
+            if size != 0 && page < va + size && va < page + mem::PAGE as u64 {
                 let c = rd32(s + 36);
-                let (exec, write) = (c & 0x2000_0000 != 0, c & 0x8000_0000 != 0);
-                return Some(match (exec, write) {
-                    (true, true) => mem::PAGE_EXECUTE_WRITECOPY,
-                    (true, false) => mem::PAGE_EXECUTE_READ,
-                    (false, true) => mem::PAGE_WRITECOPY,
-                    (false, false) => mem::PAGE_READONLY,
-                });
+                exec |= c & 0x2000_0000 != 0;
+                write |= c & 0x8000_0000 != 0;
             }
         }
+        Some(match (exec, write) {
+            (true, true) => mem::PAGE_EXECUTE_WRITECOPY,
+            (true, false) => mem::PAGE_EXECUTE_READ,
+            (false, true) => mem::PAGE_WRITECOPY,
+            (false, false) => mem::PAGE_READONLY,
+        })
     }
-    Some(mem::PAGE_READONLY)
 }
 
 /// `VirtualQuery` for addresses inside loaded images: the run of pages

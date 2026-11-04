@@ -377,8 +377,8 @@ pub fn image_page_protect(page: u64) -> Option<u32> {
 /// image loaded again after FreeLibrary starts as a fresh mapping would.
 /// Takes no loader lock (the loader calls it).
 pub fn reset_image_pages(start: u64, size: usize, prot: Prot) -> Result<(), osyx_abi::Errno> {
-    let start = start & !(PAGE as u64 - 1);
     let end = (start + size as u64).next_multiple_of(PAGE as u64);
+    let start = start & !(PAGE as u64 - 1);
     protect_range(start, (end - start) as usize, prot)?;
     IMAGE_PAGES.lock().unwrap().retain(|&p, _| p < start || p >= end);
     Ok(())
