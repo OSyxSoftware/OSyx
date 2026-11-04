@@ -363,6 +363,7 @@ extern "win64" fn connect(s: u64, addr: *const u8, len: i32) -> i32 {
     result((|| {
         let (fd, _) = fd(s)?;
         let a = read_addr(addr, len)?;
+        let _blocked = crate::stall::waiting("connect", s, 0);
         os_sys::sock_connect(fd, &a).map_err(wsa)
     })())
 }
@@ -391,7 +392,10 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
             return Err(WSAEFAULT);
         }
         events::rearm(s, 0x08);
-        let (nfd, peer) = os_sys::sock_accept(listener.fd).map_err(wsa)?;
+        let blocked = crate::stall::waiting("accept", s, 0);
+        let accepted = os_sys::sock_accept(listener.fd);
+        drop(blocked);
+        let (nfd, peer) = accepted.map_err(wsa)?;
         // Winsock accept inherits the listener's blocking mode. OSyx's
         // native accept creates a blocking endpoint, so apply it here.
         if listener.nonblocking {
@@ -764,6 +768,7 @@ fn resolve(name: &str) -> Result<Vec<[u8; 4]>, u32> {
         return Ok(alloc::vec![a]);
     }
     let mut out = [[0u8; 4]; 8];
+    let _blocked = crate::stall::waiting("resolve", name.len() as u64, 0);
     let n = os_sys::resolve(name, &mut out).map_err(wsa)?;
     Ok(out[..n].to_vec())
 }

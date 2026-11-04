@@ -139,6 +139,7 @@ pub fn pipe_name(win: &str) -> Option<&str> {
 
 fn wait(fd: u64, events: u32, timeout: u64) -> Result<bool, u32> {
     let mut items = [os_sys::ipc::WaitItem { handle: fd, events: events | osyx_abi::ipc::WAIT_HANGUP, revents: 0 }];
+    let _blocked = crate::stall::waiting("PipeWait", fd, events as u64);
     match os_sys::wait_handles(&mut items, timeout) {
         Ok(_) => Ok(items[0].revents != 0),
         Err(Errno::TimedOut) => Ok(false),

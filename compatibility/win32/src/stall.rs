@@ -29,6 +29,8 @@ struct Wait {
 
 /// The waits under way, by thread id (innermost last).
 static WAITS: Mutex<BTreeMap<u64, Vec<Wait>>> = Mutex::new(BTreeMap::new());
+/// Each thread's last finished wait: (api, subject, when it ended).
+static LAST: Mutex<BTreeMap<u64, (&'static str, u64, u64)>> = Mutex::new(BTreeMap::new());
 static WATCHDOG: AtomicBool = AtomicBool::new(false);
 
 fn now_ns() -> u64 {
@@ -42,7 +44,9 @@ impl Drop for Guard {
     fn drop(&mut self) {
         let mut waits = WAITS.lock().unwrap();
         if let Some(list) = waits.get_mut(&self.0) {
-            list.pop();
+            if let Some(w) = list.pop() {
+                LAST.lock().unwrap().insert(self.0, (w.api, w.what, now_ns()));
+            }
             if list.is_empty() {
                 waits.remove(&self.0);
             }
@@ -99,6 +103,25 @@ fn watchdog() {
             }
             out
         };
+        // Every Windows thread, with its CPU use over two seconds: a
+        // thread that is in no tracked wait is running or blocked
+        // elsewhere, and a spinning one shows here.
+        let threads = crate::kernel32::thread_list();
+        let before: Vec<u64> = threads.iter().map(|&(t, _)| os_sys::thread_times(t as u64).unwrap_or(0)).collect();
+        os_std::thread::sleep(core::time::Duration::from_secs(2));
+        let after: Vec<u64> = threads.iter().map(|&(t, _)| os_sys::thread_times(t as u64).unwrap_or(0)).collect();
+        let last = LAST.lock().unwrap().clone();
+        let now = now_ns();
+        os_std::eprintln!("winrun: threads ({}), CPU ticks in 2 s, and their last finished wait:", threads.len());
+        for (i, &(tid, _)) in threads.iter().enumerate() {
+            let busy = after[i].saturating_sub(before[i]);
+            let waiting = snapshot.iter().any(|w| w.0 == tid as u64);
+            let tail = match last.get(&(tid as u64)) {
+                Some((api, what, at)) => format!("last {api} on {what:#x} {} ms ago", now.saturating_sub(*at) / 1_000_000),
+                None => String::from("no tracked wait yet"),
+            };
+            os_std::eprintln!("winrun:   thread {tid}: {busy} ticks{} — {tail}", if waiting { ", waiting" } else { "" });
+        }
         os_std::eprintln!("winrun: stalled waits ({} thread waits under way):", snapshot.len());
         for (tid, api, what, secs, teb, rsp, fresh) in snapshot {
             os_std::eprintln!("winrun:   thread {tid}{} {api} for {secs} s on {what}", if fresh { " STALLED" } else { "" });

@@ -1768,6 +1768,16 @@ pub(crate) fn register_main_thread() {
     *MAIN_THREAD.lock().unwrap() = Some(t);
 }
 
+/// The live Windows threads of this process: (thread id, TEB).
+pub(crate) fn thread_list() -> Vec<(u32, u64)> {
+    THREADS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(&tid, w)| w.upgrade().filter(|t| !t.done.load(Ordering::SeqCst)).map(|t| (tid, t.teb.load(Ordering::SeqCst))))
+        .collect()
+}
+
 /// Records a thread's object by id, so later lookups find the same one.
 pub(crate) fn register_thread(tid: u32, obj: &Arc<ThreadObj>) {
     let mut threads = THREADS.lock().unwrap();
@@ -2189,7 +2199,10 @@ extern "win64" fn GetThreadDescription(h: u64, out: *mut u64) -> u32 {
 extern "win64" fn Sleep(ms: u32) {
     if ms == 0 {
         os_std::thread::yield_now();
-    } else if ms == u32::MAX {
+        return;
+    }
+    let _blocked = crate::stall::waiting("Sleep", ms as u64, 0);
+    if ms == u32::MAX {
         loop {
             os_std::thread::sleep(core::time::Duration::from_secs(3600));
         }
