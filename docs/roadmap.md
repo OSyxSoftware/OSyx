@@ -138,6 +138,31 @@ and starts its `steam.exe`, which loads `steamui.dll`, `steamclient64.dll`,
   `SEC_E_SECPKG_NOT_FOUND`. SChannel over rustls is the candidate if a
   Steam component turns out to call it.
 
+Status on 2026-11-04 (`fix/steam-vgui2`):
+
+- The GDI/user32 functions of `vgui2_s.dll`, the WinINet HTTP client of
+  `crashhandler64.dll`, and CEF's imports (`winhttp.dll`, `dhcpcsvc.dll`,
+  oleaut32 ordinals, the startup set of its delay-loaded imports) are in.
+  `steamwebhelper.exe` loads, runs Chromium's browser process and starts
+  the network service, which stays up.
+- Fixed on the way: 64 GiB per-process reservation cap (now 32 TiB) and a
+  word of state per reserved page in winrun; DuplicateHandle of the
+  current process and per-handle section rights; process queries on real
+  and ended process handles; a DLL loaded again after FreeLibrary now
+  restarts from its original data; IInitializeSpy; overlapped sockets on
+  completion ports.
+- Open: the GPU process does not start (`GPU process launch failed:
+  error_code=49`). It runs in Chromium's sandbox, whose broker writes into
+  the suspended child (VirtualAllocEx, WriteProcessMemory, ntdll
+  interceptions); winrun's cross-process memory calls work only on the
+  calling process. Without a GPU process there is no window. With
+  `-no-cef-sandbox`, `steam.exe` stops on "fatal stalled cross-thread
+  pipe" after 180 s instead.
+- Also open: `WSALookupServiceBegin` for NS_NLA (network change
+  notifications), the rest of CEF's delay-loaded imports (about 150, most
+  in paths not reached yet), `steamservice.dll` (32-bit, loaded into the
+  64-bit client).
+
 ### Performance (see research/performance-profile.md)
 
 6. Split the global process table lock (handle tables, mappings, page

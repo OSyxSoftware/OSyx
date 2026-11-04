@@ -497,6 +497,15 @@ pub fn initial_sd(sa: u64, mapping: &Mapping) -> Result<Option<Sd>, u32> {
     // SAFETY: the caller's descriptor.
     let (owner, group, dacl, sacl) = unsafe { sd_parts(sd as *const u8) }?;
     if let Some(o) = owner {
+        // As for files (below): the caller itself, or a group of its token
+        // that may own objects; any other owner is ERROR_INVALID_OWNER.
+        let token = tokens::effective();
+        let data = tokens::effective_data();
+        let assignable = o == tokens::user_sid(token.uid)
+            || tokens::groups(token.uid, token.gid, &data).iter().any(|(s, a)| *s == o && a & tokens::SE_GROUP_OWNER != 0);
+        if !assignable {
+            return Err(ERROR_INVALID_OWNER);
+        }
         out.owner = o;
     }
     if let Some(g) = group {

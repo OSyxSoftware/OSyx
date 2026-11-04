@@ -2,6 +2,7 @@
  * The same PE runs on Windows; OSyx-specific identity/unsupported checks
  * are gated by the runtime's OSYX environment variable. */
 #include "common.h"
+#include <sddl.h>
 _Static_assert(sizeof(SECURITY_DESCRIPTOR)==40,"Win64 descriptor ABI");
 _Static_assert(sizeof(SID_AND_ATTRIBUTES)==16,"Win64 token ABI");
 _Static_assert(sizeof(ACL)==8,"ACL ABI");
@@ -62,11 +63,22 @@ void __stdcall start(void) {
     check("default security attributes create a real event",event!=NULL);if(event)CloseHandle(event);
     if(native) {
         attributes.lpSecurityDescriptor=&sd;
-        check("custom event security is not silently ignored",!CreateEventW(&attributes,FALSE,FALSE,NULL)&&GetLastError()==ERROR_NOT_SUPPORTED);
+        /* Windows refuses an owner the caller may not assign (Everyone)
+           with ERROR_INVALID_OWNER, for events, mutexes and semaphores. */
+        check("custom event security is not silently ignored",!CreateEventW(&attributes,FALSE,FALSE,NULL)&&GetLastError()==ERROR_INVALID_OWNER);
         HANDLE file=CreateFileW(L"C:\\tmp\\security-must-not-create",GENERIC_WRITE,0,&attributes,CREATE_ALWAYS,0,NULL);
         check("custom file security fails before creating a file",file==INVALID_HANDLE_VALUE&&GetLastError()==ERROR_NOT_SUPPORTED&&GetFileAttributesW(L"C:\\tmp\\security-must-not-create")==INVALID_FILE_ATTRIBUTES);
-        check("custom mutex security fails explicitly",!CreateMutexW(&attributes,FALSE,NULL)&&GetLastError()==ERROR_NOT_SUPPORTED);
-        check("custom semaphore security fails explicitly",!CreateSemaphoreW(&attributes,0,1,NULL)&&GetLastError()==ERROR_NOT_SUPPORTED);
+        check("custom mutex security fails explicitly",!CreateMutexW(&attributes,FALSE,NULL)&&GetLastError()==ERROR_INVALID_OWNER);
+        check("custom semaphore security fails explicitly",!CreateSemaphoreW(&attributes,0,1,NULL)&&GetLastError()==ERROR_INVALID_OWNER);
+        /* A DACL that admits only the owner is accepted, as on Windows. */
+        PSECURITY_DESCRIPTOR owner_only=NULL;
+        if(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;OW)",SDDL_REVISION_1,&owner_only,NULL)){
+            SECURITY_ATTRIBUTES restricted={sizeof(SECURITY_ATTRIBUTES),owner_only,FALSE};
+            HANDLE locked=CreateEventW(&restricted,FALSE,FALSE,NULL);
+            check("an owner-only DACL creates a real event",locked!=NULL);
+            if(locked)CloseHandle(locked);
+            LocalFree(owner_only);
+        } else check("an owner-only DACL creates a real event",FALSE);
     }
     BYTE relative[64]={0};SECURITY_DESCRIPTOR_RELATIVE *rel=(void *)relative;
     rel->Revision=1;rel->Control=SE_SELF_RELATIVE|SE_DACL_PRESENT;rel->Owner=20;rel->Dacl=32;

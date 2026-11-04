@@ -505,12 +505,14 @@ extern "win64" fn InternetQueryOptionW(_session: u64, _option: u32, _buffer: *mu
 /// (winhttp.rs) the timeouts can be set.
 extern "win64" fn InternetSetOptionW(session: u64, option: u32, buffer: *const u8, len: u32) -> crate::kernel32::Bool {
     if session != 0 {
-        let value = if buffer.is_null() || len < 4 {
+        if !crate::winhttp::is_handle(session) {
+            return crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE);
+        }
+        if buffer.is_null() || len < 4 {
             return crate::kernel32::fail(ERROR_INVALID_PARAMETER, crate::kernel32::FALSE);
-        } else {
-            // SAFETY: the caller's DWORD option value.
-            unsafe { core::ptr::read_unaligned(buffer as *const u32) }
-        };
+        }
+        // SAFETY: the caller's DWORD option value.
+        let value = unsafe { core::ptr::read_unaligned(buffer as *const u32) };
         return match crate::winhttp::set_option(session, option, value) {
             None => crate::kernel32::fail(ERROR_INVALID_HANDLE, crate::kernel32::FALSE),
             Some(false) => crate::kernel32::fail(12009, crate::kernel32::FALSE),

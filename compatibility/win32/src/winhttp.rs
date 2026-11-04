@@ -1556,6 +1556,11 @@ extern "win64" fn InternetCrackUrlW(url: *const u16, len: u32, flags: u32, out: 
     1
 }
 
+/// Whether `h` is a session, connection, request or resolver handle.
+pub(crate) fn is_handle(h: u64) -> bool {
+    get(h).is_some()
+}
+
 /// InternetCloseHandle of a session, connection or request.
 pub(crate) fn close(h: u64) -> bool {
     get(h).is_some() && WinHttpCloseHandle(h) != 0
