@@ -63,6 +63,9 @@ struct Timer {
     /// Next due time and period.
     due: Mutex<Option<(Instant, Duration)>>,
     pending: Pending,
+    /// A timer-queue timer (CreateTimerQueueTimer): its callback is a
+    /// WAITORTIMERCALLBACK(parameter, TRUE).
+    legacy: bool,
 }
 
 struct Wait {
@@ -136,6 +139,7 @@ fn run(job: Job) {
     unsafe {
         match &job {
             Job::Work(w) => core::mem::transmute::<usize, Simple>(w.callback as usize)(inst, w.context, Arc::as_ptr(w) as u64),
+            Job::Timer(t) if t.legacy => core::mem::transmute::<usize, Legacy>(t.callback as usize)(t.context, 1),
             Job::Timer(t) => core::mem::transmute::<usize, Simple>(t.callback as usize)(inst, t.context, Arc::as_ptr(t) as u64),
             Job::Wait(w, r) => core::mem::transmute::<usize, WaitCb>(w.callback as usize)(inst, w.context, Arc::as_ptr(w) as u64, *r),
             Job::Registered(r, timed_out) => core::mem::transmute::<usize, Legacy>(r.callback as usize)(r.context, u8::from(*timed_out)),
@@ -260,7 +264,7 @@ extern "win64" fn CreateThreadpoolTimer(callback: u64, context: u64, env: u64) -
     if !environment_ok(env) {
         return fail(ERROR_NOT_SUPPORTED, 0);
     }
-    Arc::into_raw(Arc::new(Timer { callback, context, due: Mutex::new(None), pending: Pending::default() })) as u64
+    Arc::into_raw(Arc::new(Timer { callback, context, due: Mutex::new(None), pending: Pending::default(), legacy: false })) as u64
 }
 
 /// FILETIME due time: negative relative, positive absolute (100 ns).
@@ -317,6 +321,164 @@ extern "win64" fn CloseThreadpoolTimer(timer: u64) {
     // SAFETY: as in CloseThreadpoolWork. A closed timer stops firing.
     let t = unsafe { Arc::from_raw(timer as *const Timer) };
     *t.due.lock().unwrap() = None;
+}
+
+// ---- timer queues ----------------------------------------------------------------
+
+/// A timer queue (CreateTimerQueue) and the timers made in it, which
+/// DeleteTimerQueueEx deletes. NULL is the process's default queue.
+struct TimerQueue(Mutex<Vec<Arc<Timer>>>);
+
+static DEFAULT_QUEUE: TimerQueue = TimerQueue(Mutex::new(Vec::new()));
+
+fn queue_of(h: u64) -> Option<Arc<TimerQueue>> {
+    // SAFETY: a queue handle from CreateTimerQueue (checked against the
+    // live queues before use).
+    QUEUES.lock().unwrap().iter().find(|q| Arc::as_ptr(q) as u64 == h).cloned()
+}
+
+/// The queues CreateTimerQueue made and DeleteTimerQueueEx has not deleted.
+static QUEUES: Mutex<Vec<Arc<TimerQueue>>> = Mutex::new(Vec::new());
+
+/// Runs `f` on the timer list of queue `h` (NULL: the default queue).
+fn with_queue<R>(h: u64, f: impl FnOnce(&mut Vec<Arc<Timer>>) -> R) -> Result<R, u32> {
+    if h == 0 {
+        return Ok(f(&mut DEFAULT_QUEUE.0.lock().unwrap()));
+    }
+    let q = queue_of(h).ok_or(ERROR_INVALID_HANDLE)?;
+    let mut timers = q.0.lock().unwrap();
+    Ok(f(&mut timers))
+}
+
+extern "win64" fn CreateTimerQueue() -> u64 {
+    let q = Arc::new(TimerQueue(Mutex::new(Vec::new())));
+    let h = Arc::as_ptr(&q) as u64;
+    QUEUES.lock().unwrap().push(q);
+    h
+}
+
+/// Arms timer `t` to fire `due_ms` from now and then every `period_ms`
+/// (0: once).
+fn arm(t: &Arc<Timer>, due_ms: u32, period_ms: u32) {
+    *t.due.lock().unwrap() = Some((Instant::now() + Duration::from_millis(due_ms as u64), Duration::from_millis(period_ms as u64)));
+    let mut p = POOL.lock().unwrap();
+    if !p.timers.iter().any(|x| Arc::ptr_eq(x, t)) {
+        p.timers.push(t.clone());
+    }
+    ensure_worker(&mut p);
+    drop(p);
+    wake();
+}
+
+/// CreateTimerQueueTimer: the callback runs on a pool thread `due` ms from
+/// now and every `period` ms after (once with WT_EXECUTEONLYONCE or a zero
+/// period). The other WT_ flags choose threads Windows has: every pool
+/// thread here can wait, run long and use I/O.
+#[allow(clippy::too_many_arguments)]
+extern "win64" fn CreateTimerQueueTimer(out: *mut u64, queue: u64, callback: u64, param: u64, due: u32, period: u32, flags: u32) -> i32 {
+    if out.is_null() || callback == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    let period = if flags & WT_EXECUTEONLYONCE != 0 { 0 } else { period };
+    let t = Arc::new(Timer { callback, context: param, due: Mutex::new(None), pending: Pending::default(), legacy: true });
+    if let Err(e) = with_queue(queue, |timers| timers.push(t.clone())) {
+        return fail(e, 0);
+    }
+    arm(&t, due, period);
+    // SAFETY: the caller's out handle.
+    unsafe { *out = Arc::as_ptr(&t) as u64 };
+    1
+}
+
+/// The timer of queue `queue` whose handle is `h`.
+fn queue_timer(queue: u64, h: u64) -> Result<Arc<Timer>, u32> {
+    with_queue(queue, |timers| timers.iter().find(|t| Arc::as_ptr(t) as u64 == h).cloned())?.ok_or(ERROR_INVALID_HANDLE)
+}
+
+extern "win64" fn ChangeTimerQueueTimer(queue: u64, timer: u64, due: u32, period: u32) -> i32 {
+    match queue_timer(queue, timer) {
+        Ok(t) => {
+            arm(&t, due, period);
+            1
+        }
+        Err(e) => fail(e, 0),
+    }
+}
+
+/// Stops timer `t` and drops the callbacks it has queued.
+fn stop(t: &Arc<Timer>) {
+    *t.due.lock().unwrap() = None;
+    let mut p = POOL.lock().unwrap();
+    p.timers.retain(|x| !Arc::ptr_eq(x, t));
+    let before = p.jobs.len();
+    p.jobs.retain(|j| !matches!(j, Job::Timer(x) if Arc::ptr_eq(x, t)));
+    for _ in 0..before - p.jobs.len() {
+        t.pending.done();
+    }
+}
+
+/// Waits as DeleteTimerQueueTimer's `completion` asks once `timers` are
+/// stopped: INVALID_HANDLE_VALUE waits for running callbacks, an event is
+/// set when they end, NULL does not wait (ERROR_IO_PENDING if one runs).
+fn finish_delete(timers: Vec<Arc<Timer>>, completion: u64) -> i32 {
+    match completion {
+        INVALID_HANDLE_VALUE => {
+            for t in &timers {
+                t.pending.wait_idle();
+            }
+            1
+        }
+        0 => {
+            if timers.iter().any(|t| t.pending.0.load(Ordering::SeqCst) != 0) {
+                return fail(ERROR_IO_PENDING, 0);
+            }
+            1
+        }
+        event => {
+            let started = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
+                for t in &timers {
+                    t.pending.wait_idle();
+                }
+                kernel32::SetEvent(event);
+            });
+            if started.is_err() {
+                return fail(ERROR_NOT_ENOUGH_MEMORY, 0);
+            }
+            1
+        }
+    }
+}
+
+extern "win64" fn DeleteTimerQueueTimer(queue: u64, timer: u64, completion: u64) -> i32 {
+    let t = match with_queue(queue, |timers| {
+        let i = timers.iter().position(|t| Arc::as_ptr(t) as u64 == timer)?;
+        Some(timers.remove(i))
+    }) {
+        Ok(Some(t)) => t,
+        Ok(None) => return fail(ERROR_INVALID_PARAMETER, 0),
+        Err(e) => return fail(e, 0),
+    };
+    stop(&t);
+    finish_delete(alloc::vec![t], completion)
+}
+
+extern "win64" fn DeleteTimerQueueEx(queue: u64, completion: u64) -> i32 {
+    let q = {
+        let mut queues = QUEUES.lock().unwrap();
+        match queues.iter().position(|q| Arc::as_ptr(q) as u64 == queue) {
+            Some(i) => queues.remove(i),
+            None => return fail(ERROR_INVALID_HANDLE, 0),
+        }
+    };
+    let timers = core::mem::take(&mut *q.0.lock().unwrap());
+    for t in &timers {
+        stop(t);
+    }
+    finish_delete(timers, completion)
+}
+
+extern "win64" fn DeleteTimerQueue(queue: u64) -> i32 {
+    DeleteTimerQueueEx(queue, 0)
 }
 
 // ---- waits -----------------------------------------------------------------------
@@ -642,6 +804,12 @@ extern "win64" fn GetQueuedCompletionStatusEx(port: u64, entries: *mut u8, count
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
+        CreateTimerQueue,
+        CreateTimerQueueTimer,
+        ChangeTimerQueueTimer,
+        DeleteTimerQueueTimer,
+        DeleteTimerQueueEx,
+        DeleteTimerQueue,
         CreateThreadpoolWork,
         SubmitThreadpoolWork,
         WaitForThreadpoolWorkCallbacks,

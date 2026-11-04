@@ -825,6 +825,16 @@ extern "win64" fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, 
     1
 }
 
+/// One NUMA node (node 0) holds every processor and all memory.
+extern "win64" fn GetNumaHighestNodeNumber(out: *mut u32) -> i32 {
+    if out.is_null() {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    // SAFETY: the caller's out value.
+    unsafe { *out = 0 };
+    1
+}
+
 pub(crate) extern "win64" fn SetThreadAffinityMask(thread: u64, mask: u64) -> u64 {
     if mask==0 {return fail(ERROR_INVALID_PARAMETER,0);}
     if !(thread == objects::CURRENT_THREAD || matches!(objects::get(thread), Some(objects::Object::Thread(_)))) {
@@ -1410,6 +1420,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetProcessTimes,
         VerSetConditionMask,
         VerifyVersionInfoA,
+        GetNumaHighestNodeNumber,
         VerifyVersionInfoW,
         IsBadReadPtr,
         WerRegisterRuntimeExceptionModule,
