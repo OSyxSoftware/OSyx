@@ -1230,6 +1230,12 @@ fn shared_keys_clear(pid: Pid) {
     }
 }
 
+/// Where views of shared memory and file sections start: on 64 KiB
+/// boundaries, the allocation granularity of Windows, whose programs rely on
+/// it (Chromium unmaps a view at its address rounded down to 64 KiB, which
+/// with 4 KiB placement named the neighbouring view).
+const VIEW_ALIGN: u64 = 64 * 1024;
+
 /// Maps `[offset, offset + len)` of a file section into the current process.
 /// The region reserves the address range only: every page is loaded from the
 /// section's backing on its first touch, so mapping a 177 MiB archive costs
@@ -1251,7 +1257,7 @@ pub fn map_section(
     if p.mapped_pages + pages > MAP_LIMIT_PAGES {
         return Err(Errno::NoMemory);
     }
-    let base = free_run(p, p.next_map, pages, PAGE_SIZE).ok_or(Errno::NoMemory)?;
+    let base = free_run(p, p.next_map, pages, VIEW_ALIGN).ok_or(Errno::NoMemory)?;
     let mut region = Region::new(pages, prot);
     region.file = Some(FileRegion { section, first_page: offset / PAGE_SIZE });
     p.regions.insert(base, region);
@@ -1272,7 +1278,7 @@ pub fn map_shared(shm: Arc<SharedMemory>, writable: bool) -> Result<u64, Errno> 
     if p.mapped_pages + pages > MAP_LIMIT_PAGES {
         return Err(Errno::NoMemory);
     }
-    let base = free_run(p, p.next_map, pages, PAGE_SIZE).ok_or(Errno::NoMemory)?;
+    let base = free_run(p, p.next_map, pages, VIEW_ALIGN).ok_or(Errno::NoMemory)?;
     let mut flags = Flags::user(writable, false);
     flags.write_combining = shm.write_combining;
     for (i, &frame) in shm.frames().iter().enumerate() {
