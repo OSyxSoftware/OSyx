@@ -357,16 +357,29 @@ pub(crate) extern "win64" fn OpenProcessToken(process: u64, access: u32, out: *m
     if out.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    if process != objects::CURRENT_PROCESS {
-        return fail(ERROR_INVALID_HANDLE, 0);
-    }
+    let Some(pid) = crate::process::handle_pid(process) else { return fail(ERROR_INVALID_HANDLE, 0) };
     let access = match security::token_access(access) {
         Ok(v) => v,
         Err(e) => return fail(e, 0),
     };
-    let (uid, gid) = os_sys::getuid();
+    let (me, my_gid) = os_sys::getuid();
+    let token = if pid == crate::kernel32::pid() {
+        // This process's token, shared by every handle to it.
+        Token { uid: me, gid: my_gid, access, state: process_state() }
+    } else {
+        // Another process: its user's primary token, as it started. Only
+        // the same user, or root, may open it.
+        let info = match os_sys::proc_info(pid) {
+            Ok(i) => i,
+            Err(_) => return fail(ERROR_INVALID_HANDLE, 0),
+        };
+        if info.uid != me && me != 0 {
+            return fail(ERROR_ACCESS_DENIED, 0);
+        }
+        Token { uid: info.uid, gid: info.gid, access, state: Arc::new(TokenState { data: Mutex::new(initial(info.uid, info.gid)) }) }
+    };
     // SAFETY: the caller's out pointer.
-    unsafe { *out = objects::insert(Object::Token(Arc::new(Token { uid, gid, access, state: process_state() }))) };
+    unsafe { *out = objects::insert(Object::Token(Arc::new(token))) };
     1
 }
 
