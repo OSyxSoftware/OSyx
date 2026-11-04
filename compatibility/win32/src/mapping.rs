@@ -345,7 +345,11 @@ fn create_common(file: u64, attributes: u64, protect: u32, high: u32, low: u32, 
     };
     let named = name.is_some();
     let file = (file != INVALID_HANDLE_VALUE).then_some(file);
-    match create(file, protect, (high as u64) << 32 | low as u64, name) {
+    let r = create(file, protect, (high as u64) << 32 | low as u64, name);
+    if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: CreateFileMapping(file {file:x?}, protect {protect:#x}, size {:#x}) -> {r:x?}", (high as u64) << 32 | low as u64);
+    }
+    match r {
         Ok((h, existed)) => {
             if named && !existed {
                 crate::objsec::set_initial(h, sd);
@@ -371,7 +375,11 @@ extern "win64" fn CreateFileMappingA(file: u64, attributes: u64, protect: u32, h
 }
 
 extern "win64" fn MapViewOfFile(section: u64, access: u32, high: u32, low: u32, len: usize) -> u64 {
-    match map(section, access, (high as u64) << 32 | low as u64, len as u64) {
+    let r = map(section, access, (high as u64) << 32 | low as u64, len as u64);
+    if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+        os_std::eprintln!("winrun: MapViewOfFile({section:#x}, access {access:#x}, offset {:#x}, len {len:#x}) -> {r:x?}", (high as u64) << 32 | low as u64);
+    }
+    match r {
         // A 32-bit caller cannot use a view the kernel placed above 2 GiB
         // (shared and coherent file sections go wherever it puts them):
         // fail instead of handing back a truncated pointer.
