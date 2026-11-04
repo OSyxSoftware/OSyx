@@ -18,6 +18,31 @@ const SCAN_EVERY_MS: u64 = 10_000;
 const STATE_WORDS: usize = 6;
 const STACK_WORDS: usize = STATE_WORDS + 4096;
 
+/// winrun's own code: the executable PT_LOAD segment of the ELF image
+/// mapped at 0x40000000 (its headers are part of the first segment).
+fn own_code() -> (u64, u64) {
+    const BASE: u64 = 0x4000_0000;
+    // SAFETY: the ELF header and program headers of winrun's own image.
+    unsafe {
+        let rd = |a: u64| core::ptr::read_unaligned(a as *const u64);
+        let rd16 = |a: u64| core::ptr::read_unaligned(a as *const u16);
+        let rd32 = |a: u64| core::ptr::read_unaligned(a as *const u32);
+        if rd32(BASE) != 0x464c_457f {
+            return (0, 0);
+        }
+        let (phoff, phentsize, phnum) = (rd(BASE + 0x20), rd16(BASE + 0x36) as u64, rd16(BASE + 0x38) as u64);
+        for i in 0..phnum {
+            let ph = BASE + phoff + i * phentsize;
+            // PT_LOAD with PF_X.
+            if rd32(ph) == 1 && rd32(ph + 4) & 1 != 0 {
+                let (vaddr, memsz) = (rd(ph + 16), rd(ph + 40));
+                return (vaddr, vaddr + memsz);
+            }
+        }
+    }
+    (0, 0)
+}
+
 /// A system call a blocked thread is in, in words.
 fn syscall_text(nr: u64, arg0: u64, arg3: u64) -> String {
     use osyx_abi::nr;
@@ -170,6 +195,21 @@ fn watchdog() {
                 os_std::eprintln!("winrun:     {state}, {} (from {:#x})", syscall_text(words[1], words[4], words[5]), words[2]);
                 if let Some(chain) = images.as_ref().and_then(|i| crate::exceptions::chain_of(&words[STATE_WORDS.min(n)..n], i)) {
                     os_std::eprintln!("winrun:     stack: {chain}");
+                }
+                // winrun's own frames, for addr2line on this build's binary.
+                let (lo, hi) = own_code();
+                let mut own: Vec<u64> = Vec::new();
+                for &v in &words[STATE_WORDS.min(n)..n] {
+                    if v >= lo && v < hi && !own.contains(&v) {
+                        own.push(v);
+                        if own.len() == 24 {
+                            break;
+                        }
+                    }
+                }
+                if !own.is_empty() {
+                    let list: Vec<String> = own.iter().map(|v| format!("{v:#x}")).collect();
+                    os_std::eprintln!("winrun:     winrun frames: {}", list.join(" "));
                 }
             }
         }
