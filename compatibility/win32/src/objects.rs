@@ -176,6 +176,10 @@ pub struct EventObj {
     shared: Mutex<Option<(u64, u64)>>,
     pub manual: bool,
     pub name: Option<String>,
+    /// The thread that last set the event in this process, and when
+    /// (monotonic ns), for stall reports; 0 if none has.
+    pub last_set_by: AtomicU64,
+    pub last_set_at: AtomicU64,
 }
 
 impl EventObj {
@@ -186,6 +190,8 @@ impl EventObj {
             shared: Mutex::new(None),
             manual,
             name,
+            last_set_by: AtomicU64::new(0),
+            last_set_at: AtomicU64::new(0),
         });
         e.word.store(&e.local as *const AtomicU32 as *mut AtomicU32, Ordering::SeqCst);
         e
@@ -200,6 +206,8 @@ impl EventObj {
             shared: Mutex::new(Some((shm, base))),
             manual,
             name: None,
+            last_set_by: AtomicU64::new(0),
+            last_set_at: AtomicU64::new(0),
         });
         Some(e)
     }
@@ -220,6 +228,8 @@ impl EventObj {
     pub fn set(&self, on: bool) {
         self.word().store(on as u32, Ordering::SeqCst);
         if on {
+            self.last_set_by.store(os_sys::gettid(), Ordering::Relaxed);
+            self.last_set_at.store(os_sys::clock(osyx_abi::CLOCK_MONOTONIC).unwrap_or(0), Ordering::Relaxed);
             if self.is_shared() {
                 os_sys::futex_wake(self.word().as_ptr(), u32::MAX);
             }
