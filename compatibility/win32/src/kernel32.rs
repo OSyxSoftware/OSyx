@@ -1487,7 +1487,34 @@ pub(crate) extern "win64" fn CloseHandle(h: u64) -> Bool {
     }
 }
 
+/// DuplicateHandle; a failure across processes is reported (which
+/// processes, which handle, what object), since programs that talk through
+/// duplicated handles fail in ways hard to trace back.
 extern "win64" fn DuplicateHandle(
+    src_process: u64,
+    src: u64,
+    dst_process: u64,
+    dst: *mut u64,
+    access: u32,
+    inherit: Bool,
+    options: u32,
+) -> Bool {
+    let ok = duplicate_handle(src_process, src, dst_process, dst, access, inherit, options);
+    let other = |p: u64| crate::process::other_pid(p).ok().flatten();
+    if ok == FALSE && (other(src_process).is_some() || other(dst_process).is_some()) {
+        let what = objects::get(src).map_or("not a handle here", |o| objects::kind_name(&o));
+        os_std::eprintln!(
+            "winrun: DuplicateHandle({:?}:{src:#x} -> {:?}) failed with {} ({what}, options {options:#x})",
+            other(src_process),
+            other(dst_process),
+            teb::last_error()
+        );
+    }
+    ok
+}
+
+#[allow(clippy::too_many_arguments)]
+fn duplicate_handle(
     src_process: u64,
     src: u64,
     dst_process: u64,

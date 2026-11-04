@@ -119,9 +119,7 @@ fn item(h: u64) -> Result<Item, u32> {
         Some(Object::Process(p)) => Ok(Item { handle: h, kernel: None, kind: KIND_PROCESS, flags: 0, size: p.pid }),
         Some(Object::Mutex(m)) => Ok(Item { handle: h, kernel: Some(m.share()?), kind: KIND_MUTEX, flags: 0, size: 0 }),
         Some(o) => {
-            if crate::VERBOSE.load(Ordering::Relaxed) {
-                os_std::eprintln!("winrun: cannot inherit handle {h:#x} ({}) into another process", objects::kind_name(&o));
-            }
+            os_std::eprintln!("winrun: cannot hand handle {h:#x} ({}) to another process", objects::kind_name(&o));
             Err(ERROR_NOT_SUPPORTED)
         }
         None => Err(ERROR_INVALID_HANDLE),
