@@ -950,6 +950,57 @@ fn copy_rows_view(
 /// costs ~120 ms for a 1280x972 window. None: the general path must run.
 // Mirrors the BitBlt-style argument list of its callers.
 #[allow(clippy::too_many_arguments)]
+/// BitBlt onto a DC of another process's window (GetDC of a handle that
+/// process made): the pixels go to that process, which draws them in its
+/// window (`blit_from_other_process`). None when `dst` is not such a DC.
+#[allow(clippy::too_many_arguments)]
+fn blit_to_other_process(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i32, rop: u32) -> Option<Bool> {
+    let hwnd = with(|g| g.dcs.get(&dst).filter(|d| !d.memory && d.hwnd != 0 && !g.windows.contains_key(&d.hwnd)).map(|d| d.hwnd))?;
+    let pid = super::window_process(hwnd)?;
+    let (area, pixels) = if rop == 0xcc0020 {
+        let Some(s) = snapshot(src, Rect::new(sx, sy, w as u32, h as u32)) else { return Some(FALSE) };
+        (Rect::new(x + (s.area.x - sx), y + (s.area.y - sy), s.area.w, s.area.h), s.pixels)
+    } else {
+        let c = if rop == 0x42 { rgb(0, 0, 0) } else { rgb(255, 255, 255) };
+        (Rect::new(x, y, w as u32, h as u32), alloc::vec![c; w as usize * h as usize])
+    };
+    if area.w == 0 || area.h == 0 {
+        return Some(TRUE);
+    }
+    let ok = crate::inherit::draw_in_window(pid, hwnd, area.x, area.y, area.w, area.h, &pixels);
+    static TRACED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) && TRACED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+        os_std::eprintln!("winrun: BitBlt to window {hwnd:#x} of process {pid}: ({},{}) {}x{}, drawn {ok}, pixels {:#x} .. {:#x}", area.x, area.y, area.w, area.h, pixels[0], pixels[pixels.len() / 2]);
+    }
+    Some(if ok { TRUE } else { fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) })
+}
+
+/// Pixels another process drew on a DC of window `hwnd` of this process
+/// (`blit_to_other_process` there): drawn like a SRCCOPY BitBlt at (x, y),
+/// then presented.
+pub(super) fn blit_from_other_process(hwnd: u64, x: i32, y: i32, w: u32, h: u32, pixels: &[Color]) -> bool {
+    if pixels.len() < w as usize * h as usize || !with(|g| g.windows.contains_key(&hwnd)) {
+        return false;
+    }
+    let dc = super::GetDC(hwnd);
+    if dc == 0 {
+        return false;
+    }
+    let ok = draw(dc, |s, _, _, clip| {
+        let r = Rect::new(x, y, w, h).intersect(&clip);
+        for dy in r.y..r.y + r.h as i32 {
+            let row = (dy - y) as usize * w as usize;
+            for dx in r.x..r.x + r.w as i32 {
+                s.put(dx, dy, pixels[row + (dx - x) as usize]);
+            }
+        }
+        (TRUE, r)
+    })
+    .unwrap_or(FALSE);
+    super::ReleaseDC(hwnd, dc);
+    ok != 0
+}
+
 fn fast_blit(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i32) -> Option<Bool> {
     with(|g| {
         let d = g.dcs.get(&dst)?;
@@ -1065,6 +1116,9 @@ pub(super) extern "win64" fn BitBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, sr
         return fail(ERROR_NOT_SUPPORTED, FALSE);
     }
     let rop = rop & !0x40000000;
+    if let Some(ok) = blit_to_other_process(dst, x, y, w, h, src, sx, sy, rop) {
+        return ok;
+    }
     if rop == 0xcc0020 {
         if let Some(ok) = fast_blit(dst, x, y, w, h, src, sx, sy) {
             return ok;

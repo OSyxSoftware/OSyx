@@ -431,6 +431,19 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
     if !handled {
         let callback = FILTER.load(Ordering::SeqCst);
         if callback != 0 {
+            // A crash handler's filter usually ends the process without a
+            // word: what reached it is named first.
+            if crate::VERBOSE.load(Ordering::Relaxed) || crate::kernel32::TRACE.load(Ordering::Relaxed) {
+                os_std::eprintln!(
+                    "winrun: exception {:#x} at {:#x} ({}) in thread {} goes to the unhandled-exception filter (info {:#x} {:#x})",
+                    record.code,
+                    record.address,
+                    where_text(record.address),
+                    os_sys::gettid(),
+                    record.info[0],
+                    record.info[1],
+                );
+            }
             handled = call(Handler { id: 0, callback, continuation: false }, &mut p) == -1;
         }
     }

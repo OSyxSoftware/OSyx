@@ -304,6 +304,12 @@ pub fn receive(name: &str) -> Result<usize, String> {
 
 const PUT: u32 = 1;
 const TAKE: u32 = 2;
+/// Pixels for a window of the serving process: (hwnd, x, y, w, h) and a
+/// shared memory object holding `w * h` pixels, rows top-down. The reply
+/// is 1 if they were drawn.
+const DRAW: u32 = 3;
+/// Whether the serving process has window (hwnd); the reply is 1 if so.
+const IS_WINDOW: u32 = 4;
 
 fn service_name(pid: u64) -> String {
     alloc::format!("user.{}.winrun.handles.{pid}", os_std::os::getuid().0)
@@ -451,10 +457,86 @@ fn serve(c: u64, direct: bool) -> bool {
                 }
             }
         }
+        DRAW if n >= 4 + 8 + 16 && k == 1 => {
+            let word = |at: usize| u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
+            let hwnd = u64::from_le_bytes(buf[4..12].try_into().unwrap());
+            let (x, y, w, h) = (word(12) as i32, word(16) as i32, word(20), word(24));
+            let drawn = draw_received(hs[0], hwnd, x, y, w, h);
+            let _ = os_sys::close(hs[0]);
+            let _ = os_sys::channel_send(c, &(drawn as u32).to_le_bytes(), &[]);
+        }
+        IS_WINDOW if n >= 4 + 8 => {
+            let hwnd = u64::from_le_bytes(buf[4..12].try_into().unwrap());
+            let _ = os_sys::channel_send(c, &(crate::user32::is_window(hwnd) as u32).to_le_bytes(), &[]);
+        }
         PUT => os_std::eprintln!("winrun: handle service: malformed hand-over ({n} bytes, {k} kernel object(s))"),
         _ => {}
     }
     true
+}
+
+/// The pixels of a DRAW request, in shared memory object `shm`, drawn in
+/// window `hwnd` of this process.
+fn draw_received(shm: u64, hwnd: u64, x: i32, y: i32, w: u32, h: u32) -> bool {
+    let words = w as usize * h as usize;
+    let Ok(size) = os_sys::shm_size(shm) else { return false };
+    if words == 0 || (size as usize) < words * 4 {
+        return false;
+    }
+    let Ok(p) = os_sys::shm_map(shm, false) else { return false };
+    // SAFETY: the mapping holds at least `words` pixels.
+    let pixels = unsafe { core::slice::from_raw_parts(p as *const u32, words) };
+    let drawn = crate::user32::blit_from_other_process(hwnd, x, y, w, h, pixels);
+    // SAFETY: the mapping made above, of the object's size.
+    let _ = unsafe { os_sys::unmap(p, size as usize) };
+    drawn
+}
+
+/// Whether process `pid` has window `hwnd`.
+pub fn window_exists_in(pid: u64, hwnd: u64) -> bool {
+    connect(pid).is_ok_and(|c| {
+        let mut msg = Vec::with_capacity(12);
+        msg.extend_from_slice(&IS_WINDOW.to_le_bytes());
+        msg.extend_from_slice(&hwnd.to_le_bytes());
+        let mut out = [0u8; 4];
+        let yes = os_sys::channel_send(c, &msg, &[]).is_ok() && recv_wait(c, &mut out, &mut []).is_ok_and(|(n, _)| n == 4) && u32::from_le_bytes(out) == 1;
+        let _ = os_sys::close(c);
+        yes
+    })
+}
+
+/// Draws `pixels` (`w * h`, rows top-down) at (x, y) in window `hwnd` of
+/// process `pid`, which does the drawing (GetDC and BitBlt on another
+/// process's window). False if the process or the window is gone.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_in_window(pid: u64, hwnd: u64, x: i32, y: i32, w: u32, h: u32, pixels: &[u32]) -> bool {
+    let bytes = pixels.len() * 4;
+    if bytes == 0 || pixels.len() < w as usize * h as usize {
+        return false;
+    }
+    let Ok(shm) = os_sys::shm_create(bytes as u64) else { return false };
+    let filled = os_sys::shm_map(shm, true).map(|p| {
+        // SAFETY: a fresh writable mapping of `bytes` bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(pixels.as_ptr().cast::<u8>(), p, bytes);
+            let _ = os_sys::unmap(p, bytes);
+        }
+    });
+    let drawn = filled.is_ok()
+        && connect(pid).is_ok_and(|c| {
+            let mut msg = Vec::with_capacity(4 + 8 + 16);
+            msg.extend_from_slice(&DRAW.to_le_bytes());
+            msg.extend_from_slice(&hwnd.to_le_bytes());
+            for v in [x as u32, y as u32, w, h] {
+                msg.extend_from_slice(&v.to_le_bytes());
+            }
+            let mut out = [0u8; 4];
+            let ok = os_sys::channel_send(c, &msg, &[shm]).is_ok() && recv_wait(c, &mut out, &mut []).is_ok_and(|(n, _)| n == 4) && u32::from_le_bytes(out) == 1;
+            let _ = os_sys::close(c);
+            ok
+        });
+    let _ = os_sys::close(shm);
+    drawn
 }
 
 /// Serve the trusted parent on the already granted channel, without creating
