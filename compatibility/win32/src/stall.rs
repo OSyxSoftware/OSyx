@@ -141,14 +141,20 @@ fn describe(w: &Wait) -> String {
 }
 
 fn watchdog() {
+    // OSYX_WINRUN_REPORT_EVERY=<seconds>: a full report that often even
+    // when nothing stalls (every thread's system call and stack), for a
+    // process that is idle in untracked waits.
+    let every_ns = os_std::env::var("OSYX_WINRUN_REPORT_EVERY").ok().and_then(|v| v.parse::<u64>().ok()).filter(|&s| s > 0).map(|s| s * 1_000_000_000);
+    let mut last_report = now_ns();
     loop {
         os_std::thread::sleep(core::time::Duration::from_millis(SCAN_EVERY_MS));
         let now = now_ns();
+        let periodic = every_ns.is_some_and(|e| now.saturating_sub(last_report) >= e);
         // Copied out, so the report below runs without the lock.
         let snapshot: Vec<(u64, &'static str, String, u64, bool)> = {
             let mut waits = WAITS.lock().unwrap();
             let stalled = waits.values().flatten().any(|w| !w.reported && now.saturating_sub(w.since) > REPORT_AFTER_NS);
-            if !stalled {
+            if !stalled && !periodic {
                 continue;
             }
             let mut out = Vec::new();
@@ -166,6 +172,7 @@ fn watchdog() {
         // Every Windows thread, with its CPU use over two seconds: a
         // thread that is in no tracked wait is running or blocked
         // elsewhere, and a spinning one shows here.
+        last_report = now;
         let threads = crate::kernel32::thread_list();
         let before: Vec<u64> = threads.iter().map(|&(t, _)| os_sys::thread_times(t as u64).unwrap_or(0)).collect();
         os_std::thread::sleep(core::time::Duration::from_secs(2));
