@@ -684,6 +684,21 @@ struct TlsModule {
     zero_fill: usize,
 }
 
+/// The reference count of a module that is never unloaded (a static
+/// import, or one pinned by GetModuleHandleEx): references neither add to
+/// nor drop it.
+const PINNED: u32 = u32::MAX;
+
+/// One more reference: a pinned count stays pinned, others stop below it.
+fn add_ref(refs: u32) -> u32 {
+    if refs == PINNED { PINNED } else { refs.saturating_add(1).min(PINNED - 1) }
+}
+
+/// One reference less: a pinned count stays pinned.
+fn drop_ref(refs: u32) -> u32 {
+    if refs == PINNED { PINNED } else { refs.saturating_sub(1) }
+}
+
 struct ModState {
     /// Loader entry in the PEB lists (0 for built-ins).
     ldr: u64,
@@ -1074,7 +1089,7 @@ pub fn start(exe_path: &str, command_line: &str, environment: &[String]) -> Resu
     // The program and the DLLs linked with it are never unloaded, as
     // Windows pins static imports: FreeLibrary does not detach them.
     for s in l.state.iter_mut() {
-        s.refs = u32::MAX;
+        s.refs = PINNED;
     }
     *LOADER.lock().unwrap() = Some(l);
     setup_thread_tls(main_teb);
@@ -1470,9 +1485,11 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
                     l.state[i].pristine = writable_sections(file.as_ref(), base);
                 }
             }
-            l.state[i].refs = 1;
+            if l.state[i].refs != PINNED {
+                l.state[i].refs = 1;
+            }
         } else {
-            l.state[i].refs += 1;
+            l.state[i].refs = add_ref(l.state[i].refs);
         }
         (todo, module_handle(l, i))
     };
@@ -1504,7 +1521,7 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
                     l.state[i].attached = false;
                 }
             }
-            if let Some(i) = module_by_handle(l, h) { l.state[i].refs = l.state[i].refs.saturating_sub(1); }
+            if let Some(i) = module_by_handle(l, h) { l.state[i].refs = drop_ref(l.state[i].refs); }
         });
         return Err(ERROR_DLL_INIT_FAILED);
     }
@@ -1531,7 +1548,7 @@ pub fn add_module_reference(h: u64, pin: bool) {
     with(|l| {
         if let Some(i) = module_by_handle(l, h) {
             if let Some(s) = l.state.get_mut(i) {
-                s.refs = if pin { u32::MAX } else { s.refs.saturating_add(1) };
+                s.refs = if pin { PINNED } else { add_ref(s.refs) };
             }
         }
     })
@@ -1549,7 +1566,7 @@ pub fn free_library(h: u64) -> Result<(), u32> {
             return Ok(());
         }
         let s = &mut l.state[i];
-        s.refs = s.refs.saturating_sub(1);
+        s.refs = drop_ref(s.refs);
         if s.refs == 0 && s.attached {
             s.attached = false;
             let m = &l.linker.modules[i];

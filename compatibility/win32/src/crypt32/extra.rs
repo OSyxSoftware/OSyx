@@ -401,7 +401,19 @@ fn master_key(machine: bool) -> Result<[u8; 32], u32> {
                     }
                     k
                 }
-                Err(osyx_abi::Errno::AlreadyExists) => read(&file).ok_or(ERROR_INVALID_DATA)?,
+                // Another process made the file: it may still be writing
+                // the key, so a short read is retried for up to two seconds.
+                Err(osyx_abi::Errno::AlreadyExists) => {
+                    let mut found = read(&file);
+                    for _ in 0..40 {
+                        if found.is_some() {
+                            break;
+                        }
+                        os_std::thread::sleep(core::time::Duration::from_millis(50));
+                        found = read(&file);
+                    }
+                    found.ok_or(ERROR_INVALID_DATA)?
+                }
                 Err(e) => return Err(errno_to_win32(e)),
             }
         }

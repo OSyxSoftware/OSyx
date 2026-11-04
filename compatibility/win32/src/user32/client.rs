@@ -657,13 +657,49 @@ extern "win64" fn DisplayConfigSetDeviceInfo(packet: *const u8) -> u32 {
 static DPI_STATE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 const DPI_DECLARED: u32 = 0x100;
 
+/// The text of the first element of `xml` whose local name is `name`
+/// (any namespace prefix, any attributes on its start tag), trimmed.
+fn element_text(xml: &str, name: &str) -> Option<String> {
+    let mut rest = xml;
+    while let Some(open) = rest.find('<') {
+        rest = &rest[open + 1..];
+        if rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('!') {
+            continue;
+        }
+        let end = rest.find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/').unwrap_or(rest.len());
+        let tag = &rest[..end];
+        let local = tag.rsplit(':').next().unwrap_or(tag);
+        // The start tag ends at the first '>' outside a quoted attribute.
+        let mut quote = None;
+        let close = rest.char_indices().find(|&(_, c)| match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+                false
+            }
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                false
+            }
+            None => c == '>',
+        })?;
+        if local == name && !rest[..close.0].ends_with('/') {
+            let body = &rest[close.0 + 1..];
+            return Some(String::from(body[..body.find('<').unwrap_or(body.len())].trim()));
+        }
+        rest = &rest[close.0 + 1..];
+    }
+    None
+}
+
 /// The awareness the manifest declares (<dpiAwareness>, else <dpiAware>),
 /// as a context; None when it declares none.
 fn manifest_dpi_context() -> Option<u32> {
     let Ok(m) = crate::loader::numeric_resource(0, 24, 1) else { return None };
     let text = String::from_utf8_lossy(&m).to_ascii_lowercase();
-    let value = |tag: &str| text.split(tag).nth(1).and_then(|r| r.split('<').next()).map(|v| String::from(v.trim_start_matches('>').trim()));
-    if let Some(list) = value("<dpiawareness>") {
+    let value = |tag: &str| element_text(&text, tag);
+    if let Some(list) = value("dpiawareness") {
         // A list in order of preference: the first value this OS knows.
         for v in list.split(',').map(|v| v.trim().replace(' ', "")) {
             match v.as_str() {
@@ -676,7 +712,7 @@ fn manifest_dpi_context() -> Option<u32> {
             }
         }
     }
-    match value("<dpiaware>").as_deref().map(str::trim) {
+    match value("dpiaware").as_deref().map(str::trim) {
         Some(v) if v.contains("per monitor") || v.contains("true/pm") => Some(3),
         Some(v) if v.starts_with("true") => Some(2),
         Some(v) if v.starts_with("false") => Some(1),

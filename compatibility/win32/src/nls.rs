@@ -338,7 +338,8 @@ const MUI_LANGUAGE_NAME: u32 = 0x8;
 /// one language needs no fallback and passes every filter).
 extern "win64" fn GetThreadPreferredUILanguages(flags: u32, count: *mut u32, buf: *mut u16, size: *mut u32) -> i32 {
     const KNOWN: u32 = 0x1 | MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | 0x10 | 0x20 | 0x40 | 0x100 | 0x200;
-    if flags & !KNOWN != 0 {
+    // One list form at most: both ID and NAME is invalid on every path.
+    if flags & !KNOWN != 0 || flags & (MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME) == (MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME) {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let form = match flags & (MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME) {

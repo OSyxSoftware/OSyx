@@ -176,6 +176,14 @@ struct Sock {
 }
 
 static SOCKETS: Mutex<BTreeMap<u64, Sock>> = Mutex::new(BTreeMap::new());
+
+/// Sets the blocking mode of kernel socket `fd` in every handle to it:
+/// duplicated handles (WSADuplicateSocket) share the socket's state.
+fn set_nonblocking(socks: &mut BTreeMap<u64, Sock>, fd: u64, on: bool) {
+    for k in socks.values_mut().filter(|k| k.fd == fd) {
+        k.nonblocking = on;
+    }
+}
 static NEXT: Mutex<u64> = Mutex::new(0x1000);
 static STARTED: AtomicU32 = AtomicU32::new(0);
 
@@ -680,7 +688,11 @@ extern "win64" fn ioctlsocket(s: u64, cmd: u32, arg: *mut u32) -> i32 {
                 // SAFETY: the caller's argument.
                 let on = unsafe { *arg } != 0;
                 os_sys::sock_ctl(fd, net::ctl::NONBLOCK, on as u64).map_err(wsa)?;
-                SOCKETS.lock().unwrap().get_mut(&s).ok_or(WSAENOTSOCK)?.nonblocking = on;
+                let mut socks = SOCKETS.lock().unwrap();
+                if !socks.contains_key(&s) {
+                    return Err(WSAENOTSOCK);
+                }
+                set_nonblocking(&mut socks, fd, on);
             }
             FIONREAD => {
                 let n = os_sys::sock_ctl(fd, net::ctl::AVAILABLE, 0).map_err(wsa)?;
