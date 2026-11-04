@@ -1543,7 +1543,7 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
             .collect();
         (todo, module_handle(l, i), loaded)
     };
-    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) || crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
         os_std::eprintln!("winrun: loaded {name} at {h:#x}");
     }
     if !todo.is_empty() && !wow64::is_active() {

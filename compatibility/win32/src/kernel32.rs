@@ -3484,13 +3484,24 @@ extern "win64" fn GetSystemTimePreciseAsFileTime(out: *mut u64) {
 extern "win64" fn GetModuleHandleA(name: *const u8) -> u64 {
     // SAFETY: NULL or a NUL-terminated name.
     let n = unsafe { sa(name) };
-    loader::get_module_handle(n.as_deref()).unwrap_or_else(|| fail(ERROR_MOD_NOT_FOUND, 0))
+    module_handle_or_trace(n)
 }
 
 extern "win64" fn GetModuleHandleW(name: *const u16) -> u64 {
     // SAFETY: as above.
     let n = unsafe { sw(name) };
-    loader::get_module_handle(n.as_deref()).unwrap_or_else(|| fail(ERROR_MOD_NOT_FOUND, 0))
+    module_handle_or_trace(n)
+}
+
+/// A module that is not loaded is named under FAILTRACE: programs probe
+/// for DLLs this way before choosing a path.
+fn module_handle_or_trace(n: Option<String>) -> u64 {
+    loader::get_module_handle(n.as_deref()).unwrap_or_else(|| {
+        if TRACE.load(Ordering::Relaxed) {
+            os_std::eprintln!("winrun: GetModuleHandle({}) found no module", n.as_deref().unwrap_or("NULL"));
+        }
+        fail(ERROR_MOD_NOT_FOUND, 0)
+    })
 }
 
 pub(crate) extern "win64" fn GetModuleHandleExW(flags: u32, name: *const u16, out: *mut u64) -> Bool {
