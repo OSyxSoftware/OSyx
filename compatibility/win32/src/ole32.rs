@@ -1758,5 +1758,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         StgCreateStorageEx
     ];
     e.push(("PropVariantClear", crate::propsys::PropVariantClear as *const () as u64));
+    e.push(("PropVariantCopy", crate::propsys::PropVariantCopy as *const () as u64));
     e
 }

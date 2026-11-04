@@ -682,6 +682,15 @@ pub(crate) extern "win64" fn RegDeleteValueW(hkey: u64, name: *const u16) -> u32
 }
 
 /// Deletes a key without subkeys, as Windows does.
+/// RegDeleteKeyExW: the 32- and 64-bit registry views are one here, so
+/// the view in `sam` changes nothing.
+extern "win64" fn RegDeleteKeyExW(hkey: u64, sub: *const u16, _sam: u32, reserved: u32) -> u32 {
+    if reserved != 0 {
+        return ERROR_INVALID_PARAMETER;
+    }
+    RegDeleteKeyW(hkey, sub)
+}
+
 extern "win64" fn RegDeleteKeyW(hkey: u64, sub: *const u16) -> u32 {
     let mut r = REG.lock().unwrap();
     let (hive, base, _) = match resolve(&mut r, hkey) {
@@ -1178,6 +1187,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         RegGetValueW,
         RegSetValueExW,
         RegDeleteValueW,
+        RegDeleteKeyExW,
         RegDeleteKeyW,
         RegDisablePredefinedCache,
         RegDisablePredefinedCacheEx,
