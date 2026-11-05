@@ -357,6 +357,24 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
     }
     let mut context = windows_context(n);
     let mut record = record(n);
+    // Under OSYX_WINRUN_FAILTRACE: the first faults dispatched to the
+    // program's handlers, which may end the process themselves (V8's
+    // handler for its generated code calls the crash reporter).
+    {
+        static TRACED: AtomicU64 = AtomicU64::new(0);
+        if crate::kernel32::TRACE.load(Ordering::Relaxed) && TRACED.fetch_add(1, Ordering::Relaxed) < 400 {
+            os_std::eprintln!(
+                "winrun: fault {:#x} at {:#x} ({}) in thread {} dispatched (info {:#x} {:#x}, page fault error {:#x})",
+                record.code,
+                record.address,
+                where_text(record.address),
+                os_sys::gettid(),
+                record.info[0],
+                record.info[1],
+                n.error,
+            );
+        }
+    }
     // A fault inside the loader (winrun relocating or linking an image)
     // cannot be dispatched: finding handlers takes the loader lock this
     // thread holds, and waiting for it would hang the process. It ends the
