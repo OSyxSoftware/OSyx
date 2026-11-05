@@ -834,7 +834,9 @@ pub(crate) extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u
     if let Some(Object::Pipe(p)) = objects::get(h) {
         return crate::pipes::read_file(p, buf, n, read, ov as u64);
     }
-    match read_handle(h, buf, n, overlapped_offset(ov)) {
+    let r = read_handle(h, buf, n, overlapped_offset(ov));
+    trace_file_io(h, "read", overlapped_offset(ov), n, &r);
+    match r {
         Ok(k) => {
             if !read.is_null() {
                 // SAFETY: the caller's out pointer.
@@ -844,6 +846,25 @@ pub(crate) extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u
             TRUE
         }
         Err(e) => fail(e, FALSE),
+    }
+}
+
+/// OSYX_WINRUN_TRACE_FILES=<part>[;<part>...]: each ReadFile and WriteFile
+/// on a file whose path contains one of the parts (ignoring case) is logged
+/// with its offset, size and result.
+fn trace_file_io(h: u64, what: &str, offset: Option<u64>, n: u32, r: &Result<u32, u32>) {
+    static PARTS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+    let mut parts = PARTS.lock().unwrap();
+    let parts = parts.get_or_insert_with(|| {
+        os_std::env::var("OSYX_WINRUN_TRACE_FILES").map(|v| v.split(';').filter(|p| !p.is_empty()).map(|p| p.to_ascii_lowercase()).collect()).unwrap_or_default()
+    });
+    if parts.is_empty() {
+        return;
+    }
+    let Some(Object::File(f)) = objects::get(h) else { return };
+    let path = f.path.to_ascii_lowercase();
+    if parts.iter().any(|p| path.contains(p.as_str())) {
+        os_std::eprintln!("winrun: {what} {h:#x} {} at {offset:?}, {n} byte(s): {r:?}", f.path);
     }
 }
 
@@ -879,7 +900,9 @@ pub(crate) extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: 
     if let Some(Object::Pipe(p)) = objects::get(h) {
         return crate::pipes::write_file(p, buf, n, written, ov as u64);
     }
-    match write_handle(h, buf, n, overlapped_offset(ov)) {
+    let r = write_handle(h, buf, n, overlapped_offset(ov));
+    trace_file_io(h, "write", overlapped_offset(ov), n, &r);
+    match r {
         Ok(k) => {
             echo_write(h, buf, k);
             if !written.is_null() {
