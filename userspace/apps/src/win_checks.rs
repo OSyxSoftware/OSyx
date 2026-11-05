@@ -126,6 +126,7 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     });
     t.check("message-queue waits and window property stores", || prism.is_ok() && run("msgwait.exe", &[]) == Some(0));
     t.check("DWM window attributes and timing, imm32 and wtsapi32", || prism.is_ok() && run("dwm.exe", &[]) == Some(0));
+    t.check("GetDC and BitBlt on another process's window", || prism.is_ok() && run("xwindow.exe", &[]) == Some(0));
     t.check("mouse capture and tracking, displays and input registrations", || {
         prism.is_ok() && run("input.exe", &[]) == Some(0)
     });

@@ -357,6 +357,24 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
     }
     let mut context = windows_context(n);
     let mut record = record(n);
+    // Under OSYX_WINRUN_FAILTRACE: the first faults dispatched to the
+    // program's handlers, which may end the process themselves (V8's
+    // handler for its generated code calls the crash reporter).
+    {
+        static TRACED: AtomicU64 = AtomicU64::new(0);
+        if crate::kernel32::TRACE.load(Ordering::Relaxed) && TRACED.fetch_add(1, Ordering::Relaxed) < 400 {
+            os_std::eprintln!(
+                "winrun: fault {:#x} at {:#x} ({}) in thread {} dispatched (info {:#x} {:#x}, page fault error {:#x})",
+                record.code,
+                record.address,
+                where_text(record.address),
+                os_sys::gettid(),
+                record.info[0],
+                record.info[1],
+                n.error,
+            );
+        }
+    }
     // A fault inside the loader (winrun relocating or linking an image)
     // cannot be dispatched: finding handlers takes the loader lock this
     // thread holds, and waiting for it would hang the process. It ends the
@@ -431,6 +449,19 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
     if !handled {
         let callback = FILTER.load(Ordering::SeqCst);
         if callback != 0 {
+            // A crash handler's filter usually ends the process without a
+            // word: what reached it is named first.
+            if crate::VERBOSE.load(Ordering::Relaxed) || crate::kernel32::TRACE.load(Ordering::Relaxed) {
+                os_std::eprintln!(
+                    "winrun: exception {:#x} at {:#x} ({}) in thread {} goes to the unhandled-exception filter (info {:#x} {:#x})",
+                    record.code,
+                    record.address,
+                    where_text(record.address),
+                    os_sys::gettid(),
+                    record.info[0],
+                    record.info[1],
+                );
+            }
             handled = call(Handler { id: 0, callback, continuation: false }, &mut p) == -1;
         }
     }
@@ -456,10 +487,12 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
     }
     // The faulting access goes on the first line: the process may be ended
     // from outside (a crash handler's server) while the rest is printed.
+    // With the page fault's error code (bit 0: the page was present, 1: a
+    // write, 4: an instruction fetch), which says why no handler took it.
     let access = match (record.code, record.count >= 2, record.info[0]) {
-        (0xc000_0005, true, 0) => alloc::format!(", reading {:#x}", record.info[1]),
-        (0xc000_0005, true, 1) => alloc::format!(", writing {:#x}", record.info[1]),
-        (0xc000_0005, true, _) => alloc::format!(", executing {:#x}", record.info[1]),
+        (0xc000_0005, true, 0) => alloc::format!(", reading {:#x} (fault error {:#x})", record.info[1], n.error),
+        (0xc000_0005, true, 1) => alloc::format!(", writing {:#x} (fault error {:#x})", record.info[1], n.error),
+        (0xc000_0005, true, _) => alloc::format!(", executing {:#x} (fault error {:#x})", record.info[1], n.error),
         _ => alloc::string::String::new(),
     };
     os_std::eprintln!(

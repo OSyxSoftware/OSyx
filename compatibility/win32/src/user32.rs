@@ -178,6 +178,9 @@ struct Win {
     props: BTreeMap<String, u64>,
     /// The window's menu bar (SetMenu; the CreateWindow menu of a top-level window).
     menu: u64,
+    /// Place in the Z order among this process's windows: higher is nearer
+    /// the top (see `raise`).
+    z: u64,
 }
 
 impl Win {
@@ -510,6 +513,30 @@ fn with<R>(f: impl FnOnce(&mut Gui) -> R) -> R {
     f(gui)
 }
 
+/// Window handles: `WINDOW_BASE + pid * WINDOW_SPAN + 4 * slot`, for
+/// processes below `WINDOW_PROCESSES` (see `Gui::window_handle`).
+const WINDOW_BASE: u64 = 0x2000_0000;
+const WINDOW_SPAN: u64 = 0x1_0000;
+const WINDOW_PROCESSES: u64 = 0x2000;
+
+/// The process whose window `hwnd` is, when it is a window handle.
+pub(crate) fn window_process(hwnd: u64) -> Option<u64> {
+    let range = WINDOW_BASE..WINDOW_BASE + WINDOW_PROCESSES * WINDOW_SPAN;
+    (range.contains(&hwnd) && hwnd % 4 == 0 && hwnd % WINDOW_SPAN != 0).then(|| (hwnd - WINDOW_BASE) / WINDOW_SPAN)
+}
+
+/// A window of another (live) process: drawing on a DC of it goes to that
+/// process (`gdi::blit_to_other_process`).
+fn foreign_window(hwnd: u64) -> Option<u64> {
+    window_process(hwnd).filter(|&pid| pid != crate::kernel32::pid() && os_sys::proc_info(pid).is_ok())
+}
+
+/// Pixels another process drew on a DC of window `hwnd` of this process,
+/// through its handle service: drawn there and presented.
+pub(crate) fn blit_from_other_process(hwnd: u64, x: i32, y: i32, w: u32, h: u32, pixels: &[Color]) -> bool {
+    gdi::blit_from_other_process(hwnd, x, y, w, h, pixels)
+}
+
 fn rgb(r: u8, g: u8, b: u8) -> Color {
     osyx_gfx::rgb(r, g, b)
 }
@@ -553,6 +580,30 @@ impl Gui {
     fn handle(&mut self) -> u64 {
         self.next += 4;
         self.next
+    }
+
+    /// A handle for a new window. Window handles name their process
+    /// (`WINDOW_BASE + pid * WINDOW_SPAN + 4 * slot`), as Windows' handles
+    /// are valid in every process: a handle one process passes to another
+    /// leads back to its window (Chromium's GPU process draws into the
+    /// browser process's windows with GetDC and BitBlt). Slots go round, so
+    /// a destroyed window's handle is not reused at once.
+    fn window_handle(&mut self) -> u64 {
+        static SLOT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let pid = crate::kernel32::pid();
+        if pid >= WINDOW_PROCESSES {
+            return self.handle();
+        }
+        let base = WINDOW_BASE + pid * WINDOW_SPAN;
+        let slots = WINDOW_SPAN / 4;
+        for _ in 1..slots {
+            let slot = SLOT.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % slots;
+            let h = base + 4 * slot;
+            if slot != 0 && !self.windows.contains_key(&h) {
+                return h;
+            }
+        }
+        self.handle()
     }
 
     /// Zeroed pixel storage for a bitmap. Deleted large buffers are reused so
@@ -1490,7 +1541,7 @@ fn create_window(
         } else {
             Some(g.conn()?.create_window(spec).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?)
         };
-        let hwnd = g.handle();
+        let hwnd = g.window_handle();
         if let Some(win) = &win {
             g.by_prism.insert(win.id, hwnd);
         }
@@ -1525,6 +1576,7 @@ fn create_window(
                 drawn: None,
                 props: BTreeMap::new(),
                 menu: if style & WS_CHILD == 0 && g.menus.contains_key(&menu) { menu } else { 0 },
+                z: next_z(),
             },
         );
         Ok(hwnd)
@@ -1659,9 +1711,12 @@ pub(crate) fn is_window(hwnd: u64) -> bool {
     with(|g| g.windows.contains_key(&hwnd))
 }
 
+/// IsWindow: a window of this process, or one of another process that
+/// still has it.
 extern "win64" fn IsWindow(hwnd: u64) -> Bool {
-    is_window(hwnd) as Bool
+    (is_window(hwnd) || foreign_window(hwnd).is_some_and(|pid| crate::inherit::window_exists_in(pid, hwnd))) as Bool
 }
+
 
 extern "win64" fn IsWindowVisible(hwnd: u64) -> Bool {
     with(|g| g.windows.get(&hwnd).is_some_and(|w| w.visible)) as Bool
@@ -1685,6 +1740,11 @@ extern "win64" fn ShowWindow(hwnd: u64, cmd: i32) -> Bool {
     }
     let r = with(|g| {
         g.synchronize();
+        // Showing (anything but SW_HIDE, SW_SHOWNA, SW_SHOWNOACTIVATE and
+        // the minimizing commands) brings the window to the top.
+        if g.windows.contains_key(&hwnd) && !matches!(cmd, 0 | 2 | 4 | 6 | 7 | 8 | 11) {
+            raise(g, hwnd);
+        }
         let w = g.windows.get_mut(&hwnd)?;
         let was = w.visible;
         let previous_state = w.style & (WS_MINIMIZE | WS_MAXIMIZE);
@@ -1942,6 +2002,20 @@ extern "win64" fn SetWindowPos(hwnd: u64, after: u64, x: i32, y: i32, cx: i32, c
         }
     }
     let Some(proc) = wndproc_of(hwnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+    // The Z order: HWND_TOP and HWND_TOPMOST bring the window up, HWND_BOTTOM
+    // sends it down (SWP_NOZORDER keeps it).
+    const SWP_NOZORDER: u32 = 0x4;
+    if flags & SWP_NOZORDER == 0 {
+        with(|g| match after as i64 {
+            0 | -1 => raise(g, hwnd),
+            1 => {
+                if let Some(w) = g.windows.get_mut(&hwnd) {
+                    w.z = 0;
+                }
+            }
+            _ => {}
+        });
+    }
     let mut position = WindowPos { hwnd, after, x, y, cx, cy, flags, padding: 0 };
     if flags & 0x400 == 0 { call_window_pos(proc, hwnd, WM_WINDOWPOSCHANGING, &mut position); }
     let WindowPos { x, y, cx, cy, flags, .. } = position;
@@ -4503,7 +4577,13 @@ extern "win64" fn GetDC(hwnd: u64) -> u64 {
         return gdi::display_dc();
     }
     let state = with(|g| g.windows.get(&hwnd).map(|w| (w.size, w.configured())));
-    let Some((size, configured)) = state else { return 0 };
+    let Some((size, configured)) = state else {
+        // A window of another process: a DC whose BitBlt draws there.
+        if foreign_window(hwnd).is_some() {
+            return with(|g| new_dc(g, hwnd, Rect::new(0, 0, 0, 0)));
+        }
+        return 0;
+    };
     // A configured window may still be presenting the previous frame, the
     // same wait BeginPaint does; a hidden window gets its DC at once (its
     // drawing lands in the buffer and shows on ShowWindow).
@@ -5896,19 +5976,39 @@ extern "win64" fn GetWindow(wnd: u64, cmd: u32) -> u64 {
     } else { 0 }
 }
 
-/// The topmost child of `wnd` (the most recently created one: new windows
-/// go on top), or of the desktop when `wnd` is NULL. 0 if there is none.
+/// The topmost child of `wnd`, or of the desktop when `wnd` is NULL (this
+/// process's top-level windows, message-only ones aside). 0 if there is none.
 extern "win64" fn GetTopWindow(wnd: u64) -> u64 {
     with(|g| {
         if wnd != 0 && !g.windows.contains_key(&wnd) {
             return fail(ERROR_INVALID_WINDOW_HANDLE, 0);
         }
         g.windows.iter()
-            .filter(|(_, w)| if wnd == 0 { w.style & WS_CHILD == 0 } else { w.style & WS_CHILD != 0 && w.owner == wnd })
-            .map(|(&h, _)| h)
-            .max()
-            .unwrap_or(0)
+            .filter(|(_, w)| if wnd == 0 { is_top_level(w) } else { w.style & WS_CHILD != 0 && w.owner == wnd })
+            .max_by_key(|(_, w)| w.z)
+            .map_or(0, |(&h, _)| h)
     })
+}
+
+/// The next place on top of the Z order (see `Win::z`).
+fn next_z() -> u64 {
+    static Z: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+    Z.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
+/// A window EnumWindows lists: a top-level one, not message-only.
+fn is_top_level(w: &Win) -> bool {
+    w.style & WS_CHILD == 0 && w.owner != (-3i64) as u64
+}
+
+/// Brings `wnd`'s top-level window to the top of the Z order (it was
+/// created, shown, activated or placed at HWND_TOP).
+fn raise(g: &mut Gui, wnd: u64) {
+    if let Some(root) = root_window(g, wnd) {
+        if let Some(w) = g.windows.get_mut(&root) {
+            w.z = next_z();
+        }
+    }
 }
 
 extern "win64" fn SetParent(wnd: u64, _parent: u64) -> u64 {
@@ -5933,6 +6033,7 @@ fn root_window(g: &Gui, wnd: u64) -> Option<u64> {
 extern "win64" fn SetForegroundWindow(wnd: u64) -> Bool {
     with(|g| {
         let Some(root) = root_window(g, wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
+        raise(g, root);
         if let Some(c) = g.conn.as_mut() {
             if let Some(w) = g.windows.get_mut(&root) {
                 if let Some(win) = w.win.as_mut() { let _ = win.action(c, proto::Action::Activate); }
@@ -5966,6 +6067,9 @@ extern "win64" fn GetForegroundWindow() -> u64 {
     /// it); a child control has no stacking order of its own here.
 extern "win64" fn BringWindowToTop(wnd: u64) -> Bool {
     with(|g| {
+        if g.windows.contains_key(&wnd) {
+            raise(g, wnd);
+        }
         let Some(w) = g.windows.get(&wnd) else { return fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) };
         if w.style & WS_CHILD == 0 {
             if let Some(c) = g.conn.as_mut() {
@@ -7046,7 +7150,23 @@ extern "win64" fn EnumWindows(proc_: u64, param: u64) -> Bool {
     if proc_ == 0 {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let list: Vec<u64> = with(|g| g.windows.keys().copied().collect());
+    // Top-level windows from the top of the Z order down, as Windows lists
+    // them (Chromium's occlusion tracking takes each listed window as
+    // covering the ones after it).
+    let list: Vec<u64> = with(|g| {
+        let mut l: Vec<(u64, u64)> = g.windows.iter().filter(|(_, w)| is_top_level(w)).map(|(&h, w)| (w.z, h)).collect();
+        l.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        l.into_iter().map(|(_, h)| h).collect()
+    });
+    static TRACED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) && TRACED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 4 {
+        let rows: Vec<String> = with(|g| {
+            list.iter()
+                .filter_map(|h| g.windows.get(h).map(|w| alloc::format!("{h:#x} {:?} visible {} at {:?} {:?} ex {:#x}", w.title, w.visible, w.pos, w.size, w.ex_style)))
+                .collect()
+        });
+        os_std::eprintln!("winrun: EnumWindows lists {} window(s): {}", rows.len(), rows.join("; "));
+    }
     // A 32-bit program's WNDENUMPROC is 32-bit code: it runs through the bridge.
     if crate::wow64::is_active() {
         for h in list {
@@ -8010,6 +8130,13 @@ pub(crate) extern "win64" fn SendMessageTimeoutW(wnd: u64, msg: u32, wparam: u64
     1
 }
 
+/// CallWindowProcA: as CallWindowProcW, since windows of this runtime
+/// process messages the same way for both character sets (SendMessageA is
+/// SendMessageW too).
+extern "win64" fn CallWindowProcA(proc_: u64, wnd: u64, msg: u32, wparam: u64, lparam: i64) -> i64 {
+    CallWindowProcW(proc_, wnd, msg, wparam, lparam)
+}
+
 extern "win64" fn CallWindowProcW(proc_: u64, wnd: u64, msg: u32, wparam: u64, lparam: i64) -> i64 {
     if crate::EVENTS.load(core::sync::atomic::Ordering::Relaxed) && matches!(msg, WM_CHAR | WM_KEYDOWN | WM_KEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP) {
         os_std::eprintln!("winrun: callwndproc msg={msg:#x} hwnd={wnd:#x} w={wparam:#x}");
@@ -8490,6 +8617,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         UnregisterPowerSettingNotification,
         SendNotifyMessageW,
         SendMessageTimeoutW,
+        CallWindowProcA,
         CallWindowProcW,
         GetDisplayConfigBufferSizes,
         QueryDisplayConfig,

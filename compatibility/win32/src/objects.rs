@@ -60,6 +60,13 @@ static NEXT_OPEN: AtomicU64 = AtomicU64::new(1);
 /// Registers an open of (dev, ino); `ERROR_SHARING_VIOLATION` if it
 /// conflicts with an existing open (either side's share mode).
 pub fn share_open(key: (u64, u64), access: (bool, bool, bool), share: u32) -> Result<u64, u32> {
+    // An open for no data access (WRITE_DAC, READ_CONTROL, attributes
+    // only) is outside sharing on Windows: it is not checked, and its share
+    // mode restricts no one (Chromium opens its temporary files that way to
+    // change their DACL).
+    if access == (false, false, false) {
+        return Ok(0);
+    }
     let mut s = SHARES.lock().unwrap();
     let list = s.entry(key).or_default();
     for o in list.iter() {

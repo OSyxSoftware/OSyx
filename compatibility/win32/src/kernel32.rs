@@ -834,7 +834,9 @@ pub(crate) extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u
     if let Some(Object::Pipe(p)) = objects::get(h) {
         return crate::pipes::read_file(p, buf, n, read, ov as u64);
     }
-    match read_handle(h, buf, n, overlapped_offset(ov)) {
+    let r = read_handle(h, buf, n, overlapped_offset(ov));
+    trace_file_io(h, "read", overlapped_offset(ov), n, &r);
+    match r {
         Ok(k) => {
             if !read.is_null() {
                 // SAFETY: the caller's out pointer.
@@ -847,12 +849,62 @@ pub(crate) extern "win64" fn ReadFile(h: u64, buf: *mut u8, n: u32, read: *mut u
     }
 }
 
+/// OSYX_WINRUN_TRACE_FILES=<part>[;<part>...]: each ReadFile and WriteFile
+/// on a file whose path contains one of the parts (ignoring case) is logged
+/// with its offset, size and result.
+fn trace_file_io(h: u64, what: &str, offset: Option<u64>, n: u32, r: &Result<u32, u32>) {
+    static PARTS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+    let mut parts = PARTS.lock().unwrap();
+    let parts = parts.get_or_insert_with(|| {
+        os_std::env::var("OSYX_WINRUN_TRACE_FILES").map(|v| v.split(';').filter(|p| !p.is_empty()).map(|p| p.to_ascii_lowercase()).collect()).unwrap_or_default()
+    });
+    if parts.is_empty() {
+        return;
+    }
+    let Some(Object::File(f)) = objects::get(h) else { return };
+    let path = f.path.to_ascii_lowercase();
+    if parts.iter().any(|p| path.contains(p.as_str())) {
+        os_std::eprintln!("winrun: {what} {h:#x} {} at {offset:?}, {n} byte(s): {r:?}", f.path);
+    }
+}
+
+/// OSYX_WINRUN_ECHO_FILES=<part>[;<part>...]: what the program writes to a
+/// file whose path contains one of the parts (ignoring case) is copied to
+/// stderr, for logs a program keeps in files inside the guest (Chromium's
+/// --log-file, for one).
+fn echo_write(h: u64, buf: *const u8, n: u32) {
+    static PARTS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+    if n == 0 || buf.is_null() {
+        return;
+    }
+    let mut parts = PARTS.lock().unwrap();
+    let parts = parts.get_or_insert_with(|| {
+        os_std::env::var("OSYX_WINRUN_ECHO_FILES").map(|v| v.split(';').filter(|p| !p.is_empty()).map(|p| p.to_ascii_lowercase()).collect()).unwrap_or_default()
+    });
+    if parts.is_empty() {
+        return;
+    }
+    let Some(Object::File(f)) = objects::get(h) else { return };
+    let path = f.path.to_ascii_lowercase();
+    if !parts.iter().any(|p| path.contains(p.as_str())) {
+        return;
+    }
+    // SAFETY: the `n` bytes the write just took from the caller's buffer.
+    let bytes = unsafe { core::slice::from_raw_parts(buf, n as usize) };
+    for line in String::from_utf8_lossy(bytes).lines().filter(|l| !l.is_empty()) {
+        os_std::eprintln!("winrun: [{}] {line}", f.path.rsplit('/').next().unwrap_or(""));
+    }
+}
+
 pub(crate) extern "win64" fn WriteFile(h: u64, buf: *const u8, n: u32, written: *mut u32, ov: *const u8) -> Bool {
     if let Some(Object::Pipe(p)) = objects::get(h) {
         return crate::pipes::write_file(p, buf, n, written, ov as u64);
     }
-    match write_handle(h, buf, n, overlapped_offset(ov)) {
+    let r = write_handle(h, buf, n, overlapped_offset(ov));
+    trace_file_io(h, "write", overlapped_offset(ov), n, &r);
+    match r {
         Ok(k) => {
+            echo_write(h, buf, k);
             if !written.is_null() {
                 // SAFETY: the caller's out pointer.
                 unsafe { *written = k };
@@ -1655,6 +1707,9 @@ fn duplicate_handle(
                 crate::objsec::map_generic(access, &crate::objsec::SECTION) & objects::SECTION_ALL_ACCESS
             };
             if want & !have != 0 {
+                if TRACE.load(Ordering::Relaxed) {
+                    os_std::eprintln!("winrun: DuplicateHandle of section {src:#x}: rights {want:#x} (asked {access:#x}, options {options:#x}) exceed the handle's {have:#x}");
+                }
                 return fail(ERROR_ACCESS_DENIED, FALSE);
             }
             Some(want)
@@ -2199,6 +2254,11 @@ const E_HANDLE: u32 = 0x8007_0006; // HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE)
 
 /// SetThreadDescription. With OSYX_WINRUN_MODULES=1 (profiling) the name
 /// also goes to the log, so profiler samples by thread id get a name.
+/// The name SetThreadDescription gave thread `tid`, if any.
+pub(crate) fn thread_description(tid: u32) -> Option<String> {
+    DESCRIPTIONS.lock().unwrap().get(&tid).map(|u| char::decode_utf16(u.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')).collect())
+}
+
 extern "win64" fn SetThreadDescription(h: u64, desc: *const u16) -> u32 {
     let tid = GetThreadId(h);
     if tid == 0 {

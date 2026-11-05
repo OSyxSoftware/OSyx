@@ -155,6 +155,25 @@ fn traced() -> bool {
     crate::VERBOSE.load(Ordering::Relaxed) || crate::kernel32::TRACE.load(Ordering::Relaxed)
 }
 
+/// Under OSYX_WINRUN_FAILTRACE (or -v): the first bytes of the first
+/// socket transfers, as text with other bytes escaped.
+fn trace_data(what: &str, s: u64, data: &[u8]) {
+    static LINES: AtomicU32 = AtomicU32::new(0);
+    if !traced() || LINES.fetch_add(1, Ordering::Relaxed) >= 300 {
+        return;
+    }
+    let mut text = String::new();
+    for &b in data.iter().take(240) {
+        match b {
+            b'\r' => text.push_str(r"\r"),
+            b'\n' => text.push_str(r"\n"),
+            0x20..=0x7E => text.push(b as char),
+            _ => text.push_str(&alloc::format!(r"\x{b:02x}")),
+        }
+    }
+    os_std::eprintln!("winrun: {what} {s:#x} {} byte(s): \"{text}\"", data.len());
+}
+
 fn err<T>(code: u32, v: T) -> T {
     static ERRORS: AtomicU32 = AtomicU32::new(0);
     if code != WSAEWOULDBLOCK && traced() && ERRORS.fetch_add(1, Ordering::Relaxed) < 128 {
@@ -476,8 +495,13 @@ extern "win64" fn connect(s: u64, addr: *const u8, len: i32) -> i32 {
         // fails with WSAEWOULDBLOCK and reports the connection through
         // FD_CONNECT and select's writability (Chromium relies on it). The
         // stack connects loopback at once; that is reported the same way.
+        // A connection that fails at once is reported the same way: the
+        // call says WSAEWOULDBLOCK and SO_ERROR (FD_CONNECT, select) the
+        // failure.
+        let nonblocking = socket_state(s).is_ok_and(|k| k.nonblocking);
         let r = match r {
-            Ok(()) if socket_state(s).is_ok_and(|k| k.nonblocking) => Err(WSAEWOULDBLOCK),
+            Ok(()) if nonblocking => Err(WSAEWOULDBLOCK),
+            Err(WSAETIMEDOUT | WSAECONNREFUSED | WSAEHOSTUNREACH | WSAENETUNREACH | WSAECONNRESET) if nonblocking => Err(WSAEWOULDBLOCK),
             r => r,
         };
         if traced() {
@@ -581,7 +605,11 @@ extern "win64" fn send(s: u64, buf: *const u8, len: i32, f: i32) -> i32 {
         // pass a NULL pointer, which never becomes a real slice.
         let (n, p) = (len.max(0) as usize, if len > 0 { buf } else { core::ptr::NonNull::dangling().as_ptr() });
         let data = unsafe { core::slice::from_raw_parts(p, n) };
-        os_sys::sock_send(fd, data, None, 0).map_err(wsa)
+        let r = os_sys::sock_send(fd, data, None, 0).map_err(wsa);
+        if let Ok(n) = r {
+            trace_data("send", s, &data[..n]);
+        }
+        r
     })();
     trace_io(format_args!("send({s:#x}) -> {r:?}"));
     r.map_or_else(|e| err(e, SOCKET_ERROR), |n| n as i32)
@@ -625,6 +653,7 @@ extern "win64" fn recvfrom(s: u64, buf: *mut u8, len: i32, f: i32, from: *mut u8
         let data = unsafe { core::slice::from_raw_parts_mut(p, n) };
         let _blocked = crate::stall::waiting("recv", s, 0);
         let (n, peer) = os_sys::sock_recv(fd, data, fl).map_err(wsa)?;
+        trace_data("recv", s, &data[..n]);
         write_addr(&peer, from, fromlen, s);
         // A datagram longer than the buffer was truncated; the bytes are
         // delivered, but Winsock reports the original size.
@@ -1511,6 +1540,7 @@ fn wsa_receive(fd: u64, bufs: *const u8, count: u32, fl: u64, stream: bool) -> R
     let total: usize = parts.iter().map(|p| p.0 as usize).sum();
     let mut data = alloc::vec![0u8; total];
     let (n, from) = os_sys::sock_recv(fd, &mut data, fl).map_err(wsa)?;
+    trace_data("WSARecv on kernel socket", fd, &data[..n]);
     let truncated = datagram_truncated(fd, stream, n)?;
     let mut done = 0;
     for (len, p) in parts {
@@ -1555,6 +1585,7 @@ pub(crate) extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: 
             return Err(WSAEOPNOTSUPP);
         }
         let data = wsa_gather(bufs, count)?;
+        trace_data("WSASend", s, &data);
         if !ov.is_null() {
             return Ok(Err((fd, data)));
         }
@@ -1943,10 +1974,16 @@ pub(crate) extern "win64" fn select(_nfds: i32, rd: *mut u8, wr: *mut u8, ex: *m
     let (r, w) = (read_set(rd), read_set(wr));
     // The exception set is always reported empty (OSyx has no OOB data), but
     // an invalid handle in it is still an error, as on Windows.
-    for s in read_set(ex) {
+    let ex_set = read_set(ex);
+    for &s in &ex_set {
         if let Err(e) = fd(s) {
             return err(e, SOCKET_ERROR);
         }
+    }
+    // Nothing to watch at all is an invalid call on Windows (WSAEINVAL),
+    // not a sleep.
+    if r.is_empty() && w.is_empty() && ex_set.is_empty() {
+        return err(WSAEINVAL, SOCKET_ERROR);
     }
     let mut items = Vec::new();
     for (&s, ev) in

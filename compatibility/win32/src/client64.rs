@@ -684,8 +684,9 @@ fn tcp_state(name: &str) -> u32 {
 
 /// GetExtendedTcpTable for AF_INET (OSyx has no IPv6 sockets: an AF_INET6
 /// table is empty): the basic, owner-PID and owner-module classes, with
-/// listeners, connections or both. The kernel's socket list records no
-/// owner, so dwOwningPid is 0 and the module information is empty.
+/// listeners, connections or both. dwOwningPid is the process that made the
+/// socket (Steam checks which process is on the other end of its local
+/// connections); the module information is empty.
 extern "win64" fn GetExtendedTcpTable(table: *mut u8, size: *mut u32, sorted: Bool, family: u32, class: u32, reserved: u32) -> u32 {
     const AF_INET: u32 = 2;
     const AF_INET6: u32 = 23;
@@ -693,10 +694,10 @@ extern "win64" fn GetExtendedTcpTable(table: *mut u8, size: *mut u32, sorted: Bo
         return ERROR_INVALID_PARAMETER;
     }
     let sockets = if family == AF_INET { os_std::net::sockets().unwrap_or_default() } else { Vec::new() };
-    let mut rows: Vec<(u32, [u8; 4], u16, [u8; 4], u16)> = sockets
+    let mut rows: Vec<(u32, [u8; 4], u16, [u8; 4], u16, u32)> = sockets
         .iter()
         .filter(|s| osyx_abi::ipc::field_str(&s.kind) == "tcp" && s.internal == 0)
-        .map(|s| (tcp_state(osyx_abi::ipc::field_str(&s.state)), s.local.addr, s.local.port, s.remote.addr, s.remote.port))
+        .map(|s| (tcp_state(osyx_abi::ipc::field_str(&s.state)), s.local.addr, s.local.port, s.remote.addr, s.remote.port, s.pid))
         .filter(|r| match class % 3 {
             0 => r.0 == 2,
             1 => r.0 != 2,
@@ -731,6 +732,9 @@ extern "win64" fn GetExtendedTcpTable(table: *mut u8, size: *mut u32, sorted: Bo
             teb::put(p, 8, r.2.to_be() as u32);
             teb::put(p, 12, u32::from_ne_bytes(r.3));
             teb::put(p, 16, if r.0 == 2 { 0 } else { r.4.to_be() as u32 });
+            if class / 3 > 0 {
+                teb::put(p, 20, r.5);
+            }
         }
     }
     0

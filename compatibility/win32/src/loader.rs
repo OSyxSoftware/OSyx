@@ -291,6 +291,7 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("d3dcompiler_47.dll", crate::dwmapi::d3dcompiler_exports(), Vec::new()),
         builtin("wevtapi.dll", crate::wevtapi::exports(), Vec::new()),
         builtin("netapi32.dll", crate::netapi32::exports(), Vec::new()),
+        builtin("atlthunk.dll", crate::atlthunk::exports(), Vec::new()),
     ]
 }
 

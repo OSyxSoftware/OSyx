@@ -222,6 +222,7 @@ pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, 
                 }
                 Err(e) => break (0, if SOCKETS.lock().unwrap().contains_key(&s) { wsa(e) } else { WSA_OPERATION_ABORTED }),
                 Ok((n, peer)) => {
+                    trace_data("WSARecv (overlapped)", s, &data[..n]);
                     let truncated = datagram_truncated(fd, stream, n).unwrap_or(false);
                     let mut done = 0;
                     for &(len, p) in &parts {
