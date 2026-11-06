@@ -11,7 +11,7 @@ miniz_oxide = { version = "0.9", default-features = false, features = ["with-all
 ttf-parser = { version = "0.25.1", default-features = false, features = ["no-std-float", "variable-fonts", "glyph-names"] }
 zune-jpeg = { version = "0.5", default-features = false }
 zune-core = { version = "0.5", default-features = false }
-aes = { version = "0.8", default-features = false }
+aes = { version = "0.9", default-features = false }
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 
 
