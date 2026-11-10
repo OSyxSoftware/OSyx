@@ -1,7 +1,7 @@
 //! Behaviour tests of the compositor, driven only through its public
 //! interface: protocol messages in, input events in, events and pixels out.
 
-use crate::compositor::{ClientId, Compositor, Config, PixelSource, WindowId};
+use crate::compositor::{ClientId, Compositor, Config, PixelSource, PointerSettings, WindowId};
 use crate::theme;
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -505,6 +505,77 @@ fn pointer_events_use_local_coordinates_and_capture_while_dragging() {
     // The pointer is clamped to the screen.
     h.input(kind::MOTION, 0, -10_000, 10_000, 0);
     assert_eq!(h.c.pointer(), (0, H as i32 - 1));
+}
+
+#[test]
+fn absolute_positions_map_to_the_whole_screen() {
+    let mut h = Harness::new();
+    let max = osyx_input::ABSOLUTE_MAX;
+    h.input(kind::ABSOLUTE, 0, 0, 0, 0);
+    assert_eq!(h.c.pointer(), (0, 0));
+    h.input(kind::ABSOLUTE, 0, max, max, 0);
+    assert_eq!(h.c.pointer(), (W as i32 - 1, H as i32 - 1));
+    h.input(kind::ABSOLUTE, 0, max / 2, max / 4, 0);
+    assert_eq!(h.c.pointer(), ((W as i32 - 1) / 2, (H as i32 - 1) / 4));
+    // Out-of-range coordinates stay on the screen.
+    h.input(kind::ABSOLUTE, 0, max * 3, -5, 0);
+    assert_eq!(h.c.pointer(), (W as i32 - 1, 0));
+    // The pointer speed is for relative devices only.
+    h.c.set_pointer_settings(PointerSettings { speed: 400, ..PointerSettings::default() });
+    h.input(kind::ABSOLUTE, 0, 0, max, 0);
+    assert_eq!(h.c.pointer(), (0, H as i32 - 1));
+}
+
+#[test]
+fn pointer_settings_scale_motion_and_swap_buttons_and_scrolling() {
+    use crate::PointerSettings as P;
+    assert_eq!(P::parse(""), P::default());
+    assert_eq!(P::parse("speed=150\nnatural=1\nleft=1\n"), P { speed: 150, natural_scroll: true, left_handed: true });
+    assert_eq!(P::parse("speed=9999\njunk\nnatural=x\n").speed, P::MAX_SPEED);
+    assert_eq!(P::parse("speed=1").speed, P::MIN_SPEED);
+    let all = P { speed: 250, natural_scroll: true, left_handed: false };
+    assert_eq!(P::parse(&all.to_text()), all);
+
+    let mut h = Harness::new();
+    h.input(kind::ABSOLUTE, 0, 0, 0, 0);
+    // Half speed: ten single steps move five pixels, none is lost.
+    h.c.set_pointer_settings(P { speed: 50, ..P::default() });
+    for _ in 0..10 {
+        h.input(kind::MOTION, 0, 1, 1, 0);
+    }
+    assert_eq!(h.c.pointer(), (5, 5));
+    h.c.set_pointer_settings(P { speed: 300, ..P::default() });
+    h.input(kind::MOTION, 0, 10, -1, 0);
+    assert_eq!(h.c.pointer(), (35, 2));
+
+    // Left-handed: the device's right button is the primary one.
+    h.c.set_pointer_settings(P::default());
+    let a = h.client(2);
+    let w = h.window(a, 1, 240, 160, 0);
+    let r = h.rect_of(w);
+    h.move_to(r.x + 5, r.y + 5);
+    h.events();
+    h.c.set_pointer_settings(P { left_handed: true, natural_scroll: true, ..P::default() });
+    h.input(kind::BUTTON, 2, 1, 0, 0);
+    h.input(kind::BUTTON, 2, 0, 0, 0);
+    h.input(kind::BUTTON, 1, 1, 0, 0);
+    h.input(kind::BUTTON, 1, 0, 0, 0);
+    h.input(kind::BUTTON, 3, 1, 0, 0);
+    h.input(kind::BUTTON, 3, 0, 0, 0);
+    h.input(kind::WHEEL, 0, -2, 1, 0);
+    let ev = h.events_for(a);
+    let pressed: Vec<u16> = ev
+        .iter()
+        .filter_map(|e| match e {
+            Event::Pointer { kind: proto::pointer::BUTTON, button, pressed: true, .. } => Some(*button),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pressed, vec![1, 2, 3], "{ev:?}");
+    assert!(
+        ev.iter().any(|e| matches!(e, Event::Pointer { kind: proto::pointer::WHEEL, wheel_v: 2, wheel_h: -1, .. })),
+        "natural scrolling reverses both axes: {ev:?}"
+    );
 }
 
 #[test]

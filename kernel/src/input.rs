@@ -193,6 +193,8 @@ struct Device {
     /// Keys and buttons currently down (released if the device goes away).
     keys: Vec<u16>,
     buttons: u32,
+    /// The last absolute position reported (absolute pointers only).
+    position: Option<(i32, i32)>,
     events: u64,
 }
 
@@ -239,7 +241,7 @@ pub fn register(name: &str, class: i32) -> u32 {
     let mods = {
         let mut g = CORE.lock();
         let c = g.as_mut().expect("input core initialised");
-        c.devices.insert(id, Device { name: String::from(name), class, queue, path: path.clone(), keys: Vec::new(), buttons: 0, events: 0 });
+        c.devices.insert(id, Device { name: String::from(name), class, queue, path: path.clone(), keys: Vec::new(), buttons: 0, position: None, events: 0 });
         c.modifiers.bits()
     };
     kprintln!("input: device {} \"{}\" ({}) attached as /dev/{}", id, name, class_name(class), path);
@@ -369,6 +371,22 @@ pub fn motion(id: u32, dx: i32, dy: i32) {
     if let Some(c) = g.as_mut() {
         emit(id, InputEvent { kind: kind::MOTION, value: dx, value2: dy, ..Default::default() }, c);
     }
+}
+
+/// An absolute position: `x` and `y` from 0 to
+/// `osyx_input::ABSOLUTE_MAX` across the screen (tablets, touch screens,
+/// the pointers of virtual machines). A position equal to the device's
+/// last one is not repeated.
+pub fn absolute(id: u32, x: i32, y: i32) {
+    let (x, y) = (x.clamp(0, osyx_input::ABSOLUTE_MAX), y.clamp(0, osyx_input::ABSOLUTE_MAX));
+    let mut g = CORE.lock();
+    let Some(c) = g.as_mut() else { return };
+    let Some(d) = c.devices.get_mut(&id) else { return };
+    if d.position == Some((x, y)) {
+        return;
+    }
+    d.position = Some((x, y));
+    emit(id, InputEvent { kind: kind::ABSOLUTE, value: x, value2: y, ..Default::default() }, c);
 }
 
 /// Button `b` (1 = left, 2 = right, 3 = middle, ...).

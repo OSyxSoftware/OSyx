@@ -39,7 +39,7 @@ use dma::{DmaError, DmaPage, DmaRing};
 use hid::{HidFunction, HidKind};
 use storage::StorageState;
 use osyx_usb::descriptor::{self, Configuration, DescriptorError, DeviceDescriptor, Interface, SetupPacket};
-use osyx_usb::hid::{parse_report_descriptor, BootKeyboard, MouseLayout};
+use osyx_usb::hid::{parse_report_descriptor, BootKeyboard, MouseLayout, TabletLayout};
 use osyx_usb::xhci::context::{self, ContextLayout, EndpointContext, EndpointType, SlotContext};
 use osyx_usb::xhci::regs::{self, ext, op, portsc, rt, usbcmd, usbsts, Capabilities, SupportedProtocol};
 use osyx_usb::xhci::ring::{erst_entry, EventRing, ProducerRing, RingError, TrbMemory};
@@ -1211,16 +1211,47 @@ impl Xhci {
         }
         // A pointer: prefer the report descriptor (wheel, more buttons).
         let mut layout = None;
+        let mut tablet = None;
         let len = iface.hid.map_or(0, |h| h.report_length).min(1024);
         if len > 0 {
             let mut rd = vec![0u8; len as usize];
             match self.control_in(slot, SetupPacket::get_interface_descriptor(descriptor::DESC_HID_REPORT, iface.number, len), &mut rd) {
                 Ok(n) => match parse_report_descriptor(&rd[..n]) {
-                    Ok(fields) => layout = MouseLayout::from_fields(&fields),
+                    Ok(fields) => {
+                        layout = MouseLayout::from_fields(&fields);
+                        if layout.is_none() {
+                            tablet = TabletLayout::from_fields(&fields);
+                        }
+                    }
                     Err(e) => kprintln!("usb {}: interface {}: report descriptor rejected: {:?}", devname, iface.number, e),
                 },
                 Err(e) => kprintln!("usb {}: interface {}: no report descriptor: {}", devname, iface.number, e),
             }
+        }
+        // Absolute X/Y: a tablet, a touch screen or a virtual machine's
+        // pointer. Its reports only make sense in the report protocol.
+        if let Some(l) = tablet {
+            if boot {
+                self.control_out(slot, SetupPacket::hid_set_protocol(iface.number, true), &[])?;
+            }
+            let _ = self.control_out(slot, SetupPacket::hid_set_idle(iface.number, 0), &[]);
+            let id = input::register(name, input::class::MOUSE);
+            kprintln!(
+                "usb {}: HID absolute pointer on interface {} ({} buttons, {}-bit X/Y{}) -> input device {}",
+                devname,
+                iface.number,
+                l.buttons.len(),
+                l.x.size,
+                if l.wheel.is_some() { ", wheel" } else { "" },
+                id
+            );
+            return Ok(Some(HidFunction {
+                interface: iface.number,
+                input_id: id,
+                kind: HidKind::Tablet { layout: l, buttons: 0 },
+                reports: 0,
+                bad_reports: 0,
+            }));
         }
         let is_boot_mouse = iface.is_hid_boot(descriptor::HID_PROTOCOL_MOUSE);
         let how = match (&layout, is_boot_mouse) {
@@ -1242,7 +1273,7 @@ impl Xhci {
             }
             (None, false) => {
                 kprintln!(
-                    "usb {}: HID interface {} (subclass {}, protocol {}) is not a boot keyboard or relative pointer: not supported",
+                    "usb {}: HID interface {} (subclass {}, protocol {}) is not a boot keyboard or a pointer: not supported",
                     devname,
                     iface.number,
                     iface.subclass,

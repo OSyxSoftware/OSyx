@@ -36,7 +36,7 @@ use osyx_gfx::{Rect, Surface};
 use osyx_input::layout::Layout;
 use osyx_input::InputEvent;
 use prism_core::compositor::WindowSnapshot;
-use prism_core::{ClientId, Compositor, Config, PixelSource};
+use prism_core::{ClientId, Compositor, Config, PixelSource, PointerSettings};
 
 os_std::entry!(main);
 
@@ -132,11 +132,19 @@ fn main() -> i32 {
         }
     };
     let mut cfg = Config::new(info.width, info.height);
-    if let Some(l) = fs::read_to_string("/etc/osyx/keyboard").ok().and_then(|s| Layout::from_name(s.trim())) {
+    if let Some(l) = configured_layout() {
         cfg.layout = l;
     }
     println!("prism: keyboard layout {}", cfg.layout.name());
     let mut comp = Compositor::new(cfg);
+    let pointer = configured_pointer();
+    comp.set_pointer_settings(pointer);
+    println!(
+        "prism: pointer speed {} %, {} scrolling, {} buttons",
+        pointer.speed,
+        if pointer.natural_scroll { "natural" } else { "traditional" },
+        if pointer.left_handed { "left-handed" } else { "right-handed" }
+    );
     comp.set_cursor_overlay(true);
     println!("prism: cursor overlay follows input independently of the 60 Hz application frame limit");
     let mut prism = Prism {
@@ -172,6 +180,7 @@ fn main() -> i32 {
         shell_program,
         shell_pid: None,
         shell_restarts: 0,
+        settings_checked: 0,
     };
     prism.enable_hw_cursor();
     prism.start_shell();
@@ -219,9 +228,42 @@ struct Prism {
     shell_program: String,
     shell_pid: Option<u64>,
     shell_restarts: u32,
+    /// When the input settings files were last looked at.
+    settings_checked: u64,
+}
+
+/// The keyboard layout of `/etc/osyx/keyboard` (Settings > Keyboard).
+fn configured_layout() -> Option<Layout> {
+    fs::read_to_string("/etc/osyx/keyboard").ok().and_then(|s| Layout::from_name(s.trim()))
+}
+
+/// The pointer settings of `/etc/osyx/pointer` (Settings > Mouse & Touchpad).
+fn configured_pointer() -> PointerSettings {
+    PointerSettings::parse(&fs::read_to_string("/etc/osyx/pointer").unwrap_or_default())
 }
 
 impl Prism {
+    /// Follows the input settings: a layout or pointer option changed in
+    /// Settings applies within seconds, without a new session.
+    fn reload_input_settings(&mut self, now: u64) {
+        if now.saturating_sub(self.settings_checked) < 2000 {
+            return;
+        }
+        self.settings_checked = now;
+        if let Some(l) = configured_layout().filter(|l| *l != self.comp.layout()) {
+            println!("prism: keyboard layout {}", l.name());
+            self.comp.set_layout(l);
+        }
+        let pointer = configured_pointer();
+        if pointer != self.comp.pointer_settings() {
+            println!(
+                "prism: pointer speed {} %, natural scrolling {}, left-handed {}",
+                pointer.speed, pointer.natural_scroll, pointer.left_handed
+            );
+            self.comp.set_pointer_settings(pointer);
+        }
+    }
+
     fn start_shell(&mut self) {
         match Command::new(&self.shell_program).env("PRISM", "1").spawn() {
             Ok(child) => {
@@ -294,6 +336,7 @@ impl Prism {
             self.deliver();
             self.reap_dead_clients();
             self.supervise_shell();
+            self.reload_input_settings(now);
             self.log_window_changes(now);
             if self.comp.next_frame_in(now).is_some() && now.saturating_sub(self.last_frame) >= FRAME_MS {
                 self.frame(now);

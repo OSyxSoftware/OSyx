@@ -143,6 +143,8 @@ pub const USAGE_X: u16 = 0x30;
 pub const USAGE_Y: u16 = 0x31;
 pub const USAGE_WHEEL: u16 = 0x38;
 pub const USAGE_AC_PAN: u16 = 0x238;
+pub const PAGE_DIGITIZER: u16 = 0x0D;
+pub const USAGE_TIP_SWITCH: u16 = 0x42;
 
 /// One input field of a report: `size` bits at `offset` (bits from the
 /// start of the report data, after the report id byte if there is one).
@@ -473,6 +475,104 @@ impl MouseLayout {
     }
 }
 
+/// One decoded report of an absolute pointing device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TabletReport {
+    /// Bit `n` = button `n + 1`; a pen's or finger's tip counts as button 1.
+    pub buttons: u32,
+    /// 0 (left, top) to [`TabletLayout::RANGE`] (right, bottom).
+    pub x: i32,
+    pub y: i32,
+    pub wheel: i32,
+}
+
+/// Where an absolute pointing device (a tablet, a touch screen, the
+/// pointer QEMU, VirtualBox and remote consoles present so the guest's
+/// pointer follows the host's) keeps position, buttons and wheel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabletLayout {
+    pub report_id: u8,
+    /// (button number starting at 1, field)
+    pub buttons: Vec<(u8, Field)>,
+    pub x: Field,
+    pub y: Field,
+    pub wheel: Option<Field>,
+}
+
+impl TabletLayout {
+    /// Positions are scaled to 0..=RANGE whatever the device's own range.
+    pub const RANGE: i32 = 0xFFFF;
+
+    /// Finds absolute X and Y (Generic Desktop) and their companions in
+    /// the same report. `None` if the device has no absolute X/Y with a
+    /// usable range.
+    pub fn from_fields(fields: &[Field]) -> Option<TabletLayout> {
+        let axis = |usage: u16, id: Option<u8>| {
+            fields
+                .iter()
+                .find(|f| {
+                    f.page == PAGE_GENERIC_DESKTOP
+                        && f.usage == usage
+                        && !f.relative
+                        && f.logical_max > f.logical_min
+                        && id.is_none_or(|id| f.report_id == id)
+                })
+                .copied()
+        };
+        let x = axis(USAGE_X, None)?;
+        let y = axis(USAGE_Y, Some(x.report_id))?;
+        let same = |f: &&Field| f.report_id == x.report_id;
+        let mut buttons: Vec<(u8, Field)> = fields
+            .iter()
+            .filter(same)
+            .filter(|f| f.page == PAGE_BUTTON && (1..=32).contains(&f.usage) && f.size >= 1)
+            .map(|f| (f.usage as u8, *f))
+            .collect();
+        // A touch screen or pen has no buttons: its tip is the left one.
+        if !buttons.iter().any(|(n, _)| *n == 1) {
+            if let Some(tip) = fields.iter().filter(same).find(|f| f.page == PAGE_DIGITIZER && f.usage == USAGE_TIP_SWITCH) {
+                buttons.push((1, *tip));
+            }
+        }
+        let wheel = fields.iter().filter(same).find(|f| f.page == PAGE_GENERIC_DESKTOP && f.usage == USAGE_WHEEL && f.relative).copied();
+        Some(TabletLayout { report_id: x.report_id, buttons, x, y, wheel })
+    }
+
+    fn scale(f: &Field, v: i32) -> i32 {
+        let span = f.logical_max as i64 - f.logical_min as i64;
+        let v = (v as i64).clamp(f.logical_min as i64, f.logical_max as i64) - f.logical_min as i64;
+        (v * Self::RANGE as i64 / span) as i32
+    }
+
+    /// Decodes one interrupt IN report. With report ids, the first byte is
+    /// the id; reports for other ids are rejected.
+    pub fn decode(&self, report: &[u8]) -> Result<TabletReport, ReportError> {
+        let data = if self.report_id != 0 {
+            match report.split_first() {
+                Some((&id, rest)) if id == self.report_id => rest,
+                Some(_) => return Err(ReportError::UnknownReportId),
+                None => return Err(ReportError::Truncated),
+            }
+        } else {
+            report
+        };
+        let x = self.x.read(data).ok_or(ReportError::Truncated)?;
+        let y = self.y.read(data).ok_or(ReportError::Truncated)?;
+        let mut buttons = 0;
+        for (n, f) in &self.buttons {
+            if f.read(data).is_some_and(|v| v != 0) {
+                buttons |= 1 << (n - 1);
+            }
+        }
+        Ok(TabletReport {
+            buttons,
+            x: Self::scale(&self.x, x),
+            y: Self::scale(&self.y, y),
+            wheel: self.wheel.and_then(|f| f.read(data)).unwrap_or(0),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,6 +697,52 @@ mod tests {
         assert!(!fields[0].relative);
         assert_eq!(fields[0].logical_max, 0x7FFF);
         assert!(MouseLayout::from_fields(&fields).is_none());
+        assert!(TabletLayout::from_fields(&fields).is_some());
+    }
+
+    /// QEMU's `usb-tablet`: 3 buttons, 15-bit absolute X/Y, a wheel.
+    const QEMU_TABLET: [u8; 74] = [
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00,
+        0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x01, 0x05, 0x01, 0x09, 0x30,
+        0x09, 0x31, 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x35, 0x00, 0x46, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x02, 0x81, 0x02,
+        0x05, 0x01, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x35, 0x00, 0x45, 0x00, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+        0xC0, 0xC0,
+    ];
+
+    #[test]
+    fn absolute_tablet_positions_are_scaled_to_the_full_range() {
+        let fields = parse_report_descriptor(&QEMU_TABLET).unwrap();
+        assert!(MouseLayout::from_fields(&fields).is_none(), "not a relative pointer");
+        let l = TabletLayout::from_fields(&fields).unwrap();
+        assert_eq!((l.report_id, l.buttons.len()), (0, 3));
+        assert_eq!((l.x.offset, l.x.size, l.y.offset, l.wheel.unwrap().offset), (8, 16, 24, 40));
+        // Left button, the far right, the middle row, wheel up one.
+        let r = l.decode(&[0x01, 0xFF, 0x7F, 0x00, 0x40, 0x01]).unwrap();
+        assert_eq!(r, TabletReport { buttons: 1, x: 0xFFFF, y: 0x4000 * 0xFFFF / 0x7FFF, wheel: 1 });
+        let r = l.decode(&[0x00, 0x00, 0x00, 0x00, 0x00, 0xFF]).unwrap();
+        assert_eq!(r, TabletReport { buttons: 0, x: 0, y: 0, wheel: -1 });
+        assert_eq!(l.decode(&[0x00, 0x00]), Err(ReportError::Truncated));
+        // A relative mouse is not a tablet.
+        assert!(TabletLayout::from_fields(&parse_report_descriptor(&QEMU_MOUSE).unwrap()).is_none());
+    }
+
+    #[test]
+    fn touch_screen_tip_is_the_left_button() {
+        // Digitizer / Touch Screen, report id 1: Tip Switch (1 bit), 7 bits
+        // of padding, X 0..4095 and Y 0..2047, 16 bits each.
+        let desc = [
+            0x05, 0x0D, 0x09, 0x04, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x42, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01,
+            0x81, 0x02, 0x75, 0x07, 0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x26, 0xFF, 0x0F, 0x75, 0x10, 0x81, 0x02, 0x09,
+            0x31, 0x26, 0xFF, 0x07, 0x81, 0x02, 0xC0,
+        ];
+        let l = TabletLayout::from_fields(&parse_report_descriptor(&desc).unwrap()).unwrap();
+        assert_eq!((l.report_id, l.buttons.len(), l.wheel), (1, 1, None));
+        let r = l.decode(&[1, 0x01, 0xFF, 0x0F, 0xFF, 0x03]).unwrap();
+        assert_eq!(r, TabletReport { buttons: 1, x: 0xFFFF, y: 0x3FF * 0xFFFF / 0x7FF, wheel: 0 });
+        assert_eq!(l.decode(&[2, 0, 0, 0, 0, 0]), Err(ReportError::UnknownReportId));
+        // Values outside the declared range are clamped, not wrapped.
+        let r = l.decode(&[1, 0x00, 0xFF, 0xFF, 0x00, 0x00]).unwrap();
+        assert_eq!((r.buttons, r.x, r.y), (0, 0xFFFF, 0));
     }
 
     #[test]
