@@ -32,6 +32,7 @@ use osyx_ui::layout::{contains, inset};
 use osyx_ui::time::Tz;
 use osyx_ui::widget::{Button, ButtonStyle, Checkbox, Column, Dialog, ListItem, ListView, Menu, MenuItem, TextField};
 use osyx_ui::{icon, Align, Event as Ui, FontKind, Fonts, Icon, Painter, Response, Theme};
+use osyx_ui::options::{BatteryWarning, BatteryWatch, ClockOptions, PowerOptions};
 use prism_client::ui::Adapter;
 use prism_client::{proto, Action, Connection, Event, Role, Window, WindowSpec};
 use prism_proto::{state, WindowInfo};
@@ -124,8 +125,9 @@ enum PopupKind {
     Drives { view: drives::View },
 }
 
-/// Battery indicator width on the panel.
+/// Battery indicator width on the panel, with and without the percentage.
 const BATTERY_W: u32 = 78;
+const BATTERY_W_ICON: u32 = 42;
 
 /// Drives button width on the panel.
 const DRIVES_W: u32 = 44;
@@ -500,6 +502,12 @@ struct Shell {
     /// last read (ms).
     battery: Option<Battery>,
     battery_checked: u64,
+    /// Settings > Power (`/etc/osyx/power`) and Date & Time
+    /// (`/etc/osyx/clock`), read along with the battery.
+    power: PowerOptions,
+    clock_options: ClockOptions,
+    /// Which low-battery warnings were shown for this discharge.
+    battery_watch: BatteryWatch,
     /// Removable drives from `/run/media.status`, the text they were parsed
     /// from, and when it was read (ms).
     media: Vec<Disk>,
@@ -627,6 +635,9 @@ fn main() -> i32 {
         update_announced: false,
         battery: None,
         battery_checked: 0,
+        power: PowerOptions::parse(&os_std::fs::read_to_string(PowerOptions::PATH).unwrap_or_default()),
+        clock_options: ClockOptions::parse(&os_std::fs::read_to_string(ClockOptions::PATH).unwrap_or_default()),
+        battery_watch: BatteryWatch::default(),
         media: Vec::new(),
         media_text: String::new(),
         media_checked: 0,
@@ -2170,7 +2181,8 @@ impl Shell {
     fn battery_rect(&self) -> Option<Rect> {
         self.battery?;
         let r = self.quick_rect();
-        Some(Rect::new(r.x - 4 - BATTERY_W as i32, 8, BATTERY_W, PANEL_H - 16))
+        let w = if self.power.show_percent { BATTERY_W } else { BATTERY_W_ICON };
+        Some(Rect::new(r.x - 4 - w as i32, 8, w, PANEL_H - 16))
     }
 
     fn clock_rect(&self) -> Rect {
@@ -2179,15 +2191,41 @@ impl Shell {
     }
 
     fn update_battery(&mut self) {
+        let power = PowerOptions::parse(&os_std::fs::read_to_string(PowerOptions::PATH).unwrap_or_default());
+        let clock = ClockOptions::parse(&os_std::fs::read_to_string(ClockOptions::PATH).unwrap_or_default());
         let b = read_battery();
-        if b != self.battery {
-            let appeared = b.is_some() != self.battery.is_some();
+        if b != self.battery || power != self.power || clock != self.clock_options {
+            // The indicator appearing or changing width moves the clock,
+            // and with it the room for task buttons.
+            let moved = b.is_some() != self.battery.is_some() || power.show_percent != self.power.show_percent;
             self.battery = b;
-            if appeared {
-                // The clock moves, and with it the room for task buttons.
+            self.power = power;
+            self.clock_options = clock;
+            if moved {
                 self.layout_panel();
             }
             self.panel.dirty = true;
+        }
+        // A battery running down: say so once at the low threshold and
+        // once more when it is nearly empty (Settings > Power).
+        if let Some(b) = self.battery {
+            use osyx_abi::battery::State;
+            let discharging = b.state == State::Discharging;
+            if let Some(warning) = self.battery_watch.update(b.percent, discharging, &self.power) {
+                let left = b.time_text().map_or(String::new(), |t| format!(", about {t} left"));
+                let (title, body) = match warning {
+                    BatteryWarning::Low => (
+                        format!("Battery low: {} %", b.percent),
+                        format!("Connect the power adapter soon{left}."),
+                    ),
+                    BatteryWarning::Critical => (
+                        format!("Battery almost empty: {} %", b.percent),
+                        format!("Connect the power adapter now and save your work{left}."),
+                    ),
+                };
+                println!("desktop: {title}");
+                self.show_note(&title, &body);
+            }
         }
     }
 
@@ -2206,7 +2244,8 @@ impl Shell {
             }
         }
         let l = self.tz.local(unix_now());
-        let c = (l.hm(), l.short_date());
+        let o = self.clock_options;
+        let c = (l.clock(o.twelve_hour, o.seconds), if o.date { l.short_date() } else { String::new() });
         if c != self.clock {
             self.clock = c;
             self.panel.dirty = true;
@@ -2484,10 +2523,16 @@ fn draw_panel(
         p.rounded(clock_rect, t.radius_small, t.raised, 255);
     }
     let lh = p.fonts.line_height(FontKind::Bold);
-    let top = Rect::new(clock_rect.x, clock_rect.y + 2, clock_rect.w - 10, lh);
-    p.text_in(FontKind::Bold, top, &clock.0, t.text, Align::Right);
-    let bottom = Rect::new(clock_rect.x, clock_rect.y + 2 + lh as i32, clock_rect.w - 10, lh);
-    p.text_in(FontKind::Ui, bottom, &clock.1, t.text_dim, Align::Right);
+    if clock.1.is_empty() {
+        // Time only (Settings > Date & Time): centred in the panel's height.
+        let middle = Rect::new(clock_rect.x, clock_rect.y + (clock_rect.h as i32 - lh as i32) / 2, clock_rect.w - 10, lh);
+        p.text_in(FontKind::Bold, middle, &clock.0, t.text, Align::Right);
+    } else {
+        let top = Rect::new(clock_rect.x, clock_rect.y + 2, clock_rect.w - 10, lh);
+        p.text_in(FontKind::Bold, top, &clock.0, t.text, Align::Right);
+        let bottom = Rect::new(clock_rect.x, clock_rect.y + 2 + lh as i32, clock_rect.w - 10, lh);
+        p.text_in(FontKind::Ui, bottom, &clock.1, t.text_dim, Align::Right);
+    }
     if quick_hover || quick_open {
         p.rounded(quick_rect, t.radius_small, if quick_open { t.selection } else { t.raised }, 255);
     }
@@ -2551,9 +2596,16 @@ fn draw_battery(p: &mut Painter, r: Rect, b: Battery) {
         p.line(cx - 1, cy, cx + 4, cy, rgb(255, 214, 64));
         p.line(cx + 3, cy, cx - 2, y + body_h as i32 + 1, rgb(255, 214, 64));
     }
-    let text = if unknown { String::from("--") } else { format!("{}%", percent.min(100)) };
-    let tr = Rect::new(x + body_w as i32 + 7, r.y, r.w.saturating_sub(body_w + 11), r.h);
-    p.text_in(FontKind::Ui, tr, &text, if percent <= 15 && !charging { level } else { t.text }, Align::Left);
+    // The percentage, when there is room for it (Settings > Power).
+    if r.w >= BATTERY_W {
+        let text = if unknown { String::from("--") } else { format!("{}%", percent.min(100)) };
+        let tr = Rect::new(x + body_w as i32 + 7, r.y, r.w.saturating_sub(body_w + 11), r.h);
+        p.text_in(FontKind::Ui, tr, &text, if percent <= 15 && !charging { level } else { t.text }, Align::Left);
+    } else if unknown {
+        // Without the text the unknown state still has to be told apart
+        // from an empty battery: a question mark in the cell.
+        p.text_in(FontKind::Ui, Rect::new(x, r.y, body_w, r.h), "?", t.text, Align::Center);
+    }
 }
 
 /// Controls without a working driver are shown but disabled (naming the

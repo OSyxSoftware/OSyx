@@ -249,6 +249,33 @@ pub struct LocalTime {
     pub offset: i64,
 }
 
+/// The time zones Settings offers: (POSIX TZ string, name), west to east
+/// after UTC. The rules are those in force in 2026.
+pub const ZONES: [(&str, &str); 22] = [
+    ("UTC0", "UTC"),
+    ("HST10", "Hawaii (Honolulu)"),
+    ("AKST9AKDT,M3.2.0,M11.1.0", "Alaska (Anchorage)"),
+    ("PST8PDT,M3.2.0,M11.1.0", "US Pacific (Los Angeles, Vancouver)"),
+    ("MST7MDT,M3.2.0,M11.1.0", "US Mountain (Denver)"),
+    ("CST6CDT,M3.2.0,M11.1.0", "US Central (Chicago)"),
+    ("EST5EDT,M3.2.0,M11.1.0", "US Eastern (New York, Toronto)"),
+    ("<-03>3", "Brazil (São Paulo), Argentina (Buenos Aires)"),
+    ("GMT0BST,M3.5.0/1,M10.5.0", "United Kingdom, Ireland (London, Dublin)"),
+    ("WET0WEST,M3.5.0/1,M10.5.0", "Portugal (Lisbon)"),
+    ("CET-1CEST,M3.5.0,M10.5.0/3", "Central Europe (Warsaw, Berlin, Paris, Rome)"),
+    ("EET-2EEST,M3.5.0/3,M10.5.0/4", "Eastern Europe (Helsinki, Kyiv, Athens)"),
+    ("<+03>-3", "Türkiye (Istanbul), Saudi Arabia (Riyadh)"),
+    ("MSK-3", "Moscow"),
+    ("<+04>-4", "United Arab Emirates (Dubai)"),
+    ("IST-5:30", "India (Kolkata)"),
+    ("<+07>-7", "Thailand (Bangkok), Vietnam, Indonesia (Jakarta)"),
+    ("CST-8", "China (Beijing), Singapore, Perth"),
+    ("JST-9", "Japan (Tokyo)"),
+    ("KST-9", "Korea (Seoul)"),
+    ("AEST-10AEDT,M10.1.0,M4.1.0/3", "Australia (Sydney, Melbourne)"),
+    ("NZST-12NZDT,M9.5.0,M4.1.0/3", "New Zealand (Auckland)"),
+];
+
 const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS: [&str; 12] =
     ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -257,6 +284,28 @@ impl LocalTime {
     /// `14:05`
     pub fn hm(&self) -> String {
         alloc::format!("{:02}:{:02}", self.hour, self.minute)
+    }
+
+    /// The time of day as a clock shows it: `14:05`, `14:05:09`,
+    /// `2:05 PM` or `2:05:09 PM` (midnight and noon are 12).
+    pub fn clock(&self, twelve_hour: bool, seconds: bool) -> String {
+        let hour = match (twelve_hour, self.hour % 12) {
+            (false, _) => self.hour,
+            (true, 0) => 12,
+            (true, h) => h,
+        };
+        let mut text = if twelve_hour {
+            alloc::format!("{}:{:02}", hour, self.minute)
+        } else {
+            alloc::format!("{:02}:{:02}", hour, self.minute)
+        };
+        if seconds {
+            text.push_str(&alloc::format!(":{:02}", self.second));
+        }
+        if twelve_hour {
+            text.push_str(if self.hour < 12 { " AM" } else { " PM" });
+        }
+        text
     }
 
     /// `Fri 23 Oct`

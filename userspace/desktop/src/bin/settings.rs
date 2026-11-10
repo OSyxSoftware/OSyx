@@ -5,14 +5,25 @@
 //! * Appearance: accent colour (`/etc/osyx/accent`, read by every OSyx
 //!   application when it starts) and the desktop background
 //!   (`/etc/osyx/wallpaper`, applied by the desktop shell within seconds);
-//! * Keyboard: layout (`/etc/osyx/keyboard`, read by PRISM at start);
-//! * Sound: the default output and input card (the kernel mixer, and
-//!   `/etc/osyx/audio`, which the desktop shell applies when it starts);
-//! * Date & Time: time zone (`/etc/TZ`, a POSIX TZ string);
+//! * Keyboard: layout (`/etc/osyx/keyboard`, followed by PRISM);
+//! * Mouse & Touchpad: pointer speed, natural scrolling, left-handed
+//!   buttons (`/etc/osyx/pointer`, followed by PRISM);
+//! * Sound: output volume and mute (the kernel mixer), the default output
+//!   and input card (the mixer, and `/etc/osyx/audio`, which the desktop
+//!   shell applies when it starts);
+//! * Power: the battery as `batteryd` reads it from the firmware, its
+//!   identity, the AC adapter, the lid and the thermal zones; whether the
+//!   task bar shows the percentage and when it warns (`/etc/osyx/power`);
+//! * Date & Time: time zone (`/etc/TZ`, a POSIX TZ string) and how the
+//!   task bar shows the time (`/etc/osyx/clock`);
 //! * Network: DHCP or a static IPv4 address for each interface (the
 //!   kernel's network configuration, `net_config`);
 //! * General: host name (`/etc/hostname`);
 //! * Display, Storage and About show the live system state.
+//!
+//! Keyboard, Mouse, Sound, Power and Date & Time are built from one model
+//! (groups of rows: information, switches, choices, sliders, meters) that
+//! lays itself out and scrolls; the older sections draw themselves.
 //!
 //! Settings runs as root (it changes system files); it does not drop to
 //! the desktop user like the other applications.
@@ -28,8 +39,13 @@ use os_std::prelude::*;
 use os_std::process::Command;
 use os_std::{fs, os, system};
 use osyx_gfx::{Color, Rect};
+use osyx_abi::battery::{Info as BatteryInfo, State as BatteryState, Status as Battery};
+use osyx_input::layout::Layout;
+use osyx_ui::options::{ClockOptions, PowerOptions};
+use osyx_ui::time::ZONES;
 use osyx_ui::widget::{Button, ButtonStyle, TextField};
 use osyx_ui::{icon, Align, Event as Ui, FontKind, Icon, Painter, Response};
+use prism_core::PointerSettings;
 use prism_client::WindowSpec;
 
 os_std::entry!(main);
@@ -77,7 +93,9 @@ enum Section {
     Appearance,
     Display,
     Keyboard,
+    Mouse,
     Sound,
+    Power,
     DateTime,
     Network,
     Storage,
@@ -85,12 +103,14 @@ enum Section {
     About,
 }
 
-const SECTIONS: [(Section, &str, Icon); 10] = [
+const SECTIONS: [(Section, &str, Icon); 12] = [
     (Section::General, "General", Icon::Program),
     (Section::Appearance, "Appearance", Icon::Apps),
     (Section::Display, "Displays", Icon::Device),
     (Section::Keyboard, "Keyboard", Icon::Device),
+    (Section::Mouse, "Mouse & Touchpad", Icon::Device),
     (Section::Sound, "Sound", Icon::Volume),
+    (Section::Power, "Power", Icon::Power),
     (Section::DateTime, "Date & Time", Icon::Bell),
     (Section::Network, "Network", Icon::Link),
     (Section::Storage, "Storage", Icon::Drive),
@@ -110,23 +130,145 @@ pub const ACCENTS: [(&str, Color); 8] = [
 ];
 
 const WALLPAPERS: [&str; 4] = ["OSyx", "Deep blue", "Aurora", "Graphite"];
-const LAYOUTS: [(&str, &str); 2] = [("us", "English (US)"), ("pl", "Polish (Programmer)")];
-const ZONES: [(&str, &str); 6] = [
-    ("UTC0", "UTC"),
-    ("CET-1CEST,M3.5.0,M10.5.0/3", "Central European (Warsaw, Berlin)"),
-    ("GMT0BST,M3.5.0/1,M10.5.0", "United Kingdom (London)"),
-    ("EST5EDT,M3.2.0,M11.1.0", "US Eastern (New York)"),
-    ("PST8PDT,M3.2.0,M11.1.0", "US Pacific (Los Angeles)"),
-    ("JST-9", "Japan (Tokyo)"),
-];
+/// The pointer speeds the slider snaps to (percent of the device's motion).
+const SPEED_STEP: u32 = 25;
+
+// ---- the model of the newer sections ------------------------------------------------------------
+
+/// What a click on a row does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Act {
+    Layout(Layout),
+    Zone(usize),
+    TwelveHour(bool),
+    ClockSeconds,
+    ClockDate,
+    NaturalScroll,
+    LeftHanded,
+    Mute,
+    Output(usize),
+    Input(usize),
+    ShowPercent,
+    LowAt(u8),
+}
+
+/// What a slider sets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Slide {
+    Volume,
+    PointerSpeed,
+}
+
+enum Row {
+    /// A fact: label and value.
+    Info(String, String),
+    /// A switch.
+    Toggle(Act, String, bool),
+    /// One of a set of choices.
+    Radio(Act, String, bool),
+    /// A value from `min` to `max`, with its text.
+    Slider(Slide, String, u32, u32, u32, String),
+    /// A level: label, text, parts per thousand, colour.
+    Meter(String, String, u32, Color),
+    /// A remark under the rows.
+    Note(String),
+}
+
+impl Row {
+    fn height(&self) -> u32 {
+        match self {
+            Row::Slider(..) | Row::Meter(..) => 52,
+            Row::Note(_) => 34,
+            _ => 40,
+        }
+    }
+}
+
+struct Group {
+    title: String,
+    rows: Vec<Row>,
+}
+
+impl Group {
+    fn new(title: &str, rows: Vec<Row>) -> Group {
+        Group { title: String::from(title), rows }
+    }
+
+    /// Title, card padding and rows.
+    fn height(&self) -> u32 {
+        26 + 8 + self.rows.iter().map(Row::height).sum::<u32>()
+    }
+}
+
+/// Space between two groups.
+const GROUP_GAP: u32 = 18;
+
+/// Where the groups and their rows are, scrolled by `scroll` pixels:
+/// (card of each group, rows of each group), and the height of it all.
+fn place(view: Rect, scroll: i32, groups: &[Group]) -> (Vec<(Rect, Vec<Rect>)>, u32) {
+    let mut y = view.y - scroll;
+    let mut placed = Vec::with_capacity(groups.len());
+    for g in groups {
+        let card = Rect::new(view.x, y + 26, view.w, g.height() - 26);
+        let mut row_y = card.y + 4;
+        let rows = g
+            .rows
+            .iter()
+            .map(|r| {
+                let rect = Rect::new(card.x + 6, row_y, card.w.saturating_sub(12), r.height());
+                row_y += r.height() as i32;
+                rect
+            })
+            .collect();
+        placed.push((card, rows));
+        y += (g.height() + GROUP_GAP) as i32;
+    }
+    (placed, (y + scroll - view.y).max(0) as u32)
+}
+
+/// The track of a slider row.
+fn slider_track(row: Rect) -> Rect {
+    let x = row.x + (row.w as i32 * 38 / 100).max(170);
+    Rect::new(x, row.y + 22, (row.x + row.w as i32 - 96 - x).max(60) as u32, 8)
+}
+
+/// The value a pointer at `x` picks on a slider from `min` to `max`.
+fn slider_value(row: Rect, x: i32, min: u32, max: u32) -> u32 {
+    let t = slider_track(row);
+    let at = (x - t.x).clamp(0, t.w as i32) as u64;
+    min + ((max - min) as u64 * at / t.w.max(1) as u64) as u32
+}
+
+/// Output volume and mute from the kernel's `/run/audio.status`.
+fn mixer_state() -> Option<(u32, bool)> {
+    let status = fs::read_to_string("/run/audio.status").ok()?;
+    let field = |k: &str| status.lines().find_map(|l| l.strip_prefix(k).map(str::trim));
+    field("device=")?;
+    Some((field("volume=").and_then(|v| v.parse().ok()).unwrap_or(0), field("mute=") == Some("1")))
+}
+
+fn set_mixer(volume: u32, muted: bool) -> Result<(), os_std::error::Error> {
+    use os_std::io::Write;
+    fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/mixer")
+        .and_then(|mut f| f.write_all(format!("volume={}\nmute={}\n", volume.min(100), muted as u8).as_bytes()))
+}
+
+/// `45.0 Wh` from milliwatt hours; `12.0 W` and `11.5 V` likewise.
+fn milli(value: u32, unit: &str) -> String {
+    format!("{}.{} {unit}", value / 1000, value % 1000 / 100)
+}
 
 struct Settings {
     section: Section,
     size: (u32, u32),
     accent: usize,
     wallpaper: usize,
-    layout: usize,
-    zone: usize,
+    /// Pixels the model sections are scrolled down.
+    scroll: i32,
+    /// The slider being dragged.
+    drag: Option<Slide>,
     hostname: TextField,
     save_host: Button,
     dhcp: Button,
@@ -150,6 +292,11 @@ fn read(path: &str) -> String {
     fs::read_to_string(path).map(|s| String::from(s.trim())).unwrap_or_default()
 }
 
+/// The file as it is (`key=value` files keep their lines).
+fn read_raw(path: &str) -> String {
+    fs::read_to_string(path).unwrap_or_default()
+}
+
 fn write(path: &str, value: &str) -> String {
     let _ = fs::create_dir("/etc/osyx");
     match fs::write(path, format!("{value}\n").as_bytes()) {
@@ -157,6 +304,18 @@ fn write(path: &str, value: &str) -> String {
             println!("settings: saved {path}={value}");
             format!("Saved {path}")
         },
+        Err(e) => format!("Cannot write {path}: {e}"),
+    }
+}
+
+/// Writes `contents` to `path`; `done` on success, the reason otherwise.
+fn save(path: &str, contents: &str, done: &str) -> String {
+    let _ = fs::create_dir("/etc/osyx");
+    match fs::write(path, contents.as_bytes()) {
+        Ok(()) => {
+            println!("settings: saved {path}={}", contents.trim_end().replace('\n', " "));
+            String::from(done)
+        }
         Err(e) => format!("Cannot write {path}: {e}"),
     }
 }
@@ -266,16 +425,6 @@ impl Settings {
         card
     }
 
-    /// The option rows of the Sound section: the Output group first, the
-    /// Input group below it; a group without cards keeps one row for its
-    /// message.
-    fn sound_rows(c: Rect, cards: &Cards) -> (Vec<Rect>, Vec<Rect>) {
-        let outputs = option_rows(c, cards.outputs.len().max(1), c.y + 60);
-        let below = outputs.last().map_or(c.y + 60, |r| r.y + r.h as i32) + 12 + 30;
-        let inputs = option_rows(c, cards.inputs.len().max(1), below + 34);
-        (outputs, inputs)
-    }
-
     fn row(p: &mut Painter, r: Rect, label: &str, value: &str) {
         let t = *p.theme;
         p.text(FontKind::Ui, r.x + 16, r.y + 10, label, t.text);
@@ -299,6 +448,432 @@ impl Settings {
     fn net_iface() -> Option<osyx_abi::net::NetIface> {
         os_std::net::preferred_ethernet(&os_std::net::interfaces().ok()?)
     }
+
+    /// The area the model sections scroll in: under the title, above the
+    /// status line.
+    fn view(&self) -> Rect {
+        let c = self.content();
+        Rect::new(c.x, c.y + 44, c.w, c.h.saturating_sub(44 + 30))
+    }
+
+    /// The groups of the current section, from the system's state now;
+    /// `None` for the sections that draw themselves.
+    fn model(&self) -> Option<Vec<Group>> {
+        Some(match self.section {
+            Section::Keyboard => {
+                let current = Layout::from_name(&read("/etc/osyx/keyboard")).unwrap_or(Layout::Us);
+                let layouts = Layout::ALL.iter().map(|l| Row::Radio(Act::Layout(*l), String::from(l.label()), *l == current)).collect();
+                vec![
+                    Group::new("Input source", layouts),
+                    Group::new(
+                        "Typing",
+                        vec![
+                            Row::Info(String::from("Right Alt"), String::from("AltGr: third character of a key")),
+                            Row::Info(String::from("Key repeat"), String::from("after 500 ms, 30 per second")),
+                            Row::Note(String::from("The layout applies within a few seconds, in every application.")),
+                        ],
+                    ),
+                ]
+            }
+            Section::Mouse => {
+                let s = PointerSettings::parse(&read_raw("/etc/osyx/pointer"));
+                vec![
+                    Group::new(
+                        "Pointer",
+                        vec![
+                            Row::Slider(
+                                Slide::PointerSpeed,
+                                String::from("Pointer speed"),
+                                s.speed,
+                                PointerSettings::MIN_SPEED,
+                                PointerSettings::MAX_SPEED,
+                                format!("{} %", s.speed),
+                            ),
+                            Row::Toggle(Act::LeftHanded, String::from("Left-handed: swap the primary and secondary button"), s.left_handed),
+                        ],
+                    ),
+                    Group::new(
+                        "Scrolling",
+                        vec![
+                            Row::Toggle(Act::NaturalScroll, String::from("Natural scrolling: content follows the fingers"), s.natural_scroll),
+                            Row::Note(String::from("These options apply within a few seconds, to mice and touchpads.")),
+                            Row::Note(String::from("Tablets and touch screens report positions: the speed does not change them.")),
+                        ],
+                    ),
+                ]
+            }
+            Section::Sound => {
+                let cards = Cards::read();
+                let mut groups = Vec::new();
+                groups.push(match mixer_state() {
+                    Some((volume, muted)) => Group::new(
+                        "Volume",
+                        vec![
+                            Row::Slider(
+                                Slide::Volume,
+                                String::from("Output volume"),
+                                volume.min(100),
+                                0,
+                                100,
+                                if muted { String::from("muted") } else { format!("{} %", volume.min(100)) },
+                            ),
+                            Row::Toggle(Act::Mute, String::from("Mute"), muted),
+                        ],
+                    ),
+                    None => Group::new("Volume", vec![Row::Note(String::from("No sound card is in use."))]),
+                });
+                let list = |title: &str, names: &[String], current: &str, none: &str, act: fn(usize) -> Act| {
+                    let rows = if names.is_empty() {
+                        vec![Row::Note(String::from(none))]
+                    } else {
+                        names.iter().enumerate().map(|(i, n)| Row::Radio(act(i), n.clone(), n == current)).collect()
+                    };
+                    Group::new(title, rows)
+                };
+                groups.push(list("Output", &cards.outputs, &cards.output, "No sound card can play", Act::Output));
+                groups.push(list("Input", &cards.inputs, &cards.input, "No sound card can record", Act::Input));
+                groups
+            }
+            Section::Power => self.power_model(),
+            Section::DateTime => {
+                let zone = read("/etc/TZ");
+                let o = ClockOptions::parse(&read_raw(ClockOptions::PATH));
+                vec![
+                    Group::new(
+                        "Clock in the task bar",
+                        vec![
+                            Row::Radio(Act::TwelveHour(false), String::from("24-hour (14:05)"), !o.twelve_hour),
+                            Row::Radio(Act::TwelveHour(true), String::from("12-hour (2:05 PM)"), o.twelve_hour),
+                            Row::Toggle(Act::ClockSeconds, String::from("Show seconds"), o.seconds),
+                            Row::Toggle(Act::ClockDate, String::from("Show the date"), o.date),
+                        ],
+                    ),
+                    Group::new(
+                        "Time zone",
+                        ZONES.iter().enumerate().map(|(i, (z, name))| Row::Radio(Act::Zone(i), String::from(*name), *z == zone)).collect(),
+                    ),
+                ]
+            }
+            _ => return None,
+        })
+    }
+
+    /// Power: what `batteryd` publishes, and the options of the task bar.
+    fn power_model(&self) -> Vec<Group> {
+        let options = PowerOptions::parse(&read_raw(PowerOptions::PATH));
+        let battery = fs::read_to_string(osyx_abi::BATTERY_STATUS_PATH).ok().and_then(|t| Battery::parse(&t));
+        let mut groups = Vec::new();
+        match battery.filter(Battery::present) {
+            Some(b) => {
+                let unknown = b.state == BatteryState::Unknown && b.percent == 0;
+                let mut status = String::from(match b.state {
+                    BatteryState::Charging => "Charging",
+                    BatteryState::Discharging => "On battery",
+                    BatteryState::Full => "Fully charged",
+                    BatteryState::Idle => "Plugged in, not charging",
+                    _ => "The firmware does not answer",
+                });
+                if let Some(t) = b.time_text() {
+                    status.push_str(&match b.state {
+                        BatteryState::Charging => format!(", {t} until full"),
+                        _ => format!(", {t} remaining"),
+                    });
+                }
+                let colour = if b.charging() {
+                    osyx_gfx::rgb(80, 200, 120)
+                } else if b.percent <= options.low.max(5) {
+                    osyx_gfx::rgb(232, 72, 72)
+                } else {
+                    osyx_gfx::rgb(76, 141, 255)
+                };
+                let mut rows = vec![
+                    Row::Meter(
+                        String::from("Charge"),
+                        if unknown { String::from("unknown") } else { format!("{} %", b.percent) },
+                        b.percent as u32 * 10,
+                        colour,
+                    ),
+                    Row::Info(String::from("Status"), status),
+                ];
+                if let Some(mw) = b.rate_mw.filter(|&r| r > 0) {
+                    rows.push(Row::Info(String::from(if b.charging() { "Charging power" } else { "Power draw" }), milli(mw, "W")));
+                }
+                if let (Some(e), Some(c)) = (b.energy_mwh, b.capacity_mwh) {
+                    rows.push(Row::Info(String::from("Energy"), format!("{} of {}", milli(e, "Wh"), milli(c, "Wh"))));
+                }
+                if let (Some(h), Some(d)) = (b.health_percent(), b.design_mwh) {
+                    rows.push(Row::Info(String::from("Health"), format!("{h} % of the design capacity ({})", milli(d, "Wh"))));
+                }
+                if let Some(mv) = b.voltage_mv {
+                    rows.push(Row::Info(String::from("Voltage"), format!("{}.{:02} V", mv / 1000, mv % 1000 / 10)));
+                }
+                if b.batteries > 1 {
+                    rows.push(Row::Info(String::from("Batteries"), format!("{}", b.batteries)));
+                }
+                if b.stale {
+                    rows.push(Row::Note(String::from("The firmware stopped answering: these are the last values it gave.")));
+                }
+                if unknown {
+                    rows.push(Row::Note(String::from(
+                        "A battery is present but its firmware methods could not be run; the system log (batteryd) names the method.",
+                    )));
+                }
+                groups.push(Group::new("Battery", rows));
+                for info in BatteryInfo::parse(&read_raw(osyx_abi::BATTERY_INFO_PATH)) {
+                    let mut rows = Vec::new();
+                    for (label, value) in
+                        [("Model", &info.model), ("Manufacturer", &info.vendor), ("Chemistry", &info.technology), ("Serial number", &info.serial)]
+                    {
+                        if !value.is_empty() {
+                            rows.push(Row::Info(String::from(label), value.clone()));
+                        }
+                    }
+                    if let Some(cycles) = info.cycles {
+                        rows.push(Row::Info(String::from("Charge cycles"), format!("{cycles}")));
+                    }
+                    if !rows.is_empty() {
+                        groups.push(Group::new(&format!("About {}", info.device), rows));
+                    }
+                }
+                groups.push(Group::new(
+                    "Task bar",
+                    vec![Row::Toggle(Act::ShowPercent, String::from("Show the percentage beside the battery"), options.show_percent)],
+                ));
+                groups.push(Group::new(
+                    "Low battery warning",
+                    PowerOptions::LOW_CHOICES
+                        .iter()
+                        .map(|&low| {
+                            let label = if low == 0 { String::from("Never") } else { format!("At {low} %") };
+                            Row::Radio(Act::LowAt(low), label, options.low == low)
+                        })
+                        .collect(),
+                ));
+            }
+            None => groups.push(Group::new(
+                "Battery",
+                vec![Row::Note(String::from(if battery.is_some() {
+                    "This computer has no battery."
+                } else {
+                    "The battery service has not reported yet."
+                }))],
+            )),
+        }
+        let mut machine = Vec::new();
+        if let Some(b) = battery.filter(Battery::present) {
+            machine.push(Row::Info(String::from("Power adapter"), String::from(if b.ac { "Connected" } else { "Not connected" })));
+        }
+        match read(osyx_abi::LID_STATUS_PATH).as_str() {
+            "open" => machine.push(Row::Info(String::from("Lid"), String::from("Open"))),
+            "closed" => machine.push(Row::Info(String::from("Lid"), String::from("Closed"))),
+            _ => {}
+        }
+        for (zone, tenths) in osyx_abi::battery::parse_thermal(&read_raw(osyx_abi::THERMAL_STATUS_PATH)) {
+            let sign = if tenths < 0 { "-" } else { "" };
+            machine.push(Row::Info(
+                format!("Temperature ({zone})"),
+                format!("{sign}{}.{} °C", tenths.unsigned_abs() / 10, tenths.unsigned_abs() % 10),
+            ));
+        }
+        if !machine.is_empty() {
+            groups.push(Group::new("This computer", machine));
+        }
+        groups
+    }
+
+    /// Pointer and wheel on a model section. `None`: not for the model.
+    fn model_event(&mut self, ev: &Ui, groups: &[Group]) -> Option<bool> {
+        let view = self.view();
+        let (placed, total) = place(view, self.scroll, groups);
+        let max_scroll = (total as i32 - view.h as i32).max(0);
+        let slide_at = |x: i32, y: i32, any_row: bool| {
+            placed.iter().zip(groups).flat_map(|((_, rects), g)| rects.iter().zip(&g.rows)).find_map(|(r, row)| match row {
+                Row::Slider(slide, _, _, min, max, _) if any_row || inside(*r, x, y) => Some((*slide, *r, *min, *max)),
+                _ => None,
+            })
+        };
+        match *ev {
+            Ui::Wheel { x, dy, .. } if x >= SIDEBAR as i32 => {
+                let before = self.scroll;
+                self.scroll = (self.scroll - dy * 48).clamp(0, max_scroll);
+                Some(self.scroll != before)
+            }
+            Ui::PointerDown { x, y, .. } if inside(view, x, y) => {
+                if let Some((slide, row, min, max)) = slide_at(x, y, false) {
+                    self.drag = Some(slide);
+                    self.slide(slide, slider_value(row, x, min, max));
+                    return Some(true);
+                }
+                let hit = placed.iter().zip(groups).flat_map(|((_, rects), g)| rects.iter().zip(&g.rows)).find_map(|(r, row)| match row {
+                    Row::Toggle(act, ..) | Row::Radio(act, ..) if inside(*r, x, y) => Some(*act),
+                    _ => None,
+                });
+                hit.map(|act| {
+                    self.apply(act);
+                    true
+                })
+            }
+            Ui::PointerMove { x, .. } => {
+                let slide = self.drag?;
+                // The dragged slider follows the pointer wherever it is.
+                let (_, row, min, max) = placed
+                    .iter()
+                    .zip(groups)
+                    .flat_map(|((_, rects), g)| rects.iter().zip(&g.rows))
+                    .find_map(|(r, row)| match row {
+                        Row::Slider(s, _, _, min, max, _) if *s == slide => Some((*s, *r, *min, *max)),
+                        _ => None,
+                    })?;
+                self.slide(slide, slider_value(row, x, min, max));
+                Some(true)
+            }
+            Ui::PointerUp { .. } | Ui::PointerLeave => self.drag.take().map(|_| true),
+            _ => None,
+        }
+    }
+
+    /// A slider moved to `value`.
+    fn slide(&mut self, slide: Slide, value: u32) {
+        match slide {
+            Slide::Volume => {
+                self.status = match set_mixer(value, false) {
+                    Ok(()) => format!("Volume {value} %"),
+                    Err(e) => format!("Cannot set the volume: {e}"),
+                };
+            }
+            Slide::PointerSpeed => {
+                let mut s = PointerSettings::parse(&read_raw("/etc/osyx/pointer"));
+                // Steps of 25 %: the difference between 137 % and 138 % is not felt.
+                let speed = ((value + SPEED_STEP / 2) / SPEED_STEP * SPEED_STEP).clamp(PointerSettings::MIN_SPEED, PointerSettings::MAX_SPEED);
+                if speed != s.speed {
+                    s.speed = speed;
+                    self.status = save("/etc/osyx/pointer", &s.to_text(), &format!("Pointer speed {speed} %"));
+                }
+            }
+        }
+    }
+
+    /// A switch or a choice was clicked.
+    fn apply(&mut self, act: Act) {
+        let pointer = |change: &dyn Fn(&mut PointerSettings), done: &str| {
+            let mut s = PointerSettings::parse(&read_raw("/etc/osyx/pointer"));
+            change(&mut s);
+            save("/etc/osyx/pointer", &s.to_text(), done)
+        };
+        let clock = |change: &dyn Fn(&mut ClockOptions)| {
+            let mut o = ClockOptions::parse(&read_raw(ClockOptions::PATH));
+            change(&mut o);
+            save(ClockOptions::PATH, &o.to_text(), "The task bar clock follows within seconds")
+        };
+        let power = |change: &dyn Fn(&mut PowerOptions), done: &str| {
+            let mut o = PowerOptions::parse(&read_raw(PowerOptions::PATH));
+            change(&mut o);
+            save(PowerOptions::PATH, &o.to_text(), done)
+        };
+        self.status = match act {
+            Act::Layout(l) => save("/etc/osyx/keyboard", &format!("{}\n", l.name()), &format!("{}: applies within seconds", l.label())),
+            Act::Zone(i) => save("/etc/TZ", &format!("{}\n", ZONES[i].0), &format!("Time zone: {}", ZONES[i].1)),
+            Act::TwelveHour(on) => clock(&|o| o.twelve_hour = on),
+            Act::ClockSeconds => clock(&|o| o.seconds = !o.seconds),
+            Act::ClockDate => clock(&|o| o.date = !o.date),
+            Act::NaturalScroll => pointer(&|s| s.natural_scroll = !s.natural_scroll, "Scrolling direction changed"),
+            Act::LeftHanded => pointer(&|s| s.left_handed = !s.left_handed, "Mouse buttons swapped"),
+            Act::Mute => match mixer_state() {
+                Some((volume, muted)) => match set_mixer(volume, !muted) {
+                    Ok(()) => String::from(if muted { "Sound on" } else { "Sound muted" }),
+                    Err(e) => format!("Cannot change the mixer: {e}"),
+                },
+                None => String::from("No sound card is in use"),
+            },
+            Act::Output(i) => Cards::read().outputs.get(i).map_or(String::new(), |card| choose_card("output", card)),
+            Act::Input(i) => Cards::read().inputs.get(i).map_or(String::new(), |card| choose_card("input", card)),
+            Act::ShowPercent => power(&|o| o.show_percent = !o.show_percent, "The task bar follows within seconds"),
+            Act::LowAt(low) => power(
+                &|o| o.low = low,
+                &if low == 0 { String::from("No low battery warning") } else { format!("Warning when the battery reaches {low} %") },
+            ),
+        };
+    }
+
+    fn draw_model(&mut self, p: &mut Painter, groups: &[Group]) {
+        let t = *p.theme;
+        let view = self.view();
+        let (placed, total) = place(view, self.scroll, groups);
+        // Content that became shorter (a battery removed) must not leave
+        // the view scrolled past its end.
+        let max_scroll = (total as i32 - view.h as i32).max(0);
+        if self.scroll > max_scroll {
+            self.scroll = max_scroll;
+            return self.draw_model(p, groups);
+        }
+        let old = p.push_clip(view);
+        for ((card, rects), g) in placed.iter().zip(groups) {
+            if card.y > view.y + view.h as i32 || card.y + (card.h as i32) < view.y - 26 {
+                continue;
+            }
+            p.text(FontKind::Bold, card.x, card.y - 26, &g.title, t.text);
+            p.card(*card, 10, osyx_gfx::rgb(36, 39, 49), t.border);
+            for (r, row) in rects.iter().zip(&g.rows) {
+                match row {
+                    Row::Info(label, value) => {
+                        p.text(FontKind::Ui, r.x + 10, r.y + 10, label, t.text);
+                        let room = Rect::new(r.x + r.w as i32 / 3, r.y + 10, r.w * 2 / 3 - 10, 20);
+                        p.text_in(FontKind::Ui, room, value, t.text_dim, Align::Right);
+                    }
+                    Row::Toggle(_, label, on) => {
+                        p.text(FontKind::Ui, r.x + 10, r.y + 10, label, t.text);
+                        // A switch: a pill with the knob on the side it is on.
+                        let pill = Rect::new(r.x + r.w as i32 - 54, r.y + 9, 44, 22);
+                        p.rounded(pill, 11, if *on { t.accent } else { t.field }, 255);
+                        let knob = if *on { pill.x + 33 } else { pill.x + 11 };
+                        p.disc(knob, pill.y + 11, 8, osyx_gfx::rgb(255, 255, 255), 255);
+                    }
+                    Row::Radio(_, label, selected) => {
+                        if *selected {
+                            p.rounded(Rect::new(r.x, r.y + 2, r.w, r.h - 4), 6, t.selection, 255);
+                        }
+                        p.ring(r.x + 20, r.y + 20, 7, 2, if *selected { t.accent } else { t.text_faint }, 255, false);
+                        if *selected {
+                            p.disc(r.x + 20, r.y + 20, 4, t.accent, 255);
+                        }
+                        p.text(FontKind::Ui, r.x + 38, r.y + 10, label, t.text);
+                    }
+                    Row::Slider(_, label, value, min, max, text) => {
+                        p.text(FontKind::Ui, r.x + 10, r.y + 16, label, t.text);
+                        let track = slider_track(*r);
+                        p.rounded(track, 4, t.field, 255);
+                        let filled = (track.w as u64 * (*value).saturating_sub(*min) as u64 / (*max - *min).max(1) as u64) as u32;
+                        if filled > 0 {
+                            p.rounded(Rect::new(track.x, track.y, filled.max(8), 8), 4, t.accent, 255);
+                        }
+                        p.disc(track.x + filled as i32, track.y + 4, 9, osyx_gfx::rgb(255, 255, 255), 255);
+                        let room = Rect::new(track.x + track.w as i32 + 12, r.y + 16, 74, 20);
+                        p.text_in(FontKind::Ui, room, text, t.text_dim, Align::Right);
+                    }
+                    Row::Meter(label, text, permille, colour) => {
+                        p.text(FontKind::Ui, r.x + 10, r.y + 8, label, t.text);
+                        p.text_in(FontKind::Bold, Rect::new(r.x, r.y + 8, r.w - 10, 20), text, t.text, Align::Right);
+                        let bar = Rect::new(r.x + 10, r.y + 34, r.w.saturating_sub(20), 8);
+                        p.rounded(bar, 4, t.field, 255);
+                        let filled = (bar.w as u64 * (*permille).min(1000) as u64 / 1000) as u32;
+                        if filled > 0 {
+                            p.rounded(Rect::new(bar.x, bar.y, filled.max(8), 8), 4, *colour, 255);
+                        }
+                    }
+                    Row::Note(text) => {
+                        p.text_in(FontKind::Ui, Rect::new(r.x + 10, r.y + 8, r.w.saturating_sub(20), 20), text, t.text_faint, Align::Left);
+                    }
+                }
+            }
+        }
+        p.restore_clip(old);
+        // More below or above: a scroll bar at the right edge.
+        if total > view.h {
+            let h = (view.h as u64 * view.h as u64 / total as u64).max(24) as u32;
+            let y = view.y + ((view.h - h) as i64 * self.scroll as i64 / max_scroll.max(1) as i64) as i32;
+            p.rounded(Rect::new(view.x + view.w as i32 + 5, y, 4, h), 2, t.text_faint, 160);
+        }
+    }
 }
 
 impl App for Settings {
@@ -319,6 +894,11 @@ impl App for Settings {
 
     fn event(&mut self, ev: Ui, cx: &mut Ctx) -> bool {
         let c = self.content();
+        if let Some(groups) = self.model() {
+            if let Some(redraw) = self.model_event(&ev, &groups) {
+                return redraw;
+            }
+        }
         // The wheel scrolls the program list (dy > 0 is up).
         if let (Section::Apps, Ui::Wheel { dy, .. }) = (self.section, &ev) {
             let before = self.programs_top;
@@ -349,6 +929,8 @@ impl App for Settings {
                 for (i, (s, _, _)) in SECTIONS.iter().enumerate() {
                     if inside(Rect::new(10, 64 + i as i32 * 40, SIDEBAR - 20, 36), x, y) {
                         self.section = *s;
+                        self.scroll = 0;
+                        self.drag = None;
                         self.status.clear();
                         if *s == Section::Apps {
                             self.programs = installed_programs();
@@ -383,41 +965,6 @@ impl App for Settings {
                     for (i, r) in option_rows(c, self.programs.len().min(PROGRAM_ROWS), c.y + 74).into_iter().enumerate() {
                         if inside(r, x, y) {
                             self.selected_program = Some(self.programs_top + i);
-                            return true;
-                        }
-                    }
-                }
-                Section::Keyboard => {
-                    for (i, r) in option_rows(c, LAYOUTS.len(), c.y + 60).into_iter().enumerate() {
-                        if inside(r, x, y) {
-                            self.layout = i;
-                            self.status =
-                                write("/etc/osyx/keyboard", LAYOUTS[i].0) + " (takes effect when the session restarts)";
-                            return true;
-                        }
-                    }
-                }
-                Section::Sound => {
-                    let cards = Cards::read();
-                    let (out_rows, in_rows) = Self::sound_rows(c, &cards);
-                    for (i, r) in out_rows.into_iter().take(cards.outputs.len()).enumerate() {
-                        if inside(r, x, y) {
-                            self.status = choose_card("output", &cards.outputs[i]);
-                            return true;
-                        }
-                    }
-                    for (i, r) in in_rows.into_iter().take(cards.inputs.len()).enumerate() {
-                        if inside(r, x, y) {
-                            self.status = choose_card("input", &cards.inputs[i]);
-                            return true;
-                        }
-                    }
-                }
-                Section::DateTime => {
-                    for (i, r) in option_rows(c, ZONES.len(), c.y + 100).into_iter().enumerate() {
-                        if inside(r, x, y) {
-                            self.zone = i;
-                            self.status = write("/etc/TZ", ZONES[i].0);
                             return true;
                         }
                     }
@@ -518,7 +1065,11 @@ impl App for Settings {
             }
             return changed;
         }
-        matches!(self.section, Section::Network | Section::Storage | Section::Display | Section::About)
+        // Live state: also the battery, the mixer and the clock.
+        matches!(
+            self.section,
+            Section::Network | Section::Storage | Section::Display | Section::About | Section::Power | Section::Sound | Section::DateTime
+        ) && self.drag.is_none()
     }
 
     fn draw(&mut self, p: &mut Painter, w: u32, h: u32, cx: &Ctx) {
@@ -629,39 +1180,20 @@ impl App for Settings {
                     t.text_faint,
                 );
             }
-            Section::Keyboard => {
-                let rows = option_rows(c, LAYOUTS.len(), c.y + 60);
-                let _ =
-                    Self::group(p, Rect::new(c.x, c.y + 26, c.w, 34 + LAYOUTS.len() as u32 * 40 + 8), "Input source");
-                let labels: Vec<&str> = LAYOUTS.iter().map(|(_, l)| *l).collect();
-                Self::choices(p, &rows, &labels, self.layout);
-            }
-            Section::Sound => {
-                let cards = Cards::read();
-                let (out_rows, in_rows) = Self::sound_rows(c, &cards);
-                let groups = [
-                    ("Output", &cards.outputs, &cards.output, &out_rows, "No sound card can play"),
-                    ("Input", &cards.inputs, &cards.input, &in_rows, "No sound card can record"),
-                ];
-                for (title, list, current, rows, none) in groups {
-                    let top = rows[0].y - 34;
-                    let g = Self::group(p, Rect::new(c.x, top, c.w, 34 + list.len().max(1) as u32 * 40 + 8), title);
-                    if list.is_empty() {
-                        p.text(FontKind::Ui, g.x + 16, g.y + 12, none, t.text_faint);
-                        continue;
-                    }
-                    let labels: Vec<&str> = list.iter().map(String::as_str).collect();
-                    let selected = list.iter().position(|n| n == current).unwrap_or(usize::MAX);
-                    Self::choices(p, &rows[..list.len()], &labels, selected);
+            Section::Keyboard | Section::Mouse | Section::Sound | Section::Power | Section::DateTime => {
+                if self.section == Section::DateTime {
+                    let o = ClockOptions::parse(&read_raw(ClockOptions::PATH));
+                    let now = common::system_tz().local(common::unix_now());
+                    p.text_in(
+                        FontKind::Large,
+                        Rect::new(c.x, c.y, c.w.saturating_sub(4), 30),
+                        &format!("{}  ·  {}", now.clock(o.twelve_hour, true), now.long_date()),
+                        t.text_dim,
+                        Align::Right,
+                    );
                 }
-            }
-            Section::DateTime => {
-                let now = common::system_tz().local(common::unix_now());
-                p.text(FontKind::Display, c.x + 4, c.y + 34, &format!("{:02}:{:02}", now.hour, now.minute), t.text);
-                let rows = option_rows(c, ZONES.len(), c.y + 100);
-                let _ = Self::group(p, Rect::new(c.x, c.y + 66, c.w, 34 + ZONES.len() as u32 * 40 + 8), "Time zone");
-                let labels: Vec<&str> = ZONES.iter().map(|(_, l)| *l).collect();
-                Self::choices(p, &rows, &labels, self.zone);
+                let groups = self.model().unwrap_or_default();
+                self.draw_model(p, &groups);
             }
             Section::Network => {
                 let i = Self::net_iface();
@@ -793,8 +1325,6 @@ impl App for Settings {
 fn main() -> i32 {
     let accent = read("/etc/osyx/accent");
     let wallpaper: usize = read("/etc/osyx/wallpaper").parse().unwrap_or(0);
-    let layout = read("/etc/osyx/keyboard");
-    let zone = read("/etc/TZ");
     let host = read("/etc/hostname");
     let mut hostname = TextField::new("");
     hostname.set_text(&host);
@@ -803,8 +1333,8 @@ fn main() -> i32 {
         size: (0, 0),
         accent: ACCENTS.iter().position(|(n, _)| n.eq_ignore_ascii_case(&accent)).unwrap_or(0),
         wallpaper: wallpaper.min(WALLPAPERS.len() - 1),
-        layout: LAYOUTS.iter().position(|(k, _)| *k == layout).unwrap_or(0),
-        zone: ZONES.iter().position(|(k, _)| *k == zone).unwrap_or(0),
+        scroll: 0,
+        drag: None,
         hostname,
         save_host: Button::new(1, "Save", ButtonStyle::Primary),
         dhcp: Button::new(2, "Use DHCP", ButtonStyle::Secondary),
@@ -826,8 +1356,8 @@ fn main() -> i32 {
         focus: 0,
     };
     println!("settings: started");
-    let mut spec = WindowSpec::normal("Settings", 960, 640);
-    spec.min_width = 760;
-    spec.min_height = 520;
+    let mut spec = WindowSpec::normal("Settings", 980, 700);
+    spec.min_width = 780;
+    spec.min_height = 580;
     run_app("settings", spec, &mut app)
 }

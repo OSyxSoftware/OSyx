@@ -396,6 +396,50 @@ fn civil_dates_round_trip() {
 }
 
 #[test]
+fn offered_time_zones_parse_and_have_the_right_offsets() {
+    use crate::time::ZONES;
+    // 2026-01-15 12:00 UTC and 2026-07-15 12:00 UTC.
+    let (winter, summer) = (1_768_478_400, 1_784_116_800);
+    let hour = |zone: &str, at: i64| {
+        let tz = Tz::parse(zone).unwrap_or_else(|| panic!("{zone} must parse"));
+        let l = tz.local(at);
+        (l.hour, l.minute)
+    };
+    for (zone, name) in ZONES {
+        assert!(Tz::parse(zone).is_some(), "{zone}");
+        assert!(!name.is_empty());
+    }
+    let unique: std::collections::BTreeSet<&str> = ZONES.iter().map(|(z, _)| *z).collect();
+    assert_eq!(unique.len(), ZONES.len(), "no zone is listed twice");
+    assert_eq!(hour("CET-1CEST,M3.5.0,M10.5.0/3", winter), (13, 0));
+    assert_eq!(hour("CET-1CEST,M3.5.0,M10.5.0/3", summer), (14, 0));
+    assert_eq!(hour("EST5EDT,M3.2.0,M11.1.0", winter), (7, 0));
+    assert_eq!(hour("EST5EDT,M3.2.0,M11.1.0", summer), (8, 0));
+    assert_eq!(hour("IST-5:30", winter), (17, 30));
+    assert_eq!(hour("<-03>3", summer), (9, 0));
+    assert_eq!(hour("AEST-10AEDT,M10.1.0,M4.1.0/3", winter), (23, 0), "southern summer");
+    assert_eq!(hour("AEST-10AEDT,M10.1.0,M4.1.0/3", summer), (22, 0));
+    assert_eq!(hour("HST10", summer), (2, 0));
+    assert_eq!(hour("NZST-12NZDT,M9.5.0,M4.1.0/3", winter), (1, 0));
+}
+
+#[test]
+fn clock_formats() {
+    let utc = Tz::parse("UTC0").unwrap();
+    // 00:05:09, 12:00:00, 14:05:09 and 23:59:59 on the first day.
+    let at = |h: i64, m: i64, s: i64| utc.local(h * 3600 + m * 60 + s);
+    assert_eq!(at(14, 5, 9).clock(false, false), "14:05");
+    assert_eq!(at(14, 5, 9).clock(false, true), "14:05:09");
+    assert_eq!(at(14, 5, 9).clock(true, false), "2:05 PM");
+    assert_eq!(at(14, 5, 9).clock(true, true), "2:05:09 PM");
+    assert_eq!(at(0, 5, 9).clock(true, false), "12:05 AM");
+    assert_eq!(at(0, 5, 9).clock(false, false), "00:05");
+    assert_eq!(at(12, 0, 0).clock(true, false), "12:00 PM");
+    assert_eq!(at(23, 59, 59).clock(true, true), "11:59:59 PM");
+    assert_eq!(at(9, 30, 0).clock(false, false), at(9, 30, 0).hm());
+}
+
+#[test]
 fn posix_time_zones() {
     let warsaw = Tz::parse("CET-1CEST,M3.5.0,M10.5.0/3").unwrap();
     // 2026-10-23 09:00 UTC is 11:00 CEST.
