@@ -13,6 +13,7 @@
 
 #![no_std]
 
+pub mod evdev;
 pub mod key;
 pub mod layout;
 pub mod repeat;

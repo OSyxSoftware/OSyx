@@ -240,6 +240,8 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     }
     // After the xHCI handoff, which ends USB legacy emulation of ports 0x60/0x64.
     drivers::ps2::start();
+    // Keyboards and pointers a hypervisor provides without USB or PS/2.
+    drivers::virtio_input::init(&pci_devices);
     let partitions = block::scan_partitions();
     devices::init();
     let disks = block::devices().len();
