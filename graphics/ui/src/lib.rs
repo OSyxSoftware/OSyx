@@ -19,6 +19,7 @@ pub mod event;
 pub mod focus;
 pub mod icon;
 pub mod layout;
+pub mod options;
 pub mod paint;
 pub mod theme;
 pub mod time;

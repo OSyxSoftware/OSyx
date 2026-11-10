@@ -60,6 +60,55 @@ pub struct Config {
     pub max_notifications: u32,
 }
 
+/// How pointer devices are interpreted: `/etc/osyx/pointer`, set in
+/// Settings > Mouse & Touchpad. The file holds `key=value` lines: `speed`
+/// (percent, 100 = the device's own motion), `natural` (1: content follows
+/// the fingers when scrolling) and `left` (1: primary and secondary button
+/// swapped). Absolute pointers (tablets, touch) are positions, not motion:
+/// the speed does not apply to them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PointerSettings {
+    pub speed: u32,
+    pub natural_scroll: bool,
+    pub left_handed: bool,
+}
+
+impl Default for PointerSettings {
+    fn default() -> Self {
+        PointerSettings { speed: 100, natural_scroll: false, left_handed: false }
+    }
+}
+
+impl PointerSettings {
+    pub const MIN_SPEED: u32 = 25;
+    pub const MAX_SPEED: u32 = 400;
+
+    /// Parses the file; missing or malformed entries keep their default.
+    pub fn parse(text: &str) -> PointerSettings {
+        let mut p = PointerSettings::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let value = value.trim();
+            match key.trim() {
+                "speed" => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        p.speed = v.clamp(Self::MIN_SPEED, Self::MAX_SPEED);
+                    }
+                }
+                "natural" => p.natural_scroll = value == "1",
+                "left" => p.left_handed = value == "1",
+                _ => {}
+            }
+        }
+        p
+    }
+
+    /// The file's contents.
+    pub fn to_text(&self) -> String {
+        alloc::format!("speed={}\nnatural={}\nleft={}\n", self.speed, self.natural_scroll as u8, self.left_handed as u8)
+    }
+}
+
 impl Config {
     pub fn new(width: u32, height: u32) -> Config {
         Config {
@@ -331,6 +380,9 @@ pub struct Compositor {
     mru: Vec<WindowId>,
     ptr_x: i32,
     ptr_y: i32,
+    pointer: PointerSettings,
+    /// Hundredths of a pixel of relative motion not applied yet.
+    motion_rest: (i32, i32),
     buttons: u32,
     hover: Option<(WindowId, Part)>,
     pointer_in: Option<WindowId>,
@@ -379,6 +431,8 @@ impl Compositor {
             mru: Vec::new(),
             ptr_x: (cfg.width / 2) as i32,
             ptr_y: (cfg.height / 2) as i32,
+            pointer: PointerSettings::default(),
+            motion_rest: (0, 0),
             buttons: 0,
             hover: None,
             pointer_in: None,
@@ -418,6 +472,22 @@ impl Compositor {
 
     pub fn set_layout(&mut self, layout: Layout) {
         self.cfg.layout = layout;
+    }
+
+    pub fn layout(&self) -> Layout {
+        self.cfg.layout
+    }
+
+    /// Applies new pointer settings from the next event on.
+    pub fn set_pointer_settings(&mut self, settings: PointerSettings) {
+        if settings != self.pointer {
+            self.pointer = settings;
+            self.motion_rest = (0, 0);
+        }
+    }
+
+    pub fn pointer_settings(&self) -> PointerSettings {
+        self.pointer
     }
 
     /// The process allowed to take the shell role.
@@ -1257,7 +1327,25 @@ impl Compositor {
         self.stats.input_events += 1;
         self.modifiers = ev.modifiers;
         match ev.kind {
-            kind::MOTION => self.pointer_motion(ev.value, ev.value2),
+            kind::MOTION => {
+                // The speed scales the device's motion; what does not make
+                // a whole pixel is carried to the next event, so slow
+                // settings do not swallow small movements.
+                let speed = self.pointer.speed as i64;
+                let x = ev.value as i64 * speed + self.motion_rest.0 as i64;
+                let y = ev.value2 as i64 * speed + self.motion_rest.1 as i64;
+                self.motion_rest = ((x % 100) as i32, (y % 100) as i32);
+                self.pointer_motion((x / 100) as i32, (y / 100) as i32)
+            }
+            kind::BUTTON if self.pointer.left_handed && (1..=2).contains(&ev.code) => self.pointer_button(3 - ev.code, ev.value != 0),
+            kind::WHEEL if self.pointer.natural_scroll => self.pointer_wheel(-ev.value, -ev.value2),
+            kind::ABSOLUTE => {
+                // A position across the whole screen: go there.
+                let max = osyx_input::ABSOLUTE_MAX as i64;
+                let to = |v: i32, size: u32| (v.clamp(0, max as i32) as i64 * (size as i64 - 1).max(0) / max) as i32;
+                let (x, y) = (to(ev.value, self.screen.w), to(ev.value2, self.screen.h));
+                self.pointer_motion(x - self.ptr_x, y - self.ptr_y);
+            }
             kind::BUTTON => self.pointer_button(ev.code, ev.value != 0),
             kind::WHEEL => self.pointer_wheel(ev.value, ev.value2),
             kind::KEY => self.key(ev.code, ev.value),

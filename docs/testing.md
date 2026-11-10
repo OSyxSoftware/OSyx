@@ -48,9 +48,57 @@ files, dirty flag), `osyx-part` (MBR), `osyx-abi` (`media`, `battery`).
 `osyx-battery` (host tests): the mock machine speaks the EC protocol with
 failures and time-outs; hand-assembled AML tables (batteries, adapter,
 `_BIX`, EC-backed fields, firmware arithmetic, `Store` into `Index`) run in
-the real interpreter. QEMU has no battery: `init.args=battery-demo` publishes
-a charging and then a discharging state for the task bar. The EC and the
-firmware of a real ThinkPad are not covered.
+the real interpreter.
+
+`userspace/battery/tests/firmware.rs` runs whole firmware tables compiled by
+the reference compiler (`iasl`; the `.aml` files are checked in beside their
+`.asl` sources in `tests/fixtures/`, rebuild one with the command in its
+header):
+
+| Table | What it is |
+|---|---|
+| `thinkpad.asl` | a battery behind an EC page register, packages filled through arguments, 128-bit EC string fields, names created inside methods |
+| `laptop.asl` | two more firmware families: mAh converted by the firmware over a memory-mapped EC at odd addresses; packages of packages, `Switch`, built strings; an `IndexField`, a thermal zone, a lid |
+| `ssdt.asl` | a secondary table: `External`, table-level `If (CondRefOf ())`, `BankField`, `DataTableRegion`, processors, a power resource, a serial bus `Connection` |
+| `operators.asl` | nine methods that check operators against the specification and return the number of the first wrong result |
+
+These tables are written for the tests in the style of real firmware, not
+copied from a vendor. The embedded controller and the firmware of a real
+laptop are still not covered by an automated test: when a battery stays
+"unknown" on a machine, the serial log names what `batteryd` could not load
+(`batteryd: table N: skipped ...`) and the method that failed with the
+interpreter's error (`batteryd: firmware method failed: ...`).
+
+QEMU has no battery. `scripts/acpi/qemu-battery.aml` gives it one, with an
+AC adapter, a thermal zone and a lid:
+
+```
+qemu-system-x86_64 ... -acpitable file=scripts/acpi/qemu-battery.aml
+```
+
+`batteryd` then reads it through the kernel's firmware interface like on a
+laptop: the task bar shows the charge (76 % falling a percent every 9
+seconds, then charging), Settings > Power the details. Without the table,
+`init.args=battery-demo` publishes a charging and then a discharging state
+for the task bar.
+
+## Input devices under QEMU
+
+The suite uses `usb-kbd` and `usb-mouse`. The other pointer and keyboard
+drivers are checked by hand with the devices QEMU has for them, each as the
+only input devices of the machine:
+
+| Devices | Driver | Serial log |
+|---|---|---|
+| `-device qemu-xhci -device usb-kbd -device usb-tablet` | USB HID absolute pointer | `usb ...: HID absolute pointer on interface 0 (3 buttons, 16-bit X/Y, wheel)` |
+| `-device virtio-keyboard-pci -device virtio-tablet-pci` | virtio-input | `virtio-input at ...: "QEMU Virtio Tablet" (absolute pointer, range 32767x32767)` |
+| `-device virtio-keyboard-pci -device virtio-mouse-pci` | virtio-input | `virtio-input at ...: "QEMU Virtio Mouse" (relative pointer)` |
+
+QMP `input-send-event` (`abs`, `rel`, `btn`) and `send-key` drive them; an
+absolute device lets a script click at screen coordinates. Host tests:
+`osyx-usb` (`TabletLayout`), `osyx-input` (`evdev`, the keyboard layouts),
+`prism-core` (absolute positions, pointer speed, left-handed buttons,
+natural scrolling).
 
 ## Suite (`scripts/test.ps1`)
 

@@ -4,6 +4,7 @@
 
 use crate::hw::{EcCell, EcPorts, Firmware, Hardware, Stats};
 use crate::model::{field, Poll, Sample};
+use alloc::collections::BTreeSet;
 use aml::value::Args;
 use aml::{AmlContext, AmlName, AmlValue, DebugVerbosity, LevelType};
 use alloc::boxed::Box;
@@ -25,10 +26,33 @@ struct StaticInfo {
     design_voltage: Option<u32>,
 }
 
+/// What a battery says about itself (`_BIX`, or `_BIF`): text the firmware
+/// keeps for it, and the cycle count `_BIX` has.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Identity {
+    /// The ACPI device, e.g. `BAT0`.
+    pub device: String,
+    pub model: String,
+    pub serial: String,
+    pub technology: String,
+    pub vendor: String,
+    pub cycles: Option<u32>,
+}
+
+/// A thermal zone's temperature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Temperature {
+    /// The ACPI thermal zone, e.g. `THM0`.
+    pub zone: String,
+    /// Tenths of a degree Celsius.
+    pub decicelsius: i32,
+}
+
 struct Battery {
     name: AmlName,
     info: Option<StaticInfo>,
     info_age: u32,
+    identity: Identity,
 }
 
 pub struct Acpi {
@@ -40,6 +64,11 @@ pub struct Acpi {
     polls: u32,
     ec_cell: Arc<EcCell>,
     ec_source: &'static str,
+    zones: Vec<AmlName>,
+    lids: Vec<AmlName>,
+    /// Methods that failed, each reported once: see [`Acpi::take_problems`].
+    reported: BTreeSet<String>,
+    problems: Vec<String>,
 }
 
 /// An `_HID` as text: EISA IDs are compressed into integers.
@@ -81,6 +110,25 @@ fn path(base: &AmlName, child: &str) -> Option<AmlName> {
 
 fn call(ctx: &mut AmlContext, base: &AmlName, method: &str, args: Args) -> Option<AmlValue> {
     ctx.invoke_method(&path(base, method)?, args).ok()
+}
+
+/// The last segment of a path: the device's own name.
+fn short_name(name: &AmlName) -> String {
+    let text = name.as_string();
+    String::from(text.rsplit('.').next().unwrap_or("").trim_end_matches('_'))
+}
+
+/// Firmware text (a string, or a buffer of characters) made printable:
+/// up to the first zero, ASCII only, trimmed, at most 32 characters.
+fn text_of(v: Option<&AmlValue>) -> String {
+    let raw: Vec<u8> = match v {
+        Some(AmlValue::String(s)) => s.as_bytes().to_vec(),
+        Some(AmlValue::Buffer(b)) => b.lock().clone(),
+        _ => Vec::new(),
+    };
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let text: String = raw[..end].iter().map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { ' ' }).collect();
+    text.trim().chars().take(32).collect()
 }
 
 fn integer(ctx: &AmlContext, v: &AmlValue) -> Option<u64> {
@@ -165,6 +213,21 @@ impl Acpi {
                 // interpreter cannot follow part-way still yields devices.
                 log(&format!("table {i} ({} bytes): {e:?} at AML offset {at}", t.len()));
             }
+            // What the interpreter had to skip inside the table. The
+            // objects around it are loaded; say what was lost, so a
+            // battery that stays unknown can be traced to its cause.
+            let (skipped, more) = ctx.take_load_errors();
+            for problem in &skipped {
+                log(&format!(
+                    "table {i}: skipped {} in {}: {:?}",
+                    if problem.object_only { "an object" } else { "the rest of the scope" },
+                    problem.scope.as_string(),
+                    problem.error
+                ));
+            }
+            if more > 0 {
+                log(&format!("table {i}: {more} more object(s) skipped"));
+            }
         }
         let mut ec_devices = devices(&mut ctx, &["PNP0C09"]);
         merge(&mut ec_devices, named_devices(&mut ctx, &["H_EC", "EC"], None));
@@ -189,15 +252,95 @@ impl Acpi {
             polls: 0,
             ec_cell,
             ec_source,
+            zones: Vec::new(),
+            lids: Vec::new(),
+            reported: BTreeSet::new(),
+            problems: Vec::new(),
         };
         acpi.connect_ec();
         let mut batteries = devices(&mut acpi.ctx, &["PNP0C0A"]);
         merge(&mut batteries, named_devices(&mut acpi.ctx, &["BAT", "CMB"], Some("_BST")));
-        acpi.batteries = batteries.into_iter().map(|name| Battery { name, info: None, info_age: 0 }).collect();
+        acpi.batteries = batteries
+            .into_iter()
+            .map(|name| {
+                let identity = Identity { device: short_name(&name), ..Identity::default() };
+                Battery { name, info: None, info_age: 0, identity }
+            })
+            .collect();
         let mut adapters = devices(&mut acpi.ctx, &["ACPI0003"]);
         merge(&mut adapters, named_devices(&mut acpi.ctx, &["AC", "ADP"], Some("_PSR")));
         acpi.adapters = adapters;
+        let mut zones = Vec::new();
+        let _ = acpi.ctx.namespace.traverse(|name, level| {
+            if level.typ == LevelType::ThermalZone {
+                zones.push(name.clone());
+            }
+            Ok(true)
+        });
+        acpi.zones = zones.into_iter().filter(|z| has(&acpi.ctx, z, "_TMP")).collect();
+        acpi.lids = devices(&mut acpi.ctx, &["PNP0C0D"]).into_iter().filter(|d| has(&acpi.ctx, d, "_LID")).collect();
         acpi
+    }
+
+    /// Runs `method` of `base`. A failure is remembered once per method
+    /// and error for [`Acpi::take_problems`]: why a battery stays unknown
+    /// on some firmware is the interpreter's answer here.
+    fn run(&mut self, base: &AmlName, method: &str) -> Option<AmlValue> {
+        let path = path(base, method)?;
+        match self.ctx.invoke_method(&path, Args::EMPTY) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                let text = format!("{}: {e:?}", path.as_string());
+                if self.reported.len() < 64 && self.reported.insert(text.clone()) {
+                    self.problems.push(text);
+                }
+                None
+            }
+        }
+    }
+
+    /// Firmware methods that failed since the last call, each with the
+    /// interpreter's error; a method is listed once however often it fails.
+    pub fn take_problems(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.problems)
+    }
+
+    /// What each present battery says about itself, after a poll.
+    pub fn identities(&self) -> Vec<Identity> {
+        self.batteries.iter().filter(|b| b.info.is_some()).map(|b| b.identity.clone()).collect()
+    }
+
+    pub fn thermal_zones(&self) -> usize {
+        self.zones.len()
+    }
+
+    /// The thermal zones' temperatures (`_TMP`, tenths of a kelvin).
+    /// Readings outside -50..150 degrees Celsius are firmware noise (an
+    /// EC that is not ready reads 0 K) and are left out.
+    pub fn temperatures(&mut self) -> Vec<Temperature> {
+        let mut out = Vec::new();
+        for zone in self.zones.clone() {
+            let Some(v) = self.run(&zone, "_TMP") else { continue };
+            let Some(decikelvin) = integer(&self.ctx, &v) else { continue };
+            let decicelsius = decikelvin as i64 - 2732;
+            if (-500..=1500).contains(&decicelsius) {
+                out.push(Temperature { zone: short_name(&zone), decicelsius: decicelsius as i32 });
+            }
+        }
+        out
+    }
+
+    /// `Some(open)` when the machine has a lid switch that answered.
+    pub fn lid_open(&mut self) -> Option<bool> {
+        let mut state = None;
+        for lid in self.lids.clone() {
+            if let Some(v) = self.run(&lid, "_LID") {
+                if let Some(n) = integer(&self.ctx, &v) {
+                    state = Some(state.unwrap_or(false) | (n != 0));
+                }
+            }
+        }
+        state
     }
 
     /// Tells the firmware its embedded controller region may be used
@@ -232,6 +375,13 @@ impl Acpi {
         &self.stats
     }
 
+    /// Runs the object or method at `path` (no arguments) and describes
+    /// the result or the interpreter's error: for diagnostics.
+    pub fn evaluate(&mut self, path: &str) -> Result<String, String> {
+        let name = AmlName::from_str(path).map_err(|e| format!("{e:?}"))?;
+        self.ctx.invoke_method(&name, Args::EMPTY).map(|v| format!("{v:?}")).map_err(|e| format!("{e:?}"))
+    }
+
     /// `_STA` bit 4: a battery is inserted. No `_STA` means present; a
     /// failing one counts as present, the readings then decide.
     fn present(ctx: &mut AmlContext, dev: &AmlName) -> bool {
@@ -241,28 +391,42 @@ impl Acpi {
         }
     }
 
-    fn static_info(ctx: &mut AmlContext, dev: &AmlName) -> Option<StaticInfo> {
+    fn static_info(&mut self, dev: &AmlName) -> Option<(StaticInfo, Identity)> {
         // `_BIX` starts with a revision, so its fields are one slot later:
-        // unit at 1, design capacity 2, last full 3, design voltage 5.
-        // `_BIF`: unit 0, design capacity 1, last full 2, design voltage 4.
-        let (p, base) = match package(call(ctx, dev, "_BIX", Args::EMPTY)) {
-            Some(p) if p.len() > 5 => (p, 1),
-            _ => (package(call(ctx, dev, "_BIF", Args::EMPTY))?, 0),
+        // unit at 1, design capacity 2, last full 3, design voltage 5,
+        // cycle count 8, model 16, serial 17, type 18, OEM 19.
+        // `_BIF`: unit 0, design capacity 1, last full 2, design voltage 4,
+        // model 9, serial 10, type 11, OEM 12.
+        let bix = if has(&self.ctx, dev, "_BIX") { package(self.run(dev, "_BIX")).filter(|p| p.len() > 5) } else { None };
+        let (p, base, text, cycles) = match bix {
+            Some(p) => (p, 1, 16, true),
+            None => (package(self.run(dev, "_BIF"))?, 0, 9, false),
         };
-        let get = |ctx: &AmlContext, i: usize| p.get(base + i).and_then(|v| integer(ctx, v)).and_then(field);
-        Some(StaticInfo {
+        let ctx = &self.ctx;
+        let get = |i: usize| p.get(base + i).and_then(|v| integer(ctx, v)).and_then(field);
+        let info = StaticInfo {
             amp_units: p.get(base).and_then(|v| integer(ctx, v)) == Some(1),
-            design_capacity: get(ctx, 1),
-            last_full_capacity: get(ctx, 2),
-            design_voltage: get(ctx, 4),
-        })
+            design_capacity: get(1),
+            last_full_capacity: get(2),
+            design_voltage: get(4),
+        };
+        let identity = Identity {
+            device: short_name(dev),
+            model: text_of(p.get(text)),
+            serial: text_of(p.get(text + 1)),
+            technology: text_of(p.get(text + 2)),
+            vendor: text_of(p.get(text + 3)),
+            cycles: if cycles { p.get(8).and_then(|v| integer(ctx, v)).and_then(field) } else { None },
+        };
+        Some((info, identity))
     }
 
-    fn sample(ctx: &mut AmlContext, b: &mut Battery) -> Option<Sample> {
+    fn sample(&mut self, b: &mut Battery) -> Option<Sample> {
         if b.info.is_none() || b.info_age >= STATIC_INFO_POLLS {
-            match Self::static_info(ctx, &b.name) {
-                Some(i) => {
-                    b.info = Some(i);
+            match self.static_info(&b.name) {
+                Some((info, identity)) => {
+                    b.info = Some(info);
+                    b.identity = identity;
                     b.info_age = 0;
                 }
                 // Keep using the old values if the refresh failed.
@@ -272,7 +436,8 @@ impl Acpi {
         }
         b.info_age += 1;
         let info = b.info?;
-        let st = package(call(ctx, &b.name, "_BST", Args::EMPTY))?;
+        let st = package(self.run(&b.name, "_BST"))?;
+        let ctx = &self.ctx;
         let num = |i: usize| st.get(i).and_then(|v| integer(ctx, v));
         let state = num(0)?;
         Some(Sample {
@@ -301,7 +466,7 @@ impl Acpi {
                 b.info = None;
                 continue;
             }
-            out.batteries.push(Self::sample(&mut self.ctx, b));
+            out.batteries.push(self.sample(b));
         }
         self.batteries = batteries;
         for a in self.adapters.clone() {

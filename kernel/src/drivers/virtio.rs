@@ -326,6 +326,10 @@ impl Transport {
         self.device.r32(off)
     }
 
+    pub fn write_device_config_u8(&self, off: u64, v: u8) {
+        self.device.w8(off, v)
+    }
+
     pub fn write_device_config_u32(&self, off: u64, v: u32) {
         self.device.w32(off, v)
     }

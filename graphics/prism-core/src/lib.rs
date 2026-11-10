@@ -22,4 +22,4 @@ pub mod taskbar;
 #[cfg(test)]
 mod tests;
 
-pub use compositor::{ClientId, Compositor, Config, PixelSource, WindowId};
+pub use compositor::{ClientId, Compositor, Config, PixelSource, PointerSettings, WindowId};

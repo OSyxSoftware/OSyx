@@ -17,6 +17,6 @@ pub mod acpi;
 pub mod hw;
 pub mod model;
 
-pub use acpi::Acpi;
+pub use acpi::{Acpi, Identity, Temperature};
 pub use hw::{EcPorts, Hardware};
 pub use model::{Monitor, Poll, Sample};

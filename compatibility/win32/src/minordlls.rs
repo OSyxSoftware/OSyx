@@ -362,10 +362,58 @@ const STATUS_SUCCESS_P: u32 = 0;
 const STATUS_BUFFER_TOO_SMALL_P: u32 = 0xC000_0023;
 const STATUS_INVALID_PARAMETER_P: u32 = 0xC000_000D;
 
+/// SYSTEM_BATTERY_STATE for a battery state: AcOnLine, BatteryPresent,
+/// Charging, Discharging, Spare1[3], Tag, MaxCapacity and
+/// RemainingCapacity (mWh), Rate (mW, negative while discharging),
+/// EstimatedTime (seconds, -1 unknown), DefaultAlert1 and 2 (mWh).
+fn battery_state(battery: Option<osyx_abi::battery::Status>) -> [u8; 32] {
+    use osyx_abi::battery::State;
+    let mut out = [0u8; 32];
+    let put = |out: &mut [u8; 32], at: usize, v: u32| out[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    put(&mut out, 20, u32::MAX);
+    let Some(b) = battery.filter(|b| b.present()) else {
+        // No battery (or no report yet): a machine on AC power.
+        out[0] = 1;
+        return out;
+    };
+    out[0] = b.ac as u8;
+    out[1] = 1;
+    out[2] = (b.state == State::Charging) as u8;
+    out[3] = (b.state == State::Discharging) as u8;
+    let capacity = b.capacity_mwh.unwrap_or(0);
+    put(&mut out, 8, capacity);
+    put(&mut out, 12, b.energy_mwh.unwrap_or(0));
+    let rate = b.rate_mw.unwrap_or(0) as i32;
+    put(&mut out, 16, if b.state == State::Discharging { rate.wrapping_neg() as u32 } else { rate as u32 });
+    if let (State::Discharging, Some(minutes)) = (b.state, b.minutes_to_empty) {
+        put(&mut out, 20, minutes.saturating_mul(60));
+    }
+    // The alerts Windows derives from the capacity: low at 10 %, warning at 5 %... of it.
+    put(&mut out, 24, capacity / 10);
+    put(&mut out, 28, capacity / 20);
+    out
+}
+
+/// SYSTEM_POWER_CAPABILITIES (76 bytes): a power button, soft off (S5), no
+/// sleep states; the lid and thermal control when the firmware has them;
+/// the processor is not throttled; batteries as the firmware reports.
+fn power_capabilities() -> [u8; 76] {
+    let mut c = [0u8; 76];
+    c[0] = 1; // PowerButtonPresent
+    c[2] = os_std::fs::metadata(osyx_abi::LID_STATUS_PATH).is_ok() as u8; // LidPresent
+    c[7] = 1; // SystemS5
+    c[13] = os_std::fs::metadata(osyx_abi::THERMAL_STATUS_PATH).is_ok() as u8; // ThermalControl
+    c[15] = 100; // ProcessorMinThrottle
+    c[16] = 100; // ProcessorMaxThrottle
+    c[30] = crate::procinfo::battery().is_some_and(|b| b.present()) as u8; // SystemBatteriesPresent
+    c
+}
+
 /// CallNtPowerInformation: the processors' power information (11: per CPU
 /// the number, maximum and current MHz from the measured TSC rate, the
-/// limit, idle states), the battery state (5: AC power, no battery) and
-/// the execution state (16: nothing requested).
+/// limit, idle states), the battery state (5: from the firmware's battery),
+/// the system power capabilities (4) and the execution state (16: nothing
+/// requested).
 extern "win64" fn CallNtPowerInformation(level: u32, _input: *const u8, _in_len: u32, out: *mut u8, out_len: u32) -> u32 {
     let data: Vec<u8> = match level {
         11 => {
@@ -373,14 +421,8 @@ extern "win64" fn CallNtPowerInformation(level: u32, _input: *const u8, _in_len:
             let mhz = (crate::procinfo::tsc_hz() / 1_000_000) as u32;
             (0..cpus).flat_map(|n| [n, mhz, mhz, mhz, 1, 0].into_iter().flat_map(u32::to_le_bytes)).collect()
         }
-        5 => {
-            // SYSTEM_BATTERY_STATE: AcOnLine, BatteryPresent, Charging,
-            // Discharging, Spare1[3], Tag, MaxCapacity, RemainingCapacity,
-            // Rate, EstimatedTime, DefaultAlert1, DefaultAlert2.
-            let mut b = alloc::vec![0u8; 32];
-            b[0] = 1;
-            b
-        }
+        4 => power_capabilities().to_vec(),
+        5 => battery_state(crate::procinfo::battery()).to_vec(),
         16 => 0u32.to_le_bytes().to_vec(),
         _ => return STATUS_INVALID_PARAMETER_P,
     };
@@ -392,9 +434,28 @@ extern "win64" fn CallNtPowerInformation(level: u32, _input: *const u8, _in_len:
     STATUS_SUCCESS_P
 }
 
-/// A desktop computer (PlatformRoleDesktop): OSyx reports no battery.
+/// GetPwrCapabilities: the same structure as power information level 4.
+extern "win64" fn GetPwrCapabilities(out: *mut u8) -> u8 {
+    if out.is_null() {
+        return 0;
+    }
+    let c = power_capabilities();
+    // SAFETY: the caller's SYSTEM_POWER_CAPABILITIES.
+    unsafe { core::ptr::copy_nonoverlapping(c.as_ptr(), out, c.len()) };
+    1
+}
+
+/// PlatformRoleMobile (2) for a computer with a battery, PlatformRoleDesktop
+/// (1) otherwise; version 1 and 2 of the enumeration agree on both.
 extern "win64" fn PowerDeterminePlatformRoleEx(version: u32) -> u32 {
-    if version == 1 || version == 2 { 1 } else { 0 }
+    if version != 1 && version != 2 {
+        return 0;
+    }
+    if crate::procinfo::battery().is_some_and(|b| b.present()) { 2 } else { 1 }
+}
+
+extern "win64" fn PowerDeterminePlatformRole() -> u32 {
+    PowerDeterminePlatformRoleEx(1)
 }
 
 /// The Balanced scheme {381b4222-f694-41f0-9685-ff5bb260df2e}, the one
@@ -426,7 +487,15 @@ extern "win64" fn PowerReadDCValue(_root: u64, _scheme: u64, _subgroup: u64, _se
 const ERROR_FILE_NOT_FOUND_P: u32 = 2;
 
 pub fn powrprof_exports() -> Vec<(&'static str, u64)> {
-    export_table![CallNtPowerInformation, PowerDeterminePlatformRoleEx, PowerGetActiveScheme, PowerReadACValue, PowerReadDCValue]
+    export_table![
+        CallNtPowerInformation,
+        GetPwrCapabilities,
+        PowerDeterminePlatformRole,
+        PowerDeterminePlatformRoleEx,
+        PowerGetActiveScheme,
+        PowerReadACValue,
+        PowerReadDCValue
+    ]
 }
 
 // ---- wininet -----------------------------------------------------------------------------------

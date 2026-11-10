@@ -19,6 +19,8 @@
 //!
 //! Unknown keys are ignored, a missing key means "not known".
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -209,11 +211,137 @@ impl fmt::Display for Status {
     }
 }
 
+/// What one battery says about itself, from [`crate::BATTERY_INFO_PATH`].
+///
+/// The file is a block of `key value` lines per battery; a `battery <name>`
+/// line starts a block, and the value is the rest of the line:
+///
+/// ```text
+/// battery BAT0
+/// model 45N1234
+/// serial 4321
+/// technology LION
+/// vendor OSYX CELLS
+/// cycles 123
+/// ```
+///
+/// Empty values are left out; unknown keys are ignored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Info {
+    /// The firmware's name of the battery device, e.g. `BAT0`.
+    pub device: String,
+    pub model: String,
+    pub serial: String,
+    pub technology: String,
+    pub vendor: String,
+    /// Charge cycles so far, when the firmware counts them.
+    pub cycles: Option<u32>,
+}
+
+impl Info {
+    /// Parses the file: one entry per battery.
+    pub fn parse(text: &str) -> Vec<Info> {
+        let mut all: Vec<Info> = Vec::new();
+        for line in text.lines() {
+            let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+            let value = value.trim();
+            if key == "battery" {
+                all.push(Info { device: String::from(value), ..Info::default() });
+                continue;
+            }
+            let Some(info) = all.last_mut() else { continue };
+            match key {
+                "model" => info.model = String::from(value),
+                "serial" => info.serial = String::from(value),
+                "technology" => info.technology = String::from(value),
+                "vendor" => info.vendor = String::from(value),
+                "cycles" => info.cycles = value.parse().ok(),
+                _ => {}
+            }
+        }
+        all
+    }
+}
+
+impl fmt::Display for Info {
+    /// The battery's block of the file.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "battery {}", self.device)?;
+        for (key, value) in
+            [("model", &self.model), ("serial", &self.serial), ("technology", &self.technology), ("vendor", &self.vendor)]
+        {
+            if !value.is_empty() {
+                writeln!(f, "{key} {value}")?;
+            }
+        }
+        if let Some(cycles) = self.cycles {
+            writeln!(f, "cycles {cycles}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The thermal zones of [`crate::THERMAL_STATUS_PATH`]: (zone, tenths of a
+/// degree Celsius). Lines that are not `zone degrees` are skipped.
+pub fn parse_thermal(text: &str) -> Vec<(String, i32)> {
+    text.lines()
+        .filter_map(|line| {
+            let (zone, degrees) = line.trim().split_once(' ')?;
+            let (whole, tenth) = degrees.trim().split_once('.').unwrap_or((degrees.trim(), "0"));
+            let negative = whole.starts_with('-');
+            let whole: i32 = whole.trim_start_matches('-').parse().ok()?;
+            let tenth: i32 = tenth.get(..1).unwrap_or("0").parse().ok()?;
+            let value = whole.checked_mul(10)?.checked_add(tenth)?;
+            Some((String::from(zone), if negative { -value } else { value }))
+        })
+        .collect()
+}
+
+/// One line of [`crate::THERMAL_STATUS_PATH`].
+pub struct ThermalLine<'a>(pub &'a str, pub i32);
+
+impl fmt::Display for ThermalLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sign = if self.1 < 0 { "-" } else { "" };
+        writeln!(f, "{} {sign}{}.{}", self.0, self.1.unsigned_abs() / 10, self.1.unsigned_abs() % 10)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
     use super::*;
     use std::string::ToString;
+
+    #[test]
+    fn battery_info_round_trip() {
+        let a = Info {
+            device: String::from("BAT0"),
+            model: String::from("45N1234"),
+            serial: String::from("4321"),
+            technology: String::from("LION"),
+            vendor: String::from("OSYX CELLS"),
+            cycles: Some(123),
+        };
+        let b = Info { device: String::from("BAT1"), ..Info::default() };
+        let text = std::format!("{a}{b}");
+        assert_eq!(text, "battery BAT0\nmodel 45N1234\nserial 4321\ntechnology LION\nvendor OSYX CELLS\ncycles 123\nbattery BAT1\n");
+        assert_eq!(Info::parse(&text), std::vec![a, b]);
+        assert!(Info::parse("").is_empty());
+        assert!(Info::parse("model lost\ngarbage\n").is_empty(), "values before a battery line belong to nothing");
+        assert_eq!(Info::parse("battery B\nfuture 1\ncycles x\n")[0].cycles, None);
+    }
+
+    #[test]
+    fn thermal_lines() {
+        assert_eq!(ThermalLine("THM0", 450).to_string(), "THM0 45.0\n");
+        assert_eq!(ThermalLine("CPUZ", -25).to_string(), "CPUZ -2.5\n");
+        let zones = parse_thermal("THM0 45.0\nCPUZ -2.5\nBAD\nGPUZ 61\nX y\n");
+        assert_eq!(
+            zones,
+            std::vec![(String::from("THM0"), 450), (String::from("CPUZ"), -25), (String::from("GPUZ"), 610)]
+        );
+    }
 
     #[test]
     fn old_format_still_parses() {

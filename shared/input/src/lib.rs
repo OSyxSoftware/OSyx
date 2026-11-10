@@ -13,6 +13,7 @@
 
 #![no_std]
 
+pub mod evdev;
 pub mod key;
 pub mod layout;
 pub mod repeat;
@@ -34,7 +35,14 @@ pub mod kind {
     pub const DEVICE: u16 = 5;
     /// The reader fell behind and `value` events were dropped before this one.
     pub const DROPPED: u16 = 6;
+    /// Absolute pointer position (a tablet, a touch screen, the pointer of
+    /// a virtual machine): `value` = x, `value2` = y, each from 0 (left,
+    /// top) to [`super::ABSOLUTE_MAX`] (right, bottom) of the whole screen.
+    pub const ABSOLUTE: u16 = 7;
 }
+
+/// The largest coordinate of a [`kind::ABSOLUTE`] event.
+pub const ABSOLUTE_MAX: i32 = 0xFFFF;
 
 pub const KEY_UP: i32 = 0;
 pub const KEY_DOWN: i32 = 1;

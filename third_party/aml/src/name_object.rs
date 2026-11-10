@@ -49,26 +49,50 @@ where
     comment_scope(
         DebugVerbosity::AllScopes,
         "SuperName",
-        choice!(debug_obj().map(|()| Ok(Target::Debug)), index_target(), simple_name()),
+        choice!(
+            debug_obj().map(|()| Ok(Target::Debug)),
+            index_target(),
+            // OSyx: `DerefOf (Index (...))` names the element itself.
+            crate::opcode::opcode(crate::opcode::DEF_DEREF_OF_OP).then(index_target()).map(|((), target)| Ok(target)),
+            simple_name()
+        ),
     )
 }
 
 /// OSyx: `DefIndex` in a target position, as `Index(Object, Position, Null)`.
+/// The object is a name, a local or an argument, or an element of one:
+/// `Index (DerefOf (Index (PKG, 1)), 2)` is how firmware fills a package
+/// kept inside another package.
 fn index_target<'a, 'c>() -> impl Parser<'a, 'c, Target>
 where
     'c: 'a,
 {
-    crate::opcode::opcode(crate::opcode::DEF_INDEX_OP)
-        .then(simple_name())
-        .then(crate::term_object::term_arg())
-        .then(null_name())
-        .map_with_context(|((((), object), position), _null), context| {
-            let position = match position.as_integer(context) {
-                Ok(p) => p,
-                Err(e) => return (Err(crate::parser::Propagate::Err(e)), context),
-            } as usize;
-            (Ok(Target::Index(alloc::boxed::Box::new(object), position)), context)
-        })
+    move |input: &'a [u8], context: &'c mut AmlContext| -> crate::parser::ParseResult<'a, 'c, Target> {
+        let (input, context, ()) = crate::opcode::opcode(crate::opcode::DEF_INDEX_OP).parse(input, context)?;
+        let (input, context, object) = index_object().parse(input, context)?;
+        let (input, context, position) = crate::term_object::term_arg().parse(input, context)?;
+        let position = match position.as_integer(context) {
+            Ok(p) => p as usize,
+            Err(e) => return Err((input, context, Propagate::Err(e))),
+        };
+        // The reference `Index` would store in its own target is not kept.
+        let (input, context, _) = target().parse(input, context)?;
+        Ok((input, context, Target::Index(alloc::boxed::Box::new(object), position)))
+    }
+}
+
+/// OSyx: what an `Index` in a target position indexes.
+fn index_object<'a, 'c>() -> impl Parser<'a, 'c, Target>
+where
+    'c: 'a,
+{
+    move |input: &'a [u8], context: &'c mut AmlContext| -> crate::parser::ParseResult<'a, 'c, Target> {
+        match input.first() {
+            Some(&crate::opcode::DEF_DEREF_OF_OP) => index_object().parse(&input[1..], context),
+            Some(&crate::opcode::DEF_INDEX_OP) => index_target().parse(input, context),
+            _ => simple_name().parse(input, context),
+        }
+    }
 }
 
 pub fn simple_name<'a, 'c>() -> impl Parser<'a, 'c, Target>

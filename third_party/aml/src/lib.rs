@@ -59,7 +59,7 @@ pub mod value;
 
 pub use crate::{namespace::*, value::AmlValue};
 
-use alloc::{boxed::Box, string::ToString};
+use alloc::{boxed::Box, string::ToString, vec::Vec};
 use core::mem;
 use log::{error, warn};
 use misc::{ArgNum, LocalNum};
@@ -95,16 +95,50 @@ struct MethodContext {
     /// If we're currently invoking a control method, this stores the arguments that were passed to
     /// it. It's `None` if we aren't invoking a method.
     args: Args,
+    /// OSyx: where each argument came from; see [`ArgSource`].
+    sources: [ArgSource; 7],
+}
+
+/// OSyx: a package passed to a method is the caller's object, not a copy:
+/// `Arg1 [2] = x` in the callee fills the package the caller named (how
+/// every firmware fills its `_BIF` and `_BST` packages). The interpreter
+/// keeps packages by value, so it remembers where an argument came from
+/// and writes element stores through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ArgSource {
+    /// The named object the argument is, however many calls up.
+    pub(crate) named: Option<AmlHandle>,
+    /// The caller's local or argument the value was taken from.
+    pub(crate) slot: Option<CallerSlot>,
+    /// The callee stored a new object in the argument: it no longer is
+    /// the caller's.
+    pub(crate) rebound: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallerSlot {
+    Local(LocalNum),
+    Arg(ArgNum),
 }
 
 impl MethodContext {
-    fn new(args: Args) -> MethodContext {
+    fn new(args: Args, sources: [ArgSource; 7]) -> MethodContext {
         // XXX: this is required because `Option<AmlValue>` is not `Copy`, so it can't be used to initialize an
         // array, but consts can :(
         const NONE_BUT_CONST: Option<AmlValue> = None;
 
-        MethodContext { locals: [NONE_BUT_CONST; 8], args }
+        MethodContext { locals: [NONE_BUT_CONST; 8], args, sources }
     }
+}
+
+/// OSyx: something in a table that could not be parsed while it was loaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadError {
+    pub error: AmlError,
+    /// The scope the object was in.
+    pub scope: AmlName,
+    /// `true`: only that object was skipped; `false`: the rest of its scope too.
+    pub object_only: bool,
 }
 
 pub struct AmlContext {
@@ -114,6 +148,12 @@ pub struct AmlContext {
 
     pub namespace: Namespace,
     method_context: Option<MethodContext>,
+    /// OSyx: what could not be parsed while tables were loaded; see
+    /// [`AmlContext::take_load_errors`].
+    load_errors: Vec<LoadError>,
+    load_errors_dropped: usize,
+    /// OSyx: nested method invocations in progress.
+    method_depth: u32,
 
     /*
      * These track the state of the context while it's parsing an AML table.
@@ -131,6 +171,9 @@ impl AmlContext {
             handler,
             namespace: Namespace::new(),
             method_context: None,
+            load_errors: Vec::new(),
+            load_errors_dropped: 0,
+            method_depth: 0,
 
             current_scope: AmlName::root(),
             scope_indent: 0,
@@ -167,48 +210,88 @@ impl AmlContext {
         }
     }
 
+    /// OSyx: records an object skipped while a table was loaded (the first
+    /// 32 are kept, the rest counted).
+    pub(crate) fn note_load_error(&mut self, error: AmlError, object_only: bool) {
+        if self.load_errors.len() < 32 {
+            self.load_errors.push(LoadError { error, scope: self.current_scope.clone(), object_only });
+        } else {
+            self.load_errors_dropped += 1;
+        }
+    }
+
+    /// OSyx: what the tables loaded so far contained that this interpreter
+    /// could not parse, and how many more such objects there were. The
+    /// objects around them are in the namespace.
+    pub fn take_load_errors(&mut self) -> (Vec<LoadError>, usize) {
+        (mem::take(&mut self.load_errors), mem::replace(&mut self.load_errors_dropped, 0))
+    }
+
     // TODO: docs
     pub fn invoke_method(&mut self, path: &AmlName, args: Args) -> Result<AmlValue, AmlError> {
+        self.invoke_method_from(path, args, [ArgSource::default(); 7])
+    }
+
+    /// OSyx: nested calls allowed before a method is taken for runaway
+    /// recursion (ACPICA allows 255; firmware stays far below this).
+    const MAX_METHOD_DEPTH: u32 = 64;
+
+    pub(crate) fn invoke_method_from(
+        &mut self,
+        path: &AmlName,
+        args: Args,
+        sources: [ArgSource; 7],
+    ) -> Result<AmlValue, AmlError> {
         use value::MethodCode;
 
         match self.namespace.get_by_path(path)?.clone() {
-            AmlValue::Method { flags, code } => {
+            AmlValue::Method { flags: _, code } => {
+                if self.method_depth >= Self::MAX_METHOD_DEPTH {
+                    return Err(AmlError::TooManyArgs);
+                }
                 /*
                  * First, set up the state we expect to enter the method with, but clearing local
                  * variables to "null" and setting the arguments. Save the current method state and scope, so if we're
                  * already executing another control method, we resume into it correctly.
                  */
-                let old_context = mem::replace(&mut self.method_context, Some(MethodContext::new(args)));
+                let old_context = mem::replace(&mut self.method_context, Some(MethodContext::new(args, sources)));
                 let old_scope = mem::replace(&mut self.current_scope, path.clone());
+                self.method_depth += 1;
 
                 /*
                  * Create a namespace level to store local objects created by the invocation.
+                 *
+                 * OSyx: a method that calls itself (or was left half-way by
+                 * an earlier failure) already has that level: its objects
+                 * are set aside for the duration of this call.
                  */
-                self.namespace.add_level(path.clone(), LevelType::MethodLocals)?;
+                let shadowed = self.namespace.take_level(path);
+                let return_value = match self.namespace.add_level(path.clone(), LevelType::MethodLocals) {
+                    Err(err) => Err(err),
+                    Ok(()) => match code {
+                        MethodCode::Aml(ref code) => {
+                            match term_list(PkgLength::from_raw_length(code, code.len() as u32).unwrap())
+                                .parse(code, self)
+                            {
+                                // If the method doesn't return a value, we implicitly return `0`
+                                Ok(_) => Ok(AmlValue::Integer(0)),
+                                Err((_, _, Propagate::Return(result))) => Ok(result),
+                                Err((_, _, Propagate::Break)) => Err(AmlError::BreakInInvalidPosition),
+                                Err((_, _, Propagate::Continue)) => Err(AmlError::ContinueInInvalidPosition),
+                                Err((_, _, Propagate::Err(err))) => {
+                                    error!("Failed to execute control method: {:?}", err);
+                                    Err(err)
+                                }
+                            }
+                        }
 
-                let return_value = match code {
-                    MethodCode::Aml(ref code) => {
-                        match term_list(PkgLength::from_raw_length(code, code.len() as u32).unwrap())
-                            .parse(code, self)
-                        {
-                            // If the method doesn't return a value, we implicitly return `0`
-                            Ok(_) => Ok(AmlValue::Integer(0)),
-                            Err((_, _, Propagate::Return(result))) => Ok(result),
-                            Err((_, _, Propagate::Break)) => Err(AmlError::BreakInInvalidPosition),
-                            Err((_, _, Propagate::Continue)) => Err(AmlError::ContinueInInvalidPosition),
-                            Err((_, _, Propagate::Err(err))) => {
+                        MethodCode::Native(ref method) => match (method)(self) {
+                            Ok(result) => Ok(result),
+                            Err(err) => {
                                 error!("Failed to execute control method: {:?}", err);
                                 Err(err)
                             }
-                        }
-                    }
-
-                    MethodCode::Native(ref method) => match (method)(self) {
-                        Ok(result) => Ok(result),
-                        Err(err) => {
-                            error!("Failed to execute control method: {:?}", err);
-                            Err(err)
-                        }
+                        },
                     },
                 };
 
@@ -218,13 +301,44 @@ impl AmlContext {
                  */
                 // TODO: this should also remove objects created by the method outside the method's scope, if they
                 // weren't statically created. This is harder.
-                self.namespace.remove_level(path.clone())?;
+                if let Some(level) = self.namespace.take_level(path) {
+                    self.namespace.free_level(level);
+                }
+                if let Some(level) = shadowed {
+                    self.namespace.put_level(path, level);
+                }
 
                 /*
                  * Restore the old state.
+                 *
+                 * OSyx: packages the callee filled through its arguments
+                 * go back to the caller's locals and arguments they came
+                 * from (named objects were written as the stores happened).
                  */
-                self.method_context = old_context;
+                let finished = mem::replace(&mut self.method_context, old_context);
+                if let (Some(finished), Some(caller)) = (finished, self.method_context.as_mut()) {
+                    for (i, source) in finished.sources.iter().enumerate() {
+                        let (false, Some(slot), Some(value @ AmlValue::Package(_))) =
+                            (source.rebound, source.slot, finished.args.0[i].as_ref())
+                        else {
+                            continue;
+                        };
+                        match slot {
+                            CallerSlot::Local(n) => {
+                                if let Some(AmlValue::Package(_)) = caller.locals[n as usize] {
+                                    caller.locals[n as usize] = Some(value.clone());
+                                }
+                            }
+                            CallerSlot::Arg(n) => {
+                                if let Some(AmlValue::Package(_)) = caller.args.0[n as usize] {
+                                    caller.args.0[n as usize] = Some(value.clone());
+                                }
+                            }
+                        }
+                    }
+                }
                 self.current_scope = old_scope;
+                self.method_depth -= 1;
 
                 return_value
             }
@@ -233,8 +347,10 @@ impl AmlContext {
              * AML can encode methods that don't require any computation simply as the value that would otherwise be
              * returned (e.g. a `_STA` object simply being an `AmlValue::Integer`, instead of a method that just
              * returns an integer).
+             *
+             * OSyx: a field is read: the caller wants its value, now.
              */
-            value => Ok(value),
+            value => value.resolved(self),
         }
     }
 
@@ -246,10 +362,17 @@ impl AmlContext {
         /*
          * If `\_SB._INI` exists, we unconditionally execute it at the beginning of device initialization.
          */
+        /*
+         * OSyx: an `_INI` or `_STA` this interpreter cannot run is that
+         * device's loss; the walk goes on (the embedded controller and the
+         * battery are usually initialised long after the first PCI bridge).
+         * The first failure is returned once every device had its turn.
+         */
+        let mut first_error = None;
         match self.invoke_method(&AmlName::from_str("\\_SB._INI").unwrap(), Args::default()) {
             Ok(_) => (),
             Err(AmlError::ValueDoesNotExist(_)) => (),
-            Err(err) => return Err(err),
+            Err(err) => first_error = Some(err),
         }
 
         /*
@@ -264,8 +387,18 @@ impl AmlContext {
         self.namespace.clone().traverse(|path, level: &NamespaceLevel| match level.typ {
             LevelType::Device => {
                 let status = if level.values.contains_key(&NameSeg::from_str("_STA").unwrap()) {
-                    self.invoke_method(&AmlName::from_str("_STA").unwrap().resolve(&path)?, Args::default())?
-                        .as_status()?
+                    match AmlName::from_str("_STA")
+                        .unwrap()
+                        .resolve(&path)
+                        .and_then(|name| self.invoke_method(&name, Args::default()))
+                        .and_then(|value| value.as_integer(self))
+                    {
+                        Ok(bits) => AmlValue::Integer(bits).as_status()?,
+                        Err(err) => {
+                            first_error.get_or_insert(err);
+                            StatusObject::default()
+                        }
+                    }
                 } else {
                     StatusObject::default()
                 };
@@ -275,7 +408,13 @@ impl AmlContext {
                  */
                 if status.present && level.values.contains_key(&NameSeg::from_str("_INI").unwrap()) {
                     log::info!("Invoking _INI at level: {}", path);
-                    self.invoke_method(&AmlName::from_str("_INI").unwrap().resolve(&path)?, Args::default())?;
+                    if let Err(err) = AmlName::from_str("_INI")
+                        .unwrap()
+                        .resolve(&path)
+                        .and_then(|name| self.invoke_method(&name, Args::default()))
+                    {
+                        first_error.get_or_insert(err);
+                    }
                 }
 
                 /*
@@ -293,7 +432,7 @@ impl AmlContext {
             LevelType::MethodLocals => Ok(false),
         })?;
 
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     pub(crate) fn read_target(&self, target: &Target) -> Result<&AmlValue, AmlError> {
@@ -310,6 +449,28 @@ impl AmlContext {
                 AmlValue::Package(items) => items.get(*position).ok_or(AmlError::FieldInvalidAccessSize),
                 _ => Err(AmlError::FieldInvalidAccessSize),
             },
+        }
+    }
+
+    /// OSyx: the object a target names, by value. Unlike `read_target` an
+    /// element of a buffer or a string is an object too (an integer).
+    pub(crate) fn target_value(&self, target: &Target) -> Result<AmlValue, AmlError> {
+        match target {
+            Target::Index(object, position) => match self.target_value(object)? {
+                AmlValue::Package(mut items) if *position < items.len() => Ok(items.swap_remove(*position)),
+                AmlValue::Buffer(bytes) => bytes
+                    .lock()
+                    .get(*position)
+                    .map(|&byte| AmlValue::Integer(byte as u64))
+                    .ok_or(AmlError::FieldInvalidAccessSize),
+                AmlValue::String(text) => text
+                    .as_bytes()
+                    .get(*position)
+                    .map(|&byte| AmlValue::Integer(byte as u64))
+                    .ok_or(AmlError::FieldInvalidAccessSize),
+                _ => Err(AmlError::FieldInvalidAccessSize),
+            },
+            other => self.read_target(other).cloned(),
         }
     }
 
@@ -337,24 +498,65 @@ impl AmlContext {
     /// required, this also performs required implicit conversions, otherwise stores are semantically equivalent to
     /// a `CopyObject`.
     pub(crate) fn store(&mut self, target: Target, value: AmlValue) -> Result<AmlValue, AmlError> {
+        // OSyx: what is stored is a value, never a field object, and never
+        // shares its buffer with where it came from.
+        let value = value.resolved(self)?.detached();
         match target {
             Target::Name(ref path) => {
                 let (_, handle) = self.namespace.search(path, &self.current_scope)?;
+                let existing = self.namespace.get(handle)?.clone();
 
-                match self.namespace.get(handle).unwrap().type_of() {
-                    AmlType::FieldUnit => {
-                        let mut field = self.namespace.get(handle).unwrap().clone();
-                        field.write_field(value, self)?;
-                        field.read_field(self)
+                match existing {
+                    AmlValue::Field { .. } | AmlValue::IndexField { .. } => {
+                        existing.write_field_value(value.clone(), self)?;
+                        Ok(value)
                     }
-                    AmlType::BufferField => {
-                        let mut buffer_field = self.namespace.get(handle).unwrap().clone();
+                    AmlValue::BufferField { .. } => {
+                        let mut buffer_field = existing;
                         buffer_field.write_buffer_field(value.clone(), self)?;
                         Ok(value)
                     }
-                    typ => {
-                        *self.namespace.get_mut(handle)? = value.as_type(typ, self)?;
+                    /*
+                     * OSyx: a named buffer keeps its storage (buffer fields
+                     * created on it stay attached) and its length; the new
+                     * contents are truncated or zero-extended. An empty
+                     * buffer takes the length of what is stored.
+                     */
+                    AmlValue::Buffer(storage) => {
+                        match value.as_buffer(self) {
+                            Ok(source) => {
+                                let source = source.lock().clone();
+                                let mut storage = storage.lock();
+                                if storage.is_empty() {
+                                    *storage = source;
+                                } else {
+                                    for (i, byte) in storage.iter_mut().enumerate() {
+                                        *byte = source.get(i).copied().unwrap_or(0);
+                                    }
+                                }
+                            }
+                            // Not convertible (a package): the name gets the new object.
+                            Err(_) => *self.namespace.get_mut(handle)? = value.clone(),
+                        }
                         Ok(self.namespace.get(handle)?.clone())
+                    }
+                    /*
+                     * Integers and strings convert what is stored to
+                     * their own type; anything that cannot be converted,
+                     * and every other kind of object, is replaced.
+                     */
+                    AmlValue::Integer(_) | AmlValue::Boolean(_) | AmlValue::String(_) => {
+                        let typ = existing.type_of();
+                        let converted = match value {
+                            AmlValue::Package(_) => value.clone(),
+                            _ => value.as_type(typ, self).unwrap_or_else(|_| value.clone()),
+                        };
+                        *self.namespace.get_mut(handle)? = converted.clone();
+                        Ok(converted)
+                    }
+                    _ => {
+                        *self.namespace.get_mut(handle)? = value.clone();
+                        Ok(value)
                     }
                 }
             }
@@ -366,59 +568,150 @@ impl AmlContext {
             }
 
             Target::Arg(arg_num) => {
-                if let None = self.method_context {
-                    return Err(AmlError::NotExecutingControlMethod);
-                }
-
                 /*
                  * Stores into `Arg` objects are simply copied with no conversion applied, unless the `Arg`
                  * contains an Object Reference, in which case an automatic de-reference occurs and the object is
                  * copied to the target of the Object Reference, instead of overwriting the `Arg.`
                  */
                 // TODO: implement behaviour for object references
-                self.method_context.as_mut().unwrap().args.store_arg(arg_num, value.clone())?;
+                let method = self.method_context.as_mut().ok_or(AmlError::NotExecutingControlMethod)?;
+                method.args.store_arg(arg_num, value.clone())?;
+                method.sources[arg_num as usize].rebound = true;
                 Ok(value)
             }
 
             Target::Local(local_num) => {
-                if let None = self.method_context {
-                    return Err(AmlError::NotExecutingControlMethod);
-                }
-
                 /*
                  * Stores into `Local` objects are always simply copied into the destination with no conversion
                  * applied, even if it contains an Object Reference.
                  */
-                self.method_context.as_mut().unwrap().locals[local_num as usize] = Some(value.clone());
+                let method = self.method_context.as_mut().ok_or(AmlError::NotExecutingControlMethod)?;
+                *method.locals.get_mut(local_num as usize).ok_or(AmlError::InvalidLocalAccess(local_num))? =
+                    Some(value.clone());
                 Ok(value)
             }
 
             Target::Index(object, position) => {
-                // Only packages hold elements that can be replaced.
-                let container: &mut AmlValue = match *object {
+                /*
+                 * OSyx: an element of a package, or a byte of a buffer or
+                 * string, in a named object, a local or an argument - or
+                 * in an element of one of those (`Index (DerefOf (Index
+                 * (PKG, 1)), 2)`).
+                 */
+                fn element<'v>(container: &'v mut AmlValue, position: usize) -> Result<&'v mut AmlValue, AmlError> {
+                    match container {
+                        AmlValue::Package(items) => items.get_mut(position).ok_or(AmlError::FieldInvalidAccessSize),
+                        _ => Err(AmlError::FieldInvalidAccessSize),
+                    }
+                }
+                fn put(container: &mut AmlValue, position: usize, value: &AmlValue, byte: Option<u8>) -> Result<(), AmlError> {
+                    match container {
+                        AmlValue::Package(items) => {
+                            *items.get_mut(position).ok_or(AmlError::FieldInvalidAccessSize)? = value.clone();
+                            Ok(())
+                        }
+                        AmlValue::Buffer(bytes) => {
+                            *bytes.lock().get_mut(position).ok_or(AmlError::FieldInvalidAccessSize)? =
+                                byte.ok_or(AmlError::FieldInvalidAccessSize)?;
+                            Ok(())
+                        }
+                        AmlValue::String(text) => {
+                            let byte = byte.filter(u8::is_ascii).ok_or(AmlError::FieldInvalidAccessSize)?;
+                            if position >= text.len() || !text.is_char_boundary(position) || !text.is_char_boundary(position + 1) {
+                                return Err(AmlError::FieldInvalidAccessSize);
+                            }
+                            text.replace_range(position..position + 1, core::str::from_utf8(&[byte]).unwrap_or("?"));
+                            Ok(())
+                        }
+                        _ => Err(AmlError::FieldInvalidAccessSize),
+                    }
+                }
+
+                // The path of positions from the outermost container in.
+                let mut positions = alloc::vec![position];
+                let mut root = *object;
+                while let Target::Index(inner, position) = root {
+                    positions.push(position);
+                    root = *inner;
+                }
+                positions.reverse();
+                let (last, through) = positions.split_last().unwrap();
+                let byte = value.as_integer(self).ok().map(|v| v as u8);
+
+                let write = |mut container: &mut AmlValue| -> Result<(), AmlError> {
+                    for &position in through {
+                        container = element(container, position)?;
+                    }
+                    put(container, *last, &value, byte)
+                };
+                match root {
                     Target::Name(ref path) => {
                         let (_, handle) = self.namespace.search(path, &self.current_scope)?;
-                        self.namespace.get_mut(handle)?
+                        write(self.namespace.get_mut(handle)?)?;
                     }
                     Target::Local(local_num) => {
-                        let ctx = self.method_context.as_mut().ok_or(AmlError::NotExecutingControlMethod)?;
-                        ctx.locals[local_num as usize].as_mut().ok_or(AmlError::InvalidLocalAccess(local_num))?
+                        let method = self.method_context.as_mut().ok_or(AmlError::NotExecutingControlMethod)?;
+                        write(
+                            method
+                                .locals
+                                .get_mut(local_num as usize)
+                                .and_then(Option::as_mut)
+                                .ok_or(AmlError::InvalidLocalAccess(local_num))?,
+                        )?;
+                    }
+                    Target::Arg(arg_num) => {
+                        let method = self.method_context.as_mut().ok_or(AmlError::NotExecutingControlMethod)?;
+                        let source = method.sources.get(arg_num as usize).copied().unwrap_or_default();
+                        let is_package = matches!(method.args.0.get(arg_num as usize), Some(Some(AmlValue::Package(_))));
+                        write(
+                            method
+                                .args
+                                .0
+                                .get_mut(arg_num as usize)
+                                .and_then(Option::as_mut)
+                                .ok_or(AmlError::InvalidArgAccess(arg_num))?,
+                        )?;
+                        // The caller's named package gets the element too
+                        // (a buffer is shared with the caller already).
+                        if let (true, false, Some(handle)) = (is_package, source.rebound, source.named) {
+                            if let Ok(named) = self.namespace.get_mut(handle) {
+                                let _ = write(named);
+                            }
+                        }
                     }
                     _ => return Err(AmlError::FieldInvalidAccessSize),
-                };
-                match container {
-                    AmlValue::Package(items) => match items.get_mut(position) {
-                        Some(slot) => {
-                            *slot = value.clone();
-                            Ok(value)
-                        }
-                        None => Err(AmlError::FieldInvalidAccessSize),
-                    },
-                    _ => Err(AmlError::FieldInvalidAccessSize),
                 }
+                Ok(value)
             }
 
             Target::Null => Ok(value),
+        }
+    }
+
+    /// OSyx: where the package a method is about to receive comes from.
+    /// `first` is the first byte of the argument's encoding, `consumed` its
+    /// length, and `name` the argument when it is nothing but a name.
+    pub(crate) fn arg_source(&self, first: u8, consumed: usize, name: Option<&AmlName>, value: &AmlValue) -> ArgSource {
+        if !matches!(value, AmlValue::Package(_)) {
+            return ArgSource::default();
+        }
+        match (first, consumed) {
+            (op @ opcode::LOCAL0_OP..=opcode::LOCAL7_OP, 1) => {
+                ArgSource { slot: Some(CallerSlot::Local(op - opcode::LOCAL0_OP)), ..ArgSource::default() }
+            }
+            (op @ opcode::ARG0_OP..=opcode::ARG6_OP, 1) => {
+                let n = op - opcode::ARG0_OP;
+                let outer = self.method_context.as_ref().map(|m| m.sources[n as usize]).unwrap_or_default();
+                ArgSource {
+                    named: outer.named.filter(|_| !outer.rebound),
+                    slot: Some(CallerSlot::Arg(n)),
+                    rebound: false,
+                }
+            }
+            _ => ArgSource {
+                named: name.and_then(|name| self.namespace.search(name, &self.current_scope).ok()).map(|(_, handle)| handle),
+                ..ArgSource::default()
+            },
         }
     }
 
@@ -467,7 +760,7 @@ impl AmlContext {
                  * `_SEG` and `_BBN` seem optional, with defaults that line up with legacy PCI implementations
                  * (e.g. systems with a single segment group and a single root, respectively).
                  */
-                let parent_device = parent_device.as_ref().unwrap();
+                let parent_device = parent_device.as_ref().ok_or(AmlError::FieldInvalidAddress)?;
                 let seg = match self.namespace.search(&AmlName::from_str("_SEG").unwrap(), parent_device) {
                     Ok((_, handle)) => self
                         .namespace
@@ -524,7 +817,7 @@ impl AmlContext {
     }
 
     pub(crate) fn write_region(
-        &mut self,
+        &self,
         region_handle: AmlHandle,
         offset: u64,
         length: u64,
@@ -572,7 +865,7 @@ impl AmlContext {
                  * `_SEG` and `_BBN` seem optional, with defaults that line up with legacy PCI implementations
                  * (e.g. systems with a single segment group and a single root, respectively).
                  */
-                let parent_device = parent_device.as_ref().unwrap();
+                let parent_device = parent_device.as_ref().ok_or(AmlError::FieldInvalidAddress)?;
                 let seg = match self.namespace.search(&AmlName::from_str("_SEG").unwrap(), parent_device) {
                     Ok((_, handle)) => self
                         .namespace
@@ -739,10 +1032,10 @@ pub trait Handler: Send + Sync {
     fn read_u32(&self, address: usize) -> u32;
     fn read_u64(&self, address: usize) -> u64;
 
-    fn write_u8(&mut self, address: usize, value: u8);
-    fn write_u16(&mut self, address: usize, value: u16);
-    fn write_u32(&mut self, address: usize, value: u32);
-    fn write_u64(&mut self, address: usize, value: u64);
+    fn write_u8(&self, address: usize, value: u8);
+    fn write_u16(&self, address: usize, value: u16);
+    fn write_u32(&self, address: usize, value: u32);
+    fn write_u64(&self, address: usize, value: u64);
 
     fn read_io_u8(&self, port: u16) -> u8;
     fn read_io_u16(&self, port: u16) -> u16;
@@ -781,8 +1074,16 @@ pub trait Handler: Send + Sync {
         }
     }
 
+    /// OSyx: a monotonic count of 100 ns units (`DefTimer`). Firmware
+    /// measures its own time-outs with it; the default never advances.
+    fn timer_100ns(&self) -> u64 {
+        0
+    }
+
+    /// OSyx: the default logs: firmware saying `Fatal` must not end the
+    /// process that interprets it (upstream panicked).
     fn handle_fatal_error(&self, fatal_type: u8, fatal_code: u32, fatal_arg: u64) {
-        panic!("Fatal error while executing AML (encountered DefFatal op). fatal_type = {:?}, fatal_code = {:?}, fatal_arg = {:?}", fatal_type, fatal_code, fatal_arg);
+        error!("AML Fatal: type {:#x}, code {:#x}, argument {:#x}", fatal_type, fatal_code, fatal_arg);
     }
 }
 
@@ -794,6 +1095,8 @@ pub enum AmlError {
      */
     UnexpectedEndOfStream,
     UnexpectedByte(u8),
+    /// OSyx: an object referred to after the method that created it returned.
+    HandleDoesNotExist,
     /// Produced when the stream evaluates to something other than nothing or an error.
     MalformedStream,
     InvalidNameSeg,

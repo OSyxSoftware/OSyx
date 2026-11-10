@@ -127,6 +127,37 @@ impl Namespace {
         }
     }
 
+    /// OSyx: takes the level at `path` (and everything below it) out of the
+    /// namespace, if it is there. The objects stay allocated until the level
+    /// is given to [`Namespace::free_level`] or put back.
+    pub fn take_level(&mut self, path: &AmlName) -> Option<NamespaceLevel> {
+        let path = path.clone().normalize().ok()?;
+        if path == AmlName::root() {
+            return None;
+        }
+        let (level, last_seg) = self.get_level_for_path_mut(&path).ok()?;
+        level.children.remove(&last_seg)
+    }
+
+    /// OSyx: puts back a level taken with [`Namespace::take_level`].
+    pub fn put_level(&mut self, path: &AmlName, taken: NamespaceLevel) {
+        let Ok(path) = path.clone().normalize() else { return };
+        if let Ok((level, last_seg)) = self.get_level_for_path_mut(&path) {
+            level.children.insert(last_seg, taken);
+        }
+    }
+
+    /// OSyx: releases the objects of a level that left the namespace (the
+    /// names a method created while it ran).
+    pub fn free_level(&mut self, level: NamespaceLevel) {
+        for handle in level.values.values() {
+            self.object_map.remove(handle);
+        }
+        for (_, child) in level.children {
+            self.free_level(child);
+        }
+    }
+
     /// Add a value to the namespace at the given path, which must be a normalized, absolute AML
     /// name. If you want to add at a path relative to a given scope, use `add_at_resolved_path`
     /// instead.
@@ -178,11 +209,13 @@ impl Namespace {
     }
 
     pub fn get(&self, handle: AmlHandle) -> Result<&AmlValue, AmlError> {
-        Ok(self.object_map.get(&handle).unwrap())
+        // OSyx: an object a method created is gone once the method returned;
+        // a handle kept past that is an error, not a panic.
+        self.object_map.get(&handle).ok_or(AmlError::HandleDoesNotExist)
     }
 
     pub fn get_mut(&mut self, handle: AmlHandle) -> Result<&mut AmlValue, AmlError> {
-        Ok(self.object_map.get_mut(&handle).unwrap())
+        self.object_map.get_mut(&handle).ok_or(AmlError::HandleDoesNotExist)
     }
 
     pub fn get_handle(&self, path: &AmlName) -> Result<AmlHandle, AmlError> {
@@ -192,12 +225,12 @@ impl Namespace {
 
     pub fn get_by_path(&self, path: &AmlName) -> Result<&AmlValue, AmlError> {
         let handle = self.get_handle(path)?;
-        Ok(self.get(handle).unwrap())
+        self.get(handle)
     }
 
     pub fn get_by_path_mut(&mut self, path: &AmlName) -> Result<&mut AmlValue, AmlError> {
         let handle = self.get_handle(path)?;
-        Ok(self.get_mut(handle).unwrap())
+        self.get_mut(handle)
     }
 
     /// Search for an object at the given path of the namespace, applying the search rules described in §5.3 of the

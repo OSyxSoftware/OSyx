@@ -73,6 +73,16 @@ pub const DEF_BREAKPOINT_OP: u8 = 0xcc;
  * Type 2 opcodes
  */
 pub const DEF_STORE_OP: u8 = 0x70;
+pub const DEF_REF_OF_OP: u8 = 0x71;
+pub const DEF_FIND_SET_LEFT_BIT_OP: u8 = 0x81;
+pub const DEF_FIND_SET_RIGHT_BIT_OP: u8 = 0x82;
+pub const DEF_MATCH_OP: u8 = 0x89;
+pub const EXT_DEF_LOAD_TABLE_OP: u8 = 0x1f;
+pub const EXT_DEF_LOAD_OP: u8 = 0x20;
+pub const EXT_DEF_FROM_BCD_OP: u8 = 0x28;
+pub const EXT_DEF_TO_BCD_OP: u8 = 0x29;
+pub const EXT_DEF_UNLOAD_OP: u8 = 0x2a;
+pub const EXT_DEF_TIMER_OP: u8 = 0x33;
 pub const DEF_ADD_OP: u8 = 0x72;
 pub const DEF_SUBTRACT_OP: u8 = 0x74;
 pub const DEF_MULTIPLY_OP: u8 = 0x77;

@@ -2,7 +2,10 @@ use crate::{
     misc::debug_obj,
     name_object::{name_string, simple_name, super_name, target},
     opcode::{self, ext_opcode, opcode},
-    parser::{choice, comment_scope, n_of, take, take_to_end_of_pkglength, try_with_context, Parser, Propagate},
+    parser::{
+        choice, comment_scope, n_of, take, take_to_end_of_pkglength, take_u16, try_with_context, ParseResult, Parser,
+        Propagate,
+    },
     pkg_length::pkg_length,
     term_object::{data_ref_object, term_arg, def_cond_ref_of},
     value::{AmlType, AmlValue, Args},
@@ -81,6 +84,14 @@ where
             def_acquire(),
             def_wait(),
             def_cond_ref_of(),
+            def_ref_of(),
+            def_find_set_left_bit(),
+            def_find_set_right_bit(),
+            def_match(),
+            def_timer(),
+            def_from_bcd(),
+            def_to_bcd(),
+            def_load_table(),
             method_invocation() // XXX: this must always appear last. See how we have to parse it to see why.
         ),
     )
@@ -585,8 +596,12 @@ where
             DebugVerbosity::AllScopes,
             "DefObjectType",
             choice!(
-                simple_name().map_with_context(|target, context| {
-                    let value = try_with_context!(context, context.read_target(&target));
+                // OSyx: any SuperName, so also `DerefOf (Index (...))`.
+                super_name().map_with_context(|target, context| {
+                    if matches!(target, crate::name_object::Target::Debug) {
+                        return (Ok(AmlValue::Integer(16)), context);
+                    }
+                    let value = try_with_context!(context, context.target_value(&target));
                     let typ = match value.type_of() {
                         AmlType::Uninitialized => 0,
                         AmlType::Integer => 1,
@@ -649,9 +664,17 @@ where
                         package_contents.push(value);
                     }
 
-                    if package_contents.len() != num_elements as usize {
+                    /*
+                     * OSyx: NumElements may be larger than the initializer
+                     * list (`Package (0x04) {}`, the usual way firmware
+                     * declares a package it fills later); the rest of the
+                     * elements are uninitialized, here zero. Only a list
+                     * longer than NumElements is malformed.
+                     */
+                    if package_contents.len() > num_elements as usize {
                         return Err((input, context, Propagate::Err(AmlError::MalformedPackage)));
                     }
+                    package_contents.resize(num_elements as usize, AmlValue::Integer(0));
 
                     Ok((input, context, AmlValue::Package(package_contents)))
                 }
@@ -686,12 +709,17 @@ where
                         return Err((input, context, Propagate::Err(err)));
                     }
 
+                    let count = count.as_integer(context).unwrap_or(0) as usize;
                     let mut contents = Vec::new();
                     while pkg_length.still_parsing(input) {
                         let (new_input, new_context, value) = package_element().parse(input, context)?;
                         input = new_input;
                         context = new_context;
                         contents.push(value);
+                    }
+                    // The elements the list does not give are uninitialized (zero).
+                    if contents.len() < count && count <= 0x1_0000 {
+                        contents.resize(count, AmlValue::Integer(0));
                     }
 
                     Ok((input, context, AmlValue::Package(contents)))
@@ -859,7 +887,7 @@ where
             DebugVerbosity::AllScopes,
             "DefSizeOf",
             super_name().map_with_context(|target, context| {
-                let value = try_with_context!(context, context.read_target(&target)).clone();
+                let value = try_with_context!(context, context.target_value(&target));
                 let size = match value {
                     AmlValue::Buffer(b) => b.lock().len(),
                     AmlValue::String(s) => s.len(),
@@ -929,13 +957,8 @@ where
         .map_with_context(|((), ((operand, shift_count), target)), context| {
             let operand = try_with_context!(context, operand.as_integer(context));
             let shift_count = try_with_context!(context, shift_count.as_integer(context));
-            let shift_count =
-                try_with_context!(context, shift_count.try_into().map_err(|_| AmlError::InvalidShiftLeft));
-
-            let result = AmlValue::Integer(try_with_context!(
-                context,
-                operand.checked_shl(shift_count).ok_or(AmlError::InvalidShiftLeft)
-            ));
+            // OSyx: shifting by the integer width or more leaves zero.
+            let result = AmlValue::Integer(TryInto::<u32>::try_into(shift_count).ok().and_then(|n| operand.checked_shl(n)).unwrap_or(0));
 
             try_with_context!(context, context.store(target, result.clone()));
             (Ok(result), context)
@@ -956,13 +979,7 @@ where
         .map_with_context(|((), ((operand, shift_count), target)), context| {
             let operand = try_with_context!(context, operand.as_integer(context));
             let shift_count = try_with_context!(context, shift_count.as_integer(context));
-            let shift_count =
-                try_with_context!(context, shift_count.try_into().map_err(|_| AmlError::InvalidShiftRight));
-
-            let result = AmlValue::Integer(try_with_context!(
-                context,
-                operand.checked_shr(shift_count).ok_or(AmlError::InvalidShiftRight)
-            ));
+            let result = AmlValue::Integer(TryInto::<u32>::try_into(shift_count).ok().and_then(|n| operand.checked_shr(n)).unwrap_or(0));
 
             try_with_context!(context, context.store(target, result.clone()));
             (Ok(result), context)
@@ -1195,7 +1212,9 @@ where
         .then(comment_scope(
             DebugVerbosity::Scopes,
             "DefAcquire",
-            super_name().then(term_arg()).map(|(_event, _timeout)| Ok(AmlValue::Integer(0))),
+            // OSyx: the timeout is a WordData (`0xFFFF` in nearly every
+            // firmware), not a TermArg: read as one it left a stray byte.
+            super_name().then(take_u16()).map(|(_mutex, _timeout)| Ok(AmlValue::Integer(0))),
         ))
         .map(|((), result)| Ok(result))
 }
@@ -1218,6 +1237,144 @@ where
             super_name().then(term_arg()).map(|(_event, _timeout)| Ok(AmlValue::Integer(0))),
         ))
         .map(|((), result)| Ok(result))
+}
+
+/// OSyx: `RefOf`. The interpreter has no reference objects; the object
+/// itself stands in for a reference to it, and `DerefOf` passes it through.
+fn def_ref_of<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefRefOf := 0x71 SuperName
+     */
+    opcode(opcode::DEF_REF_OF_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefRefOf",
+            super_name().map_with_context(|target, context| {
+                let value = try_with_context!(context, context.target_value(&target));
+                (Ok(try_with_context!(context, value.resolved(context))), context)
+            }),
+        ))
+        .map(|((), result)| Ok(result))
+}
+
+/// OSyx: one-operand integer operators with a target.
+macro_rules! unary_operator {
+    ($fn_name:ident, $opcode:expr, $label:literal, |$v:ident| $body:expr) => {
+        fn $fn_name<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+        where
+            'c: 'a,
+        {
+            $opcode
+                .then(comment_scope(
+                    DebugVerbosity::AllScopes,
+                    $label,
+                    term_arg().then(target()).map_with_context(|(operand, target), context| {
+                        let $v = try_with_context!(context, operand.as_integer(context));
+                        let result = AmlValue::Integer($body);
+                        try_with_context!(context, context.store(target, result.clone()));
+                        (Ok(result), context)
+                    }),
+                ))
+                .map(|((), result)| Ok(result))
+        }
+    };
+}
+
+// The position of the most and the least significant set bit, counted from 1; 0 for zero.
+unary_operator!(def_find_set_left_bit, opcode(opcode::DEF_FIND_SET_LEFT_BIT_OP), "DefFindSetLeftBit", |v| {
+    64 - v.leading_zeros() as u64
+});
+unary_operator!(def_find_set_right_bit, opcode(opcode::DEF_FIND_SET_RIGHT_BIT_OP), "DefFindSetRightBit", |v| {
+    if v == 0 { 0 } else { v.trailing_zeros() as u64 + 1 }
+});
+unary_operator!(def_from_bcd, ext_opcode(opcode::EXT_DEF_FROM_BCD_OP), "DefFromBCD", |v| {
+    (0..16).rev().fold(0u64, |acc, digit| acc.wrapping_mul(10).wrapping_add((v >> (digit * 4)) & 0xf))
+});
+unary_operator!(def_to_bcd, ext_opcode(opcode::EXT_DEF_TO_BCD_OP), "DefToBCD", |v| {
+    let mut rest = v;
+    let mut bcd = 0u64;
+    for digit in 0..16 {
+        bcd |= (rest % 10) << (digit * 4);
+        rest /= 10;
+    }
+    bcd
+});
+
+/// OSyx: `Match`: the index of the first package element, from `StartIndex`
+/// on, that satisfies both comparisons; `Ones` when there is none.
+fn def_match<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefMatch := 0x89 SearchPkg MatchOpcode Operand MatchOpcode Operand StartIndex
+     * MatchOpcode := ByteData (MTR 0, MEQ 1, MLE 2, MLT 3, MGE 4, MGT 5)
+     */
+    fn holds(op: u8, element: u64, operand: u64) -> bool {
+        match op {
+            0 => true,
+            1 => element == operand,
+            2 => element <= operand,
+            3 => element < operand,
+            4 => element >= operand,
+            5 => element > operand,
+            _ => false,
+        }
+    }
+    opcode(opcode::DEF_MATCH_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefMatch",
+            term_arg().then(take()).then(term_arg()).then(take()).then(term_arg()).then(term_arg()).map_with_context(
+                |(((((package, op1), operand1), op2), operand2), start), context| {
+                    let AmlValue::Package(items) = package else {
+                        return (
+                            Err(Propagate::Err(AmlError::IncompatibleValueConversion {
+                                current: package.type_of(),
+                                target: AmlType::Package,
+                            })),
+                            context,
+                        );
+                    };
+                    let operand1 = try_with_context!(context, operand1.as_integer(context));
+                    let operand2 = try_with_context!(context, operand2.as_integer(context));
+                    let start = try_with_context!(context, start.as_integer(context)) as usize;
+                    let found = items.iter().enumerate().skip(start).find_map(|(i, item)| {
+                        // Elements that are not integers never match.
+                        let element = item.as_integer(context).ok()?;
+                        (holds(op1, element, operand1) && holds(op2, element, operand2)).then_some(i as u64)
+                    });
+                    (Ok(AmlValue::Integer(found.unwrap_or(u64::MAX))), context)
+                },
+            ),
+        ))
+        .map(|((), result)| Ok(result))
+}
+
+/// OSyx: `Timer`: a monotonic count of 100 ns units.
+fn def_timer<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    ext_opcode(opcode::EXT_DEF_TIMER_OP)
+        .map_with_context(|(), context| (Ok(AmlValue::Integer(context.handler.timer_100ns())), context))
+}
+
+/// OSyx: `LoadTable` names a table for the host to load; none is loaded
+/// from inside a method, and zero ("no table") is the documented result.
+fn def_load_table<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefLoadTable := ExtOpPrefix 0x1F TermArg TermArg TermArg TermArg TermArg TermArg
+     */
+    ext_opcode(opcode::EXT_DEF_LOAD_TABLE_OP)
+        .then(comment_scope(DebugVerbosity::AllScopes, "DefLoadTable", n_of(term_arg(), 6)))
+        .map(|((), _)| Ok(AmlValue::Integer(0)))
 }
 
 fn method_invocation<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
@@ -1255,15 +1412,61 @@ where
                 (Ok((full_path, num_args)), context)
             })
             .feed(|(path, num_args)| {
-                n_of(term_arg(), num_args.unwrap_or(0) as usize).map_with_context(move |arg_list, context| {
-                    if num_args.is_some() {
-                        let args = try_with_context!(context, Args::from_list(arg_list));
-                        let result = context.invoke_method(&path, args);
-                        (Ok(try_with_context!(context, result)), context)
-                    } else {
-                        (Ok(try_with_context!(context, context.namespace.get_by_path(&path)).clone()), context)
+                move |mut input: &'a [u8], mut context: &'c mut AmlContext| -> ParseResult<'a, 'c, AmlValue> {
+                    let Some(num_args) = num_args else {
+                        // OSyx: not a method: the object's value (a field is read now).
+                        let value = match context.namespace.get_by_path(&path).cloned().and_then(|v| v.resolved(context)) {
+                            Ok(value) => value,
+                            Err(err) => return Err((input, context, Propagate::Err(err))),
+                        };
+                        return Ok((input, context, value));
+                    };
+                    /*
+                     * OSyx: the arguments, each with where it came from: a
+                     * package argument is the caller's package (see
+                     * `ArgSource`), so the callee's element stores must
+                     * reach it.
+                     */
+                    let mut arg_list = Vec::with_capacity(num_args as usize);
+                    let mut sources = [crate::ArgSource::default(); 7];
+                    for i in 0..num_args as usize {
+                        let start = input;
+                        let (new_input, new_context, value) = match term_arg().parse(input, context) {
+                            Ok(parsed) => parsed,
+                            Err((_, context, propagate)) => return Err((input, context, propagate)),
+                        };
+                        input = new_input;
+                        context = new_context;
+                        let consumed = start.len() - input.len();
+                        let first = start.first().copied().unwrap_or(0);
+                        let name = if matches!(value, AmlValue::Package(_)) && !matches!(first, 0x60..=0x6e) {
+                            match name_string().parse(start, context) {
+                                Ok((after, new_context, name)) => {
+                                    context = new_context;
+                                    (start.len() - after.len() == consumed).then_some(name)
+                                }
+                                Err((_, new_context, _)) => {
+                                    context = new_context;
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        if i < 7 {
+                            sources[i] = context.arg_source(first, consumed, name.as_ref(), &value);
+                        }
+                        arg_list.push(value);
                     }
-                })
+                    let args = match Args::from_list(arg_list) {
+                        Ok(args) => args,
+                        Err(err) => return Err((input, context, Propagate::Err(err))),
+                    };
+                    match context.invoke_method_from(&path, args, sources) {
+                        Ok(value) => Ok((input, context, value)),
+                        Err(err) => Err((input, context, Propagate::Err(err))),
+                    }
+                }
             }),
     )
 }

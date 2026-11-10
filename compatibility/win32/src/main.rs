@@ -66,6 +66,7 @@ mod oleaut32;
 mod setupapi;
 mod shell32;
 mod shelllink;
+mod shlstr;
 mod shlwapi;
 mod security;
 mod seh;

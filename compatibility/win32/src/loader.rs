@@ -239,7 +239,11 @@ fn builtins() -> Vec<Arc<Builtin>> {
             [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports(), crate::cryptbase::exports(), crate::apiextra::advapi32_exports(), crate::clientapi::advapi32_exports()].concat(),
             Vec::new()
         ),
-        builtin("shlwapi.dll", [crate::shlwapi::exports(), crate::clientapi::shlwapi_exports()].concat(), crate::shlwapi::ordinals()),
+        builtin(
+            "shlwapi.dll",
+            [crate::shlwapi::exports(), crate::shlstr::exports(), crate::clientapi::shlwapi_exports()].concat(),
+            crate::shlwapi::ordinals(),
+        ),
         // ole32's COM entry points live in combase on Windows.
         builtin("combase.dll", [crate::shlwapi::combase_exports(), crate::ole32::exports(), crate::client64::ole32_exports()].concat(), Vec::new()),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),

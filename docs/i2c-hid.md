@@ -47,7 +47,8 @@ DesignWare signature (`IC_COMP_TYPE`) and only then talks to a device.
   about 15 % at 400 kHz for a 64-byte report). A device is polled only if it
   answers an empty read by a zero length or a NACK; one that repeats its last
   report is refused, because the pointer would drift by itself.
-* Touchscreens (the input core has no absolute events), gestures (tap,
+* Touchscreens (the input core has absolute events since the USB tablet
+  driver, but this driver does not send them yet), gestures (tap,
   scroll), consumer-control hot keys, GET/SET_REPORT, output reports (LEDs),
   10-bit addressing, fast-mode plus and high speed, controllers behind PCI
   bridges.
