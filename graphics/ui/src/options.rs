@@ -46,7 +46,7 @@ impl PowerOptions {
         if self.low == 0 {
             0
         } else {
-            (self.low / 2).min(5).max(1)
+            (self.low / 2).clamp(1, 5)
         }
     }
 }

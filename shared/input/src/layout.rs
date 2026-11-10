@@ -139,7 +139,7 @@ fn german_key(usage: u16) -> Option<Key> {
         key::Q => Key('q', 'Q', Some('@')),
         key::E => Key('e', 'E', Some('€')),
         key::M => Key('m', 'M', Some('µ')),
-        A..=Z => letter(us_letter(usage)?),
+        letter_key if (A..=Z).contains(&letter_key) => letter(us_letter(letter_key)?),
         DIGIT1..=DIGIT0 => {
             let (plain, shifted, altgr) = DIGITS[(usage - DIGIT1) as usize];
             Key(plain, shifted, altgr)
@@ -170,7 +170,7 @@ fn united_kingdom_key(usage: u16) -> Option<Key> {
         key::I => Key('i', 'I', Some('í')),
         key::O => Key('o', 'O', Some('ó')),
         key::U => Key('u', 'U', Some('ú')),
-        A..=Z => letter(us_letter(usage)?),
+        letter_key if (A..=Z).contains(&letter_key) => letter(us_letter(letter_key)?),
         0x1F => Key('2', '"', None),
         0x20 => Key('3', '£', None),
         0x21 => Key('4', '$', Some('€')),
@@ -207,7 +207,7 @@ fn french_key(usage: u16) -> Option<Key> {
         key::Z => letter('w'),
         key::E => Key('e', 'E', Some('€')),
         key::M => Key(',', '?', None),
-        A..=Z => letter(us_letter(usage)?),
+        letter_key if (A..=Z).contains(&letter_key) => letter(us_letter(letter_key)?),
         DIGIT1..=DIGIT0 => {
             let (plain, shifted, altgr) = DIGITS[(usage - DIGIT1) as usize];
             Key(plain, shifted, altgr)

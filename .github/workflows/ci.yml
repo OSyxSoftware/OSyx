@@ -38,6 +38,11 @@ jobs:
       - name: Test wireless WPA support
         run: cargo test --locked -p osyx-wireless --features wpa
 
+      - name: Test battery firmware handling and the USB and I2C HID drivers
+        run: >-
+          cargo test --locked
+          -p osyx-battery -p osyx-usb -p osyx-i2c -p osyx-i2chid
+
       - name: Test OSyx Std and the storage drivers
         run: >-
           cargo test --locked

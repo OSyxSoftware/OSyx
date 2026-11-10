@@ -638,7 +638,7 @@ impl AmlContext {
                 let (last, through) = positions.split_last().unwrap();
                 let byte = value.as_integer(self).ok().map(|v| v as u8);
 
-                let mut write = |mut container: &mut AmlValue| -> Result<(), AmlError> {
+                let write = |mut container: &mut AmlValue| -> Result<(), AmlError> {
                     for &position in through {
                         container = element(container, position)?;
                     }

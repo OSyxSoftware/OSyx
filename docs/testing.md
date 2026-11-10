@@ -82,6 +82,24 @@ seconds, then charging), Settings > Power the details. Without the table,
 `init.args=battery-demo` publishes a charging and then a discharging state
 for the task bar.
 
+## Input devices under QEMU
+
+The suite uses `usb-kbd` and `usb-mouse`. The other pointer and keyboard
+drivers are checked by hand with the devices QEMU has for them, each as the
+only input devices of the machine:
+
+| Devices | Driver | Serial log |
+|---|---|---|
+| `-device qemu-xhci -device usb-kbd -device usb-tablet` | USB HID absolute pointer | `usb ...: HID absolute pointer on interface 0 (3 buttons, 16-bit X/Y, wheel)` |
+| `-device virtio-keyboard-pci -device virtio-tablet-pci` | virtio-input | `virtio-input at ...: "QEMU Virtio Tablet" (absolute pointer, range 32767x32767)` |
+| `-device virtio-keyboard-pci -device virtio-mouse-pci` | virtio-input | `virtio-input at ...: "QEMU Virtio Mouse" (relative pointer)` |
+
+QMP `input-send-event` (`abs`, `rel`, `btn`) and `send-key` drive them; an
+absolute device lets a script click at screen coordinates. Host tests:
+`osyx-usb` (`TabletLayout`), `osyx-input` (`evdev`, the keyboard layouts),
+`prism-core` (absolute positions, pointer speed, left-handed buttons,
+natural scrolling).
+
 ## Suite (`scripts/test.ps1`)
 
 | Test | Checks |

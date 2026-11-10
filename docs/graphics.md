@@ -46,6 +46,24 @@ report-descriptor parser (buttons, X/Y, wheel), falling back to the boot
 protocol (3 buttons, X/Y) when the descriptor is not understood. Only boot-protocol keyboards are supported; report-descriptor
 keyboards are not yet.
 
+**Absolute pointers**: a HID pointer whose report descriptor has absolute
+X/Y is a tablet (`osyx_usb::hid::TabletLayout`): QEMU's `usb-tablet`, the
+pointer VirtualBox and remote consoles present, touch screens and pens (the
+tip switch is the left button). Positions reach the compositor as
+`kind::ABSOLUTE` events, 0 to `ABSOLUTE_MAX` across the screen, and PRISM
+maps them to pixels.
+
+**virtio-input** (`kernel/src/drivers/virtio_input.rs`): the keyboards, mice
+and tablets of a virtual machine without USB or PS/2 hardware. The device's
+Linux evdev events are decoded by `osyx_input::evdev` (host tests); the event
+queue is polled about 250 times a second.
+
+**Pointer and keyboard settings**: PRISM reads `/etc/osyx/pointer` (`speed`
+in percent, `natural`, `left`) and `/etc/osyx/keyboard` (`us`, `pl`, `de`,
+`gb`, `fr`) when it starts and every two seconds after, so Settings applies
+them without a new session. The speed scales relative motion only, with the
+remainder carried to the next event.
+
 **Input core**: one event format (`shared/input`, 32 bytes: time, device,
 kind, code, values, modifier/lock state, sequence). Modifier and lock state
 and key auto-repeat (500 ms / 33 ms) are per seat. Queues are bounded (256

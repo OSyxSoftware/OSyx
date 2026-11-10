@@ -1,7 +1,7 @@
 use crate::{
     expression::{def_buffer, def_package, def_var_package, expression_opcode},
     misc::{arg_obj, local_obj},
-    name_object::{name_seg, name_string, target, Target},
+    name_object::{name_seg, name_string, target},
     namespace::{AmlName, LevelType},
     opcode::{self, ext_opcode, opcode},
     parser::{
@@ -736,25 +736,6 @@ where
     });
 
     choice!(reserved_field, access_field, connect_field, extended_access_field, named_field)
-}
-
-/// OSyx: consumes a field list without adding anything to the namespace.
-fn skip_field_list<'a, 'c>(list_length: PkgLength) -> impl Parser<'a, 'c, ()>
-where
-    'c: 'a,
-{
-    move |mut input: &'a [u8], mut context: &'c mut AmlContext| {
-        let mut current_offset = 0;
-        while list_length.still_parsing(input) {
-            let (new_input, new_context, field_length) =
-                field_element(None, FieldFlags::new(0), current_offset).parse(input, context)?;
-            input = new_input;
-            context = new_context;
-            current_offset += field_length;
-        }
-
-        Ok((input, context, ()))
-    }
 }
 
 pub fn def_index_field<'a, 'c>() -> impl Parser<'a, 'c, ()>
