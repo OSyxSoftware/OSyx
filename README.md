@@ -49,7 +49,7 @@ and desktop, and a compatibility layer that runs Windows PE32+ programs.
   comdlg32, Winsock and more. The Zen Browser (Windows build) runs on it.
 - **Drivers** written for OSyx, plus OpenBSD drivers through a small
   compatibility layer: `re(4)` (Realtek Ethernet), `iwm(4)` (Intel Wi-Fi)
-  with net80211, `azalia(4)` (HD Audio). Input from USB keyboards, mice,
+  with net80211, `azalia(4)` (HD Audio). Input from USB (xHCI and EHCI) keyboards, mice,
   tablets and touch screens, PS/2, HID over I2C and virtio-input.
 - **Laptops**: the battery, AC adapter, lid and thermal zones are read from
   the firmware's own ACPI methods by a user-space service; the task bar

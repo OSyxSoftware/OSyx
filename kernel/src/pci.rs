@@ -71,6 +71,18 @@ impl Address {
         (self.read32(offset) >> ((offset & 3) * 8)) as u8
     }
 
+    /// Writes one byte of configuration space, leaving its neighbours
+    /// alone (a semaphore byte the firmware may set at the same time).
+    pub fn write8(&self, offset: u8, value: u8) {
+        let _g = CONFIG.lock();
+        // SAFETY: as in `read32`; a byte access to the data port selects
+        // the byte within the dword.
+        unsafe {
+            cpu::outl(CONFIG_ADDRESS, self.cf8(offset));
+            cpu::outb(CONFIG_DATA + (offset & 3) as u16, value);
+        }
+    }
+
     pub fn write16(&self, offset: u8, value: u16) {
         let shift = (offset & 2) * 8;
         let old = self.read32(offset);

@@ -20,7 +20,6 @@
 
 mod bt;
 pub mod dma;
-mod hid;
 mod storage;
 
 use crate::arch::timer::{self, Deadline};
@@ -36,10 +35,9 @@ use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use dma::{DmaError, DmaPage, DmaRing};
-use hid::{HidFunction, HidKind};
+use crate::drivers::usbhid::{HidFunction, HidKind};
 use storage::StorageState;
 use osyx_usb::descriptor::{self, Configuration, DescriptorError, DeviceDescriptor, Interface, SetupPacket};
-use osyx_usb::hid::{parse_report_descriptor, BootKeyboard, MouseLayout, TabletLayout};
 use osyx_usb::xhci::context::{self, ContextLayout, EndpointContext, EndpointType, SlotContext};
 use osyx_usb::xhci::regs::{self, ext, op, portsc, rt, usbcmd, usbsts, Capabilities, SupportedProtocol};
 use osyx_usb::xhci::ring::{erst_entry, EventRing, ProducerRing, RingError, TrbMemory};
@@ -338,6 +336,23 @@ mod hubreq {
     }
     pub fn clear_port(port: u8, feature: u16) -> SetupPacket {
         SetupPacket { request_type: 0x23, request: 1, value: feature, index: port as u16, length: 0 }
+    }
+}
+
+/// The default control endpoint of a slot, for code shared with other
+/// host controller drivers.
+struct SlotPipe<'a> {
+    xhci: &'a mut Xhci,
+    slot: u8,
+}
+
+impl crate::drivers::usbhid::ControlPipe for SlotPipe<'_> {
+    type Error = XhciError;
+    fn control_in(&mut self, setup: SetupPacket, buf: &mut [u8]) -> Result<usize> {
+        self.xhci.control_in(self.slot, setup, buf)
+    }
+    fn control_out(&mut self, setup: SetupPacket, data: &[u8]) -> Result<()> {
+        self.xhci.control_out(self.slot, setup, data)
     }
 }
 
@@ -1191,101 +1206,11 @@ impl Xhci {
         Ok(())
     }
 
-    /// Prepares a HID interface: protocol, idle rate, report layout.
+    /// Prepares a HID interface: protocol, idle rate, report layout
+    /// (`drivers::usbhid::setup`, shared with the EHCI driver).
     fn setup_hid(&mut self, slot: u8, iface: &Interface, name: &str) -> Result<Option<HidFunction>> {
         let devname = self.devices[&slot].name.clone();
-        let boot = iface.subclass == descriptor::HID_SUBCLASS_BOOT;
-        if iface.is_hid_boot(descriptor::HID_PROTOCOL_KEYBOARD) {
-            self.control_out(slot, SetupPacket::hid_set_protocol(iface.number, false), &[])?;
-            // Report only on change; some keyboards stall this request.
-            let _ = self.control_out(slot, SetupPacket::hid_set_idle(iface.number, 0), &[]);
-            let id = input::register(name, input::class::KEYBOARD);
-            kprintln!("usb {}: HID boot keyboard on interface {} -> input device {}", devname, iface.number, id);
-            return Ok(Some(HidFunction {
-                interface: iface.number,
-                input_id: id,
-                kind: HidKind::Keyboard { state: BootKeyboard::new(), applied_leds: 0 },
-                reports: 0,
-                bad_reports: 0,
-            }));
-        }
-        // A pointer: prefer the report descriptor (wheel, more buttons).
-        let mut layout = None;
-        let mut tablet = None;
-        let len = iface.hid.map_or(0, |h| h.report_length).min(1024);
-        if len > 0 {
-            let mut rd = vec![0u8; len as usize];
-            match self.control_in(slot, SetupPacket::get_interface_descriptor(descriptor::DESC_HID_REPORT, iface.number, len), &mut rd) {
-                Ok(n) => match parse_report_descriptor(&rd[..n]) {
-                    Ok(fields) => {
-                        layout = MouseLayout::from_fields(&fields);
-                        if layout.is_none() {
-                            tablet = TabletLayout::from_fields(&fields);
-                        }
-                    }
-                    Err(e) => kprintln!("usb {}: interface {}: report descriptor rejected: {:?}", devname, iface.number, e),
-                },
-                Err(e) => kprintln!("usb {}: interface {}: no report descriptor: {}", devname, iface.number, e),
-            }
-        }
-        // Absolute X/Y: a tablet, a touch screen or a virtual machine's
-        // pointer. Its reports only make sense in the report protocol.
-        if let Some(l) = tablet {
-            if boot {
-                self.control_out(slot, SetupPacket::hid_set_protocol(iface.number, true), &[])?;
-            }
-            let _ = self.control_out(slot, SetupPacket::hid_set_idle(iface.number, 0), &[]);
-            let id = input::register(name, input::class::MOUSE);
-            kprintln!(
-                "usb {}: HID absolute pointer on interface {} ({} buttons, {}-bit X/Y{}) -> input device {}",
-                devname,
-                iface.number,
-                l.buttons.len(),
-                l.x.size,
-                if l.wheel.is_some() { ", wheel" } else { "" },
-                id
-            );
-            return Ok(Some(HidFunction {
-                interface: iface.number,
-                input_id: id,
-                kind: HidKind::Tablet { layout: l, buttons: 0 },
-                reports: 0,
-                bad_reports: 0,
-            }));
-        }
-        let is_boot_mouse = iface.is_hid_boot(descriptor::HID_PROTOCOL_MOUSE);
-        let how = match (&layout, is_boot_mouse) {
-            (Some(l), _) => {
-                if boot {
-                    self.control_out(slot, SetupPacket::hid_set_protocol(iface.number, true), &[])?;
-                }
-                alloc::format!(
-                    "report protocol: {} buttons, {}-bit X/Y{}{}",
-                    l.buttons.len(),
-                    l.x.size,
-                    if l.wheel.is_some() { ", wheel" } else { "" },
-                    if l.pan.is_some() { ", horizontal wheel" } else { "" }
-                )
-            }
-            (None, true) => {
-                self.control_out(slot, SetupPacket::hid_set_protocol(iface.number, false), &[])?;
-                String::from("boot protocol: 3 buttons, 8-bit X/Y")
-            }
-            (None, false) => {
-                kprintln!(
-                    "usb {}: HID interface {} (subclass {}, protocol {}) is not a boot keyboard or a pointer: not supported",
-                    devname,
-                    iface.number,
-                    iface.subclass,
-                    iface.protocol
-                );
-                return Ok(None);
-            }
-        };
-        let _ = self.control_out(slot, SetupPacket::hid_set_idle(iface.number, 0), &[]);
-        let id = input::register(name, input::class::MOUSE);
-        kprintln!("usb {}: HID mouse on interface {} ({}) -> input device {}", devname, iface.number, how, id);
-        Ok(Some(HidFunction { interface: iface.number, input_id: id, kind: HidKind::Mouse { layout, buttons: 0 }, reports: 0, bad_reports: 0 }))
+        crate::drivers::usbhid::setup(&mut SlotPipe { xhci: self, slot }, iface, name, &devname)
     }
 
     /// Configure Endpoint for every HID interrupt IN endpoint and for the

@@ -3,6 +3,7 @@
 pub mod ahci;
 pub mod amdgpu;
 pub mod e1000;
+pub mod ehci;
 pub mod i2c;
 pub mod nvme;
 pub mod ps2;
@@ -12,6 +13,7 @@ pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_gpu;
 pub mod virtio_input;
+pub mod usbhid;
 pub mod virtio_net;
 pub mod virtio_rng;
 pub mod xhci;

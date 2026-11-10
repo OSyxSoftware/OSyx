@@ -4,7 +4,8 @@
 //! development host: xHCI register layouts and bit fields, Transfer Request
 //! Blocks, producer/consumer ring bookkeeping (cycle bits, link TRBs,
 //! wraparound), device/endpoint contexts, USB descriptor parsing and HID
-//! report decoding. The kernel driver (`kernel/src/drivers/xhci`) supplies
+//! report decoding, and the EHCI register layouts, queue heads and transfer
+//! descriptors. The kernel drivers (`kernel/src/drivers/xhci`, `ehci.rs`) supply
 //! the hardware side: MMIO, DMA memory, interrupts and timing.
 //!
 //! References: eXtensible Host Controller Interface for Universal Serial Bus
@@ -20,6 +21,7 @@
 extern crate alloc;
 
 pub mod descriptor;
+pub mod ehci;
 pub mod hid;
 pub mod xhci;
 
