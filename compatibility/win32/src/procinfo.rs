@@ -590,19 +590,62 @@ extern "win64" fn GetSystemCpuSetInformation(buf: *mut u8, len: u32, returned: *
     1
 }
 
-/// SYSTEM_POWER_STATUS: the AC line and battery are unknown to OSyx
-/// (255 / "no system battery" / unknown lifetimes).
+/// The battery as the ACPI service publishes it (`/run/battery`): `None`
+/// when the service has not reported (the state is then unknown, not
+/// "no battery"), `Some(Status::NONE)` on a machine without one.
+pub(crate) fn battery() -> Option<osyx_abi::battery::Status> {
+    osyx_abi::battery::Status::parse(&os_std::fs::read_to_string(osyx_abi::BATTERY_STATUS_PATH).ok()?)
+}
+
+/// What SYSTEM_POWER_STATUS says for a battery state: (ACLineStatus,
+/// BatteryFlag, BatteryLifePercent, BatteryLifeTime in seconds).
+///
+/// Without a report everything is unknown (255, 255, 255, -1). Without a
+/// battery the machine runs on AC power and has "no system battery" (128).
+/// With one, the flag is high above 66 %, low below 33 %, critical below
+/// 5 %, plus charging (8), as Windows computes it; the remaining time is
+/// known only while discharging.
+pub(crate) fn power_status(battery: Option<osyx_abi::battery::Status>) -> (u8, u8, u8, u32) {
+    use osyx_abi::battery::State;
+    let Some(b) = battery else { return (255, 255, 255, u32::MAX) };
+    if !b.present() {
+        return (1, 128, 255, u32::MAX);
+    }
+    if b.state == State::Unknown && b.percent == 0 {
+        // A battery the firmware would not describe.
+        return (255, 255, 255, u32::MAX);
+    }
+    let mut flag = match b.percent {
+        67..=u8::MAX => 1,
+        0..=4 => 2 | 4,
+        5..=32 => 2,
+        _ => 0,
+    };
+    if b.charging() {
+        flag |= 8;
+    }
+    let seconds = match b.state {
+        State::Discharging => b.minutes_to_empty.map_or(u32::MAX, |m| m.saturating_mul(60)),
+        _ => u32::MAX,
+    };
+    (b.ac as u8, flag, b.percent.min(100), seconds)
+}
+
+/// SYSTEM_POWER_STATUS from the battery the firmware reports: the AC line,
+/// the charge and the time left. BatteryFullLifeTime is unknown (-1), as on
+/// Windows with most batteries; the battery saver is never on.
 extern "win64" fn GetSystemPowerStatus(out: *mut u8) -> i32 {
     if out.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
+    let (ac, flag, percent, seconds) = power_status(battery());
     // SAFETY: the caller's 12-byte structure.
     unsafe {
-        *out = 255;
-        *out.add(1) = 128;
-        *out.add(2) = 255;
+        *out = ac;
+        *out.add(1) = flag;
+        *out.add(2) = percent;
         *out.add(3) = 0;
-        teb::put(out as u64, 4, u32::MAX);
+        teb::put(out as u64, 4, seconds);
         teb::put(out as u64, 8, u32::MAX);
     }
     1

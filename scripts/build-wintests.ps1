@@ -62,6 +62,7 @@ $programs = [ordered]@{
     'keyboard.exe' = @{ Src = @('keyboard.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lkernel32') }
     'input.exe' = @{ Src = @('input.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-luser32', '-lgdi32', '-lkernel32') }
     'shlpath.exe' = @{ Src = @('shlpath.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lshlwapi', '-lkernel32') }
+    'power.exe' = @{ Src = @('power.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lpowrprof', '-lkernel32') }
     'secattr.exe' = @{ Src = @('secattr.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-ladvapi32', '-lkernel32') }
     'childproc.exe' = @{ Src = @('childproc.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }
     'imageshare.exe' = @{ Src = @('imageshare.c'); Args = @('-Wl,--subsystem,console', '-Wl,-e,start', '-lkernel32') }

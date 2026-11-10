@@ -168,6 +168,32 @@ and Network Center. The same PE files also run on Windows. `build.ps1`
 installs them in `/opt/apps`; desktop entries invoke them through winrun.
 The desktop integration test launches and closes each with USB input.
 
+### Power status and the shell's path and string helpers
+
+Windows programs see the battery the firmware reports (`/run/battery`, kept
+by `batteryd`): `GetSystemPowerStatus` gives the AC line, the charge, the
+high/low/critical/charging flags and the time left; `CallNtPowerInformation`
+answers `SystemBatteryState` (capacities in mWh, the rate negative while
+discharging) and `SystemPowerCapabilities`, which `GetPwrCapabilities`
+returns too; `PowerDeterminePlatformRole` is mobile on a machine with a
+battery. Without a battery the answers are those of a desktop on AC power;
+before the service reported, "unknown". `power.exe` checks the relations
+between these calls on any machine.
+
+shlwapi exports 76 more of the helpers ordinary programs and installers
+link, wide and ANSI (`shlstr.rs`): path predicates (`PathIsRelative`,
+`PathIsRoot`, `PathIsUNC`, `PathIsURL`, `PathIsDirectory`, `PathIsPrefix`,
+`PathIsFileSpec`), path editing (`PathAddBackslash`, `PathRemoveBackslash`,
+`PathStripPath`, `PathStripToRoot`, `PathAddExtension`,
+`PathRenameExtension`, `PathQuoteSpaces`, `PathUnquoteSpaces`, `PathGetArgs`,
+`PathRemoveArgs`, `PathSkipRoot`, `PathFindNextComponent`,
+`PathCanonicalize`) and strings (`StrCmp`/`I`/`N`/`NI`, `StrChr`/`RChr`,
+`StrStr`, `StrRStrI`, `StrSpn`, `StrCSpn`, `StrPBrk`, `StrToInt`/`Ex`/`64Ex`,
+`StrDup`, `SHStrDup`, `StrCpy`/`Cat`/`CpyN`/`CatBuff`, `StrTrim`,
+`StrFormatByteSize`). 32-bit programs reach them through the WoW64 bridge.
+`shlpath.exe` checks them, with the examples of the Windows documentation
+where it gives any.
+
 ## Known limits
 
 This is a small Win32 subset, not general Windows application compatibility.

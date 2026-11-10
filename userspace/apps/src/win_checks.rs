@@ -63,7 +63,8 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("winmm wave devices: enumeration, recording, playback and conversion", || run("wavedev.exe", &[]) == Some(0));
     t.check("object security, ACLs, AccessCheck, restricted tokens and the event log", || run("sandbox.exe", &[]) == Some(0));
     t.check("US keyboard layout, key mapping and keyboard state", || run("keyboard.exe", &[]) == Some(0));
-    t.check("shlwapi paths, environment folders, StrStrIW and IsOS", || run("shlpath.exe", &[]) == Some(0));
+    t.check("shlwapi paths and strings (wide and ANSI), environment folders and IsOS", || run("shlpath.exe", &[]) == Some(0));
+    t.check("power status, battery state, power capabilities and platform role", || run("power.exe", &[]) == Some(0));
     t.check("security descriptors on sections and new directories", || run("secattr.exe", &[]) == Some(0));
     t.check("handle inheritance and DuplicateHandle between processes", || run("childproc.exe", &[]) == Some(0));
     t.check("executable images shared copy-on-write between processes", || run("imageshare.exe", &[]) == Some(0));
