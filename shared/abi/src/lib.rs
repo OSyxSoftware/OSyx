@@ -516,6 +516,21 @@ pub mod firmware {
 /// optional second line of `key=value` details. See [`battery`].
 pub const BATTERY_STATUS_PATH: &str = "/run/battery";
 
+/// What each battery says about itself (model, serial number, chemistry,
+/// maker, charge cycles), published by the ACPI service once it has read a
+/// battery; see [`battery::Info`]. Absent while no battery was read.
+pub const BATTERY_INFO_PATH: &str = "/run/battery.info";
+
+/// Temperatures of the firmware's thermal zones, published by the ACPI
+/// service: one line `zone degrees` per zone, degrees Celsius with one
+/// decimal (`THM0 45.0`); see [`battery::parse_thermal`]. Absent on a
+/// machine without thermal zones.
+pub const THERMAL_STATUS_PATH: &str = "/run/thermal";
+
+/// The lid switch, published by the ACPI service: `open` or `closed`.
+/// Absent on a machine without one.
+pub const LID_STATUS_PATH: &str = "/run/lid";
+
 /// `map_ex` flags.
 pub const MAP_FIXED: u64 = 1;
 pub const MAP_ALIGN_64K: u64 = 2;

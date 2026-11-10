@@ -17,16 +17,16 @@ impl Handler for TestHandler {
         unimplemented!()
     }
 
-    fn write_u8(&mut self, _address: usize, _value: u8) {
+    fn write_u8(&self, _address: usize, _value: u8) {
         unimplemented!()
     }
-    fn write_u16(&mut self, _address: usize, _value: u16) {
+    fn write_u16(&self, _address: usize, _value: u16) {
         unimplemented!()
     }
-    fn write_u32(&mut self, _address: usize, _value: u32) {
+    fn write_u32(&self, _address: usize, _value: u32) {
         unimplemented!()
     }
-    fn write_u64(&mut self, _address: usize, _value: u64) {
+    fn write_u64(&self, _address: usize, _value: u64) {
         unimplemented!()
     }
 

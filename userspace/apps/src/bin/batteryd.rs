@@ -9,15 +9,21 @@
 //! the machine and the schedule.
 //!
 //! Every five seconds (two while the firmware misbehaves) the state goes to
-//! `osyx_abi::BATTERY_STATUS_PATH` in the format of `osyx_abi::battery`. A
+//! `osyx_abi::BATTERY_STATUS_PATH` in the format of `osyx_abi::battery`;
+//! what each battery says about itself goes to `BATTERY_INFO_PATH`, the
+//! thermal zones' temperatures (`_TMP`) to `THERMAL_STATUS_PATH` and the lid
+//! switch (`_LID`) to `LID_STATUS_PATH`. A
 //! reading taken while the embedded controller failed is never published:
 //! the last good state is kept, marked stale, and after three bad polls it
 //! turns "unknown".
 //!
 //! The program never exits because it found no battery: a machine whose
-//! namespace only becomes readable later, or whose battery appears after
-//! boot, is scanned again every 30 seconds. "No battery" is published as
-//! `Status::NONE`, which the desktop shows as no indicator.
+//! namespace only becomes readable later is scanned again after 30 seconds,
+//! three times in all; then the namespace is kept and only its thermal
+//! zones and lid are followed. "No battery" is published as `Status::NONE`,
+//! which the desktop shows as no indicator. A battery device that exists
+//! but cannot be read is published as "unknown" and shown as such, and the
+//! firmware method that failed is logged with the interpreter's error.
 //!
 //! The interpreter runs here, not in the kernel: firmware byte code this
 //! interpreter does not handle ends this process, never the system.
@@ -35,6 +41,8 @@ os_std::entry!(main);
 
 /// Delay before re-reading the namespace when no battery device was found.
 const RESCAN_WITHOUT_DEVICES: u64 = 30;
+/// How many times the namespace is read before "no battery device" is final.
+const RESCANS_WITHOUT_DEVICES: u32 = 3;
 
 /// The machine through `nr::FIRMWARE`.
 struct Machine {
@@ -81,6 +89,22 @@ fn table(sig: &[u8; 4], n: u64) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Replaces `path` with `text` in one step (readers never see half a file)
+/// when it differs from what was written `last`.
+fn publish(path: &str, text: &str, last: &mut String, log: bool) {
+    if text == last {
+        return;
+    }
+    if log {
+        println!("batteryd: {path}: {}", text.trim_end().replace('\n', " | "));
+    }
+    let tmp = format!("{path}.tmp");
+    if fs::write(&tmp, text).is_ok() {
+        let _ = fs::rename(&tmp, path);
+    }
+    *last = String::from(text);
+}
+
 fn write_status(text: &str, last: &mut String) {
     if text == last {
         return;
@@ -91,6 +115,52 @@ fn write_status(text: &str, last: &mut String) {
         let _ = fs::rename(tmp, osyx_abi::BATTERY_STATUS_PATH);
     }
     *last = String::from(text);
+}
+
+/// What the firmware offers besides batteries; published while the daemon
+/// waits for a battery too (a desktop computer has thermal zones).
+#[derive(Default)]
+struct Extras {
+    info: String,
+    thermal: String,
+    lid: String,
+}
+
+impl Extras {
+    fn publish(&mut self, acpi: &mut Acpi) {
+        use core::fmt::Write;
+        let mut info = String::new();
+        for id in acpi.identities() {
+            let _ = write!(
+                info,
+                "{}",
+                osyx_abi::battery::Info {
+                    device: id.device,
+                    model: id.model,
+                    serial: id.serial,
+                    technology: id.technology,
+                    vendor: id.vendor,
+                    cycles: id.cycles,
+                }
+            );
+        }
+        if !info.is_empty() || !self.info.is_empty() {
+            publish(osyx_abi::BATTERY_INFO_PATH, &info, &mut self.info, true);
+        }
+        let mut thermal = String::new();
+        for t in acpi.temperatures() {
+            let _ = write!(thermal, "{}", osyx_abi::battery::ThermalLine(&t.zone, t.decicelsius));
+        }
+        if !thermal.is_empty() || !self.thermal.is_empty() {
+            publish(osyx_abi::THERMAL_STATUS_PATH, &thermal, &mut self.thermal, false);
+        }
+        if let Some(open) = acpi.lid_open() {
+            publish(osyx_abi::LID_STATUS_PATH, if open { "open\n" } else { "closed\n" }, &mut self.lid, true);
+        }
+        for problem in acpi.take_problems() {
+            eprintln!("batteryd: firmware method failed: {problem}");
+        }
+    }
 }
 
 fn main() -> i32 {
@@ -114,7 +184,12 @@ fn main() -> i32 {
         println!("batteryd: scan {scan}: {} ACPI table(s), ECDT {}", tables.len(), if ec.is_some() { "found" } else { "absent" });
         let machine = Machine { start: Instant::now() };
         let mut acpi = Acpi::load(machine, ec, &tables, &mut |problem| eprintln!("batteryd: {problem}"));
-        println!("batteryd: {} battery device(s), {} AC adapter(s)", acpi.battery_devices(), acpi.adapter_devices());
+        println!(
+            "batteryd: {} battery device(s), {} AC adapter(s), {} thermal zone(s)",
+            acpi.battery_devices(),
+            acpi.adapter_devices(),
+            acpi.thermal_zones()
+        );
         match acpi.ec_ports() {
             (Some(p), source) => println!("batteryd: {} EC device(s), EC ports {:#x}/{:#x} from {source}", acpi.ec_devices(), p.command, p.data),
             (None, source) => println!("batteryd: no EC ports ({source})"),
@@ -122,7 +197,18 @@ fn main() -> i32 {
         if acpi.battery_devices() == 0 {
             println!("batteryd: no battery device in the namespace; looking again in {RESCAN_WITHOUT_DEVICES} s");
             write_status(&Status::NONE.to_string(), &mut last);
-            thread::sleep(Duration::from_secs(RESCAN_WITHOUT_DEVICES));
+            // The thermal zones and the lid are followed meanwhile. The
+            // namespace is read again a few times (a firmware interface
+            // that was not ready at boot); after that this one is kept:
+            // a machine without a battery device does not grow one, and
+            // its `_INI` methods should not run every half minute forever.
+            let mut extras = Extras::default();
+            let mut rounds = 0;
+            while scan >= RESCANS_WITHOUT_DEVICES || rounds < RESCAN_WITHOUT_DEVICES / 5 {
+                extras.publish(&mut acpi);
+                thread::sleep(Duration::from_secs(5));
+                rounds += 1;
+            }
             continue;
         }
         publish_forever(&mut acpi, &mut last);
@@ -132,10 +218,12 @@ fn main() -> i32 {
 /// Polls the firmware until the process ends.
 fn publish_forever(acpi: &mut Acpi, last: &mut String) -> ! {
     let mut monitor = Monitor::new();
+    let mut extras = Extras::default();
     let mut first = true;
     loop {
         let poll = acpi.poll();
         let status = monitor.update(&poll);
+        extras.publish(acpi);
         if first {
             first = false;
             let st = acpi.stats();

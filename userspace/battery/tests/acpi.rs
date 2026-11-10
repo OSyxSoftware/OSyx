@@ -560,8 +560,10 @@ fn firmware_to_buffer_events_and_notify() {
     };
     let deref_index = |local: u8, i: u64| cat(&[vec![0x83, 0x88, local], int(i), vec![0x00]]);
     let body = cat(&[
-        // Acquire(MUT0, 0xFFFF) ... Release(MUT0)
-        cat(&[vec![0x5B, 0x23], seg("MUT0"), vec![0x0B, 0xFF, 0xFF]]),
+        // Acquire(MUT0, 0xFFFF) ... Release(MUT0). The time-out of an
+        // Acquire is a bare word (iasl emits `5B 23 <name> FF FF`), unlike
+        // the TermArg of Wait below.
+        cat(&[vec![0x5B, 0x23], seg("MUT0"), vec![0xFF, 0xFF]]),
         // Local0 = ToBuffer(2): the state "charging".
         cat(&[vec![0x96], int(2), vec![0x60]]),
         // Local1 = VarPackage(3) { 1000, 500, 12000 }
@@ -620,10 +622,12 @@ fn index_bank_fields_and_data_regions_do_not_stop_parsing() {
         vec![8],
     ]);
     let index_field = cat(&[vec![0x5B, 0x86], pkg_len(index_body.len()), index_body]);
+    // BankField(PDAT, BANK, 0, ...): region, bank register, bank value
+    // (the order iasl emits).
     let bank_body = cat(&[
+        seg("PDAT"),
         seg("BANK"),
         int(0),
-        seg("PDAT"),
         vec![0x01],
         seg("FLD3"),
         vec![8],
@@ -690,7 +694,39 @@ fn a_table_that_stops_parsing_keeps_what_came_before() {
     aml.extend_from_slice(&[0x08, b'X']); // a truncated NameSeg
     let mut problems = Vec::new();
     let mut acpi = Acpi::load(m, Some(EcPorts::LEGACY), &[table(aml)], &mut |s: &str| problems.push(String::from(s)));
-    assert!(problems.iter().any(|p| p.contains("AML offset")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("table 0") && p.contains("skipped")), "{problems:?}");
     assert_eq!(acpi.battery_devices(), 1, "the battery parsed before the problem is kept");
     assert_eq!(Monitor::new().update(&acpi.poll()).percent, 50);
+}
+
+/// A battery method the interpreter cannot run is reported once, with the
+/// interpreter's error, however often the poll repeats.
+#[test]
+fn failing_methods_are_reported_once() {
+    let m = Machine::new();
+    let dev = device(
+        "BAT0",
+        cat(&[
+            name("_HID", eisa("PNP0C0A")),
+            method("_BIF", ret(package(ints(&[0, 50_000, 45_000, 1, 11_400])))),
+            // Return (NOPE): a name no table defines.
+            method("_BST", ret(seg("NOPE"))),
+        ]),
+    );
+    let mut acpi = load(&m, vec![table(scope_sb(dev))]);
+    let poll = acpi.poll();
+    assert_eq!(poll.batteries, vec![None], "present, but no reading");
+    let problems = acpi.take_problems();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("BAT0._BST") && problems[0].contains("NOPE"), "{problems:?}");
+    acpi.poll();
+    assert!(acpi.take_problems().is_empty(), "the same failure is not repeated");
+    // The battery is still shown: present, state unknown.
+    let mut monitor = Monitor::new();
+    let mut status = monitor.update(&acpi.poll());
+    for _ in 0..4 {
+        status = monitor.update(&acpi.poll());
+    }
+    assert_eq!(status.state, State::Unknown);
+    assert!(status.present());
 }

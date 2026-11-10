@@ -231,34 +231,56 @@ impl<H: Hardware> Firmware<H> {
     }
 }
 
+impl<H: Hardware> Firmware<H> {
+    /// Physical memory, `width` bytes. The machine only takes accesses
+    /// aligned to their width; a field at an odd address (firmware lays
+    /// its memory-mapped embedded controller out byte by byte) is read and
+    /// written a byte at a time.
+    fn phys_read(&self, address: u64, width: u8) -> u64 {
+        if address.is_multiple_of(width as u64) {
+            return self.hw.phys_read(address, width);
+        }
+        (0..width as u64).fold(0, |value, i| value | (self.hw.phys_read(address + i, 1) & 0xff) << (8 * i))
+    }
+
+    fn phys_write(&self, address: u64, width: u8, value: u64) {
+        if address.is_multiple_of(width as u64) {
+            return self.hw.phys_write(address, width, value);
+        }
+        for i in 0..width as u64 {
+            self.hw.phys_write(address + i, 1, (value >> (8 * i)) & 0xff);
+        }
+    }
+}
+
 fn pci_address(bus: u8, device: u8, function: u8) -> u64 {
     (bus as u64) << 16 | (device as u64) << 8 | function as u64
 }
 
 impl<H: Hardware> Handler for Firmware<H> {
     fn read_u8(&self, address: usize) -> u8 {
-        self.hw.phys_read(address as u64, 1) as u8
+        self.phys_read(address as u64, 1) as u8
     }
     fn read_u16(&self, address: usize) -> u16 {
-        self.hw.phys_read(address as u64, 2) as u16
+        self.phys_read(address as u64, 2) as u16
     }
     fn read_u32(&self, address: usize) -> u32 {
-        self.hw.phys_read(address as u64, 4) as u32
+        self.phys_read(address as u64, 4) as u32
     }
     fn read_u64(&self, address: usize) -> u64 {
-        self.hw.phys_read(address as u64, 8)
+        self.phys_read(address as u64, 8)
     }
-    fn write_u8(&mut self, address: usize, value: u8) {
-        self.hw.phys_write(address as u64, 1, value as u64);
+    fn write_u8(&self, address: usize, value: u8) {
+        self.phys_write(address as u64, 1, value as u64);
     }
-    fn write_u16(&mut self, address: usize, value: u16) {
-        self.hw.phys_write(address as u64, 2, value as u64);
+    fn write_u16(&self, address: usize, value: u16) {
+        self.phys_write(address as u64, 2, value as u64);
     }
-    fn write_u32(&mut self, address: usize, value: u32) {
-        self.hw.phys_write(address as u64, 4, value as u64);
+    fn write_u32(&self, address: usize, value: u32) {
+        self.phys_write(address as u64, 4, value as u64);
     }
-    fn write_u64(&mut self, address: usize, value: u64) {
-        self.hw.phys_write(address as u64, 8, value);
+    fn write_u64(&self, address: usize, value: u64) {
+        self.phys_write(address as u64, 8, value);
     }
     fn read_io_u8(&self, port: u16) -> u8 {
         self.hw.port_in(port, 1) as u8
@@ -321,6 +343,9 @@ impl<H: Hardware> Handler for Firmware<H> {
     }
     fn sleep_ms(&self, ms: u32) {
         self.hw.sleep_ms(ms.min(MAX_FIRMWARE_SLEEP_MS as u32) as u64);
+    }
+    fn timer_100ns(&self) -> u64 {
+        self.hw.now_ms().saturating_mul(10_000)
     }
     fn handle_fatal_error(&self, _fatal_type: u8, _fatal_code: u32, _fatal_arg: u64) {
         // The interpreter must not take the daemon down with it: the

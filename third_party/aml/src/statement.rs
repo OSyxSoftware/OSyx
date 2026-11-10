@@ -46,9 +46,43 @@ where
             def_signal(),
             def_sleep(),
             def_stall(),
-            def_while()
+            def_while(),
+            def_load(),
+            def_unload()
         ),
     )
+}
+
+/// OSyx: `Load` asks the host to load a table kept in a region or field
+/// (CPU power tables, usually); none is loaded, and the statement is
+/// consumed so the method goes on.
+fn def_load<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefLoad := ExtOpPrefix 0x20 NameString Target
+     */
+    ext_opcode(opcode::EXT_DEF_LOAD_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefLoad",
+            crate::name_object::name_string().then(crate::name_object::target()),
+        ))
+        .discard_result()
+}
+
+/// OSyx: `Unload` of a table that was never loaded: nothing to do.
+fn def_unload<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefUnload := ExtOpPrefix 0x2A SuperName
+     */
+    ext_opcode(opcode::EXT_DEF_UNLOAD_OP)
+        .then(comment_scope(DebugVerbosity::AllScopes, "DefUnload", super_name()))
+        .discard_result()
 }
 
 fn def_break<'a, 'c>() -> impl Parser<'a, 'c, ()>

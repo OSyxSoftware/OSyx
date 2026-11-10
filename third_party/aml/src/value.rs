@@ -193,6 +193,26 @@ pub enum AmlValue {
         offset: u64,
         length: u64,
     },
+    /// OSyx: a field of an `IndexField`: the byte at `offset / 8` is
+    /// selected by writing its number to the `index` field and then read or
+    /// written through the `data` field.
+    IndexField {
+        index: AmlHandle,
+        data: AmlHandle,
+        flags: FieldFlags,
+        offset: u64,
+        length: u64,
+    },
+    /// OSyx: a field of a `BankField`: a field of `region` that is only
+    /// valid while the `bank` field holds `bank_value`.
+    BankField {
+        region: AmlHandle,
+        bank: AmlHandle,
+        bank_value: u64,
+        flags: FieldFlags,
+        offset: u64,
+        length: u64,
+    },
     Device,
     Method {
         flags: MethodFlags,
@@ -254,7 +274,7 @@ impl AmlValue {
             AmlValue::Integer(_) => AmlType::Integer,
             AmlValue::String(_) => AmlType::String,
             AmlValue::OpRegion { .. } => AmlType::OpRegion,
-            AmlValue::Field { .. } => AmlType::FieldUnit,
+            AmlValue::Field { .. } | AmlValue::IndexField { .. } | AmlValue::BankField { .. } => AmlType::FieldUnit,
             AmlValue::Device => AmlType::Device,
             AmlValue::Method { .. } => AmlType::Method,
             AmlValue::Buffer(_) => AmlType::Buffer,
@@ -301,8 +321,25 @@ impl AmlValue {
              * Read from a field or buffer field. These can return either a `Buffer` or an `Integer`, so we make sure to call
              * `as_integer` on the result.
              */
-            AmlValue::Field { .. } => self.read_field(context)?.as_integer(context),
+            AmlValue::Field { .. } | AmlValue::IndexField { .. } | AmlValue::BankField { .. } => self.read_field(context)?.as_integer(context),
             AmlValue::BufferField { .. } => self.read_buffer_field(context)?.as_integer(context),
+            /*
+             * OSyx: "0x" marks hexadecimal, otherwise the leading decimal
+             * digits count (the implicit conversion of §19.3.5.7).
+             */
+            AmlValue::String(s) => {
+                let s = s.trim();
+                Ok(match s.strip_prefix("0x").or(s.strip_prefix("0X")) {
+                    Some(hex) => {
+                        let end = hex.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(hex.len());
+                        u64::from_str_radix(&hex[..end], 16).unwrap_or(0)
+                    }
+                    None => {
+                        let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+                        s[..end].parse().unwrap_or(0)
+                    }
+                })
+            }
 
             _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::Integer }),
         }
@@ -311,8 +348,18 @@ impl AmlValue {
     pub fn as_buffer(&self, context: &AmlContext) -> Result<Arc<Spinlock<Vec<u8>>>, AmlError> {
         match self {
             AmlValue::Buffer(ref bytes) => Ok(bytes.clone()),
-            // TODO: implement conversion of String and Integer to Buffer
-            AmlValue::Field { .. } => self.read_field(context)?.as_buffer(context),
+            // OSyx: an integer is its eight bytes, a string its characters
+            // and the terminating zero.
+            AmlValue::Integer(value) => Ok(Arc::new(Spinlock::new(value.to_le_bytes().to_vec()))),
+            AmlValue::Boolean(value) => {
+                Ok(Arc::new(Spinlock::new(if *value { u64::MAX } else { 0 }.to_le_bytes().to_vec())))
+            }
+            AmlValue::String(s) => {
+                let mut bytes = s.as_bytes().to_vec();
+                bytes.push(0);
+                Ok(Arc::new(Spinlock::new(bytes)))
+            }
+            AmlValue::Field { .. } | AmlValue::IndexField { .. } | AmlValue::BankField { .. } => self.read_field(context)?.as_buffer(context),
             AmlValue::BufferField { .. } => self.read_buffer_field(context)?.as_buffer(context),
             _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::Buffer }),
         }
@@ -321,9 +368,38 @@ impl AmlValue {
     pub fn as_string(&self, context: &AmlContext) -> Result<String, AmlError> {
         match self {
             AmlValue::String(ref string) => Ok(string.clone()),
-            // TODO: implement conversion of Buffer to String
-            AmlValue::Field { .. } => self.read_field(context)?.as_string(context),
+            // OSyx: a buffer is text up to its first zero; an integer its
+            // hexadecimal digits.
+            AmlValue::Buffer(bytes) => {
+                let bytes = bytes.lock();
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                Ok(bytes[..end].iter().map(|&b| b as char).collect())
+            }
+            AmlValue::Integer(value) => Ok(alloc::format!("{value:X}")),
+            AmlValue::Field { .. } | AmlValue::IndexField { .. } | AmlValue::BankField { .. } => self.read_field(context)?.as_string(context),
+            AmlValue::BufferField { .. } => self.read_buffer_field(context)?.as_string(context),
             _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::String }),
+        }
+    }
+
+    /// OSyx: the value an operand evaluates to: fields are read (once, now),
+    /// everything else is itself. A field stored as an object would be read
+    /// again later, when the firmware has long selected another page of the
+    /// embedded controller.
+    pub fn resolved(self, context: &AmlContext) -> Result<AmlValue, AmlError> {
+        match self {
+            AmlValue::Field { .. } | AmlValue::IndexField { .. } | AmlValue::BankField { .. } => self.read_field(context),
+            AmlValue::BufferField { .. } => self.read_buffer_field(context),
+            other => Ok(other),
+        }
+    }
+
+    /// OSyx: a copy that shares no buffer with `self` (`Store` copies).
+    pub fn detached(&self) -> AmlValue {
+        match self {
+            AmlValue::Buffer(bytes) => AmlValue::Buffer(Arc::new(Spinlock::new(bytes.lock().clone()))),
+            AmlValue::Package(items) => AmlValue::Package(items.iter().map(AmlValue::detached).collect()),
+            other => other.clone(),
         }
     }
 
@@ -402,6 +478,7 @@ impl AmlValue {
         match desired_type {
             AmlType::Integer => self.as_integer(context).map(|value| AmlValue::Integer(value)),
             AmlType::Buffer => self.as_buffer(context).map(|value| AmlValue::Buffer(value)),
+            AmlType::String => self.as_string(context).map(AmlValue::String),
             AmlType::FieldUnit => Err(AmlError::IncompatibleValueConversion {
                 current: self.type_of(),
                 target: AmlType::FieldUnit,
@@ -423,23 +500,18 @@ impl AmlValue {
         }
     }
 
-    /// OSyx: where a field of `length` bits at bit `offset` is accessed:
-    /// (byte offset in the region, aligned to the access; access size in
-    /// bits; bit position of the field inside that access). Upstream 0.16.4
-    /// passed the bit offset as a byte offset.
-    fn field_access(offset: u64, length: u64, minimum: u64, maximum: u64) -> Result<(u64, u64, u64), AmlError> {
-        let mut access = u64::max(minimum, 8);
-        loop {
-            let bytes = access / 8;
-            let byte = (offset / 8) & !(bytes - 1);
-            let shift = offset - byte * 8;
-            if shift + length <= access {
-                return Ok((byte, access, shift));
-            }
-            if access >= maximum {
-                return Err(AmlError::FieldInvalidAccessSize);
-            }
-            access *= 2;
+    /// OSyx: the width in bits of one access to `region` for a field with
+    /// `flags`: the field's access type, limited to what the region's
+    /// address space can do.
+    fn access_unit(context: &AmlContext, region: AmlHandle, flags: &FieldFlags) -> Result<u64, AmlError> {
+        Ok(u64::min(Self::minimum_access_size(flags)?, Self::maximum_access_size(context, region)?))
+    }
+
+    fn low_bits(length: u64) -> u64 {
+        if length >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << length) - 1
         }
     }
 
@@ -452,126 +524,234 @@ impl AmlValue {
         })
     }
 
+    /// OSyx: reads `length` (at most 64) bits at bit `offset` of a field's
+    /// backing store: an operation region, or an index/data register pair.
+    fn read_bits(&self, context: &AmlContext, offset: u64, length: u64) -> Result<u64, AmlError> {
+        match self {
+            AmlValue::Field { region, flags, .. } => {
+                /*
+                 * The region is accessed in units of the field's access
+                 * width, as many as the field touches: a 16-bit field at
+                 * an odd byte of a `ByteAcc` region is two byte reads,
+                 * wherever it starts.
+                 */
+                let unit = Self::access_unit(context, *region, flags)?;
+                let (first, last) = (offset / unit, (offset + length - 1) / unit);
+                let mut raw = 0u128;
+                for (i, n) in (first..=last).enumerate() {
+                    raw |= (context.read_region(*region, n * unit / 8, unit)? as u128) << (unit as usize * i);
+                }
+                Ok(((raw >> (offset - first * unit)) as u64) & Self::low_bits(length))
+            }
+            AmlValue::BankField { region, bank, bank_value, flags, .. } => {
+                context.namespace.get(*bank)?.clone().write_field_value(AmlValue::Integer(*bank_value), context)?;
+                AmlValue::Field { region: *region, flags: *flags, offset, length }.read_bits(context, offset, length)
+            }
+            AmlValue::IndexField { index, data, .. } => {
+                // Byte by byte: select, then read through the data register.
+                let (first, last) = (offset / 8, (offset + length - 1) / 8);
+                let mut raw = 0u128;
+                for (i, byte) in (first..=last).enumerate() {
+                    context.namespace.get(*index)?.clone().write_field_value(AmlValue::Integer(byte), context)?;
+                    let value = context.namespace.get(*data)?.read_field(context)?.as_integer(context)?;
+                    raw |= ((value & 0xff) as u128) << (8 * i);
+                }
+                Ok(((raw >> (offset - first * 8)) as u64) & Self::low_bits(length))
+            }
+            _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::FieldUnit }),
+        }
+    }
+
+    /// OSyx: writes the low `length` (at most 64) bits of `value` at bit
+    /// `offset` of a field's backing store.
+    fn write_bits(&self, context: &AmlContext, offset: u64, length: u64, value: u64) -> Result<(), AmlError> {
+        match self {
+            AmlValue::Field { region, flags, .. } => {
+                let unit = Self::access_unit(context, *region, flags)?;
+                let (first, last) = (offset / unit, (offset + length - 1) / unit);
+                let shift = offset - first * unit;
+                let mask = (Self::low_bits(length) as u128) << shift;
+                let bits = ((value as u128) << shift) & mask;
+                let unit_mask = Self::low_bits(unit);
+                for (i, n) in (first..=last).enumerate() {
+                    let covered = (mask >> (unit as usize * i)) as u64 & unit_mask;
+                    let new = (bits >> (unit as usize * i)) as u64 & unit_mask;
+                    // A unit the field covers whole is written without a read.
+                    let old = if covered == unit_mask {
+                        0
+                    } else {
+                        match flags.field_update_rule()? {
+                            FieldUpdateRule::Preserve => context.read_region(*region, n * unit / 8, unit)?,
+                            FieldUpdateRule::WriteAsOnes => u64::MAX,
+                            FieldUpdateRule::WriteAsZeros => 0,
+                        }
+                    };
+                    context.write_region(*region, n * unit / 8, unit, (old & !covered) | new)?;
+                }
+                Ok(())
+            }
+            AmlValue::BankField { region, bank, bank_value, flags, .. } => {
+                context.namespace.get(*bank)?.clone().write_field_value(AmlValue::Integer(*bank_value), context)?;
+                AmlValue::Field { region: *region, flags: *flags, offset, length }.write_bits(context, offset, length, value)
+            }
+            AmlValue::IndexField { index, data, flags, .. } => {
+                let (first, last) = (offset / 8, (offset + length - 1) / 8);
+                let shift = offset - first * 8;
+                let mask = (Self::low_bits(length) as u128) << shift;
+                let bits = ((value as u128) << shift) & mask;
+                for (i, byte) in (first..=last).enumerate() {
+                    let byte_mask = (mask >> (8 * i)) as u8;
+                    let new = (bits >> (8 * i)) as u8;
+                    context.namespace.get(*index)?.clone().write_field_value(AmlValue::Integer(byte), context)?;
+                    let old = if byte_mask == 0xff {
+                        0
+                    } else {
+                        match flags.field_update_rule()? {
+                            FieldUpdateRule::Preserve => {
+                                context.namespace.get(*data)?.read_field(context)?.as_integer(context)? as u8
+                            }
+                            FieldUpdateRule::WriteAsOnes => 0xff,
+                            FieldUpdateRule::WriteAsZeros => 0,
+                        }
+                    };
+                    let merged = (old & !byte_mask) | (new & byte_mask);
+                    context.namespace.get(*data)?.clone().write_field_value(AmlValue::Integer(merged as u64), context)?;
+                }
+                Ok(())
+            }
+            _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::FieldUnit }),
+        }
+    }
+
+    fn field_span(&self) -> Result<(u64, u64), AmlError> {
+        match self {
+            AmlValue::Field { offset, length, .. }
+            | AmlValue::IndexField { offset, length, .. }
+            | AmlValue::BankField { offset, length, .. } => Ok((*offset, *length)),
+            _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::FieldUnit }),
+        }
+    }
+
     /// Reads from a field of an opregion, returning either a `AmlValue::Integer` or an `AmlValue::Buffer`,
     /// depending on the size of the field.
+    ///
+    /// OSyx: a field wider than 64 bits is a `Buffer`, read a byte at a
+    /// time (the strings a firmware keeps in its embedded controller).
     pub fn read_field(&self, context: &AmlContext) -> Result<AmlValue, AmlError> {
-        if let AmlValue::Field { region, flags, offset, length } = self {
-            let maximum = Self::maximum_access_size(context, *region)?;
-            let minimum = Self::minimum_access_size(flags)?;
-            let (byte, access, shift) = Self::field_access(*offset, *length, minimum, maximum)?;
-            let raw = context.read_region(*region, byte, access)?;
-            Ok(AmlValue::Integer(raw.get_bits(shift as usize..(shift + *length) as usize)))
-        } else {
-            Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::FieldUnit })
+        let (offset, length) = self.field_span()?;
+        if length == 0 {
+            return Err(AmlError::FieldInvalidAccessSize);
         }
+        if length <= 64 {
+            return Ok(AmlValue::Integer(self.read_bits(context, offset, length)?));
+        }
+        let mut bytes = Vec::with_capacity(((length + 7) / 8) as usize);
+        let mut done = 0;
+        while done < length {
+            let n = u64::min(8, length - done);
+            bytes.push(self.read_bits(context, offset + done, n)? as u8);
+            done += n;
+        }
+        Ok(AmlValue::Buffer(Arc::new(Spinlock::new(bytes))))
     }
 
     pub fn write_field(&mut self, value: AmlValue, context: &mut AmlContext) -> Result<(), AmlError> {
-        if let AmlValue::Field { region, flags, offset, length } = self {
-            let maximum = Self::maximum_access_size(context, *region)?;
-            let minimum = Self::minimum_access_size(flags)?;
-            let (byte, access, shift) = Self::field_access(*offset, *length, minimum, maximum)?;
-            let mut raw = match flags.field_update_rule()? {
-                FieldUpdateRule::Preserve => context.read_region(*region, byte, access)?,
-                FieldUpdateRule::WriteAsOnes => u64::MAX,
-                FieldUpdateRule::WriteAsZeros => 0,
-            };
-            raw.set_bits(shift as usize..(shift + *length) as usize, value.as_integer(context)?);
-            context.write_region(*region, byte, access, raw)
-        } else {
-            Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::FieldUnit })
-        }
+        self.write_field_value(value, context)
     }
 
-    pub fn read_buffer_field(&self, context: &AmlContext) -> Result<AmlValue, AmlError> {
-        use bitvec::view::BitView;
+    /// OSyx: [`AmlValue::write_field`] without the exclusive borrows; an
+    /// index register is written while a field is being read.
+    pub(crate) fn write_field_value(&self, value: AmlValue, context: &AmlContext) -> Result<(), AmlError> {
+        let (offset, length) = self.field_span()?;
+        if length == 0 {
+            return Err(AmlError::FieldInvalidAccessSize);
+        }
+        if length <= 64 {
+            return self.write_bits(context, offset, length, value.as_integer(context)?);
+        }
+        // Wide field: the source's bytes, zero-extended.
+        let source = value.as_buffer(context)?;
+        let source = source.lock();
+        let mut done = 0;
+        while done < length {
+            let n = u64::min(8, length - done);
+            let byte = source.get((done / 8) as usize).copied().unwrap_or(0);
+            self.write_bits(context, offset + done, n, byte as u64)?;
+            done += n;
+        }
+        Ok(())
+    }
 
+    /// OSyx: the bits `offset .. offset + length` of `bytes`, least
+    /// significant first, as bytes (the last one zero-padded).
+    fn extract_bits(bytes: &[u8], offset: usize, length: usize) -> Vec<u8> {
+        let mut out = alloc::vec![0u8; length.div_ceil(8)];
+        for i in 0..length {
+            let bit = offset + i;
+            if bytes[bit / 8] >> (bit % 8) & 1 != 0 {
+                out[i / 8] |= 1 << (i % 8);
+            }
+        }
+        out
+    }
+
+    /// OSyx: reads a buffer field: an `Integer` up to 64 bits, a `Buffer`
+    /// beyond. (Upstream 0.16.4 panicked on fields of 33 to 64 bits.)
+    pub fn read_buffer_field(&self, _context: &AmlContext) -> Result<AmlValue, AmlError> {
         if let AmlValue::BufferField { buffer_data, offset, length } = self {
             let offset = *offset as usize;
             let length = *length as usize;
             let inner_data = buffer_data.lock();
 
-            if (offset + length) > (inner_data.len() * 8) {
+            if offset.checked_add(length).is_none_or(|end| end > inner_data.len() * 8) {
                 return Err(AmlError::BufferFieldIndexesOutOfBounds);
             }
 
-            let bitslice = inner_data.view_bits::<bitvec::order::Lsb0>();
-            let bits = &bitslice[offset..(offset + length)];
-
+            let bits = Self::extract_bits(&inner_data, offset, length);
             if length > 64 {
-                let mut bitvec = bits.to_bitvec();
-                bitvec.set_uninitialized(false);
-                Ok(AmlValue::Buffer(Arc::new(spinning_top::Spinlock::new(bitvec.into_vec()))))
-            } else if length > 32 {
-                /*
-                 * TODO: this is a pretty gross hack to work around a weird limitation with the `bitvec` crate on
-                 * 32-bit platforms. For reasons beyond me right now, it can't operate on a `u64` on a 32-bit
-                 * platform, so we manually extract two `u32`s and stick them together. In the future, we should
-                 * definitely have a closer look at what `bitvec` is doing and see if we can fix this code, or
-                 * replace it with a different crate. This should hold everything vaguely together until we have
-                 * time to do that.
-                 */
-                let mut upper = 0u32;
-                let mut lower = 0u32;
-                lower.view_bits_mut::<bitvec::order::Lsb0>()[0..32].clone_from_bitslice(bits);
-                upper.view_bits_mut::<bitvec::order::Lsb0>()[0..(length - 32)].clone_from_bitslice(&bits[32..]);
-                Ok(AmlValue::Integer((upper as u64) << 32 + (lower as u64)))
+                Ok(AmlValue::Buffer(Arc::new(Spinlock::new(bits))))
             } else {
-                let mut value = 0u32;
-                value.view_bits_mut::<bitvec::order::Lsb0>()[0..length].clone_from_bitslice(bits);
-                Ok(AmlValue::Integer(value as u64))
+                let mut value = [0u8; 8];
+                value[..bits.len()].copy_from_slice(&bits);
+                Ok(AmlValue::Integer(u64::from_le_bytes(value)))
             }
         } else {
             Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::BufferField })
         }
     }
 
+    /// OSyx: writes a buffer field. The whole field is overwritten: the
+    /// source is truncated or zero-extended to the field's length.
     pub fn write_buffer_field(&mut self, value: AmlValue, context: &mut AmlContext) -> Result<(), AmlError> {
-        use bitvec::view::BitView;
-
         if let AmlValue::BufferField { buffer_data, offset, length } = self {
             let offset = *offset as usize;
             let length = *length as usize;
-            // TODO: check these against the size of the buffer to be written into
+            let source: Vec<u8> = match value {
+                AmlValue::Integer(value) => value.to_le_bytes().to_vec(),
+                AmlValue::Boolean(value) => alloc::vec![value as u8],
+                // Copied out first: the source may be the field's own buffer.
+                AmlValue::Buffer(bytes) => bytes.lock().clone(),
+                AmlValue::String(text) => text.into_bytes(),
+                other @ (AmlValue::Field { .. }
+                | AmlValue::IndexField { .. }
+                | AmlValue::BankField { .. }
+                | AmlValue::BufferField { .. }) => other.resolved(context)?.as_buffer(context)?.lock().clone(),
+                other => return Err(AmlError::TypeCannotBeWrittenToBufferField(other.type_of())),
+            };
             let mut inner_data = buffer_data.lock();
-            let bitslice = inner_data.view_bits_mut::<bitvec::order::Lsb0>();
-
-            match value {
-                AmlValue::Integer(value) => {
-                    /*
-                     * When an `Integer` is written into a `BufferField`, the entire contents are overwritten. If
-                     * it's smaller than the length of the buffer field, it's zero-extended. If it's larger, the
-                     * upper bits are truncated.
-                     */
-                    let bits_to_copy = cmp::min(length, 64);
-                    bitslice[offset..(offset + bits_to_copy)]
-                        .copy_from_bitslice(&value.to_le_bytes().view_bits()[..(bits_to_copy as usize)]);
-                    // Zero extend to the end of the buffer field
-                    bitslice[(offset + bits_to_copy)..(offset + length)].fill(false);
-                    Ok(())
-                }
-                AmlValue::Boolean(value) => {
-                    bitslice.set(offset, value);
-                    Ok(())
-                }
-                AmlValue::Buffer(value) => {
-                    /*
-                     * When a `Buffer` is written into a `BufferField`, the entire contents are copied into the
-                     * field. If the buffer is smaller than the size of the buffer field, it is zero extended. If
-                     * the buffer is larger, the upper bits are truncated.
-                     * XXX: this behaviour is only explicitly defined in ACPI 2.0+. While undefined in ACPI 1.0,
-                     * we produce the same behaviour there.
-                     */
-                    let value_data = value.lock();
-                    let bits_to_copy = cmp::min(length, value_data.len() * 8);
-                    bitslice[offset..(offset + bits_to_copy)]
-                        .copy_from_bitslice(&value_data.view_bits()[..(bits_to_copy as usize)]);
-                    // Zero extend to the end of the buffer field
-                    bitslice[(offset + bits_to_copy)..(offset + length)].fill(false);
-                    Ok(())
-                }
-                _ => Err(AmlError::TypeCannotBeWrittenToBufferField(value.type_of())),
+            if offset.checked_add(length).is_none_or(|end| end > inner_data.len() * 8) {
+                return Err(AmlError::BufferFieldIndexesOutOfBounds);
             }
+            for i in 0..length {
+                let bit = source.get(i / 8).is_some_and(|byte| byte >> (i % 8) & 1 != 0);
+                let at = offset + i;
+                if bit {
+                    inner_data[at / 8] |= 1 << (at % 8);
+                } else {
+                    inner_data[at / 8] &= !(1 << (at % 8));
+                }
+            }
+            Ok(())
         } else {
             Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::BufferField })
         }
@@ -586,13 +766,18 @@ impl AmlValue {
     ///      identical, the lengths are compared. Luckily, the Rust standard library implements lexicographic
     ///      comparison of strings and `[u8]` for us already.
     pub fn cmp(&self, other: AmlValue, context: &mut AmlContext) -> Result<cmp::Ordering, AmlError> {
-        let self_inner =
-            if self.type_of() == AmlType::FieldUnit { self.read_field(context)? } else { self.clone() };
+        let self_inner = self.clone().resolved(context)?;
 
         match self_inner.type_of() {
-            AmlType::Integer => Ok(self.as_integer(context)?.cmp(&other.as_integer(context)?)),
-            AmlType::Buffer => Ok(self.as_buffer(context)?.lock().cmp(&other.as_buffer(context)?.lock())),
-            AmlType::String => Ok(self.as_string(context)?.cmp(&other.as_string(context)?)),
+            AmlType::Integer => Ok(self_inner.as_integer(context)?.cmp(&other.as_integer(context)?)),
+            AmlType::Buffer => {
+                // OSyx: both sides are copied out first: they may be the
+                // same buffer, and the lock is not re-entrant.
+                let left = self_inner.as_buffer(context)?.lock().clone();
+                let right = other.as_buffer(context)?.lock().clone();
+                Ok(left.cmp(&right))
+            }
+            AmlType::String => Ok(self_inner.as_string(context)?.cmp(&other.as_string(context)?)),
             typ => Err(AmlError::TypeCannotBeCompared(typ)),
         }
     }

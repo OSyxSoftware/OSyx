@@ -37,17 +37,104 @@ where
     /*
      * TermList := Nothing | <TermObj TermList>
      */
-    // TODO: why does this use still_parsing, instead of just taking the whole thing and parsing it til it's empty?
     move |mut input: &'a [u8], mut context: &'c mut AmlContext| {
         while list_length.still_parsing(input) {
-            // TODO: currently, we ignore the value of the expression. We may need to propagate
-            // this.
-            let (new_input, new_context, _) = term_object().parse(input, context)?;
-            input = new_input;
-            context = new_context;
+            let start = input;
+            let scope = context.current_scope.clone();
+            match term_object().parse(input, context) {
+                Ok((new_input, new_context, _)) => {
+                    input = new_input;
+                    context = new_context;
+                }
+                /*
+                 * OSyx: while a table is loaded (no method runs), an object
+                 * this interpreter cannot follow costs that object, or at
+                 * worst the rest of its enclosing scope - not the rest of
+                 * the table. Firmware tables are large and one unsupported
+                 * construct early in the DSDT must not hide the devices
+                 * (embedded controller, battery) defined after it.
+                 */
+                Err((_, new_context, Propagate::Err(err))) if new_context.method_context.is_none() => {
+                    context = new_context;
+                    context.current_scope = scope;
+                    let end = &start[start.len() - (list_length.end_offset as usize).min(start.len())..];
+                    let skipped = skip_object(start).filter(|rest| rest.len() >= end.len());
+                    context.note_load_error(err, skipped.is_some());
+                    input = skipped.unwrap_or(end);
+                }
+                Err(other) => return Err(other),
+            }
         }
 
         Ok((input, context, ()))
+    }
+}
+
+/// OSyx: the stream after the object at the start of `input`, when its
+/// length can be told without understanding it: an object that carries a
+/// `PkgLength`, or a `Name` of a constant, buffer or package.
+fn skip_object(input: &[u8]) -> Option<&[u8]> {
+    /// The stream after an encoded `PkgLength`-delimited body that starts at `input`.
+    fn after_pkg(input: &[u8]) -> Option<&[u8]> {
+        let lead = *input.first()?;
+        let extra = (lead >> 6) as usize;
+        let mut length = if extra == 0 { (lead & 0x3f) as usize } else { (lead & 0x0f) as usize };
+        for i in 0..extra {
+            length |= (*input.get(1 + i)? as usize) << (4 + 8 * i);
+        }
+        (length > extra).then_some(())?;
+        input.get(length..)
+    }
+    /// The stream after a `NameString`.
+    fn after_name(mut input: &[u8]) -> Option<&[u8]> {
+        while matches!(input.first(), Some(&opcode::ROOT_CHAR) | Some(&opcode::PREFIX_CHAR)) {
+            input = &input[1..];
+        }
+        match *input.first()? {
+            opcode::NULL_NAME => input.get(1..),
+            opcode::DUAL_NAME_PREFIX => input.get(9..),
+            opcode::MULTI_NAME_PREFIX => input.get(2 + 4 * (*input.get(1)? as usize)..),
+            _ => input.get(4..),
+        }
+    }
+    match *input.first()? {
+        opcode::DEF_SCOPE_OP
+        | opcode::DEF_METHOD_OP
+        | opcode::DEF_BUFFER_OP
+        | opcode::DEF_PACKAGE_OP
+        | opcode::DEF_VAR_PACKAGE_OP
+        | opcode::DEF_IF_ELSE_OP
+        | opcode::DEF_ELSE_OP
+        | opcode::DEF_WHILE_OP => after_pkg(&input[1..]),
+        opcode::EXT_OPCODE_PREFIX => match *input.get(1)? {
+            opcode::EXT_DEF_FIELD_OP
+            | opcode::EXT_DEF_DEVICE_OP
+            | opcode::EXT_DEF_PROCESSOR_OP
+            | opcode::EXT_DEF_POWER_RES_OP
+            | opcode::EXT_DEF_THERMAL_ZONE_OP
+            | opcode::EXT_DEF_INDEX_FIELD_OP
+            | opcode::EXT_DEF_BANK_FIELD_OP => after_pkg(&input[2..]),
+            // Mutex and Event: a name, and a flags byte for the mutex.
+            opcode::EXT_DEF_MUTEX_OP => after_name(&input[2..])?.get(1..),
+            opcode::EXT_DEF_EVENT_OP => after_name(&input[2..]),
+            _ => None,
+        },
+        opcode::DEF_NAME_OP => {
+            let value = after_name(&input[1..])?;
+            match *value.first()? {
+                opcode::ZERO_OP | opcode::ONE_OP | opcode::ONES_OP => value.get(1..),
+                opcode::BYTE_CONST => value.get(2..),
+                opcode::WORD_CONST => value.get(3..),
+                opcode::DWORD_CONST => value.get(5..),
+                opcode::QWORD_CONST => value.get(9..),
+                opcode::STRING_PREFIX => value.get(value.iter().position(|&b| b == 0)? + 1..),
+                opcode::DEF_BUFFER_OP | opcode::DEF_PACKAGE_OP | opcode::DEF_VAR_PACKAGE_OP => after_pkg(&value[1..]),
+                _ => None,
+            }
+        }
+        opcode::DEF_ALIAS_OP => after_name(after_name(&input[1..])?),
+        opcode::DEF_EXTERNAL_OP => after_name(&input[1..])?.get(2..),
+        _ => None,
     }
 }
 
@@ -455,7 +542,10 @@ where
                         0x08 => RegionSpace::GeneralPurposeIo,
                         0x09 => RegionSpace::GenericSerialBus,
                         space @ 0x80..=0xff => RegionSpace::OemDefined(space),
-                        byte => return (Err(Propagate::Err(AmlError::InvalidRegionSpace(byte))), context),
+                        // OSyx: spaces defined after ACPI 5 (PCC, platform
+                        // runtime, ...) are kept as regions nothing can
+                        // access, so their fields still get their names.
+                        byte => RegionSpace::OemDefined(byte),
                     };
                     let offset = match offset.as_integer(context) {
                         Ok(offset) => offset,
@@ -543,6 +633,28 @@ pub fn field_element<'a, 'c>(
 where
     'c: 'a,
 {
+    backed_field_element(region_handle.map(FieldBacking::Region), flags, current_offset)
+}
+
+/// OSyx: what the fields of a field list are read and written through.
+#[derive(Clone, Copy)]
+pub enum FieldBacking {
+    /// An operation region (`Field`).
+    Region(AmlHandle),
+    /// An index and a data register (`IndexField`).
+    Index { index: AmlHandle, data: AmlHandle },
+    /// An operation region behind a bank register (`BankField`).
+    Bank { region: AmlHandle, bank: AmlHandle, value: u64 },
+}
+
+fn backed_field_element<'a, 'c>(
+    backing: Option<FieldBacking>,
+    flags: FieldFlags,
+    current_offset: u64,
+) -> impl Parser<'a, 'c, u64>
+where
+    'c: 'a,
+{
     /*
      * FieldElement := NamedField | ReservedField | AccessField | ExtendedAccessField |
      *                 ConnectField
@@ -580,25 +692,42 @@ where
     // A connect field names (or describes) an interrupt or controller the
     // fields belong to. Its resources are not interpreted.
     let connect_field = opcode(opcode::CONNECT_FIELD)
-        .then(choice!(name_string().map(|_| Ok(())), def_buffer().map(|_| Ok(()))))
+        // OSyx: the buffer first: a name parser given a buffer opcode
+        // reports a malformed name instead of declining.
+        .then(choice!(def_buffer().map(|_| Ok(())), name_string().map(|_| Ok(()))))
         .map(|_| Ok(0));
 
     let named_field = name_seg().then(pkg_length()).map_with_context(move |(name_seg, length), context| {
-        // Fields of an `IndexField`/`BankField` are not modelled (they would
-        // need a write to the index register before every access), so their
-        // names are consumed without being added to the namespace.
-        if let Some(region_handle) = region_handle {
+        // Fields of a `BankField` are not modelled (they would need a
+        // write to the bank register before every access), so their names
+        // are consumed without being added to the namespace.
+        if let Some(backing) = backing {
+            let field = match backing {
+                FieldBacking::Region(region) => {
+                    AmlValue::Field { region, flags, offset: current_offset, length: length.raw_length as u64 }
+                }
+                FieldBacking::Index { index, data } => AmlValue::IndexField {
+                    index,
+                    data,
+                    flags,
+                    offset: current_offset,
+                    length: length.raw_length as u64,
+                },
+                FieldBacking::Bank { region, bank, value } => AmlValue::BankField {
+                    region,
+                    bank,
+                    bank_value: value,
+                    flags,
+                    offset: current_offset,
+                    length: length.raw_length as u64,
+                },
+            };
             try_with_context!(
                 context,
                 context.namespace.add_value_at_resolved_path(
                     AmlName::from_name_seg(name_seg),
                     &context.current_scope,
-                    AmlValue::Field {
-                        region: region_handle,
-                        flags,
-                        offset: current_offset,
-                        length: length.raw_length as u64,
-                    },
+                    field,
                 )
             );
         }
@@ -635,20 +764,40 @@ where
     /*
      * DefIndexField := ExtOpPrefix 0x86 PkgLength NameString NameString FieldFlags FieldList
      *
-     * The fields are read and written through an index/data register pair.
-     * The interpreter consumes the definition so the rest of the table is
-     * parsed; accessing one of the fields fails instead of returning
-     * someone else's data.
+     * The fields are read and written through an index/data register pair
+     * (CMOS, and the embedded controller RAM of some laptops): see
+     * `AmlValue::IndexField`.
      */
+    let field_as_handle = || {
+        name_string().map_with_context(|name, context| {
+            let (_, handle) = try_with_context!(context, context.namespace.search(&name, &context.current_scope));
+            (Ok(handle), context)
+        })
+    };
     ext_opcode(opcode::EXT_DEF_INDEX_FIELD_OP)
         .then(comment_scope(
             DebugVerbosity::Scopes,
             "DefIndexField",
-            pkg_length()
-                .then(name_string())
-                .then(name_string())
-                .then(take())
-                .feed(|(((list_length, _index), _data), _flags)| skip_field_list(list_length)),
+            pkg_length().then(field_as_handle()).then(field_as_handle()).then(take()).feed(
+                |(((list_length, index), data), flags)| {
+                    move |mut input: &'a [u8], mut context: &'c mut AmlContext| -> ParseResult<'a, 'c, ()> {
+                        let mut current_offset = 0;
+                        while list_length.still_parsing(input) {
+                            let (new_input, new_context, field_length) = backed_field_element(
+                                Some(FieldBacking::Index { index, data }),
+                                FieldFlags::new(flags),
+                                current_offset,
+                            )
+                            .parse(input, context)?;
+                            input = new_input;
+                            context = new_context;
+                            current_offset += field_length;
+                        }
+
+                        Ok((input, context, ()))
+                    }
+                },
+            ),
         ))
         .discard_result()
 }
@@ -658,20 +807,46 @@ where
     'c: 'a,
 {
     /*
-     * DefBankField := ExtOpPrefix 0x87 PkgLength NameString BankValue NameString FieldFlags FieldList
+     * DefBankField := ExtOpPrefix 0x87 PkgLength NameString NameString BankValue FieldFlags FieldList
      *
-     * `BankValue` is a TermArg (usually a constant), not a name.
+     * OSyx: the region name, then the bank register's name, then the
+     * `BankValue` TermArg. Each field is accessed after the bank register
+     * was written with that value: see `AmlValue::BankField`.
      */
+    let as_handle = || {
+        name_string().map_with_context(|name, context| {
+            let (_, handle) = try_with_context!(context, context.namespace.search(&name, &context.current_scope));
+            (Ok(handle), context)
+        })
+    };
     ext_opcode(opcode::EXT_DEF_BANK_FIELD_OP)
         .then(comment_scope(
             DebugVerbosity::Scopes,
             "DefBankField",
-            pkg_length()
-                .then(name_string())
-                .then(term_arg())
-                .then(name_string())
-                .then(take())
-                .feed(|((((list_length, _bank), _bank_value), _data), _flags)| skip_field_list(list_length)),
+            pkg_length().then(as_handle()).then(as_handle()).then(term_arg()).then(take()).feed(
+                |((((list_length, region), bank), value), flags)| {
+                    move |mut input: &'a [u8], mut context: &'c mut AmlContext| -> ParseResult<'a, 'c, ()> {
+                        let value = match value.as_integer(context) {
+                            Ok(value) => value,
+                            Err(err) => return Err((input, context, Propagate::Err(err))),
+                        };
+                        let mut current_offset = 0;
+                        while list_length.still_parsing(input) {
+                            let (new_input, new_context, field_length) = backed_field_element(
+                                Some(FieldBacking::Bank { region, bank, value }),
+                                FieldFlags::new(flags),
+                                current_offset,
+                            )
+                            .parse(input, context)?;
+                            input = new_input;
+                            context = new_context;
+                            current_offset += field_length;
+                        }
+
+                        Ok((input, context, ()))
+                    }
+                },
+            ),
         ))
         .discard_result()
 }
@@ -683,14 +858,32 @@ where
     /*
      * DefDataRegion := ExtOpPrefix 0x88 NameString TermArg TermArg TermArg
      *
-     * A region backed by another ACPI table's data. Firmware here only reads
-     * it for diagnostics; the definition is consumed and not modelled.
+     * A region backed by another ACPI table's data. The interpreter has no
+     * access to the tables' bytes: the region exists (so the fields
+     * declared on it get their names) and reading one of them fails.
      */
     ext_opcode(opcode::EXT_DEF_DATA_REGION_OP)
         .then(comment_scope(
             DebugVerbosity::Scopes,
             "DefDataRegion",
-            name_string().then(term_arg()).then(term_arg()).then(term_arg()),
+            name_string().then(term_arg()).then(term_arg()).then(term_arg()).map_with_context(
+                |(((name, _signature), _oem_id), _oem_table_id), context| {
+                    try_with_context!(
+                        context,
+                        context.namespace.add_value_at_resolved_path(
+                            name,
+                            &context.current_scope,
+                            AmlValue::OpRegion {
+                                region: RegionSpace::OemDefined(0xff),
+                                offset: 0,
+                                length: 0,
+                                parent_device: None,
+                            },
+                        )
+                    );
+                    (Ok(()), context)
+                },
+            ),
         ))
         .discard_result()
 }
@@ -982,22 +1175,35 @@ where
     'c: 'a,
 {
     /*
-     * DefCondRefOf := ExtOpPrefix 0x12 NameString Target => boolean
+     * DefCondRefOf := ExtOpPrefix 0x12 SuperName Target => boolean
+     *
+     * OSyx: with a target (`If (CondRefOf (\_OSI, Local0))`, in the `_INI`
+     * of nearly every firmware) the target receives the object itself,
+     * which is what this interpreter uses in place of a reference; an
+     * object that cannot be copied (a method, a device) leaves a zero.
      */
     ext_opcode(opcode::EXT_DEF_COND_REF_OF_OP)
         .then(comment_scope(
             DebugVerbosity::Scopes,
             "DefCondRefOf",
-            name_string().then(target()).map_with_context(|(source, target), context| {
-                let handle = context.namespace.search(&source, &context.current_scope);
-                let result = AmlValue::Boolean(handle.is_ok());
-                if let Ok((_name, _handle)) = handle {
-                    match target {
-                        Target::Null => { /* just return the result of the check */ }
-                        _ => {return (Err(Propagate::Err(AmlError::Unimplemented)), context) },
-                    }
+            crate::name_object::super_name().then(target()).map_with_context(|(source, target), context| {
+                let found = context.target_value(&source).ok();
+                let exists = found.is_some();
+                if let Some(object) = found {
+                    let reference = match object {
+                        AmlValue::Integer(_)
+                        | AmlValue::Boolean(_)
+                        | AmlValue::String(_)
+                        | AmlValue::Buffer(_)
+                        | AmlValue::Package(_)
+                        | AmlValue::Field { .. }
+                        | AmlValue::IndexField { .. }
+                        | AmlValue::BufferField { .. } => object,
+                        _ => AmlValue::Integer(0),
+                    };
+                    try_with_context!(context, context.store(target, reference));
                 }
-                (Ok(result), context)
+                (Ok(AmlValue::Boolean(exists)), context)
             }),
         ))
         .map(|((), result)| Ok(result))
