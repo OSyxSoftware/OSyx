@@ -238,7 +238,19 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     if usb_controllers > 0 {
         drivers::xhci::wait_ready(10_000);
     }
-    // After the xHCI handoff, which ends USB legacy emulation of ports 0x60/0x64.
+    // The USB 2.0 ports of chipsets without xHCI (Intel up to the 6
+    // series) and beside it: taken from the firmware here, devices come up
+    // in the driver's own thread.
+    // `usb.ehci=off` leaves them to the firmware, whose PS/2 emulation of a
+    // USB keyboard then keeps working as before this driver existed.
+    if boot.option_value("usb.ehci") == Some("off") {
+        kprintln!("usb: EHCI controllers left to the firmware (usb.ehci=off)");
+    } else {
+        let ehci_controllers = drivers::ehci::init(&pci_devices);
+        kprintln!("usb: {} EHCI controller(s)", ehci_controllers);
+    }
+    // After the xHCI and EHCI handoffs, which end USB legacy emulation of
+    // ports 0x60/0x64.
     drivers::ps2::start();
     // Keyboards and pointers a hypervisor provides without USB or PS/2.
     drivers::virtio_input::init(&pci_devices);
@@ -418,6 +430,9 @@ fn log_subsystems() {
         kprintln!("usb: controller {} took {} interrupts", i, drivers::xhci::interrupts_of(i));
     }
     for line in drivers::xhci::status() {
+        kprintln!("usb: {}", line);
+    }
+    for line in drivers::ehci::status() {
         kprintln!("usb: {}", line);
     }
     for line in drivers::i2c::status() {

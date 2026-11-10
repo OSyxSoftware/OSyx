@@ -53,6 +53,22 @@ tip switch is the left button). Positions reach the compositor as
 `kind::ABSOLUTE` events, 0 to `ABSOLUTE_MAX` across the screen, and PRISM
 maps them to pixels.
 
+**EHCI** (`kernel/src/drivers/ehci.rs`, layouts and their tests in
+`osyx_usb::ehci`): the USB 2.0 ports of PCs without xHCI (every Intel
+chipset up to the 6 series: H61, P67, Z68, ...) and beside it. The driver
+takes the controller from the firmware at boot (USBLEGSUP handoff, SMIs
+off) before the PS/2 driver starts; one thread per controller then runs
+control transfers on the asynchronous schedule and HID interrupt endpoints
+on the periodic one (every frame). Intel's rate matching hub behind each
+root port is driven like any high-speed hub: low and full-speed keyboards
+and mice behind it get split transactions through its transaction
+translator, and the hub's status change endpoint reports plugging. HID
+setup is shared with xHCI (`drivers/usbhid.rs`). Only HID devices and hubs
+are configured; low and full-speed devices on root ports with companion
+controllers (older ICH chipsets) go to the companions, which OSyx does not
+drive. `usb.ehci=off` on the kernel command line leaves the controllers to
+the firmware and its PS/2 emulation.
+
 **virtio-input** (`kernel/src/drivers/virtio_input.rs`): the keyboards, mice
 and tablets of a virtual machine without USB or PS/2 hardware. The device's
 Linux evdev events are decoded by `osyx_input::evdev` (host tests); the event
@@ -266,7 +282,8 @@ own launcher entries. They draw through the same PRISM compositor.
   the toolkit apps redraw whole windows).
 * Popups and notifications are square (no per-pixel alpha in the toolkit
   yet; the protocol supports ARGB buffers).
-* HID: boot-protocol keyboards; xHCI hubs are supported;
+* HID: boot-protocol keyboards; hubs on xHCI and EHCI; no UHCI/OHCI
+  (companion controllers of older chipsets); EHCI drives HID and hubs only;
   no isochronous or bulk endpoints; no USB 3 streams.
 * No IOMMU support (none is assumed); DMA buffers are kernel pages.
 * AXIS is minimal (see above); the terminal is a line-mode terminal.

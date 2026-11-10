@@ -93,6 +93,15 @@ only input devices of the machine:
 | `-device qemu-xhci -device usb-kbd -device usb-tablet` | USB HID absolute pointer | `usb ...: HID absolute pointer on interface 0 (3 buttons, 16-bit X/Y, wheel)` |
 | `-device virtio-keyboard-pci -device virtio-tablet-pci` | virtio-input | `virtio-input at ...: "QEMU Virtio Tablet" (absolute pointer, range 32767x32767)` |
 | `-device virtio-keyboard-pci -device virtio-mouse-pci` | virtio-input | `virtio-input at ...: "QEMU Virtio Mouse" (relative pointer)` |
+| `-device usb-ehci,id=ehci -device usb-kbd,bus=ehci.0 -device usb-tablet,bus=ehci.0` | EHCI | `usb ehci0-1 (QEMU USB Keyboard): HID boot keyboard on interface 0` |
+| `-device ich9-usb-ehci1,id=ehci ...` beside `qemu-xhci` | EHCI and xHCI | both controllers' devices |
+
+Plugging again: QMP `device_del` and `device_add` of the keyboard; the log
+shows `disconnected` and the new port, and typing works afterwards. QEMU's
+HID devices are high-speed on EHCI and its `usb-hub` is full-speed, so the
+split transactions EHCI needs behind Intel's rate matching hub are not
+exercised in QEMU; their queue head encoding is covered by the `osyx-usb`
+host tests.
 
 QMP `input-send-event` (`abs`, `rel`, `btn`) and `send-key` drive them; an
 absolute device lets a script click at screen coordinates. Host tests:
