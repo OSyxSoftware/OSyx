@@ -444,9 +444,17 @@ mod imp {
     static RESYNCING: AtomicU64 = AtomicU64::new(0);
 
     /// Re-anchor and re-measure the rate once per second of local time. Any
-    /// error in the initial estimate (or in the TSC rate itself) can then
-    /// only grow for one second instead of for the life of the process.
+    /// error in the rate can then only grow for one second instead of for
+    /// the life of the process. The first resync comes after a tenth of that:
+    /// the rate the kernel hands out at calibration is its coarsest.
     const RESYNC_NS: u64 = 1_000_000_000;
+    const FIRST_RESYNC_NS: u64 = 100_000_000;
+    /// Local time between the anchor and the next resync.
+    static RESYNC_AFTER: AtomicU64 = AtomicU64::new(FIRST_RESYNC_NS);
+    /// The kernel's (monotonic_ns, tsc) pair of the last resync, for the
+    /// rate; `CAL_NS` can be ahead of it while the clock slews back.
+    static KERNEL_NS: AtomicU64 = AtomicU64::new(0);
+    static KERNEL_TSC: AtomicU64 = AtomicU64::new(0);
 
     #[inline]
     fn rdtsc() -> u64 {
@@ -463,6 +471,8 @@ mod imp {
             Ok(_) if v[2] != 0 => {
                 CAL_NS.store(v[0], Ordering::Relaxed);
                 CAL_TSC.store(v[1], Ordering::Relaxed);
+                KERNEL_NS.store(v[0], Ordering::Relaxed);
+                KERNEL_TSC.store(v[1], Ordering::Relaxed);
                 CAL_STEP.store(((1_000_000u128 << 32) / v[2] as u128) as u64, Ordering::Relaxed);
                 CAL_RT_OFF.store(v[3].wrapping_sub(v[0]), Ordering::Relaxed);
                 CAL_STATE.store(2, Ordering::Release);
@@ -473,25 +483,51 @@ mod imp {
         }
     }
 
+    /// Re-anchors the clock on the kernel's and re-measures the TSC rate.
+    ///
+    /// The kernel returns its clock and the TSC reading it used as a pair;
+    /// reading them with two calls would shift the anchor by any preemption
+    /// between them. When this clock is ahead of the kernel's it is not set
+    /// back: the monotonic guard would hold it still until the kernel caught
+    /// up, and every interval measured meanwhile (a sleep, a timeout) would
+    /// come out short by that much. It keeps its reading and runs slower
+    /// until the next resync instead, by at most half its rate.
     fn resync() {
-        let tsc = rdtsc();
-        let Ok(now) = decode(syscall1(nr::CLOCK, osyx_abi::CLOCK_MONOTONIC)) else { return };
-        let (anchor_ns, anchor_tsc) =
-            (CAL_NS.load(Ordering::Relaxed), CAL_TSC.load(Ordering::Relaxed));
-        let ns = now.wrapping_sub(anchor_ns);
-        let counts = tsc.wrapping_sub(anchor_tsc);
+        let mut v = [0u64; 4];
+        if decode(syscall1(nr::TIME_CALIB, v.as_mut_ptr() as u64)).is_err() {
+            return;
+        }
+        let (now, tsc) = (v[0], v[1]);
+        let old_step = CAL_STEP.load(Ordering::Relaxed) as u128;
+        let mut step = old_step;
+        let ns = now.wrapping_sub(KERNEL_NS.load(Ordering::Relaxed));
+        let counts = tsc.wrapping_sub(KERNEL_TSC.load(Ordering::Relaxed));
         if ns >= 10_000_000 && counts != 0 {
-            let step = ((ns as u128) << 32) / counts as u128;
-            let old = CAL_STEP.load(Ordering::Relaxed) as u128;
+            let measured = ((ns as u128) << 32) / counts as u128;
             // A wild sample means the tick source stalled or the TSC jumped:
             // keep the old rate and just re-anchor.
-            if old == 0 || (step * 4 >= old && step <= old * 4) {
-                CAL_STEP.store(step as u64, Ordering::Relaxed);
+            if old_step == 0 || (measured * 4 >= old_step && measured <= old_step * 4) {
+                step = measured;
             }
         }
+        KERNEL_NS.store(now, Ordering::Relaxed);
+        KERNEL_TSC.store(tsc, Ordering::Relaxed);
+        // What this clock reads at the kernel's TSC sample.
+        let local = CAL_NS.load(Ordering::Relaxed).wrapping_add(
+            ((tsc.wrapping_sub(CAL_TSC.load(Ordering::Relaxed)) as u128 * old_step) >> 32) as u64,
+        );
+        let mut anchor = now;
+        if local > now && local - now < RESYNC_NS {
+            let ahead = (local - now) as u128;
+            let span = RESYNC_NS as u128;
+            step = step * (span - ahead.min(span / 2)) / span;
+            anchor = local;
+        }
         // Publish the rate before the anchor it belongs to.
+        CAL_STEP.store(step as u64, Ordering::Relaxed);
         CAL_TSC.store(tsc, Ordering::Relaxed);
-        CAL_NS.store(now, Ordering::Relaxed);
+        CAL_NS.store(anchor, Ordering::Relaxed);
+        RESYNC_AFTER.store(RESYNC_NS, Ordering::Relaxed);
     }
 
     #[inline]
@@ -509,7 +545,7 @@ mod imp {
             return None;
         }
         let mut ns = CAL_NS.load(Ordering::Relaxed).wrapping_add(tsc_delta_ns()?);
-        if ns.wrapping_sub(CAL_NS.load(Ordering::Relaxed)) >= RESYNC_NS
+        if ns.wrapping_sub(CAL_NS.load(Ordering::Relaxed)) >= RESYNC_AFTER.load(Ordering::Relaxed)
             && RESYNCING.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed).is_ok()
         {
             resync();
