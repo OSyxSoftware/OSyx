@@ -133,6 +133,57 @@ pub unsafe fn enable_sse(cpu: usize) {
     }
 }
 
+const CR4_SMEP: u64 = 1 << 20;
+const CR4_SMAP: u64 = 1 << 21;
+
+/// Enables supervisor-mode execution prevention (SMEP) and access prevention
+/// (SMAP) on this CPU when it has them. With SMEP the kernel cannot execute
+/// code in user pages; with SMAP it cannot read or write them outside the
+/// `stac`/`clac` windows of [`crate::fixup`], so a kernel bug that follows a
+/// user-controlled pointer faults instead of using attacker data.
+///
+/// # Safety
+/// Must run once per CPU during early boot. All kernel accesses to user
+/// memory must go through the `crate::fixup` routines.
+pub unsafe fn enable_supervisor_protection() {
+    let (max_leaf, ..) = cpuid(0, 0);
+    if max_leaf < 7 {
+        return;
+    }
+    let (_, ebx7, ..) = cpuid(7, 0);
+    let mut bits = 0;
+    if ebx7 & (1 << 7) != 0 {
+        bits |= CR4_SMEP;
+    }
+    if ebx7 & (1 << 20) != 0 {
+        // The flag comes first: once CR4.SMAP is set, the copy routines
+        // must already open their access windows.
+        crate::fixup::osyx_smap_on.store(1, Ordering::Release);
+        bits |= CR4_SMAP;
+    }
+    if bits != 0 {
+        asm!("mov {t}, cr4", "or {t}, {b}", "mov cr4, {t}", t = out(reg) _, b = in(reg) bits, options(nostack));
+    }
+}
+
+/// CR4 of this CPU.
+pub fn read_cr4() -> u64 {
+    let v: u64;
+    // SAFETY: reading CR4 has no side effects in ring 0.
+    unsafe { asm!("mov {}, cr4", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+/// True when this CPU runs with SMEP enabled.
+pub fn smep_enabled() -> bool {
+    read_cr4() & CR4_SMEP != 0
+}
+
+/// True when this CPU runs with SMAP enabled.
+pub fn smap_enabled() -> bool {
+    read_cr4() & CR4_SMAP != 0
+}
+
 unsafe fn xsetbv(index: u32, value: u64) {
     asm!(
         "xsetbv",

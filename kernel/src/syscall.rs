@@ -798,9 +798,8 @@ fn sys_readdir(handle: u64, buf: u64, len: u64) -> Result<u64, Errno> {
 /// later than the TSC sample, and later samples never run behind it.
 fn sys_time_calib(out: u64) -> Result<u64, Errno> {
     let mut v = [0u64; 4];
-    v[0] = interrupts::monotonic_ns();
+    (v[0], v[1]) = interrupts::monotonic_pair();
     v[3] = crate::time::now_ns().max(0) as u64;
-    v[1] = crate::arch::timer::tsc();
     v[2] = interrupts::tsc_per_tick();
     crate::fixup::copy_to_user(out, unsafe {
         // SAFETY: the array is plain data of the given length.

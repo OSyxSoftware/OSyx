@@ -51,6 +51,7 @@ pub fn run(boot: &BootData) -> Summary {
         ("timer interrupts", &timer),
         ("I/O APIC wired interrupt routing", &|| if boot.has_option("test.ioapic") { crate::arch::ioapic::selftest() } else { Ok(()) }),
         ("user copy validation", &user_copy),
+        ("supervisor protection (SMEP, SMAP)", &supervisor_protection),
         ("address space lifecycle", &address_space),
         ("per-process memory locks", &crate::process::memory_lock_selftest),
         ("preemptive kernel threads", &preemption),
@@ -308,6 +309,54 @@ fn user_copy() -> TestResult {
     ensure!(copy_to_user(0x40_0000, &buf) == Err(Errno::Fault), "unmapped user page writable");
     ensure!(copy_from_user(&mut [], 0) == Ok(()), "empty copy must succeed");
     Ok(())
+}
+
+/// A mapped user page: the copy routines reach it, a kernel read outside
+/// their access window faults when the CPU has SMAP. The page lives in an
+/// address space of its own, entered with interrupts off for the checks.
+fn supervisor_protection() -> TestResult {
+    const VA: u64 = 0x50_0000;
+    kprintln!(
+        "[test]   SMEP {}, SMAP {}",
+        if cpu::smep_enabled() { "on" } else { "not available" },
+        if cpu::smap_enabled() { "on" } else { "not available" }
+    );
+    let root = paging::new_address_space().map_err(|e| format!("create: {e:?}"))?;
+    let frame = mem::alloc_frame().ok_or("out of frames")?;
+    paging::map_in(root, VA, frame, Flags::user(true, false)).map_err(|e| format!("map_in: {e:?}"))?;
+    let were_enabled = cpu::interrupts_enabled();
+    cpu::disable_interrupts();
+    let previous = cpu::read_cr3();
+    // SAFETY: `root` shares the kernel half; interrupts are off, so nothing
+    // else runs on this CPU until the old root is back.
+    unsafe { cpu::write_cr3(root) };
+    let result = (|| {
+        let mut buf = [0u8; 8];
+        ensure!(copy_to_user(VA, b"osyxsmap") == Ok(()), "copy to a mapped user page failed");
+        ensure!(copy_from_user(&mut buf, VA) == Ok(()) && &buf == b"osyxsmap", "copy from a mapped user page failed");
+        ensure!(probe_read_u8(VA) == Ok(b'o'), "probe of a mapped user page failed");
+        let closed = crate::fixup::probe_read_u8_closed(VA);
+        if cpu::smap_enabled() {
+            ensure!(closed.is_err(), "kernel read a user page outside an access window");
+            // The fault must not leave the access window open.
+            ensure!(crate::fixup::probe_read_u8_closed(VA).is_err(), "user access stayed open after a fault");
+        } else {
+            ensure!(closed == Ok(b'o'), "plain kernel read of a user page failed without SMAP");
+        }
+        let flags: u64;
+        // SAFETY: reads RFLAGS through the stack.
+        unsafe { core::arch::asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags)) };
+        ensure!(flags & (1 << 18) == 0, "RFLAGS.AC left set after user copies");
+        Ok(())
+    })();
+    // SAFETY: back to the address space this thread came from.
+    unsafe { cpu::write_cr3(previous) };
+    if were_enabled {
+        cpu::enable_interrupts();
+    }
+    // SAFETY: the address space is no longer active and owns `frame`.
+    unsafe { paging::destroy_address_space(root) };
+    result
 }
 
 fn address_space() -> TestResult {

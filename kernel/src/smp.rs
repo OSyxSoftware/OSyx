@@ -994,6 +994,7 @@ pub fn start(boot: &BootData) {
 extern "C" fn ap_main(index: usize) -> ! {
     unsafe {
         cpu::enable_sse(index);
+        cpu::enable_supervisor_protection();
         gdt::init_cpu(index);
         install_local(index);
         idt::load();

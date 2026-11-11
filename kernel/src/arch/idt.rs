@@ -49,6 +49,13 @@ osyx_isr_common:
     pushq %r15
     movq %rsp, %rdi
     cld
+    // An interrupt keeps RFLAGS.AC: user code may have set it, and a kernel
+    // copy may be inside its user access window. Handlers run with SMAP in
+    // force; iretq restores the interrupted flags.
+    cmpb $0, osyx_smap_on(%rip)
+    je 3f
+    clac
+3:
     call osyx_interrupt_dispatch
     popq %r15
     popq %r14
