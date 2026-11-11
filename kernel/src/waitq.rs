@@ -105,5 +105,5 @@ pub fn deadline_after_ns(ns: u64) -> Option<u64> {
     }
     let tick_ns = 1_000_000_000 / crate::arch::pic::TIMER_HZ as u64;
     let extra = u64::from(ns > 0);
-    Some(crate::interrupts::ticks().saturating_add(ns.div_ceil(tick_ns) + extra))
+    Some(crate::interrupts::ticks_now().saturating_add(ns.div_ceil(tick_ns) + extra))
 }

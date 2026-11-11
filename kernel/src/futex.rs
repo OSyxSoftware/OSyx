@@ -142,7 +142,7 @@ fn wait_registered(addr: u64, expected: u32, timeout_ticks: Option<u64>, pid: Pi
             }
             return Ok(());
         }
-        let deadline = timeout_ticks.map(|t| interrupts::ticks().saturating_add(t.max(1)));
+        let deadline = timeout_ticks.map(|t| interrupts::ticks_now().saturating_add(t.max(1)));
         if owner != 0 {
             // Before blocking: the scheduler lock is innermost, so this is
             // safe with interrupts off.

@@ -876,7 +876,7 @@ pub fn sleep_ticks(ticks: u64) {
         let s = g.as_mut().expect("scheduler not initialised");
         let tid = s.current[crate::smp::index()];
         let t = s.threads.get_mut(&tid).expect("current thread exists");
-        let at = interrupts::ticks() + ticks;
+        let at = interrupts::ticks_now() + ticks;
         t.wake_at = Some(at);
         t.state = State::Blocked;
         // A waker must not queue this thread before its own CPU has saved

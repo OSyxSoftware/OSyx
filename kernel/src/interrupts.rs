@@ -13,6 +13,25 @@ pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
+/// The tick the clock has really reached, for deadlines counted from now.
+/// [`ticks`] can be behind: CPU 0 counts a tick only when its timer
+/// interrupt runs, and the other CPUs raise the count only once it is more
+/// than a tick late (`catch_up_ticks`). The count then jumps forward, so a
+/// deadline of `ticks() + n` set while it was behind expires that much too
+/// early. This adds what the TSC says has passed since the last counted
+/// tick, by at most a second.
+pub fn ticks_now() -> u64 {
+    let now = ticks();
+    let per = per_tick_estimate();
+    let (tick, tsc) = (LAST_TICK.load(Ordering::Relaxed), LAST_TSC.load(Ordering::Relaxed));
+    if per == 0 || tick == 0 {
+        return now;
+    }
+    // Another CPU's TSC can be slightly behind CPU 0's.
+    let Some(elapsed) = rdtsc().checked_sub(tsc) else { return now };
+    now.max((tick + elapsed / per).min(now + timer::TIMER_HZ as u64))
+}
+
 pub fn breakpoints() -> u64 {
     BREAKPOINTS.load(Ordering::Relaxed)
 }
@@ -143,7 +162,13 @@ pub fn tsc_per_tick() -> u64 {
 }
 
 /// Nanoseconds since the timer was started, interpolated with the TSC
-/// between ticks (tick resolution until the TSC is calibrated).
+/// from the last counted tick (tick resolution until the TSC is calibrated).
+/// The interpolation is not limited to one tick: the tick count falls
+/// behind when CPU 0's timer interrupt is late, and a clock that stood still
+/// for that time made user space, which re-anchors its own TSC clock on this
+/// one, measure intervals too short by the delay. The last tick is read
+/// before its TSC (they are stored in the other order), so a reading never
+/// pairs a new tick with an old TSC.
 pub fn monotonic_ns() -> u64 {
     let tick_ns = 1_000_000_000 / pic::TIMER_HZ as u64;
     let were = cpu::interrupts_enabled();
@@ -156,7 +181,7 @@ pub fn monotonic_ns() -> u64 {
     let mut ns = tick * tick_ns;
     if per > 0 {
         let extra = (tsc.wrapping_sub(base) as u128 * tick_ns as u128 / per as u128) as u64;
-        ns += extra.min(tick_ns - 1);
+        ns += extra.min(1_000_000_000);
     }
     // Monotonic across calls even if the rate estimate moves.
     let prev = LAST_NS.fetch_max(ns, Ordering::Relaxed);
