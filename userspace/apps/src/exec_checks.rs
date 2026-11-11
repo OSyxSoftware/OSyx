@@ -139,13 +139,39 @@ pub fn run(t: &mut Tests) {
         let no_x = kind("/tmp/probe-copy") == Err(ErrorKind::PermissionDenied);
         let made_x = fs::set_permissions("/tmp/probe-copy", Permissions::from_mode(0o755)).is_ok();
         let runs_from_tmpfs = kind("/tmp/probe-copy") == Ok(Some(0));
-        let script = fs::write("/tmp/exec-script", "#!/bin/sh\necho no\n").is_ok()
+        let script = fs::write("/tmp/exec-script", "neither ELF nor a script\n").is_ok()
             && fs::set_permissions("/tmp/exec-script", Permissions::from_mode(0o755)).is_ok();
         let not_elf = kind("/tmp/exec-script") == Err(ErrorKind::InvalidExecutable);
         let dir = kind("/tmp") == Err(ErrorKind::PermissionDenied);
         let _ = fs::remove_file("/tmp/probe-copy");
         println!("exec perms: copied {copied} no-x {no_x} made-x {made_x} tmpfs {runs_from_tmpfs} not-elf {not_elf} dir {dir}");
         copied && no_x && made_x && runs_from_tmpfs && script && not_elf && dir
+    });
+    t.check("exec: #! scripts run their interpreter", || {
+        const SCRIPT: &str = "/tmp/exec-shebang";
+        const OUT: &str = "/tmp/exec-shebang.out";
+        let _ = fs::remove_file(OUT);
+        let run = |text: &str| {
+            fs::write(SCRIPT, text)
+                .and_then(|_| fs::set_permissions(SCRIPT, Permissions::from_mode(0o755)))
+                .and_then(|_| Command::new(SCRIPT).status())
+                .map(|s| s.code())
+                .map_err(|e| e.kind())
+        };
+        // AXIS takes the script's path as its argument; the #! line is a
+        // comment to it.
+        let ran = run(&format!("#!/bin/axis\necho from-script > {OUT}\n"));
+        let wrote = fs::read_to_string(OUT).is_ok_and(|t| t.trim() == "from-script");
+        // The interpreter is searched like any program name.
+        let _ = fs::remove_file(OUT);
+        let by_name = run(&format!("#! axis\necho by-name > {OUT}\n"));
+        let wrote_by_name = fs::read_to_string(OUT).is_ok_and(|t| t.trim() == "by-name");
+        let missing = run("#!/bin/no-such-interpreter\n") == Err(ErrorKind::NotFound);
+        let itself = run(&format!("#!{SCRIPT}\n")).is_err();
+        let _ = fs::remove_file(SCRIPT);
+        let _ = fs::remove_file(OUT);
+        println!("exec script: ran {ran:?} wrote {wrote} by-name {by_name:?} wrote {wrote_by_name} missing {missing} itself {itself}");
+        ran == Ok(Some(0)) && wrote && by_name == Ok(Some(0)) && wrote_by_name && missing && itself
     });
     t.check("exec: kernel validates the argument block", || {
         let fault = raw::exec_raw(nr::SPAWN, 0xFFFF_8000_0000_0000) == Err(Errno::Fault)

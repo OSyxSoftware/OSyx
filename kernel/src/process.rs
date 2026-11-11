@@ -316,7 +316,22 @@ impl Space {
 /// `cx` (whose credentials and current directory apply); returns the space,
 /// the entry point, the initial rsp and the canonical program path.
 fn build_image(cx: &Lookup, req: &ExecRequest) -> Result<(Space, u64, u64, String), ExecError> {
-    let prog = exec::load(cx, &req.path).map_err(ExecError::Load)?;
+    let mut prog = exec::load(cx, &req.path).map_err(ExecError::Load)?;
+    // A script runs its interpreter, which gets the script's path as an
+    // argument; the caller's request is left as it is (the process keeps
+    // the script's name).
+    let mut through: Option<ExecRequest> = None;
+    let mut depth = 0;
+    while let Some(script) = exec::Script::parse(&prog.image).map_err(ExecError::Load)? {
+        depth += 1;
+        if depth > exec::MAX_SCRIPT_DEPTH {
+            return Err(ExecError::Load(Errno::Loop));
+        }
+        let next = through.as_ref().unwrap_or(req).through_interpreter(&script, &prog.path).map_err(ExecError::Load)?;
+        prog = exec::load(cx, &next.path).map_err(ExecError::Load)?;
+        through = Some(next);
+    }
+    let req = through.as_ref().unwrap_or(req);
     let elf = ElfImage::parse_with(&prog.image, PROGRAM_RANGE).map_err(|e| {
         kprintln!("exec {}: rejected: {}", prog.path, e.describe());
         ExecError::BadImage(e)

@@ -7,6 +7,10 @@
 //! * The file must be a regular file with execute permission for the
 //!   caller (root: at least one execute bit) and every directory on the way
 //!   must be searchable. Set-user-ID and set-group-ID bits are not honoured.
+//! * A file that starts with `#!` is a script: the rest of its first line
+//!   names the interpreter and at most one argument ([`Script`]), and the
+//!   interpreter runs with the script's path after them. The interpreter
+//!   may itself be a script, up to [`MAX_SCRIPT_DEPTH`] levels.
 //! * Only the ELF headers and the `PT_LOAD` data are read (not debug
 //!   information), and all of it is validated before anything of the
 //!   caller changes, so a failing `execve` leaves the old program running.
@@ -105,6 +109,60 @@ impl ExecRequest {
     /// Process name: the last component of the program path.
     pub fn name(&self) -> &str {
         self.path.rsplit('/').find(|c| !c.is_empty()).unwrap_or(&self.path)
+    }
+}
+
+/// Interpreter scripts followed before the load fails with `Loop`.
+pub const MAX_SCRIPT_DEPTH: usize = 4;
+/// Longest `#!` line read, without the line end.
+pub const MAX_SCRIPT_LINE: usize = 255;
+
+/// The `#!` line of a script: `#!interpreter [argument]`. Blanks around the
+/// two parts are dropped; everything after the interpreter is one argument,
+/// blanks inside it included.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Script<'a> {
+    pub interpreter: &'a str,
+    pub argument: Option<&'a str>,
+}
+
+impl<'a> Script<'a> {
+    /// `Ok(None)` when `image` does not start with `#!`. `BadExecutable`
+    /// when the line names no interpreter, is not UTF-8, holds a NUL or is
+    /// longer than [`MAX_SCRIPT_LINE`].
+    pub fn parse(image: &'a [u8]) -> Result<Option<Script<'a>>, Errno> {
+        let Some(rest) = image.strip_prefix(b"#!") else { return Ok(None) };
+        let line = match rest.iter().take(MAX_SCRIPT_LINE + 1).position(|&b| b == b'\n') {
+            Some(end) => &rest[..end],
+            None if rest.len() <= MAX_SCRIPT_LINE => rest,
+            None => return Err(Errno::BadExecutable),
+        };
+        let line = core::str::from_utf8(line).map_err(|_| Errno::BadExecutable)?;
+        let blank = |c: char| c == ' ' || c == '\t' || c == '\r';
+        let line = line.trim_matches(blank);
+        if line.is_empty() || line.contains('\0') {
+            return Err(Errno::BadExecutable);
+        }
+        let (interpreter, argument) = match line.split_once(blank) {
+            Some((i, a)) => (i, Some(a.trim_start_matches(blank))),
+            None => (line, None),
+        };
+        Ok(Some(Script { interpreter, argument }))
+    }
+}
+
+impl ExecRequest {
+    /// The request that runs `script` (read from the canonical path
+    /// `script_path`) for this one: the interpreter, its argument, the
+    /// script's path, then this request's arguments without `argv[0]`.
+    pub fn through_interpreter(&self, script: &Script, script_path: &str) -> Result<ExecRequest, Errno> {
+        let mut argv = alloc::vec![String::from(script.interpreter)];
+        argv.extend(script.argument.map(String::from));
+        argv.push(String::from(script_path));
+        argv.extend(self.argv.iter().skip(1).cloned());
+        let r = ExecRequest { path: String::from(script.interpreter), argv, envp: self.envp.clone() };
+        r.check()?;
+        Ok(r)
     }
 }
 
