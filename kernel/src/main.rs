@@ -180,7 +180,10 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     unsafe {
         core::arch::asm!("mov rax, cr0", "or rax, 0x10000", "mov cr0, rax", out("rax") _);
         cpu::enable_sse(0);
+        cpu::enable_supervisor_protection();
     }
+    let on_off = |on| if on { "on" } else { "off" };
+    kprintln!("cpu: SMEP {}, SMAP {}", on_off(cpu::smep_enabled()), on_off(cpu::smap_enabled()));
 
     log_memory_map(boot.memory_map());
     // SAFETY: own GDT/IDT are loaded; called once.

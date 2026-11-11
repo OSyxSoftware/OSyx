@@ -9,42 +9,90 @@
 
 use core::arch::global_asm;
 
+/// Non-zero once a CPU with supervisor-mode access prevention was found
+/// ([`crate::arch::cpu::enable_supervisor_protection`]). The routines below
+/// and the interrupt entry test it before `stac`/`clac`, which are undefined
+/// instructions on CPUs without SMAP.
+#[no_mangle]
+pub static osyx_smap_on: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+// With SMAP the kernel cannot touch user pages while RFLAGS.AC is clear.
+// These routines are the only places that set it: `USER_ACCESS_BEGIN` right
+// before the instruction that may touch user memory, `USER_ACCESS_END` on
+// both the normal and the recovery path (a fault resumes with the
+// interrupted RFLAGS, so AC is still set at the recovery label).
 global_asm!(
     r#"
+    .macro USER_ACCESS_BEGIN
+    cmp byte ptr [rip + osyx_smap_on], 0
+    je 90f
+    stac
+90:
+    .endm
+    .macro USER_ACCESS_END
+    cmp byte ptr [rip + osyx_smap_on], 0
+    je 91f
+    clac
+91:
+    .endm
+
     .section .text
     .global osyx_probe_read_u8
 osyx_probe_read_u8:
-    xor eax, eax
+    USER_ACCESS_BEGIN
 1:  movzx ecx, byte ptr [rdi]
+    USER_ACCESS_END
     mov byte ptr [rsi], cl
+    xor eax, eax
     ret
-2:  mov eax, 1
+2:  USER_ACCESS_END
+    mov eax, 1
     ret
 
     .global osyx_probe_write_u8
 osyx_probe_write_u8:
-    xor eax, eax
+    USER_ACCESS_BEGIN
 3:  mov byte ptr [rdi], sil
+    USER_ACCESS_END
+    xor eax, eax
     ret
-4:  mov eax, 1
+4:  USER_ACCESS_END
+    mov eax, 1
     ret
 
     .global osyx_probe_read_u64
 osyx_probe_read_u64:
-    xor eax, eax
+    USER_ACCESS_BEGIN
 7:  mov rcx, qword ptr [rdi]
+    USER_ACCESS_END
     mov qword ptr [rsi], rcx
+    xor eax, eax
     ret
-8:  mov eax, 1
+8:  USER_ACCESS_END
+    mov eax, 1
     ret
 
     .global osyx_copy_bytes
 osyx_copy_bytes:
     mov rcx, rdx
+    USER_ACCESS_BEGIN
 5:  rep movsb
+    USER_ACCESS_END
     xor eax, eax
     ret
-6:  mov eax, 1
+6:  USER_ACCESS_END
+    mov eax, 1
+    ret
+
+    // The same read as osyx_probe_read_u8 without opening the user access
+    // window: with SMAP it must fault on a mapped user page (self-test).
+    .global osyx_probe_read_u8_closed
+osyx_probe_read_u8_closed:
+92: movzx ecx, byte ptr [rdi]
+    mov byte ptr [rsi], cl
+    xor eax, eax
+    ret
+93: mov eax, 1
     ret
 
     .pushsection .osyx_fixup, "a"
@@ -53,6 +101,7 @@ osyx_copy_bytes:
     .quad 3b, 4b
     .quad 5b, 6b
     .quad 7b, 8b
+    .quad 92b, 93b
     .popsection
     "#
 );
@@ -68,6 +117,7 @@ extern "C" {
     fn osyx_probe_read_u64(addr: u64, out: *mut u64) -> u32;
     fn osyx_probe_write_u8(addr: u64, value: u8) -> u32;
     fn osyx_copy_bytes(dst: *mut u8, src: *const u8, len: usize) -> u32;
+    fn osyx_probe_read_u8_closed(addr: u64, out: *mut u8) -> u32;
     static __fixup_start: Fixup;
     static __fixup_end: Fixup;
 }
@@ -92,6 +142,20 @@ pub fn probe_read_u8(addr: u64) -> Result<u8, Fault> {
     let mut v = 0u8;
     // SAFETY: the routine either completes or is redirected by the fixup.
     let r = unsafe { osyx_probe_read_u8(addr, &mut v) };
+    if r == 0 {
+        Ok(v)
+    } else {
+        Err(Fault)
+    }
+}
+
+/// Reads a byte like [`probe_read_u8`], but without permission to touch user
+/// pages: with SMAP enabled a mapped user address reports a fault. Only the
+/// self-tests use it, to prove that the protection is active.
+pub fn probe_read_u8_closed(addr: u64) -> Result<u8, Fault> {
+    let mut v = 0u8;
+    // SAFETY: the routine either completes or is redirected by the fixup.
+    let r = unsafe { osyx_probe_read_u8_closed(addr, &mut v) };
     if r == 0 {
         Ok(v)
     } else {

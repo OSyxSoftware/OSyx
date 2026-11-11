@@ -203,8 +203,21 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
             return;
         }
     }
+    // The kernel touched a present user page outside a user access window
+    // (SMAP), or fetched an instruction from one (SMEP): a kernel bug, never
+    // a page to repair. A routine with a fixup recovers below; anything else
+    // stops the system with the faulting address.
+    let supervisor_violation = f.vector == 14
+        && !from_user
+        && f.error_code & 1 != 0
+        && cpu::read_cr2() < osyx_abi::USER_END
+        && ((f.error_code & 0x10 != 0 && cpu::smep_enabled()) || (f.rflags & (1 << 18) == 0 && cpu::smap_enabled()));
     // A write to a read-only shared image page: copy it for this process.
-    if f.vector == 14 && f.error_code & 3 == 3 && crate::process::cow_fault(cpu::read_cr2(), from_user) {
+    if f.vector == 14
+        && f.error_code & 3 == 3
+        && !supervisor_violation
+        && crate::process::cow_fault(cpu::read_cr2(), from_user)
+    {
         return;
     }
     // The timer only needs the tick counters (atomics) and the scheduler's

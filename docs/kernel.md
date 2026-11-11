@@ -10,7 +10,8 @@ as a static ELF at `0xFFFF_FFFF_8000_0000` with three W^X segments
 1. COM1 serial, BootInfo validation, copy of BootInfo / memory map / command
    line into kernel memory.
 2. GDT with TSS (IST stacks for #DF, NMI, #MC), IDT (256 gates), SYSCALL MSRs.
-3. CPU identification, `CR0.WP` set.
+3. CPU identification, `CR0.WP` set; SMEP and SMAP enabled when the CPU
+   has them (on every CPU, see "Supervisor protection" below).
 4. Frame allocator, paging state (NX, kernel root, pre-allocated upper-half
    PDPTs), removal of the boot identity map.
 5. Kernel heap; boot modules copied; bootloader memory reclaimed.
@@ -40,6 +41,16 @@ as a static ELF at `0xFFFF_FFFF_8000_0000` with three W^X segments
 - Kernel-mode #PF/#GP at an instruction listed in the `.osyx_fixup` table
   resume at its recovery address (`fixup.rs`); this backs `probe_*` and
   `copy_from_user`/`copy_to_user`.
+- Supervisor protection: with SMEP (`CR4` bit 20) the kernel cannot execute
+  user pages; with SMAP (`CR4` bit 21) it cannot read or write them while
+  `RFLAGS.AC` is clear. Only the `fixup.rs` routines set AC (`stac` before
+  the instruction that touches user memory, `clac` on the normal and the
+  recovery path); `SYSCALL` masks AC and the interrupt entry clears it, so
+  user code cannot hand the kernel an open window. A kernel fault on a
+  present user page outside a window is never repaired (no copy-on-write):
+  it recovers through a fixup or stops the system. The boot log prints
+  `cpu: SMEP on, SMAP on`; the self-test "supervisor protection" checks
+  that a plain kernel read of a mapped user page faults.
 - Other kernel-mode exceptions print name, error code, decoded page-fault
   cause, CR2/CR3 and all registers, then panic.
 - User-mode exceptions terminate the process with status
