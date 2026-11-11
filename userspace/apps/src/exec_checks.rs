@@ -115,6 +115,26 @@ pub fn run(t: &mut Tests) {
         let b = probe_report(|_| {}).map(|r| String::from(r.get("random")));
         matches!((a, b), (Some(a), Some(b)) if a.len() == 32 && a != b)
     });
+    t.check("exec: stack and mapping addresses differ between processes", || {
+        let place = || {
+            probe_report(|_| {}).and_then(|r| {
+                let hex = |k: &str| u64::from_str_radix(r.get(k).trim_start_matches("0x"), 16).ok();
+                Some((hex("stack")?, hex("map")?))
+            })
+        };
+        let runs: Vec<(u64, u64)> = (0..4).filter_map(|_| place()).collect();
+        println!("exec places: {runs:x?}");
+        let in_range = runs.iter().all(|&(stack, map)| {
+            (0x7FFB_0000_0000..0x7FFF_FFFF_0000).contains(&stack) && (0x1000_0000_0000..0x1100_0000_0000).contains(&map)
+        });
+        let distinct = |f: fn(&(u64, u64)) -> u64| {
+            let mut v: Vec<u64> = runs.iter().map(f).collect();
+            v.sort_unstable();
+            v.dedup();
+            v.len()
+        };
+        runs.len() == 4 && in_range && distinct(|r| r.0) >= 3 && distinct(|r| r.1) >= 3
+    });
     t.check("exec: absolute and relative program paths", || {
         let abs = matches!(Command::new("/usr/bin/probe").args(["count", "0"]).status(), Ok(s) if s.success());
         let rel = env::set_current_dir("/usr")

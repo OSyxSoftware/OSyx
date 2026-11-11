@@ -100,10 +100,13 @@ The panic path may force-unlock SERIAL and only try-locks the display.
 - Created by `spawn(parent, request)` from an executable file (see
   [Program loader](#program-loader)) with one main thread; `thread_spawn`
   adds more (up to 64). Each process has its own address space: ELF
-  segments with their permissions, a 512 KiB stack below
-  `0x7FFF_FFFF_0000`, null guard below 64 KiB, System V initial stack
+  segments with their permissions, a 512 KiB stack that ends at most
+  16 GiB below `0x7FFF_FFFF_0000`, null guard below 64 KiB, System V initial stack
   (`argc`, `argv`, `envp`, `auxv`). `execve` swaps in a new address space
-  (below).
+  (below). The stack top and the start of the anonymous mappings are
+  chosen at random for every program image (`spawn` and `execve`): 22 and
+  24 bits from the kernel's random source. Program segments stay at their
+  link addresses (`ET_EXEC` only), so code addresses are not randomised.
 - `exit` (or a fatal CPU exception in any thread) records the exit status
   and asks the other threads to stop; `thread_exit` ends one thread. The last
   thread to end destroys the address space, drops the process's futex

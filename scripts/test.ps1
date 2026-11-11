@@ -26,7 +26,7 @@ param(
 # "[user] fs: ..." checks init runs (userspace/apps/src/fs_checks.rs).
 $ExpectedFsChecks = 19
 # "[user] exec: ..." checks init runs (userspace/apps/src/exec_checks.rs).
-$ExpectedExecChecks = 14
+$ExpectedExecChecks = 15
 # "[user] ipc: ..." checks init runs (userspace/apps/src/ipc_checks.rs).
 $ExpectedIpcChecks = 16
 $results = New-Object System.Collections.Generic.List[object]

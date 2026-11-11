@@ -212,8 +212,8 @@ Status on 2026-11-04 (`fix/steam-vgui2`):
     (MSI-X or MSI, polling fallback); FAT entries are stamped with the wall
     clock on create and write, and `stat` reports the stored time (2-second
     DOS resolution); the write-back thread flushes ext4 after 5 s and exFAT
-    after 2 s of quiet. Still open: FAT writes its metadata through on every
-    change.
+    and FAT32 after 2 s of quiet (FAT32 keeps dirty FAT sectors and FSInfo in
+    memory until then).
 14. **SMP**: finer-grained kernel locking (still one kernel entry lock and
     `TABLE` for mappings and page faults) and load balancing policies.
 15. **OSyx Std**: `thread`, futex-based `Mutex`, `Condvar`, `RwLock`,

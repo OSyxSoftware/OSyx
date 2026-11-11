@@ -220,7 +220,8 @@ rsp ->  argc
         padding to 16 bytes
         argument and environment strings
         16 random bytes (AT_RANDOM)
-        program path (AT_EXECFN), ending right below 0x7FFF_FFFF_0000
+        program path (AT_EXECFN), ending at the stack top (random, at
+        most 16 GiB below 0x7FFF_FFFF_0000)
 ```
 
 Auxiliary entries: `AT_PHDR` (3, when a loadable segment maps the program
