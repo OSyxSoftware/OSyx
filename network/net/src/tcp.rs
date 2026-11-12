@@ -38,7 +38,12 @@
 //!   flushes output, so a burst of segments handled together is
 //!   acknowledged once
 //!
-//! Not implemented: timestamps, D-SACK, urgent data (the URG flag is
+//! * timestamps (RFC 7323), when both SYNs carry the option: every segment
+//!   echoes the peer's latest value, round-trip time is measured from the
+//!   echo (retransmissions included), and segments older than the last one
+//!   accepted are dropped (PAWS)
+//!
+//! Not implemented: D-SACK, urgent data (the URG flag is
 //! ignored), delayed-ACK timers, keep-alive.
 
 use crate::ipv4::PROTO_TCP;
@@ -105,6 +110,8 @@ pub fn seq_ge(a: u32, b: u32) -> bool {
     seq_le(b, a)
 }
 
+/// Bytes of the timestamps option with its two NOPs (RFC 7323 appendix A).
+pub const TS_OPTION_LEN: usize = 12;
 /// Most SACK blocks in one segment: the option space holds four, three
 /// are sent (RFC 2018 section 3).
 pub const MAX_SACK_BLOCKS: usize = 4;
@@ -180,6 +187,8 @@ pub struct Segment<'a> {
     /// The SACK-permitted option (meaningful on a SYN).
     pub sack_permitted: bool,
     pub sack: SackOption<'a>,
+    /// The timestamps option: (TSval, TSecr).
+    pub ts: Option<(u32, u32)>,
     pub payload: &'a [u8],
 }
 
@@ -218,6 +227,7 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
     let mut ws = None;
     let mut sack_permitted = false;
     let mut sack = SackOption::NONE;
+    let mut ts = None;
     let mut opts = &b[HEADER_LEN..off];
     while let Some(&kind) = opts.first() {
         match kind {
@@ -248,6 +258,11 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
                         return Err(SegmentError::BadOption);
                     }
                     sack = SackOption(&opts[2..len]);
+                } else if kind == 8 {
+                    if len != 10 {
+                        return Err(SegmentError::BadOption);
+                    }
+                    ts = Some((be32(opts, 2), be32(opts, 6)));
                 }
                 opts = &opts[len..];
             }
@@ -264,6 +279,7 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
         ws,
         sack_permitted,
         sack,
+        ts,
         payload: &b[off..],
     };
     if seg.src_port == 0 || seg.dst_port == 0 {
@@ -286,6 +302,8 @@ pub struct OutSegment {
     pub sack_permitted: bool,
     /// Out-of-order data held, as a SACK option.
     pub sack: SackBlocks,
+    /// The timestamps option: (TSval, TSecr).
+    pub ts: Option<(u32, u32)>,
     pub payload: Vec<u8>,
 }
 
@@ -304,7 +322,7 @@ impl OutSegment {
     /// Encodes this segment's header with the payload `a` followed by `b`
     /// (in place of `payload`), behind `headroom` bytes.
     pub fn encode_parts_with_headroom(&self, local: Endpoint, remote: Endpoint, a: &[u8], b: &[u8], headroom: usize) -> Vec<u8> {
-        let options = Options { mss: self.mss, ws: self.ws, sack_permitted: self.sack_permitted, sack: self.sack };
+        let options = Options { mss: self.mss, ws: self.ws, sack_permitted: self.sack_permitted, sack: self.sack, ts: self.ts };
         build_parts(local, remote, self.seq, self.ack, self.flags, self.window, &options, (a, b), headroom)
     }
 }
@@ -338,7 +356,7 @@ pub fn build_with_headroom(
     payload: &[u8],
     headroom: usize,
 ) -> Vec<u8> {
-    let options = Options { mss, ws, sack_permitted: false, sack: SackBlocks::NONE };
+    let options = Options { mss, ws, sack_permitted: false, sack: SackBlocks::NONE, ts: None };
     build_parts(local, remote, seq, ack, flags, window, &options, (payload, &[]), headroom)
 }
 
@@ -348,6 +366,7 @@ struct Options {
     ws: Option<u8>,
     sack_permitted: bool,
     sack: SackBlocks,
+    ts: Option<(u32, u32)>,
 }
 
 impl Options {
@@ -358,6 +377,7 @@ impl Options {
         n += if self.ws.is_some() { 3 } else { 0 };
         n = (n + 3) & !3;
         n += if self.sack_permitted { 4 } else { 0 };
+        n += if self.ts.is_some() { TS_OPTION_LEN } else { 0 };
         n += if self.sack.is_empty() { 0 } else { 4 + 8 * self.sack.as_slice().len() };
         n
     }
@@ -379,12 +399,18 @@ impl Options {
             o[at + 1] = 3;
             o[at + 2] = shift;
             // A NOP pads the option when more follow; a zero would end the list.
-            o[at + 3] = if self.sack_permitted || !self.sack.is_empty() { 1 } else { 0 };
+            o[at + 3] = if self.sack_permitted || self.ts.is_some() || !self.sack.is_empty() { 1 } else { 0 };
             at += 4;
         }
         if self.sack_permitted {
             o[at..at + 4].copy_from_slice(&[1, 1, 4, 2]);
             at += 4;
+        }
+        if let Some((value, echo)) = self.ts {
+            o[at..at + 4].copy_from_slice(&[1, 1, 8, 10]);
+            put32(o, at + 4, value);
+            put32(o, at + 8, echo);
+            at += TS_OPTION_LEN;
         }
         if !self.sack.is_empty() {
             let blocks = self.sack.as_slice();
@@ -449,9 +475,9 @@ pub fn reset_for(seg: &Segment) -> Option<OutSegment> {
         return None;
     }
     Some(if seg.has(ACK) {
-        OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, payload: Vec::new() }
+        OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, ts: None, payload: Vec::new() }
     } else {
-        OutSegment { seq: 0, ack: seg.seq.wrapping_add(seg.seq_len()), flags: RST | ACK, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, payload: Vec::new() }
+        OutSegment { seq: 0, ack: seg.seq.wrapping_add(seg.seq_len()), flags: RST | ACK, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, ts: None, payload: Vec::new() }
     })
 }
 
@@ -551,6 +577,17 @@ pub struct Tcb {
     sacked: Vec<(u32, u32)>,
     /// End of the data retransmitted in the current fast recovery.
     rexmit_high: u32,
+    /// Both SYNs carried the timestamps option.
+    ts_ok: bool,
+    /// The peer's latest timestamp, echoed in what we send (TS.Recent).
+    ts_recent: u32,
+    /// Added to the clock for our own timestamps, so they do not start at
+    /// the uptime.
+    ts_offset: u32,
+    /// The acknowledgement number of the last segment sent (Last.ACK.sent).
+    last_ack_sent: u32,
+    /// When the last round-trip sample was taken from a timestamp echo.
+    ts_sampled_at: u64,
     /// The application called `close`: a FIN follows the data.
     fin_queued: bool,
     /// Sequence number of our FIN once it has been sent.
@@ -619,6 +656,11 @@ impl Tcb {
             last_ooo: None,
             sacked: Vec::new(),
             rexmit_high: iss,
+            ts_ok: false,
+            ts_recent: 0,
+            ts_offset: iss.rotate_left(13) ^ 0x5bd1_e995,
+            last_ack_sent: 0,
+            ts_sampled_at: 0,
             fin_queued: false,
             fin_sent: None,
             fin_received: false,
@@ -666,6 +708,8 @@ impl Tcb {
         t.peer_mss = syn.mss.unwrap_or(DEFAULT_MSS).max(64);
         t.peer_scale = syn.ws.unwrap_or(0);
         t.sack_ok = syn.sack_permitted;
+        t.ts_ok = syn.ts.is_some();
+        t.ts_recent = syn.ts.map_or(0, |ts| ts.0);
         // Scaling only takes effect when both sides offered WS.
         if syn.ws.is_none() {
             t.our_scale = 0;
@@ -695,9 +739,21 @@ impl Tcb {
         self.error
     }
 
-    /// Effective sending MSS.
+    /// Effective sending MSS: the data a segment can carry, which the
+    /// timestamps option reduces on every segment.
     pub fn mss(&self) -> u16 {
-        self.peer_mss.min(self.our_mss)
+        let mss = self.peer_mss.min(self.our_mss);
+        if self.ts_ok {
+            mss.saturating_sub(TS_OPTION_LEN as u16).max(1)
+        } else {
+            mss
+        }
+    }
+
+    /// The timestamp clock: milliseconds, as `now`, plus this connection's
+    /// offset.
+    fn ts_now(&self, now: u64) -> u32 {
+        (now as u32).wrapping_add(self.ts_offset)
     }
 
     pub fn rto_ms(&self) -> u64 {
@@ -927,6 +983,7 @@ impl Tcb {
             ws: None,
             sack_permitted: false,
             sack: SackBlocks::NONE,
+            ts: None,
             payload: Vec::new(),
         });
         self.fail(TcpError::NotConnected);
@@ -1000,7 +1057,7 @@ impl Tcb {
             // Not for this connection attempt; RFC 9293 answers with a
             // reset, which the stack sends for the caller.
             if !seg.has(RST) {
-                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, payload: Vec::new() });
+                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, ts: None, payload: Vec::new() });
             }
             return;
         }
@@ -1018,6 +1075,8 @@ impl Tcb {
         self.peer_mss = seg.mss.unwrap_or(DEFAULT_MSS).max(64);
         self.peer_scale = seg.ws.unwrap_or(0);
         self.sack_ok = seg.sack_permitted;
+        self.ts_ok = seg.ts.is_some();
+        self.ts_recent = seg.ts.map_or(0, |ts| ts.0);
         if seg.ws.is_none() {
             self.our_scale = 0;
         }
@@ -1052,6 +1111,17 @@ impl Tcb {
     }
 
     fn input_synchronized(&mut self, seg: &Segment, now: u64) {
+        // PAWS (RFC 7323 section 5): a segment whose timestamp is older than
+        // the last one accepted is an old duplicate, whatever its sequence
+        // number says. It is acknowledged and dropped; a reset is exempt.
+        if let (true, Some((value, _))) = (self.ts_ok && !seg.has(RST), seg.ts) {
+            if seq_lt(value, self.ts_recent) {
+                self.stats.duplicates += 1;
+                self.ack_pending = true;
+                self.ack_now = true;
+                return;
+            }
+        }
         if !self.acceptable(seg) {
             // Old duplicate or beyond the window: re-acknowledge (unless RST).
             if !seg.has(RST) {
@@ -1066,6 +1136,14 @@ impl Tcb {
                 self.window_update(seg);
             }
             return;
+        }
+        // TS.Recent follows the segment that covers the last ACK sent (RFC
+        // 7323 section 4.3), so a delayed ACK echoes the oldest segment it
+        // acknowledges.
+        if let (true, Some((value, _))) = (self.ts_ok, seg.ts) {
+            if seq_le(seg.seq, self.last_ack_sent) && seq_ge(value, self.ts_recent) {
+                self.ts_recent = value;
+            }
         }
         if seg.has(RST) {
             // RFC 5961 3.2: only an exact match resets; others get a challenge ACK.
@@ -1105,7 +1183,7 @@ impl Tcb {
                 self.snd_wl1 = seg.seq;
                 self.snd_wl2 = seg.ack;
             } else {
-                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, payload: Vec::new() });
+                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, ts: None, payload: Vec::new() });
                 return;
             }
         }
@@ -1196,6 +1274,18 @@ impl Tcb {
         }
         let new_sack = self.record_sack(seg);
         if seq_gt(seg.ack, self.snd_una) {
+            // The echoed timestamp times the round trip, for retransmitted
+            // data too (no Karn's rule needed). One sample per round trip
+            // keeps the RFC 6298 filter as it is tuned.
+            if let (true, Some((_, echo))) = (self.ts_ok, seg.ts) {
+                let sample = self.ts_now(now).wrapping_sub(echo) as u64;
+                let due = self.srtt.is_none_or(|srtt| now.saturating_sub(self.ts_sampled_at) >= srtt);
+                if echo != 0 && sample < MAX_RTO_MS && due {
+                    self.rtt_sample(sample);
+                    self.ts_sampled_at = now;
+                }
+                self.rtt_probe = None;
+            }
             let newly = seg.ack.wrapping_sub(self.snd_una);
             self.ack_advance(seg.ack, now);
             match self.recover {
@@ -1533,7 +1623,7 @@ impl Tcb {
 
     // ----- output ------------------------------------------------------------
 
-    fn segment(&mut self, seq: u32, flags: u8, payload: Vec<u8>) -> OutSegment {
+    fn segment(&mut self, seq: u32, flags: u8, payload: Vec<u8>, now: u64) -> OutSegment {
         let mut flags = flags;
         let ack = if self.state == State::SynSent && flags & SYN != 0 {
             0
@@ -1546,6 +1636,10 @@ impl Tcb {
         // Offered on our SYN; on a SYN-ACK only when the peer offered it.
         let sack_permitted = flags & SYN != 0 && (self.state == State::SynSent || self.sack_ok);
         let sack = if flags & SYN == 0 { self.sack_blocks() } else { SackBlocks::NONE };
+        // Offered on our SYN; afterwards on every segment once both sides
+        // sent it.
+        let ts = (self.ts_ok || (flags & SYN != 0 && self.state == State::SynSent)).then(|| (self.ts_now(now), self.ts_recent));
+        self.last_ack_sent = ack;
         self.ack_pending = false;
         self.ack_now = false;
         self.unacked_segments = 0;
@@ -1557,7 +1651,7 @@ impl Tcb {
         } else {
             self.adv_window()
         };
-        OutSegment { seq, ack, flags, window, mss, ws, sack_permitted, sack, payload }
+        OutSegment { seq, ack, flags, window, mss, ws, sack_permitted, sack, ts, payload }
     }
 
     /// Segments to transmit now (SYN, data, FIN, retransmissions, ACKs).
@@ -1586,7 +1680,7 @@ impl Tcb {
             State::SynSent | State::SynReceived => {
                 if self.snd_nxt == self.iss {
                     let flags = if self.state == State::SynSent { SYN } else { SYN | ACK };
-                    let seg = self.segment(self.iss, flags, Vec::new());
+                    let seg = self.segment(self.iss, flags, Vec::new(), now);
                     emit(seg, &[], &[]);
                     self.snd_nxt = self.iss.wrapping_add(1);
                     if seq_gt(self.snd_nxt, self.snd_max) {
@@ -1599,7 +1693,7 @@ impl Tcb {
                         self.rtt_probe = Some((self.snd_nxt, now));
                     }
                 } else if self.ack_pending && self.state == State::SynReceived {
-                    let seg = self.segment(self.snd_nxt, 0, Vec::new());
+                    let seg = self.segment(self.snd_nxt, 0, Vec::new(), now);
                     emit(seg, &[], &[]);
                 }
                 return;
@@ -1641,7 +1735,7 @@ impl Tcb {
                     if fin_now {
                         flags |= FIN;
                     }
-                    let seg = self.segment(seq, flags, Vec::new());
+                    let seg = self.segment(seq, flags, Vec::new(), now);
                     self.stats.bytes_out += n as u64;
                     let (a, b) = ring_range(&self.send_buf, off, n);
                     emit(seg, a, b);
@@ -1653,7 +1747,7 @@ impl Tcb {
                 }
                 if pending == 0 && self.fin_pending() {
                     let seq = self.snd_nxt;
-                    let seg = self.segment(seq, FIN, Vec::new());
+                    let seg = self.segment(seq, FIN, Vec::new(), now);
                     emit(seg, &[], &[]);
                     self.fin_sent = Some(seq);
                     self.after_send(seq, 1, now);
@@ -1665,7 +1759,7 @@ impl Tcb {
                         None => self.persist_at = Some(now + self.rto),
                         Some(t) if now >= t => {
                             let seq = self.snd_nxt;
-                            let seg = self.segment(seq, 0, Vec::new());
+                            let seg = self.segment(seq, 0, Vec::new(), now);
                             let (a, b) = ring_range(&self.send_buf, off, 1);
                             emit(seg, a, b);
                             self.after_send(seq, 1, now);
@@ -1679,7 +1773,7 @@ impl Tcb {
             }
         }
         if self.ack_pending {
-            let seg = self.segment(self.snd_nxt, 0, Vec::new());
+            let seg = self.segment(self.snd_nxt, 0, Vec::new(), now);
             emit(seg, &[], &[]);
         }
     }
