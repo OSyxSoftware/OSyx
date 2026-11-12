@@ -40,6 +40,7 @@ const D_SAVE_AS: u32 = 2;
 const D_FIND: u32 = 3;
 const D_DISCARD: u32 = 4;
 const D_ERROR: u32 = 5;
+const D_OVERWRITE: u32 = 6;
 
 /// What to do once unsaved changes are dealt with.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -150,6 +151,8 @@ struct Editor {
     buttons: Vec<Button>,
     dialog: Option<Dialog>,
     then: Option<Then>,
+    /// The Save as path waiting for the answer to "replace it?".
+    replacing: Option<String>,
     needle: String,
     message: String,
     size: (u32, u32),
@@ -176,6 +179,7 @@ impl Editor {
             buttons: labels.iter().enumerate().map(|(i, l)| Button::new(i, l, ButtonStyle::Flat)).collect(),
             dialog: None,
             then: None,
+            replacing: None,
             needle: String::new(),
             message: String::new(),
             size: (0, 0),
@@ -214,7 +218,8 @@ impl Editor {
             Ok(m) if m.is_dir() => return Err(format!("{path} is a folder.")),
             Ok(m) if m.len() > MAX_FILE => return Err(format!("{path} is larger than 8 MiB.")),
             Ok(_) => fs::read(&path).map_err(|e| format!("{path} cannot be read: {e}."))?,
-            Err(_) => Vec::new(),
+            Err(e) if e.kind() == os_std::error::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(format!("{path} cannot be read: {e}.")),
         };
         let (text, valid) = match String::from_utf8(bytes) {
             Ok(t) => (t, true),
@@ -231,6 +236,11 @@ impl Editor {
     }
 
     fn save_to(&mut self, path: &str) -> Result<(), String> {
+        // What is shown of a file that is not UTF-8 has lost bytes: writing
+        // it back would destroy the file.
+        if self.area.read_only {
+            return Err(String::from("This file is not UTF-8 text and was opened read-only: it cannot be saved."));
+        }
         let path = absolute(path);
         let mut text = self.area.text();
         if self.crlf {
@@ -243,6 +253,18 @@ impl Editor {
         println!("edit: saved {path} ({} bytes)", text.len());
         self.path = Some(path);
         Ok(())
+    }
+
+    /// Saves to `path`, then does what was waiting for the save.
+    fn save_then(&mut self, path: &str, cx: &mut Ctx) {
+        match self.save_to(path) {
+            Ok(()) => {
+                if let Some(then) = self.then.take() {
+                    self.proceed(then, cx);
+                }
+            }
+            Err(e) => self.error(&e),
+        }
     }
 
     fn error(&mut self, text: &str) {
@@ -335,21 +357,37 @@ impl Editor {
                     self.error(&e);
                 }
             }
-            (D_SAVE_AS, 1) => match self.save_to(input.trim()) {
-                Ok(()) => {
-                    if let Some(then) = self.then.take() {
-                        self.proceed(then, cx);
-                    }
+            (D_SAVE_AS, 1) => {
+                // Another file under that name is replaced only on a yes.
+                let to = absolute(input.trim());
+                if self.path.as_deref() != Some(to.as_str()) && fs::metadata(&to).is_ok_and(|m| m.is_file()) {
+                    self.dialog = Some(Dialog::new(
+                        D_OVERWRITE,
+                        "Save as",
+                        &format!("{to} exists. Replace it?"),
+                        &[("Cancel", ButtonStyle::Secondary), ("Replace", ButtonStyle::Danger)],
+                    ));
+                    self.replacing = Some(to);
+                } else {
+                    self.save_then(&to, cx);
                 }
-                Err(e) => self.error(&e),
-            },
+            }
+            (D_OVERWRITE, 1) => {
+                if let Some(to) = self.replacing.take() {
+                    self.save_then(&to, cx);
+                }
+            }
             (D_FIND, 1) => {
                 self.needle = input;
                 self.find_next(true);
             }
             (D_DISCARD, 1) => {
                 if let Some(then) = self.then.take() {
-                    self.area.mark_saved();
+                    // Open only asks for a path: the text stays unsaved
+                    // until another file has taken its place.
+                    if !matches!(then, Then::Open) {
+                        self.area.mark_saved();
+                    }
                     self.proceed(then, cx);
                 }
             }
@@ -366,9 +404,9 @@ impl Editor {
                 None => self.ask_path(D_SAVE_AS),
             },
             _ => {
-                if tag != D_SAVE_AS {
-                    self.then = None;
-                }
+                // Cancelled: nothing waits for this dialog any more.
+                self.then = None;
+                self.replacing = None;
             }
         }
         self.area.reveal_cursor(&cx.fonts);
