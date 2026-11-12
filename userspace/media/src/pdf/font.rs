@@ -83,6 +83,113 @@ pub struct Font {
     /// A system font stands in for one the file does not embed: glyphs
     /// are scaled to the widths the file expects.
     substituted: bool,
+    /// The file's own map from codes to text (ToUnicode).
+    to_unicode: BTreeMap<u32, String>,
+    /// Glyph id to character from the embedded font's own tables, built
+    /// on first use, for fonts without a ToUnicode map.
+    reverse: RefCell<Option<BTreeMap<u16, char>>>,
+}
+
+/// Entries kept from one ToUnicode map (every code of a two-byte font).
+const TO_UNICODE_MAX: usize = 0x1_0000;
+
+/// Bytes of UTF-16 kept of one code's text. With the entry limit this
+/// bounds what a map can hold, whatever its ranges say.
+const TO_UNICODE_TEXT: usize = 64;
+
+/// Parses a ToUnicode CMap: `bfchar` and `bfrange` sections map codes to
+/// UTF-16BE strings.
+fn parse_to_unicode(data: &[u8]) -> BTreeMap<u32, String> {
+    // Tokens of a section: hex strings, and brackets around arrays.
+    enum Tok {
+        Hex(Vec<u8>),
+        Open,
+        Close,
+    }
+    let tokens = |s: &[u8]| -> Vec<Tok> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < s.len() {
+            match s[i] {
+                b'<' => {
+                    let end = s[i..].iter().position(|&c| c == b'>').map_or(s.len(), |e| i + e);
+                    let digits: Vec<u8> = s[i + 1..end].iter().filter_map(|c| (*c as char).to_digit(16).map(|d| d as u8)).collect();
+                    out.push(Tok::Hex(digits.chunks(2).map(|c| c[0] << 4 | c.get(1).copied().unwrap_or(0)).collect()));
+                    i = end;
+                }
+                b'[' => out.push(Tok::Open),
+                b']' => out.push(Tok::Close),
+                _ => {}
+            }
+            i += 1;
+        }
+        out
+    };
+    let number = |b: &[u8]| b.iter().fold(0u32, |a, &x| a << 8 | x as u32);
+    // (A destination is a few characters: a ligature, a composed letter.)
+    let text = |b: &[u8]| -> String {
+        let b = &b[..b.len().min(TO_UNICODE_TEXT)];
+        let units: Vec<u16> = b.chunks(2).map(|c| (c[0] as u16) << 8 | c.get(1).copied().unwrap_or(0) as u16).collect();
+        char::decode_utf16(units).map(|c| c.unwrap_or('\u{FFFD}')).collect()
+    };
+    let mut map = BTreeMap::new();
+    // Ranges are cheap to write and expand to many entries: a file gets
+    // as many as the largest real fonts need, and no more.
+    let mut budget = TO_UNICODE_MAX;
+    let find = |from: usize, word: &[u8]| data[from..].windows(word.len()).position(|w| w == word).map(|p| from + p);
+    for (begin, end, ranges) in [(&b"beginbfchar"[..], &b"endbfchar"[..], false), (&b"beginbfrange"[..], &b"endbfrange"[..], true)] {
+        let mut at = 0;
+        while let Some(start) = find(at, begin) {
+            let stop = find(start, end).unwrap_or(data.len());
+            let toks = tokens(&data[start + begin.len()..stop]);
+            let mut i = 0;
+            while i < toks.len() {
+                match (ranges, &toks[i], toks.get(i + 1), toks.get(i + 2)) {
+                    (false, Tok::Hex(code), Some(Tok::Hex(dst)), _) => {
+                        if budget > 0 {
+                            budget -= 1;
+                            map.insert(number(code), text(dst));
+                        }
+                        i += 2;
+                    }
+                    (true, Tok::Hex(lo), Some(Tok::Hex(hi)), Some(Tok::Hex(dst))) => {
+                        // The last UTF-16 unit counts up through the range.
+                        let (lo, hi) = (number(lo), number(hi));
+                        for (n, code) in (lo..=hi.min(lo.saturating_add(0xFFFF))).enumerate() {
+                            if budget == 0 {
+                                break;
+                            }
+                            budget -= 1;
+                            let mut d = dst[..dst.len().min(TO_UNICODE_TEXT)].to_vec();
+                            if let [.., a, b] = d.as_mut_slice() {
+                                let v = ((*a as u32) << 8 | *b as u32) + n as u32;
+                                (*a, *b) = ((v >> 8) as u8, v as u8);
+                            }
+                            map.insert(code, text(&d));
+                        }
+                        i += 3;
+                    }
+                    (true, Tok::Hex(lo), Some(Tok::Hex(_)), Some(Tok::Open)) => {
+                        let lo = number(lo);
+                        i += 3;
+                        let mut n = 0;
+                        while let Some(Tok::Hex(dst)) = toks.get(i) {
+                            if budget > 0 {
+                                budget -= 1;
+                                map.insert(lo.wrapping_add(n), text(dst));
+                            }
+                            n += 1;
+                            i += 1;
+                        }
+                        i += 1; // the closing bracket
+                    }
+                    _ => i += 1,
+                }
+            }
+            at = stop;
+        }
+    }
+    map
 }
 
 /// Codespace ranges and code to CID mappings of a CMap.
@@ -462,6 +569,8 @@ impl Font {
             single_byte: true,
             name: plain,
             substituted,
+            to_unicode: Font::to_unicode(doc, d),
+            reverse: RefCell::new(None),
         }
     }
 
@@ -558,6 +667,59 @@ impl Font {
             single_byte: false,
             name: String::from(name),
             substituted,
+            to_unicode: Font::to_unicode(doc, d),
+            reverse: RefCell::new(None),
+        }
+    }
+
+    fn to_unicode(doc: &Document, d: &Dict) -> BTreeMap<u32, String> {
+        match doc.get_key(d, "ToUnicode") {
+            Object::Stream(s) => parse_to_unicode(&doc.stream_data(&s)),
+            _ => BTreeMap::new(),
+        }
+    }
+
+    /// The text of code `code` (glyph key `k`): from the file's ToUnicode
+    /// map, else the glyph's name, else the embedded font's own character
+    /// map read backwards. Empty when nothing says what the glyph means.
+    pub fn unicode(&self, code: u32, k: u32) -> String {
+        if let Some(s) = self.to_unicode.get(&code) {
+            return s.clone();
+        }
+        if let Lookup::Names(_) = &self.lookup {
+            if let Some(c) = glyph_unicode(self.name_of(code)) {
+                return String::from(c);
+            }
+        }
+        if let Program::Sfnt(data) = &self.program {
+            if !self.substituted {
+                if let Ok(face) = ttf_parser::Face::parse(data, 0) {
+                    if let Some(gid) = self.sfnt_gid(&face, k) {
+                        let mut reverse = self.reverse.borrow_mut();
+                        let map = reverse.get_or_insert_with(|| {
+                            let mut m = BTreeMap::new();
+                            if let Some(cmap) = face.tables().cmap {
+                                for sub in cmap.subtables.into_iter().filter(|s| s.is_unicode()) {
+                                    sub.codepoints(|cp| {
+                                        if let (Some(g), Some(c)) = (sub.glyph_index(cp), char::from_u32(cp)) {
+                                            m.entry(g.0).or_insert(c);
+                                        }
+                                    });
+                                }
+                            }
+                            m
+                        });
+                        if let Some(c) = map.get(&gid.0) {
+                            return String::from(*c);
+                        }
+                    }
+                }
+            }
+        }
+        // A simple font's printable ASCII codes nearly always mean ASCII.
+        match &self.lookup {
+            Lookup::Names(_) if (32..127).contains(&code) => String::from(code as u8 as char),
+            _ => String::new(),
         }
     }
 

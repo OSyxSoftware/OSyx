@@ -390,6 +390,8 @@ pub struct Compositor {
     file_drag: Option<(WindowId, String, i32, i32)>,
     modifiers: u32,
     damage: Damage,
+    /// The colours of decorations and window bodies.
+    palette: theme::Palette,
     ghosts: Vec<Ghost>,
     outbox: Vec<(ClientId, Event)>,
     list_dirty: bool,
@@ -409,7 +411,13 @@ pub struct Compositor {
     clipboard: Vec<proto::ClipEntry>,
     clipboard_seq: u32,
     /// PrintScreen was pressed; the platform saves the next frame.
-    screenshot_requested: bool,
+    /// A part of the screen to save as a picture after the next frame.
+    capture_requested: Option<Rect>,
+    /// Choosing an area for a screenshot: `Some(None)` until the button
+    /// goes down, then where it went down.
+    selecting: Option<Option<(i32, i32)>>,
+    /// Ctrl+PrintScreen was pressed: start or stop recording the screen.
+    record_toggle: bool,
 }
 
 const DOUBLE_CLICK_MS: u64 = 400;
@@ -448,12 +456,15 @@ impl Compositor {
             cursor_overlay: false,
             clipboard: Vec::new(),
             clipboard_seq: 0,
+            palette: theme::Palette::DARK,
             shadow: ShadowTables::new(theme::SHADOW, theme::RADIUS),
             popup_shadow: ShadowTables::new(12, theme::RADIUS),
             font: PropFont::parse(TITLE_FONT).expect("embedded title font"),
             last_title_click: None,
             alt_tab: None,
-            screenshot_requested: false,
+            capture_requested: None,
+            selecting: None,
+            record_toggle: false,
             cascade: 0,
             now: 0,
             stats: Stats::default(),
@@ -468,6 +479,19 @@ impl Compositor {
 
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// Switches the colours of decorations and window bodies (dark or
+    /// light) and redraws the whole screen.
+    pub fn set_palette(&mut self, palette: theme::Palette) {
+        if palette != self.palette {
+            self.palette = palette;
+            self.damage.add(self.screen, self.screen);
+        }
+    }
+
+    pub fn palette(&self) -> theme::Palette {
+        self.palette
     }
 
     pub fn set_layout(&mut self, layout: Layout) {
@@ -846,14 +870,7 @@ impl Compositor {
                 Ok(())
             }
             Request::ClipboardSet { entries } => {
-                self.clipboard = entries;
-                self.clipboard_seq += 1;
-                let ev = Event::ClipboardChanged { seq: self.clipboard_seq, entries: self.clipboard.clone() };
-                let ids: Vec<ClientId> =
-                    self.clients.iter().filter(|(_, cl)| cl.version.is_some() && !cl.dead).map(|(id, _)| *id).collect();
-                for id in ids {
-                    self.outbox.push((id, ev.clone()));
-                }
+                self.set_clipboard(entries);
                 Ok(())
             }
             Request::Notify { title, body } => {
@@ -1464,12 +1481,18 @@ impl Compositor {
 
     fn pointer_motion(&mut self, dx: i32, dy: i32) {
         let old = self.cursor.area(self.ptr_x, self.ptr_y);
+        self.damage_selection();
         self.ptr_x = self.ptr_x.saturating_add(dx).clamp(0, self.screen.w as i32 - 1);
         self.ptr_y = self.ptr_y.saturating_add(dy).clamp(0, self.screen.h as i32 - 1);
+        self.damage_selection();
         let new = self.cursor.area(self.ptr_x, self.ptr_y);
         if !self.cursor_overlay {
             self.damage.add(old, self.screen);
             self.damage.add(new, self.screen);
+        }
+        // Windows hear nothing of the pointer while an area is chosen.
+        if self.selecting.is_some() {
+            return;
         }
         match self.grab {
             Some(Grab::Move { win, dx, dy }) => {
@@ -1619,6 +1642,29 @@ impl Compositor {
         } else {
             self.buttons &= !bit;
         }
+        // Choosing an area for a screenshot takes the pointer from the
+        // windows: press, drag, release. Any other button gives up.
+        if self.selecting.is_some() {
+            self.damage_selection();
+            match (button, pressed, self.selection()) {
+                (1, true, _) => self.selecting = Some(Some((self.ptr_x, self.ptr_y))),
+                (1, false, Some(area)) => {
+                    self.selecting = None;
+                    // A click without a drag chooses nothing.
+                    if area.w >= 4 && area.h >= 4 {
+                        self.request_capture(area);
+                    }
+                }
+                (1, false, None) => {}
+                _ => self.selecting = None,
+            }
+            // Windows heard nothing of the pointer meanwhile: the one
+            // under it now is the one the wheel and the next click reach.
+            if self.selecting.is_none() {
+                self.update_hover();
+            }
+            return;
+        }
         if !pressed {
             if button == 1 {
                 if let Some((source, path, x, y)) = self.file_drag.take() {
@@ -1745,6 +1791,10 @@ impl Compositor {
     }
 
     fn pointer_wheel(&mut self, v: i32, h: i32) {
+        // Choosing an area for a screenshot scrolls nothing.
+        if self.selecting.is_some() {
+            return;
+        }
         let target = match self.grab {
             Some(Grab::Content { win }) => Some(win),
             _ => match self.hover {
@@ -1765,8 +1815,51 @@ impl Compositor {
     }
 
     /// True once per PrintScreen press.
-    pub fn take_screenshot_request(&mut self) -> bool {
-        core::mem::take(&mut self.screenshot_requested)
+    /// The part of the screen to save as a picture, once: the whole screen
+    /// (PrintScreen), the focused window with its title bar
+    /// (Alt+PrintScreen) or an area the user dragged (Shift+PrintScreen).
+    pub fn take_capture_request(&mut self) -> Option<Rect> {
+        self.capture_requested.take()
+    }
+
+    /// Whether Ctrl+PrintScreen was pressed since the last call.
+    pub fn take_record_toggle(&mut self) -> bool {
+        core::mem::take(&mut self.record_toggle)
+    }
+
+    /// Whether the user is choosing an area for a screenshot.
+    pub fn selecting(&self) -> bool {
+        self.selecting.is_some()
+    }
+
+    /// The area dragged so far.
+    fn selection(&self) -> Option<Rect> {
+        let (x, y) = self.selecting??;
+        let (x0, y0) = (x.min(self.ptr_x), y.min(self.ptr_y));
+        Some(Rect::new(x0, y0, (x.max(self.ptr_x) - x0 + 1) as u32, (y.max(self.ptr_y) - y0 + 1) as u32))
+    }
+
+    fn damage_selection(&mut self) {
+        if let Some(r) = self.selection() {
+            self.damage.add(r.inflate(2), self.screen);
+        }
+    }
+
+    fn request_capture(&mut self, area: Rect) {
+        self.capture_requested = Some(area.intersect(&self.screen));
+        // A frame follows even when nothing else changed.
+        self.damage.add(Rect::new(self.screen.x, self.screen.y, 1, 1), self.screen);
+    }
+
+    /// Replaces the system clipboard and tells every client.
+    pub fn set_clipboard(&mut self, entries: Vec<proto::ClipEntry>) {
+        self.clipboard = entries;
+        self.clipboard_seq += 1;
+        let ev = Event::ClipboardChanged { seq: self.clipboard_seq, entries: self.clipboard.clone() };
+        let ids: Vec<ClientId> = self.clients.iter().filter(|(_, cl)| cl.version.is_some() && !cl.dead).map(|(id, _)| *id).collect();
+        for id in ids {
+            self.outbox.push((id, ev.clone()));
+        }
     }
 
     /// A notification from PRISM itself (process id 0) to the shell.
@@ -1799,9 +1892,32 @@ impl Compositor {
         // PrintScreen belongs to PRISM, whoever has focus.
         if usage == key::PRINT_SCREEN {
             if down {
-                self.screenshot_requested = true;
-                // A frame follows even when nothing else changed.
-                self.damage.add(Rect::new(self.screen.x, self.screen.y, 1, 1), self.screen);
+                self.damage_selection();
+                self.selecting = None;
+                if mods & modifier::CTRL != 0 {
+                    self.record_toggle = true;
+                } else if mods & modifier::SHIFT != 0 {
+                    // Not in the middle of a drag: its release would be
+                    // taken for the selection's and never reach the window.
+                    if self.buttons == 0 && self.grab.is_none() {
+                        self.selecting = Some(None);
+                    }
+                } else if mods & modifier::ALT != 0 {
+                    let frame = self.focus.and_then(|id| self.windows.get(&id)).filter(|w| w.visible()).map(|w| w.frame());
+                    self.request_capture(frame.unwrap_or(self.screen));
+                } else {
+                    self.request_capture(self.screen);
+                }
+            }
+            return;
+        }
+        // Escape gives up choosing an area.
+        if self.selecting.is_some() && usage == key::ESCAPE {
+            if down {
+                self.damage_selection();
+                self.selecting = None;
+                // The pointer may be over another window by now.
+                self.update_hover();
             }
             return;
         }
@@ -1916,7 +2032,7 @@ impl Compositor {
             .and_then(|id| self.windows.get(id))
             .is_some_and(|w| w.role == Role::Desktop && w.visible() && w.fade.is_none());
         if !has_desktop {
-            target.fill_rect(clip, theme::DESKTOP_FALLBACK);
+            target.fill_rect(clip, self.palette.desktop_fallback);
         }
         for id in &self.stack {
             let w = &self.windows[id];
@@ -1928,6 +2044,18 @@ impl Compositor {
         for g in &self.ghosts {
             if !g.bounds().intersect(&clip).is_empty() {
                 self.draw_ghost(target, g, clip, now);
+            }
+        }
+        // The outline of the area being chosen for a screenshot.
+        if let Some(r) = self.selection() {
+            let (right, bottom) = (r.x + r.w as i32, r.y + r.h as i32);
+            for edge in [
+                Rect::new(r.x - 2, r.y - 2, r.w + 4, 2),
+                Rect::new(r.x - 2, bottom, r.w + 4, 2),
+                Rect::new(r.x - 2, r.y, 2, r.h),
+                Rect::new(right, r.y, 2, r.h),
+            ] {
+                target.fill_rect(edge.intersect(&clip), self.palette.accent);
             }
         }
         if !self.cursor_overlay && !self.cursor.area(self.ptr_x, self.ptr_y).intersect(&clip).is_empty() {
@@ -1955,7 +2083,7 @@ impl Compositor {
         }
         self.draw_content(target, w, opacity, clip);
         if w.decorated {
-            let (c, a) = if focused { (theme::ACCENT, 70) } else { (theme::OUTLINE_INACTIVE, 22) };
+            let (c, a) = if focused { (self.palette.accent, 70) } else { (self.palette.outline_inactive, 22) };
             draw::outline_rounded(target, frame, theme::RADIUS, c, a * opacity / 256, clip);
         }
     }
@@ -1988,7 +2116,7 @@ impl Compositor {
             }
             // Body behind uncovered or translucent content.
             if px.is_none_or(|p| p.alpha) || covered.intersect(&part) != part {
-                fill_body(target, part, covered, px.is_some_and(|p| p.alpha), opacity);
+                fill_body(target, part, covered, px.is_some_and(|p| p.alpha), opacity, self.palette.window_body);
             }
             if let Some(p) = &px {
                 draw::blit(target, rect.x, rect.y, p, opacity, part.intersect(&covered));
@@ -2007,7 +2135,7 @@ impl Compositor {
                         let lx = (pxx - rect.x) as u32;
                         let ly = (py - rect.y) as u32;
                         let dst = &mut target.row_mut(py as u32)[pxx as usize];
-                        let body = draw::tint(*dst, theme::WINDOW_BODY, a);
+                        let body = draw::tint(*dst, self.palette.window_body, a);
                         *dst = match &px {
                             Some(p) if lx < p.width && ly < p.height => {
                                 let s = p.get(lx, ly);
@@ -2031,7 +2159,7 @@ impl Compositor {
         if bar.intersect(&clip).is_empty() {
             return;
         }
-        let bg = if focused { theme::TITLE_ACTIVE } else { theme::TITLE_INACTIVE };
+        let bg = if focused { self.palette.title_active } else { self.palette.title_inactive };
         draw::fill_rounded(target, bar, theme::RADIUS, corner::TOP, bg, opacity, clip);
         // Title text, ellipsized before the buttons.
         let buttons = w.buttons();
@@ -2039,7 +2167,7 @@ impl Compositor {
         let text_max = (buttons[0].1.x - 12 - text_x).max(0) as u32;
         let (shown, cut) = self.font.ellipsize(&w.title, text_max);
         let ty = bar.y + ((theme::TITLE_HEIGHT - self.font.line_height()) / 2) as i32;
-        let color = if focused { theme::TITLE_TEXT } else { theme::TITLE_TEXT_INACTIVE };
+        let color = if focused { self.palette.title_text } else { self.palette.title_text_inactive };
         let text_clip = Rect::new(text_x, bar.y, text_max + self.font.advance('…'), bar.h).intersect(&clip);
         let alpha = 255 * opacity / 256;
         let end = self.font.draw_clipped(target, text_x, ty, shown, color, alpha, text_clip);
@@ -2064,13 +2192,13 @@ impl Compositor {
             }
             let is_hover = hovered == Some(part);
             if pressed == Some(part) {
-                let c = if part == Part::Close { theme::CLOSE_HOVER } else { theme::BUTTON_PRESSED };
+                let c = if part == Part::Close { self.palette.close_hover } else { self.palette.button_pressed };
                 draw::fill_rounded(target, r, 7, corner::ALL, c, opacity, clip);
             } else if is_hover {
-                let c = if part == Part::Close { theme::CLOSE_HOVER } else { theme::BUTTON_HOVER };
+                let c = if part == Part::Close { self.palette.close_hover } else { self.palette.button_hover };
                 draw::fill_rounded(target, r, 7, corner::ALL, c, opacity, clip);
             }
-            let glyph = if is_hover && part == Part::Close { 0xFFFFFF } else if focused { theme::GLYPH } else { theme::TITLE_TEXT_INACTIVE };
+            let glyph = if is_hover && part == Part::Close { 0xFFFFFF } else if focused { self.palette.glyph } else { self.palette.title_text_inactive };
             draw_button_glyph(target, part, r, w.maximized, glyph, opacity, clip);
         }
     }
@@ -2085,13 +2213,13 @@ impl Compositor {
         self.shadow.draw(target, Rect::new(frame.x, frame.y + theme::SHADOW_OFFSET_Y, frame.w, frame.h), frame, theme::SHADOW_ALPHA_INACTIVE * opacity / 256, clip);
         if g.decorated {
             let bar = Rect::new(frame.x, frame.y, frame.w, t);
-            draw::fill_rounded(target, bar, theme::RADIUS, corner::TOP, theme::TITLE_INACTIVE, opacity, clip);
+            draw::fill_rounded(target, bar, theme::RADIUS, corner::TOP, self.palette.title_inactive, opacity, clip);
             let ty = bar.y + ((t - self.font.line_height()) / 2) as i32;
             let (shown, _) = self.font.ellipsize(&g.title, frame.w.saturating_sub(120));
-            self.font.draw_clipped(target, bar.x + 16, ty, shown, theme::TITLE_TEXT_INACTIVE, 255 * opacity / 256, bar.intersect(&clip));
+            self.font.draw_clipped(target, bar.x + 16, ty, shown, self.palette.title_text_inactive, 255 * opacity / 256, bar.intersect(&clip));
         }
         let body = Rect::new(g.rect.x, g.rect.y, g.rect.w, g.rect.h).intersect(&clip);
-        target.blend_rect(body, theme::WINDOW_BODY, 255 * opacity / 256);
+        target.blend_rect(body, self.palette.window_body, 255 * opacity / 256);
         if let Some(p) = Pixels::new(&g.pixels, g.width, g.height, g.width, g.alpha) {
             draw::blit(target, g.rect.x, g.rect.y, &p, opacity, g.rect.intersect(&clip));
         }
@@ -2104,16 +2232,16 @@ fn unknown() -> ProtocolError {
 
 /// Fills the window body colour in `part` where the surface does not
 /// cover it (or everywhere, under translucent content).
-fn fill_body(target: &mut Surface, part: Rect, covered: Rect, translucent: bool, opacity: u32) {
+fn fill_body(target: &mut Surface, part: Rect, covered: Rect, translucent: bool, opacity: u32, body: u32) {
     let alpha = 255 * opacity / 256;
     if translucent {
-        target.blend_rect(part, theme::WINDOW_BODY, alpha);
+        target.blend_rect(part, body, alpha);
         return;
     }
     // Up to four strips around the covered area.
     let c = covered.intersect(&part);
     if c.is_empty() {
-        target.blend_rect(part, theme::WINDOW_BODY, alpha);
+        target.blend_rect(part, body, alpha);
         return;
     }
     let strips = [
@@ -2124,7 +2252,7 @@ fn fill_body(target: &mut Surface, part: Rect, covered: Rect, translucent: bool,
     ];
     for s in strips {
         if !s.is_empty() {
-            target.blend_rect(s, theme::WINDOW_BODY, alpha);
+            target.blend_rect(s, body, alpha);
         }
     }
 }

@@ -9,7 +9,7 @@ param(
     # Keep the root partition of the current build/osyx.img (e.g. to boot
     # again after a simulated power cut) instead of building a fresh one.
     [switch]$KeepRoot,
-    [ValidateRange(128, 16384)][int]$RootMiB = 256,
+    [ValidateRange(128, 16384)][int]$RootMiB = 384,
     # Install the vendor payload, desktop shortcut and default web browser.
     [string]$ZenDirectory = '',
     # Small test/development images can explicitly omit the browser.
@@ -77,12 +77,12 @@ if (-not $NoZen -and -not $NoInit -and -not $KeepRoot) {
     # Program -> directory on the root file system. The graphical session
     # (PRISM, the desktop shell and its applications) lives in /system/bin.
     $installDirs = [ordered]@{
-        init = 'bin'; worker = 'bin'; probe = 'usr/bin'; axis = 'bin'; firstboot = 'bin'; fetch = 'bin'; get = 'bin'; 'osyx-update' = 'bin'; batteryd = 'bin'; i2chidd = 'bin'
+        init = 'bin'; worker = 'bin'; probe = 'usr/bin'; axis = 'bin'; firstboot = 'bin'; fetch = 'bin'; get = 'bin'; 'osyx-update' = 'bin'; pkg = 'bin'; batteryd = 'bin'; i2chidd = 'bin'
         prism = 'system/bin'; desktop = 'system/bin'; terminal = 'system/bin'; files = 'system/bin'; sysinfo = 'system/bin'
         ping = 'bin'; net = 'bin'; netstat = 'bin'; dns = 'bin'; nc = 'bin'; timesync = 'bin'; 'wifi-watch' = 'bin'
         winrun = 'bin'
         taskmgr = 'system/bin'; settings = 'system/bin'; setup = 'system/bin'
-        zen = 'system/bin'; open = 'bin'; 'run-app' = 'system/bin'; elevate = 'bin'
+        zen = 'system/bin'; open = 'bin'; 'run-app' = 'system/bin'; elevate = 'bin'; edit = 'system/bin'
     }
     $userBins = @($installDirs.Keys)
     # Only these are also boot modules (the fallback root's /bin).

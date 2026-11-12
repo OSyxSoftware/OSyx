@@ -9,6 +9,7 @@ extern crate alloc;
 pub mod gzip;
 pub mod kind;
 pub mod openwith;
+pub mod search;
 pub mod select;
 pub mod tar;
 pub mod zip;

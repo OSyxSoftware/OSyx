@@ -24,6 +24,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "pkg"
+path = "src/bin/pkg.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "firstboot"
 path = "src/bin/firstboot.rs"
 test = false

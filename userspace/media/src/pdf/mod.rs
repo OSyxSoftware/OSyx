@@ -14,6 +14,7 @@ mod metrics;
 pub mod object;
 pub mod raster;
 mod render;
+pub mod text;
 mod type1;
 
 use alloc::string::String;
@@ -95,5 +96,26 @@ impl Pdf {
         let mut r = render::Renderer::new(&self.doc, page, scale, fonts)?;
         r.render_page(page);
         Ok(Bitmap { w: r.canvas.w, h: r.canvas.h, px: r.canvas.px })
+    }
+
+    /// The text of page `i` with the place of each character, in points
+    /// from the top left corner of the page as `render` draws it. Empty
+    /// for a page without text (a scan without a text layer).
+    pub fn text(&self, i: usize, fonts: FontSource) -> text::PageText {
+        let page = &self.doc.pages[i.min(self.doc.pages.len() - 1)];
+        // Nothing is painted, so the canvas can be small; positions are
+        // scaled back to points.
+        let scale = 0.05;
+        let Ok(mut r) = render::Renderer::new(&self.doc, page, scale, fonts) else { return text::PageText::default() };
+        r.text = Some(Vec::new());
+        r.text_only = true;
+        r.render_page(page);
+        let mut glyphs = r.text.take().unwrap_or_default();
+        for g in &mut glyphs {
+            for c in &mut g.corners {
+                *c = (c.0 / scale, c.1 / scale);
+            }
+        }
+        text::PageText::from_glyphs(&glyphs)
     }
 }

@@ -139,6 +139,8 @@ pub const PAGE_KEYBOARD: u16 = 0x07;
 pub const PAGE_BUTTON: u16 = 0x09;
 pub const PAGE_CONSUMER: u16 = 0x0C;
 pub const USAGE_MOUSE: u16 = 0x02;
+/// Usage pages from here on are vendor-defined.
+pub const PAGE_VENDOR: u16 = 0xFF00;
 pub const USAGE_X: u16 = 0x30;
 pub const USAGE_Y: u16 = 0x31;
 pub const USAGE_WHEEL: u16 = 0x38;
@@ -200,7 +202,8 @@ pub enum ParseError {
     BadNesting,
     /// Push/Pop imbalance.
     BadStack,
-    /// Report size/count out of range or too many fields.
+    /// A report larger than any device's (megabytes), more controls than
+    /// the parser keeps, or a report id out of range.
     TooLarge,
 }
 
@@ -219,6 +222,9 @@ struct Globals {
 }
 
 const MAX_FIELDS: usize = 512;
+/// Items of one Input main item recorded as fields; longer ones are
+/// data blocks, not controls.
+const MAX_COUNT: u32 = 256;
 const MAX_DEPTH: usize = 16;
 const MAX_STACK: usize = 8;
 const MAX_USAGES: usize = 256;
@@ -273,9 +279,15 @@ pub fn parse_report_descriptor(desc: &[u8]) -> Result<Vec<Field>, ParseError> {
                 let constant = uval & 1 != 0;
                 let variable = uval & 2 != 0;
                 let relative = uval & 4 != 0;
-                if g.report_size > 32 || g.report_count > 1024 {
+                // Reports of other functions of the device (a gaming
+                // mouse's key bitmap, its vendor data blocks) can be long
+                // and many. They take their room in the report but are
+                // not recorded as fields; the pointer's own fields before
+                // and after them stay usable.
+                if g.report_count > 0x1_0000 || (g.report_size as u64) * (g.report_count as u64) > 0x40_0000 {
                     return Err(ParseError::TooLarge);
                 }
+                let skipped = g.report_size > 32 || g.report_count > MAX_COUNT;
                 let pos = match offsets.iter_mut().find(|(id, _)| *id == g.report_id) {
                     Some((_, off)) => off,
                     None => {
@@ -293,13 +305,24 @@ pub fn parse_report_descriptor(desc: &[u8]) -> Result<Vec<Field>, ParseError> {
                     }
                 }
                 let all: Vec<(u16, u16)> = usages.iter().copied().chain(range_usages).collect();
-                for n in 0..g.report_count {
-                    if !constant {
-                        let (page, usage) = if variable {
-                            all.get(n as usize).or(all.last()).copied().unwrap_or((g.page, 0))
-                        } else {
-                            (g.page, 0)
-                        };
+                if skipped {
+                    *pos = pos.checked_add(g.report_size * g.report_count).ok_or(ParseError::TooLarge)?;
+                }
+                for n in 0..if skipped { 0 } else { g.report_count } {
+                    let (page, usage) = if variable {
+                        all.get(n as usize).or(all.last()).copied().unwrap_or((g.page, 0))
+                    } else {
+                        (g.page, 0)
+                    };
+                    // Vendor pages mean nothing to any driver here and
+                    // take no room in the list. The page is the field's
+                    // own: a usage can name a standard page under a
+                    // vendor global page.
+                    if !constant && page < PAGE_VENDOR {
+                        // Controls beyond the limit are not dropped
+                        // quietly: a pointer without its buttons would be
+                        // worse than the boot protocol the caller falls
+                        // back to.
                         if fields.len() >= MAX_FIELDS {
                             return Err(ParseError::TooLarge);
                         }
@@ -758,10 +781,76 @@ mod tests {
         assert_eq!(parse_report_descriptor(&deep), Err(ParseError::BadNesting));
         let pushes = [0xA4u8].repeat(MAX_STACK + 1);
         assert_eq!(parse_report_descriptor(&pushes), Err(ParseError::BadStack));
-        // Report size beyond 32 bits.
-        assert_eq!(parse_report_descriptor(&[0x75, 0x40, 0x95, 0x01, 0x81, 0x02]), Err(ParseError::TooLarge));
-        // Huge report count of 1-bit data fields: bounded.
-        assert_eq!(parse_report_descriptor(&[0x75, 0x01, 0x96, 0x00, 0x04, 0x81, 0x02]), Err(ParseError::TooLarge));
+        // A report of megabytes is no device's.
+        assert_eq!(parse_report_descriptor(&[0x75, 0x20, 0x27, 0x00, 0x00, 0x10, 0x00, 0x95, 0x01, 0x97, 0x00, 0x00, 0x02, 0x00, 0x81, 0x02]), Err(ParseError::TooLarge));
+        assert_eq!(parse_report_descriptor(&[0x75, 0x08, 0x97, 0x00, 0x00, 0x80, 0x00, 0x81, 0x02]), Err(ParseError::TooLarge));
+    }
+
+    /// A gaming mouse as one HID interface with report ids: a vendor data
+    /// block first, then the mouse (five buttons, 16-bit X/Y, wheel,
+    /// horizontal wheel), a key bitmap for its macro keys and a block of
+    /// 64-bit values. The blocks used to make the whole descriptor
+    /// "too large", and the mouse was then not driven at all.
+    #[test]
+    fn a_pointer_among_long_reports_of_other_functions_is_found() {
+        #[rustfmt::skip]
+        let desc: Vec<u8> = [
+            // Vendor page, report 4: 1023 bytes.
+            &[0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x04, 0x09, 0x02, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x96, 0xFF, 0x03, 0x81, 0x02, 0xC0][..],
+            // Mouse, report 1. A vendor byte comes before the buttons.
+            &[0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x01, 0xA1, 0x00,
+              0x06, 0x00, 0xFF, 0x09, 0x03, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02,
+              0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, 0x95, 0x05, 0x75, 0x01, 0x81, 0x02,
+              0x95, 0x01, 0x75, 0x03, 0x81, 0x01,
+              0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x16, 0x01, 0x80, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x02, 0x81, 0x06,
+              0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+              0x05, 0x0C, 0x0A, 0x38, 0x02, 0x95, 0x01, 0x81, 0x06, 0xC0, 0xC0][..],
+            // Keyboard page, report 2: a bitmap of 600 keys.
+            &[0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x02, 0x05, 0x07, 0x19, 0x00, 0x2A, 0x57, 0x02, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x96, 0x58, 0x02, 0x81, 0x02, 0xC0][..],
+            // Vendor page, report 5: four 64-bit values.
+            &[0x06, 0x01, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x05, 0x09, 0x02, 0x75, 0x40, 0x95, 0x04, 0x81, 0x02, 0xC0][..],
+        ]
+        .concat();
+        let fields = parse_report_descriptor(&desc).unwrap();
+        let l = MouseLayout::from_fields(&fields).unwrap();
+        assert_eq!(l.report_id, 1);
+        assert_eq!(l.buttons.len(), 5);
+        assert_eq!((l.x.offset, l.x.size, l.y.offset), (16, 16, 32), "after the vendor byte and the button byte");
+        assert!(l.wheel.is_some() && l.pan.is_some());
+        // Report 1: vendor byte, buttons 1 and 3, X -300, Y 2, wheel -1, pan 1.
+        let r = l.decode(&[1, 0xAA, 0b0000_0101, 0xD4, 0xFE, 0x02, 0x00, 0xFF, 0x01]).unwrap();
+        assert_eq!(r, MouseReport { buttons: 0b101, dx: -300, dy: 2, wheel: -1, pan: 1 });
+        // The other functions' reports are not the pointer's.
+        assert_eq!(l.decode(&[2, 0, 0, 0]), Err(ReportError::UnknownReportId));
+        // The key bitmap and the data blocks are not recorded field by
+        // field, and neither is the vendor byte in the mouse's report.
+        assert!(fields.iter().all(|f| f.report_id == 1 && f.page < PAGE_VENDOR), "{} fields", fields.len());
+        // Vendor items of any number do not use up the room for controls
+        // declared after them: X and Y first, 600 vendor fields in three
+        // items, then the buttons, all in one report.
+        #[rustfmt::skip]
+        let late_buttons: Vec<u8> = [
+            &[0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06][..],
+            &[0x06, 0x00, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0xC8, 0x81, 0x02].repeat(3)[..],
+            &[0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x75, 0x01, 0x95, 0x03, 0x81, 0x02, 0xC0][..],
+        ]
+        .concat();
+        let l = MouseLayout::from_fields(&parse_report_descriptor(&late_buttons).unwrap()).unwrap();
+        assert_eq!(l.buttons.len(), 3);
+        assert_eq!(l.buttons[0].1.offset, 16 + 600);
+        // A vendor global page with usages that name Generic Desktop X
+        // and Y in full (four-byte usages): still a pointer.
+        #[rustfmt::skip]
+        let extended: [u8; 28] = [
+            0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01,
+            0x0B, 0x30, 0x00, 0x01, 0x00, 0x0B, 0x31, 0x00, 0x01, 0x00,
+            0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06, 0xC0,
+        ];
+        let l = MouseLayout::from_fields(&parse_report_descriptor(&extended).unwrap()).unwrap();
+        assert_eq!((l.x.offset, l.y.offset), (0, 8));
+        // More controls than are kept is an error, not a shorter list.
+        let many: Vec<u8> = [0x05u8, 0x09, 0x19, 0x01, 0x29, 0x20, 0x75, 0x01, 0x95, 0x80, 0x81, 0x02].repeat(5);
+        assert_eq!(parse_report_descriptor(&many), Err(ParseError::TooLarge));
     }
 
     #[test]

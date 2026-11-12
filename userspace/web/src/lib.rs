@@ -367,6 +367,28 @@ fn read_body(s: &mut dyn Stream, headers: &[(String, String)], first: Vec<u8>, s
 /// Downloads `url` into `sink`, following redirects. Returns the number of
 /// body bytes. Only status 200 counts as success.
 pub fn get(url: &str, sink: &mut dyn Sink) -> Result<u64, String> {
+    get_with(url, sink, true)
+}
+
+/// As [`get`], but a redirect from HTTPS to plain HTTP is refused before
+/// the HTTP request is made: nobody on the path gets to answer, also not
+/// with a redirect back to HTTPS.
+pub fn get_no_downgrade(url: &str, sink: &mut dyn Sink) -> Result<u64, String> {
+    get_with(url, sink, false)
+}
+
+/// Where a redirect to `location` leads from `current`; an error when it
+/// leaves HTTPS for HTTP and `downgrade` does not allow that.
+fn redirect(current: Url, location: &str, downgrade: bool) -> Result<Url, String> {
+    let was_https = current.https;
+    let next = if location.starts_with('/') { Url { path: location.to_string(), ..current } } else { parse_url(location)? };
+    if was_https && !next.https && !downgrade {
+        return Err(format!("redirected from HTTPS to {location}: refused"));
+    }
+    Ok(next)
+}
+
+fn get_with(url: &str, sink: &mut dyn Sink, downgrade: bool) -> Result<u64, String> {
     let mut current = parse_url(url)?;
     for _ in 0..=MAX_REDIRECTS {
         let tcp = connect(&current)?;
@@ -395,11 +417,7 @@ pub fn get(url: &str, sink: &mut dyn Sink) -> Result<u64, String> {
             }
             301 | 302 | 303 | 307 | 308 => {
                 let loc = header(&headers, "location").ok_or_else(|| format!("HTTP {status} without a Location"))?;
-                current = if loc.starts_with('/') {
-                    Url { path: loc.to_string(), ..current }
-                } else {
-                    parse_url(loc)?
-                };
+                current = redirect(current, loc, downgrade)?;
             }
             _ => return Err(format!("HTTP status {status} from {}", current.host)),
         }

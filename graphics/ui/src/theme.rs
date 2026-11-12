@@ -68,6 +68,102 @@ pub const MIDNIGHT: Theme = Theme {
     control_height: 32,
 };
 
+/// The light look: paper-white surfaces, dark text, the same accent.
+pub const DAYLIGHT: Theme = Theme {
+    window: rgb(246, 247, 250),
+    surface: rgb(236, 238, 243),
+    raised: rgb(224, 228, 236),
+    border: rgb(204, 209, 220),
+    text: rgb(26, 30, 40),
+    text_dim: rgb(84, 92, 110),
+    text_faint: rgb(134, 142, 160),
+    accent: rgb(40, 110, 235),
+    accent_hover: rgb(62, 128, 245),
+    accent_pressed: rgb(28, 92, 208),
+    on_accent: rgb(255, 255, 255),
+    danger: rgb(204, 52, 64),
+    danger_hover: rgb(222, 74, 86),
+    success: rgb(30, 142, 84),
+    warning: rgb(176, 116, 12),
+    selection: rgb(196, 216, 250),
+    field: rgb(255, 255, 255),
+    field_border: rgb(190, 197, 212),
+    scrollbar: rgb(190, 196, 210),
+    scrollbar_hover: rgb(160, 168, 186),
+    scrim: rgb(60, 66, 80),
+    radius: 10,
+    radius_small: 6,
+    spacing: 12,
+    control_height: 32,
+};
+
+/// Dark or light.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scheme {
+    Dark,
+    Light,
+}
+
+/// What the user chose (`/etc/osyx/theme`): a scheme, or the one the sun
+/// decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchemeChoice {
+    Dark,
+    Light,
+    /// Light between sunrise and sunset.
+    Automatic,
+}
+
+impl SchemeChoice {
+    /// From the configuration file's text; anything unknown is dark, the
+    /// look OSyx had before there was a choice.
+    pub fn parse(text: &str) -> SchemeChoice {
+        match text.trim() {
+            "light" => SchemeChoice::Light,
+            "auto" => SchemeChoice::Automatic,
+            _ => SchemeChoice::Dark,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SchemeChoice::Dark => "dark",
+            SchemeChoice::Light => "light",
+            SchemeChoice::Automatic => "auto",
+        }
+    }
+
+    /// The scheme to show at Unix time `unix` (UTC) at the given place.
+    pub fn at(self, unix: i64, latitude: f64, longitude: f64) -> Scheme {
+        match self {
+            SchemeChoice::Dark => Scheme::Dark,
+            SchemeChoice::Light => Scheme::Light,
+            SchemeChoice::Automatic => {
+                if crate::time::sun_is_up(unix, latitude, longitude) {
+                    Scheme::Light
+                } else {
+                    Scheme::Dark
+                }
+            }
+        }
+    }
+}
+
+impl Theme {
+    pub const fn of(scheme: Scheme) -> Theme {
+        match scheme {
+            Scheme::Dark => MIDNIGHT,
+            Scheme::Light => DAYLIGHT,
+        }
+    }
+
+    /// Whether this is a light theme (dark text on a light window).
+    pub fn is_light(&self) -> bool {
+        let lum = |c: Color| ((c >> 16) & 255) * 3 + ((c >> 8) & 255) * 6 + (c & 255);
+        lum(self.window) > lum(self.text)
+    }
+}
+
 impl Default for Theme {
     fn default() -> Theme {
         MIDNIGHT

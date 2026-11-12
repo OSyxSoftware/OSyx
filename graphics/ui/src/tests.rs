@@ -600,3 +600,439 @@ fn png_icon_refuses_what_it_does_not_support() {
     assert!(icon::decode_png(&png(300, 1, 2, &[], &[0])).is_none()); // larger than an icon
     assert!(icon::decode_png(&png(1, 1, 6, &[], &[9, 0, 0, 0, 0])).is_none()); // unknown filter
 }
+
+// ----- TextArea -------------------------------------------------------------
+
+fn area(text: &str) -> (TextArea, Fonts, crate::Clipboard) {
+    let fonts = Fonts::load();
+    let mut a = TextArea::new(text);
+    a.rect = Rect::new(0, 0, 600, 300);
+    a.layout(&fonts);
+    (a, fonts, crate::Clipboard::default())
+}
+
+#[test]
+fn text_area_finds_text_around_letters_whose_case_changes_their_length() {
+    // Lower-casing the first letter makes it one byte longer and the third
+    // one byte shorter: byte offsets of the folded text are not the line's.
+    let (mut a, fonts, _) = area("\u{23a}\u{e9}\u{23a}K and \u{130}x\u{e9}");
+    assert!(a.find("\u{e9}", true));
+    assert_eq!(a.selected_text().as_deref(), Some("\u{e9}"));
+    assert_eq!(a.cursor(), Pos::new(0, 2));
+    assert!(a.find("\u{e9}", true));
+    assert_eq!(a.cursor(), Pos::new(0, 12));
+    assert!(a.find("k and", true));
+    assert_eq!(a.selected_text().as_deref(), Some("K and"));
+    // Drawing marks the matches without slicing inside a character either.
+    let mut buf = vec![0u32; 400 * 100];
+    let mut s = Surface::new(&mut buf, 400, 100, 400).unwrap();
+    a.draw(&mut Painter::new(&mut s, &MIDNIGHT, &fonts), true);
+}
+
+/// The limit of the tests that guard against work that grows with the
+/// square of a line's length. Such work takes minutes here; the limit is
+/// far above what a slow, unoptimized run on a shared machine needs (a few
+/// seconds), so that only the real fault trips it.
+const SLOW_MS: u128 = 60_000;
+
+#[test]
+fn text_area_draws_a_very_long_line_by_its_visible_part() {
+    let long: String = "ab\tcd ".repeat(200_000);
+    let (mut a, fonts, _) = area(&long);
+    a.move_to(Pos::new(0, 700_000), false);
+    a.reveal_cursor(&fonts);
+    let mut buf = vec![0u32; 400 * 100];
+    let mut s = Surface::new(&mut buf, 400, 100, 400).unwrap();
+    let started = std::time::Instant::now();
+    for _ in 0..20 {
+        a.draw(&mut Painter::new(&mut s, &MIDNIGHT, &fonts), true);
+    }
+    // Twenty frames of a 1.2 MB line.
+    assert!(started.elapsed().as_millis() < SLOW_MS, "{} ms", started.elapsed().as_millis());
+}
+
+#[test]
+fn text_area_keeps_its_screen_cell_and_tab_stops_with_tabs() {
+    // Column 2 of the first line is screen cell 5: Down twice stays there.
+    let (mut a, fonts, mut clip) = area("\tx\nabcdef\nabcdef\nab\nabcdef");
+    a.move_to(Pos::new(0, 2), false);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(1, 5));
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(2, 5));
+    // A short line on the way does not change the cell aimed for.
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(3, 2));
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(4, 5));
+    // Tab after a tab and a letter (cell 5) goes to cell 8: three spaces.
+    a.move_to(Pos::new(0, 2), false);
+    a.event(&key_down(key::TAB, None, 0), &fonts, &mut clip);
+    assert_eq!(a.line(0), "\tx   ");
+}
+
+#[test]
+fn text_area_read_only_keeps_history_and_long_words_move_fast() {
+    let (mut a, fonts, mut clip) = area("");
+    a.event(&typed('x'), &fonts, &mut clip);
+    a.read_only = true;
+    assert!(!a.undo());
+    assert_eq!(a.text(), "x");
+    a.read_only = false;
+    assert!(a.undo());
+    a.read_only = true;
+    assert!(!a.redo());
+    assert_eq!(a.text(), "");
+    // One word of 300 000 letters, then another line: each move reads
+    // the line once.
+    let long = "w".repeat(300_000);
+    let (mut a, fonts, mut clip) = area(&alloc::format!("  {long}  next\nlast"));
+    let started = std::time::Instant::now();
+    a.event(&key_down(key::RIGHT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 2));
+    a.event(&key_down(key::RIGHT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 300_004));
+    a.event(&key_down(key::RIGHT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(1, 0));
+    a.event(&key_down(key::LEFT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 300_004));
+    a.event(&key_down(key::LEFT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 2));
+    a.event(&key_down(key::LEFT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 0));
+    assert!(started.elapsed().as_millis() < SLOW_MS, "{} ms", started.elapsed().as_millis());
+    // A line of one letter 100 000 times, every one a match: drawn by its
+    // visible part.
+    let (mut a, fonts, _) = area(&"a".repeat(100_000));
+    assert!(a.find("a", true));
+    let mut buf = vec![0u32; 400 * 100];
+    let mut s = Surface::new(&mut buf, 400, 100, 400).unwrap();
+    let started = std::time::Instant::now();
+    a.draw(&mut Painter::new(&mut s, &MIDNIGHT, &fonts), true);
+    assert!(started.elapsed().as_millis() < SLOW_MS, "{} ms", started.elapsed().as_millis());
+}
+
+#[test]
+fn text_area_typing_lines_and_unicode() {
+    let (mut a, fonts, mut clip) = area("");
+    for c in "zażółć".chars() {
+        assert_eq!(a.event(&typed(c), &fonts, &mut clip), Response::Changed);
+    }
+    a.event(&key_down(key::ENTER, None, 0), &fonts, &mut clip);
+    for c in "gęślą".chars() {
+        a.event(&typed(c), &fonts, &mut clip);
+    }
+    assert_eq!(a.text(), "zażółć\ngęślą");
+    assert_eq!((a.line_count(), a.cursor()), (2, Pos::new(1, 5)));
+    // Backspace at the start of a line joins it to the one above.
+    a.event(&key_down(key::HOME, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::BACKSPACE, None, 0), &fonts, &mut clip);
+    assert_eq!((a.text().as_str(), a.cursor()), ("zażółćgęślą", Pos::new(0, 6)));
+    // Delete takes one character, not one byte.
+    a.event(&key_down(key::DELETE, None, 0), &fonts, &mut clip);
+    assert_eq!(a.text(), "zażółćęślą");
+    assert!(a.is_modified());
+    a.mark_saved();
+    assert!(!a.is_modified());
+}
+
+#[test]
+fn text_area_enter_keeps_the_indentation_and_tab_goes_to_the_next_stop() {
+    let (mut a, fonts, mut clip) = area("    if x {");
+    a.event(&key_down(key::END, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::ENTER, None, 0), &fonts, &mut clip);
+    assert_eq!(a.text(), "    if x {\n    ");
+    a.event(&typed('a'), &fonts, &mut clip);
+    a.event(&key_down(key::TAB, None, 0), &fonts, &mut clip);
+    assert_eq!(a.line(1), "    a   ", "from column 5 to column 8");
+    // Backspace in the indentation removes a whole stop.
+    let (mut b, fonts, mut clip) = area("        x");
+    b.move_to(Pos::new(0, 8), false);
+    b.event(&key_down(key::BACKSPACE, None, 0), &fonts, &mut clip);
+    assert_eq!(b.text(), "    x");
+    // Home goes to the text first, then to the margin.
+    b.event(&key_down(key::END, None, 0), &fonts, &mut clip);
+    b.event(&key_down(key::HOME, None, 0), &fonts, &mut clip);
+    assert_eq!(b.cursor(), Pos::new(0, 4));
+    b.event(&key_down(key::HOME, None, 0), &fonts, &mut clip);
+    assert_eq!(b.cursor(), Pos::new(0, 0));
+}
+
+#[test]
+fn text_area_selection_across_lines_and_the_clipboard() {
+    let (mut a, fonts, mut clip) = area("one\ntwo\nthree");
+    a.move_to(Pos::new(0, 1), false);
+    a.event(&key_down(key::DOWN, None, modifier::LEFT_SHIFT), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, modifier::LEFT_SHIFT), &fonts, &mut clip);
+    a.event(&key_down(key::RIGHT, None, modifier::LEFT_SHIFT), &fonts, &mut clip);
+    assert_eq!(a.selection(), Some((Pos::new(0, 1), Pos::new(2, 2))));
+    assert_eq!(a.selected_text().as_deref(), Some("ne\ntwo\nth"));
+    assert_eq!(a.event(&key_down(key::C, Some('c'), modifier::LEFT_CTRL), &fonts, &mut clip), Response::Consumed);
+    assert_eq!(clip.text(), Some("ne\ntwo\nth"));
+    a.event(&key_down(key::X, Some('x'), modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!((a.text().as_str(), a.cursor()), ("oree", Pos::new(0, 1)));
+    // Pasting text with Windows line ends gives plain lines.
+    clip.receive(Some("A\r\nB".into()));
+    a.event(&key_down(key::V, Some('v'), modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!((a.text().as_str(), a.cursor()), ("oA\nBree", Pos::new(1, 1)));
+    a.event(&key_down(key::A, Some('a'), modifier::LEFT_CTRL), &fonts, &mut clip);
+    a.event(&typed('!'), &fonts, &mut clip);
+    assert_eq!(a.text(), "!");
+}
+
+#[test]
+fn text_area_undo_and_redo() {
+    let (mut a, fonts, mut clip) = area("start");
+    a.event(&key_down(key::END, None, 0), &fonts, &mut clip);
+    for c in " one".chars() {
+        a.event(&typed(c), &fonts, &mut clip);
+    }
+    a.event(&key_down(key::ENTER, None, 0), &fonts, &mut clip);
+    for c in "two".chars() {
+        a.event(&typed(c), &fonts, &mut clip);
+    }
+    assert_eq!(a.text(), "start one\ntwo");
+    // Characters typed in a row are one step; the line break is its own.
+    let undo = key_down(key::Z, Some('z'), modifier::LEFT_CTRL);
+    a.event(&undo, &fonts, &mut clip);
+    assert_eq!(a.text(), "start one\n");
+    a.event(&undo, &fonts, &mut clip);
+    assert_eq!(a.text(), "start one");
+    a.event(&undo, &fonts, &mut clip);
+    assert_eq!((a.text().as_str(), a.cursor()), ("start", Pos::new(0, 5)));
+    assert!(!a.is_modified(), "back at the loaded text");
+    assert_eq!(a.event(&undo, &fonts, &mut clip), Response::Consumed, "nothing left to undo");
+    let redo = key_down(key::Y, Some('y'), modifier::LEFT_CTRL);
+    a.event(&redo, &fonts, &mut clip);
+    a.event(&key_down(key::Z, Some('Z'), modifier::LEFT_CTRL | modifier::LEFT_SHIFT), &fonts, &mut clip);
+    assert_eq!(a.text(), "start one\n");
+    // A new edit drops what could be redone.
+    a.event(&typed('x'), &fonts, &mut clip);
+    assert!(!a.can_redo());
+    assert_eq!(a.text(), "start one\nx");
+    // Undoing a deletion of several lines restores them and the cursor.
+    let (mut b, fonts, mut clip) = area("a\nb\nc\nd");
+    b.move_to(Pos::new(0, 1), false);
+    b.move_to(Pos::new(3, 0), true);
+    b.event(&key_down(key::DELETE, None, 0), &fonts, &mut clip);
+    assert_eq!(b.text(), "ad");
+    b.event(&undo, &fonts, &mut clip);
+    assert_eq!((b.text().as_str(), b.cursor()), ("a\nb\nc\nd", Pos::new(3, 0)));
+    // Saved, changed, undone back to the save: not modified.
+    b.event(&typed('q'), &fonts, &mut clip);
+    b.mark_saved();
+    b.event(&typed('r'), &fonts, &mut clip);
+    assert!(b.is_modified());
+    b.event(&undo, &fonts, &mut clip);
+    assert!(!b.is_modified());
+    assert_eq!(b.text(), "a\nb\nc\nqd");
+    b.event(&undo, &fonts, &mut clip);
+    assert!(b.is_modified(), "before the save is a change too");
+}
+
+#[test]
+fn text_area_word_movement_and_vertical_columns() {
+    let (mut a, fonts, mut clip) = area("alpha beta_2, gamma\nxy\nlonger line here");
+    a.event(&key_down(key::RIGHT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 6));
+    a.event(&key_down(key::RIGHT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 14), "over the word and the punctuation after it");
+    a.event(&key_down(key::LEFT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 6));
+    a.event(&key_down(key::BACKSPACE, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.line(0), "beta_2, gamma");
+    // Down through a short line and on: the column aimed for is kept.
+    a.event(&key_down(key::END, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(1, 2));
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(2, 13));
+    a.event(&key_down(key::HOME, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 0));
+    a.event(&key_down(key::END, None, modifier::LEFT_CTRL | modifier::LEFT_SHIFT), &fonts, &mut clip);
+    assert_eq!(a.selection(), Some((Pos::new(0, 0), Pos::new(2, 16))));
+    // Down through a tab that puts the cursor to the right of the cell
+    // aimed for: the cell is kept, not the place the tab gave.
+    let (mut a, fonts, mut clip) = area("ab\n\t\nabcdef");
+    a.event(&key_down(key::END, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor().line, 1);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(2, 2));
+    // A move sideways that ends where it began still gives up the cell
+    // aimed for: the cursor's own cell counts from then on.
+    let (mut a, fonts, mut clip) = area("ab\n\t\nabcdef");
+    a.event(&key_down(key::END, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(1, 1));
+    a.event(&key_down(key::LEFT, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::RIGHT, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(2, 4));
+    // So does an edit that is undone again.
+    let (mut a, fonts, mut clip) = area("ab\n\t\nabcdef");
+    a.event(&key_down(key::END, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    a.insert("x");
+    a.undo();
+    assert_eq!(a.cursor(), Pos::new(1, 1));
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(2, 4));
+}
+
+#[test]
+fn text_area_pointer_places_selects_and_scrolls() {
+    let (mut a, fonts, mut clip) = area("first line\nsecond word here\nthird");
+    a.line_numbers = false;
+    let (cw, lh) = (fonts.mono.cell_width() as i32, fonts.line_height(FontKind::Mono) as i32);
+    let at = |col: i32, line: i32| (6 + col * cw + 1, line * lh + lh / 2);
+    let (x, y) = at(7, 1);
+    for e in click(x, y, 1) {
+        a.event(&e, &fonts, &mut clip);
+    }
+    assert_eq!((a.cursor(), a.selection()), (Pos::new(1, 7), None));
+    // Double click: the word; triple: the line.
+    for e in click(x, y, 2) {
+        a.event(&e, &fonts, &mut clip);
+    }
+    assert_eq!(a.selected_text().as_deref(), Some("word"));
+    for e in click(x, y, 3) {
+        a.event(&e, &fonts, &mut clip);
+    }
+    assert_eq!(a.selected_text().as_deref(), Some("second word here"));
+    // Press, drag to another line, release.
+    let (x0, y0) = at(2, 0);
+    let (x1, y1) = at(3, 2);
+    a.event(&Event::PointerDown { x: x0, y: y0, button: button::LEFT, clicks: 1 }, &fonts, &mut clip);
+    a.event(&Event::PointerMove { x: x1, y: y1 }, &fonts, &mut clip);
+    a.event(&Event::PointerUp { x: x1, y: y1, button: button::LEFT }, &fonts, &mut clip);
+    assert_eq!(a.selection(), Some((Pos::new(0, 2), Pos::new(2, 3))));
+    // A click past the end of a line lands at its end.
+    for e in click(500, lh * 2 + 2, 1) {
+        a.event(&e, &fonts, &mut clip);
+    }
+    assert_eq!(a.cursor(), Pos::new(2, 5));
+    // A long text: the cursor is kept in view.
+    let many: String = (0..200).map(|i| alloc::format!("line {i}\n")).collect();
+    let (mut b, fonts, mut clip) = area(&many);
+    b.event(&key_down(key::END, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert!(b.scroll.offset > 0 && b.scroll.offset as i32 + 300 >= 200 * lh, "scrolled to the last line");
+    b.event(&key_down(key::PAGE_UP, None, 0), &fonts, &mut clip);
+    assert_eq!(b.cursor().line, 200 - (300 / lh as usize - 1));
+    assert_eq!(b.event(&Event::Wheel { x: 10, y: 10, dy: 3 }, &fonts, &mut clip), Response::Redraw);
+}
+
+#[test]
+fn text_area_find_wraps_and_ignores_case_for_lower_case_needles() {
+    let (mut a, _fonts, _clip) = area("Echo one\necho two\nprint(\"echo\")");
+    assert!(a.find("echo", true));
+    assert_eq!(a.selection(), Some((Pos::new(0, 0), Pos::new(0, 4))), "lower case finds Echo");
+    assert!(a.find("echo", true));
+    assert_eq!(a.selection().map(|s| s.0), Some(Pos::new(1, 0)));
+    assert!(a.find("echo", true));
+    assert_eq!(a.selection().map(|s| s.0), Some(Pos::new(2, 7)));
+    assert!(a.find("echo", true));
+    assert_eq!(a.selection().map(|s| s.0), Some(Pos::new(0, 0)), "wraps to the top");
+    assert!(a.find("echo", false));
+    assert_eq!(a.selection().map(|s| s.0), Some(Pos::new(2, 7)), "backwards wraps to the bottom");
+    assert!(a.find("Echo", true));
+    assert_eq!(a.selection().map(|s| s.0), Some(Pos::new(0, 0)), "a capital letter makes it exact");
+    assert!(a.find("Echo", true));
+    assert_eq!(a.selection().map(|s| s.0), Some(Pos::new(0, 0)), "the only exact match again");
+    assert!(!a.find("absent", true));
+    assert!(!a.find("", true));
+}
+
+#[test]
+fn text_area_read_only_and_drawing() {
+    let (mut a, fonts, mut clip) = area("fixed\ttab\nsecond");
+    a.read_only = true;
+    a.event(&typed('x'), &fonts, &mut clip);
+    a.event(&key_down(key::BACKSPACE, None, 0), &fonts, &mut clip);
+    assert_eq!(a.text(), "fixed\ttab\nsecond");
+    a.event(&key_down(key::A, Some('a'), modifier::LEFT_CTRL), &fonts, &mut clip);
+    a.event(&key_down(key::C, Some('c'), modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(clip.text(), Some("fixed\ttab\nsecond"), "copying still works");
+    // Drawing: text pixels appear, a highlighter's colour is used, and the
+    // character after a tab starts at the tab stop.
+    fn all_keyword(line: &str) -> Vec<(usize, usize, Style)> {
+        vec![(0, line.chars().count().min(5), Style::Keyword)]
+    }
+    a.highlighter = Some(all_keyword);
+    a.line_numbers = false;
+    a.move_to(Pos::new(1, 0), false);
+    let mut px = vec![0u32; 600 * 300];
+    let mut s = Surface::new(&mut px, 600, 300, 600).unwrap();
+    let mut p = Painter::new(&mut s, &MIDNIGHT, &fonts);
+    a.draw(&mut p, true);
+    let (cw, lh) = (fonts.mono.cell_width() as usize, fonts.line_height(FontKind::Mono) as usize);
+    let cell = |px: &[u32], col: usize, line: usize| -> Vec<u32> {
+        (0..lh).flat_map(|y| (0..cw).map(move |x| (x, y))).map(|(x, y)| px[(line * lh + y) * 600 + 6 + col * cw + x]).collect()
+    };
+    let keyword = Style::Keyword.color(&MIDNIGHT);
+    let plain = Style::Plain.color(&MIDNIGHT);
+    assert!(cell(&px, 0, 0).contains(&keyword), "the first word in the keyword colour");
+    assert!(!cell(&px, 5, 0).contains(&plain) && !cell(&px, 6, 0).contains(&plain), "the tab is a gap");
+    assert!(cell(&px, 8, 0).contains(&plain), "'t' after the tab at column 8");
+    assert!(cell(&px, 0, 1).contains(&MIDNIGHT.accent), "the cursor on the second line");
+}
+
+// ----- themes and the sun ---------------------------------------------------
+
+#[test]
+fn sunrise_and_sunset_match_an_almanac_within_minutes() {
+    use crate::time::{sun_is_up, sun_times, Sun};
+    // (place, day of year, latitude, longitude, sunrise UTC, sunset UTC),
+    // times as hours and minutes approximated from an almanac.
+    let cases = [
+        ("Warsaw, 21 June", 172, 52.23, 21.01, (2, 14), (19, 1)),
+        ("Warsaw, 21 December", 355, 52.23, 21.01, (6, 43), (14, 25)),
+        ("Warsaw, 20 March", 79, 52.23, 21.01, (4, 39), (16, 49)),
+        ("Quito, 21 June", 172, -0.18, -78.47, (11, 12), (23, 19)),
+        ("Sydney, 21 December", 355, -33.87, 151.21, (18, 41), (9, 5)),
+    ];
+    for (place, day, lat, lon, rise, set) in cases {
+        let Sun::RisesAndSets(r, s) = sun_times(day, lat, lon) else { panic!("{place}: no sunrise") };
+        let minutes = |(h, m): (i32, i32)| (h * 60 + m) as f64;
+        // Sydney's day starts on the previous UTC day.
+        let near = |got: f64, want: f64| [-1440.0, 0.0, 1440.0].iter().any(|k| (got + k - want).abs() <= 6.0);
+        assert!(near(r, minutes(rise)), "{place}: sunrise at {:.0} min, table {:.0}", r, minutes(rise));
+        assert!(near(s, minutes(set)), "{place}: sunset at {:.0} min, table {:.0}", s, minutes(set));
+    }
+    assert_eq!(sun_times(172, 78.0, 15.0), Sun::AlwaysUp, "midnight sun on Svalbard");
+    assert_eq!(sun_times(355, 78.0, 15.0), Sun::AlwaysDown, "polar night");
+    // 2026-06-21 12:00 UTC and 23:00 UTC in Warsaw; 02:00 UTC is day in Sydney's summer.
+    let noon = days_from_civil(2026, 6, 21) * 86_400 + 12 * 3600;
+    assert!(sun_is_up(noon, 52.23, 21.01));
+    assert!(!sun_is_up(noon + 11 * 3600, 52.23, 21.01));
+    let december = days_from_civil(2026, 12, 21) * 86_400 + 2 * 3600;
+    assert!(sun_is_up(december, -33.87, 151.21), "the Sydney day that began on the previous UTC date");
+    assert!(!sun_is_up(december, 52.23, 21.01));
+}
+
+#[test]
+fn theme_choices_parse_and_follow_the_sun() {
+    use crate::theme::{Scheme, SchemeChoice, DAYLIGHT};
+    assert_eq!(SchemeChoice::parse("light\n"), SchemeChoice::Light);
+    assert_eq!(SchemeChoice::parse("auto"), SchemeChoice::Automatic);
+    assert_eq!(SchemeChoice::parse(""), SchemeChoice::Dark);
+    assert_eq!(SchemeChoice::parse("nonsense"), SchemeChoice::Dark);
+    for c in [SchemeChoice::Dark, SchemeChoice::Light, SchemeChoice::Automatic] {
+        assert_eq!(SchemeChoice::parse(c.name()), c);
+    }
+    let noon = days_from_civil(2026, 6, 21) * 86_400 + 12 * 3600;
+    assert_eq!(SchemeChoice::Automatic.at(noon, 52.23, 21.01), Scheme::Light);
+    assert_eq!(SchemeChoice::Automatic.at(noon + 11 * 3600, 52.23, 21.01), Scheme::Dark);
+    assert_eq!(SchemeChoice::Dark.at(noon, 52.23, 21.01), Scheme::Dark);
+    assert!(DAYLIGHT.is_light() && !MIDNIGHT.is_light());
+    assert_eq!(crate::Theme::of(Scheme::Light), DAYLIGHT);
+    // Text stays readable on every surface of both themes.
+    for t in [MIDNIGHT, DAYLIGHT] {
+        let lum = |c: crate::Color| (((c >> 16) & 255) * 3 + ((c >> 8) & 255) * 6 + (c & 255)) as i32;
+        for bg in [t.window, t.surface, t.raised, t.field, t.selection] {
+            assert!((lum(t.text) - lum(bg)).abs() > 1200, "text on {bg:06x}");
+            assert!((lum(t.text_dim) - lum(bg)).abs() > 600, "dim text on {bg:06x}");
+        }
+        assert!((lum(t.on_accent) - lum(t.accent)).abs() > 700);
+    }
+}

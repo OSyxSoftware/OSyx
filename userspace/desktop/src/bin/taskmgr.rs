@@ -305,13 +305,13 @@ impl TaskMgr {
     /// Area graph with grid, btop colours and an outline.
     fn graph(p: &mut Painter, r: Rect, s: &Series, scale: f32, base: Color, grid: bool) {
         let t = *p.theme;
-        p.fill(r, osyx_gfx::rgb(16, 18, 24));
+        p.fill(r, t.field);
         if grid {
             for i in 1..10 {
-                p.vline(r.x + (r.w * i / 10) as i32, r.y, r.h, osyx_gfx::rgb(34, 38, 48));
+                p.vline(r.x + (r.w * i / 10) as i32, r.y, r.h, t.border);
             }
             for i in 1..5 {
-                p.hline(r.x, r.y + (r.h * i / 5) as i32, r.w, osyx_gfx::rgb(34, 38, 48));
+                p.hline(r.x, r.y + (r.h * i / 5) as i32, r.w, t.border);
             }
         }
         let n = s.v.len().max(2);
@@ -572,14 +572,14 @@ impl App for TaskMgr {
 
     fn draw(&mut self, p: &mut Painter, w: u32, h: u32, cx: &Ctx) {
         let t = cx.theme;
-        p.fill(Rect::new(0, 0, w, h), osyx_gfx::rgb(24, 26, 33));
+        p.fill(Rect::new(0, 0, w, h), t.window);
         // Navigation rail.
-        p.fill(Rect::new(0, 0, RAIL, h), osyx_gfx::rgb(30, 33, 42));
+        p.fill(Rect::new(0, 0, RAIL, h), t.surface);
         p.text(FontKind::Bold, 20, 16, "Task Manager", t.text);
         for (i, (page, label, ic)) in Self::rail_items().iter().enumerate() {
             let r = Rect::new(8, 60 + i as i32 * 44, RAIL - 16, 38);
             if *page == self.page {
-                p.rounded(r, 6, osyx_gfx::rgb(44, 48, 60), 255);
+                p.rounded(r, 6, t.raised, 255);
                 p.rounded(Rect::new(r.x, r.y + 10, 3, 18), 1, t.accent, 255);
             }
             icon::draw(p, *ic, Rect::new(r.x + 14, r.y + 9, 20, 20), t.text_dim);
@@ -591,7 +591,7 @@ impl App for TaskMgr {
             Page::Performance => "Performance",
             Page::Details => "Details",
         };
-        p.fill(Rect::new(RAIL as i32, 0, w.saturating_sub(RAIL), 52), osyx_gfx::rgb(24, 26, 33));
+        p.fill(Rect::new(RAIL as i32, 0, w.saturating_sub(RAIL), 52), t.window);
         p.text(FontKind::Bold, RAIL as i32 + 20, 16, title, t.text);
         p.hline(RAIL as i32, 51, w.saturating_sub(RAIL), t.border);
         if !self.status.is_empty() {

@@ -5,6 +5,7 @@
 // Index loops mirror the reference decoder.
 #![allow(clippy::needless_range_loop)]
 
+pub mod encode;
 mod tables;
 
 use alloc::vec;

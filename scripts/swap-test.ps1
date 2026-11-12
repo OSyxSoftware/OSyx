@@ -2,7 +2,7 @@
 param([switch]$SkipBuild, [int]$MemoryMiB = 192, [int]$CpuCount = 2, [int]$TimeoutSec = 180)
 . (Join-Path $PSScriptRoot 'common.ps1')
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -RootMiB 256 -Cmdline 'test.exit boot.fast init.args=tests,swap-stress'
+    & (Join-Path $PSScriptRoot 'build.ps1') -NoZen -RootMiB 384 -Cmdline 'test.exit boot.fast init.args=tests,swap-stress'
 }
 $log = Join-Path $BuildDir 'swap-stress.serial.log'
 if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log }

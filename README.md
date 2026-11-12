@@ -42,7 +42,7 @@ and desktop, and a compatibility layer that runs Windows PE32+ programs.
   ring-3 sockets; HTTPS (rustls) for downloads and updates; Wi-Fi with WPA2.
 - **Desktop**: PRISM, a compositor running as an ordinary process, with a
   panel, launcher, quick settings, notifications, desktop shortcuts and
-  native applications (Files, AXIS Terminal, Settings, Task Manager, System
+  native applications (Files, AXIS Terminal, Text Editor, Settings, Task Manager, System
   Information, OSyx Setup).
 - **Windows programs**: `winrun` loads PE32+ programs and DLLs with
   original implementations of a subset of ntdll, kernel32, user32/gdi32,
@@ -79,6 +79,10 @@ installs the new programs, kernel and boot loader; your settings and files
 in `/etc`, `/home` and `/var` stay as they are. A notification asks for a
 restart when an update is installed. The previous kernel stays as
 `KERNEL.OLD` on the EFI partition.
+
+`/bin/pkg` installs single applications from a repository of packages
+signed the same way; a package can write only its own directory
+([docs/packages.md](docs/packages.md)).
 
 Publishing a release (maintainers):
 

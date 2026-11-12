@@ -107,3 +107,61 @@ fn hostile_inputs_fail_cleanly() {
     data.splice(t + 7..t + 7, b" << /XRefStm 99999999 >> ".iter().copied());
     assert_eq!(Pdf::open(data).unwrap().pages(), 1);
 }
+
+/// The text of the fixtures, as `pdftotext` (poppler) gives it too:
+/// standard fonts by glyph name, embedded TrueType through its own
+/// character map, Polish letters through ToUnicode, encrypted files.
+#[test]
+fn page_text_has_the_words_and_where_they_are() {
+    let text = |stem: &str| {
+        let pdf = Pdf::open(std::fs::read(path(&format!("{stem}.pdf"))).unwrap()).unwrap();
+        pdf.text(0, &|n: &str| system_font(n))
+    };
+    let all = |stem: &str| {
+        let t = text(stem);
+        t.string(0..t.chars.len())
+    };
+    let fox = "Helvetica: The quick brown fox\nTimes-Bold: The quick brown fox\nCourier: The quick brown fox\nrotated";
+    assert_eq!(all("standard-fonts"), fox);
+    assert_eq!(all("rc4"), fox);
+    assert_eq!(all("truetype42"), "TrueType 42 text");
+    for stem in ["objstm", "aes256", "shapes"] {
+        assert_eq!(all(stem), "Zażółć gęślą jaźń 123", "{stem}");
+    }
+    let chart = all("chart");
+    for word in ["Chart", "sin", "\u{2212}0.5", "0 1 2 3 4 5 6"] {
+        assert!(chart.contains(word), "{word:?} in {chart:?}");
+    }
+    // Where: the three lines of the first fixture are under one another,
+    // each match inside the page, and the box as wide as the words.
+    let t = text("standard-fonts");
+    let pdf = Pdf::open(std::fs::read(path("standard-fonts.pdf")).unwrap()).unwrap();
+    let (pw, ph) = pdf.page_size(0);
+    let found = t.find("QUICK BROWN");
+    assert_eq!(found.len(), 3);
+    let boxes: Vec<[f32; 4]> = found.iter().map(|r| t.rects(r.clone())[0]).collect();
+    for b in &boxes {
+        assert!(b[0] >= 0.0 && b[1] >= 0.0 && b[2] <= pw as f32 && b[3] <= ph as f32, "{b:?} in {pw} x {ph}");
+        assert!(b[2] - b[0] > 30.0 && b[3] - b[1] > 4.0, "{b:?}");
+    }
+    assert!(boxes[0][3] <= boxes[1][1] + 1.0 && boxes[1][3] <= boxes[2][1] + 1.0, "{boxes:?}");
+    // The character under the middle of a match is part of it.
+    let b = boxes[1];
+    let at = t.nearest((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0).unwrap();
+    assert!(found[1].contains(&at));
+    // The rendered page has ink inside the match's box and none in a box
+    // of the same size in the empty margin: the places agree with `render`.
+    let scale = 2.0;
+    let bmp = pdf.render(0, scale, &|n: &str| system_font(n)).unwrap();
+    let ink = |b: [f32; 4]| {
+        let mut n = 0;
+        for y in (b[1] * scale as f32) as usize..(b[3] * scale as f32) as usize {
+            for x in (b[0] * scale as f32) as usize..(b[2] * scale as f32) as usize {
+                n += (bmp.px[y * bmp.w + x][1] < 128) as usize;
+            }
+        }
+        n
+    };
+    assert!(ink(boxes[0]) > 50, "ink {}", ink(boxes[0]));
+    assert_eq!(ink([1.0, 1.0, 1.0 + b[2] - b[0], 1.0 + b[3] - b[1]]), 0);
+}

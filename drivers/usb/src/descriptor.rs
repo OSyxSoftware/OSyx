@@ -26,6 +26,7 @@ pub const HID_GET_REPORT: u8 = 0x01;
 pub const HID_SET_REPORT: u8 = 0x09;
 pub const HID_SET_IDLE: u8 = 0x0A;
 pub const HID_SET_PROTOCOL: u8 = 0x0B;
+pub const HID_GET_PROTOCOL: u8 = 0x03;
 
 pub const CLASS_HID: u8 = 3;
 pub const CLASS_MASS_STORAGE: u8 = 8;
@@ -78,6 +79,11 @@ impl SetupPacket {
     /// HID SET_PROTOCOL: 0 = boot protocol, 1 = report protocol.
     pub fn hid_set_protocol(interface: u8, report_protocol: bool) -> SetupPacket {
         SetupPacket { request_type: 0x21, request: HID_SET_PROTOCOL, value: u16::from(report_protocol), index: interface as u16, length: 0 }
+    }
+
+    /// HID GET_PROTOCOL: one byte, 0 = boot protocol, 1 = report protocol.
+    pub fn hid_get_protocol(interface: u8) -> SetupPacket {
+        SetupPacket { request_type: 0xA1, request: HID_GET_PROTOCOL, value: 0, index: interface as u16, length: 1 }
     }
 
     /// HID SET_IDLE: `duration` in 4 ms units, 0 = report only on change.
@@ -592,6 +598,7 @@ mod tests {
         assert!(p.is_in());
         assert_eq!(SetupPacket::hid_set_protocol(1, false).to_u64(), 0x0000_0001_0000_0B21);
         assert_eq!(SetupPacket::hid_set_idle(0, 0).to_u64(), 0x0A21);
+        assert_eq!(SetupPacket::hid_get_protocol(2).to_u64(), 0x0001_0002_0000_03A1);
         assert_eq!(SetupPacket::hid_set_output_report(0, 0, 1).to_u64(), 0x0001_0000_0200_0921);
         assert!(!SetupPacket::set_configuration(1).is_in());
     }

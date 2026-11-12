@@ -44,8 +44,14 @@ impl HidFunction {
     pub fn report(&mut self, data: &[u8]) -> Result<(), ReportError> {
         self.reports += 1;
         let r = self.decode(data);
-        if r.is_err() {
+        if let Err(e) = r {
             self.bad_reports += 1;
+            // The first few say what the device sends; a report with
+            // another function's id, or a keyboard's rollover, is expected and
+            // not one of them.
+            if !matches!(e, ReportError::UnknownReportId | ReportError::Rollover) && self.bad_reports <= 4 {
+                kprintln!("usb input device {}: report not understood ({:?}): {:02x?}", self.input_id, e, &data[..data.len().min(16)]);
+            }
         }
         r
     }
@@ -128,7 +134,9 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
     // A pointer: prefer the report descriptor (wheel, more buttons).
     let mut layout = None;
     let mut tablet = None;
-    let len = iface.hid.map_or(0, |h| h.report_length).min(1024);
+    // (Gaming mice describe their extra functions at length; both host
+    // controller drivers carry 2 KiB in a control transfer.)
+    let len = iface.hid.map_or(0, |h| h.report_length).min(2048);
     if len > 0 {
         let mut rd = vec![0u8; len as usize];
         match pipe.control_in(SetupPacket::get_interface_descriptor(descriptor::DESC_HID_REPORT, iface.number, len), &mut rd) {
@@ -170,11 +178,33 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
         }));
     }
     let is_boot_mouse = iface.is_hid_boot(descriptor::HID_PROTOCOL_MOUSE);
+    // The report protocol is what a device starts in, so one that refuses
+    // the request is still driven. Which protocol it is in is then asked,
+    // not guessed from its reports: only a device that says "boot" is
+    // read as a boot mouse.
+    if layout.is_some() && boot {
+        if let Err(e) = pipe.control_out(SetupPacket::hid_set_protocol(iface.number, true), &[]) {
+            let mut protocol = [0xFFu8; 1];
+            let asked = pipe.control_in(SetupPacket::hid_get_protocol(iface.number), &mut protocol);
+            let in_boot = is_boot_mouse && matches!(asked, Ok(1)) && protocol[0] == 0;
+            kprintln!(
+                "usb {}: interface {}: SET_PROTOCOL(report) refused ({}); the device says it is in the {} protocol",
+                devname,
+                iface.number,
+                e,
+                match (in_boot, &asked) {
+                    (true, _) => "boot",
+                    (false, Ok(1)) => "report",
+                    _ => "report (it did not answer; assumed)",
+                }
+            );
+            if in_boot {
+                layout = None;
+            }
+        }
+    }
     let how = match (&layout, is_boot_mouse) {
         (Some(l), _) => {
-            if boot {
-                pipe.control_out(SetupPacket::hid_set_protocol(iface.number, true), &[])?;
-            }
             alloc::format!(
                 "report protocol: {} buttons, {}-bit X/Y{}{}",
                 l.buttons.len(),
@@ -184,7 +214,24 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
             )
         }
         (None, true) => {
-            pipe.control_out(SetupPacket::hid_set_protocol(iface.number, false), &[])?;
+            // Boot reports are read only from a device known to send
+            // them: it took the request, or says so when asked. Its
+            // report protocol has no layout this driver understands, so
+            // a device that is or may be in it is left alone.
+            if let Err(e) = pipe.control_out(SetupPacket::hid_set_protocol(iface.number, false), &[]) {
+                let mut protocol = [0xFFu8; 1];
+                let in_boot = matches!(pipe.control_in(SetupPacket::hid_get_protocol(iface.number), &mut protocol), Ok(1)) && protocol[0] == 0;
+                if !in_boot {
+                    kprintln!(
+                        "usb {}: interface {}: SET_PROTOCOL(boot) refused ({}) and the device does not say it is in the boot protocol: not driven",
+                        devname,
+                        iface.number,
+                        e
+                    );
+                    return Ok(None);
+                }
+                kprintln!("usb {}: interface {}: SET_PROTOCOL(boot) refused ({}); the device says it is in the boot protocol", devname, iface.number, e);
+            }
             String::from("boot protocol: 3 buttons, 8-bit X/Y")
         }
         (None, false) => {

@@ -17,6 +17,57 @@ pub const GLYPH: Color = rgb(186, 195, 212);
 pub const ACCENT: Color = rgb(76, 141, 255);
 pub const OUTLINE_INACTIVE: Color = rgb(255, 255, 255);
 
+/// The colours PRISM draws with. The constants above are the dark set;
+/// [`Compositor::set_palette`](crate::Compositor::set_palette) switches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    pub desktop_fallback: Color,
+    pub title_active: Color,
+    pub title_inactive: Color,
+    pub window_body: Color,
+    pub title_text: Color,
+    pub title_text_inactive: Color,
+    pub button_hover: Color,
+    pub button_pressed: Color,
+    pub close_hover: Color,
+    pub glyph: Color,
+    pub accent: Color,
+    pub outline_inactive: Color,
+}
+
+impl Palette {
+    pub const DARK: Palette = Palette {
+        desktop_fallback: DESKTOP_FALLBACK,
+        title_active: TITLE_ACTIVE,
+        title_inactive: TITLE_INACTIVE,
+        window_body: WINDOW_BODY,
+        title_text: TITLE_TEXT,
+        title_text_inactive: TITLE_TEXT_INACTIVE,
+        button_hover: BUTTON_HOVER,
+        button_pressed: BUTTON_PRESSED,
+        close_hover: CLOSE_HOVER,
+        glyph: GLYPH,
+        accent: ACCENT,
+        outline_inactive: OUTLINE_INACTIVE,
+    };
+
+    /// The light set, matching the toolkit's light theme.
+    pub const LIGHT: Palette = Palette {
+        desktop_fallback: rgb(206, 214, 230),
+        title_active: rgb(228, 232, 240),
+        title_inactive: rgb(238, 240, 245),
+        window_body: rgb(246, 247, 250),
+        title_text: rgb(26, 30, 40),
+        title_text_inactive: rgb(120, 128, 146),
+        button_hover: rgb(208, 214, 226),
+        button_pressed: rgb(190, 198, 214),
+        close_hover: rgb(214, 66, 76),
+        glyph: rgb(70, 78, 96),
+        accent: rgb(40, 110, 235),
+        outline_inactive: rgb(0, 0, 0),
+    };
+}
+
 /// Height of the title bar of decorated windows.
 pub const TITLE_HEIGHT: u32 = 34;
 /// Corner radius of window frames.

@@ -2,7 +2,8 @@
 //! panel of grouped options, in the style of a modern desktop settings
 //! app. Every option writes real system configuration:
 //!
-//! * Appearance: accent colour (`/etc/osyx/accent`, read by every OSyx
+//! * Appearance: colour scheme (`/etc/osyx/theme`: dark, light or by the
+//!   sun), accent colour (`/etc/osyx/accent`, read by every OSyx
 //!   application when it starts) and the desktop background
 //!   (`/etc/osyx/wallpaper`, applied by the desktop shell within seconds);
 //! * Keyboard: layout (`/etc/osyx/keyboard`, followed by PRISM);
@@ -43,6 +44,7 @@ use osyx_abi::battery::{Info as BatteryInfo, State as BatteryState, Status as Ba
 use osyx_input::layout::Layout;
 use osyx_ui::options::{ClockOptions, PowerOptions};
 use osyx_ui::time::ZONES;
+use osyx_ui::theme::SchemeChoice;
 use osyx_ui::widget::{Button, ButtonStyle, TextField};
 use osyx_ui::{icon, Align, Event as Ui, FontKind, Icon, Painter, Response};
 use prism_core::PointerSettings;
@@ -264,6 +266,8 @@ struct Settings {
     section: Section,
     size: (u32, u32),
     accent: usize,
+    /// The colour scheme: dark, light, or by the sun.
+    scheme: SchemeChoice,
     wallpaper: usize,
     /// Pixels the model sections are scrolled down.
     scroll: i32,
@@ -286,6 +290,14 @@ struct Settings {
     uninstall: Button,
     status: String,
     focus: usize,
+}
+
+const SCHEMES: [SchemeChoice; 3] = [SchemeChoice::Dark, SchemeChoice::Light, SchemeChoice::Automatic];
+
+/// The button of the `i`th colour scheme in Appearance.
+fn scheme_button(c: Rect, i: usize) -> Rect {
+    let w = ((c.w as i32 - 40 - 2 * 10) / 3).max(60);
+    Rect::new(c.x + 20 + i as i32 * (w + 10), c.y + 202, w as u32, 34)
 }
 
 fn read(path: &str) -> String {
@@ -421,7 +433,7 @@ impl Settings {
         let t = *p.theme;
         p.text(FontKind::Bold, r.x, r.y, title, t.text);
         let card = Rect::new(r.x, r.y + 26, r.w, r.h.saturating_sub(26));
-        p.card(card, 10, osyx_gfx::rgb(36, 39, 49), t.border);
+        p.card(card, 10, t.raised, t.border);
         card
     }
 
@@ -812,7 +824,7 @@ impl Settings {
                 continue;
             }
             p.text(FontKind::Bold, card.x, card.y - 26, &g.title, t.text);
-            p.card(*card, 10, osyx_gfx::rgb(36, 39, 49), t.border);
+            p.card(*card, 10, t.raised, t.border);
             for (r, row) in rects.iter().zip(&g.rows) {
                 match row {
                     Row::Info(label, value) => {
@@ -949,11 +961,18 @@ impl App for Settings {
                         if inside(r, x, y) {
                             self.accent = i;
                             self.status =
-                                write("/etc/osyx/accent", accent.0) + " (applies to applications started from now on)";
+                                write("/etc/osyx/accent", accent.0);
                             return true;
                         }
                     }
-                    for (i, r) in option_rows(c, WALLPAPERS.len(), c.y + 200).into_iter().enumerate() {
+                    for (i, choice) in SCHEMES.iter().enumerate() {
+                        if inside(scheme_button(c, i), x, y) {
+                            self.scheme = *choice;
+                            self.status = write(common::scheme::THEME_FILE, choice.name());
+                            return true;
+                        }
+                    }
+                    for (i, r) in option_rows(c, WALLPAPERS.len(), c.y + 300).into_iter().enumerate() {
                         if inside(r, x, y) {
                             self.wallpaper = i;
                             self.status = write("/etc/osyx/wallpaper", &format!("{i}"));
@@ -1074,9 +1093,9 @@ impl App for Settings {
 
     fn draw(&mut self, p: &mut Painter, w: u32, h: u32, cx: &Ctx) {
         let t = cx.theme;
-        p.fill(Rect::new(0, 0, w, h), osyx_gfx::rgb(28, 30, 38));
+        p.fill(Rect::new(0, 0, w, h), t.window);
         // Sidebar.
-        p.fill(Rect::new(0, 0, SIDEBAR, h), osyx_gfx::rgb(34, 37, 46));
+        p.fill(Rect::new(0, 0, SIDEBAR, h), t.surface);
         p.text(FontKind::Large, 20, 18, "Settings", t.text);
         for (i, (s, label, ic)) in SECTIONS.iter().enumerate() {
             let r = Rect::new(10, 64 + i as i32 * 40, SIDEBAR - 20, 36);
@@ -1122,17 +1141,29 @@ impl App for Settings {
                 for (i, (name, col)) in ACCENTS.iter().enumerate() {
                     let r = Rect::new(g.x + 20 + i as i32 * 52, g.y + 14, 40, 40);
                     if i == self.accent {
-                        p.ring(r.x + 20, r.y + 20, 20, 2, osyx_gfx::rgb(255, 255, 255), 255, false);
+                        p.ring(r.x + 20, r.y + 20, 20, 2, t.text, 255, false);
                     }
                     p.disc(r.x + 20, r.y + 20, 15, *col, 255);
                     if i == self.accent {
                         p.text_in(FontKind::Ui, Rect::new(g.x, g.y + 58, g.w, 20), name, t.text_dim, Align::Center);
                     }
                 }
-                let rows = option_rows(c, WALLPAPERS.len(), c.y + 200);
+                let _ = Self::group(p, Rect::new(c.x, c.y + 166, c.w, 84), "Theme");
+                for (i, choice) in SCHEMES.iter().enumerate() {
+                    let r = scheme_button(c, i);
+                    let on = *choice == self.scheme;
+                    p.rounded(r, 7, if on { t.accent } else { t.field }, 255);
+                    let label = match choice {
+                        SchemeChoice::Dark => "Dark",
+                        SchemeChoice::Light => "Light",
+                        SchemeChoice::Automatic => "Automatic (light by day)",
+                    };
+                    p.text_in(FontKind::Ui, r, label, if on { t.on_accent } else { t.text }, Align::Center);
+                }
+                let rows = option_rows(c, WALLPAPERS.len(), c.y + 300);
                 let _ = Self::group(
                     p,
-                    Rect::new(c.x, c.y + 166, c.w, 34 + WALLPAPERS.len() as u32 * 40 + 8),
+                    Rect::new(c.x, c.y + 266, c.w, 34 + WALLPAPERS.len() as u32 * 40 + 8),
                     "Desktop background",
                 );
                 Self::choices(p, &rows, &WALLPAPERS, self.wallpaper);
@@ -1328,9 +1359,25 @@ fn main() -> i32 {
     let host = read("/etc/hostname");
     let mut hostname = TextField::new("");
     hostname.set_text(&host);
+    // `settings <section>` opens at that section (the launcher's search).
+    let section = match os_std::env::args().nth(1).as_deref() {
+        Some("appearance") => Section::Appearance,
+        Some("display") => Section::Display,
+        Some("keyboard") => Section::Keyboard,
+        Some("mouse") => Section::Mouse,
+        Some("sound") => Section::Sound,
+        Some("power") => Section::Power,
+        Some("datetime") => Section::DateTime,
+        Some("network") => Section::Network,
+        Some("storage") => Section::Storage,
+        Some("apps") => Section::Apps,
+        Some("about") => Section::About,
+        _ => Section::General,
+    };
     let mut app = Settings {
-        section: Section::General,
+        section,
         size: (0, 0),
+        scheme: common::scheme::choice(),
         accent: ACCENTS.iter().position(|(n, _)| n.eq_ignore_ascii_case(&accent)).unwrap_or(0),
         wallpaper: wallpaper.min(WALLPAPERS.len() - 1),
         scroll: 0,

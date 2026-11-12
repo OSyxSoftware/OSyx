@@ -7,6 +7,7 @@ mod dialog;
 mod list;
 mod menu;
 mod scroll;
+mod text_area;
 mod text_field;
 
 pub use button::{Button, ButtonStyle, Checkbox};
@@ -14,6 +15,7 @@ pub use dialog::Dialog;
 pub use list::{Column, ListItem, ListView};
 pub use menu::{Menu, MenuItem};
 pub use scroll::{Scroll, ScrollView};
+pub use text_area::{Highlighter, Pos, Style, TextArea, TAB_WIDTH};
 pub use text_field::TextField;
 
 use crate::paint::{Align, FontKind, Fonts, Painter};

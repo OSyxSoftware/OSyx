@@ -69,6 +69,20 @@ controllers (older ICH chipsets) go to the companions, which OSyx does not
 drive. `usb.ehci=off` on the kernel command line leaves the controllers to
 the firmware and its PS/2 emulation.
 
+Low and full-speed devices behind one transaction translator share its
+bus: it runs their transactions one after the other, and a low-speed one
+takes about a micro-frame. Their interrupt endpoints therefore start in
+micro-frames 0 to 3 in turn (`osyx_usb::ehci::split_masks`), each with its
+complete splits two, three and four micro-frames later; with every
+endpoint starting in micro-frame 0, the fourth and later endpoints (a
+keyboard and a gaming mouse have two or three each) can finish after the
+last complete split and are then never heard (worked out from the USB 2.0
+timing rules; not measured on hardware). An endpoint that keeps failing
+rests for a second and is tried again, with the data toggle it had. A
+pointer among long reports of other functions (key bitmaps, vendor data
+blocks) is found; a refused SET_PROTOCOL does not stop a mouse from being
+driven; the first reports that are not understood are logged in hex.
+
 **virtio-input** (`kernel/src/drivers/virtio_input.rs`): the keyboards, mice
 and tablets of a virtual machine without USB or PS/2 hardware. The device's
 Linux evdev events are decoded by `osyx_input::evdev` (host tests); the event
@@ -162,8 +176,8 @@ window list) is granted only to the process PRISM started as the shell.
   `Window` (shared-memory buffer grown with headroom, attach/damage/commit,
   CONFIGURE and BUFFER_RELEASE handling), and an adapter to toolkit events
   with double-click detection.
-* `graphics/ui` (`osyx-ui`, host tested): theme (midnight blue/charcoal,
-  blue accent), Cantarell and Source Code Pro fonts with Polish letters, a
+* `graphics/ui` (`osyx-ui`, host tested): themes (midnight blue/charcoal and a
+  light one, blue accent), sunrise and sunset, Cantarell and Source Code Pro fonts with Polish letters, a
   clipping painter (anti-aliased rounded rectangles, discs, rings, thick
   segments), line icons, layout helpers, focus chain, and the widgets Label,
   Button, Checkbox, TextField, Panel, Menu, Dialog, ListView and
@@ -178,7 +192,25 @@ window list) is granted only to the process PRISM started as the shell.
 | AXIS Terminal | `/system/bin/terminal` | user 1000 |
 | Files | `/system/bin/files` | user 1000 |
 | System Information | `/system/bin/sysinfo` | user 1000 |
+| Text Editor | `/system/bin/edit [file]` | user 1000 |
 | AXIS shell | `/bin/axis` | user 1000 (child of the terminal) |
+
+Text Editor edits UTF-8 text with the toolkit's multi-line `TextArea`
+(`graphics/ui/src/widget/text_area.rs`: selection, clipboard, undo and redo,
+line numbers, find). AXIS scripts are coloured by the shell's own tokenizer
+(`osyx_shell::highlight`), other source and configuration files by their
+comments, strings and numbers. Line ends are kept as found (LF or CRLF); a
+file that is not UTF-8 opens read-only; files above 8 MiB are refused. Files
+offers it under "Open with" for text and source files. A save writes a new
+file beside the old one (made for that save only, private until it is
+complete) and renames it into place; through a symbolic link, the file the
+link names is saved and the link stays. Where no file can be made beside it
+(a folder that is not writable, a file of another user, or one of another
+group whose group has rights of its own), the editor asks
+before it writes the file in place, since a failure there loses the old
+contents.
+
+![Text Editor with an AXIS script](screenshots/editor.jpg)
 
 The shell draws the wallpaper (`/system/share/wallpapers/default.osxi`,
 converted at build time from `graphics/assets/wallpaper/osyx-default.png` by
@@ -265,9 +297,106 @@ selection by PID; End task uses the existing kernel permission checks.
 Date & Time, Network, Storage and About. Host name, accent, background,
 US/Polish keyboard layout and POSIX time zone write system configuration;
 DHCP/static IPv4 applies through the native net_config syscall. Keyboard
-layout needs a session restart. The desktop reloads background/time zone;
-new native application windows read the saved accent. Display information
-is read-only. Settings retains root credentials for system configuration.
+layout needs a session restart. The desktop reloads background/time zone.
+Display information is read-only. Settings retains root credentials for system configuration.
+
+Appearance also chooses the theme: Dark (`MIDNIGHT`), Light (`DAYLIGHT`) or
+Automatic, kept in `/etc/osyx/theme` as `dark`, `light` or `auto`. Automatic
+is light while the sun is up: `osyx_ui::time::sun_times` computes sunrise
+and sunset for the day from the solar declination and the equation of time
+(within a few minutes of an almanac; polar day and night are handled). The
+place is `latitude longitude` in `/etc/osyx/location` when that file exists;
+otherwise the longitude is the middle of the time zone and the latitude
+50 degrees north. Every native application, the desktop shell and PRISM
+(window decorations, `prism_core::theme::Palette`) look at the choice every
+three seconds, so a change of theme or accent, and sunrise and sunset, show
+in running programs without a restart. The terminal keeps its dark
+background in both themes.
+
+![The light theme](screenshots/light-theme.jpg)
+
+### Text in PDF files
+
+The PDF viewer built into Files searches and selects text. Ctrl+F opens a
+search field: every match in the document is marked as its pages are
+searched on the viewer's thread, the count is shown, Enter or F3 goes to
+the next match and Shift+Enter to the one before; Escape closes the field.
+Dragging over a page selects its text, a double click a word, Ctrl+A the
+page in view; Ctrl+C copies the selection.
+
+`osyx_media::pdf::Pdf::text` runs a page's content without painting and
+keeps each glyph's text and box (`pdf::text::PageText`). The text of a
+glyph comes from the font's ToUnicode map, else its glyph name, else the
+embedded font's own character map read backwards. Characters stay in the
+order the page draws them; a space is added where the page leaves a gap
+and a line break where the text moves to another line. Invisible text
+counts, so scanned pages with a text layer can be searched. Searching
+ignores case, and a space matches a line break.
+
+![Searching a PDF](screenshots/pdf-search.jpg)
+
+### Screenshots and screen recording
+
+PrintScreen belongs to PRISM, whichever window has the focus:
+
+| Keys | What is captured |
+|---|---|
+| PrintScreen | the whole screen |
+| Alt+PrintScreen | the focused window with its title bar |
+| Shift+PrintScreen | an area: press, drag, release; Escape or a click without a drag gives up |
+| Ctrl+PrintScreen | starts recording the screen; again, stops and saves |
+
+A picture is a PNG in `~/Pictures`, a recording a WebM file with VP8 video
+in `~/Videos`, both named by the UTC time. The saved file goes onto the
+clipboard as a file (Paste in Files copies it; Win32 programs see
+`CF_HDROP`) and as its path in text, and the shell shows a notification.
+The clipboard holds at most 56 KiB, so the picture itself is not put on it.
+
+PRISM is root, and root writes nothing in the user's home: a folder there
+could be a symbolic link to anywhere. A child process (`prism
+--save-as-user`, `userspace/desktop/src/user_save.rs`) gives up root, makes
+the folder and the file as the desktop user and gets the length and the data
+through a pipe, so the captures are the user's own; a file that did not
+arrive whole is removed by the child, not by root. A recording is written in
+`/var/cache/osyx-prism`, which only root can reach, and handed over when it
+is finished. A `~/Pictures` or `~/Videos` that an earlier version made as
+root is not the user's: the child renames it to `Pictures (old)` or
+`Videos (old)`, where its files stay readable, and makes the user's own
+folder. A recording leaves the spool only once the user
+has it: one that could not be handed over, or that a PRISM which died left
+cut off, is saved after the next recording, under `name (2)` and so on when
+the name is taken.
+
+While an area is chosen the compositor keeps the pointer from the windows
+and draws the outline; the picture is taken from the frame after the
+outline is gone.
+
+The recorder (`userspace/desktop/src/recorder.rs`) copies the composed
+screen, with the pointer, at most ten times a second and only when it
+changed (once a second otherwise), and a thread of its own encodes and
+writes; frames it cannot keep up with are dropped. Each frame carries its
+time, so the film keeps its pace. The encoder
+(`osyx_media::vp8::encode`) writes key frames with 16x16 intra prediction
+every fifty frames and, between them, frames predicted from the same place
+in the previous one, where an unchanged macroblock costs a fraction of a
+bit. It has no motion search and no loop filter. It reconstructs each
+frame as a decoder does; the tests check that this crate's decoder shows
+exactly that picture, and libavcodec did too for a sample. Colours stay
+within a few levels of the screen. `osyx_media::video::webm` writes the
+container with cues for seeking; a recording that was cut off still plays
+up to its last complete cluster.
+
+The launcher's search field also finds settings and files once two
+characters are typed (`osyx_filekit::search`). A setting ("wallpaper",
+"wifi", "time zone", also by related words such as "background") opens
+Settings at its section (`settings <section>`). Files and folders are
+matched by name against a list of the home directory made when the launcher
+opens (up to 5000 entries, five levels deep, hidden names left out); a file
+opens in Files as a double click would (`files --open FILE`), a folder
+opens in Files. Applications come first, then up to four settings and
+twelve files, each group best match first.
+
+![The launcher finding a file](screenshots/launcher-search.jpg)
 
 The application launcher also accepts `.exe` paths, invoking `/bin/winrun`.
 The four Windows GUI utilities are installed in `/opt/apps` and have their
