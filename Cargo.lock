@@ -1101,7 +1101,7 @@ dependencies = [
 name = "osyx-media"
 version = "0.1.0"
 dependencies = [
- "aes 0.8.4",
+ "aes 0.9.3",
  "libm",
  "miniz_oxide",
  "sha2 0.10.9",
