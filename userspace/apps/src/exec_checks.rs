@@ -186,12 +186,23 @@ pub fn run(t: &mut Tests) {
         let _ = fs::remove_file(OUT);
         let by_name = run(&format!("#! axis\necho by-name > {OUT}\n"));
         let wrote_by_name = fs::read_to_string(OUT).is_ok_and(|t| t.trim() == "by-name");
+        // The script's own arguments: $1, $#, and $@ as separate words.
+        let _ = fs::remove_file(OUT);
+        let with_args = fs::write(SCRIPT, format!("#!/bin/axis\necho $1+$2+$# > {OUT}\nfor a in $@ {{\n    echo [$a] >> {OUT}\n}}\n"))
+            .and_then(|_| Command::new(SCRIPT).args(["one", "two words"]).status())
+            .map(|s| s.code())
+            .map_err(|e| e.kind());
+        let args_text = fs::read_to_string(OUT).unwrap_or_default();
+        let args_ok = with_args == Ok(Some(0)) && args_text == "one+two words+2\n[one]\n[two words]\n";
+        if !args_ok {
+            println!("exec script arguments: {with_args:?} {args_text:?}");
+        }
         let missing = run("#!/bin/no-such-interpreter\n") == Err(ErrorKind::NotFound);
         let itself = run(&format!("#!{SCRIPT}\n")).is_err();
         let _ = fs::remove_file(SCRIPT);
         let _ = fs::remove_file(OUT);
         println!("exec script: ran {ran:?} wrote {wrote} by-name {by_name:?} wrote {wrote_by_name} missing {missing} itself {itself}");
-        ran == Ok(Some(0)) && wrote && by_name == Ok(Some(0)) && wrote_by_name && missing && itself
+        ran == Ok(Some(0)) && wrote && by_name == Ok(Some(0)) && wrote_by_name && args_ok && missing && itself
     });
     t.check("exec: kernel validates the argument block", || {
         let fault = raw::exec_raw(nr::SPAWN, 0xFFFF_8000_0000_0000) == Err(Errno::Fault)

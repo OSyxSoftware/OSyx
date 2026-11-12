@@ -124,17 +124,20 @@ fn expect_close(lines: &[&str], i: &mut usize) -> Result<(), String> {
     }
 }
 
-/// The line without a trailing comment.
-fn code(line: &str) -> &str {
+/// The line without a trailing comment. `$#` (the number of script
+/// arguments) does not start one.
+pub fn code(line: &str) -> &str {
     let mut quote = None;
+    let mut previous = ' ';
     for (o, ch) in line.char_indices() {
         match (quote, ch) {
             (Some(q), c) if c == q => quote = None,
             (Some(_), _) => {}
             (None, '"') | (None, '\'') => quote = Some(ch),
-            (None, '#') => return &line[..o],
+            (None, '#') if previous != '$' => return &line[..o],
             _ => {}
         }
+        previous = ch;
     }
     line
 }
@@ -186,6 +189,14 @@ mod tests {
     fn commands_and_comments() {
         let s = run("echo one\n# note\n\necho two # trailing").unwrap();
         assert_eq!(s, [Stmt::Command(String::from("echo one")), Stmt::Command(String::from("echo two"))]);
+    }
+
+    #[test]
+    fn the_argument_count_is_not_a_comment() {
+        assert_eq!(code("echo $# args # really"), "echo $# args ");
+        assert_eq!(code("echo \"# quoted\" '#' # gone"), "echo \"# quoted\" '#' ");
+        let s = run("echo $1+$# > out").unwrap();
+        assert_eq!(s, [Stmt::Command(String::from("echo $1+$# > out"))]);
     }
 
     #[test]
