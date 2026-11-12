@@ -92,6 +92,9 @@ pub struct TextArea {
     anchor: Option<Pos>,
     /// The column vertical movement aims for.
     wanted_col: usize,
+    /// For vertical moves: where the cursor was after the last one and
+    /// the screen cell it aims for.
+    wanted_cell: Option<(Pos, usize)>,
     /// First line shown, as a pixel offset, and columns scrolled out.
     pub scroll: Scroll,
     scroll_x: usize,
@@ -185,6 +188,7 @@ impl TextArea {
             cursor: Pos::default(),
             anchor: None,
             wanted_col: 0,
+            wanted_cell: None,
             scroll: Scroll::default(),
             scroll_x: 0,
             undo: Vec::new(),
@@ -363,6 +367,10 @@ impl TextArea {
     }
 
     pub fn undo(&mut self) -> bool {
+        // Text that may not be changed is not changed back either.
+        if self.read_only {
+            return false;
+        }
         let Some(e) = self.undo.pop() else { return false };
         let end = Self::end_of(e.at, &e.inserted);
         self.splice(e.at, end, &e.removed);
@@ -374,6 +382,9 @@ impl TextArea {
     }
 
     pub fn redo(&mut self) -> bool {
+        if self.read_only {
+            return false;
+        }
         let Some(mut e) = self.redo.pop() else { return false };
         let end = Self::end_of(e.at, &e.removed);
         self.splice(e.at, end, &e.inserted);
@@ -430,30 +441,50 @@ impl TextArea {
         }
     }
 
-    fn char_at(&self, p: Pos) -> Option<char> {
-        self.lines[p.line].chars().nth(p.col)
-    }
-
+    /// The start of the word before `p`: over blanks and punctuation,
+    /// then over the word. Each line is read once.
     fn word_left(&self, mut p: Pos) -> Pos {
-        // Over blanks and punctuation, then over the word.
-        while p != Pos::default() && !self.char_at(self.left_of(p)).is_some_and(is_word) {
-            p = self.left_of(p);
+        loop {
+            let line: Vec<char> = self.lines[p.line].chars().take(p.col).collect();
+            let mut col = line.len();
+            while col > 0 && !is_word(line[col - 1]) {
+                col -= 1;
+            }
+            if col == 0 && p.line > 0 {
+                // Nothing but blanks back to the line's start: the word
+                // is on a line above.
+                p = Pos::new(p.line - 1, char_len(&self.lines[p.line - 1]));
+                continue;
+            }
+            while col > 0 && is_word(line[col - 1]) {
+                col -= 1;
+            }
+            return Pos::new(p.line, col);
         }
-        while p.col > 0 && self.char_at(self.left_of(p)).is_some_and(is_word) {
-            p = self.left_of(p);
-        }
-        p
     }
 
+    /// The start of the word after `p`: over the word, then over blanks
+    /// and punctuation. Each line is read once.
     fn word_right(&self, mut p: Pos) -> Pos {
-        let end = self.end();
-        while p != end && self.char_at(p).is_some_and(is_word) {
-            p = self.right_of(p);
+        let mut in_word = true;
+        loop {
+            let mut col = p.col;
+            for c in self.lines[p.line].chars().skip(p.col) {
+                if in_word && !is_word(c) {
+                    in_word = false;
+                }
+                if !in_word && is_word(c) {
+                    return Pos::new(p.line, col);
+                }
+                col += 1;
+            }
+            if p.line + 1 >= self.lines.len() {
+                return Pos::new(p.line, col);
+            }
+            // A line end is a blank.
+            in_word = false;
+            p = Pos::new(p.line + 1, 0);
         }
-        while p != end && !self.char_at(p).is_some_and(is_word) {
-            p = self.right_of(p);
-        }
-        p
     }
 
     /// The word around `p` (a single character where there is none).
@@ -474,16 +505,17 @@ impl TextArea {
     /// Up or down by `by` lines, keeping the column aimed for.
     fn vertical(&mut self, by: i64, select: bool) {
         let line = (self.cursor.line as i64 + by).clamp(0, self.lines.len() as i64 - 1) as usize;
-        // The same screen cell, so tabs above do not shift the cursor.
-        let cell = cells_before(&self.lines[self.cursor.line], self.wanted_col.min(char_len(&self.lines[self.cursor.line])));
-        let wanted = self.wanted_col;
-        let col = if self.lines[self.cursor.line].contains('\t') || self.lines[line].contains('\t') {
-            col_at_cell(&self.lines[line], cell)
-        } else {
-            wanted.min(char_len(&self.lines[line]))
+        // The same screen cell, so tabs do not shift the cursor. The cell
+        // aimed for is where the cursor was when it last moved sideways;
+        // short lines on the way do not change it.
+        let here = cells_before(&self.lines[self.cursor.line], self.cursor.col);
+        let cell = match self.wanted_cell {
+            Some((at, cell)) if at == self.cursor => cell.max(here),
+            _ => here,
         };
+        let col = col_at_cell(&self.lines[line], cell);
         self.move_to(Pos::new(line, col), select);
-        self.wanted_col = wanted;
+        self.wanted_cell = Some((self.cursor, cell));
     }
 
     // ----- find --------------------------------------------------------
@@ -653,7 +685,10 @@ impl TextArea {
                 self.replace(a, b, &text, false);
             }
             key::TAB => {
-                let n = TAB_WIDTH - self.cursor.col % TAB_WIDTH;
+                // To the next tab stop on screen (tabs before the cursor
+                // take several cells).
+                let (a, _) = self.selection().unwrap_or((self.cursor, self.cursor));
+                let n = TAB_WIDTH - cells_before(&self.lines[a.line], a.col) % TAB_WIDTH;
                 let spaces: String = core::iter::repeat_n(' ', n).collect();
                 let (a, b) = self.selection().unwrap_or((self.cursor, self.cursor));
                 self.replace(a, b, &spaces, false);
@@ -800,7 +835,9 @@ impl TextArea {
             // Search matches, then the selection over them.
             if !self.needle.is_empty() {
                 let n = char_len(&self.needle);
-                for col in match_cols(line, &self.needle, fold) {
+                // Only matches on screen get their place worked out.
+                let on_screen = (col_covering(line, self.scroll_x), col_covering(line, self.scroll_x + cols + 1) + 1);
+                for col in match_cols(line, &self.needle, fold).into_iter().filter(|c| c + n > on_screen.0 && *c < on_screen.1) {
                     p.blend(Rect::new(cell_x(col), y, (cell_x(col + n) - cell_x(col)).max(0) as u32, lh as u32), t.warning, 70);
                 }
             }

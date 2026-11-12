@@ -30,6 +30,9 @@ const KEEP: usize = 8;
 const FONT_DIR: &str = "/Windows/Fonts";
 
 const F3: u16 = key::F1 + 2;
+/// Matches kept from one search. A single letter in a long book matches
+/// hundreds of thousands of times; nobody steps through those.
+const MAX_HITS: usize = 5000;
 /// Page texts kept for selecting.
 const KEEP_TEXT: usize = 16;
 
@@ -64,6 +67,8 @@ struct Search {
     hits: Vec<Hit>,
     /// Pages searched so far.
     pages: usize,
+    /// The search stopped at [`MAX_HITS`]: there may be more.
+    limited: bool,
 }
 
 /// Selected characters of one page: where the button went down and where
@@ -161,12 +166,14 @@ fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Job>, again: Sender<Job>, sha
                 if s.id != id {
                     continue;
                 }
-                s.hits.extend(hits);
-                s.pages = page + 1;
-                let found = s.hits.len();
+                let room = MAX_HITS.saturating_sub(s.hits.len());
+                s.limited = hits.len() > room;
+                s.hits.extend(hits.into_iter().take(room));
+                s.pages = if s.limited { pdf.pages() } else { page + 1 };
+                let (found, limited) = (s.hits.len(), s.limited);
                 drop(s);
                 shared.generation.fetch_add(1, Ordering::Relaxed);
-                if page + 1 < pdf.pages() {
+                if page + 1 < pdf.pages() && !limited {
                     // One page at a time: pages to draw get their turn.
                     let _ = again.send(Job::Search { id, query, page: page + 1 });
                 } else {
@@ -368,7 +375,7 @@ impl PdfView {
             return;
         }
         let id = s.id + 1;
-        *s = Search { id, query: query.clone(), hits: Vec::new(), pages: 0 };
+        *s = Search { id, query: query.clone(), hits: Vec::new(), pages: 0, limited: false };
         drop(s);
         self.current = 0;
         self.jump = !query.is_empty();
@@ -615,7 +622,8 @@ impl PdfView {
             } else if s.hits.is_empty() {
                 if s.pages < self.sizes.len() { format!("searching, page {}", s.pages + 1) } else { String::from("not found") }
             } else {
-                format!("{} of {}{}", self.current.min(s.hits.len() - 1) + 1, s.hits.len(), if s.pages < self.sizes.len() { "+" } else { "" })
+                let more = if s.limited { " or more" } else if s.pages < self.sizes.len() { "+" } else { "" };
+                format!("{} of {}{more}", self.current.min(s.hits.len() - 1) + 1, s.hits.len())
             };
             drop(s);
             let at = self.find.rect.right() as i32 + 10;

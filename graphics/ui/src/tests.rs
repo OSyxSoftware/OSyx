@@ -646,6 +646,67 @@ fn text_area_draws_a_very_long_line_by_its_visible_part() {
 }
 
 #[test]
+fn text_area_keeps_its_screen_cell_and_tab_stops_with_tabs() {
+    // Column 2 of the first line is screen cell 5: Down twice stays there.
+    let (mut a, fonts, mut clip) = area("\tx\nabcdef\nabcdef\nab\nabcdef");
+    a.move_to(Pos::new(0, 2), false);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(1, 5));
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(2, 5));
+    // A short line on the way does not change the cell aimed for.
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(3, 2));
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(4, 5));
+    // Tab after a tab and a letter (cell 5) goes to cell 8: three spaces.
+    a.move_to(Pos::new(0, 2), false);
+    a.event(&key_down(key::TAB, None, 0), &fonts, &mut clip);
+    assert_eq!(a.line(0), "\tx   ");
+}
+
+#[test]
+fn text_area_read_only_keeps_history_and_long_words_move_fast() {
+    let (mut a, fonts, mut clip) = area("");
+    a.event(&typed('x'), &fonts, &mut clip);
+    a.read_only = true;
+    assert!(!a.undo());
+    assert_eq!(a.text(), "x");
+    a.read_only = false;
+    assert!(a.undo());
+    a.read_only = true;
+    assert!(!a.redo());
+    assert_eq!(a.text(), "");
+    // One word of 300 000 letters, then another line: each move reads
+    // the line once.
+    let long = "w".repeat(300_000);
+    let (mut a, fonts, mut clip) = area(&alloc::format!("  {long}  next\nlast"));
+    let started = std::time::Instant::now();
+    a.event(&key_down(key::RIGHT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 2));
+    a.event(&key_down(key::RIGHT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 300_004));
+    a.event(&key_down(key::RIGHT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(1, 0));
+    a.event(&key_down(key::LEFT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 300_004));
+    a.event(&key_down(key::LEFT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 2));
+    a.event(&key_down(key::LEFT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(0, 0));
+    assert!(started.elapsed().as_millis() < 3000, "{} ms", started.elapsed().as_millis());
+    // A line of one letter 100 000 times, every one a match: drawn by its
+    // visible part.
+    let (mut a, fonts, _) = area(&"a".repeat(100_000));
+    assert!(a.find("a", true));
+    let mut buf = vec![0u32; 400 * 100];
+    let mut s = Surface::new(&mut buf, 400, 100, 400).unwrap();
+    let started = std::time::Instant::now();
+    a.draw(&mut Painter::new(&mut s, &MIDNIGHT, &fonts), true);
+    assert!(started.elapsed().as_millis() < 3000, "{} ms", started.elapsed().as_millis());
+}
+
+#[test]
 fn text_area_typing_lines_and_unicode() {
     let (mut a, fonts, mut clip) = area("");
     for c in "zażółć".chars() {

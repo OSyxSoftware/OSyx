@@ -42,6 +42,7 @@ const KEYS: &str = "/etc/osyx/packages.keys";
 const DB: &str = "/var/lib/osyx/pkg";
 const CACHE: &str = "/var/cache/osyx/pkg";
 const LOG: &str = "/var/log/osyx-pkg.log";
+const LOCK: &str = "/var/lib/osyx/pkg/.lock";
 const MANIFEST_MAX: usize = 4 << 20;
 const STAGED: &str = osyx_update::STAGED_SUFFIX;
 /// Suffix of an installed file set aside while its replacement moves in.
@@ -67,11 +68,83 @@ fn keys() -> Vec<[u8; 32]> {
     package::trusted_keys(&fs::read_to_string(KEYS).unwrap_or_default())
 }
 
+/// A repository asked for over HTTPS is not answered over plain HTTP: a
+/// redirect there would let someone on the path serve an older signed
+/// list. `from` is where the answer came from.
+fn no_downgrade(secure: bool, from: &str) -> Result<(), String> {
+    if secure && !from.starts_with("https://") {
+        return Err(format!("redirected from HTTPS to {from}: refused"));
+    }
+    Ok(())
+}
+
+/// One `pkg` changes what is installed at a time: the lock is a file made
+/// with "create new" and removed when the work is done. A lock left by a
+/// `pkg` that died is taken over after ten minutes.
+struct Lock;
+
+impl Lock {
+    fn take() -> Result<Lock, String> {
+        fs::create_dir_all(DB).map_err(|e| format!("{DB}: {e}"))?;
+        for _ in 0..2 {
+            match fs::OpenOptions::new().write(true).create_new(true).open(LOCK) {
+                Ok(_) => return Ok(Lock),
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    let age = fs::metadata(LOCK).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
+                    if age.is_some_and(|a| a.as_secs() > 600) {
+                        let _ = fs::remove_file(LOCK);
+                        continue;
+                    }
+                    return Err(format!("another pkg is installing or removing ({LOCK} exists); try again when it is done"));
+                }
+                Err(e) => return Err(format!("{LOCK}: {e}")),
+            }
+        }
+        Err(format!("{LOCK} cannot be taken"))
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(LOCK);
+    }
+}
+
+/// Files of earlier versions that could not be removed when a package was
+/// upgraded (`<name>.stale`, one path per line): tried again whenever the
+/// package is installed, upgraded or removed.
+fn stale_list(name: &str) -> String {
+    format!("{DB}/{name}.stale")
+}
+
+/// Tries to remove the files in `name`'s stale list and those in `more`,
+/// except the files in `live` (the installed version has them again);
+/// what still will not go stays in the list. Returns what is left.
+fn clear_stale(name: &str, more: &[String], live: &[String]) -> Vec<String> {
+    let list = stale_list(name);
+    let mut paths: Vec<String> = fs::read_to_string(&list).unwrap_or_default().lines().map(String::from).filter(|l| !l.is_empty()).collect();
+    for p in more {
+        if !paths.contains(p) {
+            paths.push(p.clone());
+        }
+    }
+    paths.retain(|p| !live.contains(p));
+    // Only a package's own paths, whatever the list says.
+    paths.retain(|p| package::allowed_path(name, p.trim_start_matches('/')) && remove_file(p).is_err());
+    if paths.is_empty() {
+        let _ = fs::remove_file(&list);
+    } else {
+        let _ = fs::write(&list, paths.join("\n") + "\n");
+    }
+    paths
+}
+
 /// A small download kept in memory.
 fn fetch(url: &str) -> Result<Vec<u8>, String> {
-    struct Buf(Vec<u8>);
+    struct Buf(Vec<u8>, bool);
     impl osyx_web::Sink for Buf {
-        fn start(&mut self, _url: &str, length: Option<u64>) -> Result<(), String> {
+        fn start(&mut self, from: &str, length: Option<u64>) -> Result<(), String> {
+            no_downgrade(self.1, from)?;
             match length {
                 Some(n) if n as usize > MANIFEST_MAX => Err(format!("{n} bytes is too large")),
                 _ => Ok(()),
@@ -85,7 +158,7 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
             Ok(())
         }
     }
-    let mut b = Buf(Vec::new());
+    let mut b = Buf(Vec::new(), url.starts_with("https://"));
     osyx_web::get(url, &mut b).map_err(|e| format!("{url}: {e}"))?;
     Ok(b.0)
 }
@@ -143,9 +216,11 @@ fn download_payload(url: &str, path: &str, size: u64, sha256: &[u8; 32]) -> Resu
         file: fs::File,
         hash: Sha256,
         left: u64,
+        secure: bool,
     }
     impl osyx_web::Sink for Limited {
-        fn start(&mut self, _url: &str, length: Option<u64>) -> Result<(), String> {
+        fn start(&mut self, from: &str, length: Option<u64>) -> Result<(), String> {
+            no_downgrade(self.secure, from)?;
             match length {
                 Some(n) if n != self.left => Err(format!("the payload is {n} bytes, the manifest says {}", self.left)),
                 _ => Ok(()),
@@ -161,7 +236,7 @@ fn download_payload(url: &str, path: &str, size: u64, sha256: &[u8; 32]) -> Resu
         }
     }
     let file = fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
-    let mut sink = Limited { file, hash: Sha256::new(), left: size };
+    let mut sink = Limited { file, hash: Sha256::new(), left: size, secure: url.starts_with("https://") };
     let result = osyx_web::get(url, &mut sink).map_err(|e| format!("{url}: {e}")).and_then(|_| {
         if sink.left != 0 {
             return Err(format!("the payload is {} bytes short", sink.left));
@@ -316,18 +391,14 @@ fn install(url: &str, name: &str) -> Result<String, String> {
             let _ = fs::remove_file(format!("{to}{KEPT}"));
         }
     }
-    // What the new version no longer has. The record already names the
-    // new version; a file that will not go is reported, not forgotten.
-    let mut left_over = Vec::new();
-    if let Some(old) = &old {
-        for path in package::stale_files(old, &p) {
-            if let Err(e) = remove_file(&format!("/{path}")) {
-                left_over.push(e);
-            }
-        }
-    }
+    // What the new version no longer has, and what an earlier upgrade
+    // could not remove. A file that will not go is kept on a list and
+    // tried again next time, and reported.
+    let dropped: Vec<String> = old.iter().flat_map(|old| package::stale_files(old, &p)).map(|path| format!("/{path}")).collect();
+    let live: Vec<String> = p.files.iter().map(|f| format!("/{}", f.path)).collect();
+    let left_over = clear_stale(name, &dropped, &live);
     if !left_over.is_empty() {
-        say(&format!("pkg: {name}: files of the old version could not be removed: {}", left_over.join("; ")));
+        say(&format!("pkg: {name}: files of an older version could not be removed and will be tried again: {}", left_over.join(", ")));
     }
     Ok(match old {
         Some(old) => format!("{name} upgraded from {} to {} ({} files)", old.version, p.version, p.files.len()),
@@ -339,7 +410,8 @@ fn remove(name: &str) -> Result<String, String> {
     let p = installed(name).ok_or_else(|| format!("{name} is not installed"))?;
     // The record goes last, and only when every file went: what could not
     // be removed can be tried again.
-    let failed: Vec<String> = p.files.iter().filter_map(|f| remove_file(&format!("/{}", f.path)).err()).collect();
+    let mut failed: Vec<String> = p.files.iter().filter_map(|f| remove_file(&format!("/{}", f.path)).err()).collect();
+    failed.extend(clear_stale(name, &[], &[]).into_iter().map(|p| format!("{p} cannot be removed")));
     if !failed.is_empty() {
         return Err(format!("{name} is still installed: {}", failed.join("; ")));
     }
@@ -393,6 +465,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         Some("install") if !names.is_empty() => {
             need_root()?;
+            let _lock = Lock::take()?;
             let url = repository()?;
             for name in names {
                 say(&install(&url, name)?);
@@ -401,6 +474,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         Some("upgrade") if names.is_empty() => {
             need_root()?;
+            let _lock = Lock::take()?;
             let url = repository()?;
             let list = index(&url)?;
             let mut any = false;
@@ -419,6 +493,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         Some("remove") if !names.is_empty() => {
             need_root()?;
+            let _lock = Lock::take()?;
             for name in names {
                 say(&remove(name)?);
             }

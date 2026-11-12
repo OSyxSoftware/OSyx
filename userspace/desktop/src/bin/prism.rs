@@ -586,6 +586,12 @@ impl Prism {
         let (y, m, d) = screenshot::civil_from_days(days as i64);
         let dir = format!("/home/user/{folder}");
         fs::create_dir_all(&dir)?;
+        // PRISM is root and nothing here can give a folder to the desktop
+        // user. The folder is opened to everyone instead, so that the user
+        // can rename and delete what is saved in it; their home folder
+        // above it lets nobody else in. (Also for a folder an earlier
+        // version made.)
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o777));
         // A second capture within the same second gets a number: nothing
         // already saved is written over.
         let stamp = format!("{kind} {y:04}-{m:02}-{d:02} {:02}.{:02}.{:02} UTC", rem / 3600, rem / 60 % 60, rem % 60);
@@ -639,7 +645,23 @@ impl Prism {
     fn record(&mut self, now: u64) {
         if self.comp.take_record_toggle() {
             match &mut self.recorder {
-                Some(r) => r.stop(now),
+                Some(r) => {
+                    // What changed since the last frame is the film's end.
+                    let cursor = self.comp.cursor_state();
+                    if self.screen_changed || cursor != self.recorded_cursor {
+                        self.recorded_cursor = cursor;
+                        self.screen_changed = false;
+                        let (back, comp, w, h) = (&self.back, &self.comp, self.width, self.height);
+                        r.frame(now, || {
+                            let mut copy = back.clone();
+                            if let Ok(mut s) = Surface::new(&mut copy, w, h, w) {
+                                comp.draw_cursor_overlay(&mut s);
+                            }
+                            copy
+                        });
+                    }
+                    r.stop(now)
+                }
                 None => {
                     let started = Self::capture_path("Videos", "Recording", "webm")
                         .map_err(|e| format!("{e}"))

@@ -93,6 +93,10 @@ pub struct Font {
 /// Entries kept from one ToUnicode map (every code of a two-byte font).
 const TO_UNICODE_MAX: usize = 0x1_0000;
 
+/// Bytes of UTF-16 kept of one code's text. With the entry limit this
+/// bounds what a map can hold, whatever its ranges say.
+const TO_UNICODE_TEXT: usize = 64;
+
 /// Parses a ToUnicode CMap: `bfchar` and `bfrange` sections map codes to
 /// UTF-16BE strings.
 fn parse_to_unicode(data: &[u8]) -> BTreeMap<u32, String> {
@@ -122,7 +126,9 @@ fn parse_to_unicode(data: &[u8]) -> BTreeMap<u32, String> {
         out
     };
     let number = |b: &[u8]| b.iter().fold(0u32, |a, &x| a << 8 | x as u32);
+    // (A destination is a few characters: a ligature, a composed letter.)
     let text = |b: &[u8]| -> String {
+        let b = &b[..b.len().min(TO_UNICODE_TEXT)];
         let units: Vec<u16> = b.chunks(2).map(|c| (c[0] as u16) << 8 | c.get(1).copied().unwrap_or(0) as u16).collect();
         char::decode_utf16(units).map(|c| c.unwrap_or('\u{FFFD}')).collect()
     };
@@ -154,7 +160,7 @@ fn parse_to_unicode(data: &[u8]) -> BTreeMap<u32, String> {
                                 break;
                             }
                             budget -= 1;
-                            let mut d = dst.clone();
+                            let mut d = dst[..dst.len().min(TO_UNICODE_TEXT)].to_vec();
                             if let [.., a, b] = d.as_mut_slice() {
                                 let v = ((*a as u32) << 8 | *b as u32) + n as u32;
                                 (*a, *b) = ((v >> 8) as u8, v as u8);

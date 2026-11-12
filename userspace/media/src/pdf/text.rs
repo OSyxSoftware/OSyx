@@ -119,12 +119,11 @@ impl PageText {
         let text: Vec<char> = self.chars.iter().map(|c| fold(c.ch)).collect();
         let mut i = 0;
         while i + needle.len() <= text.len() {
+            // Every place, also one that starts inside the match before.
             if text[i..i + needle.len()] == needle[..] {
                 out.push(i..i + needle.len());
-                i += needle.len();
-            } else {
-                i += 1;
             }
+            i += 1;
         }
         out
     }
@@ -255,6 +254,10 @@ mod tests {
         assert_eq!(t.rects(found[0].clone()), vec![[0.0, 0.0, 66.0, 10.0]]);
         assert_eq!(t.rects(found[1].clone()), vec![[36.0, 14.0, 66.0, 24.0], [0.0, 28.0, 30.0, 38.0]]);
         assert!(t.find("").is_empty());
+        // Matches may overlap: "ana" is twice in "banana".
+        let letters: Vec<String> = "banana".chars().map(|c| c.to_string()).collect();
+        let items: Vec<(&str, f64, f64)> = letters.iter().enumerate().map(|(i, s)| (s.as_str(), i as f64 * 6.0, 0.0)).collect();
+        assert_eq!(PageText::from_glyphs(&glyphs(&items)).find("ana"), vec![1..4, 3..6]);
         assert!(t.find("absent").is_empty());
         assert_eq!(t.find("THEME").len(), 2);
     }

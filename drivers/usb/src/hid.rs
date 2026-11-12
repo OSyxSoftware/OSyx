@@ -287,8 +287,7 @@ pub fn parse_report_descriptor(desc: &[u8]) -> Result<Vec<Field>, ParseError> {
                 if g.report_count > 0x1_0000 || (g.report_size as u64) * (g.report_count as u64) > 0x40_0000 {
                     return Err(ParseError::TooLarge);
                 }
-                // Vendor pages mean nothing to any driver here.
-                let skipped = g.report_size > 32 || g.report_count > MAX_COUNT || g.page >= PAGE_VENDOR;
+                let skipped = g.report_size > 32 || g.report_count > MAX_COUNT;
                 let pos = match offsets.iter_mut().find(|(id, _)| *id == g.report_id) {
                     Some((_, off)) => off,
                     None => {
@@ -310,7 +309,16 @@ pub fn parse_report_descriptor(desc: &[u8]) -> Result<Vec<Field>, ParseError> {
                     *pos = pos.checked_add(g.report_size * g.report_count).ok_or(ParseError::TooLarge)?;
                 }
                 for n in 0..if skipped { 0 } else { g.report_count } {
-                    if !constant {
+                    let (page, usage) = if variable {
+                        all.get(n as usize).or(all.last()).copied().unwrap_or((g.page, 0))
+                    } else {
+                        (g.page, 0)
+                    };
+                    // Vendor pages mean nothing to any driver here and
+                    // take no room in the list. The page is the field's
+                    // own: a usage can name a standard page under a
+                    // vendor global page.
+                    if !constant && page < PAGE_VENDOR {
                         // Controls beyond the limit are not dropped
                         // quietly: a pointer without its buttons would be
                         // worse than the boot protocol the caller falls
@@ -318,11 +326,6 @@ pub fn parse_report_descriptor(desc: &[u8]) -> Result<Vec<Field>, ParseError> {
                         if fields.len() >= MAX_FIELDS {
                             return Err(ParseError::TooLarge);
                         }
-                        let (page, usage) = if variable {
-                            all.get(n as usize).or(all.last()).copied().unwrap_or((g.page, 0))
-                        } else {
-                            (g.page, 0)
-                        };
                         fields.push(Field {
                             report_id: g.report_id,
                             offset: *pos,
@@ -835,6 +838,16 @@ mod tests {
         let l = MouseLayout::from_fields(&parse_report_descriptor(&late_buttons).unwrap()).unwrap();
         assert_eq!(l.buttons.len(), 3);
         assert_eq!(l.buttons[0].1.offset, 16 + 600);
+        // A vendor global page with usages that name Generic Desktop X
+        // and Y in full (four-byte usages): still a pointer.
+        #[rustfmt::skip]
+        let extended: [u8; 28] = [
+            0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01,
+            0x0B, 0x30, 0x00, 0x01, 0x00, 0x0B, 0x31, 0x00, 0x01, 0x00,
+            0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06, 0xC0,
+        ];
+        let l = MouseLayout::from_fields(&parse_report_descriptor(&extended).unwrap()).unwrap();
+        assert_eq!((l.x.offset, l.y.offset), (0, 8));
         // More controls than are kept is an error, not a shorter list.
         let many: Vec<u8> = [0x05u8, 0x09, 0x19, 0x01, 0x29, 0x20, 0x75, 0x01, 0x95, 0x80, 0x81, 0x02].repeat(5);
         assert_eq!(parse_report_descriptor(&many), Err(ParseError::TooLarge));

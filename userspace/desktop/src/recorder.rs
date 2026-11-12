@@ -68,7 +68,15 @@ impl Recorder {
         let made = thread::Builder::new().spawn({
             let path = path.clone();
             move || {
+                // The compositor's thread runs above the others so that
+                // input and frames come first; encoding must not share
+                // that place.
+                let _ = os_std::system::thread_priority(0, os_std::system::priority::NORMAL);
                 let result = work(&worker, encoder, writer, file, head.len() as u64, width as usize, &path);
+                // Half a file is of no use to anyone.
+                if result.is_err() {
+                    let _ = fs::remove_file(&path);
+                }
                 worker.lock().unwrap().result = Some(result);
             }
         });

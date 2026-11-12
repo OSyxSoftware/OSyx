@@ -30,6 +30,32 @@ use prism_client::WindowSpec;
 
 os_std::entry!(main);
 
+/// Writes `data` as the file `path` so that a failure half way leaves the
+/// file as it was: to a file beside it first, renamed over it once every
+/// byte is there. Where no file can be made beside it (a folder the user
+/// may not write, while the file itself is writable), the file is written
+/// in place.
+fn write_whole(path: &str, data: &[u8]) -> Result<(), Error> {
+    let tmp = format!("{path}.osyx-saving");
+    let mut file = match fs::File::create(&tmp) {
+        Ok(f) => f,
+        Err(_) => return fs::write(path, data),
+    };
+    let written = file.write_all(data).and_then(|()| file.sync_all());
+    drop(file);
+    let done = written.and_then(|()| {
+        // The file keeps the permissions it had.
+        if let Ok(m) = fs::metadata(path) {
+            let _ = fs::set_permissions(&tmp, m.permissions());
+        }
+        fs::rename(&tmp, path)
+    });
+    if done.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    done
+}
+
 /// Larger files are refused: the editor keeps the whole text in memory.
 const MAX_FILE: u64 = 8 << 20;
 const TOOLBAR: u32 = 44;
@@ -256,7 +282,7 @@ impl Editor {
         if self.crlf {
             text = text.replace('\n', "\r\n");
         }
-        fs::write(&path, text.as_bytes()).map_err(|e| format!("{path} cannot be written: {e}."))?;
+        write_whole(&path, text.as_bytes()).map_err(|e| format!("{path} cannot be written: {e}."))?;
         self.area.mark_saved();
         self.set_language(Language::of(&path, self.area.line(0)));
         self.message = format!("Saved {} bytes", text.len());

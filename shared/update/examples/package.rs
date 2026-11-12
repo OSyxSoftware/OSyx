@@ -114,6 +114,15 @@ fn index(secret_path: &str, dir: &str) -> Result<(), String> {
         if payload.len() as u64 != p.payload_size || <[u8; 32]>::from(Sha256::digest(&payload)) != p.payload_sha256 {
             return Err(format!("{dir}/{bin} is not the payload of the manifest"));
         }
+        // Each file too, as the installer checks them.
+        let mut at = 0usize;
+        for f in &p.files {
+            let part = &payload[at..at + f.size as usize];
+            if <[u8; 32]>::from(Sha256::digest(part)) != f.sha256 {
+                return Err(format!("{dir}/{bin}: {} does not match its SHA-256 in the manifest", f.path));
+            }
+            at += f.size as usize;
+        }
         list.packages.push(Listing { name: p.name, version: p.version, description: p.description });
     }
     let text = list.to_text();
