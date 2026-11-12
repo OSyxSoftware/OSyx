@@ -75,10 +75,15 @@ fn write_whole(path: &str, data: &[u8], in_place: bool, known_mode: Option<u32>)
     // and never changed afterwards: it is never more open than the old
     // one, and no later step names it by a path that someone else in a
     // shared folder could have pointed elsewhere meanwhile.
-    // A file that is gone (someone removed it while it was open) keeps
-    // the permissions it had when it was opened or last saved: a private
-    // text does not become readable because its file went away.
-    let mode = old.map_or(known_mode.unwrap_or(0o644), |m| m.permissions().mode());
+    // Never more open than the file was when it was opened or last saved:
+    // a private text does not become readable because its file went away,
+    // nor because someone put a link to a more open file in its place.
+    let mode = match (old.as_ref().map(|m| m.permissions().mode()), known_mode) {
+        (Some(now), Some(known)) => now & known,
+        (Some(now), None) => now,
+        (None, Some(known)) => known,
+        (None, None) => 0o644,
+    };
     // No two saves share a name, and a name someone made first is not
     // used: "create new" follows no link and replaces nothing.
     let pid = os_std::process::id().unwrap_or(0);
