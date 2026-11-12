@@ -1,10 +1,11 @@
 //! Pictures for the image viewer built into Files: PNG, JPEG, GIF
-//! (animated), BMP, ICO, JBIG2, JPEG 2000 and WebP (animated too), decoded
-//! to straight-alpha RGBA frames.
+//! (animated), BMP, ICO, TIFF, JBIG2, JPEG 2000 and WebP (animated too),
+//! decoded to straight-alpha RGBA frames.
 
 mod bmp;
 mod gif;
 mod png;
+mod tiff;
 mod webp;
 
 use alloc::string::String;
@@ -51,6 +52,8 @@ pub fn decode(data: &[u8]) -> Result<Picture, String> {
         bmp::decode(data, false)
     } else if data.len() >= 6 && data[..4] == [0, 0, 1, 0] {
         ico(data)
+    } else if data.starts_with(b"II*\0") || data.starts_with(b"MM\0*") || data.starts_with(b"II+\0") || data.starts_with(b"MM\0+") {
+        tiff::decode(data)
     } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
         webp::decode(data)
     } else if data.starts_with(&[0x97, 0x4A, 0x42, 0x32, 0x0D, 0x0A, 0x1A, 0x0A]) {
@@ -61,7 +64,7 @@ pub fn decode(data: &[u8]) -> Result<Picture, String> {
         jpeg2000(data)
     } else {
         Err(String::from(
-            "not a picture OSyx can show (PNG, JPEG, GIF, BMP, ICO, JBIG2, JPEG 2000 and WebP are supported)",
+            "not a picture OSyx can show (PNG, JPEG, GIF, BMP, ICO, TIFF, JBIG2, JPEG 2000 and WebP are supported)",
         ))
     }
 }

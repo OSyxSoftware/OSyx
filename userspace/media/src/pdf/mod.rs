@@ -7,7 +7,7 @@ mod color;
 mod crypt;
 pub mod document;
 mod encoding;
-mod filter;
+pub(crate) mod filter;
 pub mod font;
 mod image;
 mod metrics;

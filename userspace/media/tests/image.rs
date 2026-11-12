@@ -114,3 +114,73 @@ fn damaged_or_huge_pictures_fail_cleanly() {
     assert!(image::decode(&gif).is_err());
     assert!(image::decode(b"not a picture").is_err());
 }
+
+#[test]
+fn tiff_files_match_their_references() {
+    for name in [
+        "rgb8.tif",
+        "rgb8-lzw.tif",
+        "rgb8-packbits.tif",
+        "rgba8-deflate.tif",
+        "grey8.tif",
+        "pal4-lzw.tif",
+        "mono-g4.tif",
+        "mono-g3.tif",
+        "mono.tif",
+        "mono-miniswhite.tif",
+        "mono-lsb.tif",
+        "rgb8-be-tiles.tif",
+        "rgb8-planar-pred.tif",
+        "rgb8-pred-strips.tif",
+        "rgba8-tiles-lzw.tif",
+        "rgb16-be-pred.tif",
+        "rgb16-le-pred.tif",
+        "grey16-be.tif",
+        "grey4.tif",
+        "rgba8-assoc.tif",
+        "rgb8-rotated.tif",
+        "pages.tif",
+    ] {
+        check(name, 0);
+    }
+    // Pillow rounds the CMYK inks its own way.
+    check("cmyk8-lzw.tif", 1);
+}
+
+#[test]
+fn tiff_formats_are_described_and_unsupported_ones_named() {
+    let format = |name: &str| image::decode(&data(name)).unwrap().format;
+    assert_eq!(format("rgb8-lzw.tif"), "TIFF, 8-bit RGB, LZW");
+    assert_eq!(format("mono-g4.tif"), "TIFF, 1-bit bilevel, CCITT Group 4");
+    assert_eq!(format("rgba8-assoc.tif"), "TIFF, 8-bit RGB with alpha, uncompressed");
+    assert_eq!(format("pages.tif"), "TIFF, 8-bit RGB, uncompressed, page 1 of 2");
+
+    // The compression field (tag 259, a SHORT in the entry) set to JPEG.
+    let mut jpeg = data("rgb8.tif");
+    let ifd = u32::from_le_bytes(jpeg[4..8].try_into().unwrap()) as usize;
+    let entries = u16::from_le_bytes(jpeg[ifd..ifd + 2].try_into().unwrap()) as usize;
+    let entry = (0..entries).map(|i| ifd + 2 + 12 * i).find(|&e| jpeg[e..e + 2] == 259u16.to_le_bytes()).unwrap();
+    jpeg[entry + 8] = 7;
+    assert_eq!(image::decode(&jpeg).unwrap_err(), "JPEG-compressed TIFF pictures are not supported");
+    assert_eq!(image::decode(b"II+\0\x08\0\0\0").unwrap_err(), "BigTIFF pictures are not supported");
+}
+
+#[test]
+fn damaged_tiff_files_do_not_panic() {
+    for name in ["rgb8-lzw.tif", "mono-g4.tif", "rgb8-be-tiles.tif", "rgb8-planar-pred.tif", "rgb16-le-pred.tif", "pal4-lzw.tif"] {
+        let good = data(name);
+        // Every prefix, and every byte of the header and directory changed.
+        for cut in (0..good.len()).step_by(7) {
+            let _ = image::decode(&good[..cut]);
+        }
+        for i in 0..good.len() {
+            for bits in [0x01u8, 0x80, 0xFF] {
+                let mut bad = good.clone();
+                bad[i] ^= bits;
+                if let Ok(p) = image::decode(&bad) {
+                    assert_eq!(p.frames[0].px.len(), p.w * p.h, "{name}: byte {i}");
+                }
+            }
+        }
+    }
+}
