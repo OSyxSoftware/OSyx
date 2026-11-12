@@ -411,7 +411,13 @@ pub struct Compositor {
     clipboard: Vec<proto::ClipEntry>,
     clipboard_seq: u32,
     /// PrintScreen was pressed; the platform saves the next frame.
-    screenshot_requested: bool,
+    /// A part of the screen to save as a picture after the next frame.
+    capture_requested: Option<Rect>,
+    /// Choosing an area for a screenshot: `Some(None)` until the button
+    /// goes down, then where it went down.
+    selecting: Option<Option<(i32, i32)>>,
+    /// Ctrl+PrintScreen was pressed: start or stop recording the screen.
+    record_toggle: bool,
 }
 
 const DOUBLE_CLICK_MS: u64 = 400;
@@ -456,7 +462,9 @@ impl Compositor {
             font: PropFont::parse(TITLE_FONT).expect("embedded title font"),
             last_title_click: None,
             alt_tab: None,
-            screenshot_requested: false,
+            capture_requested: None,
+            selecting: None,
+            record_toggle: false,
             cascade: 0,
             now: 0,
             stats: Stats::default(),
@@ -862,14 +870,7 @@ impl Compositor {
                 Ok(())
             }
             Request::ClipboardSet { entries } => {
-                self.clipboard = entries;
-                self.clipboard_seq += 1;
-                let ev = Event::ClipboardChanged { seq: self.clipboard_seq, entries: self.clipboard.clone() };
-                let ids: Vec<ClientId> =
-                    self.clients.iter().filter(|(_, cl)| cl.version.is_some() && !cl.dead).map(|(id, _)| *id).collect();
-                for id in ids {
-                    self.outbox.push((id, ev.clone()));
-                }
+                self.set_clipboard(entries);
                 Ok(())
             }
             Request::Notify { title, body } => {
@@ -1480,12 +1481,18 @@ impl Compositor {
 
     fn pointer_motion(&mut self, dx: i32, dy: i32) {
         let old = self.cursor.area(self.ptr_x, self.ptr_y);
+        self.damage_selection();
         self.ptr_x = self.ptr_x.saturating_add(dx).clamp(0, self.screen.w as i32 - 1);
         self.ptr_y = self.ptr_y.saturating_add(dy).clamp(0, self.screen.h as i32 - 1);
+        self.damage_selection();
         let new = self.cursor.area(self.ptr_x, self.ptr_y);
         if !self.cursor_overlay {
             self.damage.add(old, self.screen);
             self.damage.add(new, self.screen);
+        }
+        // Windows hear nothing of the pointer while an area is chosen.
+        if self.selecting.is_some() {
+            return;
         }
         match self.grab {
             Some(Grab::Move { win, dx, dy }) => {
@@ -1635,6 +1642,24 @@ impl Compositor {
         } else {
             self.buttons &= !bit;
         }
+        // Choosing an area for a screenshot takes the pointer from the
+        // windows: press, drag, release. Any other button gives up.
+        if self.selecting.is_some() {
+            self.damage_selection();
+            match (button, pressed, self.selection()) {
+                (1, true, _) => self.selecting = Some(Some((self.ptr_x, self.ptr_y))),
+                (1, false, Some(area)) => {
+                    self.selecting = None;
+                    // A click without a drag chooses nothing.
+                    if area.w >= 4 && area.h >= 4 {
+                        self.request_capture(area);
+                    }
+                }
+                (1, false, None) => {}
+                _ => self.selecting = None,
+            }
+            return;
+        }
         if !pressed {
             if button == 1 {
                 if let Some((source, path, x, y)) = self.file_drag.take() {
@@ -1781,8 +1806,51 @@ impl Compositor {
     }
 
     /// True once per PrintScreen press.
-    pub fn take_screenshot_request(&mut self) -> bool {
-        core::mem::take(&mut self.screenshot_requested)
+    /// The part of the screen to save as a picture, once: the whole screen
+    /// (PrintScreen), the focused window with its title bar
+    /// (Alt+PrintScreen) or an area the user dragged (Shift+PrintScreen).
+    pub fn take_capture_request(&mut self) -> Option<Rect> {
+        self.capture_requested.take()
+    }
+
+    /// Whether Ctrl+PrintScreen was pressed since the last call.
+    pub fn take_record_toggle(&mut self) -> bool {
+        core::mem::take(&mut self.record_toggle)
+    }
+
+    /// Whether the user is choosing an area for a screenshot.
+    pub fn selecting(&self) -> bool {
+        self.selecting.is_some()
+    }
+
+    /// The area dragged so far.
+    fn selection(&self) -> Option<Rect> {
+        let (x, y) = self.selecting??;
+        let (x0, y0) = (x.min(self.ptr_x), y.min(self.ptr_y));
+        Some(Rect::new(x0, y0, (x.max(self.ptr_x) - x0 + 1) as u32, (y.max(self.ptr_y) - y0 + 1) as u32))
+    }
+
+    fn damage_selection(&mut self) {
+        if let Some(r) = self.selection() {
+            self.damage.add(r.inflate(2), self.screen);
+        }
+    }
+
+    fn request_capture(&mut self, area: Rect) {
+        self.capture_requested = Some(area.intersect(&self.screen));
+        // A frame follows even when nothing else changed.
+        self.damage.add(Rect::new(self.screen.x, self.screen.y, 1, 1), self.screen);
+    }
+
+    /// Replaces the system clipboard and tells every client.
+    pub fn set_clipboard(&mut self, entries: Vec<proto::ClipEntry>) {
+        self.clipboard = entries;
+        self.clipboard_seq += 1;
+        let ev = Event::ClipboardChanged { seq: self.clipboard_seq, entries: self.clipboard.clone() };
+        let ids: Vec<ClientId> = self.clients.iter().filter(|(_, cl)| cl.version.is_some() && !cl.dead).map(|(id, _)| *id).collect();
+        for id in ids {
+            self.outbox.push((id, ev.clone()));
+        }
     }
 
     /// A notification from PRISM itself (process id 0) to the shell.
@@ -1815,9 +1883,26 @@ impl Compositor {
         // PrintScreen belongs to PRISM, whoever has focus.
         if usage == key::PRINT_SCREEN {
             if down {
-                self.screenshot_requested = true;
-                // A frame follows even when nothing else changed.
-                self.damage.add(Rect::new(self.screen.x, self.screen.y, 1, 1), self.screen);
+                self.damage_selection();
+                self.selecting = None;
+                if mods & modifier::CTRL != 0 {
+                    self.record_toggle = true;
+                } else if mods & modifier::SHIFT != 0 {
+                    self.selecting = Some(None);
+                } else if mods & modifier::ALT != 0 {
+                    let frame = self.focus.and_then(|id| self.windows.get(&id)).filter(|w| w.visible()).map(|w| w.frame());
+                    self.request_capture(frame.unwrap_or(self.screen));
+                } else {
+                    self.request_capture(self.screen);
+                }
+            }
+            return;
+        }
+        // Escape gives up choosing an area.
+        if self.selecting.is_some() && usage == key::ESCAPE {
+            if down {
+                self.damage_selection();
+                self.selecting = None;
             }
             return;
         }
@@ -1944,6 +2029,18 @@ impl Compositor {
         for g in &self.ghosts {
             if !g.bounds().intersect(&clip).is_empty() {
                 self.draw_ghost(target, g, clip, now);
+            }
+        }
+        // The outline of the area being chosen for a screenshot.
+        if let Some(r) = self.selection() {
+            let (right, bottom) = (r.x + r.w as i32, r.y + r.h as i32);
+            for edge in [
+                Rect::new(r.x - 2, r.y - 2, r.w + 4, 2),
+                Rect::new(r.x - 2, bottom, r.w + 4, 2),
+                Rect::new(r.x - 2, r.y, 2, r.h),
+                Rect::new(right, r.y, 2, r.h),
+            ] {
+                target.fill_rect(edge.intersect(&clip), self.palette.accent);
             }
         }
         if !self.cursor_overlay && !self.cursor.area(self.ptr_x, self.ptr_y).intersect(&clip).is_empty() {

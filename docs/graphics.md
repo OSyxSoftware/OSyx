@@ -294,6 +294,42 @@ background in both themes.
 
 ![The light theme](screenshots/light-theme.jpg)
 
+### Screenshots and screen recording
+
+PrintScreen belongs to PRISM, whichever window has the focus:
+
+| Keys | What is captured |
+|---|---|
+| PrintScreen | the whole screen |
+| Alt+PrintScreen | the focused window with its title bar |
+| Shift+PrintScreen | an area: press, drag, release; Escape or a click without a drag gives up |
+| Ctrl+PrintScreen | starts recording the screen; again, stops and saves |
+
+A picture is a PNG in `~/Pictures`, a recording a WebM file with VP8 video
+in `~/Videos`, both named by the UTC time. The saved file goes onto the
+clipboard as a file (Paste in Files copies it; Win32 programs see
+`CF_HDROP`) and as its path in text, and the shell shows a notification.
+The clipboard holds at most 56 KiB, so the picture itself is not put on it.
+
+While an area is chosen the compositor keeps the pointer from the windows
+and draws the outline; the picture is taken from the frame after the
+outline is gone.
+
+The recorder (`userspace/desktop/src/recorder.rs`) copies the composed
+screen, with the pointer, at most ten times a second and only when it
+changed (once a second otherwise), and a thread of its own encodes and
+writes; frames it cannot keep up with are dropped. Each frame carries its
+time, so the film keeps its pace. The encoder
+(`osyx_media::vp8::encode`) writes key frames with 16x16 intra prediction
+every fifty frames and, between them, frames predicted from the same place
+in the previous one, where an unchanged macroblock costs a fraction of a
+bit. It has no motion search and no loop filter. It reconstructs each
+frame as a decoder does; the tests check that this crate's decoder shows
+exactly that picture, and libavcodec did too for a sample. Colours stay
+within a few levels of the screen. `osyx_media::video::webm` writes the
+container with cues for seeking; a recording that was cut off still plays
+up to its last complete cluster.
+
 The launcher's search field also finds settings and files once two
 characters are typed (`osyx_filekit::search`). A setting ("wallpaper",
 "wifi", "time zone", also by related words such as "background") opens

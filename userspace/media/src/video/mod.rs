@@ -5,6 +5,7 @@
 //! sound file, whose position is the player's clock.
 
 pub mod mkv;
+pub mod webm;
 
 use crate::audio::opus::oggopus::OggOpusDecoder;
 use crate::audio::vorbis::VorbisDecoder;

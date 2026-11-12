@@ -80,6 +80,61 @@ fn changing_the_palette_redraws_decorations_in_the_new_colours() {
     assert_eq!(h.fb, dark);
 }
 
+fn key_event(h: &mut Harness, code: u16, down: bool, mods: u32) {
+    h.input(kind::KEY, code, if down { osyx_input::KEY_DOWN } else { osyx_input::KEY_UP }, 0, mods);
+}
+
+#[test]
+fn print_screen_asks_for_the_screen_the_window_or_a_dragged_area() {
+    let mut h = Harness::new();
+    let c = h.client(7);
+    let id = h.window(c, 1, 320, 200, 0x0010_2030);
+    h.render();
+    // Plain: the whole screen, once.
+    key_event(&mut h, key::PRINT_SCREEN, true, 0);
+    assert!(h.c.has_damage(), "a frame must follow the request");
+    assert_eq!(h.c.take_capture_request(), Some(Rect::new(0, 0, W, H)));
+    assert_eq!(h.c.take_capture_request(), None);
+    // Alt: the focused window with its title bar.
+    key_event(&mut h, key::PRINT_SCREEN, true, modifier::LEFT_ALT);
+    let frame = h.c.take_capture_request().unwrap();
+    let rect = h.rect_of(id);
+    assert_eq!((frame.x, frame.w, frame.y + frame.h as i32), (rect.x, rect.w, rect.y + rect.h as i32));
+    assert!(frame.y < rect.y, "the title bar is part of the picture");
+    // Ctrl: recording, not a picture.
+    key_event(&mut h, key::PRINT_SCREEN, true, modifier::LEFT_CTRL);
+    assert_eq!(h.c.take_capture_request(), None);
+    assert!(h.c.take_record_toggle());
+    assert!(!h.c.take_record_toggle());
+    // Shift: drag an area; the window below hears nothing of it.
+    h.events();
+    key_event(&mut h, key::PRINT_SCREEN, true, modifier::LEFT_SHIFT);
+    assert!(h.c.selecting());
+    h.move_to(rect.x + 40, rect.y + 30);
+    h.input(kind::BUTTON, 1, 1, 0, 0);
+    h.move_to(rect.x + 10, rect.y + 90);
+    h.render();
+    let accent = theme::Palette::DARK.accent & 0x00ff_ffff;
+    assert_eq!(h.px(rect.x + 20, rect.y + 29) & 0x00ff_ffff, accent, "outline above the area");
+    assert_eq!(h.px(rect.x + 20, rect.y + 60) & 0x00ff_ffff, 0x0010_2030, "the area itself is untouched");
+    h.input(kind::BUTTON, 1, 0, 0, 0);
+    assert!(!h.c.selecting());
+    assert_eq!(h.c.take_capture_request(), Some(Rect::new(rect.x + 10, rect.y + 30, 31, 61)));
+    assert!(h.events_for(c).iter().all(|e| !matches!(e, Event::Pointer { .. })), "the window got pointer events");
+    // The outline is gone from the frame the picture is taken from.
+    h.render();
+    assert_eq!(h.px(rect.x + 20, rect.y + 29) & 0x00ff_ffff, 0x0010_2030);
+    // Escape, or a click without a drag, chooses nothing.
+    key_event(&mut h, key::PRINT_SCREEN, true, modifier::LEFT_SHIFT);
+    key_event(&mut h, key::ESCAPE, true, 0);
+    assert!(!h.c.selecting());
+    key_event(&mut h, key::PRINT_SCREEN, true, modifier::LEFT_SHIFT);
+    h.input(kind::BUTTON, 1, 1, 0, 0);
+    h.input(kind::BUTTON, 1, 0, 0, 0);
+    assert!(!h.c.selecting());
+    assert_eq!(h.c.take_capture_request(), None);
+}
+
 struct Harness {
     c: Compositor,
     now: u64,

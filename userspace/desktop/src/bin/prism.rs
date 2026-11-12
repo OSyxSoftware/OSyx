@@ -24,6 +24,8 @@
 
 #[path = "../screenshot.rs"]
 mod screenshot;
+#[path = "../recorder.rs"]
+mod recorder;
 #[path = "../scheme.rs"]
 mod scheme;
 
@@ -176,6 +178,8 @@ fn main() -> i32 {
         last_focus: None,
         geometry_dirty_at: None,
         scheme_checked: 0,
+        recorder: None,
+        screen_changed: false,
         settled_base: None,
         frame_time_us: 0,
         frames_measured: 0,
@@ -225,6 +229,10 @@ struct Prism {
     geometry_dirty_at: Option<u64>,
     /// When the colour scheme was last looked up (ms).
     scheme_checked: u64,
+    /// The screen recording in progress (Ctrl+PrintScreen).
+    recorder: Option<recorder::Recorder>,
+    /// The screen changed since the recorder's last frame.
+    screen_changed: bool,
     /// Window states before the unsettled changes.
     settled_base: Option<Vec<WindowSnapshot>>,
     frame_time_us: u64,
@@ -300,6 +308,8 @@ impl Prism {
                 None if self.geometry_dirty_at.is_some() => 100,
                 None => 1000,
             };
+            // A recording takes frames on its own clock.
+            let timeout = if self.recorder.is_some() { timeout.min(recorder::FRAME_MS / 2) } else { timeout };
             let mut items: Vec<WaitItem> = Vec::with_capacity(self.clients.len() + 2);
             items.push(ipc::item(listener.handle(), WAIT_READABLE));
             if let Some(s) = &seat {
@@ -353,11 +363,12 @@ impl Prism {
             self.log_window_changes(now);
             if self.comp.next_frame_in(now).is_some() && now.saturating_sub(self.last_frame) >= FRAME_MS {
                 self.frame(now);
-                if self.comp.take_screenshot_request() {
-                    self.save_screenshot();
+                if let Some(area) = self.comp.take_capture_request() {
+                    self.save_screenshot(area);
                 }
                 self.deliver();
             }
+            self.record(now);
             self.paint_cursor(false);
             if now >= self.stats_at + 30_000 {
                 self.stats_at = now;
@@ -562,29 +573,113 @@ impl Prism {
         }
     }
 
-    /// Saves the composed screen as a PNG in the desktop user's Pictures
-    /// folder and tells the shell where it went.
-    fn save_screenshot(&mut self) {
-        let t0 = Instant::now();
-        let (w, h) = (self.width, self.height);
-        let png = screenshot::encode_png(&self.back, w, h);
+    /// `Pictures/Screenshot 2026-11-12 10.30.00 UTC.png`-style name in the
+    /// desktop user's `folder`, with the folder made.
+    fn capture_path(folder: &str, kind: &str, extension: &str) -> Result<(String, String), Error> {
         let secs = os_std::time::SystemTime::now()
             .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let (days, rem) = (secs / 86_400, secs % 86_400);
         let (y, m, d) = screenshot::civil_from_days(days as i64);
-        let dir = "/home/user/Pictures";
-        let name = format!("Screenshot {y:04}-{m:02}-{d:02} {:02}.{:02}.{:02} UTC.png", rem / 3600, rem / 60 % 60, rem % 60);
-        let path = format!("{dir}/{name}");
-        let result = fs::create_dir_all(dir).and_then(|_| fs::write(&path, &png));
+        let dir = format!("/home/user/{folder}");
+        let name = format!("{kind} {y:04}-{m:02}-{d:02} {:02}.{:02}.{:02} UTC.{extension}", rem / 3600, rem / 60 % 60, rem % 60);
+        fs::create_dir_all(&dir)?;
+        Ok((format!("{dir}/{name}"), format!("{folder}/{name}")))
+    }
+
+    /// Saves `area` of the composed screen as a PNG in the desktop user's
+    /// Pictures folder, puts the file on the clipboard (Paste in Files
+    /// copies it) and tells the shell where it went.
+    fn save_screenshot(&mut self, area: Rect) {
+        let t0 = Instant::now();
+        let area = area.intersect(&Rect::new(0, 0, self.width, self.height));
+        if area.w == 0 || area.h == 0 {
+            return;
+        }
+        let (w, h) = (area.w, area.h);
+        let png = if (w, h) == (self.width, self.height) {
+            screenshot::encode_png(&self.back, w, h)
+        } else {
+            let mut part = Vec::with_capacity((w * h) as usize);
+            for y in 0..h as usize {
+                let at = (area.y as usize + y) * self.width as usize + area.x as usize;
+                part.extend_from_slice(&self.back[at..at + w as usize]);
+            }
+            screenshot::encode_png(&part, w, h)
+        };
+        let result = Self::capture_path("Pictures", "Screenshot", "png").and_then(|(path, shown)| fs::write(&path, &png).map(|_| (path, shown)));
         match result {
-            Ok(()) => {
+            Ok((path, shown)) => {
                 println!("prism: screenshot {w}x{h} saved to {path} ({} bytes, {} ms)", png.len(), t0.elapsed().as_millis());
-                self.comp.notify_shell("Screenshot saved", &format!("Pictures/{name}"));
+                if let Some(entry) = prism_proto::clipboard_files_entry(core::slice::from_ref(&path), false) {
+                    self.comp.set_clipboard(vec![entry, prism_proto::clipboard_text_entry(&path)]);
+                }
+                self.comp.notify_shell("Screenshot saved", &shown);
             }
             Err(e) => {
-                eprintln!("prism: cannot save the screenshot to {path}: {e}");
+                eprintln!("prism: cannot save the screenshot: {e}");
                 self.comp.notify_shell("Screenshot failed", &format!("{e}"));
+            }
+        }
+    }
+
+    /// Screen recording: starts or stops on Ctrl+PrintScreen, hands the
+    /// encoder a copy of the screen when one is due, and reports the end.
+    fn record(&mut self, now: u64) {
+        if self.comp.take_record_toggle() {
+            match &mut self.recorder {
+                Some(r) => r.stop(now),
+                None => {
+                    let started = Self::capture_path("Videos", "Recording", "webm")
+                        .map_err(|e| format!("{e}"))
+                        .and_then(|(path, _)| recorder::Recorder::start(path, self.width, self.height, now));
+                    match started {
+                        Ok(r) => {
+                            println!("prism: recording the screen, {}x{}", self.width, self.height);
+                            self.recorder = Some(r);
+                            self.screen_changed = true;
+                            self.comp.notify_shell("Recording the screen", "Ctrl+PrintScreen stops and saves");
+                        }
+                        Err(e) => {
+                            eprintln!("prism: cannot record the screen: {e}");
+                            self.comp.notify_shell("Recording failed", &e);
+                        }
+                    }
+                }
+            }
+        }
+        let Some(r) = &mut self.recorder else { return };
+        if r.due(now, self.screen_changed) {
+            self.screen_changed = false;
+            let (back, comp, w, h) = (&self.back, &self.comp, self.width, self.height);
+            r.frame(now, || {
+                let mut copy = back.clone();
+                // The pointer is drawn over the screen, not into it.
+                if let Ok(mut s) = Surface::new(&mut copy, w, h, w) {
+                    comp.draw_cursor_overlay(&mut s);
+                }
+                copy
+            });
+        }
+        if let Some(result) = r.finished() {
+            let dropped = r.dropped;
+            self.recorder = None;
+            match result {
+                Ok(s) => {
+                    println!(
+                        "prism: recording saved to {} ({} frames, {} bytes, {} ms, {dropped} frames dropped)",
+                        s.path, s.frames, s.bytes, s.ms
+                    );
+                    if let Some(entry) = prism_proto::clipboard_files_entry(core::slice::from_ref(&s.path), false) {
+                        self.comp.set_clipboard(vec![entry, prism_proto::clipboard_text_entry(&s.path)]);
+                    }
+                    let shown = s.path.strip_prefix("/home/user/").unwrap_or(&s.path);
+                    self.comp.notify_shell("Recording saved", shown);
+                }
+                Err(e) => {
+                    eprintln!("prism: the recording failed: {e}");
+                    self.comp.notify_shell("Recording failed", &e);
+                }
             }
         }
     }
@@ -606,6 +701,7 @@ impl Prism {
                 }
             }
         }
+        self.screen_changed |= !rects.is_empty();
         for r in &rects {
             self.present(*r);
         }
