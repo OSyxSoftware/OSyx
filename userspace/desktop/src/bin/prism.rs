@@ -24,6 +24,8 @@
 
 #[path = "../screenshot.rs"]
 mod screenshot;
+#[path = "../scheme.rs"]
+mod scheme;
 
 use os_std::fs::File;
 use os_std::ipc::{self, Channel, Listener, Mapping, SharedMemory, WaitItem, WAIT_HANGUP, WAIT_READABLE};
@@ -173,6 +175,7 @@ fn main() -> i32 {
         last_snapshot: Vec::new(),
         last_focus: None,
         geometry_dirty_at: None,
+        scheme_checked: 0,
         settled_base: None,
         frame_time_us: 0,
         frames_measured: 0,
@@ -220,6 +223,8 @@ struct Prism {
     last_focus: Option<u32>,
     /// When window geometry last changed (logged once it settles).
     geometry_dirty_at: Option<u64>,
+    /// When the colour scheme was last looked up (ms).
+    scheme_checked: u64,
     /// Window states before the unsettled changes.
     settled_base: Option<Vec<WindowSnapshot>>,
     frame_time_us: u64,
@@ -309,6 +314,14 @@ impl Prism {
                 thread::sleep(Duration::from_millis(10));
             }
             let now = now_ms(self.start);
+            // Decorations follow the scheme the applications use.
+            if now.saturating_sub(self.scheme_checked) >= 3000 || self.scheme_checked == 0 {
+                self.scheme_checked = now.max(1);
+                self.comp.set_palette(match scheme::current() {
+                    osyx_ui::theme::Scheme::Light => prism_core::theme::Palette::LIGHT,
+                    osyx_ui::theme::Scheme::Dark => prism_core::theme::Palette::DARK,
+                });
+            }
             if items[0].revents & WAIT_READABLE != 0 {
                 self.accept(listener);
             }

@@ -331,3 +331,104 @@ impl LocalTime {
         )
     }
 }
+
+// ----- the sun --------------------------------------------------------------
+
+const PI: f64 = core::f64::consts::PI;
+
+/// Sine by range reduction and its series (the target has no libm).
+fn sin(x: f64) -> f64 {
+    // Into [-pi, pi], then [-pi/2, pi/2] by symmetry.
+    let mut x = x % (2.0 * PI);
+    if x > PI {
+        x -= 2.0 * PI;
+    } else if x < -PI {
+        x += 2.0 * PI;
+    }
+    if x > PI / 2.0 {
+        x = PI - x;
+    } else if x < -PI / 2.0 {
+        x = -PI - x;
+    }
+    let x2 = x * x;
+    // Terms to x^15: below 1e-10 on this range.
+    let mut term = x;
+    let mut sum = x;
+    let mut n = 1.0;
+    while n < 15.0 {
+        term *= -x2 / ((n + 1.0) * (n + 2.0));
+        sum += term;
+        n += 2.0;
+    }
+    sum
+}
+
+fn cos(x: f64) -> f64 {
+    sin(x + PI / 2.0)
+}
+
+/// Arc cosine on [-1, 1] by bisection (cos falls from 0 to pi).
+fn acos(v: f64) -> f64 {
+    let (mut lo, mut hi) = (0.0, PI);
+    for _ in 0..40 {
+        let mid = (lo + hi) / 2.0;
+        if cos(mid) > v {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo + hi) / 2.0
+}
+
+/// The sun on one day at one place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Sun {
+    /// Sunrise and sunset in minutes after 00:00 UTC of that day (either
+    /// may lie outside 0..1440 far from Greenwich).
+    RisesAndSets(f64, f64),
+    /// Polar day.
+    AlwaysUp,
+    /// Polar night.
+    AlwaysDown,
+}
+
+/// Sunrise and sunset on day `day_of_year` (1 = 1 January) at `latitude`
+/// (north positive) and `longitude` (east positive), in degrees, by the
+/// NOAA approximation: the sun's upper edge at the horizon with standard
+/// refraction (zenith 90.833 degrees). Good to a few minutes.
+pub fn sun_times(day_of_year: u32, latitude: f64, longitude: f64) -> Sun {
+    let rad = PI / 180.0;
+    let g = 2.0 * PI / 365.0 * (day_of_year as f64 - 1.0);
+    let decl = 0.006918 - 0.399912 * cos(g) + 0.070257 * sin(g) - 0.006758 * cos(2.0 * g) + 0.000907 * sin(2.0 * g)
+        - 0.002697 * cos(3.0 * g)
+        + 0.00148 * sin(3.0 * g);
+    let eqtime = 229.18 * (0.000075 + 0.001868 * cos(g) - 0.032077 * sin(g) - 0.014615 * cos(2.0 * g) - 0.040849 * sin(2.0 * g));
+    let lat = latitude.clamp(-89.9, 89.9) * rad;
+    let tan = |x: f64| sin(x) / cos(x);
+    let h = cos(90.833 * rad) / (cos(lat) * cos(decl)) - tan(lat) * tan(decl);
+    if h > 1.0 {
+        return Sun::AlwaysDown;
+    }
+    if h < -1.0 {
+        return Sun::AlwaysUp;
+    }
+    let ha = acos(h) / rad;
+    Sun::RisesAndSets(720.0 - 4.0 * (longitude + ha) - eqtime, 720.0 - 4.0 * (longitude - ha) - eqtime)
+}
+
+/// Whether the sun is above the horizon at Unix time `unix` (UTC).
+pub fn sun_is_up(unix: i64, latitude: f64, longitude: f64) -> bool {
+    let day = unix.div_euclid(86_400);
+    let (y, _, _) = civil_from_days(day);
+    let day_of_year = (day - days_from_civil(y, 1, 1) + 1) as u32;
+    let minute = unix.rem_euclid(86_400) as f64 / 60.0;
+    match sun_times(day_of_year, latitude, longitude) {
+        Sun::AlwaysUp => true,
+        Sun::AlwaysDown => false,
+        // East of Greenwich the day can start before 00:00 UTC and west of
+        // it end after 24:00: the same minute of the neighbouring days
+        // counts too.
+        Sun::RisesAndSets(rise, set) => [-1440.0, 0.0, 1440.0].iter().any(|shift| (rise..set).contains(&(minute + shift))),
+    }
+}

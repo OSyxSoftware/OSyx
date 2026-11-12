@@ -91,10 +91,13 @@ pub fn run_app(name: &str, spec: WindowSpec, app: &mut dyn App) -> i32 {
     let mut adapter = Adapter::default();
     let mut size = (0, 0);
     let mut last_tick = os_std::time::Instant::now();
+    let mut theme_checked = os_std::time::Instant::now();
     loop {
         let mut extra = app.wait_items();
-        let timeout =
-            app.tick_ms().map(|ms| Duration::from_millis(ms.saturating_sub(last_tick.elapsed().as_millis() as u64)));
+        // Wake at least every few seconds: the theme may have been changed
+        // in Settings, or the sun may have set.
+        let tick = app.tick_ms().map(|ms| ms.saturating_sub(last_tick.elapsed().as_millis() as u64));
+        let timeout = Some(Duration::from_millis(tick.unwrap_or(THEME_POLL_MS).min(THEME_POLL_MS)));
         if let Err(e) = conn.wait(&mut extra, timeout) {
             eprintln!("{name}: lost PRISM: {e}");
             return 2;
@@ -151,6 +154,17 @@ pub fn run_app(name: &str, spec: WindowSpec, app: &mut dyn App) -> i32 {
                 if let Some(path) = cx.drag_file.take() {
                     let _ = conn.send(&prism_client::Request::FileDrag { window: win.id, path }, &[]);
                 }
+            }
+        }
+        if theme_checked.elapsed() >= Duration::from_millis(THEME_POLL_MS) {
+            theme_checked = os_std::time::Instant::now();
+            let theme = configured_theme();
+            if theme != cx.theme {
+                cx.theme = theme;
+                if size.0 > 0 {
+                    app.layout(size.0, size.1, &mut cx);
+                }
+                win.dirty = true;
             }
         }
         if let Some(ms) = app.tick_ms() {
@@ -230,8 +244,13 @@ pub struct AppEntry {
 pub const APP_DIR: &str = "/system/share/applications";
 pub const DESKTOP_DIR: &str = "/home/user/Desktop";
 
+/// How often a running program looks whether the theme changed.
+pub const THEME_POLL_MS: u64 = 3000;
+#[path = "scheme.rs"]
+pub mod scheme;
+
 pub fn configured_theme() -> Theme {
-    let mut theme = Theme::default();
+    let mut theme = Theme::of(scheme::current());
     let name = fs::read_to_string("/etc/osyx/accent").unwrap_or_default();
     let (r, g, b) = match name.trim() {
         "Purple" => (160, 110, 240),

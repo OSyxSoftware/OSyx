@@ -56,6 +56,30 @@ fn cursor_overlay_moves_without_recomposing_and_matches_composed_pixels() {
     assert!(overlay.c.cursor_area().w * overlay.c.cursor_area().h < 1024);
 }
 
+#[test]
+fn changing_the_palette_redraws_decorations_in_the_new_colours() {
+    let mut h = Harness::new();
+    let c = h.client(7);
+    h.window(c, 1, 320, 200, 0x0010_2030);
+    h.render();
+    let dark = h.fb.clone();
+    assert!(!h.c.has_damage());
+    // The same palette again is not a change.
+    h.c.set_palette(theme::Palette::DARK);
+    assert!(!h.c.has_damage());
+    h.c.set_palette(theme::Palette::LIGHT);
+    assert!(h.c.has_damage());
+    h.render();
+    let light = theme::Palette::LIGHT;
+    assert!(h.fb.iter().any(|px| px & 0x00ff_ffff == light.title_active & 0x00ff_ffff), "no light title bar");
+    assert_ne!(h.fb, dark);
+    // The client's own pixels are not recoloured.
+    assert_eq!(h.fb.iter().filter(|px| **px & 0x00ff_ffff == 0x0010_2030).count(), dark.iter().filter(|px| **px & 0x00ff_ffff == 0x0010_2030).count());
+    h.c.set_palette(theme::Palette::DARK);
+    h.render();
+    assert_eq!(h.fb, dark);
+}
+
 struct Harness {
     c: Compositor,
     now: u64,

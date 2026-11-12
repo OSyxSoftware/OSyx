@@ -670,7 +670,7 @@ impl App for Setup {
 
     fn draw(&mut self, p: &mut Painter, w: u32, h: u32, cx: &Ctx) {
         let t = cx.theme;
-        p.fill(Rect::new(0, 0, w, h), osyx_gfx::rgb(28, 30, 38));
+        p.fill(Rect::new(0, 0, w, h), t.window);
         // Steps.
         p.vertical_gradient(Rect::new(0, 0, SIDEBAR, h), osyx_gfx::rgb(22, 40, 84), osyx_gfx::rgb(14, 20, 40));
         p.text(FontKind::Large, 24, 22, "OSyx Setup", osyx_gfx::rgb(255, 255, 255));
@@ -725,7 +725,7 @@ impl App for Setup {
                 }
                 for (i, (d, r)) in self.disks.iter().zip(self.disk_rows()).enumerate() {
                     let sel = self.disk == Some(i);
-                    p.card(r, 8, if sel { t.selection } else { osyx_gfx::rgb(36, 39, 49) }, if sel { t.accent } else { t.border });
+                    p.card(r, 8, if sel { t.selection } else { t.raised }, if sel { t.accent } else { t.border });
                     icon::draw(p, Icon::Drive, Rect::new(r.x + 14, r.y + 12, 22, 22), if d.blocked.is_some() { t.text_faint } else { t.accent });
                     p.text(FontKind::Bold, r.x + 50, r.y + 6, &format!("/dev/disks/{}", d.name), if d.blocked.is_some() { t.text_faint } else { t.text });
                     let info = format!("{}  ·  {} partition(s)", human_size(d.bytes), d.partitions);
@@ -803,7 +803,7 @@ impl App for Setup {
                     ("Zen Browser", String::from(if self.zen.checked { "download and install on first start" } else { "no" })),
                 ];
                 let card = Rect::new(c.x, c.y + 56, c.w, rows.len() as u32 * 40 + 8);
-                p.card(card, 10, osyx_gfx::rgb(36, 39, 49), t.border);
+                p.card(card, 10, t.raised, t.border);
                 for (i, (k, v)) in rows.iter().enumerate() {
                     let y = card.y + 12 + i as i32 * 40;
                     p.text(FontKind::Ui, card.x + 16, y, k, t.text_dim);
@@ -841,7 +841,7 @@ impl App for Setup {
                     p.text(FontKind::Ui, c.x + 196, c.y + 160, note, t.text_dim);
                 }
                 let log = Rect::new(c.x, c.y + 206, c.w, c.h.saturating_sub(206));
-                p.card(log, 8, osyx_gfx::rgb(20, 22, 28), t.border);
+                p.card(log, 8, t.field, t.border);
                 let n = (log.h / 20).saturating_sub(1) as usize;
                 for (i, l) in lines.iter().rev().take(n).rev().enumerate() {
                     p.text_in(FontKind::Ui, Rect::new(log.x + 10, log.y + 8 + i as i32 * 20, log.w - 20, 18), l, t.text_dim, Align::Left);

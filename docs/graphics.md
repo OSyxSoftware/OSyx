@@ -162,8 +162,8 @@ window list) is granted only to the process PRISM started as the shell.
   `Window` (shared-memory buffer grown with headroom, attach/damage/commit,
   CONFIGURE and BUFFER_RELEASE handling), and an adapter to toolkit events
   with double-click detection.
-* `graphics/ui` (`osyx-ui`, host tested): theme (midnight blue/charcoal,
-  blue accent), Cantarell and Source Code Pro fonts with Polish letters, a
+* `graphics/ui` (`osyx-ui`, host tested): themes (midnight blue/charcoal and a
+  light one, blue accent), sunrise and sunset, Cantarell and Source Code Pro fonts with Polish letters, a
   clipping painter (anti-aliased rounded rectangles, discs, rings, thick
   segments), line icons, layout helpers, focus chain, and the widgets Label,
   Button, Checkbox, TextField, Panel, Menu, Dialog, ListView and
@@ -276,9 +276,23 @@ selection by PID; End task uses the existing kernel permission checks.
 Date & Time, Network, Storage and About. Host name, accent, background,
 US/Polish keyboard layout and POSIX time zone write system configuration;
 DHCP/static IPv4 applies through the native net_config syscall. Keyboard
-layout needs a session restart. The desktop reloads background/time zone;
-new native application windows read the saved accent. Display information
-is read-only. Settings retains root credentials for system configuration.
+layout needs a session restart. The desktop reloads background/time zone.
+Display information is read-only. Settings retains root credentials for system configuration.
+
+Appearance also chooses the theme: Dark (`MIDNIGHT`), Light (`DAYLIGHT`) or
+Automatic, kept in `/etc/osyx/theme` as `dark`, `light` or `auto`. Automatic
+is light while the sun is up: `osyx_ui::time::sun_times` computes sunrise
+and sunset for the day from the solar declination and the equation of time
+(within a few minutes of an almanac; polar day and night are handled). The
+place is `latitude longitude` in `/etc/osyx/location` when that file exists;
+otherwise the longitude is the middle of the time zone and the latitude
+50 degrees north. Every native application, the desktop shell and PRISM
+(window decorations, `prism_core::theme::Palette`) look at the choice every
+three seconds, so a change of theme or accent, and sunrise and sunset, show
+in running programs without a restart. The terminal keeps its dark
+background in both themes.
+
+![The light theme](screenshots/light-theme.jpg)
 
 The launcher's search field also finds settings and files once two
 characters are typed (`osyx_filekit::search`). A setting ("wallpaper",

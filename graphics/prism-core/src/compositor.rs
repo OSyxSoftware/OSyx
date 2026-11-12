@@ -390,6 +390,8 @@ pub struct Compositor {
     file_drag: Option<(WindowId, String, i32, i32)>,
     modifiers: u32,
     damage: Damage,
+    /// The colours of decorations and window bodies.
+    palette: theme::Palette,
     ghosts: Vec<Ghost>,
     outbox: Vec<(ClientId, Event)>,
     list_dirty: bool,
@@ -448,6 +450,7 @@ impl Compositor {
             cursor_overlay: false,
             clipboard: Vec::new(),
             clipboard_seq: 0,
+            palette: theme::Palette::DARK,
             shadow: ShadowTables::new(theme::SHADOW, theme::RADIUS),
             popup_shadow: ShadowTables::new(12, theme::RADIUS),
             font: PropFont::parse(TITLE_FONT).expect("embedded title font"),
@@ -468,6 +471,19 @@ impl Compositor {
 
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// Switches the colours of decorations and window bodies (dark or
+    /// light) and redraws the whole screen.
+    pub fn set_palette(&mut self, palette: theme::Palette) {
+        if palette != self.palette {
+            self.palette = palette;
+            self.damage.add(self.screen, self.screen);
+        }
+    }
+
+    pub fn palette(&self) -> theme::Palette {
+        self.palette
     }
 
     pub fn set_layout(&mut self, layout: Layout) {
@@ -1916,7 +1932,7 @@ impl Compositor {
             .and_then(|id| self.windows.get(id))
             .is_some_and(|w| w.role == Role::Desktop && w.visible() && w.fade.is_none());
         if !has_desktop {
-            target.fill_rect(clip, theme::DESKTOP_FALLBACK);
+            target.fill_rect(clip, self.palette.desktop_fallback);
         }
         for id in &self.stack {
             let w = &self.windows[id];
@@ -1955,7 +1971,7 @@ impl Compositor {
         }
         self.draw_content(target, w, opacity, clip);
         if w.decorated {
-            let (c, a) = if focused { (theme::ACCENT, 70) } else { (theme::OUTLINE_INACTIVE, 22) };
+            let (c, a) = if focused { (self.palette.accent, 70) } else { (self.palette.outline_inactive, 22) };
             draw::outline_rounded(target, frame, theme::RADIUS, c, a * opacity / 256, clip);
         }
     }
@@ -1988,7 +2004,7 @@ impl Compositor {
             }
             // Body behind uncovered or translucent content.
             if px.is_none_or(|p| p.alpha) || covered.intersect(&part) != part {
-                fill_body(target, part, covered, px.is_some_and(|p| p.alpha), opacity);
+                fill_body(target, part, covered, px.is_some_and(|p| p.alpha), opacity, self.palette.window_body);
             }
             if let Some(p) = &px {
                 draw::blit(target, rect.x, rect.y, p, opacity, part.intersect(&covered));
@@ -2007,7 +2023,7 @@ impl Compositor {
                         let lx = (pxx - rect.x) as u32;
                         let ly = (py - rect.y) as u32;
                         let dst = &mut target.row_mut(py as u32)[pxx as usize];
-                        let body = draw::tint(*dst, theme::WINDOW_BODY, a);
+                        let body = draw::tint(*dst, self.palette.window_body, a);
                         *dst = match &px {
                             Some(p) if lx < p.width && ly < p.height => {
                                 let s = p.get(lx, ly);
@@ -2031,7 +2047,7 @@ impl Compositor {
         if bar.intersect(&clip).is_empty() {
             return;
         }
-        let bg = if focused { theme::TITLE_ACTIVE } else { theme::TITLE_INACTIVE };
+        let bg = if focused { self.palette.title_active } else { self.palette.title_inactive };
         draw::fill_rounded(target, bar, theme::RADIUS, corner::TOP, bg, opacity, clip);
         // Title text, ellipsized before the buttons.
         let buttons = w.buttons();
@@ -2039,7 +2055,7 @@ impl Compositor {
         let text_max = (buttons[0].1.x - 12 - text_x).max(0) as u32;
         let (shown, cut) = self.font.ellipsize(&w.title, text_max);
         let ty = bar.y + ((theme::TITLE_HEIGHT - self.font.line_height()) / 2) as i32;
-        let color = if focused { theme::TITLE_TEXT } else { theme::TITLE_TEXT_INACTIVE };
+        let color = if focused { self.palette.title_text } else { self.palette.title_text_inactive };
         let text_clip = Rect::new(text_x, bar.y, text_max + self.font.advance('…'), bar.h).intersect(&clip);
         let alpha = 255 * opacity / 256;
         let end = self.font.draw_clipped(target, text_x, ty, shown, color, alpha, text_clip);
@@ -2064,13 +2080,13 @@ impl Compositor {
             }
             let is_hover = hovered == Some(part);
             if pressed == Some(part) {
-                let c = if part == Part::Close { theme::CLOSE_HOVER } else { theme::BUTTON_PRESSED };
+                let c = if part == Part::Close { self.palette.close_hover } else { self.palette.button_pressed };
                 draw::fill_rounded(target, r, 7, corner::ALL, c, opacity, clip);
             } else if is_hover {
-                let c = if part == Part::Close { theme::CLOSE_HOVER } else { theme::BUTTON_HOVER };
+                let c = if part == Part::Close { self.palette.close_hover } else { self.palette.button_hover };
                 draw::fill_rounded(target, r, 7, corner::ALL, c, opacity, clip);
             }
-            let glyph = if is_hover && part == Part::Close { 0xFFFFFF } else if focused { theme::GLYPH } else { theme::TITLE_TEXT_INACTIVE };
+            let glyph = if is_hover && part == Part::Close { 0xFFFFFF } else if focused { self.palette.glyph } else { self.palette.title_text_inactive };
             draw_button_glyph(target, part, r, w.maximized, glyph, opacity, clip);
         }
     }
@@ -2085,13 +2101,13 @@ impl Compositor {
         self.shadow.draw(target, Rect::new(frame.x, frame.y + theme::SHADOW_OFFSET_Y, frame.w, frame.h), frame, theme::SHADOW_ALPHA_INACTIVE * opacity / 256, clip);
         if g.decorated {
             let bar = Rect::new(frame.x, frame.y, frame.w, t);
-            draw::fill_rounded(target, bar, theme::RADIUS, corner::TOP, theme::TITLE_INACTIVE, opacity, clip);
+            draw::fill_rounded(target, bar, theme::RADIUS, corner::TOP, self.palette.title_inactive, opacity, clip);
             let ty = bar.y + ((t - self.font.line_height()) / 2) as i32;
             let (shown, _) = self.font.ellipsize(&g.title, frame.w.saturating_sub(120));
-            self.font.draw_clipped(target, bar.x + 16, ty, shown, theme::TITLE_TEXT_INACTIVE, 255 * opacity / 256, bar.intersect(&clip));
+            self.font.draw_clipped(target, bar.x + 16, ty, shown, self.palette.title_text_inactive, 255 * opacity / 256, bar.intersect(&clip));
         }
         let body = Rect::new(g.rect.x, g.rect.y, g.rect.w, g.rect.h).intersect(&clip);
-        target.blend_rect(body, theme::WINDOW_BODY, 255 * opacity / 256);
+        target.blend_rect(body, self.palette.window_body, 255 * opacity / 256);
         if let Some(p) = Pixels::new(&g.pixels, g.width, g.height, g.width, g.alpha) {
             draw::blit(target, g.rect.x, g.rect.y, &p, opacity, g.rect.intersect(&clip));
         }
@@ -2104,16 +2120,16 @@ fn unknown() -> ProtocolError {
 
 /// Fills the window body colour in `part` where the surface does not
 /// cover it (or everywhere, under translucent content).
-fn fill_body(target: &mut Surface, part: Rect, covered: Rect, translucent: bool, opacity: u32) {
+fn fill_body(target: &mut Surface, part: Rect, covered: Rect, translucent: bool, opacity: u32, body: u32) {
     let alpha = 255 * opacity / 256;
     if translucent {
-        target.blend_rect(part, theme::WINDOW_BODY, alpha);
+        target.blend_rect(part, body, alpha);
         return;
     }
     // Up to four strips around the covered area.
     let c = covered.intersect(&part);
     if c.is_empty() {
-        target.blend_rect(part, theme::WINDOW_BODY, alpha);
+        target.blend_rect(part, body, alpha);
         return;
     }
     let strips = [
@@ -2124,7 +2140,7 @@ fn fill_body(target: &mut Surface, part: Rect, covered: Rect, translucent: bool,
     ];
     for s in strips {
         if !s.is_empty() {
-            target.blend_rect(s, theme::WINDOW_BODY, alpha);
+            target.blend_rect(s, body, alpha);
         }
     }
 }

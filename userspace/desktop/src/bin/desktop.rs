@@ -726,6 +726,16 @@ impl Shell {
             if self.now().saturating_sub(self.media_checked) >= 1000 {
                 self.media_checked = self.now();
                 self.update_media();
+                // The scheme was changed in Settings, or the sun rose or set.
+                let theme = common::configured_theme();
+                if theme != self.theme {
+                    self.theme = theme;
+                    self.desktop.dirty = true;
+                    self.panel.dirty = true;
+                    if let Some(p) = &mut self.popup {
+                        p.win.dirty = true;
+                    }
+                }
             }
             self.collect_ejects();
             self.expire_notes();
@@ -2576,8 +2586,23 @@ fn app_items(apps: &[AppEntry], found: &[AppEntry], shown: &[usize]) -> Vec<List
         .collect()
 }
 
-const PANEL_BG: Color = rgb(11, 14, 21);
-const PANEL_LINE: Color = rgb(34, 41, 56);
+/// The panel is a shade darker than the windows in the dark theme and
+/// the toolkit's surface colour in the light one.
+fn panel_bg(t: &Theme) -> Color {
+    if t.is_light() {
+        t.surface
+    } else {
+        rgb(11, 14, 21)
+    }
+}
+
+fn panel_line(t: &Theme) -> Color {
+    if t.is_light() {
+        t.border
+    } else {
+        rgb(34, 41, 56)
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn draw_panel(
@@ -2596,8 +2621,8 @@ fn draw_panel(
 ) {
     let t = *p.theme;
     let full = p.s.bounds();
-    p.fill(full, PANEL_BG);
-    p.hline(0, 0, full.w, PANEL_LINE);
+    p.fill(full, panel_bg(&t));
+    p.hline(0, 0, full.w, panel_line(&t));
     launcher.draw(p, false);
     for b in pins {
         b.draw(p, false);
@@ -2647,7 +2672,7 @@ fn draw_panel(
             p.text_in(FontKind::Ui, Rect::new(r.x + 30, r.y, r.w.saturating_sub(32), r.h), &format!("{count}"), t.text_dim, Align::Left);
         }
     }
-    p.vline(quick_rect.right() as i32 + 5, 12, full.h - 24, PANEL_LINE);
+    p.vline(quick_rect.right() as i32 + 5, 12, full.h - 24, panel_line(&t));
     power.draw(p, false);
 }
 
@@ -2684,9 +2709,9 @@ fn draw_battery(p: &mut Painter, r: Rect, b: Battery) {
         // A bolt across the cell: down-left stroke, short bar, down-left stroke.
         let (cx, cy) = (x + body_w as i32 / 2, y + body_h as i32 / 2);
         for dx in 0..2 {
-            p.line(cx + 3 + dx, y - 3, cx - 2 + dx, cy + 1, PANEL_BG);
-            p.line(cx - 2 + dx, cy, cx + 3 + dx, cy, PANEL_BG);
-            p.line(cx + 2 + dx, cy - 1, cx - 3 + dx, y + body_h as i32 + 2, PANEL_BG);
+            p.line(cx + 3 + dx, y - 3, cx - 2 + dx, cy + 1, panel_bg(p.theme));
+            p.line(cx - 2 + dx, cy, cx + 3 + dx, cy, panel_bg(p.theme));
+            p.line(cx + 2 + dx, cy - 1, cx - 3 + dx, y + body_h as i32 + 2, panel_bg(p.theme));
         }
         p.line(cx + 4, y - 2, cx - 1, cy, rgb(255, 214, 64));
         p.line(cx - 1, cy, cx + 4, cy, rgb(255, 214, 64));

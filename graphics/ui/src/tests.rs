@@ -848,3 +848,63 @@ fn text_area_read_only_and_drawing() {
     assert!(cell(&px, 8, 0).contains(&plain), "'t' after the tab at column 8");
     assert!(cell(&px, 0, 1).contains(&MIDNIGHT.accent), "the cursor on the second line");
 }
+
+// ----- themes and the sun ---------------------------------------------------
+
+#[test]
+fn sunrise_and_sunset_match_an_almanac_within_minutes() {
+    use crate::time::{sun_is_up, sun_times, Sun};
+    // (place, day of year, latitude, longitude, sunrise UTC, sunset UTC),
+    // times as hours and minutes approximated from an almanac.
+    let cases = [
+        ("Warsaw, 21 June", 172, 52.23, 21.01, (2, 14), (19, 1)),
+        ("Warsaw, 21 December", 355, 52.23, 21.01, (6, 43), (14, 25)),
+        ("Warsaw, 20 March", 79, 52.23, 21.01, (4, 39), (16, 49)),
+        ("Quito, 21 June", 172, -0.18, -78.47, (11, 12), (23, 19)),
+        ("Sydney, 21 December", 355, -33.87, 151.21, (18, 41), (9, 5)),
+    ];
+    for (place, day, lat, lon, rise, set) in cases {
+        let Sun::RisesAndSets(r, s) = sun_times(day, lat, lon) else { panic!("{place}: no sunrise") };
+        let minutes = |(h, m): (i32, i32)| (h * 60 + m) as f64;
+        // Sydney's day starts on the previous UTC day.
+        let near = |got: f64, want: f64| [-1440.0, 0.0, 1440.0].iter().any(|k| (got + k - want).abs() <= 6.0);
+        assert!(near(r, minutes(rise)), "{place}: sunrise at {:.0} min, table {:.0}", r, minutes(rise));
+        assert!(near(s, minutes(set)), "{place}: sunset at {:.0} min, table {:.0}", s, minutes(set));
+    }
+    assert_eq!(sun_times(172, 78.0, 15.0), Sun::AlwaysUp, "midnight sun on Svalbard");
+    assert_eq!(sun_times(355, 78.0, 15.0), Sun::AlwaysDown, "polar night");
+    // 2026-06-21 12:00 UTC and 23:00 UTC in Warsaw; 02:00 UTC is day in Sydney's summer.
+    let noon = days_from_civil(2026, 6, 21) * 86_400 + 12 * 3600;
+    assert!(sun_is_up(noon, 52.23, 21.01));
+    assert!(!sun_is_up(noon + 11 * 3600, 52.23, 21.01));
+    let december = days_from_civil(2026, 12, 21) * 86_400 + 2 * 3600;
+    assert!(sun_is_up(december, -33.87, 151.21), "the Sydney day that began on the previous UTC date");
+    assert!(!sun_is_up(december, 52.23, 21.01));
+}
+
+#[test]
+fn theme_choices_parse_and_follow_the_sun() {
+    use crate::theme::{Scheme, SchemeChoice, DAYLIGHT};
+    assert_eq!(SchemeChoice::parse("light\n"), SchemeChoice::Light);
+    assert_eq!(SchemeChoice::parse("auto"), SchemeChoice::Automatic);
+    assert_eq!(SchemeChoice::parse(""), SchemeChoice::Dark);
+    assert_eq!(SchemeChoice::parse("nonsense"), SchemeChoice::Dark);
+    for c in [SchemeChoice::Dark, SchemeChoice::Light, SchemeChoice::Automatic] {
+        assert_eq!(SchemeChoice::parse(c.name()), c);
+    }
+    let noon = days_from_civil(2026, 6, 21) * 86_400 + 12 * 3600;
+    assert_eq!(SchemeChoice::Automatic.at(noon, 52.23, 21.01), Scheme::Light);
+    assert_eq!(SchemeChoice::Automatic.at(noon + 11 * 3600, 52.23, 21.01), Scheme::Dark);
+    assert_eq!(SchemeChoice::Dark.at(noon, 52.23, 21.01), Scheme::Dark);
+    assert!(DAYLIGHT.is_light() && !MIDNIGHT.is_light());
+    assert_eq!(crate::Theme::of(Scheme::Light), DAYLIGHT);
+    // Text stays readable on every surface of both themes.
+    for t in [MIDNIGHT, DAYLIGHT] {
+        let lum = |c: crate::Color| (((c >> 16) & 255) * 3 + ((c >> 8) & 255) * 6 + (c & 255)) as i32;
+        for bg in [t.window, t.surface, t.raised, t.field, t.selection] {
+            assert!((lum(t.text) - lum(bg)).abs() > 1200, "text on {bg:06x}");
+            assert!((lum(t.text_dim) - lum(bg)).abs() > 600, "dim text on {bg:06x}");
+        }
+        assert!((lum(t.on_accent) - lum(t.accent)).abs() > 700);
+    }
+}
