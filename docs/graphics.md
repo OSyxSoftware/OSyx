@@ -362,8 +362,10 @@ arrive whole is removed by the child, not by root. A recording is written in
 is finished. A `~/Pictures` or `~/Videos` that an earlier version made as
 root is not the user's: the child renames it to `Pictures (old)` or
 `Videos (old)`, where its files stay readable, and makes the user's own
-folder. A finished recording that could not be handed
-over stays in the spool and is saved after the next recording that can be.
+folder. A recording leaves the spool only once the user
+has it: one that could not be handed over, or that a PRISM which died left
+cut off, is saved after the next recording, under `name (2)` and so on when
+the name is taken. A spool file under 4 KiB holds no frame and is removed.
 
 While an area is chosen the compositor keeps the pointer from the windows
 and draws the outline; the picture is taken from the frame after the
