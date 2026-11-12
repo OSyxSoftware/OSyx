@@ -143,6 +143,28 @@ impl SackBlocks {
     }
 }
 
+/// The SACK option of a received segment, still in wire form: parsing a
+/// segment only checks its length, and the blocks are decoded when the
+/// connection looks at them (most segments carry none).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SackOption<'a>(&'a [u8]);
+
+impl SackOption<'_> {
+    pub const NONE: SackOption<'static> = SackOption(&[]);
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn blocks(&self) -> SackBlocks {
+        let mut blocks = SackBlocks::NONE;
+        for block in self.0.as_chunks::<8>().0 {
+            blocks.push(be32(block, 0), be32(block, 4));
+        }
+        blocks
+    }
+}
+
 /// A parsed segment (borrowing its payload).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Segment<'a> {
@@ -157,7 +179,7 @@ pub struct Segment<'a> {
     pub ws: Option<u8>,
     /// The SACK-permitted option (meaningful on a SYN).
     pub sack_permitted: bool,
-    pub sack: SackBlocks,
+    pub sack: SackOption<'a>,
     pub payload: &'a [u8],
 }
 
@@ -195,7 +217,7 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
     let mut mss = None;
     let mut ws = None;
     let mut sack_permitted = false;
-    let mut sack = SackBlocks::NONE;
+    let mut sack = SackOption::NONE;
     let mut opts = &b[HEADER_LEN..off];
     while let Some(&kind) = opts.first() {
         match kind {
@@ -225,9 +247,7 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
                     if len < 10 || !(len - 2).is_multiple_of(8) || (len - 2) / 8 > MAX_SACK_BLOCKS {
                         return Err(SegmentError::BadOption);
                     }
-                    for block in opts[2..len].as_chunks::<8>().0 {
-                        sack.push(be32(block, 0), be32(block, 4));
-                    }
+                    sack = SackOption(&opts[2..len]);
                 }
                 opts = &opts[len..];
             }
@@ -1259,7 +1279,7 @@ impl Tcb {
         }
         let base = if seq_gt(seg.ack, self.snd_una) && seq_le(seg.ack, self.snd_max) { seg.ack } else { self.snd_una };
         let mut new = false;
-        for &(left, right) in seg.sack.as_slice() {
+        for &(left, right) in seg.sack.blocks().as_slice() {
             if !seq_lt(left, right) || seq_le(left, base) || seq_gt(right, self.snd_max) {
                 continue;
             }

@@ -53,7 +53,7 @@ fn sack_options_survive_the_codec() {
     let bytes = seg.encode(A, B);
     assert_eq!(bytes.len(), 20 + 4 + 3 * 8, "two NOPs, kind, length and three blocks");
     let parsed = tcp::parse(A.addr, B.addr, &bytes).unwrap();
-    assert_eq!(parsed.sack.as_slice(), &[(3000, 4000), (6000, 7000), (9000, 9500)]);
+    assert_eq!(parsed.sack.blocks().as_slice(), &[(3000, 4000), (6000, 7000), (9000, 9500)]);
     assert!(!parsed.sack_permitted);
 
     // A SYN with every option: MSS, window scale, SACK-permitted.
@@ -80,7 +80,7 @@ fn malformed_sack_options_are_rejected() {
         b[17] = 0;
         let c = osyx_net::wire::transport_checksum(A.addr, B.addr, 6, &b);
         b[16..18].copy_from_slice(&c.to_be_bytes());
-        tcp::parse(A.addr, B.addr, &b).map(|s| (s.sack_permitted, s.sack.as_slice().to_vec()))
+        tcp::parse(A.addr, B.addr, &b).map(|s| (s.sack_permitted, s.sack.blocks().as_slice().to_vec()))
     };
     assert_eq!(with_options([1, 1, 5, 10, 0, 0, 0, 1, 0, 0, 0, 2]), Ok((false, vec![(1, 2)])));
     assert_eq!(with_options([4, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]), Ok((true, vec![])));
