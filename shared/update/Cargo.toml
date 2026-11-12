@@ -1,6 +1,6 @@
 [package]
 name = "osyx-update"
-description = "OSyx system updates: the signed release manifest (Ed25519), version order and the paths an update may replace"
+description = "OSyx system updates and packages: the signed manifests (Ed25519), version order and the paths an update or a package may write"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -80,6 +80,10 @@ in `/etc`, `/home` and `/var` stay as they are. A notification asks for a
 restart when an update is installed. The previous kernel stays as
 `KERNEL.OLD` on the EFI partition.
 
+`/bin/pkg` installs single applications from a repository of packages
+signed the same way; a package can write only its own directory
+([docs/packages.md](docs/packages.md)).
+
 Publishing a release (maintainers):
 
 ```powershell

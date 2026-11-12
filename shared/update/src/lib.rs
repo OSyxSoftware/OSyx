@@ -27,6 +27,8 @@
 
 extern crate alloc;
 
+pub mod package;
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
