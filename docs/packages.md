@@ -31,7 +31,7 @@ system or of another package. System updates never write `/opt/pkg`.
 
 ## The repository
 
-A directory of files over HTTP or HTTPS; a GitHub Releases download
+A directory of files over HTTPS; a GitHub Releases download
 directory will do. `url=` in `/etc/osyx/packages.conf` names it; without
 that file the system update's `url=` (`/etc/osyx/update.conf`) is used.
 
@@ -74,10 +74,11 @@ numbers, ordered as for system updates.
    the installed version are put back.
 5. An older version than the installed one is not installed.
 
-Over plain HTTP, someone on the network path can still answer with an
-older signed list together with its packages; use an HTTPS repository to
-rule that out. A redirect from an HTTPS repository to plain HTTP is refused
-before the HTTP request is made.
+A repository given as plain HTTP is refused: someone on the network path
+could answer with an older signed list together with its packages, and keep
+a system from its fixes. A redirect from HTTPS to plain HTTP is refused
+before the HTTP request is made, for every download of the system
+(`osyx_web::get`: packages, system updates, `fetch`, `get`).
 
 What is installed is recorded in `/var/lib/osyx/pkg/<name>.txt` (the
 manifest). An upgrade removes the files the new version no longer has;
