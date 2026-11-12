@@ -46,12 +46,35 @@ os_std::entry!(main);
 ///   contents. That is done only with `in_place`, which the user grants;
 ///   otherwise the answer is [`Save::NeedsInPlace`] and nothing is touched.
 enum Save {
-    Done,
+    /// Saved; the permissions the saved file has.
+    Done(u32),
     NeedsInPlace,
 }
 
+/// Writes `data` into the existing file `target` itself, after the user
+/// agreed. The checks are made on the file that was opened, not on the
+/// name: a file is not written into when it is more open than the one the
+/// text came from (`known`), since that would show the text to people
+/// who could not read it before.
+fn write_in_place(target: &str, data: &[u8], known: Option<u32>) -> Result<Save, Error> {
+    let mut file = fs::File::options().write(true).open(target)?;
+    let mode = file.metadata()?.permissions().mode() & 0o777;
+    if let Some(known) = known {
+        if mode & !known & 0o077 != 0 {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "the file there now can be read or written by others who could not read the file that was opened",
+            ));
+        }
+    }
+    file.set_len(0)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    Ok(Save::Done(mode))
+}
+
 fn write_whole(path: &str, data: &[u8], in_place: bool, known_mode: Option<u32>) -> Result<Save, Error> {
-    let direct = |target: &str| if in_place { fs::write(target, data).map(|()| Save::Done) } else { Ok(Save::NeedsInPlace) };
+    let direct = |target: &str| if in_place { write_in_place(target, data, known_mode) } else { Ok(Save::NeedsInPlace) };
     let target = match fs::symlink_metadata(path) {
         Ok(_) => String::from(fs::canonicalize(path)?.as_str()),
         Err(e) if e.kind() == ErrorKind::NotFound => String::from(path),
@@ -113,7 +136,7 @@ fn write_whole(path: &str, data: &[u8], in_place: bool, known_mode: Option<u32>)
     if done.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    done.map(|()| Save::Done)
+    done.map(|()| Save::Done(mode))
 }
 
 /// Larger files are refused: the editor keeps the whole text in memory.
@@ -309,11 +332,25 @@ impl Editor {
     /// with that name.
     fn open(&mut self, path: &str) -> Result<(), String> {
         let path = absolute(path);
-        let bytes = match fs::metadata(&path) {
+        // The text and the permissions it is remembered with come from the
+        // same opened file, not from two looks at the name.
+        let (bytes, mode) = match fs::metadata(&path) {
             Ok(m) if m.is_dir() => return Err(format!("{path} is a folder.")),
-            Ok(m) if m.len() > MAX_FILE => return Err(format!("{path} is larger than 8 MiB.")),
-            Ok(_) => fs::read(&path).map_err(|e| format!("{path} cannot be read: {e}."))?,
-            Err(e) if e.kind() == os_std::error::ErrorKind::NotFound => Vec::new(),
+            Ok(_) => {
+                let cannot = |e: Error| format!("{path} cannot be read: {e}.");
+                let mut file = fs::File::open(&path).map_err(cannot)?;
+                let m = file.metadata().map_err(cannot)?;
+                if m.is_dir() {
+                    return Err(format!("{path} is a folder."));
+                }
+                if m.len() > MAX_FILE {
+                    return Err(format!("{path} is larger than 8 MiB."));
+                }
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes).map_err(cannot)?;
+                (bytes, Some(m.permissions().mode() & 0o777))
+            }
+            Err(e) if e.kind() == os_std::error::ErrorKind::NotFound => (Vec::new(), None),
             Err(e) => return Err(format!("{path} cannot be read: {e}.")),
         };
         let (text, valid) = match String::from_utf8(bytes) {
@@ -336,7 +373,7 @@ impl Editor {
             String::new()
         };
         println!("edit: opened {path} ({} lines, {})", self.area.line_count(), self.language.name());
-        self.known_mode = fs::metadata(&path).ok().map(|m| (path.clone(), m.permissions().mode()));
+        self.known_mode = mode.map(|m| (path.clone(), m));
         self.path = Some(path);
         Ok(())
     }
@@ -355,7 +392,7 @@ impl Editor {
         let in_place = self.in_place.take().is_some_and(|granted| granted == path);
         let known = self.known_mode.as_ref().filter(|(p, _)| *p == path).map(|&(_, m)| m);
         match write_whole(&path, text.as_bytes(), in_place, known).map_err(|e| format!("{path} cannot be written: {e}."))? {
-            Save::Done => {}
+            Save::Done(mode) => self.known_mode = Some((path.clone(), mode)),
             Save::NeedsInPlace => {
                 // `error` asks instead of reporting.
                 self.ask_in_place = Some(path.clone());
@@ -366,7 +403,6 @@ impl Editor {
         self.set_language(Language::of(&path, self.area.line(0)));
         self.message = format!("Saved {} bytes", text.len());
         println!("edit: saved {path} ({} bytes)", text.len());
-        self.known_mode = fs::metadata(&path).ok().map(|m| (path.clone(), m.permissions().mode()));
         self.path = Some(path);
         Ok(())
     }
