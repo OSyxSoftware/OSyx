@@ -45,9 +45,24 @@ os_std::entry!(main);
 ///   can only be written in place, where a failure half way loses the old
 ///   contents. That is done only with `in_place`, which the user grants;
 ///   otherwise the answer is [`Save::NeedsInPlace`] and nothing is touched.
+/// Who could read a text: the owner, group and permission bits of the
+/// file it was read from or last saved to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Access {
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+impl Access {
+    fn of(m: &fs::Metadata) -> Access {
+        Access { uid: m.uid(), gid: m.gid(), mode: m.permissions().mode() & 0o777 }
+    }
+}
+
 enum Save {
-    /// Saved; the permissions the saved file has.
-    Done(u32),
+    /// Saved; who can read the saved file.
+    Done(Access),
     NeedsInPlace,
 }
 
@@ -56,25 +71,29 @@ enum Save {
 /// name: a file is not written into when it is more open than the one the
 /// text came from (`known`), since that would show the text to people
 /// who could not read it before.
-fn write_in_place(target: &str, data: &[u8], known: Option<u32>) -> Result<Save, Error> {
+fn write_in_place(target: &str, data: &[u8], known: Option<Access>) -> Result<Save, Error> {
     let mut file = fs::File::options().write(true).open(target)?;
-    let mode = file.metadata()?.permissions().mode() & 0o777;
+    let now = Access::of(&file.metadata()?);
     if let Some(known) = known {
-        if mode & !known & 0o077 != 0 {
+        // Another owner or group reads through other rights than the ones
+        // the text had, whatever the bits say.
+        let widened = now.uid != known.uid || now.gid != known.gid || now.mode & !known.mode & 0o077 != 0;
+        if widened {
             return Err(Error::new(
                 ErrorKind::PermissionDenied,
-                "the file there now can be read or written by others who could not read the file that was opened",
+                "the file there now belongs to someone else or can be read or written by others who could not read the file that was opened",
             ));
         }
     }
     file.set_len(0)?;
     file.write_all(data)?;
     file.sync_all()?;
-    Ok(Save::Done(mode))
+    Ok(Save::Done(now))
 }
 
-fn write_whole(path: &str, data: &[u8], in_place: bool, known_mode: Option<u32>) -> Result<Save, Error> {
-    let direct = |target: &str| if in_place { write_in_place(target, data, known_mode) } else { Ok(Save::NeedsInPlace) };
+fn write_whole(path: &str, data: &[u8], in_place: bool, known: Option<Access>) -> Result<Save, Error> {
+    let known_mode = known.map(|k| k.mode);
+    let direct = |target: &str| if in_place { write_in_place(target, data, known) } else { Ok(Save::NeedsInPlace) };
     let target = match fs::symlink_metadata(path) {
         Ok(_) => String::from(fs::canonicalize(path)?.as_str()),
         Err(e) if e.kind() == ErrorKind::NotFound => String::from(path),
@@ -136,7 +155,7 @@ fn write_whole(path: &str, data: &[u8], in_place: bool, known_mode: Option<u32>)
     if done.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    done.map(|()| Save::Done(mode))
+    done.map(|()| Save::Done(Access { uid, gid, mode: mode & 0o777 }))
 }
 
 /// Larger files are refused: the editor keeps the whole text in memory.
@@ -256,7 +275,7 @@ struct Editor {
     area: TextArea,
     path: Option<String>,
     /// The permissions of `path` when it was opened or last saved.
-    known_mode: Option<(String, u32)>,
+    known_mode: Option<(String, Access)>,
     language: Language,
     /// The file used CRLF line ends; they are written back.
     crlf: bool,
@@ -348,7 +367,7 @@ impl Editor {
                 }
                 let mut bytes = Vec::new();
                 file.read_to_end(&mut bytes).map_err(cannot)?;
-                (bytes, Some(m.permissions().mode() & 0o777))
+                (bytes, Some(Access::of(&m)))
             }
             Err(e) if e.kind() == os_std::error::ErrorKind::NotFound => (Vec::new(), None),
             Err(e) => return Err(format!("{path} cannot be read: {e}.")),
