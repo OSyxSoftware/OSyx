@@ -288,8 +288,12 @@ fn remove_empty_dirs(path: &str) {
 /// Tries again to remove what an earlier upgrade of the installed package
 /// `p` could not, also when there is nothing to install.
 fn retry_stale(p: &Package) {
-    if fs::metadata(stale_list(&p.name)).is_err() {
-        return;
+    // No list, nothing to do and nothing to say; a list that cannot be
+    // read is said.
+    match stale_read(&p.name) {
+        Ok(listed) if listed.is_empty() => return,
+        Ok(_) => {}
+        Err(e) => return say(&format!("pkg: {}: {e}", p.name)),
     }
     let live: Vec<String> = p.files.iter().map(|f| format!("/{}", f.path)).collect();
     match clear_stale(&p.name, &live) {

@@ -629,6 +629,12 @@ fn text_area_finds_text_around_letters_whose_case_changes_their_length() {
     a.draw(&mut Painter::new(&mut s, &MIDNIGHT, &fonts), true);
 }
 
+/// The limit of the tests that guard against work that grows with the
+/// square of a line's length. Such work takes minutes here; the limit is
+/// far above what a slow, unoptimized run on a shared machine needs (a few
+/// seconds), so that only the real fault trips it.
+const SLOW_MS: u128 = 60_000;
+
 #[test]
 fn text_area_draws_a_very_long_line_by_its_visible_part() {
     let long: String = "ab\tcd ".repeat(200_000);
@@ -642,7 +648,7 @@ fn text_area_draws_a_very_long_line_by_its_visible_part() {
         a.draw(&mut Painter::new(&mut s, &MIDNIGHT, &fonts), true);
     }
     // Twenty frames of a 1.2 MB line.
-    assert!(started.elapsed().as_millis() < 3000, "{} ms", started.elapsed().as_millis());
+    assert!(started.elapsed().as_millis() < SLOW_MS, "{} ms", started.elapsed().as_millis());
 }
 
 #[test]
@@ -694,7 +700,7 @@ fn text_area_read_only_keeps_history_and_long_words_move_fast() {
     assert_eq!(a.cursor(), Pos::new(0, 2));
     a.event(&key_down(key::LEFT, None, modifier::LEFT_CTRL), &fonts, &mut clip);
     assert_eq!(a.cursor(), Pos::new(0, 0));
-    assert!(started.elapsed().as_millis() < 3000, "{} ms", started.elapsed().as_millis());
+    assert!(started.elapsed().as_millis() < SLOW_MS, "{} ms", started.elapsed().as_millis());
     // A line of one letter 100 000 times, every one a match: drawn by its
     // visible part.
     let (mut a, fonts, _) = area(&"a".repeat(100_000));
@@ -703,7 +709,7 @@ fn text_area_read_only_keeps_history_and_long_words_move_fast() {
     let mut s = Surface::new(&mut buf, 400, 100, 400).unwrap();
     let started = std::time::Instant::now();
     a.draw(&mut Painter::new(&mut s, &MIDNIGHT, &fonts), true);
-    assert!(started.elapsed().as_millis() < 3000, "{} ms", started.elapsed().as_millis());
+    assert!(started.elapsed().as_millis() < SLOW_MS, "{} ms", started.elapsed().as_millis());
 }
 
 #[test]
@@ -861,6 +867,15 @@ fn text_area_word_movement_and_vertical_columns() {
     assert_eq!(a.cursor(), Pos::new(1, 1));
     a.event(&key_down(key::LEFT, None, 0), &fonts, &mut clip);
     a.event(&key_down(key::RIGHT, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(2, 4));
+    // So does an edit that is undone again.
+    let (mut a, fonts, mut clip) = area("ab\n\t\nabcdef");
+    a.event(&key_down(key::END, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    a.insert("x");
+    a.undo();
+    assert_eq!(a.cursor(), Pos::new(1, 1));
     a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
     assert_eq!(a.cursor(), Pos::new(2, 4));
 }

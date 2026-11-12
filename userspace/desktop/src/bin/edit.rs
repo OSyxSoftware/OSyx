@@ -37,8 +37,8 @@ os_std::entry!(main);
 /// - Through a symbolic link, the file the link names is saved and the
 ///   link stays; a link that names nothing is an error.
 /// - The file beside it is made for this save only (never an existing
-///   file or link), readable by its owner alone until it holds everything
-///   and has the permissions of the file it replaces.
+///   file or link), with the permissions of the file it replaces from the
+///   start.
 /// - Where that cannot be done (a folder the user may not write, or a file
 ///   of another user or of another group with rights of its own, which a
 ///   rename would make this user's and this group's), the file
@@ -71,6 +71,10 @@ fn write_whole(path: &str, data: &[u8], in_place: bool) -> Result<Save, Error> {
         return direct(&target);
     }
     let existed = old.is_some();
+    // The new file is made with the permissions of the file it replaces
+    // and never changed afterwards: it is never more open than the old
+    // one, and no later step names it by a path that someone else in a
+    // shared folder could have pointed elsewhere meanwhile.
     let mode = old.map_or(0o644, |m| m.permissions().mode());
     // No two saves share a name, and a name someone made first is not
     // used: "create new" follows no link and replaces nothing.
@@ -81,7 +85,7 @@ fn write_whole(path: &str, data: &[u8], in_place: bool) -> Result<Save, Error> {
             .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
         let tmp = format!("{target}.{pid:x}-{:x}.osyx-saving", nanos.wrapping_add(u64::from(attempt)));
-        match fs::File::options().write(true).create_new(true).mode(0o600).open(&tmp) {
+        match fs::File::options().write(true).create_new(true).mode(mode).open(&tmp) {
             Ok(f) => {
                 made = Some((f, tmp));
                 break;
@@ -97,7 +101,7 @@ fn write_whole(path: &str, data: &[u8], in_place: bool) -> Result<Save, Error> {
     };
     let written = file.write_all(data).and_then(|()| file.sync_all());
     drop(file);
-    let done = written.and_then(|()| fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))).and_then(|()| fs::rename(&tmp, &target));
+    let done = written.and_then(|()| fs::rename(&tmp, &target));
     if done.is_err() {
         let _ = fs::remove_file(&tmp);
     }

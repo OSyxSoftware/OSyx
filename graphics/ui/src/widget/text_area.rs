@@ -363,6 +363,7 @@ impl TextArea {
         }
         self.redo.clear();
         self.cursor = after;
+        self.wanted_cell = None;
         self.anchor = None;
         self.wanted_col = after.col;
     }
@@ -376,6 +377,7 @@ impl TextArea {
         let end = Self::end_of(e.at, &e.inserted);
         self.splice(e.at, end, &e.removed);
         self.cursor = e.before;
+        self.wanted_cell = None;
         self.anchor = None;
         self.wanted_col = self.cursor.col;
         self.redo.push(e);
@@ -390,6 +392,7 @@ impl TextArea {
         let end = Self::end_of(e.at, &e.removed);
         self.splice(e.at, end, &e.inserted);
         self.cursor = Self::end_of(e.at, &e.inserted);
+        self.wanted_cell = None;
         self.anchor = None;
         self.wanted_col = self.cursor.col;
         e.typing = false;
@@ -408,6 +411,7 @@ impl TextArea {
     pub fn select_all(&mut self) {
         self.anchor = Some(Pos::default());
         self.cursor = self.end();
+        self.wanted_cell = None;
     }
 
     /// Moves the cursor; with `select` the selection follows it.
@@ -420,7 +424,8 @@ impl TextArea {
         }
         self.cursor = p;
         self.wanted_col = p.col;
-        // Only `vertical` keeps a cell to aim for, and sets it after this.
+        // Only `vertical` keeps a cell to aim for, and sets it after this;
+        // every other place that puts the cursor somewhere gives it up.
         self.wanted_cell = None;
     }
 
@@ -546,6 +551,7 @@ impl TextArea {
             if let Some(col) = hit {
                 self.anchor = Some(Pos::new(line, col));
                 self.cursor = Pos::new(line, col + len);
+                self.wanted_cell = None;
                 self.wanted_col = self.cursor.col;
                 return true;
             }
@@ -761,6 +767,7 @@ impl TextArea {
                 match clicks {
                     1 => {
                         self.cursor = p;
+                        self.wanted_cell = None;
                         self.anchor = Some(p);
                         self.wanted_col = p.col;
                         self.dragging = true;
@@ -769,10 +776,12 @@ impl TextArea {
                         let (a, b) = self.word_around(p);
                         self.anchor = Some(a);
                         self.cursor = b;
+                        self.wanted_cell = None;
                     }
                     _ => {
                         self.anchor = Some(Pos::new(p.line, 0));
                         self.cursor = self.clamp(Pos::new(p.line, usize::MAX));
+                        self.wanted_cell = None;
                     }
                 }
                 Response::Redraw
@@ -783,6 +792,7 @@ impl TextArea {
                     return Response::Consumed;
                 }
                 self.cursor = p;
+                self.wanted_cell = None;
                 self.wanted_col = p.col;
                 self.reveal_cursor(fonts);
                 Response::Redraw
