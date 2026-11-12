@@ -282,6 +282,10 @@ struct Query {
 
 pub type QueryId = u32;
 
+const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
+const MDNS_MAC: MacAddr = MacAddr([0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb]);
+const MDNS_PORT: u16 = 5353;
+
 /// Result of [`Stack::resolve`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolve {
@@ -1025,9 +1029,18 @@ impl Stack {
         }
         let from = Endpoint::new(h.src, uh.src_port);
         let mut delivered = false;
-        for s in self.sockets.values_mut() {
+        let on_link = uh.src_port == MDNS_PORT && !h.src.is_unspecified() && !h.src.is_loopback()
+            && self.ifaces[iface].addr.is_some_and(|(addr, prefix)| {
+                h.dst == addr && h.src.in_subnet(addr, prefix) && !h.src.is_subnet_broadcast(addr, prefix)
+            });
+        for (&id, s) in &mut self.sockets {
             let Socket::Udp(u) = s else { continue };
             if u.local.port != uh.dst_port {
+                continue;
+            }
+            if !on_link && uh.src_port == MDNS_PORT && self.queries.values().any(|q| {
+                q.transport == Transport::Udp(id) && q.name.ends_with(".local")
+            }) {
                 continue;
             }
             if !u.local.addr.is_unspecified() && u.local.addr != h.dst && !broadcast {
@@ -2004,7 +2017,7 @@ impl Stack {
         if let Some(addrs) = self.dns_cache.get(&n, now) {
             return Resolve::Done(if addrs.is_empty() { Err(NetError::NameNotFound) } else { Ok(addrs) });
         }
-        if self.dns_servers.is_empty() {
+        if self.dns_servers.is_empty() && !n.ends_with(".local") {
             return Resolve::Done(Err(NetError::DnsFailure));
         }
         if self.queries.len() >= MAX_QUERIES {
@@ -2080,14 +2093,15 @@ impl Stack {
     /// (Re)sends a query over UDP to its current server.
     fn dns_send(&mut self, qid: QueryId) {
         let Some(q) = self.queries.get(&qid) else { return };
-        let servers = self.dns_servers.len();
+        let mdns = q.name.ends_with(".local");
+        let servers = if mdns { 1 } else { self.dns_servers.len() };
         if servers == 0 || q.server >= servers {
             self.finish_query(qid, Err(NetError::TimedOut));
             return;
         }
         let old = q.transport;
         self.drop_transport(old);
-        let server = self.dns_servers[self.queries[&qid].server];
+        let server = if mdns { MDNS_GROUP } else { self.dns_servers[self.queries[&qid].server] };
         // A fresh random source port for every attempt (RFC 5452).
         let sock = match self.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)) {
             Ok(s) => s,
@@ -2103,8 +2117,34 @@ impl Stack {
         q.transport = Transport::Udp(sock);
         q.deadline = now + DNS_TIMEOUT_MS;
         q.server_addr = server;
-        let msg = dns::build_query(q.id, &q.name, dns::TYPE_A);
+        let mut msg = dns::build_query(q.id, &q.name, dns::TYPE_A);
         self.stats.dns_queries += 1;
+        if mdns {
+            // RFC 6762 §5.1: an ephemeral source port requests a legacy
+            // unicast reply, with the original transaction ID and question.
+            msg[2] = 0; // Recursion Desired is clear.
+            let port = self.udp(sock).expect("query socket exists").local.port;
+            let mut sent = false;
+            for iface in 1..self.ifaces.len() {
+                let i = &self.ifaces[iface];
+                let Some((src, _)) = i.addr.filter(|_| i.link_up && i.kind == IfaceKind::Ethernet) else { continue };
+                let packet = udp::build(src, MDNS_GROUP, port, MDNS_PORT, &msg);
+                self.ident = self.ident.wrapping_add(1);
+                if let Some(packets) = ipv4::build(src, MDNS_GROUP, PROTO_UDP, 255, self.ident, &packet, i.mtu, true) {
+                    let mac = i.mac;
+                    for packet in packets {
+                        self.push_frame(iface, ethernet::build(MDNS_MAC, mac, ETHERTYPE_IPV4, &packet));
+                        self.stats.ip_out += 1;
+                    }
+                    self.stats.udp_out += 1;
+                    sent = true;
+                }
+            }
+            if !sent {
+                self.finish_query(qid, Err(NetError::NoRoute));
+            }
+            return;
+        }
         if self.udp_send_to(sock, Some(Endpoint::new(server, dns::PORT)), &msg).is_err() {
             // No route yet: the timeout moves on to the next attempt.
         }
@@ -2114,7 +2154,11 @@ impl Stack {
     /// timeout. A dead first server therefore costs one timeout, not
     /// `DNS_ATTEMPTS` of them, before the next server is tried.
     fn dns_advance(&mut self, qid: QueryId, exhausted: NetError) {
-        let servers = self.dns_servers.len().max(1);
+        let servers = if self.queries.get(&qid).is_some_and(|q| q.name.ends_with(".local")) {
+            1
+        } else {
+            self.dns_servers.len().max(1)
+        };
         let (attempt, server) = {
             let Some(q) = self.queries.get_mut(&qid) else { return };
             q.attempt += 1;
@@ -2157,6 +2201,21 @@ impl Stack {
                 return false;
             }
         };
+        if name.ends_with(".local") {
+            // Each host speaks only for its own records. An empty answer,
+            // negative answer or truncated answer cannot settle the lookup.
+            if r.truncated || r.rcode != dns::RCODE_OK {
+                return false;
+            }
+            if let Ok(Some(answer)) = dns::chase(&name, &r.answers) {
+                if answer.ttl != 0 {
+                    self.dns_cache.put(&name, answer.addrs.clone(), answer.ttl.min(10), now);
+                    self.finish_query(qid, Ok(answer.addrs));
+                    return true;
+                }
+            }
+            return false;
+        }
         if r.truncated && over_tcp {
             // A TCP answer must be complete; an incomplete one says nothing
             // about the name, so never cache it as negative.
@@ -2221,10 +2280,12 @@ impl Stack {
                 Transport::Udp(sock) if sock != 0 => {
                     let mut buf = [0u8; dns::MAX_UDP];
                     let server = q.server_addr;
+                    let mdns = q.name.ends_with(".local");
                     let mut ended = false;
-                    while let Ok((from, n, _)) = self.udp_recv_from(sock, &mut buf) {
-                        // Only the server we asked, from port 53.
-                        if from != Endpoint::new(server, dns::PORT) {
+                    while let Ok((from, n, total)) = self.udp_recv_from(sock, &mut buf) {
+                        if (mdns && (from.port != MDNS_PORT || n != total))
+                            || (!mdns && from != Endpoint::new(server, dns::PORT))
+                        {
                             self.stats.dns_rejected += 1;
                             continue;
                         }

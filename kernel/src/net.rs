@@ -995,10 +995,12 @@ pub fn sys_resolve(name: u64, len: u64, out: u64, max: u64) -> Result<u64, Errno
         Resolve::Pending(q) => {
             let deadline = deadline_after_ns(RESOLVE_TIMEOUT_NS);
             loop {
+                // Snapshot first, so a reply between the result check and
+                // wait registration changes the value seen by block_on.
+                let seen = GENERATION.load(Ordering::Acquire);
                 if let Some(r) = with_stack(|s| s.resolve_result(q)).flatten() {
                     break r.map_err(errno)?;
                 }
-                let seen = GENERATION.load(Ordering::Acquire);
                 if let Err(e) = block_on(&[&CHANGED], deadline, || (GENERATION.load(Ordering::Acquire) != seen).then_some(())) {
                     with_stack(|s| s.resolve_cancel(q));
                     return Err(e);
