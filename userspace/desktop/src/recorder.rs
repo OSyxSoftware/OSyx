@@ -23,9 +23,6 @@ const SPOOL: &str = "/var/cache/osyx-prism";
 /// Name prefix that an earlier build of this code gave to recordings
 /// waiting in the spool; such files are delivered under the plain name.
 const KEPT: &str = "kept ";
-/// A spool file this short holds no frame (a recording that died right
-/// after it began): nothing to hand over.
-const EMPTY: u64 = 4096;
 
 /// `name` in `dir`, or `stem (2).ext`, `stem (3).ext` … when a file of
 /// that name is there already: nothing the user has is written over, and
@@ -54,10 +51,6 @@ fn deliver_spool(dir: &str, name: &str) -> Result<String, String> {
         let file = String::from(entry.file_name());
         let path = format!("{SPOOL}/{file}");
         let as_name = file.strip_prefix(KEPT).unwrap_or(&file);
-        if fs::metadata(&path).is_ok_and(|m| m.len() < EMPTY) && as_name != name {
-            let _ = fs::remove_file(&path);
-            continue;
-        }
         let to = free_name(dir, as_name);
         match user_save::save(dir, &to, user_save::Source::File(&path)) {
             Ok(()) => {

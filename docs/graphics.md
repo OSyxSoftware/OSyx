@@ -365,7 +365,7 @@ root is not the user's: the child renames it to `Pictures (old)` or
 folder. A recording leaves the spool only once the user
 has it: one that could not be handed over, or that a PRISM which died left
 cut off, is saved after the next recording, under `name (2)` and so on when
-the name is taken. A spool file under 4 KiB holds no frame and is removed.
+the name is taken.
 
 While an area is chosen the compositor keeps the pointer from the windows
 and draws the outline; the picture is taken from the frame after the

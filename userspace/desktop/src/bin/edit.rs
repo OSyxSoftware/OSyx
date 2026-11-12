@@ -50,7 +50,7 @@ enum Save {
     NeedsInPlace,
 }
 
-fn write_whole(path: &str, data: &[u8], in_place: bool) -> Result<Save, Error> {
+fn write_whole(path: &str, data: &[u8], in_place: bool, known_mode: Option<u32>) -> Result<Save, Error> {
     let direct = |target: &str| if in_place { fs::write(target, data).map(|()| Save::Done) } else { Ok(Save::NeedsInPlace) };
     let target = match fs::symlink_metadata(path) {
         Ok(_) => String::from(fs::canonicalize(path)?.as_str()),
@@ -75,7 +75,10 @@ fn write_whole(path: &str, data: &[u8], in_place: bool) -> Result<Save, Error> {
     // and never changed afterwards: it is never more open than the old
     // one, and no later step names it by a path that someone else in a
     // shared folder could have pointed elsewhere meanwhile.
-    let mode = old.map_or(0o644, |m| m.permissions().mode());
+    // A file that is gone (someone removed it while it was open) keeps
+    // the permissions it had when it was opened or last saved: a private
+    // text does not become readable because its file went away.
+    let mode = old.map_or(known_mode.unwrap_or(0o644), |m| m.permissions().mode());
     // No two saves share a name, and a name someone made first is not
     // used: "create new" follows no link and replaces nothing.
     let pid = os_std::process::id().unwrap_or(0);
@@ -224,6 +227,8 @@ fn slash_colors(line: &str) -> Vec<(usize, usize, Style)> {
 struct Editor {
     area: TextArea,
     path: Option<String>,
+    /// The permissions of `path` when it was opened or last saved.
+    known_mode: Option<(String, u32)>,
     language: Language,
     /// The file used CRLF line ends; they are written back.
     crlf: bool,
@@ -261,6 +266,7 @@ impl Editor {
             buttons: labels.iter().enumerate().map(|(i, l)| Button::new(i, l, ButtonStyle::Flat)).collect(),
             dialog: None,
             then: None,
+            known_mode: None,
             replacing: None,
             in_place: None,
             ask_in_place: None,
@@ -325,6 +331,7 @@ impl Editor {
             String::new()
         };
         println!("edit: opened {path} ({} lines, {})", self.area.line_count(), self.language.name());
+        self.known_mode = fs::metadata(&path).ok().map(|m| (path.clone(), m.permissions().mode()));
         self.path = Some(path);
         Ok(())
     }
@@ -341,7 +348,8 @@ impl Editor {
             text = text.replace('\n', "\r\n");
         }
         let in_place = self.in_place.take().is_some_and(|granted| granted == path);
-        match write_whole(&path, text.as_bytes(), in_place).map_err(|e| format!("{path} cannot be written: {e}."))? {
+        let known = self.known_mode.as_ref().filter(|(p, _)| *p == path).map(|&(_, m)| m);
+        match write_whole(&path, text.as_bytes(), in_place, known).map_err(|e| format!("{path} cannot be written: {e}."))? {
             Save::Done => {}
             Save::NeedsInPlace => {
                 // `error` asks instead of reporting.
@@ -353,6 +361,7 @@ impl Editor {
         self.set_language(Language::of(&path, self.area.line(0)));
         self.message = format!("Saved {} bytes", text.len());
         println!("edit: saved {path} ({} bytes)", text.len());
+        self.known_mode = fs::metadata(&path).ok().map(|m| (path.clone(), m.permissions().mode()));
         self.path = Some(path);
         Ok(())
     }
