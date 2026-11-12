@@ -445,6 +445,9 @@ fn install(url: &str, name: &str) -> Result<String, String> {
 
 fn remove(name: &str) -> Result<String, String> {
     let p = installed(name).ok_or_else(|| format!("{name} is not installed"))?;
+    // A stale list that cannot be read stops the removal before anything
+    // is touched: its files would be forgotten with the record.
+    stale_read(name).map_err(|e| format!("{name} was not removed: {e}"))?;
     // The record goes last, and only when every file went: what could not
     // be removed can be tried again.
     let mut failed: Vec<String> = p.files.iter().filter_map(|f| remove_file(&format!("/{}", f.path)).err()).collect();
