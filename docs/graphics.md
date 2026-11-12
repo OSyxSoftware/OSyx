@@ -280,6 +280,18 @@ layout needs a session restart. The desktop reloads background/time zone;
 new native application windows read the saved accent. Display information
 is read-only. Settings retains root credentials for system configuration.
 
+The launcher's search field also finds settings and files once two
+characters are typed (`osyx_filekit::search`). A setting ("wallpaper",
+"wifi", "time zone", also by related words such as "background") opens
+Settings at its section (`settings <section>`). Files and folders are
+matched by name against a list of the home directory made when the launcher
+opens (up to 5000 entries, five levels deep, hidden names left out); a file
+opens in Files as a double click would (`files --open FILE`), a folder
+opens in Files. Applications come first, then up to four settings and
+twelve files, each group best match first.
+
+![The launcher finding a file](screenshots/launcher-search.jpg)
+
 The application launcher also accepts `.exe` paths, invoking `/bin/winrun`.
 The four Windows GUI utilities are installed in `/opt/apps` and have their
 own launcher entries. They draw through the same PRISM compositor.

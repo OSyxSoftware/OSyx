@@ -114,7 +114,10 @@ const CONFIRM_REBOOT: u32 = 2;
 const CONFIRM_ELEVATE: u32 = 3;
 
 enum PopupKind {
-    Launcher { search: TextField, list: ListView, shown: Vec<usize>, list_focus: bool },
+    /// `shown`: rows of the list, as indices into the applications and,
+    /// from their number on, into `found` (settings and files a search
+    /// turned up).
+    Launcher { search: TextField, list: ListView, shown: Vec<usize>, list_focus: bool, found: Vec<AppEntry> },
     Menu { menu: Menu, purpose: MenuPurpose },
     Confirm { dialog: Dialog },
     Quick { net: NetSummary, radios: Radios, sound: Option<Sound>, dragging: bool, hover: Option<QuickItem> },
@@ -485,6 +488,8 @@ struct Shell {
     popup_closed: Option<(u64, PopupTag)>,
     notes: Vec<Note>,
     apps: Vec<AppEntry>,
+    /// Paths under the user's home, for the launcher's search.
+    file_index: Vec<String>,
     shortcuts: Vec<AppEntry>,
     selected_shortcut: Option<usize>,
     shortcut_scan: u64,
@@ -625,6 +630,7 @@ fn main() -> i32 {
         popup_closed: None,
         notes: Vec::new(),
         apps: load_apps(),
+        file_index: Vec::new(),
         shortcuts: common::load_apps_from(common::DESKTOP_DIR),
         selected_shortcut: None,
         shortcut_scan: 0,
@@ -1135,6 +1141,7 @@ impl Shell {
         let fonts = self.fonts;
         let Some(p) = &mut self.popup else { return };
         let mut launch = None;
+        let mut launch_found: Option<AppEntry> = None;
         let mut pick = None;
         let mut confirm = None;
         let mut close = false;
@@ -1147,9 +1154,10 @@ impl Shell {
         let mut wifi_reconnect = false;
         let mut drive_action: Option<drives::Hit> = None;
         match &mut p.kind {
-            PopupKind::Launcher { search, list, shown, list_focus } => {
+            PopupKind::Launcher { search, list, shown, list_focus, found } => {
                 if let Ui::PointerDown { x, y, button: button::RIGHT, .. } = ui {
-                    app_menu = list.row_at(x, y).and_then(|i| app_at(shown, i)).map(|i| (i, p.x + x, p.y + y));
+                    // Applications have a menu; found settings and files do not.
+                    app_menu = list.row_at(x, y).and_then(|i| app_at(shown, i)).filter(|&i| i < self.apps.len()).map(|i| (i, p.x + x, p.y + y));
                 }
                 // Arrow keys and Enter in the search field drive the list.
                 if let Ui::Key(k) = ui {
@@ -1182,7 +1190,9 @@ impl Shell {
                 }
                 if search.text() != before {
                     *shown = filter_apps(&self.apps, search.text());
-                    list.set_items(app_items(&self.apps, shown));
+                    *found = find_more(&self.file_index, search.text());
+                    shown.extend((0..found.len()).map(|k| self.apps.len() + k));
+                    list.set_items(app_items(&self.apps, found, shown));
                     list.select(if shown.is_empty() { None } else { Some(0) });
                 }
                 match list.event(&ui, *list_focus) {
@@ -1202,6 +1212,9 @@ impl Shell {
                         close = true;
                     }
                 }
+                // Copied now: the popup (and with it `found`) is gone by
+                // the time the entry is started.
+                launch_found = launch.and_then(|i| i.checked_sub(self.apps.len())).and_then(|k| found.get(k).cloned());
             }
             PopupKind::Menu { menu, purpose } => match menu.event(&ui) {
                 Response::Activated(i) => pick = Some((*purpose, i)),
@@ -1410,8 +1423,10 @@ impl Shell {
             _ => {}
         }
         if let Some(i) = launch {
-            let app = self.apps[i].clone();
-            self.launch_entry(&app);
+            // An application, or a setting or file the search found.
+            if let Some(app) = self.apps.get(i).cloned().or(launch_found) {
+                self.launch_entry(&app);
+            }
         }
         if let Some((purpose, i)) = pick {
             self.menu_pick(purpose, i);
@@ -1530,7 +1545,9 @@ impl Shell {
             return;
         }
         let command = if Self::PRIVILEGED.contains(&exec) {
-            Command::new(exec)
+            let mut c = Command::new(exec);
+            c.args(args);
+            c
         } else {
             let mut c = Command::new("/system/bin/run-app");
             c.arg(exec).args(args);
@@ -1805,19 +1822,21 @@ impl Shell {
             return;
         }
         let mut search = TextField::new("");
-        search.placeholder = String::from("Search applications");
+        search.placeholder = String::from("Search applications, settings and files");
         search.rect = Rect::new(16, 60, LAUNCHER_W - 32, 36);
         let mut list = ListView::new(vec![Column::new("Application", 0, Align::Left)]);
         list.row_height = 44;
         list.rect = Rect::new(8, 108, LAUNCHER_W - 16, LAUNCHER_H - 108 - 48);
         // Programs installed while the session runs appear at once.
         self.apps = load_apps();
+        // The files a search can find: listed once, when the launcher opens.
+        self.file_index = index_files(common::USER_HOME);
         let shown = filter_apps(&self.apps, "");
-        list.set_items(app_items(&self.apps, &shown));
+        list.set_items(app_items(&self.apps, &[], &shown));
         list.select(if shown.is_empty() { None } else { Some(0) });
         let y = (self.h - PANEL_H) as i32 - LAUNCHER_H as i32 - 8;
-        println!("desktop: launcher opened ({} applications)", shown.len());
-        self.open_popup(8, y, LAUNCHER_W, LAUNCHER_H, PopupKind::Launcher { search, list, shown, list_focus: false });
+        println!("desktop: launcher opened ({} applications, {} files indexed)", shown.len(), self.file_index.len());
+        self.open_popup(8, y, LAUNCHER_W, LAUNCHER_H, PopupKind::Launcher { search, list, shown, list_focus: false, found: Vec::new() });
         self.launcher_btn.active = true;
         self.panel.dirty = true;
     }
@@ -2465,9 +2484,86 @@ fn filter_apps(apps: &[AppEntry], q: &str) -> Vec<usize> {
     rows
 }
 
-fn app_items(apps: &[AppEntry], shown: &[usize]) -> Vec<ListItem> {
+/// Settings and files that match `q`, as entries the launcher can start:
+/// a setting opens its section of Settings, a file opens in Files as a
+/// double click would. Nothing for fewer than two characters.
+fn find_more(file_index: &[String], q: &str) -> Vec<AppEntry> {
+    use osyx_filekit::search;
+    if q.trim().chars().count() < 2 {
+        return Vec::new();
+    }
+    let entry = |name: String, exec: &str, icon: Icon, comment: String, args: Vec<String>| AppEntry {
+        source: String::new(),
+        name,
+        exec: String::from(exec),
+        icon,
+        comment,
+        args,
+        workdir: String::new(),
+        group: String::new(),
+    };
+    let mut out: Vec<AppEntry> = search::settings(q)
+        .into_iter()
+        .take(MAX_FOUND_SETTINGS)
+        .map(|s| entry(format!("{}  ·  Settings", s.title), SETTINGS_APP, Icon::Settings, format!("Open Settings at {}", s.title), vec![String::from(s.section)]))
+        .collect();
+    for i in search::files(file_index, q, MAX_FOUND_FILES) {
+        let path = &file_index[i];
+        let name = search::file_name(path);
+        let folder = path.strip_suffix(name).unwrap_or(path).trim_end_matches('/');
+        let shown_folder = folder.strip_prefix(common::USER_HOME).map_or(String::from(folder), |rest| format!("~{rest}"));
+        let is_dir = path.ends_with('/');
+        let icon = if is_dir { Icon::Folder } else { Icon::File };
+        let args = if is_dir { vec![String::from(path.trim_end_matches('/'))] } else { vec![String::from("--open"), path.clone()] };
+        out.push(entry(format!("{name}  ·  {shown_folder}"), "/system/bin/files", icon, path.trim_end_matches('/').to_string(), args));
+    }
+    out
+}
+
+const MAX_FOUND_SETTINGS: usize = 4;
+const MAX_FOUND_FILES: usize = 12;
+/// Entries and folder depth the launcher's file index stops at.
+const MAX_INDEXED: usize = 5000;
+const MAX_INDEX_DEPTH: usize = 5;
+
+/// The files and folders under `root` (folders end with `/`), breadth
+/// first so that a limit keeps what is nearest. Hidden names are left out.
+fn index_files(root: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut level = vec![String::from(root)];
+    for _ in 0..MAX_INDEX_DEPTH {
+        let mut next = Vec::new();
+        for dir in &level {
+            let Ok(entries) = os_std::fs::read_dir(dir) else { continue };
+            for e in entries {
+                let name = e.file_name();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let path = format!("{}/{name}", dir.trim_end_matches('/'));
+                if out.len() >= MAX_INDEXED {
+                    return out;
+                }
+                if e.file_type().is_dir() {
+                    out.push(format!("{path}/"));
+                    next.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        level = next;
+    }
+    out
+}
+
+fn app_items(apps: &[AppEntry], found: &[AppEntry], shown: &[usize]) -> Vec<ListItem> {
     (0..shown.len())
         .map(|row| match app_at(shown, row) {
+            Some(i) if i >= apps.len() => match found.get(i - apps.len()) {
+                Some(f) => ListItem::new(Some(f.icon), &[&f.name]),
+                None => ListItem::new(None, &[""]),
+            },
             Some(i) => ListItem::new(Some(apps[i].icon), &[&apps[i].name]),
             None => {
                 // A header names the folder of the application after it.
@@ -2717,7 +2813,7 @@ fn draw_popup(p: &mut Painter, kind: &PopupKind, apps: &[AppEntry]) {
     let full = p.s.bounds();
     p.fill(full, t.surface);
     match kind {
-        PopupKind::Launcher { search, list, shown, list_focus } => {
+        PopupKind::Launcher { search, list, shown, list_focus, found } => {
             p.text(FontKind::Large, 20, 18, "Applications", t.text);
             search.draw(p, !*list_focus);
             if shown.is_empty() {
@@ -2734,7 +2830,11 @@ fn draw_popup(p: &mut Painter, kind: &PopupKind, apps: &[AppEntry]) {
             }
             let footer = Rect::new(20, (LAUNCHER_H - 44) as i32, LAUNCHER_W - 40, 40);
             p.hline(12, footer.y, LAUNCHER_W - 24, t.border);
-            let comment = list.selected().and_then(|i| app_at(shown, i)).map_or("", |i| apps[i].comment.as_str());
+            let comment = list
+                .selected()
+                .and_then(|i| app_at(shown, i))
+                .and_then(|i| apps.get(i).or_else(|| found.get(i - apps.len())))
+                .map_or("", |a| a.comment.as_str());
             p.text_in(FontKind::Ui, footer, comment, t.text_dim, Align::Left);
         }
         PopupKind::Menu { menu, .. } => menu.draw(p),

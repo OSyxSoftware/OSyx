@@ -1328,8 +1328,23 @@ fn main() -> i32 {
     let host = read("/etc/hostname");
     let mut hostname = TextField::new("");
     hostname.set_text(&host);
+    // `settings <section>` opens at that section (the launcher's search).
+    let section = match os_std::env::args().nth(1).as_deref() {
+        Some("appearance") => Section::Appearance,
+        Some("display") => Section::Display,
+        Some("keyboard") => Section::Keyboard,
+        Some("mouse") => Section::Mouse,
+        Some("sound") => Section::Sound,
+        Some("power") => Section::Power,
+        Some("datetime") => Section::DateTime,
+        Some("network") => Section::Network,
+        Some("storage") => Section::Storage,
+        Some("apps") => Section::Apps,
+        Some("about") => Section::About,
+        _ => Section::General,
+    };
     let mut app = Settings {
-        section: Section::General,
+        section,
         size: (0, 0),
         accent: ACCENTS.iter().position(|(n, _)| n.eq_ignore_ascii_case(&accent)).unwrap_or(0),
         wallpaper: wallpaper.min(WALLPAPERS.len() - 1),

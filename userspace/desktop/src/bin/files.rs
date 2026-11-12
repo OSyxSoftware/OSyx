@@ -218,6 +218,8 @@ struct Files {
     delete_names: Vec<String>,
     /// `--open-with FILE`: the file whose open-with menu shows at start.
     open_with: Option<String>,
+    /// `--open`: open the named file instead of showing its menu.
+    open_now: bool,
 }
 
 const CHOICES_FILE: &str = "/home/user/.config/osyx/openwith.conf";
@@ -265,8 +267,11 @@ fn main() -> i32 {
     // `files --open-with FILE` opens FILE's folder with its open-with
     // choices (Windows programs ask for that through SHOpenWithDialog).
     let args: Vec<String> = env::args().collect();
+    // `files --open FILE` opens FILE's folder and then the file itself, as
+    // a double click would (the launcher's search does that).
+    let open_now = args.get(1).is_some_and(|a| a == "--open");
     let (start, open_with) = match args.get(1).map(String::as_str) {
-        Some("--open-with") if args.len() > 2 => {
+        Some("--open-with" | "--open") if args.len() > 2 => {
             let full = if args[2].starts_with('/') { args[2].clone() } else { join(&caller_dir, &args[2]) };
             let file = full.trim_end_matches('/');
             let name = file.rsplit('/').next().unwrap_or(file);
@@ -326,6 +331,7 @@ fn main() -> i32 {
         band: None,
         delete_names: Vec::new(),
         open_with,
+        open_now,
     };
     f.navigate(&start, false);
     let spec = WindowSpec::normal(&format!("Files — {}", f.cwd), 860, 540);
@@ -1268,9 +1274,13 @@ impl App for Files {
             if let Some(i) = self.entries.iter().position(|e| e.name == name) {
                 self.list.clear_marks();
                 self.list.select(Some(i));
-                let r = self.list.rect;
-                let fonts = cx.fonts;
-                self.open_context_menu(r.x + r.w as i32 / 3, r.y + 40, &fonts);
+                if self.open_now {
+                    self.open(i, cx);
+                } else {
+                    let r = self.list.rect;
+                    let fonts = cx.fonts;
+                    self.open_context_menu(r.x + r.w as i32 / 3, r.y + 40, &fonts);
+                }
             } else {
                 self.set_status(format!("{name}: not found"), true);
             }
