@@ -5,6 +5,11 @@
 //!
 //! Keys: Up/Down and the wheel scroll, Page Up/Page Down move by a page,
 //! Home/End go to the first/last page, + and - zoom, 0 fits the width.
+//!
+//! Text: Ctrl+F opens the search field; every match in the document is
+//! marked as the pages are searched, Enter (or F3) goes to the next one
+//! and Shift+Enter to the one before. Dragging over a page selects its
+//! text, a double click a word, Ctrl+A the page in view; Ctrl+C copies.
 
 use os_std::mpsc::{self, Sender};
 use os_std::prelude::*;
@@ -12,10 +17,11 @@ use os_std::sync::atomic::{AtomicU64, Ordering};
 use os_std::thread;
 use osyx_gfx::{rgb, Rect};
 use osyx_input::key;
+use osyx_media::pdf::text::PageText;
 use osyx_media::pdf::{Bitmap, Pdf};
 use osyx_ui::layout::{contains, split_top};
-use osyx_ui::widget::{Button, ButtonStyle};
-use osyx_ui::{Align, Event as Ui, FontKind, Painter, Response};
+use osyx_ui::widget::{Button, ButtonStyle, TextField};
+use osyx_ui::{Align, Clipboard, Event as Ui, FontKind, Fonts, Painter, Response};
 
 /// Space between pages and around them, in pixels.
 const GAP: i64 = 14;
@@ -23,8 +29,46 @@ const GAP: i64 = 14;
 const KEEP: usize = 8;
 const FONT_DIR: &str = "/Windows/Fonts";
 
+const F3: u16 = key::F1 + 2;
+/// Page texts kept for selecting.
+const KEEP_TEXT: usize = 16;
+
 /// A page to render at a zoom (pixels per point times 1000).
 type Key = (usize, u32);
+
+/// Work for the thread that owns the document.
+enum Job {
+    Render(Key),
+    /// The text of a page, for selecting.
+    Text(usize),
+    /// Every match of a string in the document.
+    Search(String),
+}
+
+/// One match: its page and its boxes (one per line) in points.
+struct Hit {
+    page: usize,
+    rects: Vec<[f32; 4]>,
+}
+
+#[derive(Default)]
+struct Search {
+    query: String,
+    hits: Vec<Hit>,
+    /// Pages searched so far.
+    pages: usize,
+}
+
+/// Selected characters of one page: where the button went down and where
+/// the pointer is.
+#[derive(Clone, Copy)]
+struct Selection {
+    page: usize,
+    anchor: usize,
+    head: usize,
+    /// A double click took a whole word: the ends are both inside.
+    word: bool,
+}
 
 struct Shared {
     done: Mutex<BTreeMap<Key, Arc<Bitmap>>>,
@@ -34,6 +78,8 @@ struct Shared {
     generation: AtomicU64,
     /// The document itself could not be read.
     error: Mutex<Option<String>>,
+    texts: Mutex<BTreeMap<usize, Arc<PageText>>>,
+    search: Mutex<Search>,
 }
 
 pub struct PdfView {
@@ -41,8 +87,18 @@ pub struct PdfView {
     title: Option<String>,
     sizes: Vec<(f64, f64)>,
     shared: Arc<Shared>,
-    tx: Sender<Key>,
+    tx: Sender<Job>,
     requested: BTreeSet<Key>,
+    text_requested: BTreeSet<usize>,
+    /// The search field, shown after Ctrl+F.
+    find: TextField,
+    finding: bool,
+    /// The match Enter went to last.
+    current: usize,
+    /// Go to the first match when the search finds one.
+    jump: bool,
+    selection: Option<Selection>,
+    dragging: bool,
     seen: u64,
     /// Pixels per point; `fit` recomputes it from the width.
     zoom: f64,
@@ -57,7 +113,7 @@ pub struct PdfView {
     fit_btn: Button,
 }
 
-fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Key>, shared: Arc<Shared>) {
+fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Job>, shared: Arc<Shared>) {
     let pdf = match Pdf::open(data) {
         Ok(p) => p,
         Err(e) => {
@@ -74,7 +130,42 @@ fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Key>, shared: Arc<Shared>) {
             .or_insert_with(|| os_std::fs::read(format!("{FONT_DIR}/{name}")).ok())
             .clone()
     };
-    while let Ok(key) = rx.recv() {
+    while let Ok(job) = rx.recv() {
+        let key = match job {
+            Job::Render(key) => key,
+            Job::Text(page) => {
+                if !shared.texts.lock().unwrap().contains_key(&page) {
+                    let text = Arc::new(pdf.text(page, &lookup));
+                    shared.texts.lock().unwrap().insert(page, text);
+                    shared.generation.fetch_add(1, Ordering::Relaxed);
+                }
+                continue;
+            }
+            Job::Search(query) => {
+                let start = os_std::time::Instant::now();
+                let mut found = 0;
+                for page in 0..pdf.pages() {
+                    // A newer search replaced this one.
+                    if shared.search.lock().unwrap().query != query {
+                        break;
+                    }
+                    let cached = shared.texts.lock().unwrap().get(&page).cloned();
+                    let text = cached.unwrap_or_else(|| Arc::new(pdf.text(page, &lookup)));
+                    let hits: Vec<Hit> = text.find(&query).into_iter().map(|r| Hit { page, rects: text.rects(r) }).collect();
+                    let mut s = shared.search.lock().unwrap();
+                    if s.query != query {
+                        break;
+                    }
+                    found += hits.len();
+                    s.hits.extend(hits);
+                    s.pages = page + 1;
+                    drop(s);
+                    shared.generation.fetch_add(1, Ordering::Relaxed);
+                }
+                println!("files: found {found} of {query:?} in {} pages in {} ms", pdf.pages(), start.elapsed().as_millis());
+                continue;
+            }
+        };
         // Requests for pages scrolled past may already be done.
         if shared.done.lock().unwrap().contains_key(&key) {
             continue;
@@ -107,6 +198,8 @@ impl PdfView {
             failed: Mutex::new(BTreeMap::new()),
             generation: AtomicU64::new(0),
             error: Mutex::new(None),
+            texts: Mutex::new(BTreeMap::new()),
+            search: Mutex::new(Search::default()),
         });
         let (tx, rx) = mpsc::channel();
         let s = shared.clone();
@@ -119,6 +212,17 @@ impl PdfView {
             shared,
             tx,
             requested: BTreeSet::new(),
+            text_requested: BTreeSet::new(),
+            find: {
+                let mut f = TextField::new("");
+                f.placeholder = String::from("Find in the document");
+                f
+            },
+            finding: false,
+            current: 0,
+            jump: false,
+            selection: None,
+            dragging: false,
             seen: 0,
             zoom: 1.0,
             fit: true,
@@ -196,6 +300,8 @@ impl PdfView {
         x -= 120;
         self.prev.rect = Rect::new(x, head.y + 6, 34, 32);
         self.next.rect = Rect::new(x + 86, head.y + 6, 34, 32);
+        let room = (self.prev.rect.x - head.x - 44 - 130).clamp(60, 280);
+        self.find.rect = Rect::new(head.x + 44, head.y + 6, room as u32, 32);
         if self.fit {
             let page = self.current_page();
             self.fit_zoom();
@@ -204,9 +310,169 @@ impl PdfView {
         self.scroll = self.scroll.clamp(0, self.max_scroll());
     }
 
+    /// Where page `i` is in the window: left, top, width, height.
+    fn page_rect(&self, i: usize, tops: &[i64]) -> (i64, i64, i64, i64) {
+        let (pw, ph) = self.sizes[i];
+        let (w, h) = ((pw * self.zoom) as i64, (ph * self.zoom) as i64);
+        let x = self.view.x as i64 + ((self.view.w as i64 - w) / 2).max(GAP);
+        (x, self.view.y as i64 + tops[i] - self.scroll, w, h)
+    }
+
+    /// The page under (`x`, `y`) and the point on it, in points.
+    fn page_at(&self, x: i32, y: i32) -> Option<(usize, f32, f32)> {
+        let (tops, _) = self.layout_pages();
+        (0..self.sizes.len()).find_map(|i| {
+            let (px, py, w, h) = self.page_rect(i, &tops);
+            let inside = (x as i64) >= px && (x as i64) < px + w && (y as i64) >= py && (y as i64) < py + h;
+            inside.then(|| (i, ((x as i64 - px) as f64 / self.zoom) as f32, ((y as i64 - py) as f64 / self.zoom) as f32))
+        })
+    }
+
+    fn page_text(&self, page: usize) -> Option<Arc<PageText>> {
+        self.shared.texts.lock().unwrap().get(&page).cloned()
+    }
+
+    /// The selected characters of the selection's page.
+    fn selected(&self) -> Option<(usize, core::ops::Range<usize>)> {
+        let s = self.selection?;
+        let text = self.page_text(s.page)?;
+        let (a, b) = (s.anchor.min(s.head), s.anchor.max(s.head));
+        if s.word {
+            return Some((s.page, text.word(a).start..text.word(b).end));
+        }
+        // A click without a drag selects nothing.
+        (a != b).then_some((s.page, a..b + 1))
+    }
+
+    /// Starts searching for the field's text.
+    fn search(&mut self) {
+        let query = String::from(self.find.text().trim());
+        let mut s = self.shared.search.lock().unwrap();
+        if s.query == query {
+            return;
+        }
+        *s = Search { query: query.clone(), hits: Vec::new(), pages: 0 };
+        drop(s);
+        self.current = 0;
+        self.jump = !query.is_empty();
+        if !query.is_empty() {
+            let _ = self.tx.send(Job::Search(query));
+        }
+    }
+
+    /// Scrolls match `n` (wrapping) into view.
+    fn show_hit(&mut self, n: i64) {
+        let s = self.shared.search.lock().unwrap();
+        if s.hits.is_empty() {
+            return;
+        }
+        self.current = n.rem_euclid(s.hits.len() as i64) as usize;
+        let hit = &s.hits[self.current];
+        let (page, top) = (hit.page, hit.rects.first().map_or(0.0, |r| r[1]));
+        drop(s);
+        let (tops, _) = self.layout_pages();
+        let y = tops[page] + (top as f64 * self.zoom) as i64;
+        self.scroll = (y - self.view.h as i64 / 3).clamp(0, self.max_scroll());
+    }
+
+    fn close_find(&mut self) {
+        self.finding = false;
+        *self.shared.search.lock().unwrap() = Search::default();
+    }
+
     /// True to redraw; sets `close` when the view should go away.
-    pub fn event(&mut self, ev: &Ui, close: &mut bool) -> bool {
+    pub fn event(&mut self, ev: &Ui, fonts: &Fonts, clipboard: &mut Clipboard, close: &mut bool) -> bool {
         let mut redraw = false;
+        // The search field has the keyboard while it is shown.
+        if self.finding {
+            if let Ui::Key(k) = ev {
+                if k.down && k.key == key::ESCAPE {
+                    self.close_find();
+                    return true;
+                }
+                if k.down && (k.key == key::ENTER || k.key == key::KP_ENTER || k.key == F3) {
+                    self.search();
+                    let step = if k.shift() { -1 } else { 1 };
+                    let at = if self.jump { 0 } else { self.current as i64 + step };
+                    self.show_hit(at);
+                    return true;
+                }
+            }
+            match self.find.event_with_clipboard(ev, true, fonts, clipboard) {
+                Response::Changed => {
+                    self.search();
+                    return true;
+                }
+                Response::Ignored => {}
+                r => {
+                    if matches!(ev, Ui::Key(_)) {
+                        return r.needs_redraw();
+                    }
+                    redraw |= r.needs_redraw();
+                }
+            }
+        }
+        if let Ui::Key(k) = ev {
+            if k.down && k.ctrl() {
+                match k.key {
+                    key::F => {
+                        self.finding = true;
+                        self.find.select_all();
+                        return true;
+                    }
+                    key::C => {
+                        if let Some((page, range)) = self.selected() {
+                            if let Some(text) = self.page_text(page) {
+                                clipboard.set(&text.string(range));
+                            }
+                        }
+                        return false;
+                    }
+                    key::A => {
+                        let page = self.current_page();
+                        if let Some(text) = self.page_text(page) {
+                            if !text.is_empty() {
+                                self.selection = Some(Selection { page, anchor: 0, head: text.chars.len() - 1, word: false });
+                            }
+                        }
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Selecting text with the pointer.
+        match *ev {
+            Ui::PointerDown { x, y, button: 1, clicks } if contains(&self.view, x, y) => {
+                let before = self.selection.is_some();
+                self.selection = None;
+                self.dragging = false;
+                if let Some((page, px, py)) = self.page_at(x, y) {
+                    if let Some(at) = self.page_text(page).and_then(|t| t.nearest(px, py)) {
+                        self.selection = Some(Selection { page, anchor: at, head: at, word: clicks >= 2 });
+                        self.dragging = true;
+                    }
+                }
+                redraw |= before || clicks >= 2;
+            }
+            Ui::PointerMove { x, y } if self.dragging => {
+                if let Some(mut s) = self.selection {
+                    // Outside the page the nearest character still counts.
+                    let (tops, _) = self.layout_pages();
+                    let (px, py, _, _) = self.page_rect(s.page, &tops);
+                    let point = (((x as i64 - px) as f64 / self.zoom) as f32, ((y as i64 - py) as f64 / self.zoom) as f32);
+                    if let Some(at) = self.page_text(s.page).and_then(|t| t.nearest(point.0, point.1)) {
+                        if at != s.head {
+                            s.head = at;
+                            self.selection = Some(s);
+                            redraw = true;
+                        }
+                    }
+                }
+            }
+            Ui::PointerUp { button: 1, .. } => self.dragging = false,
+            _ => {}
+        }
         for id in 0..6 {
             let b = match id {
                 0 => &mut self.close,
@@ -257,10 +523,18 @@ impl PdfView {
             Ui::Key(k) if k.down => match k.key {
                 key::DOWN => self.scroll += step,
                 key::UP => self.scroll -= step,
+                F3 => {
+                    self.show_hit(self.current as i64 + if k.shift() { -1 } else { 1 });
+                    return true;
+                }
                 key::PAGE_DOWN | key::SPACE => self.scroll += page_step,
                 key::PAGE_UP => self.scroll -= page_step,
                 key::HOME => self.scroll = 0,
                 key::END => self.scroll = max,
+                key::ESCAPE if self.selection.is_some() => {
+                    self.selection = None;
+                    return true;
+                }
                 key::ESCAPE => {
                     *close = true;
                     return true;
@@ -295,6 +569,11 @@ impl PdfView {
         let g = self.shared.generation.load(Ordering::Relaxed);
         let changed = g != self.seen;
         self.seen = g;
+        // The first match of a new search, as soon as there is one.
+        if changed && self.jump && !self.shared.search.lock().unwrap().hits.is_empty() {
+            self.show_hit(0);
+            self.jump = false;
+        }
         changed
     }
 
@@ -310,7 +589,22 @@ impl PdfView {
         osyx_ui::icon::draw(p, osyx_ui::Icon::TextFile, Rect::new(head.x + 14, head.y + 12, 20, 20), t.text_dim);
         let name = self.title.clone().unwrap_or_else(|| self.path.clone());
         let title_w = (self.prev.rect.x - head.x - 56).max(40) as u32;
-        p.text_in(FontKind::Bold, Rect::new(head.x + 44, head.y, title_w, head.h), &name, t.text, Align::Left);
+        if self.finding {
+            self.find.draw(p, true);
+            let s = self.shared.search.lock().unwrap();
+            let count = if s.query.is_empty() {
+                String::new()
+            } else if s.hits.is_empty() {
+                if s.pages < self.sizes.len() { format!("searching, page {}", s.pages + 1) } else { String::from("not found") }
+            } else {
+                format!("{} of {}{}", self.current.min(s.hits.len() - 1) + 1, s.hits.len(), if s.pages < self.sizes.len() { "+" } else { "" })
+            };
+            drop(s);
+            let at = self.find.rect.right() as i32 + 10;
+            p.text_in(FontKind::Ui, Rect::new(at, head.y, (self.prev.rect.x - at - 8).max(0) as u32, head.h), &count, t.text_dim, Align::Left);
+        } else {
+            p.text_in(FontKind::Bold, Rect::new(head.x + 44, head.y, title_w, head.h), &name, t.text, Align::Left);
+        }
         let page = self.current_page();
         let label = format!("{} / {}", page + 1, self.sizes.len());
         p.text_in(
@@ -344,8 +638,35 @@ impl PdfView {
             // A soft shadow under the page.
             p.blend(Rect::new(page_rect.x + 2, page_rect.y + 3, page_rect.w, page_rect.h), rgb(0, 0, 0), 40);
             let bmp = self.shared.done.lock().unwrap().get(&(i, zk)).cloned();
+            // A box in points on this page, in the window.
+            let zoom = self.zoom;
+            let place = |r: &[f32; 4]| {
+                let (x0, y0) = ((r[0] as f64 * zoom) as i32, (r[1] as f64 * zoom) as i32);
+                let (x1, y1) = ((r[2] as f64 * zoom + 0.999) as i32, (r[3] as f64 * zoom + 0.999) as i32);
+                Rect::new(page_rect.x + x0, page_rect.y + y0, (x1 - x0).max(1) as u32, (y1 - y0).max(1) as u32).intersect(&page_rect)
+            };
             match bmp {
-                Some(b) => blit(p, &b, page_rect.x, page_rect.y),
+                Some(b) => {
+                    blit(p, &b, page_rect.x, page_rect.y);
+                    // Matches in yellow, the one Enter went to in orange.
+                    let s = self.shared.search.lock().unwrap();
+                    for (n, hit) in s.hits.iter().enumerate().filter(|(_, h)| h.page == i) {
+                        let (colour, alpha) = if n == self.current { (rgb(255, 136, 0), 120) } else { (rgb(255, 214, 0), 100) };
+                        for r in &hit.rects {
+                            p.blend(place(r), colour, alpha);
+                        }
+                    }
+                    drop(s);
+                    if let Some((page, range)) = self.selected() {
+                        if page == i {
+                            if let Some(text) = self.page_text(i) {
+                                for r in text.rects(range) {
+                                    p.blend(place(&r), t.accent, 90);
+                                }
+                            }
+                        }
+                    }
+                }
                 None => {
                     p.fill(page_rect, rgb(255, 255, 255));
                     let failed = self.shared.failed.lock().unwrap().get(&(i, zk)).cloned();
@@ -375,9 +696,23 @@ impl PdfView {
                 || self.shared.failed.lock().unwrap().contains_key(&k);
             if !settled && !self.requested.contains(&k) {
                 self.requested.insert(k);
-                let _ = self.tx.send(k);
+                let _ = self.tx.send(Job::Render(k));
+            }
+            // The text of the pages in view, for selecting.
+            if self.text_requested.insert(i) {
+                let _ = self.tx.send(Job::Text(i));
             }
         }
+        let mut texts = self.shared.texts.lock().unwrap();
+        if texts.len() > KEEP_TEXT {
+            let selected = self.selection.map(|s| s.page);
+            let drop: Vec<usize> = texts.keys().filter(|k| !visible.contains(k) && Some(**k) != selected).copied().collect();
+            for k in drop.into_iter().take(texts.len() - KEEP_TEXT) {
+                texts.remove(&k);
+                self.text_requested.remove(&k);
+            }
+        }
+        drop(texts);
         let mut done = self.shared.done.lock().unwrap();
         if done.len() > KEEP {
             let keep: BTreeSet<Key> = visible.iter().map(|&i| (i, zk)).collect();

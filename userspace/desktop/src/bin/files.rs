@@ -1370,7 +1370,7 @@ impl App for Files {
         }
         if let Some(v) = &mut self.pdf {
             let mut close = false;
-            let redraw = v.event(&ev, &mut close);
+            let redraw = v.event(&ev, &cx.fonts, &mut cx.clipboard, &mut close);
             if close {
                 self.pdf = None;
                 let n = self.entries.len();

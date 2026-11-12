@@ -294,6 +294,26 @@ background in both themes.
 
 ![The light theme](screenshots/light-theme.jpg)
 
+### Text in PDF files
+
+The PDF viewer built into Files searches and selects text. Ctrl+F opens a
+search field: every match in the document is marked as its pages are
+searched on the viewer's thread, the count is shown, Enter or F3 goes to
+the next match and Shift+Enter to the one before; Escape closes the field.
+Dragging over a page selects its text, a double click a word, Ctrl+A the
+page in view; Ctrl+C copies the selection.
+
+`osyx_media::pdf::Pdf::text` runs a page's content without painting and
+keeps each glyph's text and box (`pdf::text::PageText`). The text of a
+glyph comes from the font's ToUnicode map, else its glyph name, else the
+embedded font's own character map read backwards. Characters stay in the
+order the page draws them; a space is added where the page leaves a gap
+and a line break where the text moves to another line. Invisible text
+counts, so scanned pages with a text layer can be searched. Searching
+ignores case, and a space matches a line break.
+
+![Searching a PDF](screenshots/pdf-search.jpg)
+
 ### Screenshots and screen recording
 
 PrintScreen belongs to PRISM, whichever window has the focus:

@@ -208,6 +208,10 @@ pub struct Renderer<'a> {
     depth: u32,
     /// Operators executed (to bound pathological files).
     ops: u64,
+    /// Glyphs shown, in device pixels, when text is being collected.
+    pub text: Option<Vec<super::text::RawGlyph>>,
+    /// Only the text is wanted: nothing is painted and no image decoded.
+    pub text_only: bool,
 }
 
 fn n(o: &[Object], i: usize) -> f64 {
@@ -257,6 +261,8 @@ impl<'a> Renderer<'a> {
             font_by_ref: BTreeMap::new(),
             depth: 0,
             ops: 0,
+            text: None,
+            text_only: false,
         })
     }
 
@@ -574,11 +580,16 @@ impl<'a> Renderer<'a> {
             font_by_ref: BTreeMap::new(),
             depth: self.depth + 1,
             ops: 0,
+            text: None,
+            text_only: self.text_only,
         }
     }
 
     /// Fills a device-space path with `paint`.
     fn paint_path(&mut self, path: &Path, rule: Rule, stroke: Option<StrokeStyle>, paint: &Paint, alpha: f32) {
+        if self.text_only {
+            return;
+        }
         let clip = self.gs.clip.clone();
         let clip = clip.as_deref();
         let mut f = paint_fn(paint);
@@ -958,7 +969,19 @@ impl<'a> Renderer<'a> {
         for (code, k) in font.decode(s) {
             let trm = Matrix([size * h, 0.0, 0.0, size, 0.0, self.gs.rise]).then(&self.tm).then(&self.gs.ctm);
             let w0 = if font.type3.is_some() { font.width(k) * font.matrix[0] } else { font.width(k) / 1000.0 };
-            if mode != 3 && mode != 7 {
+            if let Some(out) = &mut self.text {
+                // Invisible text (mode 3) counts: it is what scanned
+                // pages carry under their picture.
+                let text = font.unicode(code, k);
+                if !text.is_empty() {
+                    let (descent, ascent) = (-0.2, 0.8);
+                    let corners = [trm.apply(0.0, descent), trm.apply(w0, descent), trm.apply(w0, ascent), trm.apply(0.0, ascent)];
+                    out.push(super::text::RawGlyph { text, corners });
+                }
+            }
+            if self.text_only {
+                // Only the advance below matters.
+            } else if mode != 3 && mode != 7 {
                 if font.type3.is_some() {
                     self.type3_glyph(&font, code, &trm);
                 } else if let Some(g) = font.glyph(k) {
@@ -1020,6 +1043,7 @@ impl<'a> Renderer<'a> {
     fn xobject(&mut self, x: &Object) {
         let Object::Stream(s) = self.doc.resolve(x) else { return };
         match self.doc.get_key(&s.dict, "Subtype").as_name() {
+            Some(b"Image") if self.text_only => {}
             Some(b"Image") => {
                 let res_space = |o: &Object| -> Option<Space> { o.as_name().map(|_| Space::Gray) };
                 let cs = s.dict.get(&b"ColorSpace"[..]).cloned();
