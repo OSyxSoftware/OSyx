@@ -139,6 +139,8 @@ pub const PAGE_KEYBOARD: u16 = 0x07;
 pub const PAGE_BUTTON: u16 = 0x09;
 pub const PAGE_CONSUMER: u16 = 0x0C;
 pub const USAGE_MOUSE: u16 = 0x02;
+/// Usage pages from here on are vendor-defined.
+pub const PAGE_VENDOR: u16 = 0xFF00;
 pub const USAGE_X: u16 = 0x30;
 pub const USAGE_Y: u16 = 0x31;
 pub const USAGE_WHEEL: u16 = 0x38;
@@ -200,8 +202,8 @@ pub enum ParseError {
     BadNesting,
     /// Push/Pop imbalance.
     BadStack,
-    /// A report larger than any device's (megabytes), or a report id out
-    /// of range.
+    /// A report larger than any device's (megabytes), more controls than
+    /// the parser keeps, or a report id out of range.
     TooLarge,
 }
 
@@ -285,7 +287,8 @@ pub fn parse_report_descriptor(desc: &[u8]) -> Result<Vec<Field>, ParseError> {
                 if g.report_count > 0x1_0000 || (g.report_size as u64) * (g.report_count as u64) > 0x40_0000 {
                     return Err(ParseError::TooLarge);
                 }
-                let skipped = g.report_size > 32 || g.report_count > MAX_COUNT;
+                // Vendor pages mean nothing to any driver here.
+                let skipped = g.report_size > 32 || g.report_count > MAX_COUNT || g.page >= PAGE_VENDOR;
                 let pos = match offsets.iter_mut().find(|(id, _)| *id == g.report_id) {
                     Some((_, off)) => off,
                     None => {
@@ -307,9 +310,14 @@ pub fn parse_report_descriptor(desc: &[u8]) -> Result<Vec<Field>, ParseError> {
                     *pos = pos.checked_add(g.report_size * g.report_count).ok_or(ParseError::TooLarge)?;
                 }
                 for n in 0..if skipped { 0 } else { g.report_count } {
-                    // The pointer and key usages come first in every
-                    // descriptor seen; what does not fit is left out.
-                    if !constant && fields.len() < MAX_FIELDS {
+                    if !constant {
+                        // Controls beyond the limit are not dropped
+                        // quietly: a pointer without its buttons would be
+                        // worse than the boot protocol the caller falls
+                        // back to.
+                        if fields.len() >= MAX_FIELDS {
+                            return Err(ParseError::TooLarge);
+                        }
                         let (page, usage) = if variable {
                             all.get(n as usize).or(all.last()).copied().unwrap_or((g.page, 0))
                         } else {
@@ -811,8 +819,25 @@ mod tests {
         assert_eq!(r, MouseReport { buttons: 0b101, dx: -300, dy: 2, wheel: -1, pan: 1 });
         // The other functions' reports are not the pointer's.
         assert_eq!(l.decode(&[2, 0, 0, 0]), Err(ReportError::UnknownReportId));
-        // The key bitmap and the data blocks are not recorded field by field.
-        assert!(fields.iter().all(|f| f.report_id == 1), "{} fields", fields.len());
+        // The key bitmap and the data blocks are not recorded field by
+        // field, and neither is the vendor byte in the mouse's report.
+        assert!(fields.iter().all(|f| f.report_id == 1 && f.page < PAGE_VENDOR), "{} fields", fields.len());
+        // Vendor items of any number do not use up the room for controls
+        // declared after them: X and Y first, 600 vendor fields in three
+        // items, then the buttons, all in one report.
+        #[rustfmt::skip]
+        let late_buttons: Vec<u8> = [
+            &[0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06][..],
+            &[0x06, 0x00, 0xFF, 0x09, 0x01, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0xC8, 0x81, 0x02].repeat(3)[..],
+            &[0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x75, 0x01, 0x95, 0x03, 0x81, 0x02, 0xC0][..],
+        ]
+        .concat();
+        let l = MouseLayout::from_fields(&parse_report_descriptor(&late_buttons).unwrap()).unwrap();
+        assert_eq!(l.buttons.len(), 3);
+        assert_eq!(l.buttons[0].1.offset, 16 + 600);
+        // More controls than are kept is an error, not a shorter list.
+        let many: Vec<u8> = [0x05u8, 0x09, 0x19, 0x01, 0x29, 0x20, 0x75, 0x01, 0x95, 0x80, 0x81, 0x02].repeat(5);
+        assert_eq!(parse_report_descriptor(&many), Err(ParseError::TooLarge));
     }
 
     #[test]
