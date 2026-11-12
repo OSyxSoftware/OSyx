@@ -161,18 +161,22 @@ impl fmt::Display for Endpoint {
     }
 }
 
+#[inline]
 pub fn be16(b: &[u8], off: usize) -> u16 {
     u16::from_be_bytes([b[off], b[off + 1]])
 }
 
+#[inline]
 pub fn be32(b: &[u8], off: usize) -> u32 {
     u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
+#[inline]
 pub fn put16(b: &mut [u8], off: usize, v: u16) {
     b[off..off + 2].copy_from_slice(&v.to_be_bytes());
 }
 
+#[inline]
 pub fn put32(b: &mut [u8], off: usize, v: u32) {
     b[off..off + 4].copy_from_slice(&v.to_be_bytes());
 }
