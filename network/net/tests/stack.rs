@@ -1002,6 +1002,8 @@ fn the_sender_waits_for_a_full_segment_instead_of_filling_the_window_bytewise() 
         window: 65535,
         mss: Some(1460),
         ws: None,
+        sack_permitted: false,
+        sack: osyx_net::tcp::SackBlocks::NONE,
         payload: &[],
     };
     t.input(&seg(1001, SYN | ACK), 1);
