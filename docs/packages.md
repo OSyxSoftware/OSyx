@@ -76,7 +76,8 @@ numbers, ordered as for system updates.
 
 Over plain HTTP, someone on the network path can still answer with an
 older signed list together with its packages; use an HTTPS repository to
-rule that out.
+rule that out. A redirect from an HTTPS repository to plain HTTP is refused
+before the HTTP request is made.
 
 What is installed is recorded in `/var/lib/osyx/pkg/<name>.txt` (the
 manifest). An upgrade removes the files the new version no longer has;
@@ -86,10 +87,9 @@ can be tried again. Files of an older version that would not go are listed
 in `<name>.stale` and tried again by every `install`, `upgrade` and
 `remove`, also when the package is already up to date.
 
-One `pkg` changes what is installed at a time. The lock
-`/var/lib/osyx/pkg/.lock` names the process that holds it; it is taken over
-only when that process is no longer a running `pkg`, however long ago it
-was made, and a `pkg` removes only its own lock.
+One `pkg` changes what is installed at a time. The lock is a service name
+held in the kernel (`pkg-lock`), not a file: it is free again the moment
+its holder ends, however it ends.
 
 ## Publishing
 

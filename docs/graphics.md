@@ -204,7 +204,10 @@ file that is not UTF-8 opens read-only; files above 8 MiB are refused. Files
 offers it under "Open with" for text and source files. A save writes a new
 file beside the old one (made for that save only, private until it is
 complete) and renames it into place; through a symbolic link, the file the
-link names is saved and the link stays.
+link names is saved and the link stays. Where no file can be made beside it
+(a folder that is not writable, a file of another user), the editor asks
+before it writes the file in place, since a failure there loses the old
+contents.
 
 ![Text Editor with an AXIS script](screenshots/editor.jpg)
 

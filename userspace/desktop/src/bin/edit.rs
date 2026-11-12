@@ -40,9 +40,17 @@ os_std::entry!(main);
 ///   file or link), readable by its owner alone until it holds everything
 ///   and has the permissions of the file it replaces.
 /// - Where that cannot be done (a folder the user may not write, or a file
-///   of someone else's, which a rename would make the user's), the file is
-///   written in place.
-fn write_whole(path: &str, data: &[u8]) -> Result<(), Error> {
+///   of someone else's, which a rename would make the user's), the file
+///   can only be written in place, where a failure half way loses the old
+///   contents. That is done only with `in_place`, which the user grants;
+///   otherwise the answer is [`Save::NeedsInPlace`] and nothing is touched.
+enum Save {
+    Done,
+    NeedsInPlace,
+}
+
+fn write_whole(path: &str, data: &[u8], in_place: bool) -> Result<Save, Error> {
+    let direct = |target: &str| if in_place { fs::write(target, data).map(|()| Save::Done) } else { Ok(Save::NeedsInPlace) };
     let target = match fs::symlink_metadata(path) {
         Ok(_) => String::from(fs::canonicalize(path)?.as_str()),
         Err(e) if e.kind() == ErrorKind::NotFound => String::from(path),
@@ -50,8 +58,9 @@ fn write_whole(path: &str, data: &[u8]) -> Result<(), Error> {
     };
     let old = fs::metadata(&target).ok();
     if old.as_ref().is_some_and(|m| m.uid() != os_std::os::getuid().0) {
-        return fs::write(&target, data);
+        return direct(&target);
     }
+    let existed = old.is_some();
     let mode = old.map_or(0o644, |m| m.permissions().mode());
     // No two saves share a name, and a name someone made first is not
     // used: "create new" follows no link and replaces nothing.
@@ -68,7 +77,9 @@ fn write_whole(path: &str, data: &[u8]) -> Result<(), Error> {
                 break;
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
-            Err(_) => return fs::write(&target, data),
+            // A file that does not exist yet has nothing to lose.
+            Err(e) if !existed => return Err(e),
+            Err(_) => return direct(&target),
         }
     }
     let Some((mut file, tmp)) = made else {
@@ -80,7 +91,7 @@ fn write_whole(path: &str, data: &[u8]) -> Result<(), Error> {
     if done.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    done
+    done.map(|()| Save::Done)
 }
 
 /// Larger files are refused: the editor keeps the whole text in memory.
@@ -94,6 +105,7 @@ const D_FIND: u32 = 3;
 const D_DISCARD: u32 = 4;
 const D_ERROR: u32 = 5;
 const D_OVERWRITE: u32 = 6;
+const D_IN_PLACE: u32 = 7;
 
 /// What to do once unsaved changes are dealt with.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -206,6 +218,9 @@ struct Editor {
     then: Option<Then>,
     /// The Save as path waiting for the answer to "replace it?".
     replacing: Option<String>,
+    /// A file the user allowed to be written in place, and one to ask about.
+    in_place: Option<String>,
+    ask_in_place: Option<String>,
     needle: String,
     message: String,
     size: (u32, u32),
@@ -233,6 +248,8 @@ impl Editor {
             dialog: None,
             then: None,
             replacing: None,
+            in_place: None,
+            ask_in_place: None,
             needle: String::new(),
             message: String::new(),
             size: (0, 0),
@@ -309,7 +326,15 @@ impl Editor {
         if self.crlf {
             text = text.replace('\n', "\r\n");
         }
-        write_whole(&path, text.as_bytes()).map_err(|e| format!("{path} cannot be written: {e}."))?;
+        let in_place = self.in_place.take().is_some_and(|granted| granted == path);
+        match write_whole(&path, text.as_bytes(), in_place).map_err(|e| format!("{path} cannot be written: {e}."))? {
+            Save::Done => {}
+            Save::NeedsInPlace => {
+                // `error` asks instead of reporting.
+                self.ask_in_place = Some(path.clone());
+                return Err(format!("{path} can only be written in place."));
+            }
+        }
         self.area.mark_saved();
         self.set_language(Language::of(&path, self.area.line(0)));
         self.message = format!("Saved {} bytes", text.len());
@@ -331,6 +356,16 @@ impl Editor {
     }
 
     fn error(&mut self, text: &str) {
+        if let Some(path) = self.ask_in_place.take() {
+            self.dialog = Some(Dialog::new(
+                D_IN_PLACE,
+                "Save",
+                &format!("{path} cannot be replaced by a new file (its folder is not writable, or the file is not yours). It can be written in place: if that fails half way, its old contents are lost. Write it in place?"),
+                &[("Cancel", ButtonStyle::Secondary), ("Write in place", ButtonStyle::Danger)],
+            ));
+            self.replacing = Some(path);
+            return;
+        }
         self.dialog = Some(Dialog::new(D_ERROR, "Text Editor", text, &[("Close", ButtonStyle::Primary)]));
     }
 
@@ -437,6 +472,12 @@ impl Editor {
             }
             (D_OVERWRITE, 1) => {
                 if let Some(to) = self.replacing.take() {
+                    self.save_then(&to, cx);
+                }
+            }
+            (D_IN_PLACE, 1) => {
+                if let Some(to) = self.replacing.take() {
+                    self.in_place = Some(to.clone());
                     self.save_then(&to, cx);
                 }
             }

@@ -78,79 +78,24 @@ fn no_downgrade(secure: bool, from: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// One `pkg` changes what is installed at a time: the lock is a file made
-/// with "create new" that names its owner, and removed when the work is
-/// done. A lock is taken over only when its owner is no longer running,
-/// however old it is: an installation may take long.
-struct Lock {
-    /// What this process wrote into the file.
-    token: String,
-}
+/// One `pkg` changes what is installed at a time. The lock is a service
+/// name held in the kernel, which only one process can have and which is
+/// free again the moment its holder ends, however it ends: there is no
+/// lock file to go stale and nothing to take over.
+struct Lock(#[allow(dead_code)] os_std::ipc::Listener);
 
-/// Whether process `pid` is a running `pkg`. `None`: it cannot be told.
-fn pkg_runs(pid: u64) -> Option<bool> {
-    let all = os_std::system::processes().ok()?;
-    match all.iter().find(|p| p.pid == pid) {
-        Some(p) => Some(p.state == os_std::system::PROC_RUNNING && os_std::system::process_name(p).ends_with("pkg")),
-        // A full list may have left it out.
-        None if all.len() >= 128 => None,
-        None => Some(false),
-    }
-}
+/// The service name that is the lock.
+const LOCK_NAME: &str = "pkg-lock";
 
 impl Lock {
     fn take() -> Result<Lock, String> {
         fs::create_dir_all(DB).map_err(|e| format!("{DB}: {e}"))?;
-        let pid = os_std::process::id().map_err(|e| format!("{e}"))?;
-        let nanos = os_std::time::SystemTime::now().duration_since(os_std::time::SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let token = format!("{pid} {nanos}\n");
-        let busy = || format!("another pkg is installing or removing ({LOCK} exists); try again when it is done");
-        for _ in 0..2 {
-            match fs::OpenOptions::new().write(true).create_new(true).open(LOCK) {
-                Ok(mut f) => {
-                    if let Err(e) = f.write_all(token.as_bytes()).and_then(|()| f.sync_all()) {
-                        drop(f);
-                        let _ = fs::remove_file(LOCK);
-                        return Err(format!("{LOCK}: {e}"));
-                    }
-                    return Ok(Lock { token });
-                }
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                    // The owner writes its name right after making the
-                    // file: an empty one is given a moment.
-                    let mut held = String::new();
-                    for _ in 0..10 {
-                        held = fs::read_to_string(LOCK).unwrap_or_default();
-                        if held.ends_with('\n') {
-                            break;
-                        }
-                        os_std::thread::sleep(os_std::time::Duration::from_millis(50));
-                    }
-                    let owner = held.split_whitespace().next().and_then(|p| p.parse::<u64>().ok());
-                    let Some(owner) = owner.filter(|_| held.ends_with('\n')) else {
-                        return Err(format!("{LOCK} does not say whose it is; remove it when no pkg is running"));
-                    };
-                    if owner != pid && pkg_runs(owner) != Some(false) {
-                        return Err(busy());
-                    }
-                    // Its owner died. Removed only if it is still that
-                    // lock: another pkg may have taken it over meanwhile.
-                    if fs::read_to_string(LOCK).is_ok_and(|now| now == held) {
-                        let _ = fs::remove_file(LOCK);
-                    }
-                }
-                Err(e) => return Err(format!("{LOCK}: {e}")),
-            }
-        }
-        Err(busy())
-    }
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        // Only this process's own lock.
-        if fs::read_to_string(LOCK).is_ok_and(|held| held == self.token) {
-            let _ = fs::remove_file(LOCK);
+        // The lock file of earlier versions means nothing any more.
+        let _ = fs::remove_file(LOCK);
+        match os_std::ipc::Listener::listen(LOCK_NAME) {
+            Ok(held) => Ok(Lock(held)),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(String::from("another pkg is installing or removing; try again when it is done")),
+            Err(e) => Err(format!("the pkg lock cannot be taken: {e}")),
         }
     }
 }
@@ -179,7 +124,15 @@ fn clear_stale(name: &str, more: &[String], live: &[String]) -> Vec<String> {
     if paths.is_empty() {
         let _ = fs::remove_file(&list);
     } else {
-        let _ = fs::write(&list, paths.join("\n") + "\n");
+        // Beside the list first, so that a failure keeps the old one; a
+        // list that cannot be kept is said and logged, since nothing else
+        // remembers these files.
+        let tmp = format!("{list}{STAGED}");
+        let kept = fs::write(&tmp, paths.join("\n") + "\n").and_then(|()| fs::rename(&tmp, &list));
+        if let Err(e) = kept {
+            let _ = fs::remove_file(&tmp);
+            say(&format!("pkg: {name}: {list} cannot be written ({e}); remove by hand: {}", paths.join(", ")));
+        }
     }
     paths
 }
@@ -204,7 +157,7 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
         }
     }
     let mut b = Buf(Vec::new(), url.starts_with("https://"));
-    osyx_web::get(url, &mut b).map_err(|e| format!("{url}: {e}"))?;
+    osyx_web::get_no_downgrade(url, &mut b).map_err(|e| format!("{url}: {e}"))?;
     Ok(b.0)
 }
 
@@ -282,7 +235,7 @@ fn download_payload(url: &str, path: &str, size: u64, sha256: &[u8; 32]) -> Resu
     }
     let file = fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
     let mut sink = Limited { file, hash: Sha256::new(), left: size, secure: url.starts_with("https://") };
-    let result = osyx_web::get(url, &mut sink).map_err(|e| format!("{url}: {e}")).and_then(|_| {
+    let result = osyx_web::get_no_downgrade(url, &mut sink).map_err(|e| format!("{url}: {e}")).and_then(|_| {
         if sink.left != 0 {
             return Err(format!("the payload is {} bytes short", sink.left));
         }
