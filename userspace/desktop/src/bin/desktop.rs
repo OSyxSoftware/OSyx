@@ -1537,8 +1537,19 @@ impl Shell {
 
     /// System programs that need root (Setup writes whole disks) and are
     /// started without run-app's drop to the desktop user. Matched exactly,
-    /// so a user-edited shortcut can start them but cannot add arguments.
+    /// so a user-edited shortcut can start them but cannot add arguments:
+    /// the only argument passed on is a section of Settings the launcher's
+    /// search knows ([`Self::privileged_args`]).
     const PRIVILEGED: &'static [&'static str] = &["/system/bin/setup", "/system/bin/settings"];
+
+    /// The arguments a root program gets: none, except one known section
+    /// name for Settings. Whatever else a shortcut asks for is dropped.
+    fn privileged_args<'a>(exec: &str, args: &'a [String]) -> &'a [String] {
+        match args {
+            [section] if exec == SETTINGS_APP && osyx_filekit::search::SETTINGS.iter().any(|s| s.section == section.as_str()) => args,
+            _ => &[],
+        }
+    }
 
     fn launch(&mut self, name: &str, exec: &str) {
         self.launch_with(name, exec, &[], "", false);
@@ -1562,7 +1573,7 @@ impl Shell {
         }
         let command = if Self::PRIVILEGED.contains(&exec) {
             let mut c = Command::new(exec);
-            c.args(args);
+            c.args(Self::privileged_args(exec, args));
             c
         } else {
             let mut c = Command::new("/system/bin/run-app");

@@ -1791,6 +1791,10 @@ impl Compositor {
     }
 
     fn pointer_wheel(&mut self, v: i32, h: i32) {
+        // Choosing an area for a screenshot scrolls nothing.
+        if self.selecting.is_some() {
+            return;
+        }
         let target = match self.grab {
             Some(Grab::Content { win }) => Some(win),
             _ => match self.hover {

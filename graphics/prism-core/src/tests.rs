@@ -113,6 +113,7 @@ fn print_screen_asks_for_the_screen_the_window_or_a_dragged_area() {
     h.move_to(rect.x + 40, rect.y + 30);
     h.input(kind::BUTTON, 1, 1, 0, 0);
     h.move_to(rect.x + 10, rect.y + 90);
+    h.input(kind::WHEEL, 0, 1, 0, 0);
     h.render();
     let accent = theme::Palette::DARK.accent & 0x00ff_ffff;
     assert_eq!(h.px(rect.x + 20, rect.y + 29) & 0x00ff_ffff, accent, "outline above the area");
