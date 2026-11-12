@@ -178,7 +178,18 @@ window list) is granted only to the process PRISM started as the shell.
 | AXIS Terminal | `/system/bin/terminal` | user 1000 |
 | Files | `/system/bin/files` | user 1000 |
 | System Information | `/system/bin/sysinfo` | user 1000 |
+| Text Editor | `/system/bin/edit [file]` | user 1000 |
 | AXIS shell | `/bin/axis` | user 1000 (child of the terminal) |
+
+Text Editor edits UTF-8 text with the toolkit's multi-line `TextArea`
+(`graphics/ui/src/widget/text_area.rs`: selection, clipboard, undo and redo,
+line numbers, find). AXIS scripts are coloured by the shell's own tokenizer
+(`osyx_shell::highlight`), other source and configuration files by their
+comments, strings and numbers. Line ends are kept as found (LF or CRLF); a
+file that is not UTF-8 opens read-only; files above 8 MiB are refused. Files
+offers it under "Open with" for text and source files.
+
+![Text Editor with an AXIS script](screenshots/editor.jpg)
 
 The shell draws the wallpaper (`/system/share/wallpapers/default.osxi`,
 converted at build time from `graphics/assets/wallpaper/osyx-default.png` by

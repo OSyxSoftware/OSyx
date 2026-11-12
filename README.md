@@ -42,7 +42,7 @@ and desktop, and a compatibility layer that runs Windows PE32+ programs.
   ring-3 sockets; HTTPS (rustls) for downloads and updates; Wi-Fi with WPA2.
 - **Desktop**: PRISM, a compositor running as an ordinary process, with a
   panel, launcher, quick settings, notifications, desktop shortcuts and
-  native applications (Files, AXIS Terminal, Settings, Task Manager, System
+  native applications (Files, AXIS Terminal, Text Editor, Settings, Task Manager, System
   Information, OSyx Setup).
 - **Windows programs**: `winrun` loads PE32+ programs and DLLs with
   original implementations of a subset of ntdll, kernel32, user32/gdi32,

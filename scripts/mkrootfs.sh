@@ -87,9 +87,13 @@ chmod 0755 "$R/system/share/wallpapers"
 printf 'CET-1CEST,M3.5.0,M10.5.0/3\n' > "$R/etc/TZ"
 printf 'us\n' > "$R/etc/osyx/keyboard"
 # Applications the launcher offers (only those whose program is installed).
-app() { # file name exec icon comment
+app() { # file name exec icon comment [handles]
     if [ -f "$R$3" ]; then
         printf 'Name=%s\nExec=%s\nIcon=%s\nComment=%s\n' "$2" "$3" "$4" "$5" > "$R/system/share/applications/$1.app"
+        # Extensions and kinds Files offers this application for.
+        if [ -n "${6:-}" ]; then
+            printf 'Handles=%s\n' "$6" >> "$R/system/share/applications/$1.app"
+        fi
     fi
 }
 app 10-terminal "AXIS Terminal" /system/bin/terminal terminal "Run commands in the AXIS shell"
@@ -97,7 +101,8 @@ app 20-files "Files" /system/bin/files files "Browse and manage files on every m
 app 30-sysinfo "System Information" /system/bin/sysinfo info "Version, processor, memory, volumes and processes"
 app 40-taskmgr "Task Manager" /system/bin/taskmgr info "Processes, CPU, memory, disk and network performance"
 app 50-settings "Settings" /system/bin/settings info "Configure appearance, keyboard, time and networking"
-app 60-textedit "Text Editor" /opt/apps/textedit.exe info "Edit UTF-8 text with the Win32 application"
+app 55-edit "Text Editor" /system/bin/edit text "Edit text, source files and AXIS scripts" "text,source,ax"
+app 60-textedit "Text Editor (Win32)" /opt/apps/textedit.exe info "Edit UTF-8 text with the Win32 application"
 app 70-diskutil "Disk Utility" /opt/apps/diskutil.exe info "Mounted volumes and directory usage"
 app 80-devmgr "Device Manager" /opt/apps/devmgr.exe info "Devices reported by OSyx"
 app 90-netcenter "Network Center" /opt/apps/netcenter.exe info "Network adapters, traffic, ping and DNS"

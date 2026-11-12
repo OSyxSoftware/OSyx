@@ -10,6 +10,7 @@
 extern crate alloc;
 
 pub mod block;
+pub mod highlight;
 
 use alloc::string::String;
 use alloc::vec::Vec;

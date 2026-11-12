@@ -254,6 +254,7 @@ pub fn icon_by_name(name: &str) -> Icon {
         "terminal" => Icon::Terminal,
         "files" | "folder" => Icon::Folder,
         "info" | "sysinfo" => Icon::Info,
+        "text" | "edit" => Icon::TextFile,
         "zen" | "browser" => Icon::Browser,
         _ => Icon::Program,
     }

@@ -9,7 +9,7 @@ param(
     # Keep the root partition of the current build/osyx.img (e.g. to boot
     # again after a simulated power cut) instead of building a fresh one.
     [switch]$KeepRoot,
-    [ValidateRange(128, 16384)][int]$RootMiB = 256,
+    [ValidateRange(128, 16384)][int]$RootMiB = 384,
     # Install the vendor payload, desktop shortcut and default web browser.
     [string]$ZenDirectory = '',
     # Small test/development images can explicitly omit the browser.
@@ -82,7 +82,7 @@ if (-not $NoZen -and -not $NoInit -and -not $KeepRoot) {
         ping = 'bin'; net = 'bin'; netstat = 'bin'; dns = 'bin'; nc = 'bin'; timesync = 'bin'; 'wifi-watch' = 'bin'
         winrun = 'bin'
         taskmgr = 'system/bin'; settings = 'system/bin'; setup = 'system/bin'
-        zen = 'system/bin'; open = 'bin'; 'run-app' = 'system/bin'; elevate = 'bin'
+        zen = 'system/bin'; open = 'bin'; 'run-app' = 'system/bin'; elevate = 'bin'; edit = 'system/bin'
     }
     $userBins = @($installDirs.Keys)
     # Only these are also boot modules (the fallback root's /bin).
