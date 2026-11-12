@@ -44,8 +44,14 @@ impl HidFunction {
     pub fn report(&mut self, data: &[u8]) -> Result<(), ReportError> {
         self.reports += 1;
         let r = self.decode(data);
-        if r.is_err() {
+        if let Err(e) = r {
             self.bad_reports += 1;
+            // The first few say what the device sends; a report with
+            // another function's id, or a keyboard's rollover, is expected and
+            // not one of them.
+            if !matches!(e, ReportError::UnknownReportId | ReportError::Rollover) && self.bad_reports <= 4 {
+                kprintln!("usb input device {}: report not understood ({:?}): {:02x?}", self.input_id, e, &data[..data.len().min(16)]);
+            }
         }
         r
     }
@@ -62,7 +68,13 @@ impl HidFunction {
             }
             HidKind::Mouse { layout, buttons } => {
                 let r = match layout {
-                    Some(l) => l.decode(data)?,
+                    // A report too short for the layout, from a device
+                    // without report ids: it is still in the boot
+                    // protocol (it ignored or refused the switch).
+                    Some(l) => match l.decode(data) {
+                        Err(ReportError::Truncated) if l.report_id == 0 && data.len() >= 3 => hid::boot_mouse(data)?,
+                        r => r?,
+                    },
                     None => hid::boot_mouse(data)?,
                 };
                 // Buttons first (a click at the position before the motion
@@ -128,7 +140,9 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
     // A pointer: prefer the report descriptor (wheel, more buttons).
     let mut layout = None;
     let mut tablet = None;
-    let len = iface.hid.map_or(0, |h| h.report_length).min(1024);
+    // (Gaming mice describe their extra functions at length; both host
+    // controller drivers carry 2 KiB in a control transfer.)
+    let len = iface.hid.map_or(0, |h| h.report_length).min(2048);
     if len > 0 {
         let mut rd = vec![0u8; len as usize];
         match pipe.control_in(SetupPacket::get_interface_descriptor(descriptor::DESC_HID_REPORT, iface.number, len), &mut rd) {
@@ -172,8 +186,12 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
     let is_boot_mouse = iface.is_hid_boot(descriptor::HID_PROTOCOL_MOUSE);
     let how = match (&layout, is_boot_mouse) {
         (Some(l), _) => {
+            // Report protocol is what a device starts in: one that
+            // refuses the request is still driven.
             if boot {
-                pipe.control_out(SetupPacket::hid_set_protocol(iface.number, true), &[])?;
+                if let Err(e) = pipe.control_out(SetupPacket::hid_set_protocol(iface.number, true), &[]) {
+                    kprintln!("usb {}: interface {}: SET_PROTOCOL(report) refused ({}); carrying on", devname, iface.number, e);
+                }
             }
             alloc::format!(
                 "report protocol: {} buttons, {}-bit X/Y{}{}",
@@ -184,7 +202,9 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
             )
         }
         (None, true) => {
-            pipe.control_out(SetupPacket::hid_set_protocol(iface.number, false), &[])?;
+            if let Err(e) = pipe.control_out(SetupPacket::hid_set_protocol(iface.number, false), &[]) {
+                kprintln!("usb {}: interface {}: SET_PROTOCOL(boot) refused ({}); carrying on", devname, iface.number, e);
+            }
             String::from("boot protocol: 3 buttons, 8-bit X/Y")
         }
         (None, false) => {

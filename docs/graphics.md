@@ -69,6 +69,20 @@ controllers (older ICH chipsets) go to the companions, which OSyx does not
 drive. `usb.ehci=off` on the kernel command line leaves the controllers to
 the firmware and its PS/2 emulation.
 
+Low and full-speed devices behind one transaction translator share its
+bus: it runs their transactions one after the other, and a low-speed one
+takes about a micro-frame. Their interrupt endpoints therefore start in
+micro-frames 0 to 3 in turn (`osyx_usb::ehci::split_masks`), each with its
+complete splits two, three and four micro-frames later; with every
+endpoint starting in micro-frame 0, the fourth and later endpoints (a
+keyboard and a gaming mouse have two or three each) can finish after the
+last complete split and are then never heard (worked out from the USB 2.0
+timing rules; not measured on hardware). An endpoint that keeps failing
+rests for a second and is tried again, with the data toggle it had. A
+pointer among long reports of other functions (key bitmaps, vendor data
+blocks) is found; a refused SET_PROTOCOL does not stop a mouse from being
+driven; the first reports that are not understood are logged in hex.
+
 **virtio-input** (`kernel/src/drivers/virtio_input.rs`): the keyboards, mice
 and tablets of a virtual machine without USB or PS/2 hardware. The device's
 Linux evdev events are decoded by `osyx_input::evdev` (host tests); the event

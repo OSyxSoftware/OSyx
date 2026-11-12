@@ -272,8 +272,29 @@ pub struct Endpoint {
 /// EHCI 4.12.2.4 gives for a transaction that starts at the beginning of
 /// a frame.
 pub fn interrupt_masks(speed: Speed) -> (u8, u8) {
+    split_masks(speed, 0)
+}
+
+/// Start-split micro-frames a transaction translator's endpoints are
+/// spread over.
+pub const SPLIT_SLOTS: u8 = 4;
+
+/// [`interrupt_masks`] for the `slot`th endpoint behind one transaction
+/// translator. A translator runs its transactions one after the other on
+/// the low or full-speed bus, and a low-speed one takes about a
+/// micro-frame. When every endpoint starts in micro-frame 0, the fourth
+/// and later ones finish after the last complete split (micro-frame 4):
+/// the host never collects their data, and a keyboard and a mouse with
+/// two or three interfaces each are that many. So the start splits go to
+/// micro-frames 0 to 3 in turn, each with its complete splits two, three
+/// and four micro-frames later (at most micro-frame 7: nothing crosses
+/// into the next frame, which would need a frame span traversal node).
+pub fn split_masks(speed: Speed, slot: u8) -> (u8, u8) {
     match speed {
-        Speed::Low | Speed::Full => (0x01, 0x1C),
+        Speed::Low | Speed::Full => {
+            let k = slot % SPLIT_SLOTS;
+            (1 << k, 0x1C << k)
+        }
         _ => (0x01, 0x00),
     }
 }
@@ -284,6 +305,12 @@ pub fn interrupt_masks(speed: Speed) -> (u8, u8) {
 /// `periodic`: an interrupt endpoint, with the masks of
 /// [`interrupt_masks`].
 pub fn queue_head(link: u32, ep: &Endpoint, first: u32, head: bool, periodic: bool) -> [u32; 12] {
+    queue_head_in_slot(link, ep, first, head, periodic, 0)
+}
+
+/// [`queue_head`] for an interrupt endpoint in start-split `slot`
+/// ([`split_masks`]).
+pub fn queue_head_in_slot(link: u32, ep: &Endpoint, first: u32, head: bool, periodic: bool, slot: u8) -> [u32; 12] {
     let high = !matches!(ep.speed, Speed::Low | Speed::Full);
     let characteristics = (ep.address as u32 & 0x7F)
         | (ep.number as u32 & 0xF) << 8
@@ -294,7 +321,7 @@ pub fn queue_head(link: u32, ep: &Endpoint, first: u32, head: bool, periodic: bo
         | if ep.control && !high { 1 << 27 } else { 0 }
         // NAK count reload: only for high-speed asynchronous endpoints.
         | if high && !periodic { 4 << 28 } else { 0 };
-    let (s, c) = if periodic { interrupt_masks(ep.speed) } else { (0, 0) };
+    let (s, c) = if periodic { split_masks(ep.speed, slot) } else { (0, 0) };
     let (hub, port) = ep.tt.filter(|_| !high).unwrap_or((0, 0));
     let capabilities = s as u32 | (c as u32) << 8 | (hub as u32 & 0x7F) << 16 | (port as u32 & 0x7F) << 23 | 1 << 30;
     [link, characteristics, capabilities, 0, first, LINK_TERMINATE, 0, 0, 0, 0, 0, 0]
@@ -397,6 +424,18 @@ mod tests {
         let q = queue_head(LINK_TERMINATE, &int, 0x7080, false, true);
         assert_eq!(q[1], 0x0008_1105);
         assert_eq!(q[2], 0x4000_0000 | 1 << 16 | 3 << 23 | 0x1C01);
+        // More endpoints behind the same translator start one micro-frame
+        // later each, and no complete split leaves the frame.
+        let masks: alloc::vec::Vec<(u8, u8)> = (0..6).map(|slot| split_masks(Speed::Low, slot)).collect();
+        assert_eq!(masks, [(0x01, 0x1C), (0x02, 0x38), (0x04, 0x70), (0x08, 0xE0), (0x01, 0x1C), (0x02, 0x38)]);
+        for (s, c) in masks {
+            assert_eq!(s & c, 0, "a start and a complete split never share a micro-frame");
+            assert_eq!(c.count_ones(), 3);
+        }
+        assert_eq!(split_masks(Speed::Full, 3), (0x08, 0xE0));
+        assert_eq!(split_masks(Speed::High, 3), (0x01, 0x00), "high speed has no splits");
+        let q = queue_head_in_slot(LINK_TERMINATE, &int, 0x7080, false, true, 2);
+        assert_eq!(q[2], 0x4000_0000 | 1 << 16 | 3 << 23 | 0x7004);
         // A full-speed mouse: EPS 0.
         let fs = Endpoint { speed: Speed::Full, max_packet: 64, ..int };
         assert_eq!(queue_head(LINK_TERMINATE, &fs, 0, false, true)[1], 0x0040_0105);

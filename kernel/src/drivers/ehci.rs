@@ -63,8 +63,10 @@ const CONTROL_TIMEOUT_MS: u64 = 1_000;
 const PORT_POLL_MS: u64 = 100;
 /// Attempts at bringing up a device before it is given up.
 const ATTACH_ATTEMPTS: u32 = 3;
-/// Consecutive failed reports before an interrupt endpoint is left alone.
+/// Consecutive failed reports before an interrupt endpoint is given a rest.
 const MAX_PIPE_ERRORS: u32 = 16;
+/// How long that rest is before the endpoint is tried again.
+const PIPE_REST_MS: u64 = 1_000;
 /// Hubs between a root port and a device (USB 2.0 allows five).
 const MAX_DEPTH: u8 = 5;
 
@@ -196,6 +198,13 @@ struct Pipe {
     len: u32,
     kind: PipeKind,
     errors: u32,
+    /// The transaction translator (hub address) and start-split slot of a
+    /// low or full-speed endpoint.
+    split: Option<(u8, u8)>,
+    /// Resting after too many errors, until this time.
+    rest: Option<Deadline>,
+    /// The failure was reported once.
+    reported: bool,
 }
 
 enum PipeKind {
@@ -499,13 +508,30 @@ impl Ehci {
     fn open_pipe(&mut self, ep: Endpoint, kind: PipeKind) -> Result<Pipe> {
         let frame = Frame::new()?;
         let len = (ep.max_packet as u32).clamp(1, PIPE_MAX);
+        // Endpoints behind one transaction translator take turns at the
+        // start of the frame: the least used start-split slot.
+        let split = match (ep.speed, ep.tt) {
+            (Speed::Low | Speed::Full, Some((hub, _))) => {
+                let mut used = [0u32; e::SPLIT_SLOTS as usize];
+                for p in self.devices.values().flat_map(|d| d.pipes.iter()) {
+                    if let Some((h, slot)) = p.split {
+                        if h == hub {
+                            used[slot as usize] += 1;
+                        }
+                    }
+                }
+                let slot = (0..e::SPLIT_SLOTS).min_by_key(|s| used[*s as usize]).unwrap_or(0);
+                Some((hub, slot))
+            }
+            _ => None,
+        };
         frame.write(PIPE_TD, &e::qtd(LINK_TERMINATE, LINK_TERMINATE, e::qtd_token(Pid::In, len, false, true), frame.p32(PIPE_BUF), len));
-        let qh = e::queue_head(self.heads.r32(ANCHOR_QH), &ep, frame.p32(PIPE_TD), false, true);
+        let qh = e::queue_head_in_slot(self.heads.r32(ANCHOR_QH), &ep, frame.p32(PIPE_TD), false, true, split.map_or(0, |s| s.1));
         frame.write(PIPE_QH, &qh);
         fence(Ordering::SeqCst);
         self.heads.w32(ANCHOR_QH, e::qh_link(frame.p32(PIPE_QH)));
         self.chain.insert(0, frame.p32(PIPE_QH));
-        Ok(Pipe { frame, len, kind, errors: 0 })
+        Ok(Pipe { frame, len, kind, errors: 0, split, rest: None, reported: false })
     }
 
     /// Takes an interrupt endpoint off the periodic schedule and frees it.
@@ -538,14 +564,33 @@ impl Ehci {
             for pipe in dev.pipes.iter_mut() {
                 let f = &pipe.frame;
                 let t = f.r32(PIPE_TD + TD_TOKEN);
-                if t & token::ACTIVE != 0 || pipe.errors >= MAX_PIPE_ERRORS {
+                if t & token::ACTIVE != 0 {
                     continue;
+                }
+                // An endpoint that kept failing rests, then gets another
+                // chance: a device that was only slow to start, or that
+                // another one's traffic disturbed, comes back by itself.
+                if let Some(rest) = pipe.rest {
+                    if !rest.expired() {
+                        continue;
+                    }
+                    pipe.rest = None;
+                    pipe.errors = 0;
                 }
                 let halted = token::halted(t);
                 if halted {
                     pipe.errors += 1;
-                    if pipe.errors == MAX_PIPE_ERRORS {
-                        kprintln!("usb {}: interrupt endpoint keeps failing ({}); left alone", dev.name, EhciError::Transfer(t));
+                    if pipe.errors >= MAX_PIPE_ERRORS {
+                        if !pipe.reported {
+                            pipe.reported = true;
+                            kprintln!(
+                                "usb {}: interrupt endpoint keeps failing ({}); trying again every {} ms",
+                                dev.name,
+                                EhciError::Transfer(t),
+                                PIPE_REST_MS
+                            );
+                        }
+                        pipe.rest = Some(Deadline::after_ms(PIPE_REST_MS));
                         continue;
                     }
                 } else {
@@ -562,13 +607,21 @@ impl Ehci {
                         _ => {}
                     }
                     pipe.errors = 0;
+                    if n > 0 && pipe.reported {
+                        pipe.reported = false;
+                        kprintln!("usb {}: interrupt endpoint works again", dev.name);
+                    }
                 }
                 f.write(PIPE_TD, &e::qtd(LINK_TERMINATE, LINK_TERMINATE, e::qtd_token(Pid::In, pipe.len, false, true), f.p32(PIPE_BUF), pipe.len));
                 fence(Ordering::SeqCst);
                 if halted {
-                    // The queue head is out of service: start it again
-                    // with data toggle 0.
-                    f.w32(PIPE_QH + QH_TOKEN, 0);
+                    // The queue head is out of service: start it again,
+                    // with the data toggle it had. The device did not
+                    // reset its own, and a host that starts from 0 again
+                    // throws away every second report of a device that
+                    // fails now and then.
+                    let toggle = f.r32(PIPE_QH + QH_TOKEN) & token::TOGGLE;
+                    f.w32(PIPE_QH + QH_TOKEN, toggle);
                 }
                 f.w32(PIPE_QH + QH_NEXT, f.p32(PIPE_TD));
             }
@@ -720,7 +773,17 @@ impl Ehci {
             let pipe_ep = Endpoint { number: int.number(), max_packet: int.max_packet.max(1), control: false, ..ep };
             match self.open_pipe(pipe_ep, PipeKind::Hid(Box::new(function))) {
                 Ok(pipe) => {
-                    kprintln!("usb {}: endpoint {:#04x}: interrupt IN, {} bytes, polled every 1 ms", name, int.address, pipe.len);
+                    match pipe.split {
+                        Some((hub, slot)) => kprintln!(
+                            "usb {}: endpoint {:#04x}: interrupt IN, {} bytes, polled every 1 ms through hub {} (start split in micro-frame {})",
+                            name,
+                            int.address,
+                            pipe.len,
+                            hub,
+                            slot
+                        ),
+                        None => kprintln!("usb {}: endpoint {:#04x}: interrupt IN, {} bytes, polled every 1 ms", name, int.address, pipe.len),
+                    }
                     if let Some(d) = self.devices.get_mut(&address) {
                         d.pipes.push(pipe);
                     }
