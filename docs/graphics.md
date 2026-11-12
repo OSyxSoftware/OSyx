@@ -201,7 +201,10 @@ line numbers, find). AXIS scripts are coloured by the shell's own tokenizer
 (`osyx_shell::highlight`), other source and configuration files by their
 comments, strings and numbers. Line ends are kept as found (LF or CRLF); a
 file that is not UTF-8 opens read-only; files above 8 MiB are refused. Files
-offers it under "Open with" for text and source files.
+offers it under "Open with" for text and source files. A save writes a new
+file beside the old one (made for that save only, private until it is
+complete) and renames it into place; through a symbolic link, the file the
+link names is saved and the link stays.
 
 ![Text Editor with an AXIS script](screenshots/editor.jpg)
 
@@ -344,6 +347,16 @@ in `~/Videos`, both named by the UTC time. The saved file goes onto the
 clipboard as a file (Paste in Files copies it; Win32 programs see
 `CF_HDROP`) and as its path in text, and the shell shows a notification.
 The clipboard holds at most 56 KiB, so the picture itself is not put on it.
+
+PRISM is root, and root writes nothing in the user's home: a folder there
+could be a symbolic link to anywhere. A child process (`prism
+--save-as-user`, `userspace/desktop/src/user_save.rs`) gives up root, makes
+the folder and the file as the desktop user and gets the data through a
+pipe, so the captures are the user's own. A recording is written in
+`/var/cache/osyx-prism`, which only root can reach, and handed over when it
+is finished. A `~/Pictures` or `~/Videos` that an earlier version made as
+root is not the user's; a capture then fails with "permission denied" until
+the folder is renamed away.
 
 While an area is chosen the compositor keeps the pointer from the windows
 and draws the outline; the picture is taken from the frame after the

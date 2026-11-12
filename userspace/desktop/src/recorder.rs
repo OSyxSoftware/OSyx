@@ -14,6 +14,13 @@ use os_std::time::Duration;
 use osyx_media::video::webm;
 use osyx_media::vp8::encode::Encoder;
 
+use crate::user_save;
+
+/// Where a recording is written while it is made: a folder only root can
+/// reach. The finished file is handed to the desktop user (`user_save`);
+/// root writes nothing in the user's home.
+const SPOOL: &str = "/var/cache/osyx-prism";
+
 /// The shortest time between two frames (ms).
 pub const FRAME_MS: u64 = 100;
 /// A still screen is recorded this often, so that players see time pass.
@@ -56,32 +63,47 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Starts recording `width` x `height` frames into `path`.
-    pub fn start(path: String, width: u32, height: u32, now: u64) -> Result<Recorder, String> {
+    /// Starts recording `width` x `height` frames; the finished film
+    /// becomes the desktop user's file `dir/name`.
+    pub fn start(dir: String, name: String, width: u32, height: u32, now: u64) -> Result<Recorder, String> {
         let encoder = Encoder::new(width as usize, height as usize, QUALITY).ok_or("the screen is too large to record")?;
         let (writer, head) = webm::Writer::start(width, height);
-        let mut file = File::create(&path).map_err(|e| format!("{e}"))?;
-        file.write_all(&head).map_err(|e| format!("{e}"))?;
+        let io = |e: Error| format!("{SPOOL}: {e}");
+        fs::create_dir_all(SPOOL).map_err(io)?;
+        fs::set_permissions(SPOOL, fs::Permissions::from_mode(0o700)).map_err(io)?;
+        // What an earlier PRISM left when it died.
+        for old in fs::read_dir(SPOOL).map_err(io)? {
+            let _ = fs::remove_file(old.path());
+        }
+        let spool = format!("{SPOOL}/{name}");
+        let mut file = File::options().read(true).write(true).create_new(true).mode(0o600).open(&spool).map_err(io)?;
+        if let Err(e) = file.write_all(&head) {
+            let _ = fs::remove_file(&spool);
+            return Err(io(e));
+        }
         let shared = Arc::new(Mutex::new(Shared::default()));
         let worker = shared.clone();
         // Without a thread there is no recording, but PRISM lives on.
         let made = thread::Builder::new().spawn({
-            let path = path.clone();
+            let spool = spool.clone();
             move || {
                 // The compositor's thread runs above the others so that
                 // input and frames come first; encoding must not share
                 // that place.
                 let _ = os_std::system::thread_priority(0, os_std::system::priority::NORMAL);
-                let result = work(&worker, encoder, writer, file, head.len() as u64, width as usize, &path);
-                // Half a file is of no use to anyone.
-                if result.is_err() {
-                    let _ = fs::remove_file(&path);
-                }
+                let result = work(&worker, encoder, writer, file, head.len() as u64, width as usize).and_then(|mut summary| {
+                    user_save::save(&dir, &name, user_save::Source::File(&spool))?;
+                    summary.path = format!("{dir}/{name}");
+                    Ok(summary)
+                });
+                // Half a file is of no use to anyone, and the whole one
+                // is the user's now.
+                let _ = fs::remove_file(&spool);
                 worker.lock().unwrap().result = Some(result);
             }
         });
         if let Err(e) = made {
-            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(&spool);
             return Err(format!("no thread for the encoder: {e}"));
         }
         Ok(Recorder { shared, started: now, last: 0, stopping: false, dropped: 0 })
@@ -129,7 +151,6 @@ fn work(
     mut file: File,
     mut bytes: u64,
     stride: usize,
-    path: &str,
 ) -> Result<Summary, String> {
     let io = |e: Error| format!("{e}");
     loop {
@@ -160,12 +181,12 @@ fn work(
                     file.seek(SeekFrom::Start(p.at)).map_err(io)?;
                     file.write_all(&p.bytes).map_err(io)?;
                 }
+                file.sync_all().map_err(io)?;
                 drop(file);
                 if frames == 0 {
-                    let _ = fs::remove_file(path);
                     return Err(String::from("nothing was recorded"));
                 }
-                return Ok(Summary { path: String::from(path), frames, bytes, ms });
+                return Ok(Summary { path: String::new(), frames, bytes, ms });
             }
         }
     }

@@ -82,7 +82,14 @@ What is installed is recorded in `/var/lib/osyx/pkg/<name>.txt` (the
 manifest). An upgrade removes the files the new version no longer has;
 `remove` removes the files of the manifest and the directories they leave
 empty, and keeps the record when a file could not be removed, so that it
-can be tried again.
+can be tried again. Files of an older version that would not go are listed
+in `<name>.stale` and tried again by every `install`, `upgrade` and
+`remove`, also when the package is already up to date.
+
+One `pkg` changes what is installed at a time. The lock
+`/var/lib/osyx/pkg/.lock` names the process that holds it; it is taken over
+only when that process is no longer a running `pkg`, however long ago it
+was made, and a `pkg` removes only its own lock.
 
 ## Publishing
 

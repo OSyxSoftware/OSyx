@@ -31,25 +31,52 @@ use prism_client::WindowSpec;
 os_std::entry!(main);
 
 /// Writes `data` as the file `path` so that a failure half way leaves the
-/// file as it was: to a file beside it first, renamed over it once every
-/// byte is there. Where no file can be made beside it (a folder the user
-/// may not write, while the file itself is writable), the file is written
-/// in place.
+/// file as it was: to a new file beside it first, renamed over it once
+/// every byte is there.
+///
+/// - Through a symbolic link, the file the link names is saved and the
+///   link stays; a link that names nothing is an error.
+/// - The file beside it is made for this save only (never an existing
+///   file or link), readable by its owner alone until it holds everything
+///   and has the permissions of the file it replaces.
+/// - Where that cannot be done (a folder the user may not write, or a file
+///   of someone else's, which a rename would make the user's), the file is
+///   written in place.
 fn write_whole(path: &str, data: &[u8]) -> Result<(), Error> {
-    let tmp = format!("{path}.osyx-saving");
-    let mut file = match fs::File::create(&tmp) {
-        Ok(f) => f,
-        Err(_) => return fs::write(path, data),
+    let target = match fs::symlink_metadata(path) {
+        Ok(_) => String::from(fs::canonicalize(path)?.as_str()),
+        Err(e) if e.kind() == ErrorKind::NotFound => String::from(path),
+        Err(e) => return Err(e),
+    };
+    let old = fs::metadata(&target).ok();
+    if old.as_ref().is_some_and(|m| m.uid() != os_std::os::getuid().0) {
+        return fs::write(&target, data);
+    }
+    let mode = old.map_or(0o644, |m| m.permissions().mode());
+    // No two saves share a name, and a name someone made first is not
+    // used: "create new" follows no link and replaces nothing.
+    let pid = os_std::process::id().unwrap_or(0);
+    let mut made = None;
+    for attempt in 0..8u32 {
+        let nanos = os_std::time::SystemTime::now()
+            .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        let tmp = format!("{target}.{pid:x}-{:x}.osyx-saving", nanos.wrapping_add(u64::from(attempt)));
+        match fs::File::options().write(true).create_new(true).mode(0o600).open(&tmp) {
+            Ok(f) => {
+                made = Some((f, tmp));
+                break;
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(_) => return fs::write(&target, data),
+        }
+    }
+    let Some((mut file, tmp)) = made else {
+        return Err(Error::new(ErrorKind::AlreadyExists, "no temporary file could be made beside the file"));
     };
     let written = file.write_all(data).and_then(|()| file.sync_all());
     drop(file);
-    let done = written.and_then(|()| {
-        // The file keeps the permissions it had.
-        if let Ok(m) = fs::metadata(path) {
-            let _ = fs::set_permissions(&tmp, m.permissions());
-        }
-        fs::rename(&tmp, path)
-    });
+    let done = written.and_then(|()| fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))).and_then(|()| fs::rename(&tmp, &target));
     if done.is_err() {
         let _ = fs::remove_file(&tmp);
     }

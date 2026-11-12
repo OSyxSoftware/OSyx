@@ -845,6 +845,14 @@ fn text_area_word_movement_and_vertical_columns() {
     assert_eq!(a.cursor(), Pos::new(0, 0));
     a.event(&key_down(key::END, None, modifier::LEFT_CTRL | modifier::LEFT_SHIFT), &fonts, &mut clip);
     assert_eq!(a.selection(), Some((Pos::new(0, 0), Pos::new(2, 16))));
+    // Down through a tab that puts the cursor to the right of the cell
+    // aimed for: the cell is kept, not the place the tab gave.
+    let (mut a, fonts, mut clip) = area("ab\n\t\nabcdef");
+    a.event(&key_down(key::END, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor().line, 1);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(2, 2));
 }
 
 #[test]

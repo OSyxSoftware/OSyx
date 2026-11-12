@@ -507,11 +507,10 @@ impl TextArea {
         let line = (self.cursor.line as i64 + by).clamp(0, self.lines.len() as i64 - 1) as usize;
         // The same screen cell, so tabs do not shift the cursor. The cell
         // aimed for is where the cursor was when it last moved sideways;
-        // short lines on the way do not change it.
-        let here = cells_before(&self.lines[self.cursor.line], self.cursor.col);
+        // short lines and tabs on the way do not change it.
         let cell = match self.wanted_cell {
-            Some((at, cell)) if at == self.cursor => cell.max(here),
-            _ => here,
+            Some((at, cell)) if at == self.cursor => cell,
+            _ => cells_before(&self.lines[self.cursor.line], self.cursor.col),
         };
         let col = col_at_cell(&self.lines[line], cell);
         self.move_to(Pos::new(line, col), select);

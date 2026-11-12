@@ -79,34 +79,79 @@ fn no_downgrade(secure: bool, from: &str) -> Result<(), String> {
 }
 
 /// One `pkg` changes what is installed at a time: the lock is a file made
-/// with "create new" and removed when the work is done. A lock left by a
-/// `pkg` that died is taken over after ten minutes.
-struct Lock;
+/// with "create new" that names its owner, and removed when the work is
+/// done. A lock is taken over only when its owner is no longer running,
+/// however old it is: an installation may take long.
+struct Lock {
+    /// What this process wrote into the file.
+    token: String,
+}
+
+/// Whether process `pid` is a running `pkg`. `None`: it cannot be told.
+fn pkg_runs(pid: u64) -> Option<bool> {
+    let all = os_std::system::processes().ok()?;
+    match all.iter().find(|p| p.pid == pid) {
+        Some(p) => Some(p.state == os_std::system::PROC_RUNNING && os_std::system::process_name(p).ends_with("pkg")),
+        // A full list may have left it out.
+        None if all.len() >= 128 => None,
+        None => Some(false),
+    }
+}
 
 impl Lock {
     fn take() -> Result<Lock, String> {
         fs::create_dir_all(DB).map_err(|e| format!("{DB}: {e}"))?;
+        let pid = os_std::process::id().map_err(|e| format!("{e}"))?;
+        let nanos = os_std::time::SystemTime::now().duration_since(os_std::time::SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let token = format!("{pid} {nanos}\n");
+        let busy = || format!("another pkg is installing or removing ({LOCK} exists); try again when it is done");
         for _ in 0..2 {
             match fs::OpenOptions::new().write(true).create_new(true).open(LOCK) {
-                Ok(_) => return Ok(Lock),
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                    let age = fs::metadata(LOCK).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
-                    if age.is_some_and(|a| a.as_secs() > 600) {
+                Ok(mut f) => {
+                    if let Err(e) = f.write_all(token.as_bytes()).and_then(|()| f.sync_all()) {
+                        drop(f);
                         let _ = fs::remove_file(LOCK);
-                        continue;
+                        return Err(format!("{LOCK}: {e}"));
                     }
-                    return Err(format!("another pkg is installing or removing ({LOCK} exists); try again when it is done"));
+                    return Ok(Lock { token });
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    // The owner writes its name right after making the
+                    // file: an empty one is given a moment.
+                    let mut held = String::new();
+                    for _ in 0..10 {
+                        held = fs::read_to_string(LOCK).unwrap_or_default();
+                        if held.ends_with('\n') {
+                            break;
+                        }
+                        os_std::thread::sleep(os_std::time::Duration::from_millis(50));
+                    }
+                    let owner = held.split_whitespace().next().and_then(|p| p.parse::<u64>().ok());
+                    let Some(owner) = owner.filter(|_| held.ends_with('\n')) else {
+                        return Err(format!("{LOCK} does not say whose it is; remove it when no pkg is running"));
+                    };
+                    if owner != pid && pkg_runs(owner) != Some(false) {
+                        return Err(busy());
+                    }
+                    // Its owner died. Removed only if it is still that
+                    // lock: another pkg may have taken it over meanwhile.
+                    if fs::read_to_string(LOCK).is_ok_and(|now| now == held) {
+                        let _ = fs::remove_file(LOCK);
+                    }
                 }
                 Err(e) => return Err(format!("{LOCK}: {e}")),
             }
         }
-        Err(format!("{LOCK} cannot be taken"))
+        Err(busy())
     }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(LOCK);
+        // Only this process's own lock.
+        if fs::read_to_string(LOCK).is_ok_and(|held| held == self.token) {
+            let _ = fs::remove_file(LOCK);
+        }
     }
 }
 
@@ -276,6 +321,21 @@ fn remove_empty_dirs(path: &str) {
     }
 }
 
+/// Tries again to remove what an earlier upgrade of the installed package
+/// `p` could not, also when there is nothing to install.
+fn retry_stale(p: &Package) {
+    if fs::metadata(stale_list(&p.name)).is_err() {
+        return;
+    }
+    let live: Vec<String> = p.files.iter().map(|f| format!("/{}", f.path)).collect();
+    let left_over = clear_stale(&p.name, &[], &live);
+    if left_over.is_empty() {
+        say(&format!("pkg: {}: files of an older version were removed", p.name));
+    } else {
+        say(&format!("pkg: {}: files of an older version still cannot be removed: {}", p.name, left_over.join(", ")));
+    }
+}
+
 fn install(url: &str, name: &str) -> Result<String, String> {
     if !package::valid_name(name) {
         return Err(format!("{name:?} is not a package name"));
@@ -297,6 +357,7 @@ fn install(url: &str, name: &str) -> Result<String, String> {
     let old = installed(name);
     if let Some(old) = &old {
         if old.version == p.version {
+            retry_stale(old);
             return Ok(format!("{name} {} is already installed", p.version));
         }
         if !osyx_update::newer(&p.version, &old.version) {
@@ -479,11 +540,12 @@ fn run(args: &[String]) -> Result<(), String> {
             let list = index(&url)?;
             let mut any = false;
             for have in all_installed() {
-                if let Some(p) = list.find(&have.name) {
-                    if package::state(Some(&have.version), &p.version) == State::Upgradable {
-                        say(&install(&url, &have.name)?);
-                        any = true;
-                    }
+                let upgradable = list.find(&have.name).is_some_and(|p| package::state(Some(&have.version), &p.version) == State::Upgradable);
+                if upgradable {
+                    say(&install(&url, &have.name)?);
+                    any = true;
+                } else {
+                    retry_stale(&have);
                 }
             }
             if !any {

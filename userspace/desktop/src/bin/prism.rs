@@ -28,6 +28,8 @@ mod screenshot;
 mod recorder;
 #[path = "../scheme.rs"]
 mod scheme;
+#[path = "../user_save.rs"]
+mod user_save;
 
 use os_std::fs::File;
 use os_std::ipc::{self, Channel, Listener, Mapping, SharedMemory, WaitItem, WAIT_HANGUP, WAIT_READABLE};
@@ -95,6 +97,13 @@ fn main() -> i32 {
     TRACE_BUFFERS.store(env::var("OSYX_PRISM_TRACE").is_ok_and(|v| v == "1"), Ordering::Relaxed);
     TRACE_EVENTS.store(env::var("OSYX_PRISM_EVENTS").is_ok_and(|v| v == "1"), Ordering::Relaxed);
     let args: Vec<String> = env::args().collect();
+    // The child that saves a capture as the desktop user.
+    if args.get(1).is_some_and(|a| a == user_save::FLAG) {
+        return match (args.get(2), args.get(3)) {
+            (Some(dir), Some(name)) => user_save::child(dir, name),
+            _ => 1,
+        };
+    }
     let shell_program = args.get(1).cloned().unwrap_or_else(|| String::from("/system/bin/desktop"));
     let info = match system::display_info() {
         Ok(i) => i,
@@ -576,32 +585,28 @@ impl Prism {
         }
     }
 
-    /// `Pictures/Screenshot 2026-11-12 10.30.00 UTC.png`-style name in the
-    /// desktop user's `folder`, with the folder made.
-    fn capture_path(folder: &str, kind: &str, extension: &str) -> Result<(String, String), Error> {
+    /// Where a capture goes: the desktop user's `folder`, a name like
+    /// `Screenshot 2026-11-12 10.30.00 UTC.png` in it, and the two as the
+    /// user reads them (`Pictures/Screenshot ...`). Nothing is made here:
+    /// `user_save` makes the folder and the file as the user.
+    fn capture_path(folder: &str, kind: &str, extension: &str) -> (String, String, String) {
         let secs = os_std::time::SystemTime::now()
             .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let (days, rem) = (secs / 86_400, secs % 86_400);
         let (y, m, d) = screenshot::civil_from_days(days as i64);
         let dir = format!("/home/user/{folder}");
-        fs::create_dir_all(&dir)?;
-        // PRISM is root and nothing here can give a folder to the desktop
-        // user. The folder is opened to everyone instead, so that the user
-        // can rename and delete what is saved in it; their home folder
-        // above it lets nobody else in. (Also for a folder an earlier
-        // version made.)
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o777));
         // A second capture within the same second gets a number: nothing
         // already saved is written over.
         let stamp = format!("{kind} {y:04}-{m:02}-{d:02} {:02}.{:02}.{:02} UTC", rem / 3600, rem / 60 % 60, rem % 60);
         let mut name = format!("{stamp}.{extension}");
         let mut n = 2;
-        while fs::metadata(format!("{dir}/{name}")).is_ok() && n < 1000 {
+        while fs::symlink_metadata(format!("{dir}/{name}")).is_ok() && n < 1000 {
             name = format!("{stamp} ({n}).{extension}");
             n += 1;
         }
-        Ok((format!("{dir}/{name}"), format!("{folder}/{name}")))
+        let shown = format!("{folder}/{name}");
+        (dir, name, shown)
     }
 
     /// Saves `area` of the composed screen as a PNG in the desktop user's
@@ -624,7 +629,8 @@ impl Prism {
             }
             screenshot::encode_png(&part, w, h)
         };
-        let result = Self::capture_path("Pictures", "Screenshot", "png").and_then(|(path, shown)| fs::write(&path, &png).map(|_| (path, shown)));
+        let (dir, name, shown) = Self::capture_path("Pictures", "Screenshot", "png");
+        let result = user_save::save(&dir, &name, user_save::Source::Bytes(&png)).map(|()| (format!("{dir}/{name}"), shown));
         match result {
             Ok((path, shown)) => {
                 println!("prism: screenshot {w}x{h} saved to {path} ({} bytes, {} ms)", png.len(), t0.elapsed().as_millis());
@@ -663,9 +669,8 @@ impl Prism {
                     r.stop(now)
                 }
                 None => {
-                    let started = Self::capture_path("Videos", "Recording", "webm")
-                        .map_err(|e| format!("{e}"))
-                        .and_then(|(path, _)| recorder::Recorder::start(path, self.width, self.height, now));
+                    let (dir, name, _) = Self::capture_path("Videos", "Recording", "webm");
+                    let started = recorder::Recorder::start(dir, name, self.width, self.height, now);
                     match started {
                         Ok(r) => {
                             println!("prism: recording the screen, {}x{}", self.width, self.height);
