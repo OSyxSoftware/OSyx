@@ -84,6 +84,8 @@ UTF-8). The inventory contains real PCI functions and attached HID inputs.
   Set-user-ID bits are not honoured. Programs are static ELF64 x86-64
   executables (`ET_EXEC`, no `PT_INTERP`/`PT_DYNAMIC`) with W^X, page-aligned
   segments below `0x1000_0000_0000`; see [kernel.md](kernel.md#program-loader).
+  A file that starts with `#!` is a script and runs the interpreter named
+  on its first line with the script's path as an argument.
 - `spawn` starts a child with the caller's credentials and current
   directory and no open handles (except the console streams 0–2).
 - `execve` replaces the calling program: pid, parent, children, open
@@ -193,9 +195,9 @@ non-zero base also replaces the base 64-bit code sees until `set_fs_base`
 | 20 | TooManyHandles | the process already has 64 open handles |
 | 21 | CrossDevice | `rename` between volumes |
 | 22 | Busy | unmounting a volume in use, removing a mount point, raw writes to a mounted disk, removing an open file on FAT; `execve` with more than one thread |
-| 23 | Loop | more than 40 symbolic links in one path; `OPEN_NOFOLLOW` on a link |
+| 23 | Loop | more than 40 symbolic links in one path; `OPEN_NOFOLLOW` on a link; `spawn`/`execve` through more than 4 `#!` scripts |
 | 24 | Unsupported | a file system feature the driver refuses (e.g. ext4 inline data, adding to a hashed directory) |
-| 25 | BadExecutable | `spawn`/`execve` of a file that is not a loadable static ELF64 x86-64 executable |
+| 25 | BadExecutable | `spawn`/`execve` of a file that is neither a loadable static ELF64 x86-64 executable nor a script with a valid `#!` line |
 
 ## Pointer validation
 
@@ -218,7 +220,8 @@ rsp ->  argc
         padding to 16 bytes
         argument and environment strings
         16 random bytes (AT_RANDOM)
-        program path (AT_EXECFN), ending right below 0x7FFF_FFFF_0000
+        program path (AT_EXECFN), ending at the stack top (random, at
+        most 16 GiB below 0x7FFF_FFFF_0000)
 ```
 
 Auxiliary entries: `AT_PHDR` (3, when a loadable segment maps the program

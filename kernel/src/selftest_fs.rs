@@ -670,7 +670,7 @@ pub fn program_loader() -> TestResult {
         write_file(&cx, &format!("{dir}/plain"), elf).map_err(|err| e("write plain", err))?;
         ensure!(load(&cx, &format!("{dir}/plain")) == Err(Errno::PermissionDenied), "0644 file executable by root");
         ensure!(load(&cx, dir) == Err(Errno::PermissionDenied), "directory executable");
-        write_file(&cx, &format!("{dir}/garbage"), b"#!/bin/sh\necho no interpreters\n").map_err(|err| e("write", err))?;
+        write_file(&cx, &format!("{dir}/garbage"), b"neither ELF nor a script\n").map_err(|err| e("write", err))?;
         vfs::chmod(&cx, &format!("{dir}/garbage"), 0o700).map_err(|err| e("chmod", err))?;
         ensure!(load(&cx, &format!("{dir}/garbage")).is_ok(), "0700 file not loadable by root");
         ensure!(load(&user(1000), &format!("{dir}/garbage")) == Err(Errno::PermissionDenied), "0700 root file loadable by a user");
@@ -678,6 +678,41 @@ pub fn program_loader() -> TestResult {
         let r = process::spawn(process::KERNEL_PID, &req);
         ensure!(matches!(r, Err(ExecError::BadImage(_))), "non-ELF file spawned: {:?}", r.map_err(|e| e.errno()));
         ensure!(ExecError::BadImage(osyx_elf::ElfError::BadMagic).errno() == Errno::BadExecutable, "errno of a bad image");
+        // Scripts: the first line names the interpreter.
+        use exec::Script;
+        ensure!(Script::parse(b"\x7fELF") == Ok(None), "ELF taken for a script");
+        ensure!(
+            Script::parse(b"#! /bin/axis \t-x  y \r\necho") == Ok(Some(Script { interpreter: "/bin/axis", argument: Some("-x  y") })),
+            "interpreter line with an argument"
+        );
+        ensure!(Script::parse(b"#!axis") == Ok(Some(Script { interpreter: "axis", argument: None })), "line without a line end");
+        ensure!(Script::parse(b"#!  \n") == Err(Errno::BadExecutable), "empty interpreter accepted");
+        ensure!(Script::parse(b"#!/bin/\xff\n") == Err(Errno::BadExecutable), "non-UTF-8 interpreter accepted");
+        let long = [b"#!".as_slice(), &[b'a'; exec::MAX_SCRIPT_LINE + 1], b"\n"].concat();
+        ensure!(Script::parse(&long) == Err(Errno::BadExecutable), "overlong interpreter line accepted");
+        ensure!(Script::parse(&long[..long.len() - 2]).is_ok_and(|s| s.is_some()), "longest interpreter line refused");
+        let through = ExecRequest::new("./s", &["s", "a", "b"], &["K=V"])
+            .and_then(|r| r.through_interpreter(&Script { interpreter: "/bin/axis", argument: Some("-x") }, "/tmp/s"))
+            .map_err(|err| e("through_interpreter", err))?;
+        ensure!(
+            through.path == "/bin/axis" && through.argv == ["/bin/axis", "-x", "/tmp/s", "a", "b"] && through.envp == ["K=V"],
+            "interpreter arguments {:?}",
+            through.argv
+        );
+        let script = |name: &str, text: &str| -> TestResult {
+            write_file(&cx, &format!("{dir}/{name}"), text.as_bytes()).map_err(|err| e("write script", err))?;
+            vfs::chmod(&cx, &format!("{dir}/{name}"), 0o755).map_err(|err| e("chmod script", err))
+        };
+        let spawn_error = |name: &str| {
+            let req = ExecRequest::new(&format!("{dir}/{name}"), &[name], &[]).map_err(|err| e("request", err))?;
+            Ok::<_, String>(process::spawn(process::KERNEL_PID, &req).map(|_| ()).map_err(|e| e.errno()))
+        };
+        script("missing", "#!/bin/no-such-interpreter\n")?;
+        ensure!(spawn_error("missing")? == Err(Errno::NotFound), "script with a missing interpreter");
+        script("loop", &format!("#!{dir}/loop\n"))?;
+        ensure!(spawn_error("loop")? == Err(Errno::Loop), "script that interprets itself");
+        script("to-garbage", &format!("#!{dir}/garbage\n"))?;
+        ensure!(spawn_error("to-garbage")? == Err(Errno::BadExecutable), "script with a non-ELF interpreter");
         // A relative path resolves from the current directory.
         let here = Lookup { cwd: String::from(dir), ..root() };
         ensure!(load(&here, "./garbage").map(|p| p == format!("{dir}/garbage")) == Ok(true), "relative path");

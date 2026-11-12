@@ -17,8 +17,10 @@
 //! User address space layout:
 //! * `0x0000_0000_0000_0000..0x0000_0000_0001_0000` never mapped (null guard)
 //! * ELF segments at their link addresses, below `MAP_BASE`
-//! * anonymous memory from `MAP_BASE` upwards, a guard page after each region
-//! * stack: `STACK_PAGES` pages below `STACK_TOP`, guard page below that;
+//! * anonymous memory from the process's map base upwards (`MAP_BASE` plus a
+//!   random offset below `MAP_SLIDE`), a guard page after each region
+//! * stack: `STACK_PAGES` pages below the process's stack top (`STACK_TOP`
+//!   minus a random offset below `STACK_SLIDE`), guard page below that;
 //!   at its top the System V start-up data (`osyx_abi::startup`)
 
 use crate::arch::cpu;
@@ -51,7 +53,14 @@ pub const KERNEL_PID: Pid = 0;
 pub const STACK_TOP: u64 = 0x0000_7FFF_FFFF_0000;
 const STACK_PAGES: u64 = 128; // 512 KiB
 /// Fixed mappings must end below the main stack and its guard page.
-const STACK_LIMIT: u64 = STACK_TOP - (STACK_PAGES + 1) * PAGE_SIZE;
+/// Each program image gets its stack top this far below `STACK_TOP` at most
+/// (a whole number of pages, 22 random bits) and its first anonymous mapping
+/// this far above `MAP_BASE` at most (in 64 KiB steps, 24 random bits), so
+/// stack and heap addresses differ from run to run.
+const STACK_SLIDE: u64 = 16 << 30;
+const MAP_SLIDE: u64 = 1 << 40;
+/// Mappings end below the lowest place the stack and its guard page can be.
+const STACK_LIMIT: u64 = STACK_TOP - STACK_SLIDE - (STACK_PAGES + 1) * PAGE_SIZE;
 const MAP_BASE: u64 = 0x0000_1000_0000_0000;
 /// Where program segments may lie: above the null guard, below `MAP_BASE`.
 const PROGRAM_RANGE: AddressRange = AddressRange { start: osyx_elf::USER_RANGE.start, end: MAP_BASE };
@@ -110,6 +119,10 @@ struct Space {
     root: u64,
     frames: u64,
     program_shared: BTreeMap<u64, (Arc<SharedMemory>, u64)>,
+    /// End of this image's stack (`STACK_TOP` minus its random offset).
+    stack_top: u64,
+    /// Where this image's anonymous mappings start.
+    map_base: u64,
 }
 
 /// An anonymous mapping. Its pages get frames on first access; until then
@@ -184,7 +197,13 @@ struct SwappedPage {
 
 impl Space {
     fn new() -> Result<Space, MapError> {
-        Ok(Space { root: paging::new_address_space()?, frames: 1, program_shared: BTreeMap::new() })
+        // Two independent offsets from the kernel's random source (the TSC
+        // fallback of `exec::random_bytes` without one).
+        let r = exec::random_bytes();
+        let word = |i: usize| u64::from_le_bytes(r[i..i + 8].try_into().expect("8 bytes"));
+        let stack_top = STACK_TOP - (word(0) % (STACK_SLIDE / PAGE_SIZE)) * PAGE_SIZE;
+        let map_base = MAP_BASE + (word(8) % (MAP_SLIDE / VIEW_ALIGN)) * VIEW_ALIGN;
+        Ok(Space { root: paging::new_address_space()?, frames: 1, program_shared: BTreeMap::new(), stack_top, map_base })
     }
 
     fn map_zeroed(&mut self, va: u64, flags: Flags) -> Result<u64, MapError> {
@@ -273,9 +292,9 @@ impl Space {
             return Err(ExecError::ArgsTooLarge);
         }
         let mut bytes = alloc::vec![0u8; size];
-        let sp = image.build(STACK_TOP, &mut bytes).ok_or(ExecError::ArgsTooLarge)?;
+        let sp = image.build(self.stack_top, &mut bytes).ok_or(ExecError::ArgsTooLarge)?;
         let mut va = sp & !(PAGE_SIZE - 1);
-        while va < STACK_TOP {
+        while va < self.stack_top {
             self.map_zeroed(va, Flags::user(true, false)).map_err(ExecError::Map)?;
             va += PAGE_SIZE;
         }
@@ -316,7 +335,22 @@ impl Space {
 /// `cx` (whose credentials and current directory apply); returns the space,
 /// the entry point, the initial rsp and the canonical program path.
 fn build_image(cx: &Lookup, req: &ExecRequest) -> Result<(Space, u64, u64, String), ExecError> {
-    let prog = exec::load(cx, &req.path).map_err(ExecError::Load)?;
+    let mut prog = exec::load(cx, &req.path).map_err(ExecError::Load)?;
+    // A script runs its interpreter, which gets the script's path as an
+    // argument; the caller's request is left as it is (the process keeps
+    // the script's name).
+    let mut through: Option<ExecRequest> = None;
+    let mut depth = 0;
+    while let Some(script) = exec::Script::parse(&prog.image).map_err(ExecError::Load)? {
+        depth += 1;
+        if depth > exec::MAX_SCRIPT_DEPTH {
+            return Err(ExecError::Load(Errno::Loop));
+        }
+        let next = through.as_ref().unwrap_or(req).through_interpreter(&script, &prog.path).map_err(ExecError::Load)?;
+        prog = exec::load(cx, &next.path).map_err(ExecError::Load)?;
+        through = Some(next);
+    }
+    let req = through.as_ref().unwrap_or(req);
     let elf = ElfImage::parse_with(&prog.image, PROGRAM_RANGE).map_err(|e| {
         kprintln!("exec {}: rejected: {}", prog.path, e.describe());
         ExecError::BadImage(e)
@@ -357,13 +391,14 @@ struct ProcessMemory {
 impl ProcessMemory {
     fn new(mut space: Space) -> Self {
         let program_shared = core::mem::take(&mut space.program_shared);
+        let next_map = space.map_base;
         Self {
             alive: true,
             space,
             regions: BTreeMap::new(),
             shared: BTreeMap::new(),
             program_shared,
-            next_map: MAP_BASE,
+            next_map,
             mapped_pages: 0,
         }
     }
@@ -934,7 +969,7 @@ pub fn exec_current(req: ExecRequest) -> ExecError {
             let old_program_shared = core::mem::replace(&mut m.program_shared, new_program_shared);
             let old_shared = core::mem::take(&mut m.shared);
             shared_keys_clear(pid);
-            m.next_map = MAP_BASE;
+            m.next_map = m.space.map_base;
             m.mapped_pages = 0;
             p.name = name.clone();
             kprintln!("process {} ({}): exec {}, entry {:#x}", pid, name, path, entry);
@@ -2093,11 +2128,12 @@ fn demand_fault_for(pid: Pid, va: u64, write: bool, fetch: bool, wait: bool) -> 
     if !p.alive { return Demand::Refused; }
     let page = va & !(PAGE_SIZE - 1);
     let around = page + FAULT_AROUND_PAGES * PAGE_SIZE;
-    let (flags, run_end) = if (STACK_TOP - STACK_PAGES * PAGE_SIZE..STACK_TOP).contains(&page) {
+    let stack_top = p.space.stack_top;
+    let (flags, run_end) = if (stack_top - STACK_PAGES * PAGE_SIZE..stack_top).contains(&page) {
         if fetch {
             return Demand::Refused;
         }
-        (Flags::user(true, false), around.min(STACK_TOP))
+        (Flags::user(true, false), around.min(stack_top))
     } else {
         let root = p.space.root;
         let Some((&start, r)) = p.regions.range_mut(..=page).next_back() else { return Demand::Refused };

@@ -6,8 +6,8 @@
 |---|---|
 | `0x0000_0000_0000_0000 – 0x0000_0000_0000_FFFF` | never mapped (null guard) |
 | `0x0000_0000_0040_0000 …` | user program segments (`userspace/user.ld`) |
-| `0x0000_1000_0000_0000 …` | user anonymous mappings (`map`), guard page after each |
-| `… – 0x0000_7FFF_FFFF_0000` | user stack (256 KiB) |
+| `0x0000_1000_0000_0000 + r …` | user anonymous mappings (`map`), guard page after each; `r` is random per program image, below 1 TiB in 64 KiB steps |
+| `… – 0x0000_7FFF_FFFF_0000 − s` | user stack (512 KiB); `s` is random per program image, below 16 GiB in pages |
 | `0xFFFF_8000_0000_0000 + phys` | HHDM: direct map of RAM (NX) |
 | `0xFFFF_C000_0000_0000` | kernel heap (grows on demand, max 1 GiB) |
 | `0xFFFF_D000_0000_0000` | scratch page for paging self-tests |

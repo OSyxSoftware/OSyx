@@ -1,7 +1,8 @@
 //! AXIS, the OSyx command shell (`/bin/axis`), first version.
 //!
 //! Reads commands from standard input (the AXIS Terminal connects it to
-//! pipes) or from a script file (`axis script.ax`). A line is either a
+//! pipes) or from a script file (`axis script.ax arguments...`; a script
+//! that starts with `#!/bin/axis` and is executable runs the same way). A line is either a
 //! command or a small Python-flavoured statement:
 //!
 //! ```text
@@ -10,6 +11,7 @@
 //! count = 2 + 3
 //! print("Hello from", name, count)
 //! echo $name has $count       # $variables expand in command words; $? = last status
+//! echo $1 of $#: $@           # a script's arguments ($0 = the script), their number, all of them
 //! worker exit 3               # anything else runs a program from /bin, /usr/bin, /system/bin
 //! ```
 //!
@@ -40,11 +42,14 @@ struct Shell {
     vars: BTreeMap<String, String>,
     last: i32,
     history: Vec<String>,
+    /// The script's path and its arguments (`$0`, `$1`...); empty when
+    /// commands come from standard input.
+    args: Vec<String>,
 }
 
 fn main() -> i32 {
     let args: Vec<String> = env::args().collect();
-    let mut sh = Shell { vars: BTreeMap::new(), last: 0, history: Vec::new() };
+    let mut sh = Shell { vars: BTreeMap::new(), last: 0, history: Vec::new(), args: args.iter().skip(1).cloned().collect() };
     if let Some(script) = args.get(1) {
         return match fs::read_to_string(script) {
             Ok(text) => {
@@ -304,6 +309,13 @@ impl Shell {
             if name == "?" {
                 return Ok(Value::Int(self.last as i64));
             }
+            if name == "#" {
+                return Ok(Value::Int(self.args.len().saturating_sub(1) as i64));
+            }
+            if let Ok(i) = name.parse::<usize>() {
+                let v = self.args.get(i).cloned().unwrap_or_default();
+                return Ok(v.parse::<i64>().map(Value::Int).unwrap_or(Value::Str(v)));
+            }
             return self.term(String::from(name));
         }
         if let Ok(i) = t.parse::<i64>() {
@@ -339,6 +351,17 @@ impl Shell {
                         }
                     }
                 }
+                // Unquoted `$@`: every script argument is a word of its own.
+                '$' if chars.peek() == Some(&'@') => {
+                    chars.next();
+                    for (i, arg) in self.args.iter().skip(1).enumerate() {
+                        if i > 0 {
+                            words.push(core::mem::take(&mut cur));
+                        }
+                        cur.push_str(arg);
+                        in_word = true;
+                    }
+                }
                 '$' => {
                     in_word = true;
                     cur.push_str(&self.expand_var(&mut chars));
@@ -365,6 +388,20 @@ impl Shell {
         if chars.peek() == Some(&'?') {
             chars.next();
             return format!("{}", self.last);
+        }
+        if chars.peek() == Some(&'#') {
+            chars.next();
+            return format!("{}", self.args.len().saturating_sub(1));
+        }
+        // Inside quotes: all arguments as one string.
+        if chars.peek() == Some(&'@') {
+            chars.next();
+            return self.args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+        }
+        // `$0`..`$9`: one digit, so `$10` is `$1` followed by `0`.
+        if let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
+            chars.next();
+            return self.args.get(d as usize).cloned().unwrap_or_default();
         }
         let mut name = String::new();
         while let Some(&c) = chars.peek() {
@@ -1181,16 +1218,7 @@ fn cmd_devices(args: &[&str]) -> os_std::error::Result<i32> {
 }
 
 fn strip_comment(line: &str) -> &str {
-    let mut quote = None;
-    for (i, c) in line.char_indices() {
-        match (quote, c) {
-            (None, '"' | '\'') => quote = Some(c),
-            (Some(q), c) if c == q => quote = None,
-            (None, '#') => return &line[..i],
-            _ => {}
-        }
-    }
-    line
+    block::code(line)
 }
 
 /// `name = expr` (a Python-style identifier on the left, not `==`).

@@ -11,6 +11,14 @@
 //!   close, TIME-WAIT for [`TIME_WAIT_MS`]
 //! * MSS and window scale options (both sent on SYN, honoured from the
 //!   peer); other options are parsed and ignored
+//! * selective acknowledgements (RFC 2018), when both SYNs permit them:
+//!   ACKs name the out-of-order data held, the most recent arrival first;
+//!   blocks received are kept as a scoreboard, and fast recovery
+//!   retransmits only the holes below the highest block instead of
+//!   everything from the first loss, counting what is in flight from the
+//!   scoreboard (RFC 6675's pipe)
+//! * limited transmit (RFC 3042) and, with SACK, early retransmit (RFC
+//!   5827), so a loss in a small window does not wait for the timer
 //! * retransmission with RTO estimation (RFC 6298: SRTT/RTTVAR, Karn's
 //!   algorithm, exponential back-off, [`MAX_RETRIES`] then the connection
 //!   fails with [`TcpError::TimedOut`])
@@ -30,7 +38,7 @@
 //!   flushes output, so a burst of segments handled together is
 //!   acknowledged once
 //!
-//! Not implemented: timestamps, SACK, urgent data (the URG flag is
+//! Not implemented: timestamps, D-SACK, urgent data (the URG flag is
 //! ignored), delayed-ACK timers, keep-alive.
 
 use crate::ipv4::PROTO_TCP;
@@ -75,8 +83,10 @@ pub const TIME_WAIT_MS: u64 = 20_000;
 pub const ORPHAN_FIN_WAIT_MS: u64 = 60_000;
 /// Zero-window probes a closed connection sends before it gives up.
 pub const MAX_ORPHAN_PROBES: u32 = 8;
-/// Out-of-order segments kept at most.
-pub const MAX_OOO_SEGMENTS: usize = 64;
+/// Out-of-order segments kept at most: enough for a full receive window of
+/// ordinary segments behind one hole. With fewer, what arrives behind a
+/// loss is dropped and the peer has to send it all again.
+pub const MAX_OOO_SEGMENTS: usize = 256;
 
 /// Sequence number comparison modulo 2^32.
 pub fn seq_lt(a: u32, b: u32) -> bool {
@@ -95,6 +105,66 @@ pub fn seq_ge(a: u32, b: u32) -> bool {
     seq_le(b, a)
 }
 
+/// Most SACK blocks in one segment: the option space holds four, three
+/// are sent (RFC 2018 section 3).
+pub const MAX_SACK_BLOCKS: usize = 4;
+const SENT_SACK_BLOCKS: usize = 3;
+/// Ranges the sender's scoreboard keeps; more arrive only when the peer's
+/// out-of-order queue is badly fragmented, and forgetting one only costs a
+/// retransmission.
+const MAX_SACKED_RANGES: usize = 32;
+
+/// The blocks of a SACK option: `[left, right)` sequence ranges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SackBlocks {
+    len: u8,
+    blocks: [(u32, u32); MAX_SACK_BLOCKS],
+}
+
+impl SackBlocks {
+    pub const NONE: SackBlocks = SackBlocks { len: 0, blocks: [(0, 0); MAX_SACK_BLOCKS] };
+
+    pub fn as_slice(&self) -> &[(u32, u32)] {
+        &self.blocks[..self.len as usize]
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Adds a block; false (and nothing added) when four are held.
+    pub fn push(&mut self, left: u32, right: u32) -> bool {
+        if self.len as usize == MAX_SACK_BLOCKS {
+            return false;
+        }
+        self.blocks[self.len as usize] = (left, right);
+        self.len += 1;
+        true
+    }
+}
+
+/// The SACK option of a received segment, still in wire form: parsing a
+/// segment only checks its length, and the blocks are decoded when the
+/// connection looks at them (most segments carry none).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SackOption<'a>(&'a [u8]);
+
+impl SackOption<'_> {
+    pub const NONE: SackOption<'static> = SackOption(&[]);
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn blocks(&self) -> SackBlocks {
+        let mut blocks = SackBlocks::NONE;
+        for block in self.0.as_chunks::<8>().0 {
+            blocks.push(be32(block, 0), be32(block, 4));
+        }
+        blocks
+    }
+}
+
 /// A parsed segment (borrowing its payload).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Segment<'a> {
@@ -107,6 +177,9 @@ pub struct Segment<'a> {
     pub mss: Option<u16>,
     /// Window scale shift from a SYN's WS option.
     pub ws: Option<u8>,
+    /// The SACK-permitted option (meaningful on a SYN).
+    pub sack_permitted: bool,
+    pub sack: SackOption<'a>,
     pub payload: &'a [u8],
 }
 
@@ -143,6 +216,8 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
     }
     let mut mss = None;
     let mut ws = None;
+    let mut sack_permitted = false;
+    let mut sack = SackOption::NONE;
     let mut opts = &b[HEADER_LEN..off];
     while let Some(&kind) = opts.first() {
         match kind {
@@ -163,6 +238,16 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
                         return Err(SegmentError::BadOption);
                     }
                     ws = Some(opts[2].min(14));
+                } else if kind == 4 {
+                    if len != 2 {
+                        return Err(SegmentError::BadOption);
+                    }
+                    sack_permitted = true;
+                } else if kind == 5 {
+                    if len < 10 || !(len - 2).is_multiple_of(8) || (len - 2) / 8 > MAX_SACK_BLOCKS {
+                        return Err(SegmentError::BadOption);
+                    }
+                    sack = SackOption(&opts[2..len]);
                 }
                 opts = &opts[len..];
             }
@@ -177,6 +262,8 @@ pub fn parse(src: Ipv4Addr, dst: Ipv4Addr, b: &[u8]) -> Result<Segment<'_>, Segm
         window: be16(b, 14),
         mss,
         ws,
+        sack_permitted,
+        sack,
         payload: &b[off..],
     };
     if seg.src_port == 0 || seg.dst_port == 0 {
@@ -195,12 +282,16 @@ pub struct OutSegment {
     pub mss: Option<u16>,
     /// Window scale shift to announce in this segment's options (SYN only).
     pub ws: Option<u8>,
+    /// Send the SACK-permitted option (SYN only).
+    pub sack_permitted: bool,
+    /// Out-of-order data held, as a SACK option.
+    pub sack: SackBlocks,
     pub payload: Vec<u8>,
 }
 
 impl OutSegment {
     pub fn encode(&self, local: Endpoint, remote: Endpoint) -> Vec<u8> {
-        build(local, remote, self.seq, self.ack, self.flags, self.window, self.mss, self.ws, &self.payload)
+        self.encode_parts_with_headroom(local, remote, &self.payload, &[], 0)
     }
 
     /// Like [`encode`](Self::encode), with `headroom` bytes in front of the
@@ -213,7 +304,8 @@ impl OutSegment {
     /// Encodes this segment's header with the payload `a` followed by `b`
     /// (in place of `payload`), behind `headroom` bytes.
     pub fn encode_parts_with_headroom(&self, local: Endpoint, remote: Endpoint, a: &[u8], b: &[u8], headroom: usize) -> Vec<u8> {
-        build_parts(local, remote, self.seq, self.ack, self.flags, self.window, self.mss, self.ws, (a, b), headroom)
+        let options = Options { mss: self.mss, ws: self.ws, sack_permitted: self.sack_permitted, sack: self.sack };
+        build_parts(local, remote, self.seq, self.ack, self.flags, self.window, &options, (a, b), headroom)
     }
 }
 
@@ -246,7 +338,65 @@ pub fn build_with_headroom(
     payload: &[u8],
     headroom: usize,
 ) -> Vec<u8> {
-    build_parts(local, remote, seq, ack, flags, window, mss, ws, (payload, &[]), headroom)
+    let options = Options { mss, ws, sack_permitted: false, sack: SackBlocks::NONE };
+    build_parts(local, remote, seq, ack, flags, window, &options, (payload, &[]), headroom)
+}
+
+/// The options of an outgoing segment.
+struct Options {
+    mss: Option<u16>,
+    ws: Option<u8>,
+    sack_permitted: bool,
+    sack: SackBlocks,
+}
+
+impl Options {
+    /// Bytes the options take, padded to the header's 4-byte units.
+    fn len(&self) -> usize {
+        let mut n = 0;
+        n += if self.mss.is_some() { 4 } else { 0 };
+        n += if self.ws.is_some() { 3 } else { 0 };
+        n = (n + 3) & !3;
+        n += if self.sack_permitted { 4 } else { 0 };
+        n += if self.sack.is_empty() { 0 } else { 4 + 8 * self.sack.as_slice().len() };
+        n
+    }
+
+    /// Writes the options into `o` (`len()` zeroed bytes). MSS and window
+    /// scale come first, padded with the end-of-list byte as before; the
+    /// SACK options follow two NOPs each, which keeps their 32-bit fields
+    /// aligned.
+    fn write(&self, o: &mut [u8]) {
+        let mut at = 0;
+        if let Some(m) = self.mss {
+            o[at] = 2;
+            o[at + 1] = 4;
+            put16(o, at + 2, m);
+            at += 4;
+        }
+        if let Some(shift) = self.ws {
+            o[at] = 3;
+            o[at + 1] = 3;
+            o[at + 2] = shift;
+            // A NOP pads the option when more follow; a zero would end the list.
+            o[at + 3] = if self.sack_permitted || !self.sack.is_empty() { 1 } else { 0 };
+            at += 4;
+        }
+        if self.sack_permitted {
+            o[at..at + 4].copy_from_slice(&[1, 1, 4, 2]);
+            at += 4;
+        }
+        if !self.sack.is_empty() {
+            let blocks = self.sack.as_slice();
+            o[at..at + 4].copy_from_slice(&[1, 1, 5, 2 + 8 * blocks.len() as u8]);
+            at += 4;
+            for &(left, right) in blocks {
+                put32(o, at, left);
+                put32(o, at + 4, right);
+                at += 8;
+            }
+        }
+    }
 }
 
 /// [`build_with_headroom`] with the payload in two parts.
@@ -258,21 +408,11 @@ fn build_parts(
     ack: u32,
     flags: u8,
     window: u16,
-    mss: Option<u16>,
-    ws: Option<u8>,
+    options: &Options,
     (a, b): (&[u8], &[u8]),
     headroom: usize,
 ) -> Vec<u8> {
-    // MSS (4 bytes) + WS (3 bytes) + END (1 byte) always fits the 4-byte
-    // option alignment.
-    let opt_len = if mss.is_some() && ws.is_some() {
-        8
-    } else if mss.is_some() || ws.is_some() {
-        4
-    } else {
-        0
-    };
-    let hl = HEADER_LEN + opt_len;
+    let hl = HEADER_LEN + options.len();
     let mut frame = alloc::vec![0u8; headroom + hl + a.len() + b.len()];
     let s = &mut frame[headroom..];
     put16(s, 0, local.port);
@@ -282,22 +422,7 @@ fn build_parts(
     s[12] = ((hl / 4) as u8) << 4;
     s[13] = flags;
     put16(s, 14, window);
-    let mut o = HEADER_LEN;
-    if let Some(m) = mss {
-        s[o] = 2;
-        s[o + 1] = 4;
-        put16(s, o + 2, m);
-        o += 4;
-    }
-    if let Some(shift) = ws {
-        s[o] = 3;
-        s[o + 1] = 3;
-        s[o + 2] = shift;
-        o += 3;
-        if mss.is_none() {
-            s[o] = 0;
-        }
-    }
+    options.write(&mut s[HEADER_LEN..hl]);
     s[hl..hl + a.len()].copy_from_slice(a);
     s[hl + a.len()..].copy_from_slice(b);
     let c = transport_checksum(local.addr, remote.addr, PROTO_TCP, s);
@@ -324,9 +449,9 @@ pub fn reset_for(seg: &Segment) -> Option<OutSegment> {
         return None;
     }
     Some(if seg.has(ACK) {
-        OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, payload: Vec::new() }
+        OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, payload: Vec::new() }
     } else {
-        OutSegment { seq: 0, ack: seg.seq.wrapping_add(seg.seq_len()), flags: RST | ACK, window: 0, mss: None, ws: None, payload: Vec::new() }
+        OutSegment { seq: 0, ack: seg.seq.wrapping_add(seg.seq_len()), flags: RST | ACK, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, payload: Vec::new() }
     })
 }
 
@@ -416,6 +541,16 @@ pub struct Tcb {
     recv_buf: VecDeque<u8>,
     /// (seq, data, fin) received ahead of `rcv_nxt`.
     ooo: Vec<(u32, Vec<u8>, bool)>,
+    /// Both SYNs carried SACK-permitted.
+    sack_ok: bool,
+    /// Start of the out-of-order segment that arrived last: its block
+    /// leads the SACK option.
+    last_ooo: Option<u32>,
+    /// What the peer reported holding above `snd_una`: disjoint `[left,
+    /// right)` ranges in sequence order.
+    sacked: Vec<(u32, u32)>,
+    /// End of the data retransmitted in the current fast recovery.
+    rexmit_high: u32,
     /// The application called `close`: a FIN follows the data.
     fin_queued: bool,
     /// Sequence number of our FIN once it has been sent.
@@ -480,6 +615,10 @@ impl Tcb {
             send_buf: VecDeque::new(),
             recv_buf: VecDeque::new(),
             ooo: Vec::new(),
+            sack_ok: false,
+            last_ooo: None,
+            sacked: Vec::new(),
+            rexmit_high: iss,
             fin_queued: false,
             fin_sent: None,
             fin_received: false,
@@ -526,6 +665,7 @@ impl Tcb {
         t.rcv_nxt = syn.seq.wrapping_add(1);
         t.peer_mss = syn.mss.unwrap_or(DEFAULT_MSS).max(64);
         t.peer_scale = syn.ws.unwrap_or(0);
+        t.sack_ok = syn.sack_permitted;
         // Scaling only takes effect when both sides offered WS.
         if syn.ws.is_none() {
             t.our_scale = 0;
@@ -592,6 +732,7 @@ impl Tcb {
         self.set_state(State::Closed);
         self.send_buf.clear();
         self.ooo.clear();
+        self.sacked.clear();
         self.retransmit_at = None;
         self.persist_at = None;
         self.changed = true;
@@ -784,6 +925,8 @@ impl Tcb {
             window: 0,
             mss: None,
             ws: None,
+            sack_permitted: false,
+            sack: SackBlocks::NONE,
             payload: Vec::new(),
         });
         self.fail(TcpError::NotConnected);
@@ -857,7 +1000,7 @@ impl Tcb {
             // Not for this connection attempt; RFC 9293 answers with a
             // reset, which the stack sends for the caller.
             if !seg.has(RST) {
-                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, payload: Vec::new() });
+                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, payload: Vec::new() });
             }
             return;
         }
@@ -874,6 +1017,7 @@ impl Tcb {
         self.rcv_nxt = seg.seq.wrapping_add(1);
         self.peer_mss = seg.mss.unwrap_or(DEFAULT_MSS).max(64);
         self.peer_scale = seg.ws.unwrap_or(0);
+        self.sack_ok = seg.sack_permitted;
         if seg.ws.is_none() {
             self.our_scale = 0;
         }
@@ -961,7 +1105,7 @@ impl Tcb {
                 self.snd_wl1 = seg.seq;
                 self.snd_wl2 = seg.ack;
             } else {
-                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, payload: Vec::new() });
+                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, payload: Vec::new() });
                 return;
             }
         }
@@ -999,6 +1143,12 @@ impl Tcb {
         let data = (acked as usize).min(self.send_buf.len());
         self.send_buf.drain(..data);
         self.snd_una = ack;
+        self.sacked.retain_mut(|r| {
+            if seq_lt(r.0, ack) {
+                r.0 = ack;
+            }
+            seq_lt(r.0, r.1)
+        });
         if seq_lt(self.snd_nxt, ack) {
             self.snd_nxt = ack;
         }
@@ -1044,14 +1194,23 @@ impl Tcb {
             self.ack_now = true;
             return;
         }
+        let new_sack = self.record_sack(seg);
         if seq_gt(seg.ack, self.snd_una) {
             let newly = seg.ack.wrapping_sub(self.snd_una);
             self.ack_advance(seg.ack, now);
             match self.recover {
                 Some(r) if seq_lt(seg.ack, r) => {
-                    // Partial ACK in fast recovery: retransmit the next hole.
-                    self.snd_nxt = self.snd_una;
-                    self.cwnd = self.cwnd.saturating_sub(newly).max(mss) + mss;
+                    // Partial ACK in fast recovery: retransmit the next
+                    // hole. With a scoreboard the holes up to `rexmit_high`
+                    // were already sent again in this recovery.
+                    self.snd_nxt = if !self.sacked.is_empty() && seq_gt(self.rexmit_high, self.snd_una) {
+                        if seq_lt(self.rexmit_high, self.snd_max) { self.rexmit_high } else { self.snd_max }
+                    } else {
+                        self.snd_una
+                    };
+                    if self.sacked.is_empty() {
+                        self.cwnd = self.cwnd.saturating_sub(newly).max(mss) + mss;
+                    }
                 }
                 Some(_) => {
                     self.recover = None;
@@ -1064,19 +1223,33 @@ impl Tcb {
         } else if seg.ack == self.snd_una
             && seg.payload.is_empty()
             && !seg.has(FIN)
-            && self.peer_window(seg.window) == self.snd_wnd
+            && (self.peer_window(seg.window) == self.snd_wnd || new_sack)
             && self.snd_max != self.snd_una
         {
             self.dup_acks += 1;
-            if self.dup_acks == 3 && self.recover.is_none() {
+            // Early retransmit (RFC 5827): with fewer than four segments
+            // outstanding and nothing new to send, three duplicate ACKs can
+            // never arrive; one fewer than the segments in flight has to do.
+            // Only with SACK, where each one names a segment that arrived.
+            let unsent = self.send_buf.len() as u32 > self.snd_max.wrapping_sub(self.data_start());
+            let threshold = if self.sack_ok && !unsent && self.flight() < 4 * mss {
+                self.flight().div_ceil(mss).saturating_sub(1).max(1)
+            } else {
+                3
+            };
+            if self.dup_acks >= threshold && self.recover.is_none() {
                 // Fast retransmit (RFC 5681 3.2).
                 self.ssthresh = (self.flight() / 2).max(2 * mss);
-                self.cwnd = self.ssthresh + 3 * mss;
+                // With a scoreboard the data in flight is counted exactly
+                // (`pipe`), so the window is not inflated by the duplicate
+                // ACKs as in Reno (RFC 6675 section 5).
+                self.cwnd = if self.sacked.is_empty() { self.ssthresh + 3 * mss } else { self.ssthresh };
                 self.recover = Some(self.snd_max);
                 self.snd_nxt = self.snd_una;
+                self.rexmit_high = self.snd_una;
                 self.rtt_probe = None;
                 self.stats.fast_retransmits += 1;
-            } else if self.dup_acks > 3 {
+            } else if self.dup_acks > 3 && self.recover.is_some() && self.sacked.is_empty() {
                 self.cwnd = self.cwnd.saturating_add(mss);
             }
         }
@@ -1095,6 +1268,87 @@ impl Tcb {
             self.ack_now = true;
             self.time_wait_until = Some(now + TIME_WAIT_MS);
         }
+    }
+
+    /// Merges the SACK blocks of `seg` into the scoreboard; true if they
+    /// reported data not known to be held before. Blocks that do not lie in
+    /// `(snd_una, snd_max]` (old, D-SACK or bogus) are ignored.
+    fn record_sack(&mut self, seg: &Segment) -> bool {
+        if !self.sack_ok || seg.sack.is_empty() {
+            return false;
+        }
+        let base = if seq_gt(seg.ack, self.snd_una) && seq_le(seg.ack, self.snd_max) { seg.ack } else { self.snd_una };
+        let mut new = false;
+        for &(left, right) in seg.sack.blocks().as_slice() {
+            if !seq_lt(left, right) || seq_le(left, base) || seq_gt(right, self.snd_max) {
+                continue;
+            }
+            // Position among the ranges, then merge with every neighbour it
+            // touches.
+            let (mut left, mut right) = (left, right);
+            let covered = self.sacked.iter().any(|r| seq_le(r.0, left) && seq_ge(r.1, right));
+            if covered {
+                continue;
+            }
+            new = true;
+            self.sacked.retain(|r| {
+                let apart = seq_lt(r.1, left) || seq_gt(r.0, right);
+                if !apart {
+                    if seq_lt(r.0, left) {
+                        left = r.0;
+                    }
+                    if seq_gt(r.1, right) {
+                        right = r.1;
+                    }
+                }
+                apart
+            });
+            let at = self.sacked.iter().position(|r| seq_gt(r.0, left)).unwrap_or(self.sacked.len());
+            self.sacked.insert(at, (left, right));
+            if self.sacked.len() > MAX_SACKED_RANGES {
+                self.sacked.remove(0);
+            }
+        }
+        new
+    }
+
+    /// The out-of-order data held, as SACK blocks: the range with the most
+    /// recent arrival first, then the others from the highest down.
+    fn sack_blocks(&self) -> SackBlocks {
+        let mut blocks = SackBlocks::NONE;
+        if !self.sack_ok || self.ooo.is_empty() {
+            return blocks;
+        }
+        let mut ranges: Vec<(u32, u32)> = self
+            .ooo
+            .iter()
+            .map(|(s, d, _)| (*s, s.wrapping_add(d.len() as u32)))
+            .filter(|r| seq_lt(r.0, r.1) && seq_gt(r.1, self.rcv_nxt))
+            .collect();
+        ranges.sort_unstable_by_key(|r| r.0.wrapping_sub(self.rcv_nxt));
+        let mut merged: Vec<(u32, u32)> = Vec::new();
+        for r in ranges {
+            match merged.last_mut() {
+                Some(last) if seq_le(r.0, last.1) => {
+                    if seq_gt(r.1, last.1) {
+                        last.1 = r.1;
+                    }
+                }
+                _ => merged.push(r),
+            }
+        }
+        let first = self.last_ooo.and_then(|s| merged.iter().position(|r| seq_le(r.0, s) && seq_lt(s, r.1)));
+        if let Some(i) = first {
+            let r = merged.remove(i);
+            blocks.push(r.0, r.1);
+        }
+        for r in merged.iter().rev() {
+            if blocks.as_slice().len() == SENT_SACK_BLOCKS {
+                break;
+            }
+            blocks.push(r.0, r.1);
+        }
+        blocks
     }
 
     fn enter_time_wait(&mut self, now: u64) {
@@ -1151,6 +1405,9 @@ impl Tcb {
             self.stats.out_of_order += 1;
             if self.ooo.len() < MAX_OOO_SEGMENTS && !self.ooo.iter().any(|(s, d, _)| *s == seq && d.len() >= data.len()) {
                 self.ooo.push((seq, data.to_vec(), fin));
+            }
+            if !data.is_empty() {
+                self.last_ooo = Some(seq);
             }
         }
     }
@@ -1242,6 +1499,9 @@ impl Tcb {
                 self.dup_acks = 0;
                 self.rtt_probe = None;
                 self.snd_nxt = self.snd_una;
+                // The peer may have dropped what it reported (RFC 2018
+                // section 8): after a timeout everything is sent again.
+                self.sacked.clear();
                 self.retransmit_at = Some(now + self.rto);
                 return true;
             }
@@ -1283,6 +1543,9 @@ impl Tcb {
         };
         let mss = (flags & SYN != 0).then_some(self.our_mss);
         let ws = (flags & SYN != 0).then_some(self.our_scale);
+        // Offered on our SYN; on a SYN-ACK only when the peer offered it.
+        let sack_permitted = flags & SYN != 0 && (self.state == State::SynSent || self.sack_ok);
+        let sack = if flags & SYN == 0 { self.sack_blocks() } else { SackBlocks::NONE };
         self.ack_pending = false;
         self.ack_now = false;
         self.unacked_segments = 0;
@@ -1294,7 +1557,7 @@ impl Tcb {
         } else {
             self.adv_window()
         };
-        OutSegment { seq, ack, flags, window, mss, ws, payload }
+        OutSegment { seq, ack, flags, window, mss, ws, sack_permitted, sack, payload }
     }
 
     /// Segments to transmit now (SYN, data, FIN, retransmissions, ACKs).
@@ -1347,17 +1610,28 @@ impl Tcb {
         if can_send_data {
             let mss = self.mss() as usize;
             loop {
+                let hole_end = self.skip_sacked();
                 let start = self.data_start();
                 let off = self.snd_nxt.wrapping_sub(start) as usize;
-                let window = self.snd_wnd.min(self.cwnd);
                 let in_flight = self.snd_nxt.wrapping_sub(self.snd_una);
-                let room = window.saturating_sub(in_flight) as usize;
+                // The peer's window bounds how far `snd_nxt` may go; the
+                // congestion window bounds what is in flight, which in a
+                // SACK recovery is not everything up to `snd_nxt`.
+                // Limited transmit (RFC 3042): each of the first two
+                // duplicate ACKs lets one more segment out, so a small
+                // window still produces the third one.
+                let limited = if self.recover.is_none() { self.dup_acks.min(2) * self.mss() as u32 } else { 0 };
+                let cwnd = self.cwnd.saturating_add(limited);
+                let room = self.snd_wnd.saturating_sub(in_flight).min(cwnd.saturating_sub(self.pipe())) as usize;
                 let pending = self.send_buf.len().saturating_sub(off);
+                // Data segments carry the SACK option too while
+                // out-of-order data is held: it comes off the payload.
+                let mss = mss.saturating_sub(self.sack_option_len()).max(1);
                 // Silly window avoidance: a segment the window cuts short of
                 // both a full MSS and the queued data waits for more room,
                 // unless it is at least half the largest window the peer
                 // offered or nothing is in flight (no ACK would come).
-                let n = pending.min(mss).min(room);
+                let n = pending.min(mss).min(room).min(hole_end.map_or(usize::MAX, |e| e.wrapping_sub(self.snd_nxt) as usize));
                 let silly = n < mss && n < pending && in_flight > 0 && (n as u32) < self.max_snd_wnd / 2;
                 if pending > 0 && room > 0 && !silly {
                     let last = off + n == self.send_buf.len();
@@ -1410,9 +1684,67 @@ impl Tcb {
         }
     }
 
+    /// Bytes the SACK option takes in a segment sent now.
+    fn sack_option_len(&self) -> usize {
+        match self.sack_blocks().as_slice().len() {
+            0 => 0,
+            n => 4 + 8 * n,
+        }
+    }
+
+    /// Data presumed in flight. Without a scoreboard, or outside fast
+    /// recovery, everything from `snd_una` to `snd_nxt`. In a SACK recovery:
+    /// what was sent, less what the peer holds and less the holes below the
+    /// highest block that have not been sent again yet (presumed lost).
+    fn pipe(&self) -> u32 {
+        if self.recover.is_none() || self.sacked.is_empty() {
+            return self.snd_nxt.wrapping_sub(self.snd_una);
+        }
+        let held: u32 = self.sacked.iter().map(|r| r.1.wrapping_sub(r.0)).sum();
+        let highest = self.sacked.last().map_or(self.snd_una, |r| r.1);
+        let mut lost = 0u32;
+        if seq_lt(self.snd_nxt, highest) {
+            let mut at = self.snd_nxt;
+            for &(left, right) in &self.sacked {
+                if seq_gt(left, at) {
+                    lost = lost.wrapping_add(left.wrapping_sub(at));
+                }
+                if seq_gt(right, at) {
+                    at = right;
+                }
+            }
+        }
+        self.flight().saturating_sub(held).saturating_sub(lost)
+    }
+
+    /// While retransmitting with a scoreboard: moves `snd_nxt` past data
+    /// the peer holds, and in fast recovery past everything above the
+    /// highest block (not known to be lost; a timeout sends it again).
+    /// Returns where the hole at `snd_nxt` ends, if a held range follows.
+    fn skip_sacked(&mut self) -> Option<u32> {
+        if self.sacked.is_empty() || !seq_lt(self.snd_nxt, self.snd_max) {
+            return None;
+        }
+        for &(left, right) in &self.sacked {
+            if seq_lt(self.snd_nxt, left) {
+                return Some(left);
+            }
+            if seq_lt(self.snd_nxt, right) {
+                self.snd_nxt = right;
+            }
+        }
+        if self.recover.is_some() && seq_lt(self.snd_nxt, self.snd_max) {
+            self.snd_nxt = self.snd_max;
+        }
+        None
+    }
+
     fn after_send(&mut self, seq: u32, len: u32, now: u64) {
         let end = seq.wrapping_add(len);
         let retransmission = seq_lt(seq, self.snd_max);
+        if retransmission && self.recover.is_some() && seq_gt(end, self.rexmit_high) {
+            self.rexmit_high = end;
+        }
         self.snd_nxt = end;
         if seq_gt(end, self.snd_max) {
             self.snd_max = end;

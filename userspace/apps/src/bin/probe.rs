@@ -73,6 +73,9 @@ fn report(path: &str) -> i32 {
         b.iter().map(|x| format!("{x:02x}")).collect::<String>()
     });
     out += &format!("random={}\n", random.unwrap_or_default());
+    // Where the kernel put this image's stack and its first anonymous mapping.
+    out += &format!("stack={:#x}\n", os::aux_value(auxv::AT_RANDOM).unwrap_or(0) & !0xfff);
+    out += &format!("map={:#x}\n", raw::map(4096, raw::PROT_READ | raw::PROT_WRITE).map_or(0, |p| p as usize));
     out += &format!("uid={}\n", os::aux_value(auxv::AT_UID).map_or(-1, |v| v as i64));
     let (phdr, entry) = headers_ok();
     out += &format!("phdr={phdr}\nentry={entry}\nhandle3={handle3}\n");

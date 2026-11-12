@@ -115,6 +115,26 @@ pub fn run(t: &mut Tests) {
         let b = probe_report(|_| {}).map(|r| String::from(r.get("random")));
         matches!((a, b), (Some(a), Some(b)) if a.len() == 32 && a != b)
     });
+    t.check("exec: stack and mapping addresses differ between processes", || {
+        let place = || {
+            probe_report(|_| {}).and_then(|r| {
+                let hex = |k: &str| u64::from_str_radix(r.get(k).trim_start_matches("0x"), 16).ok();
+                Some((hex("stack")?, hex("map")?))
+            })
+        };
+        let runs: Vec<(u64, u64)> = (0..4).filter_map(|_| place()).collect();
+        println!("exec places: {runs:x?}");
+        let in_range = runs.iter().all(|&(stack, map)| {
+            (0x7FFB_0000_0000..0x7FFF_FFFF_0000).contains(&stack) && (0x1000_0000_0000..0x1100_0000_0000).contains(&map)
+        });
+        let distinct = |f: fn(&(u64, u64)) -> u64| {
+            let mut v: Vec<u64> = runs.iter().map(f).collect();
+            v.sort_unstable();
+            v.dedup();
+            v.len()
+        };
+        runs.len() == 4 && in_range && distinct(|r| r.0) >= 3 && distinct(|r| r.1) >= 3
+    });
     t.check("exec: absolute and relative program paths", || {
         let abs = matches!(Command::new("/usr/bin/probe").args(["count", "0"]).status(), Ok(s) if s.success());
         let rel = env::set_current_dir("/usr")
@@ -139,13 +159,50 @@ pub fn run(t: &mut Tests) {
         let no_x = kind("/tmp/probe-copy") == Err(ErrorKind::PermissionDenied);
         let made_x = fs::set_permissions("/tmp/probe-copy", Permissions::from_mode(0o755)).is_ok();
         let runs_from_tmpfs = kind("/tmp/probe-copy") == Ok(Some(0));
-        let script = fs::write("/tmp/exec-script", "#!/bin/sh\necho no\n").is_ok()
+        let script = fs::write("/tmp/exec-script", "neither ELF nor a script\n").is_ok()
             && fs::set_permissions("/tmp/exec-script", Permissions::from_mode(0o755)).is_ok();
         let not_elf = kind("/tmp/exec-script") == Err(ErrorKind::InvalidExecutable);
         let dir = kind("/tmp") == Err(ErrorKind::PermissionDenied);
         let _ = fs::remove_file("/tmp/probe-copy");
         println!("exec perms: copied {copied} no-x {no_x} made-x {made_x} tmpfs {runs_from_tmpfs} not-elf {not_elf} dir {dir}");
         copied && no_x && made_x && runs_from_tmpfs && script && not_elf && dir
+    });
+    t.check("exec: #! scripts run their interpreter", || {
+        const SCRIPT: &str = "/tmp/exec-shebang";
+        const OUT: &str = "/tmp/exec-shebang.out";
+        let _ = fs::remove_file(OUT);
+        let run = |text: &str| {
+            fs::write(SCRIPT, text)
+                .and_then(|_| fs::set_permissions(SCRIPT, Permissions::from_mode(0o755)))
+                .and_then(|_| Command::new(SCRIPT).status())
+                .map(|s| s.code())
+                .map_err(|e| e.kind())
+        };
+        // AXIS takes the script's path as its argument; the #! line is a
+        // comment to it.
+        let ran = run(&format!("#!/bin/axis\necho from-script > {OUT}\n"));
+        let wrote = fs::read_to_string(OUT).is_ok_and(|t| t.trim() == "from-script");
+        // The interpreter is searched like any program name.
+        let _ = fs::remove_file(OUT);
+        let by_name = run(&format!("#! axis\necho by-name > {OUT}\n"));
+        let wrote_by_name = fs::read_to_string(OUT).is_ok_and(|t| t.trim() == "by-name");
+        // The script's own arguments: $1, $#, and $@ as separate words.
+        let _ = fs::remove_file(OUT);
+        let with_args = fs::write(SCRIPT, format!("#!/bin/axis\necho $1+$2+$# > {OUT}\nfor a in $@ {{\n    echo [$a] >> {OUT}\n}}\n"))
+            .and_then(|_| Command::new(SCRIPT).args(["one", "two words"]).status())
+            .map(|s| s.code())
+            .map_err(|e| e.kind());
+        let args_text = fs::read_to_string(OUT).unwrap_or_default();
+        let args_ok = with_args == Ok(Some(0)) && args_text == "one+two words+2\n[one]\n[two words]\n";
+        if !args_ok {
+            println!("exec script arguments: {with_args:?} {args_text:?}");
+        }
+        let missing = run("#!/bin/no-such-interpreter\n") == Err(ErrorKind::NotFound);
+        let itself = run(&format!("#!{SCRIPT}\n")).is_err();
+        let _ = fs::remove_file(SCRIPT);
+        let _ = fs::remove_file(OUT);
+        println!("exec script: ran {ran:?} wrote {wrote} by-name {by_name:?} wrote {wrote_by_name} missing {missing} itself {itself}");
+        ran == Ok(Some(0)) && wrote && by_name == Ok(Some(0)) && wrote_by_name && args_ok && missing && itself
     });
     t.check("exec: kernel validates the argument block", || {
         let fault = raw::exec_raw(nr::SPAWN, 0xFFFF_8000_0000_0000) == Err(Errno::Fault)

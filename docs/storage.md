@@ -172,7 +172,10 @@ state clean), which `e2fsck -fn` confirms after every QEMU test run.
 - FAT32 (`osyx-fat`): see the driver's own documentation in the crate; the
   VFS adapter assigns stable inode numbers by path, synthesises root-owned
   0755/0644 permissions (0444 with the read-only attribute) and the FAT
-  timestamp, and writes metadata through after every change.
+  timestamp. Dirty FAT sectors and FSInfo stay in memory and reach the
+  medium once the volume has been quiet for two seconds, on `sync` and on
+  unmount (the write-back thread); directory entries and file data are
+  written at once.
 - tmpfs (`osyx-tmpfs`): 4 KiB pages allocated on first write (holes are
   free), a per-instance memory limit (nodes, names, pages are charged;
   `NoSpace` when exceeded, short writes when partly possible), memory

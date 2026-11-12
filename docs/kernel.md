@@ -100,10 +100,13 @@ The panic path may force-unlock SERIAL and only try-locks the display.
 - Created by `spawn(parent, request)` from an executable file (see
   [Program loader](#program-loader)) with one main thread; `thread_spawn`
   adds more (up to 64). Each process has its own address space: ELF
-  segments with their permissions, a 512 KiB stack below
-  `0x7FFF_FFFF_0000`, null guard below 64 KiB, System V initial stack
+  segments with their permissions, a 512 KiB stack that ends at most
+  16 GiB below `0x7FFF_FFFF_0000`, null guard below 64 KiB, System V initial stack
   (`argc`, `argv`, `envp`, `auxv`). `execve` swaps in a new address space
-  (below).
+  (below). The stack top and the start of the anonymous mappings are
+  chosen at random for every program image (`spawn` and `execve`): 22 and
+  24 bits from the kernel's random source. Program segments stay at their
+  link addresses (`ET_EXEC` only), so code addresses are not randomised.
 - `exit` (or a fatal CPU exception in any thread) records the exit status
   and asks the other threads to stop; `thread_exit` ends one thread. The last
   thread to end destroys the address space, drops the process's futex
@@ -161,6 +164,15 @@ The panic path may force-unlock SERIAL and only try-locks the display.
   checked (`old image released N frames, no leak`), and the thread enters
   ring 3 at the new entry with `iretq`. The system call's kernel stack is
   abandoned; nothing on it owns memory at that point.
+- **Scripts**: an executable file that starts with `#!` runs the
+  interpreter named on its first line (`#!interpreter [argument]`, at most
+  255 bytes; everything after the interpreter is one argument). The
+  interpreter is found like any program (a name without `/` is searched in
+  `/bin` and `/usr/bin`) and gets `argv` = interpreter, the argument, the
+  script's canonical path, then the caller's arguments after `argv[0]`. An
+  interpreter may be a script itself, four levels deep; a longer chain
+  fails with `Loop`, a malformed line with `BadExecutable`. The process
+  keeps the script's name. `/bin/axis` runs AXIS scripts this way.
 - **Boot modules** (`\EFI\OSYX\BIN`) are only used when there is no usable
   root partition: they are installed into `/bin` of the fallback tmpfs
   root.
@@ -188,6 +200,6 @@ Thread priorities, fine-grained parallel kernel execution (SMP currently
 serializes kernel entries while user threads run in parallel), local IOAPIC, ACPI AML
 parsing, PCIe ECAM, device interrupts/MSI-X, storage controllers other than
 virtio-blk, NTFS, keyboard input, XSAVE (AVX state), dynamically linked or
-position-independent (`ET_DYN`) programs, `#!` interpreter scripts,
+position-independent (`ET_DYN`) programs,
 set-user-ID programs, close-on-exec handles, demand paging of program
 images.
