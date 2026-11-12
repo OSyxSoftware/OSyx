@@ -245,3 +245,31 @@ fn blocks_outside_the_sent_data_are_ignored() {
     assert_eq!(b.recv(&mut got), Ok(data.len()));
     assert_eq!(got, data);
 }
+
+#[test]
+fn a_data_segment_with_sack_blocks_still_fits_the_mss() {
+    let (mut a, mut b) = pair(true);
+    let data = pattern(4 * MSS);
+    assert_eq!(a.send(&data), Ok(data.len()));
+    let segs = a.output(2);
+    // The receiver holds one out-of-order segment and has data of its own.
+    deliver(&segs[2], A, B, &mut b, 3);
+    assert_eq!(b.send(&pattern(3 * MSS)), Ok(3 * MSS));
+    let out = b.output(3);
+    assert!(out.iter().any(|s| !s.payload.is_empty()));
+    for seg in &out {
+        assert_eq!(seg.sack.as_slice().len(), 1, "every segment reports the held data");
+        let on_wire = seg.encode(B, A).len() - 20;
+        assert!(on_wire <= MSS, "options and payload take {on_wire} bytes of a {MSS}-byte MSS");
+    }
+}
+
+#[test]
+fn a_loss_in_a_short_flight_is_repaired_without_a_timeout() {
+    let (mut a, mut b) = pair(true);
+    // Three segments, the first lost: only two duplicate ACKs can come.
+    let data = pattern(3 * MSS);
+    let (resent, timed_out) = transfer(&mut a, &mut b, &data, &[0]);
+    assert!(!timed_out, "early retransmit, not the retransmission timer");
+    assert_eq!(resent, MSS);
+}

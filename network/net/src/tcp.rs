@@ -15,7 +15,10 @@
 //!   ACKs name the out-of-order data held, the most recent arrival first;
 //!   blocks received are kept as a scoreboard, and fast recovery
 //!   retransmits only the holes below the highest block instead of
-//!   everything from the first loss
+//!   everything from the first loss, counting what is in flight from the
+//!   scoreboard (RFC 6675's pipe)
+//! * limited transmit (RFC 3042) and, with SACK, early retransmit (RFC
+//!   5827), so a loss in a small window does not wait for the timer
 //! * retransmission with RTO estimation (RFC 6298: SRTT/RTTVAR, Karn's
 //!   algorithm, exponential back-off, [`MAX_RETRIES`] then the connection
 //!   fails with [`TcpError::TimedOut`])
@@ -80,8 +83,10 @@ pub const TIME_WAIT_MS: u64 = 20_000;
 pub const ORPHAN_FIN_WAIT_MS: u64 = 60_000;
 /// Zero-window probes a closed connection sends before it gives up.
 pub const MAX_ORPHAN_PROBES: u32 = 8;
-/// Out-of-order segments kept at most.
-pub const MAX_OOO_SEGMENTS: usize = 64;
+/// Out-of-order segments kept at most: enough for a full receive window of
+/// ordinary segments behind one hole. With fewer, what arrives behind a
+/// loss is dropped and the peer has to send it all again.
+pub const MAX_OOO_SEGMENTS: usize = 256;
 
 /// Sequence number comparison modulo 2^32.
 pub fn seq_lt(a: u32, b: u32) -> bool {
@@ -1183,7 +1188,9 @@ impl Tcb {
                     } else {
                         self.snd_una
                     };
-                    self.cwnd = self.cwnd.saturating_sub(newly).max(mss) + mss;
+                    if self.sacked.is_empty() {
+                        self.cwnd = self.cwnd.saturating_sub(newly).max(mss) + mss;
+                    }
                 }
                 Some(_) => {
                     self.recover = None;
@@ -1200,16 +1207,29 @@ impl Tcb {
             && self.snd_max != self.snd_una
         {
             self.dup_acks += 1;
-            if self.dup_acks == 3 && self.recover.is_none() {
+            // Early retransmit (RFC 5827): with fewer than four segments
+            // outstanding and nothing new to send, three duplicate ACKs can
+            // never arrive; one fewer than the segments in flight has to do.
+            // Only with SACK, where each one names a segment that arrived.
+            let unsent = self.send_buf.len() as u32 > self.snd_max.wrapping_sub(self.data_start());
+            let threshold = if self.sack_ok && !unsent && self.flight() < 4 * mss {
+                self.flight().div_ceil(mss).saturating_sub(1).max(1)
+            } else {
+                3
+            };
+            if self.dup_acks >= threshold && self.recover.is_none() {
                 // Fast retransmit (RFC 5681 3.2).
                 self.ssthresh = (self.flight() / 2).max(2 * mss);
-                self.cwnd = self.ssthresh + 3 * mss;
+                // With a scoreboard the data in flight is counted exactly
+                // (`pipe`), so the window is not inflated by the duplicate
+                // ACKs as in Reno (RFC 6675 section 5).
+                self.cwnd = if self.sacked.is_empty() { self.ssthresh + 3 * mss } else { self.ssthresh };
                 self.recover = Some(self.snd_max);
                 self.snd_nxt = self.snd_una;
                 self.rexmit_high = self.snd_una;
                 self.rtt_probe = None;
                 self.stats.fast_retransmits += 1;
-            } else if self.dup_acks > 3 {
+            } else if self.dup_acks > 3 && self.recover.is_some() && self.sacked.is_empty() {
                 self.cwnd = self.cwnd.saturating_add(mss);
             }
         }
@@ -1573,10 +1593,20 @@ impl Tcb {
                 let hole_end = self.skip_sacked();
                 let start = self.data_start();
                 let off = self.snd_nxt.wrapping_sub(start) as usize;
-                let window = self.snd_wnd.min(self.cwnd);
                 let in_flight = self.snd_nxt.wrapping_sub(self.snd_una);
-                let room = window.saturating_sub(in_flight) as usize;
+                // The peer's window bounds how far `snd_nxt` may go; the
+                // congestion window bounds what is in flight, which in a
+                // SACK recovery is not everything up to `snd_nxt`.
+                // Limited transmit (RFC 3042): each of the first two
+                // duplicate ACKs lets one more segment out, so a small
+                // window still produces the third one.
+                let limited = if self.recover.is_none() { self.dup_acks.min(2) * self.mss() as u32 } else { 0 };
+                let cwnd = self.cwnd.saturating_add(limited);
+                let room = self.snd_wnd.saturating_sub(in_flight).min(cwnd.saturating_sub(self.pipe())) as usize;
                 let pending = self.send_buf.len().saturating_sub(off);
+                // Data segments carry the SACK option too while
+                // out-of-order data is held: it comes off the payload.
+                let mss = mss.saturating_sub(self.sack_option_len()).max(1);
                 // Silly window avoidance: a segment the window cuts short of
                 // both a full MSS and the queued data waits for more room,
                 // unless it is at least half the largest window the peer
@@ -1632,6 +1662,39 @@ impl Tcb {
             let seg = self.segment(self.snd_nxt, 0, Vec::new());
             emit(seg, &[], &[]);
         }
+    }
+
+    /// Bytes the SACK option takes in a segment sent now.
+    fn sack_option_len(&self) -> usize {
+        match self.sack_blocks().as_slice().len() {
+            0 => 0,
+            n => 4 + 8 * n,
+        }
+    }
+
+    /// Data presumed in flight. Without a scoreboard, or outside fast
+    /// recovery, everything from `snd_una` to `snd_nxt`. In a SACK recovery:
+    /// what was sent, less what the peer holds and less the holes below the
+    /// highest block that have not been sent again yet (presumed lost).
+    fn pipe(&self) -> u32 {
+        if self.recover.is_none() || self.sacked.is_empty() {
+            return self.snd_nxt.wrapping_sub(self.snd_una);
+        }
+        let held: u32 = self.sacked.iter().map(|r| r.1.wrapping_sub(r.0)).sum();
+        let highest = self.sacked.last().map_or(self.snd_una, |r| r.1);
+        let mut lost = 0u32;
+        if seq_lt(self.snd_nxt, highest) {
+            let mut at = self.snd_nxt;
+            for &(left, right) in &self.sacked {
+                if seq_gt(left, at) {
+                    lost = lost.wrapping_add(left.wrapping_sub(at));
+                }
+                if seq_gt(right, at) {
+                    at = right;
+                }
+            }
+        }
+        self.flight().saturating_sub(held).saturating_sub(lost)
     }
 
     /// While retransmitting with a scoreboard: moves `snd_nxt` past data
