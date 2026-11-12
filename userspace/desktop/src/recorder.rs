@@ -32,6 +32,13 @@ fn deliver_kept(dir: &str, name: &str) -> Result<(), String> {
     for entry in entries {
         let Some(as_name) = entry.file_name().strip_prefix(KEPT).map(String::from) else { continue };
         let path = format!("{SPOOL}/{}", entry.file_name());
+        // Handed over already, and only the removal here was lost (the
+        // power went): the user's file of that name has every byte.
+        let size = |p: &str| fs::metadata(p).map(|m| m.len()).ok();
+        if size(&path).is_some() && size(&path) == size(&format!("{dir}/{as_name}")) {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
         match user_save::save(dir, &as_name, user_save::Source::File(&path)) {
             Ok(()) => {
                 let _ = fs::remove_file(&path);
@@ -119,17 +126,27 @@ impl Recorder {
                 // input and frames come first; encoding must not share
                 // that place.
                 let _ = os_std::system::thread_priority(0, os_std::system::priority::NORMAL);
-                let result = work(&worker, encoder, writer, file, head.len() as u64, width as usize).and_then(|mut summary| {
-                    // Finished: kept until the user has it, also when
-                    // their folder cannot be written today.
-                    fs::rename(&spool, format!("{SPOOL}/{KEPT}{name}")).map_err(|e| format!("{SPOOL}: {e}"))?;
-                    deliver_kept(&dir, &name)?;
+                let made = work(&worker, encoder, writer, file, head.len() as u64, width as usize);
+                // Half a file is of no use to anyone; a finished one is
+                // removed from here only once the user has it.
+                if made.is_err() {
+                    let _ = fs::remove_file(&spool);
+                }
+                let result = made.and_then(|mut summary| {
+                    // Kept under its own name until it is handed over,
+                    // also when the user's folder cannot be written today.
+                    match fs::rename(&spool, format!("{SPOOL}/{KEPT}{name}")) {
+                        Ok(()) => deliver_kept(&dir, &name)?,
+                        // Not even that: handed over from where it lies,
+                        // and left there if that fails too.
+                        Err(_) => {
+                            user_save::save(&dir, &name, user_save::Source::File(&spool))?;
+                            let _ = fs::remove_file(&spool);
+                        }
+                    }
                     summary.path = format!("{dir}/{name}");
                     Ok(summary)
                 });
-                // Half a file is of no use to anyone (a finished one has
-                // another name by now).
-                let _ = fs::remove_file(&spool);
                 worker.lock().unwrap().result = Some(result);
             }
         });
