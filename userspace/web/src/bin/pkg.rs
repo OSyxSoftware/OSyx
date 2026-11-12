@@ -58,7 +58,13 @@ fn setting(text: &str, key: &str) -> Option<String> {
 fn repository() -> Result<String, String> {
     for conf in [CONF, UPDATE_CONF] {
         if let Some(url) = fs::read_to_string(conf).ok().and_then(|t| setting(&t, "url")) {
-            return Ok(String::from(osyx_update::update_url(&url)));
+            let url = osyx_update::update_url(&url);
+            // Over plain HTTP anyone on the path can answer with an older
+            // signed list and keep a system from its fixes: refused.
+            if !url.starts_with("https://") {
+                return Err(format!("{url} (from {conf}) is not HTTPS: package repositories must use HTTPS"));
+            }
+            return Ok(String::from(url));
         }
     }
     Err(format!("no repository: put url=... in {CONF}"))
@@ -168,7 +174,7 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
         }
     }
     let mut b = Buf(Vec::new(), url.starts_with("https://"));
-    osyx_web::get_no_downgrade(url, &mut b).map_err(|e| format!("{url}: {e}"))?;
+    osyx_web::get(url, &mut b).map_err(|e| format!("{url}: {e}"))?;
     Ok(b.0)
 }
 
@@ -246,7 +252,7 @@ fn download_payload(url: &str, path: &str, size: u64, sha256: &[u8; 32]) -> Resu
     }
     let file = fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
     let mut sink = Limited { file, hash: Sha256::new(), left: size, secure: url.starts_with("https://") };
-    let result = osyx_web::get_no_downgrade(url, &mut sink).map_err(|e| format!("{url}: {e}")).and_then(|_| {
+    let result = osyx_web::get(url, &mut sink).map_err(|e| format!("{url}: {e}")).and_then(|_| {
         if sink.left != 0 {
             return Err(format!("the payload is {} bytes short", sink.left));
         }
