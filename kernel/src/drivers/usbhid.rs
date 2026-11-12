@@ -25,10 +25,8 @@ use osyx_usb::hid::{self, BootKeyboard, KeyChange, MouseLayout, ReportError, Tab
 
 pub enum HidKind {
     Keyboard { state: BootKeyboard, applied_leds: u8 },
-    /// `layout` `None`: boot protocol reports. `maybe_boot`: the device
-    /// refused the switch to the report protocol, so it may still send
-    /// boot reports.
-    Mouse { layout: Option<MouseLayout>, buttons: u32, maybe_boot: bool },
+    /// `layout` `None`: boot protocol reports.
+    Mouse { layout: Option<MouseLayout>, buttons: u32 },
     /// An absolute pointing device.
     Tablet { layout: TabletLayout, buttons: u32 },
 }
@@ -68,16 +66,9 @@ impl HidFunction {
                     input::key(id, c.usage as u16, c.pressed);
                 }
             }
-            HidKind::Mouse { layout, buttons, maybe_boot } => {
+            HidKind::Mouse { layout, buttons } => {
                 let r = match layout {
-                    // A report too short for the layout, from a device
-                    // that refused the switch to the report protocol: it
-                    // is still in the boot protocol. (A short report from
-                    // any other device is just a bad report.)
-                    Some(l) => match l.decode(data) {
-                        Err(ReportError::Truncated) if *maybe_boot && l.report_id == 0 && data.len() >= 3 => hid::boot_mouse(data)?,
-                        r => r?,
-                    },
+                    Some(l) => l.decode(data)?,
                     None => hid::boot_mouse(data)?,
                 };
                 // Buttons first (a click at the position before the motion
@@ -187,17 +178,33 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
         }));
     }
     let is_boot_mouse = iface.is_hid_boot(descriptor::HID_PROTOCOL_MOUSE);
-    let mut maybe_boot = false;
+    // The report protocol is what a device starts in, so one that refuses
+    // the request is still driven. Which protocol it is in is then asked,
+    // not guessed from its reports: only a device that says "boot" is
+    // read as a boot mouse.
+    if layout.is_some() && boot {
+        if let Err(e) = pipe.control_out(SetupPacket::hid_set_protocol(iface.number, true), &[]) {
+            let mut protocol = [0xFFu8; 1];
+            let asked = pipe.control_in(SetupPacket::hid_get_protocol(iface.number), &mut protocol);
+            let in_boot = is_boot_mouse && matches!(asked, Ok(1)) && protocol[0] == 0;
+            kprintln!(
+                "usb {}: interface {}: SET_PROTOCOL(report) refused ({}); the device says it is in the {} protocol",
+                devname,
+                iface.number,
+                e,
+                match (in_boot, &asked) {
+                    (true, _) => "boot",
+                    (false, Ok(1)) => "report",
+                    _ => "report (it did not answer; assumed)",
+                }
+            );
+            if in_boot {
+                layout = None;
+            }
+        }
+    }
     let how = match (&layout, is_boot_mouse) {
         (Some(l), _) => {
-            // Report protocol is what a device starts in: one that
-            // refuses the request is still driven.
-            if boot {
-                if let Err(e) = pipe.control_out(SetupPacket::hid_set_protocol(iface.number, true), &[]) {
-                    kprintln!("usb {}: interface {}: SET_PROTOCOL(report) refused ({}); carrying on", devname, iface.number, e);
-                    maybe_boot = is_boot_mouse;
-                }
-            }
             alloc::format!(
                 "report protocol: {} buttons, {}-bit X/Y{}{}",
                 l.buttons.len(),
@@ -226,5 +233,5 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
     let _ = pipe.control_out(SetupPacket::hid_set_idle(iface.number, 0), &[]);
     let id = input::register(name, input::class::MOUSE);
     kprintln!("usb {}: HID mouse on interface {} ({}) -> input device {}", devname, iface.number, how, id);
-    Ok(Some(HidFunction { interface: iface.number, input_id: id, kind: HidKind::Mouse { layout, buttons: 0, maybe_boot }, reports: 0, bad_reports: 0 }))
+    Ok(Some(HidFunction { interface: iface.number, input_id: id, kind: HidKind::Mouse { layout, buttons: 0 }, reports: 0, bad_reports: 0 }))
 }
