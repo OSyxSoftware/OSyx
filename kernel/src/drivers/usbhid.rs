@@ -214,8 +214,23 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
             )
         }
         (None, true) => {
+            // Boot reports are read only from a device known to send
+            // them: it took the request, or says so when asked. Its
+            // report protocol has no layout this driver understands, so
+            // a device that is or may be in it is left alone.
             if let Err(e) = pipe.control_out(SetupPacket::hid_set_protocol(iface.number, false), &[]) {
-                kprintln!("usb {}: interface {}: SET_PROTOCOL(boot) refused ({}); carrying on", devname, iface.number, e);
+                let mut protocol = [0xFFu8; 1];
+                let in_boot = matches!(pipe.control_in(SetupPacket::hid_get_protocol(iface.number), &mut protocol), Ok(1)) && protocol[0] == 0;
+                if !in_boot {
+                    kprintln!(
+                        "usb {}: interface {}: SET_PROTOCOL(boot) refused ({}) and the device does not say it is in the boot protocol: not driven",
+                        devname,
+                        iface.number,
+                        e
+                    );
+                    return Ok(None);
+                }
+                kprintln!("usb {}: interface {}: SET_PROTOCOL(boot) refused ({}); the device says it is in the boot protocol", devname, iface.number, e);
             }
             String::from("boot protocol: 3 buttons, 8-bit X/Y")
         }
