@@ -355,12 +355,14 @@ The clipboard holds at most 56 KiB, so the picture itself is not put on it.
 PRISM is root, and root writes nothing in the user's home: a folder there
 could be a symbolic link to anywhere. A child process (`prism
 --save-as-user`, `userspace/desktop/src/user_save.rs`) gives up root, makes
-the folder and the file as the desktop user and gets the data through a
-pipe, so the captures are the user's own. A recording is written in
+the folder and the file as the desktop user and gets the length and the data
+through a pipe, so the captures are the user's own; a file that did not
+arrive whole is removed by the child, not by root. A recording is written in
 `/var/cache/osyx-prism`, which only root can reach, and handed over when it
 is finished. A `~/Pictures` or `~/Videos` that an earlier version made as
-root is not the user's; a capture then fails with "permission denied" until
-the folder is renamed away. A finished recording that could not be handed
+root is not the user's: the child renames it to `Pictures (old)` or
+`Videos (old)`, where its files stay readable, and makes the user's own
+folder. A finished recording that could not be handed
 over stays in the spool and is saved after the next recording that can be.
 
 While an area is chosen the compositor keeps the pointer from the windows

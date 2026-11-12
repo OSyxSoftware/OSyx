@@ -107,34 +107,45 @@ fn stale_list(name: &str) -> String {
     format!("{DB}/{name}.stale")
 }
 
-/// Tries to remove the files in `name`'s stale list and those in `more`,
-/// except the files in `live` (the installed version has them again);
-/// what still will not go stays in the list. Returns what is left.
-fn clear_stale(name: &str, more: &[String], live: &[String]) -> Vec<String> {
+/// The stale list of `name`; none is an empty one. A list that is there
+/// and cannot be read is an error: it must not pass for "nothing left".
+fn stale_read(name: &str) -> Result<Vec<String>, String> {
     let list = stale_list(name);
-    let mut paths: Vec<String> = fs::read_to_string(&list).unwrap_or_default().lines().map(String::from).filter(|l| !l.is_empty()).collect();
-    for p in more {
-        if !paths.contains(p) {
-            paths.push(p.clone());
-        }
+    match fs::read_to_string(&list) {
+        Ok(text) => Ok(text.lines().map(String::from).filter(|l| !l.is_empty()).collect()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("{list} cannot be read: {e}")),
     }
+}
+
+/// Writes the stale list of `name` beside the old one and renames it, so
+/// that a failure keeps the old list; an empty list is removed.
+fn stale_write(name: &str, paths: &[String]) -> Result<(), String> {
+    let list = stale_list(name);
+    if paths.is_empty() {
+        return match fs::remove_file(&list) {
+            Err(e) if e.kind() != ErrorKind::NotFound => Err(format!("{list} cannot be removed: {e}")),
+            _ => Ok(()),
+        };
+    }
+    let tmp = format!("{list}{STAGED}");
+    fs::write(&tmp, paths.join("\n") + "\n").and_then(|()| fs::rename(&tmp, &list)).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("{list} cannot be written: {e}")
+    })
+}
+
+/// Tries to remove the files in `name`'s stale list, except the files in
+/// `live` (the installed version has them again); what still will not go
+/// stays in the list. Returns what is left; an error when the list could
+/// not be read or kept, so that nobody takes the package for clean.
+fn clear_stale(name: &str, live: &[String]) -> Result<Vec<String>, String> {
+    let mut paths = stale_read(name)?;
     paths.retain(|p| !live.contains(p));
     // Only a package's own paths, whatever the list says.
     paths.retain(|p| package::allowed_path(name, p.trim_start_matches('/')) && remove_file(p).is_err());
-    if paths.is_empty() {
-        let _ = fs::remove_file(&list);
-    } else {
-        // Beside the list first, so that a failure keeps the old one; a
-        // list that cannot be kept is said and logged, since nothing else
-        // remembers these files.
-        let tmp = format!("{list}{STAGED}");
-        let kept = fs::write(&tmp, paths.join("\n") + "\n").and_then(|()| fs::rename(&tmp, &list));
-        if let Err(e) = kept {
-            let _ = fs::remove_file(&tmp);
-            say(&format!("pkg: {name}: {list} cannot be written ({e}); remove by hand: {}", paths.join(", ")));
-        }
-    }
-    paths
+    stale_write(name, &paths).map_err(|e| format!("{e}; still to remove: {}", paths.join(", ")))?;
+    Ok(paths)
 }
 
 /// A small download kept in memory.
@@ -281,11 +292,10 @@ fn retry_stale(p: &Package) {
         return;
     }
     let live: Vec<String> = p.files.iter().map(|f| format!("/{}", f.path)).collect();
-    let left_over = clear_stale(&p.name, &[], &live);
-    if left_over.is_empty() {
-        say(&format!("pkg: {}: files of an older version were removed", p.name));
-    } else {
-        say(&format!("pkg: {}: files of an older version still cannot be removed: {}", p.name, left_over.join(", ")));
+    match clear_stale(&p.name, &live) {
+        Ok(left) if left.is_empty() => say(&format!("pkg: {}: files of an older version were removed", p.name)),
+        Ok(left) => say(&format!("pkg: {}: files of an older version still cannot be removed: {}", p.name, left.join(", "))),
+        Err(e) => say(&format!("pkg: {}: {e}", p.name)),
     }
 }
 
@@ -359,8 +369,17 @@ fn install(url: &str, name: &str) -> Result<String, String> {
     // The record of the new version, written beside the old one.
     let record = format!("{DB}/{name}.txt");
     let new_record = format!("{record}{STAGED}");
+    // What the new version no longer has goes onto the stale list before
+    // anything is replaced: once the new record is in place, nothing else
+    // names these files. If the list cannot be kept, nothing is installed.
+    let dropped: Vec<String> = old.iter().flat_map(|old| package::stale_files(old, &p)).map(|path| format!("/{path}")).collect();
     let result = result.and_then(|()| {
         fs::create_dir_all(DB).map_err(|e| format!("{DB}: {e}"))?;
+        if !dropped.is_empty() {
+            let mut pending = stale_read(name)?;
+            pending.extend(dropped.iter().filter(|d| !pending.contains(d)).cloned().collect::<Vec<_>>());
+            stale_write(name, &pending)?;
+        }
         let mut f = fs::File::create(&new_record).map_err(|e| format!("{new_record}: {e}"))?;
         f.write_all(text.as_bytes()).and_then(|()| f.sync_all()).map_err(|e| format!("{new_record}: {e}"))
     });
@@ -405,14 +424,14 @@ fn install(url: &str, name: &str) -> Result<String, String> {
             let _ = fs::remove_file(format!("{to}{KEPT}"));
         }
     }
-    // What the new version no longer has, and what an earlier upgrade
-    // could not remove. A file that will not go is kept on a list and
-    // tried again next time, and reported.
-    let dropped: Vec<String> = old.iter().flat_map(|old| package::stale_files(old, &p)).map(|path| format!("/{path}")).collect();
+    // The stale list now holds what the new version no longer has and
+    // what an earlier upgrade could not remove. A file that will not go
+    // stays on it, is tried again next time, and is reported.
     let live: Vec<String> = p.files.iter().map(|f| format!("/{}", f.path)).collect();
-    let left_over = clear_stale(name, &dropped, &live);
-    if !left_over.is_empty() {
-        say(&format!("pkg: {name}: files of an older version could not be removed and will be tried again: {}", left_over.join(", ")));
+    match clear_stale(name, &live) {
+        Ok(left) if left.is_empty() => {}
+        Ok(left) => say(&format!("pkg: {name}: files of an older version could not be removed and will be tried again: {}", left.join(", "))),
+        Err(e) => say(&format!("pkg: {name}: {e}")),
     }
     Ok(match old {
         Some(old) => format!("{name} upgraded from {} to {} ({} files)", old.version, p.version, p.files.len()),
@@ -425,7 +444,10 @@ fn remove(name: &str) -> Result<String, String> {
     // The record goes last, and only when every file went: what could not
     // be removed can be tried again.
     let mut failed: Vec<String> = p.files.iter().filter_map(|f| remove_file(&format!("/{}", f.path)).err()).collect();
-    failed.extend(clear_stale(name, &[], &[]).into_iter().map(|p| format!("{p} cannot be removed")));
+    match clear_stale(name, &[]) {
+        Ok(left) => failed.extend(left.into_iter().map(|p| format!("{p} cannot be removed"))),
+        Err(e) => failed.push(e),
+    }
     if !failed.is_empty() {
         return Err(format!("{name} is still installed: {}", failed.join("; ")));
     }
