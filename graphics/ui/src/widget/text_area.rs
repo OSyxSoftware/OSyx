@@ -214,6 +214,7 @@ impl TextArea {
         self.cursor = Pos::default();
         self.anchor = None;
         self.wanted_col = 0;
+        self.wanted_cell = None;
         self.scroll_x = 0;
         self.scroll.scroll_to(0);
         self.undo.clear();
@@ -419,6 +420,8 @@ impl TextArea {
         }
         self.cursor = p;
         self.wanted_col = p.col;
+        // Only `vertical` keeps a cell to aim for, and sets it after this.
+        self.wanted_cell = None;
     }
 
     fn left_of(&self, p: Pos) -> Pos {

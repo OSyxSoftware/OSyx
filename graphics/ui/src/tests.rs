@@ -853,6 +853,16 @@ fn text_area_word_movement_and_vertical_columns() {
     assert_eq!(a.cursor().line, 1);
     a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
     assert_eq!(a.cursor(), Pos::new(2, 2));
+    // A move sideways that ends where it began still gives up the cell
+    // aimed for: the cursor's own cell counts from then on.
+    let (mut a, fonts, mut clip) = area("ab\n\t\nabcdef");
+    a.event(&key_down(key::END, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(1, 1));
+    a.event(&key_down(key::LEFT, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::RIGHT, None, 0), &fonts, &mut clip);
+    a.event(&key_down(key::DOWN, None, 0), &fonts, &mut clip);
+    assert_eq!(a.cursor(), Pos::new(2, 4));
 }
 
 #[test]

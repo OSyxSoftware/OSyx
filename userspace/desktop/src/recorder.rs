@@ -20,6 +20,31 @@ use crate::user_save;
 /// reach. The finished file is handed to the desktop user (`user_save`);
 /// root writes nothing in the user's home.
 const SPOOL: &str = "/var/cache/osyx-prism";
+/// A finished recording that could not be handed over yet is kept in the
+/// spool under this prefix and tried again after every later recording.
+const KEPT: &str = "kept ";
+
+/// Hands the kept recordings to the user (`dir` is their Videos folder).
+/// Returns the error for `name` if that one is still kept.
+fn deliver_kept(dir: &str, name: &str) -> Result<(), String> {
+    let mut mine = Ok(());
+    let Ok(entries) = fs::read_dir(SPOOL) else { return mine };
+    for entry in entries {
+        let Some(as_name) = entry.file_name().strip_prefix(KEPT).map(String::from) else { continue };
+        let path = format!("{SPOOL}/{}", entry.file_name());
+        match user_save::save(dir, &as_name, user_save::Source::File(&path)) {
+            Ok(()) => {
+                let _ = fs::remove_file(&path);
+                if as_name != name {
+                    println!("prism: an earlier recording was saved to {dir}/{as_name}");
+                }
+            }
+            Err(e) if as_name == name => mine = Err(format!("{e}. The recording is kept and will be saved after the next recording that can be")),
+            Err(_) => {}
+        }
+    }
+    mine
+}
 
 /// The shortest time between two frames (ms).
 pub const FRAME_MS: u64 = 100;
@@ -71,9 +96,12 @@ impl Recorder {
         let io = |e: Error| format!("{SPOOL}: {e}");
         fs::create_dir_all(SPOOL).map_err(io)?;
         fs::set_permissions(SPOOL, fs::Permissions::from_mode(0o700)).map_err(io)?;
-        // What an earlier PRISM left when it died.
+        // What an earlier PRISM left half written when it died; finished
+        // recordings that wait for their folder stay.
         for old in fs::read_dir(SPOOL).map_err(io)? {
-            let _ = fs::remove_file(old.path());
+            if !old.file_name().starts_with(KEPT) {
+                let _ = fs::remove_file(old.path());
+            }
         }
         let spool = format!("{SPOOL}/{name}");
         let mut file = File::options().read(true).write(true).create_new(true).mode(0o600).open(&spool).map_err(io)?;
@@ -92,12 +120,15 @@ impl Recorder {
                 // that place.
                 let _ = os_std::system::thread_priority(0, os_std::system::priority::NORMAL);
                 let result = work(&worker, encoder, writer, file, head.len() as u64, width as usize).and_then(|mut summary| {
-                    user_save::save(&dir, &name, user_save::Source::File(&spool))?;
+                    // Finished: kept until the user has it, also when
+                    // their folder cannot be written today.
+                    fs::rename(&spool, format!("{SPOOL}/{KEPT}{name}")).map_err(|e| format!("{SPOOL}: {e}"))?;
+                    deliver_kept(&dir, &name)?;
                     summary.path = format!("{dir}/{name}");
                     Ok(summary)
                 });
-                // Half a file is of no use to anyone, and the whole one
-                // is the user's now.
+                // Half a file is of no use to anyone (a finished one has
+                // another name by now).
                 let _ = fs::remove_file(&spool);
                 worker.lock().unwrap().result = Some(result);
             }

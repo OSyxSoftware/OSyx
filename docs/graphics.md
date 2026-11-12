@@ -205,7 +205,8 @@ offers it under "Open with" for text and source files. A save writes a new
 file beside the old one (made for that save only, private until it is
 complete) and renames it into place; through a symbolic link, the file the
 link names is saved and the link stays. Where no file can be made beside it
-(a folder that is not writable, a file of another user), the editor asks
+(a folder that is not writable, a file of another user, or one of another
+group whose group has rights of its own), the editor asks
 before it writes the file in place, since a failure there loses the old
 contents.
 
@@ -359,7 +360,8 @@ pipe, so the captures are the user's own. A recording is written in
 `/var/cache/osyx-prism`, which only root can reach, and handed over when it
 is finished. A `~/Pictures` or `~/Videos` that an earlier version made as
 root is not the user's; a capture then fails with "permission denied" until
-the folder is renamed away.
+the folder is renamed away. A finished recording that could not be handed
+over stays in the spool and is saved after the next recording that can be.
 
 While an area is chosen the compositor keeps the pointer from the windows
 and draws the outline; the picture is taken from the frame after the

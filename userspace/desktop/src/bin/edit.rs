@@ -40,7 +40,8 @@ os_std::entry!(main);
 ///   file or link), readable by its owner alone until it holds everything
 ///   and has the permissions of the file it replaces.
 /// - Where that cannot be done (a folder the user may not write, or a file
-///   of someone else's, which a rename would make the user's), the file
+///   of another user or of another group with rights of its own, which a
+///   rename would make this user's and this group's), the file
 ///   can only be written in place, where a failure half way loses the old
 ///   contents. That is done only with `in_place`, which the user grants;
 ///   otherwise the answer is [`Save::NeedsInPlace`] and nothing is touched.
@@ -57,7 +58,16 @@ fn write_whole(path: &str, data: &[u8], in_place: bool) -> Result<Save, Error> {
         Err(e) => return Err(e),
     };
     let old = fs::metadata(&target).ok();
-    if old.as_ref().is_some_and(|m| m.uid() != os_std::os::getuid().0) {
+    // A new file is this user's, in this process's group, and nothing here
+    // can give a file away. So a file of another user is not replaced, nor
+    // one of another group whose group may do something others may not:
+    // the new group would get that.
+    let (uid, gid) = os_std::os::getuid();
+    let foreign = |m: &fs::Metadata| {
+        let mode = m.permissions().mode();
+        m.uid() != uid || (m.gid() != gid && (mode >> 3) & 7 != mode & 7)
+    };
+    if old.as_ref().is_some_and(foreign) {
         return direct(&target);
     }
     let existed = old.is_some();
@@ -360,7 +370,7 @@ impl Editor {
             self.dialog = Some(Dialog::new(
                 D_IN_PLACE,
                 "Save",
-                &format!("{path} cannot be replaced by a new file (its folder is not writable, or the file is not yours). It can be written in place: if that fails half way, its old contents are lost. Write it in place?"),
+                &format!("{path} cannot be replaced by a new file (its folder is not writable, or the file is not yours or belongs to another group). It can be written in place: if that fails half way, its old contents are lost. Write it in place?"),
                 &[("Cancel", ButtonStyle::Secondary), ("Write in place", ButtonStyle::Danger)],
             ));
             self.replacing = Some(path);
