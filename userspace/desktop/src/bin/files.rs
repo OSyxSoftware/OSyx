@@ -228,6 +228,7 @@ const CHOICES_FILE: &str = "/home/user/.config/osyx/openwith.conf";
 #[derive(Clone, Debug)]
 enum Act {
     Open,
+    SendToPhone,
     With(Target),
     Default(Target),
     Copy,
@@ -267,6 +268,10 @@ fn main() -> i32 {
     // `files --open-with FILE` opens FILE's folder with its open-with
     // choices (Windows programs ask for that through SHOpenWithDialog).
     let args: Vec<String> = env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--share") && args.len() == 3 {
+        let path = if args[2].starts_with('/') { args[2].clone() } else { join(&caller_dir, &args[2]) };
+        return phone_share::run(&path);
+    }
     // `files --open FILE` opens FILE's folder and then the file itself, as
     // a double click would (the launcher's search does that).
     let open_now = args.get(1).is_some_and(|a| a == "--open");
@@ -1162,6 +1167,7 @@ impl Files {
             let is_dir = entry.is_some_and(|e| e.is_dir());
             add(&mut items, &mut acts, MenuItem::new("Open", Some(Icon::Folder)), Act::Open);
             if !is_dir {
+                add(&mut items, &mut acts, MenuItem::new("Send to phone…", None), Act::SendToPhone);
                 let kind = classify(name);
                 let list = openwith::candidates(name, kind, &self.handlers, self.browser);
                 let current = openwith::default_target(name, kind, &self.handlers, &self.choices, self.browser);
@@ -1219,6 +1225,14 @@ impl Files {
     fn do_act(&mut self, act: Act, cx: &mut Ctx) {
         let first = self.list.chosen().first().copied();
         match act {
+            Act::SendToPhone => {
+                if let Some(name) = self.chosen_names().first() {
+                    let path = join(&self.cwd, name);
+                    let mut command = Command::new("/system/bin/files");
+                    command.arg("--share").arg(&path);
+                    self.spawn(command, "file sharing", "/system/bin/files");
+                }
+            }
             Act::Open => {
                 if let Some(i) = first {
                     self.open(i, cx);
@@ -1254,6 +1268,9 @@ impl Files {
         self.layout_inner(w, h);
     }
 }
+
+#[path = "../phone_share.rs"]
+mod phone_share;
 
 fn remove_any(p: &str) -> Result<(), String> {
     match fs::symlink_metadata(p) {

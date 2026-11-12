@@ -58,3 +58,4 @@ osyx-media = { path = "../media" }
 osyx-shell = { path = "../shell" }
 osyx-7z = { path = "../../storage/sevenz" }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+qrcodegen-no-heap = "1.8.1"

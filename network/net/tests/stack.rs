@@ -673,6 +673,42 @@ fn dns_resolves_caches_and_reports_missing_names() {
 }
 
 #[test]
+fn local_names_use_link_local_multicast_and_accept_only_local_replies() {
+    let mut n = Net::new();
+    n.a.set_dns_servers(&[Ipv4Addr::new(8, 8, 8, 8)]);
+    let Resolve::Pending(id) = n.a.resolve("Phone.LOCAL.") else { panic!("expected mDNS query") };
+    let frames = n.a.take_tx();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].0, 1);
+    let (eth, ip) = osyx_net::ethernet::parse(&frames[0].1).unwrap();
+    assert_eq!(eth.dst.0, [1, 0, 0x5e, 0, 0, 0xfb]);
+    let (ip, udp) = osyx_net::ipv4::parse(ip).unwrap();
+    assert_eq!(ip.dst, Ipv4Addr::new(224, 0, 0, 251));
+    assert_eq!(ip.ttl, 255);
+    let (udp, query) = osyx_net::udp::parse(ip.src, ip.dst, udp).unwrap();
+    assert_eq!(udp.dst_port, 5353);
+    assert_ne!(udp.src_port, 5353);
+    assert_eq!(query[2], 0);
+    let answer = dns_answer(query, &[("phone.local", B_IP.0)], false);
+    let inject = |n: &mut Net, from, port| {
+        let dgram = osyx_net::udp::build(from, A_IP, port, udp.src_port, &answer);
+        let packet = osyx_net::ipv4::build(from, A_IP, 17, 255, 1, &dgram, 1500, true).unwrap().remove(0);
+        n.a.receive(1, &osyx_net::ethernet::build(A_MAC, B_MAC, 0x0800, &packet));
+        n.run(1);
+    };
+    inject(&mut n, Ipv4Addr::new(8, 8, 8, 8), 5353);
+    assert_eq!(n.a.resolve_result(id), None);
+    inject(&mut n, B_IP, 53);
+    assert_eq!(n.a.resolve_result(id), None);
+    inject(&mut n, B_IP, 5353);
+    assert_eq!(n.a.resolve_result(id), Some(Ok(vec![B_IP])));
+    assert_eq!(n.a.resolve("phone.local"), Resolve::Done(Ok(vec![B_IP])));
+    n.run(10_001);
+    n.a.set_dns_servers(&[]);
+    assert!(matches!(n.a.resolve("phone.local"), Resolve::Pending(_)));
+}
+
+#[test]
 fn dns_falls_back_to_tcp_for_truncated_answers() {
     let mut n = Net::new();
     n.a.set_dns_servers(&[B_IP]);
