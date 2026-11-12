@@ -123,6 +123,33 @@ fn is_word(c: char) -> bool {
 }
 
 /// Screen cells before column `col` of `line` (tabs take several).
+/// The column whose cell is `cell`, or the last one before it (a tab
+/// covers several cells); the line's length past its end.
+fn col_covering(line: &str, cell: usize) -> usize {
+    let mut at = 0;
+    for (col, c) in line.chars().enumerate() {
+        let next = if c == '\t' { (at / TAB_WIDTH + 1) * TAB_WIDTH } else { at + 1 };
+        if next > cell {
+            return col;
+        }
+        at = next;
+    }
+    char_len(line)
+}
+
+/// Columns where `needle` starts in `line`. With `fold`, letters match
+/// whatever their case; the comparison is character by character, so a
+/// letter whose other case is longer or shorter in UTF-8 moves nothing.
+fn match_cols(line: &str, needle: &str, fold: bool) -> Vec<usize> {
+    let lower = |c: char| if fold { c.to_lowercase().next().unwrap_or(c) } else { c };
+    let hay: Vec<char> = line.chars().map(lower).collect();
+    let needle: Vec<char> = needle.chars().map(lower).collect();
+    if needle.is_empty() || needle.len() > hay.len() {
+        return Vec::new();
+    }
+    (0..=hay.len() - needle.len()).filter(|&i| hay[i..i + needle.len()] == needle[..]).collect()
+}
+
 fn cells_before(line: &str, col: usize) -> usize {
     let mut cells = 0;
     for c in line.chars().take(col) {
@@ -470,14 +497,7 @@ impl TextArea {
             return false;
         }
         let fold = !needle.chars().any(char::is_uppercase);
-        let matches = |line: &str| -> Vec<usize> {
-            let hay: String = if fold { line.to_lowercase() } else { String::from(line) };
-            // Lower-casing can change lengths: only search when it did not.
-            if fold && hay.len() != line.len() {
-                return line.match_indices(needle).map(|(i, _)| char_len(&line[..i])).collect();
-            }
-            hay.match_indices(needle).map(|(i, _)| char_len(&line[..i])).collect()
-        };
+        let matches = |line: &str| match_cols(line, needle, fold);
         let n = self.lines.len();
         let len = char_len(needle);
         let from = if forward { self.selection().map_or(self.cursor, |s| s.1) } else { self.selection().map_or(self.cursor, |s| s.0) };
@@ -779,13 +799,9 @@ impl TextArea {
             let len = char_len(line);
             // Search matches, then the selection over them.
             if !self.needle.is_empty() {
-                let hay: String = if fold { line.to_lowercase() } else { line.clone() };
-                if hay.len() == line.len() {
-                    let n = char_len(&self.needle);
-                    for (b, _) in hay.match_indices(self.needle.as_str()) {
-                        let col = char_len(&line[..b]);
-                        p.blend(Rect::new(cell_x(col), y, (cell_x(col + n) - cell_x(col)).max(0) as u32, lh as u32), t.warning, 70);
-                    }
+                let n = char_len(&self.needle);
+                for col in match_cols(line, &self.needle, fold) {
+                    p.blend(Rect::new(cell_x(col), y, (cell_x(col + n) - cell_x(col)).max(0) as u32, lh as u32), t.warning, 70);
                 }
             }
             if let Some((a, b)) = selection {
@@ -798,6 +814,8 @@ impl TextArea {
                     p.fill(Rect::new(x0, y, (cell_x(to) + extra - x0).max(0) as u32, lh as u32), t.selection);
                 }
             }
+            // The columns on screen (a tab that starts left of it counts).
+            let visible = (col_covering(line, self.scroll_x), col_covering(line, self.scroll_x + cols + 1) + 1);
             // The text, one run per style.
             let spans = self.highlighter.map(|h| h(line)).unwrap_or_default();
             let mut col = 0;
@@ -805,8 +823,10 @@ impl TextArea {
                 if to <= from {
                     return;
                 }
-                let first_cell = cells_before(line, from);
-                if first_cell > self.scroll_x + cols {
+                // Only what is on screen: a line of a megabyte is drawn
+                // as fast as a short one.
+                let (from, to) = (from.max(visible.0), to.min(visible.1));
+                if to <= from {
                     return;
                 }
                 let part: String = line.chars().skip(from).take(to - from).collect();

@@ -180,6 +180,7 @@ fn main() -> i32 {
         scheme_checked: 0,
         recorder: None,
         screen_changed: false,
+        recorded_cursor: (0, 0, prism_core::draw::CursorShape::Arrow),
         settled_base: None,
         frame_time_us: 0,
         frames_measured: 0,
@@ -233,6 +234,8 @@ struct Prism {
     recorder: Option<recorder::Recorder>,
     /// The screen changed since the recorder's last frame.
     screen_changed: bool,
+    /// Where the pointer was, and its shape, at the recorder's last look.
+    recorded_cursor: (i32, i32, prism_core::draw::CursorShape),
     /// Window states before the unsettled changes.
     settled_base: Option<Vec<WindowSnapshot>>,
     frame_time_us: u64,
@@ -582,8 +585,16 @@ impl Prism {
         let (days, rem) = (secs / 86_400, secs % 86_400);
         let (y, m, d) = screenshot::civil_from_days(days as i64);
         let dir = format!("/home/user/{folder}");
-        let name = format!("{kind} {y:04}-{m:02}-{d:02} {:02}.{:02}.{:02} UTC.{extension}", rem / 3600, rem / 60 % 60, rem % 60);
         fs::create_dir_all(&dir)?;
+        // A second capture within the same second gets a number: nothing
+        // already saved is written over.
+        let stamp = format!("{kind} {y:04}-{m:02}-{d:02} {:02}.{:02}.{:02} UTC", rem / 3600, rem / 60 % 60, rem % 60);
+        let mut name = format!("{stamp}.{extension}");
+        let mut n = 2;
+        while fs::metadata(format!("{dir}/{name}")).is_ok() && n < 1000 {
+            name = format!("{stamp} ({n}).{extension}");
+            n += 1;
+        }
         Ok((format!("{dir}/{name}"), format!("{folder}/{name}")))
     }
 
@@ -649,6 +660,13 @@ impl Prism {
             }
         }
         let Some(r) = &mut self.recorder else { return };
+        // The pointer is drawn over the screen: its moves damage nothing
+        // and are a change of the picture all the same.
+        let cursor = self.comp.cursor_state();
+        if cursor != self.recorded_cursor {
+            self.recorded_cursor = cursor;
+            self.screen_changed = true;
+        }
         if r.due(now, self.screen_changed) {
             self.screen_changed = false;
             let (back, comp, w, h) = (&self.back, &self.comp, self.width, self.height);

@@ -64,10 +64,18 @@ impl Recorder {
         file.write_all(&head).map_err(|e| format!("{e}"))?;
         let shared = Arc::new(Mutex::new(Shared::default()));
         let worker = shared.clone();
-        thread::spawn(move || {
-            let result = work(&worker, encoder, writer, file, head.len() as u64, width as usize, &path);
-            worker.lock().unwrap().result = Some(result);
+        // Without a thread there is no recording, but PRISM lives on.
+        let made = thread::Builder::new().spawn({
+            let path = path.clone();
+            move || {
+                let result = work(&worker, encoder, writer, file, head.len() as u64, width as usize, &path);
+                worker.lock().unwrap().result = Some(result);
+            }
         });
+        if let Err(e) = made {
+            let _ = fs::remove_file(&path);
+            return Err(format!("no thread for the encoder: {e}"));
+        }
         Ok(Recorder { shared, started: now, last: 0, stopping: false, dropped: 0 })
     }
 

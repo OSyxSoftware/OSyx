@@ -41,8 +41,12 @@ enum Job {
     Render(Key),
     /// The text of a page, for selecting.
     Text(usize),
-    /// Every match of a string in the document.
-    Search(String),
+    /// The matches of a string on one page; the thread queues the next
+    /// page itself, behind whatever pages were asked for meanwhile.
+    Search { id: u64, query: String, page: usize },
+    /// The view is gone. (The thread holds a sender of its own for the
+    /// next page of a search, so the channel never closes by itself.)
+    Quit,
 }
 
 /// One match: its page and its boxes (one per line) in points.
@@ -53,6 +57,9 @@ struct Hit {
 
 #[derive(Default)]
 struct Search {
+    /// Which search this is: results of an earlier one are dropped, also
+    /// when it looked for the same text.
+    id: u64,
     query: String,
     hits: Vec<Hit>,
     /// Pages searched so far.
@@ -113,7 +120,7 @@ pub struct PdfView {
     fit_btn: Button,
 }
 
-fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Job>, shared: Arc<Shared>) {
+fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Job>, again: Sender<Job>, shared: Arc<Shared>) {
     let pdf = match Pdf::open(data) {
         Ok(p) => p,
         Err(e) => {
@@ -141,28 +148,30 @@ fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Job>, shared: Arc<Shared>) {
                 }
                 continue;
             }
-            Job::Search(query) => {
-                let start = os_std::time::Instant::now();
-                let mut found = 0;
-                for page in 0..pdf.pages() {
-                    // A newer search replaced this one.
-                    if shared.search.lock().unwrap().query != query {
-                        break;
-                    }
-                    let cached = shared.texts.lock().unwrap().get(&page).cloned();
-                    let text = cached.unwrap_or_else(|| Arc::new(pdf.text(page, &lookup)));
-                    let hits: Vec<Hit> = text.find(&query).into_iter().map(|r| Hit { page, rects: text.rects(r) }).collect();
-                    let mut s = shared.search.lock().unwrap();
-                    if s.query != query {
-                        break;
-                    }
-                    found += hits.len();
-                    s.hits.extend(hits);
-                    s.pages = page + 1;
-                    drop(s);
-                    shared.generation.fetch_add(1, Ordering::Relaxed);
+            Job::Quit => return,
+            Job::Search { id, query, page } => {
+                // A newer search replaced this one.
+                if shared.search.lock().unwrap().id != id || page >= pdf.pages() {
+                    continue;
                 }
-                println!("files: found {found} of {query:?} in {} pages in {} ms", pdf.pages(), start.elapsed().as_millis());
+                let cached = shared.texts.lock().unwrap().get(&page).cloned();
+                let text = cached.unwrap_or_else(|| Arc::new(pdf.text(page, &lookup)));
+                let hits: Vec<Hit> = text.find(&query).into_iter().map(|r| Hit { page, rects: text.rects(r) }).collect();
+                let mut s = shared.search.lock().unwrap();
+                if s.id != id {
+                    continue;
+                }
+                s.hits.extend(hits);
+                s.pages = page + 1;
+                let found = s.hits.len();
+                drop(s);
+                shared.generation.fetch_add(1, Ordering::Relaxed);
+                if page + 1 < pdf.pages() {
+                    // One page at a time: pages to draw get their turn.
+                    let _ = again.send(Job::Search { id, query, page: page + 1 });
+                } else {
+                    println!("files: found {found} of {query:?} in {} pages", pdf.pages());
+                }
                 continue;
             }
         };
@@ -186,6 +195,12 @@ fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Job>, shared: Arc<Shared>) {
     }
 }
 
+impl Drop for PdfView {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Job::Quit);
+    }
+}
+
 impl PdfView {
     pub fn open(path: &str) -> Result<PdfView, String> {
         let data = os_std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -203,7 +218,8 @@ impl PdfView {
         });
         let (tx, rx) = mpsc::channel();
         let s = shared.clone();
-        thread::spawn(move || render_thread(data, rx, s));
+        let again = tx.clone();
+        thread::spawn(move || render_thread(data, rx, again, s));
         println!("files: opened PDF {path} ({} pages)", (&sizes as &Vec<(f64, f64)>).len());
         Ok(PdfView {
             path: String::from(path),
@@ -351,12 +367,13 @@ impl PdfView {
         if s.query == query {
             return;
         }
-        *s = Search { query: query.clone(), hits: Vec::new(), pages: 0 };
+        let id = s.id + 1;
+        *s = Search { id, query: query.clone(), hits: Vec::new(), pages: 0 };
         drop(s);
         self.current = 0;
         self.jump = !query.is_empty();
         if !query.is_empty() {
-            let _ = self.tx.send(Job::Search(query));
+            let _ = self.tx.send(Job::Search { id, query, page: 0 });
         }
     }
 
@@ -377,7 +394,8 @@ impl PdfView {
 
     fn close_find(&mut self) {
         self.finding = false;
-        *self.shared.search.lock().unwrap() = Search::default();
+        let mut s = self.shared.search.lock().unwrap();
+        *s = Search { id: s.id + 1, ..Search::default() };
     }
 
     /// True to redraw; sets `close` when the view should go away.

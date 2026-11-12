@@ -735,6 +735,12 @@ impl Shell {
                     if let Some(p) = &mut self.popup {
                         p.win.dirty = true;
                     }
+                    for note in &mut self.notes {
+                        note.win.dirty = true;
+                    }
+                    if let Some(lock) = &mut self.lock {
+                        lock.win.dirty = true;
+                    }
                 }
             }
             self.collect_ejects();
@@ -2520,7 +2526,9 @@ fn find_more(file_index: &[String], q: &str) -> Vec<AppEntry> {
     for i in search::files(file_index, q, MAX_FOUND_FILES) {
         let path = &file_index[i];
         let name = search::file_name(path);
-        let folder = path.strip_suffix(name).unwrap_or(path).trim_end_matches('/');
+        // (A folder's path ends in a slash: its parent is what precedes its name.)
+        let whole = path.trim_end_matches('/');
+        let folder = whole.strip_suffix(name).unwrap_or(whole).trim_end_matches('/');
         let shown_folder = folder.strip_prefix(common::USER_HOME).map_or(String::from(folder), |rest| format!("~{rest}"));
         let is_dir = path.ends_with('/');
         let icon = if is_dir { Icon::Folder } else { Icon::File };

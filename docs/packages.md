@@ -64,17 +64,25 @@ numbers, ordered as for system updates.
    OSyx release key built into the system, or a key in
    `/etc/osyx/packages.keys` (one public key in hex per line; `#` starts a
    comment). A file without one is refused before anything is downloaded.
-2. The payload is checked against the manifest's SHA-256, and each file
-   against its own while it is written.
-3. Every file is written next to its target and renamed into place only
-   when all of them were written; a failure leaves the installed version
-   as it was.
-4. An older version than the installed one is not installed.
+2. A package is installed only in the version the signed list names: a
+   manifest of another version, however well signed, is refused.
+3. The payload may be exactly as long as the manifest says; more bytes are
+   refused as they arrive. It is checked against the manifest's SHA-256,
+   and each file against its own while it is written.
+4. Every file is written next to its target and renamed into place only
+   when all of them were written. If a rename fails half way, the files of
+   the installed version are put back.
+5. An older version than the installed one is not installed.
+
+Over plain HTTP, someone on the network path can still answer with an
+older signed list together with its packages; use an HTTPS repository to
+rule that out.
 
 What is installed is recorded in `/var/lib/osyx/pkg/<name>.txt` (the
 manifest). An upgrade removes the files the new version no longer has;
 `remove` removes the files of the manifest and the directories they leave
-empty.
+empty, and keeps the record when a file could not be removed, so that it
+can be tried again.
 
 ## Publishing
 
@@ -88,7 +96,9 @@ cargo run -p osyx-update --example package -- build hello 1.1.0 "A sample packag
 cargo run -p osyx-update --example package -- index my.key repo
 ```
 
-`build` refuses a tree with a file outside the package's own paths. Files
+`build` refuses a tree with a file outside the package's own paths.
+`index` lists a package only when its signature and payload are there and
+match its manifest. Files
 with an execute bit are installed 0755, the others 0644.
 
 ## Limits

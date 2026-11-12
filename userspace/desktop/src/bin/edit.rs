@@ -225,11 +225,21 @@ impl Editor {
             Ok(t) => (t, true),
             Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), false),
         };
-        self.crlf = text.contains("\r\n");
+        // One kind of line end is written back. A file with both keeps the
+        // kind most of its lines have, and says so before anything is saved.
+        let crlf = text.matches("\r\n").count();
+        let lf = text.matches('\n').count() - crlf;
+        self.crlf = crlf > lf;
         self.area.set_text(&text);
         self.area.read_only = !valid;
         self.set_language(Language::of(&path, self.area.line(0)));
-        self.message = if valid { String::new() } else { String::from("Not UTF-8 text: opened read-only") };
+        self.message = if !valid {
+            String::from("Not UTF-8 text: opened read-only")
+        } else if crlf > 0 && lf > 0 {
+            format!("Mixed line ends ({crlf} CRLF, {lf} LF): saving writes {} everywhere", if self.crlf { "CRLF" } else { "LF" })
+        } else {
+            String::new()
+        };
         println!("edit: opened {path} ({} lines, {})", self.area.line_count(), self.language.name());
         self.path = Some(path);
         Ok(())

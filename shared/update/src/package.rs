@@ -40,6 +40,8 @@ pub const INDEX: &str = "packages.txt";
 pub const INDEX_SIGNATURE: &str = "packages.sig";
 /// Where a package's own files go, with its name appended.
 pub const PREFIX: &str = "opt/pkg/";
+/// Suffix of an installed file set aside while its replacement moves in.
+pub const KEPT_SUFFIX: &str = ".osyx-old";
 /// Where launcher entries live.
 pub const APPLICATIONS: &str = "system/share/applications/";
 
@@ -70,7 +72,8 @@ pub fn allowed_path(name: &str, path: &str) -> bool {
         && !path.contains('\\')
         && !path.chars().any(|c| c.is_control())
         && path.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
-        && !path.ends_with(crate::STAGED_SUFFIX);
+        && !path.ends_with(crate::STAGED_SUFFIX)
+        && !path.ends_with(KEPT_SUFFIX);
     let own = format!("{PREFIX}{name}/");
     valid_name(name) && clean && ((path.starts_with(&own) && path.len() > own.len()) || path == launcher_entry(name))
 }
@@ -312,6 +315,7 @@ mod tests {
             "opt/pkg/hello/../other/x",
             "/opt/pkg/hello/x",
             "opt/pkg/hello/x.osyx-new",
+            "opt/pkg/hello/x.osyx-old",
             "system/share/applications/pkg-other.app",
             "system/share/applications/10-terminal.app",
             "esp/EFI/OSYX/KERNEL.ELF",

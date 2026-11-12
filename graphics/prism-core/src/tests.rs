@@ -117,10 +117,21 @@ fn print_screen_asks_for_the_screen_the_window_or_a_dragged_area() {
     let accent = theme::Palette::DARK.accent & 0x00ff_ffff;
     assert_eq!(h.px(rect.x + 20, rect.y + 29) & 0x00ff_ffff, accent, "outline above the area");
     assert_eq!(h.px(rect.x + 20, rect.y + 60) & 0x00ff_ffff, 0x0010_2030, "the area itself is untouched");
+    assert!(h.events_for(c).iter().all(|e| !matches!(e, Event::Pointer { .. })), "the window got pointer events");
     h.input(kind::BUTTON, 1, 0, 0, 0);
     assert!(!h.c.selecting());
     assert_eq!(h.c.take_capture_request(), Some(Rect::new(rect.x + 10, rect.y + 30, 31, 61)));
-    assert!(h.events_for(c).iter().all(|e| !matches!(e, Event::Pointer { .. })), "the window got pointer events");
+    // The release itself is not the window's either, but the window
+    // under the pointer hears where the pointer is now.
+    let after = h.events_for(c);
+    assert!(after.iter().all(|e| !matches!(e, Event::Pointer { kind, .. } if *kind == proto::pointer::BUTTON)), "the window got the release");
+    // A drag in a window is not turned into a selection half way.
+    h.move_to(rect.x + 50, rect.y + 50);
+    h.input(kind::BUTTON, 1, 1, 0, 0);
+    key_event(&mut h, key::PRINT_SCREEN, true, modifier::LEFT_SHIFT);
+    assert!(!h.c.selecting());
+    h.input(kind::BUTTON, 1, 0, 0, 0);
+    assert!(h.events_for(c).iter().any(|e| matches!(e, Event::Pointer { kind, .. } if *kind == proto::pointer::BUTTON)), "the window lost its release");
     // The outline is gone from the frame the picture is taken from.
     h.render();
     assert_eq!(h.px(rect.x + 20, rect.y + 29) & 0x00ff_ffff, 0x0010_2030);

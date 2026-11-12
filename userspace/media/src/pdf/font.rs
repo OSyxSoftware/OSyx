@@ -90,6 +90,9 @@ pub struct Font {
     reverse: RefCell<Option<BTreeMap<u16, char>>>,
 }
 
+/// Entries kept from one ToUnicode map (every code of a two-byte font).
+const TO_UNICODE_MAX: usize = 0x1_0000;
+
 /// Parses a ToUnicode CMap: `bfchar` and `bfrange` sections map codes to
 /// UTF-16BE strings.
 fn parse_to_unicode(data: &[u8]) -> BTreeMap<u32, String> {
@@ -124,6 +127,9 @@ fn parse_to_unicode(data: &[u8]) -> BTreeMap<u32, String> {
         char::decode_utf16(units).map(|c| c.unwrap_or('\u{FFFD}')).collect()
     };
     let mut map = BTreeMap::new();
+    // Ranges are cheap to write and expand to many entries: a file gets
+    // as many as the largest real fonts need, and no more.
+    let mut budget = TO_UNICODE_MAX;
     let find = |from: usize, word: &[u8]| data[from..].windows(word.len()).position(|w| w == word).map(|p| from + p);
     for (begin, end, ranges) in [(&b"beginbfchar"[..], &b"endbfchar"[..], false), (&b"beginbfrange"[..], &b"endbfrange"[..], true)] {
         let mut at = 0;
@@ -134,13 +140,20 @@ fn parse_to_unicode(data: &[u8]) -> BTreeMap<u32, String> {
             while i < toks.len() {
                 match (ranges, &toks[i], toks.get(i + 1), toks.get(i + 2)) {
                     (false, Tok::Hex(code), Some(Tok::Hex(dst)), _) => {
-                        map.insert(number(code), text(dst));
+                        if budget > 0 {
+                            budget -= 1;
+                            map.insert(number(code), text(dst));
+                        }
                         i += 2;
                     }
                     (true, Tok::Hex(lo), Some(Tok::Hex(hi)), Some(Tok::Hex(dst))) => {
                         // The last UTF-16 unit counts up through the range.
                         let (lo, hi) = (number(lo), number(hi));
                         for (n, code) in (lo..=hi.min(lo.saturating_add(0xFFFF))).enumerate() {
+                            if budget == 0 {
+                                break;
+                            }
+                            budget -= 1;
                             let mut d = dst.clone();
                             if let [.., a, b] = d.as_mut_slice() {
                                 let v = ((*a as u32) << 8 | *b as u32) + n as u32;
@@ -155,7 +168,10 @@ fn parse_to_unicode(data: &[u8]) -> BTreeMap<u32, String> {
                         i += 3;
                         let mut n = 0;
                         while let Some(Tok::Hex(dst)) = toks.get(i) {
-                            map.insert(lo + n, text(dst));
+                            if budget > 0 {
+                                budget -= 1;
+                                map.insert(lo.wrapping_add(n), text(dst));
+                            }
                             n += 1;
                             i += 1;
                         }

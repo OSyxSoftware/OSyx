@@ -974,9 +974,15 @@ impl<'a> Renderer<'a> {
                 // pages carry under their picture.
                 let text = font.unicode(code, k);
                 if !text.is_empty() {
-                    let (descent, ascent) = (-0.2, 0.8);
-                    let corners = [trm.apply(0.0, descent), trm.apply(w0, descent), trm.apply(w0, ascent), trm.apply(0.0, ascent)];
-                    out.push(super::text::RawGlyph { text, corners });
+                    let corners = if font.vertical {
+                        // Vertical writing: the origin is the middle of the
+                        // glyph's top edge and the advance goes down.
+                        [trm.apply(-0.5, -w0), trm.apply(0.5, -w0), trm.apply(0.5, 0.0), trm.apply(-0.5, 0.0)]
+                    } else {
+                        let (descent, ascent) = (-0.2, 0.8);
+                        [trm.apply(0.0, descent), trm.apply(w0, descent), trm.apply(w0, ascent), trm.apply(0.0, ascent)]
+                    };
+                    out.push(super::text::RawGlyph { text, corners, vertical: font.vertical });
                 }
             }
             if self.text_only {
@@ -1133,6 +1139,10 @@ impl<'a> Renderer<'a> {
             end += 1;
         }
         lx.pos = (end + 2).min(data.len());
+        // Text has no use for the picture: its bytes are only passed over.
+        if self.text_only {
+            return;
+        }
         let mut raw_end = end;
         if raw_end > start && data[raw_end - 1].is_ascii_whitespace() {
             raw_end -= 1;

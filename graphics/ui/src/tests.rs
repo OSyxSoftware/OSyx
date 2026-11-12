@@ -612,6 +612,40 @@ fn area(text: &str) -> (TextArea, Fonts, crate::Clipboard) {
 }
 
 #[test]
+fn text_area_finds_text_around_letters_whose_case_changes_their_length() {
+    // Lower-casing the first letter makes it one byte longer and the third
+    // one byte shorter: byte offsets of the folded text are not the line's.
+    let (mut a, fonts, _) = area("\u{23a}\u{e9}\u{23a}K and \u{130}x\u{e9}");
+    assert!(a.find("\u{e9}", true));
+    assert_eq!(a.selected_text().as_deref(), Some("\u{e9}"));
+    assert_eq!(a.cursor(), Pos::new(0, 2));
+    assert!(a.find("\u{e9}", true));
+    assert_eq!(a.cursor(), Pos::new(0, 12));
+    assert!(a.find("k and", true));
+    assert_eq!(a.selected_text().as_deref(), Some("K and"));
+    // Drawing marks the matches without slicing inside a character either.
+    let mut buf = vec![0u32; 400 * 100];
+    let mut s = Surface::new(&mut buf, 400, 100, 400).unwrap();
+    a.draw(&mut Painter::new(&mut s, &MIDNIGHT, &fonts), true);
+}
+
+#[test]
+fn text_area_draws_a_very_long_line_by_its_visible_part() {
+    let long: String = "ab\tcd ".repeat(200_000);
+    let (mut a, fonts, _) = area(&long);
+    a.move_to(Pos::new(0, 700_000), false);
+    a.reveal_cursor(&fonts);
+    let mut buf = vec![0u32; 400 * 100];
+    let mut s = Surface::new(&mut buf, 400, 100, 400).unwrap();
+    let started = std::time::Instant::now();
+    for _ in 0..20 {
+        a.draw(&mut Painter::new(&mut s, &MIDNIGHT, &fonts), true);
+    }
+    // Twenty frames of a 1.2 MB line.
+    assert!(started.elapsed().as_millis() < 3000, "{} ms", started.elapsed().as_millis());
+}
+
+#[test]
 fn text_area_typing_lines_and_unicode() {
     let (mut a, fonts, mut clip) = area("");
     for c in "zażółć".chars() {

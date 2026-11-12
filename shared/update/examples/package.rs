@@ -30,7 +30,11 @@ fn read_secret(path: &str) -> Result<[u8; 32], String> {
 /// Regular files below `dir`, as (path relative to `root`, mode, data),
 /// sorted by path.
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u32, Vec<u8>)>) -> Result<(), String> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.filter_map(Result::ok).collect();
+    // An entry that cannot be read is an error: a package signed without
+    // it would remove that file from the systems that upgrade.
+    let mut entries = std::fs::read_dir(dir)
+        .and_then(|d| d.collect::<Result<Vec<_>, _>>())
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let path = e.path();
@@ -86,11 +90,10 @@ fn build(name: &str, version: &str, description: &str, tree: &str, secret_path: 
 
 fn index(secret_path: &str, dir: &str) -> Result<(), String> {
     let secret = read_secret(secret_path)?;
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map_err(|e| format!("{dir}: {e}"))?
-        .filter_map(Result::ok)
-        .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".pkg.txt")).map(String::from))
-        .collect();
+    let entries = std::fs::read_dir(dir).and_then(|d| d.collect::<Result<Vec<_>, _>>()).map_err(|e| format!("{dir}: {e}"))?;
+    let mut names: Vec<String> =
+        entries.iter().filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".pkg.txt")).map(String::from)).collect();
+    let public = public_from_secret(&secret);
     names.sort();
     let mut list = Index::default();
     for name in names {
@@ -99,6 +102,17 @@ fn index(secret_path: &str, dir: &str) -> Result<(), String> {
         let p = Package::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         if p.name != name {
             return Err(format!("{}: the manifest is of package {}", path.display(), p.name));
+        }
+        // Only what a system can install is listed: the signature and the
+        // payload must be there and match the manifest.
+        let [_, signature, bin] = package::file_names(&name);
+        let sig = std::fs::read(Path::new(dir).join(&signature)).map_err(|e| format!("{dir}/{signature}: {e}"))?;
+        if !osyx_update::verify(text.as_bytes(), &sig, &public) {
+            return Err(format!("{dir}/{signature} does not sign the manifest with this key"));
+        }
+        let payload = std::fs::read(Path::new(dir).join(&bin)).map_err(|e| format!("{dir}/{bin}: {e}"))?;
+        if payload.len() as u64 != p.payload_size || <[u8; 32]>::from(Sha256::digest(&payload)) != p.payload_sha256 {
+            return Err(format!("{dir}/{bin} is not the payload of the manifest"));
         }
         list.packages.push(Listing { name: p.name, version: p.version, description: p.description });
     }

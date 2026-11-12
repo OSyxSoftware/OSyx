@@ -16,6 +16,8 @@ use core::ops::Range;
 pub struct RawGlyph {
     pub text: String,
     pub corners: [(f64, f64); 4],
+    /// From a font written top to bottom.
+    pub vertical: bool,
 }
 
 /// One character and its box in points from the page's top left corner,
@@ -55,6 +57,7 @@ fn fold(c: char) -> char {
 impl PageText {
     pub fn from_glyphs(glyphs: &[RawGlyph]) -> PageText {
         let mut chars: Vec<TextChar> = Vec::new();
+        let mut prev_vertical = false;
         for g in glyphs {
             let xs = g.corners.map(|c| c.0 as f32);
             let ys = g.corners.map(|c| c.1 as f32);
@@ -64,7 +67,16 @@ impl PageText {
             if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
                 continue;
             }
-            if let Some(prev) = chars.last().copied() {
+            let was_vertical = core::mem::replace(&mut prev_vertical, g.vertical);
+            if let (true, true, Some(prev)) = (g.vertical, was_vertical, chars.last().copied()) {
+                // Vertical writing: a line is a column. The next glyph is
+                // below in the same column, or the column has ended.
+                let w = (prev.x1 - prev.x0).max(x1 - x0).max(1.0);
+                let same_column = ((prev.x0 + prev.x1) / 2.0 - (x0 + x1) / 2.0).abs() < w * 0.5 && y0 > prev.y0 - w;
+                if !same_column && prev.ch != '\n' {
+                    chars.push(TextChar { ch: '\n', x0: prev.x0, y0: prev.y1, x1: prev.x1, y1: prev.y1 });
+                }
+            } else if let Some(prev) = chars.last().copied() {
                 let h = prev.height().max(y1 - y0).max(1.0);
                 let same_line = (prev.middle() - (y0 + y1) / 2.0).abs() < h * 0.5;
                 let space = |c: char| c == ' ' || c == '\n';
@@ -182,7 +194,7 @@ mod tests {
     fn glyphs(items: &[(&str, f64, f64)]) -> Vec<RawGlyph> {
         items
             .iter()
-            .map(|&(t, x, y)| RawGlyph { text: t.to_string(), corners: [(x, y + 10.0), (x + 6.0, y + 10.0), (x + 6.0, y), (x, y)] })
+            .map(|&(t, x, y)| RawGlyph { text: t.to_string(), corners: [(x, y + 10.0), (x + 6.0, y + 10.0), (x + 6.0, y), (x, y)], vertical: false })
             .collect()
     }
 
@@ -204,6 +216,21 @@ mod tests {
         // would have given two.
         assert_eq!(t.string(0..t.chars.len()), "Hi you\nﬁne");
         assert_eq!(t.chars[2], TextChar { ch: ' ', x0: 12.0, y0: 0.0, x1: 20.0, y1: 10.0 });
+    }
+
+    #[test]
+    fn vertical_writing_reads_down_its_columns() {
+        // Two columns of three glyphs, the right one first.
+        let mut g = Vec::new();
+        for (col, word) in ["縦書き", "です。"].iter().enumerate() {
+            for (row, c) in word.chars().enumerate() {
+                let (x, y) = (100.0 - col as f64 * 14.0, row as f64 * 12.0);
+                g.push(RawGlyph { text: c.to_string(), corners: [(x, y + 12.0), (x + 12.0, y + 12.0), (x + 12.0, y), (x, y)], vertical: true });
+            }
+        }
+        let t = PageText::from_glyphs(&g);
+        assert_eq!(t.string(0..t.chars.len()), "縦書き\nです。");
+        assert_eq!(t.find("書き").len(), 1, "consecutive characters of a column are found");
     }
 
     #[test]

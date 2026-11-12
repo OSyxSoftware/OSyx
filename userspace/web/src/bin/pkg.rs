@@ -16,7 +16,9 @@
 //! `/etc/osyx/packages.keys`; the payload is checked against the
 //! manifest's SHA-256 and every file against its own. A package's files
 //! are written next to their targets and renamed into place only when all
-//! of them were written. A package can write only `/opt/pkg/<name>/` and
+//! of them were written; if a rename fails, the files of the installed
+//! version are put back. A package is installed only in the version the
+//! signed list names. A package can write only `/opt/pkg/<name>/` and
 //! its launcher entry (osyx_update::package::allowed_path). What is
 //! installed is recorded in `/var/lib/osyx/pkg/<name>.txt`.
 //!
@@ -30,7 +32,6 @@ use os_std::io::{Read, Write};
 use os_std::prelude::*;
 use os_std::{env, fs, os, println};
 use osyx_update::package::{self, Index, Package, State};
-use osyx_update::hex;
 use sha2::{Digest, Sha256};
 
 os_std::entry!(main);
@@ -43,6 +44,8 @@ const CACHE: &str = "/var/cache/osyx/pkg";
 const LOG: &str = "/var/log/osyx-pkg.log";
 const MANIFEST_MAX: usize = 4 << 20;
 const STAGED: &str = osyx_update::STAGED_SUFFIX;
+/// Suffix of an installed file set aside while its replacement moves in.
+const KEPT: &str = package::KEPT_SUFFIX;
 
 fn setting(text: &str, key: &str) -> Option<String> {
     text.lines()
@@ -132,10 +135,63 @@ fn need_root() -> Result<(), String> {
     Ok(())
 }
 
-/// Removes `path` and then its directories while they are empty, up to
-/// (not including) `/opt/pkg` or the launcher directory.
-fn remove_file(path: &str) {
-    let _ = fs::remove_file(path);
+/// Downloads a payload of exactly `size` bytes with SHA-256 `sha256` to
+/// `path`. More bytes than the signed manifest names are refused as they
+/// arrive, and nothing is left behind on any failure.
+fn download_payload(url: &str, path: &str, size: u64, sha256: &[u8; 32]) -> Result<(), String> {
+    struct Limited {
+        file: fs::File,
+        hash: Sha256,
+        left: u64,
+    }
+    impl osyx_web::Sink for Limited {
+        fn start(&mut self, _url: &str, length: Option<u64>) -> Result<(), String> {
+            match length {
+                Some(n) if n != self.left => Err(format!("the payload is {n} bytes, the manifest says {}", self.left)),
+                _ => Ok(()),
+            }
+        }
+        fn data(&mut self, bytes: &[u8]) -> Result<(), String> {
+            if bytes.len() as u64 > self.left {
+                return Err(String::from("the payload is longer than the manifest says"));
+            }
+            self.left -= bytes.len() as u64;
+            self.hash.update(bytes);
+            self.file.write_all(bytes).map_err(|e| format!("write: {e}"))
+        }
+    }
+    let file = fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut sink = Limited { file, hash: Sha256::new(), left: size };
+    let result = osyx_web::get(url, &mut sink).map_err(|e| format!("{url}: {e}")).and_then(|_| {
+        if sink.left != 0 {
+            return Err(format!("the payload is {} bytes short", sink.left));
+        }
+        if <[u8; 32]>::from(sink.hash.clone().finalize()) != *sha256 {
+            return Err(String::from("the payload does not match its SHA-256 in the manifest"));
+        }
+        sink.file.sync_all().map_err(|e| format!("{path}: {e}"))
+    });
+    drop(sink);
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result
+}
+
+/// Removes `path` (one that is already gone is fine) and then its
+/// directories while they are empty, up to (not including) `/opt/pkg` or
+/// the launcher directory.
+fn remove_file(path: &str) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{path}: {e}")),
+    }
+    remove_empty_dirs(path);
+    Ok(())
+}
+
+fn remove_empty_dirs(path: &str) {
     let mut dir = path;
     while let Some((parent, _)) = dir.rsplit_once('/') {
         if !parent.starts_with("/opt/pkg/") || fs::remove_dir(parent).is_err() {
@@ -155,6 +211,14 @@ fn install(url: &str, name: &str) -> Result<String, String> {
     if p.name != name {
         return Err(format!("{manifest} is the manifest of package {}: refused", p.name));
     }
+    // The signed list says which version the repository has now: a
+    // manifest of another version, however well signed, is one the
+    // repository withdrew or has not published yet.
+    match index(url)?.find(name) {
+        Some(listed) if listed.version == p.version => {}
+        Some(listed) => return Err(format!("{manifest} is version {}, the repository lists {}: refused", p.version, listed.version)),
+        None => return Err(format!("the repository does not list {name}: refused")),
+    }
     let old = installed(name);
     if let Some(old) = &old {
         if old.version == p.version {
@@ -166,7 +230,7 @@ fn install(url: &str, name: &str) -> Result<String, String> {
     }
     fs::create_dir_all(CACHE).map_err(|e| format!("{CACHE}: {e}"))?;
     let payload = format!("{CACHE}/{bin}");
-    osyx_web::download(&format!("{url}/{bin}"), &payload, Some(&hex(&p.payload_sha256)), &mut |_, _| {}).map_err(|e| format!("download: {e}"))?;
+    download_payload(&format!("{url}/{bin}"), &payload, p.payload_size, &p.payload_sha256).map_err(|e| format!("download: {e}"))?;
     // Every file next to its target first, checked against its SHA-256.
     let mut src = fs::File::open(&payload).map_err(|e| format!("{payload}: {e}"))?;
     let mut staged: Vec<String> = Vec::new();
@@ -203,22 +267,68 @@ fn install(url: &str, name: &str) -> Result<String, String> {
     })();
     drop(src);
     let _ = fs::remove_file(&payload);
-    if let Err(e) = result {
-        for to in &staged {
-            remove_file(&format!("{to}{STAGED}"));
+    // The record of the new version, written beside the old one.
+    let record = format!("{DB}/{name}.txt");
+    let new_record = format!("{record}{STAGED}");
+    let result = result.and_then(|()| {
+        fs::create_dir_all(DB).map_err(|e| format!("{DB}: {e}"))?;
+        let mut f = fs::File::create(&new_record).map_err(|e| format!("{new_record}: {e}"))?;
+        f.write_all(text.as_bytes()).and_then(|()| f.sync_all()).map_err(|e| format!("{new_record}: {e}"))
+    });
+    let unstage = |staged: &[String]| {
+        for to in staged {
+            let _ = fs::remove_file(format!("{to}{STAGED}"));
+            remove_empty_dirs(to);
         }
+        let _ = fs::remove_file(&new_record);
+    };
+    if let Err(e) = result {
+        unstage(&staged);
         return Err(e);
     }
-    for to in &staged {
-        fs::rename(format!("{to}{STAGED}"), to).map_err(|e| format!("{to}: {e}"))?;
+    // Commit. Each file of the installed version steps aside before the
+    // new one takes its place, so that a failure half way puts every one
+    // of them back: the old version stays whole.
+    let mut done: Vec<(&String, bool)> = Vec::new();
+    let commit = (|| -> Result<(), String> {
+        for to in &staged {
+            let had = fs::metadata(to).is_ok();
+            if had {
+                fs::rename(to, format!("{to}{KEPT}")).map_err(|e| format!("{to}: {e}"))?;
+            }
+            done.push((to, had));
+            fs::rename(format!("{to}{STAGED}"), to).map_err(|e| format!("{to}: {e}"))?;
+        }
+        fs::rename(&new_record, &record).map_err(|e| format!("{record}: {e}"))
+    })();
+    if let Err(e) = commit {
+        for (to, had) in done.iter().rev() {
+            let _ = fs::remove_file(to);
+            if *had {
+                let _ = fs::rename(format!("{to}{KEPT}"), to);
+            }
+        }
+        unstage(&staged);
+        return Err(format!("{e}; the installed version was put back"));
     }
-    if let Some(old) = &old {
-        for path in package::stale_files(old, &p) {
-            remove_file(&format!("/{path}"));
+    for (to, had) in &done {
+        if *had {
+            let _ = fs::remove_file(format!("{to}{KEPT}"));
         }
     }
-    fs::create_dir_all(DB).map_err(|e| format!("{DB}: {e}"))?;
-    fs::write(format!("{DB}/{name}.txt"), &text).map_err(|e| format!("{DB}/{name}.txt: {e}"))?;
+    // What the new version no longer has. The record already names the
+    // new version; a file that will not go is reported, not forgotten.
+    let mut left_over = Vec::new();
+    if let Some(old) = &old {
+        for path in package::stale_files(old, &p) {
+            if let Err(e) = remove_file(&format!("/{path}")) {
+                left_over.push(e);
+            }
+        }
+    }
+    if !left_over.is_empty() {
+        say(&format!("pkg: {name}: files of the old version could not be removed: {}", left_over.join("; ")));
+    }
     Ok(match old {
         Some(old) => format!("{name} upgraded from {} to {} ({} files)", old.version, p.version, p.files.len()),
         None => format!("{name} {} installed ({} files)", p.version, p.files.len()),
@@ -227,8 +337,11 @@ fn install(url: &str, name: &str) -> Result<String, String> {
 
 fn remove(name: &str) -> Result<String, String> {
     let p = installed(name).ok_or_else(|| format!("{name} is not installed"))?;
-    for f in &p.files {
-        remove_file(&format!("/{}", f.path));
+    // The record goes last, and only when every file went: what could not
+    // be removed can be tried again.
+    let failed: Vec<String> = p.files.iter().filter_map(|f| remove_file(&format!("/{}", f.path)).err()).collect();
+    if !failed.is_empty() {
+        return Err(format!("{name} is still installed: {}", failed.join("; ")));
     }
     let _ = fs::remove_dir(format!("/{}{name}", package::PREFIX));
     fs::remove_file(format!("{DB}/{name}.txt")).map_err(|e| format!("{DB}/{name}.txt: {e}"))?;

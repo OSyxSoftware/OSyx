@@ -1658,6 +1658,11 @@ impl Compositor {
                 (1, false, None) => {}
                 _ => self.selecting = None,
             }
+            // Windows heard nothing of the pointer meanwhile: the one
+            // under it now is the one the wheel and the next click reach.
+            if self.selecting.is_none() {
+                self.update_hover();
+            }
             return;
         }
         if !pressed {
@@ -1888,7 +1893,11 @@ impl Compositor {
                 if mods & modifier::CTRL != 0 {
                     self.record_toggle = true;
                 } else if mods & modifier::SHIFT != 0 {
-                    self.selecting = Some(None);
+                    // Not in the middle of a drag: its release would be
+                    // taken for the selection's and never reach the window.
+                    if self.buttons == 0 && self.grab.is_none() {
+                        self.selecting = Some(None);
+                    }
                 } else if mods & modifier::ALT != 0 {
                     let frame = self.focus.and_then(|id| self.windows.get(&id)).filter(|w| w.visible()).map(|w| w.frame());
                     self.request_capture(frame.unwrap_or(self.screen));
@@ -1903,6 +1912,8 @@ impl Compositor {
             if down {
                 self.damage_selection();
                 self.selecting = None;
+                // The pointer may be over another window by now.
+                self.update_hover();
             }
             return;
         }
