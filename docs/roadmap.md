@@ -58,10 +58,11 @@ Planned work, roughly by priority. Items marked (in progress) have a branch.
    `userspace/filekit/src/openwith.rs`). Files plays WAV, FLAC, MP3, AAC/M4A,
    Ogg Vorbis and Opus (`userspace/desktop/src/audio_view.rs`), WebM and
    Matroska video with VP8 (`userspace/desktop/src/video_view.rs`), shows
-   PNG, JPEG, GIF, BMP, ICO, WebP, JPEG 2000 and JBIG2 pictures and PDF
+   PNG, JPEG, GIF, BMP, ICO, TIFF, WebP, JPEG 2000 and JBIG2 pictures and PDF
    documents with CCITT, JBIG2 and JPEG 2000 images, all decoded by
    `userspace/media`. Still open: H.264/MP4, VP9 and AV1 video (those files
-   still need a registered application), TIFF, and thumbnails.
+   still need a registered application), JPEG-compressed and BigTIFF files,
+   and thumbnails.
 5. **Release hygiene**: partly done. CodSpeed benchmarks run on every pull
    request. Still open: the release workflow builds and signs only; it runs
    neither the host tests nor the Win32, SMP, desktop and Zen QEMU suites.

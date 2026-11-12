@@ -970,8 +970,9 @@ fn a_burst_of_segments_is_acknowledged_every_second_segment() {
     let mut n = Net::new();
     let (c, s) = connect(&mut n, 6200);
     n.run(20);
-    // Ten full segments (the initial window) leave A at once.
-    let data = pattern(10 * 1460, 4);
+    // Ten full segments (the initial window) leave A at once; each carries
+    // the timestamps option, so 12 bytes less than the MSS of data.
+    let data = pattern(10 * (1460 - osyx_net::tcp::TS_OPTION_LEN), 4);
     assert_eq!(n.a.tcp_send(c, &data), Ok(data.len()));
     let burst = n.a.take_tx();
     assert_eq!(burst.len(), 10);
@@ -1004,6 +1005,7 @@ fn the_sender_waits_for_a_full_segment_instead_of_filling_the_window_bytewise() 
         ws: None,
         sack_permitted: false,
         sack: osyx_net::tcp::SackOption::NONE,
+        ts: None,
         payload: &[],
     };
     t.input(&seg(1001, SYN | ACK), 1);

@@ -26,6 +26,9 @@ fn pair(server_sack: bool) -> (Tcb, Tcb) {
     assert!(syn.sack_permitted, "our SYN offers SACK");
     let mut wire_syn = syn.clone();
     wire_syn.sack_permitted = server_sack;
+    // These tests count whole segments of MSS bytes: no timestamps option
+    // (tests/timestamps.rs covers it).
+    wire_syn.ts = None;
     let bytes = wire_syn.encode(A, B);
     let parsed = tcp::parse(A.addr, B.addr, &bytes).unwrap();
     assert_eq!(parsed.sack_permitted, server_sack);
@@ -49,7 +52,7 @@ fn pattern(len: usize) -> Vec<u8> {
 fn sack_options_survive_the_codec() {
     let mut sack = SackBlocks::NONE;
     assert!(sack.push(3000, 4000) && sack.push(6000, 7000) && sack.push(9000, 9500));
-    let seg = OutSegment { seq: 1, ack: 2000, flags: ACK, window: 512, mss: None, ws: None, sack_permitted: false, sack, payload: vec![] };
+    let seg = OutSegment { seq: 1, ack: 2000, flags: ACK, window: 512, mss: None, ws: None, sack_permitted: false, sack, ts: None, payload: vec![] };
     let bytes = seg.encode(A, B);
     assert_eq!(bytes.len(), 20 + 4 + 3 * 8, "two NOPs, kind, length and three blocks");
     let parsed = tcp::parse(A.addr, B.addr, &bytes).unwrap();
@@ -57,7 +60,7 @@ fn sack_options_survive_the_codec() {
     assert!(!parsed.sack_permitted);
 
     // A SYN with every option: MSS, window scale, SACK-permitted.
-    let syn = OutSegment { seq: 7, ack: 0, flags: SYN, window: 65535, mss: Some(1460), ws: Some(8), sack_permitted: true, sack: SackBlocks::NONE, payload: vec![] };
+    let syn = OutSegment { seq: 7, ack: 0, flags: SYN, window: 65535, mss: Some(1460), ws: Some(8), sack_permitted: true, sack: SackBlocks::NONE, ts: None, payload: vec![] };
     let bytes = syn.encode(A, B);
     assert_eq!(bytes.len(), 20 + 12);
     let parsed = tcp::parse(A.addr, B.addr, &bytes).unwrap();

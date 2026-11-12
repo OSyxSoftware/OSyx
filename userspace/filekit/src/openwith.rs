@@ -166,7 +166,7 @@ impl Choices {
 fn viewer_shows(ext: Option<&str>) -> bool {
     matches!(
         ext,
-        Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "jbig2" | "jb2" | "jp2" | "j2k" | "j2c" | "jpc" | "jpf" | "jpx" | "webp")
+        Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "tif" | "tiff" | "jbig2" | "jb2" | "jp2" | "j2k" | "j2c" | "jpc" | "jpf" | "jpx" | "webp")
     )
 }
 
