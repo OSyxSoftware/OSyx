@@ -9,4 +9,4 @@ license.workspace = true
 osyx-battery = { path = "../battery" }
 osyx-i2c = { path = "../../drivers/i2c" }
 aml = { path = "../../third_party/aml" }
-spinning_top = "0.3.0"
+spinning_top = "0.4.0"
