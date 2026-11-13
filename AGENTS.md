@@ -21,7 +21,7 @@ Mandatory work report:
 - `Verification`: Give exact checks, tests, or commands run and their outcomes. Include failures, skipped checks, and behavior not tested. Never claim success without evidence.
 - `Remaining`: List blockers, risks, unfinished work, and required user actions. Write `None` only when nothing remains.
 - Distinguish completed work from proposals. Never hide failed attempts or present partial work as complete.
-- End the report with `Agent: <agent name>` and `Date: <YYYY-MM-DD>`.
+- End the report with `Workflow: <workflow or tool>` (e.g. `Antigravity`), `Agent: <model name>` underneath, and `Date: <YYYY-MM-DD>`.
 - For questions or investigations that change nothing, explicitly state that no files or external resources were changed.
 
 Switch: /caveman (default), /ultracave (fragments, each fact once), /megacave (Classical Chinese 文言文)
@@ -41,3 +41,22 @@ Pull request labels:
 - Every area label that matches the change: `wifi`, `network`, `storage`, `installer`, `update`, `desktop`, `kernel` or `drivers`.
 - Create a missing label first: `gh label create <name> --color <hex> --description <text>`.
 - Never leave a pull request without labels.
+
+Build and tests:
+- `rust-toolchain.toml` pins `stable` Rust; do not use nightly features. CI runs with `--locked`, so update `Cargo.lock` when dependencies change.
+- `Cargo.toml` lists host-testable crates in `default-members`; plain `cargo test` runs those, while `cargo test --workspace` fails on freestanding crates.
+- `osyx-wireless` WPA tests require `--features wpa`; `osyx-ext4` tests require `e2fsprogs` and generated fixtures (`bash storage/ext4/tests/gen-fixtures.sh`).
+- When changing `compatibility/win32` or parity tooling, run `python3 -m unittest scripts/test_winparity.py`.
+- Check freestanding targets explicitly: `cargo check --locked -p osyx-uefi-loader --target x86_64-unknown-uefi`, `cargo check --locked -p osyx-kernel --target x86_64-unknown-none`, and userspace (`-p osyx-apps -p osyx-desktop -p osyx-nettools -p osyx-win32 -p osyx-web`) with `--target x86_64-unknown-none` and `RUSTFLAGS='-C relocation-model=static -C code-model=small --cfg polyval_force_soft --cfg poly1305_force_soft --cfg aes_force_soft --cfg chacha20_force_soft --cfg curve25519_dalek_backend="serial"'`.
+- `rustfmt.toml` sets `max_width = 120` and `use_small_heuristics = "Max"`.
+
+Host platforms and verification scope:
+- Full image builds and QEMU suites (`scripts/build.ps1`, `scripts/test.ps1`, `scripts/net-test.ps1`, `scripts/desktop-test.ps1`) target Windows 11 with Rust, MSYS2, and WSL.
+- On Linux hosts, verify with portable `cargo test --locked`, `scripts/test_winparity.py`, `cargo check --locked --target ...`, and `scripts/build-linux.sh` when relevant. Never claim QEMU or Windows-only checks passed if they were not run.
+
+Releases, license, and secrets:
+- Passing CI on `main` triggers an automatic signed release unless the merge or squash commit message contains `/norelease` or `[skip release]`; add `/norelease` to documentation, CI, or agent-instruction PRs that should not cut a release.
+- Preserve the `GPL-3.0-or-later` license and never commit or report passwords, Wi-Fi keys, signing keys, personal files, or private logs.
+
+Agent instruction sync:
+- `AGENTS.md` is the canonical source for repository agent instructions. Whenever `AGENTS.md` changes, copy it verbatim to `CLAUDE.md` and `.opencode/AGENTS.md`.
