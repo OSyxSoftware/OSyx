@@ -1,0 +1,7 @@
+# Commits that only reformat code. GitHub's blame view skips them; locally run
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# These hashes stay valid only when the pull request is merged with a merge
+# commit (not squashed or rebased).
+
+# style: format the workspace with rustfmt
+7d99f2ecf84551789c6c7e7f093b4d7a025b186c

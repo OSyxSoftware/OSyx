@@ -47,7 +47,8 @@ members = [
     "third_party/aml",
 ]
 # Host-testable crates only. The loader, kernel and user programs are freestanding and are
-# built with an explicit --target by scripts/build.ps1.
+# built with an explicit --target by scripts/build.ps1. CI runs plain `cargo test` on this
+# list, so add every new host-testable crate here.
 default-members = [
     "shared/abi",
     "shared/bootinfo",
