@@ -51,7 +51,6 @@ pub fn update_url(url: &str) -> &str {
     }
 }
 
-
 /// Public half of the release signing key (hex), built into every system.
 /// The secret half stays with whoever publishes releases, outside the
 /// repository (scripts/release.ps1).
@@ -132,7 +131,8 @@ pub fn release_version(text: &str) -> Option<&str> {
 
 impl Manifest {
     pub fn to_text(&self) -> String {
-        let mut s = format!("{MAGIC}\nversion {}\npayload {} {}\n", self.version, hex(&self.payload_sha256), self.payload_size);
+        let mut s =
+            format!("{MAGIC}\nversion {}\npayload {} {}\n", self.version, hex(&self.payload_sha256), self.payload_size);
         for f in &self.files {
             s.push_str(&format!("file {} {} {:o} {}\n", hex(&f.sha256), f.size, f.mode, f.path));
         }
@@ -153,7 +153,9 @@ impl Manifest {
             match f.next() {
                 Some("version") => {
                     let v = f.next().ok_or_else(bad)?;
-                    if v.split('.').any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) || part.parse::<u64>().is_err()) {
+                    if v.split('.').any(|part| {
+                        part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) || part.parse::<u64>().is_err()
+                    }) {
                         return Err(bad());
                     }
                     version = Some(v.to_string());
@@ -166,7 +168,11 @@ impl Manifest {
                 Some("file") => {
                     let sha256 = f.next().and_then(parse_hex::<32>).ok_or_else(bad)?;
                     let size = f.next().and_then(|s| s.parse().ok()).ok_or_else(bad)?;
-                    let mode = f.next().and_then(|s| u32::from_str_radix(s, 8).ok()).filter(|m| *m <= 0o777).ok_or_else(bad)?;
+                    let mode = f
+                        .next()
+                        .and_then(|s| u32::from_str_radix(s, 8).ok())
+                        .filter(|m| *m <= 0o777)
+                        .ok_or_else(bad)?;
                     let path = f.next().ok_or_else(bad)?;
                     if !allowed_path(path) {
                         return Err(format!("manifest line {}: an update may not write {path}", n + 2));
@@ -174,7 +180,10 @@ impl Manifest {
                     if files.iter().any(|e| e.path == path) {
                         return Err(format!("manifest line {}: {path} listed twice", n + 2));
                     }
-                    if files.iter().any(|e| e.path.strip_suffix(STAGED_SUFFIX) == Some(path) || path.strip_suffix(STAGED_SUFFIX) == Some(e.path.as_str())) {
+                    if files.iter().any(|e| {
+                        e.path.strip_suffix(STAGED_SUFFIX) == Some(path)
+                            || path.strip_suffix(STAGED_SUFFIX) == Some(e.path.as_str())
+                    }) {
                         return Err(format!("manifest line {}: {path} conflicts with a staged file", n + 2));
                     }
                     files.push(Entry { path: path.to_string(), size, mode, sha256 });
@@ -268,11 +277,18 @@ mod tests {
 
     #[test]
     fn manifest_rejects_staging_path_collisions_in_either_order() {
-        for files in [vec![entry("bin/a", 1), entry("bin/a.osyx-new", 1)], vec![entry("bin/a.osyx-new", 1), entry("bin/a", 1)]] {
+        for files in
+            [vec![entry("bin/a", 1), entry("bin/a.osyx-new", 1)], vec![entry("bin/a.osyx-new", 1), entry("bin/a", 1)]]
+        {
             let manifest = Manifest { version: "1.0".to_string(), payload_size: 2, payload_sha256: [0; 32], files };
             assert!(Manifest::parse(&manifest.to_text()).is_err());
         }
-        let manifest = Manifest { version: "1.0".to_string(), payload_size: 2, payload_sha256: [0; 32], files: vec![entry("bin/a", 1), entry("bin/b.osyx-new", 1)] };
+        let manifest = Manifest {
+            version: "1.0".to_string(),
+            payload_size: 2,
+            payload_sha256: [0; 32],
+            files: vec![entry("bin/a", 1), entry("bin/b.osyx-new", 1)],
+        };
         assert!(Manifest::parse(&manifest.to_text()).is_ok());
     }
 
@@ -289,10 +305,27 @@ mod tests {
 
     #[test]
     fn paths() {
-        for ok in ["bin/axis", "system/bin/desktop", "Windows/Fonts/Lato.ttf", "esp/EFI/BOOT/BOOTX64.EFI", "etc/firmware/iwm-9260-46"] {
+        for ok in [
+            "bin/axis",
+            "system/bin/desktop",
+            "Windows/Fonts/Lato.ttf",
+            "esp/EFI/BOOT/BOOTX64.EFI",
+            "etc/firmware/iwm-9260-46",
+        ] {
             assert!(allowed_path(ok), "{ok}");
         }
-        for bad in ["etc/passwd", "/bin/x", "bin/../etc/shadow", "bin//x", "bin/", "bin", "home/user/a", "esp/EFI/OSYX/CMDLINE.TXT", "opt/zen/zen.exe", "bin\\x"] {
+        for bad in [
+            "etc/passwd",
+            "/bin/x",
+            "bin/../etc/shadow",
+            "bin//x",
+            "bin/",
+            "bin",
+            "home/user/a",
+            "esp/EFI/OSYX/CMDLINE.TXT",
+            "opt/zen/zen.exe",
+            "bin\\x",
+        ] {
             assert!(!allowed_path(bad), "{bad}");
         }
     }

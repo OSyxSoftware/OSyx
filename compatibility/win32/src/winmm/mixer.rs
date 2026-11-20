@@ -49,13 +49,25 @@ fn resolve(obj: u64, flags: u32) -> Result<(), u32> {
     let handle = flags & OBJECTF_HANDLE != 0;
     match flags & OBJECTF_TYPEMASK {
         OBJECTF_MIXER if handle => {
-            if OPEN.lock().unwrap().contains(&obj) { Ok(()) } else { Err(MMSYSERR_INVALHANDLE) }
+            if OPEN.lock().unwrap().contains(&obj) {
+                Ok(())
+            } else {
+                Err(MMSYSERR_INVALHANDLE)
+            }
         }
         OBJECTF_MIXER | OBJECTF_WAVEOUT if !handle => {
-            if obj == 0 { Ok(()) } else { Err(MMSYSERR_BADDEVICEID) }
+            if obj == 0 {
+                Ok(())
+            } else {
+                Err(MMSYSERR_BADDEVICEID)
+            }
         }
         OBJECTF_WAVEOUT => {
-            if wave_out(obj).is_some() { Ok(()) } else { Err(MMSYSERR_INVALHANDLE) }
+            if wave_out(obj).is_some() {
+                Ok(())
+            } else {
+                Err(MMSYSERR_INVALHANDLE)
+            }
         }
         // Recording has no mixer line of its own.
         OBJECTF_WAVEIN => Err(MMSYSERR_NODRIVER),
@@ -183,10 +195,10 @@ fn line_info(obj: u64, line: *mut u8, flags: u32, wide: bool) -> u32 {
         return MMSYSERR_INVALPARAM;
     }
     let found = match flags & 0xF {
-        0 => rd32(line, 4) == 0,                                              // DESTINATION
-        1 => return MIXERR_INVALLINE,                                         // SOURCE: none
-        2 => rd32(line, 12) == DEST_LINE,                                     // LINEID
-        3 => rd32(line, 28) == MIXERLINE_COMPONENTTYPE_DST_SPEAKERS,          // COMPONENTTYPE
+        0 => rd32(line, 4) == 0,                                                       // DESTINATION
+        1 => return MIXERR_INVALLINE,                                                  // SOURCE: none
+        2 => rd32(line, 12) == DEST_LINE,                                              // LINEID
+        3 => rd32(line, 28) == MIXERLINE_COMPONENTTYPE_DST_SPEAKERS,                   // COMPONENTTYPE
         4 => rd32(line, if wide { 204 } else { 124 }) == MIXERLINE_TARGETTYPE_WAVEOUT, // TARGETTYPE
         _ => return MMSYSERR_INVALFLAG,
     };

@@ -226,7 +226,9 @@ pub fn monotonic_pair() -> (u64, u64) {
 
 #[no_mangle]
 extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
-    if f.vector == 2 && crate::smp::handle_tlb_nmi() { return; }
+    if f.vector == 2 && crate::smp::handle_tlb_nmi() {
+        return;
+    }
     crate::smp::leave_tickless();
     if f.vector == crate::smp::RESCHED_VECTOR as u64 {
         // Work was queued for this idle CPU; nothing else to do here.
@@ -288,11 +290,8 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     // mode. A preempted kernel path that holds the lock keeps it across the
     // switch as before (`pick_next` records ownership per thread).
     if f.vector == pic::TIMER_VECTOR as u64 || f.vector == timer::APIC_TIMER_VECTOR as u64 {
-        let now = if f.vector == pic::TIMER_VECTOR as u64 || crate::smp::index() == 0 {
-            record_tick()
-        } else {
-            ticks()
-        };
+        let now =
+            if f.vector == pic::TIMER_VECTOR as u64 || crate::smp::index() == 0 { record_tick() } else { ticks() };
         // Acknowledge first: the scheduler may switch to another thread
         // before this handler returns.
         if f.vector == pic::TIMER_VECTOR as u64 {
@@ -327,16 +326,14 @@ extern "C" fn osyx_interrupt_dispatch(f: &mut TrapFrame) {
     }
     let _entry = crate::smp::KernelEntry::new();
     if _entry.acquired() {
-        crate::smp::set_hold_kind(if f.vector < 32 {
-            crate::smp::HOLD_EXCEPTION
-        } else {
-            crate::smp::HOLD_IRQ
-        });
+        crate::smp::set_hold_kind(if f.vector < 32 { crate::smp::HOLD_EXCEPTION } else { crate::smp::HOLD_IRQ });
     }
     match f.vector {
         0..=31 if from_user => {
-            if !crate::user_fault::deliver(f) {kill_process(f);}
-        },
+            if !crate::user_fault::deliver(f) {
+                kill_process(f);
+            }
+        }
         3 => {
             BREAKPOINTS.fetch_add(1, Ordering::Relaxed);
             kprintln!("breakpoint at {:#x}", f.rip);

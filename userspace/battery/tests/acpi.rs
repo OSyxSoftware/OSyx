@@ -47,7 +47,13 @@ impl Machine {
 
 impl Hardware for Machine {
     fn port_in(&self, port: u16, _width: u8) -> u64 {
-        let port = if port == self.ports.0 { 0x66 } else if port == self.ports.1 { 0x62 } else { 0xFFFF };
+        let port = if port == self.ports.0 {
+            0x66
+        } else if port == self.ports.1 {
+            0x62
+        } else {
+            0xFFFF
+        };
         let mut ec = self.ec.lock().unwrap();
         match port {
             0x66 => {
@@ -66,7 +72,13 @@ impl Hardware for Machine {
     }
 
     fn port_out(&self, port: u16, _width: u8, value: u64) {
-        let port = if port == self.ports.0 { 0x66 } else if port == self.ports.1 { 0x62 } else { 0xFFFF };
+        let port = if port == self.ports.0 {
+            0x66
+        } else if port == self.ports.1 {
+            0x62
+        } else {
+            0xFFFF
+        };
         let mut ec = self.ec.lock().unwrap();
         if ec.hung {
             return;
@@ -185,7 +197,13 @@ fn eisa(id: &str) -> Vec<u8> {
     let b = id.as_bytes();
     let letter = |c: u8| (c - b'@') as u32;
     let hex = |c: u8| (c as char).to_digit(16).unwrap();
-    let be: u32 = letter(b[0]) << 26 | letter(b[1]) << 21 | letter(b[2]) << 16 | hex(b[3]) << 12 | hex(b[4]) << 8 | hex(b[5]) << 4 | hex(b[6]);
+    let be: u32 = letter(b[0]) << 26
+        | letter(b[1]) << 21
+        | letter(b[2]) << 16
+        | hex(b[3]) << 12
+        | hex(b[4]) << 8
+        | hex(b[5]) << 4
+        | hex(b[6]);
     let mut v = vec![0x0C];
     v.extend_from_slice(&be.swap_bytes().to_le_bytes());
     v
@@ -325,7 +343,18 @@ fn ec_battery() -> Vec<u8> {
 /// The EC-backed battery; `ec_extra` is added to the EC device (a `_CRS`).
 fn ec_battery_with(ec_extra: Vec<u8>) -> Vec<u8> {
     let region = cat(&[vec![0x5B, 0x80], seg("ECOR"), vec![0x03], int(0), int(0x100)]);
-    let field_body = cat(&[seg("ECOR"), vec![0x01], seg("B0ST"), vec![8], seg("RATE"), vec![16], seg("REMN"), vec![16], seg("VOLT"), vec![16]]);
+    let field_body = cat(&[
+        seg("ECOR"),
+        vec![0x01],
+        seg("B0ST"),
+        vec![8],
+        seg("RATE"),
+        vec![16],
+        seg("REMN"),
+        vec![16],
+        seg("VOLT"),
+        vec![16],
+    ]);
     let field = cat(&[vec![0x5B, 0x81], pkg_len(field_body.len()), field_body]);
     let ec = device("EC__", cat(&[name("_HID", eisa("PNP0C09")), ec_extra, region, field]));
     let bat = device(
@@ -335,13 +364,16 @@ fn ec_battery_with(ec_extra: Vec<u8>) -> Vec<u8> {
             method("_STA", ret(int(0x1F))),
             method("_BIF", ret(package(ints(&[0, 50_000, 45_000, 1, 11_400])))),
             name("PBST", package(ints(&[0, 0, 0, 0]))),
-            method("_BST", cat(&[
-                store_index("B0ST", 0),
-                store_index("RATE", 1),
-                store_index("REMN", 2),
-                store_index("VOLT", 3),
-                ret(seg("PBST")),
-            ])),
+            method(
+                "_BST",
+                cat(&[
+                    store_index("B0ST", 0),
+                    store_index("RATE", 1),
+                    store_index("REMN", 2),
+                    store_index("VOLT", 3),
+                    ret(seg("PBST")),
+                ]),
+            ),
         ]),
     );
     table(scope_sb(cat(&[ec, bat])))
@@ -487,7 +519,8 @@ fn ec_ports_come_from_crs_when_there_is_no_ecdt() {
     assert!(legacy.poll().ec_errors > 0);
 
     // Without an EC device or ECDT the legacy ports are used.
-    let bare = vec![table(scope_sb(battery("BAT0", Some(0x1f), &[0, 40000, 38000, 1, 11400], &[1, 5000, 19000, 11300])))];
+    let bare =
+        vec![table(scope_sb(battery("BAT0", Some(0x1f), &[0, 40000, 38000, 1, 11400], &[1, 5000, 19000, 11300])))];
     let acpi = Acpi::load(Machine::new(), None, &bare, &mut log);
     assert_eq!(acpi.ec_ports(), (Some(EcPorts::LEGACY), "legacy ports"));
 }
@@ -616,7 +649,7 @@ fn index_bank_fields_and_data_regions_do_not_stop_parsing() {
         seg("FLD1"),
         vec![0x10],
         vec![0x02],
-        seg("GIOP"), // ConnectField(NameString)
+        seg("GIOP"),                  // ConnectField(NameString)
         vec![0x03, 0x00, 0x00, 0x00], // ExtendedAccessField(AnyAcc, Attrib, 0)
         seg("FLD2"),
         vec![8],
@@ -624,14 +657,7 @@ fn index_bank_fields_and_data_regions_do_not_stop_parsing() {
     let index_field = cat(&[vec![0x5B, 0x86], pkg_len(index_body.len()), index_body]);
     // BankField(PDAT, BANK, 0, ...): region, bank register, bank value
     // (the order iasl emits).
-    let bank_body = cat(&[
-        seg("PDAT"),
-        seg("BANK"),
-        int(0),
-        vec![0x01],
-        seg("FLD3"),
-        vec![8],
-    ]);
+    let bank_body = cat(&[seg("PDAT"), seg("BANK"), int(0), vec![0x01], seg("FLD3"), vec![8]]);
     let bank_field = cat(&[vec![0x5B, 0x87], pkg_len(bank_body.len()), bank_body]);
     // DataRegion(DRGN, 0, 0, 0): no PkgLength.
     let data_region = cat(&[vec![0x5B, 0x88], seg("DRGN"), int(0), int(0), int(0)]);

@@ -214,7 +214,11 @@ impl Hci {
     }
 
     /// Waits for an event accepted by `want`, stashing the others.
-    pub fn wait_event(&mut self, timeout_ms: u64, mut want: impl FnMut(&[u8]) -> bool) -> Result<Option<Vec<u8>>, HciError> {
+    pub fn wait_event(
+        &mut self,
+        timeout_ms: u64,
+        mut want: impl FnMut(&[u8]) -> bool,
+    ) -> Result<Option<Vec<u8>>, HciError> {
         let deadline = interrupts::ticks() + crate::arch::timer::ms_to_ticks(timeout_ms);
         let mut other = VecDeque::new();
         let mut stash = core::mem::take(&mut self.stash);

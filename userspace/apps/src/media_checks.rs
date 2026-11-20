@@ -65,7 +65,8 @@ pub fn run() -> i32 {
     };
 
     // 1. Automount at boot.
-    let mounted = wait_for("automount", 90, || status().iter().any(|d| d.state == DiskState::Mounted && mounted_at(d, STICK)));
+    let mounted =
+        wait_for("automount", 90, || status().iter().any(|d| d.state == DiskState::Mounted && mounted_at(d, STICK)));
     check("automount at /media/PENDRIVE", mounted);
     if !mounted {
         println!("status: {:?}", fs::read_to_string(media::STATUS_PATH));
@@ -75,7 +76,11 @@ pub fn run() -> i32 {
     check("read HELLO.TXT", fs::read_to_string(format!("{STICK}/HELLO.TXT")).is_ok_and(|s| s.starts_with("Hello")));
     let wrote = fs::write(format!("{STICK}/OSYX.TXT"), NOTE).is_ok();
     check("write OSYX.TXT", wrote);
-    check("files on the stick belong to the desktop user", fs::metadata(format!("{STICK}/OSYX.TXT")).is_ok_and(|m| m.uid() == media::OWNER_UID && m.gid() == media::OWNER_GID));
+    check(
+        "files on the stick belong to the desktop user",
+        fs::metadata(format!("{STICK}/OSYX.TXT"))
+            .is_ok_and(|m| m.uid() == media::OWNER_UID && m.gid() == media::OWNER_GID),
+    );
     let statfs_ok = os_std::os::statfs(STICK).is_ok_and(|s| s.total_blocks > 0);
     check("statfs of the stick", statfs_ok);
 
@@ -84,7 +89,10 @@ pub fn run() -> i32 {
     check("open file on the stick", held.is_ok());
     check("eject with an open file is refused (Busy)", eject(&disk) == Err(ErrorKind::ResourceBusy));
     check("volume still mounted after the refusal", status().iter().any(|d| mounted_at(d, STICK)));
-    check("file still readable after the refusal", fs::read_to_string(format!("{STICK}/OSYX.TXT")).as_deref() == Ok(NOTE));
+    check(
+        "file still readable after the refusal",
+        fs::read_to_string(format!("{STICK}/OSYX.TXT")).as_deref() == Ok(NOTE),
+    );
     drop(held);
     check("eject after closing the file", eject(&disk).is_ok());
     check("mount point gone", fs::metadata(STICK).is_err());
@@ -92,10 +100,15 @@ pub fn run() -> i32 {
     println!("MEDIA_EJECTED {disk}");
 
     // 3. The script replugs the stick: a new disk, same volume.
-    let again = wait_for("remount after replug", 90, || status().iter().any(|d| d.state == DiskState::Mounted && mounted_at(d, STICK)));
+    let again = wait_for("remount after replug", 90, || {
+        status().iter().any(|d| d.state == DiskState::Mounted && mounted_at(d, STICK))
+    });
     check("stick mounted again after replug", again);
     check("old disk entry removed after the unplug", !status().iter().any(|d| d.name == disk));
-    check("file written before the eject survived", fs::read_to_string(format!("{STICK}/OSYX.TXT")).as_deref() == Ok(NOTE));
+    check(
+        "file written before the eject survived",
+        fs::read_to_string(format!("{STICK}/OSYX.TXT")).as_deref() == Ok(NOTE),
+    );
     let disk2 = status().into_iter().find(|d| mounted_at(d, STICK)).map(|d| d.name).unwrap_or_default();
 
     // 4. Pulled out while a file is open.

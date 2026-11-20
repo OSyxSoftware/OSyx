@@ -41,11 +41,19 @@ extern "win64" fn EventRegister(guid: *const u8, _callback: u64, _context: u64, 
 }
 
 extern "win64" fn EventUnregister(h: u64) -> u32 {
-    if PROVIDERS.lock().unwrap().remove(&h).is_some() { ERROR_SUCCESS } else { ERROR_INVALID_HANDLE }
+    if PROVIDERS.lock().unwrap().remove(&h).is_some() {
+        ERROR_SUCCESS
+    } else {
+        ERROR_INVALID_HANDLE
+    }
 }
 
 fn known(h: u64) -> u32 {
-    if PROVIDERS.lock().unwrap().contains_key(&h) { ERROR_SUCCESS } else { ERROR_INVALID_HANDLE }
+    if PROVIDERS.lock().unwrap().contains_key(&h) {
+        ERROR_SUCCESS
+    } else {
+        ERROR_INVALID_HANDLE
+    }
 }
 
 /// EventProviderSetTraits (2) and EventProviderUseDescriptorType (3) are
@@ -69,7 +77,14 @@ extern "win64" fn EventWrite(h: u64, desc: *const u8, _count: u32, _data: *const
     known(h)
 }
 
-extern "win64" fn EventWriteTransfer(h: u64, desc: *const u8, _activity: *const u8, _related: *const u8, _count: u32, _data: *const u8) -> u32 {
+extern "win64" fn EventWriteTransfer(
+    h: u64,
+    desc: *const u8,
+    _activity: *const u8,
+    _related: *const u8,
+    _count: u32,
+    _data: *const u8,
+) -> u32 {
     if desc.is_null() {
         return ERROR_INVALID_PARAMETER;
     }

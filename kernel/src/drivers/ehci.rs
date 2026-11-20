@@ -316,7 +316,9 @@ fn handoff(index: usize, dev: &pci::Device, eecp: u8) {
 
 impl Ehci {
     fn new(index: usize, dev: &pci::Device) -> Result<Ehci> {
-        let Some(pci::Bar::Memory { base, size, .. }) = dev.bar(0) else { return Err(EhciError::Bar("BAR0 is not a memory BAR")) };
+        let Some(pci::Bar::Memory { base, size, .. }) = dev.bar(0) else {
+            return Err(EhciError::Bar("BAR0 is not a memory BAR"));
+        };
         if base == 0 || size < 0x100 {
             return Err(EhciError::Bar("BAR0 unassigned or too small"));
         }
@@ -325,7 +327,8 @@ impl Ehci {
         dev.addr.write16(0x04, dev.command() | pci::CMD_MEMORY | pci::CMD_BUS_MASTER | pci::CMD_INTX_DISABLE);
         // SAFETY: the capability registers at the start of the mapped BAR.
         let r = |o: u64| unsafe { read_volatile((virt + o) as *const u32) };
-        let caps = Capabilities::parse(r(e::CAPLENGTH), r(e::HCSPARAMS), r(e::HCCPARAMS)).ok_or(EhciError::Bar("no EHCI capability registers"))?;
+        let caps = Capabilities::parse(r(e::CAPLENGTH), r(e::HCSPARAMS), r(e::HCCPARAMS))
+            .ok_or(EhciError::Bar("no EHCI capability registers"))?;
         handoff(index, dev, caps.eecp);
         let mut h = Ehci {
             index,
@@ -458,10 +461,19 @@ impl Ehci {
         // A short IN packet continues with the status stage.
         c.write(
             CTL_DATA_TD,
-            &e::qtd(c.p32(CTL_STATUS_TD), c.p32(CTL_STATUS_TD), e::qtd_token(data_pid, len as u32, true, false), c.p32(CTL_DATA), len as u32),
+            &e::qtd(
+                c.p32(CTL_STATUS_TD),
+                c.p32(CTL_STATUS_TD),
+                e::qtd_token(data_pid, len as u32, true, false),
+                c.p32(CTL_DATA),
+                len as u32,
+            ),
         );
         let after_setup = if len > 0 { c.p32(CTL_DATA_TD) } else { c.p32(CTL_STATUS_TD) };
-        c.write(CTL_SETUP_TD, &e::qtd(after_setup, LINK_TERMINATE, e::qtd_token(Pid::Setup, 8, false, false), c.p32(CTL_SETUP_BUF), 8));
+        c.write(
+            CTL_SETUP_TD,
+            &e::qtd(after_setup, LINK_TERMINATE, e::qtd_token(Pid::Setup, 8, false, false), c.p32(CTL_SETUP_BUF), 8),
+        );
         let ep = Endpoint { number: 0, control: true, ..ep };
         let qh = e::queue_head(self.heads.r32(HEAD_QH), &ep, c.p32(CTL_SETUP_TD), false, false);
         c.write(CTL_QH, &qh);
@@ -525,8 +537,18 @@ impl Ehci {
             }
             _ => None,
         };
-        frame.write(PIPE_TD, &e::qtd(LINK_TERMINATE, LINK_TERMINATE, e::qtd_token(Pid::In, len, false, true), frame.p32(PIPE_BUF), len));
-        let qh = e::queue_head_in_slot(self.heads.r32(ANCHOR_QH), &ep, frame.p32(PIPE_TD), false, true, split.map_or(0, |s| s.1));
+        frame.write(
+            PIPE_TD,
+            &e::qtd(LINK_TERMINATE, LINK_TERMINATE, e::qtd_token(Pid::In, len, false, true), frame.p32(PIPE_BUF), len),
+        );
+        let qh = e::queue_head_in_slot(
+            self.heads.r32(ANCHOR_QH),
+            &ep,
+            frame.p32(PIPE_TD),
+            false,
+            true,
+            split.map_or(0, |s| s.1),
+        );
         frame.write(PIPE_QH, &qh);
         fence(Ordering::SeqCst);
         self.heads.w32(ANCHOR_QH, e::qh_link(frame.p32(PIPE_QH)));
@@ -602,7 +624,10 @@ impl Ehci {
                             let _ = f.report(&report[..n]);
                         }
                         PipeKind::Hub { pending } => {
-                            *pending |= report[..n.min(4)].iter().enumerate().fold(0u32, |m, (i, b)| m | (*b as u32) << (8 * i));
+                            *pending |= report[..n.min(4)]
+                                .iter()
+                                .enumerate()
+                                .fold(0u32, |m, (i, b)| m | (*b as u32) << (8 * i));
                         }
                         _ => {}
                     }
@@ -612,7 +637,16 @@ impl Ehci {
                         kprintln!("usb {}: interrupt endpoint works again", dev.name);
                     }
                 }
-                f.write(PIPE_TD, &e::qtd(LINK_TERMINATE, LINK_TERMINATE, e::qtd_token(Pid::In, pipe.len, false, true), f.p32(PIPE_BUF), pipe.len));
+                f.write(
+                    PIPE_TD,
+                    &e::qtd(
+                        LINK_TERMINATE,
+                        LINK_TERMINATE,
+                        e::qtd_token(Pid::In, pipe.len, false, true),
+                        f.p32(PIPE_BUF),
+                        pipe.len,
+                    ),
+                );
                 fence(Ordering::SeqCst);
                 if halted {
                     // The queue head is out of service: start it again,
@@ -646,7 +680,9 @@ impl Ehci {
         for (address, i, iface) in todo {
             let Some(ep) = self.ep0(address) else { continue };
             let ok = self.control_out(ep, SetupPacket::hid_set_output_report(iface, 0, 1), &[want]).is_ok();
-            if let Some(PipeKind::Hid(f)) = self.devices.get_mut(&address).and_then(|d| d.pipes.get_mut(i)).map(|p| &mut p.kind) {
+            if let Some(PipeKind::Hid(f)) =
+                self.devices.get_mut(&address).and_then(|d| d.pipes.get_mut(i)).map(|p| &mut p.kind)
+            {
                 if let HidKind::Keyboard { applied_leds, .. } = &mut f.kind {
                     // A keyboard without LEDs may stall: do not retry forever.
                     *applied_leds = want;
@@ -684,7 +720,8 @@ impl Ehci {
     /// Addresses and configures a device that was just reset; returns its
     /// address. `prefix` names where it is (`ehci0-1.3`).
     fn enumerate(&mut self, speed: Speed, tt: Option<(u8, u8)>, depth: u8, prefix: String) -> Result<u8> {
-        let mut ep = Endpoint { address: 0, number: 0, speed, max_packet: speed.default_max_packet0(), control: true, tt };
+        let mut ep =
+            Endpoint { address: 0, number: 0, speed, max_packet: speed.default_max_packet0(), control: true, tt };
         let mut head = [0u8; 8];
         let n = self.control(ep, SetupPacket::get_descriptor(descriptor::DESC_DEVICE, 0, 0, 8), &mut head)?;
         let mps = DeviceDescriptor::max_packet0_from_prefix(&head[..n])? as u16;
@@ -692,7 +729,13 @@ impl Ehci {
             ep.max_packet = mps;
         }
         let address = self.alloc_address()?;
-        let set_address = SetupPacket { request_type: 0, request: descriptor::REQ_SET_ADDRESS, value: address as u16, index: 0, length: 0 };
+        let set_address = SetupPacket {
+            request_type: 0,
+            request: descriptor::REQ_SET_ADDRESS,
+            value: address as u16,
+            index: 0,
+            length: 0,
+        };
         if let Err(err) = self.control_out(ep, set_address, &[]) {
             self.used[address as usize] = false;
             return Err(err);
@@ -700,7 +743,15 @@ impl Ehci {
         timer::sleep_ms(RESET_RECOVERY_MS);
         self.devices.insert(
             address,
-            Device { speed, max_packet0: ep.max_packet, tt, depth, name: alloc::format!("{prefix} (address {address})"), hub: None, pipes: Vec::new() },
+            Device {
+                speed,
+                max_packet0: ep.max_packet,
+                tt,
+                depth,
+                name: alloc::format!("{prefix} (address {address})"),
+                hub: None,
+                pipes: Vec::new(),
+            },
         );
         match self.configure(address, speed, prefix) {
             Ok(()) => Ok(address),
@@ -714,7 +765,11 @@ impl Ehci {
     fn configure(&mut self, address: u8, speed: Speed, prefix: String) -> Result<()> {
         let ep = self.ep0(address).ok_or(EhciError::PortGone)?;
         let mut dd = [0u8; DeviceDescriptor::LEN];
-        let n = self.control(ep, SetupPacket::get_descriptor(descriptor::DESC_DEVICE, 0, 0, DeviceDescriptor::LEN as u16), &mut dd)?;
+        let n = self.control(
+            ep,
+            SetupPacket::get_descriptor(descriptor::DESC_DEVICE, 0, 0, DeviceDescriptor::LEN as u16),
+            &mut dd,
+        )?;
         let desc = DeviceDescriptor::parse(&dd[..n])?;
         let mut c9 = [0u8; 9];
         let n = self.control(ep, SetupPacket::get_descriptor(descriptor::DESC_CONFIGURATION, 0, 0, 9), &mut c9)?;
@@ -723,10 +778,18 @@ impl Ehci {
             return Err(EhciError::Unsupported("configuration descriptor larger than 2 KiB"));
         }
         let mut raw = vec![0u8; total];
-        let n = self.control(ep, SetupPacket::get_descriptor(descriptor::DESC_CONFIGURATION, 0, 0, total as u16), &mut raw)?;
+        let n = self.control(
+            ep,
+            SetupPacket::get_descriptor(descriptor::DESC_CONFIGURATION, 0, 0, total as u16),
+            &mut raw,
+        )?;
         let cfg = Configuration::parse(&raw[..n])?;
         let product = self.string(ep, desc.product_index).unwrap_or_default();
-        let label = if product.is_empty() { alloc::format!("{:04x}:{:04x}", desc.vendor, desc.product) } else { product.clone() };
+        let label = if product.is_empty() {
+            alloc::format!("{:04x}:{:04x}", desc.vendor, desc.product)
+        } else {
+            product.clone()
+        };
         let name = alloc::format!("{prefix} ({label})");
         kprintln!(
             "usb {}: {:04x}:{:04x} \"{}\", {}, USB {:x}.{:02x}, class {:02x}, {} interface(s), EP0 max packet {}, address {}",
@@ -746,17 +809,28 @@ impl Ehci {
             d.name = name.clone();
         }
         if desc.class == descriptor::CLASS_HUB {
-            let status = cfg.default_interfaces().find(|i| i.class == descriptor::CLASS_HUB).and_then(|i| i.interrupt_in()).copied();
+            let status = cfg
+                .default_interfaces()
+                .find(|i| i.class == descriptor::CLASS_HUB)
+                .and_then(|i| i.interrupt_in())
+                .copied();
             return self.setup_hub(address, cfg.value, status);
         }
-        let hid: Vec<Interface> =
-            cfg.default_interfaces().filter(|i| i.class == descriptor::CLASS_HID && i.interrupt_in().is_some()).cloned().collect();
+        let hid: Vec<Interface> = cfg
+            .default_interfaces()
+            .filter(|i| i.class == descriptor::CLASS_HID && i.interrupt_in().is_some())
+            .cloned()
+            .collect();
         if hid.is_empty() {
             let class = match (desc.class, cfg.default_interfaces().next()) {
                 (0, Some(i)) => i.class,
                 _ => desc.class,
             };
-            kprintln!("usb {}: class {:02x} is not driven on EHCI ports (only HID and hubs); left unconfigured", name, class);
+            kprintln!(
+                "usb {}: class {:02x} is not driven on EHCI ports (only HID and hubs); left unconfigured",
+                name,
+                class
+            );
             return Ok(());
         }
         self.control_out(ep, SetupPacket::set_configuration(cfg.value), &[])?;
@@ -805,7 +879,8 @@ impl Ehci {
             .and_then(|n| descriptor::first_language(&langs[..n]))
             .unwrap_or(0x0409);
         let mut buf = [0u8; 255];
-        let n = self.control(ep, SetupPacket::get_descriptor(descriptor::DESC_STRING, index, lang, 255), &mut buf).ok()?;
+        let n =
+            self.control(ep, SetupPacket::get_descriptor(descriptor::DESC_STRING, index, lang, 255), &mut buf).ok()?;
         descriptor::parse_string(&buf[..n]).ok()
     }
 
@@ -835,8 +910,16 @@ impl Ehci {
                         break;
                     }
                     Ok(None) | Err(EhciError::PortGone) => break,
-                    Err(err) if attempt == ATTACH_ATTEMPTS => kprintln!("ehci{}: port {}: device not usable: {}", self.index, p, err),
-                    Err(err) => kprintln!("ehci{}: port {}: attempt {} failed: {}; resetting the port again", self.index, p, attempt, err),
+                    Err(err) if attempt == ATTACH_ATTEMPTS => {
+                        kprintln!("ehci{}: port {}: device not usable: {}", self.index, p, err)
+                    }
+                    Err(err) => kprintln!(
+                        "ehci{}: port {}: attempt {} failed: {}; resetting the port again",
+                        self.index,
+                        p,
+                        attempt,
+                        err
+                    ),
                 }
             }
         }
@@ -886,9 +969,19 @@ impl Ehci {
         if self.caps.companions > 0 {
             let v = self.r(op::portsc(p));
             self.w(op::portsc(p), portsc::update(v, portsc::OWNER, 0));
-            kprintln!("ehci{}: port {}: {} device handed to the companion controller (not driven by OSyx)", self.index, p, speed);
+            kprintln!(
+                "ehci{}: port {}: {} device handed to the companion controller (not driven by OSyx)",
+                self.index,
+                p,
+                speed
+            );
         } else {
-            kprintln!("ehci{}: port {}: {} device on a port without a companion controller: not usable", self.index, p, speed);
+            kprintln!(
+                "ehci{}: port {}: {} device on a port without a companion controller: not usable",
+                self.index,
+                p,
+                speed
+            );
         }
     }
 
@@ -917,11 +1010,17 @@ impl Ehci {
         // nothing that changes during the scan is missed.
         let pipe = match status {
             Some(int) => {
-                let pipe_ep = Endpoint { number: int.number(), max_packet: int.max_packet.clamp(1, 4), control: false, ..ep };
+                let pipe_ep =
+                    Endpoint { number: int.number(), max_packet: int.max_packet.clamp(1, 4), control: false, ..ep };
                 match self.open_pipe(pipe_ep, PipeKind::Hub { pending: 0 }) {
                     Ok(p) => Some(p),
                     Err(err) => {
-                        kprintln!("usb {}: status change endpoint: {}; asking the hub every {} ms", name, err, PORT_POLL_MS);
+                        kprintln!(
+                            "usb {}: status change endpoint: {}; asking the hub every {} ms",
+                            name,
+                            err,
+                            PORT_POLL_MS
+                        );
                         None
                     }
                 }
@@ -978,8 +1077,16 @@ impl Ehci {
                     break;
                 }
                 Err(EhciError::PortGone) => break,
-                Err(err) if attempt == ATTACH_ATTEMPTS => kprintln!("usb {}: port {}: device not usable: {}", hub_name, port, err),
-                Err(err) => kprintln!("usb {}: port {}: attempt {} failed: {}; resetting the port again", hub_name, port, attempt, err),
+                Err(err) if attempt == ATTACH_ATTEMPTS => {
+                    kprintln!("usb {}: port {}: device not usable: {}", hub_name, port, err)
+                }
+                Err(err) => kprintln!(
+                    "usb {}: port {}: attempt {} failed: {}; resetting the port again",
+                    hub_name,
+                    port,
+                    attempt,
+                    err
+                ),
             }
         }
     }
@@ -1063,7 +1170,8 @@ impl Ehci {
     }
 
     fn report_status(&self) {
-        let functions: usize = self.devices.values().map(|d| d.pipes.iter().filter(|p| matches!(p.kind, PipeKind::Hid(_))).count()).sum();
+        let functions: usize =
+            self.devices.values().map(|d| d.pipes.iter().filter(|p| matches!(p.kind, PipeKind::Hid(_))).count()).sum();
         set_status(
             self.index,
             alloc::format!("ehci{}: running, {} devices, {} HID functions", self.index, self.devices.len(), functions),

@@ -19,7 +19,8 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use osyx_abi::ipc::{
-    MAX_BACKLOG, MAX_MESSAGE, MAX_QUEUED_BYTES, MAX_QUEUED_MESSAGES, MAX_SERVICE_NAME, WAIT_HANGUP, WAIT_READABLE, WAIT_WRITABLE,
+    MAX_BACKLOG, MAX_MESSAGE, MAX_QUEUED_BYTES, MAX_QUEUED_MESSAGES, MAX_SERVICE_NAME, WAIT_HANGUP, WAIT_READABLE,
+    WAIT_WRITABLE,
 };
 use osyx_abi::Errno;
 
@@ -105,7 +106,9 @@ impl Endpoint {
             match me.queue.front() {
                 None if peer_closed => return Err(Errno::BrokenPipe),
                 None => return Err(Errno::WouldBlock),
-                Some(m) if m.data.len() > capacity || m.objects.len() > max_objects => return Err(Errno::InvalidArgument),
+                Some(m) if m.data.len() > capacity || m.objects.len() > max_objects => {
+                    return Err(Errno::InvalidArgument)
+                }
                 Some(_) => {}
             }
             let m = me.queue.pop_front().expect("checked above");

@@ -66,13 +66,22 @@ impl Ch for u16 {
 }
 
 /// Windows x64 uses 8-byte slots; i386 uses 4-byte stack slots.
-struct Args { ptr: *const u8, pe32: bool }
+struct Args {
+    ptr: *const u8,
+    pe32: bool,
+}
 
 impl Args {
     fn next(&mut self) -> u64 {
         // SAFETY: the caller's va_list holds an argument for every
         // conversion of its format (C contract).
-        let v = unsafe { if self.pe32 { core::ptr::read_unaligned(self.ptr.cast::<u32>()) as u64 } else { core::ptr::read_unaligned(self.ptr.cast::<u64>()) } };
+        let v = unsafe {
+            if self.pe32 {
+                core::ptr::read_unaligned(self.ptr.cast::<u32>()) as u64
+            } else {
+                core::ptr::read_unaligned(self.ptr.cast::<u64>())
+            }
+        };
         // SAFETY: as above.
         self.ptr = unsafe { self.ptr.add(if self.pe32 { 4 } else { 8 }) };
         v
@@ -80,7 +89,11 @@ impl Args {
 
     fn next64(&mut self) -> u64 {
         let low = self.next();
-        if self.pe32 { low | (self.next() << 32) } else { low }
+        if self.pe32 {
+            low | (self.next() << 32)
+        } else {
+            low
+        }
     }
 
     fn float(&mut self) -> f64 {
@@ -410,11 +423,7 @@ fn fmt_a(x: f64, prec: Option<usize>, alt: bool, f: &FloatFmt) -> Vec<u8> {
     let bits = x.to_bits();
     let bexp = ((bits >> 52) & 0x7FF) as i32;
     let mut mant = bits & ((1u64 << 52) - 1);
-    let (mut lead, e) = if bexp == 0 {
-        (0u64, if mant == 0 { 0 } else { -1022 })
-    } else {
-        (1u64, bexp - 1023)
-    };
+    let (mut lead, e) = if bexp == 0 { (0u64, if mant == 0 { 0 } else { -1022 }) } else { (1u64, bexp - 1023) };
     let p = prec.unwrap_or(13);
     if p < 13 {
         let shift = 4 * (13 - p) as u32;
@@ -710,9 +719,16 @@ fn format<C: Ch>(opts: u64, fmt: &[C], args: *const u64, secure: bool, pe32: boo
                 let p = a.next();
                 // ANSI_STRING / UNICODE_STRING: Length (bytes), Maximum, Buffer.
                 // SAFETY: the caller's counted-string structure.
-                let (len, buf) = if p == 0 { (0, 0) } else { unsafe {
-                    (*(p as *const u16) as usize, if pe32 { *((p + 4) as *const u32) as u64 } else { *((p + 8) as *const u64) })
-                } };
+                let (len, buf) = if p == 0 {
+                    (0, 0)
+                } else {
+                    unsafe {
+                        (
+                            *(p as *const u16) as usize,
+                            if pe32 { *((p + 4) as *const u32) as u64 } else { *((p + 8) as *const u64) },
+                        )
+                    }
+                };
                 let body: Vec<C> = if buf == 0 {
                     units(b"(null)")
                 } else if wide_arg {
@@ -928,7 +944,14 @@ fn vsnprintf_s<C: Ch>(opts: u64, buf: *mut C, size: usize, count: usize, fmt: *c
 extern "win64" fn __stdio_common_vsprintf(o: u64, b: *mut u8, n: usize, f: *const u8, _l: u64, a: *const u64) -> i32 {
     vsprintf(o, b, n, f, a, false)
 }
-extern "win64" fn __stdio_common_vswprintf(o: u64, b: *mut u16, n: usize, f: *const u16, _l: u64, a: *const u64) -> i32 {
+extern "win64" fn __stdio_common_vswprintf(
+    o: u64,
+    b: *mut u16,
+    n: usize,
+    f: *const u16,
+    _l: u64,
+    a: *const u64,
+) -> i32 {
     vsprintf(o, b, n, f, a, false)
 }
 
@@ -953,7 +976,14 @@ extern "win64" fn _snwprintf() {
 /// Legacy MSVCRT formatting with arguments in 32-bit stack slots.
 pub(crate) fn legacy_snprintf32(wide: bool, b: u32, n: u32, f: u32, a: *const u32) -> i32 {
     if wide {
-        vsprintf(LEGACY_VSPRINTF_NULL_TERMINATION | LEGACY_WIDE_SPECIFIERS, b as *mut u16, n as usize, f as *const u16, a.cast(), true)
+        vsprintf(
+            LEGACY_VSPRINTF_NULL_TERMINATION | LEGACY_WIDE_SPECIFIERS,
+            b as *mut u16,
+            n as usize,
+            f as *const u16,
+            a.cast(),
+            true,
+        )
     } else {
         vsprintf(LEGACY_VSPRINTF_NULL_TERMINATION, b as *mut u8, n as usize, f as *const u8, a.cast(), true)
     }
@@ -961,7 +991,14 @@ pub(crate) fn legacy_snprintf32(wide: bool, b: u32, n: u32, f: u32, a: *const u3
 extern "win64" fn __stdio_common_vsprintf_s(o: u64, b: *mut u8, n: usize, f: *const u8, _l: u64, a: *const u64) -> i32 {
     vsprintf_s(o, b, n, f, a)
 }
-extern "win64" fn __stdio_common_vswprintf_s(o: u64, b: *mut u16, n: usize, f: *const u16, _l: u64, a: *const u64) -> i32 {
+extern "win64" fn __stdio_common_vswprintf_s(
+    o: u64,
+    b: *mut u16,
+    n: usize,
+    f: *const u16,
+    _l: u64,
+    a: *const u64,
+) -> i32 {
     vsprintf_s(o, b, n, f, a)
 }
 extern "win64" fn __stdio_common_vsnprintf_s(
@@ -1011,7 +1048,11 @@ fn vfprintf<C: Ch>(opts: u64, f: *mut File, fmt: *const C, args: *const u64, sec
         stdio::write_nolock(&b, file) == b.len()
     };
     file.unlock();
-    if ok { s.len() as i32 } else { -1 }
+    if ok {
+        s.len() as i32
+    } else {
+        -1
+    }
 }
 
 extern "win64" fn __stdio_common_vfprintf(o: u64, f: *mut File, fmt: *const u8, _l: u64, a: *const u64) -> i32 {

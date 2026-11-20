@@ -134,8 +134,14 @@ pub fn tmpfs_files() -> TestResult {
     ensure!(vfs::open(&cx, "/tmp/kst/a.txt", flags, 0o644).err() == Some(Errno::AlreadyExists), "exclusive create");
     ensure!(vfs::open(&cx, "/tmp/kst/missing", OPEN_READ, 0).err() == Some(Errno::NotFound), "missing file");
     ensure!(vfs::open(&cx, "/tmp/kst/a.txt/x", OPEN_READ, 0).err() == Some(Errno::NotADirectory), "file as directory");
-    ensure!(vfs::open(&cx, "/tmp/kst/a.txt", OPEN_CREATE, 0).err() == Some(Errno::InvalidArgument), "create without write");
-    ensure!(vfs::open(&cx, "/tmp/kst/a.txt", OPEN_READ | OPEN_DIRECTORY, 0).err() == Some(Errno::NotADirectory), "O_DIRECTORY");
+    ensure!(
+        vfs::open(&cx, "/tmp/kst/a.txt", OPEN_CREATE, 0).err() == Some(Errno::InvalidArgument),
+        "create without write"
+    );
+    ensure!(
+        vfs::open(&cx, "/tmp/kst/a.txt", OPEN_READ | OPEN_DIRECTORY, 0).err() == Some(Errno::NotADirectory),
+        "O_DIRECTORY"
+    );
     let rel = Lookup { cwd: String::from("/tmp/kst"), ..root() };
     ensure!(read_file(&rel, "a.txt") == Ok(b"Hello!".to_vec()), "relative path from cwd");
     ensure!(read_file(&rel, "../kst/./a.txt").is_ok(), "relative path with ..");
@@ -144,7 +150,10 @@ pub fn tmpfs_files() -> TestResult {
     vfs::rename(&cx, "/tmp/kst/a.txt", "/tmp/kst/sub/./../sub/moved.txt").map_err(|x| e("rename", x))?;
     ensure!(vfs::rmdir(&cx, "/tmp/kst/sub") == Err(Errno::DirectoryNotEmpty), "removed a non-empty directory");
     ensure!(listing(&cx, "/tmp/kst/sub") == Ok(alloc::vec![(String::from("moved.txt"), KIND_FILE)]), "listing");
-    ensure!(vfs::open(&cx, "/tmp/kst/sub", OPEN_WRITE, 0).err() == Some(Errno::IsADirectory), "directory opened for writing");
+    ensure!(
+        vfs::open(&cx, "/tmp/kst/sub", OPEN_WRITE, 0).err() == Some(Errno::IsADirectory),
+        "directory opened for writing"
+    );
     // A removed file stays readable through an open handle.
     let mut h = vfs::open(&cx, "/tmp/kst/sub/moved.txt", OPEN_READ, 0).map_err(|x| e("open", x))?;
     vfs::unlink(&cx, "/tmp/kst/sub/moved.txt").map_err(|x| e("unlink", x))?;
@@ -188,41 +197,59 @@ pub fn links_cwd_perms() -> TestResult {
     let up = vfs::walk(&cx, "/tmp/lk/devlink/..", true).map_err(|x| e("walk ..", x))?;
     ensure!(up.path == "/", ".. after a symlink is physical: got {}", up.path);
     vfs::symlink(&cx, "missing", "/tmp/lk/dangle").map_err(|x| e("dangle", x))?;
-    ensure!(vfs::stat(&cx, "/tmp/lk/dangle") == Err(Errno::NotFound) && vfs::lstat(&cx, "/tmp/lk/dangle").is_ok(), "dangling link");
+    ensure!(
+        vfs::stat(&cx, "/tmp/lk/dangle") == Err(Errno::NotFound) && vfs::lstat(&cx, "/tmp/lk/dangle").is_ok(),
+        "dangling link"
+    );
     let in_lk = Lookup { cwd: String::from("/tmp/lk"), ..root() };
     ensure!(vfs::chdir(&in_lk, "../lk/./self").as_deref() == Ok("/tmp/lk"), "chdir canonicalises through links");
     ensure!(vfs::chdir(&in_lk, "target.txt") == Err(Errno::NotADirectory), "chdir to a file");
     // Case-insensitive resolution (the Windows compatibility hook).
     write_file(&cx, "/tmp/lk/CaseFile.Txt", b"c").map_err(|x| e("case file", x))?;
-    ensure!(vfs::open(&cx, "/TMP/LK/casefile.txt", OPEN_READ, 0).err() == Some(Errno::NotFound), "case-sensitive by default");
+    ensure!(
+        vfs::open(&cx, "/TMP/LK/casefile.txt", OPEN_READ, 0).err() == Some(Errno::NotFound),
+        "case-sensitive by default"
+    );
     let ci = vfs::open(&cx, "/TMP/LK/casefile.txt", OPEN_READ | OPEN_CASE_INSENSITIVE, 0);
     ensure!(ci.is_ok(), "OPEN_CASE_INSENSITIVE: {:?}", ci.err());
     let ci_root = Lookup { case_insensitive: true, ..root() };
-    ensure!(vfs::walk(&ci_root, "/TMP/Lk/CASEFILE.TXT", true).map(|n| n.path).as_deref() == Ok("/tmp/lk/CaseFile.Txt"), "canonical spelling");
+    ensure!(
+        vfs::walk(&ci_root, "/TMP/Lk/CASEFILE.TXT", true).map(|n| n.path).as_deref() == Ok("/tmp/lk/CaseFile.Txt"),
+        "canonical spelling"
+    );
     ensure!(vfs::statfs(&ci_root, "/TMP").map(|s| s.fstype[0]) == Ok(b't'), "mount point found case-insensitively");
     // Permissions.
     let u = user(1000);
     let other = user(1001);
     write_file(&cx, "/tmp/lk/secret", b"s").map_err(|x| e("secret", x))?;
     vfs::chmod(&cx, "/tmp/lk/secret", 0o600).map_err(|x| e("chmod", x))?;
-    ensure!(vfs::open(&u, "/tmp/lk/secret", OPEN_READ, 0).err() == Some(Errno::PermissionDenied), "0600 root file readable by a user");
+    ensure!(
+        vfs::open(&u, "/tmp/lk/secret", OPEN_READ, 0).err() == Some(Errno::PermissionDenied),
+        "0600 root file readable by a user"
+    );
     ensure!(vfs::chmod(&u, "/tmp/lk/secret", 0o666) == Err(Errno::PermissionDenied), "user chmod of a root file");
     vfs::chmod(&cx, "/tmp/lk/secret", 0o644).map_err(|x| e("chmod 644", x))?;
     ensure!(read_file(&u, "/tmp/lk/secret") == Ok(b"s".to_vec()), "0644 file readable");
-    ensure!(vfs::open(&u, "/tmp/lk/secret", OPEN_WRITE, 0).err() == Some(Errno::PermissionDenied), "0644 file writable by others");
-    ensure!(create(&u, "/tmp/lk/mine", 0o644).err() == Some(Errno::PermissionDenied), "create in a 0755 root directory");
+    ensure!(
+        vfs::open(&u, "/tmp/lk/secret", OPEN_WRITE, 0).err() == Some(Errno::PermissionDenied),
+        "0644 file writable by others"
+    );
+    ensure!(
+        create(&u, "/tmp/lk/mine", 0o644).err() == Some(Errno::PermissionDenied),
+        "create in a 0755 root directory"
+    );
     vfs::mkdir(&cx, "/tmp/lk/private", 0o700).map_err(|x| e("private", x))?;
     ensure!(vfs::stat(&u, "/tmp/lk/private/x") == Err(Errno::PermissionDenied), "search without x permission");
     // Sticky /tmp: users create their own files and cannot remove others'.
     write_file(&u, "/tmp/kst-user.txt", b"u").map_err(|x| e("user file in /tmp", x))?;
     ensure!(vfs::stat(&cx, "/tmp/kst-user.txt").map(|s| s.uid) == Ok(1000), "owner of a new file");
     ensure!(vfs::unlink(&other, "/tmp/kst-user.txt") == Err(Errno::PermissionDenied), "sticky bit");
-    ensure!(vfs::rename(&other, "/tmp/kst-user.txt", "/tmp/kst-stolen") == Err(Errno::PermissionDenied), "sticky rename");
-    vfs::unlink(&u, "/tmp/kst-user.txt").map_err(|x| e("owner unlink", x))?;
     ensure!(
-        vfs::mount(&u, "", "/tmp/lk", "tmpfs", 0, 0) == Err(Errno::PermissionDenied),
-        "mount by an ordinary user"
+        vfs::rename(&other, "/tmp/kst-user.txt", "/tmp/kst-stolen") == Err(Errno::PermissionDenied),
+        "sticky rename"
     );
+    vfs::unlink(&u, "/tmp/kst-user.txt").map_err(|x| e("owner unlink", x))?;
+    ensure!(vfs::mount(&u, "", "/tmp/lk", "tmpfs", 0, 0) == Err(Errno::PermissionDenied), "mount by an ordinary user");
     remove_tree(d);
     ensure!(vfs::stat(&cx, d) == Err(Errno::NotFound), "cleanup");
     Ok(())
@@ -270,8 +297,18 @@ pub fn mount_unmount() -> TestResult {
     let full = vfs::statfs(&cx, "/tmp").map_err(|x| e("statfs", x))?;
     vfs::unlink(&cx, "/tmp/kst-reclaim").map_err(|x| e("unlink", x))?;
     let after = vfs::statfs(&cx, "/tmp").map_err(|x| e("statfs", x))?;
-    ensure!(full.free_blocks + 256 <= after.free_blocks, "1 MiB not charged/reclaimed: {} -> {}", full.free_blocks, after.free_blocks);
-    ensure!(after.free_blocks == before.free_blocks, "/tmp usage changed: {} -> {}", before.free_blocks, after.free_blocks);
+    ensure!(
+        full.free_blocks + 256 <= after.free_blocks,
+        "1 MiB not charged/reclaimed: {} -> {}",
+        full.free_blocks,
+        after.free_blocks
+    );
+    ensure!(
+        after.free_blocks == before.free_blocks,
+        "/tmp usage changed: {} -> {}",
+        before.free_blocks,
+        after.free_blocks
+    );
     Ok(())
 }
 
@@ -321,7 +358,10 @@ pub fn devfs() -> TestResult {
     }
     let seat = vfs::stat(&cx, "/dev/input/seat0").map_err(|x| e("stat seat0", x))?;
     ensure!(seat.mode == 0o600 && seat.uid == 0, "seat0 mode {:o}", seat.mode);
-    ensure!(vfs::open(&user(1000), "/dev/input/seat0", OPEN_READ, 0).err() == Some(Errno::PermissionDenied), "seat0 open by a user");
+    ensure!(
+        vfs::open(&user(1000), "/dev/input/seat0", OPEN_READ, 0).err() == Some(Errno::PermissionDenied),
+        "seat0 open by a user"
+    );
     {
         let first = vfs::open(&cx, "/dev/input/seat0", OPEN_READ, 0).map_err(|x| e("open seat0", x))?;
         ensure!(vfs::open(&cx, "/dev/input/seat0", OPEN_READ, 0).err() == Some(Errno::Busy), "seat0 is exclusive");
@@ -334,7 +374,10 @@ pub fn devfs() -> TestResult {
     let first = format!("/dev/disks/{}", disks[0].0);
     let st = vfs::stat(&cx, &first).map_err(|x| e("stat disk", x))?;
     ensure!(st.mode == 0o600 && st.uid == 0 && st.size > 0, "disk node {st:?}");
-    ensure!(vfs::open(&user(1000), &first, OPEN_READ, 0).err() == Some(Errno::PermissionDenied), "raw disk readable by a user");
+    ensure!(
+        vfs::open(&user(1000), &first, OPEN_READ, 0).err() == Some(Errno::PermissionDenied),
+        "raw disk readable by a user"
+    );
     let mut disk = vfs::open(&cx, &first, OPEN_READ, 0).map_err(|x| e("open disk", x))?;
     let mut s0 = [0u8; 512];
     ensure!(disk.read(&mut s0) == Ok(512) && s0[510..] == [0x55, 0xAA], "sector 0 of {first}");
@@ -346,7 +389,10 @@ pub fn devfs() -> TestResult {
     // Dynamic registration.
     devices::register("kselftest/probe", DeviceKind::Char(Arc::new(Probe)), 0o666, 0).map_err(|x| e("register", x))?;
     ensure!(read_first(&cx, "/dev/kselftest/probe") == Ok(b'p'), "registered device");
-    ensure!(devices::register("kselftest/probe", DeviceKind::Char(Arc::new(Probe)), 0o666, 0).is_err(), "duplicate registration");
+    ensure!(
+        devices::register("kselftest/probe", DeviceKind::Char(Arc::new(Probe)), 0o666, 0).is_err(),
+        "duplicate registration"
+    );
     devices::unregister("kselftest/probe").map_err(|x| e("unregister", x))?;
     ensure!(vfs::stat(&cx, "/dev/kselftest") == Err(Errno::NotFound), "empty devfs directory still visible");
     ensure!(create(&cx, "/dev/newfile", 0o644).err() == Some(Errno::PermissionDenied), "creating files in /dev");
@@ -387,17 +433,30 @@ pub fn fat_boot() -> TestResult {
     ensure!(vfs::stat(&cx, "/boot/kselftest/ż.txt") == Err(Errno::NotFound), "Unicode hit invalidated on unlink");
     ensure!(vfs::stat(&cx, "/boot/kselftest/Ος.txt") == Err(Errno::NotFound), "cache contextual Unicode miss");
     write_file(&cx, "/boot/kselftest/ΟΣ.txt", b"unicode").map_err(|x| e("contextual Unicode file", x))?;
-    ensure!(read_file(&cx, "/boot/kselftest/Ος.txt") == Ok(b"unicode".to_vec()), "contextual Unicode miss invalidated on create");
+    ensure!(
+        read_file(&cx, "/boot/kselftest/Ος.txt") == Ok(b"unicode".to_vec()),
+        "contextual Unicode miss invalidated on create"
+    );
     vfs::unlink(&cx, "/boot/kselftest/ΟΣ.txt").map_err(|x| e("unlink contextual Unicode file", x))?;
-    ensure!(vfs::stat(&cx, "/boot/kselftest/Ος.txt") == Err(Errno::NotFound), "contextual Unicode hit invalidated on unlink");
-    vfs::rename(&cx, "/boot/kselftest/Mixed Case Name.TXT", "/boot/kselftest/renamed.bin").map_err(|x| e("rename", x))?;
+    ensure!(
+        vfs::stat(&cx, "/boot/kselftest/Ος.txt") == Err(Errno::NotFound),
+        "contextual Unicode hit invalidated on unlink"
+    );
+    vfs::rename(&cx, "/boot/kselftest/Mixed Case Name.TXT", "/boot/kselftest/renamed.bin")
+        .map_err(|x| e("rename", x))?;
     let h = vfs::open(&cx, "/boot/kselftest/renamed.bin", OPEN_READ, 0).map_err(|x| e("open", x))?;
     ensure!(vfs::unlink(&cx, "/boot/kselftest/renamed.bin") == Err(Errno::Busy), "FAT refuses to remove an open file");
     drop(h);
     ensure!(vfs::symlink(&cx, "x", "/boot/kselftest/link") == Err(Errno::NotSupported), "symlink on FAT");
     ensure!(vfs::chmod(&cx, "/boot/kselftest/renamed.bin", 0o600) == Err(Errno::NotSupported), "chmod on FAT");
-    ensure!(vfs::stat(&cx, "/boot/kselftest/renamed.bin").map(|s| (s.mode, s.uid)) == Ok((0o644, 0)), "FAT permissions");
-    ensure!(vfs::open(&user(1000), "/boot/kselftest/renamed.bin", OPEN_WRITE, 0).err() == Some(Errno::PermissionDenied), "user write to /boot");
+    ensure!(
+        vfs::stat(&cx, "/boot/kselftest/renamed.bin").map(|s| (s.mode, s.uid)) == Ok((0o644, 0)),
+        "FAT permissions"
+    );
+    ensure!(
+        vfs::open(&user(1000), "/boot/kselftest/renamed.bin", OPEN_WRITE, 0).err() == Some(Errno::PermissionDenied),
+        "user write to /boot"
+    );
     remove_tree(d);
     match m.fs.fsck() {
         Some(Ok(s)) => kprintln!("[test]   /boot ({}): {s}, consistent", m.source),
@@ -421,7 +480,10 @@ pub fn ext4_root() -> TestResult {
     ensure!(read_file(&cx, "/etc/osyx-release") == Ok(release.into_bytes()), "/etc/osyx-release");
     let st = vfs::stat(&cx, "/osyx-seed/secret").map_err(|x| e("stat secret", x))?;
     ensure!((st.mode, st.uid, st.kind) == (0o600, 0, KIND_FILE), "ext4 ownership and mode {st:?}");
-    ensure!(vfs::open(&user(1000), "/osyx-seed/secret", OPEN_READ, 0).err() == Some(Errno::PermissionDenied), "ext4 permissions");
+    ensure!(
+        vfs::open(&user(1000), "/osyx-seed/secret", OPEN_READ, 0).err() == Some(Errno::PermissionDenied),
+        "ext4 permissions"
+    );
     ensure!(vfs::stat(&cx, "/home/user").map(|s| s.uid) == Ok(1000), "home directory owner");
     ensure!(vfs::readlink(&cx, "/osyx-seed/link").as_deref() == Ok("hello.txt"), "ext4 symlink");
     ensure!(vfs::stat(&cx, "/osyx-seed/sparse.bin").map(|s| s.size) == Ok((5 << 30) + 3), "large sparse file");
@@ -539,26 +601,53 @@ pub fn restricted_opens() -> TestResult {
         let restricted = Lookup { path_policy: Some(Arc::new(policy)), ..root.clone() };
         ensure!(read_file(&restricted, &inside).is_ok(), "allowed file denied");
         ensure!(vfs::stat(&restricted, "/tmp").is_ok(), "allowed ancestor metadata denied");
-        ensure!(matches!(vfs::open(&restricted, "/tmp", OPEN_READ | OPEN_DIRECTORY, 0), Err(Errno::PermissionDenied)), "ancestor listing allowed");
-        ensure!(matches!(vfs::open(&restricted, outside, OPEN_READ, 0), Err(Errno::PermissionDenied)), "outside file allowed");
-        ensure!(matches!(vfs::open(&restricted, &format!("{dir}/escape"), OPEN_READ, 0), Err(Errno::PermissionDenied)), "symlink escape allowed");
-        ensure!(matches!(vfs::open(&restricted, &inside, OPEN_WRITE, 0), Err(Errno::PermissionDenied)), "write allowed");
+        ensure!(
+            matches!(vfs::open(&restricted, "/tmp", OPEN_READ | OPEN_DIRECTORY, 0), Err(Errno::PermissionDenied)),
+            "ancestor listing allowed"
+        );
+        ensure!(
+            matches!(vfs::open(&restricted, outside, OPEN_READ, 0), Err(Errno::PermissionDenied)),
+            "outside file allowed"
+        );
+        ensure!(
+            matches!(vfs::open(&restricted, &format!("{dir}/escape"), OPEN_READ, 0), Err(Errno::PermissionDenied)),
+            "symlink escape allowed"
+        );
+        ensure!(
+            matches!(vfs::open(&restricted, &inside, OPEN_WRITE, 0), Err(Errno::PermissionDenied)),
+            "write allowed"
+        );
         ensure!(matches!(vfs::open_exec(&restricted, &inside), Err(Errno::PermissionDenied)), "execute allowed");
         ensure!(matches!(vfs::stat(&restricted, outside), Err(Errno::PermissionDenied)), "outside stat allowed");
         ensure!(matches!(vfs::unlink(&restricted, &inside), Err(Errno::PermissionDenied)), "unlink allowed");
-        ensure!(matches!(vfs::rename(&restricted, &inside, &format!("{dir}/renamed")), Err(Errno::PermissionDenied)), "rename allowed");
+        ensure!(
+            matches!(vfs::rename(&restricted, &inside, &format!("{dir}/renamed")), Err(Errno::PermissionDenied)),
+            "rename allowed"
+        );
         ensure!(matches!(vfs::chmod(&restricted, &inside, 0o777), Err(Errno::PermissionDenied)), "chmod allowed");
-        ensure!(matches!(vfs::mkdir(&restricted, &format!("{dir}/subdir"), 0o755), Err(Errno::PermissionDenied)), "mkdir allowed");
-        ensure!(matches!(vfs::symlink(&restricted, outside, &format!("{dir}/newlink")), Err(Errno::PermissionDenied)), "symlink allowed");
+        ensure!(
+            matches!(vfs::mkdir(&restricted, &format!("{dir}/subdir"), 0o755), Err(Errno::PermissionDenied)),
+            "mkdir allowed"
+        );
+        ensure!(
+            matches!(vfs::symlink(&restricted, outside, &format!("{dir}/newlink")), Err(Errno::PermissionDenied)),
+            "symlink allowed"
+        );
         let new = format!("{dir}/new");
         ensure!(matches!(create(&restricted, &new, 0o644), Err(Errno::PermissionDenied)), "create allowed");
         ensure!(matches!(vfs::stat(&root, &new), Err(Errno::NotFound)), "denied create left a file");
         let rw = Access { read: true, write: true, exec: false };
-        let writable = Lookup { path_policy: Some(Arc::new(PathPolicy::new(&[(dir, rw)]).map_err(|err| e("write policy", err))?)), ..root.clone() };
+        let writable = Lookup {
+            path_policy: Some(Arc::new(PathPolicy::new(&[(dir, rw)]).map_err(|err| e("write policy", err))?)),
+            ..root.clone()
+        };
         write_file(&writable, &new, b"new").map_err(|err| e("allowed create", err))?;
         let renamed = format!("{dir}/renamed");
         vfs::rename(&writable, &new, &renamed).map_err(|err| e("allowed rename", err))?;
-        ensure!(matches!(vfs::rename(&writable, &renamed, outside), Err(Errno::PermissionDenied)), "rename escape allowed");
+        ensure!(
+            matches!(vfs::rename(&writable, &renamed, outside), Err(Errno::PermissionDenied)),
+            "rename escape allowed"
+        );
         vfs::unlink(&writable, &renamed).map_err(|err| e("allowed unlink", err))?;
         let _ = vfs::unlink(&root, outside);
         Ok(())
@@ -577,13 +666,20 @@ pub fn restricted_process() -> TestResult {
     let denied_paths = Arc::new(PathPolicy::default());
     let allowed: Vec<u64> = (0..256).filter(|n| *n != nr::CPU_INFO).collect();
     let syscalls = Arc::new(SyscallPolicy::new(&allowed));
-    ensure!(matches!(process::spawn_kernel_restricted(&req, denied_paths, syscalls.clone()), Err(process::ExecError::Load(Errno::PermissionDenied))), "executable loaded without permission");
+    ensure!(
+        matches!(
+            process::spawn_kernel_restricted(&req, denied_paths, syscalls.clone()),
+            Err(process::ExecError::Load(Errno::PermissionDenied))
+        ),
+        "executable loaded without permission"
+    );
     let access = Access { read: true, write: false, exec: true };
     let paths = Arc::new(PathPolicy::new(&[("/bin", access)]).map_err(|err| e("policy", err))?);
     let pid = process::spawn_kernel_restricted(&req, paths, syscalls).map_err(|err| format!("spawn: {err}"))?;
     let (_, status) = process::wait(process::KERNEL_PID, pid).map_err(|err| e("wait", err))?;
     ensure!(status == 0, "restricted worker exited with status {status}");
-    let broker = ExecRequest::new("/bin/worker", &["worker", "sandbox-broker"], &[]).map_err(|err| e("broker request", err))?;
+    let broker =
+        ExecRequest::new("/bin/worker", &["worker", "sandbox-broker"], &[]).map_err(|err| e("broker request", err))?;
     let pid = process::spawn(process::KERNEL_PID, &broker).map_err(|err| format!("broker spawn: {err}"))?;
     let (_, status) = process::wait(process::KERNEL_PID, pid).map_err(|err| e("broker wait", err))?;
     ensure!(status == 0, "broker test exited with status {status}");
@@ -616,29 +712,43 @@ pub fn restricted_winrun() -> TestResult {
     let result = (|| -> TestResult {
         // Exclusive creation protects an existing browser even if it appears
         // after the check above.
-        let mut file = vfs::open(&cx, "/opt/zen/zen.exe", OPEN_WRITE | OPEN_CREATE | OPEN_EXCLUSIVE, 0o755).map_err(|err| e("create PE fixture", err))?;
+        let mut file = vfs::open(&cx, "/opt/zen/zen.exe", OPEN_WRITE | OPEN_CREATE | OPEN_EXCLUSIVE, 0o755)
+            .map_err(|err| e("create PE fixture", err))?;
         fixture_created = true;
         let mut done = 0;
         while done < image.len() {
             let n = file.write(&image[done..]).map_err(|err| e("write PE fixture", err))?;
-            if n == 0 { return Err(String::from("short write of PE fixture")); }
+            if n == 0 {
+                return Err(String::from("short write of PE fixture"));
+            }
             done += n;
         }
         drop(file);
-        let mut secret = vfs::open(&cx, "/tmp/sandbox-winrun-secret", OPEN_WRITE | OPEN_CREATE | OPEN_EXCLUSIVE, 0o600).map_err(|err| e("create secret", err))?;
+        let mut secret = vfs::open(&cx, "/tmp/sandbox-winrun-secret", OPEN_WRITE | OPEN_CREATE | OPEN_EXCLUSIVE, 0o600)
+            .map_err(|err| e("create secret", err))?;
         secret_created = true;
         secret.write(b"private").map_err(|err| e("write secret", err))?;
         drop(secret);
-        let req = ExecRequest::new("/bin/winrun", &["winrun", "/opt/zen/zen.exe"], &["OSYX_EXPERIMENTAL_CONTENT_SANDBOX=1"]).map_err(|err| e("request", err))?;
+        let req =
+            ExecRequest::new("/bin/winrun", &["winrun", "/opt/zen/zen.exe"], &["OSYX_EXPERIMENTAL_CONTENT_SANDBOX=1"])
+                .map_err(|err| e("request", err))?;
         let pid = process::spawn(process::KERNEL_PID, &req).map_err(|err| format!("winrun spawn: {err}"))?;
         let (_, status) = process::wait(process::KERNEL_PID, pid).map_err(|err| e("winrun wait", err))?;
         ensure!(status == 0, "Winrun PE fixture exited with status {status}");
         Ok(())
     })();
-    if fixture_created { let _ = vfs::unlink(&cx, "/opt/zen/zen.exe"); }
-    if secret_created { let _ = vfs::unlink(&cx, "/tmp/sandbox-winrun-secret"); }
-    if zen_created { let _ = vfs::rmdir(&cx, "/opt/zen"); }
-    if opt_created { let _ = vfs::rmdir(&cx, "/opt"); }
+    if fixture_created {
+        let _ = vfs::unlink(&cx, "/opt/zen/zen.exe");
+    }
+    if secret_created {
+        let _ = vfs::unlink(&cx, "/tmp/sandbox-winrun-secret");
+    }
+    if zen_created {
+        let _ = vfs::rmdir(&cx, "/opt/zen");
+    }
+    if opt_created {
+        let _ = vfs::rmdir(&cx, "/opt");
+    }
     result
 }
 
@@ -673,19 +783,29 @@ pub fn program_loader() -> TestResult {
         write_file(&cx, &format!("{dir}/garbage"), b"neither ELF nor a script\n").map_err(|err| e("write", err))?;
         vfs::chmod(&cx, &format!("{dir}/garbage"), 0o700).map_err(|err| e("chmod", err))?;
         ensure!(load(&cx, &format!("{dir}/garbage")).is_ok(), "0700 file not loadable by root");
-        ensure!(load(&user(1000), &format!("{dir}/garbage")) == Err(Errno::PermissionDenied), "0700 root file loadable by a user");
+        ensure!(
+            load(&user(1000), &format!("{dir}/garbage")) == Err(Errno::PermissionDenied),
+            "0700 root file loadable by a user"
+        );
         let req = ExecRequest::new(&format!("{dir}/garbage"), &["garbage"], &[]).map_err(|err| e("request", err))?;
         let r = process::spawn(process::KERNEL_PID, &req);
         ensure!(matches!(r, Err(ExecError::BadImage(_))), "non-ELF file spawned: {:?}", r.map_err(|e| e.errno()));
-        ensure!(ExecError::BadImage(osyx_elf::ElfError::BadMagic).errno() == Errno::BadExecutable, "errno of a bad image");
+        ensure!(
+            ExecError::BadImage(osyx_elf::ElfError::BadMagic).errno() == Errno::BadExecutable,
+            "errno of a bad image"
+        );
         // Scripts: the first line names the interpreter.
         use exec::Script;
         ensure!(Script::parse(b"\x7fELF") == Ok(None), "ELF taken for a script");
         ensure!(
-            Script::parse(b"#! /bin/axis \t-x  y \r\necho") == Ok(Some(Script { interpreter: "/bin/axis", argument: Some("-x  y") })),
+            Script::parse(b"#! /bin/axis \t-x  y \r\necho")
+                == Ok(Some(Script { interpreter: "/bin/axis", argument: Some("-x  y") })),
             "interpreter line with an argument"
         );
-        ensure!(Script::parse(b"#!axis") == Ok(Some(Script { interpreter: "axis", argument: None })), "line without a line end");
+        ensure!(
+            Script::parse(b"#!axis") == Ok(Some(Script { interpreter: "axis", argument: None })),
+            "line without a line end"
+        );
         ensure!(Script::parse(b"#!  \n") == Err(Errno::BadExecutable), "empty interpreter accepted");
         ensure!(Script::parse(b"#!/bin/\xff\n") == Err(Errno::BadExecutable), "non-UTF-8 interpreter accepted");
         let long = [b"#!".as_slice(), &[b'a'; exec::MAX_SCRIPT_LINE + 1], b"\n"].concat();
@@ -695,7 +815,9 @@ pub fn program_loader() -> TestResult {
             .and_then(|r| r.through_interpreter(&Script { interpreter: "/bin/axis", argument: Some("-x") }, "/tmp/s"))
             .map_err(|err| e("through_interpreter", err))?;
         ensure!(
-            through.path == "/bin/axis" && through.argv == ["/bin/axis", "-x", "/tmp/s", "a", "b"] && through.envp == ["K=V"],
+            through.path == "/bin/axis"
+                && through.argv == ["/bin/axis", "-x", "/tmp/s", "a", "b"]
+                && through.envp == ["K=V"],
             "interpreter arguments {:?}",
             through.argv
         );
@@ -722,9 +844,15 @@ pub fn program_loader() -> TestResult {
     r?;
 
     let big = "x".repeat(MAX_EXEC_ARGS);
-    ensure!(ExecRequest::new("init", &["init", &big], &[]).err() == Some(Errno::InvalidArgument), "oversized argv accepted");
+    ensure!(
+        ExecRequest::new("init", &["init", &big], &[]).err() == Some(Errno::InvalidArgument),
+        "oversized argv accepted"
+    );
     let many = alloc::vec!["A=1"; MAX_EXEC_STRINGS + 1];
-    ensure!(ExecRequest::new("init", &["init"], &many).err() == Some(Errno::InvalidArgument), "too many env strings accepted");
+    ensure!(
+        ExecRequest::new("init", &["init"], &many).err() == Some(Errno::InvalidArgument),
+        "too many env strings accepted"
+    );
     ensure!(ExecRequest::new("init", &["a\0b"], &[]).err() == Some(Errno::InvalidArgument), "NUL in argv accepted");
     let ok = ExecRequest::new("/usr/bin/probe", &["probe"], &["K=V"]).map_err(|err| e("request", err))?;
     ensure!(ok.name() == "probe", "process name {:?}", ok.name());

@@ -20,7 +20,11 @@ const ERROR_MENU_ITEM_NOT_FOUND: u32 = 1456;
 /// Offsets of MENUITEMINFOW: (size, hSubMenu, dwItemData, dwTypeData, cch,
 /// hbmpItem); the fields before hSubMenu are 4 bytes on both.
 pub(super) fn menuiteminfo() -> (u32, u64, u64, u64, u64, u64) {
-    if crate::wow64::is_active() { (48, 20, 32, 36, 40, 44) } else { (80, 24, 48, 56, 64, 72) }
+    if crate::wow64::is_active() {
+        (48, 20, 32, 36, 40, 44)
+    } else {
+        (80, 24, 48, 56, 64, 72)
+    }
 }
 
 /// Reads a pointer-sized field of a caller structure.
@@ -29,7 +33,13 @@ pub(super) fn menuiteminfo() -> (u32, u64, u64, u64, u64, u64) {
 /// `p + at` must be readable.
 pub(super) unsafe fn get_ptr(p: u64, at: u64) -> u64 {
     // SAFETY: as documented.
-    unsafe { if crate::wow64::is_active() { teb::get::<u32>(p, at as usize) as u64 } else { teb::get::<u64>(p, at as usize) } }
+    unsafe {
+        if crate::wow64::is_active() {
+            teb::get::<u32>(p, at as usize) as u64
+        } else {
+            teb::get::<u64>(p, at as usize)
+        }
+    }
 }
 
 /// Writes a pointer-sized field of a caller structure.
@@ -75,7 +85,11 @@ extern "win64" fn GetMenuItemInfoW(menu: u64, item: u32, by_pos: Bool, info: *mu
         Some(it)
     });
     let Some(it) = found else {
-        return if with(|g| g.menus.contains_key(&menu)) { fail(ERROR_MENU_ITEM_NOT_FOUND, FALSE) } else { fail(ERROR_INVALID_MENU_HANDLE, FALSE) };
+        return if with(|g| g.menus.contains_key(&menu)) {
+            fail(ERROR_MENU_ITEM_NOT_FOUND, FALSE)
+        } else {
+            fail(ERROR_INVALID_MENU_HANDLE, FALSE)
+        };
     };
     let popup = it.flags & MF_POPUP != 0;
     // The MFT_* type bits: separator, bitmap, owner-drawn, radio check,
@@ -101,7 +115,11 @@ extern "win64" fn GetMenuItemInfoW(menu: u64, item: u32, by_pos: Bool, info: *mu
             teb::put(p, 8, kind);
         }
         if mask & MIIM_DATA != 0 {
-            put_ptr(p, data_at, if it.flags & (MF_BITMAP | MF_OWNERDRAW) != 0 && it.text.is_none() { it.data } else { it.data });
+            put_ptr(
+                p,
+                data_at,
+                if it.flags & (MF_BITMAP | MF_OWNERDRAW) != 0 && it.text.is_none() { it.data } else { it.data },
+            );
         }
         if mask & MIIM_BITMAP != 0 {
             put_ptr(p, bmp_at, if it.flags & MF_BITMAP != 0 { it.data } else { 0 });
@@ -129,7 +147,11 @@ pub(super) extern "win64" fn InsertMenuW(menu: u64, position: u32, flags: u32, i
     let at = with(|g| {
         let m = g.menus.get(&menu)?;
         if flags & MF_BYPOSITION != 0 {
-            Some(if position == u32::MAX || position as usize > m.items.len() { m.items.len() } else { position as usize })
+            Some(if position == u32::MAX || position as usize > m.items.len() {
+                m.items.len()
+            } else {
+                position as usize
+            })
         } else {
             let (handle, index) = menu_item(g, menu, position, false, 0)?;
             // A command in a submenu is inserted there, as Windows does.
@@ -137,7 +159,11 @@ pub(super) extern "win64" fn InsertMenuW(menu: u64, position: u32, flags: u32, i
         }
     });
     let Some(at) = at else {
-        return if with(|g| g.menus.contains_key(&menu)) { fail(ERROR_MENU_ITEM_NOT_FOUND, FALSE) } else { fail(ERROR_INVALID_MENU_HANDLE, FALSE) };
+        return if with(|g| g.menus.contains_key(&menu)) {
+            fail(ERROR_MENU_ITEM_NOT_FOUND, FALSE)
+        } else {
+            fail(ERROR_INVALID_MENU_HANDLE, FALSE)
+        };
     };
     // Built like AppendMenuW, then moved into place.
     let target = if at > usize::MAX / 2 {
@@ -192,7 +218,15 @@ extern "win64" fn CheckMenuItem(menu: u64, id: u32, check: u32) -> u32 {
 /// RT_ICON / RT_CURSOR resource: a DIB (BITMAPINFOHEADER, colour bits of
 /// 1-32 bpp and the AND mask) or a PNG image. A cursor resource starts
 /// with its hotspot (two 16-bit values). Only version 0x00030000 exists.
-extern "win64" fn CreateIconFromResourceEx(bits: *const u8, size: u32, icon: Bool, version: u32, _cx: i32, _cy: i32, _flags: u32) -> u64 {
+extern "win64" fn CreateIconFromResourceEx(
+    bits: *const u8,
+    size: u32,
+    icon: Bool,
+    version: u32,
+    _cx: i32,
+    _cy: i32,
+    _flags: u32,
+) -> u64 {
     if bits.is_null() || size < 4 || !(0x0002_0000..=0x0003_0000).contains(&version) {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -237,7 +271,13 @@ const DISP_CHANGE_BADPARAM: i32 = -5;
 /// see EnumDisplaySettingsW). Asking for that mode, or for the registry
 /// mode (NULL), succeeds without a change; any other is DISP_CHANGE_BADMODE,
 /// as Windows answers for a mode the adapter does not have.
-extern "win64" fn ChangeDisplaySettingsExW(device: *const u16, mode: *const u8, _hwnd: u64, flags: u32, _param: u64) -> i32 {
+extern "win64" fn ChangeDisplaySettingsExW(
+    device: *const u16,
+    mode: *const u8,
+    _hwnd: u64,
+    flags: u32,
+    _param: u64,
+) -> i32 {
     const CDS_TEST: u32 = 0x2;
     const CDS_RESET: u32 = 0x4000_0000;
     // SAFETY: a NUL-terminated device name, or NULL.
@@ -253,14 +293,24 @@ extern "win64" fn ChangeDisplaySettingsExW(device: *const u16, mode: *const u8, 
     // SAFETY: the caller's DEVMODEW: dmFields at 72, then the mode.
     let (fields, bpp, w, h, hz) = unsafe {
         let p = mode as u64;
-        (teb::get::<u32>(p, 72), teb::get::<u32>(p, 168), teb::get::<u32>(p, 172), teb::get::<u32>(p, 176), teb::get::<u32>(p, 184))
+        (
+            teb::get::<u32>(p, 72),
+            teb::get::<u32>(p, 168),
+            teb::get::<u32>(p, 172),
+            teb::get::<u32>(p, 176),
+            teb::get::<u32>(p, 184),
+        )
     };
     let (_, _, sw, sh) = screen_rect();
     let ok = (fields & 0x4_0000 == 0 || bpp == 32)
         && (fields & 0x8_0000 == 0 || w == sw as u32)
         && (fields & 0x10_0000 == 0 || h == sh as u32)
         && (fields & 0x40_0000 == 0 || hz == 60 || hz <= 1);
-    if ok { DISP_CHANGE_SUCCESSFUL } else { DISP_CHANGE_BADMODE }
+    if ok {
+        DISP_CHANGE_SUCCESSFUL
+    } else {
+        DISP_CHANGE_BADMODE
+    }
 }
 
 /// DEVMODEA (156 bytes) <-> DEVMODEW (220): the device and form names
@@ -283,7 +333,7 @@ fn devmode_w_to_a(w: &[u8; 220], a: *mut u8) {
     out[70..102].copy_from_slice(&name(102));
     out[102..156].copy_from_slice(&w[166..220]);
     out[36..38].copy_from_slice(&156u16.to_le_bytes()); // dmSize
-    // SAFETY: the caller's DEVMODEA of 156 bytes.
+                                                        // SAFETY: the caller's DEVMODEA of 156 bytes.
     unsafe { core::ptr::copy_nonoverlapping(out.as_ptr(), a, 156) };
 }
 
@@ -301,7 +351,13 @@ fn devmode_a_to_w(a: *const u8) -> [u8; 220] {
     w
 }
 
-extern "win64" fn ChangeDisplaySettingsExA(device: *const u8, mode: *const u8, hwnd: u64, flags: u32, param: u64) -> i32 {
+extern "win64" fn ChangeDisplaySettingsExA(
+    device: *const u8,
+    mode: *const u8,
+    hwnd: u64,
+    flags: u32,
+    param: u64,
+) -> i32 {
     // SAFETY: NULL or a NUL-terminated name.
     let d = unsafe { path::ansi_to_wide(device) };
     let w = (!mode.is_null()).then(|| devmode_a_to_w(mode));
@@ -339,7 +395,8 @@ extern "win64" fn EnumDisplayDevicesA(device: *const u8, index: u32, out: *mut u
     let d = unsafe { path::ansi_to_wide(device) };
     let mut w = [0u8; 840];
     w[..4].copy_from_slice(&840u32.to_le_bytes());
-    if EnumDisplayDevicesW(d.as_ref().map_or(core::ptr::null(), |d| d.as_ptr()), index, w.as_mut_ptr(), flags) == FALSE {
+    if EnumDisplayDevicesW(d.as_ref().map_or(core::ptr::null(), |d| d.as_ptr()), index, w.as_mut_ptr(), flags) == FALSE
+    {
         return FALSE;
     }
     let mut a = [0u8; 424];
@@ -355,7 +412,7 @@ extern "win64" fn EnumDisplayDevicesA(device: *const u8, index: u32, out: *mut u
         }
     }
     a[164..168].copy_from_slice(&w[324..328]); // StateFlags
-    // SAFETY: the caller's 424-byte DISPLAY_DEVICEA.
+                                               // SAFETY: the caller's 424-byte DISPLAY_DEVICEA.
     unsafe { core::ptr::copy_nonoverlapping(a.as_ptr(), out, 424) };
     TRUE
 }
@@ -612,14 +669,26 @@ fn template_bytes(template: *const u8) -> &'static [u8] {
 }
 
 /// CreateDialogIndirectParamW/A: a modeless dialog from a template in memory.
-extern "win64" fn CreateDialogIndirectParamW(module: u64, template: *const u8, owner: u64, proc_: u64, param: u64) -> u64 {
+extern "win64" fn CreateDialogIndirectParamW(
+    module: u64,
+    template: *const u8,
+    owner: u64,
+    proc_: u64,
+    param: u64,
+) -> u64 {
     if template.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     create_dialog_from(template_bytes(template), module, owner, proc_, param, false).unwrap_or_else(|e| fail(e, 0))
 }
 
-extern "win64" fn CreateDialogIndirectParamA(module: u64, template: *const u8, owner: u64, proc_: u64, param: u64) -> u64 {
+extern "win64" fn CreateDialogIndirectParamA(
+    module: u64,
+    template: *const u8,
+    owner: u64,
+    proc_: u64,
+    param: u64,
+) -> u64 {
     CreateDialogIndirectParamW(module, template, owner, proc_, param)
 }
 
@@ -639,7 +708,9 @@ extern "win64" fn DisplayConfigSetDeviceInfo(packet: *const u8) -> u32 {
         return ERROR_INVALID_PARAMETER;
     }
     // SAFETY: a DISPLAYCONFIG_DEVICE_INFO_HEADER: type, size, LUID, id.
-    let (kind, size) = unsafe { (core::ptr::read_unaligned(packet as *const i32), core::ptr::read_unaligned(packet.add(4) as *const u32)) };
+    let (kind, size) = unsafe {
+        (core::ptr::read_unaligned(packet as *const i32), core::ptr::read_unaligned(packet.add(4) as *const u32))
+    };
     // SET_TARGET_PERSISTENCE (5), SET_ADVANCED_COLOR_STATE (10),
     // SET_SDR_WHITE_LEVEL (0xFFFFFFEE), SET_MONITOR_SPECIALIZATION (12),
     // SET_HDR_STATE (16), SET_WCG_STATE (17).
@@ -837,8 +908,14 @@ extern "win64" fn InjectTouchInput(count: u32, contacts: *const u8) -> Bool {
         return TRUE;
     };
     let hit = with(|g| {
-        let inside = |w: &Win| sx >= w.pos.0 && sx < w.pos.0 + w.size.0 as i32 && sy >= w.pos.1 && sy < w.pos.1 + w.size.1 as i32;
-        g.windows.iter().rev().find(|(_, w)| w.style & WS_CHILD == 0 && w.visible && inside(w)).map(|(_, w)| (w.prism_id(), w.pos))
+        let inside = |w: &Win| {
+            sx >= w.pos.0 && sx < w.pos.0 + w.size.0 as i32 && sy >= w.pos.1 && sy < w.pos.1 + w.size.1 as i32
+        };
+        g.windows
+            .iter()
+            .rev()
+            .find(|(_, w)| w.style & WS_CHILD == 0 && w.visible && inside(w))
+            .map(|(_, w)| (w.prism_id(), w.pos))
     });
     let Some((prism, pos)) = hit else { return TRUE };
     let event = Event::Pointer {

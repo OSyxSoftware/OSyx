@@ -309,7 +309,8 @@ impl Xhci {
                     return Err(XhciError::Unsupported("short data stage"));
                 }
                 let mut data = request.data.lock();
-                let state = self.devices.get(&request.slot).and_then(|d| d.storage.as_ref()).ok_or(XhciError::PortGone)?;
+                let state =
+                    self.devices.get(&request.slot).and_then(|d| d.storage.as_ref()).ok_or(XhciError::PortGone)?;
                 state.data.copy_out(&mut data);
             }
             Op::Write => {
@@ -340,7 +341,14 @@ impl Xhci {
 
     /// One Bulk-Only Transport transaction. Returns the data-stage bytes
     /// actually transferred.
-    fn scsi(&mut self, slot: u8, cdb: &[u8], dir_in: bool, data_len: usize, out: Option<&[u8]>) -> Result<usize, XhciError> {
+    fn scsi(
+        &mut self,
+        slot: u8,
+        cdb: &[u8],
+        dir_in: bool,
+        data_len: usize,
+        out: Option<&[u8]>,
+    ) -> Result<usize, XhciError> {
         if cdb.len() > 16 || data_len > MAX_TRANSFER {
             return Err(XhciError::Unsupported("SCSI request too large"));
         }
@@ -402,7 +410,8 @@ impl Xhci {
     fn bulk(&mut self, slot: u8, dci: u8, phys: u64, len: usize) -> Result<usize, XhciError> {
         let ptr = {
             let device = self.devices.get_mut(&slot).ok_or(XhciError::BadSlot)?;
-            let ep = device.bulk.iter_mut().find(|e| e.dci == dci).ok_or(XhciError::Unsupported("bulk endpoint missing"))?;
+            let ep =
+                device.bulk.iter_mut().find(|e| e.dci == dci).ok_or(XhciError::Unsupported("bulk endpoint missing"))?;
             ep.pending = None;
             ep.last = None;
             let trb = Trb::normal(phys, len as u32, true);
@@ -416,7 +425,8 @@ impl Xhci {
             self.pump();
             let done = {
                 let device = self.devices.get(&slot).ok_or(XhciError::PortGone)?;
-                let ep = device.bulk.iter().find(|e| e.dci == dci).ok_or(XhciError::Unsupported("bulk endpoint missing"))?;
+                let ep =
+                    device.bulk.iter().find(|e| e.dci == dci).ok_or(XhciError::Unsupported("bulk endpoint missing"))?;
                 ep.last.filter(|(p, _, _)| *p == ptr).map(|(_, code, residual)| (code, residual))
             };
             if let Some((code, residual)) = done {
@@ -515,7 +525,13 @@ impl Xhci {
         if last_lba == 0xFFFF_FFFF {
             // Larger than 2 TiB: READ CAPACITY(16).
             let mut cap16 = [0u8; 32];
-            let n = self.scsi(slot, &[SCSI_READ_CAPACITY_16, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], true, 32, None)?;
+            let n = self.scsi(
+                slot,
+                &[SCSI_READ_CAPACITY_16, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                true,
+                32,
+                None,
+            )?;
             if let Some(state) = self.devices.get(&slot).and_then(|d| d.storage.as_ref()) {
                 state.data.copy_out(&mut cap16[..n.min(32)]);
             }
@@ -536,14 +552,7 @@ impl Xhci {
         } else {
             alloc::format!("\"{}\" rev {} on port {}", product, revision, port)
         };
-        kprintln!(
-            "usb-storage {}: {} sectors ({} MiB), {} {}",
-            name,
-            sectors,
-            sectors >> 11,
-            vendor,
-            what
-        );
+        kprintln!("usb-storage {}: {} sectors ({} MiB), {} {}", name, sectors, sectors >> 11, vendor, what);
         let model = match (vendor.is_empty(), product.is_empty()) {
             (false, false) => alloc::format!("{vendor} {product}"),
             (true, false) => product.clone(),
@@ -553,7 +562,16 @@ impl Xhci {
         if let Some(state) = self.devices.get_mut(&slot).and_then(|d| d.storage.as_mut()) {
             state.disk_name = name.clone();
         }
-        block::register(Arc::new(UsbDisk { controller: self.index, slot, generation, name, what, model, sectors, gone }));
+        block::register(Arc::new(UsbDisk {
+            controller: self.index,
+            slot,
+            generation,
+            name,
+            what,
+            model,
+            sectors,
+            gone,
+        }));
         Ok(())
     }
 }

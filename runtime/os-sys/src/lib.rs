@@ -284,7 +284,9 @@ mod imp {
         }
         // A request larger than the window (with its two guard pages) fails
         // here, before any arithmetic on it can overflow.
-        let size = (len as u64).checked_next_multiple_of(4096).filter(|&s| s.checked_add(8192).is_some_and(|span| span <= LOW_END));
+        let size = (len as u64)
+            .checked_next_multiple_of(4096)
+            .filter(|&s| s.checked_add(8192).is_some_and(|span| span <= LOW_END));
         let Some(size) = size else { return Some(Err(Errno::NoMemory)) };
         if size >= LOW_LARGE {
             // Top down in 1 MiB steps; the rising search below is the
@@ -358,11 +360,13 @@ mod imp {
         Ok(())
     }
 
-    pub fn cpu_info() -> Result<(u32,u32),Errno> {
-        decode(syscall1(nr::CPU_INFO,0)).map(|value|(value as u32,(value>>32) as u32))
+    pub fn cpu_info() -> Result<(u32, u32), Errno> {
+        decode(syscall1(nr::CPU_INFO, 0)).map(|value| (value as u32, (value >> 32) as u32))
     }
 
-    pub fn thread_affinity(tid:u64,mask:u64)->Result<u64,Errno> { decode(syscall2(nr::THREAD_AFFINITY,tid,mask)) }
+    pub fn thread_affinity(tid: u64, mask: u64) -> Result<u64, Errno> {
+        decode(syscall2(nr::THREAD_AFFINITY, tid, mask))
+    }
     /// Sets (or with `priority::QUERY` reads) a thread's priority; tid 0 is the caller.
     pub fn thread_priority(tid: u64, priority: u64) -> Result<u64, Errno> {
         decode(syscall2(nr::THREAD_PRIORITY, tid, priority))
@@ -406,7 +410,9 @@ mod imp {
         decode(syscall3(nr::WORKING_SET, pid, out.as_mut_ptr() as u64, out.len() as u64))
     }
 
-    pub fn process_write_barrier()->Result<(),Errno> { decode(syscall1(nr::PROCESS_WRITE_BARRIER,0)).map(|_|()) }
+    pub fn process_write_barrier() -> Result<(), Errno> {
+        decode(syscall1(nr::PROCESS_WRITE_BARRIER, 0)).map(|_| ())
+    }
 
     pub fn sysinfo() -> Result<SystemInfo, Errno> {
         let mut info = SystemInfo::default();
@@ -513,9 +519,9 @@ mod imp {
         KERNEL_NS.store(now, Ordering::Relaxed);
         KERNEL_TSC.store(tsc, Ordering::Relaxed);
         // What this clock reads at the kernel's TSC sample.
-        let local = CAL_NS.load(Ordering::Relaxed).wrapping_add(
-            ((tsc.wrapping_sub(CAL_TSC.load(Ordering::Relaxed)) as u128 * old_step) >> 32) as u64,
-        );
+        let local = CAL_NS
+            .load(Ordering::Relaxed)
+            .wrapping_add(((tsc.wrapping_sub(CAL_TSC.load(Ordering::Relaxed)) as u128 * old_step) >> 32) as u64);
         let mut anchor = now;
         if local > now && local - now < RESYNC_NS {
             let ahead = (local - now) as u128;
@@ -662,7 +668,14 @@ mod imp {
     /// Writes the link target into `buf`; returns its length (truncated to `buf`).
     /// A second name (hard link) `new` for the file `existing`.
     pub fn link(existing: &str, new: &str) -> Result<(), Errno> {
-        decode(syscall4(nr::LINK, existing.as_ptr() as u64, existing.len() as u64, new.as_ptr() as u64, new.len() as u64)).map(|_| ())
+        decode(syscall4(
+            nr::LINK,
+            existing.as_ptr() as u64,
+            existing.len() as u64,
+            new.as_ptr() as u64,
+            new.len() as u64,
+        ))
+        .map(|_| ())
     }
 
     pub fn readlink(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -708,8 +721,8 @@ mod imp {
     /// # Safety
     /// A nonzero entry must be a live System V `fn(*mut fault::Context)->!`
     /// for the registration lifetime and must obey the fault return ABI.
-    pub unsafe fn fault_handler(entry: u64) -> Result<(),Errno> {
-        decode(syscall1(nr::FAULT_HANDLER,entry)).map(|_|())
+    pub unsafe fn fault_handler(entry: u64) -> Result<(), Errno> {
+        decode(syscall1(nr::FAULT_HANDLER, entry)).map(|_| ())
     }
     /// Resumes the current thread's outstanding exception. On success
     /// control transfers to the supplied user context rather than returning.
@@ -717,8 +730,8 @@ mod imp {
     /// # Safety
     /// The context must describe a valid continuation of this program,
     /// including its stack, register invariants and floating-point state.
-    pub unsafe fn fault_return(context: &osyx_abi::fault::Context) -> Result<(),Errno> {
-        decode(syscall1(nr::FAULT_RETURN,context as *const _ as u64)).map(|_|())
+    pub unsafe fn fault_return(context: &osyx_abi::fault::Context) -> Result<(), Errno> {
+        decode(syscall1(nr::FAULT_RETURN, context as *const _ as u64)).map(|_| ())
     }
 
     /// Changes identity (root only, permanent for this process and its children).
@@ -803,20 +816,50 @@ mod imp {
     /// Starts a child with experimental path and syscall policies. This does
     /// not yet provide a complete security boundary.
     /// The caller must keep each path referenced by `paths` alive for the call.
-    pub fn spawn_restricted(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64]) -> Result<u64, Errno> {
+    pub fn spawn_restricted(
+        path: &str,
+        argv: &[u8],
+        envp: &[u8],
+        paths: &[osyx_abi::sandbox::PathRule],
+        syscalls: &[u64],
+    ) -> Result<u64, Errno> {
         spawn_restricted_with_broker(path, argv, envp, paths, syscalls, osyx_abi::HANDLE_NONE)
     }
 
     /// As `spawn_restricted`, granting one existing channel as child handle 3.
-    pub fn spawn_restricted_with_broker(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64) -> Result<u64, Errno> {
+    pub fn spawn_restricted_with_broker(
+        path: &str,
+        argv: &[u8],
+        envp: &[u8],
+        paths: &[osyx_abi::sandbox::PathRule],
+        syscalls: &[u64],
+        broker: u64,
+    ) -> Result<u64, Errno> {
         spawn_restricted_with_options(path, argv, envp, paths, syscalls, broker, 0)
     }
 
-    pub fn spawn_restricted_with_options(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64, flags: u64) -> Result<u64, Errno> {
+    pub fn spawn_restricted_with_options(
+        path: &str,
+        argv: &[u8],
+        envp: &[u8],
+        paths: &[osyx_abi::sandbox::PathRule],
+        syscalls: &[u64],
+        broker: u64,
+        flags: u64,
+    ) -> Result<u64, Errno> {
         spawn_restricted_with_channels(path, argv, envp, paths, syscalls, broker, flags, &[])
     }
 
-    pub fn spawn_restricted_with_channels(path: &str, argv: &[u8], envp: &[u8], paths: &[osyx_abi::sandbox::PathRule], syscalls: &[u64], broker: u64, flags: u64, channels: &[u64]) -> Result<u64, Errno> {
+    pub fn spawn_restricted_with_channels(
+        path: &str,
+        argv: &[u8],
+        envp: &[u8],
+        paths: &[osyx_abi::sandbox::PathRule],
+        syscalls: &[u64],
+        broker: u64,
+        flags: u64,
+        channels: &[u64],
+    ) -> Result<u64, Errno> {
         let a = exec_args(path, argv, envp);
         let policy = osyx_abi::sandbox::SpawnPolicy {
             paths: paths.as_ptr() as u64,

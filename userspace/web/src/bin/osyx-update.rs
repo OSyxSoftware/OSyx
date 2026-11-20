@@ -180,7 +180,8 @@ fn install(log: &mut Log, m: &Manifest, payload: &str) -> Result<usize, String> 
                 f.sync_all().map_err(|err| format!("{tmp}: {err}"))?;
                 drop(f);
                 if !esp {
-                    fs::set_permissions(&tmp, fs::Permissions::from_mode(e.mode)).map_err(|err| format!("{tmp}: {err}"))?;
+                    fs::set_permissions(&tmp, fs::Permissions::from_mode(e.mode))
+                        .map_err(|err| format!("{tmp}: {err}"))?;
                 }
                 staged.push((to, esp));
             }
@@ -237,7 +238,12 @@ fn run_once(log: &mut Log, check_only: bool) -> Result<&'static str, String> {
         status("up-to-date", current, "");
         return Ok("up-to-date");
     }
-    log.line(&format!("OSyx {} is available (installed: {current}), {} files, {} MiB", m.version, m.files.len(), m.payload_size >> 20));
+    log.line(&format!(
+        "OSyx {} is available (installed: {current}), {} files, {} MiB",
+        m.version,
+        m.files.len(),
+        m.payload_size >> 20
+    ));
     if check_only {
         status("available", &m.version, "");
         return Ok("available");
@@ -249,12 +255,21 @@ fn run_once(log: &mut Log, check_only: bool) -> Result<&'static str, String> {
     fs::create_dir_all(CACHE).map_err(|e| format!("{CACHE}: {e}"))?;
     let payload = format!("{CACHE}/payload-{}.bin", m.version);
     let mut shown = u64::MAX;
-    osyx_web::download(&format!("{url}/{}", osyx_update::PAYLOAD), &payload, Some(&hex(&m.payload_sha256)), &mut |done, total| {
-        if shown == u64::MAX || done >> 22 != shown >> 22 {
-            shown = done;
-            status("downloading", &m.version, &format!("{} / {} MiB", done >> 20, total.unwrap_or(m.payload_size) >> 20));
-        }
-    })
+    osyx_web::download(
+        &format!("{url}/{}", osyx_update::PAYLOAD),
+        &payload,
+        Some(&hex(&m.payload_sha256)),
+        &mut |done, total| {
+            if shown == u64::MAX || done >> 22 != shown >> 22 {
+                shown = done;
+                status(
+                    "downloading",
+                    &m.version,
+                    &format!("{} / {} MiB", done >> 20, total.unwrap_or(m.payload_size) >> 20),
+                );
+            }
+        },
+    )
     .map_err(|e| format!("download: {e}"))?;
     log.line("payload downloaded, SHA-256 verified");
     status("installing", &m.version, "");

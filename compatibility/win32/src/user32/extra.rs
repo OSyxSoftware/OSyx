@@ -46,7 +46,9 @@ extern "win64" fn CopyIcon(icon: u64) -> u64 {
 /// LR_COPYDELETEORG deletes the original.
 extern "win64" fn CopyImage(image: u64, kind: u32, w: i32, h: i32, flags: u32) -> u64 {
     let copy = match kind {
-        IMAGE_BITMAP => with(|g| if w > 0 || h > 0 { gdi::scaled_bitmap(g, image, w, h) } else { gdi::duplicate_bitmap(g, image) }),
+        IMAGE_BITMAP => {
+            with(|g| if w > 0 || h > 0 { gdi::scaled_bitmap(g, image, w, h) } else { gdi::duplicate_bitmap(g, image) })
+        }
         IMAGE_ICON | IMAGE_CURSOR if is_system_icon(image) => return image,
         IMAGE_ICON | IMAGE_CURSOR => with(|g| copy_icon(g, image, w, h)),
         _ => return fail(ERROR_INVALID_PARAMETER, 0),
@@ -68,7 +70,17 @@ extern "win64" fn CopyImage(image: u64, kind: u32, w: i32, h: i32, flags: u32) -
 /// A flicker-free brush fills the rectangle first, as Windows' off-screen
 /// copy does.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn DrawIconEx(dc: u64, x: i32, y: i32, icon: u64, w: i32, h: i32, _step: u32, brush: u64, flags: u32) -> Bool {
+extern "win64" fn DrawIconEx(
+    dc: u64,
+    x: i32,
+    y: i32,
+    icon: u64,
+    w: i32,
+    h: i32,
+    _step: u32,
+    brush: u64,
+    flags: u32,
+) -> Bool {
     if is_system_icon(icon) {
         // No image to draw: OSyx's pointer and stock icons are its own.
         return TRUE;
@@ -239,7 +251,9 @@ extern "win64" fn ShutdownBlockReasonQuery(wnd: u64, buf: *mut u16, chars: *mut 
     if chars.is_null() {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let Some(text) = BLOCK_REASONS.lock().unwrap().get(&wnd).cloned() else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
+    let Some(text) = BLOCK_REASONS.lock().unwrap().get(&wnd).cloned() else {
+        return fail(ERROR_INVALID_PARAMETER, FALSE);
+    };
     // SAFETY: the caller's count and buffer of *chars characters.
     unsafe {
         let need = text.len() as u32 + 1;

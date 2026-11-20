@@ -119,11 +119,19 @@ extern "win64" fn _access_s(p: *const u8, mode: i32) -> i32 {
 }
 
 extern "win64" fn _waccess(p: *const u16, mode: i32) -> i32 {
-    if _waccess_s(p, mode) == 0 { 0 } else { -1 }
+    if _waccess_s(p, mode) == 0 {
+        0
+    } else {
+        -1
+    }
 }
 
 extern "win64" fn _access(p: *const u8, mode: i32) -> i32 {
-    if _access_s(p, mode) == 0 { 0 } else { -1 }
+    if _access_s(p, mode) == 0 {
+        0
+    } else {
+        -1
+    }
 }
 
 /// `_wfullpath`: NULL or empty path is the current directory; a NULL

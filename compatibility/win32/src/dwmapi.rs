@@ -125,7 +125,11 @@ extern "win64" fn DwmGetWindowAttribute(hwnd: u64, attr: u32, out: *mut u8, size
 
 /// The frame already is the whole client area: nothing to extend.
 extern "win64" fn DwmExtendFrameIntoClientArea(hwnd: u64, _margins: *const i32) -> u32 {
-    if crate::user32::is_window(hwnd) { S_OK } else { E_INVALIDARG }
+    if crate::user32::is_window(hwnd) {
+        S_OK
+    } else {
+        E_INVALIDARG
+    }
 }
 
 /// Waits for the next tick of the composition clock.
@@ -182,15 +186,27 @@ extern "win64" fn DwmGetCompositionTimingInfo(hwnd: u64, info: *mut u8) -> u32 {
 
 /// Taskbar thumbnails and peek bitmaps: accepted for a window, never shown.
 extern "win64" fn DwmSetIconicThumbnail(hwnd: u64, _bitmap: u64, _flags: u32) -> u32 {
-    if crate::user32::is_window(hwnd) { S_OK } else { E_INVALIDARG }
+    if crate::user32::is_window(hwnd) {
+        S_OK
+    } else {
+        E_INVALIDARG
+    }
 }
 
 extern "win64" fn DwmSetIconicLivePreviewBitmap(hwnd: u64, _bitmap: u64, _offset: *const i32, _flags: u32) -> u32 {
-    if crate::user32::is_window(hwnd) { S_OK } else { E_INVALIDARG }
+    if crate::user32::is_window(hwnd) {
+        S_OK
+    } else {
+        E_INVALIDARG
+    }
 }
 
 extern "win64" fn DwmInvalidateIconicBitmaps(hwnd: u64) -> u32 {
-    if crate::user32::is_window(hwnd) { S_OK } else { E_INVALIDARG }
+    if crate::user32::is_window(hwnd) {
+        S_OK
+    } else {
+        E_INVALIDARG
+    }
 }
 
 /// DwmDefWindowProc: DWM handles a message itself only for the caption
@@ -222,10 +238,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
 
 // ---- imm32 ----------------------------------------------------------------------------------
 
-
-
-
-
 /// ImmAssociateContextEx: IACE_DEFAULT gives the window (and with
 /// IACE_CHILDREN its descendants) back its default context; otherwise
 /// they use `himc`, IACE_IGNORENOCONTEXT leaving windows associated with
@@ -255,33 +267,9 @@ extern "win64" fn ImmAssociateContextEx(hwnd: u64, himc: u64, flags: u32) -> Boo
     1
 }
 
-
-
 /// No layout is an IME: no properties, description or IME file.
 
-
-
-
-
-
 /// Every remaining call takes an input context, and there never is one.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ---- imm32: input contexts -------------------------------------------------
 // OSyx has no input method editor: every window can have a default input
@@ -318,7 +306,15 @@ extern "win64" fn ImmGetContext(hwnd: u64) -> u64 {
         return h;
     }
     let himc = 0x4000_0000 | hwnd;
-    CONTEXTS.lock().unwrap().entry(himc).or_insert(InputContext { wnd: hwnd, open: false, composition_window: [0; 28], font: [0; 92], candidates: [[0; 32]; 4], conversion: 0, sentence: 0 });
+    CONTEXTS.lock().unwrap().entry(himc).or_insert(InputContext {
+        wnd: hwnd,
+        open: false,
+        composition_window: [0; 28],
+        font: [0; 92],
+        candidates: [[0; 32]; 4],
+        conversion: 0,
+        sentence: 0,
+    });
     himc
 }
 
@@ -392,7 +388,8 @@ extern "win64" fn ImmGetCompositionFontW(himc: u64, font: *mut u8) -> i32 {
 /// Nothing is ever being composed: every known string index has length 0,
 /// an unknown index or context is IMM_ERROR_GENERAL.
 fn composition_length(himc: u64, index: u32) -> i32 {
-    const KNOWN: u32 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x2000;
+    const KNOWN: u32 =
+        0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x2000;
     if himc == 0 {
         return 0; // as on Windows
     }
@@ -494,7 +491,14 @@ extern "win64" fn ImmGetCandidateListW(himc: u64, _index: u32, _list: *mut u8, _
 
 /// ImmSetCompositionStringW: without an IME there is no composition to
 /// change; Windows answers FALSE.
-extern "win64" fn ImmSetCompositionStringW(himc: u64, _index: u32, _comp: *const u8, _comp_len: u32, _read: *const u8, _read_len: u32) -> i32 {
+extern "win64" fn ImmSetCompositionStringW(
+    himc: u64,
+    _index: u32,
+    _comp: *const u8,
+    _comp_len: u32,
+    _read: *const u8,
+    _read_len: u32,
+) -> i32 {
     let _ = with_context(himc, |_| ());
     0
 }
@@ -512,7 +516,18 @@ static NEXT_CONTEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 
 extern "win64" fn ImmCreateContext() -> u64 {
     let himc = NEXT_CONTEXT.fetch_add(0x10, core::sync::atomic::Ordering::Relaxed);
-    CONTEXTS.lock().unwrap().insert(himc, InputContext { wnd: 0, open: false, composition_window: [0; 28], font: [0; 92], candidates: [[0; 32]; 4], conversion: 0, sentence: 0 });
+    CONTEXTS.lock().unwrap().insert(
+        himc,
+        InputContext {
+            wnd: 0,
+            open: false,
+            composition_window: [0; 28],
+            font: [0; 92],
+            candidates: [[0; 32]; 4],
+            conversion: 0,
+            sentence: 0,
+        },
+    );
     himc
 }
 
@@ -678,7 +693,14 @@ pub fn d3dcompiler_exports() -> Vec<(&'static str, u64)> {
 
 const DNS_INFO_NO_RECORDS: u32 = 9501;
 
-extern "win64" fn DnsQuery_A(name: *const u8, _kind: u16, _options: u32, _extra: u64, results: *mut u64, _reserved: u64) -> u32 {
+extern "win64" fn DnsQuery_A(
+    name: *const u8,
+    _kind: u16,
+    _options: u32,
+    _extra: u64,
+    results: *mut u64,
+    _reserved: u64,
+) -> u32 {
     if name.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
@@ -689,7 +711,14 @@ extern "win64" fn DnsQuery_A(name: *const u8, _kind: u16, _options: u32, _extra:
     DNS_INFO_NO_RECORDS
 }
 
-extern "win64" fn DnsQuery_W(name: *const u16, kind: u16, options: u32, extra: u64, results: *mut u64, reserved: u64) -> u32 {
+extern "win64" fn DnsQuery_W(
+    name: *const u16,
+    kind: u16,
+    options: u32,
+    extra: u64,
+    results: *mut u64,
+    reserved: u64,
+) -> u32 {
     DnsQuery_A(name as *const u8, kind, options, extra, results, reserved)
 }
 
@@ -703,11 +732,19 @@ pub fn dnsapi_exports() -> Vec<(&'static str, u64)> {
 // ---- wtsapi32 -------------------------------------------------------------------------------
 
 extern "win64" fn WTSRegisterSessionNotification(hwnd: u64, _flags: u32) -> Bool {
-    if crate::user32::is_window(hwnd) { TRUE } else { fail(ERROR_INVALID_PARAMETER, FALSE) }
+    if crate::user32::is_window(hwnd) {
+        TRUE
+    } else {
+        fail(ERROR_INVALID_PARAMETER, FALSE)
+    }
 }
 
 extern "win64" fn WTSUnRegisterSessionNotification(hwnd: u64) -> Bool {
-    if crate::user32::is_window(hwnd) { TRUE } else { fail(ERROR_INVALID_PARAMETER, FALSE) }
+    if crate::user32::is_window(hwnd) {
+        TRUE
+    } else {
+        fail(ERROR_INVALID_PARAMETER, FALSE)
+    }
 }
 
 const WTS_CURRENT_SESSION: u32 = u32::MAX;
@@ -717,7 +754,13 @@ const SESSION: u32 = 1;
 /// state (WTSActive), station name, user and domain names, connect state,
 /// client name and protocol (console). The buffer is freed with
 /// WTSFreeMemory.
-extern "win64" fn WTSQuerySessionInformationW(_server: u64, session: u32, class: u32, out: *mut u64, len: *mut u32) -> Bool {
+extern "win64" fn WTSQuerySessionInformationW(
+    _server: u64,
+    session: u32,
+    class: u32,
+    out: *mut u64,
+    len: *mut u32,
+) -> Bool {
     if out.is_null() || len.is_null() {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
@@ -728,16 +771,16 @@ extern "win64" fn WTSQuerySessionInformationW(_server: u64, session: u32, class:
     let user = crate::accounts::current_user_name();
     let domain = crate::accounts::computer_name();
     let data: Vec<u8> = match class {
-        0..=3 | 10 | 11 => text(""),         // initial program, application, directories, OEM id, client name
+        0..=3 | 10 | 11 => text(""), // initial program, application, directories, OEM id, client name
         4 => SESSION.to_le_bytes().to_vec(), // WTSSessionId
-        5 => text(&user),                    // WTSUserName
-        6 => text("Console"),                // WTSWinStationName
-        7 => text(&domain),                  // WTSDomainName
-        8 => 0i32.to_le_bytes().to_vec(),    // WTSConnectState: WTSActive
+        5 => text(&user),            // WTSUserName
+        6 => text("Console"),        // WTSWinStationName
+        7 => text(&domain),          // WTSDomainName
+        8 => 0i32.to_le_bytes().to_vec(), // WTSConnectState: WTSActive
         9 | 13 => 0u32.to_le_bytes().to_vec(), // client build number, hardware id
         12 | 16 => 0u16.to_le_bytes().to_vec(), // client product id, protocol (console)
-        14 => alloc::vec![0; 24],            // WTS_CLIENT_ADDRESS: none (AF_UNSPEC)
-        15 => alloc::vec![0; 12],            // WTS_CLIENT_DISPLAY: no remote client
+        14 => alloc::vec![0; 24],    // WTS_CLIENT_ADDRESS: none (AF_UNSPEC)
+        15 => alloc::vec![0; 12],    // WTS_CLIENT_DISPLAY: no remote client
         _ => return fail(ERROR_INVALID_PARAMETER, FALSE),
     };
     let Some(p) = crate::kernel32::heap_alloc(data.len(), false) else { return fail(ERROR_NOT_ENOUGH_MEMORY, FALSE) };
@@ -757,5 +800,10 @@ extern "win64" fn WTSFreeMemory(p: u64) {
 }
 
 pub fn wtsapi32_exports() -> Vec<(&'static str, u64)> {
-    export_table![WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, WTSQuerySessionInformationW, WTSFreeMemory]
+    export_table![
+        WTSRegisterSessionNotification,
+        WTSUnRegisterSessionNotification,
+        WTSQuerySessionInformationW,
+        WTSFreeMemory
+    ]
 }

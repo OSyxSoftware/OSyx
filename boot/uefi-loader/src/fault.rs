@@ -70,12 +70,38 @@ extern "C" {
 }
 
 const NAMES: [&str; VECTORS] = [
-    "divide error", "debug", "NMI", "breakpoint", "overflow", "bound range", "invalid opcode",
-    "device not available", "double fault", "coprocessor overrun", "invalid TSS", "segment not present",
-    "stack fault", "general protection", "page fault", "reserved", "x87 error", "alignment check",
-    "machine check", "SIMD error", "virtualization", "control protection", "reserved", "reserved",
-    "reserved", "reserved", "reserved", "reserved", "hypervisor injection", "VMM communication",
-    "security", "reserved",
+    "divide error",
+    "debug",
+    "NMI",
+    "breakpoint",
+    "overflow",
+    "bound range",
+    "invalid opcode",
+    "device not available",
+    "double fault",
+    "coprocessor overrun",
+    "invalid TSS",
+    "segment not present",
+    "stack fault",
+    "general protection",
+    "page fault",
+    "reserved",
+    "x87 error",
+    "alignment check",
+    "machine check",
+    "SIMD error",
+    "virtualization",
+    "control protection",
+    "reserved",
+    "reserved",
+    "reserved",
+    "reserved",
+    "reserved",
+    "reserved",
+    "hypervisor injection",
+    "VMM communication",
+    "security",
+    "reserved",
 ];
 
 /// Loads the reporting IDT. Interrupts must be disabled; `screen` (if any)
@@ -118,7 +144,16 @@ extern "sysv64" fn report(frame: *const u64) -> ! {
     let name = NAMES.get(vector).copied().unwrap_or("?");
     let (kb, ke) = (KERNEL_BASE.load(Ordering::Relaxed), KERNEL_END.load(Ordering::Relaxed));
     let place = if (kb..ke).contains(&rip) { "kernel" } else { "loader/firmware" };
-    let line1 = crate::fmt_buf!(128, "#{} {} (error {:#x}) at RIP {:#x} ({}, +{:#x})", vector, name, error, rip, place, rip.wrapping_sub(kb));
+    let line1 = crate::fmt_buf!(
+        128,
+        "#{} {} (error {:#x}) at RIP {:#x} ({}, +{:#x})",
+        vector,
+        name,
+        error,
+        rip,
+        place,
+        rip.wrapping_sub(kb)
+    );
     let line2 = crate::fmt_buf!(128, "CR2 {:#x}  RSP {:#x}  CR3 {:#x}", cr2, rsp, cr3);
     crate::log!("CPU EXCEPTION before the kernel IDT: {}", line1.as_str());
     crate::log!("{}", line2.as_str());

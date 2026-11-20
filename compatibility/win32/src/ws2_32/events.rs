@@ -185,14 +185,17 @@ extern "win64" fn WSAEventSelect(s: u64, event: u64, mask: i32) -> i32 {
         // A new selection keeps what was recorded, as Windows does.
         let mut sels = SELECTIONS.lock().unwrap();
         let old = sels.get(&s).copied();
-        sels.insert(s, Selection {
-            event,
-            mask,
-            armed: if old.is_some_and(|o| o.closed) { mask & !FD_CLOSE } else { mask },
-            pending: old.map_or(0, |o| o.pending & mask),
-            errors: old.map_or([0; 10], |o| o.errors),
-            closed: old.is_some_and(|o| o.closed),
-        });
+        sels.insert(
+            s,
+            Selection {
+                event,
+                mask,
+                armed: if old.is_some_and(|o| o.closed) { mask & !FD_CLOSE } else { mask },
+                pending: old.map_or(0, |o| o.pending & mask),
+                errors: old.map_or([0; 10], |o| o.errors),
+                closed: old.is_some_and(|o| o.closed),
+            },
+        );
         drop(sels);
         if old.is_some_and(|o| o.pending & mask != 0) {
             crate::kernel32::SetEvent(event);
@@ -241,7 +244,11 @@ extern "win64" fn WSACreateEvent() -> u64 {
 const WSA_NOT_ENOUGH_MEMORY: u32 = 8;
 
 fn bool_result(ok: i32) -> i32 {
-    if ok != 0 { 1 } else { err(WSA_INVALID_HANDLE, 0) }
+    if ok != 0 {
+        1
+    } else {
+        err(WSA_INVALID_HANDLE, 0)
+    }
 }
 
 extern "win64" fn WSACloseEvent(event: u64) -> i32 {
@@ -266,5 +273,13 @@ extern "win64" fn WSAWaitForMultipleEvents(n: u32, events: *const u64, all: i32,
 }
 
 pub(super) fn exports() -> Vec<(&'static str, u64)> {
-    export_table![WSAEventSelect, WSAEnumNetworkEvents, WSACreateEvent, WSACloseEvent, WSASetEvent, WSAResetEvent, WSAWaitForMultipleEvents]
+    export_table![
+        WSAEventSelect,
+        WSAEnumNetworkEvents,
+        WSACreateEvent,
+        WSACloseEvent,
+        WSASetEvent,
+        WSAResetEvent,
+        WSAWaitForMultipleEvents
+    ]
 }

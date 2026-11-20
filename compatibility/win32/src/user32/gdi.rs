@@ -341,15 +341,30 @@ pub(super) fn resource_bitmap(g: &mut Gui, data: &[u8]) -> Option<u64> {
     let rd16 = |n: usize| Some(u16::from_le_bytes(data.get(n..n + 2)?.try_into().ok()?));
     let rd32 = |n: usize| Some(u32::from_le_bytes(data.get(n..n + 4)?.try_into().ok()?));
     let header = rd32(0)? as usize;
-    if !(40..=124).contains(&header) || header > data.len() { return None; }
+    if !(40..=124).contains(&header) || header > data.len() {
+        return None;
+    }
     let bpp = rd16(14)?;
     let compression = rd32(16)?;
     let masks = if compression == 3 && header == 40 { 12 } else { 0 };
-    let palette = if bpp <= 8 { let n = rd32(32)? as usize; if n == 0 { 1usize.checked_shl(bpp as u32)? } else { n } } else { 0 };
+    let palette = if bpp <= 8 {
+        let n = rd32(32)? as usize;
+        if n == 0 {
+            1usize.checked_shl(bpp as u32)?
+        } else {
+            n
+        }
+    } else {
+        0
+    };
     let offset = header.checked_add(masks)?.checked_add(palette.checked_mul(4)?)?;
-    if offset > data.len() { return None; }
+    if offset > data.len() {
+        return None;
+    }
     let dib = Dib::read(data.as_ptr(), 0)?;
-    if offset.checked_add(dib.bytes())? > data.len() { return None; }
+    if offset.checked_add(dib.bytes())? > data.len() {
+        return None;
+    }
     let mut bitmap = Bitmap::new(dib, false);
     let len = bitmap.dib.bytes();
     bitmap.bits_mut().copy_from_slice(&data[offset..offset + len]);
@@ -363,14 +378,25 @@ pub(super) fn resource_icon(g: &mut Gui, data: &[u8]) -> Option<(u64, u64)> {
     let header = rd32(0)? as usize;
     let width = rd32(4)? as i32;
     let total_height = rd32(8)? as i32;
-    if !(40..=124).contains(&header) || header > data.len() || width <= 0 || total_height <= 0 ||
-        total_height % 2 != 0 || rd16(12)? != 1 || rd16(14)? != 32 || rd32(16)? != 0 { return None; }
+    if !(40..=124).contains(&header)
+        || header > data.len()
+        || width <= 0
+        || total_height <= 0
+        || total_height % 2 != 0
+        || rd16(12)? != 1
+        || rd16(14)? != 32
+        || rd32(16)? != 0
+    {
+        return None;
+    }
     let height = total_height / 2;
     let color_dib = Dib::new(width, height, 32)?;
     let mask_dib = Dib::new(width, height, 1)?;
     let end_color = header.checked_add(color_dib.bytes())?;
     let end_mask = end_color.checked_add(mask_dib.bytes())?;
-    if end_mask > data.len() { return None; }
+    if end_mask > data.len() {
+        return None;
+    }
     let mut color = Bitmap::new(color_dib, false);
     let mut mask = Bitmap::new(mask_dib, false);
     color.bits_mut().copy_from_slice(&data[header..end_color]);
@@ -407,7 +433,8 @@ pub(super) fn scaled_bitmap(g: &mut Gui, h: u64, w: i32, height: i32) -> Option<
     let bits = out.bits_mut();
     // Source position of a destination pixel centre, in 1/256 pixels.
     let map = |i: u32, from: u32, to: u32| -> (u32, u32, u32) {
-        let p = ((2 * i as i64 + 1) * from as i64 * 256 / (2 * to as i64) - 128).clamp(0, (from as i64 - 1) * 256) as u32;
+        let p =
+            ((2 * i as i64 + 1) * from as i64 * 256 / (2 * to as i64) - 128).clamp(0, (from as i64 - 1) * 256) as u32;
         (p >> 8, (p >> 8).saturating_add(1).min(from - 1), p & 255)
     };
     let mix = |a: Color, b: Color, f: u32| -> Color {
@@ -575,10 +602,11 @@ fn dib_in_section(dib: Dib, out: *mut *mut u8, section: u64, offset: u32) -> u64
     let aligned = offset as u64 & !(crate::mem::GRANULARITY as u64 - 1);
     let skip = (offset as u64 - aligned) as usize;
     let bytes = dib.bytes();
-    let (base, size) = match crate::mapping::map(section, FILE_MAP_READ | FILE_MAP_WRITE, aligned, (skip + bytes) as u64) {
-        Ok(v) => v,
-        Err(s) => return fail(crate::error::status_to_win32(s), 0),
-    };
+    let (base, size) =
+        match crate::mapping::map(section, FILE_MAP_READ | FILE_MAP_WRITE, aligned, (skip + bytes) as u64) {
+            Ok(v) => v,
+            Err(s) => return fail(crate::error::status_to_win32(s), 0),
+        };
     if (size as usize) < skip + bytes {
         let _ = crate::mapping::unmap(base);
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -911,13 +939,9 @@ impl SrcHolder<'_> {
     fn view(&self) -> SrcView<'_> {
         match self {
             SrcHolder::Bits { bits, w, h, stride, top } => SrcView { bits, w: *w, h: *h, stride: *stride, top: *top },
-            SrcHolder::Surface(s) => SrcView {
-                bits: s.pixels(),
-                w: s.width(),
-                h: s.height(),
-                stride: s.stride() as usize,
-                top: true,
-            },
+            SrcHolder::Surface(s) => {
+                SrcView { bits: s.pixels(), w: s.width(), h: s.height(), stride: s.stride() as usize, top: true }
+            }
         }
     }
 }
@@ -954,8 +978,20 @@ fn copy_rows_view(
 /// process made): the pixels go to that process, which draws them in its
 /// window (`blit_from_other_process`). None when `dst` is not such a DC.
 #[allow(clippy::too_many_arguments)]
-fn blit_to_other_process(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i32, rop: u32) -> Option<Bool> {
-    let hwnd = with(|g| g.dcs.get(&dst).filter(|d| !d.memory && d.hwnd != 0 && !g.windows.contains_key(&d.hwnd)).map(|d| d.hwnd))?;
+fn blit_to_other_process(
+    dst: u64,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    src: u64,
+    sx: i32,
+    sy: i32,
+    rop: u32,
+) -> Option<Bool> {
+    let hwnd = with(|g| {
+        g.dcs.get(&dst).filter(|d| !d.memory && d.hwnd != 0 && !g.windows.contains_key(&d.hwnd)).map(|d| d.hwnd)
+    })?;
     let pid = super::window_process(hwnd)?;
     let (area, pixels) = if rop == 0xcc0020 {
         let Some(s) = snapshot(src, Rect::new(sx, sy, w as u32, h as u32)) else { return Some(FALSE) };
@@ -969,8 +1005,18 @@ fn blit_to_other_process(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx:
     }
     let ok = crate::inherit::draw_in_window(pid, hwnd, area.x, area.y, area.w, area.h, &pixels);
     static TRACED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-    if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) && TRACED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
-        os_std::eprintln!("winrun: BitBlt to window {hwnd:#x} of process {pid}: ({},{}) {}x{}, drawn {ok}, pixels {:#x} .. {:#x}", area.x, area.y, area.w, area.h, pixels[0], pixels[pixels.len() / 2]);
+    if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed)
+        && TRACED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16
+    {
+        os_std::eprintln!(
+            "winrun: BitBlt to window {hwnd:#x} of process {pid}: ({},{}) {}x{}, drawn {ok}, pixels {:#x} .. {:#x}",
+            area.x,
+            area.y,
+            area.w,
+            area.h,
+            pixels[0],
+            pixels[pixels.len() / 2]
+        );
     }
     Some(if ok { TRUE } else { fail(ERROR_INVALID_WINDOW_HANDLE, FALSE) })
 }
@@ -1111,7 +1157,17 @@ fn fast_blit(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i3
     })
 }
 
-pub(super) extern "win64" fn BitBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i32, rop: u32) -> Bool {
+pub(super) extern "win64" fn BitBlt(
+    dst: u64,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    src: u64,
+    sx: i32,
+    sy: i32,
+    rop: u32,
+) -> Bool {
     if !matches!(rop & !0x40000000, 0xcc0020 | 0x42 | 0xff0062) || w < 0 || h < 0 {
         return fail(ERROR_NOT_SUPPORTED, FALSE);
     }
@@ -1130,7 +1186,9 @@ pub(super) extern "win64" fn BitBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, sr
     } else {
         None
     };
-    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) && with(|g| g.dcs.get(&dst).is_some_and(|d| !d.memory && d.hwnd != 0)) {
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed)
+        && with(|g| g.dcs.get(&dst).is_some_and(|d| !d.memory && d.hwnd != 0))
+    {
         static TRACE_BLITS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
         if TRACE_BLITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
             if let Some(source) = &source {
@@ -2304,7 +2362,11 @@ extern "win64" fn ChoosePixelFormat(dc: u64, pfd: *const u8) -> i32 {
     if pfd.is_null() {
         return 0;
     }
-    if pixel_format_ok(pfd) { 1 } else { fail(ERROR_INVALID_PARAMETER, 0) }
+    if pixel_format_ok(pfd) {
+        1
+    } else {
+        fail(ERROR_INVALID_PARAMETER, 0)
+    }
 }
 extern "win64" fn SetPixelFormat(dc: u64, format: i32, pfd: *const u8) -> Bool {
     if !with(|g| g.dcs.contains_key(&dc)) {
@@ -2339,7 +2401,7 @@ extern "win64" fn DescribePixelFormat(dc: u64, format: i32, size: u32, pfd: *mut
         let p = pfd as u64;
         teb::put(p, 0, 40u16); // nSize
         teb::put(p, 2, 1u16); // nVersion
-        // PFD_DOUBLEBUFFER | PFD_DRAW_TO_WINDOW | PFD_SUPPORT_GDI
+                              // PFD_DOUBLEBUFFER | PFD_DRAW_TO_WINDOW | PFD_SUPPORT_GDI
         teb::put(p, 4, 0x1u32 | 0x4 | 0x10);
         teb::put(p, 8, 0u8); // PFD_TYPE_RGBA
         teb::put(p, 9, 32u8); // cColorBits
@@ -2442,7 +2504,19 @@ extern "win64" fn GetBrushOrgEx(dc: u64, out: *mut i32) -> Bool {
 /// StretchBlt: SRCCOPY scales the source rectangle to the destination
 /// (nearest pixel; negative sizes mirror), BLACKNESS and WHITENESS fill.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn StretchBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i32, sw: i32, sh: i32, rop: u32) -> Bool {
+extern "win64" fn StretchBlt(
+    dst: u64,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    src: u64,
+    sx: i32,
+    sy: i32,
+    sw: i32,
+    sh: i32,
+    rop: u32,
+) -> Bool {
     let rop = rop & !0x4000_0000;
     if !matches!(rop, 0xcc0020 | 0x42 | 0xff0062) {
         return fail(ERROR_NOT_SUPPORTED, FALSE);
@@ -2493,7 +2567,15 @@ extern "win64" fn StretchBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64,
 
 /// GDI functions added for the Steam client and SDL3.
 pub(super) fn client_exports() -> Vec<(&'static str, u64)> {
-    export_table![DescribePixelFormat, GetPixelFormat, GetBitmapBits, GetObjectA, SetBrushOrgEx, GetBrushOrgEx, StretchBlt]
+    export_table![
+        DescribePixelFormat,
+        GetPixelFormat,
+        GetBitmapBits,
+        GetObjectA,
+        SetBrushOrgEx,
+        GetBrushOrgEx,
+        StretchBlt
+    ]
 }
 
 /// SwapBuffers: an OpenGL context drawing into the window shows its back
@@ -2530,7 +2612,14 @@ pub(super) fn blend_exports() -> Vec<(&'static str, u64)> {
 }
 /// Escapes are printer and driver commands; a display DC supports none
 /// (QUERYESCSUPPORT included), which Windows answers with 0.
-extern "win64" fn ExtEscape(dc: u64, _escape: i32, _count: i32, _input: *const u8, _out_count: i32, _output: *mut u8) -> i32 {
+extern "win64" fn ExtEscape(
+    dc: u64,
+    _escape: i32,
+    _count: i32,
+    _input: *const u8,
+    _out_count: i32,
+    _output: *mut u8,
+) -> i32 {
     if with(|g| !g.dcs.contains_key(&dc)) {
         return fail(ERROR_INVALID_HANDLE, 0);
     }

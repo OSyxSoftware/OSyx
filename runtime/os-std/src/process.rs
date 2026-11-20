@@ -97,7 +97,13 @@ pub struct Command {
 
 impl Command {
     pub fn new(program: &str) -> Command {
-        Command { program: program.to_string(), arg0: None, args: Vec::new(), env_clear: false, env_changes: BTreeMap::new() }
+        Command {
+            program: program.to_string(),
+            arg0: None,
+            args: Vec::new(),
+            env_clear: false,
+            env_changes: BTreeMap::new(),
+        }
     }
 
     pub fn arg(&mut self, arg: &str) -> &mut Command {

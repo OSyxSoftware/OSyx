@@ -50,13 +50,18 @@ static CONTROLLERS: AtomicUsize = AtomicUsize::new(0);
 const MAX_IRQ_CONTROLLERS: usize = 8;
 // Stable addresses: an interrupt may arrive after a failed probe. Never
 // point an interrupt handler at the temporary controller allocation.
-static COMPLETIONS: [crate::waitq::WaitQueue; MAX_IRQ_CONTROLLERS] = [const { crate::waitq::WaitQueue::new() }; MAX_IRQ_CONTROLLERS];
+static COMPLETIONS: [crate::waitq::WaitQueue; MAX_IRQ_CONTROLLERS] =
+    [const { crate::waitq::WaitQueue::new() }; MAX_IRQ_CONTROLLERS];
 static IRQ_COUNTS: [AtomicUsize; MAX_IRQ_CONTROLLERS] = [const { AtomicUsize::new(0) }; MAX_IRQ_CONTROLLERS];
 static SLEEP_COMPLETIONS: [AtomicUsize; MAX_IRQ_CONTROLLERS] = [const { AtomicUsize::new(0) }; MAX_IRQ_CONTROLLERS];
 
 pub fn log_stats() {
     for index in 0..CONTROLLERS.load(Ordering::Relaxed).min(MAX_IRQ_CONTROLLERS) {
-        crate::kprintln!("nvme{index}: {} completion interrupts, {} completions after sleeping", IRQ_COUNTS[index].load(Ordering::Relaxed), SLEEP_COMPLETIONS[index].load(Ordering::Relaxed));
+        crate::kprintln!(
+            "nvme{index}: {} completion interrupts, {} completions after sleeping",
+            IRQ_COUNTS[index].load(Ordering::Relaxed),
+            SLEEP_COMPLETIONS[index].load(Ordering::Relaxed)
+        );
     }
 }
 
@@ -68,11 +73,18 @@ fn completion_interrupt(index: u64) {
 }
 
 fn setup_interrupts(dev: &pci::Device, index: usize) -> bool {
-    if index >= MAX_IRQ_CONTROLLERS { return false; }
+    if index >= MAX_IRQ_CONTROLLERS {
+        return false;
+    }
     let Some(vector) = crate::irq::allocate(completion_interrupt, index as u64) else { return false };
     let (address, data) = crate::arch::apic::msi_message(vector);
-    let mode = if dev.enable_msix(address, data).is_ok() { Some("MSI-X") }
-        else if dev.enable_msi(address, data).is_ok() { Some("MSI") } else { None };
+    let mode = if dev.enable_msix(address, data).is_ok() {
+        Some("MSI-X")
+    } else if dev.enable_msi(address, data).is_ok() {
+        Some("MSI")
+    } else {
+        None
+    };
     if let Some(mode) = mode {
         crate::kprintln!("nvme{index}: completion interrupts via {mode} on vector {vector:#x}");
         true
@@ -220,7 +232,9 @@ pub fn probe(dev: &pci::Device) -> Vec<Arc<dyn BlockDev>> {
 }
 
 fn start(dev: &pci::Device, index: usize) -> Result<Vec<Arc<dyn BlockDev>>, NvmeError> {
-    let Some(pci::Bar::Memory { base, size, .. }) = dev.bar(0) else { return Err(NvmeError::Device("BAR0 is not a memory BAR")) };
+    let Some(pci::Bar::Memory { base, size, .. }) = dev.bar(0) else {
+        return Err(NvmeError::Device("BAR0 is not a memory BAR"));
+    };
     if base == 0 || size < 0x1000 {
         return Err(NvmeError::Device("BAR0 unassigned or too small"));
     }
@@ -267,8 +281,26 @@ fn start(dev: &pci::Device, index: usize) -> Result<Vec<Arc<dyn BlockDev>>, Nvme
         mmio: m,
         interrupt_index: setup_interrupts(dev, index).then_some(index),
         inner: KMutex::new(Inner {
-            admin: Queue { sq: admin_sq, cq: admin_cq, qsize, tail: 0, head: 0, phase: true, sq_doorbell: 0, cq_doorbell: stride },
-            io: Queue { sq: io_sq, cq: io_cq, qsize, tail: 0, head: 0, phase: true, sq_doorbell: 2 * stride, cq_doorbell: 3 * stride },
+            admin: Queue {
+                sq: admin_sq,
+                cq: admin_cq,
+                qsize,
+                tail: 0,
+                head: 0,
+                phase: true,
+                sq_doorbell: 0,
+                cq_doorbell: stride,
+            },
+            io: Queue {
+                sq: io_sq,
+                cq: io_cq,
+                qsize,
+                tail: 0,
+                head: 0,
+                phase: true,
+                sq_doorbell: 2 * stride,
+                cq_doorbell: 3 * stride,
+            },
             data,
             prp,
             cid: 1,
@@ -364,7 +396,12 @@ fn start(dev: &pci::Device, index: usize) -> Result<Vec<Arc<dyn BlockDev>>, Nvme
             let lbaf = u32_at(ident, 128 + flbas as usize * 4);
             let lbads = (lbaf >> 16) & 0xFF;
             if lbads != 9 {
-                crate::kprintln!("nvme{}: namespace {} uses {} byte blocks; only 512 is supported", index, nsid, 1u64 << lbads);
+                crate::kprintln!(
+                    "nvme{}: namespace {} uses {} byte blocks; only 512 is supported",
+                    index,
+                    nsid,
+                    1u64 << lbads
+                );
                 continue;
             }
             let name = format!("nvme{}n{}", index, nsid);
@@ -427,7 +464,10 @@ fn wait_completion(ctrl: &Nvme, q: &mut Queue, cid: u16) -> Result<(), NvmeError
         if deadline.expired() {
             return Err(NvmeError::Timeout("command completion"));
         }
-        if let Some(index) = ctrl.interrupt_index.filter(|_| timer::healthy() && crate::sched::current_tid() != 0 && crate::arch::cpu::interrupts_enabled()) {
+        if let Some(index) = ctrl
+            .interrupt_index
+            .filter(|_| timer::healthy() && crate::sched::current_tid() != 0 && crate::arch::cpu::interrupts_enabled())
+        {
             let mut checks = 0usize;
             let result = crate::waitq::block_on(&[&COMPLETIONS[index]], Some(deadline.tick()), || {
                 checks += 1;
@@ -445,7 +485,9 @@ fn wait_completion(ctrl: &Nvme, q: &mut Queue, cid: u16) -> Result<(), NvmeError
             }
             // block_on checks twice before scheduling; a third check proves
             // this request returned from the scheduler rather than spinning.
-            if checks > 2 { SLEEP_COMPLETIONS[index].fetch_add(1, Ordering::Relaxed); }
+            if checks > 2 {
+                SLEEP_COMPLETIONS[index].fetch_add(1, Ordering::Relaxed);
+            }
         } else {
             timer::pause_tick();
         }
@@ -526,7 +568,11 @@ impl Nvme {
             for (i, chunk) in buf.chunks_mut(PAGE).enumerate() {
                 // SAFETY: as above; the device has finished with the frame.
                 unsafe {
-                    core::ptr::copy_nonoverlapping(phys_to_virt(g.data[i]) as *const u8, chunk.as_mut_ptr(), chunk.len());
+                    core::ptr::copy_nonoverlapping(
+                        phys_to_virt(g.data[i]) as *const u8,
+                        chunk.as_mut_ptr(),
+                        chunk.len(),
+                    );
                 }
             }
         }

@@ -23,10 +23,24 @@ const RPC_S_INVALID_STRING_UUID: u32 = 1705;
 /// GUID { Data1 u32, Data2 u16, Data3 u16, Data4 [u8; 8] } as text.
 fn uuid_text(u: *const u8) -> String {
     // SAFETY: the caller's 16-byte UUID.
-    let (d1, d2, d3, d4) = unsafe { (teb::get::<u32>(u as u64, 0), teb::get::<u16>(u as u64, 4), teb::get::<u16>(u as u64, 6), teb::get::<[u8; 8]>(u as u64, 8)) };
+    let (d1, d2, d3, d4) = unsafe {
+        (
+            teb::get::<u32>(u as u64, 0),
+            teb::get::<u16>(u as u64, 4),
+            teb::get::<u16>(u as u64, 6),
+            teb::get::<[u8; 8]>(u as u64, 8),
+        )
+    };
     alloc::format!(
         "{d1:08x}-{d2:04x}-{d3:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7]
+        d4[0],
+        d4[1],
+        d4[2],
+        d4[3],
+        d4[4],
+        d4[5],
+        d4[6],
+        d4[7]
     )
 }
 
@@ -86,7 +100,9 @@ extern "win64" fn UuidFromStringW(s: *const u16, out: *mut u8) -> u32 {
     if let Some(t) = text {
         let parts: Vec<&str> = t.split('-').collect();
         let lens = [8, 4, 4, 4, 12];
-        if parts.len() != 5 || parts.iter().zip(lens).any(|(p, l)| p.len() != l || !p.bytes().all(|b| b.is_ascii_hexdigit())) {
+        if parts.len() != 5
+            || parts.iter().zip(lens).any(|(p, l)| p.len() != l || !p.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
             return RPC_S_INVALID_STRING_UUID;
         }
         let hex = |s: &str| u64::from_str_radix(s, 16).unwrap_or(0);
@@ -147,7 +163,12 @@ extern "win64" fn CM_Get_Device_IDW(_devinst: u32, buf: *mut u16, _len: u32, fla
 }
 
 /// Interface lists are empty: one NUL closes the empty multi-string.
-extern "win64" fn CM_Get_Device_Interface_List_SizeW(len: *mut u32, class: *const u8, _device: *const u16, flags: u32) -> u32 {
+extern "win64" fn CM_Get_Device_Interface_List_SizeW(
+    len: *mut u32,
+    class: *const u8,
+    _device: *const u16,
+    flags: u32,
+) -> u32 {
     if len.is_null() || class.is_null() {
         return CR_INVALID_POINTER;
     }
@@ -190,7 +211,12 @@ extern "win64" fn CM_Unregister_Notification(h: u64) -> u32 {
 }
 
 pub fn cfgmgr32_exports() -> Vec<(&'static str, u64)> {
-    export_table![CM_Get_Device_IDW, CM_Get_Device_Interface_List_SizeW, CM_Register_Notification, CM_Unregister_Notification]
+    export_table![
+        CM_Get_Device_IDW,
+        CM_Get_Device_Interface_List_SizeW,
+        CM_Register_Notification,
+        CM_Unregister_Notification
+    ]
 }
 
 // ---- ktmw32 ------------------------------------------------------------------------------
@@ -338,7 +364,11 @@ extern "win64" fn SetProcessDpiAwareness(level: u32) -> u32 {
     if level > 2 {
         return E_INVALIDARG;
     }
-    if crate::user32::client::set_process_dpi_awareness(level) { 0 } else { E_ACCESSDENIED }
+    if crate::user32::client::set_process_dpi_awareness(level) {
+        0
+    } else {
+        E_ACCESSDENIED
+    }
 }
 
 /// Any process's awareness is this one's: the others run in their own
@@ -414,7 +444,13 @@ fn power_capabilities() -> [u8; 76] {
 /// limit, idle states), the battery state (5: from the firmware's battery),
 /// the system power capabilities (4) and the execution state (16: nothing
 /// requested).
-extern "win64" fn CallNtPowerInformation(level: u32, _input: *const u8, _in_len: u32, out: *mut u8, out_len: u32) -> u32 {
+extern "win64" fn CallNtPowerInformation(
+    level: u32,
+    _input: *const u8,
+    _in_len: u32,
+    out: *mut u8,
+    out_len: u32,
+) -> u32 {
     let data: Vec<u8> = match level {
         11 => {
             let cpus = os_sys::cpu_info().map_or(1, |(c, _)| c as u32);
@@ -451,7 +487,11 @@ extern "win64" fn PowerDeterminePlatformRoleEx(version: u32) -> u32 {
     if version != 1 && version != 2 {
         return 0;
     }
-    if crate::procinfo::battery().is_some_and(|b| b.present()) { 2 } else { 1 }
+    if crate::procinfo::battery().is_some_and(|b| b.present()) {
+        2
+    } else {
+        1
+    }
 }
 
 extern "win64" fn PowerDeterminePlatformRole() -> u32 {
@@ -461,7 +501,8 @@ extern "win64" fn PowerDeterminePlatformRole() -> u32 {
 /// The Balanced scheme {381b4222-f694-41f0-9685-ff5bb260df2e}, the one
 /// scheme here; LocalFree releases it.
 extern "win64" fn PowerGetActiveScheme(_root: u64, out: *mut u64) -> u32 {
-    const BALANCED: [u8; 16] = [0x22, 0x42, 0x1b, 0x38, 0x94, 0xf6, 0xf0, 0x41, 0x96, 0x85, 0xff, 0x5b, 0xb2, 0x60, 0xdf, 0x2e];
+    const BALANCED: [u8; 16] =
+        [0x22, 0x42, 0x1b, 0x38, 0x94, 0xf6, 0xf0, 0x41, 0x96, 0x85, 0xff, 0x5b, 0xb2, 0x60, 0xdf, 0x2e];
     if out.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
@@ -476,11 +517,27 @@ extern "win64" fn PowerGetActiveScheme(_root: u64, out: *mut u64) -> u32 {
 
 /// The scheme has no stored setting values: OSyx's power policy is the
 /// scheduler's, not per-setting.
-extern "win64" fn PowerReadACValue(_root: u64, _scheme: u64, _subgroup: u64, _setting: u64, _kind: *mut u32, _buf: *mut u8, _size: *mut u32) -> u32 {
+extern "win64" fn PowerReadACValue(
+    _root: u64,
+    _scheme: u64,
+    _subgroup: u64,
+    _setting: u64,
+    _kind: *mut u32,
+    _buf: *mut u8,
+    _size: *mut u32,
+) -> u32 {
     ERROR_FILE_NOT_FOUND_P
 }
 
-extern "win64" fn PowerReadDCValue(_root: u64, _scheme: u64, _subgroup: u64, _setting: u64, _kind: *mut u32, _buf: *mut u8, _size: *mut u32) -> u32 {
+extern "win64" fn PowerReadDCValue(
+    _root: u64,
+    _scheme: u64,
+    _subgroup: u64,
+    _setting: u64,
+    _kind: *mut u32,
+    _buf: *mut u8,
+    _size: *mut u32,
+) -> u32 {
     ERROR_FILE_NOT_FOUND_P
 }
 
@@ -576,12 +633,21 @@ extern "win64" fn InternetAttemptConnect(reserved: u32) -> u32 {
     if reserved != 0 {
         return ERROR_INVALID_PARAMETER;
     }
-    if crate::iphlpapi::has_connectivity() { ERROR_SUCCESS } else { 12163 }
+    if crate::iphlpapi::has_connectivity() {
+        ERROR_SUCCESS
+    } else {
+        12163
+    }
 }
 
 /// There is no WinINet session state to query; callers fall back to a
 /// direct connection.
-extern "win64" fn InternetQueryOptionW(_session: u64, _option: u32, _buffer: *mut u8, _len: *mut u32) -> crate::kernel32::Bool {
+extern "win64" fn InternetQueryOptionW(
+    _session: u64,
+    _option: u32,
+    _buffer: *mut u8,
+    _len: *mut u32,
+) -> crate::kernel32::Bool {
     crate::kernel32::fail(ERROR_INVALID_PARAMETER, crate::kernel32::FALSE)
 }
 
@@ -622,7 +688,15 @@ extern "win64" fn InternetCloseHandle(h: u64) -> crate::kernel32::Bool {
 
 /// winrun's wininet keeps no URL cache: every lookup finds no entry.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn GetUrlCacheEntryInfoExW(url: *const u16, _info: *mut u8, _size: *mut u32, _redirect: *mut u16, _redirect_size: *mut u32, _reserved: u64, _flags: u32) -> i32 {
+extern "win64" fn GetUrlCacheEntryInfoExW(
+    url: *const u16,
+    _info: *mut u8,
+    _size: *mut u32,
+    _redirect: *mut u16,
+    _redirect_size: *mut u32,
+    _reserved: u64,
+    _flags: u32,
+) -> i32 {
     if url.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -960,7 +1034,10 @@ fn catalog_hash(f: &mut os_std::fs::File) -> Option<[u8; 20]> {
                 skip.push((opt + 64, 4));
                 skip.push((cert_entry, 8));
                 if read_at(f, cert_entry, &mut d) {
-                    let (at, size) = (u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as u64, u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as u64);
+                    let (at, size) = (
+                        u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as u64,
+                        u32::from_le_bytes([d[4], d[5], d[6], d[7]]) as u64,
+                    );
                     if size != 0 && at.checked_add(size).is_some_and(|e| e <= len) {
                         skip.push((at, size));
                     }
@@ -1017,7 +1094,13 @@ extern "win64" fn CryptCATAdminCalcHashFromFileHandle(file: u64, size: *mut u32,
     1
 }
 
-extern "win64" fn CryptCATAdminEnumCatalogFromHash(admin: u64, hash: *const u8, len: u32, _flags: u32, _prev: *mut u64) -> u64 {
+extern "win64" fn CryptCATAdminEnumCatalogFromHash(
+    admin: u64,
+    hash: *const u8,
+    len: u32,
+    _flags: u32,
+    _prev: *mut u64,
+) -> u64 {
     if !CAT_ADMINS.lock().unwrap().contains(&admin) || hash.is_null() || len == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -1095,7 +1178,11 @@ extern "win64" fn AvSetMmThreadCharacteristicsA(task: *const u8, task_index: *mu
     avrt_register(unsafe { path::ansi_to_string(task) }, task_index)
 }
 
-extern "win64" fn AvSetMmMaxThreadCharacteristicsW(first: *const u16, _second: *const u16, task_index: *mut u32) -> u64 {
+extern "win64" fn AvSetMmMaxThreadCharacteristicsW(
+    first: *const u16,
+    _second: *const u16,
+    task_index: *mut u32,
+) -> u64 {
     avrt_register(unsafe { path::wide_to_string(first) }, task_index)
 }
 
@@ -1107,9 +1194,15 @@ extern "win64" fn AvRevertMmThreadCharacteristics(handle: u64) -> i32 {
     if handle == AVRT_HANDLE {
         let _ = os_sys::thread_priority(0, osyx_abi::priority::NORMAL);
         1
-    } else { fail(ERROR_INVALID_HANDLE, 0) }
+    } else {
+        fail(ERROR_INVALID_HANDLE, 0)
+    }
 }
 
 extern "win64" fn AvSetMmThreadPriority(handle: u64, _priority: i32) -> i32 {
-    if handle == AVRT_HANDLE { 1 } else { fail(ERROR_INVALID_HANDLE, 0) }
+    if handle == AVRT_HANDLE {
+        1
+    } else {
+        fail(ERROR_INVALID_HANDLE, 0)
+    }
 }

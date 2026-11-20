@@ -45,7 +45,12 @@ pub(crate) extern "win64" fn GetDriveTypeW(root: *const u16) -> u32 {
         Err(_) => 1,
     }
 }
-pub(crate) extern "win64" fn GetDiskFreeSpaceExW(root: *const u16, avail: *mut u64, total: *mut u64, free: *mut u64) -> i32 {
+pub(crate) extern "win64" fn GetDiskFreeSpaceExW(
+    root: *const u16,
+    avail: *mut u64,
+    total: *mut u64,
+    free: *mut u64,
+) -> i32 {
     let s = match usage(root) {
         Ok(s) => s,
         Err(e) => return fail(e, 0),
@@ -277,7 +282,9 @@ pub(crate) fn find_first(pattern: *const u16, out: u64, case_sensitive: bool) ->
     let dir = if dir.len() == 2 && dir.ends_with(':') {
         rooted_drive = alloc::format!("{dir}\\");
         rooted_drive.as_str()
-    } else { dir };
+    } else {
+        dir
+    };
     let cwd = path::to_windows(
         os_std::env::current_dir().map(|p| String::from(p.as_str())).unwrap_or_else(|_| String::from("/")).as_str(),
     );

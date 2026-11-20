@@ -113,7 +113,8 @@ pub const CONFIG_DHCP: u8 = 2;
 pub const CONFIG_DOWN: u8 = 3;
 
 /// DHCP client phases in `NetIface::dhcp_phase`.
-pub const DHCP_PHASE_NAMES: [&str; 8] = ["-", "init", "selecting", "requesting", "bound", "renewing", "rebinding", "stopped"];
+pub const DHCP_PHASE_NAMES: [&str; 8] =
+    ["-", "init", "selecting", "requesting", "bound", "renewing", "rebinding", "stopped"];
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -144,8 +145,12 @@ pub struct NetIface {
 
 /// Select a wired interface, preferring one with an address or active link.
 pub fn preferred_ethernet(ifaces: &[NetIface]) -> Option<NetIface> {
-    ifaces.iter().filter(|i| i.flags & (IFF_LOOPBACK | IFF_WIRELESS) == 0)
-        .max_by_key(|i| (i.flags & IFF_LINK != 0 && i.addr != [0; 4], i.flags & IFF_LINK != 0, core::cmp::Reverse(i.index)))
+    ifaces
+        .iter()
+        .filter(|i| i.flags & (IFF_LOOPBACK | IFF_WIRELESS) == 0)
+        .max_by_key(|i| {
+            (i.flags & IFF_LINK != 0 && i.addr != [0; 4], i.flags & IFF_LINK != 0, core::cmp::Reverse(i.index))
+        })
         .copied()
 }
 

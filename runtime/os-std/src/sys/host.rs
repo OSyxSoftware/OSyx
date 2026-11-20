@@ -129,7 +129,11 @@ pub mod fs {
     fn resolve(path: &str) -> Result<String> {
         let cwd = {
             let c = CWD.lock().unwrap_or_else(|e| e.into_inner());
-            if c.is_empty() { String::from("/") } else { c.clone() }
+            if c.is_empty() {
+                String::from("/")
+            } else {
+                c.clone()
+            }
         };
         osyx_vfs_free_normalize(&cwd, path)
     }
@@ -195,7 +199,9 @@ pub mod fs {
 
         pub fn seek(&self, offset: i64, whence: u64) -> Result<u64> {
             let pos = match whence {
-                osyx_abi::SEEK_SET => std::io::SeekFrom::Start(u64::try_from(offset).map_err(|_| ErrorKind::InvalidInput)?),
+                osyx_abi::SEEK_SET => {
+                    std::io::SeekFrom::Start(u64::try_from(offset).map_err(|_| ErrorKind::InvalidInput)?)
+                }
                 osyx_abi::SEEK_CUR => std::io::SeekFrom::Current(offset),
                 _ => std::io::SeekFrom::End(offset),
             };

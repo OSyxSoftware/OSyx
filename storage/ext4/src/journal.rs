@@ -44,7 +44,8 @@ const INCOMPAT_ASYNC_COMMIT: u32 = 0x4;
 const INCOMPAT_CSUM_V2: u32 = 0x8;
 const INCOMPAT_CSUM_V3: u32 = 0x10;
 const INCOMPAT_FAST_COMMIT: u32 = 0x20;
-const KNOWN_INCOMPAT: u32 = INCOMPAT_REVOKE | INCOMPAT_64BIT | INCOMPAT_ASYNC_COMMIT | INCOMPAT_CSUM_V2 | INCOMPAT_CSUM_V3;
+const KNOWN_INCOMPAT: u32 =
+    INCOMPAT_REVOKE | INCOMPAT_64BIT | INCOMPAT_ASYNC_COMMIT | INCOMPAT_CSUM_V2 | INCOMPAT_CSUM_V3;
 
 const TAG_ESCAPE: u32 = 1;
 const TAG_SAME_UUID: u32 = 2;
@@ -82,7 +83,11 @@ impl Journal {
     fn tag_size(&self) -> usize {
         let wide = self.incompat & INCOMPAT_64BIT != 0;
         if self.incompat & INCOMPAT_CSUM_V3 != 0 {
-            if wide { 16 } else { 12 }
+            if wide {
+                16
+            } else {
+                12
+            }
         } else if wide {
             12
         } else {
@@ -201,7 +206,10 @@ impl<D: BlockDevice> Ext4<D> {
             let (flags, hi) = if j.incompat & INCOMPAT_CSUM_V3 != 0 {
                 (be32(b, off + 4), if j.incompat & INCOMPAT_64BIT != 0 { be32(b, off + 8) as u64 } else { 0 })
             } else {
-                (u16::from_be_bytes([b[off + 6], b[off + 7]]) as u32, if j.incompat & INCOMPAT_64BIT != 0 { be32(b, off + 8) as u64 } else { 0 })
+                (
+                    u16::from_be_bytes([b[off + 6], b[off + 7]]) as u32,
+                    if j.incompat & INCOMPAT_64BIT != 0 { be32(b, off + 8) as u64 } else { 0 },
+                )
             };
             out.push((lo | hi << 32, flags));
             off += ts;
@@ -263,7 +271,11 @@ impl<D: BlockDevice> Ext4<D> {
                     }
                     let mut o = 16;
                     while o + rs <= used {
-                        let blk = if rs == 8 { (be32(&b, o) as u64) << 32 | be32(&b, o + 4) as u64 } else { be32(&b, o) as u64 };
+                        let blk = if rs == 8 {
+                            (be32(&b, o) as u64) << 32 | be32(&b, o + 4) as u64
+                        } else {
+                            be32(&b, o) as u64
+                        };
                         let e = revoked.entry(blk).or_insert(seq);
                         *e = (*e).max(seq);
                         o += rs;
@@ -420,7 +432,16 @@ impl<D: BlockDevice> Ext4<D> {
         let (seq, first, tag_size, v23, v3, wide, room, jlen) = {
             let j = self.journal.as_ref().expect("checked");
             let end = if j.csum_v23() { bs - 4 } else { bs };
-            (j.sequence, j.first, j.tag_size(), j.csum_v23(), j.incompat & INCOMPAT_CSUM_V3 != 0, j.incompat & INCOMPAT_64BIT != 0, end, j.len())
+            (
+                j.sequence,
+                j.first,
+                j.tag_size(),
+                j.csum_v23(),
+                j.incompat & INCOMPAT_CSUM_V3 != 0,
+                j.incompat & INCOMPAT_64BIT != 0,
+                end,
+                j.len(),
+            )
         };
         // Lay out: descriptor, copies (as many as fit per descriptor), ..., commit.
         let list: Vec<(&u64, &Vec<u8>)> = blocks.iter().collect();
@@ -556,5 +577,4 @@ impl<D: BlockDevice> Ext4<D> {
     pub fn journal_commits(&self) -> u64 {
         self.journal.as_ref().map_or(0, |j| j.committed)
     }
-
 }

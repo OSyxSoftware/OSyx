@@ -7,7 +7,8 @@ use super::*;
 const NS_DNS: u32 = 12;
 const NS_ALL: u32 = 0;
 /// The Windows TCP/IP DNS provider's id, {22059D40-7E9E-11CF-AE5A-00AA00A7112B}.
-const DNS_PROVIDER_ID: [u8; 16] = [0x40, 0x9d, 0x05, 0x22, 0x9e, 0x7e, 0xcf, 0x11, 0xae, 0x5a, 0x00, 0xaa, 0x00, 0xa7, 0x11, 0x2b];
+const DNS_PROVIDER_ID: [u8; 16] =
+    [0x40, 0x9d, 0x05, 0x22, 0x9e, 0x7e, 0xcf, 0x11, 0xae, 0x5a, 0x00, 0xaa, 0x00, 0xa7, 0x11, 0x2b];
 const WSA_E_NO_MORE: u32 = 10110;
 const WSASERVICE_NOT_FOUND: u32 = 10108;
 
@@ -226,8 +227,9 @@ extern "win64" fn WSADuplicateSocketW(s: u64, pid: u32, info: u64) -> i32 {
 pub(super) fn socket_from_info(info: *const u8) -> u64 {
     let p = info as u64;
     // SAFETY: the caller's WSAPROTOCOL_INFOW.
-    let (id, token, af, kind, proto): ([u8; 16], u32, i32, i32, i32) =
-        unsafe { (teb::get(p, 20), teb::get(p, PROVIDER_RESERVED as usize), teb::get(p, 76), teb::get(p, 88), teb::get(p, 92)) };
+    let (id, token, af, kind, proto): ([u8; 16], u32, i32, i32, i32) = unsafe {
+        (teb::get(p, 20), teb::get(p, PROVIDER_RESERVED as usize), teb::get(p, 76), teb::get(p, 88), teb::get(p, 92))
+    };
     if id != PROVIDER_ID {
         return err(WSAEINVAL, INVALID_SOCKET);
     }

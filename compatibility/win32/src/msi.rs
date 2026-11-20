@@ -9,7 +9,11 @@
 use crate::{error::*, kernel32::fail, path, registry, teb};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::{format, string::{String, ToString}, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::cmp::Ordering as Cmp;
 use core::sync::atomic::{AtomicU32, Ordering};
 use os_std::sync::Mutex;
@@ -126,10 +130,10 @@ impl StringTable {
 
 fn cp1252(b: u8) -> char {
     const HIGH: [char; 32] = [
-        '\u{20AC}', '\u{FFFD}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
-        '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{FFFD}', '\u{017D}', '\u{FFFD}',
-        '\u{FFFD}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
-        '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{FFFD}', '\u{017E}', '\u{0178}',
+        '\u{20AC}', '\u{FFFD}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}', '\u{02C6}',
+        '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{FFFD}', '\u{017D}', '\u{FFFD}', '\u{FFFD}', '\u{2018}',
+        '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}',
+        '\u{203A}', '\u{0153}', '\u{FFFD}', '\u{017E}', '\u{0178}',
     ];
     match b {
         0x80..=0x9F => HIGH[(b - 0x80) as usize],
@@ -223,17 +227,24 @@ fn parse_database(bytes: &[u8]) -> Option<Database> {
         }
         let number = num.wrapping_sub(0x8000);
         let ty = ty.wrapping_sub(0x8000) as i16;
-        grouped
-            .entry(table.to_lowercase())
-            .or_insert_with(|| (table, Vec::new()))
-            .1
-            .push(Column { number, name, kind: (ty & 0xFF) as u8 });
+        grouped.entry(table.to_lowercase()).or_insert_with(|| (table, Vec::new())).1.push(Column {
+            number,
+            name,
+            kind: (ty & 0xFF) as u8,
+        });
     }
     let mut tables = BTreeMap::new();
     for (key, (name, mut columns)) in grouped {
         columns.sort_by_key(|c| c.number);
         let raw = cfb.stream(&name)?;
-        let row_width: usize = columns.iter().map(|c| match c.kind { 1 => ref_width, 3 => 4, _ => 2 }).sum();
+        let row_width: usize = columns
+            .iter()
+            .map(|c| match c.kind {
+                1 => ref_width,
+                3 => 4,
+                _ => 2,
+            })
+            .sum();
         if row_width == 0 || raw.len() % row_width != 0 {
             return None;
         }
@@ -556,22 +567,20 @@ fn tokenize(q: &str) -> Result<Vec<Tok>, ()> {
                 out.push(Tok::Eq);
                 i += 1;
             }
-            b'<' => {
-                match b.get(i + 1) {
-                    Some(b'=') => {
-                        out.push(Tok::Le);
-                        i += 2;
-                    }
-                    Some(b'>') => {
-                        out.push(Tok::Ne);
-                        i += 2;
-                    }
-                    _ => {
-                        out.push(Tok::Lt);
-                        i += 1;
-                    }
+            b'<' => match b.get(i + 1) {
+                Some(b'=') => {
+                    out.push(Tok::Le);
+                    i += 2;
                 }
-            }
+                Some(b'>') => {
+                    out.push(Tok::Ne);
+                    i += 2;
+                }
+                _ => {
+                    out.push(Tok::Lt);
+                    i += 1;
+                }
+            },
             b'>' => {
                 if b.get(i + 1) == Some(&b'=') {
                     out.push(Tok::Ge);
@@ -601,7 +610,9 @@ fn tokenize(q: &str) -> Result<Vec<Tok>, ()> {
             }
             c if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'#' | b'.') || c >= 0x80 => {
                 let start = i;
-                while i < b.len() && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'_' | b'#' | b'.') || b[i] >= 0x80) {
+                while i < b.len()
+                    && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'_' | b'#' | b'.') || b[i] >= 0x80)
+                {
                     i += 1;
                 }
                 out.push(Tok::Ident(String::from(core::str::from_utf8(&b[start..i]).map_err(|_| ())?)));
@@ -823,7 +834,11 @@ fn eval(c: &Cond, row: &[Value], params: &[Value]) -> bool {
         Cond::Or(a, b) => eval(a, row, params) || eval(b, row, params),
         Cond::IsNull { col, not } => {
             let null = !matches!(row.get(*col), Some(Value::Int(_)) | Some(Value::Str(_)));
-            if *not { !null } else { null }
+            if *not {
+                !null
+            } else {
+                null
+            }
         }
         Cond::Cmp { col, op, rhs } => {
             let a = match row.get(*col) {
@@ -1077,9 +1092,8 @@ extern "win64" fn MsiGetProductInfoW(product: *const u16, attribute: *const u16,
     if names.is_empty() {
         return fail(ERROR_UNKNOWN_PROPERTY, 0);
     }
-    let value = names
-        .iter()
-        .find_map(|n| values.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|(_, v)| v.clone()));
+    let value =
+        names.iter().find_map(|n| values.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|(_, v)| v.clone()));
     match value {
         Some(v) => put_string(&v, buf, pcch),
         None => fail(ERROR_UNKNOWN_PROPERTY, 0),

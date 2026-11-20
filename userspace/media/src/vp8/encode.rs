@@ -398,7 +398,13 @@ impl Encoder {
             return None;
         }
         let (mb_cols, mb_rows) = (width.div_ceil(16), height.div_ceil(16));
-        let planes = || [Plane::new(mb_cols * 16, mb_rows * 16), Plane::new(mb_cols * 8, mb_rows * 8), Plane::new(mb_cols * 8, mb_rows * 8)];
+        let planes = || {
+            [
+                Plane::new(mb_cols * 16, mb_rows * 16),
+                Plane::new(mb_cols * 8, mb_rows * 8),
+                Plane::new(mb_cols * 8, mb_rows * 8),
+            ]
+        };
         Some(Encoder {
             w: width,
             h: height,
@@ -424,7 +430,11 @@ impl Encoder {
     /// The picture a decoder shows after the last frame, as Y, U and V
     /// planes with their strides (for tests).
     pub fn reconstruction(&self) -> [(&[u8], usize); 3] {
-        [(&self.recon[0].px[..], self.recon[0].stride), (&self.recon[1].px[..], self.recon[1].stride), (&self.recon[2].px[..], self.recon[2].stride)]
+        [
+            (&self.recon[0].px[..], self.recon[0].stride),
+            (&self.recon[1].px[..], self.recon[1].stride),
+            (&self.recon[2].px[..], self.recon[2].stride),
+        ]
     }
 
     /// Loads `pixels` (0x00RRGGBB, rows of `stride`) as BT.601 limited-range
@@ -603,7 +613,15 @@ impl Encoder {
                 }
                 let mut dc = [0i16; 16];
                 walsh(&y2, &mut dc);
-                let put = |plane: &mut Plane, px: usize, py: usize, pred: &[u8], n: usize, b: (usize, usize), levels: &[i16; 16], f: [i32; 2], dc: Option<i16>| {
+                let put = |plane: &mut Plane,
+                           px: usize,
+                           py: usize,
+                           pred: &[u8],
+                           n: usize,
+                           b: (usize, usize),
+                           levels: &[i16; 16],
+                           f: [i32; 2],
+                           dc: Option<i16>| {
                     let mut c = [0i16; 16];
                     for (k, v) in levels.iter().enumerate() {
                         c[k] = (*v as i32 * f[(k > 0) as usize]) as i16;
@@ -688,8 +706,8 @@ impl Encoder {
                 } else {
                     b.put(1, true); // predicted from a frame
                     b.put(255, false); // the last one
-                    // The zero vector's probability depends on how many
-                    // neighbours used it: all that exist did.
+                                       // The zero vector's probability depends on how many
+                                       // neighbours used it: all that exist did.
                     let count = 2 * (row > 0) as usize + 2 * (col > 0) as usize + (row > 0 && col > 0) as usize;
                     b.put(MV_COUNTS_TO_PROBS[count][0], false);
                 }
@@ -753,12 +771,24 @@ mod tests {
             assert_eq!((f.w, f.h), (w, h));
             let [(ry, rys), (ru, rus), (rv, rvs)] = enc.reconstruction();
             for y in 0..h {
-                assert_eq!(&f.y[y * f.y_stride..y * f.y_stride + w], &ry[y * rys..y * rys + w], "frame {t}, luma row {y}");
+                assert_eq!(
+                    &f.y[y * f.y_stride..y * f.y_stride + w],
+                    &ry[y * rys..y * rys + w],
+                    "frame {t}, luma row {y}"
+                );
             }
             for y in 0..h.div_ceil(2) {
                 let n = w.div_ceil(2);
-                assert_eq!(&f.u[y * f.uv_stride..y * f.uv_stride + n], &ru[y * rus..y * rus + n], "frame {t}, U row {y}");
-                assert_eq!(&f.v[y * f.uv_stride..y * f.uv_stride + n], &rv[y * rvs..y * rvs + n], "frame {t}, V row {y}");
+                assert_eq!(
+                    &f.u[y * f.uv_stride..y * f.uv_stride + n],
+                    &ru[y * rus..y * rus + n],
+                    "frame {t}, U row {y}"
+                );
+                assert_eq!(
+                    &f.v[y * f.uv_stride..y * f.uv_stride + n],
+                    &rv[y * rvs..y * rvs + n],
+                    "frame {t}, V row {y}"
+                );
             }
             // The picture is close to the source.
             let rgba = crate::vp8::to_rgba(&f);
@@ -774,8 +804,20 @@ mod tests {
             // (A one-pixel picture is all rounding, a tiny one mostly chroma
             // subsampling of steep colour changes; the coarsest quantizer
             // keeps little of the stripes.)
-            let by_q = if q <= 20 { 30.0 } else if q <= 60 { 22.0 } else { 14.0 };
-            let floor = if w * h < 256 { 5.0 } else if w * h < 4096 { by_q - 10.0 } else { by_q };
+            let by_q = if q <= 20 {
+                30.0
+            } else if q <= 60 {
+                22.0
+            } else {
+                14.0
+            };
+            let floor = if w * h < 256 {
+                5.0
+            } else if w * h < 4096 {
+                by_q - 10.0
+            } else {
+                by_q
+            };
             assert!(psnr > floor, "{w}x{h} frame {t}: {psnr:.1} dB at q {q}");
             sizes.push(packet.data.len());
         }

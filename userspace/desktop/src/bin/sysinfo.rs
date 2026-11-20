@@ -87,18 +87,37 @@ fn gather(procs: &mut Vec<ListItem>) -> Info {
     let mut mounts = Vec::new();
     for m in system::mounts().unwrap_or_default() {
         let path = String::from(system::field_str(&m.path));
-        let (total, free) = os::statfs(&path).map_or((0, 0), |s| (s.total_blocks * s.block_size, s.free_blocks * s.block_size));
-        mounts.push(Mount { fstype: String::from(system::field_str(&m.fstype)), source: String::from(system::field_str(&m.source)), path, total, free });
+        let (total, free) =
+            os::statfs(&path).map_or((0, 0), |s| (s.total_blocks * s.block_size, s.free_blocks * s.block_size));
+        mounts.push(Mount {
+            fstype: String::from(system::field_str(&m.fstype)),
+            source: String::from(system::field_str(&m.source)),
+            path,
+            total,
+            free,
+        });
     }
     let list = system::processes().unwrap_or_default();
     let threads = list.iter().map(|p| p.threads).sum();
     procs.clear();
     for p in &list {
-        let user = if p.uid == 0 { String::from("root") } else if p.uid == 1000 { String::from("user") } else { format!("{}", p.uid) };
+        let user = if p.uid == 0 {
+            String::from("root")
+        } else if p.uid == 1000 {
+            String::from("user")
+        } else {
+            format!("{}", p.uid)
+        };
         let zombie = p.state == system::PROC_ZOMBIE;
         let mut item = ListItem::new(
             Some(if zombie { Icon::Close } else { Icon::Program }),
-            &[&system::process_name(p), &format!("{}", p.pid), &user, &format!("{}", p.threads), &human_size(p.frames * 4096)],
+            &[
+                &system::process_name(p),
+                &format!("{}", p.pid),
+                &user,
+                &format!("{}", p.threads),
+                &human_size(p.frames * 4096),
+            ],
         );
         item.dim = zombie;
         procs.push(item);
@@ -108,10 +127,14 @@ fn gather(procs: &mut Vec<ListItem>) -> Info {
         let backend = if d.backend == system::BACKEND_VIRTIO_GPU { "VirtIO-GPU scanout" } else { "framebuffer" };
         format!("{}x{} {backend}, 32-bit {fmt}, owned by process {}", d.width, d.height, d.owner)
     });
-    let mut inputs: Vec<String> = fs::read_dir("/dev/input").map(|d| d.map(|e| format!("/dev/input/{}", e.file_name())).collect()).unwrap_or_default();
+    let mut inputs: Vec<String> = fs::read_dir("/dev/input")
+        .map(|d| d.map(|e| format!("/dev/input/{}", e.file_name())).collect())
+        .unwrap_or_default();
     inputs.sort();
     Info {
-        release: fs::read_to_string("/etc/osyx-release").map(|s| String::from(s.trim())).unwrap_or_else(|_| String::from("OSyx")),
+        release: fs::read_to_string("/etc/osyx-release")
+            .map(|s| String::from(s.trim()))
+            .unwrap_or_else(|_| String::from("OSyx")),
         kernel: si.as_ref().map_or(String::from("?"), |i| String::from(os::kernel_version(i))),
         abi: si.as_ref().map_or(0, |i| i.abi_version),
         cpu: cpu_brand(),
@@ -140,12 +163,24 @@ fn main() -> i32 {
     let mut items = Vec::new();
     let info = gather(&mut items);
     procs.set_items(items);
-    println!("sysinfo: {} | kernel {} | {} | {} processes, {} mounts", info.release, info.kernel, info.cpu, info.procs, info.mounts.len());
+    println!(
+        "sysinfo: {} | kernel {} | {} | {} processes, {} mounts",
+        info.release,
+        info.kernel,
+        info.cpu,
+        info.procs,
+        info.mounts.len()
+    );
     let mut app = SysInfo {
         info,
         tz: system_tz(),
         procs,
-        cards: [Panel::new(Some("System")), Panel::new(Some("Memory")), Panel::new(Some("File systems")), Panel::new(Some("Processes"))],
+        cards: [
+            Panel::new(Some("System")),
+            Panel::new(Some("Memory")),
+            Panel::new(Some("File systems")),
+            Panel::new(Some("Processes")),
+        ],
         fs_view: ScrollView::default(),
         size: (0, 0),
         refreshes: 0,
@@ -162,9 +197,16 @@ const FS_ROW: u32 = 46;
 fn bar(p: &mut Painter, r: Rect, used: u64, total: u64) {
     let t = *p.theme;
     p.rounded(r, r.h / 2, t.field, 255);
-    if let (Some(w), Some(frac)) = ((r.w as u64 * used.min(total)).checked_div(total), (used * 100).checked_div(total)) {
+    if let (Some(w), Some(frac)) = ((r.w as u64 * used.min(total)).checked_div(total), (used * 100).checked_div(total))
+    {
         let w = w as u32;
-        let c = if frac >= 90 { t.danger } else if frac >= 75 { t.warning } else { t.accent };
+        let c = if frac >= 90 {
+            t.danger
+        } else if frac >= 75 {
+            t.warning
+        } else {
+            t.accent
+        };
         if w > 0 {
             p.rounded(Rect::new(r.x, r.y, w.max(r.h), r.h), r.h / 2, c, 255);
         }
@@ -178,7 +220,13 @@ impl SysInfo {
         let mut y = r.y;
         for (k, v) in rows {
             p.text_in(FontKind::Ui, Rect::new(r.x, y, 104, lh as u32), k, t.text_dim, Align::Left);
-            p.text_in(FontKind::Ui, Rect::new(r.x + 110, y, r.w.saturating_sub(110), lh as u32), v, t.text, Align::Left);
+            p.text_in(
+                FontKind::Ui,
+                Rect::new(r.x + 110, y, r.w.saturating_sub(110), lh as u32),
+                v,
+                t.text,
+                Align::Left,
+            );
             y += lh;
         }
         y
@@ -220,7 +268,12 @@ impl App for SysInfo {
         self.procs.set_items(items);
         self.refreshes += 1;
         if self.refreshes.is_multiple_of(30) {
-            println!("sysinfo: {} processes, {} free of {}", self.info.procs, human_size(self.info.free_mem), human_size(self.info.total_mem));
+            println!(
+                "sysinfo: {} processes, {} free of {}",
+                self.info.procs,
+                human_size(self.info.free_mem),
+                human_size(self.info.total_mem)
+            );
         }
         let (w, h) = self.size;
         self.layout(w, h, cx);
@@ -259,7 +312,11 @@ impl App for SysInfo {
         // Memory.
         let r = self.cards[1].content(&cx.fonts);
         let used = i.total_mem.saturating_sub(i.free_mem);
-        let y = Self::rows(p, r, &[("Total", human_size(i.total_mem)), ("In use", human_size(used)), ("Free", human_size(i.free_mem))]);
+        let y = Self::rows(
+            p,
+            r,
+            &[("Total", human_size(i.total_mem)), ("In use", human_size(used)), ("Free", human_size(i.free_mem))],
+        );
         bar(p, Rect::new(r.x, y + 6, r.w, 10), used, i.total_mem);
         let y2 = y + 28;
         Self::rows(p, Rect::new(r.x, y2, r.w, 60), &[("Processes", format!("{} ({} threads)", i.procs, i.threads))]);
@@ -271,7 +328,11 @@ impl App for SysInfo {
             let used = m.total.saturating_sub(m.free);
             let label = format!("{}  ·  {}  ·  {}", m.path, m.fstype, m.source);
             p.text_in(FontKind::Ui, Rect::new(r.x, y, r.w.saturating_sub(150), 22), &label, t.text, Align::Left);
-            let size = if m.total > 0 { format!("{} of {}", human_size(used), human_size(m.total)) } else { String::from("virtual") };
+            let size = if m.total > 0 {
+                format!("{} of {}", human_size(used), human_size(m.total))
+            } else {
+                String::from("virtual")
+            };
             p.text_in(FontKind::Ui, Rect::new(r.x, y, r.w, 22), &size, t.text_dim, Align::Right);
             bar(p, Rect::new(r.x, y + 26, r.w, 8), used, m.total);
         }

@@ -188,7 +188,6 @@ extern "win64" fn PathMatchSpecW(file: *const u16, spec: *const u16) -> i32 {
     0
 }
 
-
 /// PathCchCanonicalize: removes "." and ".." components (never above the
 /// root) of a path; the result must fit `cch` units with its NUL.
 extern "win64" fn PathCchCanonicalize(out: *mut u16, cch: usize, input: *const u16) -> u32 {
@@ -412,7 +411,14 @@ extern "win64" fn StrStrIW(hay: *const u16, needle: *const u16) -> *const u16 {
 }
 
 /// OSyx registers no file associations.
-extern "win64" fn AssocQueryStringW(_flags: u32, _what: u32, _assoc: *const u16, _extra: *const u16, out: *mut u16, len: *mut u32) -> u32 {
+extern "win64" fn AssocQueryStringW(
+    _flags: u32,
+    _what: u32,
+    _assoc: *const u16,
+    _extra: *const u16,
+    out: *mut u16,
+    len: *mut u32,
+) -> u32 {
     if !out.is_null() && !len.is_null() {
         // SAFETY: the caller's buffer of at least one unit when *len > 0.
         unsafe {
@@ -592,7 +598,9 @@ extern "win64" fn WindowsCreateString(src: *const u16, len: u32, out: *mut u64) 
         unsafe { *out = 0 };
         return S_OK;
     }
-    let Some(p) = kernel32::heap_alloc(core::mem::size_of::<HString>() + (len as usize + 1) * 2, false) else { return E_OUTOFMEMORY };
+    let Some(p) = kernel32::heap_alloc(core::mem::size_of::<HString>() + (len as usize + 1) * 2, false) else {
+        return E_OUTOFMEMORY;
+    };
     // SAFETY: a fresh block holding the header and len + 1 units.
     unsafe {
         let text = (p as usize + core::mem::size_of::<HString>()) as *mut u16;
@@ -615,7 +623,11 @@ extern "win64" fn WindowsDeleteString(s: u64) -> u32 {
 extern "win64" fn WindowsGetStringRawBuffer(s: u64, len: *mut u32) -> *const u16 {
     static EMPTY: u16 = 0;
     // SAFETY: NULL or a valid HSTRING.
-    let (buf, n) = if s == 0 { (&EMPTY as *const u16, 0) } else { unsafe { ((*(s as *const HString)).buffer, (*(s as *const HString)).length) } };
+    let (buf, n) = if s == 0 {
+        (&EMPTY as *const u16, 0)
+    } else {
+        unsafe { ((*(s as *const HString)).buffer, (*(s as *const HString)).length) }
+    };
     if !len.is_null() {
         // SAFETY: the caller's out pointer.
         unsafe { *len = n };
@@ -625,7 +637,11 @@ extern "win64" fn WindowsGetStringRawBuffer(s: u64, len: *mut u32) -> *const u16
 
 extern "win64" fn WindowsGetStringLen(s: u64) -> u32 {
     // SAFETY: as above.
-    if s == 0 { 0 } else { unsafe { (*(s as *const HString)).length } }
+    if s == 0 {
+        0
+    } else {
+        unsafe { (*(s as *const HString)).length }
+    }
 }
 
 extern "win64" fn RoGetActivationFactory(class: u64, _iid: u64, out: *mut u64) -> u32 {
@@ -656,9 +672,17 @@ extern "win64" fn WindowsCompareStringOrdinal(a: u64, b: u64, out: *mut i32) -> 
         return E_INVALIDARG;
     }
     // SAFETY: NULL or a valid HSTRING.
-    let (pa, la) = if a == 0 { (core::ptr::null::<u16>(), 0) } else { unsafe { ((*(a as *const HString)).buffer, (*(a as *const HString)).length) } };
+    let (pa, la) = if a == 0 {
+        (core::ptr::null::<u16>(), 0)
+    } else {
+        unsafe { ((*(a as *const HString)).buffer, (*(a as *const HString)).length) }
+    };
     // SAFETY: as above.
-    let (pb, lb) = if b == 0 { (core::ptr::null::<u16>(), 0) } else { unsafe { ((*(b as *const HString)).buffer, (*(b as *const HString)).length) } };
+    let (pb, lb) = if b == 0 {
+        (core::ptr::null::<u16>(), 0)
+    } else {
+        unsafe { ((*(b as *const HString)).buffer, (*(b as *const HString)).length) }
+    };
     let mut result = 0i32;
     for i in 0..la.min(lb) {
         // SAFETY: both strings have at least that many units.

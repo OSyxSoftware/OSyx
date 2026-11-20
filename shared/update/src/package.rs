@@ -79,7 +79,9 @@ pub fn allowed_path(name: &str, path: &str) -> bool {
 }
 
 fn valid_version(v: &str) -> bool {
-    !v.is_empty() && v.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && part.parse::<u64>().is_ok())
+    !v.is_empty()
+        && v.split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && part.parse::<u64>().is_ok())
 }
 
 /// One line of text: no control characters, not empty, not too long.
@@ -126,7 +128,9 @@ impl Package {
             match word {
                 "name" if name.is_none() && valid_name(rest) => name = Some(rest.to_string()),
                 "version" if version.is_none() && valid_version(rest) => version = Some(rest.to_string()),
-                "description" if description.is_none() && valid_description(rest) => description = Some(rest.to_string()),
+                "description" if description.is_none() && valid_description(rest) => {
+                    description = Some(rest.to_string())
+                }
                 "payload" if payload.is_none() => {
                     let mut f = rest.split(' ');
                     let sha = f.next().and_then(parse_hex::<32>).ok_or_else(bad)?;
@@ -139,7 +143,11 @@ impl Package {
                     let mut f = rest.splitn(4, ' ');
                     let sha256 = f.next().and_then(parse_hex::<32>).ok_or_else(bad)?;
                     let size = f.next().and_then(|s| s.parse().ok()).ok_or_else(bad)?;
-                    let mode = f.next().and_then(|s| u32::from_str_radix(s, 8).ok()).filter(|m| *m <= 0o777).ok_or_else(bad)?;
+                    let mode = f
+                        .next()
+                        .and_then(|s| u32::from_str_radix(s, 8).ok())
+                        .filter(|m| *m <= 0o777)
+                        .ok_or_else(bad)?;
                     let path = f.next().ok_or_else(bad)?;
                     if !allowed_path(name, path) {
                         return Err(format!("package manifest line {}: package {name} may not write {path}", n + 2));
@@ -202,13 +210,23 @@ impl Index {
             }
             let bad = || format!("package list line {}: {line}", n + 2);
             let mut f = line.splitn(4, ' ');
-            let (Some("package"), Some(name), Some(version), Some(description)) = (f.next(), f.next(), f.next(), f.next()) else {
+            let (Some("package"), Some(name), Some(version), Some(description)) =
+                (f.next(), f.next(), f.next(), f.next())
+            else {
                 return Err(bad());
             };
-            if !valid_name(name) || !valid_version(version) || !valid_description(description) || packages.iter().any(|p| p.name == name) {
+            if !valid_name(name)
+                || !valid_version(version)
+                || !valid_description(description)
+                || packages.iter().any(|p| p.name == name)
+            {
                 return Err(bad());
             }
-            packages.push(Listing { name: name.to_string(), version: version.to_string(), description: description.to_string() });
+            packages.push(Listing {
+                name: name.to_string(),
+                version: version.to_string(),
+                description: description.to_string(),
+            });
         }
         Ok(Index { packages })
     }
@@ -338,8 +356,16 @@ mod tests {
     fn a_list_survives_writing_and_reading_and_orders_versions() {
         let index = Index {
             packages: vec![
-                Listing { name: "hello".to_string(), version: "1.2.0".to_string(), description: "Says hello".to_string() },
-                Listing { name: "notes".to_string(), version: "0.10.0".to_string(), description: "Keeps notes".to_string() },
+                Listing {
+                    name: "hello".to_string(),
+                    version: "1.2.0".to_string(),
+                    description: "Says hello".to_string(),
+                },
+                Listing {
+                    name: "notes".to_string(),
+                    version: "0.10.0".to_string(),
+                    description: "Keeps notes".to_string(),
+                },
             ],
         };
         assert_eq!(Index::parse(&index.to_text()).unwrap(), index);

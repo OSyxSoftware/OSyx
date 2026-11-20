@@ -6,11 +6,7 @@
 //! dynamic key name is the standard abbreviation too) and every year uses
 //! the same rule.
 #![allow(non_snake_case)]
-use crate::{
-    error::*,
-    kernel32::fail,
-    sysext, teb, tz,
-};
+use crate::{error::*, kernel32::fail, sysext, teb, tz};
 
 const TIME_ZONE_ID_UNKNOWN: u32 = 0;
 const TIME_ZONE_ID_STANDARD: u32 = 1;

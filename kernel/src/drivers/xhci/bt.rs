@@ -43,7 +43,15 @@ impl Pipe {
     fn new(ep: &EndpointDescriptor, ac64: bool, len: u32) -> Result<Pipe, XhciError> {
         let mem = DmaRing::new(ac64)?;
         let ring = ProducerRing::new(&mem);
-        Ok(Pipe { dci: osyx_usb::xhci::dci(ep.address), ring, mem, buffer: DmaPage::new(ac64)?, len, pending: None, errors: 0 })
+        Ok(Pipe {
+            dci: osyx_usb::xhci::dci(ep.address),
+            ring,
+            mem,
+            buffer: DmaPage::new(ac64)?,
+            len,
+            pending: None,
+            errors: 0,
+        })
     }
 
     /// Queues a transfer of `len` bytes from (OUT) or into (IN) the buffer.
@@ -118,7 +126,14 @@ impl BtState {
 impl Xhci {
     /// Configures a Bluetooth controller (interface 0: interrupt IN, bulk
     /// IN and OUT) and registers it with the Bluetooth core.
-    pub(super) fn setup_bt(&mut self, slot: u8, config: u8, iface: &Interface, vid: u16, pid: u16) -> Result<(), XhciError> {
+    pub(super) fn setup_bt(
+        &mut self,
+        slot: u8,
+        config: u8,
+        iface: &Interface,
+        vid: u16,
+        pid: u16,
+    ) -> Result<(), XhciError> {
         let (Some(ev), Some(bin), Some(bout)) = (iface.interrupt_in(), iface.bulk_in(), iface.bulk_out()) else {
             return Err(XhciError::Unsupported("Bluetooth interface without its three endpoints"));
         };
@@ -133,9 +148,11 @@ impl Xhci {
         dev.input.zero();
         let mut add = 1u32;
         let mut max_dci = 1;
-        for (ep, pipe, ep_type) in
-            [(&ev, &events, EndpointType::InterruptIn), (&bin, &acl_in, EndpointType::BulkIn), (&bout, &acl_out, EndpointType::BulkOut)]
-        {
+        for (ep, pipe, ep_type) in [
+            (&ev, &events, EndpointType::InterruptIn),
+            (&bin, &acl_in, EndpointType::BulkIn),
+            (&bout, &acl_out, EndpointType::BulkOut),
+        ] {
             let (dequeue, dcs) = pipe.ring.start();
             let max_packet = ep.max_packet.max(1);
             let periodic = ep_type == EndpointType::InterruptIn;
@@ -147,7 +164,11 @@ impl Xhci {
                 dequeue,
                 dcs,
                 average_trb_length: max_packet,
-                max_esit_payload: if periodic { max_packet as u32 * (ep.mult as u32 + 1) * (ep.max_burst as u32 + 1) } else { 0 },
+                max_esit_payload: if periodic {
+                    max_packet as u32 * (ep.mult as u32 + 1) * (ep.max_burst as u32 + 1)
+                } else {
+                    0
+                },
                 error_count: 3,
             };
             dev.input.write_dwords(l.input_endpoint(pipe.dci), &ctx.encode());
@@ -242,7 +263,13 @@ impl Xhci {
         if !code.is_ok() {
             pipe.errors += 1;
             if pipe.errors <= 3 || pipe.errors == MAX_ERRORS {
-                kprintln!("bluetooth: hci{}: endpoint {} transfer error {:?} ({} in a row)", unit, dci, code, pipe.errors);
+                kprintln!(
+                    "bluetooth: hci{}: endpoint {} transfer error {:?} ({} in a row)",
+                    unit,
+                    dci,
+                    code,
+                    pipe.errors
+                );
             }
             if code.halts_endpoint() {
                 self.recover_bt_endpoint(slot, dci);
@@ -258,7 +285,9 @@ impl Xhci {
                 // endpoint with events.
                 let events = dci == bt.events.dci || bluetooth::bulk_carries_events(unit);
                 let stream = if events { &mut bt.event_stream } else { &mut bt.acl_stream };
-                stream.feed(&data, |p| bluetooth::deliver(unit, if events { Incoming::Event(p) } else { Incoming::Acl(p) }));
+                stream.feed(&data, |p| {
+                    bluetooth::deliver(unit, if events { Incoming::Event(p) } else { Incoming::Acl(p) })
+                });
             }
         }
         self.bt_queue_in(slot);
@@ -294,9 +323,20 @@ impl Xhci {
             match pkt {
                 Outgoing::Command(cmd) => {
                     // Class request to the interface (Vol 4, Part B, 2.2).
-                    let setup = SetupPacket { request_type: 0x20, request: 0, value: 0, index: iface as u16, length: cmd.len() as u16 };
+                    let setup = SetupPacket {
+                        request_type: 0x20,
+                        request: 0,
+                        value: 0,
+                        index: iface as u16,
+                        length: cmd.len() as u16,
+                    };
                     if let Err(e) = self.control_out(slot, setup, &cmd) {
-                        kprintln!("bluetooth: hci{}: command {:#06x} not sent: {}", unit, u16::from_le_bytes([cmd[0], cmd[1]]), e);
+                        kprintln!(
+                            "bluetooth: hci{}: command {:#06x} not sent: {}",
+                            unit,
+                            u16::from_le_bytes([cmd[0], cmd[1]]),
+                            e
+                        );
                         bluetooth::deliver(unit, Incoming::SendFailed);
                     }
                 }

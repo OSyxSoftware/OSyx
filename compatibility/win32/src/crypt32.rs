@@ -24,7 +24,11 @@ pub(crate) use encode::{der, der_oid, der_uint};
 /// rustls-rustcrypto (whose signature verifiers the chain checks use) is
 /// built against getrandom; its randomness is the kernel's CSPRNG.
 fn osyx_random(buf: &mut [u8]) -> Result<(), getrandom::Error> {
-    if crate::ucrt::entropy(buf) { Ok(()) } else { Err(getrandom::Error::UNSUPPORTED) }
+    if crate::ucrt::entropy(buf) {
+        Ok(())
+    } else {
+        Err(getrandom::Error::UNSUPPORTED)
+    }
 }
 getrandom::register_custom_getrandom!(osyx_random);
 
@@ -94,7 +98,11 @@ fn items(d: &[u8]) -> Result<Vec<Tlv<'_>>, u32> {
 }
 
 fn expect(t: Tlv<'_>, tag: u8) -> Result<Tlv<'_>, u32> {
-    if t.tag == tag { Ok(t) } else { Err(CRYPT_E_ASN1_BADTAG) }
+    if t.tag == tag {
+        Ok(t)
+    } else {
+        Err(CRYPT_E_ASN1_BADTAG)
+    }
 }
 
 const SEQ: u8 = 0x30;
@@ -221,7 +229,19 @@ fn parse_cert(der: &[u8]) -> Result<Cert, u32> {
             }
         }
     }
-    Ok(Cert { der: outer.raw.to_vec(), version, serial, sig_alg, issuer, subject, not_before, not_after, key_alg, key, extensions })
+    Ok(Cert {
+        der: outer.raw.to_vec(),
+        version,
+        serial,
+        sig_alg,
+        issuer,
+        subject,
+        not_before,
+        not_after,
+        key_alg,
+        key,
+        extensions,
+    })
 }
 
 /// The attributes of a Name: (OID, string value), in order.
@@ -284,7 +304,12 @@ fn attr_label(oid: &str) -> String {
 fn alt_names(c: &Cert, tag: u8) -> Vec<String> {
     let Some(ext) = c.extensions.iter().find(|e| e.0 == OID_SAN) else { return Vec::new() };
     let Ok((seq, _)) = tlv(&ext.2) else { return Vec::new() };
-    items(seq.body).unwrap_or_default().into_iter().filter(|t| t.tag == 0x80 | tag).map(|t| String::from_utf8_lossy(t.body).into_owned()).collect()
+    items(seq.body)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.tag == 0x80 | tag)
+        .map(|t| String::from_utf8_lossy(t.body).into_owned())
+        .collect()
 }
 
 // ---- PKCS#7 ---------------------------------------------------------------------------------
@@ -319,7 +344,8 @@ fn attributes(t: Tlv<'_>) -> Result<Vec<Attribute>, u32> {
         .map(|a| {
             let f = items(expect(a, SEQ)?.body)?;
             let oid = oid_string(expect(*f.first().ok_or(ASN1)?, OID)?.body);
-            let values = items(expect(*f.get(1).ok_or(ASN1)?, SET)?.body)?.into_iter().map(|v| v.raw.to_vec()).collect();
+            let values =
+                items(expect(*f.get(1).ok_or(ASN1)?, SET)?.body)?.into_iter().map(|v| v.raw.to_vec()).collect();
             Ok((oid, values))
         })
         .collect()
@@ -341,7 +367,11 @@ fn parse_signed(der: &[u8]) -> Result<Signed, u32> {
             let (inner, _) = tlv(c.body)?;
             // Data is an OCTET STRING; other types (Authenticode's
             // SpcIndirectDataContent) are kept whole.
-            if inner.tag == 0x04 { inner.body.to_vec() } else { inner.raw.to_vec() }
+            if inner.tag == 0x04 {
+                inner.body.to_vec()
+            } else {
+                inner.raw.to_vec()
+            }
         }
         _ => Vec::new(),
     };
@@ -635,7 +665,9 @@ extern "win64" fn CryptQueryObject(
     let data = match kind {
         CERT_QUERY_OBJECT_FILE => {
             // SAFETY: a NUL-terminated file name.
-            let Some(name) = (unsafe { path::wide_to_string(object as *const u16) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+            let Some(name) = (unsafe { path::wide_to_string(object as *const u16) }) else {
+                return fail(ERROR_INVALID_PARAMETER, 0);
+            };
             let p = match path::to_osyx(&name, &kernel32::cwd_win()) {
                 Ok(p) => p,
                 Err(e) => return fail(e, 0),
@@ -719,7 +751,14 @@ extern "win64" fn CryptQueryObject(
     1
 }
 
-extern "win64" fn CryptMsgOpenToDecode(encoding: u32, _flags: u32, kind: u32, _prov: u64, _recipient: u64, stream: u64) -> u64 {
+extern "win64" fn CryptMsgOpenToDecode(
+    encoding: u32,
+    _flags: u32,
+    kind: u32,
+    _prov: u64,
+    _recipient: u64,
+    stream: u64,
+) -> u64 {
     if encoding & PKCS_7_ASN_ENCODING == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -905,7 +944,8 @@ extern "win64" fn CertOpenStore(provider: u64, _encoding: u32, _prov: u64, flags
                 if p.is_null() {
                     return fail(ERROR_INVALID_PARAMETER, 0);
                 }
-                core::slice::from_raw_parts(*(p.add(8) as *const u64) as *const u8, *(p as *const u32) as usize).to_vec()
+                core::slice::from_raw_parts(*(p.add(8) as *const u64) as *const u8, *(p as *const u32) as usize)
+                    .to_vec()
             };
             match parse_signed(&data) {
                 Ok(s) => new_store(s.certs),
@@ -968,7 +1008,14 @@ const CERT_FIND_SUBJECT_NAME: u32 = 0x2_0007;
 const CERT_FIND_SUBJECT_CERT: u32 = 0xb_0000;
 const CERT_FIND_EXISTING: u32 = 0xd_0000;
 
-extern "win64" fn CertFindCertificateInStore(store: u64, _encoding: u32, _flags: u32, kind: u32, para: *const u8, prev: u64) -> u64 {
+extern "win64" fn CertFindCertificateInStore(
+    store: u64,
+    _encoding: u32,
+    _flags: u32,
+    kind: u32,
+    para: *const u8,
+    prev: u64,
+) -> u64 {
     let s = {
         let h = HANDLES.lock().unwrap();
         match h.stores.get(&store) {
@@ -989,7 +1036,9 @@ extern "win64" fn CertFindCertificateInStore(store: u64, _encoding: u32, _flags:
         }
     };
     // SAFETY: a CERT_NAME_BLOB / CERT_INFO / CERT_CONTEXT, per the find type.
-    let blob = |p: *const u8| unsafe { core::slice::from_raw_parts(*(p.add(8) as *const u64) as *const u8, *(p as *const u32) as usize).to_vec() };
+    let blob = |p: *const u8| unsafe {
+        core::slice::from_raw_parts(*(p.add(8) as *const u64) as *const u8, *(p as *const u32) as usize).to_vec()
+    };
     let certs = all_certs(&s);
     for (i, der) in certs.iter().enumerate().skip(start) {
         let Ok(c) = parse_cert(der) else { continue };
@@ -1038,8 +1087,12 @@ fn cert_name(c: &Cert, kind: u32, flags: u32, para: *const u8) -> String {
     let attrs = name_attrs(if issuer { &c.issuer } else { &c.subject });
     let first = |oid: &str| attrs.iter().find(|a| a.0 == oid).map(|a| a.1.clone());
     match kind {
-        CERT_NAME_EMAIL_TYPE => (if issuer { None } else { alt_names(c, 1).into_iter().next() }).or_else(|| first(OID_EMAIL)).unwrap_or_default(),
-        CERT_NAME_RDN_TYPE => attrs.iter().map(|(o, v)| alloc::format!("{}={}", attr_label(o), v)).collect::<Vec<_>>().join(", "),
+        CERT_NAME_EMAIL_TYPE => (if issuer { None } else { alt_names(c, 1).into_iter().next() })
+            .or_else(|| first(OID_EMAIL))
+            .unwrap_or_default(),
+        CERT_NAME_RDN_TYPE => {
+            attrs.iter().map(|(o, v)| alloc::format!("{}={}", attr_label(o), v)).collect::<Vec<_>>().join(", ")
+        }
         CERT_NAME_ATTR_TYPE => {
             // SAFETY: NULL or the caller's NUL-terminated OID string.
             let oid = unsafe { path::ansi_to_string(para) }.unwrap_or_default();
@@ -1051,7 +1104,9 @@ fn cert_name(c: &Cert, kind: u32, flags: u32, para: *const u8) -> String {
             .or_else(|| (if issuer { None } else { alt_names(c, 1).into_iter().next() }).or_else(|| first(OID_EMAIL)))
             .or_else(|| attrs.first().map(|a| a.1.clone()))
             .unwrap_or_default(),
-        CERT_NAME_DNS_TYPE => (if issuer { None } else { alt_names(c, 2).into_iter().next() }).or_else(|| first(OID_CN)).unwrap_or_default(),
+        CERT_NAME_DNS_TYPE => (if issuer { None } else { alt_names(c, 2).into_iter().next() })
+            .or_else(|| first(OID_CN))
+            .unwrap_or_default(),
         CERT_NAME_URL_TYPE => (if issuer { None } else { alt_names(c, 6).into_iter().next() }).unwrap_or_default(),
         CERT_NAME_UPN_TYPE => String::new(), // otherName UPNs are not decoded
         _ => String::new(),
@@ -1059,7 +1114,10 @@ fn cert_name(c: &Cert, kind: u32, flags: u32, para: *const u8) -> String {
 }
 
 extern "win64" fn CertGetNameStringW(ctx: u64, kind: u32, flags: u32, para: *const u8, out: *mut u16, len: u32) -> u32 {
-    let name = context_der(ctx).and_then(|d| parse_cert(&d).ok()).map(|c| cert_name(&c, kind, flags, para)).unwrap_or_default();
+    let name = context_der(ctx)
+        .and_then(|d| parse_cert(&d).ok())
+        .map(|c| cert_name(&c, kind, flags, para))
+        .unwrap_or_default();
     let w: Vec<u16> = name.encode_utf16().collect();
     if out.is_null() || len == 0 {
         return w.len() as u32 + 1;
@@ -1104,7 +1162,13 @@ fn base64(data: &[u8], eol: &str) -> String {
 }
 
 fn binary_string(data: &[u8], flags: u32) -> Result<String, u32> {
-    let eol = if flags & CRYPT_STRING_NOCRLF != 0 { "" } else if flags & CRYPT_STRING_NOCR != 0 { "\n" } else { "\r\n" };
+    let eol = if flags & CRYPT_STRING_NOCRLF != 0 {
+        ""
+    } else if flags & CRYPT_STRING_NOCR != 0 {
+        "\n"
+    } else {
+        "\r\n"
+    };
     let hex = |b: &u8| alloc::format!("{b:02x}");
     Ok(match flags & 0xffff {
         CRYPT_STRING_BASE64 => base64(data, eol),
@@ -1361,7 +1425,11 @@ impl webpki::ExtendedKeyUsageValidator for Usage {
         }
         let has = |o: &String| present.contains(o);
         let ok = if self.all { self.oids.iter().all(has) } else { self.oids.iter().any(has) };
-        if ok { Ok(()) } else { Err(webpki::Error::RequiredEkuNotFound) }
+        if ok {
+            Ok(())
+        } else {
+            Err(webpki::Error::RequiredEkuNotFound)
+        }
     }
 }
 
@@ -1377,11 +1445,23 @@ fn trust_error(e: &webpki::Error, untrusted_root: bool) -> u32 {
         | E::UnsupportedSignatureAlgorithmContext(_)
         | E::UnsupportedSignatureAlgorithmForPublicKey
         | E::UnsupportedSignatureAlgorithmForPublicKeyContext(_) => CERT_TRUST_IS_NOT_SIGNATURE_VALID,
-        E::RequiredEkuNotFound | E::RequiredEkuNotFoundContext(_) | E::EmptyEkuExtension => CERT_TRUST_IS_NOT_VALID_FOR_USAGE,
-        E::CaUsedAsEndEntity | E::EndEntityUsedAsCa | E::PathLenConstraintViolated => CERT_TRUST_INVALID_BASIC_CONSTRAINTS,
-        E::NameConstraintViolation | E::MalformedNameConstraint | E::InvalidNetworkMaskConstraint => CERT_TRUST_INVALID_NAME_CONSTRAINTS,
-        E::BadDer | E::BadDerTime | E::ExtensionValueInvalid | E::MalformedExtensions | E::UnsupportedCriticalExtension
-        | E::UnsupportedCertVersion | E::TrailingData(_) | E::InvalidSerialNumber => CERT_TRUST_INVALID_EXTENSION,
+        E::RequiredEkuNotFound | E::RequiredEkuNotFoundContext(_) | E::EmptyEkuExtension => {
+            CERT_TRUST_IS_NOT_VALID_FOR_USAGE
+        }
+        E::CaUsedAsEndEntity | E::EndEntityUsedAsCa | E::PathLenConstraintViolated => {
+            CERT_TRUST_INVALID_BASIC_CONSTRAINTS
+        }
+        E::NameConstraintViolation | E::MalformedNameConstraint | E::InvalidNetworkMaskConstraint => {
+            CERT_TRUST_INVALID_NAME_CONSTRAINTS
+        }
+        E::BadDer
+        | E::BadDerTime
+        | E::ExtensionValueInvalid
+        | E::MalformedExtensions
+        | E::UnsupportedCriticalExtension
+        | E::UnsupportedCertVersion
+        | E::TrailingData(_)
+        | E::InvalidSerialNumber => CERT_TRUST_INVALID_EXTENSION,
         // UnknownIssuer and the path search limits: no chain to a trusted root.
         _ if untrusted_root => CERT_TRUST_IS_UNTRUSTED_ROOT,
         _ => CERT_TRUST_IS_PARTIAL_CHAIN,
@@ -1428,7 +1508,11 @@ fn requested_usage(para: *const u8, narrow: bool) -> Usage {
             if list == 0 {
                 break;
             }
-            let s = if narrow { *((list + 4 * i as u64) as *const u32) as u64 } else { *((list + 8 * i as u64) as *const u64) };
+            let s = if narrow {
+                *((list + 4 * i as u64) as *const u32) as u64
+            } else {
+                *((list + 8 * i as u64) as *const u64)
+            };
             u.oids.push(c_string(s));
         }
     }
@@ -1458,8 +1542,11 @@ fn same_name(full: &[u8], other: &[u8]) -> bool {
 fn build_chain(end: &[u8], extra: &[Vec<u8>], time: u64, usage: &Usage) -> (Vec<Vec<u8>>, u32) {
     use rustls_pki_types::{CertificateDer, UnixTime};
     let der = CertificateDer::from(end);
-    let Ok(ee) = webpki::EndEntityCert::try_from(&der) else { return (alloc::vec![end.to_vec()], CERT_TRUST_INVALID_EXTENSION) };
-    let intermediates: Vec<CertificateDer<'_>> = extra.iter().filter(|c| c.as_slice() != end).map(|c| CertificateDer::from(c.as_slice())).collect();
+    let Ok(ee) = webpki::EndEntityCert::try_from(&der) else {
+        return (alloc::vec![end.to_vec()], CERT_TRUST_INVALID_EXTENSION);
+    };
+    let intermediates: Vec<CertificateDer<'_>> =
+        extra.iter().filter(|c| c.as_slice() != end).map(|c| CertificateDer::from(c.as_slice())).collect();
     let algs = rustls_rustcrypto::provider().signature_verification_algorithms.all;
     let at = UnixTime::since_unix_epoch(core::time::Duration::from_secs(time));
     match ee.verify_for_usage(algs, webpki_roots::TLS_SERVER_ROOTS, &intermediates, at, usage, None, None) {
@@ -1467,9 +1554,9 @@ fn build_chain(end: &[u8], extra: &[Vec<u8>], time: u64, usage: &Usage) -> (Vec<
             let mut certs = alloc::vec![end.to_vec()];
             certs.extend(path.intermediate_certificates().map(|c| c.der().as_ref().to_vec()));
             let anchor = path.anchor();
-            let root = extra.iter().find(|c| parse_cert(c).is_ok_and(|p| {
-                same_name(&p.subject, anchor.subject.as_ref()) && p.subject == p.issuer
-            }));
+            let root = extra.iter().find(|c| {
+                parse_cert(c).is_ok_and(|p| same_name(&p.subject, anchor.subject.as_ref()) && p.subject == p.issuer)
+            });
             if let Some(r) = root {
                 certs.push(r.clone());
             }
@@ -1478,7 +1565,8 @@ fn build_chain(end: &[u8], extra: &[Vec<u8>], time: u64, usage: &Usage) -> (Vec<
         Err(e) => {
             // A path ending in a self-signed certificate the store does not
             // hold has an untrusted root; otherwise the chain stops short.
-            let self_signed = core::iter::once(end).chain(extra.iter().map(Vec::as_slice))
+            let self_signed = core::iter::once(end)
+                .chain(extra.iter().map(Vec::as_slice))
                 .any(|c| parse_cert(c).is_ok_and(|p| p.subject == p.issuer));
             (alloc::vec![end.to_vec()], trust_error(&e, self_signed))
         }
@@ -1494,7 +1582,14 @@ fn build_chain(end: &[u8], extra: &[Vec<u8>], time: u64, usage: &Usage) -> (Vec<
 /// context has one simple chain; its layout follows the caller's pointer
 /// size.
 extern "win64" fn CertGetCertificateChain(
-    _engine: u64, ctx: u64, time: *const u64, store: u64, para: *const u8, flags: u32, _reserved: u64, out: *mut u64,
+    _engine: u64,
+    ctx: u64,
+    time: *const u64,
+    store: u64,
+    para: *const u8,
+    flags: u32,
+    _reserved: u64,
+    out: *mut u64,
 ) -> i32 {
     if out.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -1506,7 +1601,11 @@ extern "win64" fn CertGetCertificateChain(
     let narrow = crate::wow64::is_active();
     let usage = requested_usage(para, narrow);
     let (certs, error) = build_chain(&end, &extra, chain_time(time), &usage);
-    let revocation = if flags & REVOCATION_CHECKS != 0 { CERT_TRUST_REVOCATION_STATUS_UNKNOWN | CERT_TRUST_IS_OFFLINE_REVOCATION } else { 0 };
+    let revocation = if flags & REVOCATION_CHECKS != 0 {
+        CERT_TRUST_REVOCATION_STATUS_UNKNOWN | CERT_TRUST_IS_OFFLINE_REVOCATION
+    } else {
+        0
+    };
     let mut contexts = Vec::new();
     for c in &certs {
         match make_context(0, 0, c) {
@@ -1524,13 +1623,15 @@ extern "win64" fn CertGetCertificateChain(
     // CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, not checked.
     let n = certs.len();
     let has_root = error == 0 && n > 1 && parse_cert(&certs[n - 1]).is_ok_and(|p| p.subject == p.issuer);
-    let status: Vec<(u32, u32)> = (0..n).map(|i| {
-        let root = has_root && i == n - 1;
-        let checked = revocation != 0 && !(root && flags & 0x4000_0000 != 0);
-        let err = if i == 0 { error } else { 0 } | if checked { revocation } else { 0 };
-        let info = if root { CERT_TRUST_IS_SELF_SIGNED | CERT_TRUST_HAS_NAME_MATCH_ISSUER } else { 0 };
-        (err, info)
-    }).collect();
+    let status: Vec<(u32, u32)> = (0..n)
+        .map(|i| {
+            let root = has_root && i == n - 1;
+            let checked = revocation != 0 && !(root && flags & 0x4000_0000 != 0);
+            let err = if i == 0 { error } else { 0 } | if checked { revocation } else { 0 };
+            let info = if root { CERT_TRUST_IS_SELF_SIGNED | CERT_TRUST_HAS_NAME_MATCH_ISSUER } else { 0 };
+            (err, info)
+        })
+        .collect();
     let chain_error = status.iter().fold(0, |a, s| a | s.0);
     let chain_info = status.iter().fold(0, |a, s| a | s.1);
     // Layout: CERT_CHAIN_CONTEXT, CERT_SIMPLE_CHAIN, rgpChain[1],
@@ -1552,7 +1653,11 @@ extern "win64" fn CertGetCertificateChain(
     let b = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
     let put32 = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
     let put_ptr = |b: &mut [u8], at: usize, v: u64| {
-        if narrow { b[at..at + 4].copy_from_slice(&(v as u32).to_le_bytes()) } else { b[at..at + 8].copy_from_slice(&v.to_le_bytes()) }
+        if narrow {
+            b[at..at + 4].copy_from_slice(&(v as u32).to_le_bytes())
+        } else {
+            b[at..at + 8].copy_from_slice(&v.to_le_bytes())
+        }
     };
     // CERT_CHAIN_CONTEXT: cbSize, TrustStatus, cChain, rgpChain.
     put32(b, 0, ctx_size as u32);

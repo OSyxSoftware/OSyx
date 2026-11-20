@@ -73,7 +73,11 @@ fn copy(from: &str, to: &str, fail_if_exists: bool) -> Result<(), u32> {
         return Err(ERROR_FILE_EXISTS);
     }
     let input = os_sys::open(&src, osyx_abi::OPEN_READ, 0).map_err(errno_to_win32)?;
-    let output = match os_sys::open(&dst, osyx_abi::OPEN_WRITE | osyx_abi::OPEN_CREATE | osyx_abi::OPEN_TRUNCATE, st.mode | 0o200) {
+    let output = match os_sys::open(
+        &dst,
+        osyx_abi::OPEN_WRITE | osyx_abi::OPEN_CREATE | osyx_abi::OPEN_TRUNCATE,
+        st.mode | 0o200,
+    ) {
         Ok(h) => h,
         Err(e) => {
             let _ = os_sys::close(input);
@@ -135,8 +139,12 @@ const COPY_FILE_OPEN_SOURCE_FOR_WRITE: u32 = 0x4;
 const COPY_FILE_ALLOW_DECRYPTED_DESTINATION: u32 = 0x8;
 const COPY_FILE_COPY_SYMLINK: u32 = 0x800;
 const COPY_FILE_NO_BUFFERING: u32 = 0x1000;
-const COPY_FILE_KNOWN: u32 = COPY_FILE_FAIL_IF_EXISTS | COPY_FILE_RESTARTABLE | COPY_FILE_OPEN_SOURCE_FOR_WRITE
-    | COPY_FILE_ALLOW_DECRYPTED_DESTINATION | COPY_FILE_COPY_SYMLINK | COPY_FILE_NO_BUFFERING;
+const COPY_FILE_KNOWN: u32 = COPY_FILE_FAIL_IF_EXISTS
+    | COPY_FILE_RESTARTABLE
+    | COPY_FILE_OPEN_SOURCE_FOR_WRITE
+    | COPY_FILE_ALLOW_DECRYPTED_DESTINATION
+    | COPY_FILE_COPY_SYMLINK
+    | COPY_FILE_NO_BUFFERING;
 
 /// Copies a symbolic link itself: the link's target is recreated at `to`.
 fn copy_link(from: &str, to: &str, fail_if_exists: bool) -> Option<Result<(), u32>> {
@@ -158,7 +166,14 @@ fn copy_link(from: &str, to: &str, fail_if_exists: bool) -> Option<Result<(), u3
 /// with the whole size when it is done (PROGRESS_CANCEL or _STOP then
 /// removes the copy, as an interrupted copy would). COPY_FILE_COPY_SYMLINK
 /// copies the link itself; the other flags are hints.
-extern "win64" fn CopyFileExW(from: *const u16, to: *const u16, progress: u64, data: u64, cancel: *const i32, flags: u32) -> i32 {
+extern "win64" fn CopyFileExW(
+    from: *const u16,
+    to: *const u16,
+    progress: u64,
+    data: u64,
+    cancel: *const i32,
+    flags: u32,
+) -> i32 {
     if flags & !COPY_FILE_KNOWN != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -203,15 +218,33 @@ extern "win64" fn CopyFileExW(from: *const u16, to: *const u16, progress: u64, d
 /// is moved to `backup` when one is given. Attributes and ACLs are not
 /// merged (OSyx keeps only the read-only bit). REPLACEFILE_WRITE_THROUGH
 /// needs nothing more: the renames below are complete when they return.
-extern "win64" fn ReplaceFileA(replaced: *const u8, replacement: *const u8, backup: *const u8, flags: u32, _e: u64, _r: u64) -> i32 {
+extern "win64" fn ReplaceFileA(
+    replaced: *const u8,
+    replacement: *const u8,
+    backup: *const u8,
+    flags: u32,
+    _e: u64,
+    _r: u64,
+) -> i32 {
     // SAFETY: NULL or NUL-terminated names.
-    let (Some(old), Some(new), b) = (unsafe { path::ansi_to_string(replaced) }, unsafe { path::ansi_to_string(replacement) }, unsafe { path::ansi_to_string(backup) }) else {
+    let (Some(old), Some(new), b) =
+        (unsafe { path::ansi_to_string(replaced) }, unsafe { path::ansi_to_string(replacement) }, unsafe {
+            path::ansi_to_string(backup)
+        })
+    else {
         return fail(ERROR_INVALID_PARAMETER, 0);
     };
     replace_file(old, new, b, flags)
 }
 
-extern "win64" fn ReplaceFileW(replaced: *const u16, replacement: *const u16, backup: *const u16, flags: u32, _e: u64, _r: u64) -> i32 {
+extern "win64" fn ReplaceFileW(
+    replaced: *const u16,
+    replacement: *const u16,
+    backup: *const u16,
+    flags: u32,
+    _e: u64,
+    _r: u64,
+) -> i32 {
     let (Some(old), Some(new)) = (name(replaced), name(replacement)) else {
         return fail(ERROR_INVALID_PARAMETER, 0);
     };
@@ -271,10 +304,10 @@ extern "win64" fn GetFinalPathNameByHandleW(h: u64, buf: *mut u16, len: u32, fla
     let win = path::to_windows(&f.path);
     let rest = win.get(2..).unwrap_or("\\");
     let s = match flags & 0x7 {
-        0 => alloc::format!("\\\\?\\{win}"), // VOLUME_NAME_DOS
+        0 => alloc::format!("\\\\?\\{win}"),                    // VOLUME_NAME_DOS
         2 => alloc::format!("\\Device\\HarddiskVolume1{rest}"), // VOLUME_NAME_NT
-        4 => String::from(rest), // VOLUME_NAME_NONE
-        _ => return fail(ERROR_NOT_SUPPORTED, 0), // VOLUME_NAME_GUID
+        4 => String::from(rest),                                // VOLUME_NAME_NONE
+        _ => return fail(ERROR_NOT_SUPPORTED, 0),               // VOLUME_NAME_GUID
     };
     kernel32::out_w(&s, buf, len)
 }
@@ -374,7 +407,14 @@ extern "win64" fn CreateSymbolicLinkW(link: *const u16, target: *const u16, flag
 /// FINDEX_INFO_LEVELS: standard (0) and basic (1, no short names, which
 /// OSyx never has); FINDEX_SEARCH_OPS: name match (0) and the advisory
 /// directory filter (1).
-pub(crate) extern "win64" fn FindFirstFileExW(pattern: *const u16, level: u32, data: u64, op: u32, filter: u64, flags: u32) -> u64 {
+pub(crate) extern "win64" fn FindFirstFileExW(
+    pattern: *const u16,
+    level: u32,
+    data: u64,
+    op: u32,
+    filter: u64,
+    flags: u32,
+) -> u64 {
     if level > 1 || op > 1 || filter != 0 || flags & !0x7 != 0 {
         return fail(ERROR_INVALID_PARAMETER, u64::MAX);
     }
@@ -630,7 +670,11 @@ extern "win64" fn GetFileInformationByHandleEx(h: u64, class: u32, out: u64, siz
                 teb::put(out, 0, (units.len() * 2) as u32);
                 let room = (size as usize - 4) / 2;
                 core::ptr::copy_nonoverlapping(units.as_ptr(), (out + 4) as *mut u16, units.len().min(room));
-                if units.len() > room { Err(ERROR_MORE_DATA) } else { Ok(()) }
+                if units.len() > room {
+                    Err(ERROR_MORE_DATA)
+                } else {
+                    Ok(())
+                }
             }),
             FILE_ATTRIBUTE_TAG_INFO => need(8).map(|()| {
                 teb::put(out, 0, kernel32::attributes(&st));
@@ -671,11 +715,19 @@ extern "win64" fn SetFileInformationByHandle(h: u64, class: u32, data: u64, size
                 // Allocation is advisory: it only truncates when smaller.
                 if class == FILE_END_OF_FILE_INFO || len < st.size {
                     // A mapped file may grow, not be cut into a view.
-                    os_sys::ftruncate(f.fd, len).map_err(|e| if e == osyx_abi::Errno::Busy { ERROR_USER_MAPPED_FILE } else { errno_to_win32(e) })?;
+                    os_sys::ftruncate(f.fd, len).map_err(|e| {
+                        if e == osyx_abi::Errno::Busy {
+                            ERROR_USER_MAPPED_FILE
+                        } else {
+                            errno_to_win32(e)
+                        }
+                    })?;
                 }
                 Ok(())
             }),
-            FILE_DISPOSITION_INFO => need(1).map(|()| f.delete_on_close.store(teb::get::<u8>(data, 0) != 0, Ordering::SeqCst)),
+            FILE_DISPOSITION_INFO => {
+                need(1).map(|()| f.delete_on_close.store(teb::get::<u8>(data, 0) != 0, Ordering::SeqCst))
+            }
             FILE_DISPOSITION_INFO_EX => need(4).and_then(|()| {
                 const DELETE: u32 = 0x1;
                 const POSIX: u32 = 0x2;
@@ -722,7 +774,11 @@ extern "win64" fn SetFileInformationByHandle(h: u64, class: u32, data: u64, size
                     }
                 }
                 let from = path::to_windows(&f.path);
-                if kernel32::move_file(Some(from), Some(to), u32::from(replace)) != 0 { Ok(()) } else { Err(teb::last_error()) }
+                if kernel32::move_file(Some(from), Some(to), u32::from(replace)) != 0 {
+                    Ok(())
+                } else {
+                    Err(teb::last_error())
+                }
             }),
             FILE_BASIC_INFO => need(36).and_then(|()| {
                 // LARGE_INTEGER 100 ns units; 0 means "leave unchanged".
@@ -769,7 +825,7 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         GetFileAttributesExA,
         CopyFileExW,
         ReplaceFileA,
-    ReplaceFileW,
+        ReplaceFileW,
         GetLongPathNameW,
         GetShortPathNameW,
         GetFinalPathNameByHandleW,

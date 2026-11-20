@@ -22,7 +22,8 @@ pub fn is_hid_over_i2c(id: &str) -> bool {
 
 /// The `_DSM` UUID of HID over I2C (3CDFF6F7-4267-4555-AD05-B30A3D8938DE)
 /// as the 16-byte buffer AML passes (first three fields little-endian).
-pub const DSM_UUID: [u8; 16] = [0xF7, 0xF6, 0xDF, 0x3C, 0x67, 0x42, 0x55, 0x45, 0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE];
+pub const DSM_UUID: [u8; 16] =
+    [0xF7, 0xF6, 0xDF, 0x3C, 0x67, 0x42, 0x55, 0x45, 0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE];
 /// Revision and function index of the descriptor register query.
 pub const DSM_REVISION: u64 = 1;
 pub const DSM_FUNCTION_DESCRIPTOR_ADDRESS: u64 = 1;
@@ -158,7 +159,12 @@ pub fn parse_resources(buf: &[u8]) -> Result<Resources, ResourceError> {
                         return Err(ResourceError::Truncated);
                     }
                     let source = string_at(d, 13 + data_len)?;
-                    out.i2c.push(I2cConnection { address: u16_at(d, 17)?, ten_bit: flags & 1 != 0, speed_hz: u32_at(d, 13)?, source });
+                    out.i2c.push(I2cConnection {
+                        address: u16_at(d, 17)?,
+                        ten_bit: flags & 1 != 0,
+                        speed_hz: u32_at(d, 13)?,
+                        source,
+                    });
                 }
             }
             _ => {}
@@ -253,8 +259,14 @@ mod tests {
         crs.extend(build::gpio_interrupt(0x42, "\\_SB.GPI0", false, true));
         crs.extend(build::end());
         let r = parse_resources(&crs).unwrap();
-        assert_eq!(r.i2c, [I2cConnection { address: 0x2C, ten_bit: false, speed_hz: 400_000, source: "\\_SB.PCI0.I2C1".into() }]);
-        assert_eq!(r.gpio_interrupts, [GpioInterrupt { pin: 0x42, source: "\\_SB.GPI0".into(), edge: false, active_low: true }]);
+        assert_eq!(
+            r.i2c,
+            [I2cConnection { address: 0x2C, ten_bit: false, speed_hz: 400_000, source: "\\_SB.PCI0.I2C1".into() }]
+        );
+        assert_eq!(
+            r.gpio_interrupts,
+            [GpioInterrupt { pin: 0x42, source: "\\_SB.GPI0".into(), edge: false, active_low: true }]
+        );
         assert!(r.interrupts.is_empty());
     }
 

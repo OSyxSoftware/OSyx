@@ -38,18 +38,18 @@ fn builtin_version() -> Vec<u8> {
     let (major, minor, build) = crate::sysext::windows_version();
     let mut fixed = Vec::with_capacity(52);
     for v in [
-        0xfeef_04bdu32,           // signature
-        0x0001_0000,              // structure version
-        major << 16 | minor,      // file version, most significant
-        build << 16,              // file version, least significant
-        major << 16 | minor,      // product version
+        0xfeef_04bdu32,      // signature
+        0x0001_0000,         // structure version
+        major << 16 | minor, // file version, most significant
+        build << 16,         // file version, least significant
+        major << 16 | minor, // product version
         build << 16,
-        0x3f,                     // flags mask
-        0,                        // flags
-        0x0004_0004,              // VOS_NT_WINDOWS32
-        2,                        // VFT_DLL
-        0,                        // subtype
-        0,                        // date
+        0x3f,        // flags mask
+        0,           // flags
+        0x0004_0004, // VOS_NT_WINDOWS32
+        2,           // VFT_DLL
+        0,           // subtype
+        0,           // date
         0,
     ] {
         fixed.extend_from_slice(&v.to_le_bytes());
@@ -128,7 +128,12 @@ pub(crate) extern "win64" fn GetFileVersionInfoW(filename: *const u16, _handle: 
         Err(e) => fail(e, 0),
     }
 }
-pub(crate) extern "win64" fn VerQueryValueW(block: *const u8, query: *const u16, out: *mut *const u8, len: *mut u32) -> i32 {
+pub(crate) extern "win64" fn VerQueryValueW(
+    block: *const u8,
+    query: *const u16,
+    out: *mut *const u8,
+    len: *mut u32,
+) -> i32 {
     if block.is_null() || out.is_null() || len.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }

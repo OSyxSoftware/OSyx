@@ -326,7 +326,8 @@ pub fn jit_fault(n: &osyx_abi::fault::Context) -> bool {
     drop(regions);
     // Image pages VirtualProtect made writable and executable switch the
     // same way.
-    let image = !private && matches!(IMAGE_PAGES.lock().unwrap().get(&page), Some(&(PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)));
+    let image = !private
+        && matches!(IMAGE_PAGES.lock().unwrap().get(&page), Some(&(PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)));
     if !private && !image {
         return false;
     }

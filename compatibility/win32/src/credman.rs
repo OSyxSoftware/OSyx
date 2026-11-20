@@ -75,7 +75,8 @@ fn store(all: &[Cred]) -> Result<(), u32> {
     }
     let name = file();
     let tmp = format!("{name}.{}.tmp", crate::kernel32::pid());
-    let fd = os_sys::open(&tmp, osyx_abi::OPEN_WRITE | osyx_abi::OPEN_CREATE | osyx_abi::OPEN_TRUNCATE, 0o600).map_err(errno_to_win32)?;
+    let fd = os_sys::open(&tmp, osyx_abi::OPEN_WRITE | osyx_abi::OPEN_CREATE | osyx_abi::OPEN_TRUNCATE, 0o600)
+        .map_err(errno_to_win32)?;
     let r = os_sys::write(fd, text.as_bytes()).map(|_| ()).and_then(|()| os_sys::fsync(fd));
     let _ = os_sys::close(fd);
     if let Err(e) = r {
@@ -106,7 +107,11 @@ unsafe fn read_cred(p: u64) -> Option<Cred> {
             target: path::ansi_to_string(teb::get::<u64>(p, 8) as *const u8)?,
             comment: path::ansi_to_string(teb::get::<u64>(p, 16) as *const u8).unwrap_or_default(),
             written: crate::sysext::now_filetime(),
-            blob: if blob_len == 0 { Vec::new() } else { core::slice::from_raw_parts(blob_p as *const u8, blob_len as usize).to_vec() },
+            blob: if blob_len == 0 {
+                Vec::new()
+            } else {
+                core::slice::from_raw_parts(blob_p as *const u8, blob_len as usize).to_vec()
+            },
             persist: teb::get(p, 48),
             user: path::ansi_to_string(teb::get::<u64>(p, 72) as *const u8).unwrap_or_default(),
         })

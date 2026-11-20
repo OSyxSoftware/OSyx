@@ -81,11 +81,19 @@ trait Round {
 impl Round for f32 {
     fn floor(self) -> f32 {
         let t = self as i64 as f32;
-        if t > self { t - 1. } else { t }
+        if t > self {
+            t - 1.
+        } else {
+            t
+        }
     }
     fn ceil(self) -> f32 {
         let t = self as i64 as f32;
-        if t < self { t + 1. } else { t }
+        if t < self {
+            t + 1.
+        } else {
+            t
+        }
     }
     fn round(self) -> f32 {
         Round::floor(self + 0.5)
@@ -150,7 +158,8 @@ impl Texture {
         let (x0, y0) = (x.floor(), y.floor());
         let (fx, fy) = (x - x0, y - y0);
         let (x0, y0) = (x0 as i64, y0 as i64);
-        let (a, b, c, d) = (self.texel(x0, y0), self.texel(x0 + 1, y0), self.texel(x0, y0 + 1), self.texel(x0 + 1, y0 + 1));
+        let (a, b, c, d) =
+            (self.texel(x0, y0), self.texel(x0 + 1, y0), self.texel(x0, y0 + 1), self.texel(x0 + 1, y0 + 1));
         let mut r = [0f32; 4];
         for k in 0..4 {
             r[k] = (a[k] * (1. - fx) + b[k] * fx) * (1. - fy) + (c[k] * (1. - fx) + d[k] * fx) * fy;
@@ -291,7 +300,10 @@ impl Context {
         if self.prim.is_none() {
             return; // outside glBegin/glEnd: undefined, ignored
         }
-        let mvp = mul(&self.stacks[1].last().copied().unwrap_or(IDENTITY), &self.stacks[0].last().copied().unwrap_or(IDENTITY));
+        let mvp = mul(
+            &self.stacks[1].last().copied().unwrap_or(IDENTITY),
+            &self.stacks[0].last().copied().unwrap_or(IDENTITY),
+        );
         let c = apply(&mvp, [x, y, z, 1.]);
         let w = if c[3] == 0. { 1. } else { c[3] };
         let [vx, vy, vw, vh] = self.viewport;
@@ -305,14 +317,14 @@ impl Context {
         match f {
             0 => [0.; 4],
             1 => [1.; 4],
-            0x0300 => src,                                                   // SRC_COLOR
-            0x0301 => src.map(|v| 1. - v),                                   // ONE_MINUS_SRC_COLOR
-            0x0302 => [src[3]; 4],                                           // SRC_ALPHA
-            0x0303 => [1. - src[3]; 4],                                      // ONE_MINUS_SRC_ALPHA
-            0x0304 => [dst[3]; 4],                                           // DST_ALPHA
-            0x0305 => [1. - dst[3]; 4],                                      // ONE_MINUS_DST_ALPHA
-            0x0306 => dst,                                                   // DST_COLOR
-            0x0307 => dst.map(|v| 1. - v),                                   // ONE_MINUS_DST_COLOR
+            0x0300 => src,                 // SRC_COLOR
+            0x0301 => src.map(|v| 1. - v), // ONE_MINUS_SRC_COLOR
+            0x0302 => [src[3]; 4],         // SRC_ALPHA
+            0x0303 => [1. - src[3]; 4],    // ONE_MINUS_SRC_ALPHA
+            0x0304 => [dst[3]; 4],         // DST_ALPHA
+            0x0305 => [1. - dst[3]; 4],    // ONE_MINUS_DST_ALPHA
+            0x0306 => dst,                 // DST_COLOR
+            0x0307 => dst.map(|v| 1. - v), // ONE_MINUS_DST_COLOR
             0x0308 => {
                 // SRC_ALPHA_SATURATE
                 let f = src[3].min(1. - dst[3]);
@@ -329,16 +341,27 @@ impl Context {
                 GL_REPLACE => texel,
                 GL_DECAL => {
                     let a = texel[3];
-                    [c[0] * (1. - a) + texel[0] * a, c[1] * (1. - a) + texel[1] * a, c[2] * (1. - a) + texel[2] * a, c[3]]
+                    [
+                        c[0] * (1. - a) + texel[0] * a,
+                        c[1] * (1. - a) + texel[1] * a,
+                        c[2] * (1. - a) + texel[2] * a,
+                        c[3],
+                    ]
                 }
                 _ => [c[0] * texel[0], c[1] * texel[1], c[2] * texel[2], c[3] * texel[3]],
             };
         }
         let i = (y as u32 * self.w + x as u32) as usize;
         let d = self.color[i];
-        let dst = [(d >> 16 & 255) as f32 / 255., (d >> 8 & 255) as f32 / 255., (d & 255) as f32 / 255., (d >> 24) as f32 / 255.];
+        let dst = [
+            (d >> 16 & 255) as f32 / 255.,
+            (d >> 8 & 255) as f32 / 255.,
+            (d & 255) as f32 / 255.,
+            (d >> 24) as f32 / 255.,
+        ];
         if self.blend {
-            let (sf, df) = (Self::blend_factor(self.blend_func.0, c, dst), Self::blend_factor(self.blend_func.1, c, dst));
+            let (sf, df) =
+                (Self::blend_factor(self.blend_func.0, c, dst), Self::blend_factor(self.blend_func.1, c, dst));
             for k in 0..4 {
                 c[k] = c[k] * sf[k] + dst[k] * df[k];
             }
@@ -401,7 +424,11 @@ impl Context {
             // Wide lines spread across the minor axis.
             for o in 0..width {
                 let off = o - width / 2;
-                let (px, py) = if dx.abs() >= dy.abs() { (x.floor() as i32, y.floor() as i32 + off) } else { (x.floor() as i32 + off, y.floor() as i32) };
+                let (px, py) = if dx.abs() >= dy.abs() {
+                    (x.floor() as i32, y.floor() as i32 + off)
+                } else {
+                    (x.floor() as i32 + off, y.floor() as i32)
+                };
                 if px >= bx0 && px < bx1 && py >= by0 && py < by1 {
                     self.fragment(px, py, col, tex.map(|t| (t, st)));
                 }
@@ -495,7 +522,9 @@ pub(crate) fn frame(hwnd: u64) -> Option<(u32, u32, Vec<u32>)> {
 // ---- WGL -----------------------------------------------------------------------------------
 
 extern "win64" fn wglCreateContext(dc: u64) -> u64 {
-    let Some(hwnd) = crate::user32::dc_window(dc) else { return crate::kernel32::fail(crate::error::ERROR_INVALID_HANDLE, 0) };
+    let Some(hwnd) = crate::user32::dc_window(dc) else {
+        return crate::kernel32::fail(crate::error::ERROR_INVALID_HANDLE, 0);
+    };
     let h = NEXT.fetch_add(0x10, Ordering::Relaxed);
     let ctx = Context::new(dc, hwnd, Arc::new(Mutex::new(Textures::default())));
     CONTEXTS.lock().unwrap().insert(h, Arc::new(Mutex::new(ctx)));
@@ -516,7 +545,9 @@ extern "win64" fn wglMakeCurrent(dc: u64, h: u64) -> i32 {
         CURRENT.lock().unwrap().remove(&tid);
         return 1;
     }
-    let Some(c) = CONTEXTS.lock().unwrap().get(&h).cloned() else { return crate::kernel32::fail(crate::error::ERROR_INVALID_HANDLE, 0) };
+    let Some(c) = CONTEXTS.lock().unwrap().get(&h).cloned() else {
+        return crate::kernel32::fail(crate::error::ERROR_INVALID_HANDLE, 0);
+    };
     // A context is current in one thread at a time.
     if CURRENT.lock().unwrap().iter().any(|(t, x)| *x == h && *t != tid) {
         return crate::kernel32::fail(170, 0); // ERROR_BUSY
@@ -546,7 +577,9 @@ extern "win64" fn wglGetCurrentDC() -> u64 {
 /// wglShareLists: the second context uses the first one's texture names.
 extern "win64" fn wglShareLists(from: u64, to: u64) -> i32 {
     let contexts = CONTEXTS.lock().unwrap();
-    let (Some(a), Some(b)) = (contexts.get(&from), contexts.get(&to)) else { return crate::kernel32::fail(crate::error::ERROR_INVALID_HANDLE, 0) };
+    let (Some(a), Some(b)) = (contexts.get(&from), contexts.get(&to)) else {
+        return crate::kernel32::fail(crate::error::ERROR_INVALID_HANDLE, 0);
+    };
     let shared = a.lock().unwrap().textures.clone();
     let mut b = b.lock().unwrap();
     if !b.textures.lock().unwrap().map.is_empty() {
@@ -586,7 +619,13 @@ extern "win64" fn glGetString(name: Enum) -> *const u8 {
 }
 
 extern "win64" fn glMatrixMode(mode: Enum) {
-    with(|c| if matches!(mode, GL_MODELVIEW | GL_PROJECTION | GL_TEXTURE) { c.matrix_mode = mode } else { c.set_error(GL_INVALID_ENUM) })
+    with(|c| {
+        if matches!(mode, GL_MODELVIEW | GL_PROJECTION | GL_TEXTURE) {
+            c.matrix_mode = mode
+        } else {
+            c.set_error(GL_INVALID_ENUM)
+        }
+    })
 }
 
 extern "win64" fn glLoadIdentity() {
@@ -596,12 +635,22 @@ extern "win64" fn glLoadIdentity() {
 extern "win64" fn glPushMatrix() {
     with(|c| {
         let t = *c.top();
-        if c.stack().len() >= STACK_DEPTH { c.set_error(GL_STACK_OVERFLOW) } else { c.stack().push(t) }
+        if c.stack().len() >= STACK_DEPTH {
+            c.set_error(GL_STACK_OVERFLOW)
+        } else {
+            c.stack().push(t)
+        }
     })
 }
 
 extern "win64" fn glPopMatrix() {
-    with(|c| if c.stack().len() <= 1 { c.set_error(GL_STACK_UNDERFLOW) } else { c.stack().pop(); })
+    with(|c| {
+        if c.stack().len() <= 1 {
+            c.set_error(GL_STACK_UNDERFLOW)
+        } else {
+            c.stack().pop();
+        }
+    })
 }
 
 extern "win64" fn glOrtho(l: f64, r: f64, b: f64, t: f64, n: f64, f: f64) {
@@ -610,10 +659,22 @@ extern "win64" fn glOrtho(l: f64, r: f64, b: f64, t: f64, n: f64, f: f64) {
             return c.set_error(GL_INVALID_VALUE);
         }
         let m: Mat = [
-            (2. / (r - l)) as f32, 0., 0., 0.,
-            0., (2. / (t - b)) as f32, 0., 0.,
-            0., 0., (-2. / (f - n)) as f32, 0.,
-            (-(r + l) / (r - l)) as f32, (-(t + b) / (t - b)) as f32, (-(f + n) / (f - n)) as f32, 1.,
+            (2. / (r - l)) as f32,
+            0.,
+            0.,
+            0.,
+            0.,
+            (2. / (t - b)) as f32,
+            0.,
+            0.,
+            0.,
+            0.,
+            (-2. / (f - n)) as f32,
+            0.,
+            (-(r + l) / (r - l)) as f32,
+            (-(t + b) / (t - b)) as f32,
+            (-(f + n) / (f - n)) as f32,
+            1.,
         ];
         c.mult(&m);
     })
@@ -643,7 +704,8 @@ fn capability(c: &mut Context, cap: Enum, on: bool) {
         // Fixed-function state without visible effect here: depth, alpha
         // and stencil tests (no such buffers), dithering, culling of 2D
         // geometry, lighting, fog, smoothing hints.
-        0x0B71 | 0x0BC0 | 0x0B90 | 0x0BD0 | 0x0B44 | 0x0B50 | 0x0B60 | 0x0B20 | 0x0B41 | 0x0B10 | 0x0BF2 | 0x0C60 | 0x0C61 | 0x8037 => {}
+        0x0B71 | 0x0BC0 | 0x0B90 | 0x0BD0 | 0x0B44 | 0x0B50 | 0x0B60 | 0x0B20 | 0x0B41 | 0x0B10 | 0x0BF2 | 0x0C60
+        | 0x0C61 | 0x8037 => {}
         _ => c.set_error(GL_INVALID_ENUM),
     }
 }
@@ -926,7 +988,17 @@ fn unpack(c: &Context, w: u32, h: u32, format: Enum, kind: Enum, data: *const u8
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn glTexImage2D(target: Enum, level: i32, _internal: i32, w: i32, h: i32, border: i32, format: Enum, kind: Enum, data: *const u8) {
+extern "win64" fn glTexImage2D(
+    target: Enum,
+    level: i32,
+    _internal: i32,
+    w: i32,
+    h: i32,
+    border: i32,
+    format: Enum,
+    kind: Enum,
+    data: *const u8,
+) {
     with(|c| {
         if target != GL_TEXTURE_2D {
             return c.set_error(GL_INVALID_ENUM);
@@ -953,7 +1025,17 @@ extern "win64" fn glTexImage2D(target: Enum, level: i32, _internal: i32, w: i32,
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn glTexSubImage2D(target: Enum, level: i32, x: i32, y: i32, w: i32, h: i32, format: Enum, kind: Enum, data: *const u8) {
+extern "win64" fn glTexSubImage2D(
+    target: Enum,
+    level: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    format: Enum,
+    kind: Enum,
+    data: *const u8,
+) {
     with(|c| {
         if target != GL_TEXTURE_2D {
             return c.set_error(GL_INVALID_ENUM);
@@ -983,20 +1065,20 @@ extern "win64" fn glTexSubImage2D(target: Enum, level: i32, x: i32, y: i32, w: i
 extern "win64" fn glGetIntegerv(name: Enum, out: *mut i32) {
     with(|c| {
         let v: Vec<i32> = match name {
-            0x0BA2 => c.viewport.to_vec(),                // GL_VIEWPORT
-            0x0C10 => c.scissor.to_vec(),                 // GL_SCISSOR_BOX
-            0x0D33 => vec![MAX_TEXTURE_SIZE as i32],      // GL_MAX_TEXTURE_SIZE
-            0x0D3A => vec![4096, 4096],                   // GL_MAX_VIEWPORT_DIMS
-            0x8069 => vec![c.bound as i32],               // GL_TEXTURE_BINDING_2D
-            0x0BA0 => vec![c.matrix_mode as i32],         // GL_MATRIX_MODE
-            0x0CF5 => vec![c.unpack[3]],                  // GL_UNPACK_ALIGNMENT
-            0x0C40 => vec![GL_RENDER as i32],             // GL_RENDER_MODE
-            0x0BE1 => vec![c.blend_func.0 as i32],        // GL_BLEND_SRC
-            0x0BE0 => vec![c.blend_func.1 as i32],        // GL_BLEND_DST
-            0x0D32 => vec![STACK_DEPTH as i32],           // GL_MAX_MODELVIEW_STACK_DEPTH
-            0x0D36 => vec![STACK_DEPTH as i32],           // GL_MAX_PROJECTION_STACK_DEPTH
-            0x0D50..=0x0D53 => vec![8],                   // GL_RED/GREEN/BLUE/ALPHA_BITS
-            0x0D56 => vec![0],                            // GL_DEPTH_BITS
+            0x0BA2 => c.viewport.to_vec(),           // GL_VIEWPORT
+            0x0C10 => c.scissor.to_vec(),            // GL_SCISSOR_BOX
+            0x0D33 => vec![MAX_TEXTURE_SIZE as i32], // GL_MAX_TEXTURE_SIZE
+            0x0D3A => vec![4096, 4096],              // GL_MAX_VIEWPORT_DIMS
+            0x8069 => vec![c.bound as i32],          // GL_TEXTURE_BINDING_2D
+            0x0BA0 => vec![c.matrix_mode as i32],    // GL_MATRIX_MODE
+            0x0CF5 => vec![c.unpack[3]],             // GL_UNPACK_ALIGNMENT
+            0x0C40 => vec![GL_RENDER as i32],        // GL_RENDER_MODE
+            0x0BE1 => vec![c.blend_func.0 as i32],   // GL_BLEND_SRC
+            0x0BE0 => vec![c.blend_func.1 as i32],   // GL_BLEND_DST
+            0x0D32 => vec![STACK_DEPTH as i32],      // GL_MAX_MODELVIEW_STACK_DEPTH
+            0x0D36 => vec![STACK_DEPTH as i32],      // GL_MAX_PROJECTION_STACK_DEPTH
+            0x0D50..=0x0D53 => vec![8],              // GL_RED/GREEN/BLUE/ALPHA_BITS
+            0x0D56 => vec![0],                       // GL_DEPTH_BITS
             _ => return c.set_error(GL_INVALID_ENUM),
         };
         if !out.is_null() {

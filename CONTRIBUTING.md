@@ -19,6 +19,8 @@ The supported image-building host is Windows 11 with Rust, MSYS2 and WSL. See [R
 .\scripts\test.ps1
 ```
 
+Run `cargo fmt --all` before committing; CI rejects code that `cargo fmt --all --check` would change. Plain `cargo test` runs every host-testable crate listed in `default-members` in `Cargo.toml`, as CI does; the ext4 tests first need their images (`bash storage/ext4/tests/gen-fixtures.sh`, which uses e2fsprogs).
+
 For a focused network change, run `cargo test -p osyx-net` and `./scripts/net-test.ps1`. For desktop changes, run `./scripts/desktop-test.ps1`. Include physical hardware and QEMU details when relevant. GitHub Actions runs portable host tests and checks the freestanding targets; it does not replace the full Windows/WSL and QEMU suite.
 
 ## Pull requests

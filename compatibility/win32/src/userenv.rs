@@ -7,7 +7,12 @@
 //! OSyx has no group-policy engine: policy never changes, so a
 //! registered notification never fires.
 #![allow(non_snake_case)]
-use crate::{error::*, kernel32::{self, fail}, objects, path, security::sid};
+use crate::{
+    error::*,
+    kernel32::{self, fail},
+    objects, path,
+    security::sid,
+};
 use alloc::{string::String, vec::Vec};
 use os_std::sync::Mutex;
 
@@ -18,7 +23,13 @@ const MAX_NAME: usize = 64;
 
 /// The AppContainer SID of `name`.
 pub fn appcontainer_sid(name: &str) -> Vec<u8> {
-    let lower: Vec<u8> = name.chars().flat_map(|c| c.to_lowercase()).collect::<alloc::string::String>().encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let lower: Vec<u8> = name
+        .chars()
+        .flat_map(|c| c.to_lowercase())
+        .collect::<alloc::string::String>()
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
     let hash = osyx_crypto::Sha256::digest(&lower);
     let mut sub = alloc::vec![2u32];
     sub.extend((0..7).map(|i| u32::from_le_bytes([hash[i * 4], hash[i * 4 + 1], hash[i * 4 + 2], hash[i * 4 + 3]])));
@@ -30,7 +41,9 @@ extern "win64" fn DeriveAppContainerSidFromAppContainerName(name: *const u16, ou
         return E_INVALIDARG;
     }
     // SAFETY: NULL or a NUL-terminated name.
-    let Some(name) = (unsafe { path::wide_to_string(name) }).filter(|n| !n.is_empty() && n.encode_utf16().count() <= MAX_NAME) else {
+    let Some(name) =
+        (unsafe { path::wide_to_string(name) }).filter(|n| !n.is_empty() && n.encode_utf16().count() <= MAX_NAME)
+    else {
         return E_INVALIDARG;
     };
     let s = appcontainer_sid(&name);
@@ -49,12 +62,21 @@ const ERROR_NOT_OWNER: u32 = 288;
 /// CreateAppContainerProfile: the profile's folder,
 /// %LOCALAPPDATA%\Packages\<name>, and the container's SID. An existing
 /// profile is HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS), as on Windows.
-extern "win64" fn CreateAppContainerProfile(name: *const u16, display: *const u16, _description: *const u16, _caps: u64, _count: u32, out: *mut u64) -> u32 {
+extern "win64" fn CreateAppContainerProfile(
+    name: *const u16,
+    display: *const u16,
+    _description: *const u16,
+    _caps: u64,
+    _count: u32,
+    out: *mut u64,
+) -> u32 {
     if out.is_null() || display.is_null() {
         return E_INVALIDARG;
     }
     // SAFETY: NULL or a NUL-terminated name.
-    let Some(name) = (unsafe { path::wide_to_string(name) }).filter(|n| !n.is_empty() && n.encode_utf16().count() <= MAX_NAME && !n.contains(['\\', '/'])) else {
+    let Some(name) = (unsafe { path::wide_to_string(name) })
+        .filter(|n| !n.is_empty() && n.encode_utf16().count() <= MAX_NAME && !n.contains(['\\', '/']))
+    else {
         return E_INVALIDARG;
     };
     let base = kernel32::env_get("LOCALAPPDATA").unwrap_or_else(|| String::from("C:\\Users\\user\\AppData\\Local"));
@@ -74,8 +96,21 @@ extern "win64" fn CreateAppContainerProfile(name: *const u16, display: *const u1
 /// The system's variables (the same for every user), taken from this
 /// process, which OSyx starts with them.
 const SYSTEM_VARIABLES: [&str; 15] = [
-    "ALLUSERSPROFILE", "CommonProgramFiles", "COMPUTERNAME", "ComSpec", "NUMBER_OF_PROCESSORS", "OS", "Path", "PATHEXT",
-    "PROCESSOR_ARCHITECTURE", "ProgramData", "ProgramFiles", "PUBLIC", "SystemDrive", "SystemRoot", "windir",
+    "ALLUSERSPROFILE",
+    "CommonProgramFiles",
+    "COMPUTERNAME",
+    "ComSpec",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "Path",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "ProgramData",
+    "ProgramFiles",
+    "PUBLIC",
+    "SystemDrive",
+    "SystemRoot",
+    "windir",
 ];
 
 /// The variables of the user a token names: this process's for its own
@@ -83,7 +118,8 @@ const SYSTEM_VARIABLES: [&str; 15] = [
 fn user_variables(uid: u32) -> Vec<(String, String)> {
     let name = crate::accounts::user_name(uid);
     let own = |k: &str| kernel32::env_get(k);
-    let profile = if uid == os_sys::getuid().0 { own("USERPROFILE") } else { None }.unwrap_or_else(|| alloc::format!("C:\\Users\\{name}"));
+    let profile = if uid == os_sys::getuid().0 { own("USERPROFILE") } else { None }
+        .unwrap_or_else(|| alloc::format!("C:\\Users\\{name}"));
     let mine = uid == os_sys::getuid().0;
     let pick = |k: &str, default: String| if mine { own(k).unwrap_or(default) } else { default };
     let local = pick("LOCALAPPDATA", alloc::format!("{profile}\\AppData\\Local"));
@@ -110,14 +146,18 @@ extern "win64" fn CreateEnvironmentBlock(out: *mut u64, token: u64, inherit: i32
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let all = kernel32::env_vars();
-    let mut vars: Vec<(String, String)> = SYSTEM_VARIABLES.iter().filter_map(|k| all.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).cloned()).collect();
+    let mut vars: Vec<(String, String)> =
+        SYSTEM_VARIABLES.iter().filter_map(|k| all.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).cloned()).collect();
     let set = |vars: &mut Vec<(String, String)>, (k, v): (String, String)| {
         vars.retain(|(n, _)| !n.eq_ignore_ascii_case(&k));
         vars.push((k, v));
     };
     if token == 0 {
         // Without a user, the system's temporary folder.
-        let root = all.iter().find(|(n, _)| n.eq_ignore_ascii_case("SystemRoot")).map_or(String::from("C:\\Windows"), |(_, v)| v.clone());
+        let root = all
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("SystemRoot"))
+            .map_or(String::from("C:\\Windows"), |(_, v)| v.clone());
         set(&mut vars, (String::from("TEMP"), alloc::format!("{root}\\TEMP")));
         set(&mut vars, (String::from("TMP"), alloc::format!("{root}\\TEMP")));
     } else {

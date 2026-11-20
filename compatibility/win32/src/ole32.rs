@@ -10,7 +10,12 @@
 //! out of it, so class activation reports every class as not registered.
 #![allow(non_snake_case)]
 use crate::kernel32;
-use alloc::{boxed::Box, collections::BTreeMap, string::{String, ToString}, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::BTreeMap,
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicU32, Ordering};
 use os_std::sync::Mutex;
 use prism_client::proto;
@@ -74,12 +79,8 @@ struct Com {
     mta_usage: u32,
 }
 
-static COM: Mutex<Com> = Mutex::new(Com {
-    threads: BTreeMap::new(),
-    ole_threads: BTreeMap::new(),
-    security_set: false,
-    mta_usage: 0,
-});
+static COM: Mutex<Com> =
+    Mutex::new(Com { threads: BTreeMap::new(), ole_threads: BTreeMap::new(), security_set: false, mta_usage: 0 });
 
 impl Com {
     /// Whether the process has an MTA (any thread entered one), which is what
@@ -125,7 +126,8 @@ unsafe fn method(obj: u64, slot: usize) -> u64 {
 /// them in), each with a reference taken: a spy may revoke itself or
 /// another one from its callback. Only this thread changes its own list.
 fn spies() -> Vec<u64> {
-    let list: Vec<u64> = SPIES.lock().unwrap().get(&os_sys::gettid()).map_or(Vec::new(), |v| v.iter().rev().map(|&(_, s)| s).collect());
+    let list: Vec<u64> =
+        SPIES.lock().unwrap().get(&os_sys::gettid()).map_or(Vec::new(), |v| v.iter().rev().map(|&(_, s)| s).collect());
     for &s in &list {
         // SAFETY: a registered IInitializeSpy: AddRef is slot 1.
         let add_ref: extern "win64" fn(u64) -> u32 = unsafe { core::mem::transmute(method(s, 1)) };
@@ -181,7 +183,8 @@ pub(crate) fn co_uninitialize() {
 /// CoRegisterInitializeSpy: `spy` (an IInitializeSpy, held with AddRef)
 /// is told about this thread's CoInitialize and CoUninitialize calls.
 extern "win64" fn CoRegisterInitializeSpy(spy: u64, cookie: *mut u64) -> u32 {
-    const IID_IINITIALIZESPY: [u8; 16] = [0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46];
+    const IID_IINITIALIZESPY: [u8; 16] =
+        [0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46];
     if spy == 0 || cookie.is_null() {
         return E_INVALIDARG;
     }
@@ -224,7 +227,7 @@ extern "win64" fn CoCreateGuid(out: *mut [u8; 16]) -> u32 {
     }
     g[7] = (g[7] & 0x0f) | 0x40; // Data3's version nibble
     g[8] = (g[8] & 0x3f) | 0x80; // RFC 4122 variant
-    // SAFETY: the caller's GUID.
+                                 // SAFETY: the caller's GUID.
     unsafe { *out = g };
     S_OK
 }
@@ -315,7 +318,17 @@ extern "win64" fn CoGetApartmentType(kind: *mut i32, qualifier: *mut i32) -> u32
 /// calls on OSyx nothing ever authenticates with it, but it can be set
 /// once, after the caller has entered an apartment, as on Windows.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn CoInitializeSecurity(_sd: u64, _count: i32, _services: u64, _r1: u64, _authn: u32, _imp: u32, _list: u64, _caps: u32, _r3: u64) -> u32 {
+extern "win64" fn CoInitializeSecurity(
+    _sd: u64,
+    _count: i32,
+    _services: u64,
+    _r1: u64,
+    _authn: u32,
+    _imp: u32,
+    _list: u64,
+    _caps: u32,
+    _r3: u64,
+) -> u32 {
     let tid = os_sys::gettid();
     let mut com = COM.lock().unwrap();
     if !com.threads.contains_key(&tid) {
@@ -425,7 +438,14 @@ fn guid_string(g: *const u8) -> String {
     let d3 = u16::from_le_bytes([b[6], b[7]]);
     alloc::format!(
         "{{{d1:08X}-{d2:04X}-{d3:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     )
 }
 
@@ -433,7 +453,9 @@ fn guid_string(g: *const u8) -> String {
 fn parse_guid(s: &str) -> Option<[u8; 16]> {
     let inner = s.strip_prefix('{')?.strip_suffix('}')?;
     let parts: Vec<&str> = inner.split('-').collect();
-    if parts.len() != 5 || parts.iter().zip([8, 4, 4, 4, 12]).any(|(p, l)| p.len() != l || !p.bytes().all(|c| c.is_ascii_hexdigit())) {
+    if parts.len() != 5
+        || parts.iter().zip([8, 4, 4, 4, 12]).any(|(p, l)| p.len() != l || !p.bytes().all(|c| c.is_ascii_hexdigit()))
+    {
         return None;
     }
     let hex = |s: &str| u64::from_str_radix(s, 16).ok();
@@ -593,7 +615,9 @@ static NEXT_FILE_DROP: AtomicU32 = AtomicU32::new(1);
 
 pub(crate) fn queue_file_drop(hwnd: u64, path: String, x: i32, y: i32) -> u64 {
     let mut drops = FILE_DROPS.lock().unwrap();
-    if drops.len() >= 32 { return 0; }
+    if drops.len() >= 32 {
+        return 0;
+    }
     let token = NEXT_FILE_DROP.fetch_add(1, Ordering::Relaxed) as u64;
     drops.insert(token, (hwnd, path, x, y));
     token
@@ -601,7 +625,9 @@ pub(crate) fn queue_file_drop(hwnd: u64, path: String, x: i32, y: i32) -> u64 {
 
 pub(crate) fn dispatch_file_drop(hwnd: u64, token: u64) {
     let Some((owner, path, x, y)) = FILE_DROPS.lock().unwrap().remove(&token) else { return };
-    if owner != hwnd { return; }
+    if owner != hwnd {
+        return;
+    }
     let target = {
         let targets = DROP_TARGETS.lock().unwrap();
         let Some(&target) = targets.get(&hwnd) else { return };
@@ -618,8 +644,8 @@ pub(crate) fn dispatch_file_drop(hwnd: u64, token: u64) {
     let data = make_data_object(alloc::vec![proto::ClipEntry { format: CF_HDROP, name: None, data: bytes }]);
     let point = (x as u32 as u64) | ((y as u32 as u64) << 32);
     let mut effect = 1u32; // DROPEFFECT_COPY: the source retains its file.
-    // SAFETY: a registered IDropTarget and our live IDataObject, invoked
-    // on the window's thread after releasing the user32 lock. POINTL is 8 bytes.
+                           // SAFETY: a registered IDropTarget and our live IDataObject, invoked
+                           // on the window's thread after releasing the user32 lock. POINTL is 8 bytes.
     unsafe {
         let vtbl = *(target as *const *const u64);
         let enter: extern "win64" fn(u64, u64, u32, u64, *mut u32) -> u32 = core::mem::transmute(*vtbl.add(3));
@@ -693,7 +719,11 @@ extern "win64" fn OleFlushClipboard() -> u32 {
 }
 
 extern "win64" fn OleIsCurrentClipboard(data: u64) -> u32 {
-    if data != 0 && data == CLIPBOARD.lock().unwrap().0 { S_OK } else { S_FALSE }
+    if data != 0 && data == CLIPBOARD.lock().unwrap().0 {
+        S_OK
+    } else {
+        S_FALSE
+    }
 }
 
 const TYMED_HGLOBAL: u32 = 1;
@@ -805,7 +835,11 @@ fn get_data(data: u64, format: u32) -> Option<Vec<u8>> {
     // SAFETY: an HGLOBAL is a fixed block of `size` bytes.
     let bytes = unsafe { core::slice::from_raw_parts(m.handle as *const u8, size) }.to_vec();
     release_stg_medium(&mut m as *mut StgMedium as *mut u8, false);
-    if bytes.is_empty() { None } else { Some(bytes) }
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes)
+    }
 }
 
 fn render_entries(data: u64) -> Vec<proto::ClipEntry> {
@@ -932,7 +966,11 @@ extern "win64" fn DataQueryGetData(this: u64, f: *const FormatEtc) -> u32 {
     }
     // SAFETY: the caller's FORMATETC.
     let want = unsafe { (*f).cf as u32 };
-    if entry(this, want).is_some() { S_OK } else { DV_E_FORMATETC }
+    if entry(this, want).is_some() {
+        S_OK
+    } else {
+        DV_E_FORMATETC
+    }
 }
 
 extern "win64" fn DataGetCanonical(_this: u64, f: *const FormatEtc, out: *mut FormatEtc) -> u32 {
@@ -1069,7 +1107,11 @@ extern "win64" fn EnumNext(this: u64, count: u32, out: *mut FormatEtc, fetched: 
         // SAFETY: the caller's out pointer.
         unsafe { *fetched = n as u32 };
     }
-    if n as u32 == count { S_OK } else { S_FALSE }
+    if n as u32 == count {
+        S_OK
+    } else {
+        S_FALSE
+    }
 }
 
 extern "win64" fn EnumSkip(this: u64, count: u32) -> u32 {
@@ -1094,7 +1136,14 @@ extern "win64" fn EnumClone(this: u64, out: *mut u64) -> u32 {
     }
     let e = formats(this);
     // SAFETY: the caller's out pointer.
-    unsafe { *out = Box::into_raw(Box::new(FormatEnum { vtbl: &ENUM_VTBL, refs: AtomicU32::new(1), formats: e.formats.clone(), pos: e.pos })) as u64 };
+    unsafe {
+        *out = Box::into_raw(Box::new(FormatEnum {
+            vtbl: &ENUM_VTBL,
+            refs: AtomicU32::new(1),
+            formats: e.formats.clone(),
+            pos: e.pos,
+        })) as u64
+    };
     S_OK
 }
 
@@ -1104,11 +1153,13 @@ const STG_E_INVALIDFUNCTION: u32 = 0x8003_0001;
 const STG_E_SEEKERROR: u32 = 0x8003_0019;
 const STG_E_INVALIDPOINTER: u32 = 0x8003_0009;
 /// {0c733a30-2a1c-11ce-ade5-00aa0044773d}
-const IID_ISEQUENTIALSTREAM: [u8; 16] = [0x30, 0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11, 0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d];
+const IID_ISEQUENTIALSTREAM: [u8; 16] =
+    [0x30, 0x3a, 0x73, 0x0c, 0x1c, 0x2a, 0xce, 0x11, 0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d];
 /// {0000000c-0000-0000-C000-000000000046}
 const IID_ISTREAM: [u8; 16] = [0x0c, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
 /// {C03F6A43-65A4-9818-987E-E0B810D2A6F2}
-const IID_IAGILEREFERENCE: [u8; 16] = [0x43, 0x6a, 0x3f, 0xc0, 0xa4, 0x65, 0x18, 0x98, 0x98, 0x7e, 0xe0, 0xb8, 0x10, 0xd2, 0xa6, 0xf2];
+const IID_IAGILEREFERENCE: [u8; 16] =
+    [0x43, 0x6a, 0x3f, 0xc0, 0xa4, 0x65, 0x18, 0x98, 0x98, 0x7e, 0xe0, 0xb8, 0x10, 0xd2, 0xa6, 0xf2];
 /// {00000003-0000-0000-C000-000000000046}
 const IID_IMARSHAL: [u8; 16] = [0x03, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
 
@@ -1285,7 +1336,11 @@ extern "win64" fn StreamSeek(this: u64, delta: i64, origin: u32, new_pos: *mut u
 
 extern "win64" fn StreamSetSize(this: u64, new_size: u64) -> u32 {
     let Ok(sz) = usize::try_from(new_size) else { return E_OUTOFMEMORY };
-    if stream(this).shared.lock().unwrap().resize(sz) { S_OK } else { E_OUTOFMEMORY }
+    if stream(this).shared.lock().unwrap().resize(sz) {
+        S_OK
+    } else {
+        E_OUTOFMEMORY
+    }
 }
 
 extern "win64" fn StreamCopyTo(this: u64, dst: u64, cb: u64, pcb_read: *mut u64, pcb_written: *mut u64) -> u32 {
@@ -1421,7 +1476,11 @@ extern "win64" fn OleDuplicateData(src: u64, _cf_format: u16, _flags: u32) -> u6
 }
 
 extern "win64" fn OleQueryLinkFromData(data: u64) -> u32 {
-    if data == 0 { E_INVALIDARG } else { S_FALSE }
+    if data == 0 {
+        E_INVALIDARG
+    } else {
+        S_FALSE
+    }
 }
 
 #[repr(C)]
@@ -1507,11 +1566,7 @@ extern "win64" fn RoGetAgileReference(options: u32, riid: *const u8, unk: u64, o
         unsafe { *out = 0 };
         return if hr != S_OK { hr } else { E_NOINTERFACE };
     }
-    let obj = Box::into_raw(Box::new(AgileRef {
-        vtbl: &AGILE_VTBL,
-        refs: AtomicU32::new(1),
-        target: checked,
-    })) as u64;
+    let obj = Box::into_raw(Box::new(AgileRef { vtbl: &AGILE_VTBL, refs: AtomicU32::new(1), target: checked })) as u64;
     unsafe { *out = obj };
     S_OK
 }
@@ -1582,7 +1637,15 @@ extern "win64" fn FtmRelease(this: u64) -> u32 {
     left
 }
 
-extern "win64" fn FtmGetUnmarshalClass(_this: u64, _riid: *const u8, _pv: u64, ctx: u32, _reserved: u64, _flags: u32, cid: *mut [u8; 16]) -> u32 {
+extern "win64" fn FtmGetUnmarshalClass(
+    _this: u64,
+    _riid: *const u8,
+    _pv: u64,
+    ctx: u32,
+    _reserved: u64,
+    _flags: u32,
+    cid: *mut [u8; 16],
+) -> u32 {
     if cid.is_null() {
         return E_POINTER;
     }
@@ -1594,7 +1657,15 @@ extern "win64" fn FtmGetUnmarshalClass(_this: u64, _riid: *const u8, _pv: u64, c
     S_OK
 }
 
-extern "win64" fn FtmGetMarshalSizeMax(_this: u64, _riid: *const u8, _pv: u64, ctx: u32, _reserved: u64, _flags: u32, size: *mut u32) -> u32 {
+extern "win64" fn FtmGetMarshalSizeMax(
+    _this: u64,
+    _riid: *const u8,
+    _pv: u64,
+    ctx: u32,
+    _reserved: u64,
+    _flags: u32,
+    size: *mut u32,
+) -> u32 {
     if size.is_null() {
         return E_POINTER;
     }
@@ -1605,7 +1676,15 @@ extern "win64" fn FtmGetMarshalSizeMax(_this: u64, _riid: *const u8, _pv: u64, c
     S_OK
 }
 
-extern "win64" fn FtmMarshalInterface(_this: u64, stm: u64, _riid: *const u8, pv: u64, ctx: u32, _reserved: u64, _flags: u32) -> u32 {
+extern "win64" fn FtmMarshalInterface(
+    _this: u64,
+    stm: u64,
+    _riid: *const u8,
+    pv: u64,
+    ctx: u32,
+    _reserved: u64,
+    _flags: u32,
+) -> u32 {
     if stm == 0 || pv == 0 {
         return E_POINTER;
     }
@@ -1675,11 +1754,7 @@ extern "win64" fn CoCreateFreeThreadedMarshaler(outer: u64, out: *mut u64) -> u3
     if out.is_null() {
         return E_INVALIDARG;
     }
-    let obj = Box::into_raw(Box::new(FreeThreadedMarshaler {
-        vtbl: &FTM_VTBL,
-        refs: AtomicU32::new(1),
-        outer,
-    })) as u64;
+    let obj = Box::into_raw(Box::new(FreeThreadedMarshaler { vtbl: &FTM_VTBL, refs: AtomicU32::new(1), outer })) as u64;
     unsafe { *out = obj };
     S_OK
 }

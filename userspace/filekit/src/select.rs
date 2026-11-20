@@ -34,7 +34,8 @@ pub fn free_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
         _ => (name, ""),
     };
     for n in 1u32.. {
-        let candidate = if n == 1 { alloc::format!("{stem} (copy){ext}") } else { alloc::format!("{stem} (copy {n}){ext}") };
+        let candidate =
+            if n == 1 { alloc::format!("{stem} (copy){ext}") } else { alloc::format!("{stem} (copy {n}){ext}") };
         if !taken(&candidate) {
             return candidate;
         }

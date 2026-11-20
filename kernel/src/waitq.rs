@@ -47,7 +47,6 @@ impl WaitQueue {
             sched::wake_boosted(t, levels);
         }
     }
-
 }
 
 impl Default for WaitQueue {
@@ -59,7 +58,11 @@ impl Default for WaitQueue {
 /// Blocks until `ready` returns `Some`, waking whenever one of `queues` is
 /// signalled. `deadline` is an absolute timer tick. `ready` runs with
 /// interrupts disabled and must only take spinlocks.
-pub fn block_on<T>(queues: &[&WaitQueue], deadline: Option<u64>, mut ready: impl FnMut() -> Option<T>) -> Result<T, Errno> {
+pub fn block_on<T>(
+    queues: &[&WaitQueue],
+    deadline: Option<u64>,
+    mut ready: impl FnMut() -> Option<T>,
+) -> Result<T, Errno> {
     let tid = sched::current_tid();
     loop {
         let were_enabled = cpu::interrupts_enabled();

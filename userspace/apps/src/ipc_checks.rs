@@ -20,9 +20,13 @@ pub fn run(t: &mut Tests) {
         let Ok(after) = os::sysinfo() else { return false };
         let Ok(procs) = system::processes() else { return false };
         let Some(later) = procs.iter().find(|p| p.pid == before.pid) else { return false };
-        after.ticks > before.ticks && after.idle_ticks >= before.idle_ticks && after.idle_ticks <= after.ticks
-            && after.disk_read_bytes >= before.disk_read_bytes && after.disk_write_bytes >= before.disk_write_bytes
-            && later.cpu_ticks >= me.cpu_ticks && later.cpu_ticks <= after.ticks
+        after.ticks > before.ticks
+            && after.idle_ticks >= before.idle_ticks
+            && after.idle_ticks <= after.ticks
+            && after.disk_read_bytes >= before.disk_read_bytes
+            && after.disk_write_bytes >= before.disk_write_bytes
+            && later.cpu_ticks >= me.cpu_ticks
+            && later.cpu_ticks <= after.ticks
     });
     t.check("ipc: device inventory includes PCI and attached USB inputs", || {
         let Ok(devs) = system::devices() else { return false };
@@ -94,7 +98,8 @@ pub fn run(t: &mut Tests) {
         let empty = os::raw::channel_recv(conn.handle(), &mut buf, &mut []) == Err(os::raw::Errno::WouldBlock);
         let sent = client.send(b"raw", &[]).is_ok();
         let mut tiny = [0u8; 2];
-        let too_small = os::raw::channel_recv(conn.handle(), &mut tiny, &mut []) == Err(os::raw::Errno::InvalidArgument);
+        let too_small =
+            os::raw::channel_recv(conn.handle(), &mut tiny, &mut []) == Err(os::raw::Errno::InvalidArgument);
         let received = os::raw::channel_recv(conn.handle(), &mut buf, &mut []);
         let raw_ok = received == Ok((3, 0)) && &buf[..3] == b"raw";
         let Ok(shm) = SharedMemory::create(4096) else { return false };

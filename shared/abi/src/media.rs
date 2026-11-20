@@ -184,7 +184,9 @@ pub fn diff(old: &[Disk], new: &[Disk]) -> Vec<Change> {
     for d in new {
         match old.iter().find(|o| o.name == d.name) {
             None => out.push(Change::Connected(d.clone())),
-            Some(o) if o.state == DiskState::Mounted && d.state == DiskState::Ejected => out.push(Change::Ejected(d.clone())),
+            Some(o) if o.state == DiskState::Mounted && d.state == DiskState::Ejected => {
+                out.push(Change::Ejected(d.clone()))
+            }
             Some(_) => {}
         }
     }
@@ -198,11 +200,16 @@ pub struct Size(pub u64);
 impl fmt::Display for Size {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let b = self.0;
-        const UNITS: [(&str, u64); 4] = [("TB", 1_000_000_000_000), ("GB", 1_000_000_000), ("MB", 1_000_000), ("KB", 1_000)];
+        const UNITS: [(&str, u64); 4] =
+            [("TB", 1_000_000_000_000), ("GB", 1_000_000_000), ("MB", 1_000_000), ("KB", 1_000)];
         for (unit, size) in UNITS {
             if b >= size {
                 let tenths = b * 10 / size;
-                return if tenths >= 1000 || b.is_multiple_of(size) { write!(f, "{} {unit}", tenths / 10) } else { write!(f, "{}.{} {unit}", tenths / 10, tenths % 10) };
+                return if tenths >= 1000 || b.is_multiple_of(size) {
+                    write!(f, "{} {unit}", tenths / 10)
+                } else {
+                    write!(f, "{}.{} {unit}", tenths / 10, tenths % 10)
+                };
             }
         }
         write!(f, "{b} B")
@@ -242,11 +249,25 @@ mod tests {
                         bytes: 15_000_000_000,
                         read_only: false,
                     },
-                    Volume { device: "usb0p2".into(), fstype: "unknown".into(), label: "".into(), mount: None, bytes: 500_000_000, read_only: false },
+                    Volume {
+                        device: "usb0p2".into(),
+                        fstype: "unknown".into(),
+                        label: "".into(),
+                        mount: None,
+                        bytes: 500_000_000,
+                        read_only: false,
+                    },
                 ],
                 note: "busy /media/PENDRIVE".into(),
             },
-            Disk { name: "usb1".into(), state: DiskState::Ejected, bytes: 1_000_000, model: "".into(), volumes: vec![], note: "".into() },
+            Disk {
+                name: "usb1".into(),
+                state: DiskState::Ejected,
+                bytes: 1_000_000,
+                model: "".into(),
+                volumes: vec![],
+                note: "".into(),
+            },
         ]
     }
 
@@ -254,7 +275,10 @@ mod tests {
     fn round_trip() {
         let disks = sample();
         let text = render(&disks, 7);
-        assert!(text.starts_with("generation\t7\ndisk\tusb0\tmounted\t15523119104\tKingston DataTraveler 3.0\n"), "{text}");
+        assert!(
+            text.starts_with("generation\t7\ndisk\tusb0\tmounted\t15523119104\tKingston DataTraveler 3.0\n"),
+            "{text}"
+        );
         assert_eq!(parse(&text), disks);
         assert_eq!(disks[0].busy_path(), Some("/media/PENDRIVE"));
         assert_eq!(disks[0].volumes[1].name(), "usb0p2");

@@ -18,8 +18,8 @@
 #![no_main]
 
 use os_std::io::Write;
-use os_std::prelude::*;
 use os_std::io::{Read, Seek, SeekFrom};
+use os_std::prelude::*;
 use os_std::time::Duration;
 use os_std::{fs, println, thread};
 
@@ -83,7 +83,8 @@ fn main() -> i32 {
                 }
                 Err(e) => {
                     log.line(&format!("Zen Browser: not installed: {e}; trying again in {RETRY_SECS} s"));
-                    let _ = fs::write(STATE, format!("zen=pending\nzen.attempts={attempt}\nzen.error={e}\n").as_bytes());
+                    let _ =
+                        fs::write(STATE, format!("zen=pending\nzen.attempts={attempt}\nzen.error={e}\n").as_bytes());
                     thread::sleep(Duration::from_secs(RETRY_SECS));
                     attempt += 1;
                 }
@@ -152,7 +153,9 @@ fn wait_for_network(log: &mut Log) -> Result<(), String> {
             }
             Err(_) => {
                 if waited == 0 {
-                    log.line(&format!("waiting up to {NETWORK_WAIT_SECS} s for a network connection (Wi-Fi or a cable)"));
+                    log.line(&format!(
+                        "waiting up to {NETWORK_WAIT_SECS} s for a network connection (Wi-Fi or a cable)"
+                    ));
                 }
                 thread::sleep(Duration::from_secs(5));
                 waited += 5;

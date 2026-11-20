@@ -73,9 +73,16 @@ impl Packet {
 
 #[derive(Clone, Debug)]
 enum State {
-    Resolved { mac: MacAddr, expires: u64 },
+    Resolved {
+        mac: MacAddr,
+        expires: u64,
+    },
     /// Waiting for a reply: packets to send once resolved.
-    Pending { probes: u32, next_probe: u64, queued: Vec<Vec<u8>> },
+    Pending {
+        probes: u32,
+        next_probe: u64,
+        queued: Vec<Vec<u8>>,
+    },
 }
 
 #[derive(Clone, Debug)]

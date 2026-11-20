@@ -14,6 +14,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        run: rustup show
+      # rustfmt.toml sets the style; third_party/aml keeps its upstream layout.
+      - name: Check formatting
+        run: cargo fmt --all --check
+
   host-tests:
     name: Portable host tests
     runs-on: ubuntu-latest
@@ -22,38 +34,24 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install Rust targets
         run: rustup show
-      - name: Test networking, UI, compositor and shared crates
-        run: >-
-          cargo test --locked
-          -p osyx-abi -p osyx-bootinfo -p osyx-crypto -p osyx-input
-          -p osyx-net -p osyx-update -p prism-proto -p prism-core -p osyx-ui
-          -p osyx-gfx -p osyx-font -p osyx-elf -p osyx-pe -p osyx-pe-loader
-          -p osyx-shell -p osyx-interrupts
+      - name: Generate the ext4 test images with e2fsprogs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends e2fsprogs
+          bash storage/ext4/tests/gen-fixtures.sh
+
+      # Plain `cargo test` runs every crate in default-members (Cargo.toml),
+      # so a new host-testable crate is tested as soon as it is listed there.
+      - name: Test all host-testable crates
+        run: cargo test --locked
+
+      - name: Test wireless WPA support
+        run: cargo test --locked -p osyx-wireless --features wpa
 
       - name: Win Parity Check (tool tests, then a scan without test evidence)
         run: |
           python3 -m unittest scripts/test_winparity.py
           python3 scripts/winparity.py scan --tests-log none --format terminal,json --no-history --top 5
-
-      - name: Test wireless WPA support
-        run: cargo test --locked -p osyx-wireless --features wpa
-
-      - name: Test battery firmware handling and the USB and I2C HID drivers
-        run: >-
-          cargo test --locked
-          -p osyx-battery -p osyx-usb -p osyx-i2c -p osyx-i2chid
-
-      - name: Test OSyx Std and the storage drivers
-        run: >-
-          cargo test --locked
-          -p os-std -p osyx-fat -p osyx-exfat -p osyx-vfs
-
-      - name: Test ext4 against e2fsprogs images
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends e2fsprogs
-          bash storage/ext4/tests/gen-fixtures.sh
-          cargo test --locked -p osyx-ext4
 
   freestanding:
     name: Check OS targets

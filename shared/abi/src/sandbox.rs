@@ -41,7 +41,16 @@ pub struct SpawnPolicy {
 
 impl Default for SpawnPolicy {
     fn default() -> Self {
-        Self { paths: 0, path_count: 0, syscalls: 0, syscall_count: 0, broker_handle: crate::HANDLE_NONE, flags: 0, channels: 0, channel_count: 0 }
+        Self {
+            paths: 0,
+            path_count: 0,
+            syscalls: 0,
+            syscall_count: 0,
+            broker_handle: crate::HANDLE_NONE,
+            flags: 0,
+            channels: 0,
+            channel_count: 0,
+        }
     }
 }
 

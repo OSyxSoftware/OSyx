@@ -59,7 +59,8 @@ pub struct Flags {
 }
 
 impl Flags {
-    pub const KERNEL_RW: Flags = Flags { writable: true, executable: false, user: false, uncached: false, write_combining: false };
+    pub const KERNEL_RW: Flags =
+        Flags { writable: true, executable: false, user: false, uncached: false, write_combining: false };
 
     pub const fn user(writable: bool, executable: bool) -> Flags {
         Flags { writable, executable, user: true, uncached: false, write_combining: false }
@@ -316,7 +317,7 @@ pub fn unmap_in(root: u64, va: u64, user: bool) -> Result<u64, MapError> {
     if root == current_root() || va >= USER_END {
         cpu::invlpg(va);
     }
-    crate::smp::flush_remote(root,va>=USER_END);
+    crate::smp::flush_remote(root, va >= USER_END);
     Ok(val & ADDR_MASK)
 }
 

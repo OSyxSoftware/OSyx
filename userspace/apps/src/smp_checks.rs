@@ -82,7 +82,9 @@ pub fn run(t: &mut Tests) {
                         Ok((online, current)) if online == cpus && current < cpus => {}
                         _ => return false,
                     }
-                    if n % 8 == 0 { thread::yield_now(); }
+                    if n % 8 == 0 {
+                        thread::yield_now();
+                    }
                 }
                 true
             }));
@@ -95,24 +97,36 @@ pub fn run(t: &mut Tests) {
     t.check("SMP: futex wake racing with registration", || {
         const ROUNDS: u32 = 1000;
         let worker = thread::spawn(|| {
-            if system::thread_affinity(0, 2).is_err() { return false; }
+            if system::thread_affinity(0, 2).is_err() {
+                return false;
+            }
             for n in 1..=ROUNDS {
                 FUTEX_READY.store(n, Ordering::Release);
                 while FUTEX_WORD.load(Ordering::Acquire) == 0 {
                     let result = raw::futex_wait(FUTEX_WORD.as_ptr(), 0, 200_000_000);
-                    if result == Err(raw::Errno::TimedOut) && FUTEX_WORD.load(Ordering::Acquire) == 0 { return false; }
+                    if result == Err(raw::Errno::TimedOut) && FUTEX_WORD.load(Ordering::Acquire) == 0 {
+                        return false;
+                    }
                 }
                 FUTEX_DONE.store(n, Ordering::Release);
-                if !wait(&FUTEX_NEXT, n) { return false; }
+                if !wait(&FUTEX_NEXT, n) {
+                    return false;
+                }
             }
             true
         });
         let mut ok = true;
         for n in 1..=ROUNDS {
-            if !wait(&FUTEX_READY, n) { ok = false; break; }
+            if !wait(&FUTEX_READY, n) {
+                ok = false;
+                break;
+            }
             FUTEX_WORD.store(1, Ordering::Release);
             raw::futex_wake(FUTEX_WORD.as_ptr(), 1);
-            if !wait(&FUTEX_DONE, n) { ok = false; break; }
+            if !wait(&FUTEX_DONE, n) {
+                ok = false;
+                break;
+            }
             FUTEX_WORD.store(0, Ordering::Release);
             FUTEX_NEXT.store(n, Ordering::Release);
         }

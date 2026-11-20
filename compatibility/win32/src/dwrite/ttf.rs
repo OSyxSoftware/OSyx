@@ -86,7 +86,18 @@ impl Face {
                 tables.push((t, off, len));
             }
         }
-        let mut f = Face { data: data.clone(), index, dir, tables, units_per_em: 0, glyph_count: 0, long_loca: false, hmetrics: 0, vmetrics: 0, cmap: None };
+        let mut f = Face {
+            data: data.clone(),
+            index,
+            dir,
+            tables,
+            units_per_em: 0,
+            glyph_count: 0,
+            long_loca: false,
+            hmetrics: 0,
+            vmetrics: 0,
+            cmap: None,
+        };
         let head = f.table(b"head")?;
         let (upem, long_loca) = (u16_at(head, 18).filter(|&u| (16..=16384).contains(&u))?, i16_at(head, 50)? == 1);
         f.units_per_em = upem;
@@ -131,7 +142,8 @@ impl Face {
         let mut best: Option<(u32, String)> = None;
         for i in 0..count {
             let r = 6 + 12 * i;
-            let (platform, encoding, language, nid) = (u16_at(t, r)?, u16_at(t, r + 2)?, u16_at(t, r + 4)?, u16_at(t, r + 6)?);
+            let (platform, encoding, language, nid) =
+                (u16_at(t, r)?, u16_at(t, r + 2)?, u16_at(t, r + 4)?, u16_at(t, r + 6)?);
             if nid != id {
                 continue;
             }
@@ -140,7 +152,13 @@ impl Face {
             let (rank, text) = match (platform, encoding) {
                 (3, 1) | (3, 10) | (0, _) => {
                     let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
-                    let rank = if platform == 3 && language == 0x409 { 0 } else if platform == 3 { 1 } else { 2 };
+                    let rank = if platform == 3 && language == 0x409 {
+                        0
+                    } else if platform == 3 {
+                        1
+                    } else {
+                        2
+                    };
                     (rank, String::from_utf16_lossy(&units))
                 }
                 (1, 0) => (3, bytes.iter().map(|&b| b as char).collect()),
@@ -209,11 +227,17 @@ impl Face {
             if let (Some(a), Some(d)) = (u16_at(t, 74), u16_at(t, 76)) {
                 let gap = hhea.and_then(|h| i16_at(h, 8)).unwrap_or(0);
                 // The win metrics already include the gap Windows applies.
-                let gap = (gap as i32 - ((a as i32 + d as i32) - (self.hhea_ascent() as i32 - self.hhea_descent() as i32))).max(0) as i16;
+                let gap = (gap as i32
+                    - ((a as i32 + d as i32) - (self.hhea_ascent() as i32 - self.hhea_descent() as i32)))
+                    .max(0) as i16;
                 return (a, d, gap);
             }
         }
-        (self.hhea_ascent().max(0) as u16, self.hhea_descent().unsigned_abs(), hhea.and_then(|h| i16_at(h, 8)).unwrap_or(0))
+        (
+            self.hhea_ascent().max(0) as u16,
+            self.hhea_descent().unsigned_abs(),
+            hhea.and_then(|h| i16_at(h, 8)).unwrap_or(0),
+        )
     }
 
     fn hhea_ascent(&self) -> i16 {
@@ -225,11 +249,19 @@ impl Face {
     }
 
     pub fn cap_height(&self) -> u16 {
-        self.os2().filter(|t| u16_at(t, 0).unwrap_or(0) >= 2).and_then(|t| i16_at(t, 88)).map(|v| v.max(0) as u16).unwrap_or(self.units_per_em * 7 / 10)
+        self.os2()
+            .filter(|t| u16_at(t, 0).unwrap_or(0) >= 2)
+            .and_then(|t| i16_at(t, 88))
+            .map(|v| v.max(0) as u16)
+            .unwrap_or(self.units_per_em * 7 / 10)
     }
 
     pub fn x_height(&self) -> u16 {
-        self.os2().filter(|t| u16_at(t, 0).unwrap_or(0) >= 2).and_then(|t| i16_at(t, 86)).map(|v| v.max(0) as u16).unwrap_or(self.units_per_em / 2)
+        self.os2()
+            .filter(|t| u16_at(t, 0).unwrap_or(0) >= 2)
+            .and_then(|t| i16_at(t, 86))
+            .map(|v| v.max(0) as u16)
+            .unwrap_or(self.units_per_em / 2)
     }
 
     /// (position, thickness) of the underline (post), in font units.
@@ -274,7 +306,10 @@ impl Face {
                     let r = 4 * glyph as usize;
                     (u16_at(t, r).unwrap_or(0), i16_at(t, r + 2).unwrap_or(0))
                 } else {
-                    (u16_at(t, 4 * (n as usize - 1)).unwrap_or(0), i16_at(t, 4 * n as usize + 2 * (glyph - n) as usize).unwrap_or(0))
+                    (
+                        u16_at(t, 4 * (n as usize - 1)).unwrap_or(0),
+                        i16_at(t, 4 * n as usize + 2 * (glyph - n) as usize).unwrap_or(0),
+                    )
                 }
             }
             _ => {
@@ -373,7 +408,11 @@ impl Face {
             }
         };
         let g = lookup(c).or_else(|| (encoding == 0 && c <= 0xFF).then(|| lookup(0xF000 + c)).flatten()).unwrap_or(0);
-        if g < self.glyph_count { g } else { 0 }
+        if g < self.glyph_count {
+            g
+        } else {
+            0
+        }
     }
 
     // ---- outlines --------------------------------------------------------------------------
@@ -409,7 +448,8 @@ impl Face {
     pub fn outline(&self, glyph: u16) -> Outline {
         if !self.has_glyf() {
             return osyx_font::outline(&self.data, self.index, glyph)
-                .unwrap_or_default().into_iter()
+                .unwrap_or_default()
+                .into_iter()
                 .map(|contour| contour.into_iter().map(|p| Point { x: p.x, y: p.y, on: p.on }).collect())
                 .collect();
         }

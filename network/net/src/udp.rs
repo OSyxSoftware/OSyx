@@ -47,7 +47,14 @@ pub fn build(src: Ipv4Addr, dst: Ipv4Addr, src_port: u16, dst_port: u16, data: &
 
 /// [`build`] behind `headroom` unused bytes (room for the IP and Ethernet
 /// headers, so the datagram is not copied again below).
-pub fn build_with_headroom(src: Ipv4Addr, dst: Ipv4Addr, src_port: u16, dst_port: u16, data: &[u8], headroom: usize) -> Vec<u8> {
+pub fn build_with_headroom(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    data: &[u8],
+    headroom: usize,
+) -> Vec<u8> {
     let mut frame = alloc::vec![0u8; headroom + HEADER_LEN + data.len()];
     let d = &mut frame[headroom..];
     put16(d, 0, src_port);

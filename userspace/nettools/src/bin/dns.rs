@@ -35,7 +35,11 @@ fn main() -> i32 {
         ["cache"] => match net::dns_cache() {
             Ok(entries) => {
                 for e in entries {
-                    let what = if e.count == 0 { String::from("does not exist") } else { format!("{} ({} address(es))", Ipv4Addr(e.addr), e.count) };
+                    let what = if e.count == 0 {
+                        String::from("does not exist")
+                    } else {
+                        format!("{} ({} address(es))", Ipv4Addr(e.addr), e.count)
+                    };
                     println!("{:<40} {what}, {} s left", net::field(&e.name), e.ttl_left);
                 }
                 0

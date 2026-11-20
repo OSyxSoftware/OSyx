@@ -133,7 +133,17 @@ impl FileObj {
         delete_on_close: bool,
         append: bool,
     ) -> FileObj {
-        FileObj { fd, path, access, key, open_id, is_dir, delete_on_close: AtomicBool::new(delete_on_close), append, peeked: Mutex::new(Vec::new()) }
+        FileObj {
+            fd,
+            path,
+            access,
+            key,
+            open_id,
+            is_dir,
+            delete_on_close: AtomicBool::new(delete_on_close),
+            append,
+            peeked: Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -344,7 +354,12 @@ impl MutexObj {
     /// A mutex whose state is the first two words of shared memory `shm`.
     pub fn from_shared(shm: u64) -> Option<Arc<MutexObj>> {
         let base = os_sys::shm_map(shm, true).ok()? as u64;
-        Some(Arc::new(MutexObj { local: Mutex::new((0, 0)), shared: AtomicU64::new(base), shm: AtomicU64::new(shm), name: None }))
+        Some(Arc::new(MutexObj {
+            local: Mutex::new((0, 0)),
+            shared: AtomicU64::new(base),
+            shm: AtomicU64::new(shm),
+            name: None,
+        }))
     }
 
     fn words(base: u64) -> (&'static AtomicU32, &'static AtomicU32) {
@@ -865,9 +880,16 @@ fn ready(o: &Object, consume: bool, me: u32) -> Result<bool, u32> {
         }
         Object::Console(_) | Object::File(_) | Object::Null | Object::Pipe(_) => true,
         Object::Process(p) => p.done.load(Ordering::SeqCst),
-        Object::KeyedEvent(_) | Object::Section(_) | Object::Token(_) | Object::Port(_) | Object::Job(_) | Object::WindowStation(_) | Object::Desktop(_) | Object::Directory(_) | Object::Transaction(_) | Object::Snapshot(_) => {
-            return Err(ERROR_INVALID_HANDLE)
-        }
+        Object::KeyedEvent(_)
+        | Object::Section(_)
+        | Object::Token(_)
+        | Object::Port(_)
+        | Object::Job(_)
+        | Object::WindowStation(_)
+        | Object::Desktop(_)
+        | Object::Directory(_)
+        | Object::Transaction(_)
+        | Object::Snapshot(_) => return Err(ERROR_INVALID_HANDLE),
     })
 }
 

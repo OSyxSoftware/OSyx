@@ -12,12 +12,12 @@
 #![no_std]
 #![no_main]
 
+#[path = "../shell_common.rs"]
+mod common;
 #[path = "../drives.rs"]
 mod drives;
 #[path = "../elevate.rs"]
 mod elevate;
-#[path = "../shell_common.rs"]
-mod common;
 
 use common::{load_apps, system_tz, unix_now, AppEntry};
 use os_std::prelude::*;
@@ -29,10 +29,10 @@ use osyx_abi::media::{self, Change, Disk, DiskState};
 use osyx_gfx::{rgb, Color, Rect, Surface};
 use osyx_input::{button, key};
 use osyx_ui::layout::{contains, inset};
+use osyx_ui::options::{BatteryWarning, BatteryWatch, ClockOptions, PowerOptions};
 use osyx_ui::time::Tz;
 use osyx_ui::widget::{Button, ButtonStyle, Checkbox, Column, Dialog, ListItem, ListView, Menu, MenuItem, TextField};
 use osyx_ui::{icon, Align, Event as Ui, FontKind, Fonts, Icon, Painter, Response, Theme};
-use osyx_ui::options::{BatteryWarning, BatteryWatch, ClockOptions, PowerOptions};
 use prism_client::ui::Adapter;
 use prism_client::{proto, Action, Connection, Event, Role, Window, WindowSpec};
 use prism_proto::{state, WindowInfo};
@@ -117,15 +117,39 @@ enum PopupKind {
     /// `shown`: rows of the list, as indices into the applications and,
     /// from their number on, into `found` (settings and files a search
     /// turned up).
-    Launcher { search: TextField, list: ListView, shown: Vec<usize>, list_focus: bool, found: Vec<AppEntry> },
-    Menu { menu: Menu, purpose: MenuPurpose },
-    Confirm { dialog: Dialog },
-    Quick { net: NetSummary, radios: Radios, sound: Option<Sound>, dragging: bool, hover: Option<QuickItem> },
+    Launcher {
+        search: TextField,
+        list: ListView,
+        shown: Vec<usize>,
+        list_focus: bool,
+        found: Vec<AppEntry>,
+    },
+    Menu {
+        menu: Menu,
+        purpose: MenuPurpose,
+    },
+    Confirm {
+        dialog: Dialog,
+    },
+    Quick {
+        net: NetSummary,
+        radios: Radios,
+        sound: Option<Sound>,
+        dragging: bool,
+        hover: Option<QuickItem>,
+    },
     /// The Wi-Fi network picker; `pass` is the password prompt for a
     /// secured network, with its "Show password" box.
-    Wifi { state: WifiState, list: ListView, pass: Option<(String, TextField, Checkbox)>, message: String },
+    Wifi {
+        state: WifiState,
+        list: ListView,
+        pass: Option<(String, TextField, Checkbox)>,
+        message: String,
+    },
     /// The removable drives list (see `drives.rs`).
-    Drives { view: drives::View },
+    Drives {
+        view: drives::View,
+    },
 }
 
 /// Battery indicator width on the panel, with and without the percentage.
@@ -145,7 +169,11 @@ fn read_battery() -> Option<Battery> {
 /// The notification shown when the battery indicator is clicked.
 fn battery_note(b: &Battery) -> (String, String) {
     use osyx_abi::battery::State;
-    let level = if b.state == State::Unknown && b.percent == 0 { String::from("Battery") } else { format!("Battery {} %", b.percent) };
+    let level = if b.state == State::Unknown && b.percent == 0 {
+        String::from("Battery")
+    } else {
+        format!("Battery {} %", b.percent)
+    };
     let mut parts: Vec<String> = Vec::new();
     parts.push(String::from(match b.state {
         State::Charging => "Charging",
@@ -286,21 +314,38 @@ impl WifiState {
             }
         }
         w.networks.sort_by_key(|n| core::cmp::Reverse(n.0));
-        if let Some(i) = os_std::net::interfaces().ok().and_then(|v| v.into_iter().find(|i| i.flags & os_std::net::IFF_WIRELESS != 0)) {
+        if let Some(i) = os_std::net::interfaces()
+            .ok()
+            .and_then(|v| v.into_iter().find(|i| i.flags & os_std::net::IFF_WIRELESS != 0))
+        {
             let ip = os_std::net::Ipv4Addr(i.addr);
             let gw = os_std::net::Ipv4Addr(i.gateway);
             w.diagnostics.push(format!("IP: {ip}   Gateway: {gw}"));
             let phase = os_std::net::DHCP_PHASE_NAMES.get(i.dhcp_phase as usize).copied().unwrap_or("unknown");
-            w.diagnostics.push(if i.method == os_std::net::CONFIG_DHCP { format!("DHCP: {phase}   Lease: {} s", i.lease_left) } else { String::from("DHCP: not enabled") });
+            w.diagnostics.push(if i.method == os_std::net::CONFIG_DHCP {
+                format!("DHCP: {phase}   Lease: {} s", i.lease_left)
+            } else {
+                String::from("DHCP: not enabled")
+            });
         } else {
             w.diagnostics.push(String::from("No Wi-Fi interface"));
         }
-        let dns = os_std::net::dns_servers().unwrap_or_default().iter().map(|d| format!("{d}")).collect::<Vec<_>>().join(", ");
+        let dns = os_std::net::dns_servers()
+            .unwrap_or_default()
+            .iter()
+            .map(|d| format!("{d}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         w.diagnostics.push(format!("DNS: {}", if dns.is_empty() { "none" } else { &dns }));
         let health = os_std::fs::read_to_string("/run/wifi.health").unwrap_or_default();
-        if let Some(line) = health.lines().find_map(|l| l.strip_prefix("status ")) { w.diagnostics.push(format!("Recovery: {line}")); }
+        if let Some(line) = health.lines().find_map(|l| l.strip_prefix("status ")) {
+            w.diagnostics.push(format!("Recovery: {line}"));
+        }
         let health_error = health.lines().find_map(|l| l.strip_prefix("last_error ")).filter(|s| !s.is_empty());
-        w.diagnostics.push(format!("Last error: {}", w.last_error.as_deref().or(w.error.as_deref()).or(health_error).unwrap_or("none")));
+        w.diagnostics.push(format!(
+            "Last error: {}",
+            w.last_error.as_deref().or(w.error.as_deref()).or(health_error).unwrap_or("none")
+        ));
         Some(w)
     }
 }
@@ -339,10 +384,7 @@ struct NetSummary {
 
 impl NetSummary {
     fn read() -> NetSummary {
-        let Some(i) = os_std::net::interfaces()
-            .ok()
-            .and_then(|v| os_std::net::preferred_ethernet(&v))
-        else {
+        let Some(i) = os_std::net::interfaces().ok().and_then(|v| os_std::net::preferred_ethernet(&v)) else {
             return NetSummary { present: false, connected: false, detail: String::from("No adapter") };
         };
         let link = i.flags & os_std::net::IFF_LINK != 0;
@@ -372,8 +414,14 @@ enum QuickItem {
 }
 
 impl QuickItem {
-    const ALL: [QuickItem; 6] =
-        [QuickItem::Network, QuickItem::Wifi, QuickItem::Bluetooth, QuickItem::Settings, QuickItem::Volume, QuickItem::Mute];
+    const ALL: [QuickItem; 6] = [
+        QuickItem::Network,
+        QuickItem::Wifi,
+        QuickItem::Bluetooth,
+        QuickItem::Settings,
+        QuickItem::Volume,
+        QuickItem::Mute,
+    ];
 
     fn rect(self) -> Rect {
         let tile_w = (QUICK_PANEL_W - 40 - 2 * 10) / 3;
@@ -451,7 +499,8 @@ enum PanelAction {
 }
 
 /// Finished ejects: the disk and what went wrong (None: it worked).
-static EJECTS: os_std::sync::Mutex<Vec<(String, Option<os_std::error::ErrorKind>)>> = os_std::sync::Mutex::new(Vec::new());
+static EJECTS: os_std::sync::Mutex<Vec<(String, Option<os_std::error::ErrorKind>)>> =
+    os_std::sync::Mutex::new(Vec::new());
 
 /// Exits of the shell's children, collected by the reaper thread.
 static EXITS: os_std::sync::Mutex<Vec<(u64, i32)>> = os_std::sync::Mutex::new(Vec::new());
@@ -703,7 +752,11 @@ impl Shell {
 
     fn run(&mut self) -> i32 {
         loop {
-            let timeout = if self.notes.is_empty() && !self.elevation.busy() && self.elevation_prompt.is_none() { 1000 } else { 250 };
+            let timeout = if self.notes.is_empty() && !self.elevation.busy() && self.elevation_prompt.is_none() {
+                1000
+            } else {
+                250
+            };
             if let Err(e) = self.conn.wait(&mut [], Some(Duration::from_millis(timeout))) {
                 eprintln!("desktop: lost PRISM: {e}");
                 return 2;
@@ -1077,10 +1130,14 @@ impl Shell {
                 self.quick_hover = false;
                 self.drives_hover = false;
             }
-            Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && drives.is_some_and(|r| contains(&r, x, y)) => {
+            Ui::PointerDown { x, y, button: b, .. }
+                if b == button::LEFT && drives.is_some_and(|r| contains(&r, x, y)) =>
+            {
                 action = Some(PanelAction::Drives)
             }
-            Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && battery.is_some_and(|r| contains(&r, x, y)) => {
+            Ui::PointerDown { x, y, button: b, .. }
+                if b == button::LEFT && battery.is_some_and(|r| contains(&r, x, y)) =>
+            {
                 action = Some(PanelAction::Battery)
             }
             Ui::PointerDown { x, y, button: b, .. } if b == button::LEFT && contains(&clock, x, y) => {
@@ -1173,7 +1230,11 @@ impl Shell {
             PopupKind::Launcher { search, list, shown, list_focus, found } => {
                 if let Ui::PointerDown { x, y, button: button::RIGHT, .. } = ui {
                     // Applications have a menu; found settings and files do not.
-                    app_menu = list.row_at(x, y).and_then(|i| app_at(shown, i)).filter(|&i| i < self.apps.len()).map(|i| (i, p.x + x, p.y + y));
+                    app_menu = list
+                        .row_at(x, y)
+                        .and_then(|i| app_at(shown, i))
+                        .filter(|&i| i < self.apps.len())
+                        .map(|i| (i, p.x + x, p.y + y));
                 }
                 // Arrow keys and Enter in the search field drive the list.
                 if let Ui::Key(k) = ui {
@@ -1274,7 +1335,9 @@ impl Shell {
                     }
                 } else {
                     if let Ui::PointerDown { x, y, button: button::LEFT, .. } = ui {
-                        if contains(&wifi_reconnect_rect(), x, y) { wifi_reconnect = true; }
+                        if contains(&wifi_reconnect_rect(), x, y) {
+                            wifi_reconnect = true;
+                        }
                     }
                     match list.event(&ui, true) {
                         Response::Activated(i) => {
@@ -1546,7 +1609,12 @@ impl Shell {
     /// name for Settings. Whatever else a shortcut asks for is dropped.
     fn privileged_args<'a>(exec: &str, args: &'a [String]) -> &'a [String] {
         match args {
-            [section] if exec == SETTINGS_APP && osyx_filekit::search::SETTINGS.iter().any(|s| s.section == section.as_str()) => args,
+            [section]
+                if exec == SETTINGS_APP
+                    && osyx_filekit::search::SETTINGS.iter().any(|s| s.section == section.as_str()) =>
+            {
+                args
+            }
             _ => &[],
         }
     }
@@ -1628,9 +1696,8 @@ impl Shell {
             (format!("{name}.app"), Ok(format!("Name={name}\nExec={}\nIcon=program\n", app.exec).into_bytes()))
         };
         let target = format!("{}/{file}", common::DESKTOP_DIR);
-        let result = os_std::fs::create_dir_all(common::DESKTOP_DIR)
-            .and(data)
-            .and_then(|data| os_std::fs::write(&target, data));
+        let result =
+            os_std::fs::create_dir_all(common::DESKTOP_DIR).and(data).and_then(|data| os_std::fs::write(&target, data));
         match result {
             Ok(()) => {
                 println!("desktop: shortcut added: {name} -> {target}");
@@ -1774,7 +1841,10 @@ impl Shell {
     /// prompt closed without a "Yes".
     fn service_elevation(&mut self) {
         self.elevation.poll();
-        let asking = self.popup.as_ref().is_some_and(|p| matches!(&p.kind, PopupKind::Confirm { dialog } if dialog.tag == CONFIRM_ELEVATE));
+        let asking = self
+            .popup
+            .as_ref()
+            .is_some_and(|p| matches!(&p.kind, PopupKind::Confirm { dialog } if dialog.tag == CONFIRM_ELEVATE));
         if self.elevation_prompt.is_some() && !asking {
             if let Some(request) = self.elevation_prompt.take() {
                 println!("desktop: elevation of {} declined", request.exe);
@@ -1782,7 +1852,9 @@ impl Shell {
             }
         }
         // One prompt at a time, and never over another confirmation.
-        if self.elevation_prompt.is_none() && self.popup.as_ref().is_none_or(|p| !matches!(p.kind, PopupKind::Confirm { .. })) {
+        if self.elevation_prompt.is_none()
+            && self.popup.as_ref().is_none_or(|p| !matches!(p.kind, PopupKind::Confirm { .. }))
+        {
             if let Some(request) = self.elevation.queue.pop_front() {
                 let message = request.prompt();
                 self.confirm(CONFIRM_ELEVATE, "User Account Control", &message, "Yes");
@@ -1863,7 +1935,13 @@ impl Shell {
         list.select(if shown.is_empty() { None } else { Some(0) });
         let y = (self.h - PANEL_H) as i32 - LAUNCHER_H as i32 - 8;
         println!("desktop: launcher opened ({} applications, {} files indexed)", shown.len(), self.file_index.len());
-        self.open_popup(8, y, LAUNCHER_W, LAUNCHER_H, PopupKind::Launcher { search, list, shown, list_focus: false, found: Vec::new() });
+        self.open_popup(
+            8,
+            y,
+            LAUNCHER_W,
+            LAUNCHER_H,
+            PopupKind::Launcher { search, list, shown, list_focus: false, found: Vec::new() },
+        );
         self.launcher_btn.active = true;
         self.panel.dirty = true;
     }
@@ -1886,7 +1964,11 @@ impl Shell {
             .filter_map(|v| v.mount.as_ref())
             .filter_map(|m| {
                 let s = os_std::os::statfs(m).ok()?;
-                Some((m.clone(), s.total_blocks.saturating_mul(s.block_size), s.free_blocks.saturating_mul(s.block_size)))
+                Some((
+                    m.clone(),
+                    s.total_blocks.saturating_mul(s.block_size),
+                    s.free_blocks.saturating_mul(s.block_size),
+                ))
             })
             .collect()
     }
@@ -1936,7 +2018,10 @@ impl Shell {
                     Change::Ejected(d) => {
                         let name = d.model.clone();
                         println!("desktop: drive ejected: {name}");
-                        self.show_note("Safe to remove", &format!("{} can be unplugged now.", if name.is_empty() { "The drive" } else { &name }));
+                        self.show_note(
+                            "Safe to remove",
+                            &format!("{} can be unplugged now.", if name.is_empty() { "The drive" } else { &name }),
+                        );
                     }
                     Change::Unplugged(d) if d.state == DiskState::Mounted => {
                         let name = d.volumes.first().map_or(d.model.clone(), |v| String::from(v.name()));
@@ -2056,7 +2141,8 @@ impl Shell {
     }
 
     fn open_wifi(&mut self, state: WifiState) {
-        let mut list = ListView::new(vec![Column::new("Network", 0, Align::Left), Column::new("Security", 120, Align::Right)]);
+        let mut list =
+            ListView::new(vec![Column::new("Network", 0, Align::Left), Column::new("Security", 120, Align::Right)]);
         list.show_header = false;
         list.row_height = 40;
         list.rect = Rect::new(8, 180, QUICK_PANEL_W - 16, WIFI_PANEL_H - 180 - 40);
@@ -2077,7 +2163,13 @@ impl Shell {
         let x = self.w as i32 - QUICK_PANEL_W as i32 - 8;
         let y = (self.h - PANEL_H) as i32 - WIFI_PANEL_H as i32 - 8;
         println!("desktop: Wi-Fi picker opened ({} networks)", state.networks.len());
-        self.open_popup(x, y, QUICK_PANEL_W, WIFI_PANEL_H, PopupKind::Wifi { state, list, pass: None, message: String::new() });
+        self.open_popup(
+            x,
+            y,
+            QUICK_PANEL_W,
+            WIFI_PANEL_H,
+            PopupKind::Wifi { state, list, pass: None, message: String::new() },
+        );
     }
 
     fn toggle_quick(&mut self) {
@@ -2098,7 +2190,13 @@ impl Shell {
             net.detail,
             sound.as_ref().map_or("none", |s| s.device.as_str())
         );
-        self.open_popup(x, y, QUICK_PANEL_W, QUICK_PANEL_H, PopupKind::Quick { net, radios, sound, dragging: false, hover: None });
+        self.open_popup(
+            x,
+            y,
+            QUICK_PANEL_W,
+            QUICK_PANEL_H,
+            PopupKind::Quick { net, radios, sound, dragging: false, hover: None },
+        );
         self.panel.dirty = true;
     }
 
@@ -2161,7 +2259,10 @@ impl Shell {
         }
         if w.error.as_deref() == Some("wrong-password") {
             println!("desktop: wrong Wi-Fi password for {ssid}");
-            self.show_note("Wi-Fi: wrong password", &format!("{ssid} did not accept the password. Open Wi-Fi in Quick Settings and try again."));
+            self.show_note(
+                "Wi-Fi: wrong password",
+                &format!("{ssid} did not accept the password. Open Wi-Fi in Quick Settings and try again."),
+            );
             self.wifi_joining = None;
         } else if w.keys && w.ssid.as_deref() == Some(ssid.as_str()) {
             self.show_note("Wi-Fi", &format!("Connected to {ssid}"));
@@ -2260,10 +2361,9 @@ impl Shell {
             if let Some(warning) = self.battery_watch.update(b.percent, discharging, &self.power) {
                 let left = b.time_text().map_or(String::new(), |t| format!(", about {t} left"));
                 let (title, body) = match warning {
-                    BatteryWarning::Low => (
-                        format!("Battery low: {} %", b.percent),
-                        format!("Connect the power adapter soon{left}."),
-                    ),
+                    BatteryWarning::Low => {
+                        (format!("Battery low: {} %", b.percent), format!("Connect the power adapter soon{left}."))
+                    }
                     BatteryWarning::Critical => (
                         format!("Battery almost empty: {} %", b.percent),
                         format!("Connect the power adapter now and save your work{left}."),
@@ -2375,14 +2475,16 @@ impl Shell {
         }
         if self.panel.dirty && self.panel.can_draw() {
             let clock = self.clock_rect();
-            let quick = (
-                self.quick_rect(),
-                self.quick_hover,
-                self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Quick),
-            );
+            let quick =
+                (self.quick_rect(), self.quick_hover, self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Quick));
             let battery = self.battery_rect().zip(self.battery);
             let drives = self.drives_rect().map(|r| {
-                (r, self.media.len(), self.drives_hover, self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Drives))
+                (
+                    r,
+                    self.media.len(),
+                    self.drives_hover,
+                    self.popup.as_ref().is_some_and(|p| p.tag() == PopupTag::Drives),
+                )
             });
             let mut s = self.panel.surface()?;
             let mut p = Painter::new(&mut s, &theme, &fonts);
@@ -2443,7 +2545,13 @@ fn draw_lock(p: &mut Painter, field: &TextField, message: &str, clock: &(String,
     let big = p.fonts.line_height(FontKind::Display);
     p.text_in(FontKind::Display, Rect::new(0, cy - 150, full.w, big), &clock.0, rgb(245, 248, 255), Align::Center);
     let lh = p.fonts.line_height(FontKind::Large);
-    p.text_in(FontKind::Large, Rect::new(0, cy - 150 + big as i32 + 4, full.w, lh), &clock.1, rgb(210, 220, 240), Align::Center);
+    p.text_in(
+        FontKind::Large,
+        Rect::new(0, cy - 150 + big as i32 + 4, full.w, lh),
+        &clock.1,
+        rgb(210, 220, 240),
+        Align::Center,
+    );
     icon::draw(p, Icon::Lock, Rect::new(cx - 14, cy - 10, 28, 28), rgb(230, 236, 250));
     let r = field.rect;
     let card = Rect::new(r.x - 6, r.y - 6, r.w + 12, r.h + 12);
@@ -2532,7 +2640,15 @@ fn find_more(file_index: &[String], q: &str) -> Vec<AppEntry> {
     let mut out: Vec<AppEntry> = search::settings(q)
         .into_iter()
         .take(MAX_FOUND_SETTINGS)
-        .map(|s| entry(format!("{}  ·  Settings", s.title), SETTINGS_APP, Icon::Settings, format!("Open Settings at {}", s.title), vec![String::from(s.section)]))
+        .map(|s| {
+            entry(
+                format!("{}  ·  Settings", s.title),
+                SETTINGS_APP,
+                Icon::Settings,
+                format!("Open Settings at {}", s.title),
+                vec![String::from(s.section)],
+            )
+        })
         .collect();
     for i in search::files(file_index, q, MAX_FOUND_FILES) {
         let path = &file_index[i];
@@ -2540,11 +2656,22 @@ fn find_more(file_index: &[String], q: &str) -> Vec<AppEntry> {
         // (A folder's path ends in a slash: its parent is what precedes its name.)
         let whole = path.trim_end_matches('/');
         let folder = whole.strip_suffix(name).unwrap_or(whole).trim_end_matches('/');
-        let shown_folder = folder.strip_prefix(common::USER_HOME).map_or(String::from(folder), |rest| format!("~{rest}"));
+        let shown_folder =
+            folder.strip_prefix(common::USER_HOME).map_or(String::from(folder), |rest| format!("~{rest}"));
         let is_dir = path.ends_with('/');
         let icon = if is_dir { Icon::Folder } else { Icon::File };
-        let args = if is_dir { vec![String::from(path.trim_end_matches('/'))] } else { vec![String::from("--open"), path.clone()] };
-        out.push(entry(format!("{name}  ·  {shown_folder}"), "/system/bin/files", icon, path.trim_end_matches('/').to_string(), args));
+        let args = if is_dir {
+            vec![String::from(path.trim_end_matches('/'))]
+        } else {
+            vec![String::from("--open"), path.clone()]
+        };
+        out.push(entry(
+            format!("{name}  ·  {shown_folder}"),
+            "/system/bin/files",
+            icon,
+            path.trim_end_matches('/').to_string(),
+            args,
+        ));
     }
     out
 }
@@ -2665,7 +2792,8 @@ fn draw_panel(
     let lh = p.fonts.line_height(FontKind::Bold);
     if clock.1.is_empty() {
         // Time only (Settings > Date & Time): centred in the panel's height.
-        let middle = Rect::new(clock_rect.x, clock_rect.y + (clock_rect.h as i32 - lh as i32) / 2, clock_rect.w - 10, lh);
+        let middle =
+            Rect::new(clock_rect.x, clock_rect.y + (clock_rect.h as i32 - lh as i32) / 2, clock_rect.w - 10, lh);
         p.text_in(FontKind::Bold, middle, &clock.0, t.text, Align::Right);
     } else {
         let top = Rect::new(clock_rect.x, clock_rect.y + 2, clock_rect.w - 10, lh);
@@ -2688,7 +2816,13 @@ fn draw_panel(
         }
         icon::draw(p, Icon::Drive, Rect::new(r.x + 8, r.y + (r.h as i32 - 22) / 2, 22, 22), t.text);
         if count > 1 {
-            p.text_in(FontKind::Ui, Rect::new(r.x + 30, r.y, r.w.saturating_sub(32), r.h), &format!("{count}"), t.text_dim, Align::Left);
+            p.text_in(
+                FontKind::Ui,
+                Rect::new(r.x + 30, r.y, r.w.saturating_sub(32), r.h),
+                &format!("{count}"),
+                t.text_dim,
+                Align::Left,
+            );
         }
     }
     p.vline(quick_rect.right() as i32 + 5, 12, full.h - 24, panel_line(&t));
@@ -2812,9 +2946,17 @@ fn draw_quick(p: &mut Painter, net: &NetSummary, radios: &Radios, sound: Option<
     p.text_in(FontKind::Ui, Rect::new(s.x + 40, s.y, s.w - 48, s.h), "All settings", t.text, Align::Left);
 }
 
-fn wifi_reconnect_rect() -> Rect { Rect::new(220, 14, 120, 32) }
+fn wifi_reconnect_rect() -> Rect {
+    Rect::new(220, 14, 120, 32)
+}
 
-fn draw_wifi(p: &mut Painter, state: &WifiState, list: &ListView, pass: Option<&(String, TextField, Checkbox)>, message: &str) {
+fn draw_wifi(
+    p: &mut Painter,
+    state: &WifiState,
+    list: &ListView,
+    pass: Option<&(String, TextField, Checkbox)>,
+    message: &str,
+) {
     let t = *p.theme;
     p.text(FontKind::Large, 20, 16, "Wi-Fi", t.text);
     let status = match &state.ssid {
@@ -2838,7 +2980,8 @@ fn draw_wifi(p: &mut Painter, state: &WifiState, list: &ListView, pass: Option<&
             let top = field.rect.y - 2 * lh as i32 - 12;
             p.text(FontKind::Bold, 20, top, &format!("Password for {ssid}"), t.text);
             field.draw(p, true);
-            let (msg, color) = if message.is_empty() { ("Enter to join, Esc to go back", t.text_faint) } else { (message, t.danger) };
+            let (msg, color) =
+                if message.is_empty() { ("Enter to join, Esc to go back", t.text_faint) } else { (message, t.danger) };
             p.text(FontKind::Ui, 20, field.rect.bottom() as i32 + 10, msg, color);
         }
         None if state.networks.is_empty() => {
@@ -2846,7 +2989,11 @@ fn draw_wifi(p: &mut Painter, state: &WifiState, list: &ListView, pass: Option<&
         }
         None => {
             list.draw(p, true);
-            let hint = if state.known.is_empty() { "Enter to join" } else { "Enter to join, Delete to forget a saved network" };
+            let hint = if state.known.is_empty() {
+                "Enter to join"
+            } else {
+                "Enter to join, Delete to forget a saved network"
+            };
             p.text(FontKind::Ui, 20, (WIFI_PANEL_H - 34) as i32, hint, t.text_faint);
         }
     }

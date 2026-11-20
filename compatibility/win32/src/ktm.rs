@@ -70,7 +70,15 @@ pub fn active(h: u64) -> Result<Arc<TransactionObj>, u32> {
 /// flags, timeout, description): the handle, or INVALID_HANDLE_VALUE. The
 /// options may only be TRANSACTION_DO_NOT_PROMOTE; the isolation arguments
 /// are accepted and unused (see the module comment).
-extern "win64" fn CreateTransaction(attributes: u64, uow: *const u8, options: u32, _isolation: u32, _flags: u32, _timeout: u32, _description: *const u16) -> u64 {
+extern "win64" fn CreateTransaction(
+    attributes: u64,
+    uow: *const u8,
+    options: u32,
+    _isolation: u32,
+    _flags: u32,
+    _timeout: u32,
+    _description: *const u16,
+) -> u64 {
     if let Err(e) = security::validate_attributes(attributes) {
         return fail(e, u64::MAX);
     }
@@ -84,7 +92,11 @@ extern "win64" fn CreateTransaction(attributes: u64, uow: *const u8, options: u3
     } else if !crate::ucrt::entropy(&mut id) {
         return fail(ERROR_GEN_FAILURE, u64::MAX);
     }
-    objects::insert(Object::Transaction(Arc::new(TransactionObj { id, state: AtomicU32::new(ACTIVE), undo: Mutex::new(Vec::new()) })))
+    objects::insert(Object::Transaction(Arc::new(TransactionObj {
+        id,
+        state: AtomicU32::new(ACTIVE),
+        undo: Mutex::new(Vec::new()),
+    })))
 }
 
 extern "win64" fn CommitTransaction(h: u64) -> i32 {
@@ -188,7 +200,14 @@ extern "win64" fn DeleteFileTransactedW(name: *const u16, tx: u64) -> i32 {
 /// the commit. The progress routine is called once with the whole size,
 /// as for CopyFileEx (the move is one step).
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn MoveFileTransactedW(from: *const u16, to: *const u16, _progress: u64, _data: u64, flags: u32, tx: u64) -> i32 {
+extern "win64" fn MoveFileTransactedW(
+    from: *const u16,
+    to: *const u16,
+    _progress: u64,
+    _data: u64,
+    flags: u32,
+    tx: u64,
+) -> i32 {
     if flags & !(MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }

@@ -218,9 +218,11 @@ impl Lookup {
     }
 
     fn check_metadata(&self, path: &str) -> Result<()> {
-        if self.path_policy.as_ref().is_some_and(|policy| {
-            !policy.allows(path, Access::READ) && !policy.may_inspect_ancestor(path)
-        }) {
+        if self
+            .path_policy
+            .as_ref()
+            .is_some_and(|policy| !policy.allows(path, Access::READ) && !policy.may_inspect_ancestor(path))
+        {
             return Err(Errno::PermissionDenied);
         }
         Ok(())
@@ -291,11 +293,7 @@ fn cache_get(key: &(u64, u64, bool, String)) -> Option<Hit> {
     if c.epoch != DCACHE_EPOCH.load(Ordering::Relaxed) {
         return None;
     }
-    Some(if c.missing {
-        Hit::Missing
-    } else {
-        Hit::Node { ino: c.ino, st: c.st, stored: c.stored.clone() }
-    })
+    Some(if c.missing { Hit::Missing } else { Hit::Node { ino: c.ino, st: c.st, stored: c.stored.clone() } })
 }
 
 fn cache_put(key: (u64, u64, bool, String), ino: u64, st: FileStat, stored: String, epoch: u64) {
@@ -327,11 +325,11 @@ fn cache_forget(mount: u64, dir: u64, name: &str) {
     let mut t = DCACHE.lock();
     let lo = (mount, dir, false, String::new());
     let hi = (mount, dir, true, String::from("\u{10ffff}"));
-    let stale: Vec<(u64, u64, bool, String)> =
-        t.range(lo..=hi)
-            .filter(|(_, c)| path::fold_case(&c.stored) == path::fold_case(name))
-            .map(|(k, _)| k.clone())
-            .collect();
+    let stale: Vec<(u64, u64, bool, String)> = t
+        .range(lo..=hi)
+        .filter(|(_, c)| path::fold_case(&c.stored) == path::fold_case(name))
+        .map(|(k, _)| k.clone())
+        .collect();
     for k in stale {
         t.remove(&k);
     }
@@ -583,7 +581,8 @@ pub fn detach_volumes(paths: &[String], force: bool) -> Result<Vec<Arc<Mount>>> 
             if Arc::strong_count(m) > 2 {
                 return Err(Errno::Busy);
             }
-            let nested = t.iter().any(|(p, _)| p != m.path && path::is_within(p, &m.path) && !paths.iter().any(|q| q == p));
+            let nested =
+                t.iter().any(|(p, _)| p != m.path && path::is_within(p, &m.path) && !paths.iter().any(|q| q == p));
             if nested {
                 return Err(Errno::Busy);
             }
@@ -640,7 +639,6 @@ pub fn device_in_use(name: &str) -> bool {
         })
     })
 }
-
 
 /// Unmounts everything except `/` (innermost first) and syncs `/`.
 pub fn shutdown() {
@@ -893,7 +891,10 @@ pub fn open(cx: &Lookup, p: &str, flags: u64, mode: u32) -> Result<OpenFile> {
             Err(Errno::NotFound) => {
                 let (dir, name) = walk_parent(cx, p)?;
                 cx.check_path(&dir.path, Access::WRITE)?;
-                cx.check_path(&path::join(&dir.path, &name), Access { read: flags & OPEN_READ != 0, write, exec: false })?;
+                cx.check_path(
+                    &path::join(&dir.path, &name),
+                    Access { read: flags & OPEN_READ != 0, write, exec: false },
+                )?;
                 check_dir_write(&dir, &cx.cred)?;
                 let ino = dir.mount.fs.create(dir.ino, &name, NewNode::File, mode & MODE_PERMS, &cx.cred)?;
                 cache_forget(dir.mount.id, dir.ino, &name);
@@ -1015,8 +1016,12 @@ pub fn write_cat_bytes() -> [u64; 8] {
 impl OpenFile {
     /// Mapped I/O does not move the file position or apply OPEN_APPEND.
     pub fn mapping_access(&self, writable: bool) -> Result<()> {
-        if self.kind != KIND_FILE || self.device.is_some() { return Err(Errno::NotSupported); }
-        if !self.read || (writable && !self.write) { return Err(Errno::PermissionDenied); }
+        if self.kind != KIND_FILE || self.device.is_some() {
+            return Err(Errno::NotSupported);
+        }
+        if !self.read || (writable && !self.write) {
+            return Err(Errno::PermissionDenied);
+        }
         Ok(())
     }
 
@@ -1089,7 +1094,15 @@ impl OpenFile {
                 let ms = crate::interrupts::uptime_ms().saturating_sub(t0);
                 if ms >= 40 {
                     // TEMP I/O diagnostics: which read blocks its thread this long.
-                    crate::kprintln!("sloread: {} at {} len {} in {} ms (pid {} tid {})", self.path(), self.pos, buf.len(), ms, crate::sched::current_pid(), crate::sched::current_tid());
+                    crate::kprintln!(
+                        "sloread: {} at {} len {} in {} ms (pid {} tid {})",
+                        self.path(),
+                        self.pos,
+                        buf.len(),
+                        ms,
+                        crate::sched::current_pid(),
+                        crate::sched::current_tid()
+                    );
                 }
                 r
             }
@@ -1282,4 +1295,3 @@ pub fn mount_disk_owned(
         _ => Err(Errno::InvalidArgument),
     }
 }
-

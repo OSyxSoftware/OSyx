@@ -44,7 +44,10 @@ pub enum Interrupt {
     /// An interrupt resource (global system interrupt).
     Gsi(u32),
     /// A GPIO interrupt: pin number and the GPIO controller's ACPI path.
-    Gpio { pin: u16, controller: String },
+    Gpio {
+        pin: u16,
+        controller: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,7 +186,8 @@ pub fn encode(devices: &[DeviceSpec]) -> Result<Vec<u8>, SpecError> {
             }
         }
         let t = &c.timing;
-        let flags = u8::from(t.standard.is_some()) | u8::from(t.fast.is_some()) << 1 | u8::from(t.sda_hold.is_some()) << 2;
+        let flags =
+            u8::from(t.standard.is_some()) | u8::from(t.fast.is_some()) << 1 | u8::from(t.sda_hold.is_some()) << 2;
         w.u8(flags);
         for v in [t.standard.map(|s| (s.hcnt, s.lcnt)), t.fast.map(|s| (s.hcnt, s.lcnt))] {
             let (h, l) = v.unwrap_or((0, 0));

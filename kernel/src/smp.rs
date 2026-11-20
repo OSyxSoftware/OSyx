@@ -32,7 +32,11 @@ struct CpuLocal {
     tid: AtomicU64, // GS:40
     pid: AtomicU64, // GS:48
 }
-const _: () = assert!(core::mem::offset_of!(CpuLocal,kernel_rsp)==0 && core::mem::offset_of!(CpuLocal,user_rsp)==8 && core::mem::offset_of!(CpuLocal,index)==16);
+const _: () = assert!(
+    core::mem::offset_of!(CpuLocal, kernel_rsp) == 0
+        && core::mem::offset_of!(CpuLocal, user_rsp) == 8
+        && core::mem::offset_of!(CpuLocal, index) == 16
+);
 // SAFETY: stack pointers are accessed only by their CPU with interrupts
 // disabled; shared bookkeeping uses atomics and index never changes online.
 unsafe impl Sync for CpuLocal {}
@@ -410,21 +414,13 @@ pub fn sample_user(rip: u64, rsp: u64) {
 
 pub fn stack_samples() -> [(u64, u64, u64); STACK_SLOTS] {
     core::array::from_fn(|i| {
-        (
-            K_TID[i].load(Ordering::Relaxed),
-            K_RIP[i].load(Ordering::Relaxed),
-            K_COUNT[i].load(Ordering::Relaxed),
-        )
+        (K_TID[i].load(Ordering::Relaxed), K_RIP[i].load(Ordering::Relaxed), K_COUNT[i].load(Ordering::Relaxed))
     })
 }
 
 pub fn rip_samples() -> [(u64, u64, u64); SAMPLE_SLOTS] {
     core::array::from_fn(|i| {
-        (
-            S_TID[i].load(Ordering::Relaxed),
-            S_RIP[i].load(Ordering::Relaxed),
-            S_COUNT[i].load(Ordering::Relaxed),
-        )
+        (S_TID[i].load(Ordering::Relaxed), S_RIP[i].load(Ordering::Relaxed), S_COUNT[i].load(Ordering::Relaxed))
     })
 }
 
@@ -437,7 +433,8 @@ static LAST_SYSCALL_RIP: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::n
 static LAST_SYSCALL_RSP: [AtomicU64; LAST_SYSCALL_SLOTS] = [const { AtomicU64::new(0) }; LAST_SYSCALL_SLOTS];
 /// The first and fourth argument (rdi, r10) of each thread's last system
 /// call: what a blocking call waits on (a futex and its owner, a handle).
-static LAST_SYSCALL_ARGS: [[AtomicU64; 2]; LAST_SYSCALL_SLOTS] = [const { [const { AtomicU64::new(0) }; 2] }; LAST_SYSCALL_SLOTS];
+static LAST_SYSCALL_ARGS: [[AtomicU64; 2]; LAST_SYSCALL_SLOTS] =
+    [const { [const { AtomicU64::new(0) }; 2] }; LAST_SYSCALL_SLOTS];
 
 pub fn note_last_syscall(tid: u64, rip: u64, nr: u64, rsp: u64, args: [u64; 2]) {
     if tid != 0 && (tid as usize) < LAST_SYSCALL_SLOTS {
@@ -470,10 +467,7 @@ pub fn last_syscall(tid: u64) -> (u64, u64) {
     if tid == 0 || tid as usize >= LAST_SYSCALL_SLOTS {
         return (0, 0);
     }
-    (
-        LAST_SYSCALL_NR[tid as usize].load(Ordering::Relaxed),
-        LAST_SYSCALL_RIP[tid as usize].load(Ordering::Relaxed),
-    )
+    (LAST_SYSCALL_NR[tid as usize].load(Ordering::Relaxed), LAST_SYSCALL_RIP[tid as usize].load(Ordering::Relaxed))
 }
 
 // TEMP syscall calling-site attribution (user return RIP for CLOCK/RECV).
@@ -782,7 +776,9 @@ pub fn flush_remote(root: u64, kernel_mapping: bool) {
             }
         }
     }
-    if were_enabled { cpu::enable_interrupts(); }
+    if were_enabled {
+        cpu::enable_interrupts();
+    }
 }
 
 global_asm!(
@@ -924,7 +920,14 @@ pub fn start(boot: &BootData) {
         kprintln!("smp: 1 CPU online");
         return;
     }
-    if !boot.memory_map().iter().any(|region| region.phys_start<=TRAMPOLINE && region.end()>=0xa000 && matches!(region.kind,osyx_bootinfo::MemoryKind::Usable|osyx_bootinfo::MemoryKind::BootloaderReclaimable)) {
+    if !boot.memory_map().iter().any(|region| {
+        region.phys_start <= TRAMPOLINE
+            && region.end() >= 0xa000
+            && matches!(
+                region.kind,
+                osyx_bootinfo::MemoryKind::Usable | osyx_bootinfo::MemoryKind::BootloaderReclaimable
+            )
+    }) {
         kprintln!("smp: low bootstrap pages are not usable RAM; keeping one CPU");
         return;
     }

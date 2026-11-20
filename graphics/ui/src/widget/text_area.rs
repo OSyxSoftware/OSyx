@@ -539,7 +539,11 @@ impl TextArea {
         let matches = |line: &str| match_cols(line, needle, fold);
         let n = self.lines.len();
         let len = char_len(needle);
-        let from = if forward { self.selection().map_or(self.cursor, |s| s.1) } else { self.selection().map_or(self.cursor, |s| s.0) };
+        let from = if forward {
+            self.selection().map_or(self.cursor, |s| s.1)
+        } else {
+            self.selection().map_or(self.cursor, |s| s.0)
+        };
         for step in 0..=n {
             let line = if forward { (from.line + step) % n } else { (from.line + n - step % n) % n };
             let cols = matches(&self.lines[line]);
@@ -583,7 +587,12 @@ impl TextArea {
     /// The area the text is drawn in.
     fn text_rect(&self, fonts: &Fonts) -> Rect {
         let g = self.gutter(fonts) as i32;
-        Rect::new(self.rect.x + g + PAD, self.rect.y, (self.rect.w as i32 - g - PAD - SCROLLBAR as i32).max(0) as u32, self.rect.h)
+        Rect::new(
+            self.rect.x + g + PAD,
+            self.rect.y,
+            (self.rect.w as i32 - g - PAD - SCROLLBAR as i32).max(0) as u32,
+            self.rect.h,
+        )
     }
 
     fn track(&self) -> Rect {
@@ -617,7 +626,8 @@ impl TextArea {
     fn pos_at(&self, x: i32, y: i32, fonts: &Fonts) -> Pos {
         let lh = fonts.line_height(FontKind::Mono) as i64;
         let r = self.text_rect(fonts);
-        let line = ((y as i64 - r.y as i64 + self.scroll.offset as i64) / lh).clamp(0, self.lines.len() as i64 - 1) as usize;
+        let line =
+            ((y as i64 - r.y as i64 + self.scroll.offset as i64) / lh).clamp(0, self.lines.len() as i64 - 1) as usize;
         let cw = fonts.mono.cell_width() as i32;
         let cell = ((x - r.x + cw / 2).max(0) / cw) as usize + self.scroll_x;
         // `col_at_cell` rounds within a cell; the half cell is already added.
@@ -676,7 +686,10 @@ impl TextArea {
                         let c = self.cursor.col;
                         let in_indent = c > 0 && line.chars().take(c).all(|ch| ch == ' ');
                         let n = if in_indent { (c - 1) % TAB_WIDTH + 1 } else { 1 };
-                        (if in_indent { Pos::new(self.cursor.line, c - n) } else { self.left_of(self.cursor) }, self.cursor)
+                        (
+                            if in_indent { Pos::new(self.cursor.line, c - n) } else { self.left_of(self.cursor) },
+                            self.cursor,
+                        )
                     }
                     (None, false, true) => (self.cursor, self.word_right(self.cursor)),
                     (None, false, false) => (self.cursor, self.right_of(self.cursor)),
@@ -686,7 +699,8 @@ impl TextArea {
             key::ENTER | key::KP_ENTER => {
                 // The new line starts under the text of this one.
                 let line = &self.lines[self.cursor.line];
-                let indent: String = line.chars().take(self.cursor.col).take_while(|c| *c == ' ' || *c == '\t').collect();
+                let indent: String =
+                    line.chars().take(self.cursor.col).take_while(|c| *c == ' ' || *c == '\t').collect();
                 let mut text = String::from("\n");
                 text.push_str(&indent);
                 let (a, b) = self.selection().unwrap_or((self.cursor, self.cursor));
@@ -849,8 +863,14 @@ impl TextArea {
                 let n = char_len(&self.needle);
                 // Only matches on screen get their place worked out.
                 let on_screen = (col_covering(line, self.scroll_x), col_covering(line, self.scroll_x + cols + 1) + 1);
-                for col in match_cols(line, &self.needle, fold).into_iter().filter(|c| c + n > on_screen.0 && *c < on_screen.1) {
-                    p.blend(Rect::new(cell_x(col), y, (cell_x(col + n) - cell_x(col)).max(0) as u32, lh as u32), t.warning, 70);
+                for col in
+                    match_cols(line, &self.needle, fold).into_iter().filter(|c| c + n > on_screen.0 && *c < on_screen.1)
+                {
+                    p.blend(
+                        Rect::new(cell_x(col), y, (cell_x(col + n) - cell_x(col)).max(0) as u32, lh as u32),
+                        t.warning,
+                        70,
+                    );
                 }
             }
             if let Some((a, b)) = selection {

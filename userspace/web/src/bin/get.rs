@@ -38,7 +38,8 @@ fn free_name(name: &str) -> String {
 fn main() -> i32 {
     let args: Vec<String> = env::args().collect();
     let sha = args.iter().position(|a| a == "--sha256").and_then(|i| args.get(i + 1)).cloned();
-    let plain: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--") && Some(*a) != sha.as_ref()).collect();
+    let plain: Vec<&String> =
+        args.iter().skip(1).filter(|a| !a.starts_with("--") && Some(*a) != sha.as_ref()).collect();
     let Some(url) = plain.first() else {
         eprintln!("usage: get <url> [<file>] [--sha256 <hex>]");
         eprintln!("Downloads <url> into <file>, or into the current directory under the URL's file name.");

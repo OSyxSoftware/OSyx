@@ -143,7 +143,13 @@ fn cert_bytes(d: &[u8], c: (usize, usize)) -> Vec<u8> {
     d[c.0..c.0 + c.1].to_vec()
 }
 
-extern "win64" fn ImageEnumerateCertificates(h: u64, filter: u16, count: *mut u32, indices: *mut u32, index_count: u32) -> i32 {
+extern "win64" fn ImageEnumerateCertificates(
+    h: u64,
+    filter: u16,
+    count: *mut u32,
+    indices: *mut u32,
+    index_count: u32,
+) -> i32 {
     let r = (|| {
         let d = read_all(h)?;
         let l = layout(&d)?;
@@ -260,7 +266,12 @@ extern "win64" fn ImageRemoveCertificate(h: u64, index: u32) -> i32 {
         if index as usize >= existing.len() {
             return Err(ERROR_INVALID_PARAMETER);
         }
-        let all: Vec<Vec<u8>> = existing.iter().enumerate().filter(|(i, _)| *i != index as usize).map(|(_, &c)| cert_bytes(&d, c)).collect();
+        let all: Vec<Vec<u8>> = existing
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index as usize)
+            .map(|(_, &c)| cert_bytes(&d, c))
+            .collect();
         rewrite(h, d, &l, &existing, &all)
     })();
     match r {

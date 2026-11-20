@@ -275,7 +275,8 @@ impl Window {
     fn bounds(&self) -> Rect {
         let f = self.frame();
         if self.has_shadow() {
-            f.inflate(theme::SHADOW as i32 + 2).union(&Rect::new(f.x, f.y + theme::SHADOW_OFFSET_Y, f.w, f.h).inflate(theme::SHADOW as i32 + 2))
+            f.inflate(theme::SHADOW as i32 + 2)
+                .union(&Rect::new(f.x, f.y + theme::SHADOW_OFFSET_Y, f.w, f.h).inflate(theme::SHADOW as i32 + 2))
         } else {
             f
         }
@@ -330,7 +331,8 @@ impl Ghost {
     fn bounds(&self) -> Rect {
         let t = if self.decorated { theme::TITLE_HEIGHT } else { 0 };
         let f = Rect::new(self.rect.x, self.rect.y - t as i32, self.rect.w, self.rect.h + t);
-        f.inflate(theme::SHADOW as i32 + 2).union(&Rect::new(f.x, f.y + theme::SHADOW_OFFSET_Y, f.w, f.h).inflate(theme::SHADOW as i32 + 2))
+        f.inflate(theme::SHADOW as i32 + 2)
+            .union(&Rect::new(f.x, f.y + theme::SHADOW_OFFSET_Y, f.w, f.h).inflate(theme::SHADOW as i32 + 2))
     }
 }
 
@@ -525,16 +527,26 @@ impl Compositor {
 
     /// The platform can draw the small cursor overlay independently of the
     /// application frame deadline. Cursor motion then causes no composition.
-    pub fn set_cursor_overlay(&mut self, enabled: bool) { self.cursor_overlay = enabled; }
+    pub fn set_cursor_overlay(&mut self, enabled: bool) {
+        self.cursor_overlay = enabled;
+    }
 
-    pub fn cursor_state(&self) -> (i32, i32, CursorShape) { (self.ptr_x, self.ptr_y, self.cursor.shape) }
+    pub fn cursor_state(&self) -> (i32, i32, CursorShape) {
+        (self.ptr_x, self.ptr_y, self.cursor.shape)
+    }
 
-    pub fn cursor_area(&self) -> Rect { self.cursor.area(self.ptr_x, self.ptr_y).intersect(&self.screen) }
+    pub fn cursor_area(&self) -> Rect {
+        self.cursor.area(self.ptr_x, self.ptr_y).intersect(&self.screen)
+    }
 
-    pub fn draw_cursor_overlay(&self, target: &mut Surface) { self.cursor.draw(target, self.ptr_x, self.ptr_y, self.screen); }
+    pub fn draw_cursor_overlay(&self, target: &mut Surface) {
+        self.cursor.draw(target, self.ptr_x, self.ptr_y, self.screen);
+    }
     /// The current pointer shape as a `size` x `size` ARGB image and its hot
     /// spot, for a hardware cursor plane.
-    pub fn cursor_image(&self, size: u32) -> Option<(Vec<u32>, (u32, u32))> { self.cursor.argb_image(size) }
+    pub fn cursor_image(&self, size: u32) -> Option<(Vec<u32>, (u32, u32))> {
+        self.cursor.argb_image(size)
+    }
 
     pub fn focused(&self) -> Option<WindowId> {
         self.focus
@@ -602,10 +614,15 @@ impl Compositor {
         for w in wins {
             self.destroy_window(w, true);
         }
-        if self.file_drag.as_ref().is_some_and(|(id, _, _, _)| !self.windows.contains_key(id)) { self.file_drag = None; }
+        if self.file_drag.as_ref().is_some_and(|(id, _, _, _)| !self.windows.contains_key(id)) {
+            self.file_drag = None;
+        }
         self.clients.remove(&c);
         self.outbox.retain(|(to, _)| *to != c);
-        if let Some(Grab::Content { win } | Grab::Move { win, .. } | Grab::Resize { win, .. } | Grab::Button { win, .. }) = self.grab {
+        if let Some(
+            Grab::Content { win } | Grab::Move { win, .. } | Grab::Resize { win, .. } | Grab::Button { win, .. },
+        ) = self.grab
+        {
             if !self.windows.contains_key(&win) {
                 self.grab = None;
             }
@@ -622,7 +639,13 @@ impl Compositor {
     /// the message carried (only meaningful for `ATTACH_BUFFER`). On a
     /// protocol violation an `ERROR` event is queued and the error is
     /// returned; the platform then flushes and disconnects the client.
-    pub fn handle(&mut self, c: ClientId, msg: &[u8], buffer: Option<Box<dyn PixelSource>>, now: u64) -> Result<(), ProtocolError> {
+    pub fn handle(
+        &mut self,
+        c: ClientId,
+        msg: &[u8],
+        buffer: Option<Box<dyn PixelSource>>,
+        now: u64,
+    ) -> Result<(), ProtocolError> {
         self.now = now;
         if self.is_dead(c) {
             return err(proto::error::NOT_ALLOWED, "client is disconnected");
@@ -652,7 +675,8 @@ impl Compositor {
         if self.list_dirty {
             self.list_dirty = false;
             let list = self.window_list();
-            let shells: Vec<ClientId> = self.clients.iter().filter(|(_, cl)| cl.shell && !cl.dead).map(|(id, _)| *id).collect();
+            let shells: Vec<ClientId> =
+                self.clients.iter().filter(|(_, cl)| cl.shell && !cl.dead).map(|(id, _)| *id).collect();
             for s in shells {
                 self.outbox.push((s, Event::WindowList { windows: list.clone() }));
             }
@@ -661,8 +685,11 @@ impl Compositor {
     }
 
     fn window_list(&self) -> Vec<proto::WindowInfo> {
-        let mut v: Vec<&Window> = self.windows.values()
-            .filter(|w| w.role == Role::Normal && w.shown && !w.skip_taskbar && (w.mapped || w.minimized)).collect();
+        let mut v: Vec<&Window> = self
+            .windows
+            .values()
+            .filter(|w| w.role == Role::Normal && w.shown && !w.skip_taskbar && (w.mapped || w.minimized))
+            .collect();
         v.sort_by_key(|w| w.seq);
         v.into_iter()
             .map(|w| proto::WindowInfo {
@@ -678,7 +705,9 @@ impl Compositor {
         let mut current = self.focus;
         for _ in 0..self.windows.len() {
             let Some(id) = current else { return false };
-            if id == owner { return true; }
+            if id == owner {
+                return true;
+            }
             current = self.windows.get(&id).and_then(|w| w.parent);
         }
         false
@@ -699,8 +728,10 @@ impl Compositor {
                 if initialised {
                     return err(proto::error::MALFORMED, "duplicate HELLO");
                 }
-                let version = proto::negotiate(min_version, max_version)
-                    .ok_or_else(|| ProtocolError { code: proto::error::BAD_VERSION, message: "no common protocol version".to_string() })?;
+                let version = proto::negotiate(min_version, max_version).ok_or_else(|| ProtocolError {
+                    code: proto::error::BAD_VERSION,
+                    message: "no common protocol version".to_string(),
+                })?;
                 let cl = self.clients.get_mut(&c).expect("client exists");
                 cl.version = Some(version);
                 cl.name = name;
@@ -709,7 +740,13 @@ impl Compositor {
                 let granted = if cl.shell { proto::hello::SHELL } else { 0 };
                 self.send(
                     c,
-                    Event::Hello { version, client_id: c, flags: granted, screen_width: self.screen.w, screen_height: self.screen.h },
+                    Event::Hello {
+                        version,
+                        client_id: c,
+                        flags: granted,
+                        screen_width: self.screen.w,
+                        screen_height: self.screen.h,
+                    },
                 );
                 let (seq, entries) = (self.clipboard_seq, self.clipboard.clone());
                 self.send(c, Event::ClipboardChanged { seq, entries });
@@ -751,9 +788,30 @@ impl Compositor {
                 }
                 Ok(())
             }
-            Request::CreateWindow { window, surface, parent, role, flags, x, y, width, height, min_width, min_height, title } => {
-                self.create_window(c, window, surface, parent, role, flags, (x, y, width, height), (min_width, min_height), title)
-            }
+            Request::CreateWindow {
+                window,
+                surface,
+                parent,
+                role,
+                flags,
+                x,
+                y,
+                width,
+                height,
+                min_width,
+                min_height,
+                title,
+            } => self.create_window(
+                c,
+                window,
+                surface,
+                parent,
+                role,
+                flags,
+                (x, y, width, height),
+                (min_width, min_height),
+                title,
+            ),
             Request::DestroyWindow { window } => {
                 let id = self.local_window(c, window)?;
                 self.destroy_window(id, true);
@@ -782,8 +840,14 @@ impl Compositor {
                     return err(proto::error::BAD_BUFFER, "buffer smaller than its geometry");
                 }
                 let s = cl.surfaces.get_mut(&surface).expect("checked above");
-                s.attached =
-                    Some(Attached { buffer: buf_id, width, height, stride_px, offset_px, alpha: format == proto::format::ARGB8888 });
+                s.attached = Some(Attached {
+                    buffer: buf_id,
+                    width,
+                    height,
+                    stride_px,
+                    offset_px,
+                    alpha: format == proto::format::ARGB8888,
+                });
                 Ok(())
             }
             Request::DestroyBuffer { buffer } => {
@@ -864,7 +928,11 @@ impl Compositor {
             Request::FileDrag { window, path } => {
                 let id = self.local_window(c, window)?;
                 if matches!(self.grab, Some(Grab::Content { win }) if win == id)
-                    && self.buttons & 1 != 0 && path.starts_with('/') && !path.contains('\0') && !path.is_empty() {
+                    && self.buttons & 1 != 0
+                    && path.starts_with('/')
+                    && !path.contains('\0')
+                    && !path.is_empty()
+                {
                     self.file_drag = Some((id, path, self.ptr_x, self.ptr_y));
                 }
                 Ok(())
@@ -975,7 +1043,10 @@ impl Compositor {
                     self.cascade += 1;
                     let cx = wa.x + 80 + step;
                     let cy = wa.y + 56 + step + t as i32;
-                    (cx.min(wa.right() as i32 - w as i32).max(wa.x), cy.min(wa.bottom() as i32 - h as i32).max(wa.y + t as i32))
+                    (
+                        cx.min(wa.right() as i32 - w as i32).max(wa.x),
+                        cy.min(wa.bottom() as i32 - h as i32).max(wa.y + t as i32),
+                    )
                 };
                 Rect::new(px, py, w, h)
             }
@@ -1010,7 +1081,8 @@ impl Compositor {
             win.maximized = true;
             win.rect = Rect::new(wa.x, wa.y + t as i32, wa.w, wa.h.saturating_sub(t).max(1));
         }
-        let configure = Event::Configure { window: local, width: win.rect.w, height: win.rect.h, states: win.states(false) };
+        let configure =
+            Event::Configure { window: local, width: win.rect.w, height: win.rect.h, states: win.states(false) };
         let layer = win.layer();
         self.windows.insert(id, win);
         let pos = self.stack.iter().position(|o| self.windows[o].layer() > layer).unwrap_or(self.stack.len());
@@ -1057,14 +1129,19 @@ impl Compositor {
                 }
             }
         }
-        if self.file_drag.as_ref().is_some_and(|(source, _, _, _)| *source == id) { self.file_drag = None; }
+        if self.file_drag.as_ref().is_some_and(|(source, _, _, _)| *source == id) {
+            self.file_drag = None;
+        }
         if self.pointer_in == Some(id) {
             self.pointer_in = None;
         }
         if self.hover.is_some_and(|(h, _)| h == id) {
             self.hover = None;
         }
-        if let Some(Grab::Content { win } | Grab::Move { win, .. } | Grab::Resize { win, .. } | Grab::Button { win, .. }) = self.grab {
+        if let Some(
+            Grab::Content { win } | Grab::Move { win, .. } | Grab::Resize { win, .. } | Grab::Button { win, .. },
+        ) = self.grab
+        {
             if win == id {
                 self.grab = None;
             }
@@ -1089,7 +1166,10 @@ impl Compositor {
         let cl = self.clients.get_mut(&c).expect("client exists");
         let held_other: usize = cl.surfaces.iter().filter(|(id, _)| **id != surface).map(|(_, s)| s.pixels.len()).sum();
         let s = cl.surfaces.get_mut(&surface).ok_or_else(unknown)?;
-        let a = s.attached.ok_or_else(|| ProtocolError { code: proto::error::BAD_BUFFER, message: "commit without a buffer".to_string() })?;
+        let a = s.attached.ok_or_else(|| ProtocolError {
+            code: proto::error::BAD_BUFFER,
+            message: "commit without a buffer".to_string(),
+        })?;
         let src = cl.buffers.get(&a.buffer).ok_or_else(unknown)?;
         let words = src.words();
         // Re-validate: the buffer may have been redefined since ATTACH.
@@ -1108,11 +1188,8 @@ impl Compositor {
             s.pixels = vec![0; n];
         }
         let full = proto::Rect { x: 0, y: 0, w: a.width, h: a.height };
-        let rects: Vec<proto::Rect> = if resized || s.damage_all || s.alpha != a.alpha {
-            vec![full]
-        } else {
-            core::mem::take(&mut s.damage)
-        };
+        let rects: Vec<proto::Rect> =
+            if resized || s.damage_all || s.alpha != a.alpha { vec![full] } else { core::mem::take(&mut s.damage) };
         s.damage.clear();
         s.damage_all = false;
         s.alpha = a.alpha;
@@ -1126,7 +1203,8 @@ impl Compositor {
             for row in r.y..r.y + r.h as i32 {
                 let src_start = a.offset_px as usize + row as usize * a.stride_px as usize + r.x as usize;
                 let dst_start = row as usize * a.width as usize + r.x as usize;
-                s.pixels[dst_start..dst_start + r.w as usize].copy_from_slice(&words[src_start..src_start + r.w as usize]);
+                s.pixels[dst_start..dst_start + r.w as usize]
+                    .copy_from_slice(&words[src_start..src_start + r.w as usize]);
             }
             copied.push(r);
         }
@@ -1176,7 +1254,8 @@ impl Compositor {
             Role::Panel | Role::Notification => w.rect = Rect::new(x, y, width.min(screen.w), height.min(screen.h)),
             Role::Popup => {
                 let (ox, oy) = parent_origin.unwrap_or((0, 0));
-                w.rect = Rect::new(ox.saturating_add(x), oy.saturating_add(y), width.min(screen.w), height.min(screen.h));
+                w.rect =
+                    Rect::new(ox.saturating_add(x), oy.saturating_add(y), width.min(screen.w), height.min(screen.h));
             }
             Role::Normal => {
                 if maximized {
@@ -1185,7 +1264,13 @@ impl Compositor {
                 let t = w.title_height();
                 let nw = if resizable { width.max(w.min_w).min(wa.w) } else { w.rect.w };
                 let nh = if resizable { height.max(w.min_h).min(wa.h.saturating_sub(t)) } else { w.rect.h };
-                let py = if y == -1 { w.rect.y } else if y >= 0 { y.max(t as i32) } else { y };
+                let py = if y == -1 {
+                    w.rect.y
+                } else if y >= 0 {
+                    y.max(t as i32)
+                } else {
+                    y
+                };
                 w.rect = Rect::new(if x == -1 { w.rect.x } else { x }, py, nw.max(1), nh.max(1));
             }
         }
@@ -1194,7 +1279,15 @@ impl Compositor {
         self.damage.add(old, screen);
         self.damage.add(new, screen);
         let focused = self.focus == Some(id);
-        self.send(client, Event::Configure { window: local, width: rw, height: rh, states: states | if focused { proto::state::ACTIVATED } else { 0 } });
+        self.send(
+            client,
+            Event::Configure {
+                window: local,
+                width: rw,
+                height: rh,
+                states: states | if focused { proto::state::ACTIVATED } else { 0 },
+            },
+        );
         if role == Role::Panel {
             self.relayout_maximized();
         }
@@ -1229,7 +1322,8 @@ impl Compositor {
             w.maximized = false;
             w.rect = w.restore;
         }
-        let (client, local, rw, rh, states, new) = (w.client, w.local, w.rect.w, w.rect.h, w.states(focused), w.bounds());
+        let (client, local, rw, rh, states, new) =
+            (w.client, w.local, w.rect.w, w.rect.h, w.states(focused), w.bounds());
         self.damage.add(old, screen);
         self.damage.add(new, screen);
         self.list_dirty = true;
@@ -1255,7 +1349,15 @@ impl Compositor {
                 self.set_focus(Some(id));
                 if was_minimized {
                     if let Some(w) = self.windows.get(&id) {
-                        self.send(client, Event::Configure { window: local, width: w.rect.w, height: w.rect.h, states: w.states(true) });
+                        self.send(
+                            client,
+                            Event::Configure {
+                                window: local,
+                                width: w.rect.w,
+                                height: w.rect.h,
+                                states: w.states(true),
+                            },
+                        );
                     }
                 }
             }
@@ -1276,7 +1378,10 @@ impl Compositor {
                     self.set_focus(next);
                 }
                 if let Some(w) = self.windows.get(&id) {
-                    self.send(client, Event::Configure { window: local, width: w.rect.w, height: w.rect.h, states: w.states(false) });
+                    self.send(
+                        client,
+                        Event::Configure { window: local, width: w.rect.w, height: w.rect.h, states: w.states(false) },
+                    );
                 }
             }
             Action::Maximize => self.apply_maximize(id, true),
@@ -1304,7 +1409,8 @@ impl Compositor {
             self.damage.add(b, self.screen);
         }
         // Its popups stay above it.
-        let children: Vec<WindowId> = self.stack.iter().copied().filter(|c| self.windows[c].parent == Some(id)).collect();
+        let children: Vec<WindowId> =
+            self.stack.iter().copied().filter(|c| self.windows[c].parent == Some(id)).collect();
         for ch in children {
             self.raise(ch);
         }
@@ -1354,7 +1460,9 @@ impl Compositor {
                 self.motion_rest = ((x % 100) as i32, (y % 100) as i32);
                 self.pointer_motion((x / 100) as i32, (y / 100) as i32)
             }
-            kind::BUTTON if self.pointer.left_handed && (1..=2).contains(&ev.code) => self.pointer_button(3 - ev.code, ev.value != 0),
+            kind::BUTTON if self.pointer.left_handed && (1..=2).contains(&ev.code) => {
+                self.pointer_button(3 - ev.code, ev.value != 0)
+            }
             kind::WHEEL if self.pointer.natural_scroll => self.pointer_wheel(-ev.value, -ev.value2),
             kind::ABSOLUTE => {
                 // A position across the whole screen: go there.
@@ -1366,7 +1474,11 @@ impl Compositor {
             kind::BUTTON => self.pointer_button(ev.code, ev.value != 0),
             kind::WHEEL => self.pointer_wheel(ev.value, ev.value2),
             kind::KEY => self.key(ev.code, ev.value),
-            kind::DEVICE if ev.code == osyx_input::DEVICE_REMOVED && ev.value == osyx_input::class::MOUSE && self.buttons != 0 => {
+            kind::DEVICE
+                if ev.code == osyx_input::DEVICE_REMOVED
+                    && ev.value == osyx_input::class::MOUSE
+                    && self.buttons != 0 =>
+            {
                 // A mouse vanished mid-drag: end grabs as if released.
                 for b in 1..=5u16 {
                     if self.buttons & (1 << (b - 1)) != 0 {
@@ -1596,7 +1708,12 @@ impl Compositor {
         if edges & edge::BOTTOM != 0 {
             y1 = (y1 + dy).max(y0 + minh);
         }
-        let r = Rect::new(x0, y0, (x1 - x0).clamp(1, proto::MAX_DIMENSION as i32) as u32, (y1 - y0).clamp(1, proto::MAX_DIMENSION as i32) as u32);
+        let r = Rect::new(
+            x0,
+            y0,
+            (x1 - x0).clamp(1, proto::MAX_DIMENSION as i32) as u32,
+            (y1 - y0).clamp(1, proto::MAX_DIMENSION as i32) as u32,
+        );
         if r == w.rect {
             return;
         }
@@ -1672,7 +1789,8 @@ impl Compositor {
                         if let Some((id, Part::Content)) = self.top_window_at(self.ptr_x, self.ptr_y) {
                             if id != source {
                                 if let Some(w) = self.windows.get(&id) {
-                                    let (client, window, x, y) = (w.client, w.local, self.ptr_x - w.rect.x, self.ptr_y - w.rect.y);
+                                    let (client, window, x, y) =
+                                        (w.client, w.local, self.ptr_x - w.rect.x, self.ptr_y - w.rect.y);
                                     self.send(client, Event::FileDrop { window, x, y, path });
                                 }
                             }
@@ -1856,7 +1974,8 @@ impl Compositor {
         self.clipboard = entries;
         self.clipboard_seq += 1;
         let ev = Event::ClipboardChanged { seq: self.clipboard_seq, entries: self.clipboard.clone() };
-        let ids: Vec<ClientId> = self.clients.iter().filter(|(_, cl)| cl.version.is_some() && !cl.dead).map(|(id, _)| *id).collect();
+        let ids: Vec<ClientId> =
+            self.clients.iter().filter(|(_, cl)| cl.version.is_some() && !cl.dead).map(|(id, _)| *id).collect();
         for id in ids {
             self.outbox.push((id, ev.clone()));
         }
@@ -1903,7 +2022,8 @@ impl Compositor {
                         self.selecting = Some(None);
                     }
                 } else if mods & modifier::ALT != 0 {
-                    let frame = self.focus.and_then(|id| self.windows.get(&id)).filter(|w| w.visible()).map(|w| w.frame());
+                    let frame =
+                        self.focus.and_then(|id| self.windows.get(&id)).filter(|w| w.visible()).map(|w| w.frame());
                     self.request_capture(frame.unwrap_or(self.screen));
                 } else {
                     self.request_capture(self.screen);
@@ -2073,9 +2193,11 @@ impl Compositor {
         let focused = self.focus == Some(w.id);
         let frame = w.frame();
         if w.has_shadow() {
-            let strength = if focused { theme::SHADOW_ALPHA_ACTIVE } else { theme::SHADOW_ALPHA_INACTIVE } * opacity / 256;
+            let strength =
+                if focused { theme::SHADOW_ALPHA_ACTIVE } else { theme::SHADOW_ALPHA_INACTIVE } * opacity / 256;
             let tables = if w.decorated { &self.shadow } else { &self.popup_shadow };
-            let sr = Rect::new(frame.x, frame.y + if w.decorated { theme::SHADOW_OFFSET_Y } else { 3 }, frame.w, frame.h);
+            let sr =
+                Rect::new(frame.x, frame.y + if w.decorated { theme::SHADOW_OFFSET_Y } else { 3 }, frame.w, frame.h);
             tables.draw(target, sr, frame, strength, clip);
         }
         if w.decorated {
@@ -2101,13 +2223,19 @@ impl Compositor {
         let px = self.surface_pixels(w);
         let covered = px.map_or(Rect::EMPTY, |p| Rect::new(rect.x, rect.y, p.width.min(rect.w), p.height.min(rect.h)));
         // Bottom corner squares are blended per pixel; everything else in bulk.
-        let corner_rows = if radius > 0 { Rect::new(rect.x, rect.bottom() as i32 - radius, rect.w, radius as u32) } else { Rect::EMPTY };
+        let corner_rows = if radius > 0 {
+            Rect::new(rect.x, rect.bottom() as i32 - radius, rect.w, radius as u32)
+        } else {
+            Rect::EMPTY
+        };
         let bulk_clip = |r: Rect| -> [Rect; 3] {
             if corner_rows.is_empty() {
                 return [r, Rect::EMPTY, Rect::EMPTY];
             }
             let above = Rect::new(rect.x, rect.y, rect.w, rect.h - radius as u32).intersect(&r);
-            let middle = Rect::new(rect.x + radius, corner_rows.y, rect.w.saturating_sub(2 * radius as u32), radius as u32).intersect(&r);
+            let middle =
+                Rect::new(rect.x + radius, corner_rows.y, rect.w.saturating_sub(2 * radius as u32), radius as u32)
+                    .intersect(&r);
             [above, middle, Rect::EMPTY]
         };
         for part in bulk_clip(area) {
@@ -2127,7 +2255,14 @@ impl Compositor {
                 let sq = Rect::new(cx, corner_rows.y, radius as u32, radius as u32).intersect(&clip);
                 for py in sq.y..sq.y + sq.h as i32 {
                     for pxx in sq.x..sq.x + sq.w as i32 {
-                        let cov = draw::corner_coverage(pxx - rect.x, py - rect.y, rect.w as i32, rect.h as i32, radius, bit & rounded);
+                        let cov = draw::corner_coverage(
+                            pxx - rect.x,
+                            py - rect.y,
+                            rect.w as i32,
+                            rect.h as i32,
+                            radius,
+                            bit & rounded,
+                        );
                         if cov == 0 {
                             continue;
                         }
@@ -2198,7 +2333,13 @@ impl Compositor {
                 let c = if part == Part::Close { self.palette.close_hover } else { self.palette.button_hover };
                 draw::fill_rounded(target, r, 7, corner::ALL, c, opacity, clip);
             }
-            let glyph = if is_hover && part == Part::Close { 0xFFFFFF } else if focused { self.palette.glyph } else { self.palette.title_text_inactive };
+            let glyph = if is_hover && part == Part::Close {
+                0xFFFFFF
+            } else if focused {
+                self.palette.glyph
+            } else {
+                self.palette.title_text_inactive
+            };
             draw_button_glyph(target, part, r, w.maximized, glyph, opacity, clip);
         }
     }
@@ -2210,13 +2351,27 @@ impl Compositor {
         }
         let t = if g.decorated { theme::TITLE_HEIGHT } else { 0 };
         let frame = Rect::new(g.rect.x, g.rect.y - t as i32, g.rect.w, g.rect.h + t);
-        self.shadow.draw(target, Rect::new(frame.x, frame.y + theme::SHADOW_OFFSET_Y, frame.w, frame.h), frame, theme::SHADOW_ALPHA_INACTIVE * opacity / 256, clip);
+        self.shadow.draw(
+            target,
+            Rect::new(frame.x, frame.y + theme::SHADOW_OFFSET_Y, frame.w, frame.h),
+            frame,
+            theme::SHADOW_ALPHA_INACTIVE * opacity / 256,
+            clip,
+        );
         if g.decorated {
             let bar = Rect::new(frame.x, frame.y, frame.w, t);
             draw::fill_rounded(target, bar, theme::RADIUS, corner::TOP, self.palette.title_inactive, opacity, clip);
             let ty = bar.y + ((t - self.font.line_height()) / 2) as i32;
             let (shown, _) = self.font.ellipsize(&g.title, frame.w.saturating_sub(120));
-            self.font.draw_clipped(target, bar.x + 16, ty, shown, self.palette.title_text_inactive, 255 * opacity / 256, bar.intersect(&clip));
+            self.font.draw_clipped(
+                target,
+                bar.x + 16,
+                ty,
+                shown,
+                self.palette.title_text_inactive,
+                255 * opacity / 256,
+                bar.intersect(&clip),
+            );
         }
         let body = Rect::new(g.rect.x, g.rect.y, g.rect.w, g.rect.h).intersect(&clip);
         target.blend_rect(body, self.palette.window_body, 255 * opacity / 256);
@@ -2263,7 +2418,12 @@ fn draw_button_glyph(target: &mut Surface, part: Part, r: Rect, maximized: bool,
     let cy = r.y + r.h as i32 / 2;
     let a = opacity;
     let mut px = |x: i32, y: i32, cov: u32| {
-        if x >= clip.x && y >= clip.y && (x as i64) < clip.right() && (y as i64) < clip.bottom() && target.bounds().intersect(&Rect::new(x, y, 1, 1)) == Rect::new(x, y, 1, 1) {
+        if x >= clip.x
+            && y >= clip.y
+            && (x as i64) < clip.right()
+            && (y as i64) < clip.bottom()
+            && target.bounds().intersect(&Rect::new(x, y, 1, 1)) == Rect::new(x, y, 1, 1)
+        {
             let p = &mut target.row_mut(y as u32)[x as usize];
             *p = draw::tint(*p, c, cov * a / 256);
         }

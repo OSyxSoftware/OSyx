@@ -49,7 +49,8 @@ struct Shell {
 
 fn main() -> i32 {
     let args: Vec<String> = env::args().collect();
-    let mut sh = Shell { vars: BTreeMap::new(), last: 0, history: Vec::new(), args: args.iter().skip(1).cloned().collect() };
+    let mut sh =
+        Shell { vars: BTreeMap::new(), last: 0, history: Vec::new(), args: args.iter().skip(1).cloned().collect() };
     if let Some(script) = args.get(1) {
         return match fs::read_to_string(script) {
             Ok(text) => {
@@ -477,7 +478,15 @@ impl Shell {
                 } else {
                     "regular file"
                 };
-                println!("{a}: {kind}, {} bytes, mode {:o}, uid {} gid {}, inode {}, {} link(s)", m.len(), m.permissions().mode() & 0o7777, m.uid(), m.gid(), m.ino(), m.nlink());
+                println!(
+                    "{a}: {kind}, {} bytes, mode {:o}, uid {} gid {}, inode {}, {} link(s)",
+                    m.len(),
+                    m.permissions().mode() & 0o7777,
+                    m.uid(),
+                    m.gid(),
+                    m.ino(),
+                    m.nlink()
+                );
                 Ok(())
             }),
             "ps" => cmd_ps(),
@@ -493,7 +502,12 @@ impl Shell {
             "beep" => cmd_beep(args),
             "play" => cmd_play(args),
             "free" => os::sysinfo().map(|i| {
-                println!("total {} KiB, free {} KiB, used {} KiB", i.total_memory / 1024, i.free_memory / 1024, (i.total_memory - i.free_memory) / 1024);
+                println!(
+                    "total {} KiB, free {} KiB, used {} KiB",
+                    i.total_memory / 1024,
+                    i.free_memory / 1024,
+                    (i.total_memory - i.free_memory) / 1024
+                );
                 0
             }),
             "uptime" => {
@@ -671,7 +685,11 @@ impl Shell {
         }
         let mut c = Command::new(&path);
         c.arg0(cmd).args(&args);
-        let stdio = [input.as_ref().map_or(osyx_abi::STDIN, File::handle), output.as_ref().map_or(osyx_abi::STDOUT, File::handle), osyx_abi::STDERR];
+        let stdio = [
+            input.as_ref().map_or(osyx_abi::STDIN, File::handle),
+            output.as_ref().map_or(osyx_abi::STDOUT, File::handle),
+            osyx_abi::STDERR,
+        ];
         match c.spawn_stdio(stdio).and_then(|ch| ch.wait()) {
             Ok(st) => Ok(report(cmd, st)),
             Err(e) => {
@@ -970,7 +988,16 @@ fn cmd_ps() -> os_std::error::Result<i32> {
     println!("{:>5} {:>6} {:>5} {:>7} {:>9}  NAME", "PID", "PARENT", "UID", "THREADS", "MEMORY");
     for p in procs {
         let state = if p.state == system::PROC_ZOMBIE { " (zombie)" } else { "" };
-        println!("{:>5} {:>6} {:>5} {:>7} {:>6} KiB  {}{}", p.pid, p.parent, p.uid, p.threads, p.frames * 4, system::process_name(&p), state);
+        println!(
+            "{:>5} {:>6} {:>5} {:>7} {:>6} KiB  {}{}",
+            p.pid,
+            p.parent,
+            p.uid,
+            p.threads,
+            p.frames * 4,
+            system::process_name(&p),
+            state
+        );
     }
     Ok(0)
 }
@@ -979,8 +1006,16 @@ fn cmd_mounts() -> os_std::error::Result<i32> {
     println!("{:<14} {:<8} {:>10} {:>10}  SOURCE", "MOUNT", "TYPE", "SIZE", "FREE");
     for m in system::mounts()? {
         let path = system::field_str(&m.path);
-        let (size, free) = os::statfs(path).map_or((0, 0), |s| (s.total_blocks * s.block_size, s.free_blocks * s.block_size));
-        println!("{:<14} {:<8} {:>7} KiB {:>7} KiB  {}", path, system::field_str(&m.fstype), size / 1024, free / 1024, system::field_str(&m.source));
+        let (size, free) =
+            os::statfs(path).map_or((0, 0), |s| (s.total_blocks * s.block_size, s.free_blocks * s.block_size));
+        println!(
+            "{:<14} {:<8} {:>7} KiB {:>7} KiB  {}",
+            path,
+            system::field_str(&m.fstype),
+            size / 1024,
+            free / 1024,
+            system::field_str(&m.source)
+        );
     }
     Ok(0)
 }
@@ -1069,8 +1104,10 @@ fn cmd_volume(args: &[&str]) -> os_std::error::Result<i32> {
         }
         ["mute"] => String::from("mute=1"),
         ["unmute"] => String::from("mute=0"),
-        [n] if n.parse::<u32>().is_ok_and(|v| v <= 100) => format!("volume={n}
-mute=0"),
+        [n] if n.parse::<u32>().is_ok_and(|v| v <= 100) => format!(
+            "volume={n}
+mute=0"
+        ),
         _ => {
             eprintln!("usage: volume [0-100|mute|unmute]");
             return Ok(2);
@@ -1176,7 +1213,11 @@ fn wav_to_pcm(d: &[u8]) -> Result<Vec<u8>, &'static str> {
     let step = (channels * bits / 8) as usize;
     let sample = |f: usize, ch: usize| -> i32 {
         let o = f * step + ch.min(channels as usize - 1) * (bits as usize / 8);
-        if bits == 8 { (body[o] as i32 - 128) << 8 } else { i16::from_le_bytes([body[o], body[o + 1]]) as i32 }
+        if bits == 8 {
+            (body[o] as i32 - 128) << 8
+        } else {
+            i16::from_le_bytes([body[o], body[o + 1]]) as i32
+        }
     };
     let frames = body.len() / step;
     let out_frames = (frames as u64 * AUDIO_RATE as u64 / rate as u64) as usize;

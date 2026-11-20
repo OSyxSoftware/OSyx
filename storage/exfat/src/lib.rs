@@ -319,7 +319,8 @@ impl<D: BlockDevice> FileSystem<D> {
         self.read_extent(bfirst, false, blen, 0, &mut raw)?;
         self.bitmap = raw;
         self.bitmap_first = bfirst;
-        let used: u32 = (0..self.geo.cluster_count).filter(|&i| self.bitmap[(i / 8) as usize] >> (i % 8) & 1 != 0).count() as u32;
+        let used: u32 =
+            (0..self.geo.cluster_count).filter(|&i| self.bitmap[(i / 8) as usize] >> (i % 8) & 1 != 0).count() as u32;
         self.free_clusters = self.geo.cluster_count - used;
 
         self.upcase = default_upcase();
@@ -433,7 +434,8 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     pub(crate) fn cluster_off(&self, c: u32) -> u64 {
-        ((self.geo.heap_offset as u64) << self.geo.bytes_per_sector_shift) + ((c as u64 - 2) << self.geo.cluster_shift())
+        ((self.geo.heap_offset as u64) << self.geo.bytes_per_sector_shift)
+            + ((c as u64 - 2) << self.geo.cluster_shift())
     }
 
     // ---- FAT ------------------------------------------------------------------------------
@@ -624,7 +626,11 @@ impl<D: BlockDevice> FileSystem<D> {
                 Err(FsError::Corrupt("contiguous extent leaves the heap"))
             };
         }
-        let (mut i, mut c) = if cursor.valid && cursor.first == first && cursor.idx <= idx { (cursor.idx, cursor.cluster) } else { (0, first) };
+        let (mut i, mut c) = if cursor.valid && cursor.first == first && cursor.idx <= idx {
+            (cursor.idx, cursor.cluster)
+        } else {
+            (0, first)
+        };
         while i < idx {
             c = self.fat_next(c)?;
             i += 1;
@@ -634,7 +640,14 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     /// Device byte ranges covering `len` bytes at `off` of an extent.
-    pub(crate) fn segments(&mut self, first: u32, nofat: bool, off: u64, len: usize, cursor: &mut Cursor) -> Result<Vec<(u64, usize)>> {
+    pub(crate) fn segments(
+        &mut self,
+        first: u32,
+        nofat: bool,
+        off: u64,
+        len: usize,
+        cursor: &mut Cursor,
+    ) -> Result<Vec<(u64, usize)>> {
         let shift = self.geo.cluster_shift();
         let cb = 1u64 << shift;
         let mut out: Vec<(u64, usize)> = Vec::new();

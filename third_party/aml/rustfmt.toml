@@ -1,0 +1,2 @@
+# Vendored crate: keep the upstream layout so diffs against aml 0.16.4 stay small.
+disable_all_formatting = true

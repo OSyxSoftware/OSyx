@@ -35,7 +35,8 @@ unsafe fn local(server: *const u16) -> bool {
 /// A buffer NetApiBufferFree releases: `fixed` bytes of structure followed
 /// by the strings, whose addresses are returned in order (0 for None).
 fn buffer(fixed: usize, strings: &[Option<&str>]) -> Option<(u64, Vec<u64>)> {
-    let wide: Vec<Option<Vec<u16>>> = strings.iter().map(|s| s.map(|s| s.encode_utf16().chain([0]).collect())).collect();
+    let wide: Vec<Option<Vec<u16>>> =
+        strings.iter().map(|s| s.map(|s| s.encode_utf16().chain([0]).collect())).collect();
     let total = fixed + wide.iter().flatten().map(|w| w.len() * 2).sum::<usize>();
     let base = crate::kernel32::heap_alloc(total.max(8), true)?;
     let mut at = base + fixed as u64;

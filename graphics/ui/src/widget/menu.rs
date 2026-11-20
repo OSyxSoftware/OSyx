@@ -21,7 +21,14 @@ pub struct MenuItem {
 
 impl MenuItem {
     pub fn new(label: &str, icon: Option<Icon>) -> MenuItem {
-        MenuItem { label: String::from(label), icon, hint: String::new(), enabled: true, separator: false, danger: false }
+        MenuItem {
+            label: String::from(label),
+            icon,
+            hint: String::new(),
+            enabled: true,
+            separator: false,
+            danger: false,
+        }
     }
 
     pub fn hint(mut self, h: &str) -> MenuItem {
@@ -140,10 +147,13 @@ impl Menu {
                         Response::Redraw
                     }
                     key::UP => {
-                        self.hovered = Some(enabled[pos.map_or(enabled.len() - 1, |p| (p + enabled.len() - 1) % enabled.len())]);
+                        self.hovered =
+                            Some(enabled[pos.map_or(enabled.len() - 1, |p| (p + enabled.len() - 1) % enabled.len())]);
                         Response::Redraw
                     }
-                    key::ENTER | key::KP_ENTER | key::SPACE => self.hovered.map_or(Response::Ignored, Response::Activated),
+                    key::ENTER | key::KP_ENTER | key::SPACE => {
+                        self.hovered.map_or(Response::Ignored, Response::Activated)
+                    }
                     key::ESCAPE => Response::Cancelled,
                     _ => Response::Ignored,
                 }

@@ -71,9 +71,15 @@ pub fn atom_header_offset(image: &[u8]) -> Option<usize> {
         return None;
     }
     let header = u16::from_le_bytes([image[0x48], image[0x49]]) as usize;
-    if header == 0 { return None; }
+    if header == 0 {
+        return None;
+    }
     let signature = image.get(header.checked_add(4)?..header.checked_add(8)?)?;
-    if signature == ATOM_SIGNATURE || signature == b"MOTA" { Some(header) } else { None }
+    if signature == ATOM_SIGNATURE || signature == b"MOTA" {
+        Some(header)
+    } else {
+        None
+    }
 }
 
 /// Find a matching ATOM VBIOS in an ACPI VFCT table. PCI coordinates and
@@ -88,28 +94,42 @@ pub fn vfct_vbios(table: &[u8], bus: u8, device: u8, function: u8, vendor_id: u1
     fn u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
         Some(u16::from_le_bytes(bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?))
     }
-    if table.get(..4)? != b"VFCT" { return None; }
+    if table.get(..4)? != b"VFCT" {
+        return None;
+    }
     let length = u32_at(table, 4)? as usize;
     let table = table.get(..length)?;
-    if table.len() < VFCT_HEADER || table.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) != 0 { return None; }
+    if table.len() < VFCT_HEADER || table.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) != 0 {
+        return None;
+    }
     let mut offset = u32_at(table, 0x34)? as usize;
-    if offset < VFCT_HEADER || offset >= table.len() { return None; }
+    if offset < VFCT_HEADER || offset >= table.len() {
+        return None;
+    }
     let lib_offset = u32_at(table, 0x38)? as usize;
-    if lib_offset > table.len() || (lib_offset != 0 && lib_offset == offset) { return None; }
+    if lib_offset > table.len() || (lib_offset != 0 && lib_offset == offset) {
+        return None;
+    }
     let end = if lib_offset > offset { lib_offset } else { table.len() };
     while offset < end {
         let header_end = offset.checked_add(IMAGE_HEADER)?;
-        if header_end > end { return None; }
+        if header_end > end {
+            return None;
+        }
         let image_len = u32_at(table, offset + 24)? as usize;
         let image_end = header_end.checked_add(image_len)?;
-        if image_end > end { return None; }
+        if image_end > end {
+            return None;
+        }
         let matches = u32_at(table, offset)? == bus as u32
             && u32_at(table, offset + 4)? == device as u32
             && u32_at(table, offset + 8)? == function as u32
             && u16_at(table, offset + 12)? == vendor_id
             && u16_at(table, offset + 14)? == device_id;
         let image = &table[header_end..image_end];
-        if matches && atom_header_offset(image).is_some() { return Some(image); }
+        if matches && atom_header_offset(image).is_some() {
+            return Some(image);
+        }
         offset = image_end;
     }
     None

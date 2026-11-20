@@ -67,7 +67,8 @@ pub fn init() -> Option<i64> {
     if !(1..=12).contains(&mon) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 || year < 2000 {
         return None;
     }
-    let secs = days_from_civil(year, mon as i64, day as i64) * 86_400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
+    let secs =
+        days_from_civil(year, mon as i64, day as i64) * 86_400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
     let uptime = crate::interrupts::uptime_ms() as i64;
     BOOT_EPOCH_NS.store(secs * 1_000_000_000 - uptime * 1_000_000, Ordering::Relaxed);
     Some(secs)

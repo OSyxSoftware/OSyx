@@ -74,7 +74,10 @@ pub fn highlight(line: &str) -> Vec<(usize, usize, Kind)> {
             }
             command_next = false;
         } else if ch.is_alphabetic() || ch == '_' || ch == '/' || ch == '.' {
-            while i < c.len() && !(c[i].is_whitespace() || matches!(c[i], '|' | '<' | '>' | '=' | '(' | ')' | '{' | '}' | ',' | '"' | '\'' | '#' | '$')) {
+            while i < c.len()
+                && !(c[i].is_whitespace()
+                    || matches!(c[i], '|' | '<' | '>' | '=' | '(' | ')' | '{' | '}' | ',' | '"' | '\'' | '#' | '$'))
+            {
                 i += 1;
             }
             let word: alloc::string::String = c[start..i].iter().collect();
@@ -126,16 +129,28 @@ mod tests {
     fn commands_strings_variables_and_comments() {
         assert_eq!(
             parts("echo \"hi $name\" $1 > out.txt # done"),
-            [s("echo", Kind::Command), s("\"hi $name\"", Kind::String), s("$1", Kind::Variable), s(">", Kind::Operator), s("# done", Kind::Comment)]
+            [
+                s("echo", Kind::Command),
+                s("\"hi $name\"", Kind::String),
+                s("$1", Kind::Variable),
+                s(">", Kind::Operator),
+                s("# done", Kind::Comment)
+            ]
         );
-        assert_eq!(parts("ls -l /osyx-seed | cat"), [s("ls", Kind::Command), s("-", Kind::Operator), s("|", Kind::Operator), s("cat", Kind::Command)]);
+        assert_eq!(
+            parts("ls -l /osyx-seed | cat"),
+            [s("ls", Kind::Command), s("-", Kind::Operator), s("|", Kind::Operator), s("cat", Kind::Command)]
+        );
         assert_eq!(parts("  # only a comment"), [s("# only a comment", Kind::Comment)]);
         assert_eq!(parts("/bin/worker exit 3"), [s("/bin/worker", Kind::Command), s("3", Kind::Number)]);
     }
 
     #[test]
     fn statements_are_not_commands() {
-        assert_eq!(parts("count = 2 + 3"), [s("=", Kind::Operator), s("2", Kind::Number), s("+", Kind::Operator), s("3", Kind::Number)]);
+        assert_eq!(
+            parts("count = 2 + 3"),
+            [s("=", Kind::Operator), s("2", Kind::Number), s("+", Kind::Operator), s("3", Kind::Number)]
+        );
         assert_eq!(parts("name = \"OSyx\""), [s("=", Kind::Operator), s("\"OSyx\"", Kind::String)]);
         assert_eq!(
             parts("for a in $@ {"),

@@ -117,8 +117,20 @@ pub fn corner_coverage(lx: i32, ly: i32, w: i32, h: i32, r: i32, corners: u8) ->
     if r <= 0 || lx < 0 || ly < 0 || lx >= w || ly >= h {
         return if lx >= 0 && ly >= 0 && lx < w && ly < h { 256 } else { 0 };
     }
-    let (cx, which_x) = if lx < r { (r - lx, 0) } else if lx >= w - r { (lx - (w - r) + 1, 1) } else { return 256 };
-    let (cy, which_y) = if ly < r { (r - ly, 0) } else if ly >= h - r { (ly - (h - r) + 1, 1) } else { return 256 };
+    let (cx, which_x) = if lx < r {
+        (r - lx, 0)
+    } else if lx >= w - r {
+        (lx - (w - r) + 1, 1)
+    } else {
+        return 256;
+    };
+    let (cy, which_y) = if ly < r {
+        (r - ly, 0)
+    } else if ly >= h - r {
+        (ly - (h - r) + 1, 1)
+    } else {
+        return 256;
+    };
     let bit = match (which_x, which_y) {
         (0, 0) => corner::TOP_LEFT,
         (1, 0) => corner::TOP_RIGHT,
@@ -232,8 +244,20 @@ impl ShadowTables {
     fn alpha(&self, px: i32, py: i32, r: &Rect) -> u32 {
         let rad = self.radius.min(r.w / 2).min(r.h / 2) as i32;
         let (x0, y0, x1, y1) = (r.x, r.y, r.x + r.w as i32, r.y + r.h as i32);
-        let qx = if px < x0 + rad { x0 + rad - 1 - px } else if px >= x1 - rad { px - (x1 - rad) } else { -1 };
-        let qy = if py < y0 + rad { y0 + rad - 1 - py } else if py >= y1 - rad { py - (y1 - rad) } else { -1 };
+        let qx = if px < x0 + rad {
+            x0 + rad - 1 - px
+        } else if px >= x1 - rad {
+            px - (x1 - rad)
+        } else {
+            -1
+        };
+        let qy = if py < y0 + rad {
+            y0 + rad - 1 - py
+        } else if py >= y1 - rad {
+            py - (y1 - rad)
+        } else {
+            -1
+        };
         match (qx >= 0, qy >= 0) {
             (true, true) => {
                 // Corner: distance from the arc centre (radius may be clipped).
@@ -450,7 +474,8 @@ impl Cursor {
                 pixels.push(((x as i32 - hx) as i8, (y as i32 - hy) as i8, c, 256));
             }
         }
-        let bounds = pixels.iter().fold(Rect::EMPTY, |b, &(dx, dy, _, _)| b.union(&Rect::new(dx as i32, dy as i32, 1, 1)));
+        let bounds =
+            pixels.iter().fold(Rect::EMPTY, |b, &(dx, dy, _, _)| b.union(&Rect::new(dx as i32, dy as i32, 1, 1)));
         Cursor { shape, pixels, bounds }
     }
 
@@ -629,7 +654,10 @@ mod tests {
                 for x in 0..64 {
                     if s.get(x, y) != Some(0x404040) {
                         ink += 1;
-                        assert!(x >= area.x && (x as i64) < area.right() && y >= area.y && (y as i64) < area.bottom(), "{shape:?}");
+                        assert!(
+                            x >= area.x && (x as i64) < area.right() && y >= area.y && (y as i64) < area.bottom(),
+                            "{shape:?}"
+                        );
                     }
                 }
             }

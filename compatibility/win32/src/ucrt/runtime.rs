@@ -68,7 +68,11 @@ static mut AT_QUICK_EXIT: OnexitTable =
     OnexitTable { first: core::ptr::null_mut(), last: core::ptr::null_mut(), end: core::ptr::null_mut() };
 
 fn table_ptr(quick: bool) -> *mut OnexitTable {
-    if quick { core::ptr::addr_of_mut!(AT_QUICK_EXIT) } else { core::ptr::addr_of_mut!(ATEXIT) }
+    if quick {
+        core::ptr::addr_of_mut!(AT_QUICK_EXIT)
+    } else {
+        core::ptr::addr_of_mut!(ATEXIT)
+    }
 }
 
 extern "win64" fn _initialize_onexit_table(t: *mut OnexitTable) -> i32 {
@@ -614,7 +618,11 @@ fn configure_argv(mode: i32, wide: bool) -> i32 {
     validate!((0..=2).contains(&mode), EINVAL, EINVAL);
     if (if wide { &WPGMPTR } else { &PGMPTR }).load(Ordering::SeqCst) == 0 {
         let path = module_path();
-        let p = if wide { heap_wstr(&path) as u64 } else { heap_cstr(&String::from_utf16_lossy(&path).into_bytes()) as u64 };
+        let p = if wide {
+            heap_wstr(&path) as u64
+        } else {
+            heap_cstr(&String::from_utf16_lossy(&path).into_bytes()) as u64
+        };
         (if wide { &WPGMPTR } else { &PGMPTR }).store(p, Ordering::SeqCst);
     }
     if mode == 0 {
@@ -866,7 +874,13 @@ extern "win64" fn __p__wcmdln() -> u64 {
 fn winmain_tail(cmd: u64, unit: usize) -> u64 {
     let get = |i: usize| -> u32 {
         // SAFETY: the NUL-terminated process command line.
-        unsafe { if unit == 1 { *(cmd as *const u8).add(i) as u32 } else { *(cmd as *const u16).add(i) as u32 } }
+        unsafe {
+            if unit == 1 {
+                *(cmd as *const u8).add(i) as u32
+            } else {
+                *(cmd as *const u16).add(i) as u32
+            }
+        }
     };
     let mut i = 0;
     let mut quoted = false;
@@ -892,12 +906,20 @@ extern "win64" fn _get_wide_winmain_command_line() -> u64 {
 
 extern "win64" fn _initialize_narrow_environment() -> i32 {
     super::env::init(false);
-    if super::env::environ_ptr(false) == 0 { -1 } else { 0 }
+    if super::env::environ_ptr(false) == 0 {
+        -1
+    } else {
+        0
+    }
 }
 
 extern "win64" fn _initialize_wide_environment() -> i32 {
     super::env::init(true);
-    if super::env::environ_ptr(true) == 0 { -1 } else { 0 }
+    if super::env::environ_ptr(true) == 0 {
+        -1
+    } else {
+        0
+    }
 }
 
 extern "win64" fn _get_initial_narrow_environment() -> u64 {
@@ -936,14 +958,7 @@ extern "win64" fn thread_start(param: u64) -> u32 {
 const CREATE_SUSPENDED: u32 = 4;
 const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x10000;
 
-extern "win64" fn _beginthreadex(
-    security: u64,
-    stack: u32,
-    func: u64,
-    arg: u64,
-    flags: u32,
-    tid: *mut u32,
-) -> u64 {
+extern "win64" fn _beginthreadex(security: u64, stack: u32, func: u64, arg: u64, flags: u32, tid: *mut u32) -> u64 {
     validate!(func != 0, EINVAL, 0);
     if flags & !(CREATE_SUSPENDED | STACK_SIZE_PARAM_IS_A_RESERVATION) != 0 {
         set_errno(EINVAL);

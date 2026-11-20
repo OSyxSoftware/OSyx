@@ -11,7 +11,10 @@
 use crate::{
     error::*,
     kernel32::fail,
-    mem::{self, Prot, GRANULARITY, PAGE, PAGE_EXECUTE_READ, PAGE_EXECUTE_WRITECOPY, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY},
+    mem::{
+        self, Prot, GRANULARITY, PAGE, PAGE_EXECUTE_READ, PAGE_EXECUTE_WRITECOPY, PAGE_READONLY, PAGE_READWRITE,
+        PAGE_WRITECOPY,
+    },
     objects::{self, Object, SectionObj},
     path, teb,
 };
@@ -69,7 +72,10 @@ pub(crate) fn release_if_owner_gone(tid: u64) -> bool {
 pub fn create(file: Option<u64>, protect: u32, size: u64, name: Option<String>) -> Result<(u64, bool), NtStatus> {
     let r = create_section(file, protect, size, name);
     if r == Err(STATUS_NOT_SUPPORTED) && crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
-        os_std::eprintln!("winrun: section not supported: protect {protect:#x}, file {}, size {size:#x}", file.is_some());
+        os_std::eprintln!(
+            "winrun: section not supported: protect {protect:#x}, file {}, size {size:#x}",
+            file.is_some()
+        );
     }
     r
 }
@@ -139,9 +145,9 @@ fn create_section(file: Option<u64>, protect: u32, size: u64, name: Option<Strin
                 }
                 // Large immutable resources keep the existing snapshot path.
                 // Writable mappings require the coherent kernel backing.
-                Err(osyx_abi::Errno::NotSupported) if !write => SectionObj {
-                    shm: 0, file_mapping: false, size, writable: false, executable, file: Some(f), name,
-                },
+                Err(osyx_abi::Errno::NotSupported) if !write => {
+                    SectionObj { shm: 0, file_mapping: false, size, writable: false, executable, file: Some(f), name }
+                }
                 Err(e) => return Err(errno_to_status(e)),
             }
         }
@@ -217,7 +223,9 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
                 return Err(STATUS_NO_MEMORY);
             };
             // SAFETY: the kernel view and new private mapping both cover len.
-            unsafe { core::ptr::copy_nonoverlapping(source, p as *mut u8, len as usize); }
+            unsafe {
+                core::ptr::copy_nonoverlapping(source, p as *mut u8, len as usize);
+            }
             let _ = unsafe { os_sys::unmap(source, (len as usize).next_multiple_of(PAGE)) };
             if exec {
                 if let Err(e) = mem::protect(p, len as usize, Prot::ExecuteRead) {
@@ -229,38 +237,40 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
         } else {
             (source as u64, if write { PAGE_READWRITE } else { PAGE_READONLY })
         }
-    } else { match &s.file {
-        None => {
-            // Shared pages: views alias the whole object.
-            if offset != 0 || copy || exec {
-                return Err(STATUS_NOT_SUPPORTED);
-            }
-            let p = os_sys::shm_map(s.shm, write).map_err(errno_to_status)? as u64;
-            (p, if write { PAGE_READWRITE } else { PAGE_READONLY })
-        }
-        Some(f) => {
-            let size = len as usize;
-            let p = mem::alloc_pages(size, Prot::ReadWrite).ok_or(STATUS_NO_MEMORY)?;
-            if let Err(e) = read_at(f.fd, offset, p, size) {
-                mem::free_pages(p, size);
-                return Err(e);
-            }
-            let (prot, protect) = if copy {
-                (Prot::ReadWrite, PAGE_WRITECOPY)
-            } else if exec {
-                (Prot::ExecuteRead, PAGE_EXECUTE_READ)
-            } else {
-                (Prot::ReadOnly, PAGE_READONLY)
-            };
-            if prot != Prot::ReadWrite {
-                if let Err(e) = mem::protect(p, size, prot) {
-                    mem::free_pages(p, size);
-                    return Err(errno_to_status(e));
+    } else {
+        match &s.file {
+            None => {
+                // Shared pages: views alias the whole object.
+                if offset != 0 || copy || exec {
+                    return Err(STATUS_NOT_SUPPORTED);
                 }
+                let p = os_sys::shm_map(s.shm, write).map_err(errno_to_status)? as u64;
+                (p, if write { PAGE_READWRITE } else { PAGE_READONLY })
             }
-            (p, protect)
+            Some(f) => {
+                let size = len as usize;
+                let p = mem::alloc_pages(size, Prot::ReadWrite).ok_or(STATUS_NO_MEMORY)?;
+                if let Err(e) = read_at(f.fd, offset, p, size) {
+                    mem::free_pages(p, size);
+                    return Err(e);
+                }
+                let (prot, protect) = if copy {
+                    (Prot::ReadWrite, PAGE_WRITECOPY)
+                } else if exec {
+                    (Prot::ExecuteRead, PAGE_EXECUTE_READ)
+                } else {
+                    (Prot::ReadOnly, PAGE_READONLY)
+                };
+                if prot != Prot::ReadWrite {
+                    if let Err(e) = mem::protect(p, size, prot) {
+                        mem::free_pages(p, size);
+                        return Err(errno_to_status(e));
+                    }
+                }
+                (p, protect)
+            }
         }
-    }};
+    };
     let size = if s.file.is_some() || s.file_mapping { len } else { s.size };
     let allocation_protect = if s.writable { PAGE_READWRITE } else { PAGE_READONLY };
     let file_write = s.file_mapping && write && !copy;
@@ -271,7 +281,8 @@ pub fn map(section: u64, access: u32, offset: u64, len: u64) -> Result<(u64, u64
 /// The last views unmapped (base, size, file path, who unmapped it),
 /// newest last: a fault report names an address that lies in one (a use
 /// after UnmapViewOfFile) and the code that unmapped it.
-static UNMAPPED: Mutex<alloc::collections::VecDeque<(u64, u64, String, String)>> = Mutex::new(alloc::collections::VecDeque::new());
+static UNMAPPED: Mutex<alloc::collections::VecDeque<(u64, u64, String, String)>> =
+    Mutex::new(alloc::collections::VecDeque::new());
 
 /// The calling thread and the code addresses on its stack, for a record
 /// of who unmapped a view: only while a Windows thread runs on its Windows
@@ -289,14 +300,16 @@ fn caller() -> String {
     // SAFETY: reads the stack pointer only.
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
     // SAFETY: this thread's TEB, which it frees only after this.
-    let (base, limit): (u64, u64) = unsafe { (crate::teb::get(t, crate::teb::TEB_STACK_BASE), crate::teb::get(t, crate::teb::TEB_STACK_LIMIT)) };
+    let (base, limit): (u64, u64) =
+        unsafe { (crate::teb::get(t, crate::teb::TEB_STACK_BASE), crate::teb::get(t, crate::teb::TEB_STACK_LIMIT)) };
     if !(limit..base).contains(&rsp) {
         return alloc::format!("thread {tid}");
     }
     let start = rsp;
     let end = start.saturating_add(16 << 10).min(base);
     // SAFETY: inside this thread's stack, between its limit and base.
-    let words: Vec<u64> = (start..end).step_by(8).map(|a| unsafe { core::ptr::read_volatile(a as *const u64) }).collect();
+    let words: Vec<u64> =
+        (start..end).step_by(8).map(|a| unsafe { core::ptr::read_volatile(a as *const u64) }).collect();
     let chain = crate::exceptions::chain_of(&words, &images).unwrap_or_default();
     alloc::format!("thread {tid} from {chain}")
 }
@@ -312,13 +325,24 @@ pub fn describe_for_report(addr: u64) -> Option<String> {
         if let Some((&base, v)) = views.range(..=addr).next_back() {
             if addr < base + (v.size as usize).next_multiple_of(PAGE) as u64 {
                 let path = String::from(v.section.file.as_ref().map_or("", |f| f.path.as_str()));
-                return Some(alloc::format!("a view {base:#x}+{:#x} (protect {:#x}) of {}", v.size, v.protect, if path.is_empty() { "shared memory" } else { &path }));
+                return Some(alloc::format!(
+                    "a view {base:#x}+{:#x} (protect {:#x}) of {}",
+                    v.size,
+                    v.protect,
+                    if path.is_empty() { "shared memory" } else { &path }
+                ));
             }
         }
     }
     let unmapped = UNMAPPED.lock().unwrap();
     unmapped.iter().rev().find(|u| addr >= u.0 && addr < u.0 + u.1).map(|u| {
-        alloc::format!("a view {:#x}+{:#x} of {} that was unmapped by {}", u.0, u.1, if u.2.is_empty() { "shared memory" } else { &u.2 }, u.3)
+        alloc::format!(
+            "a view {:#x}+{:#x} of {} that was unmapped by {}",
+            u.0,
+            u.1,
+            if u.2.is_empty() { "shared memory" } else { &u.2 },
+            u.3
+        )
     })
 }
 
@@ -392,7 +416,10 @@ fn create_common(file: u64, attributes: u64, protect: u32, high: u32, low: u32, 
     let file = (file != INVALID_HANDLE_VALUE).then_some(file);
     let r = create(file, protect, (high as u64) << 32 | low as u64, name);
     if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
-        os_std::eprintln!("winrun: CreateFileMapping(file {file:x?}, protect {protect:#x}, size {:#x}) -> {r:x?}", (high as u64) << 32 | low as u64);
+        os_std::eprintln!(
+            "winrun: CreateFileMapping(file {file:x?}, protect {protect:#x}, size {:#x}) -> {r:x?}",
+            (high as u64) << 32 | low as u64
+        );
     }
     match r {
         Ok((h, existed)) => {
@@ -409,12 +436,26 @@ fn create_common(file: u64, attributes: u64, protect: u32, high: u32, low: u32, 
     }
 }
 
-extern "win64" fn CreateFileMappingW(file: u64, attributes: u64, protect: u32, high: u32, low: u32, name: *const u16) -> u64 {
+extern "win64" fn CreateFileMappingW(
+    file: u64,
+    attributes: u64,
+    protect: u32,
+    high: u32,
+    low: u32,
+    name: *const u16,
+) -> u64 {
     // SAFETY: the caller passes NULL or a NUL-terminated name.
     create_common(file, attributes, protect, high, low, unsafe { path::wide_to_string(name) })
 }
 
-extern "win64" fn CreateFileMappingA(file: u64, attributes: u64, protect: u32, high: u32, low: u32, name: *const u8) -> u64 {
+extern "win64" fn CreateFileMappingA(
+    file: u64,
+    attributes: u64,
+    protect: u32,
+    high: u32,
+    low: u32,
+    name: *const u8,
+) -> u64 {
     // SAFETY: as above.
     create_common(file, attributes, protect, high, low, unsafe { path::ansi_to_string(name) })
 }
@@ -422,7 +463,10 @@ extern "win64" fn CreateFileMappingA(file: u64, attributes: u64, protect: u32, h
 extern "win64" fn MapViewOfFile(section: u64, access: u32, high: u32, low: u32, len: usize) -> u64 {
     let r = map(section, access, (high as u64) << 32 | low as u64, len as u64);
     if crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
-        os_std::eprintln!("winrun: MapViewOfFile({section:#x}, access {access:#x}, offset {:#x}, len {len:#x}) -> {r:x?}", (high as u64) << 32 | low as u64);
+        os_std::eprintln!(
+            "winrun: MapViewOfFile({section:#x}, access {access:#x}, offset {:#x}, len {len:#x}) -> {r:x?}",
+            (high as u64) << 32 | low as u64
+        );
     }
     match r {
         // A 32-bit caller cannot use a view the kernel placed above 2 GiB
@@ -465,11 +509,22 @@ extern "win64" fn FlushViewOfFile(addr: u64, len: usize) -> i32 {
     let Some((base, size, offset, write, section)) = view else { return fail(ERROR_INVALID_ADDRESS, 0) };
     let within = addr - base;
     let len = if len == 0 { size - within } else { len as u64 };
-    if len > size - within { return fail(ERROR_INVALID_PARAMETER, 0); }
-    if !write { return 1; }
+    if len > size - within {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
+    if !write {
+        return 1;
+    }
     os_sys::filemap_flush(section.shm, offset + within, len).map_or_else(|e| fail(errno_to_win32(e), 0), |_| 1)
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![MapViewOfFileEx, CreateFileMappingW, CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FlushViewOfFile]
+    export_table![
+        MapViewOfFileEx,
+        CreateFileMappingW,
+        CreateFileMappingA,
+        MapViewOfFile,
+        UnmapViewOfFile,
+        FlushViewOfFile
+    ]
 }

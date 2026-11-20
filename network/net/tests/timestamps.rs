@@ -29,7 +29,11 @@ fn pair(server_ts: bool, now: u64) -> (Tcb, Tcb) {
     let parsed = tcp::parse(A.addr, B.addr, &bytes).unwrap();
     let mut b = Tcb::accept(B, A, &parsed, 5000, MSS as u16, now);
     let synack = b.output(now).remove(0);
-    assert_eq!(synack.ts.map(|ts| ts.1), server_ts.then_some(value), "the SYN-ACK echoes the SYN's timestamp, or has none");
+    assert_eq!(
+        synack.ts.map(|ts| ts.1),
+        server_ts.then_some(value),
+        "the SYN-ACK echoes the SYN's timestamp, or has none"
+    );
     deliver(&synack, B, A, &mut a, now);
     for seg in a.output(now) {
         assert_eq!(seg.ts.is_some(), server_ts);
@@ -43,14 +47,36 @@ fn pair(server_ts: bool, now: u64) -> (Tcb, Tcb) {
 fn the_option_survives_the_codec_with_every_other_option() {
     let mut sack = SackBlocks::NONE;
     assert!(sack.push(10, 20) && sack.push(30, 40) && sack.push(50, 60));
-    let seg = OutSegment { seq: 1, ack: 2, flags: ACK, window: 9, mss: None, ws: None, sack_permitted: false, sack, ts: Some((0xDEAD_BEEF, 77)), payload: vec![] };
+    let seg = OutSegment {
+        seq: 1,
+        ack: 2,
+        flags: ACK,
+        window: 9,
+        mss: None,
+        ws: None,
+        sack_permitted: false,
+        sack,
+        ts: Some((0xDEAD_BEEF, 77)),
+        payload: vec![],
+    };
     let bytes = seg.encode(A, B);
     assert_eq!(bytes.len(), 20 + 40, "timestamps and three SACK blocks fill the option space exactly");
     let parsed = tcp::parse(A.addr, B.addr, &bytes).unwrap();
     assert_eq!(parsed.ts, Some((0xDEAD_BEEF, 77)));
     assert_eq!(parsed.sack.blocks().as_slice().len(), 3);
 
-    let syn = OutSegment { seq: 7, ack: 0, flags: SYN, window: 65535, mss: Some(1460), ws: Some(8), sack_permitted: true, sack: SackBlocks::NONE, ts: Some((5, 0)), payload: vec![] };
+    let syn = OutSegment {
+        seq: 7,
+        ack: 0,
+        flags: SYN,
+        window: 65535,
+        mss: Some(1460),
+        ws: Some(8),
+        sack_permitted: true,
+        sack: SackBlocks::NONE,
+        ts: Some((5, 0)),
+        payload: vec![],
+    };
     let bytes = syn.encode(A, B);
     assert_eq!(bytes.len(), 20 + 24);
     let parsed = tcp::parse(A.addr, B.addr, &bytes).unwrap();
@@ -87,7 +113,11 @@ fn every_segment_carries_the_option_and_data_segments_shrink_by_it() {
     }
     let acks = b.output(160);
     let sent = segs[0].ts.unwrap().0;
-    assert_eq!(acks.last().and_then(|s| s.ts).map(|ts| ts.1), Some(sent), "the ACK echoes the first unacknowledged segment's timestamp");
+    assert_eq!(
+        acks.last().and_then(|s| s.ts).map(|ts| ts.1),
+        Some(sent),
+        "the ACK echoes the first unacknowledged segment's timestamp"
+    );
 }
 
 #[test]

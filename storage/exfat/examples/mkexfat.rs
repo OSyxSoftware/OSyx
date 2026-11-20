@@ -53,5 +53,8 @@ fn main() {
     });
     let img = fs.unmount().expect("unmount");
     std::fs::write(&args[0], img).expect("write the image");
-    println!("{}: {} files, {} directories, {} clusters used", args[0], files, report.directories, report.used_clusters);
+    println!(
+        "{}: {} files, {} directories, {} clusters used",
+        args[0], files, report.directories, report.used_clusters
+    );
 }

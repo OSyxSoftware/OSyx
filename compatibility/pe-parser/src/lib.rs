@@ -22,18 +22,18 @@
 mod exception;
 mod exports;
 mod imports;
-mod relocs;
-mod tls;
-mod resources;
 mod manifest;
+mod relocs;
+mod resources;
+mod tls;
 
 pub use exception::{RuntimeFunction, RuntimeFunctions, UnwindInfo};
 pub use exports::{Export, ExportTarget, Exports};
 pub use imports::{DelayImport, DelayImportDescriptors, Import, ImportDescriptors, ImportEntries, ImportEntry};
-pub use relocs::{BaseRelocations, Relocation, RelocationKind};
-pub use tls::{TlsCallbacks, TlsInfo};
-pub use resources::{version_value, VersionValue};
 pub use manifest::{execution_level, ExecutionLevel};
+pub use relocs::{BaseRelocations, Relocation, RelocationKind};
+pub use resources::{version_value, VersionValue};
+pub use tls::{TlsCallbacks, TlsInfo};
 
 use core::fmt;
 
@@ -431,37 +431,37 @@ impl<'a> PeFile<'a> {
                 number_of_rva_and_sizes: u32_at(data, o + 92, "optional header")?,
             }
         } else {
-        OptionalHeader {
-            magic,
-            major_linker_version: data[o + 2],
-            minor_linker_version: data[o + 3],
-            size_of_code: u32_at(data, o + 4, "optional header")?,
-            size_of_initialized_data: u32_at(data, o + 8, "optional header")?,
-            size_of_uninitialized_data: u32_at(data, o + 12, "optional header")?,
-            address_of_entry_point: u32_at(data, o + 16, "optional header")?,
-            base_of_code: u32_at(data, o + 20, "optional header")?,
-            image_base: u64_at(data, o + 24, "optional header")?,
-            section_alignment: u32_at(data, o + 32, "optional header")?,
-            file_alignment: u32_at(data, o + 36, "optional header")?,
-            major_operating_system_version: u16_at(data, o + 40, "optional header")?,
-            minor_operating_system_version: u16_at(data, o + 42, "optional header")?,
-            major_image_version: u16_at(data, o + 44, "optional header")?,
-            minor_image_version: u16_at(data, o + 46, "optional header")?,
-            major_subsystem_version: u16_at(data, o + 48, "optional header")?,
-            minor_subsystem_version: u16_at(data, o + 50, "optional header")?,
-            win32_version_value: u32_at(data, o + 52, "optional header")?,
-            size_of_image: u32_at(data, o + 56, "optional header")?,
-            size_of_headers: u32_at(data, o + 60, "optional header")?,
-            check_sum: u32_at(data, o + 64, "optional header")?,
-            subsystem: u16_at(data, o + 68, "optional header")?,
-            dll_characteristics: u16_at(data, o + 70, "optional header")?,
-            size_of_stack_reserve: u64_at(data, o + 72, "optional header")?,
-            size_of_stack_commit: u64_at(data, o + 80, "optional header")?,
-            size_of_heap_reserve: u64_at(data, o + 88, "optional header")?,
-            size_of_heap_commit: u64_at(data, o + 96, "optional header")?,
-            loader_flags: u32_at(data, o + 104, "optional header")?,
-            number_of_rva_and_sizes: u32_at(data, o + 108, "optional header")?,
-        }
+            OptionalHeader {
+                magic,
+                major_linker_version: data[o + 2],
+                minor_linker_version: data[o + 3],
+                size_of_code: u32_at(data, o + 4, "optional header")?,
+                size_of_initialized_data: u32_at(data, o + 8, "optional header")?,
+                size_of_uninitialized_data: u32_at(data, o + 12, "optional header")?,
+                address_of_entry_point: u32_at(data, o + 16, "optional header")?,
+                base_of_code: u32_at(data, o + 20, "optional header")?,
+                image_base: u64_at(data, o + 24, "optional header")?,
+                section_alignment: u32_at(data, o + 32, "optional header")?,
+                file_alignment: u32_at(data, o + 36, "optional header")?,
+                major_operating_system_version: u16_at(data, o + 40, "optional header")?,
+                minor_operating_system_version: u16_at(data, o + 42, "optional header")?,
+                major_image_version: u16_at(data, o + 44, "optional header")?,
+                minor_image_version: u16_at(data, o + 46, "optional header")?,
+                major_subsystem_version: u16_at(data, o + 48, "optional header")?,
+                minor_subsystem_version: u16_at(data, o + 50, "optional header")?,
+                win32_version_value: u32_at(data, o + 52, "optional header")?,
+                size_of_image: u32_at(data, o + 56, "optional header")?,
+                size_of_headers: u32_at(data, o + 60, "optional header")?,
+                check_sum: u32_at(data, o + 64, "optional header")?,
+                subsystem: u16_at(data, o + 68, "optional header")?,
+                dll_characteristics: u16_at(data, o + 70, "optional header")?,
+                size_of_stack_reserve: u64_at(data, o + 72, "optional header")?,
+                size_of_stack_commit: u64_at(data, o + 80, "optional header")?,
+                size_of_heap_reserve: u64_at(data, o + 88, "optional header")?,
+                size_of_heap_commit: u64_at(data, o + 96, "optional header")?,
+                loader_flags: u32_at(data, o + 104, "optional header")?,
+                number_of_rva_and_sizes: u32_at(data, o + 108, "optional header")?,
+            }
         };
         let ndirs = opt.number_of_rva_and_sizes;
         if ndirs > 16 {

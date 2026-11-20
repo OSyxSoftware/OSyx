@@ -7,12 +7,7 @@
 //! predefined keys and remote registries are not supported.
 #![allow(non_snake_case)]
 use crate::{error::*, path};
-use alloc::{
-    collections::BTreeMap,
-    format,
-    string::String,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use os_std::sync::Mutex;
 
 const HKEY_CLASSES_ROOT: u64 = 0x8000_0000;
@@ -193,7 +188,13 @@ fn save(h: Hive, d: &HiveData) -> Result<(), u32> {
     for k in d.keys.values().filter(|k| !k.volatile) {
         text.push_str(&format!("K\t{}\n", hex(k.name.as_bytes())));
         for v in k.values.values() {
-            text.push_str(&format!("V\t{}\t{}\t{}\t{}\n", hex(k.name.as_bytes()), hex(v.name.as_bytes()), v.kind, hex(&v.data)));
+            text.push_str(&format!(
+                "V\t{}\t{}\t{}\t{}\n",
+                hex(k.name.as_bytes()),
+                hex(v.name.as_bytes()),
+                v.kind,
+                hex(&v.data)
+            ));
         }
     }
     let (dir, file) = hive_file(h);
@@ -201,7 +202,8 @@ fn save(h: Hive, d: &HiveData) -> Result<(), u32> {
         os_sys::mkdir(&dir, 0o755).map_err(errno_to_win32)?;
     }
     let tmp = format!("{file}.{}.tmp", crate::kernel32::pid());
-    let fd = os_sys::open(&tmp, osyx_abi::OPEN_WRITE | osyx_abi::OPEN_CREATE | osyx_abi::OPEN_TRUNCATE, 0o644).map_err(errno_to_win32)?;
+    let fd = os_sys::open(&tmp, osyx_abi::OPEN_WRITE | osyx_abi::OPEN_CREATE | osyx_abi::OPEN_TRUNCATE, 0o644)
+        .map_err(errno_to_win32)?;
     let mut done = 0;
     let mut result = Ok(());
     while done < text.len() {
@@ -276,8 +278,12 @@ fn link_target(key: &Key) -> Option<String> {
 fn link_destination(hive: Hive, target: &str) -> (Hive, String) {
     let t = target.trim_matches('\\');
     let lower = t.to_lowercase();
-    for (name, h) in [("registry\\machine", Hive::Machine), ("hkey_local_machine", Hive::Machine),
-                      ("registry\\user", Hive::User), ("hkey_current_user", Hive::User)] {
+    for (name, h) in [
+        ("registry\\machine", Hive::Machine),
+        ("hkey_local_machine", Hive::Machine),
+        ("registry\\user", Hive::User),
+        ("hkey_current_user", Hive::User),
+    ] {
         if let Some(_rest) = lower.strip_prefix(name) {
             let orig = t[name.len()..].trim_start_matches('\\');
             if h == Hive::User {
@@ -455,7 +461,11 @@ extern "win64" fn RegCloseKey(hkey: u64) -> u32 {
     if root(hkey).is_some() {
         return ERROR_SUCCESS;
     }
-    if REG.lock().unwrap().handles.remove(&hkey).is_some() { ERROR_SUCCESS } else { ERROR_INVALID_HANDLE }
+    if REG.lock().unwrap().handles.remove(&hkey).is_some() {
+        ERROR_SUCCESS
+    } else {
+        ERROR_INVALID_HANDLE
+    }
 }
 
 fn get_value(hkey: u64, sub: Option<String>, name: &str, need: u32) -> Result<Value, u32> {
@@ -499,7 +509,14 @@ fn copy_out(data: &[u8], buf: *mut u8, size: *mut u32) -> u32 {
     ERROR_SUCCESS
 }
 
-pub(crate) extern "win64" fn RegQueryValueExW(hkey: u64, name: *const u16, reserved: *const u32, kind: *mut u32, buf: *mut u8, size: *mut u32) -> u32 {
+pub(crate) extern "win64" fn RegQueryValueExW(
+    hkey: u64,
+    name: *const u16,
+    reserved: *const u32,
+    kind: *mut u32,
+    buf: *mut u8,
+    size: *mut u32,
+) -> u32 {
     if !reserved.is_null() {
         return ERROR_INVALID_PARAMETER;
     }
@@ -556,18 +573,33 @@ fn utf16_bytes(s: &str) -> Vec<u8> {
 }
 
 fn utf16_string(data: &[u8]) -> String {
-    let units: Vec<u16> = data.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).take_while(|&u| u != 0).collect();
+    let units: Vec<u16> =
+        data.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).take_while(|&u| u != 0).collect();
     String::from_utf16_lossy(&units)
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn RegGetValueW(hkey: u64, sub: *const u16, name: *const u16, flags: u32, kind: *mut u32, buf: *mut u8, size: *mut u32) -> u32 {
+extern "win64" fn RegGetValueW(
+    hkey: u64,
+    sub: *const u16,
+    name: *const u16,
+    flags: u32,
+    kind: *mut u32,
+    buf: *mut u8,
+    size: *mut u32,
+) -> u32 {
     let types = flags & 0xffff;
-    if types == 0 || (types == RRF_RT_REG_EXPAND_SZ && flags & RRF_NOEXPAND == 0) || (!buf.is_null() && size.is_null()) {
+    if types == 0 || (types == RRF_RT_REG_EXPAND_SZ && flags & RRF_NOEXPAND == 0) || (!buf.is_null() && size.is_null())
+    {
         return ERROR_INVALID_PARAMETER;
     }
     let zero = |r: u32| {
-        if r != ERROR_SUCCESS && r != ERROR_MORE_DATA && flags & RRF_ZEROONFAILURE != 0 && !buf.is_null() && !size.is_null() {
+        if r != ERROR_SUCCESS
+            && r != ERROR_MORE_DATA
+            && flags & RRF_ZEROONFAILURE != 0
+            && !buf.is_null()
+            && !size.is_null()
+        {
             // SAFETY: the caller's buffer of *size bytes.
             unsafe { core::ptr::write_bytes(buf, 0, *size as usize) };
         }
@@ -594,11 +626,16 @@ extern "win64" fn RegGetValueW(hkey: u64, sub: *const u16, name: *const u16, fla
         REG_QWORD if data.len() == 8 => RRF_RT_REG_QWORD,
         _ => 0,
     };
-    if bit & types == 0 && !(kind_out == REG_BINARY && ((types & RRF_RT_REG_DWORD != 0 && data.len() == 4) || (types & RRF_RT_REG_QWORD != 0 && data.len() == 8))) {
+    if bit & types == 0
+        && !(kind_out == REG_BINARY
+            && ((types & RRF_RT_REG_DWORD != 0 && data.len() == 4)
+                || (types & RRF_RT_REG_QWORD != 0 && data.len() == 8)))
+    {
         return zero(ERROR_UNSUPPORTED_TYPE);
     }
     // Strings come back NUL-terminated even when stored without one.
-    if matches!(kind_out, REG_SZ | REG_EXPAND_SZ | REG_MULTI_SZ) && (data.len() < 2 || data[data.len() - 2..] != [0, 0]) {
+    if matches!(kind_out, REG_SZ | REG_EXPAND_SZ | REG_MULTI_SZ) && (data.len() < 2 || data[data.len() - 2..] != [0, 0])
+    {
         data.extend_from_slice(&[0, 0]);
     }
     if !kind.is_null() {
@@ -608,7 +645,14 @@ extern "win64" fn RegGetValueW(hkey: u64, sub: *const u16, name: *const u16, fla
     zero(copy_out(&data, buf, size))
 }
 
-pub(crate) extern "win64" fn RegSetValueExW(hkey: u64, name: *const u16, _reserved: u32, kind: u32, data: *const u8, size: u32) -> u32 {
+pub(crate) extern "win64" fn RegSetValueExW(
+    hkey: u64,
+    name: *const u16,
+    _reserved: u32,
+    kind: u32,
+    data: *const u8,
+    size: u32,
+) -> u32 {
     if data.is_null() && size != 0 {
         return ERROR_NOACCESS;
     }
@@ -616,7 +660,9 @@ pub(crate) extern "win64" fn RegSetValueExW(hkey: u64, name: *const u16, _reserv
         return ERROR_INVALID_PARAMETER;
     }
     // SAFETY: the caller's string and `size` bytes of data.
-    let (name, bytes) = unsafe { (ws(name), if size == 0 { Vec::new() } else { core::slice::from_raw_parts(data, size as usize).to_vec() }) };
+    let (name, bytes) = unsafe {
+        (ws(name), if size == 0 { Vec::new() } else { core::slice::from_raw_parts(data, size as usize).to_vec() })
+    };
     if name.len() > 16383 {
         return ERROR_INVALID_PARAMETER;
     }
@@ -753,7 +799,8 @@ pub(crate) fn delete_key(h: u64) -> u32 {
     if path.is_empty() {
         return ERROR_ACCESS_DENIED;
     }
-    let top = 0xFFFF_FFFF_0000_0000 | if hive as usize == Hive::Machine as usize { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
+    let top = 0xFFFF_FFFF_0000_0000
+        | if hive as usize == Hive::Machine as usize { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
     let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
     RegDeleteKeyW(top, wide.as_ptr())
 }
@@ -764,7 +811,11 @@ const ERROR_NOACCESS: u32 = 998;
 fn children<'a>(d: &'a HiveData, path: &str) -> Vec<&'a Key> {
     let lower = path.to_lowercase();
     let prefix = if lower.is_empty() { String::new() } else { format!("{lower}\\") };
-    d.keys.iter().filter(|(k, _)| !k.is_empty() && k.starts_with(&prefix) && !k[prefix.len()..].contains('\\')).map(|(_, v)| v).collect()
+    d.keys
+        .iter()
+        .filter(|(k, _)| !k.is_empty() && k.starts_with(&prefix) && !k[prefix.len()..].contains('\\'))
+        .map(|(_, v)| v)
+        .collect()
 }
 
 fn last_component(name: &str) -> &str {
@@ -834,7 +885,16 @@ pub(crate) extern "win64" fn RegEnumKeyExW(
 }
 
 extern "win64" fn RegEnumKeyW(hkey: u64, index: u32, name: *mut u16, mut name_len: u32) -> u32 {
-    RegEnumKeyExW(hkey, index, name, &mut name_len, core::ptr::null(), core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut())
+    RegEnumKeyExW(
+        hkey,
+        index,
+        name,
+        &mut name_len,
+        core::ptr::null(),
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+    )
 }
 
 /// Values in name order (Windows keeps insertion order; neither is
@@ -954,7 +1014,9 @@ pub(crate) extern "win64" fn RegDeleteTreeW(hkey: u64, sub: *const u16) -> u32 {
     }
     let before = d.keys.clone();
     let prefix = format!("{lower}\\");
-    d.keys.retain(|k, _| !(k.starts_with(&prefix) || (!sub.is_empty() && *k == lower) || (lower.is_empty() && !k.is_empty())));
+    d.keys.retain(|k, _| {
+        !(k.starts_with(&prefix) || (!sub.is_empty() && *k == lower) || (lower.is_empty() && !k.is_empty()))
+    });
     if sub.is_empty() {
         if let Some(k) = d.keys.get_mut(&lower) {
             k.values.clear();
@@ -999,7 +1061,14 @@ extern "win64" fn RegDeleteKeyValueW(hkey: u64, sub: *const u16, name: *const u1
 }
 
 /// Creates `sub` when it does not exist, as Windows does.
-extern "win64" fn RegSetKeyValueW(hkey: u64, sub: *const u16, name: *const u16, kind: u32, data: *const u8, size: u32) -> u32 {
+extern "win64" fn RegSetKeyValueW(
+    hkey: u64,
+    sub: *const u16,
+    name: *const u16,
+    kind: u32,
+    data: *const u8,
+    size: u32,
+) -> u32 {
     let (h, opened) = match sub_key(hkey, sub, KEY_SET_VALUE, true) {
         Ok(v) => v,
         Err(e) => return e,
@@ -1147,7 +1216,8 @@ extern "win64" fn RegCreateKeyTransactedW(
 /// end the wait (synchronous form). Changes another process makes to the
 /// hive files are not observed.
 extern "win64" fn RegNotifyChangeKeyValue(hkey: u64, subtree: i32, filter: u32, event: u64, asynchronous: i32) -> u32 {
-    let all = REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_ATTRIBUTES | REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_SECURITY;
+    let all =
+        REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_ATTRIBUTES | REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_SECURITY;
     if filter & !(all | REG_NOTIFY_THREAD_AGNOSTIC) != 0 || filter & all == 0 || (asynchronous != 0 && event == 0) {
         return ERROR_INVALID_PARAMETER;
     }

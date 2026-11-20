@@ -44,11 +44,11 @@ Pull request labels:
 
 Build and tests:
 - `rust-toolchain.toml` pins `stable` Rust; do not use nightly features. CI runs with `--locked`, so update `Cargo.lock` when dependencies change.
-- `Cargo.toml` lists host-testable crates in `default-members`; plain `cargo test` runs those, while `cargo test --workspace` fails on freestanding crates.
+- `Cargo.toml` lists host-testable crates in `default-members`; plain `cargo test` runs those (CI does the same), while `cargo test --workspace` fails on freestanding crates. Add every new host-testable crate to `default-members`.
 - `osyx-wireless` WPA tests require `--features wpa`; `osyx-ext4` tests require `e2fsprogs` and generated fixtures (`bash storage/ext4/tests/gen-fixtures.sh`).
 - When changing `compatibility/win32` or parity tooling, run `python3 -m unittest scripts/test_winparity.py`.
 - Check freestanding targets explicitly: `cargo check --locked -p osyx-uefi-loader --target x86_64-unknown-uefi`, `cargo check --locked -p osyx-kernel --target x86_64-unknown-none`, and userspace (`-p osyx-apps -p osyx-desktop -p osyx-nettools -p osyx-win32 -p osyx-web`) with `--target x86_64-unknown-none` and `RUSTFLAGS='-C relocation-model=static -C code-model=small --cfg polyval_force_soft --cfg poly1305_force_soft --cfg aes_force_soft --cfg chacha20_force_soft --cfg curve25519_dalek_backend="serial"'`.
-- `rustfmt.toml` sets `max_width = 120` and `use_small_heuristics = "Max"`.
+- `rustfmt.toml` sets `max_width = 120` and `use_small_heuristics = "Max"`. CI runs `cargo fmt --all --check`; run `cargo fmt --all` before committing. Vendored `third_party/aml` opts out through its own `rustfmt.toml`.
 
 Host platforms and verification scope:
 - Full image builds and QEMU suites (`scripts/build.ps1`, `scripts/test.ps1`, `scripts/net-test.ps1`, `scripts/desktop-test.ps1`) target Windows 11 with Rust, MSYS2, and WSL.

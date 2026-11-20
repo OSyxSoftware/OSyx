@@ -122,11 +122,19 @@ fn narrow() -> bool {
 }
 
 fn wavehdr_size() -> u32 {
-    if narrow() { 32 } else { 48 }
+    if narrow() {
+        32
+    } else {
+        48
+    }
 }
 
 fn midihdr_size() -> u32 {
-    if narrow() { 64 } else { 120 }
+    if narrow() {
+        64
+    } else {
+        120
+    }
 }
 
 /// lpData and dwBufferLength of a WAVEHDR or MIDIHDR.
@@ -177,7 +185,9 @@ impl Callback {
     fn new(target: u64, instance: u64, flags: u32) -> Result<Callback, u32> {
         let kind = flags & CALLBACK_TYPEMASK;
         match kind {
-            CALLBACK_NULL | CALLBACK_WINDOW | CALLBACK_FUNCTION | CALLBACK_EVENT => Ok(Callback { kind, target, instance }),
+            CALLBACK_NULL | CALLBACK_WINDOW | CALLBACK_FUNCTION | CALLBACK_EVENT => {
+                Ok(Callback { kind, target, instance })
+            }
             _ => Err(MMSYSERR_INVALFLAG),
         }
     }
@@ -206,7 +216,9 @@ fn dev_names(prefix: &str) -> alloc::vec::Vec<String> {
         Ok(d) => d
             .map(|e| String::from(e.file_name()))
             // `prefix` and a number: `audio0`, not the `audio` alias.
-            .filter(|n| n.len() > prefix.len() && n.starts_with(prefix) && n[prefix.len()..].bytes().all(|b| b.is_ascii_digit()))
+            .filter(|n| {
+                n.len() > prefix.len() && n.starts_with(prefix) && n[prefix.len()..].bytes().all(|b| b.is_ascii_digit())
+            })
             .collect(),
         Err(_) => alloc::vec::Vec::new(),
     };
@@ -238,7 +250,10 @@ fn wave_devices(prefix: &str) -> alloc::vec::Vec<WaveDevice> {
         .into_iter()
         .map(|node| {
             let key = alloc::format!("{node}=");
-            let card = status.lines().find_map(|l| l.strip_prefix(key.as_str())).map_or_else(|| node.clone(), |c| String::from(c.trim()));
+            let card = status
+                .lines()
+                .find_map(|l| l.strip_prefix(key.as_str()))
+                .map_or_else(|| node.clone(), |c| String::from(c.trim()));
             WaveDevice { node, card }
         })
         .collect()
@@ -264,7 +279,11 @@ fn device_index(id: u64, count: usize) -> Option<usize> {
     if id == u32::MAX {
         return if count > 0 { Some(0) } else { None };
     }
-    if (id as usize) < count { Some(id as usize) } else { None }
+    if (id as usize) < count {
+        Some(id as usize)
+    } else {
+        None
+    }
 }
 
 fn read_u32(p: *const u8, at: usize) -> u32 {
@@ -364,7 +383,11 @@ fn parse_format(p: *const u8) -> Option<Format> {
             core::ptr::read_unaligned(p.add(14) as *const u16) as u32,
         )
     };
-    let ok = tag == 1 && (channels == 1 || channels == 2) && (bits == 8 || bits == 16) && (4_000..=192_000).contains(&rate) && align == channels * bits / 8;
+    let ok = tag == 1
+        && (channels == 1 || channels == 2)
+        && (bits == 8 || bits == 16)
+        && (4_000..=192_000).contains(&rate)
+        && align == channels * bits / 8;
     ok.then_some(Format { channels, bits, rate })
 }
 
@@ -534,7 +557,14 @@ extern "win64" fn waveOutGetDevCapsW(id: u64, caps: *mut u8, size: u32) -> u32 {
 }
 
 /// waveOutOpen(&handle, id, &format, callback, instance, flags).
-extern "win64" fn waveOutOpen(handle: *mut u64, id: u32, format: *const u8, callback: u64, instance: u64, flags: u32) -> u32 {
+extern "win64" fn waveOutOpen(
+    handle: *mut u64,
+    id: u32,
+    format: *const u8,
+    callback: u64,
+    instance: u64,
+    flags: u32,
+) -> u32 {
     let query = flags & WAVE_FORMAT_QUERY != 0;
     if flags & !(CALLBACK_TYPEMASK | WAVE_FORMAT_QUERY | WAVE_ALLOWSYNC | WAVE_FORMAT_DIRECT | 0x4 | 0x10) != 0 {
         return MMSYSERR_INVALFLAG;
@@ -563,7 +593,14 @@ extern "win64" fn waveOutOpen(handle: *mut u64, id: u32, format: *const u8, call
         format: fmt,
         cb,
         file: Mutex::new(file),
-        state: Mutex::new(OutState { queue: VecDeque::new(), paused: false, current: 0, played: 0, abort: false, closing: false }),
+        state: Mutex::new(OutState {
+            queue: VecDeque::new(),
+            paused: false,
+            current: 0,
+            played: 0,
+            abort: false,
+            closing: false,
+        }),
     });
     WAVE_OUTS.lock().unwrap().insert(h, w.clone());
     if !start_thread(wave_out_worker, h) {
@@ -800,7 +837,13 @@ impl Capture {
     /// mono is the mean of both channels, 8-bit samples are unsigned.
     /// Reads the card as needed; returns the bytes written, short only
     /// when `closing` says to stop.
-    fn fill(&mut self, f: &Format, file: &Mutex<os_std::fs::File>, out: &mut [u8], closing: &dyn Fn() -> bool) -> usize {
+    fn fill(
+        &mut self,
+        f: &Format,
+        file: &Mutex<os_std::fs::File>,
+        out: &mut [u8],
+        closing: &dyn Fn() -> bool,
+    ) -> usize {
         use os_std::io::Read;
         const CARD_FRAME: usize = 4;
         let fb = f.frame_bytes() as usize;
@@ -853,7 +896,11 @@ extern "win64" fn wave_in_worker(handle: u64) -> u32 {
             if s.closing {
                 break;
             }
-            if s.started { s.queue.front().copied() } else { None }
+            if s.started {
+                s.queue.front().copied()
+            } else {
+                None
+            }
         };
         let Some(hdr) = hdr else {
             wait_ms(2);
@@ -914,7 +961,14 @@ extern "win64" fn waveInGetDevCapsW(id: u64, caps: *mut u8, size: u32) -> u32 {
     wave_in_caps(id, caps, size, true)
 }
 
-extern "win64" fn waveInOpen(handle: *mut u64, id: u32, format: *const u8, callback: u64, instance: u64, flags: u32) -> u32 {
+extern "win64" fn waveInOpen(
+    handle: *mut u64,
+    id: u32,
+    format: *const u8,
+    callback: u64,
+    instance: u64,
+    flags: u32,
+) -> u32 {
     let query = flags & WAVE_FORMAT_QUERY != 0;
     if flags & !(CALLBACK_TYPEMASK | WAVE_FORMAT_QUERY | WAVE_ALLOWSYNC | WAVE_FORMAT_DIRECT | 0x4 | 0x10) != 0 {
         return MMSYSERR_INVALFLAG;
@@ -935,7 +989,12 @@ extern "win64" fn waveInOpen(handle: *mut u64, id: u32, format: *const u8, callb
     let path = alloc::format!("/dev/{node}");
     let Ok(file) = os_std::fs::OpenOptions::new().read(true).open(path.as_str()) else { return MMSYSERR_ALLOCATED };
     let h = new_handle();
-    let w = Arc::new(WaveIn { format: fmt, cb, file: Mutex::new(file), state: Mutex::new(InState { queue: VecDeque::new(), started: false, recorded: 0, closing: false }) });
+    let w = Arc::new(WaveIn {
+        format: fmt,
+        cb,
+        file: Mutex::new(file),
+        state: Mutex::new(InState { queue: VecDeque::new(), started: false, recorded: 0, closing: false }),
+    });
     WAVE_INS.lock().unwrap().insert(h, w);
     if !start_thread(wave_in_worker, h) {
         WAVE_INS.lock().unwrap().remove(&h);
@@ -1389,7 +1448,16 @@ extern "win64" fn midiInOpen(handle: *mut u64, id: u32, callback: u64, instance:
     let path = alloc::format!("/dev/{}", ports[i]);
     let Ok(file) = os_std::fs::OpenOptions::new().read(true).open(path.as_str()) else { return MMSYSERR_ALLOCATED };
     let h = new_handle();
-    let m = Arc::new(MidiIn { cb, file: Mutex::new(file), state: Mutex::new(MidiInState { queue: VecDeque::new(), started: false, closing: false, epoch_ms: crate::kernel32::now_ns() / 1_000_000 }) });
+    let m = Arc::new(MidiIn {
+        cb,
+        file: Mutex::new(file),
+        state: Mutex::new(MidiInState {
+            queue: VecDeque::new(),
+            started: false,
+            closing: false,
+            epoch_ms: crate::kernel32::now_ns() / 1_000_000,
+        }),
+    });
     MIDI_INS.lock().unwrap().insert(h, m);
     if !start_thread(midi_in_worker, h) {
         MIDI_INS.lock().unwrap().remove(&h);

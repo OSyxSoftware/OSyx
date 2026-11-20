@@ -49,15 +49,27 @@ extern "win64" fn iscntrl(c: i32) -> i32 {
     is(c, CONTROL)
 }
 extern "win64" fn isblank(c: i32) -> i32 {
-    if c == b'\t' as i32 { BLANK as i32 } else { is(c, BLANK) }
+    if c == b'\t' as i32 {
+        BLANK as i32
+    } else {
+        is(c, BLANK)
+    }
 }
 
 fn lower(c: i32) -> i32 {
-    if (b'A' as i32..=b'Z' as i32).contains(&c) { c + 32 } else { c }
+    if (b'A' as i32..=b'Z' as i32).contains(&c) {
+        c + 32
+    } else {
+        c
+    }
 }
 
 fn upper(c: i32) -> i32 {
-    if (b'a' as i32..=b'z' as i32).contains(&c) { c - 32 } else { c }
+    if (b'a' as i32..=b'z' as i32).contains(&c) {
+        c - 32
+    } else {
+        c
+    }
 }
 
 extern "win64" fn tolower(c: i32) -> i32 {
@@ -80,7 +92,11 @@ extern "win64" fn towupper(c: u16) -> u16 {
 }
 
 fn wis(c: u16, mask: u16) -> i32 {
-    if c < 256 { is(c as i32, mask) } else { 0 }
+    if c < 256 {
+        is(c as i32, mask)
+    } else {
+        0
+    }
 }
 extern "win64" fn iswspace(c: u16) -> i32 {
     wis(c, SPACE)
@@ -127,8 +143,12 @@ extern "win64" fn wcschr(s: *const u16, c: u16) -> *const u16 {
     loop {
         // SAFETY: the caller supplies a NUL-terminated wide string.
         let ch = unsafe { *p };
-        if ch == c { return p; }
-        if ch == 0 { return core::ptr::null(); }
+        if ch == c {
+            return p;
+        }
+        if ch == 0 {
+            return core::ptr::null();
+        }
         // SAFETY: the current character is not the terminator.
         p = unsafe { p.add(1) };
     }
@@ -504,7 +524,12 @@ extern "win64" fn _wcsdup(s: *const u16) -> *mut u16 {
 
 /// _strupr_s / _wcslwr_s and friends: the string must be terminated
 /// within `size`.
-fn map_s<T: Copy + PartialEq + Default + Into<i32>>(s: *mut T, size: usize, f: fn(i32) -> i32, from: fn(i32) -> T) -> i32 {
+fn map_s<T: Copy + PartialEq + Default + Into<i32>>(
+    s: *mut T,
+    size: usize,
+    f: fn(i32) -> i32,
+    from: fn(i32) -> T,
+) -> i32 {
     validate!(!s.is_null(), EINVAL, EINVAL);
     let len = bounded(s, size);
     if len == size {
@@ -615,7 +640,11 @@ extern "win64" fn wcscspn(s: *const u16, set: *const u16) -> usize {
 fn pbrk<T: Copy + PartialEq + Default>(s: *const T, set: *const T) -> *const T {
     let n = span(s, set, false);
     // SAFETY: `n` is within the string (at most its terminator).
-    if unsafe { *s.add(n) } == T::default() { core::ptr::null() } else { unsafe { s.add(n) } }
+    if unsafe { *s.add(n) } == T::default() {
+        core::ptr::null()
+    } else {
+        unsafe { s.add(n) }
+    }
 }
 
 extern "win64" fn strpbrk(s: *const u8, set: *const u8) -> *const u8 {
@@ -691,11 +720,11 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![
         isupper, islower, isdigit, isxdigit, isspace, ispunct, isalpha, isalnum, isprint, isgraph, iscntrl, isblank,
         tolower, toupper, _tolower, _toupper, towlower, towupper, iswspace, iswdigit, iswalpha, iswupper, iswlower,
-        iswxdigit, iswalnum, iswpunct, iswcntrl, strlen, wcslen, wcschr, strnlen, wcsnlen, __strncnt, __wcsncnt, strcmp,
-        strncmp, wcscmp, wcsncmp, _stricmp, _strnicmp, _wcsicmp, _wcsnicmp, strcoll, wcscoll, strcpy, wcscpy, strcat,
-        wcscat, strncpy, wcsncpy, strncat, wcsncat, strcpy_s, wcscpy_s, strcat_s, wcscat_s, strncpy_s, wcsncpy_s,
-        strncat_s, wcsncat_s, memcpy_s, memmove_s, _strdup, _wcsdup, _strupr_s, _strlwr_s, _wcsupr_s, _wcslwr_s,
-        _strupr, _strlwr, _wcsupr, _wcslwr, strspn, strcspn, wcsspn, wcscspn, strpbrk, wcspbrk, strtok, wcstok,
-        strtok_s, wcstok_s, strxfrm,
+        iswxdigit, iswalnum, iswpunct, iswcntrl, strlen, wcslen, wcschr, strnlen, wcsnlen, __strncnt, __wcsncnt,
+        strcmp, strncmp, wcscmp, wcsncmp, _stricmp, _strnicmp, _wcsicmp, _wcsnicmp, strcoll, wcscoll, strcpy, wcscpy,
+        strcat, wcscat, strncpy, wcsncpy, strncat, wcsncat, strcpy_s, wcscpy_s, strcat_s, wcscat_s, strncpy_s,
+        wcsncpy_s, strncat_s, wcsncat_s, memcpy_s, memmove_s, _strdup, _wcsdup, _strupr_s, _strlwr_s, _wcsupr_s,
+        _wcslwr_s, _strupr, _strlwr, _wcsupr, _wcslwr, strspn, strcspn, wcsspn, wcscspn, strpbrk, wcspbrk, strtok,
+        wcstok, strtok_s, wcstok_s, strxfrm,
     ]
 }

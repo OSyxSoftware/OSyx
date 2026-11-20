@@ -60,7 +60,10 @@ struct Outstanding {
 static OUTSTANDING: Mutex<BTreeMap<u64, Outstanding>> = Mutex::new(BTreeMap::new());
 
 pub fn begin(native: *mut NativeContext, context: &Context) {
-    OUTSTANDING.lock().unwrap().insert(os_sys::gettid(), Outstanding { native: native as usize, original: Box::new(*context) });
+    OUTSTANDING
+        .lock()
+        .unwrap()
+        .insert(os_sys::gettid(), Outstanding { native: native as usize, original: Box::new(*context) });
 }
 
 pub fn end() {
@@ -92,8 +95,16 @@ fn step(kind: u32, ctx: &Context) -> Option<(u64, u64, u64, u64, u64, Context)> 
     match unwind::lookup(pc) {
         Some((function, base)) => {
             let (mut data, mut frame) = (0u64, 0u64);
-            let handler =
-                unwind::virtual_unwind(kind, base, pc, function, &mut next as *mut Context as u64, &mut data, &mut frame, 0);
+            let handler = unwind::virtual_unwind(
+                kind,
+                base,
+                pc,
+                function,
+                &mut next as *mut Context as u64,
+                &mut data,
+                &mut frame,
+                0,
+            );
             Some((handler, frame, data, function, base, next))
         }
         // A leaf function of a PE image: its return address is at RSP.
@@ -154,7 +165,8 @@ pub fn dispatch(record: &mut Record, original: &mut Context) -> bool {
 /// Unwinds from `start` to `target_frame`, running termination handlers,
 /// then continues at `target_ip` with RAX = `retval`.
 fn unwind_to(target_frame: u64, target_ip: u64, record: *mut Record, retval: u64, start: Context) -> ! {
-    let mut local = Record { code: STATUS_UNWIND, flags: 0, nested: 0, address: start.rip, count: 0, reserved: 0, info: [0; 15] };
+    let mut local =
+        Record { code: STATUS_UNWIND, flags: 0, nested: 0, address: start.rip, count: 0, reserved: 0, info: [0; 15] };
     // SAFETY: the caller's EXCEPTION_RECORD, or our own.
     let rec = if record.is_null() { &mut local } else { unsafe { &mut *record } };
     if target_frame == 0 {
@@ -430,7 +442,11 @@ extern "win64" fn osyx_consolidate_fill(data: *mut (Context, Record), top: u64) 
             w(0x20 + i as u64 * 8, ctx.regs[*reg]);
         }
         for i in 0..10 {
-            core::ptr::copy_nonoverlapping(ctx.fx.as_ptr().add(0xa0 + (6 + i) * 16), (s + 0x60 + i as u64 * 16) as *mut u8, 16);
+            core::ptr::copy_nonoverlapping(
+                ctx.fx.as_ptr().add(0xa0 + (6 + i) * 16),
+                (s + 0x60 + i as u64 * 16) as *mut u8,
+                16,
+            );
         }
         w(0x100, ctx.rip);
         w(0x108, 0x33);
@@ -452,7 +468,13 @@ extern "win64" fn osyx_consolidate_done(ctx: *const Context) -> ! {
 }
 
 #[no_mangle]
-extern "win64" fn osyx_unwind_ex(target_frame: u64, target_ip: u64, record: *mut Record, retval: u64, caller: *const Context) -> ! {
+extern "win64" fn osyx_unwind_ex(
+    target_frame: u64,
+    target_ip: u64,
+    record: *mut Record,
+    retval: u64,
+    caller: *const Context,
+) -> ! {
     let pending = OUTSTANDING.lock().unwrap().get(&os_sys::gettid()).map(|o| *o.original);
     // SAFETY: the context captured by the entry thunk.
     let start = pending.unwrap_or_else(|| unsafe { *caller });

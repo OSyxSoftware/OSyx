@@ -40,11 +40,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use osyx_abi::{auxv, startup, wow64, Errno};
 use osyx_abi::sandbox::SyscallPolicy;
+use osyx_abi::{auxv, startup, wow64, Errno};
 use osyx_elf::{AddressRange, ElfError, ElfImage};
-use osyx_vfs::Cred;
 use osyx_vfs::sandbox::PathPolicy;
+use osyx_vfs::Cred;
 
 pub type Pid = u64;
 /// Parent id of processes started (or adopted) by the kernel.
@@ -203,7 +203,13 @@ impl Space {
         let word = |i: usize| u64::from_le_bytes(r[i..i + 8].try_into().expect("8 bytes"));
         let stack_top = STACK_TOP - (word(0) % (STACK_SLIDE / PAGE_SIZE)) * PAGE_SIZE;
         let map_base = MAP_BASE + (word(8) % (MAP_SLIDE / VIEW_ALIGN)) * VIEW_ALIGN;
-        Ok(Space { root: paging::new_address_space()?, frames: 1, program_shared: BTreeMap::new(), stack_top, map_base })
+        Ok(Space {
+            root: paging::new_address_space()?,
+            frames: 1,
+            program_shared: BTreeMap::new(),
+            stack_top,
+            map_base,
+        })
     }
 
     fn map_zeroed(&mut self, va: u64, flags: Flags) -> Result<u64, MapError> {
@@ -248,7 +254,9 @@ impl Space {
                         let offset = (va - seg.vaddr) as usize;
                         let src = &file[offset..offset + (end - va) as usize];
                         // SAFETY: the frame was just allocated and is reachable via the HHDM.
-                        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), phys_to_virt(frame) as *mut u8, src.len()) };
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(src.as_ptr(), phys_to_virt(frame) as *mut u8, src.len())
+                        };
                     }
                 } else {
                     let pages = exec::shared_pages(prog, seg).map_err(|_| ExecError::Map(MapError::OutOfMemory))?;
@@ -447,7 +455,8 @@ static TABLE: IrqSpinLock<Table> = IrqSpinLock::new(Table { procs: BTreeMap::new
 /// handles to it are open, and a parent that reaps a child at once still
 /// answers for it. Bounded: the oldest record goes first. Process ids are
 /// not reused, so a record never names a newer process.
-static REAPED: IrqSpinLock<alloc::collections::VecDeque<osyx_abi::ipc::ProcInfo>> = IrqSpinLock::new(alloc::collections::VecDeque::new());
+static REAPED: IrqSpinLock<alloc::collections::VecDeque<osyx_abi::ipc::ProcInfo>> =
+    IrqSpinLock::new(alloc::collections::VecDeque::new());
 const REAPED_KEEP: usize = 256;
 /// Published before the first thread can run, removed before teardown.
 /// Clone the Arc and release this index before taking a memory lock. Faults
@@ -615,8 +624,8 @@ extern "C" {
 /// space, which must be active; a bad value only faults in ring 3.
 #[allow(dead_code)] // First caller: the M4 32-bit bridge.
 pub unsafe fn enter_compat(entry: u64, user_rsp: u64, arg: u64) -> ! {
-    let frame = wow64::CompatIretFrame::new(entry, user_rsp)
-        .expect("32-bit entry point or stack outside compatibility mode");
+    let frame =
+        wow64::CompatIretFrame::new(entry, user_rsp).expect("32-bit entry point or stack outside compatibility mode");
     // The CPU keeps one hidden FS base. The 32-bit descriptor of this CPU
     // carries the calling thread's base (the scheduler installs it with the
     // thread), so load it here rather than relying on what the caller left.
@@ -644,7 +653,9 @@ fn user_thread_entry(start: u64, _: u64) {
     let s = unsafe { alloc::boxed::Box::from_raw(start as *mut UserStart) };
     let (rip, rsp, arg) = (s.rip, s.rsp, s.arg);
     drop(s);
-    if sched::current_kill_pending() { finish_current_thread(sched::current_kill_code()); }
+    if sched::current_kill_pending() {
+        finish_current_thread(sched::current_kill_code());
+    }
     // SAFETY: the entry and stack lie in the user half of the address space
     // that is active for this thread; a bad value only faults in ring 3.
     unsafe { osyx_iret_to_user(rip, rsp, arg) }
@@ -654,7 +665,8 @@ fn user_thread_entry(start: u64, _: u64) {
 /// interrupts disabled, so the tid is recorded before the thread can run).
 fn start_thread(p: &mut Process, rip: u64, rsp: u64, arg: u64, fs_base: u64, held: bool) -> Tid {
     let start = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(UserStart { rip, rsp, arg })) as u64;
-    let tid = sched::spawn_initial(&p.name, p.pid, p.memory.lock().space.root, user_thread_entry, start, 0, fs_base, held);
+    let tid =
+        sched::spawn_initial(&p.name, p.pid, p.memory.lock().space.root, user_thread_entry, start, 0, fs_base, held);
     p.threads.push(tid);
     tid
 }
@@ -690,7 +702,12 @@ impl Process {
     }
 
     fn lookup(&self) -> Lookup {
-        Lookup { cred: self.cred, cwd: self.cwd.clone(), case_insensitive: false, path_policy: self.path_policy.clone() }
+        Lookup {
+            cred: self.cred,
+            cwd: self.cwd.clone(),
+            case_insensitive: false,
+            path_policy: self.path_policy.clone(),
+        }
     }
 
     /// Releases an inactive address space. Outstanding Arc lookups must
@@ -782,7 +799,11 @@ pub fn spawn_with_stdio(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 
     spawn_impl(parent, req, stdio, None, None, Vec::new(), false)
 }
 
-pub fn spawn_with_stdio_suspended(parent: Pid, req: &ExecRequest, stdio: [Option<Object>; 3]) -> Result<Pid, ExecError> {
+pub fn spawn_with_stdio_suspended(
+    parent: Pid,
+    req: &ExecRequest,
+    stdio: [Option<Object>; 3],
+) -> Result<Pid, ExecError> {
     spawn_impl(parent, req, stdio, None, None, Vec::new(), true)
 }
 
@@ -791,9 +812,15 @@ pub fn resume_child(pid: Pid) -> Result<u64, Errno> {
     let me = sched::current_pid();
     let mut table = TABLE.lock();
     let p = table.procs.get_mut(&pid).ok_or(Errno::NotFound)?;
-    if p.parent != me { return Err(Errno::PermissionDenied); }
-    if p.life != Life::Running || p.exit_status.is_some() { return Err(Errno::NotFound); }
-    if !p.primary_suspended { return Ok(0); }
+    if p.parent != me {
+        return Err(Errno::PermissionDenied);
+    }
+    if p.life != Life::Running || p.exit_status.is_some() {
+        return Err(Errno::NotFound);
+    }
+    if !p.primary_suspended {
+        return Ok(0);
+    }
     let tid = *p.threads.first().ok_or(Errno::NotFound)?;
     p.primary_suspended = false;
     sched::wake_boosted(tid, 0);
@@ -814,7 +841,15 @@ pub(crate) fn spawn_kernel_restricted(
 
 /// An unrestricted parent may choose restrictions for its new child.
 /// A restricted parent cannot replace or widen its inherited policy.
-pub(crate) fn spawn_restricted(parent: Pid, req: &ExecRequest, paths: Arc<PathPolicy>, syscalls: Arc<SyscallPolicy>, broker: Option<Object>, channels: Vec<Object>, suspended: bool) -> Result<Pid, ExecError> {
+pub(crate) fn spawn_restricted(
+    parent: Pid,
+    req: &ExecRequest,
+    paths: Arc<PathPolicy>,
+    syscalls: Arc<SyscallPolicy>,
+    broker: Option<Object>,
+    channels: Vec<Object>,
+    suspended: bool,
+) -> Result<Pid, ExecError> {
     spawn_impl(parent, req, [None, None, None], Some((paths, syscalls)), broker, channels, suspended)
 }
 
@@ -902,7 +937,9 @@ fn spawn_impl(
     p.primary_suspended = suspended;
     MEMORY.lock().insert(pid, p.memory.clone());
     TABLE.lock().procs.insert(pid, p);
-    if !suspended { sched::wake_boosted(tid, 0); }
+    if !suspended {
+        sched::wake_boosted(tid, 0);
+    }
     if were_enabled {
         cpu::enable_interrupts();
     }
@@ -1090,7 +1127,7 @@ pub fn finish_current_thread(code: i32) -> ! {
     cpu::disable_interrupts();
     let pid = sched::current_pid();
     let me = sched::current_tid();
-    crate::user_fault::clear_thread(pid,me);
+    crate::user_fault::clear_thread(pid, me);
     let last = {
         let mut t = TABLE.lock();
         let p = t.procs.get_mut(&pid).expect("current process exists");
@@ -1152,7 +1189,9 @@ pub fn finish_current_thread(code: i32) -> ! {
             });
         }
     }
-    for tid in held_orphans { sched::request_kill(tid); }
+    for tid in held_orphans {
+        sched::request_kill(tid);
+    }
     // Volume metadata is written through, so dropping the files needs no I/O.
     // Pipe and channel ends wake their peers as they go.
     drop(closed);
@@ -1199,18 +1238,30 @@ pub fn add_object(o: Object) -> Result<u64, Errno> {
 pub fn grant_child_channel(pid: Pid, handle: u64) -> Result<u64, Errno> {
     let me = sched::current_pid();
     let object = get_object(handle)?;
-    if !matches!(object, Object::Channel(_)) { return Err(Errno::InvalidArgument); }
+    if !matches!(object, Object::Channel(_)) {
+        return Err(Errno::InvalidArgument);
+    }
     let table = TABLE.lock();
     let parent = table.procs.get(&me).ok_or(Errno::PermissionDenied)?;
-    if parent.path_policy.is_some() { return Err(Errno::PermissionDenied); }
+    if parent.path_policy.is_some() {
+        return Err(Errno::PermissionDenied);
+    }
     let child = table.procs.get(&pid).ok_or(Errno::NotFound)?;
-    if child.parent != me || child.path_policy.is_none() { return Err(Errno::PermissionDenied); }
-    if child.life != Life::Running || child.threads.is_empty() || child.exit_status.is_some() { return Err(Errno::NotFound); }
+    if child.parent != me || child.path_policy.is_none() {
+        return Err(Errno::PermissionDenied);
+    }
+    if child.life != Life::Running || child.threads.is_empty() || child.exit_status.is_some() {
+        return Err(Errno::NotFound);
+    }
     let mut handles = HANDLES.lock();
     let target = handles.get_mut(&pid).ok_or(Errno::NotFound)?;
-    if target.len() >= osyx_abi::MAX_HANDLES { return Err(Errno::TooManyHandles); }
+    if target.len() >= osyx_abi::MAX_HANDLES {
+        return Err(Errno::TooManyHandles);
+    }
     let mut h = osyx_abi::FIRST_FILE_HANDLE;
-    while target.contains_key(&h) { h += 1; }
+    while target.contains_key(&h) {
+        h += 1;
+    }
     target.insert(h, object);
     Ok(h)
 }
@@ -1275,12 +1326,7 @@ const VIEW_ALIGN: u64 = 64 * 1024;
 /// The region reserves the address range only: every page is loaded from the
 /// section's backing on its first touch, so mapping a 177 MiB archive costs
 /// no reads until it is used.
-pub fn map_section(
-    section: Arc<crate::filemap::Section>,
-    offset: u64,
-    len: u64,
-    writable: bool,
-) -> Result<u64, Errno> {
+pub fn map_section(section: Arc<crate::filemap::Section>, offset: u64, len: u64, writable: bool) -> Result<u64, Errno> {
     use osyx_abi::{PROT_READ, PROT_WRITE};
     let prot = if writable { PROT_READ | PROT_WRITE } else { PROT_READ };
     let pages = len.div_ceil(PAGE_SIZE);
@@ -1288,7 +1334,9 @@ pub fn map_section(
     let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
     let mut guard = memory.lock();
     let p = &mut *guard;
-    if !p.alive { return Err(Errno::Interrupted); }
+    if !p.alive {
+        return Err(Errno::Interrupted);
+    }
     if p.mapped_pages + pages > MAP_LIMIT_PAGES {
         return Err(Errno::NoMemory);
     }
@@ -1308,7 +1356,9 @@ pub fn map_shared(shm: Arc<SharedMemory>, writable: bool) -> Result<u64, Errno> 
     let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
     let mut guard = memory.lock();
     let p = &mut *guard;
-    if !p.alive { return Err(Errno::Interrupted); }
+    if !p.alive {
+        return Err(Errno::Interrupted);
+    }
     let pages = shm.pages();
     if p.mapped_pages + pages > MAP_LIMIT_PAGES {
         return Err(Errno::NoMemory);
@@ -1483,7 +1533,9 @@ pub fn map_ex(addr: u64, len: u64, prot: u64, mflags: u64) -> Result<u64, Errno>
     let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
     let mut guard = memory.lock();
     let p = &mut *guard;
-    if !p.alive { return Err(Errno::Interrupted); }
+    if !p.alive {
+        return Err(Errno::Interrupted);
+    }
     if p.mapped_pages + pages > MAP_LIMIT_PAGES {
         return Err(Errno::NoMemory);
     }
@@ -1494,13 +1546,13 @@ pub fn map_ex(addr: u64, len: u64, prot: u64, mflags: u64) -> Result<u64, Errno>
         }
         // Nothing may be mapped there yet: program, stack, shared memory,
         // or a region (whose untouched pages are not in the page tables).
-        let overlaps = |m: &BTreeMap<u64, u64>| m.range(..end).next_back().is_some_and(|(&b, &n)| b + n * PAGE_SIZE > addr);
-        let regions: BTreeMap<u64, u64> = p.regions.range(..end).next_back().map(|(&b, r)| (b, r.pages)).into_iter().collect();
-        let shared: BTreeMap<u64, u64> = p.shared.range(..end).next_back().map(|(&b, s)| (b, s.1)).into_iter().collect();
-        if overlaps(&regions)
-            || overlaps(&shared)
-            || paging::any_present_in(p.space.root, addr, end)
-        {
+        let overlaps =
+            |m: &BTreeMap<u64, u64>| m.range(..end).next_back().is_some_and(|(&b, &n)| b + n * PAGE_SIZE > addr);
+        let regions: BTreeMap<u64, u64> =
+            p.regions.range(..end).next_back().map(|(&b, r)| (b, r.pages)).into_iter().collect();
+        let shared: BTreeMap<u64, u64> =
+            p.shared.range(..end).next_back().map(|(&b, s)| (b, s.1)).into_iter().collect();
+        if overlaps(&regions) || overlaps(&shared) || paging::any_present_in(p.space.root, addr, end) {
             return Err(Errno::AlreadyExists);
         }
         addr
@@ -1553,7 +1605,9 @@ pub fn protect(addr: u64, len: u64, prot: u64) -> Result<(), Errno> {
     let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
     let mut guard = memory.lock();
     let p = &mut *guard;
-    if !p.alive { return Err(Errno::Interrupted); }
+    if !p.alive {
+        return Err(Errno::Interrupted);
+    }
     let root = p.space.root;
     let (&start, r) = p.regions.range_mut(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
     if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE {
@@ -1634,7 +1688,9 @@ pub fn discard(addr: u64, len: u64) -> Result<(), Errno> {
     let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
     let mut guard = memory.lock();
     let p = &mut *guard;
-    if !p.alive { return Err(Errno::Interrupted); }
+    if !p.alive {
+        return Err(Errno::Interrupted);
+    }
     let (&start, r) = p.regions.range_mut(..=addr).next_back().ok_or(Errno::InvalidArgument)?;
     if addr + pages * PAGE_SIZE > start + r.pages * PAGE_SIZE || r.file.is_some() {
         return Err(Errno::InvalidArgument);
@@ -1657,8 +1713,7 @@ const PREFAULT_CHUNK_PAGES: u64 = 256;
 /// TEMP prefault diagnostics: pages requested, chunks whose pages were
 /// mapped, chunks skipped because the memory index or process was busy, and TSC cycles
 /// spent inside prefault_write.
-pub static PF_STATS: [core::sync::atomic::AtomicU64; 4] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; 4];
+pub static PF_STATS: [core::sync::atomic::AtomicU64; 4] = [const { core::sync::atomic::AtomicU64::new(0) }; 4];
 
 pub fn prefault_stats() -> [u64; 4] {
     PF_STATS.each_ref().map(|a| a.load(core::sync::atomic::Ordering::Relaxed))
@@ -1682,7 +1737,11 @@ pub fn prefault_write(addr: u64, len: usize) {
     while page < end {
         let stop = end.min(page + PREFAULT_CHUNK_PAGES * PAGE_SIZE);
         let next = prefault_range(page, stop);
-        if next == stop { chunks += 1 } else { skipped += 1 };
+        if next == stop {
+            chunks += 1
+        } else {
+            skipped += 1
+        };
         page = next;
     }
     PF_STATS[1].fetch_add(chunks, core::sync::atomic::Ordering::Relaxed);
@@ -1698,7 +1757,9 @@ fn prefault_range(mut page: u64, end: u64) -> u64 {
     let Some(memory) = MEMORY.try_lock().and_then(|index| index.get(&pid).cloned()) else { return end };
     let Some(mut guard) = memory.try_lock() else { return end };
     let p = &mut *guard;
-    if !p.alive { return end; }
+    if !p.alive {
+        return end;
+    }
     while page < end {
         let Some((&start, r)) = p.regions.range(..=page).next_back() else {
             page += PAGE_SIZE;
@@ -1875,7 +1936,9 @@ pub fn reclaim(want: u64) -> u64 {
         let Some(memory) = process_memory(pid, true) else { continue };
         let mut guard = memory.lock();
         let p = &mut *guard;
-        if !p.alive { continue; }
+        if !p.alive {
+            continue;
+        }
         let root = p.space.root;
         // File views are clean copies owned by their section: compressing
         // them would duplicate data and break the frame accounting.
@@ -1962,7 +2025,10 @@ pub fn reclaim(want: u64) -> u64 {
                         SWAPPED_PAGES.fetch_add(1, Ordering::Relaxed);
                         SWAPPED_BYTES.fetch_add(data.len() as u64, Ordering::Relaxed);
                         SWAP_OUT.fetch_add(1, Ordering::Relaxed);
-                        r.swapped.insert((va - start) / PAGE_SIZE, SwappedPage { data, evicted_at: crate::interrupts::ticks() });
+                        r.swapped.insert(
+                            (va - start) / PAGE_SIZE,
+                            SwappedPage { data, evicted_at: crate::interrupts::ticks() },
+                        );
                         let _ = free_frame(frame);
                         p.space.frames -= 1;
                         done += 1;
@@ -2012,7 +2078,13 @@ fn restore_page(root: u64, start: u64, r: &mut Region, index: u64, flags: Flags)
             let page = r.swapped.remove(&index).expect("compressed page exists");
             let len = page.data.len();
             let now = crate::interrupts::ticks();
-            if r.refault_guard.restored(page.evicted_at, now, crate::arch::timer::ms_to_ticks(2000), 8, crate::arch::timer::ms_to_ticks(2000)) {
+            if r.refault_guard.restored(
+                page.evicted_at,
+                now,
+                crate::arch::timer::ms_to_ticks(2000),
+                8,
+                crate::arch::timer::ms_to_ticks(2000),
+            ) {
                 SWAP_QUICK_REFAULTS.fetch_add(1, Ordering::Relaxed);
             }
             swap_stats_remove(len);
@@ -2056,7 +2128,11 @@ fn swap_thread(_: u64, _: u64) {
     let (_, total) = crate::mem::frame_stats();
     let low = (total / SWAP_LOW_DIVISOR).max(SWAP_MIN_LOW_FRAMES);
     let high = low * 2;
-    kprintln!("swap: compressing cold pages below {} MiB free (up to {} MiB of compressed data)", low >> 8, SWAP_MAX_BYTES >> 20);
+    kprintln!(
+        "swap: compressing cold pages below {} MiB free (up to {} MiB of compressed data)",
+        low >> 8,
+        SWAP_MAX_BYTES >> 20
+    );
     loop {
         // Use the scheduler's remembered wake-up so a request arriving just
         // before the worker blocks cannot be lost.
@@ -2125,7 +2201,9 @@ fn demand_fault_for(pid: Pid, va: u64, write: bool, fetch: bool, wait: bool) -> 
         }
     };
     let p = &mut *guard;
-    if !p.alive { return Demand::Refused; }
+    if !p.alive {
+        return Demand::Refused;
+    }
     let page = va & !(PAGE_SIZE - 1);
     let around = page + FAULT_AROUND_PAGES * PAGE_SIZE;
     let stack_top = p.space.stack_top;
@@ -2198,7 +2276,14 @@ fn demand_fault_for(pid: Pid, va: u64, write: bool, fetch: bool, wait: bool) -> 
 /// Maps one page of a file view after loading it from the section. The disk
 /// read runs without the memory lock; the region is re-validated before the
 /// frame goes in, so a concurrent `unmap` or `execve` wins.
-fn file_fault(page: u64, file_page: u64, section: Arc<crate::filemap::Section>, write: bool, fetch: bool, wait: bool) -> Demand {
+fn file_fault(
+    page: u64,
+    file_page: u64,
+    section: Arc<crate::filemap::Section>,
+    write: bool,
+    fetch: bool,
+    wait: bool,
+) -> Demand {
     let shm = match section.page(file_page) {
         Ok(shm) => shm,
         Err(Errno::NoMemory) => return Demand::NoMemory,
@@ -2218,7 +2303,9 @@ fn file_fault(page: u64, file_page: u64, section: Arc<crate::filemap::Section>, 
         }
     };
     let p = &mut *guard;
-    if !p.alive { return Demand::Refused; }
+    if !p.alive {
+        return Demand::Refused;
+    }
     let Some((&start, r)) = p.regions.range(..=page).next_back() else { return Demand::Refused };
     // The section must still be there: the region may have been replaced.
     if !r.file.as_ref().is_some_and(|f| Arc::ptr_eq(&f.section, &section)) {
@@ -2255,7 +2342,9 @@ pub fn unmap_region(addr: u64, len: u64) -> Result<(), Errno> {
     let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
     let mut guard = memory.lock();
     let p = &mut *guard;
-    if !p.alive { return Err(Errno::Interrupted); }
+    if !p.alive {
+        return Err(Errno::Interrupted);
+    }
     if let Some((_, pages)) = p.shared.get(&addr) {
         if len.div_ceil(PAGE_SIZE) != *pages {
             return Err(Errno::InvalidArgument);
@@ -2303,7 +2392,9 @@ pub fn cow_fault(va: u64, wait: bool) -> bool {
         }
     };
     let p = &mut *guard;
-    if !p.alive { return false; }
+    if !p.alive {
+        return false;
+    }
     let page = va & !(PAGE_SIZE - 1);
     let Some((&start, r)) = p.regions.range(..=page).next_back() else { return false };
     if r.image.is_none() || page >= start + r.pages * PAGE_SIZE {
@@ -2331,7 +2422,11 @@ pub fn cow_fault(va: u64, wait: bool) -> bool {
     // SAFETY: `frame` is fresh and `shared` is kept alive by the region's
     // section; both are RAM pages reachable through the HHDM.
     unsafe {
-        core::ptr::copy_nonoverlapping(phys_to_virt(shared) as *const u8, phys_to_virt(frame) as *mut u8, PAGE_SIZE as usize)
+        core::ptr::copy_nonoverlapping(
+            phys_to_virt(shared) as *const u8,
+            phys_to_virt(frame) as *mut u8,
+            PAGE_SIZE as usize,
+        )
     };
     match paging::replace_in(p.space.root, page, frame, flags) {
         Ok(_) => {
@@ -2367,7 +2462,9 @@ pub fn image_publish(key: image::Key) -> Result<Arc<ImageSection>, Errno> {
     let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
     let mut guard = memory.lock();
     let p = &mut *guard;
-    if !p.alive { return Err(Errno::Interrupted); }
+    if !p.alive {
+        return Err(Errno::Interrupted);
+    }
     let root = p.space.root;
     let r = image_region(&mut p.regions, addr, len)?;
     let pages = r.pages;
@@ -2432,7 +2529,9 @@ pub fn image_map(section: Arc<ImageSection>) -> Result<(), Errno> {
     let memory = process_memory(pid, true).ok_or(Errno::NotSupported)?;
     let mut guard = memory.lock();
     let p = &mut *guard;
-    if !p.alive { return Err(Errno::Interrupted); }
+    if !p.alive {
+        return Err(Errno::Interrupted);
+    }
     let root = p.space.root;
     let r = image_region(&mut p.regions, addr, len)?;
     if (0..r.pages).any(|i| paging::translate_in(root, addr + i * PAGE_SIZE).is_some()) {

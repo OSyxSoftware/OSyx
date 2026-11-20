@@ -341,7 +341,11 @@ impl<M: Mmio, C: Clock> DesignWare<M, C> {
 
 impl<M: Mmio, C: Clock> I2cBus for DesignWare<M, C> {
     fn transfer(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), I2cError> {
-        if (write.is_empty() && read.is_empty()) || write.len() > MAX_TRANSFER || read.len() > MAX_TRANSFER || address > 0x7F {
+        if (write.is_empty() && read.is_empty())
+            || write.len() > MAX_TRANSFER
+            || read.len() > MAX_TRANSFER
+            || address > 0x7F
+        {
             return Err(I2cError::InvalidLength);
         }
         if !self.configured {

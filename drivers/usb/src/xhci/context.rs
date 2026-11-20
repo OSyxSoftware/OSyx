@@ -144,7 +144,10 @@ impl SlotContext {
             | (((self.hub_ports != 0) as u32) << 26)
             | ((self.context_entries as u32 & 0x1F) << 27);
         d[1] = ((self.root_port as u32) << 16) | ((self.hub_ports as u32) << 24);
-        d[2] = (self.tt_slot as u32) | ((self.tt_port as u32) << 8) | (((self.ttt & 3) as u32) << 16) | (((self.interrupter as u32) & 0x3FF) << 22);
+        d[2] = (self.tt_slot as u32)
+            | ((self.tt_port as u32) << 8)
+            | (((self.ttt & 3) as u32) << 16)
+            | (((self.interrupter as u32) & 0x3FF) << 22);
         d
     }
 }
@@ -216,8 +219,7 @@ pub fn periodic_interval(speed: Speed, ep_type: EndpointType, b_interval: u8) ->
         exp.clamp(3, 10) as u8
     } else {
         // Exponent form, 1..=16 -> 0..=15.
-        (b_interval.clamp(1, 16) - 1)
-            .max(if fs_ls { 3 } else { 0 })
+        (b_interval.clamp(1, 16) - 1).max(if fs_ls { 3 } else { 0 })
     }
 }
 
@@ -249,17 +251,50 @@ mod tests {
 
     #[test]
     fn slot_context_encoding() {
-        let s = SlotContext { route_string: 0, speed: Speed::Full, context_entries: 1, root_port: 3, interrupter: 0, hub_ports: 0, mtt: false, ttt: 0, tt_slot: 0, tt_port: 0 };
+        let s = SlotContext {
+            route_string: 0,
+            speed: Speed::Full,
+            context_entries: 1,
+            root_port: 3,
+            interrupter: 0,
+            hub_ports: 0,
+            mtt: false,
+            ttt: 0,
+            tt_slot: 0,
+            tt_port: 0,
+        };
         let d = s.encode();
         assert_eq!(d[0], (1 << 20) | (1 << 27));
         assert_eq!(d[1], 3 << 16);
         // A low-speed device on port 2 of a hub that is on port 4 of a
         // high-speed hub in slot 5, both behind root port 1.
-        let dev = SlotContext { route_string: 0x24, speed: Speed::Low, context_entries: 1, root_port: 1, interrupter: 0, hub_ports: 0, mtt: false, ttt: 0, tt_slot: 5, tt_port: 4 };
+        let dev = SlotContext {
+            route_string: 0x24,
+            speed: Speed::Low,
+            context_entries: 1,
+            root_port: 1,
+            interrupter: 0,
+            hub_ports: 0,
+            mtt: false,
+            ttt: 0,
+            tt_slot: 5,
+            tt_port: 4,
+        };
         let d = dev.encode();
         assert_eq!(d[0], 0x24 | (2 << 20) | (1 << 27));
         assert_eq!(d[2], 5 | (4 << 8));
-        let hub = SlotContext { route_string: 3, speed: Speed::High, context_entries: 1, root_port: 2, interrupter: 0, hub_ports: 7, mtt: true, ttt: 1, tt_slot: 0, tt_port: 0 };
+        let hub = SlotContext {
+            route_string: 3,
+            speed: Speed::High,
+            context_entries: 1,
+            root_port: 2,
+            interrupter: 0,
+            hub_ports: 7,
+            mtt: true,
+            ttt: 1,
+            tt_slot: 0,
+            tt_port: 0,
+        };
         let d = hub.encode();
         assert_eq!(d[0], 3 | (3 << 20) | (1 << 25) | (1 << 26) | (1 << 27));
         assert_eq!(d[1], (2 << 16) | (7 << 24));

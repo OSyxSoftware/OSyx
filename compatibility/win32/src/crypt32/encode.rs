@@ -53,7 +53,11 @@ fn twos(be: &[u8]) -> Vec<u8> {
     while s.len() > 1 && ((s[0] == 0 && s[1] & 0x80 == 0) || (s[0] == 0xff && s[1] & 0x80 != 0)) {
         s = &s[1..];
     }
-    if s.is_empty() { vec![0] } else { s.to_vec() }
+    if s.is_empty() {
+        vec![0]
+    } else {
+        s.to_vec()
+    }
 }
 
 fn base128(out: &mut Vec<u8>, mut v: u64) {
@@ -353,7 +357,9 @@ fn str_to_name(s: &[u16], kind: u32) -> Result<Vec<u8>, (u32, Option<usize>)> {
             c == ',' || c == ';'
         }
     };
-    let space = |i: usize| s.get(i).is_some_and(|&u| u == b' ' as u16 || u == b'\t' as u16 || u == b'\r' as u16 || u == b'\n' as u16);
+    let space = |i: usize| {
+        s.get(i).is_some_and(|&u| u == b' ' as u16 || u == b'\t' as u16 || u == b'\r' as u16 || u == b'\n' as u16)
+    };
     let mut rdns: Vec<Vec<(String, Vec<u8>)>> = Vec::new();
     let mut continues = false;
     let mut i = 0;
@@ -411,7 +417,10 @@ fn str_to_name(s: &[u16], kind: u32) -> Result<Vec<u8>, (u32, Option<usize>)> {
                 value.push(s[i]);
                 i += 1;
             }
-            while value.last().is_some_and(|&u| u == b' ' as u16 || u == b'\t' as u16 || u == b'\r' as u16 || u == b'\n' as u16) {
+            while value
+                .last()
+                .is_some_and(|&u| u == b' ' as u16 || u == b'\t' as u16 || u == b'\r' as u16 || u == b'\n' as u16)
+            {
                 value.pop();
             }
         }
@@ -467,7 +476,15 @@ fn str_to_name_api(s: Vec<u16>, kind: u32, out: *mut u8, size: *mut u32, err_at:
     }
 }
 
-extern "win64" fn CertStrToNameW(_encoding: u32, x500: *const u16, kind: u32, _reserved: u64, out: *mut u8, size: *mut u32, error: *mut *const u16) -> i32 {
+extern "win64" fn CertStrToNameW(
+    _encoding: u32,
+    x500: *const u16,
+    kind: u32,
+    _reserved: u64,
+    out: *mut u8,
+    size: *mut u32,
+    error: *mut *const u16,
+) -> i32 {
     // SAFETY: NULL or the caller's NUL-terminated string.
     let Some(s) = (unsafe { path::wide_to_string(x500) }) else { return fail(E_INVALIDARG, 0) };
     let units: Vec<u16> = s.encode_utf16().collect();
@@ -479,7 +496,15 @@ extern "win64" fn CertStrToNameW(_encoding: u32, x500: *const u16, kind: u32, _r
     })
 }
 
-extern "win64" fn CertStrToNameA(_encoding: u32, x500: *const u8, kind: u32, _reserved: u64, out: *mut u8, size: *mut u32, error: *mut *const u8) -> i32 {
+extern "win64" fn CertStrToNameA(
+    _encoding: u32,
+    x500: *const u8,
+    kind: u32,
+    _reserved: u64,
+    out: *mut u8,
+    size: *mut u32,
+    error: *mut *const u8,
+) -> i32 {
     // SAFETY: NULL or the caller's NUL-terminated string.
     let Some(units) = (unsafe { path::ansi_to_wide(x500) }) else { return fail(E_INVALIDARG, 0) };
     let units: Vec<u16> = units.into_iter().take_while(|&u| u != 0).collect();
@@ -517,7 +542,11 @@ fn rd_name(p: u64, unicode: bool) -> Result<Vec<u8>, (u32, u32)> {
                 // Unicode types are UTF-16 in both structures; X509_NAME
                 // gives the 8-bit types as bytes.
                 let wide = unicode || matches!(kind, RDN_UNIVERSAL | RDN_BMP | RDN_UTF8);
-                let text: Vec<char> = if wide { chars(&rd_wide(rd64(at, 24), rd32(at, 16))) } else { rd_blob(at + 16).iter().map(|&b| b as char).collect() };
+                let text: Vec<char> = if wide {
+                    chars(&rd_wide(rd64(at, 24), rd32(at, 16)))
+                } else {
+                    rd_blob(at + 16).iter().map(|&b| b as char).collect()
+                };
                 let k = if kind == RDN_ANY { default_kind(&oid, &text, 0) } else { kind };
                 encode_text(k, &text).map_err(|(e, i)| (e, (r as u32) << 22 | (a as u32) << 16 | i as u32))?
             };
@@ -737,11 +766,23 @@ const CRYPT_ENCODE_ALLOC_FLAG: u32 = 0x8000;
 
 fn struct_kind(kind: *const u8) -> Option<u64> {
     let k = kind as u64;
-    if k <= 0xffff { Some(k) } else { rd_cstr(k).as_deref().and_then(struct_for_oid) }
+    if k <= 0xffff {
+        Some(k)
+    } else {
+        rd_cstr(k).as_deref().and_then(struct_for_oid)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn CryptEncodeObjectEx(encoding: u32, kind: *const u8, info: u64, flags: u32, para: u64, out: *mut u8, size: *mut u32) -> i32 {
+extern "win64" fn CryptEncodeObjectEx(
+    encoding: u32,
+    kind: *const u8,
+    info: u64,
+    flags: u32,
+    para: u64,
+    out: *mut u8,
+    size: *mut u32,
+) -> i32 {
     if size.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -893,14 +934,20 @@ const CRYPT_STRING_HEXASCIIADDR: u32 = 0xb;
 fn string_to_binary(s: &[u16], raw: &[u8], flags: u32) -> Option<(Vec<u8>, u32, u32)> {
     let header = |f: u32| unheader(s).map(|(skip, d)| (d, skip as u32, f));
     match flags {
-        CRYPT_STRING_BASE64HEADER | CRYPT_STRING_BASE64REQUESTHEADER | CRYPT_STRING_BASE64X509CRLHEADER => header(flags),
+        CRYPT_STRING_BASE64HEADER | CRYPT_STRING_BASE64REQUESTHEADER | CRYPT_STRING_BASE64X509CRLHEADER => {
+            header(flags)
+        }
         CRYPT_STRING_BASE64 => unbase64(s).map(|d| (d, 0, flags)),
         CRYPT_STRING_BINARY => Some((raw.to_vec(), 0, flags)),
         CRYPT_STRING_HEX | CRYPT_STRING_HEXRAW => unhex(s).map(|d| (d, 0, flags)),
         CRYPT_STRING_HEXADDR => unhex_addr(s, false).map(|d| (d, 0, flags)),
         CRYPT_STRING_HEXASCIIADDR => unhex_addr(s, true).map(|d| (d, 0, flags)),
-        CRYPT_STRING_BASE64_ANY => header(CRYPT_STRING_BASE64HEADER).or_else(|| unbase64(s).map(|d| (d, 0, CRYPT_STRING_BASE64))),
-        CRYPT_STRING_ANY => string_to_binary(s, raw, CRYPT_STRING_BASE64_ANY).or(Some((raw.to_vec(), 0, CRYPT_STRING_BINARY))),
+        CRYPT_STRING_BASE64_ANY => {
+            header(CRYPT_STRING_BASE64HEADER).or_else(|| unbase64(s).map(|d| (d, 0, CRYPT_STRING_BASE64)))
+        }
+        CRYPT_STRING_ANY => {
+            string_to_binary(s, raw, CRYPT_STRING_BASE64_ANY).or(Some((raw.to_vec(), 0, CRYPT_STRING_BINARY)))
+        }
         CRYPT_STRING_HEX_ANY => unhex_addr(s, false)
             .filter(|_| s.iter().any(|&c| c == b'\n' as u16))
             .map(|d| (d, 0, CRYPT_STRING_HEXADDR))
@@ -909,7 +956,15 @@ fn string_to_binary(s: &[u16], raw: &[u8], flags: u32) -> Option<(Vec<u8>, u32, 
     }
 }
 
-fn string_to_binary_api(s: &[u16], raw: &[u8], flags: u32, out: *mut u8, size: *mut u32, skip: *mut u32, found: *mut u32) -> i32 {
+fn string_to_binary_api(
+    s: &[u16],
+    raw: &[u8],
+    flags: u32,
+    out: *mut u8,
+    size: *mut u32,
+    skip: *mut u32,
+    found: *mut u32,
+) -> i32 {
     if size.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -943,7 +998,15 @@ unsafe fn counted<T: Copy + PartialEq + Default>(p: *const T, len: u32) -> &'sta
     }
 }
 
-extern "win64" fn CryptStringToBinaryW(s: *const u16, len: u32, flags: u32, out: *mut u8, size: *mut u32, skip: *mut u32, found: *mut u32) -> i32 {
+extern "win64" fn CryptStringToBinaryW(
+    s: *const u16,
+    len: u32,
+    flags: u32,
+    out: *mut u8,
+    size: *mut u32,
+    skip: *mut u32,
+    found: *mut u32,
+) -> i32 {
     if s.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -953,7 +1016,15 @@ extern "win64" fn CryptStringToBinaryW(s: *const u16, len: u32, flags: u32, out:
     string_to_binary_api(units, &raw, flags, out, size, skip, found)
 }
 
-extern "win64" fn CryptStringToBinaryA(s: *const u8, len: u32, flags: u32, out: *mut u8, size: *mut u32, skip: *mut u32, found: *mut u32) -> i32 {
+extern "win64" fn CryptStringToBinaryA(
+    s: *const u8,
+    len: u32,
+    flags: u32,
+    out: *mut u8,
+    size: *mut u32,
+    skip: *mut u32,
+    found: *mut u32,
+) -> i32 {
     if s.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -1001,7 +1072,15 @@ fn bytes<'a>(p: *const u8, n: u32) -> &'a [u8] {
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn CryptHashCertificate2(alg: *const u16, _flags: u32, _reserved: u64, data: *const u8, len: u32, out: *mut u8, size: *mut u32) -> i32 {
+extern "win64" fn CryptHashCertificate2(
+    alg: *const u16,
+    _flags: u32,
+    _reserved: u64,
+    data: *const u8,
+    len: u32,
+    out: *mut u8,
+    size: *mut u32,
+) -> i32 {
     // SAFETY: NULL or the caller's NUL-terminated algorithm name.
     let name = unsafe { path::wide_to_string(alg) }.unwrap_or_default();
     match crate::bcrypt::hash_named(&name, bytes(data, len)) {
@@ -1012,7 +1091,15 @@ extern "win64" fn CryptHashCertificate2(alg: *const u16, _flags: u32, _reserved:
 
 /// CryptHashCertificate: legacy ALG_IDs (SHA-1 when 0).
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn CryptHashCertificate(_prov: u64, alg: u32, _flags: u32, data: *const u8, len: u32, out: *mut u8, size: *mut u32) -> i32 {
+extern "win64" fn CryptHashCertificate(
+    _prov: u64,
+    alg: u32,
+    _flags: u32,
+    data: *const u8,
+    len: u32,
+    out: *mut u8,
+    size: *mut u32,
+) -> i32 {
     let name = match alg {
         0 | 0x8004 => "SHA1",
         0x8003 => "MD5",
@@ -1158,11 +1245,22 @@ fn rd_prov_info(p: u64) -> ProvInfo {
             let e = rd64(p, 32) + 24 * k;
             let (d, n) = (rd64(e, 8), rd32(e, 16));
             // SAFETY: the parameter's bytes.
-            let data = if d == 0 || n == 0 { Vec::new() } else { unsafe { core::slice::from_raw_parts(d as *const u8, n as usize).to_vec() } };
+            let data = if d == 0 || n == 0 {
+                Vec::new()
+            } else {
+                unsafe { core::slice::from_raw_parts(d as *const u8, n as usize).to_vec() }
+            };
             (rd32(e, 0), data, rd32(e, 20))
         })
         .collect();
-    ProvInfo { container: s(rd64(p, 0)), provider: s(rd64(p, 8)), prov_type: rd32(p, 16), flags: rd32(p, 20), params, key_spec: rd32(p, 40) }
+    ProvInfo {
+        container: s(rd64(p, 0)),
+        provider: s(rd64(p, 8)),
+        prov_type: rd32(p, 16),
+        flags: rd32(p, 20),
+        params,
+        key_spec: rd32(p, 40),
+    }
 }
 
 extern "win64" fn CertSetCertificateContextProperty(ctx: u64, id: u32, _flags: u32, data: u64) -> i32 {
@@ -1171,18 +1269,24 @@ extern "win64" fn CertSetCertificateContextProperty(ctx: u64, id: u32, _flags: u
     }
     let value = (data != 0).then(|| match id {
         CERT_KEY_PROV_INFO_PROP_ID => Prop::ProvInfo(rd_prov_info(data)),
-        CERT_NCRYPT_KEY_HANDLE_PROP_ID | CERT_HCRYPTPROV_OR_NCRYPT_KEY_HANDLE_PROP_ID | CERT_HCRYPTPROV_TRANSFER_PROP_ID => {
-            Prop::Bytes(rd64(data, 0).to_le_bytes().to_vec())
-        }
+        CERT_NCRYPT_KEY_HANDLE_PROP_ID
+        | CERT_HCRYPTPROV_OR_NCRYPT_KEY_HANDLE_PROP_ID
+        | CERT_HCRYPTPROV_TRANSFER_PROP_ID => Prop::Bytes(rd64(data, 0).to_le_bytes().to_vec()),
         CERT_DATE_STAMP_PROP_ID => Prop::Bytes(rd64(data, 0).to_le_bytes().to_vec()),
         CERT_KEY_CONTEXT_PROP_ID => {
             // CERT_KEY_CONTEXT {cbSize, hCryptProv / hNCryptKey, dwKeySpec}.
             // SAFETY: the caller's structure of cbSize bytes.
-            Prop::Bytes(unsafe { core::slice::from_raw_parts(data as *const u8, (rd32(data, 0) as usize).clamp(4, 24)).to_vec() })
+            Prop::Bytes(unsafe {
+                core::slice::from_raw_parts(data as *const u8, (rd32(data, 0) as usize).clamp(4, 24)).to_vec()
+            })
         }
         _ => Prop::Bytes(rd_blob(data).to_vec()),
     });
-    if set_prop(ctx, id, value) { 1 } else { fail(ERROR_INVALID_PARAMETER, 0) }
+    if set_prop(ctx, id, value) {
+        1
+    } else {
+        fail(ERROR_INVALID_PARAMETER, 0)
+    }
 }
 
 /// Hash properties are computed when not set.
@@ -1249,7 +1353,10 @@ pub(super) fn acquire_private_key(ctx: u64, flags: u32, key: *mut u64, spec: *mu
     let (handle, free) = match get_prop(ctx, CERT_KEY_PROV_INFO_PROP_ID) {
         Some(Prop::ProvInfo(_)) if cache && cached.is_some() => (cached.unwrap_or_default(), false),
         Some(Prop::ProvInfo(i)) if i.prov_type == 0 && i.container.is_some() => {
-            match crate::ncrypt::open_named(i.container.as_deref().unwrap_or_default(), i.flags & CRYPT_MACHINE_KEYSET != 0) {
+            match crate::ncrypt::open_named(
+                i.container.as_deref().unwrap_or_default(),
+                i.flags & CRYPT_MACHINE_KEYSET != 0,
+            ) {
                 Ok(h) if cache => {
                     if let Some(k) = slot {
                         CACHED.lock().unwrap().insert(k, h);
@@ -1261,7 +1368,9 @@ pub(super) fn acquire_private_key(ctx: u64, flags: u32, key: *mut u64, spec: *mu
                 Err(e) => return fail(e, 0),
             }
         }
-        _ => match get_prop(ctx, CERT_NCRYPT_KEY_HANDLE_PROP_ID).or_else(|| get_prop(ctx, CERT_HCRYPTPROV_OR_NCRYPT_KEY_HANDLE_PROP_ID)) {
+        _ => match get_prop(ctx, CERT_NCRYPT_KEY_HANDLE_PROP_ID)
+            .or_else(|| get_prop(ctx, CERT_HCRYPTPROV_OR_NCRYPT_KEY_HANDLE_PROP_ID))
+        {
             Some(Prop::Bytes(b)) if b.len() == 8 => (u64::from_le_bytes(b.try_into().unwrap()), false),
             _ => return fail(CRYPT_E_NO_KEY_PROPERTY, 0),
         },
@@ -1305,14 +1414,23 @@ fn ecdsa_der(rs: &[u8]) -> Vec<u8> {
     der(SEQ, &[der_uint(r), der_uint(s)].concat())
 }
 
-fn self_signed(key: u64, subject: &[u8], flags: u32, sig_oid: Option<String>, start: Option<u64>, end: Option<u64>, ext: Option<(u32, u64)>) -> Result<(Vec<u8>, crate::ncrypt::Facts), u32> {
+fn self_signed(
+    key: u64,
+    subject: &[u8],
+    flags: u32,
+    sig_oid: Option<String>,
+    start: Option<u64>,
+    end: Option<u64>,
+    ext: Option<(u32, u64)>,
+) -> Result<(Vec<u8>, crate::ncrypt::Facts), u32> {
     let f = crate::ncrypt::facts(key)?;
     // Windows names the key in the certificate's provider information,
     // so an ephemeral (unnamed) key cannot sign one.
     if f.name.is_none() && flags & CERT_CREATE_SELFSIGN_NO_KEY_INFO == 0 {
         return Err(NTE_BAD_FLAGS);
     }
-    let sig_oid = sig_oid.unwrap_or_else(|| String::from(if f.rsa { "1.2.840.113549.1.1.5" } else { "1.2.840.10045.4.1" }));
+    let sig_oid =
+        sig_oid.unwrap_or_else(|| String::from(if f.rsa { "1.2.840.113549.1.1.5" } else { "1.2.840.10045.4.1" }));
     let hash = sig_hash(&sig_oid, f.rsa).ok_or(NTE_BAD_ALGID)?;
     let sig_alg = alg_id(&sig_oid, &[])?;
     let mut serial = [0u8; 16];
@@ -1339,7 +1457,11 @@ fn self_signed(key: u64, subject: &[u8], flags: u32, sig_oid: Option<String>, st
     } else {
         let digest = crate::bcrypt::hash_named(hash, &tbs).ok_or(NTE_BAD_ALGID)?;
         let s = crate::ncrypt::sign_hash(key, hash, &digest)?;
-        if f.rsa { s } else { ecdsa_der(&s) }
+        if f.rsa {
+            s
+        } else {
+            ecdsa_der(&s)
+        }
     };
     let cert = der(SEQ, &[tbs, sig_alg, der(0x03, &[&[0u8], &signature[..]].concat())].concat());
     Ok((cert, f))
@@ -1367,7 +1489,9 @@ extern "win64" fn CertCreateSelfSignCertificate(
         (key, false)
     } else {
         let i = (prov_info != 0).then(|| rd_prov_info(prov_info));
-        let Some(name) = i.as_ref().and_then(|i| i.container.clone()) else { return fail(crate::ncrypt::NTE_INVALID_HANDLE, 0) };
+        let Some(name) = i.as_ref().and_then(|i| i.container.clone()) else {
+            return fail(crate::ncrypt::NTE_INVALID_HANDLE, 0);
+        };
         match crate::ncrypt::open_named(&name, i.is_some_and(|i| i.flags & CRYPT_MACHINE_KEYSET != 0)) {
             Ok(h) => (h, true),
             Err(e) => return fail(e, 0),

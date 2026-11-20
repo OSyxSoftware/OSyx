@@ -126,7 +126,9 @@ pub(crate) extern "win64" fn InitOnceExecuteOnce(once: u64, callback: u64, param
 /// InitOnceComplete (others wait); asynchronous callers race and the first
 /// InitOnceComplete wins. Error codes follow Windows.
 extern "win64" fn InitOnceBeginInitialize(once: u64, flags: u32, pending: *mut i32, context: *mut u64) -> i32 {
-    if !once_valid(once) || pending.is_null() || flags & !(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC) != 0
+    if !once_valid(once)
+        || pending.is_null()
+        || flags & !(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC) != 0
         || flags == INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC
     {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -166,8 +168,10 @@ extern "win64" fn InitOnceBeginInitialize(once: u64, flags: u32, pending: *mut i
 extern "win64" fn InitOnceComplete(once: u64, flags: u32, context: u64) -> i32 {
     let failed = flags & INIT_ONCE_INIT_FAILED != 0;
     let asynchronous = flags & INIT_ONCE_ASYNC != 0;
-    if !once_valid(once) || flags & !(INIT_ONCE_ASYNC | INIT_ONCE_INIT_FAILED) != 0
-        || (failed && (asynchronous || context != 0)) || context & 3 != 0
+    if !once_valid(once)
+        || flags & !(INIT_ONCE_ASYNC | INIT_ONCE_INIT_FAILED) != 0
+        || (failed && (asynchronous || context != 0))
+        || context & 3 != 0
     {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -242,9 +246,13 @@ extern "win64" fn WaitOnAddress(address: u64, compare: *const u32, size: usize, 
         unsafe {
             match size {
                 1 => core::ptr::read_volatile(address as *const u8) != *(compare as *const u8),
-                2 => core::ptr::read_volatile(address as *const u16) != core::ptr::read_unaligned(compare as *const u16),
+                2 => {
+                    core::ptr::read_volatile(address as *const u16) != core::ptr::read_unaligned(compare as *const u16)
+                }
                 4 => word(address).load(Ordering::Acquire) != core::ptr::read_unaligned(compare),
-                _ => core::ptr::read_volatile(address as *const u64) != core::ptr::read_unaligned(compare as *const u64),
+                _ => {
+                    core::ptr::read_volatile(address as *const u64) != core::ptr::read_unaligned(compare as *const u64)
+                }
             }
         }
     };

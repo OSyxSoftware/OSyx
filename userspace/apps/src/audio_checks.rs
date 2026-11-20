@@ -89,6 +89,8 @@ pub fn run(t: &mut Tests) {
         mixer(&format!("output={output}\n"))
     });
     if fs::metadata("/opt/wintests/wavedev.exe").is_ok() {
-        t.check("winmm wave devices on the card (wavedev.exe)", || crate::win_checks::run("wavedev.exe", &[]) == Some(0));
+        t.check("winmm wave devices on the card (wavedev.exe)", || {
+            crate::win_checks::run("wavedev.exe", &[]) == Some(0)
+        });
     }
 }

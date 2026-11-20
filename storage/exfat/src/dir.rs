@@ -1,7 +1,10 @@
 //! Directories: entry sets, name matching, allocation of entries.
 
 use crate::time::unix_with_offset;
-use crate::{le16, le32, le64, BlockDevice, Cursor, FileSystem, FsError, Result, ATTR_ARCHIVE, ATTR_DIRECTORY, FAT_EOC, MAX_NAME_UNITS};
+use crate::{
+    le16, le32, le64, BlockDevice, Cursor, FileSystem, FsError, Result, ATTR_ARCHIVE, ATTR_DIRECTORY, FAT_EOC,
+    MAX_NAME_UNITS,
+};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -249,7 +252,13 @@ impl<D: BlockDevice> FileSystem<D> {
                 size: le64(stream, 24),
                 valid: le64(stream, 8).min(le64(stream, 24)),
                 attr: le16(set, 4),
-                pos: Some(crate::EntryPos { pfirst: d.first, pnofat: d.nofat, plen, set_off: (i * ENTRY) as u64, count: (secondary + 1) as u8 }),
+                pos: Some(crate::EntryPos {
+                    pfirst: d.first,
+                    pnofat: d.nofat,
+                    plen,
+                    set_off: (i * ENTRY) as u64,
+                    count: (secondary + 1) as u8,
+                }),
                 cursor: Cursor::default(),
                 times: Times {
                     create: le32(set, 8),
@@ -418,7 +427,10 @@ impl<D: BlockDevice> FileSystem<D> {
                 }
             };
             added.push(c);
-            let r = self.write_at(self.cluster_off(c), &zeros).and_then(|_| self.fat_set(last, c)).and_then(|_| self.fat_set(c, FAT_EOC));
+            let r = self
+                .write_at(self.cluster_off(c), &zeros)
+                .and_then(|_| self.fat_set(last, c))
+                .and_then(|_| self.fat_set(c, FAT_EOC));
             if let Err(e) = r {
                 failure = Some(e);
                 break;
@@ -479,6 +491,12 @@ impl<D: BlockDevice> FileSystem<D> {
         let len = self.dir_len(&d)?;
         let off = (start * ENTRY) as u64;
         self.write_extent(d.first, d.nofat, len, off, set)?;
-        Ok(EntryPos { pfirst: d.first, pnofat: d.nofat, plen: if d.entry.is_none() { 0 } else { len }, set_off: off, count: need as u8 })
+        Ok(EntryPos {
+            pfirst: d.first,
+            pnofat: d.nofat,
+            plen: if d.entry.is_none() { 0 } else { len },
+            set_off: off,
+            count: need as u8,
+        })
     }
 }

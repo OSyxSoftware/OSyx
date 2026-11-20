@@ -181,7 +181,11 @@ fn main() -> i32 {
             tables.push(ssdt);
         }
         let ec = EcPorts::from_ecdt(table(b"ECDT", 0).as_deref());
-        println!("batteryd: scan {scan}: {} ACPI table(s), ECDT {}", tables.len(), if ec.is_some() { "found" } else { "absent" });
+        println!(
+            "batteryd: scan {scan}: {} ACPI table(s), ECDT {}",
+            tables.len(),
+            if ec.is_some() { "found" } else { "absent" }
+        );
         let machine = Machine { start: Instant::now() };
         let mut acpi = Acpi::load(machine, ec, &tables, &mut |problem| eprintln!("batteryd: {problem}"));
         println!(
@@ -191,7 +195,12 @@ fn main() -> i32 {
             acpi.thermal_zones()
         );
         match acpi.ec_ports() {
-            (Some(p), source) => println!("batteryd: {} EC device(s), EC ports {:#x}/{:#x} from {source}", acpi.ec_devices(), p.command, p.data),
+            (Some(p), source) => println!(
+                "batteryd: {} EC device(s), EC ports {:#x}/{:#x} from {source}",
+                acpi.ec_devices(),
+                p.command,
+                p.data
+            ),
             (None, source) => println!("batteryd: no EC ports ({source})"),
         }
         if acpi.battery_devices() == 0 {
@@ -227,8 +236,13 @@ fn publish_forever(acpi: &mut Acpi, last: &mut String) -> ! {
         if first {
             first = false;
             let st = acpi.stats();
-            println!("batteryd: first poll: {} present, {} usable sample(s), {} EC transaction(s), {} EC error(s)",
-                poll.batteries.len(), poll.batteries.iter().flatten().count(), st.ec_transactions.load(core::sync::atomic::Ordering::Relaxed), st.errors());
+            println!(
+                "batteryd: first poll: {} present, {} usable sample(s), {} EC transaction(s), {} EC error(s)",
+                poll.batteries.len(),
+                poll.batteries.iter().flatten().count(),
+                st.ec_transactions.load(core::sync::atomic::Ordering::Relaxed),
+                st.errors()
+            );
         }
         write_status(&status.to_string(), last);
         // Look again soon after a bad poll; the EC usually recovers.

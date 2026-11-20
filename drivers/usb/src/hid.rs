@@ -432,7 +432,8 @@ impl MouseLayout {
     /// same report. `None` if the device has no relative X/Y (an absolute
     /// tablet or not a pointer at all).
     pub fn from_fields(fields: &[Field]) -> Option<MouseLayout> {
-        let find = |page: u16, usage: u16| fields.iter().find(|f| f.page == page && f.usage == usage && f.relative).copied();
+        let find =
+            |page: u16, usage: u16| fields.iter().find(|f| f.page == page && f.usage == usage && f.relative).copied();
         let x = find(PAGE_GENERIC_DESKTOP, USAGE_X)?;
         let y = fields
             .iter()
@@ -445,8 +446,16 @@ impl MouseLayout {
             .filter(|f| f.page == PAGE_BUTTON && (1..=32).contains(&f.usage) && f.size >= 1)
             .map(|f| (f.usage as u8, *f))
             .collect();
-        let wheel = fields.iter().filter(same).find(|f| f.page == PAGE_GENERIC_DESKTOP && f.usage == USAGE_WHEEL && f.relative).copied();
-        let pan = fields.iter().filter(same).find(|f| f.page == PAGE_CONSUMER && f.usage == USAGE_AC_PAN && f.relative).copied();
+        let wheel = fields
+            .iter()
+            .filter(same)
+            .find(|f| f.page == PAGE_GENERIC_DESKTOP && f.usage == USAGE_WHEEL && f.relative)
+            .copied();
+        let pan = fields
+            .iter()
+            .filter(same)
+            .find(|f| f.page == PAGE_CONSUMER && f.usage == USAGE_AC_PAN && f.relative)
+            .copied();
         Some(MouseLayout { report_id: x.report_id, buttons, x, y, wheel, pan })
     }
 
@@ -553,11 +562,17 @@ impl TabletLayout {
             .collect();
         // A touch screen or pen has no buttons: its tip is the left one.
         if !buttons.iter().any(|(n, _)| *n == 1) {
-            if let Some(tip) = fields.iter().filter(same).find(|f| f.page == PAGE_DIGITIZER && f.usage == USAGE_TIP_SWITCH) {
+            if let Some(tip) =
+                fields.iter().filter(same).find(|f| f.page == PAGE_DIGITIZER && f.usage == USAGE_TIP_SWITCH)
+            {
                 buttons.push((1, *tip));
             }
         }
-        let wheel = fields.iter().filter(same).find(|f| f.page == PAGE_GENERIC_DESKTOP && f.usage == USAGE_WHEEL && f.relative).copied();
+        let wheel = fields
+            .iter()
+            .filter(same)
+            .find(|f| f.page == PAGE_GENERIC_DESKTOP && f.usage == USAGE_WHEEL && f.relative)
+            .copied();
         Some(TabletLayout { report_id: x.report_id, buttons, x, y, wheel })
     }
 
@@ -654,7 +669,10 @@ mod tests {
     #[test]
     fn boot_mouse_reports() {
         assert_eq!(boot_mouse(&[1, 5, 0xFB]).unwrap(), MouseReport { buttons: 1, dx: 5, dy: -5, wheel: 0, pan: 0 });
-        assert_eq!(boot_mouse(&[6, 0x80, 0x7F, 0xFF]).unwrap(), MouseReport { buttons: 6, dx: -128, dy: 127, wheel: -1, pan: 0 });
+        assert_eq!(
+            boot_mouse(&[6, 0x80, 0x7F, 0xFF]).unwrap(),
+            MouseReport { buttons: 6, dx: -128, dy: 127, wheel: -1, pan: 0 }
+        );
         assert_eq!(boot_mouse(&[0, 0]), Err(ReportError::Truncated));
     }
 
@@ -782,8 +800,16 @@ mod tests {
         let pushes = [0xA4u8].repeat(MAX_STACK + 1);
         assert_eq!(parse_report_descriptor(&pushes), Err(ParseError::BadStack));
         // A report of megabytes is no device's.
-        assert_eq!(parse_report_descriptor(&[0x75, 0x20, 0x27, 0x00, 0x00, 0x10, 0x00, 0x95, 0x01, 0x97, 0x00, 0x00, 0x02, 0x00, 0x81, 0x02]), Err(ParseError::TooLarge));
-        assert_eq!(parse_report_descriptor(&[0x75, 0x08, 0x97, 0x00, 0x00, 0x80, 0x00, 0x81, 0x02]), Err(ParseError::TooLarge));
+        assert_eq!(
+            parse_report_descriptor(&[
+                0x75, 0x20, 0x27, 0x00, 0x00, 0x10, 0x00, 0x95, 0x01, 0x97, 0x00, 0x00, 0x02, 0x00, 0x81, 0x02
+            ]),
+            Err(ParseError::TooLarge)
+        );
+        assert_eq!(
+            parse_report_descriptor(&[0x75, 0x08, 0x97, 0x00, 0x00, 0x80, 0x00, 0x81, 0x02]),
+            Err(ParseError::TooLarge)
+        );
     }
 
     /// A gaming mouse as one HID interface with report ids: a vendor data
@@ -872,7 +898,20 @@ mod tests {
 
     #[test]
     fn field_extraction_bounds() {
-        let f = Field { report_id: 0, offset: 4, size: 8, page: 1, usage: 0x30, logical_min: -127, logical_max: 127, physical_min: 0, physical_max: 0, unit: 0, unit_exponent: 0, relative: true };
+        let f = Field {
+            report_id: 0,
+            offset: 4,
+            size: 8,
+            page: 1,
+            usage: 0x30,
+            logical_min: -127,
+            logical_max: 127,
+            physical_min: 0,
+            physical_max: 0,
+            unit: 0,
+            unit_exponent: 0,
+            relative: true,
+        };
         assert_eq!(f.read(&[0xF0, 0x0F]), Some(-1));
         assert_eq!(f.read(&[0xF0]), None);
         let unsigned = Field { logical_min: 0, ..f };

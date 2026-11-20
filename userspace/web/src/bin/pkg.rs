@@ -100,7 +100,9 @@ impl Lock {
         let _ = fs::remove_file(LOCK);
         match os_std::ipc::Listener::listen(LOCK_NAME) {
             Ok(held) => Ok(Lock(held)),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(String::from("another pkg is installing or removing; try again when it is done")),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                Err(String::from("another pkg is installing or removing; try again when it is done"))
+            }
             Err(e) => Err(format!("the pkg lock cannot be taken: {e}")),
         }
     }
@@ -304,7 +306,9 @@ fn retry_stale(p: &Package) {
     let live: Vec<String> = p.files.iter().map(|f| format!("/{}", f.path)).collect();
     match clear_stale(&p.name, &live) {
         Ok(left) if left.is_empty() => say(&format!("pkg: {}: files of an older version were removed", p.name)),
-        Ok(left) => say(&format!("pkg: {}: files of an older version still cannot be removed: {}", p.name, left.join(", "))),
+        Ok(left) => {
+            say(&format!("pkg: {}: files of an older version still cannot be removed: {}", p.name, left.join(", ")))
+        }
         Err(e) => say(&format!("pkg: {}: {e}", p.name)),
     }
 }
@@ -324,7 +328,12 @@ fn install(url: &str, name: &str) -> Result<String, String> {
     // repository withdrew or has not published yet.
     match index(url)?.find(name) {
         Some(listed) if listed.version == p.version => {}
-        Some(listed) => return Err(format!("{manifest} is version {}, the repository lists {}: refused", p.version, listed.version)),
+        Some(listed) => {
+            return Err(format!(
+                "{manifest} is version {}, the repository lists {}: refused",
+                p.version, listed.version
+            ))
+        }
         None => return Err(format!("the repository does not list {name}: refused")),
     }
     let old = installed(name);
@@ -334,12 +343,16 @@ fn install(url: &str, name: &str) -> Result<String, String> {
             return Ok(format!("{name} {} is already installed", p.version));
         }
         if !osyx_update::newer(&p.version, &old.version) {
-            return Err(format!("{name} {} is installed and the repository has the older {}: not installed", old.version, p.version));
+            return Err(format!(
+                "{name} {} is installed and the repository has the older {}: not installed",
+                old.version, p.version
+            ));
         }
     }
     fs::create_dir_all(CACHE).map_err(|e| format!("{CACHE}: {e}"))?;
     let payload = format!("{CACHE}/{bin}");
-    download_payload(&format!("{url}/{bin}"), &payload, p.payload_size, &p.payload_sha256).map_err(|e| format!("download: {e}"))?;
+    download_payload(&format!("{url}/{bin}"), &payload, p.payload_size, &p.payload_sha256)
+        .map_err(|e| format!("download: {e}"))?;
     // Every file next to its target first, checked against its SHA-256.
     let mut src = fs::File::open(&payload).map_err(|e| format!("{payload}: {e}"))?;
     let mut staged: Vec<String> = Vec::new();
@@ -382,7 +395,8 @@ fn install(url: &str, name: &str) -> Result<String, String> {
     // What the new version no longer has goes onto the stale list before
     // anything is replaced: once the new record is in place, nothing else
     // names these files. If the list cannot be kept, nothing is installed.
-    let dropped: Vec<String> = old.iter().flat_map(|old| package::stale_files(old, &p)).map(|path| format!("/{path}")).collect();
+    let dropped: Vec<String> =
+        old.iter().flat_map(|old| package::stale_files(old, &p)).map(|path| format!("/{path}")).collect();
     let result = result.and_then(|()| {
         fs::create_dir_all(DB).map_err(|e| format!("{DB}: {e}"))?;
         if !dropped.is_empty() {
@@ -440,7 +454,10 @@ fn install(url: &str, name: &str) -> Result<String, String> {
     let live: Vec<String> = p.files.iter().map(|f| format!("/{}", f.path)).collect();
     match clear_stale(name, &live) {
         Ok(left) if left.is_empty() => {}
-        Ok(left) => say(&format!("pkg: {name}: files of an older version could not be removed and will be tried again: {}", left.join(", "))),
+        Ok(left) => say(&format!(
+            "pkg: {name}: files of an older version could not be removed and will be tried again: {}",
+            left.join(", ")
+        )),
         Err(e) => say(&format!("pkg: {name}: {e}")),
     }
     Ok(match old {
@@ -502,7 +519,14 @@ fn run(args: &[String]) -> Result<(), String> {
             let url = repository()?;
             let [manifest, signature, _] = package::file_names(&names[0]);
             let p = Package::parse(&signed(&url, &manifest, &signature)?)?;
-            println!("{} {}\n{}\n{} bytes in {} files:", p.name, p.version, p.description, p.payload_size, p.files.len());
+            println!(
+                "{} {}\n{}\n{} bytes in {} files:",
+                p.name,
+                p.version,
+                p.description,
+                p.payload_size,
+                p.files.len()
+            );
             for f in &p.files {
                 println!("  /{} ({} bytes, mode {:o})", f.path, f.size, f.mode);
             }
@@ -528,7 +552,9 @@ fn run(args: &[String]) -> Result<(), String> {
             let list = index(&url)?;
             let mut any = false;
             for have in all_installed() {
-                let upgradable = list.find(&have.name).is_some_and(|p| package::state(Some(&have.version), &p.version) == State::Upgradable);
+                let upgradable = list
+                    .find(&have.name)
+                    .is_some_and(|p| package::state(Some(&have.version), &p.version) == State::Upgradable);
                 if upgradable {
                     say(&install(&url, &have.name)?);
                     any = true;

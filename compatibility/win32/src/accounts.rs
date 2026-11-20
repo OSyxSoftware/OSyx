@@ -24,7 +24,9 @@ pub(crate) fn user_name(uid: u32) -> String {
     if uid == 0 {
         return String::from("root");
     }
-    crate::kernel32::env_get("USER").or_else(|| crate::kernel32::env_get("USERNAME")).unwrap_or_else(|| alloc::format!("user{uid}"))
+    crate::kernel32::env_get("USER")
+        .or_else(|| crate::kernel32::env_get("USERNAME"))
+        .unwrap_or_else(|| alloc::format!("user{uid}"))
 }
 
 /// The user of the calling thread's token, as GetUserNameW reports it.
@@ -38,7 +40,9 @@ pub(crate) fn computer_name() -> String {
 }
 
 fn computer() -> String {
-    let name = os_std::fs::read_to_string("/etc/hostname").map(|s| String::from(s.trim())).unwrap_or_else(|_| String::from("osyx"));
+    let name = os_std::fs::read_to_string("/etc/hostname")
+        .map(|s| String::from(s.trim()))
+        .unwrap_or_else(|_| String::from("osyx"));
     name.to_uppercase().chars().take(15).collect()
 }
 
@@ -99,7 +103,8 @@ extern "win64" fn LookupAccountNameW(
     let d: Vec<u16> = dom.encode_utf16().collect();
     // SAFETY: the caller's in/out lengths and buffers.
     unsafe {
-        let fits = !sid.is_null() && *sid_len as usize >= s.len() && !domain.is_null() && *domain_len as usize > d.len();
+        let fits =
+            !sid.is_null() && *sid_len as usize >= s.len() && !domain.is_null() && *domain_len as usize > d.len();
         if !fits {
             *sid_len = s.len() as u32;
             *domain_len = d.len() as u32 + 1;
@@ -258,7 +263,10 @@ fn secret_matches(secret: &str, password: &str) -> bool {
     if parts.len() != 4 || parts[0] != "sha256-iter" {
         return false;
     }
-    let (Ok(rounds), Some(salt), Some(want)) = (parts[1].parse::<u32>(), hex_bytes(parts[2]), hex_bytes(parts[3])) else { return false };
+    let (Ok(rounds), Some(salt), Some(want)) = (parts[1].parse::<u32>(), hex_bytes(parts[2]), hex_bytes(parts[3]))
+    else {
+        return false;
+    };
     if rounds == 0 {
         return false;
     }
@@ -280,7 +288,8 @@ fn secret_matches(secret: &str, password: &str) -> bool {
 /// gid of the account on success. Names compare without regard to case, as
 /// Windows account names do.
 pub(crate) fn logon(user: &str, password: &str) -> Result<(u32, u32), LogonFailure> {
-    let account = local_accounts().into_iter().find(|a| a.name.eq_ignore_ascii_case(user)).ok_or(LogonFailure::NoSuchUser)?;
+    let account =
+        local_accounts().into_iter().find(|a| a.name.eq_ignore_ascii_case(user)).ok_or(LogonFailure::NoSuchUser)?;
     let secret = os_std::fs::read_to_string("/etc/shadow").ok().and_then(|text| {
         text.lines().find_map(|l| {
             let mut f = l.split(':');
@@ -322,11 +331,27 @@ pub(crate) fn logon_token(uid: u32, gid: u32, network: bool) -> u64 {
 /// LogonUserW: checks the password in /etc/shadow and returns a token. A
 /// wrong user, password or domain is ERROR_LOGON_FAILURE; an unknown logon
 /// type or provider ERROR_INVALID_PARAMETER.
-extern "win64" fn LogonUserW(user: *const u16, domain: *const u16, password: *const u16, kind: u32, provider: u32, out: *mut u64) -> i32 {
+extern "win64" fn LogonUserW(
+    user: *const u16,
+    domain: *const u16,
+    password: *const u16,
+    kind: u32,
+    provider: u32,
+    out: *mut u64,
+) -> i32 {
     if out.is_null() || user.is_null() || provider > 3 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    if !matches!(kind, LOGON32_LOGON_INTERACTIVE | LOGON32_LOGON_NETWORK | LOGON32_LOGON_BATCH | LOGON32_LOGON_SERVICE | LOGON32_LOGON_UNLOCK | LOGON32_LOGON_NETWORK_CLEARTEXT | LOGON32_LOGON_NEW_CREDENTIALS) {
+    if !matches!(
+        kind,
+        LOGON32_LOGON_INTERACTIVE
+            | LOGON32_LOGON_NETWORK
+            | LOGON32_LOGON_BATCH
+            | LOGON32_LOGON_SERVICE
+            | LOGON32_LOGON_UNLOCK
+            | LOGON32_LOGON_NETWORK_CLEARTEXT
+            | LOGON32_LOGON_NEW_CREDENTIALS
+    ) {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: NUL-terminated strings or NULL.
@@ -411,7 +436,11 @@ extern "win64" fn ControlService(_h: u64, _control: u32, _status: *mut u8) -> i3
 }
 
 extern "win64" fn CloseServiceHandle(h: u64) -> i32 {
-    if MANAGERS.lock().unwrap().remove(&h) { 1 } else { fail(ERROR_INVALID_HANDLE, 0) }
+    if MANAGERS.lock().unwrap().remove(&h) {
+        1
+    } else {
+        fail(ERROR_INVALID_HANDLE, 0)
+    }
 }
 
 const ERROR_INVALID_LEVEL: u32 = 124;

@@ -11,11 +11,11 @@
 //! running. The kernel names the requester (`Channel::peer`), so a request
 //! cannot claim to come from someone else.
 
+use os_std::collections::VecDeque;
 use os_std::ipc::{Channel, Listener, MAX_MESSAGE};
 use os_std::prelude::*;
 use os_std::process::Command;
 use os_std::time::{Duration, Instant};
-use os_std::collections::VecDeque;
 
 /// The service name; only root may register it.
 const SERVICE: &str = "elevate";

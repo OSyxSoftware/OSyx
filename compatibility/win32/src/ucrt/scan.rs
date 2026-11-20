@@ -597,7 +597,8 @@ fn stream<C: Ch>(o: u64, f: *mut File, fmt: *const C, a: *const u64) -> i32 {
     validate!(!f.is_null() && !fmt.is_null(), EINVAL, -1);
     // SAFETY: caller supplies a FILE of this runtime. The lock is recursive.
     unsafe { (*f).lock() };
-    let result = scan(o, &mut Input { source: Source::Stream(f), count: 0, look: None, loaded: false }, fmt, a.cast(), false);
+    let result =
+        scan(o, &mut Input { source: Source::Stream(f), count: 0, look: None, loaded: false }, fmt, a.cast(), false);
     // SAFETY: same stream, held across scanning and lookahead restoration.
     unsafe { (*f).unlock() };
     result
@@ -655,5 +656,11 @@ pub(crate) fn legacy_swscanf32(s: u32, f: u32, a: *const u32) -> i32 {
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![__stdio_common_vsscanf, __stdio_common_vswscanf, __stdio_common_vfscanf, __stdio_common_vfwscanf, swscanf]
+    export_table![
+        __stdio_common_vsscanf,
+        __stdio_common_vswscanf,
+        __stdio_common_vfscanf,
+        __stdio_common_vfwscanf,
+        swscanf
+    ]
 }

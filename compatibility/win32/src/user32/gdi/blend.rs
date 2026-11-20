@@ -60,7 +60,19 @@ fn source(src: u64, sx: i32, sy: i32, sw: i32, sh: i32) -> Result<Snapshot, u32>
 /// AlphaFormat} packed in a DWORD. With AC_SRC_ALPHA the source is
 /// premultiplied: dst = src * k + dst * (1 - srcA * k), k = SCA / 255.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn AlphaBlend(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i32, sw: i32, sh: i32, blend: u32) -> Bool {
+extern "win64" fn AlphaBlend(
+    dst: u64,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    src: u64,
+    sx: i32,
+    sy: i32,
+    sw: i32,
+    sh: i32,
+    blend: u32,
+) -> Bool {
     let [op, flags, constant, format] = blend.to_le_bytes();
     if op != AC_SRC_OVER || flags != 0 || w < 0 || h < 0 || sw < 0 || sh < 0 {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
@@ -87,13 +99,29 @@ extern "win64" fn AlphaBlend(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64,
         }
         Some(out)
     });
-    if ok { TRUE } else { fail(ERROR_INVALID_HANDLE, FALSE) }
+    if ok {
+        TRUE
+    } else {
+        fail(ERROR_INVALID_HANDLE, FALSE)
+    }
 }
 
 /// TransparentBlt: a stretched copy that skips source pixels of the
 /// transparent colour (COLORREF).
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn TransparentBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: u64, sx: i32, sy: i32, sw: i32, sh: i32, transparent: u32) -> Bool {
+extern "win64" fn TransparentBlt(
+    dst: u64,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    src: u64,
+    sx: i32,
+    sy: i32,
+    sw: i32,
+    sh: i32,
+    transparent: u32,
+) -> Bool {
     if w < 0 || h < 0 || sw < 0 || sh < 0 {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
@@ -106,7 +134,11 @@ extern "win64" fn TransparentBlt(dst: u64, x: i32, y: i32, w: i32, h: i32, src: 
     };
     let key = colorref(transparent) & 0xFF_FFFF;
     let ok = stretch(dst, x, y, w, h, &s, sx, sy, sw, sh, |c, _| (c & 0xFF_FFFF != key).then_some(c));
-    if ok { TRUE } else { fail(ERROR_INVALID_HANDLE, FALSE) }
+    if ok {
+        TRUE
+    } else {
+        fail(ERROR_INVALID_HANDLE, FALSE)
+    }
 }
 
 /// TRIVERTEX: x, y, then 16-bit Red, Green, Blue, Alpha.
@@ -137,7 +169,10 @@ fn color16(c: [i64; 4]) -> Color {
 }
 
 extern "win64" fn GradientFill(dc: u64, vertices: *const u8, nv: u32, mesh: *const u32, nm: u32, mode: u32) -> Bool {
-    if vertices.is_null() || mesh.is_null() || !matches!(mode, GRADIENT_FILL_RECT_H | GRADIENT_FILL_RECT_V | GRADIENT_FILL_TRIANGLE) {
+    if vertices.is_null()
+        || mesh.is_null()
+        || !matches!(mode, GRADIENT_FILL_RECT_H | GRADIENT_FILL_RECT_V | GRADIENT_FILL_TRIANGLE)
+    {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
     let per = if mode == GRADIENT_FILL_TRIANGLE { 3 } else { 2 };
@@ -166,9 +201,12 @@ extern "win64" fn GradientFill(dc: u64, vertices: *const u8, nv: u32, mesh: *con
                 for py in r.y..r.y + r.h as i32 {
                     for px in r.x..r.x + r.w as i32 {
                         // Barycentric weights of the pixel centre.
-                        let edge = |p: &Vertex, q: &Vertex| (q.x - p.x) as i64 * (py - p.y) as i64 - (px - p.x) as i64 * (q.y - p.y) as i64;
+                        let edge = |p: &Vertex, q: &Vertex| {
+                            (q.x - p.x) as i64 * (py - p.y) as i64 - (px - p.x) as i64 * (q.y - p.y) as i64
+                        };
                         let (wa, wb, wc) = (edge(&b, &c), edge(&c, &a), edge(&a, &b));
-                        let inside = if area > 0 { wa >= 0 && wb >= 0 && wc >= 0 } else { wa <= 0 && wb <= 0 && wc <= 0 };
+                        let inside =
+                            if area > 0 { wa >= 0 && wb >= 0 && wc >= 0 } else { wa <= 0 && wb <= 0 && wc <= 0 };
                         if !inside {
                             continue;
                         }
@@ -190,7 +228,11 @@ extern "win64" fn GradientFill(dc: u64, vertices: *const u8, nv: u32, mesh: *con
                 for py in r.y..r.y + r.h as i32 {
                     for px in r.x..r.x + r.w as i32 {
                         let t = if horizontal { px - x0 } else { py - y0 } as i64;
-                        let (from, to) = if (horizontal && ul.x <= lr.x) || (!horizontal && ul.y <= lr.y) { (ul.c, lr.c) } else { (lr.c, ul.c) };
+                        let (from, to) = if (horizontal && ul.x <= lr.x) || (!horizontal && ul.y <= lr.y) {
+                            (ul.c, lr.c)
+                        } else {
+                            (lr.c, ul.c)
+                        };
                         let mut col = [0i64; 4];
                         for (k, v) in col.iter_mut().enumerate() {
                             *v = from[k] + (to[k] - from[k]) * t / span;
@@ -204,7 +246,11 @@ extern "win64" fn GradientFill(dc: u64, vertices: *const u8, nv: u32, mesh: *con
         (true, drawn)
     })
     .unwrap_or(false);
-    if ok { TRUE } else { fail(ERROR_INVALID_HANDLE, FALSE) }
+    if ok {
+        TRUE
+    } else {
+        fail(ERROR_INVALID_HANDLE, FALSE)
+    }
 }
 
 pub(super) fn msimg32_exports() -> Vec<(&'static str, u64)> {

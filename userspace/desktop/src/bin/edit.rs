@@ -206,7 +206,9 @@ impl Language {
         match name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref() {
             Some("ax") => Language::Axis,
             Some("sh" | "toml" | "conf" | "cfg" | "ini" | "py" | "yml" | "yaml" | "app" | "reg") => Language::Hash,
-            Some("rs" | "c" | "h" | "cpp" | "hpp" | "cc" | "js" | "ts" | "json" | "css" | "go" | "java" | "ld") => Language::Slash,
+            Some("rs" | "c" | "h" | "cpp" | "hpp" | "cc" | "js" | "ts" | "json" | "css" | "go" | "java" | "ld") => {
+                Language::Slash
+            }
             _ => Language::Plain,
         }
     }
@@ -387,7 +389,10 @@ impl Editor {
         self.message = if !valid {
             String::from("Not UTF-8 text: opened read-only")
         } else if crlf > 0 && lf > 0 {
-            format!("Mixed line ends ({crlf} CRLF, {lf} LF): saving writes {} everywhere", if self.crlf { "CRLF" } else { "LF" })
+            format!(
+                "Mixed line ends ({crlf} CRLF, {lf} LF): saving writes {} everywhere",
+                if self.crlf { "CRLF" } else { "LF" }
+            )
         } else {
             String::new()
         };
@@ -410,7 +415,9 @@ impl Editor {
         }
         let in_place = self.in_place.take().is_some_and(|granted| granted == path);
         let known = self.known_mode.as_ref().filter(|(p, _)| *p == path).map(|&(_, m)| m);
-        match write_whole(&path, text.as_bytes(), in_place, known).map_err(|e| format!("{path} cannot be written: {e}."))? {
+        match write_whole(&path, text.as_bytes(), in_place, known)
+            .map_err(|e| format!("{path} cannot be written: {e}."))?
+        {
             Save::Done(mode) => self.known_mode = Some((path.clone(), mode)),
             Save::NeedsInPlace => {
                 // `error` asks instead of reporting.
@@ -454,13 +461,21 @@ impl Editor {
 
     fn ask_path(&mut self, tag: u32) {
         let (title, text, button) = if tag == D_OPEN {
-            ("Open", "The path of the file to open. A file that does not exist yet is created when it is saved.", "Open")
+            (
+                "Open",
+                "The path of the file to open. A file that does not exist yet is created when it is saved.",
+                "Open",
+            )
         } else {
             ("Save as", "The path to save this text to.", "Save")
         };
-        let current = self.path.clone().unwrap_or_else(|| format!("{}/", env::current_dir().map(|p| String::from(p.as_str())).unwrap_or_default()));
-        self.dialog =
-            Some(Dialog::new(tag, title, text, &[("Cancel", ButtonStyle::Secondary), (button, ButtonStyle::Primary)]).with_input(&current, "/home/user/notes.txt"));
+        let current = self.path.clone().unwrap_or_else(|| {
+            format!("{}/", env::current_dir().map(|p| String::from(p.as_str())).unwrap_or_default())
+        });
+        self.dialog = Some(
+            Dialog::new(tag, title, text, &[("Cancel", ButtonStyle::Secondary), (button, ButtonStyle::Primary)])
+                .with_input(&current, "/home/user/notes.txt"),
+        );
     }
 
     fn save(&mut self) {
@@ -503,7 +518,8 @@ impl Editor {
             return;
         }
         let needle = self.needle.clone();
-        self.message = if self.area.find(&needle, forward) { String::new() } else { format!("\"{needle}\" was not found") };
+        self.message =
+            if self.area.find(&needle, forward) { String::new() } else { format!("\"{needle}\" was not found") };
     }
 
     fn command(&mut self, id: usize, cx: &mut Ctx) {
@@ -519,10 +535,16 @@ impl Editor {
                 self.area.redo();
             }
             B_FIND => {
-                let start = self.area.selected_text().filter(|s| !s.contains('\n')).unwrap_or_else(|| self.needle.clone());
+                let start =
+                    self.area.selected_text().filter(|s| !s.contains('\n')).unwrap_or_else(|| self.needle.clone());
                 self.dialog = Some(
-                    Dialog::new(D_FIND, "Find", "Lower-case text matches any case.", &[("Cancel", ButtonStyle::Secondary), ("Find", ButtonStyle::Primary)])
-                        .with_input(&start, "text to find"),
+                    Dialog::new(
+                        D_FIND,
+                        "Find",
+                        "Lower-case text matches any case.",
+                        &[("Cancel", ButtonStyle::Secondary), ("Find", ButtonStyle::Primary)],
+                    )
+                    .with_input(&start, "text to find"),
                 );
             }
             _ => {}
@@ -781,7 +803,8 @@ impl App for Editor {
         } else {
             "saved"
         };
-        let right = format!("{}  ·  UTF-8  ·  {ends}  ·  {} lines  ·  {state}", self.language.name(), self.area.line_count());
+        let right =
+            format!("{}  ·  UTF-8  ·  {ends}  ·  {} lines  ·  {state}", self.language.name(), self.area.line_count());
         p.text_in(FontKind::Ui, inner, &right, t.text_faint, Align::Right);
         if let Some(d) = &self.dialog {
             p.blend(full, t.scrim, 140);

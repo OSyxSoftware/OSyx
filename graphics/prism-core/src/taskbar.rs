@@ -29,7 +29,9 @@ pub fn group(windows: &[WindowInfo], processes: &[Process]) -> Vec<WindowInfo> {
             let minimized = (entry.flags & window.flags) & state::MINIMIZED;
             // The parent's main window stays the click target and title,
             // even if a child window happened to be announced first.
-            if (!window.title.is_empty(), parent == Some(window.pid)) > (!entry.title.is_empty(), parent == Some(entry.pid)) {
+            if (!window.title.is_empty(), parent == Some(window.pid))
+                > (!entry.title.is_empty(), parent == Some(entry.pid))
+            {
                 *entry = window.clone();
             }
             entry.flags = (entry.flags & !(state::ACTIVATED | state::MINIMIZED)) | active | minimized;

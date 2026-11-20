@@ -32,13 +32,13 @@
 #![no_std]
 #![no_main]
 
+use os_std::fs::{self, File};
 use os_std::prelude::*;
 use os_std::process::{self, Command};
 use os_std::sync::atomic::AtomicU32;
 use os_std::time::{Duration, Instant};
-use os_std::fs::{self, File};
 use os_std::{env, thread};
-#[path="../fault_checks.rs"]
+#[path = "../fault_checks.rs"]
 mod fault_checks;
 #[path = "../filemap_checks.rs"]
 mod filemap_checks;
@@ -60,88 +60,194 @@ fn main() -> i32 {
     match args.get(1).map(String::as_str) {
         Some("memory-locks") => memory_lock_checks::worker(),
         Some("suspend-test") => {
-            if os_sys::resume_child(pid) != Err(osyx_abi::Errno::PermissionDenied) { return 53; }
+            if os_sys::resume_child(pid) != Err(osyx_abi::Errno::PermissionDenied) {
+                return 53;
+            }
             let marker = "/tmp/suspended-process-test";
             let _ = fs::remove_file(marker);
             let stdio = [os_sys::HANDLE_NONE; 3];
             let pid = match os_sys::spawn_stdio_suspended("/bin/worker", b"worker\0suspend-child\0", b"", stdio) {
-                Ok(pid) => pid, Err(_) => return 40,
+                Ok(pid) => pid,
+                Err(_) => return 40,
             };
             thread::sleep(Duration::from_millis(40));
-            if fs::metadata(marker).is_ok() { return 41; }
-            if os_sys::resume_child(pid) != Ok(1) || os_sys::resume_child(pid) != Ok(0) { return 42; }
-            if !matches!(os_sys::wait(pid), Ok((_, 0))) || fs::metadata(marker).is_err() { return 43; }
+            if fs::metadata(marker).is_ok() {
+                return 41;
+            }
+            if os_sys::resume_child(pid) != Ok(1) || os_sys::resume_child(pid) != Ok(0) {
+                return 42;
+            }
+            if !matches!(os_sys::wait(pid), Ok((_, 0))) || fs::metadata(marker).is_err() {
+                return 43;
+            }
             let _ = fs::remove_file(marker);
             let pid = match os_sys::spawn_stdio_suspended("/bin/worker", b"worker\0suspend-child\0", b"", stdio) {
-                Ok(pid) => pid, Err(_) => return 44,
+                Ok(pid) => pid,
+                Err(_) => return 44,
             };
-            if os_sys::kill(pid).is_err() || !matches!(os_sys::wait(pid), Ok((_, osyx_abi::KILLED_STATUS))) { return 45; }
-            if fs::metadata(marker).is_ok() { return 46; }
+            if os_sys::kill(pid).is_err() || !matches!(os_sys::wait(pid), Ok((_, osyx_abi::KILLED_STATUS))) {
+                return 45;
+            }
+            if fs::metadata(marker).is_ok() {
+                return 46;
+            }
             let pid_file = "/tmp/suspended-orphan-test";
             let _ = fs::remove_file(pid_file);
-            if !matches!(Command::new("/bin/worker").arg("suspend-orphan").status(), Ok(s) if s.raw() == 0) { return 48; }
-            let orphan = match fs::read_to_string(pid_file).ok().and_then(|s| s.parse::<u64>().ok()) { Some(pid) => pid, None => return 49 };
+            if !matches!(Command::new("/bin/worker").arg("suspend-orphan").status(), Ok(s) if s.raw() == 0) {
+                return 48;
+            }
+            let orphan = match fs::read_to_string(pid_file).ok().and_then(|s| s.parse::<u64>().ok()) {
+                Some(pid) => pid,
+                None => return 49,
+            };
             let _ = fs::remove_file(pid_file);
             for _ in 0..100 {
-                if matches!(os_sys::proc_info(orphan), Err(osyx_abi::Errno::NotFound)) { return 0; }
+                if matches!(os_sys::proc_info(orphan), Err(osyx_abi::Errno::NotFound)) {
+                    return 0;
+                }
                 thread::sleep(Duration::from_millis(10));
             }
             return 50;
         }
         Some("suspend-orphan") => {
-            let pid = match os_sys::spawn_stdio_suspended("/bin/worker", b"worker\0suspend-child\0", b"", [os_sys::HANDLE_NONE; 3]) {
-                Ok(pid) => pid, Err(_) => return 51,
+            let pid = match os_sys::spawn_stdio_suspended(
+                "/bin/worker",
+                b"worker\0suspend-child\0",
+                b"",
+                [os_sys::HANDLE_NONE; 3],
+            ) {
+                Ok(pid) => pid,
+                Err(_) => return 51,
             };
-            if fs::write("/tmp/suspended-orphan-test", format!("{pid}")).is_ok() { 0 } else { 52 }
+            if fs::write("/tmp/suspended-orphan-test", format!("{pid}")).is_ok() {
+                0
+            } else {
+                52
+            }
         }
         Some("suspend-child") => {
             thread::sleep(Duration::from_millis(50));
-            if fs::write("/tmp/suspended-process-test", b"ran").is_ok() { 0 } else { 47 }
+            if fs::write("/tmp/suspended-process-test", b"ran").is_ok() {
+                0
+            } else {
+                47
+            }
         }
         Some("sandbox-broker") => {
             use osyx_abi::sandbox::{PathRule, SpawnPolicy, MAX_PATH_RULES, PATH_EXEC, PATH_READ};
             let invalid = SpawnPolicy { path_count: MAX_PATH_RULES + 1, ..SpawnPolicy::default() };
             if os_std::os::raw::raw_syscall(osyx_abi::nr::SPAWN_RESTRICTED, 0, &invalid as *const _ as u64, 0)
-                != Err(osyx_abi::Errno::InvalidArgument) {
+                != Err(osyx_abi::Errno::InvalidArgument)
+            {
                 return 23;
             }
             if os_std::os::raw::raw_syscall(osyx_abi::nr::CHANNEL_PAIR, 0, 0, 0) != Err(osyx_abi::Errno::Fault) {
                 return 33;
             }
             let path = "/bin";
-            let rules = [PathRule { path: path.as_ptr() as u64, path_len: path.len() as u64, access: PATH_READ | PATH_EXEC }];
+            let rules =
+                [PathRule { path: path.as_ptr() as u64, path_len: path.len() as u64, access: PATH_READ | PATH_EXEC }];
             let calls: Vec<u64> = (0..256).filter(|n| *n != osyx_abi::nr::CPU_INFO).collect();
             let pid = match os_sys::spawn_restricted("/bin/worker", b"worker\0sandbox\0", b"", &rules, &calls) {
                 Ok(pid) => pid,
                 Err(_) => return 20,
             };
-            if !matches!(os_sys::wait(pid), Ok((_, 0))) { return 21; }
-            let (peer, endpoint) = match os_sys::channel_pair() { Ok(pair) => pair, Err(_) => return 24 };
-            let file = match os_sys::open("/bin/worker", osyx_abi::OPEN_READ, 0) { Ok(file) => file, Err(_) => return 34 };
-            if os_sys::spawn_restricted_with_channels("/bin/worker", b"worker\0exit\00\0", b"", &rules, &calls, endpoint, 0, &[file]) != Err(osyx_abi::Errno::InvalidArgument) { return 35; }
-            if os_sys::grant_child_channel(process::id().unwrap_or(0), file) != Err(osyx_abi::Errno::InvalidArgument) { return 38; }
+            if !matches!(os_sys::wait(pid), Ok((_, 0))) {
+                return 21;
+            }
+            let (peer, endpoint) = match os_sys::channel_pair() {
+                Ok(pair) => pair,
+                Err(_) => return 24,
+            };
+            let file = match os_sys::open("/bin/worker", osyx_abi::OPEN_READ, 0) {
+                Ok(file) => file,
+                Err(_) => return 34,
+            };
+            if os_sys::spawn_restricted_with_channels(
+                "/bin/worker",
+                b"worker\0exit\00\0",
+                b"",
+                &rules,
+                &calls,
+                endpoint,
+                0,
+                &[file],
+            ) != Err(osyx_abi::Errno::InvalidArgument)
+            {
+                return 35;
+            }
+            if os_sys::grant_child_channel(process::id().unwrap_or(0), file) != Err(osyx_abi::Errno::InvalidArgument) {
+                return 38;
+            }
             let _ = os_sys::close(file);
-            if os_sys::grant_child_channel(process::id().unwrap_or(0), endpoint) != Err(osyx_abi::Errno::PermissionDenied) { return 39; }
+            if os_sys::grant_child_channel(process::id().unwrap_or(0), endpoint)
+                != Err(osyx_abi::Errno::PermissionDenied)
+            {
+                return 39;
+            }
             let too_many = [endpoint; 33];
-            if os_sys::spawn_restricted_with_channels("/bin/worker", b"worker\0exit\00\0", b"", &rules, &calls, endpoint, 0, &too_many) != Err(osyx_abi::Errno::InvalidArgument) { return 36; }
-            if os_sys::spawn_restricted_with_channels("/bin/worker", b"worker\0exit\00\0", b"", &rules, &calls, os_sys::HANDLE_NONE, 0, &[endpoint]) != Err(osyx_abi::Errno::InvalidArgument) { return 37; }
-            if os_sys::channel_send(peer, b"request", &[]).is_err() { return 27; }
-            let pid = match os_sys::spawn_restricted_with_broker("/bin/worker", b"worker\0sandbox-channel\0", b"", &rules, &calls, endpoint) {
+            if os_sys::spawn_restricted_with_channels(
+                "/bin/worker",
+                b"worker\0exit\00\0",
+                b"",
+                &rules,
+                &calls,
+                endpoint,
+                0,
+                &too_many,
+            ) != Err(osyx_abi::Errno::InvalidArgument)
+            {
+                return 36;
+            }
+            if os_sys::spawn_restricted_with_channels(
+                "/bin/worker",
+                b"worker\0exit\00\0",
+                b"",
+                &rules,
+                &calls,
+                os_sys::HANDLE_NONE,
+                0,
+                &[endpoint],
+            ) != Err(osyx_abi::Errno::InvalidArgument)
+            {
+                return 37;
+            }
+            if os_sys::channel_send(peer, b"request", &[]).is_err() {
+                return 27;
+            }
+            let pid = match os_sys::spawn_restricted_with_broker(
+                "/bin/worker",
+                b"worker\0sandbox-channel\0",
+                b"",
+                &rules,
+                &calls,
+                endpoint,
+            ) {
                 Ok(pid) => pid,
                 Err(_) => return 28,
             };
             let _ = os_sys::close(endpoint);
-            if !matches!(os_sys::wait(pid), Ok((_, 0))) { return 29; }
+            if !matches!(os_sys::wait(pid), Ok((_, 0))) {
+                return 29;
+            }
             let mut reply = [0u8; 16];
-            if !matches!(os_sys::channel_recv(peer, &mut reply, &mut []), Ok((5, 0))) || &reply[..5] != b"reply" { return 30; }
+            if !matches!(os_sys::channel_recv(peer, &mut reply, &mut []), Ok((5, 0))) || &reply[..5] != b"reply" {
+                return 30;
+            }
             let _ = os_sys::close(peer);
             return 0;
         }
         Some("sandbox-channel") => {
-            if os_sys::grant_child_channel(process::id().unwrap_or(0), 3) != Err(osyx_abi::Errno::PermissionDenied) { return 40; }
+            if os_sys::grant_child_channel(process::id().unwrap_or(0), 3) != Err(osyx_abi::Errno::PermissionDenied) {
+                return 40;
+            }
             let mut request = [0u8; 16];
-            if !matches!(os_sys::channel_recv(3, &mut request, &mut []), Ok((7, 0))) || &request[..7] != b"request" { return 31; }
-            if os_sys::channel_send(3, b"reply", &[]).is_err() { return 32; }
+            if !matches!(os_sys::channel_recv(3, &mut request, &mut []), Ok((7, 0))) || &request[..7] != b"request" {
+                return 31;
+            }
+            if os_sys::channel_send(3, b"reply", &[]).is_err() {
+                return 32;
+            }
             0
         }
         Some("sandbox") | Some("sandbox-child") | Some("sandbox-exec") => {
@@ -159,7 +265,8 @@ fn main() -> i32 {
                 return 17;
             }
             if raw::raw_syscall(raw::nr::CHANNEL_LISTEN, 0, 0, 0) != Err(raw::Errno::PermissionDenied)
-                || raw::raw_syscall(raw::nr::CHANNEL_CONNECT, 0, 0, 0) != Err(raw::Errno::PermissionDenied) {
+                || raw::raw_syscall(raw::nr::CHANNEL_CONNECT, 0, 0, 0) != Err(raw::Errno::PermissionDenied)
+            {
                 return 18;
             }
             if raw::raw_syscall(raw::nr::SPAWN_RESTRICTED, 0, 0, 0) != Err(raw::Errno::PermissionDenied) {
@@ -172,8 +279,11 @@ fn main() -> i32 {
             if raw::raw_syscall(raw::nr::IMAGE_PUBLISH, file, 0, 0) != Err(raw::Errno::PermissionDenied) {
                 return 15;
             }
-            let result = Command::new("/bin/worker").arg("exit").arg("0")
-                .spawn_stdio([file, raw::HANDLE_NONE, raw::HANDLE_NONE]);
+            let result = Command::new("/bin/worker").arg("exit").arg("0").spawn_stdio([
+                file,
+                raw::HANDLE_NONE,
+                raw::HANDLE_NONE,
+            ]);
             if !matches!(result, Err(ref error) if error.kind() == os_std::error::ErrorKind::PermissionDenied) {
                 return 16;
             }
@@ -324,14 +434,21 @@ fn main() -> i32 {
             (cwd.ok().as_deref().map(|p| p.as_str()) != args.get(2).map(String::as_str)) as i32
         }
         Some("as-user") => as_user(arg_num(&args, 2) as u32),
-        Some("fault-checks")=>fault_checks::run(),
+        Some("fault-checks") => fault_checks::run(),
         Some("filemap-checks") => filemap_checks::run(),
-        Some(mode @ ("fault-no-handler"|"fault-exec-reset"|"fault-nested"|"fault-bad-stack"))=>fault_checks::helper(mode),
+        Some(mode @ ("fault-no-handler" | "fault-exec-reset" | "fault-nested" | "fault-bad-stack")) => {
+            fault_checks::helper(mode)
+        }
         Some("exec-as") => {
-            let (Some(uid),Some(program))=(args.get(2).and_then(|s|s.parse::<u32>().ok()),args.get(3)) else {return 2};
-            if os_std::os::setuid(uid,uid).is_err() {return 1;}
-            let e=Command::new(program).args(&args[4..]).exec();
-            eprintln!("exec-as: {e}");1
+            let (Some(uid), Some(program)) = (args.get(2).and_then(|s| s.parse::<u32>().ok()), args.get(3)) else {
+                return 2;
+            };
+            if os_std::os::setuid(uid, uid).is_err() {
+                return 1;
+            }
+            let e = Command::new(program).args(&args[4..]).exec();
+            eprintln!("exec-as: {e}");
+            1
         }
         Some("exec-report") => {
             let (Some(handle_file), Some(report)) = (args.get(2), args.get(3)) else { return 2 };
@@ -360,7 +477,8 @@ fn main() -> i32 {
         }
         Some("exec-threads") => {
             let h = thread::spawn(|| thread::sleep(Duration::from_millis(100)));
-            let busy = Command::new("probe").args(["chain", "0"]).exec().kind() == os_std::error::ErrorKind::ResourceBusy;
+            let busy =
+                Command::new("probe").args(["chain", "0"]).exec().kind() == os_std::error::ErrorKind::ResourceBusy;
             let joined = h.join().is_ok();
             (!(busy && joined)) as i32
         }
@@ -453,23 +571,47 @@ fn as_user(uid: u32) -> i32 {
     }
     let kind = |r: os_std::error::Result<()>| r.err().map(|e| e.kind());
     let checks: [(&str, bool); 12] = [
-        ("ext4: 0600 root file unreadable", kind(File::open("/osyx-seed/secret").map(|_| ())) == Some(ErrorKind::PermissionDenied)),
-        ("ext4: /etc is read-only for users", kind(fs::write("/etc/user.txt", "x")) == Some(ErrorKind::PermissionDenied)),
-        ("ext4: own home directory is writable", fs::write("/home/user/note.txt", "mine").is_ok()
-            && fs::metadata("/home/user/note.txt").is_ok_and(|m| m.uid() == uid && m.gid() == uid)
-            && fs::remove_file("/home/user/note.txt").is_ok()),
+        (
+            "ext4: 0600 root file unreadable",
+            kind(File::open("/osyx-seed/secret").map(|_| ())) == Some(ErrorKind::PermissionDenied),
+        ),
+        (
+            "ext4: /etc is read-only for users",
+            kind(fs::write("/etc/user.txt", "x")) == Some(ErrorKind::PermissionDenied),
+        ),
+        (
+            "ext4: own home directory is writable",
+            fs::write("/home/user/note.txt", "mine").is_ok()
+                && fs::metadata("/home/user/note.txt").is_ok_and(|m| m.uid() == uid && m.gid() == uid)
+                && fs::remove_file("/home/user/note.txt").is_ok(),
+        ),
         ("cannot become root again", kind(os::setuid(0, 0)) == Some(ErrorKind::PermissionDenied)),
-        ("raw disks are root-only", fs::read_dir("/dev/disks").is_ok_and(|d| {
-            d.into_iter().all(|e| File::open(e.path()).err().map(|e| e.kind()) == Some(ErrorKind::PermissionDenied))
-        })),
-        ("0600 root file unreadable", kind(File::open("/tmp/root-only").map(|_| ())) == Some(ErrorKind::PermissionDenied)),
+        (
+            "raw disks are root-only",
+            fs::read_dir("/dev/disks").is_ok_and(|d| {
+                d.into_iter().all(|e| File::open(e.path()).err().map(|e| e.kind()) == Some(ErrorKind::PermissionDenied))
+            }),
+        ),
+        (
+            "0600 root file unreadable",
+            kind(File::open("/tmp/root-only").map(|_| ())) == Some(ErrorKind::PermissionDenied),
+        ),
         ("/boot is read-only for users", kind(fs::write("/boot/user.txt", "x")) == Some(ErrorKind::PermissionDenied)),
         ("/run is root's", kind(fs::write("/run/user.txt", "x")) == Some(ErrorKind::PermissionDenied)),
-        ("/tmp is writable (sticky)", fs::write("/tmp/user-file", "mine").is_ok()
-            && fs::metadata("/tmp/user-file").is_ok_and(|m| m.uid() == uid)),
-        ("others' files in /tmp are protected", kind(fs::remove_file("/tmp/root-only")) == Some(ErrorKind::PermissionDenied)),
+        (
+            "/tmp is writable (sticky)",
+            fs::write("/tmp/user-file", "mine").is_ok() && fs::metadata("/tmp/user-file").is_ok_and(|m| m.uid() == uid),
+        ),
+        (
+            "others' files in /tmp are protected",
+            kind(fs::remove_file("/tmp/root-only")) == Some(ErrorKind::PermissionDenied),
+        ),
         ("mount is root-only", kind(os::mount("", "/tmp", "tmpfs", false, 0)) == Some(ErrorKind::PermissionDenied)),
-        ("chmod of root's file refused", kind(fs::set_permissions("/tmp/root-only", fs::Permissions::from_mode(0o666))) == Some(ErrorKind::PermissionDenied)),
+        (
+            "chmod of root's file refused",
+            kind(fs::set_permissions("/tmp/root-only", fs::Permissions::from_mode(0o666)))
+                == Some(ErrorKind::PermissionDenied),
+        ),
     ];
     let mut failed = 0;
     for (name, ok) in checks {

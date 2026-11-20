@@ -106,7 +106,15 @@ fn lend_to(owner: Tid, pid: Pid) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn wait_registered(addr: u64, expected: u32, timeout_ticks: Option<u64>, pid: Pid, tid: Tid, owner: Tid, lends: u8) -> Result<(), Errno> {
+fn wait_registered(
+    addr: u64,
+    expected: u32,
+    timeout_ticks: Option<u64>,
+    pid: Pid,
+    tid: Tid,
+    owner: Tid,
+    lends: u8,
+) -> Result<(), Errno> {
     // Looked up before interrupts go off: it takes the process table lock.
     let key = key_of(pid, addr);
     let were_enabled = cpu::interrupts_enabled();
@@ -152,7 +160,9 @@ fn wait_registered(addr: u64, expected: u32, timeout_ticks: Option<u64>, pid: Pi
             sched::mark_current_blocked_until(deadline);
             sched::schedule();
             let mut w = WAITERS.lock();
-            let Some(i) = w.iter().position(|x| x.tid == tid) else { return Ok(()); };
+            let Some(i) = w.iter().position(|x| x.tid == tid) else {
+                return Ok(());
+            };
             // A stale scheduler wake can leave this waiter registered. It is
             // not a timeout, especially for an infinite wait: block again.
             if sched::current_kill_pending() || deadline.is_some_and(|d| interrupts::ticks() >= d) {

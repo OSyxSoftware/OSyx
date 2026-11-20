@@ -106,7 +106,12 @@ impl Button {
                     Response::Redraw
                 }
             }
-            Event::Key(k) if focused && k.down && !k.repeat && (k.key == key::ENTER || k.key == key::SPACE || k.key == key::KP_ENTER) => {
+            Event::Key(k)
+                if focused
+                    && k.down
+                    && !k.repeat
+                    && (k.key == key::ENTER || k.key == key::SPACE || k.key == key::KP_ENTER) =>
+            {
                 Response::Activated(self.id)
             }
             _ => Response::Ignored,
@@ -127,7 +132,9 @@ impl Button {
                 };
                 (Some(bg), t.on_accent, None)
             }
-            ButtonStyle::Danger => (Some(if self.hovered || self.pressed { t.danger_hover } else { t.danger }), t.on_accent, None),
+            ButtonStyle::Danger => {
+                (Some(if self.hovered || self.pressed { t.danger_hover } else { t.danger }), t.on_accent, None)
+            }
             ButtonStyle::Secondary => {
                 let bg = if self.pressed {
                     t.border
@@ -197,7 +204,14 @@ pub struct Checkbox {
 
 impl Checkbox {
     pub fn new(label: &str, checked: bool) -> Checkbox {
-        Checkbox { rect: Rect::EMPTY, label: String::from(label), checked, enabled: true, hovered: false, pressed: false }
+        Checkbox {
+            rect: Rect::EMPTY,
+            label: String::from(label),
+            checked,
+            enabled: true,
+            hovered: false,
+            pressed: false,
+        }
     }
 
     pub fn event(&mut self, ev: &Event, focused: bool) -> Response {

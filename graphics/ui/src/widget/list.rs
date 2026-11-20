@@ -323,7 +323,12 @@ impl ListView {
             let y = area.y + (i as u32 * self.row_height) as i32 - s.offset as i32;
             let row = Rect::new(area.x + 4, y + 1, area.w.saturating_sub(8), self.row_height - 2);
             if self.is_marked(i) || self.selected == Some(i) {
-                p.rounded(row, t.radius_small, if focused { t.selection } else { osyx_gfx::lerp(t.raised, t.selection, 100) }, 255);
+                p.rounded(
+                    row,
+                    t.radius_small,
+                    if focused { t.selection } else { osyx_gfx::lerp(t.raised, t.selection, 100) },
+                    255,
+                );
             } else if self.hovered == Some(i) {
                 p.rounded(row, t.radius_small, t.raised, 255);
             }
@@ -335,7 +340,12 @@ impl ListView {
                 if ci == 0 {
                     if let Some(ic) = item.icon {
                         let size = 18.min(row.h - 4);
-                        icon::draw(p, ic, Rect::new(cell.x, row.y + (row.h as i32 - size as i32) / 2, size, size), t.text_dim);
+                        icon::draw(
+                            p,
+                            ic,
+                            Rect::new(cell.x, row.y + (row.h as i32 - size as i32) / 2, size, size),
+                            t.text_dim,
+                        );
                         cell = Rect::new(cell.x + size as i32 + 10, cell.y, cell.w.saturating_sub(size + 10), cell.h);
                     }
                 }

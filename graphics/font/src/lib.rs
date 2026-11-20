@@ -58,7 +58,8 @@ impl ttf_parser::OutlineBuilder for Builder {
         for t in 1..=N {
             let u = N - t;
             let calc = |p: i32, q: i32, r: i32, s: i32| {
-                ((u*u*u*p as i64 + 3*u*u*t*q as i64 + 3*u*t*t*r as i64 + t*t*t*s as i64) / (N*N*N)) as i32
+                ((u * u * u * p as i64 + 3 * u * u * t * q as i64 + 3 * u * t * t * r as i64 + t * t * t * s as i64)
+                    / (N * N * N)) as i32
             };
             self.current.push(Point { x: calc(start.x, a.x, b.x, end.x), y: calc(start.y, a.y, b.y, end.y), on: true });
         }

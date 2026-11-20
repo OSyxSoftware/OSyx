@@ -97,8 +97,20 @@ impl<D: BlockDevice> FileSystem<D> {
 
     pub fn metadata(&mut self, path: &str) -> Result<Metadata> {
         Ok(match self.resolve(path)? {
-            Node::Root => Metadata { is_dir: true, size: 0, attributes: ATTR_DIRECTORY, first_cluster: self.geo.root_cluster, mtime: 0 },
-            Node::Item(it) => Metadata { is_dir: it.is_dir(), size: it.size, attributes: it.attr, first_cluster: it.first_cluster, mtime: it.mtime },
+            Node::Root => Metadata {
+                is_dir: true,
+                size: 0,
+                attributes: ATTR_DIRECTORY,
+                first_cluster: self.geo.root_cluster,
+                mtime: 0,
+            },
+            Node::Item(it) => Metadata {
+                is_dir: it.is_dir(),
+                size: it.size,
+                attributes: it.attr,
+                first_cluster: it.first_cluster,
+                mtime: it.mtime,
+            },
         })
     }
 

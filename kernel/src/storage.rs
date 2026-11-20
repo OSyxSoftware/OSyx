@@ -86,7 +86,12 @@ pub fn mount_hotplugged(disk: &str) {
 fn try_mount(fstype: &str, disk: Arc<dyn BlockDev>, at: &str, read_only: bool) -> bool {
     let name = String::from(disk.name());
     match vfs::mount_disk(fstype, disk, read_only) {
-        Ok(fs) => match vfs::mount_fs(at, &alloc::format!("/dev/disks/{name}"), if read_only { MOUNT_READ_ONLY } else { 0 }, fs) {
+        Ok(fs) => match vfs::mount_fs(
+            at,
+            &alloc::format!("/dev/disks/{name}"),
+            if read_only { MOUNT_READ_ONLY } else { 0 },
+            fs,
+        ) {
             Ok(_) => true,
             Err(e) => {
                 kprintln!("storage: mounting {name} at {at} failed: {e:?}");
@@ -191,7 +196,10 @@ pub fn mount_all(boot: &BootData) -> Summary {
     } else {
         match wanted_root {
             Some(name) => disks.iter().find(|d| d.name() == name).cloned(),
-            None => disks.iter().find(|d| d.partition().is_some_and(|p| p.type_guid == osyx_part::TYPE_ROOT_X86_64)).cloned(),
+            None => disks
+                .iter()
+                .find(|d| d.partition().is_some_and(|p| p.type_guid == osyx_part::TYPE_ROOT_X86_64))
+                .cloned(),
         }
     };
     let root_ro = boot.has_option("ro");
@@ -251,7 +259,8 @@ pub fn mount_all(boot: &BootData) -> Summary {
             continue;
         }
         let covered = used.iter().any(|u| *u == name || u.starts_with(&name) || name.starts_with(u.as_str()));
-        let is_partitioned_disk = d.partition().is_none() && block::devices().iter().any(|p| p.parent_name() == Some(name.as_str()));
+        let is_partitioned_disk =
+            d.partition().is_none() && block::devices().iter().any(|p| p.parent_name() == Some(name.as_str()));
         if covered || is_partitioned_disk {
             continue;
         }

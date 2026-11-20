@@ -94,7 +94,8 @@ impl Ap {
     fn msg3(&mut self, gtk: &[u8]) -> Vec<u8> {
         self.replay += 1;
         let data = self.key_data(gtk, 1);
-        let i = info::VERSION_AES | info::PAIRWISE | info::INSTALL | info::ACK | info::MIC | info::SECURE | info::ENCRYPTED;
+        let i =
+            info::VERSION_AES | info::PAIRWISE | info::INSTALL | info::ACK | info::MIC | info::SECURE | info::ENCRYPTED;
         build(i, 16, self.replay, &self.anonce, &data, Some(&self.ptk.unwrap().kck))
     }
 
@@ -142,8 +143,10 @@ fn four_way_and_group_handshake() {
 #[test]
 fn wrong_passphrase_fails_the_mic() {
     let (aa, spa) = ([0x02, 0, 0, 0, 0, 1], [0x02, 0, 0, 0, 0, 2]);
-    let mut ap = Ap { pmk: pmk_from_passphrase("right password", b"Net"), aa, spa, anonce: [1; 32], ptk: None, replay: 0 };
-    let mut sta = Supplicant::new(pmk_from_passphrase("wrong password", b"Net"), aa, spa, rsn_ie_psk(suite::CCMP), [2; 32]);
+    let mut ap =
+        Ap { pmk: pmk_from_passphrase("right password", b"Net"), aa, spa, anonce: [1; 32], ptk: None, replay: 0 };
+    let mut sta =
+        Supplicant::new(pmk_from_passphrase("wrong password", b"Net"), aa, spa, rsn_ie_psk(suite::CCMP), [2; 32]);
     let a = sta.receive(&ap.msg1()).unwrap();
     // The AP computes its PTK from the right PMK: the station's MIC is wrong.
     let f = sent(&a);

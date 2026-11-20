@@ -13,11 +13,11 @@
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::format;
 use os_std::io::{Read, Write};
 use os_std::net::TcpStream;
 use rustls::client::UnbufferedClientConnection;
@@ -296,12 +296,18 @@ fn read_head(s: &mut dyn Stream) -> Result<Head, String> {
         .nth(1)
         .and_then(|c| c.parse().ok())
         .ok_or_else(|| format!("HTTP: bad status line {status_line:?}"))?;
-    let headers = lines.filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())).collect();
+    let headers =
+        lines.filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())).collect();
     Ok((status, headers, buf[end + 4..].to_vec()))
 }
 
 /// Streams a body of `length` bytes (or until the end, or chunked).
-fn read_body(s: &mut dyn Stream, headers: &[(String, String)], first: Vec<u8>, sink: &mut dyn Sink) -> Result<u64, String> {
+fn read_body(
+    s: &mut dyn Stream,
+    headers: &[(String, String)],
+    first: Vec<u8>,
+    sink: &mut dyn Sink,
+) -> Result<u64, String> {
     let chunked = header(headers, "transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
     let length = header(headers, "content-length").and_then(|v| v.parse::<u64>().ok());
     let mut buf = vec![0u8; 64 * 1024];
@@ -350,7 +356,8 @@ fn read_body(s: &mut dyn Stream, headers: &[(String, String)], first: Vec<u8>, s
             more(&mut data, s)?;
         };
         let size_text = core::str::from_utf8(&data[..line_end]).map_err(|_| String::from("HTTP: bad chunk size"))?;
-        let size = usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16).map_err(|_| format!("HTTP: bad chunk size {size_text:?}"))?;
+        let size = usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16)
+            .map_err(|_| format!("HTTP: bad chunk size {size_text:?}"))?;
         data.drain(..line_end + 2);
         if size == 0 {
             return Ok(total);
@@ -370,7 +377,8 @@ fn read_body(s: &mut dyn Stream, headers: &[(String, String)], first: Vec<u8>, s
 /// HTTPS (for an update, with an older signed list).
 fn redirect(current: Url, location: &str) -> Result<Url, String> {
     let was_https = current.https;
-    let next = if location.starts_with('/') { Url { path: location.to_string(), ..current } } else { parse_url(location)? };
+    let next =
+        if location.starts_with('/') { Url { path: location.to_string(), ..current } } else { parse_url(location)? };
     if was_https && !next.https {
         return Err(format!("redirected from HTTPS to {location}: refused"));
     }
@@ -403,7 +411,8 @@ pub fn get(url: &str, sink: &mut dyn Sink) -> Result<u64, String> {
         match status {
             200 => {
                 let length = header(&headers, "content-length").and_then(|v| v.parse().ok());
-                let shown = format!("{}://{}{}", if current.https { "https" } else { "http" }, current.host, current.path);
+                let shown =
+                    format!("{}://{}{}", if current.https { "https" } else { "http" }, current.host, current.path);
                 sink.start(&shown, length)?;
                 return read_body(&mut *stream, &headers, first, sink);
             }
@@ -435,7 +444,12 @@ pub fn sha256_file(path: &str) -> Result<String, String> {
 /// Downloads `url` to `path` (through `path.part`, renamed when complete
 /// and, with `sha256`, verified). `progress(done, total)` is called about
 /// every MiB.
-pub fn download(url: &str, path: &str, sha256: Option<&str>, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<u64, String> {
+pub fn download(
+    url: &str,
+    path: &str,
+    sha256: Option<&str>,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<u64, String> {
     struct FileSink<'a> {
         file: os_std::fs::File,
         done: u64,

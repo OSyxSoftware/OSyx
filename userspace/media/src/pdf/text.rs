@@ -161,8 +161,20 @@ impl PageText {
             if c.ch == '\n' {
                 continue;
             }
-            let dx = if x < c.x0 { c.x0 - x } else if x > c.x1 { x - c.x1 } else { 0.0 };
-            let dy = if y < c.y0 { c.y0 - y } else if y > c.y1 { y - c.y1 } else { 0.0 };
+            let dx = if x < c.x0 {
+                c.x0 - x
+            } else if x > c.x1 {
+                x - c.x1
+            } else {
+                0.0
+            };
+            let dy = if y < c.y0 {
+                c.y0 - y
+            } else if y > c.y1 {
+                y - c.y1
+            } else {
+                0.0
+            };
             let d = dx + dy * 8.0;
             if best.is_none_or(|(b, _)| d < b) {
                 best = Some((d, i));
@@ -193,7 +205,11 @@ mod tests {
     fn glyphs(items: &[(&str, f64, f64)]) -> Vec<RawGlyph> {
         items
             .iter()
-            .map(|&(t, x, y)| RawGlyph { text: t.to_string(), corners: [(x, y + 10.0), (x + 6.0, y + 10.0), (x + 6.0, y), (x, y)], vertical: false })
+            .map(|&(t, x, y)| RawGlyph {
+                text: t.to_string(),
+                corners: [(x, y + 10.0), (x + 6.0, y + 10.0), (x + 6.0, y), (x, y)],
+                vertical: false,
+            })
             .collect()
     }
 
@@ -224,7 +240,11 @@ mod tests {
         for (col, word) in ["縦書き", "です。"].iter().enumerate() {
             for (row, c) in word.chars().enumerate() {
                 let (x, y) = (100.0 - col as f64 * 14.0, row as f64 * 12.0);
-                g.push(RawGlyph { text: c.to_string(), corners: [(x, y + 12.0), (x + 12.0, y + 12.0), (x + 12.0, y), (x, y)], vertical: true });
+                g.push(RawGlyph {
+                    text: c.to_string(),
+                    corners: [(x, y + 12.0), (x + 12.0, y + 12.0), (x + 12.0, y), (x, y)],
+                    vertical: true,
+                });
             }
         }
         let t = PageText::from_glyphs(&g);
@@ -256,7 +276,8 @@ mod tests {
         assert!(t.find("").is_empty());
         // Matches may overlap: "ana" is twice in "banana".
         let letters: Vec<String> = "banana".chars().map(|c| c.to_string()).collect();
-        let items: Vec<(&str, f64, f64)> = letters.iter().enumerate().map(|(i, s)| (s.as_str(), i as f64 * 6.0, 0.0)).collect();
+        let items: Vec<(&str, f64, f64)> =
+            letters.iter().enumerate().map(|(i, s)| (s.as_str(), i as f64 * 6.0, 0.0)).collect();
         assert_eq!(PageText::from_glyphs(&glyphs(&items)).find("ana"), vec![1..4, 3..6]);
         assert!(t.find("absent").is_empty());
         assert_eq!(t.find("THEME").len(), 2);

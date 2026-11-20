@@ -24,93 +24,93 @@ macro_rules! export_table {
     };
 }
 
+mod accounts;
 mod apc;
 mod apiextra;
-mod clientapi;
+mod atlthunk;
+mod bcrypt;
+mod capi;
 mod client64;
-mod crypt32;
-mod commdlg;
+mod clientapi;
 mod comctl32;
+mod commdlg;
+mod credman;
+mod crypt32;
 mod cryptbase;
 mod dbghelp;
-mod error;
+mod dwmapi;
+mod dwrite;
 mod elevation;
+mod error;
+mod etw;
 mod eventlog;
-mod wevtapi;
-mod atlthunk;
-mod netapi32;
 mod exceptions;
-mod files;
 mod fibers;
+mod files;
 mod fls;
 mod heaps;
 mod imagehlp;
+mod inherit;
 mod ini;
-mod ktm;
 mod iphlpapi;
 mod kernel32;
 mod keyed;
+mod ktm;
 mod loader;
 mod locale;
 mod mapping;
-mod namespace;
 mod mem;
+mod minordlls;
+mod msi;
+mod namespace;
+mod ncrypt;
+mod netapi32;
+mod newlibs;
+mod nls;
 mod ntdll;
 mod ntreg;
 mod objects;
 mod objsec;
-mod path;
 mod ole32;
-mod opengl32;
 mod oleaut32;
+mod opengl32;
+mod path;
+mod pipes;
+mod process;
+mod procinfo;
+mod propsys;
+mod psapi;
+mod registry;
+mod rtl;
+mod security;
+mod seh;
 mod setupapi;
 mod shell32;
 mod shelllink;
 mod shlstr;
 mod shlwapi;
-mod security;
-mod seh;
-mod teb;
-mod ucrt;
-mod user32;
-mod userenv;
-mod volumes;
-mod winmm;
-mod winsta;
-mod winhttp;
-mod version;
+mod sspi;
+mod stall;
 mod synch;
-mod process;
-mod psapi;
-mod registry;
-mod rtl;
 mod sysext;
-mod unwind;
+mod teb;
 mod threadpool;
 mod timers;
 mod tokens;
 mod tz;
-mod zone;
-mod nls;
-mod procinfo;
-mod etw;
-mod credman;
-mod accounts;
-mod capi;
-mod bcrypt;
-mod ncrypt;
-mod sspi;
-mod stall;
-mod newlibs;
-mod minordlls;
-mod msi;
-mod dwmapi;
-mod dwrite;
-mod inherit;
-mod propsys;
-mod pipes;
-mod ws2_32;
+mod ucrt;
+mod unwind;
+mod user32;
+mod userenv;
+mod version;
+mod volumes;
+mod wevtapi;
+mod winhttp;
+mod winmm;
+mod winsta;
 mod wow64;
+mod ws2_32;
+mod zone;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -158,20 +158,16 @@ fn main() -> i32 {
     }
     let verbose = args.first().is_some_and(|a| a == "-v");
     VERBOSE.store(verbose, core::sync::atomic::Ordering::Relaxed);
-    EVENTS.store(
-        os_std::env::var("OSYX_WINRUN_EVENTS").is_ok_and(|v| v == "1"),
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    COUNT.store(
-        os_std::env::var("OSYX_WINRUN_COUNT").is_ok_and(|v| v == "1"),
-        core::sync::atomic::Ordering::Relaxed,
-    );
+    EVENTS.store(os_std::env::var("OSYX_WINRUN_EVENTS").is_ok_and(|v| v == "1"), core::sync::atomic::Ordering::Relaxed);
+    COUNT.store(os_std::env::var("OSYX_WINRUN_COUNT").is_ok_and(|v| v == "1"), core::sync::atomic::Ordering::Relaxed);
     if COUNT.load(core::sync::atomic::Ordering::Relaxed) {
         user32::start_counter();
     }
     // OSYX_WINRUN_FAILTRACE=1 logs every failing Win32 call (with where in
     // winrun it failed) without the rest of -v's log.
-    if (verbose && os_std::env::var("OSYX_WINRUN_TRACE").is_ok_and(|v| v == "1")) || os_std::env::var("OSYX_WINRUN_FAILTRACE").is_ok_and(|v| v == "1") {
+    if (verbose && os_std::env::var("OSYX_WINRUN_TRACE").is_ok_and(|v| v == "1"))
+        || os_std::env::var("OSYX_WINRUN_FAILTRACE").is_ok_and(|v| v == "1")
+    {
         kernel32::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
     if verbose {
@@ -203,7 +199,8 @@ fn main() -> i32 {
     // consent prompt (see elevation.rs); root and the elevated copy skip it.
     // OSYX_ELEVATE=1 (the shell's "Run as administrator") asks for it whatever the manifest says.
     if os_std::os::getuid().0 != 0
-        && (os_std::env::var("OSYX_ELEVATE").is_ok_and(|v| v == "1") || os_std::fs::read(&exe).is_ok_and(|image| elevation::wanted(&image)))
+        && (os_std::env::var("OSYX_ELEVATE").is_ok_and(|v| v == "1")
+            || os_std::fs::read(&exe).is_ok_and(|image| elevation::wanted(&image)))
     {
         let dir = os_std::env::var("OSYX_WINRUN_CWD").unwrap_or_else(|_| cwd_osyx());
         return elevation::run(&exe, &dir, verbose, &args[1..]);
@@ -251,7 +248,18 @@ fn main() -> i32 {
     // A Windows profile always has these folders (created at first logon);
     // programs read them without asking for creation.
     if os_sys::stat(if home.is_empty() { "/" } else { home }).is_ok() {
-        for d in ["AppData", "AppData/Roaming", "AppData/Local", "AppData/LocalLow", "AppData/Local/Temp", "AppData/Local/Microsoft", "AppData/Local/Microsoft/Windows", "AppData/Local/Microsoft/Windows/INetCache", "AppData/Local/Microsoft/Windows/INetCookies", "AppData/Local/Microsoft/Windows/History"] {
+        for d in [
+            "AppData",
+            "AppData/Roaming",
+            "AppData/Local",
+            "AppData/LocalLow",
+            "AppData/Local/Temp",
+            "AppData/Local/Microsoft",
+            "AppData/Local/Microsoft/Windows",
+            "AppData/Local/Microsoft/Windows/INetCache",
+            "AppData/Local/Microsoft/Windows/INetCookies",
+            "AppData/Local/Microsoft/Windows/History",
+        ] {
             let _ = os_sys::mkdir(&format!("{home}/{d}"), 0o755);
         }
     }
@@ -300,7 +308,11 @@ fn main() -> i32 {
             return 126;
         }
         for (i, b) in spec.bytes().enumerate() {
-            std_override[i] = match b { b'n' => Some(0), b'i' => Some(u64::MAX), _ => None };
+            std_override[i] = match b {
+                b'n' => Some(0),
+                b'i' => Some(u64::MAX),
+                _ => None,
+            };
         }
     }
     let env_strings: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();

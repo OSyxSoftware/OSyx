@@ -111,7 +111,11 @@ fn main() -> i32 {
     env::set_var("USER", "user");
     let profile = env::var("OSYX_ZEN_PROFILE").unwrap_or_else(|_| String::from(PROFILE));
     let trace = env::var("OSYX_ZEN_TRACE").is_ok_and(|value| value == "1");
-    let prefs = if trace { format!("{PREFS}user_pref(\"devtools.console.stdout.chrome\", true);\nuser_pref(\"devtools.console.stdout.content\", true);\nuser_pref(\"browser.dom.window.dump.enabled\", true);\n") } else { String::from(PREFS) };
+    let prefs = if trace {
+        format!("{PREFS}user_pref(\"devtools.console.stdout.chrome\", true);\nuser_pref(\"devtools.console.stdout.content\", true);\nuser_pref(\"browser.dom.window.dump.enabled\", true);\n")
+    } else {
+        String::from(PREFS)
+    };
     if let Err(e) = fs::create_dir_all(&profile).and_then(|_| fs::write(format!("{profile}/user.js"), prefs)) {
         eprintln!("zen: cannot prepare profile: {e}");
         return 1;
@@ -139,7 +143,9 @@ fn main() -> i32 {
             return 2;
         }
     }
-    if !has_target { command.arg("about:blank"); }
+    if !has_target {
+        command.arg("about:blank");
+    }
     // Gecko's launcher flag must follow all URLs (its command-line handler
     // skips the argument immediately after this bootstrap-only flag).
     command.arg("-no-deelevate");

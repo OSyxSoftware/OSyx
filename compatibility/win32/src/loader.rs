@@ -149,7 +149,6 @@ extern "win64" fn attach_on_stack(todo: *const AttachList) -> u64 {
     deliver_attach(unsafe { &*todo }) as u64
 }
 
-
 pub fn exit_thread(code: u32) -> ! {
     crate::oleaut32::thread_exit();
     let frame = EXIT_FRAMES.lock().unwrap().get(&os_sys::gettid()).copied();
@@ -190,13 +189,17 @@ impl BuiltinModule for BuiltinRef {
 fn builtin(name: &'static str, mut exports: Vec<(&'static str, u64)>, mut ordinals: Vec<(u16, u64)>) -> Arc<Builtin> {
     exports.sort_by(|a, b| a.0.cmp(b.0));
     exports.dedup_by(|next, previous| {
-        if next.0 != previous.0 { return false; }
+        if next.0 != previous.0 {
+            return false;
+        }
         previous.1 = next.1;
         true
     });
     ordinals.sort_by_key(|(ordinal, _)| *ordinal);
     ordinals.dedup_by(|next, previous| {
-        if next.0 != previous.0 { return false; }
+        if next.0 != previous.0 {
+            return false;
+        }
         previous.1 = next.1;
         true
     });
@@ -221,10 +224,22 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("ntdll.dll", crate::ntdll::exports(), Vec::new()),
         builtin("kernel32.dll", k32.clone(), Vec::new()),
         builtin("kernelbase.dll", k32, Vec::new()),
-        builtin("user32.dll", [crate::user32::exports(), crate::winsta::exports(), crate::clientapi::user32_exports()].concat(), Vec::new()),
+        builtin(
+            "user32.dll",
+            [crate::user32::exports(), crate::winsta::exports(), crate::clientapi::user32_exports()].concat(),
+            Vec::new()
+        ),
         builtin("gdi32.dll", [crate::user32::gdi_exports(), crate::apiextra::gdi32_exports()].concat(), Vec::new()),
-        builtin("ws2_32.dll", [crate::ws2_32::exports(), crate::apiextra::ws2_32_exports()].concat(), crate::ws2_32::ordinals()),
-        builtin("wsock32.dll", [crate::ws2_32::exports(), crate::apiextra::wsock32_extra().0].concat(), [crate::ws2_32::legacy_ordinals(), crate::apiextra::wsock32_extra().1].concat()),
+        builtin(
+            "ws2_32.dll",
+            [crate::ws2_32::exports(), crate::apiextra::ws2_32_exports()].concat(),
+            crate::ws2_32::ordinals()
+        ),
+        builtin(
+            "wsock32.dll",
+            [crate::ws2_32::exports(), crate::apiextra::wsock32_extra().0].concat(),
+            [crate::ws2_32::legacy_ordinals(), crate::apiextra::wsock32_extra().1].concat()
+        ),
         builtin("mswsock.dll", crate::ws2_32::mswsock::exports(), Vec::new()),
         builtin("imagehlp.dll", crate::imagehlp::exports(), Vec::new()),
         builtin("opengl32.dll", crate::opengl32::exports(), Vec::new()),
@@ -233,10 +248,28 @@ fn builtins() -> Vec<Arc<Builtin>> {
         builtin("iphlpapi.dll", [crate::iphlpapi::exports(), crate::client64::iphlpapi_exports()].concat(), Vec::new()),
         builtin("hid.dll", crate::client64::hid_exports(), Vec::new()),
         builtin("version.dll", [crate::version::exports(), crate::clientapi::version_exports()].concat(), Vec::new()),
-        builtin("psapi.dll", [crate::psapi::exports(), crate::apiextra::psapi_exports(), crate::clientapi::psapi_exports()].concat(), Vec::new()),
+        builtin(
+            "psapi.dll",
+            [crate::psapi::exports(), crate::apiextra::psapi_exports(), crate::clientapi::psapi_exports()].concat(),
+            Vec::new()
+        ),
         builtin(
             "advapi32.dll",
-            [crate::security::exports(), crate::tokens::exports(), crate::objsec::exports(), crate::eventlog::exports(), crate::registry::exports(), crate::etw::exports(), crate::credman::exports(), crate::accounts::exports(), crate::capi::exports(), crate::cryptbase::exports(), crate::apiextra::advapi32_exports(), crate::clientapi::advapi32_exports()].concat(),
+            [
+                crate::security::exports(),
+                crate::tokens::exports(),
+                crate::objsec::exports(),
+                crate::eventlog::exports(),
+                crate::registry::exports(),
+                crate::etw::exports(),
+                crate::credman::exports(),
+                crate::accounts::exports(),
+                crate::capi::exports(),
+                crate::cryptbase::exports(),
+                crate::apiextra::advapi32_exports(),
+                crate::clientapi::advapi32_exports()
+            ]
+            .concat(),
             Vec::new()
         ),
         builtin(
@@ -245,11 +278,23 @@ fn builtins() -> Vec<Arc<Builtin>> {
             crate::shlwapi::ordinals(),
         ),
         // ole32's COM entry points live in combase on Windows.
-        builtin("combase.dll", [crate::shlwapi::combase_exports(), crate::ole32::exports(), crate::client64::ole32_exports()].concat(), Vec::new()),
+        builtin(
+            "combase.dll",
+            [crate::shlwapi::combase_exports(), crate::ole32::exports(), crate::client64::ole32_exports()].concat(),
+            Vec::new()
+        ),
         builtin("ucrtbase.dll", crate::ucrt::exports(), Vec::new()),
-        builtin("shell32.dll", [crate::shell32::exports(), crate::commdlg::shell_exports(), crate::client64::shell32_exports()].concat(), crate::shell32::ordinals()),
+        builtin(
+            "shell32.dll",
+            [crate::shell32::exports(), crate::commdlg::shell_exports(), crate::client64::shell32_exports()].concat(),
+            crate::shell32::ordinals()
+        ),
         builtin("comdlg32.dll", crate::commdlg::exports(), Vec::new()),
-        builtin("comctl32.dll", [crate::comctl32::exports(), crate::apiextra::comctl32_exports()].concat(), crate::comctl32::ordinals()),
+        builtin(
+            "comctl32.dll",
+            [crate::comctl32::exports(), crate::apiextra::comctl32_exports()].concat(),
+            crate::comctl32::ordinals()
+        ),
         // Rich edit: the classes (RichEdit20W, RICHEDIT50W, ...) are user32's.
         builtin("riched20.dll", Vec::new(), Vec::new()),
         builtin("riched32.dll", Vec::new(), Vec::new()),
@@ -343,7 +388,11 @@ fn schema() -> Vec<u8> {
     }
     b.add("api-ms-win-core-rtlsupport-l1-2-0", "ntdll.dll", &[]).expect("valid contract name");
     // The package and AppPolicy queries (the CRT probes l1-1-2).
-    for c in ["api-ms-win-appmodel-runtime-l1-1-0", "api-ms-win-appmodel-runtime-l1-1-1", "api-ms-win-appmodel-runtime-l1-1-2"] {
+    for c in [
+        "api-ms-win-appmodel-runtime-l1-1-0",
+        "api-ms-win-appmodel-runtime-l1-1-1",
+        "api-ms-win-appmodel-runtime-l1-1-2",
+    ] {
         b.add(c, "kernel32.dll", &[("kernel32.dll", "kernelbase.dll")]).expect("valid contract name");
     }
     b.add("api-ms-win-shcore-scaling-l1-1-1", "shcore.dll", &[]).expect("valid contract name");
@@ -359,7 +408,20 @@ fn schema() -> Vec<u8> {
     b.add("ext-ms-win-ntuser-window-l1-1-4", "user32.dll", &[]).expect("valid contract name");
     b.add("ext-ms-win-gdi-dc-l1-2-0", "gdi32.dll", &[]).expect("valid contract name");
     // The Universal C Runtime.
-    for c in ["runtime", "heap", "string", "convert", "stdio", "locale", "math", "environment", "filesystem", "time", "utility", "multibyte"] {
+    for c in [
+        "runtime",
+        "heap",
+        "string",
+        "convert",
+        "stdio",
+        "locale",
+        "math",
+        "environment",
+        "filesystem",
+        "time",
+        "utility",
+        "multibyte",
+    ] {
         b.add(&alloc::format!("api-ms-win-crt-{c}-l1-1-0"), "ucrtbase.dll", &[]).expect("valid contract name");
     }
     b.build()
@@ -369,14 +431,20 @@ fn schema() -> Vec<u8> {
 /// dependency auditing. This does not claim full semantics for an API.
 pub fn print_capabilities() {
     for module in builtins() {
-        for (name, _) in &module.by_name { os_std::println!("WIN_EXPORT {} {}", module.name, name); }
-        for (ordinal, _) in &module.by_ordinal { os_std::println!("WIN_ORDINAL {} #{}", module.name, ordinal); }
+        for (name, _) in &module.by_name {
+            os_std::println!("WIN_EXPORT {} {}", module.name, name);
+        }
+        for (ordinal, _) in &module.by_ordinal {
+            os_std::println!("WIN_ORDINAL {} #{}", module.name, ordinal);
+        }
     }
     let ns = schema();
     if let Ok(s) = Schema::parse(&ns) {
         for i in 0..s.len() {
             if let Ok(name) = s.name(i) {
-                if let Ok(Some(host)) = s.resolve(&name, None) { os_std::println!("WIN_APISET {} {}", name, host); }
+                if let Ok(Some(host)) = s.resolve(&name, None) {
+                    os_std::println!("WIN_APISET {} {}", name, host);
+                }
             }
         }
     }
@@ -527,11 +595,8 @@ impl Host for WinHost {
         let base = if fixed {
             mem::alloc_fixed(preferred, size as usize, mem::Prot::ReadWrite)
         } else {
-            let at_preferred = if preferred == 0 {
-                None
-            } else {
-                mem::alloc_fixed(preferred, size as usize, mem::Prot::ReadWrite)
-            };
+            let at_preferred =
+                if preferred == 0 { None } else { mem::alloc_fixed(preferred, size as usize, mem::Prot::ReadWrite) };
             at_preferred.or_else(|| mem::alloc_pages(size as usize, mem::Prot::ReadWrite))
         };
         let base = base.ok_or(LinkError::NoMemory)?;
@@ -585,7 +650,8 @@ impl Host for WinHost {
         if self.images.iter().any(|i| address >= i.base && address < i.base + i.size) {
             return address;
         }
-        let symbol = symbol.or_else(|| (ordinal == 17 && address == crate::comctl32::init_address()).then_some("InitCommonControls"));
+        let symbol = symbol
+            .or_else(|| (ordinal == 17 && address == crate::comctl32::init_address()).then_some("InitCommonControls"));
         // shlwapi's ordinal-only IUnknown_QueryService (re-exported by shcore).
         let symbol = symbol.or_else(|| {
             (ordinal == 176 && address == crate::shlwapi::query_service_address()).then_some("IUnknown_QueryService")
@@ -602,7 +668,8 @@ impl Host for WinHost {
         match self.bridge.as_ref() {
             Some(bridge) => bridge.import(symbol, address),
             None => wow64::import_active(symbol, address),
-        }.map_or(0, u64::from)
+        }
+        .map_or(0, u64::from)
     }
 
     fn commit(&mut self, base: u64, _image: Self::Image, prot: &[Protection]) -> Result<(), LinkError> {
@@ -658,7 +725,9 @@ impl Host for WinHost {
         while at < size {
             let len = (size - at).min(WARM_RUN) as usize;
             // SAFETY: `base + at` is inside the fresh writable reservation.
-            unsafe { let _ = os_sys::prefault((base + at) as *mut u8, len); };
+            unsafe {
+                let _ = os_sys::prefault((base + at) as *mut u8, len);
+            };
             at += len as u64;
         }
         false
@@ -698,12 +767,20 @@ const PINNED: u32 = u32::MAX;
 
 /// One more reference: a pinned count stays pinned, others stop below it.
 fn add_ref(refs: u32) -> u32 {
-    if refs == PINNED { PINNED } else { refs.saturating_add(1).min(PINNED - 1) }
+    if refs == PINNED {
+        PINNED
+    } else {
+        refs.saturating_add(1).min(PINNED - 1)
+    }
 }
 
 /// One reference less: a pinned count stays pinned.
 fn drop_ref(refs: u32) -> u32 {
-    if refs == PINNED { PINNED } else { refs.saturating_sub(1) }
+    if refs == PINNED {
+        PINNED
+    } else {
+        refs.saturating_sub(1)
+    }
 }
 
 struct ModState {
@@ -800,7 +877,14 @@ fn register_new(l: &mut Loader, root: usize) -> Vec<(u64, u64, Vec<u64>, bool)> 
     let order = l.linker.init_order(root);
     while l.state.len() < l.linker.modules.len() {
         // Held by whatever imports it until LoadLibrary says otherwise.
-        l.state.push(ModState { ldr: 0, refs: 1, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new() });
+        l.state.push(ModState {
+            ldr: 0,
+            refs: 1,
+            attached: false,
+            tls_callbacks: Vec::new(),
+            no_thread_calls: false,
+            pristine: Vec::new(),
+        });
     }
     let mut todo = Vec::new();
     for i in order {
@@ -980,7 +1064,14 @@ pub fn disable_thread_calls(h: u64) -> Result<(), u32> {
     with(|l| {
         let i = module_by_handle(l, h).ok_or(ERROR_MOD_NOT_FOUND)?;
         while l.state.len() <= i {
-            l.state.push(ModState { ldr: 0, refs: 0, attached: false, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new() });
+            l.state.push(ModState {
+                ldr: 0,
+                refs: 0,
+                attached: false,
+                tls_callbacks: Vec::new(),
+                no_thread_calls: false,
+                pristine: Vec::new(),
+            });
         }
         l.state[i].no_thread_calls = true;
         Ok(())
@@ -1172,10 +1263,9 @@ pub fn run_pe32(bytes: Vec<u8>, args: &[String], cmd: &str, env: &[String]) -> R
         path::to_osyx(&program, &cwd).unwrap_or(program.clone())
     };
     let name = osyx.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("program.exe").to_string();
-    let dir = osyx.rsplit_once('/').map_or_else(
-        || String::from("/"),
-        |(d, _)| if d.is_empty() { String::from("/") } else { String::from(d) },
-    );
+    let dir = osyx
+        .rsplit_once('/')
+        .map_or_else(|| String::from("/"), |(d, _)| if d.is_empty() { String::from("/") } else { String::from(d) });
     let schema_bytes: &'static [u8] = Vec::leak(schema());
     let schema = Schema::parse(schema_bytes).map_err(|e| alloc::format!("API set schema: {e:?}"))?;
     let bridge = wow64::Bridge::new().map_err(|e| alloc::format!("32-bit bridge: {e}"))?;
@@ -1245,17 +1335,27 @@ pub fn run_pe32(bytes: Vec<u8>, args: &[String], cmd: &str, env: &[String]) -> R
     teb::install(main_teb);
     crate::kernel32::register_main_thread();
     crate::kernel32::EXE_STACK_RESERVE.store((top - limit) as usize, core::sync::atomic::Ordering::Relaxed);
-    let attaches: Vec<(u32, u32)> = order.iter().filter_map(|&i| {
-        let m = &linker.modules[i];
-        match &m.kind {
-            Kind::Pe { is_dll: true, .. } if m.entry() != 0 => Some((m.base as u32, m.entry() as u32)),
-            _ => None,
-        }
-    }).collect();
+    let attaches: Vec<(u32, u32)> = order
+        .iter()
+        .filter_map(|&i| {
+            let m = &linker.modules[i];
+            match &m.kind {
+                Kind::Pe { is_dll: true, .. } if m.entry() != 0 => Some((m.base as u32, m.entry() as u32)),
+                _ => None,
+            }
+        })
+        .collect();
     // Keep the PE32 linker for GetProcAddress and LoadLibrary.
-    let mut state: Vec<ModState> = (0..linker.modules.len()).map(|_| ModState {
-        ldr: 0, refs: 1, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new(),
-    }).collect();
+    let mut state: Vec<ModState> = (0..linker.modules.len())
+        .map(|_| ModState {
+            ldr: 0,
+            refs: 1,
+            attached: true,
+            tls_callbacks: Vec::new(),
+            no_thread_calls: false,
+            pristine: Vec::new(),
+        })
+        .collect();
     let mut process_callbacks = Vec::new();
     for (i, cbs) in tls_callbacks {
         process_callbacks.push((linker.modules[i].base as u32, cbs.clone()));
@@ -1321,10 +1421,13 @@ pub fn modules() -> Vec<ModuleInfo> {
                             stamp = pe.coff().time_date_stamp;
                             checksum = pe.optional().check_sum;
                             if let Ok(Some(e)) = pe.exports() {
-                                let names: BTreeMap<u16, &str> = e.names().filter_map(|r| r.ok()).map(|(n, o)| (o, n)).collect();
+                                let names: BTreeMap<u16, &str> =
+                                    e.names().filter_map(|r| r.ok()).map(|(n, o)| (o, n)).collect();
                                 for (ordinal, target) in e.functions().filter_map(|r| r.ok()) {
                                     if let osyx_pe::ExportTarget::Rva(rva) = target {
-                                        let name = names.get(&ordinal).map_or_else(|| alloc::format!("Ordinal{ordinal}"), |n| String::from(*n));
+                                        let name = names
+                                            .get(&ordinal)
+                                            .map_or_else(|| alloc::format!("Ordinal{ordinal}"), |n| String::from(*n));
                                         symbols.push((m.base + rva as u64, name));
                                     }
                                 }
@@ -1338,7 +1441,15 @@ pub fn modules() -> Vec<ModuleInfo> {
                     }
                 }
                 symbols.sort();
-                ModuleInfo { name: m.name.clone(), path: l.linker.host.file_name(&m.name), base, size, time_date_stamp: stamp, checksum, symbols }
+                ModuleInfo {
+                    name: m.name.clone(),
+                    path: l.linker.host.file_name(&m.name),
+                    base,
+                    size,
+                    time_date_stamp: stamp,
+                    checksum,
+                    symbols,
+                }
             })
             .collect()
     })
@@ -1359,7 +1470,9 @@ pub fn get_module_handle(name: Option<&str>) -> Option<u64> {
     // ntdll, kernel32 and kernelbase are in every Windows process, whether
     // the program imports them or not: these built-ins load when first named.
     match (found, base) {
-        (None, Some(n)) if ["ntdll.dll", "kernel32.dll", "kernelbase.dll"].contains(&n.as_str()) => load_library(&n).ok(),
+        (None, Some(n)) if ["ntdll.dll", "kernel32.dll", "kernelbase.dll"].contains(&n.as_str()) => {
+            load_library(&n).ok()
+        }
         (f, _) => f,
     }
 }
@@ -1379,11 +1492,7 @@ pub fn module_file_name(h: Option<u64>, exe_path: &str) -> Option<String> {
             None => l.exe,
             Some(h) => module_by_handle(l, h)?,
         };
-        Some(if i == l.exe {
-            path::to_windows(exe_path)
-        } else {
-            l.linker.host.file_name(&l.linker.modules[i].name)
-        })
+        Some(if i == l.exe { path::to_windows(exe_path) } else { l.linker.host.file_name(&l.linker.modules[i].name) })
     })
 }
 
@@ -1393,12 +1502,20 @@ pub fn get_proc_address(h: u64, sym: Symbol<'_>) -> Result<u64, u32> {
         let i = module_by_handle(l, h).ok_or(ERROR_MOD_NOT_FOUND)?;
         let importer = l.linker.modules[l.exe].name.clone();
         let address = l.linker.resolve(i, sym, &importer, 0).map_err(|_| ERROR_PROC_NOT_FOUND)?;
-        if !wow64::is_active() || l.linker.host.images.iter().any(|img| address >= img.base && address < img.base + img.size) {
+        if !wow64::is_active()
+            || l.linker.host.images.iter().any(|img| address >= img.base && address < img.base + img.size)
+        {
             return Ok(address);
         }
         let name = match sym {
             Symbol::Name(name) => Some(name),
-            Symbol::Ordinal(_) => l.linker.host.builtins.iter().flat_map(|b| b.by_name.iter()).find_map(|(n, a)| (*a == address).then_some(*n)),
+            Symbol::Ordinal(_) => l
+                .linker
+                .host
+                .builtins
+                .iter()
+                .flat_map(|b| b.by_name.iter())
+                .find_map(|(n, a)| (*a == address).then_some(*n)),
         };
         name.and_then(|name| wow64::import_active(name, address)).map(u64::from).ok_or(ERROR_PROC_NOT_FOUND)
     })
@@ -1474,13 +1591,14 @@ pub(crate) fn resource_names(module: u64, kind: &ResId) -> Result<Vec<ResId>, u3
 
 /// Numeric RT_DIALOG resource from a mapped PE module, copied outside lock.
 pub(crate) fn numeric_resource(module: u64, kind: u16, name: u64) -> Result<Vec<u8>, u32> {
-    if name == 0 || name >= 0x10000 { return Err(50); }
+    if name == 0 || name >= 0x10000 {
+        return Err(50);
+    }
     with(|l| {
         let index = if module == 0 { l.exe } else { module_by_handle(l, module).ok_or(ERROR_MOD_NOT_FOUND)? };
         let Kind::Pe { file, .. } = &l.linker.modules[index].kind else { return Err(1812) };
         let pe = PeFile::parse_any(file.as_ref()).map_err(|_| 193u32)?;
-        pe.resource(kind, Some(name as u16), None).map_err(|_| 1812u32)?
-            .map(|data| data.to_vec()).ok_or(1813)
+        pe.resource(kind, Some(name as u16), None).map_err(|_| 1812u32)?.map(|data| data.to_vec()).ok_or(1813)
     })
 }
 
@@ -1521,7 +1639,14 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         })?;
         let todo = register_new(l, i);
         while l.state.len() < l.linker.modules.len() {
-            l.state.push(ModState { ldr: 0, refs: 0, attached: true, tls_callbacks: Vec::new(), no_thread_calls: false, pristine: Vec::new() });
+            l.state.push(ModState {
+                ldr: 0,
+                refs: 0,
+                attached: true,
+                tls_callbacks: Vec::new(),
+                no_thread_calls: false,
+                pristine: Vec::new(),
+            });
         }
         // The DLLs linked with this one are held by it: only the DLL
         // LoadLibrary named is released by the matching FreeLibrary.
@@ -1549,11 +1674,15 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
         // notification callbacks.
         let loaded: Vec<(u64, u64)> = todo
             .iter()
-            .filter_map(|t| (0..l.linker.modules.len()).find(|&k| l.linker.modules[k].base == t.0).map(|k| (l.state[k].ldr, t.0)))
+            .filter_map(|t| {
+                (0..l.linker.modules.len()).find(|&k| l.linker.modules[k].base == t.0).map(|k| (l.state[k].ldr, t.0))
+            })
             .collect();
         (todo, module_handle(l, i), loaded)
     };
-    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) || crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed) {
+    if crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed)
+        || crate::kernel32::TRACE.load(core::sync::atomic::Ordering::Relaxed)
+    {
         os_std::eprintln!("winrun: loaded {name} at {h:#x}");
     }
     if !todo.is_empty() && !wow64::is_active() {
@@ -1575,10 +1704,14 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
     notify_dlls(1, &loaded);
     let attached = if wow64::is_active() {
         todo.iter().all(|(base, entry, callbacks, _)| {
-            for &callback in callbacks { wow64::call32(callback as u32, &[*base as u32, DLL_PROCESS_ATTACH, 0]); }
+            for &callback in callbacks {
+                wow64::call32(callback as u32, &[*base as u32, DLL_PROCESS_ATTACH, 0]);
+            }
             *entry == 0 || wow64::call32(*entry as u32, &[*base as u32, DLL_PROCESS_ATTACH, 0]) != 0
         })
-    } else { deliver_attach(&todo) };
+    } else {
+        deliver_attach(&todo)
+    };
     if !attached {
         // The image may stay mapped, but a later LoadLibrary must retry
         // initialization instead of returning an uninitialized module.
@@ -1588,7 +1721,9 @@ pub fn load_library(name: &str) -> Result<u64, u32> {
                     l.state[i].attached = false;
                 }
             }
-            if let Some(i) = module_by_handle(l, h) { l.state[i].refs = drop_ref(l.state[i].refs); }
+            if let Some(i) = module_by_handle(l, h) {
+                l.state[i].refs = drop_ref(l.state[i].refs);
+            }
         });
         return Err(ERROR_DLL_INIT_FAILED);
     }
@@ -1663,7 +1798,8 @@ fn notify_dlls(reason: u32, dlls: &[(u64, u64)]) {
         let data = DllNotificationData { flags: 0, full_name: ldr + 0x48, base_name: ldr + 0x58, base, size };
         for &(_, callback, context) in &callbacks {
             // SAFETY: a callback the program registered, with its context.
-            let f: extern "win64" fn(u32, *const DllNotificationData, u64) = unsafe { core::mem::transmute(callback as usize) };
+            let f: extern "win64" fn(u32, *const DllNotificationData, u64) =
+                unsafe { core::mem::transmute(callback as usize) };
             f(reason, &data, context);
         }
     }
@@ -1780,7 +1916,9 @@ pub fn try_images() -> Option<Vec<(u64, u64, String)>> {
             .host
             .images
             .iter()
-            .filter_map(|i| l.linker.modules.iter().find(|m| m.base == i.base).map(|m| (i.base, i.size, m.name.clone())))
+            .filter_map(|i| {
+                l.linker.modules.iter().find(|m| m.base == i.base).map(|m| (i.base, i.size, m.name.clone()))
+            })
             .collect(),
     )
 }

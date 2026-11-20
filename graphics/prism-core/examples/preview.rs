@@ -33,44 +33,71 @@ fn main() {
     };
     let shell = c.connect(1);
     hello(&mut c, shell, 1);
-    let window = |c: &mut Compositor, id, local, role, flags, geo: (i32, i32, u32, u32), title: &str, pixels: Vec<u32>| {
-        send(c, id, Request::CreateSurface { surface: local }, None);
-        send(
-            c,
-            id,
-            Request::CreateWindow {
-                window: local,
-                surface: local,
-                parent: 0,
-                role,
-                flags,
-                x: geo.0,
-                y: geo.1,
-                width: geo.2,
-                height: geo.3,
-                min_width: 0,
-                min_height: 0,
-                title: title.into(),
-            },
-            None,
-        );
-        send(
-            c,
-            id,
-            Request::AttachBuffer { surface: local, buffer: local, width: geo.2, height: geo.3, stride: geo.2 * 4, format: 1, offset: 0 },
-            Some(Box::new(pixels)),
-        );
-        send(c, id, Request::Commit { surface: local }, None);
-    };
+    let window =
+        |c: &mut Compositor, id, local, role, flags, geo: (i32, i32, u32, u32), title: &str, pixels: Vec<u32>| {
+            send(c, id, Request::CreateSurface { surface: local }, None);
+            send(
+                c,
+                id,
+                Request::CreateWindow {
+                    window: local,
+                    surface: local,
+                    parent: 0,
+                    role,
+                    flags,
+                    x: geo.0,
+                    y: geo.1,
+                    width: geo.2,
+                    height: geo.3,
+                    min_width: 0,
+                    min_height: 0,
+                    title: title.into(),
+                },
+                None,
+            );
+            send(
+                c,
+                id,
+                Request::AttachBuffer {
+                    surface: local,
+                    buffer: local,
+                    width: geo.2,
+                    height: geo.3,
+                    stride: geo.2 * 4,
+                    format: 1,
+                    offset: 0,
+                },
+                Some(Box::new(pixels)),
+            );
+            send(c, id, Request::Commit { surface: local }, None);
+        };
     window(&mut c, shell, 1, Role::Desktop, 0, (0, 0, w, h), "desktop", gradient(w, h));
     let panel = vec![0x161B26u32; (w * 48) as usize];
     window(&mut c, shell, 2, Role::Panel, 0, (0, h as i32 - 48, w, 48), "panel", panel);
     let a = c.connect(2);
     hello(&mut c, a, 0);
-    window(&mut c, a, 1, Role::Normal, window_flags::DECORATED | window_flags::RESIZABLE, (120, 110, 560, 360), "Files — /home/user", vec![0x1E2430; 560 * 360]);
+    window(
+        &mut c,
+        a,
+        1,
+        Role::Normal,
+        window_flags::DECORATED | window_flags::RESIZABLE,
+        (120, 110, 560, 360),
+        "Files — /home/user",
+        vec![0x1E2430; 560 * 360],
+    );
     let b = c.connect(3);
     hello(&mut c, b, 0);
-    window(&mut c, b, 1, Role::Normal, window_flags::DECORATED | window_flags::RESIZABLE, (520, 260, 600, 380), "AXIS Terminal", vec![0x0F131B; 600 * 380]);
+    window(
+        &mut c,
+        b,
+        1,
+        Role::Normal,
+        window_flags::DECORATED | window_flags::RESIZABLE,
+        (520, 260, 600, 380),
+        "AXIS Terminal",
+        vec![0x0F131B; 600 * 380],
+    );
     // Move the pointer over the second window's close button.
     let mut fb = vec![0u32; (w * h) as usize];
     let mut s = Surface::new(&mut fb, w, h, w).unwrap();

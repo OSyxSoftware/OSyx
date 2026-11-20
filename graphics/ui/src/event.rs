@@ -46,22 +46,39 @@ impl KeyEvent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
-    PointerMove { x: i32, y: i32 },
+    PointerMove {
+        x: i32,
+        y: i32,
+    },
     /// `clicks`: 1 for a single click, 2 for a double click, ...
-    PointerDown { x: i32, y: i32, button: u16, clicks: u8 },
-    PointerUp { x: i32, y: i32, button: u16 },
+    PointerDown {
+        x: i32,
+        y: i32,
+        button: u16,
+        clicks: u8,
+    },
+    PointerUp {
+        x: i32,
+        y: i32,
+        button: u16,
+    },
     PointerLeave,
     /// Wheel detents: `dy` > 0 scrolls up (away from the user).
-    Wheel { x: i32, y: i32, dy: i32 },
+    Wheel {
+        x: i32,
+        y: i32,
+        dy: i32,
+    },
     Key(KeyEvent),
 }
 
 impl Event {
     pub fn position(&self) -> Option<(i32, i32)> {
         match *self {
-            Event::PointerMove { x, y } | Event::PointerDown { x, y, .. } | Event::PointerUp { x, y, .. } | Event::Wheel { x, y, .. } => {
-                Some((x, y))
-            }
+            Event::PointerMove { x, y }
+            | Event::PointerDown { x, y, .. }
+            | Event::PointerUp { x, y, .. }
+            | Event::Wheel { x, y, .. } => Some((x, y)),
             _ => None,
         }
     }
@@ -115,7 +132,10 @@ impl Default for ClickCounter {
 impl ClickCounter {
     pub fn press(&mut self, now_ms: u64, x: i32, y: i32, button: u16) -> u8 {
         let repeat = self.last.is_some_and(|(t, lx, ly, b)| {
-            b == button && now_ms.saturating_sub(t) <= self.interval_ms && (x - lx).abs() <= self.slop && (y - ly).abs() <= self.slop
+            b == button
+                && now_ms.saturating_sub(t) <= self.interval_ms
+                && (x - lx).abs() <= self.slop
+                && (y - ly).abs() <= self.slop
         });
         self.count = if repeat { self.count.saturating_add(1) } else { 1 };
         self.last = Some((now_ms, x, y, button));

@@ -22,12 +22,12 @@
 #![no_std]
 #![no_main]
 
-#[path = "../screenshot.rs"]
-mod screenshot;
 #[path = "../recorder.rs"]
 mod recorder;
 #[path = "../scheme.rs"]
 mod scheme;
+#[path = "../screenshot.rs"]
+mod screenshot;
 #[path = "../user_save.rs"]
 mod user_save;
 
@@ -60,12 +60,15 @@ struct ShmBuffer {
 
 impl PixelSource for ShmBuffer {
     fn words(&self) -> &[u32] {
-        if TRACE_BUFFERS.load(Ordering::Relaxed) && self.map.len() > 5 * 1024 * 1024 && self.map.len() < 7 * 1024 * 1024 {
+        if TRACE_BUFFERS.load(Ordering::Relaxed) && self.map.len() > 5 * 1024 * 1024 && self.map.len() < 7 * 1024 * 1024
+        {
             static READS: os_std::sync::atomic::AtomicU32 = os_std::sync::atomic::AtomicU32::new(0);
             if READS.fetch_add(1, Ordering::Relaxed) < 64 {
                 let pixel = unsafe { self.map.as_ptr().cast::<u32>().read_volatile() };
-                let samples: Vec<u32> = [8 * 1280 + 8, 100 * 1280 + 100, 500 * 1280 + 500].into_iter()
-                    .map(|i| unsafe { self.map.as_ptr().cast::<u32>().add(i).read_volatile() }).collect();
+                let samples: Vec<u32> = [8 * 1280 + 8, 100 * 1280 + 100, 500 * 1280 + 500]
+                    .into_iter()
+                    .map(|i| unsafe { self.map.as_ptr().cast::<u32>().add(i).read_volatile() })
+                    .collect();
                 println!("prism: buffer snapshot size={} first={pixel:x} samples={samples:x?}", self.map.len());
             }
         }
@@ -517,9 +520,7 @@ impl Prism {
                     Ok(()) => {
                         if TRACE_EVENTS.load(Ordering::Relaxed) && m.len() >= 2 {
                             let op = u16::from_le_bytes([m[0], m[1]]);
-                            if op == prism_proto::opcode::KEY_EVENT
-                                || op == prism_proto::opcode::POINTER_EVENT
-                            {
+                            if op == prism_proto::opcode::KEY_EVENT || op == prism_proto::opcode::POINTER_EVENT {
                                 println!("prism: t={} sent client={} event={op:#x}", now_ms(start), c.id);
                             }
                         }
@@ -630,10 +631,15 @@ impl Prism {
             screenshot::encode_png(&part, w, h)
         };
         let (dir, name, shown) = Self::capture_path("Pictures", "Screenshot", "png");
-        let result = user_save::save(&dir, &name, user_save::Source::Bytes(&png)).map(|()| (format!("{dir}/{name}"), shown));
+        let result =
+            user_save::save(&dir, &name, user_save::Source::Bytes(&png)).map(|()| (format!("{dir}/{name}"), shown));
         match result {
             Ok((path, shown)) => {
-                println!("prism: screenshot {w}x{h} saved to {path} ({} bytes, {} ms)", png.len(), t0.elapsed().as_millis());
+                println!(
+                    "prism: screenshot {w}x{h} saved to {path} ({} bytes, {} ms)",
+                    png.len(),
+                    t0.elapsed().as_millis()
+                );
                 if let Some(entry) = prism_proto::clipboard_files_entry(core::slice::from_ref(&path), false) {
                     self.comp.set_clipboard(vec![entry, prism_proto::clipboard_text_entry(&path)]);
                 }
@@ -819,7 +825,9 @@ impl Prism {
         }
         let (x, y, shape) = self.comp.cursor_state();
         let Some((image, hot)) = self.comp.cursor_image(system::CURSOR_SIZE) else { return };
-        match system::display_cursor(Some(&image), hot).and_then(|()| system::display_cursor_move(x.max(0) as u32, y.max(0) as u32)) {
+        match system::display_cursor(Some(&image), hot)
+            .and_then(|()| system::display_cursor_move(x.max(0) as u32, y.max(0) as u32))
+        {
             Ok(()) => {
                 self.hw_cursor = true;
                 self.hw_cursor_shape = Some(shape);

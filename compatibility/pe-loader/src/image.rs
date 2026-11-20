@@ -148,7 +148,8 @@ pub fn relocatable(pe: &PeFile<'_>) -> bool {
     if pe.directory(osyx_pe::dir::BASERELOC).is_present() {
         return true;
     }
-    pe.coff().characteristics & IMAGE_FILE_RELOCS_STRIPPED == 0 && pe.optional().dll_characteristics & osyx_pe::DLLCHAR_DYNAMIC_BASE != 0
+    pe.coff().characteristics & IMAGE_FILE_RELOCS_STRIPPED == 0
+        && pe.optional().dll_characteristics & osyx_pe::DLLCHAR_DYNAMIC_BASE != 0
 }
 
 /// Applies base relocations for loading at `base` instead of the linked
@@ -231,7 +232,8 @@ pub fn protections(pe: &PeFile<'_>) -> Result<Vec<Protection>, ImageError> {
         if b & 6 == 6 {
             return Err(ImageError::WritableCode(i as u32 * PAGE));
         }
-        let prot = Protection { rva: i as u32 * PAGE, size: PAGE, read: b != 0, write: b & 2 != 0, execute: b & 4 != 0 };
+        let prot =
+            Protection { rva: i as u32 * PAGE, size: PAGE, read: b != 0, write: b & 2 != 0, execute: b & 4 != 0 };
         match out.last_mut() {
             Some(l) if (l.read, l.write, l.execute) == (prot.read, prot.write, prot.execute) => l.size += PAGE,
             _ => out.push(prot),

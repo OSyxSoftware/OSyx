@@ -237,7 +237,12 @@ impl Capabilities {
         let op_end = c.cap_length as u64 + op::portsc(c.max_ports) + 0x10;
         let rt_end = c.runtime_offset + rt::interrupter(0) + 0x20;
         let db_end = c.doorbell_offset + 4 * (c.max_slots as u64 + 1);
-        if op_end > bar_len || rt_end > bar_len || db_end > bar_len || c.runtime_offset < 0x20 || c.doorbell_offset < 0x20 {
+        if op_end > bar_len
+            || rt_end > bar_len
+            || db_end > bar_len
+            || c.runtime_offset < 0x20
+            || c.doorbell_offset < 0x20
+        {
             return Err(CapError::OutOfBar);
         }
         if c.xecp != 0 && c.xecp + 8 > bar_len {

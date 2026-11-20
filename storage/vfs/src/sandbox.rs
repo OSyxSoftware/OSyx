@@ -63,15 +63,16 @@ impl PathPolicy {
     pub fn may_inspect_ancestor(&self, resolved: &str) -> bool {
         canonical(resolved).is_ok()
             && self.rules.iter().any(|(prefix, access)| {
-                (access.read || access.write || access.exec)
-                    && prefix != resolved && path::is_within(prefix, resolved)
+                (access.read || access.write || access.exec) && prefix != resolved && path::is_within(prefix, resolved)
             })
     }
 }
 
 fn canonical(p: &str) -> Result<()> {
     path::validate(p)?;
-    if !p.starts_with('/') || (p != "/" && (p.ends_with('/') || p.split('/').skip(1).any(|c| c.is_empty() || c == "." || c == ".."))) {
+    if !p.starts_with('/')
+        || (p != "/" && (p.ends_with('/') || p.split('/').skip(1).any(|c| c.is_empty() || c == "." || c == "..")))
+    {
         return Err(Errno::InvalidArgument);
     }
     Ok(())

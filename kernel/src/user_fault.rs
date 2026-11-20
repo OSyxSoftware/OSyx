@@ -26,7 +26,11 @@ struct Pending {
 /// handler's own image (winrun, linked at 0x4000_0000) on the stack, for
 /// addr2line.
 fn report_nested(tid: u64, first: u64, f: &TrapFrame) {
-    crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} while handling its fault at rip {first:#x}; handler frames:{}", f.rip, stack_frames(f.rsp, 2048, false));
+    crate::kprintln!(
+        "user fault: thread {tid} faulted at rip {:#x} while handling its fault at rip {first:#x}; handler frames:{}",
+        f.rip,
+        stack_frames(f.rsp, 2048, false)
+    );
 }
 
 /// The code addresses seen most often in the user stack above `rsp` (up
@@ -191,7 +195,9 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
         drop(registry);
         match first {
             Some(first) => report_nested(tid, first, f),
-            None => crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} with no fault handler entry", f.rip),
+            None => {
+                crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} with no fault handler entry", f.rip)
+            }
         }
         return false;
     }
@@ -210,7 +216,11 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
     let mask = u32::from_le_bytes(c.fx[28..32].try_into().unwrap());
     let Some(addr) = f.rsp.checked_sub(128 + core::mem::size_of::<Context>() as u64).map(|n| n & !63) else {
         drop(registry);
-        crate::kprintln!("user fault: thread {tid} faulted at rip {:#x} with rsp {:#x}: no room for its context", f.rip, f.rsp);
+        crate::kprintln!(
+            "user fault: thread {tid} faulted at rip {:#x} with rsp {:#x}: no room for its context",
+            f.rip,
+            f.rsp
+        );
         return false;
     };
     let Some(stack) = addr.checked_sub(8) else { return false };
@@ -226,7 +236,10 @@ pub fn deliver(f: &mut TrapFrame) -> bool {
             f.rsp,
             stack_frames(f.rsp, 16 << 10, true)
         );
-        crate::kprintln!("user fault: thread {tid}: most frequent code addresses on its stack:{}", frequent_frames(f.rsp, 8 << 20));
+        crate::kprintln!(
+            "user fault: thread {tid}: most frequent code addresses on its stack:{}",
+            frequent_frames(f.rsp, 8 << 20)
+        );
         return false;
     }
     let fs32 = if compat { sched::current_fs32_base() } else { 0 };

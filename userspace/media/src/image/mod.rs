@@ -52,7 +52,11 @@ pub fn decode(data: &[u8]) -> Result<Picture, String> {
         bmp::decode(data, false)
     } else if data.len() >= 6 && data[..4] == [0, 0, 1, 0] {
         ico(data)
-    } else if data.starts_with(b"II*\0") || data.starts_with(b"MM\0*") || data.starts_with(b"II+\0") || data.starts_with(b"MM\0+") {
+    } else if data.starts_with(b"II*\0")
+        || data.starts_with(b"MM\0*")
+        || data.starts_with(b"II+\0")
+        || data.starts_with(b"MM\0+")
+    {
         tiff::decode(data)
     } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
         webp::decode(data)

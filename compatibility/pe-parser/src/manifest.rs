@@ -83,9 +83,18 @@ mod tests {
     fn reads_the_requested_level() {
         let nsis = r#"<trustInfo><security><requestedPrivileges><requestedExecutionLevel level="requireAdministrator" uiAccess="false"/></requestedPrivileges></security></trustInfo>"#;
         assert_eq!(level(nsis), ExecutionLevel::RequireAdministrator);
-        assert_eq!(level(r#"<requestedExecutionLevel uiAccess="false" level='highestAvailable' />"#), ExecutionLevel::HighestAvailable);
-        assert_eq!(level(r#"<requestedExecutionLevel level="asInvoker" uiAccess="false"/>"#), ExecutionLevel::AsInvoker);
-        assert_eq!(level(r#"<requestedExecutionLevel level = "REQUIREADMINISTRATOR"/>"#), ExecutionLevel::RequireAdministrator);
+        assert_eq!(
+            level(r#"<requestedExecutionLevel uiAccess="false" level='highestAvailable' />"#),
+            ExecutionLevel::HighestAvailable
+        );
+        assert_eq!(
+            level(r#"<requestedExecutionLevel level="asInvoker" uiAccess="false"/>"#),
+            ExecutionLevel::AsInvoker
+        );
+        assert_eq!(
+            level(r#"<requestedExecutionLevel level = "REQUIREADMINISTRATOR"/>"#),
+            ExecutionLevel::RequireAdministrator
+        );
     }
 
     #[test]

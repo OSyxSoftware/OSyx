@@ -246,7 +246,14 @@ impl Reassembler {
                     self.partials.remove(oldest);
                     self.dropped += 1;
                 }
-                self.partials.push(Partial { key, pieces: Vec::new(), total: None, bytes: 0, started: now, header: *h });
+                self.partials.push(Partial {
+                    key,
+                    pieces: Vec::new(),
+                    total: None,
+                    bytes: 0,
+                    started: now,
+                    header: *h,
+                });
                 self.partials.len() - 1
             }
         };

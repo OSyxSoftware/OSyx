@@ -277,8 +277,20 @@ pub const ZONES: [(&str, &str); 22] = [
 ];
 
 const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const MONTHS: [&str; 12] =
-    ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
 
 impl LocalTime {
     /// `14:05`
@@ -310,12 +322,23 @@ impl LocalTime {
 
     /// `Fri 23 Oct`
     pub fn short_date(&self) -> String {
-        alloc::format!("{} {} {}", &WEEKDAYS[self.weekday as usize][..3], self.day, &MONTHS[(self.month - 1) as usize][..3])
+        alloc::format!(
+            "{} {} {}",
+            &WEEKDAYS[self.weekday as usize][..3],
+            self.day,
+            &MONTHS[(self.month - 1) as usize][..3]
+        )
     }
 
     /// `Friday, 23 October 2026`
     pub fn long_date(&self) -> String {
-        alloc::format!("{}, {} {} {}", WEEKDAYS[self.weekday as usize], self.day, MONTHS[(self.month - 1) as usize], self.year)
+        alloc::format!(
+            "{}, {} {} {}",
+            WEEKDAYS[self.weekday as usize],
+            self.day,
+            MONTHS[(self.month - 1) as usize],
+            self.year
+        )
     }
 
     /// `2026-10-23 14:05:09`
@@ -403,7 +426,8 @@ pub fn sun_times(day_of_year: u32, latitude: f64, longitude: f64) -> Sun {
     let decl = 0.006918 - 0.399912 * cos(g) + 0.070257 * sin(g) - 0.006758 * cos(2.0 * g) + 0.000907 * sin(2.0 * g)
         - 0.002697 * cos(3.0 * g)
         + 0.00148 * sin(3.0 * g);
-    let eqtime = 229.18 * (0.000075 + 0.001868 * cos(g) - 0.032077 * sin(g) - 0.014615 * cos(2.0 * g) - 0.040849 * sin(2.0 * g));
+    let eqtime =
+        229.18 * (0.000075 + 0.001868 * cos(g) - 0.032077 * sin(g) - 0.014615 * cos(2.0 * g) - 0.040849 * sin(2.0 * g));
     let lat = latitude.clamp(-89.9, 89.9) * rad;
     let tan = |x: f64| sin(x) / cos(x);
     let h = cos(90.833 * rad) / (cos(lat) * cos(decl)) - tan(lat) * tan(decl);
@@ -429,6 +453,8 @@ pub fn sun_is_up(unix: i64, latitude: f64, longitude: f64) -> bool {
         // East of Greenwich the day can start before 00:00 UTC and west of
         // it end after 24:00: the same minute of the neighbouring days
         // counts too.
-        Sun::RisesAndSets(rise, set) => [-1440.0, 0.0, 1440.0].iter().any(|shift| (rise..set).contains(&(minute + shift))),
+        Sun::RisesAndSets(rise, set) => {
+            [-1440.0, 0.0, 1440.0].iter().any(|shift| (rise..set).contains(&(minute + shift)))
+        }
     }
 }

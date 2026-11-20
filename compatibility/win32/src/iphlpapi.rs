@@ -110,7 +110,17 @@ extern "win64" fn GetIfTable(out: u64, len: *mut u32, ordered: i32) -> u32 {
         out_w(name, p as *mut u16, 256);
         unsafe {
             teb::put(p, 512, i.index as u32);
-            teb::put(p, 516, if loopback { 24u32 } else if i.flags & net::IFF_WIRELESS != 0 { 71u32 } else { 6u32 });
+            teb::put(
+                p,
+                516,
+                if loopback {
+                    24u32
+                } else if i.flags & net::IFF_WIRELESS != 0 {
+                    71u32
+                } else {
+                    6u32
+                },
+            );
             teb::put(p, 520, i.mtu);
             // Link speed is not provided by OSyx: leave it unknown (zero).
             if !loopback {
@@ -266,7 +276,13 @@ extern "win64" fn NotifyIpInterfaceChange(family: u16, callback: u64, context: u
     register_change(family, callback, context, initial, out)
 }
 
-extern "win64" fn NotifyUnicastIpAddressChange(family: u16, callback: u64, context: u64, initial: u8, out: *mut u64) -> u32 {
+extern "win64" fn NotifyUnicastIpAddressChange(
+    family: u16,
+    callback: u64,
+    context: u64,
+    initial: u8,
+    out: *mut u64,
+) -> u32 {
     register_change(family, callback, context, initial, out)
 }
 
@@ -550,8 +566,7 @@ extern "win64" fn GetBestInterfaceEx(dest: *const u8, index: *mut u32) -> u32 {
         .or_else(|| {
             ifs.iter().find(|i| {
                 let m = mask(i.prefix);
-                i.addr != [0, 0, 0, 0]
-                    && (0..4).all(|k| (i.addr[k] & m[k]) == (target[k] & m[k]))
+                i.addr != [0, 0, 0, 0] && (0..4).all(|k| (i.addr[k] & m[k]) == (target[k] & m[k]))
             })
         })
         .or_else(|| ifs.iter().find(|i| i.flags & net::IFF_LOOPBACK == 0 && i.gateway != [0, 0, 0, 0]))
@@ -660,7 +675,9 @@ extern "win64" fn GetIfEntry2(row: *mut u8) -> u32 {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let Some(i) = ifs.iter().find(|i| if luid != 0 { iface_luid(i.flags, i.index) == luid } else { i.index as u32 == index }) else {
+    let Some(i) =
+        ifs.iter().find(|i| if luid != 0 { iface_luid(i.flags, i.index) == luid } else { i.index as u32 == index })
+    else {
         return ERROR_FILE_NOT_FOUND;
     };
     let loopback = i.flags & net::IFF_LOOPBACK != 0;
@@ -683,7 +700,7 @@ extern "win64" fn GetIfEntry2(row: *mut u8) -> u32 {
         teb::put(p, 1136, if loopback { 13u32 } else { 0 }); // NdisMediumLoopback / NdisMedium802_3
         teb::put(p, 1140, if wireless { 9u32 } else { 0 }); // NdisPhysicalMediumNative802_11
         teb::put(p, 1144, if loopback { 1u32 } else { 2 }); // NET_IF_ACCESS_LOOPBACK / _BROADCAST
-        // HardwareInterface and ConnectorPresent for a real adapter.
+                                                            // HardwareInterface and ConnectorPresent for a real adapter.
         *row.add(1152) = if loopback { 0 } else { 0x1 | 0x4 };
         teb::put(p, 1156, if up { 1u32 } else { 2 }); // IfOperStatusUp / Down
         teb::put(p, 1160, 1u32); // NET_IF_ADMIN_STATUS_UP
@@ -770,7 +787,14 @@ fn adapter_name(index: u8) -> alloc::string::String {
         u32::from_le_bytes([g[0], g[1], g[2], g[3]]),
         u16::from_le_bytes([g[4], g[5]]),
         u16::from_le_bytes([g[6], g[7]]),
-        g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]
+        g[8],
+        g[9],
+        g[10],
+        g[11],
+        g[12],
+        g[13],
+        g[14],
+        g[15]
     )
 }
 
@@ -800,7 +824,11 @@ extern "win64" fn GetInterfaceInfo(out: *mut u8, len: *mut u32) -> u32 {
             out_w(&adapter_name(i.index), (m + 4) as *mut u16, 128);
         }
     }
-    if ifs.is_empty() { ERROR_NO_DATA } else { 0 }
+    if ifs.is_empty() {
+        ERROR_NO_DATA
+    } else {
+        0
+    }
 }
 
 /// Interfaces whose lease IpReleaseAddress gave up: still DHCP adapters,
@@ -923,7 +951,8 @@ extern "win64" fn DhcpCApiCleanup() {}
 fn named_adapter(name: &str) -> Option<net::NetIface> {
     let bare = name.rsplit('_').next().unwrap_or(name);
     list().ok()?.into_iter().find(|i| {
-        net::field(&i.name).eq_ignore_ascii_case(name) || adapter_name(i.index).rsplit('_').next().is_some_and(|g| g.eq_ignore_ascii_case(bare))
+        net::field(&i.name).eq_ignore_ascii_case(name)
+            || adapter_name(i.index).rsplit('_').next().is_some_and(|g| g.eq_ignore_ascii_case(bare))
     })
 }
 
@@ -934,7 +963,15 @@ fn named_adapter(name: &str) -> Option<net::NetIface> {
 /// option id, vendor flag, data pointer, data length.
 #[allow(clippy::too_many_arguments)]
 extern "win64" fn DhcpRequestParams(
-    _flags: u32, _reserved: u64, adapter: *const u16, _class: u64, _send: u64, recd: u64, buf: *mut u8, size: *mut u32, _request_id: *const u16,
+    _flags: u32,
+    _reserved: u64,
+    adapter: *const u16,
+    _class: u64,
+    _send: u64,
+    recd: u64,
+    buf: *mut u8,
+    size: *mut u32,
+    _request_id: *const u16,
 ) -> u32 {
     if adapter.is_null() || size.is_null() || recd == 0 {
         return ERROR_INVALID_PARAMETER;

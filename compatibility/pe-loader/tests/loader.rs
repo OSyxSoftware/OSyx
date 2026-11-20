@@ -31,7 +31,10 @@ fn apiset_resolves_minor_revisions_and_importers() {
     assert_eq!(s.resolve("api-ms-win-core-file-l1-2-0.dll", None).unwrap().as_deref(), Some("kernel32.dll"));
     assert_eq!(s.resolve("API-MS-WIN-CORE-FILE-L1-2-9", Some("user32.dll")).unwrap().as_deref(), Some("kernel32.dll"));
     // kernel32 importing the contract gets kernelbase (no self-import).
-    assert_eq!(s.resolve("api-ms-win-core-file-l1-2-5.dll", Some("KERNEL32.DLL")).unwrap().as_deref(), Some("kernelbase.dll"));
+    assert_eq!(
+        s.resolve("api-ms-win-core-file-l1-2-5.dll", Some("KERNEL32.DLL")).unwrap().as_deref(),
+        Some("kernelbase.dll")
+    );
     // A different major contract is a different entry.
     assert_eq!(s.resolve("api-ms-win-core-file-l1-1-0", None).unwrap(), None);
     assert_eq!(s.resolve("ext-ms-win-missing-l1-1-0", None).unwrap(), None, "contract without a host");
@@ -112,7 +115,12 @@ impl BuiltinModule for Fake {
 }
 
 fn kernel32() -> Fake {
-    let names = [("GetStdHandle", 0x7000_0010), ("WriteFile", 0x7000_0020), ("ExitProcess", 0x7000_0030), ("GetTickCount", 0x7000_0040)];
+    let names = [
+        ("GetStdHandle", 0x7000_0010),
+        ("WriteFile", 0x7000_0020),
+        ("ExitProcess", 0x7000_0030),
+        ("GetTickCount", 0x7000_0040),
+    ];
     Fake(names.iter().map(|(n, a)| (n.to_string(), *a)).collect(), [(42u16, 0x7000_0042u64)].into_iter().collect())
 }
 
@@ -259,12 +267,17 @@ fn sample_dll_relocations_exports_and_forwarders() {
     assert_eq!(l.resolve(dll, Symbol::Ordinal(7), "t", 0).unwrap(), base + r7 as u64);
     // Errors name the module and symbol.
     match l.resolve(dll, Symbol::Name("nope"), "t.exe", 0) {
-        Err(LinkError::SymbolNotFound { module, symbol, importer }) => assert_eq!((module.as_str(), symbol.as_str(), importer.as_str()), ("sample.dll", "nope", "t.exe")),
+        Err(LinkError::SymbolNotFound { module, symbol, importer }) => {
+            assert_eq!((module.as_str(), symbol.as_str(), importer.as_str()), ("sample.dll", "nope", "t.exe"))
+        }
         r => panic!("{r:?}"),
     }
     // Loading again finds the same module; a missing DLL is reported.
     assert_eq!(l.load_dll("SAMPLE.DLL", "x").unwrap(), dll);
-    assert_eq!(l.load_dll("absent", "x.exe").unwrap_err(), LinkError::DllNotFound { name: "absent.dll".into(), importer: "x.exe".into() });
+    assert_eq!(
+        l.load_dll("absent", "x.exe").unwrap_err(),
+        LinkError::DllNotFound { name: "absent.dll".into(), importer: "x.exe".into() }
+    );
 }
 
 #[test]
@@ -274,7 +287,10 @@ fn mapped_files_support_imports_exports_and_forwarders() {
     host.map_files = true;
     let mut l = Linker::new(host, None);
     let dll = l.load_dll("sample.dll", "test.exe").unwrap();
-    assert!(matches!(l.modules[dll].kind, osyx_pe_loader::link::Kind::Pe { file: osyx_pe_loader::link::PeData::Mapped(_), .. }));
+    assert!(matches!(
+        l.modules[dll].kind,
+        osyx_pe_loader::link::Kind::Pe { file: osyx_pe_loader::link::PeData::Mapped(_), .. }
+    ));
     let base = l.modules[dll].base;
     let exports = l.modules[dll].pe().unwrap().exports().unwrap().unwrap();
     let osyx_pe::ExportTarget::Rva(add_rva) = exports.by_name("add_numbers").unwrap().unwrap().target else { panic!() };
@@ -305,7 +321,10 @@ fn api_set_imports_go_through_the_schema() {
     let k = l.load_dll("api-ms-win-core-sysinfo-l1-1-0.dll", "app.exe").unwrap();
     assert_eq!(l.modules[k].name, "kernel32.dll");
     assert_eq!(l.resolve(k, Symbol::Name("GetTickCount"), "app.exe", 0).unwrap(), 0x7000_0040);
-    assert_eq!(l.load_dll("ext-ms-win-missing-l1-1-0", "app.exe").unwrap_err(), LinkError::NoApiSetHost { name: "ext-ms-win-missing-l1-1-0.dll".into(), importer: "app.exe".into() });
+    assert_eq!(
+        l.load_dll("ext-ms-win-missing-l1-1-0", "app.exe").unwrap_err(),
+        LinkError::NoApiSetHost { name: "ext-ms-win-missing-l1-1-0.dll".into(), importer: "app.exe".into() }
+    );
     assert!(l.host.opened.iter().all(|n| !n.starts_with("api-")), "contracts are never opened as files");
     assert_eq!(normalize("KERNEL32"), "kernel32.dll");
     assert_eq!(normalize("foo.drv"), "foo.drv");
@@ -401,7 +420,12 @@ fn layout_and_protections_match_the_sections() {
     assert_eq!(img.len(), pe.size_of_image() as usize);
     for s in pe.sections() {
         let n = s.file_size() as usize;
-        assert_eq!(&img[s.virtual_address as usize..][..n], pe.slice_at_rva(s.virtual_address, n).unwrap(), "{}", s.name());
+        assert_eq!(
+            &img[s.virtual_address as usize..][..n],
+            pe.slice_at_rva(s.virtual_address, n).unwrap(),
+            "{}",
+            s.name()
+        );
     }
     let prot = image::protections(&pe).unwrap();
     let total: u32 = prot.iter().map(|p| p.size).sum();

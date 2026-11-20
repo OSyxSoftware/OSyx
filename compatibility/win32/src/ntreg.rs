@@ -100,7 +100,10 @@ unsafe fn target(oa: u64) -> Result<(u64, Vec<u16>), NtStatus> {
         let sid = user_sid();
         if parts[3].eq_ignore_ascii_case(&sid) {
             (HKEY_CURRENT_USER, parts[4..].to_vec())
-        } else if parts[3].len() == sid.len() + 8 && parts[3].get(..sid.len()).is_some_and(|p| p.eq_ignore_ascii_case(&sid)) && parts[3][sid.len()..].eq_ignore_ascii_case("_Classes") {
+        } else if parts[3].len() == sid.len() + 8
+            && parts[3].get(..sid.len()).is_some_and(|p| p.eq_ignore_ascii_case(&sid))
+            && parts[3][sid.len()..].eq_ignore_ascii_case("_Classes")
+        {
             let mut r = alloc::vec!["Software", "Classes"];
             r.extend_from_slice(&parts[4..]);
             (HKEY_CURRENT_USER, r)
@@ -119,8 +122,19 @@ const REG_OPTION_CREATE_LINK: u32 = 2;
 const REG_OPTION_BACKUP_RESTORE: u32 = 4;
 const REG_OPTION_OPEN_LINK: u32 = 8;
 
-extern "win64" fn NtCreateKey(out: *mut u64, access: u32, oa: u64, _title: u32, _class: u64, options: u32, disposition: *mut u32) -> NtStatus {
-    if out.is_null() || options & !(REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK | REG_OPTION_BACKUP_RESTORE | REG_OPTION_OPEN_LINK) != 0 {
+extern "win64" fn NtCreateKey(
+    out: *mut u64,
+    access: u32,
+    oa: u64,
+    _title: u32,
+    _class: u64,
+    options: u32,
+    disposition: *mut u32,
+) -> NtStatus {
+    if out.is_null()
+        || options & !(REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK | REG_OPTION_BACKUP_RESTORE | REG_OPTION_OPEN_LINK)
+            != 0
+    {
         return STATUS_INVALID_PARAMETER;
     }
     // SAFETY: the caller's OBJECT_ATTRIBUTES.
@@ -181,13 +195,15 @@ extern "win64" fn NtQueryValueKey(h: u64, name: u64, class: u32, buf: *mut u8, l
     }
     let wide = nul_terminated(name.clone());
     let (mut kind, mut size) = (0u32, 0u32);
-    let e = registry::RegQueryValueExW(h, wide.as_ptr(), core::ptr::null(), &mut kind, core::ptr::null_mut(), &mut size);
+    let e =
+        registry::RegQueryValueExW(h, wide.as_ptr(), core::ptr::null(), &mut kind, core::ptr::null_mut(), &mut size);
     if e != ERROR_SUCCESS {
         return status(e);
     }
     let mut data = alloc::vec![0u8; size as usize];
     if class != KEY_VALUE_BASIC && size != 0 {
-        let e = registry::RegQueryValueExW(h, wide.as_ptr(), core::ptr::null(), &mut kind, data.as_mut_ptr(), &mut size);
+        let e =
+            registry::RegQueryValueExW(h, wide.as_ptr(), core::ptr::null(), &mut kind, data.as_mut_ptr(), &mut size);
         if e != ERROR_SUCCESS {
             return status(e);
         }
@@ -241,7 +257,11 @@ extern "win64" fn NtQueryValueKey(h: u64, name: u64, class: u32, buf: *mut u8, l
     let n = out.len().min(len as usize);
     // SAFETY: the caller's buffer of `len` bytes.
     unsafe { core::ptr::copy_nonoverlapping(out.as_ptr(), buf, n) };
-    if n < out.len() { STATUS_BUFFER_OVERFLOW } else { STATUS_SUCCESS }
+    if n < out.len() {
+        STATUS_BUFFER_OVERFLOW
+    } else {
+        STATUS_SUCCESS
+    }
 }
 
 /// "\REGISTRY\USER\<SID>" in a new UNICODE_STRING, freed with
@@ -264,5 +284,13 @@ extern "win64" fn RtlFormatCurrentUserKeyPath(out: u64) -> NtStatus {
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![NtCreateKey, NtOpenKeyEx, NtOpenKey, NtDeleteKey, NtSetValueKey, NtQueryValueKey, RtlFormatCurrentUserKeyPath]
+    export_table![
+        NtCreateKey,
+        NtOpenKeyEx,
+        NtOpenKey,
+        NtDeleteKey,
+        NtSetValueKey,
+        NtQueryValueKey,
+        RtlFormatCurrentUserKeyPath
+    ]
 }

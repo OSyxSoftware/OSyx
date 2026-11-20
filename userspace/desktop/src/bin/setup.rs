@@ -88,10 +88,11 @@ fn mounts_of(disk: &str) -> Vec<String> {
         .iter()
         .filter(|m| {
             let src = c_str(&m.source);
-            src == prefix || src.strip_prefix(prefix.as_str()).is_some_and(|r| {
-                let r = r.trim_start_matches('p');
-                !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit())
-            })
+            src == prefix
+                || src.strip_prefix(prefix.as_str()).is_some_and(|r| {
+                    let r = r.trim_start_matches('p');
+                    !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit())
+                })
         })
         .map(|m| String::from(c_str(&m.path)))
         .collect();
@@ -376,13 +377,26 @@ impl Setup {
         if !self.manual {
             return Ok(Layout::Automatic);
         }
-        let esp = self.esp_mib.text().trim().parse::<u64>().map_err(|_| String::from("Enter the EFI partition size in MiB."))?;
-        let root = self.root_mib.text().trim().parse::<u64>().map_err(|_| String::from("Enter the OSyx partition size in MiB (0 = rest of the disk)."))?;
+        let esp = self
+            .esp_mib
+            .text()
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| String::from("Enter the EFI partition size in MiB."))?;
+        let root = self
+            .root_mib
+            .text()
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| String::from("Enter the OSyx partition size in MiB (0 = rest of the disk)."))?;
         Ok(Layout::Manual { esp_mib: esp, root_mib: root })
     }
 
     fn plan(&self) -> Result<Plan, String> {
-        let d = self.disk.and_then(|i| self.disks.get(i)).ok_or_else(|| String::from("Choose the disk to install OSyx on."))?;
+        let d = self
+            .disk
+            .and_then(|i| self.disks.get(i))
+            .ok_or_else(|| String::from("Choose the disk to install OSyx on."))?;
         if let Some(why) = &d.blocked {
             return Err(format!("{} cannot be used: {why}.", d.name));
         }
@@ -488,7 +502,13 @@ impl Setup {
     fn fields(&mut self) -> Vec<&mut TextField> {
         match self.step {
             Step::Disk if self.manual => vec![&mut self.esp_mib, &mut self.root_mib],
-            Step::Account => vec![&mut self.full_name, &mut self.user_name, &mut self.password, &mut self.password2, &mut self.hostname],
+            Step::Account => vec![
+                &mut self.full_name,
+                &mut self.user_name,
+                &mut self.password,
+                &mut self.password2,
+                &mut self.hostname,
+            ],
             _ => Vec::new(),
         }
     }
@@ -518,7 +538,11 @@ impl App for Setup {
         self.esp_mib.rect = Rect::new(c.x + 150, manual.y + 44, 110, 32);
         self.root_mib.rect = Rect::new(c.x + 430, manual.y + 44, 110, 32);
         let fw = c.w.min(420);
-        for (i, f) in [&mut self.full_name, &mut self.user_name, &mut self.password, &mut self.password2, &mut self.hostname].into_iter().enumerate() {
+        for (i, f) in
+            [&mut self.full_name, &mut self.user_name, &mut self.password, &mut self.password2, &mut self.hostname]
+                .into_iter()
+                .enumerate()
+        {
             f.rect = Rect::new(c.x + 200, c.y + 70 + i as i32 * 52, fw, 34);
         }
         self.zen.rect = Rect::new(c.x, c.y + 70, c.w, 30);
@@ -602,7 +626,8 @@ impl App for Setup {
             redraw = true;
         }
         let navigating = self.step < Step::Install;
-        if navigating && self.step > Step::Welcome && self.back.event(&ev, focused) == Response::Activated(self.back.id) {
+        if navigating && self.step > Step::Welcome && self.back.event(&ev, focused) == Response::Activated(self.back.id)
+        {
             self.message.clear();
             self.step = match self.step {
                 Step::Disk => Step::Welcome,
@@ -685,13 +710,26 @@ impl App for Setup {
             p.disc(r.x + 18, r.y + 18, 9, dot, 255);
             if done {
                 // A check mark (as the toolkit's check box draws it).
-                let pt = |fx: i32, fy: i32| (((r.x + 9) << 8) + 18 * fx * 256 / 100, ((r.y + 9) << 8) + 18 * fy * 256 / 100);
+                let pt =
+                    |fx: i32, fy: i32| (((r.x + 9) << 8) + 18 * fx * 256 / 100, ((r.y + 9) << 8) + 18 * fy * 256 / 100);
                 p.segment(pt(26, 52), pt(44, 70), 520, osyx_gfx::rgb(255, 255, 255), 255);
                 p.segment(pt(44, 70), pt(76, 32), 520, osyx_gfx::rgb(255, 255, 255), 255);
             } else {
-                p.text_in(FontKind::Ui, Rect::new(r.x + 9, r.y + 9, 18, 18), &format!("{}", i + 1), osyx_gfx::rgb(255, 255, 255), Align::Center);
+                p.text_in(
+                    FontKind::Ui,
+                    Rect::new(r.x + 9, r.y + 9, 18, 18),
+                    &format!("{}", i + 1),
+                    osyx_gfx::rgb(255, 255, 255),
+                    Align::Center,
+                );
             }
-            p.text(if current { FontKind::Bold } else { FontKind::Ui }, r.x + 40, r.y + 9, label, if current || done { osyx_gfx::rgb(255, 255, 255) } else { osyx_gfx::rgb(170, 180, 205) });
+            p.text(
+                if current { FontKind::Bold } else { FontKind::Ui },
+                r.x + 40,
+                r.y + 9,
+                label,
+                if current || done { osyx_gfx::rgb(255, 255, 255) } else { osyx_gfx::rgb(170, 180, 205) },
+            );
         }
         let c = self.content();
         p.text(FontKind::Large, c.x, c.y, self.page_title(), t.text);
@@ -715,10 +753,22 @@ impl App for Setup {
                 let si = os::sysinfo().ok();
                 let mem = si.map_or(String::new(), |i| human_size(i.total_memory));
                 let usable = self.disks.iter().filter(|d| d.blocked.is_none()).count();
-                p.text(FontKind::Bold, c.x, c.y + 300, &format!("Memory: {mem}    Disks: {} found, {usable} usable", self.disks.len()), t.text);
+                p.text(
+                    FontKind::Bold,
+                    c.x,
+                    c.y + 300,
+                    &format!("Memory: {mem}    Disks: {} found, {usable} usable", self.disks.len()),
+                    t.text,
+                );
             }
             Step::Disk => {
-                p.text(FontKind::Ui, c.x, c.y + 36, "Select a disk. The disk OSyx is running from cannot be chosen.", t.text_dim);
+                p.text(
+                    FontKind::Ui,
+                    c.x,
+                    c.y + 36,
+                    "Select a disk. The disk OSyx is running from cannot be chosen.",
+                    t.text_dim,
+                );
                 self.rescan.draw(p, focused);
                 if self.disks.is_empty() {
                     p.text(FontKind::Ui, c.x, c.y + 80, "No disks found.", t.text);
@@ -726,8 +776,19 @@ impl App for Setup {
                 for (i, (d, r)) in self.disks.iter().zip(self.disk_rows()).enumerate() {
                     let sel = self.disk == Some(i);
                     p.card(r, 8, if sel { t.selection } else { t.raised }, if sel { t.accent } else { t.border });
-                    icon::draw(p, Icon::Drive, Rect::new(r.x + 14, r.y + 12, 22, 22), if d.blocked.is_some() { t.text_faint } else { t.accent });
-                    p.text(FontKind::Bold, r.x + 50, r.y + 6, &format!("/dev/disks/{}", d.name), if d.blocked.is_some() { t.text_faint } else { t.text });
+                    icon::draw(
+                        p,
+                        Icon::Drive,
+                        Rect::new(r.x + 14, r.y + 12, 22, 22),
+                        if d.blocked.is_some() { t.text_faint } else { t.accent },
+                    );
+                    p.text(
+                        FontKind::Bold,
+                        r.x + 50,
+                        r.y + 6,
+                        &format!("/dev/disks/{}", d.name),
+                        if d.blocked.is_some() { t.text_faint } else { t.text },
+                    );
                     let info = format!("{}  ·  {} partition(s)", human_size(d.bytes), d.partitions);
                     p.text(FontKind::Ui, r.x + 50, r.y + 24, &info, t.text_dim);
                     let status = match (&d.blocked, d.mounted.first()) {
@@ -735,7 +796,13 @@ impl App for Setup {
                         (None, Some(at)) => format!("available (mounted at {at}; will be unmounted)"),
                         (None, None) => String::from("available"),
                     };
-                    p.text_in(FontKind::Ui, Rect::new(r.x, r.y + 14, r.w - 16, 20), &status, if d.blocked.is_some() { osyx_gfx::rgb(240, 150, 90) } else { osyx_gfx::rgb(110, 200, 130) }, Align::Right);
+                    p.text_in(
+                        FontKind::Ui,
+                        Rect::new(r.x, r.y + 14, r.w - 16, 20),
+                        &status,
+                        if d.blocked.is_some() { osyx_gfx::rgb(240, 150, 90) } else { osyx_gfx::rgb(110, 200, 130) },
+                        Align::Right,
+                    );
                 }
                 let [auto, manual] = self.mode_rows();
                 for (r, on, label) in [
@@ -764,19 +831,44 @@ impl App for Setup {
                     let px = |s: u64| (s as u128 * bar.w as u128 / total as u128) as u32;
                     let esp_w = px(plan.esp_sectors).max(6);
                     let root_x = bar.x + px(plan.root_first) as i32;
-                    p.rounded(Rect::new(bar.x + px(plan.esp_first) as i32, y, esp_w, 26), 6, osyx_gfx::rgb(240, 180, 70), 255);
+                    p.rounded(
+                        Rect::new(bar.x + px(plan.esp_first) as i32, y, esp_w, 26),
+                        6,
+                        osyx_gfx::rgb(240, 180, 70),
+                        255,
+                    );
                     p.rounded(Rect::new(root_x, y, px(plan.root_sectors).max(6), 26), 6, t.accent, 255);
-                    p.text(FontKind::Ui, c.x, y + 32, &format!("EFI system partition {} MiB (FAT32)   ·   OSyx {} MiB (ext4)", plan.esp_mib(), plan.root_mib()), t.text_dim);
+                    p.text(
+                        FontKind::Ui,
+                        c.x,
+                        y + 32,
+                        &format!(
+                            "EFI system partition {} MiB (FAT32)   ·   OSyx {} MiB (ext4)",
+                            plan.esp_mib(),
+                            plan.root_mib()
+                        ),
+                        t.text_dim,
+                    );
                 }
             }
             Step::Account => {
                 let labels = ["Your name", "User name", "Password", "Repeat password", "Computer name"];
                 let f = self.focus;
-                for (i, (l, field)) in labels.iter().zip([&self.full_name, &self.user_name, &self.password, &self.password2, &self.hostname]).enumerate() {
+                for (i, (l, field)) in labels
+                    .iter()
+                    .zip([&self.full_name, &self.user_name, &self.password, &self.password2, &self.hostname])
+                    .enumerate()
+                {
                     p.text(FontKind::Ui, c.x, field.rect.y + 8, l, t.text_dim);
                     field.draw(p, focused && f == i);
                 }
-                p.text(FontKind::Ui, c.x, c.y + 340, "The password may stay empty. The desktop session runs as this user.", t.text_faint);
+                p.text(
+                    FontKind::Ui,
+                    c.x,
+                    c.y + 340,
+                    "The password may stay empty. The desktop session runs as this user.",
+                    t.text_faint,
+                );
             }
             Step::Options => {
                 self.zen.draw(p, focused);
@@ -795,12 +887,25 @@ impl App for Setup {
                 let d = self.disk.and_then(|i| self.disks.get(i));
                 let plan = self.plan().ok();
                 let rows = [
-                    ("Disk", d.map_or(String::new(), |d| format!("/dev/disks/{} ({}) — will be ERASED", d.name, human_size(d.bytes)))),
-                    ("Partitions", plan.map_or(String::new(), |p| format!("EFI {} MiB FAT32, OSyx {} MiB ext4", p.esp_mib(), p.root_mib()))),
+                    (
+                        "Disk",
+                        d.map_or(String::new(), |d| {
+                            format!("/dev/disks/{} ({}) — will be ERASED", d.name, human_size(d.bytes))
+                        }),
+                    ),
+                    (
+                        "Partitions",
+                        plan.map_or(String::new(), |p| {
+                            format!("EFI {} MiB FAT32, OSyx {} MiB ext4", p.esp_mib(), p.root_mib())
+                        }),
+                    ),
                     ("User", format!("{} ({})", self.user_name.text(), self.full_name.text())),
                     ("Password", String::from(if self.password.text().is_empty() { "none" } else { "set" })),
                     ("Computer name", String::from(self.hostname.text())),
-                    ("Zen Browser", String::from(if self.zen.checked { "download and install on first start" } else { "no" })),
+                    (
+                        "Zen Browser",
+                        String::from(if self.zen.checked { "download and install on first start" } else { "no" }),
+                    ),
                 ];
                 let card = Rect::new(c.x, c.y + 56, c.w, rows.len() as u32 * 40 + 8);
                 p.card(card, 10, t.raised, t.border);
@@ -829,9 +934,16 @@ impl App for Setup {
                 let fw = ((frac.clamp(0.0, 1.0) * bar.w as f32) as u32).max(14);
                 let color = if matches!(result, Some(Err(_))) { osyx_gfx::rgb(230, 90, 90) } else { t.accent };
                 p.rounded(Rect::new(bar.x, bar.y, fw, 14), 7, color, 255);
-                p.text_in(FontKind::Ui, Rect::new(c.x, c.y + 102, c.w, 18), &format!("{:.0}%", frac * 100.0), t.text_dim, Align::Right);
+                p.text_in(
+                    FontKind::Ui,
+                    Rect::new(c.x, c.y + 102, c.w, 18),
+                    &format!("{:.0}%", frac * 100.0),
+                    t.text_dim,
+                    Align::Right,
+                );
                 if self.step == Step::Finish {
-                    self.reboot.label = String::from(if matches!(result, Some(Ok(_))) { "Restart now" } else { "Try again" });
+                    self.reboot.label =
+                        String::from(if matches!(result, Some(Ok(_))) { "Restart now" } else { "Try again" });
                     self.reboot.draw(p, focused);
                     let note = if matches!(result, Some(Ok(_))) {
                         "Remove the installation medium, then restart."
@@ -844,7 +956,13 @@ impl App for Setup {
                 p.card(log, 8, t.field, t.border);
                 let n = (log.h / 20).saturating_sub(1) as usize;
                 for (i, l) in lines.iter().rev().take(n).rev().enumerate() {
-                    p.text_in(FontKind::Ui, Rect::new(log.x + 10, log.y + 8 + i as i32 * 20, log.w - 20, 18), l, t.text_dim, Align::Left);
+                    p.text_in(
+                        FontKind::Ui,
+                        Rect::new(log.x + 10, log.y + 8 + i as i32 * 20, log.w - 20, 18),
+                        l,
+                        t.text_dim,
+                        Align::Left,
+                    );
                 }
             }
         }
@@ -901,7 +1019,13 @@ fn main() -> i32 {
         auto: None,
     };
     for d in &app.disks {
-        println!("setup: disk {} {} bytes, {} partition(s), {}", d.name, d.bytes, d.partitions, d.blocked.as_deref().unwrap_or("available"));
+        println!(
+            "setup: disk {} {} bytes, {} partition(s), {}",
+            d.name,
+            d.bytes,
+            d.partitions,
+            d.blocked.as_deref().unwrap_or("available")
+        );
     }
     if args.iter().any(|a| a == "--auto") {
         let disk = arg_value(&args, "--disk").unwrap_or_default();

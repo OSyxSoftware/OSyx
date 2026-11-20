@@ -26,8 +26,8 @@ pub mod crc;
 pub mod dir;
 pub mod format;
 pub mod inode;
-mod map;
 pub mod journal;
+mod map;
 mod write;
 
 use alloc::collections::BTreeMap;
@@ -280,7 +280,11 @@ impl Superblock {
             min_extra_isize: le16(raw, 348),
         };
         let bits = block_size * 8;
-        if sb.blocks_per_group == 0 || sb.blocks_per_group > bits || sb.inodes_per_group == 0 || sb.inodes_per_group > bits {
+        if sb.blocks_per_group == 0
+            || sb.blocks_per_group > bits
+            || sb.inodes_per_group == 0
+            || sb.inodes_per_group > bits
+        {
             return Err(Error::Corrupt("blocks or inodes per group"));
         }
         if sb.first_data_block != if block_size == 1024 { 1 } else { 0 } {
@@ -547,7 +551,8 @@ impl<D: BlockDevice> Ext4<D> {
         if fs_bytes > dev.sector_count() * SECTOR as u64 {
             return Err(Error::Corrupt("file system larger than the device"));
         }
-        let csum_seed = if sb.has_incompat(feature::INCOMPAT_CSUM_SEED) { le32(&sb.raw, 0x270) } else { crc::crc32c(!0, &sb.uuid) };
+        let csum_seed =
+            if sb.has_incompat(feature::INCOMPAT_CSUM_SEED) { le32(&sb.raw, 0x270) } else { crc::crc32c(!0, &sb.uuid) };
         let mut fs = Ext4 {
             dev,
             sb,
@@ -658,10 +663,7 @@ impl<D: BlockDevice> Ext4<D> {
         // Sum the live group descriptors: file writes update them before
         // their transaction is journaled, and the superblock copy follows
         // only at commit.
-        (
-            self.groups.iter().map(|g| g.free_blocks as u64).sum(),
-            self.groups.iter().map(|g| g.free_inodes).sum(),
-        )
+        (self.groups.iter().map(|g| g.free_blocks as u64).sum(), self.groups.iter().map(|g| g.free_inodes).sum())
     }
 
     /// Location of group-descriptor block `i` (`meta_bg` aware).
@@ -695,8 +697,11 @@ impl<D: BlockDevice> Ext4<D> {
                 }
                 let d = GroupDesc::parse(raw, wide);
                 let fs_blocks = self.sb.blocks_count;
-                let itable_blocks = (self.sb.inodes_per_group as u64 * self.sb.inode_size as u64).div_ceil(self.sb.block_size as u64);
-                let bad = |b: u64, n: u64| b < self.sb.first_data_block as u64 || b.checked_add(n).is_none_or(|e| e > fs_blocks);
+                let itable_blocks =
+                    (self.sb.inodes_per_group as u64 * self.sb.inode_size as u64).div_ceil(self.sb.block_size as u64);
+                let bad = |b: u64, n: u64| {
+                    b < self.sb.first_data_block as u64 || b.checked_add(n).is_none_or(|e| e > fs_blocks)
+                };
                 if bad(d.block_bitmap, 1) || bad(d.inode_bitmap, 1) || bad(d.inode_table, itable_blocks) {
                     return Err(Error::Corrupt("group metadata outside the file system"));
                 }

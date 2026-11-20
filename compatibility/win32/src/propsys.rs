@@ -45,7 +45,8 @@ const VT_CLSID: u16 = 72;
 
 const IID_IUNKNOWN: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
 /// {886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}
-const IID_IPROPERTYSTORE: [u8; 16] = [0xEB, 0x8E, 0x6D, 0x88, 0xF2, 0x8C, 0x46, 0x44, 0x8D, 0x02, 0xCD, 0xBA, 0x1D, 0xBD, 0xCF, 0x99];
+const IID_IPROPERTYSTORE: [u8; 16] =
+    [0xEB, 0x8E, 0x6D, 0x88, 0xF2, 0x8C, 0x46, 0x44, 0x8D, 0x02, 0xCD, 0xBA, 0x1D, 0xBD, 0xCF, 0x99];
 
 type PropVariant = [u8; 24];
 
@@ -76,8 +77,8 @@ fn copy(src: &PropVariant) -> Result<PropVariant, u32> {
         Ok(d)
     };
     let new = match vt(src) {
-        VT_EMPTY | VT_NULL | VT_I2 | VT_I4 | VT_R4 | VT_R8 | VT_BOOL | VT_I1 | VT_UI1 | VT_UI2 | VT_UI4 | VT_I8 | VT_UI8 | VT_INT
-        | VT_UINT | VT_FILETIME => return Ok(out),
+        VT_EMPTY | VT_NULL | VT_I2 | VT_I4 | VT_R4 | VT_R8 | VT_BOOL | VT_I1 | VT_UI1 | VT_UI2 | VT_UI4 | VT_I8
+        | VT_UI8 | VT_INT | VT_UINT | VT_FILETIME => return Ok(out),
         VT_LPWSTR if p != 0 => dup((wide_len(p as *const u16) + 1) * 2)?,
         VT_CLSID if p != 0 => dup(16)?,
         VT_BSTR if p != 0 => {
@@ -151,7 +152,9 @@ pub(crate) extern "win64" fn PropVariantClear(v: *mut PropVariant) -> u32 {
 /// pointers 4 bytes at offset 8; an IUnknown is released as 32-bit code.
 fn clear32(v: *mut u8) -> u32 {
     // SAFETY: the caller's 16-byte PROPVARIANT.
-    let (t, p) = unsafe { (core::ptr::read_unaligned(v as *const u16), core::ptr::read_unaligned(v.add(8) as *const u32) as u64) };
+    let (t, p) = unsafe {
+        (core::ptr::read_unaligned(v as *const u16), core::ptr::read_unaligned(v.add(8) as *const u32) as u64)
+    };
     if !copy_supported(t) {
         return DISP_E_BADVARTYPE;
     }
@@ -175,8 +178,26 @@ fn clear32(v: *mut u8) -> u32 {
 fn copy_supported(t: u16) -> bool {
     matches!(
         t,
-        VT_EMPTY | VT_NULL | VT_I2 | VT_I4 | VT_R4 | VT_R8 | VT_BOOL | VT_I1 | VT_UI1 | VT_UI2 | VT_UI4 | VT_I8 | VT_UI8 | VT_INT | VT_UINT
-            | VT_FILETIME | VT_LPWSTR | VT_CLSID | VT_BSTR | VT_UNKNOWN
+        VT_EMPTY
+            | VT_NULL
+            | VT_I2
+            | VT_I4
+            | VT_R4
+            | VT_R8
+            | VT_BOOL
+            | VT_I1
+            | VT_UI1
+            | VT_UI2
+            | VT_UI4
+            | VT_I8
+            | VT_UI8
+            | VT_INT
+            | VT_UINT
+            | VT_FILETIME
+            | VT_LPWSTR
+            | VT_CLSID
+            | VT_BSTR
+            | VT_UNKNOWN
     )
 }
 
@@ -404,7 +425,11 @@ extern "win64" fn WsGetCount(this: u64, count: *mut u32) -> u32 {
     let n = WINDOW_PROPS.lock().unwrap().get(&window_store(this).key).map_or(0, |p| p.len());
     // SAFETY: the caller's out pointer.
     unsafe { *count = n as u32 };
-    if n == 0 { E_FAIL } else { S_OK }
+    if n == 0 {
+        E_FAIL
+    } else {
+        S_OK
+    }
 }
 
 extern "win64" fn WsGetAt(this: u64, i: u32, key: *mut [u8; 20]) -> u32 {
@@ -559,7 +584,11 @@ extern "win64" fn PropVariantToString(v: *const PropVariant, buf: *mut u16, cch:
         core::ptr::copy_nonoverlapping(w.as_ptr(), buf, n);
         *buf.add(n) = 0;
     }
-    if n < w.len() { STRSAFE_E_INSUFFICIENT_BUFFER } else { S_OK }
+    if n < w.len() {
+        STRSAFE_E_INSUFFICIENT_BUFFER
+    } else {
+        S_OK
+    }
 }
 
 /// VARIANTs: empty sorts first; numbers compare by value and strings
@@ -658,9 +687,11 @@ const KEY_NAMES: [(&str, [u8; 16], u32); 12] = [
     ("System.AppUserModel.ToastActivatorCLSID", FMTID_APPUSERMODEL, 26),
 ];
 /// {F29F85E0-4FF9-1068-AB91-08002B27B3D9}
-const FMTID_SUMMARY: [u8; 16] = [0xE0, 0x85, 0x9F, 0xF2, 0xF9, 0x4F, 0x68, 0x10, 0xAB, 0x91, 0x08, 0x00, 0x2B, 0x27, 0xB3, 0xD9];
+const FMTID_SUMMARY: [u8; 16] =
+    [0xE0, 0x85, 0x9F, 0xF2, 0xF9, 0x4F, 0x68, 0x10, 0xAB, 0x91, 0x08, 0x00, 0x2B, 0x27, 0xB3, 0xD9];
 /// {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}
-const FMTID_APPUSERMODEL: [u8; 16] = [0x55, 0x28, 0x4C, 0x9F, 0x79, 0x9F, 0x39, 0x4B, 0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3];
+const FMTID_APPUSERMODEL: [u8; 16] =
+    [0x55, 0x28, 0x4C, 0x9F, 0x79, 0x9F, 0x39, 0x4B, 0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3];
 
 /// PSGetPropertyKeyFromName: the PROPERTYKEY (format id, property id) of a
 /// canonical property name, for the properties listed above.
@@ -684,5 +715,12 @@ extern "win64" fn PSGetPropertyKeyFromName(name: *const u16, key: *mut u8) -> u3
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![PSCreateMemoryPropertyStore, PropVariantToString, VariantCompare, InitPropVariantFromCLSID, PSGetPropertyKeyFromName, PropVariantCopy]
+    export_table![
+        PSCreateMemoryPropertyStore,
+        PropVariantToString,
+        VariantCompare,
+        InitPropVariantFromCLSID,
+        PSGetPropertyKeyFromName,
+        PropVariantCopy
+    ]
 }

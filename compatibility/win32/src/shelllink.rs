@@ -437,7 +437,11 @@ extern "win64" fn PersistFile_GetCurFile(this: u64, out: *mut u64) -> u32 {
         core::ptr::copy_nonoverlapping(units.as_ptr(), block as *mut u16, units.len());
         *out = block;
     }
-    if file.is_empty() { S_FALSE } else { S_OK }
+    if file.is_empty() {
+        S_FALSE
+    } else {
+        S_OK
+    }
 }
 
 // ---- the .lnk file ----------------------------------------------------------------------
@@ -471,7 +475,9 @@ fn build(l: &Link) -> Vec<u8> {
     }
     let mut out = Vec::new();
     out.extend_from_slice(&0x4Cu32.to_le_bytes());
-    out.extend_from_slice(&[0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46]);
+    out.extend_from_slice(&[
+        0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+    ]);
     out.extend_from_slice(&flags.to_le_bytes());
     out.extend_from_slice(&0x20u32.to_le_bytes()); // FILE_ATTRIBUTE_ARCHIVE
     out.extend_from_slice(&[0u8; 24]); // creation, access and write times
@@ -520,7 +526,12 @@ fn parse(data: &[u8]) -> Option<Link> {
         return None;
     }
     let flags = u32_at(0x14)? as u32;
-    let mut link = Link { show: u32_at(0x3C)? as i32, icon_index: u32_at(0x38)? as i32, hotkey: u16_at(0x40)? as u16, ..Link::default() };
+    let mut link = Link {
+        show: u32_at(0x3C)? as i32,
+        icon_index: u32_at(0x38)? as i32,
+        hotkey: u16_at(0x40)? as u16,
+        ..Link::default()
+    };
     let mut at = 0x4C;
     if flags & 0x01 != 0 {
         at += 2 + u16_at(at)?;

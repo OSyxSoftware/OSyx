@@ -60,7 +60,8 @@ pub fn fold_case(name: &str) -> String {
 }
 
 /// Appends `name` to a canonical absolute directory path.
-pub fn join(dir: &str, name: &str) -> String {    let mut s = String::with_capacity(dir.len() + 1 + name.len());
+pub fn join(dir: &str, name: &str) -> String {
+    let mut s = String::with_capacity(dir.len() + 1 + name.len());
     s.push_str(dir);
     if !dir.ends_with('/') {
         s.push('/');

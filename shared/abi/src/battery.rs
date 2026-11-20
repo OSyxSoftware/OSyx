@@ -267,9 +267,12 @@ impl fmt::Display for Info {
     /// The battery's block of the file.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "battery {}", self.device)?;
-        for (key, value) in
-            [("model", &self.model), ("serial", &self.serial), ("technology", &self.technology), ("vendor", &self.vendor)]
-        {
+        for (key, value) in [
+            ("model", &self.model),
+            ("serial", &self.serial),
+            ("technology", &self.technology),
+            ("vendor", &self.vendor),
+        ] {
             if !value.is_empty() {
                 writeln!(f, "{key} {value}")?;
             }
@@ -325,7 +328,10 @@ mod tests {
         };
         let b = Info { device: String::from("BAT1"), ..Info::default() };
         let text = std::format!("{a}{b}");
-        assert_eq!(text, "battery BAT0\nmodel 45N1234\nserial 4321\ntechnology LION\nvendor OSYX CELLS\ncycles 123\nbattery BAT1\n");
+        assert_eq!(
+            text,
+            "battery BAT0\nmodel 45N1234\nserial 4321\ntechnology LION\nvendor OSYX CELLS\ncycles 123\nbattery BAT1\n"
+        );
         assert_eq!(Info::parse(&text), std::vec![a, b]);
         assert!(Info::parse("").is_empty());
         assert!(Info::parse("model lost\ngarbage\n").is_empty(), "values before a battery line belong to nothing");

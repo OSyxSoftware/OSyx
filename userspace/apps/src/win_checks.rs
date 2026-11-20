@@ -27,7 +27,7 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
         Command::new("worker").arg("filemap-checks").status().is_ok_and(|s| s.success())
     });
     t.check("native CPU fault delivery and safe context resumption", || {
-        Command::new("worker").arg("fault-checks").status().is_ok_and(|s|s.success())
+        Command::new("worker").arg("fault-checks").status().is_ok_and(|s| s.success())
     });
     if fs::metadata(DIR).is_err() {
         println!("win: {DIR} is missing (the Windows test programs were not built)");
@@ -41,38 +41,57 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     // 32-bit PE32 image: the loader maps it and i386 code runs; it exits 7.
     t.check("PE32 32-bit program: i386 code runs and exits 7", || run("hello32.exe", &[]) == Some(7));
     // 32-bit calls through the bridge signatures; exit code = failures.
-    t.check("PE32 32-bit program: kernel32, INI files and registry through the bridge", || run("api32.exe", &[]) == Some(0));
+    t.check("PE32 32-bit program: kernel32, INI files and registry through the bridge", || {
+        run("api32.exe", &[]) == Some(0)
+    });
     t.check("PE32 32-bit program: CreateThread, 32-bit start routines and concurrent bridge calls", || {
         run("thread32.exe", &[]) == Some(0)
     });
     // Fibers, 64-bit and 32-bit (SwitchToFiber runs as 32-bit code); exit code = failures.
-    t.check("fibers: ConvertThreadToFiber, CreateFiber, SwitchToFiber, DeleteFiber", || run("fibers.exe", &[]) == Some(0));
+    t.check("fibers: ConvertThreadToFiber, CreateFiber, SwitchToFiber, DeleteFiber", || {
+        run("fibers.exe", &[]) == Some(0)
+    });
     t.check("PE32 32-bit program: fibers through the bridge", || run("fibers32.exe", &[]) == Some(0));
     t.check("Windows file I/O on OSyx file systems (target C)", || run("fileio.exe", &[]) == Some(0));
     t.check("Windows volume, device and adapter inventory", || run("sysadmin.exe", &[]) == Some(0));
     t.check("Windows file version resources and queries", || run("version.exe", &[]) == Some(0));
     t.check("Windows vectored hardware exceptions and context resumption", || run("exceptions.exe", &[]) == Some(0));
     t.check("Windows file mappings: shared, read-only and copy-on-write views", || run("mapping.exe", &[]) == Some(0));
-    t.check("NT runtime: Rtl strings and heap, SLists, unwinding, times, registry", || run("runtime.exe", &[]) == Some(0));
+    t.check("NT runtime: Rtl strings and heap, SLists, unwinding, times, registry", || {
+        run("runtime.exe", &[]) == Some(0)
+    });
     t.check("structured exception handling, unwinding, consolidation and FLS", || run("seh.exe", &[]) == Some(0));
-    t.check("newer Win32: files, NLS, thread pool, processes, jobs, shlwapi, WinRT", || run("platform.exe", &[]) == Some(0));
+    t.check("newer Win32: files, NLS, thread pool, processes, jobs, shlwapi, WinRT", || {
+        run("platform.exe", &[]) == Some(0)
+    });
     t.check("shell32 known folders and the ole32 task allocator", || run("shell.exe", &[]) == Some(0));
-    t.check("bcrypt hashes and random, secur32, shfolder, winspool, uiautomationcore, oleacc and msvcrt libraries", || run("newlibs.exe", &[]) == Some(0));
-    t.check("heaps, critical sections, thread library calls, foreground window and attribute lists", || run("stubfix.exe", &[]) == Some(0));
+    t.check(
+        "bcrypt hashes and random, secur32, shfolder, winspool, uiautomationcore, oleacc and msvcrt libraries",
+        || run("newlibs.exe", &[]) == Some(0),
+    );
+    t.check("heaps, critical sections, thread library calls, foreground window and attribute lists", || {
+        run("stubfix.exe", &[]) == Some(0)
+    });
     t.check("winmm timers at the kernel tick resolution", || run("winmm.exe", &[]) == Some(0));
-    t.check("winmm wave devices: enumeration, recording, playback and conversion", || run("wavedev.exe", &[]) == Some(0));
-    t.check("object security, ACLs, AccessCheck, restricted tokens and the event log", || run("sandbox.exe", &[]) == Some(0));
+    t.check("winmm wave devices: enumeration, recording, playback and conversion", || {
+        run("wavedev.exe", &[]) == Some(0)
+    });
+    t.check("object security, ACLs, AccessCheck, restricted tokens and the event log", || {
+        run("sandbox.exe", &[]) == Some(0)
+    });
     t.check("US keyboard layout, key mapping and keyboard state", || run("keyboard.exe", &[]) == Some(0));
-    t.check("shlwapi paths and strings (wide and ANSI), environment folders and IsOS", || run("shlpath.exe", &[]) == Some(0));
+    t.check("shlwapi paths and strings (wide and ANSI), environment folders and IsOS", || {
+        run("shlpath.exe", &[]) == Some(0)
+    });
     t.check("power status, battery state, power capabilities and platform role", || run("power.exe", &[]) == Some(0));
     t.check("security descriptors on sections and new directories", || run("secattr.exe", &[]) == Some(0));
     t.check("handle inheritance and DuplicateHandle between processes", || run("childproc.exe", &[]) == Some(0));
     t.check("executable images shared copy-on-write between processes", || run("imageshare.exe", &[]) == Some(0));
     t.check("named pipes work as the unprivileged desktop user", || {
-        Command::new("/system/bin/run-app").arg("/opt/wintests/pipes.exe").status().is_ok_and(|s|s.success())
+        Command::new("/system/bin/run-app").arg("/opt/wintests/pipes.exe").status().is_ok_and(|s| s.success())
     });
     t.check("child handle inheritance works as the unprivileged desktop user", || {
-        Command::new("/system/bin/run-app").arg("/opt/wintests/childproc.exe").status().is_ok_and(|s|s.success())
+        Command::new("/system/bin/run-app").arg("/opt/wintests/childproc.exe").status().is_ok_and(|s| s.success())
     });
     t.check("DirectWrite fonts, faces, metrics and glyph rasterization", || run("dwrite.exe", &[]) == Some(0));
     t.check("COM apartments, BSTRs, window stations, dbghelp and crypt32", || run("interop.exe", &[]) == Some(0));
@@ -82,12 +101,19 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     });
     t.check("C Runtime extended math and floating-point edge cases", || run("crt2.exe", &[]) == Some(0));
     t.check("C Runtime scanf, floating-point control, diagnostics and local time", || run("crt3.exe", &[]) == Some(0));
-    t.check("C Runtime file metadata, temporary names, environment and multibyte conversion", || run("crt4.exe", &[]) == Some(0));
-    t.check("Windows tokens follow native uid after dropping root", || {
-        Command::new("worker").args(["exec-as", "1000", "/bin/winrun", "/opt/wintests/security.exe"])
-            .env("WIN_EXPECT_UID", "1000").status().is_ok_and(|s|s.success())
+    t.check("C Runtime file metadata, temporary names, environment and multibyte conversion", || {
+        run("crt4.exe", &[]) == Some(0)
     });
-    t.check("Windows shared locks, once initialization, condition variables and modules", || run("synch.exe", &[]) == Some(0));
+    t.check("Windows tokens follow native uid after dropping root", || {
+        Command::new("worker")
+            .args(["exec-as", "1000", "/bin/winrun", "/opt/wintests/security.exe"])
+            .env("WIN_EXPECT_UID", "1000")
+            .status()
+            .is_ok_and(|s| s.success())
+    });
+    t.check("Windows shared locks, once initialization, condition variables and modules", || {
+        run("synch.exe", &[]) == Some(0)
+    });
     t.check("critical sections pass priority inheritance and survive contention", || run("prio.exe", &[]) == Some(0));
     t.check("threads, synchronisation, TLS, virtual memory, DLL loading (target D)", || {
         run("threads.exe", &[]) == Some(0)
@@ -97,10 +123,18 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
     t.check("legacy Winsock 1.1 through wsock32.dll ordinals", || run("wsock32.exe", &[]) == Some(0));
     t.check("Winsock 2 extensions, address text and the provider catalog", || run("wsaext.exe", &[]) == Some(0));
     t.check("ANSI file and process calls, file locks, pipes and memory status", || run("k32ansi.exe", &[]) == Some(0));
-    t.check("time zones, en-US formatting, named objects and machine information", || run("k32xul.exe", &[]) == Some(0));
-    t.check("registry enumeration and notification, CryptoAPI hashes, credentials, ETW and accounts", || run("advapi.exe", &[]) == Some(0));
-    t.check("rpcrt4, cfgmgr32, propsys, bcryptprimitives, shcore and ntdll additions", || run("newdlls.exe", &[]) == Some(0));
-    t.check("named pipes across processes with overlapped I/O and completion ports", || run("pipes.exe", &[]) == Some(0));
+    t.check("time zones, en-US formatting, named objects and machine information", || {
+        run("k32xul.exe", &[]) == Some(0)
+    });
+    t.check("registry enumeration and notification, CryptoAPI hashes, credentials, ETW and accounts", || {
+        run("advapi.exe", &[]) == Some(0)
+    });
+    t.check("rpcrt4, cfgmgr32, propsys, bcryptprimitives, shcore and ntdll additions", || {
+        run("newdlls.exe", &[]) == Some(0)
+    });
+    t.check("named pipes across processes with overlapped I/O and completion ports", || {
+        run("pipes.exe", &[]) == Some(0)
+    });
     t.check("a missing program is reported", || {
         Command::new("/bin/winrun").arg("/opt/wintests/none.exe").status().ok().and_then(|s| s.code()) == Some(2)
     });
@@ -117,10 +151,10 @@ pub fn run_all(t: &mut Tests, tcp: u16, udp: u16) {
         thread::sleep(Duration::from_millis(500));
         run("gdi2.exe", &[]) == Some(0)
     });
-    t.check("Win32 GUI window through PRISM (target E)", || {
-        prism.is_ok() && run("gui.exe", &[]) == Some(0)
+    t.check("Win32 GUI window through PRISM (target E)", || prism.is_ok() && run("gui.exe", &[]) == Some(0));
+    t.check("PE32 window, child controls and paint through PRISM", || {
+        prism.is_ok() && run("gui32.exe", &[]) == Some(0)
     });
-    t.check("PE32 window, child controls and paint through PRISM", || prism.is_ok() && run("gui32.exe", &[]) == Some(0));
     // These create windows too.
     t.check("OLE apartments, GUID strings, drag-drop registration and the OLE clipboard", || {
         prism.is_ok() && run("ole2.exe", &[]) == Some(0)

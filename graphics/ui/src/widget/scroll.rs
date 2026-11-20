@@ -70,7 +70,11 @@ impl Scroll {
         }
         let h = ((track.h as u64 * self.viewport as u64) / self.content as u64).max(24).min(track.h as u64) as u32;
         let room = track.h - h;
-        let y = if self.max_offset() == 0 { 0 } else { (room as u64 * self.offset as u64 / self.max_offset() as u64) as u32 };
+        let y = if self.max_offset() == 0 {
+            0
+        } else {
+            (room as u64 * self.offset as u64 / self.max_offset() as u64) as u32
+        };
         Some(Rect::new(track.x, track.y + y as i32, track.w, h))
     }
 
@@ -84,7 +88,9 @@ impl Scroll {
                     Response::Consumed
                 }
             }
-            Event::PointerDown { x, y, button: b, .. } if b == button::LEFT && contains(&track, x, y) && self.needed() => {
+            Event::PointerDown { x, y, button: b, .. }
+                if b == button::LEFT && contains(&track, x, y) && self.needed() =>
+            {
                 let Some(th) = self.thumb(track) else { return Response::Ignored };
                 if contains(&th, x, y) {
                     self.drag = Some((y, self.offset));

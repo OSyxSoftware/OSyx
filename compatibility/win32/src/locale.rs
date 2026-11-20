@@ -27,7 +27,9 @@ pub(crate) fn locale(name: *const u16) -> Option<bool> {
     match unsafe { path::wide_to_string(name) } {
         None => Some(true), // LOCALE_NAME_USER_DEFAULT
         Some(n) if n.is_empty() => Some(false),
-        Some(n) if n.eq_ignore_ascii_case("en-US") || n.eq_ignore_ascii_case("en") || n == "!x-sys-default-locale" => Some(true),
+        Some(n) if n.eq_ignore_ascii_case("en-US") || n.eq_ignore_ascii_case("en") || n == "!x-sys-default-locale" => {
+            Some(true)
+        }
         Some(_) => None,
     }
 }
@@ -193,15 +195,30 @@ pub(crate) extern "win64" fn LCMapStringEx(
         unsafe { core::ptr::copy_nonoverlapping(key.as_ptr(), dst as *mut u8, key.len()) };
         return key.len() as i32;
     }
-    if case_flags == (LCMAP_LOWERCASE | LCMAP_UPPERCASE) || flags & !(case_flags | LCMAP_LINGUISTIC_CASING) != 0 || case_flags == 0 {
-        return fail(if flags & !(case_flags | LCMAP_LINGUISTIC_CASING) != 0 { ERROR_NOT_SUPPORTED } else { ERROR_INVALID_FLAGS }, 0);
+    if case_flags == (LCMAP_LOWERCASE | LCMAP_UPPERCASE)
+        || flags & !(case_flags | LCMAP_LINGUISTIC_CASING) != 0
+        || case_flags == 0
+    {
+        return fail(
+            if flags & !(case_flags | LCMAP_LINGUISTIC_CASING) != 0 {
+                ERROR_NOT_SUPPORTED
+            } else {
+                ERROR_INVALID_FLAGS
+            },
+            0,
+        );
     }
     // Simple (one-to-one) case mapping keeps the length, as Windows does.
     let mapped: String = text
         .iter()
         .map(|&c| {
-            let mut m: Vec<char> = if case_flags == LCMAP_LOWERCASE { c.to_lowercase().collect() } else { c.to_uppercase().collect() };
-            if m.len() == 1 && (m[0] as u32 > 0xffff) == (c as u32 > 0xffff) { m.pop().unwrap() } else { c }
+            let mut m: Vec<char> =
+                if case_flags == LCMAP_LOWERCASE { c.to_lowercase().collect() } else { c.to_uppercase().collect() };
+            if m.len() == 1 && (m[0] as u32 > 0xffff) == (c as u32 > 0xffff) {
+                m.pop().unwrap()
+            } else {
+                c
+            }
         })
         .collect();
     // A NUL-terminated source (n < 0) maps its terminator too.
@@ -330,25 +347,85 @@ const LOCALE_NOUSEROVERRIDE: u32 = 0x8000_0000;
 /// en-US locale data (the invariant locale differs only in its names).
 fn locale_info(lctype: u32, en_us: bool) -> Option<String> {
     const DAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-    const MONTHS: [&str; 12] =
-        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
     let s = match lctype {
-        0x01 => if en_us { "0409" } else { "007f" },               // LOCALE_ILANGUAGE
-        0x02 | 0x72 | 0x73 => if en_us { "English (United States)" } else { "Invariant Language (Invariant Country)" },
-        0x03 => if en_us { "ENU" } else { "IVL" },                  // LOCALE_SABBREVLANGNAME
-        0x04 | 0x6f | 0x1001 => if en_us { "English" } else { "Invariant Language" },
-        0x06 | 0x1002 | 0x08 => if en_us { "United States" } else { "Invariant Country" },
-        0x0B => "65001",                                            // LOCALE_IDEFAULTCODEPAGE
-        0x1004 => "65001",                                          // LOCALE_IDEFAULTANSICODEPAGE
-        0x0D => if en_us { "1" } else { "0" },                      // LOCALE_IMEASURE
+        0x01 => {
+            if en_us {
+                "0409"
+            } else {
+                "007f"
+            }
+        } // LOCALE_ILANGUAGE
+        0x02 | 0x72 | 0x73 => {
+            if en_us {
+                "English (United States)"
+            } else {
+                "Invariant Language (Invariant Country)"
+            }
+        }
+        0x03 => {
+            if en_us {
+                "ENU"
+            } else {
+                "IVL"
+            }
+        } // LOCALE_SABBREVLANGNAME
+        0x04 | 0x6f | 0x1001 => {
+            if en_us {
+                "English"
+            } else {
+                "Invariant Language"
+            }
+        }
+        0x06 | 0x1002 | 0x08 => {
+            if en_us {
+                "United States"
+            } else {
+                "Invariant Country"
+            }
+        }
+        0x0B => "65001",   // LOCALE_IDEFAULTCODEPAGE
+        0x1004 => "65001", // LOCALE_IDEFAULTANSICODEPAGE
+        0x0D => {
+            if en_us {
+                "1"
+            } else {
+                "0"
+            }
+        } // LOCALE_IMEASURE
         0x0E => ".",
         0x0F => ",",
         0x10 => "3;0",
         0x11 => "2",
         0x12 => "1",
         0x13 => "0123456789",
-        0x14 => if en_us { "$" } else { "\u{a4}" },
-        0x15 => if en_us { "USD" } else { "XDR" },
+        0x14 => {
+            if en_us {
+                "$"
+            } else {
+                "\u{a4}"
+            }
+        }
+        0x15 => {
+            if en_us {
+                "USD"
+            } else {
+                "XDR"
+            }
+        }
         0x16 => ".",
         0x17 => ",",
         0x18 => "3;0",
@@ -357,11 +434,29 @@ fn locale_info(lctype: u32, en_us: bool) -> Option<String> {
         0x1C => "0",
         0x1D => "/",
         0x1E => ":",
-        0x1F => if en_us { "M/d/yyyy" } else { "MM/dd/yyyy" },
-        0x20 => if en_us { "dddd, MMMM d, yyyy" } else { "dddd, dd MMMM yyyy" },
-        0x1003 => if en_us { "h:mm:ss tt" } else { "HH:mm:ss" },
-        0x1009 => "1",                                              // LOCALE_ICALENDARTYPE: Gregorian
-        0x100C => "6",                                              // LOCALE_IFIRSTDAYOFWEEK: Sunday
+        0x1F => {
+            if en_us {
+                "M/d/yyyy"
+            } else {
+                "MM/dd/yyyy"
+            }
+        }
+        0x20 => {
+            if en_us {
+                "dddd, MMMM d, yyyy"
+            } else {
+                "dddd, dd MMMM yyyy"
+            }
+        }
+        0x1003 => {
+            if en_us {
+                "h:mm:ss tt"
+            } else {
+                "HH:mm:ss"
+            }
+        }
+        0x1009 => "1", // LOCALE_ICALENDARTYPE: Gregorian
+        0x100C => "6", // LOCALE_IFIRSTDAYOFWEEK: Sunday
         0x1010 => "1",
         0x28 => "AM",
         0x29 => "PM",
@@ -371,13 +466,37 @@ fn locale_info(lctype: u32, en_us: bool) -> Option<String> {
         0x44..=0x4F => &MONTHS[(lctype - 0x44) as usize][..3],
         0x50 => "",
         0x51 => "-",
-        0x59 => if en_us { "en" } else { "iv" },                    // LOCALE_SISO639LANGNAME
-        0x5A => if en_us { "US" } else { "IV" },                    // LOCALE_SISO3166CTRYNAME
-        0x5C => if en_us { "en-US" } else { "" },                   // LOCALE_SNAME
+        0x59 => {
+            if en_us {
+                "en"
+            } else {
+                "iv"
+            }
+        } // LOCALE_SISO639LANGNAME
+        0x5A => {
+            if en_us {
+                "US"
+            } else {
+                "IV"
+            }
+        } // LOCALE_SISO3166CTRYNAME
+        0x5C => {
+            if en_us {
+                "en-US"
+            } else {
+                ""
+            }
+        } // LOCALE_SNAME
         0x69 => "NaN",
         0x6A => "Infinity",
         0x6B => "-Infinity",
-        0x6D => if en_us { "en" } else { "" },                      // LOCALE_SPARENT
+        0x6D => {
+            if en_us {
+                "en"
+            } else {
+                ""
+            }
+        } // LOCALE_SPARENT
         _ => return None,
     };
     Some(String::from(s))

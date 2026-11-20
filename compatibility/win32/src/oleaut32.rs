@@ -44,7 +44,11 @@ pub(crate) extern "win64" fn SetErrorInfo(reserved: u32, info: u64) -> u32 {
     }
     let old = {
         let mut errors = ERROR_INFO.lock().unwrap();
-        if info == 0 { errors.remove(&os_sys::gettid()) } else { errors.insert(os_sys::gettid(), info) }
+        if info == 0 {
+            errors.remove(&os_sys::gettid())
+        } else {
+            errors.insert(os_sys::gettid(), info)
+        }
     };
     if let Some(old) = old {
         error_ref(old, 2);
@@ -212,7 +216,13 @@ extern "win64" fn VariantClear(v: *mut u8) -> u32 {
     let vt = unsafe { *(v as *const u16) };
     // A 32-bit caller's VARIANT holds 4-byte pointers.
     let narrow = crate::wow64::is_active();
-    let value = unsafe { if narrow { *(v.add(8) as *const u32) as u64 } else { *(v.add(8) as *const u64) } };
+    let value = unsafe {
+        if narrow {
+            *(v.add(8) as *const u32) as u64
+        } else {
+            *(v.add(8) as *const u64)
+        }
+    };
     if vt & VT_BYREF != 0 {
         // References are not owned; only the type must be valid.
         if !plain(vt & !VT_BYREF) && ![VT_BSTR, VT_DISPATCH, VT_UNKNOWN, 12].contains(&(vt & !VT_BYREF)) {
@@ -261,7 +271,9 @@ extern "win64" fn VariantCopy(dst: *mut u8, src: *const u8) -> u32 {
     let narrow = crate::wow64::is_active();
     let size = if narrow { 16 } else { 24 };
     // SAFETY: the caller's VARIANTs (`size` bytes each).
-    let (vt, value) = unsafe { (*(src as *const u16), if narrow { *(src.add(8) as *const u32) as u64 } else { *(src.add(8) as *const u64) }) };
+    let (vt, value) = unsafe {
+        (*(src as *const u16), if narrow { *(src.add(8) as *const u32) as u64 } else { *(src.add(8) as *const u64) })
+    };
     if vt & VT_ARRAY != 0 && vt & VT_BYREF == 0 || vt == VT_RECORD {
         return DISP_E_BADVARTYPE; // no SAFEARRAY or record copies
     }
@@ -577,7 +589,13 @@ extern "win64" fn DispGetIDsOfNames(ptinfo: u64, names: *const u64, count: u32, 
     }
 }
 
-extern "win64" fn LoadRegTypeLib(_rguid: *const u8, _ver_major: u16, _ver_minor: u16, _lcid: u32, out: *mut u64) -> u32 {
+extern "win64" fn LoadRegTypeLib(
+    _rguid: *const u8,
+    _ver_major: u16,
+    _ver_minor: u16,
+    _lcid: u32,
+    out: *mut u64,
+) -> u32 {
     if out.is_null() {
         return E_INVALIDARG;
     }
@@ -690,7 +708,18 @@ extern "win64" fn VariantTimeToSystemTime(date: f64, out: *mut [u16; 8]) -> i32 
     let (y, m, d) = osyx_ui::time::civil_from_days(day);
     let weekday = osyx_ui::time::weekday(day) as u16;
     // SAFETY: the caller's SYSTEMTIME.
-    unsafe { *out = [y as u16, m as u16, weekday, d as u16, (secs / 3600) as u16, (secs / 60 % 60) as u16, (secs % 60) as u16, 0] };
+    unsafe {
+        *out = [
+            y as u16,
+            m as u16,
+            weekday,
+            d as u16,
+            (secs / 3600) as u16,
+            (secs / 60 % 60) as u16,
+            (secs % 60) as u16,
+            0,
+        ]
+    };
     1
 }
 
@@ -760,7 +789,10 @@ extern "win64" fn VarBstrCmp(a: u64, b: u64, lcid: u32, flags: u32) -> u32 {
                 char::decode_utf16(u.iter().copied())
                     .filter_map(Result::ok)
                     .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-                    .flat_map(|c| { let mut b = [0u16; 2]; c.encode_utf16(&mut b).to_vec() })
+                    .flat_map(|c| {
+                        let mut b = [0u16; 2];
+                        c.encode_utf16(&mut b).to_vec()
+                    })
                     .collect()
             } else {
                 u.to_vec()

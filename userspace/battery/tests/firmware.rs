@@ -189,7 +189,7 @@ fn thinkpad_machine() -> Machine {
     let m = Machine::new(Some(0x81));
     m.set(0x38, &[0x80 | 0x40 | 0x03]); // present, discharging, level 3
     m.set(0x46, &[0x00]); // no AC
-    // Page 0: remaining, full, -, -, current, voltage.
+                          // Page 0: remaining, full, -, -, current, voltage.
     m.page_words(0, 0, &[2250, 4500, 0, 0, 0u16.wrapping_sub(1000), 11_400]);
     // Page 1: mode (bit 15: capacities in 10 mWh), -, cycle count.
     m.page_words(1, 0, &[0x8000, 0, 123]);
@@ -232,7 +232,14 @@ fn thinkpad_style_battery_identity() {
     assert_eq!(ids.len(), 1);
     let id = &ids[0];
     assert_eq!(
-        (id.device.as_str(), id.model.as_str(), id.serial.as_str(), id.technology.as_str(), id.vendor.as_str(), id.cycles),
+        (
+            id.device.as_str(),
+            id.model.as_str(),
+            id.serial.as_str(),
+            id.technology.as_str(),
+            id.vendor.as_str(),
+            id.cycles
+        ),
         ("BAT0", "45N1234", "4321", "LION", "OSYX CELLS", Some(123))
     );
     assert!(acpi.take_problems().is_empty());
@@ -272,7 +279,6 @@ fn thinkpad_style_battery_removed_and_inserted() {
     m.set(0x38, &[0x80 | 0x20 | 0x03]);
     assert_eq!(monitor.update(&acpi.poll()).state, State::Charging);
 }
-
 
 // ---- two more firmware families in one table ------------------------------------------------------
 
@@ -316,7 +322,10 @@ fn battery_with_firmware_side_unit_conversion_and_memory_mapped_ec() {
     let (mut acpi, _) = load(&m, None, &[LAPTOP]);
     let bif = evaluate(&mut acpi, "\\_SB.PCI0.BAT0._BIF");
     // mAh * design voltage / 1000: 4400 -> 48840 mWh, 4000 -> 44400 mWh.
-    assert!(bif.starts_with("Package([Integer(0), Integer(48840), Integer(44400), Integer(1), Integer(11100)"), "{bif}");
+    assert!(
+        bif.starts_with("Package([Integer(0), Integer(48840), Integer(44400), Integer(1), Integer(11100)"),
+        "{bif}"
+    );
     let bst = evaluate(&mut acpi, "\\_SB.PCI0.BAT0._BST");
     // AC is present but the cell is not charging: state 0, 1500 mA and
     // 3000 mAh at 11.1 V, present voltage 12 V.
@@ -330,7 +339,9 @@ fn battery_in_a_package_of_packages_with_built_strings() {
     let (mut acpi, _) = load(&m, None, &[LAPTOP]);
     let bif = evaluate(&mut acpi, "\\_SB.PCI0.LPCB.EC0.BAT1._BIF");
     assert!(
-        bif.starts_with("Package([Integer(1), Integer(4000), Integer(3600), Integer(1), Integer(14800), Integer(360), Integer(180)"),
+        bif.starts_with(
+            "Package([Integer(1), Integer(4000), Integer(3600), Integer(1), Integer(14800), Integer(360), Integer(180)"
+        ),
         "{bif}"
     );
     assert!(bif.contains("String(\"OSYX-B1\")"), "model from a 128-bit EC field: {bif}");
@@ -455,7 +466,13 @@ fn qemu_battery_table() {
     assert_eq!(s.health_percent(), Some(90));
     let ids = acpi.identities();
     assert_eq!(
-        (ids[0].model.as_str(), ids[0].serial.as_str(), ids[0].technology.as_str(), ids[0].vendor.as_str(), ids[0].cycles),
+        (
+            ids[0].model.as_str(),
+            ids[0].serial.as_str(),
+            ids[0].technology.as_str(),
+            ids[0].vendor.as_str(),
+            ids[0].cycles
+        ),
         ("OSYX-QEMU-50", "03001", "LION", "OSyx", Some(87))
     );
     assert_eq!(acpi.lid_open(), Some(true));

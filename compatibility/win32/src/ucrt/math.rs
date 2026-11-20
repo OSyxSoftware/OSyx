@@ -286,12 +286,20 @@ pub(super) fn trunc_f(x: f64) -> f64 {
 
 pub(super) fn floor_f(x: f64) -> f64 {
     let t = trunc_f(x);
-    if t > x { t - 1.0 } else { t }
+    if t > x {
+        t - 1.0
+    } else {
+        t
+    }
 }
 
 fn ceil_f(x: f64) -> f64 {
     let t = trunc_f(x);
-    if t < x { t + 1.0 } else { t }
+    if t < x {
+        t + 1.0
+    } else {
+        t
+    }
 }
 
 extern "win64" fn trunc_soft(x: f64) -> f64 {
@@ -321,7 +329,11 @@ extern "win64" fn truncf_soft(x: f32) -> f32 {
 /// round: halfway cases away from zero.
 extern "win64" fn round_soft(x: f64) -> f64 {
     let t = trunc_f(x);
-    if fabs_soft(x - t) >= 0.5 { t + copysign_soft(1.0, x) } else { t }
+    if fabs_soft(x - t) >= 0.5 {
+        t + copysign_soft(1.0, x)
+    } else {
+        t
+    }
 }
 
 pub(super) extern "win64" fn sqrt_soft(x: f64) -> f64 {
@@ -649,7 +661,11 @@ fn sinpi(x: f64) -> f64 {
 pub(super) fn round_half_even(x: f64) -> f64 {
     let t = trunc_f(x);
     let d = x - t;
-    if fabs_soft(d) > 0.5 || (fabs_soft(d) == 0.5 && (t / 2.0) != trunc_f(t / 2.0)) { t + copysign_soft(1.0, x) } else { t }
+    if fabs_soft(d) > 0.5 || (fabs_soft(d) == 0.5 && (t / 2.0) != trunc_f(t / 2.0)) {
+        t + copysign_soft(1.0, x)
+    } else {
+        t
+    }
 }
 
 fn lgamma_pos(x: f64) -> f64 {
@@ -735,9 +751,36 @@ extern "win64" fn nanf_soft(_s: *const u8) -> f32 {
 }
 pub fn exports() -> Vec<(&'static str, u64)> {
     let mut v = export_table![
-        __setusermatherr, _dclass, _fdclass, _dsign, _fdsign, copysign, copysignf, fabs, trunc, floor, ceil, floorf,
-        ceilf, truncf, round, sqrt, frexp, ldexp, fmod, log10, log, log10f, logf, exp, pow, powf, lgamma, lgammaf,
-        nan, nanf,
+        __setusermatherr,
+        _dclass,
+        _fdclass,
+        _dsign,
+        _fdsign,
+        copysign,
+        copysignf,
+        fabs,
+        trunc,
+        floor,
+        ceil,
+        floorf,
+        ceilf,
+        truncf,
+        round,
+        sqrt,
+        frexp,
+        ldexp,
+        fmod,
+        log10,
+        log,
+        log10f,
+        logf,
+        exp,
+        pow,
+        powf,
+        lgamma,
+        lgammaf,
+        nan,
+        nanf,
     ];
     v.extend([("lgammal", lgamma as *const () as u64), ("_copysign", copysign as *const () as u64)]);
     v

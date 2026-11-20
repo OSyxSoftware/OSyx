@@ -18,7 +18,14 @@ use crate::{
     kernel32::{self, fail, overlapped, INVALID_HANDLE_VALUE},
     objects::{self, Object},
 };
-use alloc::{boxed::Box, collections::{BTreeMap, VecDeque}, format, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, VecDeque},
+    format,
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use os_std::sync::Mutex;
 use osyx_abi::Errno;
@@ -394,7 +401,9 @@ fn submit_pipe_job(job: PipeJob) -> Result<(), ()> {
             pool.jobs.pop_back();
             return Err(());
         }
-        if crate::COUNT.load(Ordering::Relaxed) { PIPE_WORKER_STARTS.fetch_add(1, Ordering::Relaxed); }
+        if crate::COUNT.load(Ordering::Relaxed) {
+            PIPE_WORKER_STARTS.fetch_add(1, Ordering::Relaxed);
+        }
     }
     drop(pool);
     PIPE_WORK_WAKE.fetch_add(1, Ordering::Release);
@@ -448,7 +457,10 @@ fn start(
     if crate::COUNT.load(Ordering::Relaxed) {
         let count = STARTS.fetch_add(1, Ordering::Relaxed) + 1;
         if count.is_multiple_of(1024) {
-            os_std::eprintln!("winrun: overlapped pipe starts={count} workers={}", PIPE_WORKER_STARTS.load(Ordering::Relaxed));
+            os_std::eprintln!(
+                "winrun: overlapped pipe starts={count} workers={}",
+                PIPE_WORKER_STARTS.load(Ordering::Relaxed)
+            );
         }
     }
     let epoch = p.cancel.load(Ordering::SeqCst);
@@ -522,7 +534,11 @@ fn complete_now(p: &PipeObj, ov: u64, done: *mut u32, status: u64, bytes: u32) -
         unsafe { *done = bytes };
     }
     complete(p, ov, event, status, bytes);
-    if status == 0 { 1 } else { fail(ERROR_MORE_DATA, 0) }
+    if status == 0 {
+        1
+    } else {
+        fail(ERROR_MORE_DATA, 0)
+    }
 }
 
 /// Synchronous results: TRUE, or FALSE with the error; ERROR_MORE_DATA
@@ -813,7 +829,9 @@ extern "win64" fn CreateNamedPipeW(
         return fail(e, INVALID_HANDLE_VALUE);
     }
     // SAFETY: a NUL-terminated name.
-    let Some(win) = (unsafe { crate::path::wide_to_string(name) }) else { return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE) };
+    let Some(win) = (unsafe { crate::path::wide_to_string(name) }) else {
+        return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE);
+    };
     // Windows' local app-container namespace is used by Mozilla audioipc.
     // Keep LOCAL in the hashed service name so it stays distinct from a
     // bare pipe with the same suffix, while rejecting other path nesting.
@@ -821,10 +839,14 @@ extern "win64" fn CreateNamedPipeW(
         let suffix = if n.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("LOCAL\\")) { &n[6..] } else { n };
         !suffix.is_empty() && !suffix.contains('\\')
     }) else {
-        if crate::VERBOSE.load(Ordering::Relaxed) { os_std::eprintln!("winrun: invalid named pipe path {win:?}"); }
+        if crate::VERBOSE.load(Ordering::Relaxed) {
+            os_std::eprintln!("winrun: invalid named pipe path {win:?}");
+        }
         return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE);
     };
-    if open_mode & (PIPE_ACCESS_INBOUND | PIPE_ACCESS_OUTBOUND) == 0 || max_instances == 0 || max_instances > 255
+    if open_mode & (PIPE_ACCESS_INBOUND | PIPE_ACCESS_OUTBOUND) == 0
+        || max_instances == 0
+        || max_instances > 255
         || pipe_mode & !(PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS) != 0
         || (pipe_mode & PIPE_READMODE_MESSAGE != 0 && pipe_mode & PIPE_TYPE_MESSAGE == 0)
     {
@@ -835,8 +857,12 @@ extern "win64" fn CreateNamedPipeW(
         let mut all = LISTENERS.lock().unwrap();
         match all.get(&svc).and_then(|(w, max)| Some((w.upgrade()?, *max))) {
             // The instance limit is checked first, as on Windows.
-            Some((l, max)) if Arc::strong_count(&l) >= max as usize => return fail(ERROR_PIPE_BUSY, INVALID_HANDLE_VALUE),
-            Some(_) if open_mode & FILE_FLAG_FIRST_PIPE_INSTANCE != 0 => return fail(ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE),
+            Some((l, max)) if Arc::strong_count(&l) >= max as usize => {
+                return fail(ERROR_PIPE_BUSY, INVALID_HANDLE_VALUE)
+            }
+            Some(_) if open_mode & FILE_FLAG_FIRST_PIPE_INSTANCE != 0 => {
+                return fail(ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE)
+            }
             Some((l, _)) => l,
             None => match os_sys::channel_listen(&svc) {
                 Ok(fd) => {
@@ -917,7 +943,12 @@ extern "win64" fn DisconnectNamedPipe(h: u64) -> i32 {
 /// PIPE_READMODE_MESSAGE needs a message-type pipe; PIPE_NOWAIT makes
 /// reads and connects return at once. Collection settings are for remote
 /// pipes and are refused.
-extern "win64" fn SetNamedPipeHandleState(h: u64, mode: *const u32, max_collection: *const u32, timeout: *const u32) -> i32 {
+extern "win64" fn SetNamedPipeHandleState(
+    h: u64,
+    mode: *const u32,
+    max_collection: *const u32,
+    timeout: *const u32,
+) -> i32 {
     let p = match pipe(h) {
         Ok(p) => p,
         Err(e) => return fail(e, 0),
@@ -928,7 +959,9 @@ extern "win64" fn SetNamedPipeHandleState(h: u64, mode: *const u32, max_collecti
     if !mode.is_null() {
         // SAFETY: the caller's mode.
         let m = unsafe { *mode };
-        if m & !(PIPE_READMODE_MESSAGE | PIPE_NOWAIT) != 0 || (m & PIPE_READMODE_MESSAGE != 0 && !p.message_type && p.server) {
+        if m & !(PIPE_READMODE_MESSAGE | PIPE_NOWAIT) != 0
+            || (m & PIPE_READMODE_MESSAGE != 0 && !p.message_type && p.server)
+        {
             return fail(ERROR_INVALID_PARAMETER, 0);
         }
         p.read_message.store(m & PIPE_READMODE_MESSAGE != 0, Ordering::SeqCst);
@@ -985,7 +1018,15 @@ extern "win64" fn GetNamedPipeClientProcessId(h: u64, pid: *mut u32) -> i32 {
 
 /// Writes one message and reads the reply, in message read mode.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn TransactNamedPipe(h: u64, input: *const u8, in_len: u32, output: *mut u8, out_len: u32, read: *mut u32, ov: u64) -> i32 {
+extern "win64" fn TransactNamedPipe(
+    h: u64,
+    input: *const u8,
+    in_len: u32,
+    output: *mut u8,
+    out_len: u32,
+    read: *mut u32,
+    ov: u64,
+) -> i32 {
     let p = match pipe(h) {
         Ok(p) => p,
         Err(e) => return fail(e, 0),
@@ -996,7 +1037,9 @@ extern "win64" fn TransactNamedPipe(h: u64, input: *const u8, in_len: u32, outpu
     let (i, il, o, ol) = (input as u64, in_len as usize, output as u64, out_len as usize);
     let op = move |p: &PipeObj, epoch: u64| -> Result<(usize, bool), u32> {
         // SAFETY: the caller's buffers.
-        let (data, out) = unsafe { (core::slice::from_raw_parts(i as *const u8, il), core::slice::from_raw_parts_mut(o as *mut u8, ol)) };
+        let (data, out) = unsafe {
+            (core::slice::from_raw_parts(i as *const u8, il), core::slice::from_raw_parts_mut(o as *mut u8, ol))
+        };
         p.write(data, epoch)?;
         p.read(out, epoch)
     };
@@ -1073,8 +1116,16 @@ pub(crate) fn relay_out(h: u64) -> Result<(u32, u32), u32> {
         let mut buf = alloc::vec![0u8; CHUNK];
         loop {
             let mut items = [
-                os_sys::ipc::WaitItem { handle: chan.0, events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP, revents: 0 },
-                os_sys::ipc::WaitItem { handle: other.0, events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP, revents: 0 },
+                os_sys::ipc::WaitItem {
+                    handle: chan.0,
+                    events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP,
+                    revents: 0,
+                },
+                os_sys::ipc::WaitItem {
+                    handle: other.0,
+                    events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP,
+                    revents: 0,
+                },
             ];
             if os_sys::wait_handles(&mut items, u64::MAX).is_err() {
                 return;
@@ -1117,16 +1168,30 @@ pub(crate) fn relay_out_channel(h: u64) -> Result<(u64, u32), u32> {
         // Move the owning wrapper, not just its numeric handle, into the worker.
         let parent = parent;
         let rest = core::mem::take(&mut *p.rest.lock().unwrap());
-        if !rest.is_empty() && !forward(parent.0, &rest) { return; }
+        if !rest.is_empty() && !forward(parent.0, &rest) {
+            return;
+        }
         let mut buf = alloc::vec![0u8; CHUNK];
         loop {
             let mut items = [
-                os_sys::ipc::WaitItem { handle: chan.0, events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP, revents: 0 },
-                os_sys::ipc::WaitItem { handle: parent.0, events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP, revents: 0 },
+                os_sys::ipc::WaitItem {
+                    handle: chan.0,
+                    events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP,
+                    revents: 0,
+                },
+                os_sys::ipc::WaitItem {
+                    handle: parent.0,
+                    events: osyx_abi::ipc::WAIT_READABLE | osyx_abi::ipc::WAIT_HANGUP,
+                    revents: 0,
+                },
             ];
-            if os_sys::wait_handles(&mut items, u64::MAX).is_err() { return; }
+            if os_sys::wait_handles(&mut items, u64::MAX).is_err() {
+                return;
+            }
             for (from, to, ready) in [(chan.0, parent.0, items[0].revents), (parent.0, chan.0, items[1].revents)] {
-                if ready == 0 { continue; }
+                if ready == 0 {
+                    continue;
+                }
                 match os_sys::channel_recv(from, &mut buf, &mut []) {
                     Ok((n, _)) if forward(to, &buf[..n]) => {}
                     Err(Errno::WouldBlock) => {}

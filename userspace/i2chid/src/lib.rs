@@ -21,14 +21,14 @@
 
 extern crate alloc;
 
-use aml::value::Args;
-use aml::{AmlContext, AmlName, AmlValue, DebugVerbosity, LevelType};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use aml::value::Args;
+use aml::{AmlContext, AmlName, AmlValue, DebugVerbosity, LevelType};
 use osyx_battery::hw::{Firmware, Hardware, Stats};
 use osyx_i2c::acpi::{self, parse_resources, Resources, DESIGNWARE_IDS};
 use osyx_i2c::designware::{SclTiming, Timing};
@@ -166,7 +166,9 @@ fn controller(ctx: &mut AmlContext, source: &str) -> Result<ControllerSpec, Stri
         });
     }
     let Some(hid) = ids.iter().find(|i| DESIGNWARE_IDS.contains(&i.as_str())).cloned() else {
-        return Err(format!("controller {text} (ids {ids:?}) is neither a PCI function nor a known DesignWare ACPI device"));
+        return Err(format!(
+            "controller {text} (ids {ids:?}) is neither a PCI function nor a known DesignWare ACPI device"
+        ));
     };
     let res = resources_of(ctx, &name).map_err(|e| format!("controller {text}: {e}"))?;
     let &(base, len) = res.memory.first().ok_or_else(|| format!("controller {text}: no memory resource"))?;
@@ -182,8 +184,12 @@ fn descriptor_register(ctx: &mut AmlContext, dev: &AmlName) -> Result<u16, Strin
         AmlValue::Package(Vec::new()),
     ])
     .map_err(|e| format!("_DSM arguments: {e:?}"))?;
-    let v = ctx.invoke_method(&path(dev, "_DSM").ok_or_else(|| String::from("bad path"))?, args).map_err(|e| format!("_DSM failed: {e:?}"))?;
-    let AmlValue::Integer(reg) = v else { return Err(String::from("_DSM did not return the HID descriptor register (not an integer)")) };
+    let v = ctx
+        .invoke_method(&path(dev, "_DSM").ok_or_else(|| String::from("bad path"))?, args)
+        .map_err(|e| format!("_DSM failed: {e:?}"))?;
+    let AmlValue::Integer(reg) = v else {
+        return Err(String::from("_DSM did not return the HID descriptor register (not an integer)"));
+    };
     u16::try_from(reg).map_err(|_| format!("_DSM returned {reg:#x}, which is not a 16-bit register"))
 }
 
@@ -224,7 +230,10 @@ fn describe(ctx: &mut AmlContext, dev: &AmlName) -> Result<DeviceSpec, String> {
     if conn.ten_bit {
         return Err(String::from("10-bit addressing is not supported"));
     }
-    let address = u8::try_from(conn.address).ok().filter(|a| (1..=0x7F).contains(a)).ok_or_else(|| format!("address {:#x} is not a 7-bit target address", conn.address))?;
+    let address = u8::try_from(conn.address)
+        .ok()
+        .filter(|a| (1..=0x7F).contains(a))
+        .ok_or_else(|| format!("address {:#x} is not a 7-bit target address", conn.address))?;
     let register = descriptor_register(ctx, dev)?;
     let controller = controller(ctx, &conn.source)?;
     let interrupt = match (res.gpio_interrupts.first(), res.interrupts.first()) {
@@ -232,5 +241,12 @@ fn describe(ctx: &mut AmlContext, dev: &AmlName) -> Result<DeviceSpec, String> {
         (None, Some(&n)) => Interrupt::Gsi(n),
         (None, None) => Interrupt::None,
     };
-    Ok(DeviceSpec { path: dev.as_string(), address, speed_hz: conn.speed_hz, descriptor_register: register, interrupt, controller })
+    Ok(DeviceSpec {
+        path: dev.as_string(),
+        address,
+        speed_hz: conn.speed_hz,
+        descriptor_register: register,
+        interrupt,
+        controller,
+    })
 }

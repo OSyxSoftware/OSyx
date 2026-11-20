@@ -387,4 +387,3 @@ fn set1_extended(code: u8) -> u16 {
         _ => 0,
     }
 }
-

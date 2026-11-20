@@ -58,7 +58,14 @@ impl Version {
         if r.len() != 10 || r[1] != 0x37 {
             return None;
         }
-        Some(Version { hw_platform: r[1], hw_variant: r[2], hw_revision: r[3], fw_variant: r[4], fw_revision: r[5], fw_build: (r[6], r[7], r[8]) })
+        Some(Version {
+            hw_platform: r[1],
+            hw_variant: r[2],
+            hw_revision: r[3],
+            fw_variant: r[4],
+            fw_revision: r[5],
+            fw_build: (r[6], r[7], r[8]),
+        })
     }
 }
 
@@ -137,7 +144,9 @@ fn secure_send(hci: &mut Hci, kind: u8, data: &[u8]) -> Result<(), HciError> {
 
 fn read_version(hci: &mut Hci) -> Result<Version, HciError> {
     let r = hci.command(OP_READ_VERSION, &[], 2000)?;
-    Version::parse(&r).ok_or(HciError::Protocol("Intel version in an unsupported (TLV) format: AX-series controllers are not supported yet"))
+    Version::parse(&r).ok_or(HciError::Protocol(
+        "Intel version in an unsupported (TLV) format: AX-series controllers are not supported yet",
+    ))
 }
 
 fn vendor_event(hci: &mut Hci, code: u8, timeout_ms: u64) -> Result<Option<Vec<u8>>, HciError> {
@@ -178,7 +187,8 @@ fn download(hci: &mut Hci, unit: usize, product: u16) -> Result<(), HciError> {
         return Err(HciError::Protocol("short Intel boot parameters"));
     }
     let dev_revid = u16::from_le_bytes([bp[4], bp[5]]);
-    let name = firmware_name(&v, dev_revid).ok_or(HciError::Protocol("no firmware name known for this Intel controller"))?;
+    let name =
+        firmware_name(&v, dev_revid).ok_or(HciError::Protocol("no firmware name known for this Intel controller"))?;
     let path = alloc::format!("/etc/firmware/{name}.sfi");
     let Some(fw) = crate::bsd::read_file(&path) else {
         kprintln!("bluetooth: hci{}: firmware {} is missing", unit, path);
@@ -193,7 +203,8 @@ fn download(hci: &mut Hci, unit: usize, product: u16) -> Result<(), HciError> {
         secure_send(hci, 0x01, g)?;
     }
     // Result: [ff, len, 06, result, opcode (2), status].
-    let ev = vendor_event(hci, EVT_SECURE_SEND_RESULT, 5000)?.ok_or(HciError::Protocol("no firmware download result"))?;
+    let ev =
+        vendor_event(hci, EVT_SECURE_SEND_RESULT, 5000)?.ok_or(HciError::Protocol("no firmware download result"))?;
     if ev.len() >= 4 && ev[3] != 0 {
         kprintln!("bluetooth: hci{}: firmware rejected (result {:#04x})", unit, ev[3]);
         return Err(HciError::Protocol("firmware rejected by the controller"));

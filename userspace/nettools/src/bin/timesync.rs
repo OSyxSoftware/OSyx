@@ -50,7 +50,10 @@ fn be64(b: &[u8]) -> u64 {
 /// Asks `server` for the time; returns the Unix time (ns) it is now and the
 /// round-trip delay (ns).
 fn query(server: &str) -> Result<(u64, u64), String> {
-    let addr = *net::lookup_host(server).map_err(|e| format!("{server}: {e}"))?.first().ok_or_else(|| format!("{server}: no address"))?;
+    let addr = *net::lookup_host(server)
+        .map_err(|e| format!("{server}: {e}"))?
+        .first()
+        .ok_or_else(|| format!("{server}: no address"))?;
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("socket: {e}"))?;
     sock.set_read_timeout(Some(Duration::from_secs(3))).map_err(|e| format!("socket: {e}"))?;
     let mut req = [0u8; 48];

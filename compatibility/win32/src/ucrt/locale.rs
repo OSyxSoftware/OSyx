@@ -184,7 +184,11 @@ extern "win64" fn _configthreadlocale(how: i32) -> i32 {
 }
 
 extern "win64" fn ___mb_cur_max_func() -> i32 {
-    if ctype_utf8() { 4 } else { 1 }
+    if ctype_utf8() {
+        4
+    } else {
+        1
+    }
 }
 
 extern "win64" fn ___mb_cur_max_l_func(_l: u64) -> i32 {
@@ -192,11 +196,19 @@ extern "win64" fn ___mb_cur_max_l_func(_l: u64) -> i32 {
 }
 
 extern "win64" fn ___lc_codepage_func() -> u32 {
-    if ctype_utf8() { 65001 } else { 0 }
+    if ctype_utf8() {
+        65001
+    } else {
+        0
+    }
 }
 
 extern "win64" fn ___lc_collate_cp_func() -> u32 {
-    if current().utf8(1) { 65001 } else { 0 }
+    if current().utf8(1) {
+        65001
+    } else {
+        0
+    }
 }
 
 /// Locale names per category: none (C conventions in every category).
@@ -250,7 +262,11 @@ static CTYPE: [u16; 257] = {
 
 /// Class bits of `c` (-1..=255; anything else has none).
 pub fn ctype(c: i32) -> u16 {
-    if (-1..=255).contains(&c) { CTYPE[(c + 1) as usize] } else { 0 }
+    if (-1..=255).contains(&c) {
+        CTYPE[(c + 1) as usize]
+    } else {
+        0
+    }
 }
 
 extern "win64" fn __pctype_func() -> u64 {

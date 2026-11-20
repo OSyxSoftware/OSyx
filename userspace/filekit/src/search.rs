@@ -147,8 +147,21 @@ mod tests {
         // Every section name is one Settings understands.
         for st in SETTINGS {
             assert!(
-                ["general", "appearance", "display", "keyboard", "mouse", "sound", "power", "datetime", "network", "storage", "apps", "about"]
-                    .contains(&st.section),
+                [
+                    "general",
+                    "appearance",
+                    "display",
+                    "keyboard",
+                    "mouse",
+                    "sound",
+                    "power",
+                    "datetime",
+                    "network",
+                    "storage",
+                    "apps",
+                    "about"
+                ]
+                .contains(&st.section),
                 "{}",
                 st.section
             );
@@ -157,15 +170,25 @@ mod tests {
 
     #[test]
     fn files_rank_by_match_then_name_length_then_depth() {
-        let paths: Vec<String> =
-            vec!["/home/user/Documents/report-final.txt", "/home/user/report.txt", "/home/user/a/b/report.txt", "/home/user/Music/song.mp3", "/home/user/Pictures/my report.png"]
-                .into_iter()
-                .map(String::from)
-                .collect();
+        let paths: Vec<String> = vec![
+            "/home/user/Documents/report-final.txt",
+            "/home/user/report.txt",
+            "/home/user/a/b/report.txt",
+            "/home/user/Music/song.mp3",
+            "/home/user/Pictures/my report.png",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let found = |q: &str, n: usize| files(&paths, q, n).into_iter().map(|i| paths[i].as_str()).collect::<Vec<_>>();
         assert_eq!(
             found("report", 10),
-            ["/home/user/report.txt", "/home/user/a/b/report.txt", "/home/user/Documents/report-final.txt", "/home/user/Pictures/my report.png"]
+            [
+                "/home/user/report.txt",
+                "/home/user/a/b/report.txt",
+                "/home/user/Documents/report-final.txt",
+                "/home/user/Pictures/my report.png"
+            ]
         );
         assert_eq!(found("report", 2).len(), 2);
         assert_eq!(found("mp3", 10), ["/home/user/Music/song.mp3"]);

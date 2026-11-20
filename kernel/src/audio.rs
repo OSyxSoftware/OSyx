@@ -361,7 +361,8 @@ impl CharDevice for Output {
         let deadline = crate::interrupts::ticks() + crate::arch::timer::ms_to_ticks(3000);
         let _ = waitq::block_on(&[&u.space], Some(deadline), || u.play.lock().is_empty().then_some(()));
         let last = u.fills.load(Ordering::Acquire) + RING_BLOCKS;
-        let _ = waitq::block_on(&[&u.space], Some(deadline), || (u.fills.load(Ordering::Acquire) >= last).then_some(()));
+        let _ =
+            waitq::block_on(&[&u.space], Some(deadline), || (u.fills.load(Ordering::Acquire) >= last).then_some(()));
         stop(unit);
         o.1 = false;
         u.play.lock().clear();

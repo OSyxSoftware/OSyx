@@ -36,7 +36,12 @@ pub fn dos_from_unix(secs: i64) -> u32 {
     if y > 2107 {
         return 0xFF9F_BF7D;
     }
-    (((y - 1980) as u32) << 25) | ((m as u32) << 21) | ((d as u32) << 16) | (((rem / 3600) as u32) << 11) | ((((rem / 60) % 60) as u32) << 5) | ((rem % 60) as u32 / 2)
+    (((y - 1980) as u32) << 25)
+        | ((m as u32) << 21)
+        | ((d as u32) << 16)
+        | (((rem / 3600) as u32) << 11)
+        | ((((rem / 60) % 60) as u32) << 5)
+        | ((rem % 60) as u32 / 2)
 }
 
 /// Seconds after the Unix epoch of a DOS timestamp read as UTC.

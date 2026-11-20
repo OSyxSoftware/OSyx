@@ -120,7 +120,12 @@ impl<D: BlockDevice> FileSystem<D> {
         Ok(self
             .parse_dir(&bytes, &dir)
             .into_iter()
-            .map(|it| DirEntryInfo { name: it.name(), is_dir: it.file.is_dir(), size: it.file.size, attributes: it.file.attr })
+            .map(|it| DirEntryInfo {
+                name: it.name(),
+                is_dir: it.file.is_dir(),
+                size: it.file.size,
+                attributes: it.file.attr,
+            })
             .collect())
     }
 

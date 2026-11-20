@@ -222,7 +222,11 @@ fn udp_checksum_and_lengths_are_validated() {
     let u = udp::build(s, d, 5000, 53, b"hello");
     let (h, data) = udp::parse(s, d, &u).unwrap();
     assert_eq!((h.src_port, h.dst_port, data), (5000, 53, &b"hello"[..]));
-    assert_eq!(udp::parse(Ipv4Addr::new(10, 0, 0, 3), d, &u), Err(udp::UdpError::BadChecksum), "pseudo header covers addresses");
+    assert_eq!(
+        udp::parse(Ipv4Addr::new(10, 0, 0, 3), d, &u),
+        Err(udp::UdpError::BadChecksum),
+        "pseudo header covers addresses"
+    );
     let mut long = u.clone();
     long[5] = 200;
     assert_eq!(udp::parse(s, d, &long), Err(udp::UdpError::BadLength));
@@ -307,7 +311,17 @@ fn dhcp_client_walks_through_the_lease_states() {
     assert_eq!(c.phase(), dhcp::Phase::Selecting);
     let server = Ipv4Addr::new(10, 0, 2, 2);
     let offer = |kind, xid| {
-        dhcp::build_reply(kind, xid, mac, Ipv4Addr::new(10, 0, 2, 15), server, Ipv4Addr::new(255, 255, 255, 0), server, Ipv4Addr::new(10, 0, 2, 3), 120)
+        dhcp::build_reply(
+            kind,
+            xid,
+            mac,
+            Ipv4Addr::new(10, 0, 2, 15),
+            server,
+            Ipv4Addr::new(255, 255, 255, 0),
+            server,
+            Ipv4Addr::new(10, 0, 2, 3),
+            120,
+        )
     };
     // A reply for another transaction is ignored.
     assert_eq!(c.input(&offer(dhcp::OFFER, discover.xid ^ 1), 10), (None, None));
@@ -341,8 +355,10 @@ fn dhcp_client_walks_through_the_lease_states() {
     minimal.extend_from_slice(&[51, 4, 0, 0, 0, 120, 255]);
     let (_, event) = c.input(&minimal, renewed.t1 + 1);
     let Some(dhcp::Event::Renewed(updated)) = event else { panic!("renewal failed: {event:?}") };
-    assert_eq!((updated.addr, updated.prefix, updated.router, updated.dns),
-        (renewed.addr, renewed.prefix, renewed.router, renewed.dns));
+    assert_eq!(
+        (updated.addr, updated.prefix, updated.router, updated.dns),
+        (renewed.addr, renewed.prefix, renewed.router, renewed.dns)
+    );
     // Without answers the lease runs out.
     let l = c.lease().unwrap().clone();
     let (tx, _) = c.poll(l.t2);
@@ -361,9 +377,15 @@ fn dhcp_ignores_replies_from_unselected_server() {
     let selected = Ipv4Addr::new(10, 0, 2, 2);
     let other = Ipv4Addr::new(10, 0, 2, 3);
     let address = Ipv4Addr::new(10, 0, 2, 15);
-    let reply = |kind, xid, server, addr| dhcp::build_reply(kind, xid, mac, addr, server, Ipv4Addr::new(255, 255, 255, 0), server, server, 120);
+    let reply = |kind, xid, server, addr| {
+        dhcp::build_reply(kind, xid, mac, addr, server, Ipv4Addr::new(255, 255, 255, 0), server, server, 120)
+    };
     client.input(&reply(dhcp::OFFER, xid, selected, address), 10);
-    for bad in [reply(dhcp::ACK, xid, other, address), reply(dhcp::NAK, xid, other, address), reply(dhcp::ACK, xid, selected, other)] {
+    for bad in [
+        reply(dhcp::ACK, xid, other, address),
+        reply(dhcp::NAK, xid, other, address),
+        reply(dhcp::ACK, xid, selected, other),
+    ] {
         assert_eq!(client.input(&bad, 20), (None, None));
         assert_eq!(client.phase(), dhcp::Phase::Requesting);
     }
@@ -390,7 +412,9 @@ fn dhcp_accepts_replies_without_server_identifier() {
     for kind in [dhcp::ACK, dhcp::NAK] {
         let mut client = dhcp::Client::new(mac, 7, "osyx");
         let xid = dhcp::Message::parse(&client.poll(0).0.unwrap().payload).unwrap().xid;
-        let reply = |kind| dhcp::build_reply(kind, xid, mac, address, server, Ipv4Addr::new(255, 255, 255, 0), server, server, 120);
+        let reply = |kind| {
+            dhcp::build_reply(kind, xid, mac, address, server, Ipv4Addr::new(255, 255, 255, 0), server, server, 120)
+        };
         client.input(&reply(dhcp::OFFER), 10);
         let mut reply = reply(kind);
         reply.drain(243..249);
@@ -409,16 +433,23 @@ fn dhcp_uses_ordered_lease_timers() {
     let mac = MacAddr([0x52, 0x54, 0, 0, 0, 9]);
     let server = Ipv4Addr::new(10, 0, 2, 2);
     let address = Ipv4Addr::new(10, 0, 2, 15);
-    for (t1, t2, expected) in [(110, None, (60, 105)), (100, Some(90), (60, 105)), (0, Some(90), (60, 105)), (30, Some(90), (30, 90))] {
+    for (t1, t2, expected) in
+        [(110, None, (60, 105)), (100, Some(90), (60, 105)), (0, Some(90), (60, 105)), (30, Some(90), (30, 90))]
+    {
         let mut client = dhcp::Client::new(mac, 7, "osyx");
         let xid = dhcp::Message::parse(&client.poll(0).0.unwrap().payload).unwrap().xid;
-        let reply = |kind| dhcp::build_reply(kind, xid, mac, address, server, Ipv4Addr::new(255, 255, 255, 0), server, server, 120);
+        let reply = |kind| {
+            dhcp::build_reply(kind, xid, mac, address, server, Ipv4Addr::new(255, 255, 255, 0), server, server, 120)
+        };
         client.input(&reply(dhcp::OFFER), 10);
         let mut ack = reply(dhcp::ACK);
         ack.pop();
         ack.extend_from_slice(&[58, 4]);
         ack.extend_from_slice(&(t1 as u32).to_be_bytes());
-        if let Some(t2) = t2 { ack.extend_from_slice(&[59, 4]); ack.extend_from_slice(&(t2 as u32).to_be_bytes()); }
+        if let Some(t2) = t2 {
+            ack.extend_from_slice(&[59, 4]);
+            ack.extend_from_slice(&(t2 as u32).to_be_bytes());
+        }
         ack.push(255);
         let (_, event) = client.input(&ack, 20);
         let Some(dhcp::Event::Bound(lease)) = event else { panic!("expected lease") };
@@ -517,7 +548,8 @@ fn dns_rejects_malformed_and_spoofed_responses() {
     assert_eq!(dns::parse_response(&cname, 7, "example.com", dns::TYPE_A), Err(dns::DnsError::Truncated));
     // CNAME loops are detected.
     let (x, y) = (encode_name("b.test"), encode_name("a.test"));
-    let looped = dns_response(3, "a.test", &[("a.test", dns::TYPE_CNAME, &x), ("b.test", dns::TYPE_CNAME, &y)], 0, false);
+    let looped =
+        dns_response(3, "a.test", &[("a.test", dns::TYPE_CNAME, &x), ("b.test", dns::TYPE_CNAME, &y)], 0, false);
     let r = dns::parse_response(&looped, 3, "a.test", dns::TYPE_A).unwrap();
     assert_eq!(dns::chase("a.test", &r.answers), Err(dns::DnsError::CnameLoop));
     // Random garbage never panics.

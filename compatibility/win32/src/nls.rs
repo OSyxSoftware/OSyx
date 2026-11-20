@@ -26,7 +26,11 @@ fn lcid_locale(lcid: u32) -> Option<bool> {
 }
 
 fn locale_name(en_us: bool) -> &'static str {
-    if en_us { "en-US" } else { "" }
+    if en_us {
+        "en-US"
+    } else {
+        ""
+    }
 }
 
 /// The name as UTF-16 with its NUL, for calling the -Ex forms.
@@ -230,8 +234,8 @@ extern "win64" fn FoldStringW(flags: u32, src: *const u16, n: i32, dst: *mut u16
 /// ten consecutive digits, plus the superscript and subscript digits.
 fn unicode_digit(c: char) -> Option<u32> {
     const ZEROS: [u32; 25] = [
-        0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6, 0x0C66, 0x0CE6, 0x0D66,
-        0x0DE6, 0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x2080, 0xFF10,
+        0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6, 0x0C66, 0x0CE6, 0x0D66, 0x0DE6,
+        0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x2080, 0xFF10,
     ];
     let v = c as u32;
     if let Some(z) = ZEROS.iter().find(|&&z| v >= z && v < z + 10) {
@@ -266,23 +270,108 @@ fn ligature(c: char) -> Option<&'static str> {
 
 /// Letters with one diacritic: (precomposed, base, combining mark).
 const COMPOSED: &[(u32, char, u16)] = &[
-    (0xC0, 'A', 0x300), (0xC1, 'A', 0x301), (0xC2, 'A', 0x302), (0xC3, 'A', 0x303), (0xC4, 'A', 0x308), (0xC5, 'A', 0x30A),
-    (0xC7, 'C', 0x327), (0xC8, 'E', 0x300), (0xC9, 'E', 0x301), (0xCA, 'E', 0x302), (0xCB, 'E', 0x308), (0xCC, 'I', 0x300),
-    (0xCD, 'I', 0x301), (0xCE, 'I', 0x302), (0xCF, 'I', 0x308), (0xD1, 'N', 0x303), (0xD2, 'O', 0x300), (0xD3, 'O', 0x301),
-    (0xD4, 'O', 0x302), (0xD5, 'O', 0x303), (0xD6, 'O', 0x308), (0xD9, 'U', 0x300), (0xDA, 'U', 0x301), (0xDB, 'U', 0x302),
-    (0xDC, 'U', 0x308), (0xDD, 'Y', 0x301), (0xE0, 'a', 0x300), (0xE1, 'a', 0x301), (0xE2, 'a', 0x302), (0xE3, 'a', 0x303),
-    (0xE4, 'a', 0x308), (0xE5, 'a', 0x30A), (0xE7, 'c', 0x327), (0xE8, 'e', 0x300), (0xE9, 'e', 0x301), (0xEA, 'e', 0x302),
-    (0xEB, 'e', 0x308), (0xEC, 'i', 0x300), (0xED, 'i', 0x301), (0xEE, 'i', 0x302), (0xEF, 'i', 0x308), (0xF1, 'n', 0x303),
-    (0xF2, 'o', 0x300), (0xF3, 'o', 0x301), (0xF4, 'o', 0x302), (0xF5, 'o', 0x303), (0xF6, 'o', 0x308), (0xF9, 'u', 0x300),
-    (0xFA, 'u', 0x301), (0xFB, 'u', 0x302), (0xFC, 'u', 0x308), (0xFD, 'y', 0x301), (0xFF, 'y', 0x308), (0x100, 'A', 0x304),
-    (0x101, 'a', 0x304), (0x102, 'A', 0x306), (0x103, 'a', 0x306), (0x104, 'A', 0x328), (0x105, 'a', 0x328), (0x106, 'C', 0x301),
-    (0x107, 'c', 0x301), (0x10C, 'C', 0x30C), (0x10D, 'c', 0x30C), (0x10E, 'D', 0x30C), (0x10F, 'd', 0x30C), (0x112, 'E', 0x304),
-    (0x113, 'e', 0x304), (0x118, 'E', 0x328), (0x119, 'e', 0x328), (0x11A, 'E', 0x30C), (0x11B, 'e', 0x30C), (0x12A, 'I', 0x304),
-    (0x12B, 'i', 0x304), (0x143, 'N', 0x301), (0x144, 'n', 0x301), (0x147, 'N', 0x30C), (0x148, 'n', 0x30C), (0x14C, 'O', 0x304),
-    (0x14D, 'o', 0x304), (0x150, 'O', 0x30B), (0x151, 'o', 0x30B), (0x158, 'R', 0x30C), (0x159, 'r', 0x30C), (0x15A, 'S', 0x301),
-    (0x15B, 's', 0x301), (0x160, 'S', 0x30C), (0x161, 's', 0x30C), (0x164, 'T', 0x30C), (0x165, 't', 0x30C), (0x16A, 'U', 0x304),
-    (0x16B, 'u', 0x304), (0x16E, 'U', 0x30A), (0x16F, 'u', 0x30A), (0x170, 'U', 0x30B), (0x171, 'u', 0x30B), (0x178, 'Y', 0x308),
-    (0x179, 'Z', 0x301), (0x17A, 'z', 0x301), (0x17B, 'Z', 0x307), (0x17C, 'z', 0x307), (0x17D, 'Z', 0x30C), (0x17E, 'z', 0x30C),
+    (0xC0, 'A', 0x300),
+    (0xC1, 'A', 0x301),
+    (0xC2, 'A', 0x302),
+    (0xC3, 'A', 0x303),
+    (0xC4, 'A', 0x308),
+    (0xC5, 'A', 0x30A),
+    (0xC7, 'C', 0x327),
+    (0xC8, 'E', 0x300),
+    (0xC9, 'E', 0x301),
+    (0xCA, 'E', 0x302),
+    (0xCB, 'E', 0x308),
+    (0xCC, 'I', 0x300),
+    (0xCD, 'I', 0x301),
+    (0xCE, 'I', 0x302),
+    (0xCF, 'I', 0x308),
+    (0xD1, 'N', 0x303),
+    (0xD2, 'O', 0x300),
+    (0xD3, 'O', 0x301),
+    (0xD4, 'O', 0x302),
+    (0xD5, 'O', 0x303),
+    (0xD6, 'O', 0x308),
+    (0xD9, 'U', 0x300),
+    (0xDA, 'U', 0x301),
+    (0xDB, 'U', 0x302),
+    (0xDC, 'U', 0x308),
+    (0xDD, 'Y', 0x301),
+    (0xE0, 'a', 0x300),
+    (0xE1, 'a', 0x301),
+    (0xE2, 'a', 0x302),
+    (0xE3, 'a', 0x303),
+    (0xE4, 'a', 0x308),
+    (0xE5, 'a', 0x30A),
+    (0xE7, 'c', 0x327),
+    (0xE8, 'e', 0x300),
+    (0xE9, 'e', 0x301),
+    (0xEA, 'e', 0x302),
+    (0xEB, 'e', 0x308),
+    (0xEC, 'i', 0x300),
+    (0xED, 'i', 0x301),
+    (0xEE, 'i', 0x302),
+    (0xEF, 'i', 0x308),
+    (0xF1, 'n', 0x303),
+    (0xF2, 'o', 0x300),
+    (0xF3, 'o', 0x301),
+    (0xF4, 'o', 0x302),
+    (0xF5, 'o', 0x303),
+    (0xF6, 'o', 0x308),
+    (0xF9, 'u', 0x300),
+    (0xFA, 'u', 0x301),
+    (0xFB, 'u', 0x302),
+    (0xFC, 'u', 0x308),
+    (0xFD, 'y', 0x301),
+    (0xFF, 'y', 0x308),
+    (0x100, 'A', 0x304),
+    (0x101, 'a', 0x304),
+    (0x102, 'A', 0x306),
+    (0x103, 'a', 0x306),
+    (0x104, 'A', 0x328),
+    (0x105, 'a', 0x328),
+    (0x106, 'C', 0x301),
+    (0x107, 'c', 0x301),
+    (0x10C, 'C', 0x30C),
+    (0x10D, 'c', 0x30C),
+    (0x10E, 'D', 0x30C),
+    (0x10F, 'd', 0x30C),
+    (0x112, 'E', 0x304),
+    (0x113, 'e', 0x304),
+    (0x118, 'E', 0x328),
+    (0x119, 'e', 0x328),
+    (0x11A, 'E', 0x30C),
+    (0x11B, 'e', 0x30C),
+    (0x12A, 'I', 0x304),
+    (0x12B, 'i', 0x304),
+    (0x143, 'N', 0x301),
+    (0x144, 'n', 0x301),
+    (0x147, 'N', 0x30C),
+    (0x148, 'n', 0x30C),
+    (0x14C, 'O', 0x304),
+    (0x14D, 'o', 0x304),
+    (0x150, 'O', 0x30B),
+    (0x151, 'o', 0x30B),
+    (0x158, 'R', 0x30C),
+    (0x159, 'r', 0x30C),
+    (0x15A, 'S', 0x301),
+    (0x15B, 's', 0x301),
+    (0x160, 'S', 0x30C),
+    (0x161, 's', 0x30C),
+    (0x164, 'T', 0x30C),
+    (0x165, 't', 0x30C),
+    (0x16A, 'U', 0x304),
+    (0x16B, 'u', 0x304),
+    (0x16E, 'U', 0x30A),
+    (0x16F, 'u', 0x30A),
+    (0x170, 'U', 0x30B),
+    (0x171, 'u', 0x30B),
+    (0x178, 'Y', 0x308),
+    (0x179, 'Z', 0x301),
+    (0x17A, 'z', 0x301),
+    (0x17B, 'Z', 0x307),
+    (0x17C, 'z', 0x307),
+    (0x17D, 'Z', 0x30C),
+    (0x17E, 'z', 0x30C),
 ];
 
 /// MAP_COMPOSITE: a precomposed letter as base letter and combining mark.
@@ -373,7 +462,9 @@ extern "win64" fn GetThreadPreferredUILanguages(flags: u32, count: *mut u32, buf
 
 /// A double-NUL-terminated list with the one UI language.
 extern "win64" fn GetUserPreferredUILanguages(flags: u32, count: *mut u32, buf: *mut u16, size: *mut u32) -> i32 {
-    if count.is_null() || size.is_null() || flags & !(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | 0x40) != 0
+    if count.is_null()
+        || size.is_null()
+        || flags & !(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | 0x40) != 0
         || flags & (MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME) == (MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME)
     {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -403,7 +494,11 @@ extern "win64" fn GetUserPreferredUILanguages(flags: u32, count: *mut u32, buf: 
 const GEOID_US: i32 = 244;
 
 extern "win64" fn GetUserGeoID(class: u32) -> i32 {
-    if class == 16 { GEOID_US } else { -1 } // GEOCLASS_NATION; GEOID_NOT_AVAILABLE
+    if class == 16 {
+        GEOID_US
+    } else {
+        -1
+    } // GEOCLASS_NATION; GEOID_NOT_AVAILABLE
 }
 
 extern "win64" fn GetGeoInfoW(geo: i32, kind: u32, buf: *mut u16, size: i32, _lang: u16) -> i32 {
@@ -466,8 +561,20 @@ extern "win64" fn CompareStringOrdinal(a: *const u16, alen: i32, b: *const u16, 
 // ---- date and time pictures -------------------------------------------------------
 
 const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const MONTHS: [&str; 12] =
-    ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
 
 /// Expands a picture: runs of one letter are fields, 'text' is literal
 /// ('' is a quote), anything else is copied.
@@ -531,7 +638,10 @@ const DATE_MONTHDAY: u32 = 0x80;
 
 fn format_date(en_us: bool, flags: u32, st: *const [u16; 8], fmt: Option<String>) -> Result<String, u32> {
     let kinds = flags & (DATE_SHORTDATE | DATE_LONGDATE | DATE_YEARMONTH | DATE_MONTHDAY);
-    if flags & !(kinds | DATE_USE_ALT_CALENDAR | 0x8000_0000 | 0x10 | 0x20) != 0 || kinds.count_ones() > 1 || (fmt.is_some() && kinds != 0) {
+    if flags & !(kinds | DATE_USE_ALT_CALENDAR | 0x8000_0000 | 0x10 | 0x20) != 0
+        || kinds.count_ones() > 1
+        || (fmt.is_some() && kinds != 0)
+    {
         return Err(ERROR_INVALID_FLAGS);
     }
     let d = date_of(st).ok_or(ERROR_INVALID_PARAMETER)?;
@@ -580,7 +690,9 @@ const TIME_NOTIMEMARKER: u32 = 0x4;
 const TIME_FORCE24HOURFORMAT: u32 = 0x8;
 
 fn format_time(en_us: bool, flags: u32, st: *const [u16; 8], fmt: Option<String>) -> Result<String, u32> {
-    if flags & !(TIME_NOMINUTESORSECONDS | TIME_NOSECONDS | TIME_NOTIMEMARKER | TIME_FORCE24HOURFORMAT | 0x8000_0000) != 0 {
+    if flags & !(TIME_NOMINUTESORSECONDS | TIME_NOSECONDS | TIME_NOTIMEMARKER | TIME_FORCE24HOURFORMAT | 0x8000_0000)
+        != 0
+    {
         return Err(ERROR_INVALID_FLAGS);
     }
     let t = if st.is_null() {
@@ -631,10 +743,34 @@ fn format_time(en_us: bool, flags: u32, st: *const [u16; 8], fmt: Option<String>
     let h12 = if h % 12 == 0 { 12 } else { h % 12 };
     picture(&fmt, |c, n| {
         Some(match c {
-            'h' => if n == 1 { alloc::format!("{h12}") } else { alloc::format!("{h12:02}") },
-            'H' => if n == 1 { alloc::format!("{h}") } else { alloc::format!("{h:02}") },
-            'm' => if n == 1 { alloc::format!("{mi}") } else { alloc::format!("{mi:02}") },
-            's' => if n == 1 { alloc::format!("{s}") } else { alloc::format!("{s:02}") },
+            'h' => {
+                if n == 1 {
+                    alloc::format!("{h12}")
+                } else {
+                    alloc::format!("{h12:02}")
+                }
+            }
+            'H' => {
+                if n == 1 {
+                    alloc::format!("{h}")
+                } else {
+                    alloc::format!("{h:02}")
+                }
+            }
+            'm' => {
+                if n == 1 {
+                    alloc::format!("{mi}")
+                } else {
+                    alloc::format!("{mi:02}")
+                }
+            }
+            's' => {
+                if n == 1 {
+                    alloc::format!("{s}")
+                } else {
+                    alloc::format!("{s:02}")
+                }
+            }
             't' => {
                 let marker = if h < 12 { "AM" } else { "PM" };
                 String::from(if n == 1 { &marker[..1] } else { marker })
@@ -676,19 +812,40 @@ pub(crate) extern "win64" fn GetDateFormatEx(
     finish_w(format_date(en_us, flags, st, unsafe { path::wide_to_string(fmt) }), buf, size)
 }
 
-extern "win64" fn GetDateFormatA(lcid: u32, flags: u32, st: *const [u16; 8], fmt: *const u8, buf: *mut u8, size: i32) -> i32 {
+extern "win64" fn GetDateFormatA(
+    lcid: u32,
+    flags: u32,
+    st: *const [u16; 8],
+    fmt: *const u8,
+    buf: *mut u8,
+    size: i32,
+) -> i32 {
     let Some(en_us) = lcid_locale(lcid) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     // SAFETY: NULL or a NUL-terminated picture.
     finish_a(format_date(en_us, flags, st, unsafe { path::ansi_to_string(fmt) }), buf, size)
 }
 
-pub(crate) extern "win64" fn GetTimeFormatEx(name: *const u16, flags: u32, st: *const [u16; 8], fmt: *const u16, buf: *mut u16, size: i32) -> i32 {
+pub(crate) extern "win64" fn GetTimeFormatEx(
+    name: *const u16,
+    flags: u32,
+    st: *const [u16; 8],
+    fmt: *const u16,
+    buf: *mut u16,
+    size: i32,
+) -> i32 {
     let Some(en_us) = locale::locale(name) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     // SAFETY: NULL or a NUL-terminated picture.
     finish_w(format_time(en_us, flags, st, unsafe { path::wide_to_string(fmt) }), buf, size)
 }
 
-extern "win64" fn GetTimeFormatA(lcid: u32, flags: u32, st: *const [u16; 8], fmt: *const u8, buf: *mut u8, size: i32) -> i32 {
+extern "win64" fn GetTimeFormatA(
+    lcid: u32,
+    flags: u32,
+    st: *const [u16; 8],
+    fmt: *const u8,
+    buf: *mut u8,
+    size: i32,
+) -> i32 {
     let Some(en_us) = lcid_locale(lcid) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     // SAFETY: NULL or a NUL-terminated picture.
     finish_a(format_time(en_us, flags, st, unsafe { path::ansi_to_string(fmt) }), buf, size)
@@ -796,10 +953,24 @@ fn layout(value: &str, f: &NumFmt) -> Option<(bool, String)> {
 
 fn default_number(en_us: bool) -> NumFmt {
     let _ = en_us;
-    NumFmt { digits: 2, leading_zero: true, grouping: 3, decimal: String::from("."), thousand: String::from(","), negative: 1 }
+    NumFmt {
+        digits: 2,
+        leading_zero: true,
+        grouping: 3,
+        decimal: String::from("."),
+        thousand: String::from(","),
+        negative: 1,
+    }
 }
 
-extern "win64" fn GetNumberFormatEx(name: *const u16, flags: u32, value: *const u16, fmt: u64, buf: *mut u16, size: i32) -> i32 {
+extern "win64" fn GetNumberFormatEx(
+    name: *const u16,
+    flags: u32,
+    value: *const u16,
+    fmt: u64,
+    buf: *mut u16,
+    size: i32,
+) -> i32 {
     let Some(en_us) = locale::locale(name) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     if fmt != 0 && flags & !0x8000_0000 != 0 {
         return fail(ERROR_INVALID_FLAGS, 0);
@@ -824,7 +995,14 @@ extern "win64" fn GetNumberFormatEx(name: *const u16, flags: u32, value: *const 
     out_count(&s, buf, size)
 }
 
-extern "win64" fn GetCurrencyFormatEx(name: *const u16, flags: u32, value: *const u16, fmt: u64, buf: *mut u16, size: i32) -> i32 {
+extern "win64" fn GetCurrencyFormatEx(
+    name: *const u16,
+    flags: u32,
+    value: *const u16,
+    fmt: u64,
+    buf: *mut u16,
+    size: i32,
+) -> i32 {
     let Some(en_us) = locale::locale(name) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     if fmt != 0 && flags & !0x8000_0000 != 0 {
         return fail(ERROR_INVALID_FLAGS, 0);
@@ -836,7 +1014,11 @@ extern "win64" fn GetCurrencyFormatEx(name: *const u16, flags: u32, value: *cons
         f.negative = 0;
         Some((f, 0u32, String::from(if en_us { "$" } else { "\u{a4}" })))
     } else {
-        unsafe { read_numfmt(fmt).and_then(|f| Some((f, teb::get::<u32>(fmt, 36), path::wide_to_string(teb::get::<u64>(fmt, 40) as *const u16)?))) }
+        unsafe {
+            read_numfmt(fmt).and_then(|f| {
+                Some((f, teb::get::<u32>(fmt, 36), path::wide_to_string(teb::get::<u64>(fmt, 40) as *const u16)?))
+            })
+        }
     };
     let Some((f, pos, sym)) = parsed.filter(|(f, p, _)| f.digits <= 9 && f.negative <= 15 && *p <= 3) else {
         return fail(ERROR_INVALID_PARAMETER, 0);

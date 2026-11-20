@@ -247,7 +247,15 @@ fn chunks(d: &Directory) -> Result<Vec<Chunk>, String> {
                 // Some writers leave the byte counts out of single-strip files.
                 let len = d.strip_counts.get(k).map_or(usize::MAX, |&n| n as usize);
                 let y = i * rows;
-                out.push(Chunk { x: 0, y, w: d.w, h: rows.min(d.h - y), plane: plane_of(p), offset: offset as usize, len });
+                out.push(Chunk {
+                    x: 0,
+                    y,
+                    w: d.w,
+                    h: rows.min(d.h - y),
+                    plane: plane_of(p),
+                    offset: offset as usize,
+                    len,
+                });
             }
         }
     }
@@ -262,7 +270,8 @@ fn unpack(d: &Directory, data: &[u8], cols: usize, rows: usize, row_bytes: usize
     let want = row_bytes * rows;
     let reversed;
     let data = if d.fill_order == 2 {
-        reversed = data.iter().map(|&b| REVERSED[(b & 15) as usize] << 4 | REVERSED[(b >> 4) as usize]).collect::<Vec<u8>>();
+        reversed =
+            data.iter().map(|&b| REVERSED[(b & 15) as usize] << 4 | REVERSED[(b >> 4) as usize]).collect::<Vec<u8>>();
         &reversed[..]
     } else {
         data
@@ -280,7 +289,13 @@ fn unpack(d: &Directory, data: &[u8], cols: usize, rows: usize, row_bytes: usize
             };
             // White runs decode to 0 bits; PhotometricInterpretation then
             // says what a 0 looks like, as for uncompressed bilevel data.
-            let p = ccitt::Params { k, columns: cols, rows: Some(rows), byte_align: d.t4_options & 4 != 0, black_is_1: true };
+            let p = ccitt::Params {
+                k,
+                columns: cols,
+                rows: Some(rows),
+                byte_align: d.t4_options & 4 != 0,
+                black_is_1: true,
+            };
             ccitt::decode(data, &p)
         }
         6 | 7 => return Err(String::from("JPEG-compressed TIFF pictures are not supported")),
@@ -371,7 +386,13 @@ pub fn decode(data: &[u8]) -> Result<Picture, String> {
                 } else {
                     // 16-bit samples are added as numbers, in the file's byte order.
                     for i in (step..row.len() - 1).step_by(2) {
-                        let word = |b: &[u8], i: usize| if big { u16::from_be_bytes([b[i], b[i + 1]]) } else { u16::from_le_bytes([b[i], b[i + 1]]) };
+                        let word = |b: &[u8], i: usize| {
+                            if big {
+                                u16::from_be_bytes([b[i], b[i + 1]])
+                            } else {
+                                u16::from_le_bytes([b[i], b[i + 1]])
+                            }
+                        };
                         let v = word(row, i).wrapping_add(word(row, i - step));
                         let v = if big { v.to_be_bytes() } else { v.to_le_bytes() };
                         row[i..i + 2].copy_from_slice(&v);

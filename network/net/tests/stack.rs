@@ -80,7 +80,9 @@ fn echo_replies_must_match_a_sent_request() {
     inject(&mut n, Ipv4Addr::new(8, 8, 8, 8), 43);
     assert_eq!(n.a.icmp_recv(s), Err(NetError::WouldBlock), "reply to a request that never left");
     n.a.icmp_echo(s, B_IP, 42, b"real").unwrap();
-    assert!(n.run_until(100, |n| matches!(n.a.icmp_recv(s), Ok(IcmpEvent::Reply { from, seq: 42, .. }) if from == B_IP)));
+    assert!(
+        n.run_until(100, |n| matches!(n.a.icmp_recv(s), Ok(IcmpEvent::Reply { from, seq: 42, .. }) if from == B_IP))
+    );
 }
 
 #[test]
@@ -241,7 +243,10 @@ fn udp_datagrams_flow_and_errors_are_reported() {
     n.a.udp_send_to(client, None, b"nobody").unwrap();
     let mut buf = [0u8; 8];
     assert!(n.run_until(100, |n| n.a.udp_recv_from(client, &mut buf) == Err(NetError::PortUnreachable)));
-    assert_eq!(n.a.udp_send_to(client, Some(Endpoint::new(B_IP, 9000)), &vec![0; 70_000]), Err(NetError::MessageTooLong));
+    assert_eq!(
+        n.a.udp_send_to(client, Some(Endpoint::new(B_IP, 9000)), &vec![0; 70_000]),
+        Err(NetError::MessageTooLong)
+    );
     // The receive queue is bounded.
     for _ in 0..200 {
         n.a.udp_send_to(client, Some(Endpoint::new(B_IP, 9000)), b"flood").unwrap();
@@ -593,7 +598,14 @@ fn dhcp_configures_address_route_and_dns() {
 }
 
 /// A tiny DNS server on B: answers A queries from a table, can truncate.
-fn serve_dns(n: &mut Net, sock: u32, tcp_listener: Option<u32>, table: &[(&str, [u8; 4])], truncate: bool, tcp_conns: &mut Vec<u32>) {
+fn serve_dns(
+    n: &mut Net,
+    sock: u32,
+    tcp_listener: Option<u32>,
+    table: &[(&str, [u8; 4])],
+    truncate: bool,
+    tcp_conns: &mut Vec<u32>,
+) {
     let mut buf = [0u8; 600];
     while let Ok((from, len, _)) = n.b.udp_recv_from(sock, &mut buf) {
         let reply = dns_answer(&buf[..len], table, truncate);
@@ -1028,7 +1040,7 @@ fn the_sender_waits_for_a_full_segment_instead_of_filling_the_window_bytewise() 
     let remote = Endpoint::new(B_IP, 80);
     let mut t = Tcb::connect(local, remote, 1000, 1460);
     assert_eq!(t.output(0).len(), 1); // SYN
-    // A peer without window scaling: 65535 is not a multiple of the MSS.
+                                      // A peer without window scaling: 65535 is not a multiple of the MSS.
     let seg = |ack: u32, flags: u8| Segment {
         src_port: 80,
         dst_port: 40000,
@@ -1073,8 +1085,20 @@ fn receiving_in_place_keeps_what_the_caller_could_not_take() {
     // A sink that faults takes nothing; the data stays queued.
     assert_eq!(n.b.tcp_recv_with(s, 4096, |_| false), Err(NetError::BadAddress));
     let mut got = Vec::new();
-    assert_eq!(n.b.tcp_recv_with(s, 1000, |part| { got.extend_from_slice(part); true }), Ok(1000));
-    assert_eq!(n.b.tcp_recv_with(s, 4096, |part| { got.extend_from_slice(part); true }), Ok(2000));
+    assert_eq!(
+        n.b.tcp_recv_with(s, 1000, |part| {
+            got.extend_from_slice(part);
+            true
+        }),
+        Ok(1000)
+    );
+    assert_eq!(
+        n.b.tcp_recv_with(s, 4096, |part| {
+            got.extend_from_slice(part);
+            true
+        }),
+        Ok(2000)
+    );
     assert_eq!(got, data);
 
     let ua = n.a.udp_bind(Endpoint::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
@@ -1083,7 +1107,12 @@ fn receiving_in_place_keeps_what_the_caller_could_not_take() {
     assert!(n.run_until(1000, |n| n.b.recv_available(ub) == Ok(12)));
     assert_eq!(n.b.udp_recv_with(ub, 64, |_| false), Err(NetError::BadAddress));
     let mut d = Vec::new();
-    let (_, k, len) = n.b.udp_recv_with(ub, 3, |p| { d.extend_from_slice(p); true }).unwrap();
+    let (_, k, len) =
+        n.b.udp_recv_with(ub, 3, |p| {
+            d.extend_from_slice(p);
+            true
+        })
+        .unwrap();
     assert_eq!((k, len, &d[..]), (3, 12, &b"one"[..]));
     assert_eq!(n.b.udp_recv_with(ub, 64, |_| true), Err(NetError::WouldBlock));
 }
