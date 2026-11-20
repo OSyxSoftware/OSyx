@@ -103,7 +103,8 @@ fn grants_everyone(sd: u64) -> bool {
         let count: u16 = rd(dacl as *const u8, 4);
         let mut ace = dacl + 8;
         for _ in 0..count {
-            let (kind, size, mask): (u8, u16, u32) = (rd(ace as *const u8, 0), rd(ace as *const u8, 2), rd(ace as *const u8, 4));
+            let (kind, size, mask): (u8, u16, u32) =
+                (rd(ace as *const u8, 0), rd(ace as *const u8, 2), rd(ace as *const u8, 4));
             // ACCESS_ALLOWED_ACE with SID S-1-1-0: 1 sub-authority, authority 1, value 0.
             let sid = ace as *const u8;
             let everyone = rd::<u8>(sid, 9) == 1
@@ -370,7 +371,12 @@ pub(crate) unsafe fn acl_aces(p: *const u8) -> Result<Vec<Ace>, u32> {
         }
         let s = unsafe { p.add(at + 8) };
         let n = unsafe { sid_len(s) }.ok_or(INVALID_ACL)?;
-        out.push((kind, unsafe { rd(p, at + 1) }, unsafe { rd(p, at + 4) }, unsafe { core::slice::from_raw_parts(s, n) }.to_vec()));
+        out.push((
+            kind,
+            unsafe { rd(p, at + 1) },
+            unsafe { rd(p, at + 4) },
+            unsafe { core::slice::from_raw_parts(s, n) }.to_vec(),
+        ));
         at += size as usize;
     }
     Ok(out)

@@ -94,7 +94,10 @@ pub fn marker(info: &FramebufferInfo, hhdm_offset: u64, hhdm_size: u64, stage: u
         _ => return,
     };
     let needed = info.stride as u64 * info.height as u64 * 4;
-    if info.base == 0 || info.width < 80 || info.height < 32 || info.stride < info.width
+    if info.base == 0
+        || info.width < 80
+        || info.height < 32
+        || info.stride < info.width
         || info.base.checked_add(needed).is_none_or(|end| end > hhdm_size)
     {
         return;

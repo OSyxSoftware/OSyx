@@ -4,13 +4,13 @@
 //! received (see `bin/probe.rs`).
 
 use super::{worker, Tests};
+use os_std::env;
 use os_std::error::ErrorKind;
 use os_std::fs::{self, Permissions};
 use os_std::os::raw::{self, nr, Errno, ExecArgs};
 use os_std::os::{self, auxv};
 use os_std::prelude::*;
 use os_std::process::Command;
-use os_std::env;
 
 const REPORT: &str = "/tmp/probe-report.txt";
 
@@ -66,14 +66,18 @@ pub fn run(t: &mut Tests) {
         let exe = env::current_exe().map(|p| String::from(p.as_str()));
         let path = env::var("PATH");
         println!("init: exe {exe:?}, PATH {path:?}, {} variables", env::vars().count());
-        exe.as_deref() == Ok("/bin/init") && path.as_deref() == Ok("/bin:/usr/bin") && env::var("HOME").as_deref() == Ok("/")
+        exe.as_deref() == Ok("/bin/init")
+            && path.as_deref() == Ok("/bin:/usr/bin")
+            && env::var("HOME").as_deref() == Ok("/")
     });
     t.check("exec: auxiliary vector (page size, entry, headers, ids, random)", || {
         let entry = os::aux_value(auxv::AT_ENTRY) == Some(_start as *const () as u64);
         let page = os::aux_value(auxv::AT_PAGESZ) == Some(4096);
-        let ids = [auxv::AT_UID, auxv::AT_EUID, auxv::AT_GID, auxv::AT_EGID].iter().all(|&k| os::aux_value(k) == Some(0));
+        let ids =
+            [auxv::AT_UID, auxv::AT_EUID, auxv::AT_GID, auxv::AT_EGID].iter().all(|&k| os::aux_value(k) == Some(0));
         let secure = os::aux_value(auxv::AT_SECURE) == Some(0);
-        let phdr = os::aux_value(auxv::AT_PHDR).is_some_and(|p| p == 0x40_0040) && os::aux_value(auxv::AT_PHNUM) >= Some(3);
+        let phdr =
+            os::aux_value(auxv::AT_PHDR).is_some_and(|p| p == 0x40_0040) && os::aux_value(auxv::AT_PHNUM) >= Some(3);
         let random = os::aux_value(auxv::AT_RANDOM).is_some_and(|p| {
             // SAFETY: AT_RANDOM points to 16 bytes on the start-up stack.
             unsafe { core::slice::from_raw_parts(p as *const u8, 16) }.iter().any(|&b| b != 0)
@@ -107,7 +111,9 @@ pub fn run(t: &mut Tests) {
         env::remove_var("OSYX_INHERIT");
         r.is_some_and(|r| {
             let envs = r.all("env");
-            envs.contains(&"OSYX_INHERIT=from-init") && envs.contains(&"PATH=/bin:/usr/bin") && !envs.iter().any(|e| e.starts_with("HOME="))
+            envs.contains(&"OSYX_INHERIT=from-init")
+                && envs.contains(&"PATH=/bin:/usr/bin")
+                && !envs.iter().any(|e| e.starts_with("HOME="))
         })
     });
     t.check("exec: AT_RANDOM differs between processes", || {
@@ -149,7 +155,8 @@ pub fn run(t: &mut Tests) {
         c.args(["count", "1000"]).args(&args);
         let ok = matches!(c.status(), Ok(s) if s.success());
         let too_long: Vec<String> = (0..1400).map(count_arg).collect();
-        let refused = Command::new("probe").args(&too_long).spawn().map(|c| c.id()).map_err(|e| e.kind()) == Err(ErrorKind::InvalidInput);
+        let refused = Command::new("probe").args(&too_long).spawn().map(|c| c.id()).map_err(|e| e.kind())
+            == Err(ErrorKind::InvalidInput);
         ok && refused
     });
     t.check("exec: execute permission, non-ELF files, directories", || {
@@ -243,15 +250,18 @@ pub fn run(t: &mut Tests) {
             && r.get("handle3") == "ok"
             && handle_text.as_deref() == Ok("written by probe through an inherited handle\n")
     });
-    t.check("exec: failed execve leaves the program running", || {
-        matches!(worker(&["exec-fail"]).status(), Ok(s) if s.code() == Some(0))
-    });
-    t.check("exec: execve with other threads is refused", || {
-        matches!(worker(&["exec-threads"]).status(), Ok(s) if s.code() == Some(0))
-    });
-    t.check("exec: a chain of 5 execve ends with the last program's status", || {
-        matches!(Command::new("probe").args(["chain", "5"]).status(), Ok(s) if s.code() == Some(42))
-    });
+    t.check(
+        "exec: failed execve leaves the program running",
+        || matches!(worker(&["exec-fail"]).status(), Ok(s) if s.code() == Some(0)),
+    );
+    t.check(
+        "exec: execve with other threads is refused",
+        || matches!(worker(&["exec-threads"]).status(), Ok(s) if s.code() == Some(0)),
+    );
+    t.check(
+        "exec: a chain of 5 execve ends with the last program's status",
+        || matches!(Command::new("probe").args(["chain", "5"]).status(), Ok(s) if s.code() == Some(42)),
+    );
     let _ = fs::remove_file(REPORT);
     let _ = fs::remove_file("/tmp/exec-handle.txt");
     let _ = fs::remove_file("/tmp/exec-script");

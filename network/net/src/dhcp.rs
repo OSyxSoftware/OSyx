@@ -381,7 +381,16 @@ impl Client {
         self.backoff(now);
         self.discovers += 1;
         let requested = self.lease.as_ref().map(|l| l.addr);
-        let payload = build_request(DISCOVER, self.xid, self.mac, Ipv4Addr::UNSPECIFIED, requested, None, self.secs(now), &self.hostname);
+        let payload = build_request(
+            DISCOVER,
+            self.xid,
+            self.mac,
+            Ipv4Addr::UNSPECIFIED,
+            requested,
+            None,
+            self.secs(now),
+            &self.hostname,
+        );
         Some(Transmit { src: Ipv4Addr::UNSPECIFIED, dst: Ipv4Addr::BROADCAST, payload })
     }
 
@@ -389,8 +398,16 @@ impl Client {
         let (addr, server) = self.offer?;
         self.backoff(now);
         self.requests += 1;
-        let payload =
-            build_request(REQUEST, self.xid, self.mac, Ipv4Addr::UNSPECIFIED, Some(addr), Some(server), self.secs(now), &self.hostname);
+        let payload = build_request(
+            REQUEST,
+            self.xid,
+            self.mac,
+            Ipv4Addr::UNSPECIFIED,
+            Some(addr),
+            Some(server),
+            self.secs(now),
+            &self.hostname,
+        );
         Some(Transmit { src: Ipv4Addr::UNSPECIFIED, dst: Ipv4Addr::BROADCAST, payload })
     }
 
@@ -438,7 +455,8 @@ impl Client {
             }
             (Phase::Requesting | Phase::Renewing | Phase::Rebinding, ACK) => {
                 let Some(lease) = self.lease_from(&m, now) else { return (None, None) };
-                let renewed = self.lease.as_ref().is_some_and(|l| l.addr == lease.addr) && self.phase != Phase::Requesting;
+                let renewed =
+                    self.lease.as_ref().is_some_and(|l| l.addr == lease.addr) && self.phase != Phase::Requesting;
                 self.lease = Some(lease.clone());
                 self.phase = Phase::Bound;
                 self.retry = FIRST_RETRY_MS;
@@ -469,7 +487,8 @@ impl Client {
         let lease_s = m.lease_s.unwrap_or(MIN_LEASE_S).max(MIN_LEASE_S) as u64;
         let defaults = (lease_s / 2, lease_s * 7 / 8);
         let proposed = (m.t1_s.map(u64::from).unwrap_or(defaults.0), m.t2_s.map(u64::from).unwrap_or(defaults.1));
-        let (t1, t2) = if proposed.0 > 0 && proposed.0 < proposed.1 && proposed.1 < lease_s { proposed } else { defaults };
+        let (t1, t2) =
+            if proposed.0 > 0 && proposed.0 < proposed.1 && proposed.1 < lease_s { proposed } else { defaults };
         let prior = self.lease.as_ref().filter(|l| l.addr == addr);
         let prefix = m.subnet.and_then(mask_prefix).or_else(|| prior.map(|l| l.prefix)).unwrap_or(24);
         Some(Lease {

@@ -25,7 +25,9 @@ fn main() -> i32 {
         ["info", name] => info(Some(name)),
         ["configure", rest @ ..] => configure(rest),
         _ => {
-            eprintln!("usage: net list | net info [iface] | net configure IFACE dhcp|down|A.B.C.D/P [gw G] [dns D1,D2]");
+            eprintln!(
+                "usage: net list | net info [iface] | net configure IFACE dhcp|down|A.B.C.D/P [gw G] [dns D1,D2]"
+            );
             return 2;
         }
     };
@@ -80,7 +82,15 @@ fn addr(i: &NetIface) -> String {
 fn list() -> os_std::error::Result<()> {
     println!("{:<6} {:<18} {:<19} {:<7} {:>5}  FLAGS", "IFACE", "ADDRESS", "MAC", "METHOD", "MTU");
     for i in net::interfaces()? {
-        println!("{:<6} {:<18} {:<19} {:<7} {:>5}  {}", net::field(&i.name), addr(&i), mac(&i.mac), method(&i), i.mtu, flags(&i));
+        println!(
+            "{:<6} {:<18} {:<19} {:<7} {:>5}  {}",
+            net::field(&i.name),
+            addr(&i),
+            mac(&i.mac),
+            method(&i),
+            i.mtu,
+            flags(&i)
+        );
     }
     Ok(())
 }
@@ -109,7 +119,10 @@ fn info(only: Option<&str>) -> os_std::error::Result<()> {
         if i.gateway != [0; 4] {
             println!("    gateway {}", Ipv4Addr(i.gateway));
         }
-        println!("    RX packets {}  bytes {}  errors {}  dropped {}", i.rx_packets, i.rx_bytes, i.rx_errors, i.rx_dropped);
+        println!(
+            "    RX packets {}  bytes {}  errors {}  dropped {}",
+            i.rx_packets, i.rx_bytes, i.rx_errors, i.rx_dropped
+        );
         println!("    TX packets {}  bytes {}  dropped {}", i.tx_packets, i.tx_bytes, i.tx_dropped);
         if i.interrupts > 0 {
             println!("    interrupts {}", i.interrupts);
@@ -132,7 +145,12 @@ fn info(only: Option<&str>) -> os_std::error::Result<()> {
             for e in arp {
                 let ifname = ifaces.get(e.iface as usize).map(|i| net::field(&i.name)).unwrap_or("?");
                 if e.resolved != 0 {
-                    println!("    {} at {} on {ifname} ({} s left)", Ipv4Addr(e.addr), mac(&e.mac), e.expires_ms / 1000);
+                    println!(
+                        "    {} at {} on {ifname} ({} s left)",
+                        Ipv4Addr(e.addr),
+                        mac(&e.mac),
+                        e.expires_ms / 1000
+                    );
                 } else {
                     println!("    {} on {ifname}: resolving", Ipv4Addr(e.addr));
                 }

@@ -727,7 +727,8 @@ unsafe fn convert_memory_map(
         out[i] = MemoryDescriptor { phys_start: c.start, page_count: c.pages, kind: c.kind, _reserved: 0 };
         for (s, e) in [(d.phys_start, c.start), (end, d.end())] {
             if s < e && n < out.len() {
-                out[n] = MemoryDescriptor { phys_start: s, page_count: (e - s) / PAGE_SIZE, kind: d.kind, _reserved: 0 };
+                out[n] =
+                    MemoryDescriptor { phys_start: s, page_count: (e - s) / PAGE_SIZE, kind: d.kind, _reserved: 0 };
                 n += 1;
             }
         }

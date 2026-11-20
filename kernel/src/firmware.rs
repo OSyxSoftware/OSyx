@@ -26,7 +26,10 @@ pub fn init(map: &[MemoryDescriptor]) {
         .filter(|d| {
             matches!(
                 d.kind,
-                MemoryKind::Usable | MemoryKind::BootloaderReclaimable | MemoryKind::KernelImage | MemoryKind::KernelData
+                MemoryKind::Usable
+                    | MemoryKind::BootloaderReclaimable
+                    | MemoryKind::KernelImage
+                    | MemoryKind::KernelData
             )
         })
         .map(|d| (d.phys_start, d.phys_start + d.page_count * crate::mem::PAGE_SIZE))

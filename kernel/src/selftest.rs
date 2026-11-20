@@ -49,7 +49,13 @@ pub fn run(boot: &BootData) -> Summary {
         ("kernel heap", &heap_test),
         ("breakpoint exception", &breakpoint),
         ("timer interrupts", &timer),
-        ("I/O APIC wired interrupt routing", &|| if boot.has_option("test.ioapic") { crate::arch::ioapic::selftest() } else { Ok(()) }),
+        ("I/O APIC wired interrupt routing", &|| {
+            if boot.has_option("test.ioapic") {
+                crate::arch::ioapic::selftest()
+            } else {
+                Ok(())
+            }
+        }),
         ("user copy validation", &user_copy),
         ("supervisor protection (SMEP, SMAP)", &supervisor_protection),
         ("address space lifecycle", &address_space),
@@ -66,7 +72,13 @@ pub fn run(boot: &BootData) -> Summary {
         ("VFS: restricted opens", &crate::selftest_fs::restricted_opens),
         ("restricted process: syscall and filesystem inheritance", &crate::selftest_fs::restricted_process),
         ("suspended process start and kill", &crate::selftest_fs::suspended_process),
-        ("Winrun restricted CreateProcess", &|| if boot.has_option("test.sandboxwin") { crate::selftest_fs::restricted_winrun() } else { Ok(()) }),
+        ("Winrun restricted CreateProcess", &|| {
+            if boot.has_option("test.sandboxwin") {
+                crate::selftest_fs::restricted_winrun()
+            } else {
+                Ok(())
+            }
+        }),
         ("VFS: mount, unmount and limits", &crate::selftest_fs::mount_unmount),
         ("devfs devices and /dev/random", &crate::selftest_fs::devfs),
         ("FAT32 /boot through the VFS", &crate::selftest_fs::fat_boot),
@@ -635,7 +647,10 @@ fn pci_scan() -> TestResult {
     // BAR placement for functions the firmware left unassigned.
     use crate::pci::first_fit;
     let used = [(0xD000_0000, 0xD010_0000), (0xD020_0000, 0xD030_0000), (0xD010_0000, 0xD010_4000)];
-    ensure!(first_fit(0xD000_0000, 0xD040_0000, 0x4000, 0x4000, &used) == Some(0xD010_4000), "first fit after the ranges it overlaps");
+    ensure!(
+        first_fit(0xD000_0000, 0xD040_0000, 0x4000, 0x4000, &used) == Some(0xD010_4000),
+        "first fit after the ranges it overlaps"
+    );
     ensure!(first_fit(0xD000_0000, 0xD040_0000, 0x10_0000, 0x10_0000, &used) == Some(0xD030_0000), "first aligned gap");
     ensure!(first_fit(0xD000_0000, 0xD030_0000, 0x10_0000, 0x10_0000, &used).is_none(), "full window");
     ensure!(first_fit(0xD000_1000, 0xD000_8000, 0x4000, 0x4000, &[]) == Some(0xD000_4000), "aligned start");
@@ -665,7 +680,10 @@ fn block_io() -> TestResult {
     }
     let end = dev.sector_count();
     ensure!(block::read(&**dev, end, &mut s0) == Err(BlockError::InvalidRequest), "read past the end accepted");
-    ensure!(block::read(&**dev, end - 1, &mut [0u8; 1024]) == Err(BlockError::InvalidRequest), "read across the end accepted");
+    ensure!(
+        block::read(&**dev, end - 1, &mut [0u8; 1024]) == Err(BlockError::InvalidRequest),
+        "read across the end accepted"
+    );
     ensure!(block::read(&**dev, 0, &mut [0u8; 100]) == Err(BlockError::InvalidRequest), "partial sector accepted");
     let mut backup = [0u8; SECTOR_SIZE];
     block::read(&**dev, 6, &mut backup).map_err(|e| format!("read sector 6: {e:?}"))?;

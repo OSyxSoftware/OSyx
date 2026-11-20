@@ -122,9 +122,9 @@ const IA32_FMASK: u32 = 0xC000_0084;
 pub unsafe fn init() {
     cpu::wrmsr(IA32_EFER, cpu::rdmsr(IA32_EFER) | 1); // SCE
                                                       // SYSCALL: CS = STAR[47:32], SS = +8.  SYSRET: CS = STAR[63:48] + 16, SS = +8.
-    // SYSRET derives both selectors by adding to STAR[63:48]; not every
-    // implementation forces RPL 3 on SS (WHPX on AMD loads 0x18 instead of
-    // 0x1B), so the base itself must carry the user RPL.
+                                                      // SYSRET derives both selectors by adding to STAR[63:48]; not every
+                                                      // implementation forces RPL 3 on SS (WHPX on AMD loads 0x18 instead of
+                                                      // 0x1B), so the base itself must carry the user RPL.
     let sysret_base = USER_DS as u64 - 8;
     cpu::wrmsr(IA32_STAR, (sysret_base << 48) | ((KERNEL_CS as u64) << 32));
     cpu::wrmsr(IA32_LSTAR, osyx_syscall_entry as *const () as u64);
@@ -318,8 +318,8 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::MAP => process::map_anonymous(f.rdi, f.rsi),
         nr::UNMAP => process::unmap_region(f.rdi, f.rsi).map(|_| 0),
         nr::SYSINFO => sys_sysinfo(f.rdi),
-        nr::CPU_INFO => Ok(crate::smp::online() as u64 | (crate::smp::index() as u64)<<32),
-        nr::THREAD_AFFINITY => sched::set_affinity(f.rdi,f.rsi),
+        nr::CPU_INFO => Ok(crate::smp::online() as u64 | (crate::smp::index() as u64) << 32),
+        nr::THREAD_AFFINITY => sched::set_affinity(f.rdi, f.rsi),
         nr::THREAD_PRIORITY => sched::set_priority(f.rdi, f.rsi),
         nr::THREAD_SUSPEND => sched::thread_suspend(f.rdi, f.rsi),
         nr::THREAD_TIMES => sched::thread_times(f.rdi),
@@ -328,7 +328,7 @@ extern "C" fn osyx_syscall_dispatch(f: &mut SyscallFrame) -> u64 {
         nr::WORKING_SET => sys_objects::working_set(f.rdi, f.rsi, f.rdx),
         nr::PROCESS_WRITE_BARRIER => {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            crate::smp::flush_remote(0,true);
+            crate::smp::flush_remote(0, true);
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             Ok(0)
         }
@@ -562,7 +562,8 @@ fn lock_free_ipc(f: &SyscallFrame) -> Option<Result<u64, Errno>> {
 /// and the serial port's; files and sockets take the normal path.
 fn write_unlocked(fd: u64, buf: u64, len: u64) -> Option<Result<u64, Errno>> {
     let object = process::get_object(fd);
-    if !matches!(object, Ok(Object::Pipe(_))) && (object.is_ok() || (fd != osyx_abi::STDOUT && fd != osyx_abi::STDERR)) {
+    if !matches!(object, Ok(Object::Pipe(_))) && (object.is_ok() || (fd != osyx_abi::STDOUT && fd != osyx_abi::STDERR))
+    {
         return None;
     }
     cpu::enable_interrupts();
@@ -854,7 +855,11 @@ fn sys_set_time(unix_ns: u64) -> Result<u64, Errno> {
         return Err(Errno::InvalidArgument);
     }
     let off = crate::time::set_now_ns(unix_ns as i64);
-    crate::kprintln!("time: set to {} UTC (the clock was off by {} ms)", crate::time::format_utc((unix_ns / SEC) as i64), off / 1_000_000);
+    crate::kprintln!(
+        "time: set to {} UTC (the clock was off by {} ms)",
+        crate::time::format_utc((unix_ns / SEC) as i64),
+        off / 1_000_000
+    );
     Ok(0)
 }
 

@@ -26,16 +26,16 @@
 
 #[path = "../audio_view.rs"]
 mod audio_view;
+#[path = "../shell_common.rs"]
+mod common;
 #[path = "../fileops.rs"]
 mod fileops;
 #[path = "../image_view.rs"]
 mod image_view;
-#[path = "../video_view.rs"]
-mod video_view;
 #[path = "../pdf_view.rs"]
 mod pdf_view;
-#[path = "../shell_common.rs"]
-mod common;
+#[path = "../video_view.rs"]
+mod video_view;
 
 use common::{become_user, human_size, run_app, system_tz, App, Ctx, USER_HOME};
 use os_std::fs::{self, Metadata};
@@ -49,7 +49,9 @@ use osyx_gfx::Rect;
 use osyx_input::{button, key, modifier};
 use osyx_ui::layout::{contains, inset, split_bottom, split_left, split_top};
 use osyx_ui::time::Tz;
-use osyx_ui::widget::{Button, ButtonStyle, Checkbox, Column, Dialog, ListItem, ListView, Menu, MenuItem, ScrollView, TextField};
+use osyx_ui::widget::{
+    Button, ButtonStyle, Checkbox, Column, Dialog, ListItem, ListView, Menu, MenuItem, ScrollView, TextField,
+};
 use osyx_ui::{icon, Align, Event as Ui, FontKind, Icon, Painter, Response};
 use prism_client::WindowSpec;
 
@@ -531,7 +533,8 @@ impl Files {
             match openwith::default_target(&name, kind, &self.handlers, &self.choices, self.browser) {
                 Some(t) => self.run_target(&path, &t),
                 None => {
-                    let what = osyx_filekit::kind::extension(&name).map_or(String::from("this kind of file"), |x| format!(".{x} files"));
+                    let what = osyx_filekit::kind::extension(&name)
+                        .map_or(String::from("this kind of file"), |x| format!(".{x} files"));
                     self.set_status(
                         format!("No application is registered for {what}: add Handles=... to an application's .app file, or use Open with > Hex viewer"),
                         true,
@@ -626,7 +629,11 @@ impl Files {
 
     /// A viewer (text, hex, the player or PDF) covers the list.
     fn viewing(&self) -> bool {
-        self.preview.is_some() || self.player.is_some() || self.pdf.is_some() || self.image.is_some() || self.video.is_some()
+        self.preview.is_some()
+            || self.player.is_some()
+            || self.pdf.is_some()
+            || self.image.is_some()
+            || self.video.is_some()
     }
 
     fn close_viewers(&mut self) {
@@ -692,8 +699,14 @@ impl Files {
         let from = join(&self.cwd, name);
         let _ = fs::create_dir_all(TRASH_FILES);
         let _ = fs::create_dir_all(format!("{TRASH}/info"));
-        let free = |n: &str| fs::symlink_metadata(join(TRASH_FILES, n)).is_err() && fs::metadata(format!("{TRASH}/info/{n}.trashinfo")).is_err();
-        let trashed = (1..).map(|i| if i == 1 { String::from(name) } else { format!("{name}.{i}") }).find(|n| free(n)).unwrap_or_default();
+        let free = |n: &str| {
+            fs::symlink_metadata(join(TRASH_FILES, n)).is_err()
+                && fs::metadata(format!("{TRASH}/info/{n}.trashinfo")).is_err()
+        };
+        let trashed = (1..)
+            .map(|i| if i == 1 { String::from(name) } else { format!("{name}.{i}") })
+            .find(|n| free(n))
+            .unwrap_or_default();
         fs::rename(&from, join(TRASH_FILES, &trashed)).map_err(|e| format!("{e}"))?;
         let when = os_std::time::SystemTime::now()
             .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
@@ -711,7 +724,11 @@ impl Files {
     fn restore_from_trash(&self, name: &str) -> Result<String, String> {
         let info_path = format!("{TRASH}/info/{name}.trashinfo");
         let info = fs::read_to_string(&info_path).map_err(|_| format!("{name}: where it came from is unknown"))?;
-        let to = info.lines().find_map(|l| l.strip_prefix("Path=")).map(String::from).ok_or_else(|| format!("{name}: where it came from is unknown"))?;
+        let to = info
+            .lines()
+            .find_map(|l| l.strip_prefix("Path="))
+            .map(String::from)
+            .ok_or_else(|| format!("{name}: where it came from is unknown"))?;
         if fs::symlink_metadata(&to).is_ok() {
             return Err(format!("{to} exists already; rename it first"));
         }
@@ -954,7 +971,13 @@ impl Files {
     fn describe_selection(&mut self) {
         let chosen = self.list.chosen();
         if chosen.len() > 1 {
-            let bytes: u64 = chosen.iter().filter_map(|&i| self.entries.get(i)).filter_map(|e| e.meta.as_ref()).filter(|m| !m.is_dir()).map(|m| m.len()).sum();
+            let bytes: u64 = chosen
+                .iter()
+                .filter_map(|&i| self.entries.get(i))
+                .filter_map(|e| e.meta.as_ref())
+                .filter(|m| !m.is_dir())
+                .map(|m| m.len())
+                .sum();
             self.set_status(format!("{} items selected ({})", chosen.len(), human_size(bytes)), false);
             println!("files: {} items selected", chosen.len());
         }
@@ -1009,12 +1032,17 @@ impl Files {
             let free = select::free_name(name, |n| fs::symlink_metadata(join(&cwd, n)).is_ok());
             let to = join(&cwd, &free);
             let r = if cut {
-                fs::rename(p, &to).map_err(|e| e.to_string()).or_else(|_| fileops::copy_tree(p, &to).and_then(|_| remove_any(p)))
+                fs::rename(p, &to)
+                    .map_err(|e| e.to_string())
+                    .or_else(|_| fileops::copy_tree(p, &to).and_then(|_| remove_any(p)))
             } else {
                 fileops::copy_tree(p, &to).map(|_| ())
             };
             match r {
-                Ok(()) => { done += 1; processed += 1; }
+                Ok(()) => {
+                    done += 1;
+                    processed += 1;
+                }
                 Err(e) => {
                     failure = Some(format!("Cannot {} {name}: {e}", if cut { "move" } else { "copy" }));
                     break;
@@ -1087,7 +1115,12 @@ impl Files {
             _ => format!("{n} items"),
         };
         let msg = format!("Delete {what} permanently? This cannot be undone. Folders are deleted with everything inside them.{reason}");
-        self.dialog = Some(Dialog::new(D_DELETE, "Delete", &msg, &[("Cancel", ButtonStyle::Secondary), ("Delete", ButtonStyle::Danger)]));
+        self.dialog = Some(Dialog::new(
+            D_DELETE,
+            "Delete",
+            &msg,
+            &[("Cancel", ButtonStyle::Secondary), ("Delete", ButtonStyle::Danger)],
+        ));
     }
 
     fn pack_selection(&mut self) {
@@ -1133,12 +1166,8 @@ impl Files {
     }
 
     fn extract_selection(&mut self) {
-        let paths: Vec<String> = self
-            .chosen_names()
-            .into_iter()
-            .filter(|n| fileops::is_archive(n))
-            .map(|n| join(&self.cwd, &n))
-            .collect();
+        let paths: Vec<String> =
+            self.chosen_names().into_iter().filter(|n| fileops::is_archive(n)).map(|n| join(&self.cwd, &n)).collect();
         if paths.is_empty() {
             self.set_status(String::from("Select an archive (tar, tar.gz, zip, 7z, gz) to extract"), true);
             return;
@@ -1180,7 +1209,12 @@ impl Files {
                 }
                 let ext = osyx_filekit::kind::extension(name).map_or(String::from("this type"), |x| format!(".{x}"));
                 for c in list.iter().filter(|c| Some(&c.target) != current.as_ref()).take(3) {
-                    add(&mut items, &mut acts, MenuItem::new(&format!("Always open {ext} with {}", c.label), None), Act::Default(c.target.clone()));
+                    add(
+                        &mut items,
+                        &mut acts,
+                        MenuItem::new(&format!("Always open {ext} with {}", c.label), None),
+                        Act::Default(c.target.clone()),
+                    );
                 }
             }
         } else if chosen.len() > 1 {
@@ -1199,19 +1233,39 @@ impl Files {
         }
         add(&mut items, &mut acts, paste, Act::Paste);
         if !chosen.is_empty() {
-            add(&mut items, &mut acts, MenuItem::new("Pack into a tar archive", None).hint("Ctrl+P").separated(), Act::Pack);
+            add(
+                &mut items,
+                &mut acts,
+                MenuItem::new("Pack into a tar archive", None).hint("Ctrl+P").separated(),
+                Act::Pack,
+            );
             if chosen.iter().any(|n| fileops::is_archive(n)) {
                 add(&mut items, &mut acts, MenuItem::new("Extract here", None).hint("Ctrl+E"), Act::Extract);
             }
             if chosen.len() == 1 {
-                add(&mut items, &mut acts, MenuItem::new("Rename", Some(Icon::Rename)).hint("F2").separated(), Act::Rename);
+                add(
+                    &mut items,
+                    &mut acts,
+                    MenuItem::new("Rename", Some(Icon::Rename)).hint("F2").separated(),
+                    Act::Rename,
+                );
             }
-            add(&mut items, &mut acts, MenuItem::new("Move to Trash", Some(Icon::Trash)).hint("Del").danger(), Act::Trash);
+            add(
+                &mut items,
+                &mut acts,
+                MenuItem::new("Move to Trash", Some(Icon::Trash)).hint("Del").danger(),
+                Act::Trash,
+            );
             if chosen.len() == 1 {
                 add(&mut items, &mut acts, MenuItem::new("Properties", Some(Icon::Info)).hint("Ctrl+I"), Act::Info);
             }
         } else {
-            add(&mut items, &mut acts, MenuItem::new("New folder", Some(Icon::NewFolder)).hint("Ctrl+N"), Act::NewFolder);
+            add(
+                &mut items,
+                &mut acts,
+                MenuItem::new("New folder", Some(Icon::NewFolder)).hint("Ctrl+N"),
+                Act::NewFolder,
+            );
         }
         let mut menu = Menu::new(items);
         let (w, h) = menu.size(fonts);
@@ -1249,7 +1303,8 @@ impl Files {
                     let kind = classify(&name);
                     self.choices.set(&name, kind, t.clone());
                     self.save_choices();
-                    let ext = osyx_filekit::kind::extension(&name).map_or(String::from("this type"), |x| format!(".{x}"));
+                    let ext =
+                        osyx_filekit::kind::extension(&name).map_or(String::from("this type"), |x| format!(".{x}"));
                     println!("files: default for {ext} set");
                     self.set_status(format!("{ext} files now open with the chosen program"), false);
                 }
@@ -1358,7 +1413,8 @@ impl App for Files {
                 self.set_status(format!("{n} items"), false);
                 return true;
             }
-            if !matches!(ev, Ui::PointerDown { .. } | Ui::PointerUp { .. } | Ui::PointerMove { .. } | Ui::Wheel { .. }) {
+            if !matches!(ev, Ui::PointerDown { .. } | Ui::PointerUp { .. } | Ui::PointerMove { .. } | Ui::Wheel { .. })
+            {
                 return redraw;
             }
             if let Some((x, y)) = ev.position() {
@@ -1376,7 +1432,8 @@ impl App for Files {
                 self.set_status(format!("{n} items"), false);
                 return true;
             }
-            if !matches!(ev, Ui::PointerDown { .. } | Ui::PointerUp { .. } | Ui::PointerMove { .. } | Ui::Wheel { .. }) {
+            if !matches!(ev, Ui::PointerDown { .. } | Ui::PointerUp { .. } | Ui::PointerMove { .. } | Ui::Wheel { .. })
+            {
                 return redraw;
             }
             if let Some((x, y)) = ev.position() {
@@ -1395,7 +1452,8 @@ impl App for Files {
                 return true;
             }
             // The tool bar and side bar stay usable while viewing.
-            if !matches!(ev, Ui::PointerDown { .. } | Ui::PointerUp { .. } | Ui::PointerMove { .. } | Ui::Wheel { .. }) {
+            if !matches!(ev, Ui::PointerDown { .. } | Ui::PointerUp { .. } | Ui::PointerMove { .. } | Ui::Wheel { .. })
+            {
                 return redraw;
             }
             if let Some((x, y)) = ev.position() {
@@ -1496,7 +1554,8 @@ impl App for Files {
                     }
                     if d.moved {
                         if let Some((target, label)) = self.drop_folder(x, y, d.index) {
-                            let indexes: Vec<usize> = if self.list.is_marked(d.index) { self.list.marked() } else { vec![d.index] };
+                            let indexes: Vec<usize> =
+                                if self.list.is_marked(d.index) { self.list.marked() } else { vec![d.index] };
                             for i in indexes.into_iter().rev() {
                                 self.move_entry(i, &target, &label);
                             }
@@ -1701,7 +1760,12 @@ impl App for Files {
                         if self.mods & (modifier::CTRL | modifier::SHIFT) == 0 {
                             self.list.clear_marks();
                         }
-                        self.band = Some(Band { start: (x, y), pointer: (x, y), start_content: self.list.content_y(y), moved: false });
+                        self.band = Some(Band {
+                            start: (x, y),
+                            pointer: (x, y),
+                            start_content: self.list.content_y(y),
+                            moved: false,
+                        });
                     }
                     None => {}
                 }
@@ -1766,7 +1830,8 @@ impl App for Files {
 
     fn tick(&mut self, _cx: &mut Ctx) -> bool {
         // The player's clock and seek bar move while it plays.
-        let playing = self.player.as_mut().is_some_and(|p| p.needs_redraw()) || self.pdf.as_mut().is_some_and(|v| v.needs_redraw())
+        let playing = self.player.as_mut().is_some_and(|p| p.needs_redraw())
+            || self.pdf.as_mut().is_some_and(|v| v.needs_redraw())
             || self.image.as_mut().is_some_and(|v| v.needs_redraw())
             || self.video.as_mut().is_some_and(|v| v.needs_redraw());
         let Some((path, since)) = &self.pending_move else { return playing };
@@ -1775,17 +1840,29 @@ impl App for Files {
             self.refresh();
             return true;
         }
-        if since.elapsed() >= Duration::from_secs(10) { self.pending_move = None; }
+        if since.elapsed() >= Duration::from_secs(10) {
+            self.pending_move = None;
+        }
         playing
     }
 
     fn file_drop(&mut self, path: &str, x: i32, y: i32, _cx: &mut Ctx) -> bool {
-        if self.viewing() || self.dialog.is_some() || !path.starts_with('/') { return false; }
+        if self.viewing() || self.dialog.is_some() || !path.starts_with('/') {
+            return false;
+        }
         let name = path.rsplit('/').next().unwrap_or("");
-        if name.is_empty() || name == "." || name == ".." { return false; }
-        let target = self.list.row_at(x, y).and_then(|i| self.entries.get(i))
-            .filter(|e| e.is_dir()).map(|e| join(&self.cwd, &e.name))
-            .or_else(|| self.place_rects().iter().zip(&self.places).find(|(r, _)| contains(r, x, y)).map(|(_, p)| p.1.clone()))
+        if name.is_empty() || name == "." || name == ".." {
+            return false;
+        }
+        let target = self
+            .list
+            .row_at(x, y)
+            .and_then(|i| self.entries.get(i))
+            .filter(|e| e.is_dir())
+            .map(|e| join(&self.cwd, &e.name))
+            .or_else(|| {
+                self.place_rects().iter().zip(&self.places).find(|(r, _)| contains(r, x, y)).map(|(_, p)| p.1.clone())
+            })
             .or_else(|| contains(&self.list.rect, x, y).then(|| self.cwd.clone()));
         let Some(target) = target else { return false };
         let to = join(&target, name);
@@ -1794,12 +1871,17 @@ impl App for Files {
             return true;
         }
         let result = match fs::symlink_metadata(path) {
-            Ok(meta) if meta.is_file() => fs::rename(path, &to).or_else(|_| fs::copy(path, &to).map(|_| ()).and_then(|_| fs::remove_file(path))),
+            Ok(meta) if meta.is_file() => {
+                fs::rename(path, &to).or_else(|_| fs::copy(path, &to).map(|_| ()).and_then(|_| fs::remove_file(path)))
+            }
             Ok(_) => fs::rename(path, &to),
             Err(e) => Err(e),
         };
         match result {
-            Ok(()) => { self.refresh(); self.set_status(format!("Moved {name} to {target}"), false); }
+            Ok(()) => {
+                self.refresh();
+                self.set_status(format!("Moved {name} to {target}"), false);
+            }
             Err(e) => self.set_status(format!("Cannot move {name}: {e}"), true),
         }
         true
@@ -1894,7 +1976,12 @@ impl App for Files {
         }
         if let Some(b) = &self.band {
             if b.moved {
-                let r = Rect::new(b.start.0.min(b.pointer.0), b.start.1.min(b.pointer.1), (b.start.0 - b.pointer.0).unsigned_abs(), (b.start.1 - b.pointer.1).unsigned_abs());
+                let r = Rect::new(
+                    b.start.0.min(b.pointer.0),
+                    b.start.1.min(b.pointer.1),
+                    (b.start.0 - b.pointer.0).unsigned_abs(),
+                    (b.start.1 - b.pointer.1).unsigned_abs(),
+                );
                 p.blend(r, t.accent, 40);
                 p.hline(r.x, r.y, r.w, t.accent);
                 p.hline(r.x, r.bottom() as i32 - 1, r.w, t.accent);

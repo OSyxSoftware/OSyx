@@ -97,7 +97,11 @@ fn parse_int<T: Unit>(s: *const T, end: *mut *const T, base: i32, signed: bool, 
             max
         };
     }
-    if neg { v.wrapping_neg() } else { v }
+    if neg {
+        v.wrapping_neg()
+    } else {
+        v
+    }
 }
 
 extern "win64" fn strtol(s: *const u8, e: *mut *const u8, b: i32) -> i32 {
@@ -530,8 +534,8 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     let mut v = export_table![
         strtol, strtoul, strtoll, strtoull, wcstol, wcstoul, wcstoll, wcstoull, atoi, atol, atoll, _wtoi, _wtol,
         _wtoll, strtod, strtof, strtold, wcstod, wcstof, wcstold, atof, _wtof, _itoa_s, _ltoa_s, _ultoa_s, _i64toa_s,
-        _ui64toa_s, _itow_s, _ltow_s, _ultow_s, _i64tow_s, _ui64tow_s, _itoa, _ltoa, _ultoa, _i64toa, _ui64toa,
-        _itow, _ltow, _i64tow,
+        _ui64toa_s, _itow_s, _ltow_s, _ultow_s, _i64tow_s, _ui64tow_s, _itoa, _ltoa, _ultoa, _i64toa, _ui64toa, _itow,
+        _ltow, _i64tow,
     ];
     // The 64-bit names of the same functions.
     v.extend([

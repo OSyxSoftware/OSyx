@@ -220,7 +220,11 @@ pub fn token(h: u64) -> Result<Token, u32> {
 }
 
 fn need(t: &Token, access: u32) -> Result<(), u32> {
-    if t.access & access == access { Ok(()) } else { Err(ERROR_ACCESS_DENIED) }
+    if t.access & access == access {
+        Ok(())
+    } else {
+        Err(ERROR_ACCESS_DENIED)
+    }
 }
 
 /// Whether code may run with this token on OSyx: it must grant and deny
@@ -324,7 +328,13 @@ extern "win64" fn GetTokenInformation(h: u64, class: u32, out: *mut u8, size: u3
 }
 
 /// GetTokenInformation for a 32-bit (WoW64) caller: 4-byte pointers.
-pub(crate) extern "win64" fn GetTokenInformation32(h: u64, class: u32, out: *mut u8, size: u32, needed: *mut u32) -> i32 {
+pub(crate) extern "win64" fn GetTokenInformation32(
+    h: u64,
+    class: u32,
+    out: *mut u8,
+    size: u32,
+    needed: *mut u32,
+) -> i32 {
     token_information(h, class, out, size, needed, 4)
 }
 
@@ -361,7 +371,12 @@ fn token_information(h: u64, class: u32, out: *mut u8, size: u32, needed: *mut u
 // ---- opening and duplicating ------------------------------------------------------------
 
 pub(crate) fn new_handle(uid: u32, gid: u32, access: u32, d: TokenData) -> u64 {
-    objects::insert(Object::Token(Arc::new(Token { uid, gid, access, state: Arc::new(TokenState { data: Mutex::new(d), remote: false }) })))
+    objects::insert(Object::Token(Arc::new(Token {
+        uid,
+        gid,
+        access,
+        state: Arc::new(TokenState { data: Mutex::new(d), remote: false }),
+    })))
 }
 
 pub(crate) extern "win64" fn OpenProcessToken(process: u64, access: u32, out: *mut u64) -> i32 {
@@ -387,7 +402,12 @@ pub(crate) extern "win64" fn OpenProcessToken(process: u64, access: u32, out: *m
         if info.uid != me && me != 0 {
             return fail(ERROR_ACCESS_DENIED, 0);
         }
-        Token { uid: info.uid, gid: info.gid, access, state: Arc::new(TokenState { data: Mutex::new(initial(info.uid, info.gid)), remote: true }) }
+        Token {
+            uid: info.uid,
+            gid: info.gid,
+            access,
+            state: Arc::new(TokenState { data: Mutex::new(initial(info.uid, info.gid)), remote: true }),
+        }
     };
     // SAFETY: the caller's out pointer.
     unsafe { *out = objects::insert(Object::Token(Arc::new(token))) };
@@ -507,7 +527,8 @@ extern "win64" fn CreateRestrictedToken(
     let mut d = t.state.data.lock().unwrap().clone();
     // Only the token's own user and groups become deny-only; the integrity
     // SID and SIDs the token does not have are ignored, as on Windows.
-    let mut own: Vec<Vec<u8>> = groups(t.uid, t.gid, &d).into_iter().filter(|g| g.1 & SE_GROUP_INTEGRITY == 0).map(|g| g.0).collect();
+    let mut own: Vec<Vec<u8>> =
+        groups(t.uid, t.gid, &d).into_iter().filter(|g| g.1 & SE_GROUP_INTEGRITY == 0).map(|g| g.0).collect();
     own.push(user_sid(t.uid));
     for s in disabled {
         if own.contains(&s) && !d.deny_only.contains(&s) {
@@ -551,7 +572,13 @@ fn set_info(t: &Token, class: u32, info: *const u8, len: u32) -> Result<(), u32>
     // Pointers in the structures are 4 bytes for a 32-bit (WoW64) caller.
     let ptr: u32 = if crate::wow64::is_active() { 4 } else { 8 };
     // SAFETY (both uses): the caller's structure of at least `ptr` bytes.
-    let read_ptr = || unsafe { if ptr == 4 { rd::<u32>(info, 0) as u64 } else { rd::<u64>(info, 0) } };
+    let read_ptr = || unsafe {
+        if ptr == 4 {
+            rd::<u32>(info, 0) as u64
+        } else {
+            rd::<u64>(info, 0)
+        }
+    };
     match class {
         4 | 5 => {
             need(t, TOKEN_ADJUST_DEFAULT)?;
@@ -578,7 +605,11 @@ fn set_info(t: &Token, class: u32, info: *const u8, len: u32) -> Result<(), u32>
             // SAFETY: a TOKEN_DEFAULT_DACL (one ACL pointer, NULL allowed).
             let acl = read_ptr() as *const u8;
             // SAFETY: NULL or the caller's ACL, validated by acl_bytes.
-            d.default_dacl = if acl.is_null() { None } else { Some(unsafe { security::acl_bytes(acl) }.map_err(|_| ERROR_INVALID_ACL)?) };
+            d.default_dacl = if acl.is_null() {
+                None
+            } else {
+                Some(unsafe { security::acl_bytes(acl) }.map_err(|_| ERROR_INVALID_ACL)?)
+            };
         }
         // TokenSessionId and TokenMandatoryPolicy need SeTcbPrivilege.
         12 | 27 => return Err(ERROR_PRIVILEGE_NOT_HELD),
@@ -614,7 +645,14 @@ extern "win64" fn SetTokenInformation(h: u64, class: u32, info: *const u8, len: 
     }
 }
 
-extern "win64" fn AdjustTokenPrivileges(h: u64, disable_all: i32, new: *const u8, _len: u32, prev: *mut u8, ret: *mut u32) -> i32 {
+extern "win64" fn AdjustTokenPrivileges(
+    h: u64,
+    disable_all: i32,
+    new: *const u8,
+    _len: u32,
+    prev: *mut u8,
+    ret: *mut u32,
+) -> i32 {
     let t = match token(h).and_then(|t| need(&t, TOKEN_ADJUST_PRIVILEGES).map(|()| t)) {
         Ok(t) => t,
         Err(e) => return fail(e, 0),
@@ -782,7 +820,9 @@ fn lookup_value(system: Option<alloc::string::String>, name: Option<alloc::strin
         return fail(ERROR_NOT_SUPPORTED, 0); // remote systems
     }
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, 0) };
-    let Some(i) = PRIVILEGES.iter().position(|p| p.eq_ignore_ascii_case(&name)) else { return fail(ERROR_NO_SUCH_PRIVILEGE, 0) };
+    let Some(i) = PRIVILEGES.iter().position(|p| p.eq_ignore_ascii_case(&name)) else {
+        return fail(ERROR_NO_SUCH_PRIVILEGE, 0);
+    };
     if luid.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }

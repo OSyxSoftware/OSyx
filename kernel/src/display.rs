@@ -270,12 +270,14 @@ pub fn init_gpu(gpu: Arc<VirtioGpu>, footer_right: &str, mode: Option<(u32, u32)
         Some((i, s)) => (i as u32, (s.rect.w, s.rect.h)),
         None => (0, (1024, 768)),
     };
-    let edid = if gpu.has_edid() { gpu.edid(index).ok().filter(|e| e.len() >= osyx_display::edid::BLOCK_LEN) } else { None };
+    let edid =
+        if gpu.has_edid() { gpu.edid(index).ok().filter(|e| e.len() >= osyx_display::edid::BLOCK_LEN) } else { None };
     let edid_len = edid.as_ref().map(|e| e.len()).unwrap_or(0);
     let edid = match edid.as_deref().map(osyx_display::Edid::parse) {
         Some(Ok(edid)) => {
             let name = edid.name.as_deref().unwrap_or("(unnamed)");
-            let (pw, ph, refresh) = edid.preferred_mode().map(|m| (m.width as u32, m.height as u32, m.refresh_mhz)).unwrap_or((0, 0, 0));
+            let (pw, ph, refresh) =
+                edid.preferred_mode().map(|m| (m.width as u32, m.height as u32, m.refresh_mhz)).unwrap_or((0, 0, 0));
             crate::kprintln!(
                 "display: EDID {} {} {:04x}: {}x{} cm, {} mode(s), preferred {}x{}@{} Hz, {} extension(s)",
                 edid.vendor(),
@@ -299,7 +301,12 @@ pub fn init_gpu(gpu: Arc<VirtioGpu>, footer_right: &str, mode: Option<(u32, u32)
     };
     let mut chosen = mode.or_else(|| {
         edid.as_ref().and_then(|e| e.preferred_mode()).map(|m| {
-            crate::kprintln!("display: EDID preferred mode {}x{}@{} Hz", m.width, m.height, (m.refresh_mhz + 500) / 1000);
+            crate::kprintln!(
+                "display: EDID preferred mode {}x{}@{} Hz",
+                m.width,
+                m.height,
+                (m.refresh_mhz + 500) / 1000
+            );
             (m.width as u32, m.height as u32)
         })
     });
@@ -310,7 +317,14 @@ pub fn init_gpu(gpu: Arc<VirtioGpu>, footer_right: &str, mode: Option<(u32, u32)
         match create_gpu_output(&gpu, index, w, h) {
             Ok(x) => break x,
             Err(e) if mode.is_none() && chosen != Some(native) => {
-                crate::kprintln!("display: mode {}x{} failed ({}); using the scanout mode {}x{}", w, h, e, native.0, native.1);
+                crate::kprintln!(
+                    "display: mode {}x{} failed ({}); using the scanout mode {}x{}",
+                    w,
+                    h,
+                    e,
+                    native.0,
+                    native.1
+                );
                 chosen = Some(native);
             }
             Err(e) => {
@@ -370,7 +384,14 @@ pub fn status(text: &str, color: Color, details: &[&str]) {
         let n = details.len().min(3);
         let r = {
             let (mut f, bg) = d.surfaces();
-            splash::draw_status(&mut f, &bg, &l, &a, text, color).union(&splash::draw_details(&mut f, &bg, &l, &a, &details[..n], splash::TEXT_DIM))
+            splash::draw_status(&mut f, &bg, &l, &a, text, color).union(&splash::draw_details(
+                &mut f,
+                &bg,
+                &l,
+                &a,
+                &details[..n],
+                splash::TEXT_DIM,
+            ))
         };
         d.present(r)
     };
@@ -541,7 +562,16 @@ pub fn set_cursor(pid: u64, image: Option<&[u8]>, hot: (u32, u32)) -> Result<(),
             let _ = gpu.unref_resource(resource);
             return Err(Errno::Io);
         }
-        *c = Some(HwCursor { gpu: gpu.clone(), resource, _backing: backing, va, scanout, hot, pos: (0, 0), shown: false });
+        *c = Some(HwCursor {
+            gpu: gpu.clone(),
+            resource,
+            _backing: backing,
+            va,
+            scanout,
+            hot,
+            pos: (0, 0),
+            shown: false,
+        });
     }
     let cur = c.as_mut().expect("cursor resource");
     // SAFETY: `va` maps the resource's n*n*4-byte backing; `image` has that size.
@@ -665,7 +695,15 @@ pub fn cursor_selftest() -> Result<&'static str, &'static str> {
     let va = crate::mem::map_frames(shm.frames()).map_err(|_| "no address space")?;
     for y in 0..n {
         for x in 0..n {
-            let px = if x <= y / 2 { if x == y / 2 || x == 0 { 0xFF00_0000 } else { 0xFFFF_FFFF } } else { 0 };
+            let px = if x <= y / 2 {
+                if x == y / 2 || x == 0 {
+                    0xFF00_0000
+                } else {
+                    0xFFFF_FFFF
+                }
+            } else {
+                0
+            };
             // SAFETY: `va` maps n*n*4 bytes of the cursor buffer.
             unsafe { core::ptr::write_volatile((va as *mut u32).add((y * n + x) as usize), px) };
         }
@@ -724,7 +762,13 @@ pub fn poll_hotplug() {
     }
     match gpu.display_info() {
         Ok(s) => {
-            let list: Vec<String> = s.iter().enumerate().map(|(i, o)| alloc::format!("{}: {}x{}{}", i, o.rect.w, o.rect.h, if o.enabled { "" } else { " (off)" })).collect();
+            let list: Vec<String> = s
+                .iter()
+                .enumerate()
+                .map(|(i, o)| {
+                    alloc::format!("{}: {}x{}{}", i, o.rect.w, o.rect.h, if o.enabled { "" } else { " (off)" })
+                })
+                .collect();
             crate::kprintln!("display: output configuration changed: {}", list.join(", "));
             if let Some(o) = s.iter().find(|o| o.enabled) {
                 if let Some(d) = DISPLAY.lock().as_mut() {

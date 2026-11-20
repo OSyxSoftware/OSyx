@@ -29,7 +29,9 @@ struct Ini {
 enum Encoding {
     Utf16,
     /// UTF-8, with the byte order mark the file had.
-    Utf8 { bom: bool },
+    Utf8 {
+        bom: bool,
+    },
     /// Bytes that are not UTF-8: one character per byte (Latin-1), so a
     /// rewrite keeps every byte of the other lines.
     Ansi,
@@ -132,7 +134,11 @@ fn put(buf: *mut u16, size: u32, items: &[String], list: bool) -> u32 {
     }
     let (n, truncated) = if list {
         // Room for the terminating extra NUL.
-        if out.len() + 1 > size { (size.saturating_sub(2), true) } else { (out.len(), false) }
+        if out.len() + 1 > size {
+            (size.saturating_sub(2), true)
+        } else {
+            (out.len(), false)
+        }
     } else if out.len() + 1 > size {
         (size - 1, true)
     } else {
@@ -161,8 +167,14 @@ pub extern "win64" fn GetPrivateProfileStringW(
     file: *const u16,
 ) -> u32 {
     // SAFETY: Windows contract: NUL-terminated strings or null.
-    let (section, key, default, file) =
-        unsafe { (path::wide_to_string(section), path::wide_to_string(key), path::wide_to_string(default), path::wide_to_string(file)) };
+    let (section, key, default, file) = unsafe {
+        (
+            path::wide_to_string(section),
+            path::wide_to_string(key),
+            path::wide_to_string(default),
+            path::wide_to_string(file),
+        )
+    };
     let Some(file) = file else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let default = String::from(default.unwrap_or_default().trim_end());
     let ini = file_path(&file).ok().and_then(|p| os_std::fs::read(&p).ok()).map(|b| parse(&b));
@@ -178,11 +190,15 @@ pub extern "win64" fn GetPrivateProfileStringW(
     match (section, key) {
         (None, _) => put(buf, size, &ini.sections.iter().skip(1).map(|(n, _)| n.clone()).collect::<Vec<_>>(), true),
         (Some(s), None) => {
-            let keys: Vec<String> = find(&ini, &s).map(|e| e.iter().filter(|(_, v)| v.is_some()).map(|(k, _)| k.clone()).collect()).unwrap_or_default();
+            let keys: Vec<String> = find(&ini, &s)
+                .map(|e| e.iter().filter(|(_, v)| v.is_some()).map(|(k, _)| k.clone()).collect())
+                .unwrap_or_default();
             put(buf, size, &keys, true)
         }
         (Some(s), Some(k)) => {
-            let value = find(&ini, &s).and_then(|e| e.iter().find(|(n, v)| v.is_some() && n.eq_ignore_ascii_case(&k))).and_then(|(_, v)| v.clone());
+            let value = find(&ini, &s)
+                .and_then(|e| e.iter().find(|(n, v)| v.is_some() && n.eq_ignore_ascii_case(&k)))
+                .and_then(|(_, v)| v.clone());
             put(buf, size, &[value.map_or(default, |v| String::from(unquote(&v)))], false)
         }
     }
@@ -206,18 +222,30 @@ fn profile_int(text: &str) -> u32 {
     for c in digits.chars().map_while(|c| c.to_digit(radix)) {
         value = value.wrapping_mul(radix).wrapping_add(c);
     }
-    if negative { value.wrapping_neg() } else { value }
+    if negative {
+        value.wrapping_neg()
+    } else {
+        value
+    }
 }
 
 /// The integer value of `key` in `section`, `default` when the file,
 /// section or key is missing.
-pub extern "win64" fn GetPrivateProfileIntW(section: *const u16, key: *const u16, default: i32, file: *const u16) -> u32 {
+pub extern "win64" fn GetPrivateProfileIntW(
+    section: *const u16,
+    key: *const u16,
+    default: i32,
+    file: *const u16,
+) -> u32 {
     // SAFETY: Windows contract: NUL-terminated strings or null.
-    let (section, key, file) = unsafe { (path::wide_to_string(section), path::wide_to_string(key), path::wide_to_string(file)) };
+    let (section, key, file) =
+        unsafe { (path::wide_to_string(section), path::wide_to_string(key), path::wide_to_string(file)) };
     let (Some(section), Some(key), Some(file)) = (section, key, file) else { return default as u32 };
     let ini = file_path(&file).ok().and_then(|p| os_std::fs::read(&p).ok()).map(|b| parse(&b));
     let value = ini.as_ref().and_then(|ini| {
-        find(ini, &section).and_then(|e| e.iter().find(|(n, v)| v.is_some() && n.eq_ignore_ascii_case(&key))).and_then(|(_, v)| v.clone())
+        find(ini, &section)
+            .and_then(|e| e.iter().find(|(n, v)| v.is_some() && n.eq_ignore_ascii_case(&key)))
+            .and_then(|(_, v)| v.clone())
     });
     match value {
         Some(v) => profile_int(unquote(&v)),
@@ -235,10 +263,21 @@ pub extern "win64" fn GetPrivateProfileIntA(section: *const u8, key: *const u8, 
     GetPrivateProfileIntW(ptr(&s), ptr(&k), default, ptr(&f))
 }
 
-pub extern "win64" fn WritePrivateProfileStringW(section: *const u16, key: *const u16, value: *const u16, file: *const u16) -> i32 {
+pub extern "win64" fn WritePrivateProfileStringW(
+    section: *const u16,
+    key: *const u16,
+    value: *const u16,
+    file: *const u16,
+) -> i32 {
     // SAFETY: Windows contract: NUL-terminated strings or null.
-    let (section, key, value, file) =
-        unsafe { (path::wide_to_string(section), path::wide_to_string(key), path::wide_to_string(value), path::wide_to_string(file)) };
+    let (section, key, value, file) = unsafe {
+        (
+            path::wide_to_string(section),
+            path::wide_to_string(key),
+            path::wide_to_string(value),
+            path::wide_to_string(file),
+        )
+    };
     let (Some(section), Some(file)) = (section, file) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let path = match file_path(&file) {
         Ok(p) => p,

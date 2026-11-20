@@ -31,7 +31,8 @@ unsafe fn blob_at(p: u64) -> Vec<u8> {
 // ---- system and collection stores --------------------------------------------------------
 
 /// The system stores every Windows installation has.
-const SYSTEM_STORES: [&str; 8] = ["MY", "ROOT", "CA", "TRUST", "DISALLOWED", "ADDRESSBOOK", "TRUSTEDPEOPLE", "TRUSTEDPUBLISHER"];
+const SYSTEM_STORES: [&str; 8] =
+    ["MY", "ROOT", "CA", "TRUST", "DISALLOWED", "ADDRESSBOOK", "TRUSTEDPEOPLE", "TRUSTEDPUBLISHER"];
 
 /// System stores by upper-case name, shared by every handle opened on
 /// them. OSyx has no Windows certificate stores, so they start empty and
@@ -122,7 +123,11 @@ extern "win64" fn CertControlStore(store: u64, _flags: u32, ctrl: u32, _para: u6
         return fail(ERROR_INVALID_HANDLE, 0);
     }
     match ctrl {
-        CERT_STORE_CTRL_RESYNC | CERT_STORE_CTRL_NOTIFY_CHANGE | CERT_STORE_CTRL_COMMIT | CERT_STORE_CTRL_AUTO_RESYNC | CERT_STORE_CTRL_CANCEL_NOTIFY => 1,
+        CERT_STORE_CTRL_RESYNC
+        | CERT_STORE_CTRL_NOTIFY_CHANGE
+        | CERT_STORE_CTRL_COMMIT
+        | CERT_STORE_CTRL_AUTO_RESYNC
+        | CERT_STORE_CTRL_CANCEL_NOTIFY => 1,
         _ => fail(ERROR_CALL_NOT_IMPLEMENTED, 0),
     }
 }
@@ -136,8 +141,18 @@ const CERT_STORE_ADD_NEWER_INHERIT_PROPERTIES: u32 = 7;
 
 /// CertAddEncodedCertificateToStore. A certificate with the same encoding
 /// is the existing one; with no store, only the context is made.
-extern "win64" fn CertAddEncodedCertificateToStore(store: u64, _encoding: u32, data: *const u8, len: u32, disposition: u32, out: *mut u64) -> i32 {
-    if data.is_null() || len == 0 || !(CERT_STORE_ADD_NEW..=CERT_STORE_ADD_NEWER_INHERIT_PROPERTIES).contains(&disposition) {
+extern "win64" fn CertAddEncodedCertificateToStore(
+    store: u64,
+    _encoding: u32,
+    data: *const u8,
+    len: u32,
+    disposition: u32,
+    out: *mut u64,
+) -> i32 {
+    if data.is_null()
+        || len == 0
+        || !(CERT_STORE_ADD_NEW..=CERT_STORE_ADD_NEWER_INHERIT_PROPERTIES).contains(&disposition)
+    {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's `len` bytes.
@@ -165,9 +180,16 @@ extern "win64" fn CertAddEncodedCertificateToStore(store: u64, _encoding: u32, d
         let mut certs = s.certs.lock().unwrap();
         let existing = certs.iter().position(|c| *c == der);
         match (disposition, existing) {
-            (CERT_STORE_ADD_NEW | CERT_STORE_ADD_NEWER | CERT_STORE_ADD_NEWER_INHERIT_PROPERTIES, Some(_)) => return fail(CRYPT_E_EXISTS, 0),
+            (CERT_STORE_ADD_NEW | CERT_STORE_ADD_NEWER | CERT_STORE_ADD_NEWER_INHERIT_PROPERTIES, Some(_)) => {
+                return fail(CRYPT_E_EXISTS, 0)
+            }
             // Replacing a certificate with the same encoding keeps it.
-            (CERT_STORE_ADD_USE_EXISTING | CERT_STORE_ADD_REPLACE_EXISTING | CERT_STORE_ADD_REPLACE_EXISTING_INHERIT_PROPERTIES, Some(i)) => i,
+            (
+                CERT_STORE_ADD_USE_EXISTING
+                | CERT_STORE_ADD_REPLACE_EXISTING
+                | CERT_STORE_ADD_REPLACE_EXISTING_INHERIT_PROPERTIES,
+                Some(i),
+            ) => i,
             // CERT_STORE_ADD_ALWAYS, and every disposition with no match.
             _ => {
                 certs.push(der.clone());
@@ -246,7 +268,10 @@ extern "win64" fn CertGetIntendedKeyUsage(_encoding: u32, info: u64, out: *mut u
 
 /// CertGetNameStringW's name in UTF-8 (the ANSI code page).
 extern "win64" fn CertGetNameStringA(ctx: u64, kind: u32, flags: u32, para: *const u8, out: *mut u8, len: u32) -> u32 {
-    let name = context_der(ctx).and_then(|d| parse_cert(&d).ok()).map(|c| cert_name(&c, kind, flags, para)).unwrap_or_default();
+    let name = context_der(ctx)
+        .and_then(|d| parse_cert(&d).ok())
+        .map(|c| cert_name(&c, kind, flags, para))
+        .unwrap_or_default();
     let bytes = name.as_bytes();
     if out.is_null() || len == 0 {
         return bytes.len() as u32 + 1;
@@ -301,7 +326,14 @@ const CRYPT_VERIFY_CERT_SIGN_ISSUER_CERT: u32 = 2;
 /// chain building uses.
 #[allow(clippy::too_many_arguments)]
 extern "win64" fn CryptVerifyCertificateSignatureEx(
-    _prov: u64, _encoding: u32, subject_type: u32, subject: u64, issuer_type: u32, issuer: u64, _flags: u32, _extra: u64,
+    _prov: u64,
+    _encoding: u32,
+    subject_type: u32,
+    subject: u64,
+    issuer_type: u32,
+    issuer: u64,
+    _flags: u32,
+    _extra: u64,
 ) -> i32 {
     if subject == 0 || issuer == 0 {
         return fail(E_INVALIDARG, 0);
@@ -339,7 +371,9 @@ extern "win64" fn CryptVerifyCertificateSignatureEx(
         (Err(e), _) | (_, Err(e)) => return fail(e, 0),
     };
     let algs = rustls_rustcrypto::provider().signature_verification_algorithms.all;
-    let Some(alg) = algs.iter().find(|a| a.public_key_alg_id().as_ref() == key_alg.as_slice() && a.signature_alg_id().as_ref() == sig_alg.as_slice()) else {
+    let Some(alg) = algs.iter().find(|a| {
+        a.public_key_alg_id().as_ref() == key_alg.as_slice() && a.signature_alg_id().as_ref() == sig_alg.as_slice()
+    }) else {
         return fail(NTE_BAD_ALGID, 0);
     };
     match alg.verify_signature(&key, &tbs, &sig) {
@@ -482,7 +516,15 @@ fn out_blob(out: u64, data: &[u8]) -> Result<(), u32> {
 /// optional entropy. The blob is "OSXD", a version, the flags, the
 /// description's length, a random nonce, the description (UTF-16), the
 /// ciphertext and the MAC of all of that. There is no UI to prompt with.
-extern "win64" fn CryptProtectData(input: u64, desc: *const u16, entropy: u64, _reserved: u64, _prompt: u64, flags: u32, out: u64) -> i32 {
+extern "win64" fn CryptProtectData(
+    input: u64,
+    desc: *const u16,
+    entropy: u64,
+    _reserved: u64,
+    _prompt: u64,
+    flags: u32,
+    out: u64,
+) -> i32 {
     if input == 0 || out == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -493,7 +535,8 @@ extern "win64" fn CryptProtectData(input: u64, desc: *const u16, entropy: u64, _
     };
     // SAFETY: the caller's DATA_BLOBs and NUL-terminated description.
     let (mut data, entropy, desc) = unsafe {
-        let d: Vec<u8> = path::wide_to_string(desc).unwrap_or_default().encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let d: Vec<u8> =
+            path::wide_to_string(desc).unwrap_or_default().encode_utf16().flat_map(u16::to_le_bytes).collect();
         (blob_at(input), if entropy == 0 { Vec::new() } else { blob_at(entropy) }, d)
     };
     if desc.len() > u16::MAX as usize {
@@ -521,7 +564,15 @@ extern "win64" fn CryptProtectData(input: u64, desc: *const u16, entropy: u64, _
     }
 }
 
-extern "win64" fn CryptUnprotectData(input: u64, desc: *mut u64, entropy: u64, _reserved: u64, _prompt: u64, _flags: u32, out: u64) -> i32 {
+extern "win64" fn CryptUnprotectData(
+    input: u64,
+    desc: *mut u64,
+    entropy: u64,
+    _reserved: u64,
+    _prompt: u64,
+    _flags: u32,
+    out: u64,
+) -> i32 {
     if input == 0 || out == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }

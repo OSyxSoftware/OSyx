@@ -123,7 +123,9 @@ pub fn aggregate(samples: &[Sample], ac: Option<bool>, filter: &mut RateFilter) 
     let mut volts = 0u64;
     for s in samples {
         permille_sum += s.permille().unwrap_or(0);
-        if let (Some(rem), Some(full)) = (s.remaining.and_then(|v| s.to_milli_watt(v)), s.full().and_then(|v| s.to_milli_watt(v))) {
+        if let (Some(rem), Some(full)) =
+            (s.remaining.and_then(|v| s.to_milli_watt(v)), s.full().and_then(|v| s.to_milli_watt(v)))
+        {
             energy += rem.min(full * 2);
             capacity += full;
             converted += 1;
@@ -183,7 +185,9 @@ pub fn aggregate(samples: &[Sample], ac: Option<bool>, filter: &mut RateFilter) 
         if let Some(r) = mw {
             match state {
                 State::Discharging => to_empty = Some(energy * 60 / r).filter(|&m| m <= MAX_MINUTES),
-                State::Charging => to_full = Some(capacity.saturating_sub(energy) * 60 / r).filter(|&m| m <= MAX_MINUTES),
+                State::Charging => {
+                    to_full = Some(capacity.saturating_sub(energy) * 60 / r).filter(|&m| m <= MAX_MINUTES)
+                }
                 _ => {}
             }
         }
@@ -275,7 +279,12 @@ impl Monitor {
             }
             None => {
                 // Never a good reading: show a battery without a number.
-                let mut s = Status { state: State::Unknown, batteries: present.max(poll.devices).min(255) as u8, stale: true, ..Status::NONE };
+                let mut s = Status {
+                    state: State::Unknown,
+                    batteries: present.max(poll.devices).min(255) as u8,
+                    stale: true,
+                    ..Status::NONE
+                };
                 if let Some(ac) = poll.ac {
                     s.ac = ac;
                 }

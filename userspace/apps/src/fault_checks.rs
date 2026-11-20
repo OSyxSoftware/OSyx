@@ -16,7 +16,8 @@ static GOOD: AtomicU32 = AtomicU32::new(0);
 static NESTED: AtomicBool = AtomicBool::new(false);
 static AVX_FAULT: AtomicBool = AtomicBool::new(false);
 static AVX_GOOD: AtomicBool = AtomicBool::new(false);
-const AVX_PATTERN: [u64; 4] = [0x1122_3344_5566_7788, 0x99aa_bbcc_ddee_ff00, 0x0f1e_2d3c_4b5a_6978, 0x8877_6655_4433_2211];
+const AVX_PATTERN: [u64; 4] =
+    [0x1122_3344_5566_7788, 0x99aa_bbcc_ddee_ff00, 0x0f1e_2d3c_4b5a_6978, 0x8877_6655_4433_2211];
 global_asm!(
     r#"
 .section .text
@@ -162,7 +163,8 @@ fn avx_enabled() -> bool {
     let ecx = core::arch::x86_64::__cpuid(1).ecx;
     ecx & (1 << 28) != 0 && ecx & (1 << 27) != 0
 }
-pub fn run() -> i32 {    let mut passed = 0;
+pub fn run() -> i32 {
+    let mut passed = 0;
     let mut failed = 0;
     let mut check = |name: &str, ok: bool| {
         println!("native fault: {name} ... {}", if ok { "ok" } else { "FAILED" });
@@ -193,21 +195,15 @@ pub fn run() -> i32 {    let mut passed = 0;
         AVX_FAULT.store(true, Ordering::SeqCst);
         let restored = unsafe { osyx_fault_avx_probe() } == 1;
         AVX_FAULT.store(false, Ordering::SeqCst);
-        check(
-            "YMM upper halves survive exception delivery",
-            restored && AVX_GOOD.load(Ordering::SeqCst),
-        );
+        check("YMM upper halves survive exception delivery", restored && AVX_GOOD.load(Ordering::SeqCst));
     } else {
         println!("native fault: YMM upper halves ... skipped (CPU has no AVX)");
     }
     let a = os_std::thread::spawn(|| unsafe { osyx_fault_register_probe() });
     let b = os_std::thread::spawn(|| unsafe { osyx_fault_register_probe() });
     check("independent threads resume their own contexts", a.join() == Ok(1) && b.join() == Ok(1));
-    let (callbacks, rejected, good) = (
-        CALLBACKS.load(Ordering::SeqCst),
-        REJECTED.load(Ordering::SeqCst),
-        GOOD.load(Ordering::SeqCst),
-    );
+    let (callbacks, rejected, good) =
+        (CALLBACKS.load(Ordering::SeqCst), REJECTED.load(Ordering::SeqCst), GOOD.load(Ordering::SeqCst));
     // Register markers: this thread's probe and the two helper threads.
     let register_probes = 3;
     if callbacks != deliveries || rejected != deliveries || good != register_probes {

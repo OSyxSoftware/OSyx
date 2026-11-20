@@ -473,12 +473,18 @@ impl Rtl8168 {
         let up = self.link_up();
         let event = self.watchdog.lock().check(up, crate::interrupts::uptime_ms());
         match event {
-            LinkEvent::Up => crate::kprintln!("rtl8168 {}: link up, {}", self.name, phy::describe_status(self.r8(PHY_STATUS))),
+            LinkEvent::Up => {
+                crate::kprintln!("rtl8168 {}: link up, {}", self.name, phy::describe_status(self.r8(PHY_STATUS)))
+            }
             LinkEvent::Down => crate::kprintln!("rtl8168 {}: link down", self.name),
             LinkEvent::Renegotiate => {
                 let n = self.watchdog.lock().renegotiations;
                 if n <= 3 {
-                    crate::kprintln!("rtl8168 {}: no link for {} s; restarting autonegotiation", self.name, phy::RENEGOTIATE_MS / 1000);
+                    crate::kprintln!(
+                        "rtl8168 {}: no link for {} s; restarting autonegotiation",
+                        self.name,
+                        phy::RENEGOTIATE_MS / 1000
+                    );
                 }
                 phy::restart_autoneg(self);
             }

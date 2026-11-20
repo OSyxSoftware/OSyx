@@ -150,7 +150,8 @@ fn log_file_thread(_: u64, _: u64) {
         let written = snapshot(&mut text);
         if written != saved {
             let cx = crate::vfs::Lookup::kernel();
-            if let Ok(mut f) = crate::vfs::open(&cx, "/run/kernel.log", OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0o644) {
+            if let Ok(mut f) = crate::vfs::open(&cx, "/run/kernel.log", OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE, 0o644)
+            {
                 let _ = f.write(&text);
                 saved = written;
             }

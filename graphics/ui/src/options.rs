@@ -195,7 +195,10 @@ mod tests {
     #[test]
     fn clock_options_parse_and_round_trip() {
         assert_eq!(ClockOptions::parse(""), ClockOptions { twelve_hour: false, seconds: false, date: true });
-        assert_eq!(ClockOptions::parse("hours=12\nseconds=1\ndate=0\n"), ClockOptions { twelve_hour: true, seconds: true, date: false });
+        assert_eq!(
+            ClockOptions::parse("hours=12\nseconds=1\ndate=0\n"),
+            ClockOptions { twelve_hour: true, seconds: true, date: false }
+        );
         assert_eq!(ClockOptions::parse("hours=25\nseconds=yes"), ClockOptions::default());
         for (twelve_hour, seconds, date) in [(true, false, true), (false, true, false), (true, true, true)] {
             let o = ClockOptions { twelve_hour, seconds, date };

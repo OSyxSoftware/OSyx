@@ -6,11 +6,7 @@
 //! back as EVENTLOGRECORDs; other logs are empty. Remote event logs are
 //! not supported.
 #![allow(non_snake_case)]
-use crate::{
-    error::*,
-    kernel32::fail,
-    path,
-};
+use crate::{error::*, kernel32::fail, path};
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use os_std::sync::Mutex;
 
@@ -73,12 +69,25 @@ extern "win64" fn RegisterEventSourceA(server: *const u8, source: *const u8) -> 
     let (server, source) = unsafe { (path::ansi_to_string(server), path::ansi_to_string(source)) };
     let wide = |s: Option<String>| s.map(|s| s.encode_utf16().chain([0]).collect::<Vec<u16>>());
     let (server, source) = (wide(server), wide(source));
-    RegisterEventSourceW(server.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()), source.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()))
+    RegisterEventSourceW(
+        server.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
+        source.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
+    )
 }
 
 /// ReportEventA: the strings widened (ANSI is UTF-8), then ReportEventW.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn ReportEventA(h: u64, kind: u16, category: u16, id: u32, user: *const u8, count: u16, size: u32, strings: *const u64, data: *const u8) -> i32 {
+extern "win64" fn ReportEventA(
+    h: u64,
+    kind: u16,
+    category: u16,
+    id: u32,
+    user: *const u8,
+    count: u16,
+    size: u32,
+    strings: *const u64,
+    data: *const u8,
+) -> i32 {
     if count > 0 && strings.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -91,7 +100,17 @@ extern "win64" fn ReportEventA(h: u64, kind: u16, category: u16, id: u32, user: 
         })
         .collect();
     let ptrs: Vec<u64> = wide.iter().map(|w| w.as_ptr() as u64).collect();
-    ReportEventW(h, kind, category, id, user, count, size, if count > 0 { ptrs.as_ptr() } else { core::ptr::null() }, data)
+    ReportEventW(
+        h,
+        kind,
+        category,
+        id,
+        user,
+        count,
+        size,
+        if count > 0 { ptrs.as_ptr() } else { core::ptr::null() },
+        data,
+    )
 }
 
 extern "win64" fn DeregisterEventSource(h: u64) -> i32 {
@@ -102,7 +121,17 @@ extern "win64" fn DeregisterEventSource(h: u64) -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: u32, _user: *const u8, count: u16, size: u32, strings: *const u64, data: *const u8) -> i32 {
+pub(crate) extern "win64" fn ReportEventW(
+    h: u64,
+    kind: u16,
+    category: u16,
+    id: u32,
+    _user: *const u8,
+    count: u16,
+    size: u32,
+    strings: *const u64,
+    data: *const u8,
+) -> i32 {
     let Some(source) = SOURCES.lock().unwrap().get(&h).cloned() else { return fail(ERROR_INVALID_HANDLE, 0) };
     let code = kind;
     let kind = match kind {
@@ -118,7 +147,8 @@ pub(crate) extern "win64" fn ReportEventW(h: u64, kind: u16, category: u16, id: 
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's `size` bytes of binary data.
-    let data = if size == 0 { Vec::new() } else { unsafe { core::slice::from_raw_parts(data, size as usize) }.to_vec() };
+    let data =
+        if size == 0 { Vec::new() } else { unsafe { core::slice::from_raw_parts(data, size as usize) }.to_vec() };
     let text: Vec<String> = (0..count as usize)
         // SAFETY: the caller's array of `count` NUL-terminated strings.
         .filter_map(|i| unsafe { path::wide_to_string(*strings.add(i) as *const u16) })
@@ -214,7 +244,15 @@ fn record_bytes(number: u32, r: &Record) -> Vec<u8> {
 /// record number, forwards or backwards. ERROR_HANDLE_EOF past the last;
 /// a buffer too small for the next record reports the size it needs.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn ReadEventLogW(h: u64, flags: u32, offset: u32, buf: *mut u8, size: u32, read: *mut u32, needed: *mut u32) -> i32 {
+extern "win64" fn ReadEventLogW(
+    h: u64,
+    flags: u32,
+    offset: u32,
+    buf: *mut u8,
+    size: u32,
+    read: *mut u32,
+    needed: *mut u32,
+) -> i32 {
     // The handle's position is read and advanced under one lock, so two
     // threads reading through it never return the same records.
     let mut readers = READERS.lock().unwrap();
@@ -222,7 +260,12 @@ extern "win64" fn ReadEventLogW(h: u64, flags: u32, offset: u32, buf: *mut u8, s
     let forwards = flags & EVENTLOG_FORWARDS_READ != 0;
     let backwards = flags & EVENTLOG_BACKWARDS_READ != 0;
     let seek = flags & EVENTLOG_SEEK_READ != 0;
-    if forwards == backwards || seek == (flags & EVENTLOG_SEQUENTIAL_READ != 0) || buf.is_null() || read.is_null() || needed.is_null() {
+    if forwards == backwards
+        || seek == (flags & EVENTLOG_SEQUENTIAL_READ != 0)
+        || buf.is_null()
+        || read.is_null()
+        || needed.is_null()
+    {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let log = LOG.lock().unwrap();
@@ -303,5 +346,15 @@ pub(crate) fn application_events() -> Vec<EventView> {
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    export_table![RegisterEventSourceW, RegisterEventSourceA, DeregisterEventSource, ReportEventW, ReportEventA, OpenEventLogW, OpenEventLogA, CloseEventLog, ReadEventLogW]
+    export_table![
+        RegisterEventSourceW,
+        RegisterEventSourceA,
+        DeregisterEventSource,
+        ReportEventW,
+        ReportEventA,
+        OpenEventLogW,
+        OpenEventLogA,
+        CloseEventLog,
+        ReadEventLogW
+    ]
 }

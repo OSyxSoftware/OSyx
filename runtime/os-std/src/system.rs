@@ -5,8 +5,8 @@ use crate::error::{Error, Result};
 use alloc::string::String;
 use alloc::vec::Vec;
 pub use os_sys::ipc::{
-    field_str, pixel, DisplayInfo, MountInfo, ProcInfo, BACKEND_LINEAR, BACKEND_VIRTIO_GPU, CURSOR_SIZE, MAX_FLUSH_RECTS, POWER_OFF, POWER_REBOOT,
-    PROC_RUNNING, PROC_ZOMBIE,
+    field_str, pixel, DisplayInfo, MountInfo, ProcInfo, BACKEND_LINEAR, BACKEND_VIRTIO_GPU, CURSOR_SIZE,
+    MAX_FLUSH_RECTS, POWER_OFF, POWER_REBOOT, PROC_RUNNING, PROC_ZOMBIE,
 };
 
 /// Every process (running and not yet collected).
@@ -18,11 +18,15 @@ pub fn processes() -> Result<Vec<ProcInfo>> {
 }
 
 /// (online logical CPU count, the CPU currently running this thread).
-pub fn cpu_info() -> Result<(u32,u32)> {
-    #[cfg(target_os="none")]
-    { os_sys::cpu_info().map_err(Error::from) }
-    #[cfg(not(target_os="none"))]
-    { Err(Error::new(crate::error::ErrorKind::Unsupported,"CPU information is available on OSyx")) }
+pub fn cpu_info() -> Result<(u32, u32)> {
+    #[cfg(target_os = "none")]
+    {
+        os_sys::cpu_info().map_err(Error::from)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        Err(Error::new(crate::error::ErrorKind::Unsupported, "CPU information is available on OSyx"))
+    }
 }
 
 /// Priority levels for [`thread_priority`].
@@ -43,11 +47,16 @@ pub fn thread_priority(tid: u64, priority: u64) -> Result<u64> {
 }
 
 /// Pins an owned thread (0 = the caller) to a mask of online logical CPUs.
-pub fn thread_affinity(tid:u64,mask:u64)->Result<u64> {
-    #[cfg(target_os="none")]
-    { os_sys::thread_affinity(tid,mask).map_err(Error::from) }
-    #[cfg(not(target_os="none"))]
-    { let _=(tid,mask); Err(Error::new(crate::error::ErrorKind::Unsupported,"Thread affinity is available on OSyx")) }
+pub fn thread_affinity(tid: u64, mask: u64) -> Result<u64> {
+    #[cfg(target_os = "none")]
+    {
+        os_sys::thread_affinity(tid, mask).map_err(Error::from)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (tid, mask);
+        Err(Error::new(crate::error::ErrorKind::Unsupported, "Thread affinity is available on OSyx"))
+    }
 }
 
 /// Every mounted volume, outermost first.

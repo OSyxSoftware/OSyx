@@ -211,11 +211,15 @@ fn open_mmio(base: u64, len: u32) -> Result<KernelMmio, String> {
 
 fn claim_controller(spec: &ControllerSpec, speed: BusSpeed) -> Result<Arc<Controller>, String> {
     let (mmio, what) = match spec.location {
-        Location::Pci { bus, device, function } => (open_pci(bus, device, function)?, format!("PCI {bus:02x}:{device:02x}.{function}")),
+        Location::Pci { bus, device, function } => {
+            (open_pci(bus, device, function)?, format!("PCI {bus:02x}:{device:02x}.{function}"))
+        }
         Location::Mmio { base, len } => (open_mmio(base, len)?, format!("MMIO {base:#x} ({})", spec.hid)),
     };
     let mut dw = DesignWare::probe(mmio, KernelClock).map_err(probe_error)?;
-    let source = dw.configure(speed, &spec.timing).map_err(|e| format!("no usable SCL timing ({e:?}): the firmware gives none and the controller has none set"))?;
+    let source = dw.configure(speed, &spec.timing).map_err(|e| {
+        format!("no usable SCL timing ({e:?}): the firmware gives none and the controller has none set")
+    })?;
     let (tx, rx) = dw.fifo_depths();
     kprintln!(
         "i2c: controller {} at {what}: DesignWare {:#x}, FIFOs {tx}/{rx}, {} Hz, SCL timing from the {}",
@@ -227,7 +231,10 @@ fn claim_controller(spec: &ControllerSpec, speed: BusSpeed) -> Result<Arc<Contro
             osyx_i2c::designware::TimingSource::ControllerDefault => "controller defaults",
         }
     );
-    Ok(Arc::new(Controller { name: spec.path.clone(), hw: KMutex::new(Hardware { dw, speed: Some(speed), timing: spec.timing }) }))
+    Ok(Arc::new(Controller {
+        name: spec.path.clone(),
+        hw: KMutex::new(Hardware { dw, speed: Some(speed), timing: spec.timing }),
+    }))
 }
 
 fn key_of(spec: &ControllerSpec) -> Key {
@@ -423,7 +430,9 @@ fn hid_error(e: &HidError) -> String {
         HidError::BadDescriptor => String::from("HID descriptor has impossible fields"),
         HidError::NoResetResponse => String::from("no reset response within 1 s"),
         HidError::BadReportLength(n) => format!("input report length {n} is impossible"),
-        HidError::NoIdleSignal => String::from("it answers a read with no report pending by data, not by a zero length or NACK"),
+        HidError::NoIdleSignal => {
+            String::from("it answers a read with no report pending by data, not by a zero length or NACK")
+        }
     }
 }
 
@@ -525,10 +534,12 @@ pub fn selftest() -> Result<(), String> {
     use osyx_i2c::sim::{SimClock, SimHid, SimMmio};
     // Keyboard (id 1) and mouse (id 2) in one device.
     const DESCRIPTOR: &[u8] = &[
-        0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95,
-        0x01, 0x75, 0x08, 0x81, 0x01, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xC0, 0x05, 0x01, 0x09,
-        0x02, 0xA1, 0x01, 0x85, 0x02, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
-        0x95, 0x01, 0x75, 0x05, 0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06, 0xC0, 0xC0,
+        0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x01, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00,
+        0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xC0, 0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85,
+        0x02, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75,
+        0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25,
+        0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06, 0xC0, 0xC0,
     ];
     let mmio = SimMmio::new(8, 8);
     let clock = SimClock::new();
@@ -537,7 +548,8 @@ pub fn selftest() -> Result<(), String> {
     let hid = SimHid::new(0x2C, 0x0020, DESCRIPTOR);
     mmio.attach(hid.clone());
     let mut dev = I2cHid::open(dw, &clock, 0x2C, 0x0020).map_err(|e| hid_error(&e))?;
-    let mut decoder = ReportDecoder::from_descriptor(dev.report_descriptor()).map_err(|e| format!("descriptor: {e:?}"))?;
+    let mut decoder =
+        ReportDecoder::from_descriptor(dev.report_descriptor()).map_err(|e| format!("descriptor: {e:?}"))?;
     dev.verify_idle_signal(&clock, IDLE_ATTEMPTS).map_err(|e| hid_error(&e))?;
     let id = input::register("I2C HID selftest", input::class::KEYBOARD);
     // 'A' down and up; left button down with motion (5, -3).

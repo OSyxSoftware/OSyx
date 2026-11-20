@@ -316,17 +316,21 @@ fn browse(info: u64, wide: bool) -> u64 {
     }
     let (owner, root, display, title, callback) = unsafe {
         if crate::wow64::is_active() {
-            (teb::get::<u32>(info, 0) as u64, teb::get::<u32>(info, 4) as u64,
-             teb::get::<u32>(info, 8) as u64, string(teb::get::<u32>(info, 12) as u64, wide),
-             teb::get::<u32>(info, 20) as u64)
+            (
+                teb::get::<u32>(info, 0) as u64,
+                teb::get::<u32>(info, 4) as u64,
+                teb::get::<u32>(info, 8) as u64,
+                string(teb::get::<u32>(info, 12) as u64, wide),
+                teb::get::<u32>(info, 20) as u64,
+            )
         } else {
-        (
-            teb::get::<u64>(info, 0),
-            teb::get::<u64>(info, 8),
-            teb::get::<u64>(info, 16),
-            string(teb::get::<u64>(info, 24), wide),
-            teb::get::<u64>(info, 40),
-        )
+            (
+                teb::get::<u64>(info, 0),
+                teb::get::<u64>(info, 8),
+                teb::get::<u64>(info, 16),
+                string(teb::get::<u64>(info, 24), wide),
+                teb::get::<u64>(info, 40),
+            )
         }
     };
     // Callback/window-message customization is not silently ignored.

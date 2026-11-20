@@ -344,7 +344,13 @@ impl VideoView {
         osyx_ui::icon::draw(p, osyx_ui::Icon::Volume, Rect::new(head.x + 14, head.y + 12, 20, 20), t.text_dim);
         let name = self.path.rsplit('/').next().unwrap_or(&self.path);
         let title = format!("{name}  ·  {}", self.describe);
-        p.text_in(FontKind::Bold, Rect::new(head.x + 44, head.y, head.w.saturating_sub(160), head.h), &title, t.text, Align::Left);
+        p.text_in(
+            FontKind::Bold,
+            Rect::new(head.x + 44, head.y, head.w.saturating_sub(160), head.h),
+            &title,
+            t.text,
+            Align::Left,
+        );
         self.close.draw(p, false);
         // The picture, fitted and centred on black.
         let s = self.screen;
@@ -360,12 +366,19 @@ impl VideoView {
         let foot = Rect::new(r.x, s.bottom() as i32, r.w, (r.bottom() - s.bottom()).max(0) as u32);
         p.fill(foot, t.window);
         if let Some(e) = self.error() {
-            p.text_in(FontKind::Ui, Rect::new(s.x + 16, s.bottom() as i32 - 30, s.w - 32, 24), &e, t.danger_hover, Align::Left);
+            p.text_in(
+                FontKind::Ui,
+                Rect::new(s.x + 16, s.bottom() as i32 - 30, s.w - 32, 24),
+                &e,
+                t.danger_hover,
+                Align::Left,
+            );
         }
         let pos = self.position().min(self.duration_ms.max(self.position()));
         let b = self.bar;
         p.rounded(b, b.h / 2, t.raised, 255);
-        let done = if self.duration_ms == 0 { 0 } else { (pos.min(self.duration_ms) * b.w as u64 / self.duration_ms) as u32 };
+        let done =
+            if self.duration_ms == 0 { 0 } else { (pos.min(self.duration_ms) * b.w as u64 / self.duration_ms) as u32 };
         if done > 0 {
             p.rounded(Rect::new(b.x, b.y, done.max(b.h), b.h), b.h / 2, t.accent, 255);
         }

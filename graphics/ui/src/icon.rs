@@ -43,8 +43,19 @@ pub enum Icon {
 /// Unit directions (x, y in 1/100, y down) every 15 degrees from straight
 /// right (index 0) through straight up (6) to straight left (12).
 const DIRS: [(i32, i32); 13] = [
-    (100, 0), (97, -26), (87, -50), (71, -71), (50, -87), (26, -97), (0, -100),
-    (-26, -97), (-50, -87), (-71, -71), (-87, -50), (-97, -26), (-100, 0),
+    (100, 0),
+    (97, -26),
+    (87, -50),
+    (71, -71),
+    (50, -87),
+    (26, -97),
+    (0, -100),
+    (-26, -97),
+    (-50, -87),
+    (-71, -71),
+    (-87, -50),
+    (-97, -26),
+    (-100, 0),
 ];
 
 const FOLDER_BACK: Color = rgb(58, 104, 196);
@@ -65,7 +76,9 @@ pub fn draw(p: &mut Painter, icon: Icon, r: Rect, c: Color) {
     let pt = |fx: i32, fy: i32| ((x0 << 8) + s * fx * 256 / 100, (y0 << 8) + s * fy * 256 / 100);
     let px = |f: i32| s * f / 100;
     let stroke = (s * 256 / 11).max(300);
-    let sub = |fx: i32, fy: i32, fw: i32, fh: i32| Rect::new(x0 + px(fx), y0 + px(fy), px(fw).max(1) as u32, px(fh).max(1) as u32);
+    let sub = |fx: i32, fy: i32, fw: i32, fh: i32| {
+        Rect::new(x0 + px(fx), y0 + px(fy), px(fw).max(1) as u32, px(fh).max(1) as u32)
+    };
     match icon {
         Icon::Bitmap(_) => {} // drawn above
         Icon::Browser => {
@@ -107,7 +120,15 @@ pub fn draw(p: &mut Painter, icon: Icon, r: Rect, c: Color) {
                     p.segment(pt(64, 44), pt(64, 60), stroke, a, 255);
                 }
                 Icon::Device => {
-                    p.ring(x0 + px(50), y0 + px(60), px(18) as u32, (s / 12).max(1) as u32, rgb(46, 92, 196), 255, false);
+                    p.ring(
+                        x0 + px(50),
+                        y0 + px(60),
+                        px(18) as u32,
+                        (s / 12).max(1) as u32,
+                        rgb(46, 92, 196),
+                        255,
+                        false,
+                    );
                 }
                 _ => {}
             }
@@ -138,7 +159,8 @@ pub fn draw(p: &mut Painter, icon: Icon, r: Rect, c: Color) {
             let gap = (s - 3 * cell) / 4;
             for i in 0..3 {
                 for j in 0..3 {
-                    let r = Rect::new(x0 + gap + i * (cell + gap), y0 + gap + j * (cell + gap), cell as u32, cell as u32);
+                    let r =
+                        Rect::new(x0 + gap + i * (cell + gap), y0 + gap + j * (cell + gap), cell as u32, cell as u32);
                     p.rounded(r, (cell / 3) as u32, c, 255);
                 }
             }
@@ -298,7 +320,8 @@ fn with_registry<R>(f: impl FnOnce(&mut Vec<Bitmap>) -> R) -> R {
 /// Registers `bitmap` and returns the icon that draws it, or `None` when the
 /// bitmap is empty, inconsistent or the table is full.
 pub fn register_bitmap(bitmap: Bitmap) -> Option<Icon> {
-    if bitmap.width == 0 || bitmap.height == 0 || bitmap.pixels.len() != bitmap.width as usize * bitmap.height as usize {
+    if bitmap.width == 0 || bitmap.height == 0 || bitmap.pixels.len() != bitmap.width as usize * bitmap.height as usize
+    {
         return None;
     }
     with_registry(|items| {
@@ -431,7 +454,13 @@ pub fn decode_png(data: &[u8]) -> Option<Bitmap> {
                 4 => {
                     let p = left + up - up_left;
                     let (pa, pb, pc) = ((p - left).abs(), (p - up).abs(), (p - up_left).abs());
-                    if pa <= pb && pa <= pc { left } else if pb <= pc { up } else { up_left }
+                    if pa <= pb && pa <= pc {
+                        left
+                    } else if pb <= pc {
+                        up
+                    } else {
+                        up_left
+                    }
                 }
                 _ => return None,
             };
@@ -482,7 +511,11 @@ pub fn decode_dib(data: &[u8]) -> Option<Bitmap> {
     let colours = match bpp {
         1 | 4 | 8 => {
             let used = u32_at(32)? as usize;
-            if used == 0 { 1usize << bpp } else { used.min(1 << bpp) }
+            if used == 0 {
+                1usize << bpp
+            } else {
+                used.min(1 << bpp)
+            }
         }
         24 | 32 => 0,
         _ => return None,
@@ -508,7 +541,12 @@ pub fn decode_dib(data: &[u8]) -> Option<Bitmap> {
             let argb = match bpp {
                 32 => {
                     let o = line + x as usize * 4;
-                    let (b, g, r, a) = (*data.get(o)? as u32, *data.get(o + 1)? as u32, *data.get(o + 2)? as u32, *data.get(o + 3)? as u32);
+                    let (b, g, r, a) = (
+                        *data.get(o)? as u32,
+                        *data.get(o + 1)? as u32,
+                        *data.get(o + 2)? as u32,
+                        *data.get(o + 3)? as u32,
+                    );
                     any_alpha |= a != 0;
                     a << 24 | r << 16 | g << 8 | b
                 }

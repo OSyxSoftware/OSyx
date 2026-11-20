@@ -135,7 +135,15 @@ impl FatVolume {
         paths.insert(ROOT, String::from("/"));
         let mut by_path = BTreeMap::new();
         by_path.insert(String::from("/"), ROOT);
-        let state = State { fs, paths, by_path, next: ROOT + 1, open: BTreeMap::new(), files: BTreeMap::new(), dirty_since: None };
+        let state = State {
+            fs,
+            paths,
+            by_path,
+            next: ROOT + 1,
+            open: BTreeMap::new(),
+            files: BTreeMap::new(),
+            dirty_since: None,
+        };
         Ok(FatVolume { state: KMutex::new(state), label, device, read_only, owner: owner.unwrap_or((0, 0)) })
     }
 
@@ -277,7 +285,9 @@ impl Filesystem for FatVolume {
             let p = join(&s.path(dir)?, name);
             match what {
                 NewNode::File => {
-                    let f = s.fs.open(&p, OpenOptions { create_new: true, create: true, truncate: false }).map_err(fs_errno)?;
+                    let f =
+                        s.fs.open(&p, OpenOptions { create_new: true, create: true, truncate: false })
+                            .map_err(fs_errno)?;
                     let ino = s.ino_for(&p);
                     s.files.insert(ino, f);
                     Ok(ino)

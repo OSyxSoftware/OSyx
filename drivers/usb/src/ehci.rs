@@ -340,7 +340,10 @@ mod tests {
         // port power control (the rate matching hubs sit behind them), no
         // companions, 64-bit, EECP 0xA0.
         let c = Capabilities::parse(0x0100_0020, 0x0020_3012 & !0xF000 | 0x2, 0x0000_A0E1 | 1).unwrap();
-        assert_eq!((c.op_offset, c.version, c.ports, c.port_power_control, c.companions, c.ac64, c.eecp), (0x20, 0x0100, 2, true, 0, true, 0xA0));
+        assert_eq!(
+            (c.op_offset, c.version, c.ports, c.port_power_control, c.companions, c.ac64, c.eecp),
+            (0x20, 0x0100, 2, true, 0, true, 0xA0)
+        );
         // QEMU's ICH4 EHCI: 6 ports, three companions, 32-bit, no EECP.
         let c = Capabilities::parse(0x0100_0020, 0x0000_3306 | 0x10, 0x0000_0000).unwrap();
         assert_eq!((c.ports, c.companions, c.ac64, c.eecp), (6, 3, false, 0));
@@ -420,7 +423,8 @@ mod tests {
         assert_eq!(q[2], 0x4000_0000 | 1 << 16 | 3 << 23);
         // Its interrupt endpoint: start split in micro-frame 0, complete
         // splits in 2-4, toggle kept by the queue head.
-        let int = Endpoint { address: 5, number: 1, speed: Speed::Low, max_packet: 8, control: false, tt: Some((1, 3)) };
+        let int =
+            Endpoint { address: 5, number: 1, speed: Speed::Low, max_packet: 8, control: false, tt: Some((1, 3)) };
         let q = queue_head(LINK_TERMINATE, &int, 0x7080, false, true);
         assert_eq!(q[1], 0x0008_1105);
         assert_eq!(q[2], 0x4000_0000 | 1 << 16 | 3 << 23 | 0x1C01);

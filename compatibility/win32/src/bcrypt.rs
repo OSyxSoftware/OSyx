@@ -56,9 +56,39 @@ impl Alg {
 /// Algorithm identifiers Windows has that OSyx does not implement: they are
 /// "not supported" rather than "not found".
 const KNOWN_UNSUPPORTED: &[&str] = &[
-    "SHA384", "SHA512", "MD2", "MD4", "AES", "DES", "DESX", "3DES", "3DES_112", "RC2", "RC4", "RSA", "DSA", "DH", "ECDH_P256", "ECDH_P384",
-    "ECDH_P521", "ECDSA_P256", "ECDSA_P384", "ECDSA_P521", "ECDH", "ECDSA", "AES-CMAC", "AES-GMAC", "HKDF", "PBKDF2", "SP800_108_CTR_HMAC",
-    "XTS-AES", "SP800_56A_CONCAT", "CAPI_KDF", "RNG", "FIPS186DSARNG", "DUALECRNG",
+    "SHA384",
+    "SHA512",
+    "MD2",
+    "MD4",
+    "AES",
+    "DES",
+    "DESX",
+    "3DES",
+    "3DES_112",
+    "RC2",
+    "RC4",
+    "RSA",
+    "DSA",
+    "DH",
+    "ECDH_P256",
+    "ECDH_P384",
+    "ECDH_P521",
+    "ECDSA_P256",
+    "ECDSA_P384",
+    "ECDSA_P521",
+    "ECDH",
+    "ECDSA",
+    "AES-CMAC",
+    "AES-GMAC",
+    "HKDF",
+    "PBKDF2",
+    "SP800_108_CTR_HMAC",
+    "XTS-AES",
+    "SP800_56A_CONCAT",
+    "CAPI_KDF",
+    "RNG",
+    "FIPS186DSARNG",
+    "DUALECRNG",
 ];
 
 fn algorithm(name: &str) -> Result<Alg, NtStatus> {
@@ -214,7 +244,12 @@ fn wide(p: *const u16) -> Option<String> {
 }
 
 /// `BCryptOpenAlgorithmProvider(&handle, L"SHA256", NULL, flags)`.
-extern "win64" fn BCryptOpenAlgorithmProvider(out: *mut u64, id: *const u16, implementation: *const u16, flags: u32) -> NtStatus {
+extern "win64" fn BCryptOpenAlgorithmProvider(
+    out: *mut u64,
+    id: *const u16,
+    implementation: *const u16,
+    flags: u32,
+) -> NtStatus {
     if out.is_null() || id.is_null() || flags & !(BCRYPT_ALG_HANDLE_HMAC_FLAG | BCRYPT_HASH_REUSABLE_FLAG) != 0 {
         return STATUS_INVALID_PARAMETER;
     }
@@ -231,7 +266,11 @@ extern "win64" fn BCryptOpenAlgorithmProvider(out: *mut u64, id: *const u16, imp
     if alg == Alg::Rng && flags != 0 {
         return STATUS_INVALID_PARAMETER;
     }
-    let h = insert(Object::Provider(Provider { alg, hmac: flags & BCRYPT_ALG_HANDLE_HMAC_FLAG != 0, reusable: flags & BCRYPT_HASH_REUSABLE_FLAG != 0 }));
+    let h = insert(Object::Provider(Provider {
+        alg,
+        hmac: flags & BCRYPT_ALG_HANDLE_HMAC_FLAG != 0,
+        reusable: flags & BCRYPT_HASH_REUSABLE_FLAG != 0,
+    }));
     // SAFETY: the caller's out pointer.
     unsafe { *out = h };
     STATUS_SUCCESS
@@ -268,7 +307,14 @@ fn property(value: &[u8], out: *mut u8, size: u32, result: *mut u32) -> NtStatus
 
 /// ObjectLength (a hash object is kept inside OSyx; the caller's buffer is
 /// not used), HashDigestLength, HashBlockLength, AlgorithmName, IsReusable.
-extern "win64" fn BCryptGetProperty(handle: u64, name: *const u16, out: *mut u8, size: u32, result: *mut u32, flags: u32) -> NtStatus {
+extern "win64" fn BCryptGetProperty(
+    handle: u64,
+    name: *const u16,
+    out: *mut u8,
+    size: u32,
+    result: *mut u32,
+    flags: u32,
+) -> NtStatus {
     if flags != 0 {
         return STATUS_INVALID_PARAMETER;
     }
@@ -287,7 +333,8 @@ extern "win64" fn BCryptGetProperty(handle: u64, name: *const u16, out: *mut u8,
         "HashBlockLength" if alg != Alg::Rng => property(&(BLOCK as u32).to_le_bytes(), out, size, result),
         "IsReusable" if alg != Alg::Rng => property(&u32::from(reusable).to_le_bytes(), out, size, result),
         "AlgorithmName" => {
-            let units: Vec<u8> = alg.name().encode_utf16().chain(core::iter::once(0)).flat_map(|u| u.to_le_bytes()).collect();
+            let units: Vec<u8> =
+                alg.name().encode_utf16().chain(core::iter::once(0)).flat_map(|u| u.to_le_bytes()).collect();
             property(&units, out, size, result)
         }
         _ => STATUS_NOT_SUPPORTED,
@@ -321,7 +368,15 @@ fn finish(mut h: Hash) -> (Vec<u8>, Hash) {
     (out, fresh)
 }
 
-extern "win64" fn BCryptCreateHash(provider: u64, out: *mut u64, _object: *mut u8, _object_len: u32, secret: *const u8, secret_len: u32, flags: u32) -> NtStatus {
+extern "win64" fn BCryptCreateHash(
+    provider: u64,
+    out: *mut u64,
+    _object: *mut u8,
+    _object_len: u32,
+    secret: *const u8,
+    secret_len: u32,
+    flags: u32,
+) -> NtStatus {
     if out.is_null() || flags & !BCRYPT_HASH_REUSABLE_FLAG != 0 || (secret.is_null() && secret_len != 0) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -331,7 +386,8 @@ extern "win64" fn BCryptCreateHash(provider: u64, out: *mut u64, _object: *mut u
         None => return STATUS_INVALID_HANDLE,
     };
     // SAFETY: the caller's secret of `secret_len` bytes.
-    let key = if secret_len == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(secret, secret_len as usize) } };
+    let key =
+        if secret_len == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(secret, secret_len as usize) } };
     let h = insert(Object::Hash(start_hash(alg, hmac, reusable, if hmac { key } else { &[] })));
     // SAFETY: the caller's out pointer.
     unsafe { *out = h };
@@ -392,7 +448,15 @@ extern "win64" fn BCryptDestroyHash(handle: u64) -> NtStatus {
 
 /// `BCryptHash`: create, hash and finish in one call (HMAC if the provider
 /// was opened with the HMAC flag).
-extern "win64" fn BCryptHash(provider: u64, secret: *const u8, secret_len: u32, input: *const u8, input_len: u32, out: *mut u8, out_len: u32) -> NtStatus {
+extern "win64" fn BCryptHash(
+    provider: u64,
+    secret: *const u8,
+    secret_len: u32,
+    input: *const u8,
+    input_len: u32,
+    out: *mut u8,
+    out_len: u32,
+) -> NtStatus {
     if out.is_null() || (input.is_null() && input_len != 0) || (secret.is_null() && secret_len != 0) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -442,7 +506,11 @@ extern "win64" fn BCryptGenRandom(provider: u64, out: *mut u8, len: u32, flags: 
     }
     // SAFETY: the caller's buffer of `len` bytes.
     let buf = unsafe { core::slice::from_raw_parts_mut(out, len as usize) };
-    if crate::ucrt::entropy(buf) { STATUS_SUCCESS } else { STATUS_UNSUCCESSFUL }
+    if crate::ucrt::entropy(buf) {
+        STATUS_SUCCESS
+    } else {
+        STATUS_UNSUCCESSFUL
+    }
 }
 
 pub fn exports() -> Vec<(&'static str, u64)> {

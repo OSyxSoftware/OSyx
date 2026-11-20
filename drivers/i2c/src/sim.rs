@@ -243,7 +243,9 @@ impl DwModel {
             reg::SDA_HOLD => self.sda_hold,
             reg::TX_ABRT_SOURCE => self.abort_source,
             reg::ENABLE_STATUS => (self.enabled || self.stuck_enabled) as u32,
-            reg::COMP_PARAM_1 => self.comp_param.unwrap_or(((self.tx_depth - 1) << 16) | ((self.rx_depth - 1) << 8) | 0x2 << 2),
+            reg::COMP_PARAM_1 => {
+                self.comp_param.unwrap_or(((self.tx_depth - 1) << 16) | ((self.rx_depth - 1) << 8) | 0x2 << 2)
+            }
             reg::COMP_VERSION => 0x3230_312A,
             reg::COMP_TYPE => self.comp_type,
             _ => 0,

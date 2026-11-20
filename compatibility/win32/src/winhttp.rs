@@ -98,7 +98,11 @@ trait Stream: Send {
 }
 
 fn io_error(e: os_std::error::Error) -> u32 {
-    if e.kind() == os_std::error::ErrorKind::TimedOut { ERROR_WINHTTP_TIMEOUT } else { ERROR_WINHTTP_CONNECTION_ERROR }
+    if e.kind() == os_std::error::ErrorKind::TimedOut {
+        ERROR_WINHTTP_TIMEOUT
+    } else {
+        ERROR_WINHTTP_CONNECTION_ERROR
+    }
 }
 
 impl Stream for TcpStream {
@@ -127,7 +131,17 @@ impl Tls {
     fn new(sock: TcpStream, host: &str) -> Result<Tls, u32> {
         let name = ServerName::try_from(String::from(host)).map_err(|_| ERROR_WINHTTP_INVALID_URL)?;
         let conn = UnbufferedClientConnection::new(tls_config()?, name).map_err(|_| ERROR_WINHTTP_SECURE_FAILURE)?;
-        let mut t = Tls { conn, sock, incoming: vec![0; 32 * 1024], used: 0, outgoing: vec![0; 32 * 1024], out_len: 0, plain: Vec::new(), plain_at: 0, eof: false };
+        let mut t = Tls {
+            conn,
+            sock,
+            incoming: vec![0; 32 * 1024],
+            used: 0,
+            outgoing: vec![0; 32 * 1024],
+            out_len: 0,
+            plain: Vec::new(),
+            plain_at: 0,
+            eof: false,
+        };
         t.drive(None, false)?;
         Ok(t)
     }
@@ -244,7 +258,13 @@ fn connect_tcp(host: &str, port: u16, timeouts: [u32; 4]) -> Result<TcpStream, u
                 let _ = s.set_write_timeout(ms(timeouts[2]));
                 return Ok(s);
             }
-            Err(e) => last = if e.kind() == os_std::error::ErrorKind::TimedOut { ERROR_WINHTTP_TIMEOUT } else { ERROR_WINHTTP_CANNOT_CONNECT },
+            Err(e) => {
+                last = if e.kind() == os_std::error::ErrorKind::TimedOut {
+                    ERROR_WINHTTP_TIMEOUT
+                } else {
+                    ERROR_WINHTTP_CANNOT_CONNECT
+                }
+            }
         }
     }
     Err(last)
@@ -310,8 +330,16 @@ struct Request {
 enum Kind {
     /// A session: user agent, flags, and the named proxy with its bypass
     /// list (WINHTTP_ACCESS_TYPE_NAMED_PROXY).
-    Session { agent: String, flags: u32, proxy: Option<(String, u16)>, bypass: Vec<String> },
-    Connect { host: String, port: u16 },
+    Session {
+        agent: String,
+        flags: u32,
+        proxy: Option<(String, u16)>,
+        bypass: Vec<String>,
+    },
+    Connect {
+        host: String,
+        port: u16,
+    },
     Request(Mutex<Request>),
     Resolver(Mutex<Option<Vec<ProxyEntry>>>),
 }
@@ -336,7 +364,13 @@ fn new_handle(kind: Kind, parent: u64) -> u64 {
         None => ((0, 0), [0, 60_000, 30_000, 30_000]),
     };
     let h = NEXT.fetch_add(0x10, Ordering::Relaxed);
-    let o = Obj { kind, parent, callback: Mutex::new(callback), timeouts: Mutex::new(timeouts), context: AtomicU64::new(0) };
+    let o = Obj {
+        kind,
+        parent,
+        callback: Mutex::new(callback),
+        timeouts: Mutex::new(timeouts),
+        context: AtomicU64::new(0),
+    };
     HANDLES.lock().unwrap().insert(h, Arc::new(o));
     h
 }
@@ -434,7 +468,13 @@ unsafe fn ws(p: *const u16) -> Option<String> {
 
 // ---- sessions, connections, requests --------------------------------------------------
 
-extern "win64" fn WinHttpOpen(agent: *const u16, access: u32, proxy: *const u16, bypass: *const u16, flags: u32) -> u64 {
+extern "win64" fn WinHttpOpen(
+    agent: *const u16,
+    access: u32,
+    proxy: *const u16,
+    bypass: *const u16,
+    flags: u32,
+) -> u64 {
     if flags & !(WINHTTP_FLAG_ASYNC | 0x2000_0000) != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -442,7 +482,8 @@ extern "win64" fn WinHttpOpen(agent: *const u16, access: u32, proxy: *const u16,
     let (agent, proxy, bypass) = unsafe { (ws(agent).unwrap_or_default(), ws(proxy), ws(bypass)) };
     // WINHTTP_ACCESS_TYPE_NAMED_PROXY: the proxy given; otherwise direct.
     let proxy = if access == 3 { proxy.and_then(|p| parse_proxy(&p, false)) } else { None };
-    let bypass = bypass.map_or(Vec::new(), |b| b.split([';', ' ']).filter(|e| !e.is_empty()).map(String::from).collect());
+    let bypass =
+        bypass.map_or(Vec::new(), |b| b.split([';', ' ']).filter(|e| !e.is_empty()).map(String::from).collect());
     new_handle(Kind::Session { agent, flags, proxy, bypass }, 0)
 }
 
@@ -456,11 +497,27 @@ extern "win64" fn WinHttpConnect(session: u64, server: *const u16, port: u16, _r
     new_handle(Kind::Connect { host: host.to_ascii_lowercase(), port }, session)
 }
 
-extern "win64" fn WinHttpOpenRequest(connect: u64, verb: *const u16, object: *const u16, _version: *const u16, referrer: *const u16, accept: *const u64, flags: u32) -> u64 {
+extern "win64" fn WinHttpOpenRequest(
+    connect: u64,
+    verb: *const u16,
+    object: *const u16,
+    _version: *const u16,
+    referrer: *const u16,
+    accept: *const u64,
+    flags: u32,
+) -> u64 {
     let Some(c) = get(connect) else { return fail(ERROR_INVALID_HANDLE, 0) };
     let Kind::Connect { host, port } = &c.kind else { return fail(ERROR_WINHTTP_INCORRECT_HANDLE_TYPE, 0) };
     let secure = flags & WINHTTP_FLAG_SECURE != 0;
-    let port = if *port == 0 { if secure { 443 } else { 80 } } else { *port };
+    let port = if *port == 0 {
+        if secure {
+            443
+        } else {
+            80
+        }
+    } else {
+        *port
+    };
     // SAFETY: NULL or NUL-terminated strings; a NULL-terminated array of them.
     let (verb, path, referrer, accepts) = unsafe {
         let mut a = Vec::new();
@@ -469,7 +526,12 @@ extern "win64" fn WinHttpOpenRequest(connect: u64, verb: *const u16, object: *co
             a.extend(ws(*accept.add(i) as *const u16));
             i += 1;
         }
-        (ws(verb).unwrap_or_else(|| String::from("GET")), ws(object).unwrap_or_else(|| String::from("/")), ws(referrer), a)
+        (
+            ws(verb).unwrap_or_else(|| String::from("GET")),
+            ws(object).unwrap_or_else(|| String::from("/")),
+            ws(referrer),
+            a,
+        )
     };
     let path = if path.starts_with('/') { path } else { format!("/{path}") };
     let mut headers = Vec::new();
@@ -479,7 +541,20 @@ extern "win64" fn WinHttpOpenRequest(connect: u64, verb: *const u16, object: *co
     if !accepts.is_empty() {
         headers.push((String::from("Accept"), accepts.join(", ")));
     }
-    let r = Request { host: host.clone(), port, secure, verb, path, headers, stream: None, to_write: 0, response: None, body: Body::None, buffered: Vec::new(), peeked: Vec::new() };
+    let r = Request {
+        host: host.clone(),
+        port,
+        secure,
+        verb,
+        path,
+        headers,
+        stream: None,
+        to_write: 0,
+        response: None,
+        body: Body::None,
+        buffered: Vec::new(),
+        peeked: Vec::new(),
+    };
     new_handle(Kind::Request(Mutex::new(r)), connect)
 }
 
@@ -500,7 +575,10 @@ fn add_headers(r: &mut Request, text: &str, modifiers: u32) -> Result<(), u32> {
             if !value.is_empty() {
                 r.headers.push((String::from(name), String::from(value)));
             }
-        } else if let (Some(i), true) = (at, modifiers & (WINHTTP_ADDREQ_FLAG_COALESCE_WITH_COMMA | WINHTTP_ADDREQ_FLAG_COALESCE_WITH_SEMICOLON) != 0) {
+        } else if let (Some(i), true) = (
+            at,
+            modifiers & (WINHTTP_ADDREQ_FLAG_COALESCE_WITH_COMMA | WINHTTP_ADDREQ_FLAG_COALESCE_WITH_SEMICOLON) != 0,
+        ) {
             let sep = if modifiers & WINHTTP_ADDREQ_FLAG_COALESCE_WITH_COMMA != 0 { ", " } else { "; " };
             r.headers[i].1 = format!("{}{sep}{value}", r.headers[i].1);
         } else if at.is_some() && modifiers & WINHTTP_ADDREQ_FLAG_ADD_IF_NEW != 0 {
@@ -595,7 +673,10 @@ fn send_request(r: &mut Request, via: &Route, optional: &[u8], total: u64) -> Re
         (None, true) => (Box::new(Tls::new(connect_tcp(&r.host, r.port, via.timeouts)?, &r.host)?), r.path.clone()),
         // A plain request goes to the proxy in absolute form.
         (Some((ph, pp)), false) => (Box::new(connect_tcp(ph, *pp, via.timeouts)?), format!("http://{host}{}", r.path)),
-        (Some((ph, pp)), true) => (Box::new(Tls::new(tunnel(connect_tcp(ph, *pp, via.timeouts)?, &r.host, r.port)?, &r.host)?), r.path.clone()),
+        (Some((ph, pp)), true) => (
+            Box::new(Tls::new(tunnel(connect_tcp(ph, *pp, via.timeouts)?, &r.host, r.port)?, &r.host)?),
+            r.path.clone(),
+        ),
     };
     let agent = &via.agent;
     let mut head = format!("{} {target} HTTP/1.1\r\nHost: {host}\r\n", r.verb);
@@ -606,7 +687,9 @@ fn send_request(r: &mut Request, via: &Route, optional: &[u8], total: u64) -> Re
         head.push_str(&format!("{n}: {v}\r\n"));
     }
     let length = total.max(optional.len() as u64);
-    if (length > 0 || matches!(r.verb.as_str(), "POST" | "PUT")) && !r.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("Content-Length")) {
+    if (length > 0 || matches!(r.verb.as_str(), "POST" | "PUT"))
+        && !r.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("Content-Length"))
+    {
         head.push_str(&format!("Content-Length: {length}\r\n"));
     }
     head.push_str("\r\n");
@@ -622,14 +705,25 @@ fn send_request(r: &mut Request, via: &Route, optional: &[u8], total: u64) -> Re
     Ok(())
 }
 
-extern "win64" fn WinHttpSendRequest(h: u64, headers: *const u16, hlen: u32, optional: *const u8, olen: u32, total: u32, context: u64) -> i32 {
+extern "win64" fn WinHttpSendRequest(
+    h: u64,
+    headers: *const u16,
+    hlen: u32,
+    optional: *const u8,
+    olen: u32,
+    total: u32,
+    context: u64,
+) -> i32 {
     let o = match request(h) {
         Ok(o) => o,
         Err(e) => return fail(e, 0),
     };
     // SAFETY: the caller's header text and optional data.
     let (text, data) = unsafe {
-        (header_text(headers, hlen), if optional.is_null() { Vec::new() } else { core::slice::from_raw_parts(optional, olen as usize).to_vec() })
+        (
+            header_text(headers, hlen),
+            if optional.is_null() { Vec::new() } else { core::slice::from_raw_parts(optional, olen as usize).to_vec() },
+        )
     };
     if let Some(t) = text {
         if let Err(e) = with_request(&o, |r| add_headers(r, &t, WINHTTP_ADDREQ_FLAG_ADD)) {
@@ -718,7 +812,10 @@ fn read_head(r: &mut Request) -> Result<Response, u32> {
         return Err(ERROR_WINHTTP_INVALID_SERVER_RESPONSE);
     }
     let reason = String::from(parts.next().unwrap_or_default());
-    let headers = lines.filter_map(|l| l.split_once(':')).map(|(n, v)| (String::from(n.trim()), String::from(v.trim()))).collect();
+    let headers = lines
+        .filter_map(|l| l.split_once(':'))
+        .map(|(n, v)| (String::from(n.trim()), String::from(v.trim())))
+        .collect();
     Ok(Response { status, reason, version, headers, raw: head })
 }
 
@@ -768,7 +865,8 @@ fn read_body(r: &mut Request, out: &mut [u8]) -> Result<usize, u32> {
                 };
                 let line = String::from_utf8_lossy(&r.buffered[..i]).into_owned();
                 r.buffered.drain(..i + 2);
-                let size = u64::from_str_radix(line.split(';').next().unwrap_or_default().trim(), 16).map_err(|_| ERROR_WINHTTP_INVALID_SERVER_RESPONSE)?;
+                let size = u64::from_str_radix(line.split(';').next().unwrap_or_default().trim(), 16)
+                    .map_err(|_| ERROR_WINHTTP_INVALID_SERVER_RESPONSE)?;
                 if size == 0 {
                     // The trailer is not read: the connection is not reused.
                     r.body = Body::None;
@@ -816,7 +914,8 @@ fn receive_response(r: &mut Request, via: &Route) -> Result<(), u32> {
         let no_body = r.verb == "HEAD" || resp.status == 204 || resp.status == 304 || (100..200).contains(&resp.status);
         r.body = if no_body {
             Body::None
-        } else if header(&resp.headers, "Transfer-Encoding").is_some_and(|t| t.to_ascii_lowercase().contains("chunked")) {
+        } else if header(&resp.headers, "Transfer-Encoding").is_some_and(|t| t.to_ascii_lowercase().contains("chunked"))
+        {
             Body::Chunked(None)
         } else if let Some(n) = header(&resp.headers, "Content-Length").and_then(|v| v.parse().ok()) {
             Body::Length(n)
@@ -830,7 +929,13 @@ fn receive_response(r: &mut Request, via: &Route) -> Result<(), u32> {
         let target = if loc.starts_with("http://") || loc.starts_with("https://") {
             loc
         } else {
-            format!("{}://{}:{}{}", if r.secure { "https" } else { "http" }, r.host, r.port, if loc.starts_with('/') { loc } else { format!("/{loc}") })
+            format!(
+                "{}://{}:{}{}",
+                if r.secure { "https" } else { "http" },
+                r.host,
+                r.port,
+                if loc.starts_with('/') { loc } else { format!("/{loc}") }
+            )
         };
         let (secure, host, port, path) = split_url(&target)?;
         if r.secure && !secure {
@@ -839,7 +944,8 @@ fn receive_response(r: &mut Request, via: &Route) -> Result<(), u32> {
         let status = r.response.as_ref().map_or(0, |x| x.status);
         if status == 303 || ((status == 301 || status == 302) && r.verb == "POST") {
             r.verb = String::from("GET");
-            r.headers.retain(|(n, _)| !n.eq_ignore_ascii_case("Content-Length") && !n.eq_ignore_ascii_case("Content-Type"));
+            r.headers
+                .retain(|(n, _)| !n.eq_ignore_ascii_case("Content-Length") && !n.eq_ignore_ascii_case("Content-Type"));
         } else if r.verb != "GET" && r.verb != "HEAD" {
             return Err(ERROR_WINHTTP_REDIRECT_FAILED); // a body cannot be sent again
         }
@@ -955,15 +1061,77 @@ const WINHTTP_QUERY_FLAG_NUMBER64: u32 = 0x0800_0000;
 
 /// The header names of the WINHTTP_QUERY_* indexes.
 const QUERY_NAMES: [&str; 71] = [
-    "MIME-Version", "Content-Type", "Content-Transfer-Encoding", "Content-ID", "Content-Description", "Content-Length",
-    "Content-Language", "Allow", "Public", "Date", "Expires", "Last-Modified", "Message-ID", "URI", "Derived-From", "Cost",
-    "Link", "Pragma", "", "", "", "", "", "Connection", "Accept", "Accept-Charset", "Accept-Encoding", "Accept-Language",
-    "Authorization", "Content-Encoding", "Forwarded", "From", "If-Modified-Since", "Location", "Orig-URI", "Referer",
-    "Retry-After", "Server", "Title", "User-Agent", "WWW-Authenticate", "Proxy-Authenticate", "Accept-Ranges", "Set-Cookie",
-    "Cookie", "", "Refresh", "Content-Disposition", "Age", "Cache-Control", "Content-Base", "Content-Location",
-    "Content-MD5", "Content-Range", "ETag", "Host", "If-Match", "If-None-Match", "If-Range", "If-Unmodified-Since",
-    "Max-Forwards", "Proxy-Authorization", "Range", "Transfer-Encoding", "Upgrade", "Vary", "Via", "Warning", "Expect",
-    "Proxy-Connection", "Unless-Modified-Since",
+    "MIME-Version",
+    "Content-Type",
+    "Content-Transfer-Encoding",
+    "Content-ID",
+    "Content-Description",
+    "Content-Length",
+    "Content-Language",
+    "Allow",
+    "Public",
+    "Date",
+    "Expires",
+    "Last-Modified",
+    "Message-ID",
+    "URI",
+    "Derived-From",
+    "Cost",
+    "Link",
+    "Pragma",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "Connection",
+    "Accept",
+    "Accept-Charset",
+    "Accept-Encoding",
+    "Accept-Language",
+    "Authorization",
+    "Content-Encoding",
+    "Forwarded",
+    "From",
+    "If-Modified-Since",
+    "Location",
+    "Orig-URI",
+    "Referer",
+    "Retry-After",
+    "Server",
+    "Title",
+    "User-Agent",
+    "WWW-Authenticate",
+    "Proxy-Authenticate",
+    "Accept-Ranges",
+    "Set-Cookie",
+    "Cookie",
+    "",
+    "Refresh",
+    "Content-Disposition",
+    "Age",
+    "Cache-Control",
+    "Content-Base",
+    "Content-Location",
+    "Content-MD5",
+    "Content-Range",
+    "ETag",
+    "Host",
+    "If-Match",
+    "If-None-Match",
+    "If-Range",
+    "If-Unmodified-Since",
+    "Max-Forwards",
+    "Proxy-Authorization",
+    "Range",
+    "Transfer-Encoding",
+    "Upgrade",
+    "Vary",
+    "Via",
+    "Warning",
+    "Expect",
+    "Proxy-Connection",
+    "Unless-Modified-Since",
 ];
 
 /// "Sun, 06 Nov 1994 08:49:37 GMT" as a SYSTEMTIME.
@@ -975,7 +1143,8 @@ fn http_date(s: &str) -> Option<[u16; 8]> {
         Ok(d) => d,
         Err(_) => f.next()?.parse().ok()?,
     };
-    let month = MONTHS.iter().position(|m| f.clone().next().is_some_and(|x| x.to_ascii_lowercase().starts_with(m)))? as u16 + 1;
+    let month =
+        MONTHS.iter().position(|m| f.clone().next().is_some_and(|x| x.to_ascii_lowercase().starts_with(m)))? as u16 + 1;
     f.next();
     let mut year: u16 = f.next()?.parse().ok()?;
     if year < 100 {
@@ -988,7 +1157,14 @@ fn http_date(s: &str) -> Option<[u16; 8]> {
     Some([year, month, weekday, day, h, m, sec, 0])
 }
 
-extern "win64" fn WinHttpQueryHeaders(h: u64, level: u32, name: *const u16, buf: *mut u8, len: *mut u32, index: *mut u32) -> i32 {
+extern "win64" fn WinHttpQueryHeaders(
+    h: u64,
+    level: u32,
+    name: *const u16,
+    buf: *mut u8,
+    len: *mut u32,
+    index: *mut u32,
+) -> i32 {
     let o = match request(h) {
         Ok(o) => o,
         Err(e) => return fail(e, 0),
@@ -1023,13 +1199,22 @@ extern "win64" fn WinHttpQueryHeaders(h: u64, level: u32, name: *const u16, buf:
                 } else {
                     resp.unwrap().raw.clone()
                 };
-                single(if info == WINHTTP_QUERY_RAW_HEADERS { raw.replace("\r\n", "\0") + "\0" } else { raw + "\r\n\r\n" })
+                single(if info == WINHTTP_QUERY_RAW_HEADERS {
+                    raw.replace("\r\n", "\0") + "\0"
+                } else {
+                    raw + "\r\n\r\n"
+                })
             }
             _ => {
                 let n = if info == WINHTTP_QUERY_CUSTOM {
                     custom.clone().ok_or(ERROR_INVALID_PARAMETER)?
                 } else {
-                    String::from(*QUERY_NAMES.get(info as usize).filter(|n| !n.is_empty()).ok_or(ERROR_WINHTTP_HEADER_NOT_FOUND)?)
+                    String::from(
+                        *QUERY_NAMES
+                            .get(info as usize)
+                            .filter(|n| !n.is_empty())
+                            .ok_or(ERROR_WINHTTP_HEADER_NOT_FOUND)?,
+                    )
                 };
                 headers
                     .iter()
@@ -1244,7 +1429,8 @@ fn global_string(s: &str) -> u64 {
 /// proxy, bypass list), from Internet Settings.
 fn ie_settings() -> (bool, Option<String>, Option<String>, Option<String>) {
     const HKCU: u64 = 0xFFFF_FFFF_8000_0001;
-    let key: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings".encode_utf16().chain([0]).collect();
+    let key: Vec<u16> =
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings".encode_utf16().chain([0]).collect();
     let mut h = 0u64;
     if crate::registry::RegOpenKeyExW(HKCU, key.as_ptr(), 0, 0x2_0019, &mut h) != 0 {
         return (false, None, None, None);
@@ -1252,26 +1438,44 @@ fn ie_settings() -> (bool, Option<String>, Option<String>, Option<String>) {
     let value = |name: &str| -> Option<(u32, Vec<u8>)> {
         let n: Vec<u16> = name.encode_utf16().chain([0]).collect();
         let (mut kind, mut size) = (0u32, 0u32);
-        if crate::registry::RegQueryValueExW(h, n.as_ptr(), core::ptr::null(), &mut kind, core::ptr::null_mut(), &mut size) != 0 {
+        if crate::registry::RegQueryValueExW(
+            h,
+            n.as_ptr(),
+            core::ptr::null(),
+            &mut kind,
+            core::ptr::null_mut(),
+            &mut size,
+        ) != 0
+        {
             return None;
         }
         let mut data = vec![0u8; size as usize];
-        if crate::registry::RegQueryValueExW(h, n.as_ptr(), core::ptr::null(), &mut kind, data.as_mut_ptr(), &mut size) != 0 {
+        if crate::registry::RegQueryValueExW(h, n.as_ptr(), core::ptr::null(), &mut kind, data.as_mut_ptr(), &mut size)
+            != 0
+        {
             return None;
         }
         data.truncate(size as usize);
         Some((kind, data))
     };
     let text = |name: &str| {
-        value(name).map(|(_, d)| {
-            let w: Vec<u16> = d.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
-            String::from_utf16_lossy(&w)
-        }).filter(|s| !s.is_empty())
+        value(name)
+            .map(|(_, d)| {
+                let w: Vec<u16> =
+                    d.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+                String::from_utf16_lossy(&w)
+            })
+            .filter(|s| !s.is_empty())
     };
     let enabled = value("ProxyEnable").is_some_and(|(_, d)| d.first().is_some_and(|&b| b != 0));
     // DefaultConnectionSettings: flags at byte 8, PROXY_TYPE_AUTO_DETECT 8.
     let detect = value("DefaultConnectionSettings").is_some_and(|(_, d)| d.get(8).is_some_and(|f| f & 0x8 != 0));
-    let r = (detect, text("AutoConfigURL"), if enabled { text("ProxyServer") } else { None }, if enabled { text("ProxyOverride") } else { None });
+    let r = (
+        detect,
+        text("AutoConfigURL"),
+        if enabled { text("ProxyServer") } else { None },
+        if enabled { text("ProxyOverride") } else { None },
+    );
     crate::registry::close_key(h);
     r
 }
@@ -1466,7 +1670,13 @@ extern "win64" fn WinHttpFreeProxyResult(result: u64) {
 
 /// WinINet's last error is the thread's; its codes are WinHTTP's (both
 /// number HTTP errors from 12000).
-extern "win64" fn InternetOpenW(agent: *const u16, access: u32, proxy: *const u16, bypass: *const u16, flags: u32) -> u64 {
+extern "win64" fn InternetOpenW(
+    agent: *const u16,
+    access: u32,
+    proxy: *const u16,
+    bypass: *const u16,
+    flags: u32,
+) -> u64 {
     // INTERNET_OPEN_TYPE_PRECONFIG (0) and _DIRECT (1) connect directly;
     // _PROXY (3) uses the proxy given, as WINHTTP_ACCESS_TYPE_NAMED_PROXY.
     // INTERNET_FLAG_ASYNC is WINHTTP_FLAG_ASYNC; there is no WinINet
@@ -1474,14 +1684,32 @@ extern "win64" fn InternetOpenW(agent: *const u16, access: u32, proxy: *const u1
     WinHttpOpen(agent, if access == 3 { 3 } else { 1 }, proxy, bypass, flags & !(WINHTTP_FLAG_ASYNC | 0x0100_0000))
 }
 
-extern "win64" fn InternetConnectW(session: u64, server: *const u16, port: u16, _user: *const u16, _password: *const u16, service: u32, _flags: u32, _context: u64) -> u64 {
+extern "win64" fn InternetConnectW(
+    session: u64,
+    server: *const u16,
+    port: u16,
+    _user: *const u16,
+    _password: *const u16,
+    service: u32,
+    _flags: u32,
+    _context: u64,
+) -> u64 {
     if service != 3 {
         return fail(ERROR_NOT_SUPPORTED, 0); // INTERNET_SERVICE_HTTP only (no FTP or Gopher)
     }
     WinHttpConnect(session, server, port, 0)
 }
 
-extern "win64" fn HttpOpenRequestW(connect: u64, verb: *const u16, object: *const u16, version: *const u16, referrer: *const u16, accept: *const u64, flags: u32, _context: u64) -> u64 {
+extern "win64" fn HttpOpenRequestW(
+    connect: u64,
+    verb: *const u16,
+    object: *const u16,
+    version: *const u16,
+    referrer: *const u16,
+    accept: *const u64,
+    flags: u32,
+    _context: u64,
+) -> u64 {
     WinHttpOpenRequest(connect, verb, object, version, referrer, accept, flags & WINHTTP_FLAG_SECURE)
 }
 

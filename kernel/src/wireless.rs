@@ -23,7 +23,9 @@ static FOUND: IrqSpinLock<Vec<Found>> = IrqSpinLock::new(Vec::new());
 pub fn pci_name(d: &pci::Device) -> Option<String> {
     match ids::wifi_chip(d.vendor, d.device) {
         Some(c) => Some(String::from(c.name)),
-        None if ids::is_wifi_class(d.class, d.subclass) => Some(alloc::format!("Wireless network adapter {:04x}:{:04x}", d.vendor, d.device)),
+        None if ids::is_wifi_class(d.class, d.subclass) => {
+            Some(alloc::format!("Wireless network adapter {:04x}:{:04x}", d.vendor, d.device))
+        }
         None => None,
     }
 }

@@ -82,7 +82,8 @@ fn probe(dev: &pci::Device) -> Result<Device, VirtioError> {
     let t = Transport::new(dev)?;
     t.negotiate(0)?;
     let size = select(&t, SELECT_NAME, 0).min(64);
-    let name: String = (0..size as u64).map(|i| t.device_config_u8(CFG_DATA + i)).take_while(|&b| b != 0).map(|b| b as char).collect();
+    let name: String =
+        (0..size as u64).map(|i| t.device_config_u8(CFG_DATA + i)).take_while(|&b| b != 0).map(|b| b as char).collect();
     let keyboard = has_code(&t, evdev::EV_KEY, evdev::KEY_A);
     let relative = has_code(&t, evdev::EV_REL, evdev::REL_X);
     let range = (abs_max(&t, evdev::ABS_X), abs_max(&t, evdev::ABS_Y));
@@ -205,5 +206,9 @@ fn service_thread(_: u64, _: u64) {
 
 /// One line per device for the kernel's status report.
 pub fn status() -> Vec<String> {
-    DEVICES.lock().iter().map(|d| alloc::format!("virtio-input \"{}\": input device {}, {} events", d.name, d.input_id, d.events)).collect()
+    DEVICES
+        .lock()
+        .iter()
+        .map(|d| alloc::format!("virtio-input \"{}\": input device {}, {} events", d.name, d.input_id, d.events))
+        .collect()
 }

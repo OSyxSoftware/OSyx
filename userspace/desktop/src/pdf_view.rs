@@ -46,7 +46,11 @@ enum Job {
     Text(usize),
     /// The matches of a string on one page; the thread queues the next
     /// page itself, behind whatever pages were asked for meanwhile.
-    Search { id: u64, query: String, page: usize },
+    Search {
+        id: u64,
+        query: String,
+        page: usize,
+    },
     /// The view is gone. (The thread holds a sender of its own for the
     /// next page of a search, so the channel never closes by itself.)
     Quit,
@@ -161,7 +165,8 @@ fn render_thread(data: Vec<u8>, rx: mpsc::Receiver<Job>, again: Sender<Job>, sha
                 }
                 let cached = shared.texts.lock().unwrap().get(&page).cloned();
                 let text = cached.unwrap_or_else(|| Arc::new(pdf.text(page, &lookup)));
-                let hits: Vec<Hit> = text.find(&query).into_iter().map(|r| Hit { page, rects: text.rects(r) }).collect();
+                let hits: Vec<Hit> =
+                    text.find(&query).into_iter().map(|r| Hit { page, rects: text.rects(r) }).collect();
                 let mut s = shared.search.lock().unwrap();
                 if s.id != id {
                     continue;
@@ -347,7 +352,8 @@ impl PdfView {
         (0..self.sizes.len()).find_map(|i| {
             let (px, py, w, h) = self.page_rect(i, &tops);
             let inside = (x as i64) >= px && (x as i64) < px + w && (y as i64) >= py && (y as i64) < py + h;
-            inside.then(|| (i, ((x as i64 - px) as f64 / self.zoom) as f32, ((y as i64 - py) as f64 / self.zoom) as f32))
+            inside
+                .then(|| (i, ((x as i64 - px) as f64 / self.zoom) as f32, ((y as i64 - py) as f64 / self.zoom) as f32))
         })
     }
 
@@ -457,7 +463,8 @@ impl PdfView {
                         let page = self.current_page();
                         if let Some(text) = self.page_text(page) {
                             if !text.is_empty() {
-                                self.selection = Some(Selection { page, anchor: 0, head: text.chars.len() - 1, word: false });
+                                self.selection =
+                                    Some(Selection { page, anchor: 0, head: text.chars.len() - 1, word: false });
                             }
                         }
                         return true;
@@ -485,7 +492,8 @@ impl PdfView {
                     // Outside the page the nearest character still counts.
                     let (tops, _) = self.layout_pages();
                     let (px, py, _, _) = self.page_rect(s.page, &tops);
-                    let point = (((x as i64 - px) as f64 / self.zoom) as f32, ((y as i64 - py) as f64 / self.zoom) as f32);
+                    let point =
+                        (((x as i64 - px) as f64 / self.zoom) as f32, ((y as i64 - py) as f64 / self.zoom) as f32);
                     if let Some(at) = self.page_text(s.page).and_then(|t| t.nearest(point.0, point.1)) {
                         if at != s.head {
                             s.head = at;
@@ -620,14 +628,30 @@ impl PdfView {
             let count = if s.query.is_empty() {
                 String::new()
             } else if s.hits.is_empty() {
-                if s.pages < self.sizes.len() { format!("searching, page {}", s.pages + 1) } else { String::from("not found") }
+                if s.pages < self.sizes.len() {
+                    format!("searching, page {}", s.pages + 1)
+                } else {
+                    String::from("not found")
+                }
             } else {
-                let more = if s.limited { " or more" } else if s.pages < self.sizes.len() { "+" } else { "" };
+                let more = if s.limited {
+                    " or more"
+                } else if s.pages < self.sizes.len() {
+                    "+"
+                } else {
+                    ""
+                };
                 format!("{} of {}{more}", self.current.min(s.hits.len() - 1) + 1, s.hits.len())
             };
             drop(s);
             let at = self.find.rect.right() as i32 + 10;
-            p.text_in(FontKind::Ui, Rect::new(at, head.y, (self.prev.rect.x - at - 8).max(0) as u32, head.h), &count, t.text_dim, Align::Left);
+            p.text_in(
+                FontKind::Ui,
+                Rect::new(at, head.y, (self.prev.rect.x - at - 8).max(0) as u32, head.h),
+                &count,
+                t.text_dim,
+                Align::Left,
+            );
         } else {
             p.text_in(FontKind::Bold, Rect::new(head.x + 44, head.y, title_w, head.h), &name, t.text, Align::Left);
         }
@@ -669,7 +693,8 @@ impl PdfView {
             let place = |r: &[f32; 4]| {
                 let (x0, y0) = ((r[0] as f64 * zoom) as i32, (r[1] as f64 * zoom) as i32);
                 let (x1, y1) = ((r[2] as f64 * zoom + 0.999) as i32, (r[3] as f64 * zoom + 0.999) as i32);
-                Rect::new(page_rect.x + x0, page_rect.y + y0, (x1 - x0).max(1) as u32, (y1 - y0).max(1) as u32).intersect(&page_rect)
+                Rect::new(page_rect.x + x0, page_rect.y + y0, (x1 - x0).max(1) as u32, (y1 - y0).max(1) as u32)
+                    .intersect(&page_rect)
             };
             match bmp {
                 Some(b) => {
@@ -677,7 +702,8 @@ impl PdfView {
                     // Matches in yellow, the one Enter went to in orange.
                     let s = self.shared.search.lock().unwrap();
                     for (n, hit) in s.hits.iter().enumerate().filter(|(_, h)| h.page == i) {
-                        let (colour, alpha) = if n == self.current { (rgb(255, 136, 0), 120) } else { (rgb(255, 214, 0), 100) };
+                        let (colour, alpha) =
+                            if n == self.current { (rgb(255, 136, 0), 120) } else { (rgb(255, 214, 0), 100) };
                         for r in &hit.rects {
                             p.blend(place(r), colour, alpha);
                         }
@@ -732,7 +758,8 @@ impl PdfView {
         let mut texts = self.shared.texts.lock().unwrap();
         if texts.len() > KEEP_TEXT {
             let selected = self.selection.map(|s| s.page);
-            let drop: Vec<usize> = texts.keys().filter(|k| !visible.contains(k) && Some(**k) != selected).copied().collect();
+            let drop: Vec<usize> =
+                texts.keys().filter(|k| !visible.contains(k) && Some(**k) != selected).copied().collect();
             for k in drop.into_iter().take(texts.len() - KEEP_TEXT) {
                 texts.remove(&k);
                 self.text_requested.remove(&k);

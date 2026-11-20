@@ -19,7 +19,6 @@ extern crate alloc;
 
 mod acpi;
 mod arch;
-mod firmware;
 mod audio;
 mod block;
 mod bluetooth;
@@ -31,6 +30,7 @@ mod earlycon;
 mod exec;
 mod filecache;
 mod filemap;
+mod firmware;
 mod fixup;
 mod futex;
 mod image;
@@ -39,8 +39,8 @@ mod interrupts;
 mod ipc;
 mod irq;
 mod live;
-mod mem;
 mod media;
+mod mem;
 mod modules;
 mod net;
 mod object;
@@ -52,17 +52,17 @@ mod prof;
 mod qemu;
 mod random;
 mod sched;
-mod smp;
 mod selftest;
 mod selftest_fs;
 mod serial;
 mod shm;
+mod smp;
 mod storage;
 mod sync;
 mod sys_objects;
 mod syscall;
-mod user_fault;
 mod time;
+mod user_fault;
 mod vfs;
 mod waitq;
 mod wireless;
@@ -295,10 +295,12 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let testing = boot.option_value("init.args").is_some_and(|s| s.split(',').next() == Some("tests"));
     let has_display = match gpu {
         Some(g) if display::init_gpu(g.clone(), footer.as_str(), mode) => {
-            if testing { match display::cursor_selftest() {
-                Ok(what) => kprintln!("display: cursor check ok: {}", what),
-                Err(e) => kprintln!("display: cursor check FAILED: {}", e),
-            } }
+            if testing {
+                match display::cursor_selftest() {
+                    Ok(what) => kprintln!("display: cursor check ok: {}", what),
+                    Err(e) => kprintln!("display: cursor check FAILED: {}", e),
+                }
+            }
             true
         }
         _ => raw.has_framebuffer() && display::init(fb, footer.as_str(), keep_log),
@@ -307,7 +309,8 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
         "display: {}",
         match (has_display, earlycon::active()) {
             (true, true) => "status screen ready; the boot log stays until a process takes the display (log.screen)",
-            (true, false) if display::info().is_some_and(|d| d.backend == osyx_abi::ipc::BACKEND_VIRTIO_GPU) => "status screen active on virtio-gpu",
+            (true, false) if display::info().is_some_and(|d| d.backend == osyx_abi::ipc::BACKEND_VIRTIO_GPU) =>
+                "status screen active on virtio-gpu",
             (true, false) => "status screen active on the GOP framebuffer",
             (false, true) => "status screen unavailable; the boot log stays",
             (false, false) => "none",
@@ -323,7 +326,13 @@ pub unsafe extern "C" fn _start(info: *const BootInfo) -> ! {
     let mut line1 = Line::new();
     let (free, _) = mem::frame_stats();
     if testing {
-        let _ = write!(line1, "Self-tests: {} passed, {} failed  |  {} MiB free", summary.passed, summary.failed, free >> 8);
+        let _ = write!(
+            line1,
+            "Self-tests: {} passed, {} failed  |  {} MiB free",
+            summary.passed,
+            summary.failed,
+            free >> 8
+        );
     } else {
         let _ = write!(line1, "{} MiB free", free >> 8);
     }

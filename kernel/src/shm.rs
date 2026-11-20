@@ -74,7 +74,14 @@ impl SharedMemory {
             core::ptr::write_bytes(page.add(data.len()), 0, PAGE_SIZE as usize - data.len());
         }
         SHARED_FRAMES.fetch_add(1, Ordering::Relaxed);
-        Ok(Arc::new(SharedMemory { frames: alloc::vec![frame], size: PAGE_SIZE, owned: true, write_combining: false, _owner: None, identity: None }))
+        Ok(Arc::new(SharedMemory {
+            frames: alloc::vec![frame],
+            size: PAGE_SIZE,
+            owned: true,
+            write_combining: false,
+            _owner: None,
+            identity: None,
+        }))
     }
 
     /// Physical memory of a device (page aligned).
@@ -82,12 +89,30 @@ impl SharedMemory {
         let start = phys & !(PAGE_SIZE - 1);
         let end = (phys + size).next_multiple_of(PAGE_SIZE);
         let frames = (start..end).step_by(PAGE_SIZE as usize).collect();
-        Arc::new(SharedMemory { frames, size: end - start, owned: false, write_combining: true, _owner: None, identity: None })
+        Arc::new(SharedMemory {
+            frames,
+            size: end - start,
+            owned: false,
+            write_combining: true,
+            _owner: None,
+            identity: None,
+        })
     }
 
-    pub fn alias(frames: Vec<u64>, owner: Arc<dyn core::any::Any + Send + Sync>, identity: (usize, u64)) -> Arc<SharedMemory> {
+    pub fn alias(
+        frames: Vec<u64>,
+        owner: Arc<dyn core::any::Any + Send + Sync>,
+        identity: (usize, u64),
+    ) -> Arc<SharedMemory> {
         let size = frames.len() as u64 * PAGE_SIZE;
-        Arc::new(SharedMemory { frames, size, owned: false, write_combining: false, _owner: Some(owner), identity: Some(identity) })
+        Arc::new(SharedMemory {
+            frames,
+            size,
+            owned: false,
+            write_combining: false,
+            _owner: Some(owner),
+            identity: Some(identity),
+        })
     }
 
     pub fn key(&self, offset: u64) -> (usize, u64) {
@@ -106,7 +131,6 @@ impl SharedMemory {
     pub fn frames(&self) -> &[u64] {
         &self.frames
     }
-
 }
 
 impl Drop for SharedMemory {

@@ -17,17 +17,32 @@
 //! core has no absolute events.
 
 use alloc::vec::Vec;
-use osyx_usb::hid::{self, Field, MouseLayout, ParseError, ReportError, PAGE_BUTTON, PAGE_GENERIC_DESKTOP, PAGE_KEYBOARD, USAGE_X, USAGE_Y};
+use osyx_usb::hid::{
+    self, Field, MouseLayout, ParseError, ReportError, PAGE_BUTTON, PAGE_GENERIC_DESKTOP, PAGE_KEYBOARD, USAGE_X,
+    USAGE_Y,
+};
 
 /// One change for the input core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// HID keyboard usage (page 7).
-    Key { usage: u16, down: bool },
+    Key {
+        usage: u16,
+        down: bool,
+    },
     /// Button number starting at 1 (left, right, middle, ...).
-    Button { number: u8, down: bool },
-    Motion { dx: i32, dy: i32 },
-    Wheel { vertical: i32, horizontal: i32 },
+    Button {
+        number: u8,
+        down: bool,
+    },
+    Motion {
+        dx: i32,
+        dy: i32,
+    },
+    Wheel {
+        vertical: i32,
+        horizontal: i32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -338,7 +353,9 @@ impl ReportDecoder {
             out.extend(held.drain(..).map(|usage| Action::Key { usage, down: false }));
         }
         if let Some((_, buttons)) = &mut self.mouse {
-            out.extend((0..32u8).filter(|b| *buttons & (1 << b) != 0).map(|b| Action::Button { number: b + 1, down: false }));
+            out.extend(
+                (0..32u8).filter(|b| *buttons & (1 << b) != 0).map(|b| Action::Button { number: b + 1, down: false }),
+            );
             *buttons = 0;
         }
         if let Some((_, state)) = &mut self.touch {

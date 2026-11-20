@@ -76,7 +76,8 @@ pub fn register(path: &str, kind: DeviceKind, mode: u32, rdev: u32) -> Result<Ar
         osyx_vfs::path::validate_name(c)?;
     }
     let mut nodes = NODES.lock();
-    let clash = |p: &str| p == path || p.starts_with(&alloc::format!("{path}/")) || path.starts_with(&alloc::format!("{p}/"));
+    let clash =
+        |p: &str| p == path || p.starts_with(&alloc::format!("{path}/")) || path.starts_with(&alloc::format!("{p}/"));
     if nodes.iter().any(|n| clash(&n.path)) {
         return Err(Errno::AlreadyExists);
     }

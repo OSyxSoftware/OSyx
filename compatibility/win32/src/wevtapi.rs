@@ -198,7 +198,11 @@ fn parse(query: &str) -> Option<Filter> {
         return None;
     }
     let f = p.or()?;
-    (p.eat("]") && p.eat("]") && { p.skip(); p.at == p.s.len() }).then_some(f)
+    (p.eat("]") && p.eat("]") && {
+        p.skip();
+        p.at == p.s.len()
+    })
+    .then_some(f)
 }
 
 /// The level of a classic event type: error 2, warning 3, information 4,
@@ -285,7 +289,9 @@ extern "win64" fn EvtNext(query: u64, count: u32, out: *mut u64, _timeout: u32, 
     let channel = QUERY_CHANNEL.lock().unwrap().get(&query).copied().unwrap_or("Application");
     let taken: Vec<EventView> = {
         let mut handles = HANDLES.lock().unwrap();
-        let Some(Handle::Query { events, next }) = handles.get_mut(&query) else { return fail(ERROR_INVALID_HANDLE, 0) };
+        let Some(Handle::Query { events, next }) = handles.get_mut(&query) else {
+            return fail(ERROR_INVALID_HANDLE, 0);
+        };
         let end = (*next + count as usize).min(events.len());
         let taken = events[*next..end].to_vec();
         *next = end;
@@ -391,7 +397,11 @@ fn path_value(e: &EventView, channel: &str, p: &str) -> Value {
         "System/EventRecordID" => Value::Num(VAR_UINT64, e.number as u64),
         "System/Channel" => Value::Str(String::from(channel)),
         "System/Computer" => Value::Str(crate::accounts::computer_name()),
-        _ => match p.strip_prefix("EventData/Data[").and_then(|r| r.strip_suffix(']')).and_then(|n| n.parse::<usize>().ok()) {
+        _ => match p
+            .strip_prefix("EventData/Data[")
+            .and_then(|r| r.strip_suffix(']'))
+            .and_then(|n| n.parse::<usize>().ok())
+        {
             // XPath positions start at 1.
             Some(n) if n >= 1 && n <= e.strings.len() => Value::Str(e.strings[n - 1].clone()),
             _ => Value::Null,
@@ -445,18 +455,30 @@ fn layout(values: &[Value], base: u64) -> Vec<u8> {
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn EvtRender(context: u64, fragment: u64, flags: u32, size: u32, buf: *mut u8, used: *mut u32, count: *mut u32) -> i32 {
+extern "win64" fn EvtRender(
+    context: u64,
+    fragment: u64,
+    flags: u32,
+    size: u32,
+    buf: *mut u8,
+    used: *mut u32,
+    count: *mut u32,
+) -> i32 {
     if used.is_null() || count.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let handles = HANDLES.lock().unwrap();
     let Some(Handle::Event { event, channel }) = handles.get(&fragment) else { return fail(ERROR_INVALID_HANDLE, 0) };
     let (bytes, n) = match flags {
-        EVT_RENDER_EVENT_XML => (xml(event, channel).encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect::<Vec<u8>>(), 0),
+        EVT_RENDER_EVENT_XML => {
+            (xml(event, channel).encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect::<Vec<u8>>(), 0)
+        }
         EVT_RENDER_EVENT_VALUES => {
             let values = match handles.get(&context) {
                 Some(Handle::Context { kind: EVT_RENDER_CONTEXT_SYSTEM, .. }) => system_values(event, channel),
-                Some(Handle::Context { kind: EVT_RENDER_CONTEXT_USER, .. }) => event.strings.iter().map(|s| Value::Str(s.clone())).collect(),
+                Some(Handle::Context { kind: EVT_RENDER_CONTEXT_USER, .. }) => {
+                    event.strings.iter().map(|s| Value::Str(s.clone())).collect()
+                }
                 Some(Handle::Context { paths, .. }) => paths.iter().map(|p| path_value(event, channel, p)).collect(),
                 _ => return fail(ERROR_INVALID_HANDLE, 0),
             };

@@ -167,11 +167,11 @@ pub fn open(path: &[u16], oflag: i32, shflag: i32, pmode: i32) -> Result<i32, i3
         _ => return Err(EINVAL),
     };
     let disposition = match oflag & (O_CREAT | O_EXCL | O_TRUNC) {
-        0 | O_EXCL => 3,                              // OPEN_EXISTING
-        O_CREAT => 4,                                 // OPEN_ALWAYS
+        0 | O_EXCL => 3,                                                    // OPEN_EXISTING
+        O_CREAT => 4,                                                       // OPEN_ALWAYS
         x if x == O_CREAT | O_EXCL || x == O_CREAT | O_TRUNC | O_EXCL => 1, // CREATE_NEW
-        x if x == O_CREAT | O_TRUNC => 2,             // CREATE_ALWAYS
-        _ => 5,                                       // TRUNCATE_EXISTING
+        x if x == O_CREAT | O_TRUNC => 2,                                   // CREATE_ALWAYS
+        _ => 5,                                                             // TRUNCATE_EXISTING
     };
     let mut flags = 0x80u32; // FILE_ATTRIBUTE_NORMAL
     if oflag & O_CREAT != 0 && pmode & S_IWRITE == 0 {

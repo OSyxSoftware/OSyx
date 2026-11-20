@@ -15,8 +15,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use os_std::sync::Mutex;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use rsa::{
-    BigUint, RsaPrivateKey, RsaPublicKey,
     traits::{PrivateKeyParts, PublicKeyParts},
+    BigUint, RsaPrivateKey, RsaPublicKey,
 };
 
 type SecStatus = u32;
@@ -82,7 +82,11 @@ impl Algo {
 
     /// The fixed size of curve keys, in bits.
     fn curve_bits(self) -> u32 {
-        if self.p384() { 384 } else { 256 }
+        if self.p384() {
+            384
+        } else {
+            256
+        }
     }
 
     /// The four BCRYPT_ECCKEY_BLOB magics: (public, private).
@@ -236,7 +240,8 @@ fn input<'a>(p: *const u8, len: u32) -> &'a [u8] {
 
 fn key_dir(machine: bool) -> String {
     if machine {
-        crate::path::to_osyx("C:\\ProgramData\\Microsoft\\Crypto\\Keys", "C:\\").unwrap_or_else(|_| String::from("/ProgramData/Microsoft/Crypto/Keys"))
+        crate::path::to_osyx("C:\\ProgramData\\Microsoft\\Crypto\\Keys", "C:\\")
+            .unwrap_or_else(|_| String::from("/ProgramData/Microsoft/Crypto/Keys"))
     } else {
         let home = os_std::env::var("HOME").unwrap_or_else(|_| String::from("/home/user"));
         alloc::format!("{}/AppData/Roaming/Microsoft/Crypto/Keys", home.trim_end_matches('/'))
@@ -382,7 +387,8 @@ fn export(k: &Key, kind: &str) -> Result<Vec<u8>, SecStatus> {
             let full = kind == "RSAFULLPRIVATEBLOB";
             let (p, q) = (&key.primes()[0], &key.primes()[1]);
             let prime = key.size().div_ceil(2);
-            let (mut v, modulus) = rsa_header(if full { 0x3341_5352 } else { 0x3241_5352 }, &key.to_public_key(), prime);
+            let (mut v, modulus) =
+                rsa_header(if full { 0x3341_5352 } else { 0x3241_5352 }, &key.to_public_key(), prime);
             v.extend_from_slice(&be(p, prime));
             v.extend_from_slice(&be(q, prime));
             if full {
@@ -473,8 +479,14 @@ fn import(kind: &str, d: &[u8]) -> Result<(Algo, Material), SecStatus> {
         let m = match (algo.p384(), private) {
             (false, false) => Material::P256Public(p256::PublicKey::from_sec1_bytes(&sec1).map_err(|_| NTE_BAD_DATA)?),
             (true, false) => Material::P384Public(p384::PublicKey::from_sec1_bytes(&sec1).map_err(|_| NTE_BAD_DATA)?),
-            (false, true) => Material::P256(p256::SecretKey::from_slice(d.get(8 + 2 * size..8 + 3 * size).ok_or(NTE_BAD_DATA)?).map_err(|_| NTE_BAD_DATA)?),
-            (true, true) => Material::P384(p384::SecretKey::from_slice(d.get(8 + 2 * size..8 + 3 * size).ok_or(NTE_BAD_DATA)?).map_err(|_| NTE_BAD_DATA)?),
+            (false, true) => Material::P256(
+                p256::SecretKey::from_slice(d.get(8 + 2 * size..8 + 3 * size).ok_or(NTE_BAD_DATA)?)
+                    .map_err(|_| NTE_BAD_DATA)?,
+            ),
+            (true, true) => Material::P384(
+                p384::SecretKey::from_slice(d.get(8 + 2 * size..8 + 3 * size).ok_or(NTE_BAD_DATA)?)
+                    .map_err(|_| NTE_BAD_DATA)?,
+            ),
         };
         // A private blob's point must be the secret's.
         if private && point(&m).as_deref() != Some(xy) {
@@ -488,11 +500,22 @@ fn import(kind: &str, d: &[u8]) -> Result<(Algo, Material), SecStatus> {
 /// DigestInfo prefixes for PKCS #1 v1.5 signatures.
 fn digest_info(alg: &str) -> Option<&'static [u8]> {
     Some(match alg.to_ascii_uppercase().as_str() {
-        "MD5" => &[0x30, 0x20, 0x30, 0x0c, 0x06, 0x08, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x02, 0x05, 0x05, 0x00, 0x04, 0x10],
+        "MD5" => &[
+            0x30, 0x20, 0x30, 0x0c, 0x06, 0x08, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x02, 0x05, 0x05, 0x00, 0x04, 0x10,
+        ],
         "SHA1" => &[0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14],
-        "SHA256" => &[0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20],
-        "SHA384" => &[0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30],
-        "SHA512" => &[0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40],
+        "SHA256" => &[
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04,
+            0x20,
+        ],
+        "SHA384" => &[
+            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04,
+            0x30,
+        ],
+        "SHA512" => &[
+            0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04,
+            0x40,
+        ],
         _ => return None,
     })
 }
@@ -531,11 +554,13 @@ fn sign(m: &Material, pad: Padding<'_>, hash: &[u8]) -> Result<Vec<u8>, SecStatu
             r.map_err(|_| NTE_INVALID_PARAMETER)
         }
         (Material::P256(k), Padding::None) => {
-            let s: p256::ecdsa::Signature = p256::ecdsa::SigningKey::from(k).sign_prehash(hash).map_err(|_| NTE_INVALID_PARAMETER)?;
+            let s: p256::ecdsa::Signature =
+                p256::ecdsa::SigningKey::from(k).sign_prehash(hash).map_err(|_| NTE_INVALID_PARAMETER)?;
             Ok(s.to_bytes().to_vec())
         }
         (Material::P384(k), Padding::None) => {
-            let s: p384::ecdsa::Signature = p384::ecdsa::SigningKey::from(k).sign_prehash(hash).map_err(|_| NTE_INVALID_PARAMETER)?;
+            let s: p384::ecdsa::Signature =
+                p384::ecdsa::SigningKey::from(k).sign_prehash(hash).map_err(|_| NTE_INVALID_PARAMETER)?;
             Ok(s.to_bytes().to_vec())
         }
         (Material::RsaPublic(_) | Material::P256Public(_) | Material::P384Public(_), _) => Err(NTE_NOT_SUPPORTED),
@@ -636,7 +661,14 @@ extern "win64" fn NCryptIsAlgSupported(provider: u64, alg: *const u16, _flags: u
     }
 }
 
-extern "win64" fn NCryptCreatePersistedKey(provider: u64, out: *mut u64, alg: *const u16, name: *const u16, _spec: u32, flags: u32) -> SecStatus {
+extern "win64" fn NCryptCreatePersistedKey(
+    provider: u64,
+    out: *mut u64,
+    alg: *const u16,
+    name: *const u16,
+    _spec: u32,
+    flags: u32,
+) -> SecStatus {
     if !is_provider(provider) {
         return NTE_INVALID_HANDLE;
     }
@@ -646,11 +678,23 @@ extern "win64" fn NCryptCreatePersistedKey(provider: u64, out: *mut u64, alg: *c
     let Some(algo) = wide(alg).and_then(|a| Algo::from_name(&a)) else { return NTE_NOT_SUPPORTED };
     let name = wide(name).filter(|n| !n.is_empty());
     let machine = flags & NCRYPT_MACHINE_KEY_FLAG != 0;
-    if flags & NCRYPT_OVERWRITE_KEY_FLAG == 0 && name.as_ref().is_some_and(|n| os_std::fs::metadata(key_file(n, machine)).is_ok()) {
+    if flags & NCRYPT_OVERWRITE_KEY_FLAG == 0
+        && name.as_ref().is_some_and(|n| os_std::fs::metadata(key_file(n, machine)).is_ok())
+    {
         return NTE_EXISTS;
     }
     let length = if algo == Algo::Rsa { 1024 } else { algo.curve_bits() };
-    let key = Key { algo, name, machine, length, export_policy: 0, key_usage: 0, material: None, finalized: false, props: BTreeMap::new() };
+    let key = Key {
+        algo,
+        name,
+        machine,
+        length,
+        export_policy: 0,
+        key_usage: 0,
+        material: None,
+        finalized: false,
+        props: BTreeMap::new(),
+    };
     // SAFETY: the caller's out pointer.
     unsafe { *out = insert(Object::Key(Box::new(key))) };
     0
@@ -697,7 +741,11 @@ extern "win64" fn NCryptDeleteKey(key: u64, _flags: u32) -> SecStatus {
 }
 
 extern "win64" fn NCryptFreeObject(h: u64) -> SecStatus {
-    if OBJECTS.lock().unwrap().remove(&h).is_some() { 0 } else { NTE_INVALID_HANDLE }
+    if OBJECTS.lock().unwrap().remove(&h).is_some() {
+        0
+    } else {
+        NTE_INVALID_HANDLE
+    }
 }
 
 fn u32_value(d: &[u8]) -> Result<u32, SecStatus> {
@@ -727,7 +775,9 @@ extern "win64" fn NCryptSetProperty(h: u64, name: *const u16, value: *const u8, 
             }
             "Export Policy" => k.export_policy = u32_value(d)?,
             "Key Usage" => k.key_usage = u32_value(d)?,
-            "Algorithm Name" | "Algorithm Group" | "Name" | "Unique Name" | "Key Type" | "Lengths" => return Err(NTE_NOT_SUPPORTED),
+            "Algorithm Name" | "Algorithm Group" | "Name" | "Unique Name" | "Key Type" | "Lengths" => {
+                return Err(NTE_NOT_SUPPORTED)
+            }
             _ => {
                 k.props.insert(name.clone(), d.to_vec());
             }
@@ -740,7 +790,14 @@ extern "win64" fn NCryptSetProperty(h: u64, name: *const u16, value: *const u8, 
     }))
 }
 
-extern "win64" fn NCryptGetProperty(h: u64, name: *const u16, out: *mut u8, cap: u32, result: *mut u32, _flags: u32) -> SecStatus {
+extern "win64" fn NCryptGetProperty(
+    h: u64,
+    name: *const u16,
+    out: *mut u8,
+    cap: u32,
+    result: *mut u32,
+    _flags: u32,
+) -> SecStatus {
     let Some(name) = wide(name) else { return NTE_INVALID_PARAMETER };
     if is_provider(h) {
         let v = match name.as_str() {
@@ -765,7 +822,12 @@ extern "win64" fn NCryptGetProperty(h: u64, name: *const u16, out: *mut u8, cap:
             "Name" | "Unique Name" => wide_bytes(k.name.as_deref().ok_or(NTE_NOT_SUPPORTED)?),
             "Key Type" => u(if k.machine { NCRYPT_MACHINE_KEY_FLAG } else { 0 }),
             "Lengths" => {
-                let (min, max, inc, def) = if k.algo == Algo::Rsa { (512, 16384, 64, 1024) } else { let b = k.algo.curve_bits(); (b, b, 0, b) };
+                let (min, max, inc, def) = if k.algo == Algo::Rsa {
+                    (512, 16384, 64, 1024)
+                } else {
+                    let b = k.algo.curve_bits();
+                    (b, b, 0, b)
+                };
                 [min, max, inc, def].iter().flat_map(|v: &u32| v.to_le_bytes()).collect()
             }
             "ECCCurveName" if k.algo != Algo::Rsa => wide_bytes(if k.algo.p384() { "nistP384" } else { "nistP256" }),
@@ -812,7 +874,9 @@ fn buffer_key_name(desc: *const u8) -> Option<String> {
         let buffers = *(desc.add(8) as *const u64) as *const u8;
         (0..count).find_map(|i| {
             let b = buffers.add(16 * i);
-            (*(b.add(4) as *const u32) == NCRYPTBUFFER_PKCS_KEY_NAME).then(|| wide(*(b.add(8) as *const u64) as *const u16)).flatten()
+            (*(b.add(4) as *const u32) == NCRYPTBUFFER_PKCS_KEY_NAME)
+                .then(|| wide(*(b.add(8) as *const u64) as *const u16))
+                .flatten()
         })
     }
 }

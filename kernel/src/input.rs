@@ -217,13 +217,21 @@ static TOTAL_EVENTS: AtomicU64 = AtomicU64::new(0);
 /// Sets up the core, `/dev/input/seat0` and the key repeat thread.
 /// `log` writes every event to the kernel log (for tests).
 pub fn init(log: bool) {
-    *CORE.lock() = Some(Core { devices: BTreeMap::new(), modifiers: ModifierState::default(), repeater: Repeater::new(RepeatConfig::default()) });
+    *CORE.lock() = Some(Core {
+        devices: BTreeMap::new(),
+        modifiers: ModifierState::default(),
+        repeater: Repeater::new(RepeatConfig::default()),
+    });
     LOG_EVENTS.store(log, Ordering::Relaxed);
     if let Err(e) = devices::register("input/seat0", DeviceKind::Char(Arc::new(Seat)), 0o600, 13 << 8 | 63) {
         kprintln!("input: cannot create /dev/input/seat0: {e:?}");
     }
     sched::spawn_kernel("input-repeat", repeat_thread, 0, 0);
-    kprintln!("input: core ready (seat0, key repeat {} ms / {} ms)", RepeatConfig::default().delay_ms, RepeatConfig::default().interval_ms);
+    kprintln!(
+        "input: core ready (seat0, key repeat {} ms / {} ms)",
+        RepeatConfig::default().delay_ms,
+        RepeatConfig::default().interval_ms
+    );
 }
 
 fn now_ns() -> u64 {
@@ -235,17 +243,42 @@ pub fn register(name: &str, class: i32) -> u32 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let queue = Arc::new(EventQueue::new(DEVICE_QUEUE));
     let path = alloc::format!("input/event{id}");
-    if let Err(e) = devices::register(&path, DeviceKind::Char(Arc::new(DeviceNode { queue: queue.clone() })), 0o600, 13 << 8 | (64 + id)) {
+    if let Err(e) = devices::register(
+        &path,
+        DeviceKind::Char(Arc::new(DeviceNode { queue: queue.clone() })),
+        0o600,
+        13 << 8 | (64 + id),
+    ) {
         kprintln!("input: cannot create /dev/{path}: {e:?}");
     }
     let mods = {
         let mut g = CORE.lock();
         let c = g.as_mut().expect("input core initialised");
-        c.devices.insert(id, Device { name: String::from(name), class, queue, path: path.clone(), keys: Vec::new(), buttons: 0, position: None, events: 0 });
+        c.devices.insert(
+            id,
+            Device {
+                name: String::from(name),
+                class,
+                queue,
+                path: path.clone(),
+                keys: Vec::new(),
+                buttons: 0,
+                position: None,
+                events: 0,
+            },
+        );
         c.modifiers.bits()
     };
     kprintln!("input: device {} \"{}\" ({}) attached as /dev/{}", id, name, class_name(class), path);
-    SEAT.push(InputEvent { time_ns: now_ns(), device: id, kind: kind::DEVICE, code: osyx_input::DEVICE_ADDED, value: class, modifiers: mods, ..Default::default() });
+    SEAT.push(InputEvent {
+        time_ns: now_ns(),
+        device: id,
+        kind: kind::DEVICE,
+        code: osyx_input::DEVICE_ADDED,
+        value: class,
+        modifiers: mods,
+        ..Default::default()
+    });
     id
 }
 
@@ -428,7 +461,8 @@ pub fn total_events() -> u64 {
 /// (id, name, class, events) of every attached device.
 pub fn devices() -> Vec<(u32, String, i32, u64)> {
     let g = CORE.lock();
-    g.as_ref().map_or(Vec::new(), |c| c.devices.iter().map(|(id, d)| (*id, d.name.clone(), d.class, d.events)).collect())
+    g.as_ref()
+        .map_or(Vec::new(), |c| c.devices.iter().map(|(id, d)| (*id, d.name.clone(), d.class, d.events)).collect())
 }
 
 /// The first timer tick at or after uptime ms (rounding down would wake
@@ -444,11 +478,17 @@ fn repeat_thread(_: u64, _: u64) {
             let mut g = CORE.lock();
             let c = g.as_mut().expect("input core initialised");
             if let Some((dev, usage)) = c.repeater.poll(interrupts::uptime_ms()) {
-                emit(dev, InputEvent { kind: kind::KEY, code: usage, value: osyx_input::KEY_REPEAT, ..Default::default() }, c);
+                emit(
+                    dev,
+                    InputEvent { kind: kind::KEY, code: usage, value: osyx_input::KEY_REPEAT, ..Default::default() },
+                    c,
+                );
             }
             c.repeater.deadline()
         };
         let generation = REPEAT_GEN.load(Ordering::Relaxed);
-        let _ = block_on(&[&REPEAT_WAKE], deadline.map(ms_to_tick), || (REPEAT_GEN.load(Ordering::Relaxed) != generation).then_some(()));
+        let _ = block_on(&[&REPEAT_WAKE], deadline.map(ms_to_tick), || {
+            (REPEAT_GEN.load(Ordering::Relaxed) != generation).then_some(())
+        });
     }
 }

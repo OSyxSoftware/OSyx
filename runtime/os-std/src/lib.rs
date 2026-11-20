@@ -55,12 +55,12 @@ pub mod mpsc;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod net;
 pub mod os;
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub mod system;
 pub mod path;
 pub mod process;
 pub mod rt;
 pub mod sync;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub mod system;
 pub mod thread;
 pub mod time;
 mod tls;

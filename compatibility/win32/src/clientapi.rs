@@ -62,7 +62,9 @@ fn counted_ansi(p: *const u8, n: i32) -> Option<Vec<u16>> {
 
 /// CompareStringA: the strings compared as their Unicode forms.
 extern "win64" fn CompareStringA(lcid: u32, flags: u32, s1: *const u8, n1: i32, s2: *const u8, n2: i32) -> i32 {
-    let (Some(a), Some(b)) = (counted_ansi(s1, n1), counted_ansi(s2, n2)) else { return fail(ERROR_INVALID_PARAMETER, 0) };
+    let (Some(a), Some(b)) = (counted_ansi(s1, n1), counted_ansi(s2, n2)) else {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    };
     crate::apiextra::CompareStringW(lcid, flags, a.as_ptr(), a.len() as i32, b.as_ptr(), b.len() as i32)
 }
 
@@ -91,7 +93,17 @@ extern "win64" fn RegCreateKeyA(hkey: u64, sub: *const u8, out: *mut u64) -> u32
         return ERROR_INVALID_PARAMETER;
     }
     let s = wide_arg(sub).unwrap_or_else(|| alloc::vec![0]);
-    crate::registry::RegCreateKeyExW(hkey, s.as_ptr(), 0, core::ptr::null(), 0, KEY_ALL_ACCESS, 0, out, core::ptr::null_mut())
+    crate::registry::RegCreateKeyExW(
+        hkey,
+        s.as_ptr(),
+        0,
+        core::ptr::null(),
+        0,
+        KEY_ALL_ACCESS,
+        0,
+        out,
+        core::ptr::null_mut(),
+    )
 }
 
 /// RegEnumKeyExA: the name and class as ANSI; the lengths are in bytes
@@ -172,13 +184,31 @@ extern "win64" fn RegEnumValueA(
     let mut t = 0u32;
     // First the size, then the data itself.
     let mut size = 0u32;
-    let r = crate::registry::RegEnumValueW(hkey, index, wn.as_mut_ptr(), &mut wn_len, reserved, &mut t, core::ptr::null_mut(), &mut size);
+    let r = crate::registry::RegEnumValueW(
+        hkey,
+        index,
+        wn.as_mut_ptr(),
+        &mut wn_len,
+        reserved,
+        &mut t,
+        core::ptr::null_mut(),
+        &mut size,
+    );
     if r != ERROR_SUCCESS {
         return r;
     }
     let mut raw = alloc::vec![0u8; size as usize];
     wn_len = wn.len() as u32;
-    let r = crate::registry::RegEnumValueW(hkey, index, wn.as_mut_ptr(), &mut wn_len, reserved, &mut t, raw.as_mut_ptr(), &mut size);
+    let r = crate::registry::RegEnumValueW(
+        hkey,
+        index,
+        wn.as_mut_ptr(),
+        &mut wn_len,
+        reserved,
+        &mut t,
+        raw.as_mut_ptr(),
+        &mut size,
+    );
     if r != ERROR_SUCCESS {
         return r;
     }
@@ -325,7 +355,8 @@ extern "win64" fn GetPrivateProfileStringA(
     }
     let (s, k, d, f) = (wide_arg(section), wide_arg(key), wide_arg(default), wide_arg(file));
     let mut w = alloc::vec![0u16; 65536];
-    let n = crate::ini::GetPrivateProfileStringW(ptr(&s), ptr(&k), ptr(&d), w.as_mut_ptr(), w.len() as u32, ptr(&f)) as usize;
+    let n = crate::ini::GetPrivateProfileStringW(ptr(&s), ptr(&k), ptr(&d), w.as_mut_ptr(), w.len() as u32, ptr(&f))
+        as usize;
     // Section and key lists are NUL-separated: convert unit by unit.
     let text: Vec<u8> = String::from_utf16_lossy(&w[..n]).into_bytes();
     let cap = size as usize;
@@ -383,7 +414,11 @@ extern "win64" fn GetBinaryTypeW(name: *const u16, kind: *mut u32) -> i32 {
         let mut os = [0u8; 1];
         let ok = os_std::io::Seek::seek(&mut f, os_std::io::SeekFrom::Start(lfanew as u64 + 0x36)).is_ok()
             && os_std::io::Read::read(&mut f, &mut os).is_ok();
-        if ok && os[0] == 1 { 5 } else { 2 }
+        if ok && os[0] == 1 {
+            5
+        } else {
+            2
+        }
     } else {
         1
     };
@@ -587,7 +622,15 @@ extern "win64" fn RegisterWindowMessageA(name: *const u8) -> u32 {
 }
 
 /// Window messages carry the same values in both character sets here.
-extern "win64" fn SendMessageTimeoutA(wnd: u64, msg: u32, wparam: u64, lparam: i64, flags: u32, timeout: u32, out: *mut u64) -> i64 {
+extern "win64" fn SendMessageTimeoutA(
+    wnd: u64,
+    msg: u32,
+    wparam: u64,
+    lparam: i64,
+    flags: u32,
+    timeout: u32,
+    out: *mut u64,
+) -> i64 {
     crate::user32::SendMessageTimeoutW(wnd, msg, wparam, lparam, flags, timeout, out)
 }
 
@@ -735,7 +778,10 @@ extern "win64" fn ctrl_dispatch(arg: u64) -> u32 {
     // SAFETY: the Box made by GenerateConsoleCtrlEvent for this thread.
     let CtrlEvent { event, handlers } = *unsafe { alloc::boxed::Box::from_raw(arg as *mut CtrlEvent) };
     let handled = if crate::wow64::is_active() {
-        crate::wow64::with_thread32(|| handlers.iter().rev().any(|&h| crate::wow64::callback(h, &[event as u64]) as u32 != 0)).unwrap_or(false)
+        crate::wow64::with_thread32(|| {
+            handlers.iter().rev().any(|&h| crate::wow64::callback(h, &[event as u64]) as u32 != 0)
+        })
+        .unwrap_or(false)
     } else {
         handlers.iter().rev().any(|&h| crate::wow64::callback(h, &[event as u64]) as u32 != 0)
     };

@@ -17,8 +17,20 @@ impl SectorReader for Mem {
 
 fn disk(mib: u64) -> (Mem, Vec<NewPartition<'static>>) {
     let parts = vec![
-        NewPartition { type_guid: TYPE_ESP, unique_guid: Guid([1; 16]), first_lba: 2048, sectors: 8192, name: "EFI system" },
-        NewPartition { type_guid: TYPE_ROOT_X86_64, unique_guid: Guid([2; 16]), first_lba: 10240, sectors: 4096, name: "ROOT ŻÓŁW" },
+        NewPartition {
+            type_guid: TYPE_ESP,
+            unique_guid: Guid([1; 16]),
+            first_lba: 2048,
+            sectors: 8192,
+            name: "EFI system",
+        },
+        NewPartition {
+            type_guid: TYPE_ROOT_X86_64,
+            unique_guid: Guid([2; 16]),
+            first_lba: 10240,
+            sectors: 4096,
+            name: "ROOT ŻÓŁW",
+        },
     ];
     let mut img = vec![0u8; (mib << 20) as usize];
     for (lba, data) in build(mib << 11, Guid([9; 16]), &parts).unwrap() {
@@ -42,7 +54,10 @@ fn build_then_parse() {
     assert_eq!(t.disk_guid, Guid([9; 16]));
     assert_eq!(t.partitions.len(), 2);
     for (p, n) in t.partitions.iter().zip(&parts) {
-        assert_eq!((p.type_guid, p.first_lba, p.sectors(), p.name.as_str()), (n.type_guid, n.first_lba, n.sectors, n.name));
+        assert_eq!(
+            (p.type_guid, p.first_lba, p.sectors(), p.name.as_str()),
+            (n.type_guid, n.first_lba, n.sectors, n.name)
+        );
     }
     assert_eq!(t.partitions[1].number, 2);
 }
@@ -64,9 +79,15 @@ fn damaged_primary_falls_back_to_backup() {
 fn primary_io_error_falls_back_to_backup() {
     struct FailingPrimary(Mem, u64);
     impl SectorReader for FailingPrimary {
-        fn sectors(&self) -> u64 { self.0.sectors() }
+        fn sectors(&self) -> u64 {
+            self.0.sectors()
+        }
         fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), GptError> {
-            if lba == self.1 { Err(GptError::Io) } else { self.0.read(lba, buf) }
+            if lba == self.1 {
+                Err(GptError::Io)
+            } else {
+                self.0.read(lba, buf)
+            }
         }
     }
     for failing_lba in [1, 2] {
@@ -100,7 +121,13 @@ fn corrupt_tables_are_rejected() {
 
 #[test]
 fn build_rejects_overlaps_and_invalid_lengths() {
-    let part = |first_lba, sectors| NewPartition { type_guid: TYPE_ESP, unique_guid: Guid([1; 16]), first_lba, sectors, name: "" };
+    let part = |first_lba, sectors| NewPartition {
+        type_guid: TYPE_ESP,
+        unique_guid: Guid([1; 16]),
+        first_lba,
+        sectors,
+        name: "",
+    };
     assert!(build(1 << 14, Guid([9; 16]), &[part(2048, 100), part(2147, 20)]).is_err());
     assert!(build(1 << 14, Guid([9; 16]), &[part(2048, 0)]).is_err());
     assert!(build(1 << 14, Guid([9; 16]), &[part(u64::MAX, 2)]).is_err());
@@ -109,7 +136,13 @@ fn build_rejects_overlaps_and_invalid_lengths() {
 
 #[test]
 fn build_rejects_unused_partition_type() {
-    let p = NewPartition { type_guid: Guid([0; 16]), unique_guid: Guid([1; 16]), first_lba: 2048, sectors: 100, name: "missing" };
+    let p = NewPartition {
+        type_guid: Guid([0; 16]),
+        unique_guid: Guid([1; 16]),
+        first_lba: 2048,
+        sectors: 100,
+        name: "missing",
+    };
     assert_eq!(build(1 << 14, Guid([9; 16]), &[p]), Err(GptError::Corrupt("partition type is zero")));
 }
 
@@ -159,7 +192,11 @@ fn single_byte_corruptions_never_panic() {
 }
 
 fn wsl(cmd: &str) -> Option<std::process::Output> {
-    Command::new("wsl.exe").args(["-d", "Ubuntu-24.04", "--", "bash", "-lc", cmd]).output().ok().filter(|o| o.status.code().is_some())
+    Command::new("wsl.exe")
+        .args(["-d", "Ubuntu-24.04", "--", "bash", "-lc", cmd])
+        .output()
+        .ok()
+        .filter(|o| o.status.code().is_some())
 }
 
 fn wsl_path(p: &std::path::Path) -> String {
@@ -186,15 +223,16 @@ fn interoperates_with_sgdisk() {
     assert!(o.status.success() && text.contains("No problems found"), "sgdisk -v: {text}");
     let theirs = dir.join("theirs.img");
     std::fs::write(&theirs, vec![0u8; 16 << 20]).unwrap();
-    let o = wsl(&format!(
-        "sgdisk -n 1:2048:+4M -t 1:EF00 -c 1:boot -n 2:0:0 -t 2:8304 -c 2:root '{}'",
-        wsl_path(&theirs)
-    ))
-    .unwrap();
+    let o =
+        wsl(&format!("sgdisk -n 1:2048:+4M -t 1:EF00 -c 1:boot -n 2:0:0 -t 2:8304 -c 2:root '{}'", wsl_path(&theirs)))
+            .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let t = parse(&mut Mem(std::fs::read(&theirs).unwrap())).unwrap();
     assert_eq!(t.partitions.len(), 2);
-    assert_eq!((t.partitions[0].type_guid, t.partitions[0].first_lba, t.partitions[0].name.as_str()), (TYPE_ESP, 2048, "boot"));
+    assert_eq!(
+        (t.partitions[0].type_guid, t.partitions[0].first_lba, t.partitions[0].name.as_str()),
+        (TYPE_ESP, 2048, "boot")
+    );
     assert_eq!(t.partitions[1].type_guid, TYPE_ROOT_X86_64);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -225,7 +263,8 @@ fn mbr_primary_entries() {
 #[test]
 fn mbr_rejects_garbage() {
     // Overlapping, bad boot flag, beyond the disk.
-    let mut d = mbr_disk(&[(0, 0x07, 2048, 4096), (0, 0x0C, 3000, 100), (0x40, 0x07, 6500, 100), (0, 0x07, 7990, 100)], 8000);
+    let mut d =
+        mbr_disk(&[(0, 0x07, 2048, 4096), (0, 0x0C, 3000, 100), (0x40, 0x07, 6500, 100), (0, 0x07, 7990, 100)], 8000);
     let e = parse_mbr(&mut d).unwrap();
     assert_eq!(e.len(), 1);
     assert_eq!(e[0].number, 1);

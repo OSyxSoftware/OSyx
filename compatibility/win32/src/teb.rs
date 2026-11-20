@@ -152,7 +152,7 @@ pub fn create_peb(p: &ProcessInfo) -> u64 {
         put(peb, PEB_LDR, ldr);
         put(peb, PEB_PARAMETERS, params);
         put(peb, PEB_PROCESS_HEAP, p.heap);
-        put(peb, PEB_NUMBER_OF_PROCESSORS, os_sys::cpu_info().map_or(1, |(count,_)|count));
+        put(peb, PEB_NUMBER_OF_PROCESSORS, os_sys::cpu_info().map_or(1, |(count, _)| count));
         // The Windows version OSyx's compatibility layer presents (10.0).
         put(peb, PEB_OS_MAJOR, 10u32);
         put(peb, PEB_OS_MINOR, 0u32);

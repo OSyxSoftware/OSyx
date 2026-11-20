@@ -211,7 +211,12 @@ extern "win64" fn QuerySecurityContextToken(_context: *mut [u64; 2], token: *mut
     SEC_E_INVALID_HANDLE
 }
 
-extern "win64" fn ExportSecurityContext(_context: *mut [u64; 2], _flags: u32, _packed: u64, _token: *mut u64) -> SecStatus {
+extern "win64" fn ExportSecurityContext(
+    _context: *mut [u64; 2],
+    _flags: u32,
+    _packed: u64,
+    _token: *mut u64,
+) -> SecStatus {
     SEC_E_INVALID_HANDLE
 }
 

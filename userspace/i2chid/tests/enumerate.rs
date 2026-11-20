@@ -106,7 +106,13 @@ fn eisa(id: &str) -> Vec<u8> {
     let b = id.as_bytes();
     let letter = |c: u8| (c - b'@') as u32;
     let hex = |c: u8| (c as char).to_digit(16).unwrap();
-    let be: u32 = letter(b[0]) << 26 | letter(b[1]) << 21 | letter(b[2]) << 16 | hex(b[3]) << 12 | hex(b[4]) << 8 | hex(b[5]) << 4 | hex(b[6]);
+    let be: u32 = letter(b[0]) << 26
+        | letter(b[1]) << 21
+        | letter(b[2]) << 16
+        | hex(b[3]) << 12
+        | hex(b[4]) << 8
+        | hex(b[5]) << 4
+        | hex(b[6]);
     let mut v = vec![0x0C];
     v.extend_from_slice(&be.swap_bytes().to_le_bytes());
     v
@@ -164,13 +170,29 @@ fn intel_controller(children: Vec<u8>) -> Vec<u8> {
         cat(&[
             name("_HID", eisa("PNP0A08")),
             name("_BBN", int(0)),
-            device("I2C1", cat(&[name("_ADR", int(0x0015_0001)), timing_method("SSCN", 0x1D0, 0x1F7, 0x1E), timing_method("FMCN", 0x80, 0xA0, 0x1E), children])),
+            device(
+                "I2C1",
+                cat(&[
+                    name("_ADR", int(0x0015_0001)),
+                    timing_method("SSCN", 0x1D0, 0x1F7, 0x1E),
+                    timing_method("FMCN", 0x80, 0xA0, 0x1E),
+                    children,
+                ]),
+            ),
         ]),
     )
 }
 
 fn touchpad(n: &str, connection: Vec<u8>, extra: Vec<u8>, dsm_method: Vec<u8>) -> Vec<u8> {
-    device(n, cat(&[name("_HID", string("ELAN0001")), name("_CID", string("PNP0C50")), crs(&[connection, extra]), dsm_method]))
+    device(
+        n,
+        cat(&[
+            name("_HID", string("ELAN0001")),
+            name("_CID", string("PNP0C50")),
+            crs(&[connection, extra]),
+            dsm_method,
+        ]),
+    )
 }
 
 fn run(tables: Vec<Vec<u8>>) -> (Vec<DeviceSpec>, Vec<String>) {
@@ -201,7 +223,11 @@ fn intel_style_touchpad_is_described_completely() {
     assert_eq!(s.controller.location, Location::Pci { bus: 0, device: 0x15, function: 1 });
     assert_eq!(
         s.controller.timing,
-        Timing { standard: Some(SclTiming { hcnt: 0x1D0, lcnt: 0x1F7 }), fast: Some(SclTiming { hcnt: 0x80, lcnt: 0xA0 }), sda_hold: Some(0x1E) }
+        Timing {
+            standard: Some(SclTiming { hcnt: 0x1D0, lcnt: 0x1F7 }),
+            fast: Some(SclTiming { hcnt: 0x80, lcnt: 0xA0 }),
+            sda_hold: Some(0x1E)
+        }
     );
     assert!(s.path.ends_with("TPD0"), "{}", s.path);
     assert!(s.controller.path.ends_with("I2C1"), "{}", s.controller.path);
@@ -220,7 +246,11 @@ fn amd_style_controller_with_a_memory_resource() {
             crs(&[build::memory32_fixed(0xFEDC_2000, 0x1000), build::interrupt(10)]),
             device(
                 "TPNL",
-                cat(&[name("_HID", string("ACPI0C50")), crs(&[build::i2c_connection(0x2C, 100_000, "\\_SB.I2CA"), build::interrupt(31)]), dsm(&DSM_UUID, 0x20)]),
+                cat(&[
+                    name("_HID", string("ACPI0C50")),
+                    crs(&[build::i2c_connection(0x2C, 100_000, "\\_SB.I2CA"), build::interrupt(31)]),
+                    dsm(&DSM_UUID, 0x20),
+                ]),
             ),
         ]),
     );
@@ -272,7 +302,8 @@ fn devices_that_cannot_be_driven_are_left_out_with_a_reason() {
     );
     skipped(absent, intel_controller, "_STA is 0x0");
     // No I2C connection in _CRS.
-    let nothing = device("TPD0", cat(&[name("_HID", string("PNP0C50")), crs(&[build::interrupt(5)]), dsm(&DSM_UUID, 1)]));
+    let nothing =
+        device("TPD0", cat(&[name("_HID", string("PNP0C50")), crs(&[build::interrupt(5)]), dsm(&DSM_UUID, 1)]));
     skipped(nothing, intel_controller, "no I2C serial bus connection");
     // The connection names a controller that is not there.
     skipped(
@@ -281,22 +312,34 @@ fn devices_that_cannot_be_driven_are_left_out_with_a_reason() {
         "is not a device",
     );
     // Not an absolute path.
-    skipped(touchpad("TPD0", build::i2c_connection(0x15, 400_000, "I2C1"), vec![], dsm(&DSM_UUID, 1)), intel_controller, "not absolute");
+    skipped(
+        touchpad("TPD0", build::i2c_connection(0x15, 400_000, "I2C1"), vec![], dsm(&DSM_UUID, 1)),
+        intel_controller,
+        "not absolute",
+    );
 }
 
 #[test]
 fn controllers_the_kernel_cannot_locate_are_refused() {
     // A PCI function that is not directly below a host bridge: its bus is unknown.
     let pad = touchpad("TPD0", build::i2c_connection(0x15, 400_000, "\\_SB.BRG0.I2C1"), vec![], dsm(&DSM_UUID, 1));
-    let behind_a_bridge = |pad: Vec<u8>| device("BRG0", cat(&[name("_HID", string("PNP0A08X")), device("I2C1", cat(&[name("_ADR", int(0x0015_0001)), pad]))]));
+    let behind_a_bridge = |pad: Vec<u8>| {
+        device(
+            "BRG0",
+            cat(&[name("_HID", string("PNP0A08X")), device("I2C1", cat(&[name("_ADR", int(0x0015_0001)), pad]))]),
+        )
+    };
     skipped(pad, behind_a_bridge, "not directly below a PCI host bridge");
     // An ACPI controller of a kind the kernel has no driver for.
     let pad = touchpad("TPD0", build::i2c_connection(0x15, 400_000, "\\_SB.I2CB"), vec![], dsm(&DSM_UUID, 1));
-    let unknown = |pad: Vec<u8>| device("I2CB", cat(&[name("_HID", string("XYZ0001")), crs(&[build::memory32_fixed(0xFED0_0000, 0x1000)]), pad]));
+    let unknown = |pad: Vec<u8>| {
+        device("I2CB", cat(&[name("_HID", string("XYZ0001")), crs(&[build::memory32_fixed(0xFED0_0000, 0x1000)]), pad]))
+    };
     skipped(pad, unknown, "neither a PCI function nor a known DesignWare");
     // A DesignWare ACPI controller without a memory resource.
     let pad = touchpad("TPD0", build::i2c_connection(0x15, 400_000, "\\_SB.I2CB"), vec![], dsm(&DSM_UUID, 1));
-    let no_memory = |pad: Vec<u8>| device("I2CB", cat(&[name("_HID", string("AMDI0510")), crs(&[build::interrupt(3)]), pad]));
+    let no_memory =
+        |pad: Vec<u8>| device("I2CB", cat(&[name("_HID", string("AMDI0510")), crs(&[build::interrupt(3)]), pad]));
     skipped(pad, no_memory, "no memory resource");
 }
 
@@ -315,5 +358,9 @@ fn ten_bit_and_out_of_range_addresses_are_skipped() {
     let mut conn = build::i2c_connection(0x15, 400_000, "\\_SB.PCI0.I2C1");
     conn[8] = 1; // type specific flags: 10-bit addressing (offset 8 of the descriptor)
     skipped(touchpad("TPD0", conn, vec![], dsm(&DSM_UUID, 1)), intel_controller, "10-bit");
-    skipped(touchpad("TPD0", build::i2c_connection(0x90, 400_000, "\\_SB.PCI0.I2C1"), vec![], dsm(&DSM_UUID, 1)), intel_controller, "not a 7-bit target address");
+    skipped(
+        touchpad("TPD0", build::i2c_connection(0x90, 400_000, "\\_SB.PCI0.I2C1"), vec![], dsm(&DSM_UUID, 1)),
+        intel_controller,
+        "not a 7-bit target address",
+    );
 }

@@ -285,7 +285,8 @@ impl Stream for Lzma {
             let s = self.state;
             if self.rc.bit(&mut self.is_match[(s << 4) + pos_state])? == 0 {
                 let prev = if self.total > 0 { self.back(1) } else { 0 };
-                let lit_state = (((self.total as usize) & ((1 << self.lp) - 1)) << self.lc) + ((prev as usize) >> (8 - self.lc));
+                let lit_state =
+                    (((self.total as usize) & ((1 << self.lp) - 1)) << self.lc) + ((prev as usize) >> (8 - self.lc));
                 let base = 0x300 * lit_state;
                 let mut sym = 1usize;
                 if s >= 7 {
@@ -304,7 +305,13 @@ impl Stream for Lzma {
                     sym = (sym << 1) | self.rc.bit(&mut self.literal[base + sym])? as usize;
                 }
                 self.put((sym - 0x100) as u8, out, &mut n);
-                self.state = if s < 4 { 0 } else if s < 10 { s - 3 } else { s - 6 };
+                self.state = if s < 4 {
+                    0
+                } else if s < 10 {
+                    s - 3
+                } else {
+                    s - 6
+                };
                 continue;
             }
             let len;

@@ -28,7 +28,10 @@ use crate::{
     kernel32::{self, fail},
     objects::{self, Object},
     path,
-    security::{self, acl_aces, build_acl, rd, sid, sid_bytes, wr, Ace, ACCESS_ALLOWED, ACCESS_DENIED, MANDATORY_LABEL, SYSTEM_AUDIT},
+    security::{
+        self, acl_aces, build_acl, rd, sid, sid_bytes, wr, Ace, ACCESS_ALLOWED, ACCESS_DENIED, MANDATORY_LABEL,
+        SYSTEM_AUDIT,
+    },
     tokens::{self, TokenData},
 };
 use alloc::{
@@ -61,7 +64,8 @@ const UNPROTECTED_SACL: u32 = 0x1000_0000;
 const UNPROTECTED_DACL: u32 = 0x2000_0000;
 const PROTECTED_SACL: u32 = 0x4000_0000;
 const PROTECTED_DACL: u32 = 0x8000_0000;
-const KNOWN_INFO: u32 = OWNER | GROUP | DACL | SACL | LABEL | UNPROTECTED_SACL | UNPROTECTED_DACL | PROTECTED_SACL | PROTECTED_DACL;
+const KNOWN_INFO: u32 =
+    OWNER | GROUP | DACL | SACL | LABEL | UNPROTECTED_SACL | UNPROTECTED_DACL | PROTECTED_SACL | PROTECTED_DACL;
 
 // SECURITY_DESCRIPTOR_CONTROL bits.
 const SE_DACL_PRESENT: u16 = 0x4;
@@ -144,13 +148,16 @@ impl Sd {
         self.sacl
             .iter()
             .find(|a| a.0 == MANDATORY_LABEL && a.1 & INHERIT_ONLY_ACE == 0)
-            .map_or((tokens::INTEGRITY_MEDIUM, NO_WRITE_UP), |a| (label_level(&a.3).unwrap_or(tokens::INTEGRITY_MEDIUM), a.2))
+            .map_or((tokens::INTEGRITY_MEDIUM, NO_WRITE_UP), |a| {
+                (label_level(&a.3).unwrap_or(tokens::INTEGRITY_MEDIUM), a.2)
+            })
     }
 }
 
 /// The level of a mandatory label SID (S-1-16-level).
 fn label_level(s: &[u8]) -> Option<u32> {
-    (s.len() == 12 && s[1] == 1 && s[2..8] == [0, 0, 0, 0, 0, 16]).then(|| u32::from_le_bytes([s[8], s[9], s[10], s[11]]))
+    (s.len() == 12 && s[1] == 1 && s[2..8] == [0, 0, 0, 0, 0, 16])
+        .then(|| u32::from_le_bytes([s[8], s[9], s[10], s[11]]))
 }
 
 /// The descriptor a new object of mapping `m` gets from the token `d`.
@@ -170,7 +177,8 @@ pub fn default_sd(d: &TokenData, m: &Mapping) -> Sd {
 pub fn to_relative(sd: &Sd, info: u32) -> Vec<u8> {
     let mut v = alloc::vec![0u8; 20];
     v[0] = 1;
-    let mut control = SE_SELF_RELATIVE | (sd.control & (SE_DACL_PROTECTED | SE_SACL_PROTECTED | SE_DACL_AUTO_INHERITED | SE_SACL_AUTO_INHERITED));
+    let mut control = SE_SELF_RELATIVE
+        | (sd.control & (SE_DACL_PROTECTED | SE_SACL_PROTECTED | SE_DACL_AUTO_INHERITED | SE_SACL_AUTO_INHERITED));
     let put = |v: &mut Vec<u8>, field: usize, data: &[u8]| {
         let at = v.len() as u32;
         v[4 + field * 4..8 + field * 4].copy_from_slice(&at.to_le_bytes());
@@ -208,7 +216,9 @@ pub fn to_relative(sd: &Sd, info: u32) -> Vec<u8> {
 /// (owner, group, DACL, SACL, control). A part is Ok(None) when absent;
 /// a present NULL DACL is Some(None).
 #[allow(clippy::type_complexity)]
-unsafe fn parse_sd(p: *const u8) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Option<Vec<Ace>>>, Option<Vec<Ace>>, u16), u32> {
+unsafe fn parse_sd(
+    p: *const u8,
+) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Option<Vec<Ace>>>, Option<Vec<Ace>>, u16), u32> {
     let control = unsafe { security::descriptor_control(p) }?;
     let part = |field: usize| unsafe { security::component(p, field) };
     let owner = part(0)?;
@@ -232,7 +242,9 @@ unsafe fn parse_sd(p: *const u8) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>, Op
 
 /// (owner, group, DACL, SACL) of a caller's descriptor, as parse_sd.
 #[allow(clippy::type_complexity)]
-pub unsafe fn sd_parts(p: *const u8) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Option<Vec<Ace>>>, Option<Vec<Ace>>), u32> {
+pub unsafe fn sd_parts(
+    p: *const u8,
+) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Option<Vec<Ace>>>, Option<Vec<Ace>>), u32> {
     let (o, g, d, s, _) = unsafe { parse_sd(p) }?;
     Ok((o, g, d, s))
 }
@@ -288,12 +300,20 @@ fn target(h: u64) -> Result<Target, u32> {
         Object::Token(a) => (TOKEN, true, weak(&a.state)),
         Object::Port(a) => (EVENT, false, weak(a)),
         Object::Job(a) => (JOB, false, weak(a)),
-        Object::Thread(t) => (THREAD, true, (Key::Thread(t.tid.load(core::sync::atomic::Ordering::SeqCst) as u64), None)),
+        Object::Thread(t) => {
+            (THREAD, true, (Key::Thread(t.tid.load(core::sync::atomic::Ordering::SeqCst) as u64), None))
+        }
         Object::Process(p) if p.pid == kernel32::pid() => (PROCESS, true, (Key::ThisProcess, None)),
         Object::Process(a) => (PROCESS, true, weak(a)),
         Object::WindowStation(a) => (WINSTA, true, weak(a)),
         Object::Desktop(a) => (DESKTOP, true, weak(a)),
-        Object::File(_) | Object::Console(_) | Object::Null | Object::Pipe(_) | Object::Directory(_) | Object::Transaction(_) | Object::Snapshot(_) => return Err(ERROR_NOT_SUPPORTED),
+        Object::File(_)
+        | Object::Console(_)
+        | Object::Null
+        | Object::Pipe(_)
+        | Object::Directory(_)
+        | Object::Transaction(_)
+        | Object::Snapshot(_) => return Err(ERROR_NOT_SUPPORTED),
     };
     Ok(Target { key, alive, mapping, secured })
 }
@@ -393,7 +413,13 @@ fn file_sd(st: &osyx_abi::FileStat) -> Sd {
         (ACCESS_ALLOWED, 0, bits_mask(st.mode & 7, dir), everyone()),
         (ACCESS_ALLOWED, 0, full, administrators()),
     ];
-    Sd { owner: tokens::user_sid(st.uid), group: tokens::group_sid(st.gid), dacl: Some(aces), sacl: Vec::new(), control: 0 }
+    Sd {
+        owner: tokens::user_sid(st.uid),
+        group: tokens::group_sid(st.gid),
+        dacl: Some(aces),
+        sacl: Vec::new(),
+        control: 0,
+    }
 }
 
 /// The mode a DACL gives a file of `st`, if the mode can express it.
@@ -434,7 +460,14 @@ fn get_file(p: &str) -> Result<Sd, u32> {
     os_sys::stat(p).map(|st| file_sd(&st)).map_err(errno_to_win32)
 }
 
-fn set_file(p: &str, info: u32, owner: Option<&[u8]>, group: Option<&[u8]>, dacl: Option<&Option<Vec<Ace>>>, sacl: Option<&[Ace]>) -> Result<(), u32> {
+fn set_file(
+    p: &str,
+    info: u32,
+    owner: Option<&[u8]>,
+    group: Option<&[u8]>,
+    dacl: Option<&Option<Vec<Ace>>>,
+    sacl: Option<&[Ace]>,
+) -> Result<(), u32> {
     let st = os_sys::stat(p).map_err(errno_to_win32)?;
     let current = file_sd(&st);
     if owner.is_some_and(|o| o != current.owner) || group.is_some_and(|g| g != current.group) {
@@ -455,20 +488,28 @@ fn set_file(p: &str, info: u32, owner: Option<&[u8]>, group: Option<&[u8]>, dacl
 /// Apply the requested parts of a file descriptor using the same native
 /// permission mapping as SetNamedSecurityInfoW.
 pub(crate) fn set_file_security(name: *const u16, info: u32, sd: *const u8) -> Result<(), u32> {
-    if info == 0 || info & !(OWNER | GROUP | DACL | SACL) != 0 { return Err(ERROR_INVALID_PARAMETER); }
+    if info == 0 || info & !(OWNER | GROUP | DACL | SACL) != 0 {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
     let name = unsafe { path::wide_to_string(name) }.ok_or(ERROR_INVALID_PARAMETER)?;
     let (owner, group, dacl, sacl, _) = unsafe { parse_sd(sd) }?;
-    if info & OWNER != 0 && owner.is_none() || info & GROUP != 0 && group.is_none() ||
-       info & DACL != 0 && dacl.is_none() || info & SACL != 0 && sacl.is_none() {
+    if info & OWNER != 0 && owner.is_none()
+        || info & GROUP != 0 && group.is_none()
+        || info & DACL != 0 && dacl.is_none()
+        || info & SACL != 0 && sacl.is_none()
+    {
         return Err(ERROR_INVALID_SECURITY_DESCR);
     }
     check_get_info(info & SACL)?;
     let file = file_path(&name)?;
-    set_file(&file, info,
+    set_file(
+        &file,
+        info,
         if info & OWNER != 0 { owner.as_deref() } else { None },
         if info & GROUP != 0 { group.as_deref() } else { None },
         if info & DACL != 0 { dacl.as_ref() } else { None },
-        if info & SACL != 0 { sacl.as_deref() } else { None })
+        if info & SACL != 0 { sacl.as_deref() } else { None },
+    )
 }
 
 /// The security descriptor of an object created with SECURITY_ATTRIBUTES
@@ -505,7 +546,9 @@ pub fn initial_sd(sa: u64, mapping: &Mapping) -> Result<Option<Sd>, u32> {
         let restore = data.privileges.iter().any(|&(l, a)| l == 18 && a & tokens::SE_PRIVILEGE_ENABLED != 0);
         let assignable = restore
             || o == tokens::user_sid(token.uid)
-            || tokens::groups(token.uid, token.gid, &data).iter().any(|(s, a)| *s == o && a & tokens::SE_GROUP_OWNER != 0);
+            || tokens::groups(token.uid, token.gid, &data)
+                .iter()
+                .any(|(s, a)| *s == o && a & tokens::SE_GROUP_OWNER != 0);
         if !assignable {
             return Err(ERROR_INVALID_OWNER);
         }
@@ -550,14 +593,22 @@ pub fn apply_new_file_sd(p: &str, sd: u64) -> Result<(), u32> {
         let token = tokens::effective();
         let data = tokens::effective_data();
         let assignable = *o == tokens::user_sid(token.uid)
-            || tokens::groups(token.uid, token.gid, &data).iter().any(|(s, a)| s == o && a & tokens::SE_GROUP_OWNER != 0);
+            || tokens::groups(token.uid, token.gid, &data)
+                .iter()
+                .any(|(s, a)| s == o && a & tokens::SE_GROUP_OWNER != 0);
         if !assignable {
             return Err(ERROR_INVALID_OWNER);
         }
     }
     let r = set_file(p, DACL, None, None, dacl.as_ref(), sacl.as_deref());
     if r.is_err() && crate::VERBOSE.load(core::sync::atomic::Ordering::Relaxed) {
-        os_std::eprintln!("winrun: new file security not supported for {p}: owner {} group {} dacl {:?}", owner.is_some(), group.is_some(), dacl.as_ref().map(|d| d.as_ref().map(|a| a.iter().map(|x| (x.0, x.1, x.2, sid_string(&x.3))).collect::<Vec<_>>())));
+        os_std::eprintln!(
+            "winrun: new file security not supported for {p}: owner {} group {} dacl {:?}",
+            owner.is_some(),
+            group.is_some(),
+            dacl.as_ref()
+                .map(|d| d.as_ref().map(|a| a.iter().map(|x| (x.0, x.1, x.2, sid_string(&x.3))).collect::<Vec<_>>()))
+        );
     }
     r
 }
@@ -566,7 +617,15 @@ pub fn apply_new_file_sd(p: &str, sd: u64) -> Result<(), u32> {
 
 /// Applies the parts `info` names to `sd`, checking them against the
 /// caller's token.
-fn apply(sd: &mut Sd, info: u32, owner: Option<Vec<u8>>, group: Option<Vec<u8>>, dacl: Option<Option<Vec<Ace>>>, sacl: Option<Vec<Ace>>, m: &Mapping) -> Result<(), u32> {
+fn apply(
+    sd: &mut Sd,
+    info: u32,
+    owner: Option<Vec<u8>>,
+    group: Option<Vec<u8>>,
+    dacl: Option<Option<Vec<Ace>>>,
+    sacl: Option<Vec<Ace>>,
+    m: &Mapping,
+) -> Result<(), u32> {
     let token = tokens::effective();
     let d = tokens::effective_data();
     if info & OWNER != 0 {
@@ -597,7 +656,8 @@ fn apply(sd: &mut Sd, info: u32, owner: Option<Vec<u8>>, group: Option<Vec<u8>>,
     }
     let new = sacl.unwrap_or_default();
     if info & SACL != 0 {
-        if !d.privileges.iter().any(|p| p.0 == tokens::SE_SECURITY_PRIVILEGE && p.1 & tokens::SE_PRIVILEGE_ENABLED != 0) {
+        if !d.privileges.iter().any(|p| p.0 == tokens::SE_SECURITY_PRIVILEGE && p.1 & tokens::SE_PRIVILEGE_ENABLED != 0)
+        {
             return Err(ERROR_PRIVILEGE_NOT_HELD);
         }
         if new.iter().any(|a| a.0 == SYSTEM_AUDIT) {
@@ -659,7 +719,8 @@ fn parts(info: u32, owner: *const u8, group: *const u8, dacl: *const u8, sacl: *
     // SAFETY: NULL or the caller's SIDs and ACLs, validated here.
     unsafe {
         let s = |p: *const u8| if p.is_null() { Ok(None) } else { sid_bytes(p).map(Some) };
-        let acl = |p: *const u8| if p.is_null() { Ok(None) } else { acl_aces(p).map(Some).map_err(|_| ERROR_INVALID_ACL) };
+        let acl =
+            |p: *const u8| if p.is_null() { Ok(None) } else { acl_aces(p).map(Some).map_err(|_| ERROR_INVALID_ACL) };
         Ok((
             if info & OWNER != 0 { s(owner)? } else { None },
             if info & GROUP != 0 { s(group)? } else { None },
@@ -686,7 +747,11 @@ fn hand_out(bytes: &[u8], owner: *mut u64, group: *mut u64, dacl: *mut u64, sacl
         copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
         let at = |field: usize| {
             let off = rd::<u32>(p as *const u8, 4 + field * 4) as u64;
-            if off == 0 { 0 } else { p + off }
+            if off == 0 {
+                0
+            } else {
+                p + off
+            }
         };
         for (ptr, field) in [(owner, 0), (group, 1), (sacl, 2), (dacl, 3)] {
             if !ptr.is_null() {
@@ -705,7 +770,11 @@ fn hand_out(bytes: &[u8], owner: *mut u64, group: *mut u64, dacl: *mut u64, sacl
 /// An object's descriptor; None for an object without security.
 fn get_object(h: u64, kind: u32) -> Result<Option<Sd>, u32> {
     if let Some(Object::File(f)) = objects::get(h) {
-        return if kind == SE_FILE_OBJECT || kind == SE_KERNEL_OBJECT { get_file(&f.path).map(Some) } else { Err(ERROR_INVALID_PARAMETER) };
+        return if kind == SE_FILE_OBJECT || kind == SE_KERNEL_OBJECT {
+            get_file(&f.path).map(Some)
+        } else {
+            Err(ERROR_INVALID_PARAMETER)
+        };
     }
     let t = target(h)?;
     match kind {
@@ -721,7 +790,8 @@ fn check_get_info(info: u32) -> Result<(), u32> {
     }
     if info & SACL != 0 {
         let d = tokens::effective_data();
-        if !d.privileges.iter().any(|p| p.0 == tokens::SE_SECURITY_PRIVILEGE && p.1 & tokens::SE_PRIVILEGE_ENABLED != 0) {
+        if !d.privileges.iter().any(|p| p.0 == tokens::SE_SECURITY_PRIVILEGE && p.1 & tokens::SE_PRIVILEGE_ENABLED != 0)
+        {
             return Err(ERROR_PRIVILEGE_NOT_HELD);
         }
     }
@@ -729,7 +799,16 @@ fn check_get_info(info: u32) -> Result<(), u32> {
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn GetSecurityInfo(h: u64, kind: u32, info: u32, owner: *mut u64, group: *mut u64, dacl: *mut u64, sacl: *mut u64, out: *mut u64) -> u32 {
+extern "win64" fn GetSecurityInfo(
+    h: u64,
+    kind: u32,
+    info: u32,
+    owner: *mut u64,
+    group: *mut u64,
+    dacl: *mut u64,
+    sacl: *mut u64,
+    out: *mut u64,
+) -> u32 {
     match check_get_info(info).and_then(|()| get_object(h, kind)) {
         Ok(Some(sd)) => hand_out(&to_relative(&sd, info), owner, group, dacl, sacl, out),
         Ok(None) => hand_out(&EMPTY, owner, group, dacl, sacl, out),
@@ -738,7 +817,16 @@ extern "win64" fn GetSecurityInfo(h: u64, kind: u32, info: u32, owner: *mut u64,
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn GetNamedSecurityInfoW(name: *const u16, kind: u32, info: u32, owner: *mut u64, group: *mut u64, dacl: *mut u64, sacl: *mut u64, out: *mut u64) -> u32 {
+extern "win64" fn GetNamedSecurityInfoW(
+    name: *const u16,
+    kind: u32,
+    info: u32,
+    owner: *mut u64,
+    group: *mut u64,
+    dacl: *mut u64,
+    sacl: *mut u64,
+    out: *mut u64,
+) -> u32 {
     // SAFETY: NUL-terminated name.
     let Some(name) = (unsafe { path::wide_to_string(name) }) else { return ERROR_INVALID_PARAMETER };
     if kind != SE_FILE_OBJECT {
@@ -750,14 +838,30 @@ extern "win64" fn GetNamedSecurityInfoW(name: *const u16, kind: u32, info: u32, 
     }
 }
 
-extern "win64" fn SetSecurityInfo(h: u64, kind: u32, info: u32, owner: *const u8, group: *const u8, dacl: *const u8, sacl: *const u8) -> u32 {
+extern "win64" fn SetSecurityInfo(
+    h: u64,
+    kind: u32,
+    info: u32,
+    owner: *const u8,
+    group: *const u8,
+    dacl: *const u8,
+    sacl: *const u8,
+) -> u32 {
     match parts(info, owner, group, dacl, sacl).and_then(|p| set_object(h, Some(kind), info, p)) {
         Ok(()) => ERROR_SUCCESS,
         Err(e) => e,
     }
 }
 
-extern "win64" fn SetNamedSecurityInfoW(name: *mut u16, kind: u32, info: u32, owner: *const u8, group: *const u8, dacl: *const u8, sacl: *const u8) -> u32 {
+extern "win64" fn SetNamedSecurityInfoW(
+    name: *mut u16,
+    kind: u32,
+    info: u32,
+    owner: *const u8,
+    group: *const u8,
+    dacl: *const u8,
+    sacl: *const u8,
+) -> u32 {
     // SAFETY: NUL-terminated name.
     let Some(name) = (unsafe { path::wide_to_string(name) }) else { return ERROR_INVALID_PARAMETER };
     if kind != SE_FILE_OBJECT {
@@ -766,8 +870,9 @@ extern "win64" fn SetNamedSecurityInfoW(name: *mut u16, kind: u32, info: u32, ow
     if info & !KNOWN_INFO != 0 {
         return ERROR_NOT_SUPPORTED;
     }
-    let r = parts(info, owner, group, dacl, sacl)
-        .and_then(|p| file_path(&name).and_then(|f| set_file(&f, info, p.0.as_deref(), p.1.as_deref(), p.2.as_ref(), p.3.as_deref())));
+    let r = parts(info, owner, group, dacl, sacl).and_then(|p| {
+        file_path(&name).and_then(|f| set_file(&f, info, p.0.as_deref(), p.1.as_deref(), p.2.as_ref(), p.3.as_deref()))
+    });
     match r {
         Ok(()) => ERROR_SUCCESS,
         Err(e) => e,
@@ -798,7 +903,11 @@ extern "win64" fn GetKernelObjectSecurity(h: u64, info: u32, out: *mut u8, size:
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let bytes = match check_get_info(info).and_then(|()| {
-        if let Some(Object::File(f)) = objects::get(h) { get_file(&f.path).map(Some) } else { target(h).map(|t| t.secured.then(|| stored(&t))) }
+        if let Some(Object::File(f)) = objects::get(h) {
+            get_file(&f.path).map(Some)
+        } else {
+            target(h).map(|t| t.secured.then(|| stored(&t)))
+        }
     }) {
         Ok(Some(sd)) => to_relative(&sd, info),
         Ok(None) => EMPTY.to_vec(),
@@ -1054,13 +1163,34 @@ pub fn string_sid(s: &str) -> Option<Vec<u8>> {
 
 /// Rights abbreviations of SDDL ACE strings.
 const SDDL_RIGHTS: &[(&str, u32)] = &[
-    ("GA", 0x1000_0000), ("GR", 0x8000_0000), ("GW", 0x4000_0000), ("GX", 0x2000_0000),
-    ("RC", 0x0002_0000), ("SD", 0x0001_0000), ("WD", 0x0004_0000), ("WO", 0x0008_0000),
-    ("RP", 0x0010), ("WP", 0x0020), ("CC", 0x0001), ("DC", 0x0002), ("LC", 0x0004),
-    ("SW", 0x0008), ("LO", 0x0080), ("DT", 0x0040), ("CR", 0x0100),
-    ("FA", 0x001F_01FF), ("FR", 0x0012_0089), ("FW", 0x0012_0116), ("FX", 0x0012_00A0),
-    ("KA", 0x000F_003F), ("KR", 0x0002_0019), ("KW", 0x0002_0006), ("KX", 0x0002_0019),
-    ("NR", 0x1), ("NW", 0x2), ("NX", 0x4),
+    ("GA", 0x1000_0000),
+    ("GR", 0x8000_0000),
+    ("GW", 0x4000_0000),
+    ("GX", 0x2000_0000),
+    ("RC", 0x0002_0000),
+    ("SD", 0x0001_0000),
+    ("WD", 0x0004_0000),
+    ("WO", 0x0008_0000),
+    ("RP", 0x0010),
+    ("WP", 0x0020),
+    ("CC", 0x0001),
+    ("DC", 0x0002),
+    ("LC", 0x0004),
+    ("SW", 0x0008),
+    ("LO", 0x0080),
+    ("DT", 0x0040),
+    ("CR", 0x0100),
+    ("FA", 0x001F_01FF),
+    ("FR", 0x0012_0089),
+    ("FW", 0x0012_0116),
+    ("FX", 0x0012_00A0),
+    ("KA", 0x000F_003F),
+    ("KR", 0x0002_0019),
+    ("KW", 0x0002_0006),
+    ("KX", 0x0002_0019),
+    ("NR", 0x1),
+    ("NW", 0x2),
+    ("NX", 0x4),
 ];
 
 /// One SDDL ACE: "(type;flags;rights;object;inherited object;account)".
@@ -1177,7 +1307,11 @@ fn sddl_descriptor(text: &str) -> Result<Vec<u8>, u32> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if depth == 0 && i + 1 < chars.len() && chars[i + 1] == ':' && matches!(c.to_ascii_uppercase(), 'O' | 'G' | 'D' | 'S') {
+        if depth == 0
+            && i + 1 < chars.len()
+            && chars[i + 1] == ':'
+            && matches!(c.to_ascii_uppercase(), 'O' | 'G' | 'D' | 'S')
+        {
             parts.push((c.to_ascii_uppercase(), String::new()));
             i += 2;
             continue;
@@ -1228,7 +1362,12 @@ fn sddl_descriptor(text: &str) -> Result<Vec<u8>, u32> {
 
 /// ConvertStringSecurityDescriptorToSecurityDescriptorW (SDDL_REVISION_1):
 /// a self-relative descriptor in LocalAlloc memory and its size.
-extern "win64" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(text: *const u16, revision: u32, out: *mut u64, size: *mut u32) -> i32 {
+extern "win64" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    text: *const u16,
+    revision: u32,
+    out: *mut u64,
+    size: *mut u32,
+) -> i32 {
     const ERROR_UNKNOWN_REVISION: u32 = 1305;
     if text.is_null() || out.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -1257,7 +1396,12 @@ extern "win64" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(text: *co
     1
 }
 
-extern "win64" fn ConvertStringSecurityDescriptorToSecurityDescriptorA(text: *const u8, revision: u32, out: *mut u64, size: *mut u32) -> i32 {
+extern "win64" fn ConvertStringSecurityDescriptorToSecurityDescriptorA(
+    text: *const u8,
+    revision: u32,
+    out: *mut u64,
+    size: *mut u32,
+) -> i32 {
     // SAFETY: a NUL-terminated string.
     let Some(w) = (unsafe { path::ansi_to_wide(text) }) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     ConvertStringSecurityDescriptorToSecurityDescriptorW(w.as_ptr(), revision, out, size)
@@ -1276,7 +1420,9 @@ extern "win64" fn ConvertStringSidToSidW(s: *const u16, out: *mut u64) -> i32 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: NUL-terminated string.
-    let Some(v) = (unsafe { path::wide_to_string(s) }).and_then(|t| string_sid(&t)) else { return fail(ERROR_INVALID_SID, 0) };
+    let Some(v) = (unsafe { path::wide_to_string(s) }).and_then(|t| string_sid(&t)) else {
+        return fail(ERROR_INVALID_SID, 0);
+    };
     match heap_copy(&v) {
         // SAFETY: the caller's out pointer.
         Some(p) => unsafe {
@@ -1400,14 +1546,16 @@ pub fn check(t: &crate::security::Token, d: &TokenData, sd: &Sd, desired: u32, m
     }
     let implicit = if is_owner && !has_owner_rights { READ_CONTROL | WRITE_DAC } else { 0 };
     let wanted = desired & !(MAXIMUM_ALLOWED | ACCESS_SYSTEM_SECURITY);
-    let mut granted = walk(sd, &allow_o, &deny_o, implicit, m, if desired & MAXIMUM_ALLOWED != 0 { MAXIMUM_ALLOWED } else { wanted });
+    let mut granted =
+        walk(sd, &allow_o, &deny_o, implicit, m, if desired & MAXIMUM_ALLOWED != 0 { MAXIMUM_ALLOWED } else { wanted });
     // A restricted token: the restricting SIDs must grant it too (only
     // write rights for a write-restricted token).
     if !d.restricting.is_empty() {
         let r = &d.restricting;
         let r_owner = r.contains(&sd.owner);
         let r_implicit = if r_owner && !has_owner_rights { READ_CONTROL | WRITE_DAC } else { 0 };
-        let second = walk(sd, r, r, r_implicit, m, if desired & MAXIMUM_ALLOWED != 0 { MAXIMUM_ALLOWED } else { wanted });
+        let second =
+            walk(sd, r, r, r_implicit, m, if desired & MAXIMUM_ALLOWED != 0 { MAXIMUM_ALLOWED } else { wanted });
         granted &= if d.write_restricted { second | !m[1] } else { second };
     }
     // Mandatory integrity.
@@ -1496,7 +1644,13 @@ extern "win64" fn AccessCheck(
     let ok = granted & wanted == wanted && (desired & MAXIMUM_ALLOWED == 0 || granted != 0);
     // SAFETY: the caller's out pointers.
     unsafe {
-        *granted_out = if !ok { 0 } else if desired & MAXIMUM_ALLOWED != 0 { granted } else { wanted };
+        *granted_out = if !ok {
+            0
+        } else if desired & MAXIMUM_ALLOWED != 0 {
+            granted
+        } else {
+            wanted
+        };
         *status = ok as i32;
     }
     if !ok {

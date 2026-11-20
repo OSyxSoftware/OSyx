@@ -135,15 +135,33 @@ pub fn draw(p: &mut Painter, view: &View) {
                     let busy = view.ejecting.contains(&d.name);
                     let hovered = view.hover.as_ref() == Some(h) && !busy;
                     p.rounded(*r, t.radius_small, if hovered { t.selection } else { t.raised }, 255);
-                    p.text_in(FontKind::Ui, *r, if busy { "Ejecting..." } else { "Eject" }, if busy { t.text_faint } else { t.text }, Align::Center);
+                    p.text_in(
+                        FontKind::Ui,
+                        *r,
+                        if busy { "Ejecting..." } else { "Eject" },
+                        if busy { t.text_faint } else { t.text },
+                        Align::Center,
+                    );
                 }
             }
             Kind::Volume(di, vi) => {
                 let v = &view.disks[di].volumes[vi];
                 let tx = PAD + 42;
                 let width = (row.rect.w as i32 - tx - BUTTON_W as i32 - 2 * PAD).max(40) as u32;
-                p.text_in(FontKind::Bold, Rect::new(tx, row.rect.y + 6, width, lh as u32), v.name(), t.text, Align::Left);
-                p.text_in(FontKind::Ui, Rect::new(tx, row.rect.y + 6 + lh, width, ul as u32), &volume_detail(v, &view.usage), t.text_dim, Align::Left);
+                p.text_in(
+                    FontKind::Bold,
+                    Rect::new(tx, row.rect.y + 6, width, lh as u32),
+                    v.name(),
+                    t.text,
+                    Align::Left,
+                );
+                p.text_in(
+                    FontKind::Ui,
+                    Rect::new(tx, row.rect.y + 6 + lh, width, ul as u32),
+                    &volume_detail(v, &view.usage),
+                    t.text_dim,
+                    Align::Left,
+                );
                 // Use of the volume.
                 if let Some(&(_, total, free)) = v.mount.as_ref().and_then(|m| view.usage.iter().find(|u| &u.0 == m)) {
                     if total > 0 {
@@ -170,7 +188,13 @@ pub fn draw(p: &mut Painter, view: &View) {
                 } else {
                     "No supported file system (FAT32, exFAT or ext4)."
                 };
-                p.text_in(FontKind::Ui, Rect::new(PAD + 42, row.rect.y, WIDTH - 2 * PAD as u32 - 42, row.rect.h), text, t.text_faint, Align::Left);
+                p.text_in(
+                    FontKind::Ui,
+                    Rect::new(PAD + 42, row.rect.y, WIDTH - 2 * PAD as u32 - 42, row.rect.h),
+                    text,
+                    t.text_faint,
+                    Align::Left,
+                );
             }
         }
     }

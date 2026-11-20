@@ -36,7 +36,9 @@ pub trait App {
     fn layout(&mut self, w: u32, h: u32, cx: &mut Ctx);
     /// A toolkit event; returns true if the window must be redrawn.
     fn event(&mut self, ev: Ui, cx: &mut Ctx) -> bool;
-    fn file_drop(&mut self, _path: &str, _x: i32, _y: i32, _cx: &mut Ctx) -> bool { false }
+    fn file_drop(&mut self, _path: &str, _x: i32, _y: i32, _cx: &mut Ctx) -> bool {
+        false
+    }
     fn draw(&mut self, p: &mut Painter, w: u32, h: u32, cx: &Ctx);
     /// Extra handles to wait on (pipes, ...).
     fn wait_items(&self) -> Vec<WaitItem> {
@@ -130,7 +132,9 @@ pub fn run_app(name: &str, spec: WindowSpec, app: &mut dyn App) -> i32 {
                     }
                 }
                 Event::FileDrop { window, path, x, y } if *window == win.id => {
-                    if app.file_drop(path, *x, *y, &mut cx) { win.dirty = true; }
+                    if app.file_drop(path, *x, *y, &mut cx) {
+                        win.dirty = true;
+                    }
                 }
                 Event::Error { message, .. } => eprintln!("{name}: PRISM error: {message}"),
                 _ => {}
@@ -412,7 +416,16 @@ pub fn windows_apps() -> Vec<AppEntry> {
                 continue;
             }
             let icon = exe_icon(&exe);
-            apps.push(AppEntry { source: exe.clone(), name, exec: exe, icon, comment: String::from("Windows program"), args: Vec::new(), workdir: String::new(), group: String::new() });
+            apps.push(AppEntry {
+                source: exe.clone(),
+                name,
+                exec: exe,
+                icon,
+                comment: String::from("Windows program"),
+                args: Vec::new(),
+                workdir: String::new(),
+                group: String::new(),
+            });
         }
     }
     apps.sort_by_key(|a| (a.group.to_ascii_lowercase(), a.name.to_ascii_lowercase()));
@@ -476,7 +489,11 @@ pub fn load_link(path: &str) -> Option<AppEntry> {
     let file = path.rsplit('/').next().unwrap_or(path);
     let name = file.get(..file.len().saturating_sub(4)).unwrap_or(file);
     // The shortcut's own icon, else the program's.
-    let icon = link.icon.as_ref().and_then(|(file, index)| existing_path(file).and_then(|f| icon_from(&f, *index))).unwrap_or_else(|| exe_icon(&target));
+    let icon = link
+        .icon
+        .as_ref()
+        .and_then(|(file, index)| existing_path(file).and_then(|f| icon_from(&f, *index)))
+        .unwrap_or_else(|| exe_icon(&target));
     Some(AppEntry {
         source: String::from(path),
         name: String::from(name),
@@ -500,7 +517,8 @@ fn existing_path(path: &str) -> Option<String> {
             found = exact;
             continue;
         }
-        let name = fs::read_dir(dir).ok()?.map(|e| String::from(e.file_name())).find(|n| n.eq_ignore_ascii_case(part))?;
+        let name =
+            fs::read_dir(dir).ok()?.map(|e| String::from(e.file_name())).find(|n| n.eq_ignore_ascii_case(part))?;
         found = format!("{found}/{name}");
     }
     (!found.is_empty()).then_some(found)
@@ -780,11 +798,7 @@ pub fn load_pinned(source: &str) -> Option<AppEntry> {
 
 /// The pinned entries, in the order they were pinned.
 pub fn load_pins() -> Vec<AppEntry> {
-    fs::read_to_string(PINS_FILE)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| load_pinned(l.trim()))
-        .collect()
+    fs::read_to_string(PINS_FILE).unwrap_or_default().lines().filter_map(|l| load_pinned(l.trim())).collect()
 }
 
 /// Writes the pinned sources back.

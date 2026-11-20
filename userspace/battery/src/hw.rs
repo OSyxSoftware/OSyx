@@ -6,8 +6,8 @@
 //! [`Stats`] instead of returning a made-up zero, so the caller can tell a
 //! bad reading from a real one and discard it.
 
-use aml::Handler;
 use alloc::sync::Arc;
+use aml::Handler;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Raw access to the machine. Reads return `u64::MAX` when the access
@@ -191,13 +191,15 @@ impl<H: Hardware> Firmware<H> {
     pub fn ec_read(&self, addr: u8) -> Option<u8> {
         let ec = self.ec.get()?;
         self.stats.ec_transactions.fetch_add(1, Ordering::Relaxed);
-        let ok = self.wait(ec, EC_IBF, true) && {
-            self.out(ec.command, EC_READ);
-            self.wait(ec, EC_IBF, true)
-        } && {
-            self.out(ec.data, addr as u64);
-            self.wait(ec, EC_OBF, false)
-        };
+        let ok = self.wait(ec, EC_IBF, true)
+            && {
+                self.out(ec.command, EC_READ);
+                self.wait(ec, EC_IBF, true)
+            }
+            && {
+                self.out(ec.data, addr as u64);
+                self.wait(ec, EC_OBF, false)
+            };
         if !ok {
             self.fail(ec);
             return None;
@@ -214,16 +216,19 @@ impl<H: Hardware> Firmware<H> {
     pub fn ec_write(&self, addr: u8, value: u8) -> bool {
         let Some(ec) = self.ec.get() else { return false };
         self.stats.ec_transactions.fetch_add(1, Ordering::Relaxed);
-        let ok = self.wait(ec, EC_IBF, true) && {
-            self.out(ec.command, EC_WRITE);
-            self.wait(ec, EC_IBF, true)
-        } && {
-            self.out(ec.data, addr as u64);
-            self.wait(ec, EC_IBF, true)
-        } && {
-            self.out(ec.data, value as u64);
-            self.wait(ec, EC_IBF, true)
-        };
+        let ok = self.wait(ec, EC_IBF, true)
+            && {
+                self.out(ec.command, EC_WRITE);
+                self.wait(ec, EC_IBF, true)
+            }
+            && {
+                self.out(ec.data, addr as u64);
+                self.wait(ec, EC_IBF, true)
+            }
+            && {
+                self.out(ec.data, value as u64);
+                self.wait(ec, EC_IBF, true)
+            };
         if !ok {
             self.fail(ec);
         }

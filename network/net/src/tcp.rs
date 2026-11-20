@@ -321,8 +321,16 @@ impl OutSegment {
 
     /// Encodes this segment's header with the payload `a` followed by `b`
     /// (in place of `payload`), behind `headroom` bytes.
-    pub fn encode_parts_with_headroom(&self, local: Endpoint, remote: Endpoint, a: &[u8], b: &[u8], headroom: usize) -> Vec<u8> {
-        let options = Options { mss: self.mss, ws: self.ws, sack_permitted: self.sack_permitted, sack: self.sack, ts: self.ts };
+    pub fn encode_parts_with_headroom(
+        &self,
+        local: Endpoint,
+        remote: Endpoint,
+        a: &[u8],
+        b: &[u8],
+        headroom: usize,
+    ) -> Vec<u8> {
+        let options =
+            Options { mss: self.mss, ws: self.ws, sack_permitted: self.sack_permitted, sack: self.sack, ts: self.ts };
         build_parts(local, remote, self.seq, self.ack, self.flags, self.window, &options, (a, b), headroom)
     }
 }
@@ -475,9 +483,31 @@ pub fn reset_for(seg: &Segment) -> Option<OutSegment> {
         return None;
     }
     Some(if seg.has(ACK) {
-        OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, ts: None, payload: Vec::new() }
+        OutSegment {
+            seq: seg.ack,
+            ack: 0,
+            flags: RST,
+            window: 0,
+            mss: None,
+            ws: None,
+            sack_permitted: false,
+            sack: SackBlocks::NONE,
+            ts: None,
+            payload: Vec::new(),
+        }
     } else {
-        OutSegment { seq: 0, ack: seg.seq.wrapping_add(seg.seq_len()), flags: RST | ACK, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, ts: None, payload: Vec::new() }
+        OutSegment {
+            seq: 0,
+            ack: seg.seq.wrapping_add(seg.seq_len()),
+            flags: RST | ACK,
+            window: 0,
+            mss: None,
+            ws: None,
+            sack_permitted: false,
+            sack: SackBlocks::NONE,
+            ts: None,
+            payload: Vec::new(),
+        }
     })
 }
 
@@ -1057,7 +1087,18 @@ impl Tcb {
             // Not for this connection attempt; RFC 9293 answers with a
             // reset, which the stack sends for the caller.
             if !seg.has(RST) {
-                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, ts: None, payload: Vec::new() });
+                self.reset_reply = Some(OutSegment {
+                    seq: seg.ack,
+                    ack: 0,
+                    flags: RST,
+                    window: 0,
+                    mss: None,
+                    ws: None,
+                    sack_permitted: false,
+                    sack: SackBlocks::NONE,
+                    ts: None,
+                    payload: Vec::new(),
+                });
             }
             return;
         }
@@ -1183,7 +1224,18 @@ impl Tcb {
                 self.snd_wl1 = seg.seq;
                 self.snd_wl2 = seg.ack;
             } else {
-                self.reset_reply = Some(OutSegment { seq: seg.ack, ack: 0, flags: RST, window: 0, mss: None, ws: None, sack_permitted: false, sack: SackBlocks::NONE, ts: None, payload: Vec::new() });
+                self.reset_reply = Some(OutSegment {
+                    seq: seg.ack,
+                    ack: 0,
+                    flags: RST,
+                    window: 0,
+                    mss: None,
+                    ws: None,
+                    sack_permitted: false,
+                    sack: SackBlocks::NONE,
+                    ts: None,
+                    payload: Vec::new(),
+                });
                 return;
             }
         }
@@ -1294,7 +1346,11 @@ impl Tcb {
                     // hole. With a scoreboard the holes up to `rexmit_high`
                     // were already sent again in this recovery.
                     self.snd_nxt = if !self.sacked.is_empty() && seq_gt(self.rexmit_high, self.snd_una) {
-                        if seq_lt(self.rexmit_high, self.snd_max) { self.rexmit_high } else { self.snd_max }
+                        if seq_lt(self.rexmit_high, self.snd_max) {
+                            self.rexmit_high
+                        } else {
+                            self.snd_max
+                        }
                     } else {
                         self.snd_una
                     };
@@ -1493,7 +1549,8 @@ impl Tcb {
             // Out of order: the duplicate ACK starts fast retransmit.
             self.ack_now = true;
             self.stats.out_of_order += 1;
-            if self.ooo.len() < MAX_OOO_SEGMENTS && !self.ooo.iter().any(|(s, d, _)| *s == seq && d.len() >= data.len()) {
+            if self.ooo.len() < MAX_OOO_SEGMENTS && !self.ooo.iter().any(|(s, d, _)| *s == seq && d.len() >= data.len())
+            {
                 self.ooo.push((seq, data.to_vec(), fin));
             }
             if !data.is_empty() {
@@ -1574,7 +1631,11 @@ impl Tcb {
         }
         if let Some(t) = self.retransmit_at {
             if now >= t {
-                let limit = if self.state.synchronized() && self.state != State::SynReceived { MAX_RETRIES } else { MAX_SYN_RETRIES };
+                let limit = if self.state.synchronized() && self.state != State::SynReceived {
+                    MAX_RETRIES
+                } else {
+                    MAX_SYN_RETRIES
+                };
                 if self.retries >= limit {
                     self.fail(TcpError::TimedOut);
                     return true;
@@ -1638,7 +1699,8 @@ impl Tcb {
         let sack = if flags & SYN == 0 { self.sack_blocks() } else { SackBlocks::NONE };
         // Offered on our SYN; afterwards on every segment once both sides
         // sent it.
-        let ts = (self.ts_ok || (flags & SYN != 0 && self.state == State::SynSent)).then(|| (self.ts_now(now), self.ts_recent));
+        let ts = (self.ts_ok || (flags & SYN != 0 && self.state == State::SynSent))
+            .then(|| (self.ts_now(now), self.ts_recent));
         self.last_ack_sent = ack;
         self.ack_pending = false;
         self.ack_now = false;
@@ -1700,7 +1762,10 @@ impl Tcb {
             }
             _ => {}
         }
-        let can_send_data = matches!(self.state, State::Established | State::CloseWait | State::FinWait1 | State::LastAck | State::Closing);
+        let can_send_data = matches!(
+            self.state,
+            State::Established | State::CloseWait | State::FinWait1 | State::LastAck | State::Closing
+        );
         if can_send_data {
             let mss = self.mss() as usize;
             loop {
@@ -1725,7 +1790,10 @@ impl Tcb {
                 // both a full MSS and the queued data waits for more room,
                 // unless it is at least half the largest window the peer
                 // offered or nothing is in flight (no ACK would come).
-                let n = pending.min(mss).min(room).min(hole_end.map_or(usize::MAX, |e| e.wrapping_sub(self.snd_nxt) as usize));
+                let n = pending
+                    .min(mss)
+                    .min(room)
+                    .min(hole_end.map_or(usize::MAX, |e| e.wrapping_sub(self.snd_nxt) as usize));
                 let silly = n < mss && n < pending && in_flight > 0 && (n as u32) < self.max_snd_wnd / 2;
                 if pending > 0 && room > 0 && !silly {
                     let last = off + n == self.send_buf.len();

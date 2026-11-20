@@ -6,8 +6,8 @@
 #![allow(non_snake_case)]
 
 use crate::error::*;
-use crate::objects::{self, Console, EventObj, FileObj, MutexObj, Object, SemaphoreObj, ThreadObj};
 use crate::ini::{GetPrivateProfileIntA, GetPrivateProfileIntW, GetPrivateProfileStringW, WritePrivateProfileStringW};
+use crate::objects::{self, Console, EventObj, FileObj, MutexObj, Object, SemaphoreObj, ThreadObj};
 use crate::{loader, mem, path, teb};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -66,7 +66,13 @@ pub(crate) fn print_failures() {
         // SAFETY: stored from a &'static Location by note_failure.
         let loc = unsafe { &*(at as *const core::panic::Location<'static>) };
         let what = FAILURE_WHAT[i].load(Ordering::Relaxed);
-        os_std::eprintln!("winrun:   recent failure: error {} in thread {} at {}:{}", what as u32, what >> 32, loc.file(), loc.line());
+        os_std::eprintln!(
+            "winrun:   recent failure: error {} in thread {} at {}:{}",
+            what as u32,
+            what >> 32,
+            loc.file(),
+            loc.line()
+        );
     }
 }
 
@@ -143,7 +149,9 @@ pub fn init_process(exe_path: &str, command_line: &str, env: Vec<(String, String
         objects::insert(Object::Console(Console::Err)),
     ];
     for (i, value) in std_override.into_iter().enumerate() {
-        if let Some(value) = value { std[i] = value; }
+        if let Some(value) = value {
+            std[i] = value;
+        }
     }
     let a = mem::arena_alloc(command_line.len() + 1, 8);
     let units: Vec<u16> = command_line.encode_utf16().chain(core::iter::once(0)).collect();
@@ -560,7 +568,10 @@ extern "win64" fn CreateFileA(
     flags: u32,
     _template: u64,
 ) -> u64 {
-    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, INVALID_HANDLE_VALUE) };
+    let inherit = match crate::security::validate_inheritable(attributes) {
+        Ok(i) => i,
+        Err(e) => return fail(e, INVALID_HANDLE_VALUE),
+    };
     // SAFETY: the caller passes a NUL-terminated name.
     let h = create_file_common(unsafe { sa(name) }, access, share, disposition, flags);
     if inherit && h != INVALID_HANDLE_VALUE {
@@ -580,7 +591,10 @@ extern "win64" fn CreateFileW(
 ) -> u64 {
     // An inheritable file handle is marked so (CreateProcess does not pass
     // files on: see inherit.rs).
-    let inherit = match crate::security::validate_inheritable(attributes) { Ok(i) => i, Err(e) => return fail(e, INVALID_HANDLE_VALUE) };
+    let inherit = match crate::security::validate_inheritable(attributes) {
+        Ok(i) => i,
+        Err(e) => return fail(e, INVALID_HANDLE_VALUE),
+    };
     // SAFETY: as above.
     let path = unsafe { sw(name) };
     let traced = TRACE.load(Ordering::Relaxed).then(|| path.clone()).flatten();
@@ -589,7 +603,11 @@ extern "win64" fn CreateFileW(
         objects::set_inheritable(h, true);
     }
     if let Some(p) = traced {
-        let result = if h == INVALID_HANDLE_VALUE { alloc::format!("failed: {}", teb::last_error()) } else { alloc::format!("{h:#x}") };
+        let result = if h == INVALID_HANDLE_VALUE {
+            alloc::format!("failed: {}", teb::last_error())
+        } else {
+            alloc::format!("{h:#x}")
+        };
         os_std::eprintln!("winrun: CreateFileW({p}, access {access:#x}, share {share:#x}, disposition {disposition}, flags {flags:#x}) {result}");
     }
     h
@@ -609,7 +627,11 @@ pub(crate) mod overlapped {
     pub(crate) unsafe fn status(ov: u64) -> u64 {
         // SAFETY: as documented; a helper thread may complete it.
         unsafe {
-            if narrow() { core::ptr::read_volatile(ov as *const u32) as u64 } else { core::ptr::read_volatile(ov as *const u64) }
+            if narrow() {
+                core::ptr::read_volatile(ov as *const u32) as u64
+            } else {
+                core::ptr::read_volatile(ov as *const u64)
+            }
         }
     }
 
@@ -618,7 +640,11 @@ pub(crate) mod overlapped {
     pub(crate) unsafe fn set_status(ov: u64, v: u64) {
         // SAFETY: as documented.
         unsafe {
-            if narrow() { core::ptr::write_volatile(ov as *mut u32, v as u32) } else { core::ptr::write_volatile(ov as *mut u64, v) }
+            if narrow() {
+                core::ptr::write_volatile(ov as *mut u32, v as u32)
+            } else {
+                core::ptr::write_volatile(ov as *mut u64, v)
+            }
         }
     }
 
@@ -629,7 +655,11 @@ pub(crate) mod overlapped {
     pub(crate) unsafe fn bytes(ov: u64) -> u64 {
         // SAFETY: as documented.
         unsafe {
-            if narrow() { core::ptr::read_volatile((ov + 4) as *const u32) as u64 } else { core::ptr::read_volatile((ov + 8) as *const u64) }
+            if narrow() {
+                core::ptr::read_volatile((ov + 4) as *const u32) as u64
+            } else {
+                core::ptr::read_volatile((ov + 8) as *const u64)
+            }
         }
     }
 
@@ -638,7 +668,11 @@ pub(crate) mod overlapped {
     pub(crate) unsafe fn set_bytes(ov: u64, v: u64) {
         // SAFETY: as documented.
         unsafe {
-            if narrow() { core::ptr::write_volatile((ov + 4) as *mut u32, v as u32) } else { core::ptr::write_volatile((ov + 8) as *mut u64, v) }
+            if narrow() {
+                core::ptr::write_volatile((ov + 4) as *mut u32, v as u32)
+            } else {
+                core::ptr::write_volatile((ov + 8) as *mut u64, v)
+            }
         }
     }
 
@@ -660,7 +694,11 @@ pub(crate) mod overlapped {
     pub(crate) unsafe fn event(ov: u64) -> u64 {
         // SAFETY: as documented.
         unsafe {
-            if narrow() { core::ptr::read_volatile((ov + 16) as *const u32) as i32 as i64 as u64 } else { core::ptr::read_volatile((ov + 24) as *const u64) }
+            if narrow() {
+                core::ptr::read_volatile((ov + 16) as *const u32) as i32 as i64 as u64
+            } else {
+                core::ptr::read_volatile((ov + 24) as *const u64)
+            }
         }
     }
 }
@@ -752,7 +790,9 @@ fn read_all(fd: u64, buf: *mut u8, n: u32) -> Result<u32, u32> {
                 if k == 0 || done == n {
                     return Ok(done as u32);
                 }
-                if k < want && !*regular.get_or_insert_with(|| os_sys::fstat(fd).is_ok_and(|st| st.kind == osyx_abi::KIND_FILE)) {
+                if k < want
+                    && !*regular.get_or_insert_with(|| os_sys::fstat(fd).is_ok_and(|st| st.kind == osyx_abi::KIND_FILE))
+                {
                     return Ok(done as u32);
                 }
             }
@@ -856,7 +896,9 @@ fn trace_file_io(h: u64, what: &str, offset: Option<u64>, n: u32, r: &Result<u32
     static PARTS: Mutex<Option<Vec<String>>> = Mutex::new(None);
     let mut parts = PARTS.lock().unwrap();
     let parts = parts.get_or_insert_with(|| {
-        os_std::env::var("OSYX_WINRUN_TRACE_FILES").map(|v| v.split(';').filter(|p| !p.is_empty()).map(|p| p.to_ascii_lowercase()).collect()).unwrap_or_default()
+        os_std::env::var("OSYX_WINRUN_TRACE_FILES")
+            .map(|v| v.split(';').filter(|p| !p.is_empty()).map(|p| p.to_ascii_lowercase()).collect())
+            .unwrap_or_default()
     });
     if parts.is_empty() {
         return;
@@ -879,7 +921,9 @@ fn echo_write(h: u64, buf: *const u8, n: u32) {
     }
     let mut parts = PARTS.lock().unwrap();
     let parts = parts.get_or_insert_with(|| {
-        os_std::env::var("OSYX_WINRUN_ECHO_FILES").map(|v| v.split(';').filter(|p| !p.is_empty()).map(|p| p.to_ascii_lowercase()).collect()).unwrap_or_default()
+        os_std::env::var("OSYX_WINRUN_ECHO_FILES")
+            .map(|v| v.split(';').filter(|p| !p.is_empty()).map(|p| p.to_ascii_lowercase()).collect())
+            .unwrap_or_default()
     });
     if parts.is_empty() {
         return;
@@ -1012,7 +1056,11 @@ extern "win64" fn GetOverlappedResult(h: u64, ov: *const u8, n: *mut u32, wait: 
 extern "win64" fn CancelIoEx(h: u64, ov: *const u8) -> Bool {
     match objects::get(h) {
         None if crate::ws2_32::is_socket(h) => {
-            if crate::ws2_32::cancel_socket_io(h, ov as u64, false) { TRUE } else { fail(ERROR_NOT_FOUND, FALSE) }
+            if crate::ws2_32::cancel_socket_io(h, ov as u64, false) {
+                TRUE
+            } else {
+                fail(ERROR_NOT_FOUND, FALSE)
+            }
         }
         None => fail(ERROR_INVALID_HANDLE, FALSE),
         Some(Object::Pipe(p)) if crate::pipes::cancel(&p) => TRUE,
@@ -1033,7 +1081,16 @@ extern "win64" fn CancelSynchronousIo(h: u64) -> Bool {
 /// No device or file system control codes are implemented for OSyx's
 /// files; Windows reports such codes as ERROR_INVALID_FUNCTION.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn DeviceIoControl(h: u64, _code: u32, _i: u64, _il: u32, _o: u64, _ol: u32, _ret: *mut u32, _ov: u64) -> Bool {
+extern "win64" fn DeviceIoControl(
+    h: u64,
+    _code: u32,
+    _i: u64,
+    _il: u32,
+    _o: u64,
+    _ol: u32,
+    _ret: *mut u32,
+    _ov: u64,
+) -> Bool {
     if objects::get(h).is_none() {
         return fail(ERROR_INVALID_HANDLE, FALSE);
     }
@@ -1076,7 +1133,16 @@ extern "win64" fn CreatePipe(read: *mut u64, write: *mut u64, attributes: u64, _
         Err(e) => return fail(errno_to_win32(e), FALSE),
     };
     let end = |fd: u64, access: (bool, bool, bool)| {
-        objects::insert(Object::File(Arc::new(FileObj::new(fd, String::new(), access, (objects::PIPE_DEV, fd), 0, false, false, false))))
+        objects::insert(Object::File(Arc::new(FileObj::new(
+            fd,
+            String::new(),
+            access,
+            (objects::PIPE_DEV, fd),
+            0,
+            false,
+            false,
+            false,
+        ))))
     };
     // SAFETY: the caller's out pointers.
     unsafe {
@@ -1168,7 +1234,13 @@ extern "win64" fn SetEndOfFile(h: u64) -> Bool {
     let r = (|| {
         let f = objects::file(h)?;
         let pos = os_sys::seek(f.fd, 0, osyx_abi::SEEK_CUR).map_err(errno_to_win32)?;
-        os_sys::ftruncate(f.fd, pos).map_err(|e| if e == osyx_abi::Errno::Busy { ERROR_USER_MAPPED_FILE } else { errno_to_win32(e) })
+        os_sys::ftruncate(f.fd, pos).map_err(|e| {
+            if e == osyx_abi::Errno::Busy {
+                ERROR_USER_MAPPED_FILE
+            } else {
+                errno_to_win32(e)
+            }
+        })
     })();
     r.map_or_else(|e| fail(e, FALSE), |_| TRUE)
 }
@@ -1274,7 +1346,11 @@ fn new_file_attributes(attributes: u64) -> Result<u64, u32> {
     }
     // SAFETY: the caller's SECURITY_ATTRIBUTES (24 bytes).
     let (len, sd) = unsafe { (*(attributes as *const u32), *((attributes + 8) as *const u64)) };
-    if len != 24 { Err(ERROR_INVALID_PARAMETER) } else { Ok(sd) }
+    if len != 24 {
+        Err(ERROR_INVALID_PARAMETER)
+    } else {
+        Ok(sd)
+    }
 }
 
 fn create_directory(name: Option<String>, attributes: u64) -> Bool {
@@ -1686,13 +1762,24 @@ fn duplicate_handle(
         },
     };
     if let Object::Token(token) = &o {
-        if inherit != 0 { return fail(ERROR_NOT_SUPPORTED, FALSE); }
-        if options & !3 != 0 || dst.is_null() { return fail(ERROR_INVALID_PARAMETER, FALSE); }
-        let rights = if options & 2 != 0 { token.access } else {
-            match crate::security::token_access(access) { Ok(a)=>a,Err(e)=>return fail(e,FALSE) }
+        if inherit != 0 {
+            return fail(ERROR_NOT_SUPPORTED, FALSE);
+        }
+        if options & !3 != 0 || dst.is_null() {
+            return fail(ERROR_INVALID_PARAMETER, FALSE);
+        }
+        let rights = if options & 2 != 0 {
+            token.access
+        } else {
+            match crate::security::token_access(access) {
+                Ok(a) => a,
+                Err(e) => return fail(e, FALSE),
+            }
         };
-        if rights & !token.access != 0 { return fail(ERROR_ACCESS_DENIED,FALSE); }
-        o=Object::Token(Arc::new(crate::security::Token {access:rights,..(**token).clone()}));
+        if rights & !token.access != 0 {
+            return fail(ERROR_ACCESS_DENIED, FALSE);
+        }
+        o = Object::Token(Arc::new(crate::security::Token { access: rights, ..(**token).clone() }));
     }
     // A section handle gets the rights asked for, never more than the
     // source handle has (DUPLICATE_SAME_ACCESS: the same).
@@ -1761,7 +1848,9 @@ pub extern "win64" fn ExitProcess(code: u32) -> ! {
     // A failing exit is always reported, with where it was called from.
     if crate::VERBOSE.load(Ordering::Relaxed) || code != 0 {
         os_std::eprintln!("winrun: ExitProcess({code:#x}) in thread {}", os_sys::gettid());
-        if code != 0 { crate::exceptions::trace_current(); }
+        if code != 0 {
+            crate::exceptions::trace_current();
+        }
     }
     crate::fls::thread_exit();
     loader::notify_process_detach();
@@ -1773,7 +1862,9 @@ extern "win64" fn TerminateProcess(h: u64, code: u32) -> Bool {
     if h == objects::CURRENT_PROCESS {
         if crate::VERBOSE.load(Ordering::Relaxed) || code != 0 {
             os_std::eprintln!("winrun: TerminateProcess(current, {code:#x}) in thread {}", os_sys::gettid());
-            if code != 0 { crate::exceptions::trace_current(); }
+            if code != 0 {
+                crate::exceptions::trace_current();
+            }
         }
         os_std::process::exit(code as i32);
     }
@@ -1825,7 +1916,8 @@ pub fn stack_reserve(size: usize, is_reservation: bool) -> usize {
 /// the thread ends. A second object would never be signalled, so a wait
 /// on it would last forever (the Steam updater hung this way, at random,
 /// while extracting its package).
-static THREADS: Mutex<alloc::collections::BTreeMap<u32, alloc::sync::Weak<ThreadObj>>> = Mutex::new(alloc::collections::BTreeMap::new());
+static THREADS: Mutex<alloc::collections::BTreeMap<u32, alloc::sync::Weak<ThreadObj>>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
 /// The main thread's object, owned here (a spawned thread owns its own
 /// until it ends): the registry only holds weak references.
 static MAIN_THREAD: Mutex<Option<Arc<ThreadObj>>> = Mutex::new(None);
@@ -1867,7 +1959,9 @@ pub(crate) fn thread_list() -> Vec<(u32, u64)> {
         .lock()
         .unwrap()
         .iter()
-        .filter_map(|(&tid, w)| w.upgrade().filter(|t| !t.done.load(Ordering::SeqCst)).map(|t| (tid, t.teb.load(Ordering::SeqCst))))
+        .filter_map(|(&tid, w)| {
+            w.upgrade().filter(|t| !t.done.load(Ordering::SeqCst)).map(|t| (tid, t.teb.load(Ordering::SeqCst)))
+        })
         .collect()
 }
 
@@ -1953,8 +2047,17 @@ pub fn spawn_thread(start: u64, param: u64, stack_size: usize, suspended: bool) 
     Ok(obj)
 }
 
-pub(crate) extern "win64" fn CreateThread(attributes: u64, stack: usize, start: u64, param: u64, flags: u32, tid: *mut u32) -> u64 {
-    if let Err(e) = crate::security::validate_attributes(attributes) { return fail(e,0); }
+pub(crate) extern "win64" fn CreateThread(
+    attributes: u64,
+    stack: usize,
+    start: u64,
+    param: u64,
+    flags: u32,
+    tid: *mut u32,
+) -> u64 {
+    if let Err(e) = crate::security::validate_attributes(attributes) {
+        return fail(e, 0);
+    }
     if start == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -2088,7 +2191,11 @@ extern "win64" fn SetThreadPriority(h: u64, priority: i32) -> Bool {
             TRUE
         }
         THREAD_MODE_BACKGROUND_BEGIN | THREAD_MODE_BACKGROUND_END if h == objects::CURRENT_THREAD => {
-            let level = if priority == THREAD_MODE_BACKGROUND_BEGIN { osyx_abi::priority::LOW } else { osyx_abi::priority::NORMAL };
+            let level = if priority == THREAD_MODE_BACKGROUND_BEGIN {
+                osyx_abi::priority::LOW
+            } else {
+                osyx_abi::priority::NORMAL
+            };
             let _ = os_sys::thread_priority(tid as u64, level);
             TRUE
         }
@@ -2219,7 +2326,9 @@ extern "win64" fn DiscardVirtualMemory(addr: u64, size: usize) -> u32 {
         return ERROR_INVALID_PARAMETER;
     }
     // A range that wraps the address space is invalid.
-    let Some(end) = addr.checked_add(size as u64).and_then(|e| e.checked_next_multiple_of(page)) else { return ERROR_INVALID_PARAMETER };
+    let Some(end) = addr.checked_add(size as u64).and_then(|e| e.checked_next_multiple_of(page)) else {
+        return ERROR_INVALID_PARAMETER;
+    };
     let mut at = addr;
     while at < end {
         match mem::virtual_query(at) {
@@ -2247,7 +2356,8 @@ extern "win64" fn PrefetchVirtualMemory(process: u64, count: usize, entries: *co
 }
 
 /// Thread descriptions (SetThreadDescription) by thread id, as UTF-16.
-static DESCRIPTIONS: Mutex<alloc::collections::BTreeMap<u32, Vec<u16>>> = Mutex::new(alloc::collections::BTreeMap::new());
+static DESCRIPTIONS: Mutex<alloc::collections::BTreeMap<u32, Vec<u16>>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
 const E_INVALIDARG: u32 = 0x8007_0057;
 const E_OUTOFMEMORY: u32 = 0x8007_000E;
 const E_HANDLE: u32 = 0x8007_0006; // HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE)
@@ -2256,7 +2366,11 @@ const E_HANDLE: u32 = 0x8007_0006; // HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE)
 /// also goes to the log, so profiler samples by thread id get a name.
 /// The name SetThreadDescription gave thread `tid`, if any.
 pub(crate) fn thread_description(tid: u32) -> Option<String> {
-    DESCRIPTIONS.lock().unwrap().get(&tid).map(|u| char::decode_utf16(u.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')).collect())
+    DESCRIPTIONS
+        .lock()
+        .unwrap()
+        .get(&tid)
+        .map(|u| char::decode_utf16(u.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')).collect())
 }
 
 extern "win64" fn SetThreadDescription(h: u64, desc: *const u16) -> u32 {
@@ -2506,14 +2620,24 @@ fn cs_word(cs: u64) -> &'static AtomicU32 {
 fn cs_owner(cs: u64) -> u64 {
     let l = cs_layout();
     // SAFETY: the caller's CRITICAL_SECTION.
-    unsafe { if l.size == 24 { teb::get::<u32>(cs, l.owner) as u64 } else { teb::get::<u64>(cs, l.owner) } }
+    unsafe {
+        if l.size == 24 {
+            teb::get::<u32>(cs, l.owner) as u64
+        } else {
+            teb::get::<u64>(cs, l.owner)
+        }
+    }
 }
 
 fn cs_set_owner(cs: u64, tid: u64) {
     let l = cs_layout();
     // SAFETY: the caller's CRITICAL_SECTION.
     unsafe {
-        if l.size == 24 { teb::put(cs, l.owner, tid as u32) } else { teb::put(cs, l.owner, tid) }
+        if l.size == 24 {
+            teb::put(cs, l.owner, tid as u32)
+        } else {
+            teb::put(cs, l.owner, tid)
+        }
     }
 }
 
@@ -2619,7 +2743,9 @@ extern "win64" fn InitializeSRWLock(l: u64) {
 pub(crate) extern "win64" fn AcquireSRWLockExclusive(l: u64) {
     let w = srw_word(l);
     loop {
-        if w.compare_exchange(0, SRW_WRITER, Ordering::Acquire, Ordering::Relaxed).is_ok() { return; }
+        if w.compare_exchange(0, SRW_WRITER, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            return;
+        }
         let old = w.load(Ordering::Relaxed);
         if old != 0 {
             let _blocked = crate::stall::waiting("AcquireSRWLockExclusive", l, old as u64);
@@ -2642,8 +2768,12 @@ extern "win64" fn TryAcquireSRWLockShared(l: u64) -> u8 {
     let w = srw_word(l);
     loop {
         let old = w.load(Ordering::Relaxed);
-        if old >= SRW_WRITER - 1 { return 0; }
-        if w.compare_exchange_weak(old, old + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() { return 1; }
+        if old >= SRW_WRITER - 1 {
+            return 0;
+        }
+        if w.compare_exchange_weak(old, old + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            return 1;
+        }
     }
 }
 pub(crate) extern "win64" fn AcquireSRWLockShared(l: u64) {
@@ -2658,7 +2788,9 @@ pub(crate) extern "win64" fn AcquireSRWLockShared(l: u64) {
 }
 pub(crate) extern "win64" fn ReleaseSRWLockShared(l: u64) {
     let w = srw_word(l);
-    if w.fetch_sub(1, Ordering::Release) == 1 { os_sys::futex_wake(w.as_ptr(), u32::MAX); }
+    if w.fetch_sub(1, Ordering::Release) == 1 {
+        os_sys::futex_wake(w.as_ptr(), u32::MAX);
+    }
 }
 
 /// An unnamed event, for objects that are waitable events on Windows too.
@@ -2672,7 +2804,11 @@ pub(crate) fn new_event(manual: bool, initial: bool) -> u64 {
 /// restricts other users has no one else to restrict).
 ///
 /// Opening an existing named object ignores the descriptor, as on Windows.
-pub(crate) fn sync_attributes(attributes: u64, mapping: &crate::objsec::Mapping, name: Option<&str>) -> Result<(bool, Option<crate::objsec::Sd>), u32> {
+pub(crate) fn sync_attributes(
+    attributes: u64,
+    mapping: &crate::objsec::Mapping,
+    name: Option<&str>,
+) -> Result<(bool, Option<crate::objsec::Sd>), u32> {
     let inherit = crate::security::inherit_flag(attributes);
     if name.is_some_and(|n| objects::find_named(n).is_some()) {
         return Ok((inherit, None));
@@ -2721,7 +2857,12 @@ pub(crate) fn create_event(manual: bool, initial: bool, name: Option<String>) ->
 
 /// Opens a named object: this process's own, or for the kinds that can be
 /// shared (`kind`), one another process holds under the name.
-fn open_named_kind(name: Option<String>, inherit: bool, want: fn(&Object) -> bool, kind: Option<crate::namespace::Kind>) -> u64 {
+fn open_named_kind(
+    name: Option<String>,
+    inherit: bool,
+    want: fn(&Object) -> bool,
+    kind: Option<crate::namespace::Kind>,
+) -> u64 {
     let Some(name) = name else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let h = match objects::find_named(&name) {
         Some(o) if want(&o) => objects::insert(o),
@@ -2739,47 +2880,81 @@ fn open_named_kind(name: Option<String>, inherit: bool, want: fn(&Object) -> boo
 
 extern "win64" fn OpenEventA(_access: u32, inherit: Bool, name: *const u8) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named_kind(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Event(_)), Some(crate::namespace::Kind::Event))
+    open_named_kind(
+        unsafe { sa(name) },
+        inherit != 0,
+        |o| matches!(o, Object::Event(_)),
+        Some(crate::namespace::Kind::Event),
+    )
 }
 
 extern "win64" fn OpenEventW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named_kind(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Event(_)), Some(crate::namespace::Kind::Event))
+    open_named_kind(
+        unsafe { sw(name) },
+        inherit != 0,
+        |o| matches!(o, Object::Event(_)),
+        Some(crate::namespace::Kind::Event),
+    )
 }
 
 pub(crate) extern "win64" fn OpenMutexW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named_kind(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Mutex(_)), Some(crate::namespace::Kind::Mutex))
+    open_named_kind(
+        unsafe { sw(name) },
+        inherit != 0,
+        |o| matches!(o, Object::Mutex(_)),
+        Some(crate::namespace::Kind::Mutex),
+    )
 }
 
 pub(crate) extern "win64" fn OpenFileMappingW(_access: u32, inherit: Bool, name: *const u16) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named_kind(unsafe { sw(name) }, inherit != 0, |o| matches!(o, Object::Section(_)), Some(crate::namespace::Kind::Section))
+    open_named_kind(
+        unsafe { sw(name) },
+        inherit != 0,
+        |o| matches!(o, Object::Section(_)),
+        Some(crate::namespace::Kind::Section),
+    )
 }
 
 extern "win64" fn OpenFileMappingA(_access: u32, inherit: Bool, name: *const u8) -> u64 {
     // SAFETY: a NUL-terminated name.
-    open_named_kind(unsafe { sa(name) }, inherit != 0, |o| matches!(o, Object::Section(_)), Some(crate::namespace::Kind::Section))
+    open_named_kind(
+        unsafe { sa(name) },
+        inherit != 0,
+        |o| matches!(o, Object::Section(_)),
+        Some(crate::namespace::Kind::Section),
+    )
 }
 
 extern "win64" fn CreateEventA(attributes: u64, manual: Bool, initial: Bool, name: *const u8) -> u64 {
     // SAFETY: NULL or NUL-terminated name.
     let name = unsafe { sa(name) };
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return fail(e, 0),
+    };
     finish_sync(create_event(manual != 0, initial != 0, name), inherit, sd)
 }
 
 extern "win64" fn CreateEventW(attributes: u64, manual: Bool, initial: Bool, name: *const u16) -> u64 {
     // SAFETY: as above.
     let name = unsafe { sw(name) };
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return fail(e, 0),
+    };
     finish_sync(create_event(manual != 0, initial != 0, name), inherit, sd)
 }
 
 extern "win64" fn CreateEventExW(attributes: u64, name: *const u16, flags: u32, _access: u32) -> u64 {
     // SAFETY: as above.
     let name = unsafe { sw(name) };
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, name.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return fail(e, 0),
+    };
     finish_sync(create_event(flags & 1 != 0, flags & 2 != 0, name), inherit, sd)
 }
 
@@ -2840,14 +3015,20 @@ fn create_mutex(owned: bool, name: Option<String>) -> u64 {
 extern "win64" fn CreateMutexA(attributes: u64, owned: Bool, name: *const u8) -> u64 {
     // SAFETY: NULL or NUL-terminated name.
     let name = unsafe { sa(name) };
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX, name.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return fail(e, 0),
+    };
     finish_sync(create_mutex(owned != 0, name), inherit, sd)
 }
 
 extern "win64" fn CreateMutexW(attributes: u64, owned: Bool, name: *const u16) -> u64 {
     // SAFETY: as above.
     let name = unsafe { sw(name) };
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX, name.as_deref()) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::MUTEX, name.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return fail(e, 0),
+    };
     finish_sync(create_mutex(owned != 0, name), inherit, sd)
 }
 
@@ -2862,12 +3043,19 @@ extern "win64" fn ReleaseMutex(h: u64) -> Bool {
 }
 
 pub(crate) extern "win64" fn CreateSemaphoreA(attributes: u64, initial: i32, max: i32, _name: *const u8) -> u64 {
-    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, None) { Ok(v) => v, Err(e) => return fail(e, 0) };
+    let (inherit, sd) = match sync_attributes(attributes, &crate::objsec::EVENT, None) {
+        Ok(v) => v,
+        Err(e) => return fail(e, 0),
+    };
     if max <= 0 || initial < 0 || initial > max {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     teb::set_last_error(ERROR_SUCCESS);
-    finish_sync(objects::insert(Object::Semaphore(Arc::new(SemaphoreObj { count: Mutex::new(initial), max }))), inherit, sd)
+    finish_sync(
+        objects::insert(Object::Semaphore(Arc::new(SemaphoreObj { count: Mutex::new(initial), max }))),
+        inherit,
+        sd,
+    )
 }
 
 extern "win64" fn CreateSemaphoreW(sa_: u64, initial: i32, max: i32, _name: *const u16) -> u64 {
@@ -2938,7 +3126,13 @@ pub(crate) extern "win64" fn WaitForMultipleObjects(n: u32, hs: *const u64, all:
     objects::wait(list, all != 0, ms).unwrap_or_else(|e| fail(e, objects::WAIT_FAILED))
 }
 
-pub(crate) extern "win64" fn WaitForMultipleObjectsEx(n: u32, hs: *const u64, all: Bool, ms: u32, alertable: Bool) -> u32 {
+pub(crate) extern "win64" fn WaitForMultipleObjectsEx(
+    n: u32,
+    hs: *const u64,
+    all: Bool,
+    ms: u32,
+    alertable: Bool,
+) -> u32 {
     if alertable == 0 {
         return WaitForMultipleObjects(n, hs, all, ms);
     }
@@ -3079,7 +3273,9 @@ static LOCKED: Mutex<Vec<(u64, usize)>> = Mutex::new(Vec::new());
 
 extern "win64" fn VirtualLock(addr: u64, size: usize) -> Bool {
     let mut info = [0u8; 48];
-    if VirtualQuery(addr, info.as_mut_ptr(), 48) == 0 || u32::from_le_bytes(info[32..36].try_into().unwrap()) != mem::MEM_COMMIT {
+    if VirtualQuery(addr, info.as_mut_ptr(), 48) == 0
+        || u32::from_le_bytes(info[32..36].try_into().unwrap()) != mem::MEM_COMMIT
+    {
         return fail(ERROR_NOACCESS, FALSE);
     }
     let base = addr & !(mem::PAGE as u64 - 1);
@@ -3447,8 +3643,8 @@ pub(crate) extern "win64" fn GetSystemInfo(out: *mut u8) {
         teb::put(out as u64, 4, 4096u32);
         teb::put(out as u64, 8, 0x10000u64);
         teb::put(out as u64, 16, 0x7FFF_FFFE_FFFFu64);
-        let count = os_sys::cpu_info().map_or(1, |(count,_)| count);
-        teb::put(out as u64, 24, (1u64 << count)-1);
+        let count = os_sys::cpu_info().map_or(1, |(count, _)| count);
+        teb::put(out as u64, 24, (1u64 << count) - 1);
         teb::put(out as u64, 32, count);
         teb::put(out as u64, 36, 8664u32); // PROCESSOR_AMD_X8664
         teb::put(out as u64, 40, 0x10000u32);
@@ -3587,7 +3783,10 @@ pub(crate) extern "win64" fn GetModuleHandleExW(flags: u32, name: *const u16, ou
     const PIN: u32 = 1;
     const UNCHANGED_REFCOUNT: u32 = 2;
     const FROM_ADDRESS: u32 = 4;
-    if out.is_null() || flags & !(PIN | UNCHANGED_REFCOUNT | FROM_ADDRESS) != 0 || flags & PIN != 0 && flags & UNCHANGED_REFCOUNT != 0 {
+    if out.is_null()
+        || flags & !(PIN | UNCHANGED_REFCOUNT | FROM_ADDRESS) != 0
+        || flags & PIN != 0 && flags & UNCHANGED_REFCOUNT != 0
+    {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
     let h = if flags & FROM_ADDRESS != 0 {
@@ -4047,7 +4246,9 @@ pub fn exports() -> Vec<(&'static str, u64)> {
         AcquireSRWLockExclusive,
         ReleaseSRWLockExclusive,
         TryAcquireSRWLockExclusive,
-        AcquireSRWLockShared, ReleaseSRWLockShared, TryAcquireSRWLockShared,
+        AcquireSRWLockShared,
+        ReleaseSRWLockShared,
+        TryAcquireSRWLockShared,
         CreateEventA,
         CreateEventW,
         CreateEventExW,
@@ -4142,6 +4343,6 @@ pub fn exports() -> Vec<(&'static str, u64)> {
     exports.extend(crate::threadpool::exports());
     exports.extend(crate::process::exports());
     exports.extend(crate::seh::ntdll_exports());
-    exports.push(("OpenProcessToken",crate::tokens::OpenProcessToken as *const () as u64));
+    exports.push(("OpenProcessToken", crate::tokens::OpenProcessToken as *const () as u64));
     exports
 }

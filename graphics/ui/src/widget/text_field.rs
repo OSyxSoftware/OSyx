@@ -1,5 +1,5 @@
-use crate::event::{Event, KeyEvent, Response};
 use crate::clipboard::Clipboard;
+use crate::event::{Event, KeyEvent, Response};
 use crate::layout::{contains, inset_xy};
 use crate::paint::{Align, FontKind, Fonts, Painter};
 use alloc::string::String;
@@ -299,7 +299,13 @@ impl TextField {
     }
 
     /// Handles text clipboard shortcuts before the regular editing keys.
-    pub fn event_with_clipboard(&mut self, ev: &Event, focused: bool, fonts: &Fonts, clipboard: &mut Clipboard) -> Response {
+    pub fn event_with_clipboard(
+        &mut self,
+        ev: &Event,
+        focused: bool,
+        fonts: &Fonts,
+        clipboard: &mut Clipboard,
+    ) -> Response {
         if let Event::Key(k) = ev {
             if focused && k.down && k.ctrl() {
                 match k.key {

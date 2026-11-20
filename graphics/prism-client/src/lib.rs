@@ -82,7 +82,15 @@ impl Connection {
             buf: alloc::vec![0; proto::MAX_MESSAGE],
         };
         let flags = if shell { proto::hello::SHELL } else { 0 };
-        c.send(&Request::Hello { min_version: proto::MIN_VERSION, max_version: proto::VERSION, flags, name: String::from(name) }, &[])?;
+        c.send(
+            &Request::Hello {
+                min_version: proto::MIN_VERSION,
+                max_version: proto::VERSION,
+                flags,
+                name: String::from(name),
+            },
+            &[],
+        )?;
         let asked = Instant::now();
         loop {
             c.wait_inner(&mut [], Some(Duration::from_millis(500)))?;
@@ -259,7 +267,19 @@ impl WindowSpec {
     }
 
     pub fn with_role(role: Role, x: i32, y: i32, width: u32, height: u32) -> WindowSpec {
-        WindowSpec { role, flags: 0, x, y, width, height, min_width: 0, min_height: 0, parent: 0, title: String::new(), alpha: false }
+        WindowSpec {
+            role,
+            flags: 0,
+            x,
+            y,
+            width,
+            height,
+            min_width: 0,
+            min_height: 0,
+            parent: 0,
+            title: String::new(),
+            alpha: false,
+        }
     }
 }
 
@@ -352,7 +372,15 @@ impl Window {
         self.ensure_buffer()?;
         let (w, h) = (self.width, self.height);
         let format = if self.alpha { proto::format::ARGB8888 } else { proto::format::XRGB8888 };
-        let attach = Request::AttachBuffer { surface: self.id, buffer: self.buffer, width: w, height: h, stride: w * 4, format, offset: 0 };
+        let attach = Request::AttachBuffer {
+            surface: self.id,
+            buffer: self.buffer,
+            width: w,
+            height: h,
+            stride: w * 4,
+            format,
+            offset: 0,
+        };
         if self.fresh_buffer {
             let handle = self.shm.as_ref().map(|(s, _)| s.handle()).expect("buffer allocated");
             conn.send(&attach, &[handle])?;
@@ -390,4 +418,3 @@ impl Window {
         Ok(())
     }
 }
-

@@ -24,11 +24,20 @@ use osyx_usb::hid::parse_report_descriptor;
 use osyx_usb::hid::{self, BootKeyboard, KeyChange, MouseLayout, ReportError, TabletLayout};
 
 pub enum HidKind {
-    Keyboard { state: BootKeyboard, applied_leds: u8 },
+    Keyboard {
+        state: BootKeyboard,
+        applied_leds: u8,
+    },
     /// `layout` `None`: boot protocol reports.
-    Mouse { layout: Option<MouseLayout>, buttons: u32 },
+    Mouse {
+        layout: Option<MouseLayout>,
+        buttons: u32,
+    },
     /// An absolute pointing device.
-    Tablet { layout: TabletLayout, buttons: u32 },
+    Tablet {
+        layout: TabletLayout,
+        buttons: u32,
+    },
 }
 
 pub struct HidFunction {
@@ -50,7 +59,12 @@ impl HidFunction {
             // another function's id, or a keyboard's rollover, is expected and
             // not one of them.
             if !matches!(e, ReportError::UnknownReportId | ReportError::Rollover) && self.bad_reports <= 4 {
-                kprintln!("usb input device {}: report not understood ({:?}): {:02x?}", self.input_id, e, &data[..data.len().min(16)]);
+                kprintln!(
+                    "usb input device {}: report not understood ({:?}): {:02x?}",
+                    self.input_id,
+                    e,
+                    &data[..data.len().min(16)]
+                );
             }
         }
         r
@@ -115,7 +129,12 @@ pub trait ControlPipe {
 /// Prepares a HID interface of a configured device: protocol, idle rate,
 /// report layout; registers it with the input core. `None` for an
 /// interface that is neither a boot keyboard nor a pointer.
-pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devname: &str) -> Result<Option<HidFunction>, P::Error> {
+pub fn setup<P: ControlPipe>(
+    pipe: &mut P,
+    iface: &Interface,
+    name: &str,
+    devname: &str,
+) -> Result<Option<HidFunction>, P::Error> {
     let boot = iface.subclass == descriptor::HID_SUBCLASS_BOOT;
     if iface.is_hid_boot(descriptor::HID_PROTOCOL_KEYBOARD) {
         pipe.control_out(SetupPacket::hid_set_protocol(iface.number, false), &[])?;
@@ -139,7 +158,9 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
     let len = iface.hid.map_or(0, |h| h.report_length).min(2048);
     if len > 0 {
         let mut rd = vec![0u8; len as usize];
-        match pipe.control_in(SetupPacket::get_interface_descriptor(descriptor::DESC_HID_REPORT, iface.number, len), &mut rd) {
+        match pipe
+            .control_in(SetupPacket::get_interface_descriptor(descriptor::DESC_HID_REPORT, iface.number, len), &mut rd)
+        {
             Ok(n) => match parse_report_descriptor(&rd[..n]) {
                 Ok(fields) => {
                     layout = MouseLayout::from_fields(&fields);
@@ -220,7 +241,9 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
             // a device that is or may be in it is left alone.
             if let Err(e) = pipe.control_out(SetupPacket::hid_set_protocol(iface.number, false), &[]) {
                 let mut protocol = [0xFFu8; 1];
-                let in_boot = matches!(pipe.control_in(SetupPacket::hid_get_protocol(iface.number), &mut protocol), Ok(1)) && protocol[0] == 0;
+                let in_boot =
+                    matches!(pipe.control_in(SetupPacket::hid_get_protocol(iface.number), &mut protocol), Ok(1))
+                        && protocol[0] == 0;
                 if !in_boot {
                     kprintln!(
                         "usb {}: interface {}: SET_PROTOCOL(boot) refused ({}) and the device does not say it is in the boot protocol: not driven",
@@ -230,7 +253,12 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
                     );
                     return Ok(None);
                 }
-                kprintln!("usb {}: interface {}: SET_PROTOCOL(boot) refused ({}); the device says it is in the boot protocol", devname, iface.number, e);
+                kprintln!(
+                    "usb {}: interface {}: SET_PROTOCOL(boot) refused ({}); the device says it is in the boot protocol",
+                    devname,
+                    iface.number,
+                    e
+                );
             }
             String::from("boot protocol: 3 buttons, 8-bit X/Y")
         }
@@ -248,5 +276,11 @@ pub fn setup<P: ControlPipe>(pipe: &mut P, iface: &Interface, name: &str, devnam
     let _ = pipe.control_out(SetupPacket::hid_set_idle(iface.number, 0), &[]);
     let id = input::register(name, input::class::MOUSE);
     kprintln!("usb {}: HID mouse on interface {} ({}) -> input device {}", devname, iface.number, how, id);
-    Ok(Some(HidFunction { interface: iface.number, input_id: id, kind: HidKind::Mouse { layout, buttons: 0 }, reports: 0, bad_reports: 0 }))
+    Ok(Some(HidFunction {
+        interface: iface.number,
+        input_id: id,
+        kind: HidKind::Mouse { layout, buttons: 0 },
+        reports: 0,
+        bad_reports: 0,
+    }))
 }

@@ -313,17 +313,28 @@ impl VirtioGpu {
     /// Outputs and their preferred geometry (`GET_DISPLAY_INFO`).
     pub fn display_info(&self) -> Result<Vec<Scanout>, GpuError> {
         let n = self.num_scanouts as usize;
-        self.command(CMD_GET_DISPLAY_INFO, RESP_OK_DISPLAY_INFO, HDR_LEN + MAX_SCANOUTS * 24, |_, _| 0, |base| {
-            (0..n)
-                .map(|i| {
-                    let o = HDR_LEN + i * 24;
-                    Scanout {
-                        rect: Rect { x: read32(base, o), y: read32(base, o + 4), w: read32(base, o + 8), h: read32(base, o + 12) },
-                        enabled: read32(base, o + 16) != 0,
-                    }
-                })
-                .collect()
-        })
+        self.command(
+            CMD_GET_DISPLAY_INFO,
+            RESP_OK_DISPLAY_INFO,
+            HDR_LEN + MAX_SCANOUTS * 24,
+            |_, _| 0,
+            |base| {
+                (0..n)
+                    .map(|i| {
+                        let o = HDR_LEN + i * 24;
+                        Scanout {
+                            rect: Rect {
+                                x: read32(base, o),
+                                y: read32(base, o + 4),
+                                w: read32(base, o + 8),
+                                h: read32(base, o + 12),
+                            },
+                            enabled: read32(base, o + 16) != 0,
+                        }
+                    })
+                    .collect()
+            },
+        )
     }
 
     /// The EDID block of an output (`GET_EDID`), if the device offers it.
@@ -343,7 +354,9 @@ impl VirtioGpu {
                 let size = (read32(base, HDR_LEN) as usize).min(1024);
                 let mut v = alloc::vec![0u8; size];
                 // SAFETY: the response page holds HDR_LEN + 8 + 1024 bytes.
-                unsafe { core::ptr::copy_nonoverlapping((base + HDR_LEN as u64 + 8) as *const u8, v.as_mut_ptr(), size) };
+                unsafe {
+                    core::ptr::copy_nonoverlapping((base + HDR_LEN as u64 + 8) as *const u8, v.as_mut_ptr(), size)
+                };
                 v
             },
         )
@@ -482,7 +495,15 @@ impl VirtioGpu {
         Ok(())
     }
 
-    fn cursor_command(&self, kind: u32, scanout: u32, x: u32, y: u32, resource: u32, hot: (u32, u32)) -> Result<(), GpuError> {
+    fn cursor_command(
+        &self,
+        kind: u32,
+        scanout: u32,
+        x: u32,
+        y: u32,
+        resource: u32,
+        hot: (u32, u32),
+    ) -> Result<(), GpuError> {
         let mut g = self.cursor.lock();
         let c = g.as_mut().ok_or(GpuError::InvalidArgument)?;
         let mut w = Writer { base: phys_to_virt(c.req), off: 0 };
@@ -510,7 +531,15 @@ impl VirtioGpu {
     }
 
     /// Sets the cursor image (resource 0 hides it) and position.
-    pub fn update_cursor(&self, scanout: u32, x: u32, y: u32, resource: u32, hot_x: u32, hot_y: u32) -> Result<(), GpuError> {
+    pub fn update_cursor(
+        &self,
+        scanout: u32,
+        x: u32,
+        y: u32,
+        resource: u32,
+        hot_x: u32,
+        hot_y: u32,
+    ) -> Result<(), GpuError> {
         self.cursor_command(CMD_UPDATE_CURSOR, scanout, x, y, resource, (hot_x, hot_y))
     }
 

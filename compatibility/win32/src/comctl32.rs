@@ -18,7 +18,9 @@ extern "win64" fn InitCommonControls() {
     crate::user32::register_common_controls();
 }
 
-pub(crate) fn init_address() -> u64 { InitCommonControls as *const () as u64 }
+pub(crate) fn init_address() -> u64 {
+    InitCommonControls as *const () as u64
+}
 
 pub fn exports() -> Vec<(&'static str, u64)> {
     export_table![ImageList_Create, ImageList_AddMasked, ImageList_Destroy, InitCommonControls]

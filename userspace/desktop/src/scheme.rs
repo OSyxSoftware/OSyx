@@ -14,7 +14,9 @@ pub const THEME_FILE: &str = "/etc/osyx/theme";
 pub const LOCATION_FILE: &str = "/etc/osyx/location";
 
 fn unix_now() -> i64 {
-    os_std::time::SystemTime::now().duration_since(os_std::time::SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+    os_std::time::SystemTime::now()
+        .duration_since(os_std::time::SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 pub fn choice() -> SchemeChoice {

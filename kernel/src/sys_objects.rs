@@ -98,13 +98,21 @@ fn spawn_stdio_impl(args: u64, stdio: u64, suspended: bool) -> Result<u64, Errno
 }
 
 pub fn spawn_restricted(args: u64, policy: u64) -> Result<u64, Errno> {
-    use osyx_abi::sandbox::{PathRule, SpawnPolicy, SyscallPolicy, MAX_PATH_RULES, MAX_SYSCALL_RULES, MAX_SPAWN_CHANNELS, PATH_EXEC, PATH_READ, PATH_WRITE, SPAWN_SUSPENDED};
+    use osyx_abi::sandbox::{
+        PathRule, SpawnPolicy, SyscallPolicy, MAX_PATH_RULES, MAX_SPAWN_CHANNELS, MAX_SYSCALL_RULES, PATH_EXEC,
+        PATH_READ, PATH_WRITE, SPAWN_SUSPENDED,
+    };
     use osyx_vfs::{sandbox::PathPolicy, Access};
     if process::current_path_restricted() {
         return Err(Errno::PermissionDenied);
     }
     let p: SpawnPolicy = get_user(policy)?;
-    if p.path_count > MAX_PATH_RULES || p.syscall_count > MAX_SYSCALL_RULES || p.channel_count > MAX_SPAWN_CHANNELS || p.flags & !SPAWN_SUSPENDED != 0 || (p.channel_count != 0 && p.broker_handle == HANDLE_NONE) {
+    if p.path_count > MAX_PATH_RULES
+        || p.syscall_count > MAX_SYSCALL_RULES
+        || p.channel_count > MAX_SPAWN_CHANNELS
+        || p.flags & !SPAWN_SUSPENDED != 0
+        || (p.channel_count != 0 && p.broker_handle == HANDLE_NONE)
+    {
         return Err(Errno::InvalidArgument);
     }
     let broker = if p.broker_handle == HANDLE_NONE {
@@ -121,20 +129,30 @@ pub fn spawn_restricted(args: u64, policy: u64) -> Result<u64, Errno> {
         let offset = i.checked_mul(8).ok_or(Errno::InvalidArgument)?;
         let handle: u64 = get_user(p.channels.checked_add(offset).ok_or(Errno::Fault)?)?;
         let object = process::get_object(handle)?;
-        if !matches!(object, Object::Channel(_)) { return Err(Errno::InvalidArgument); }
+        if !matches!(object, Object::Channel(_)) {
+            return Err(Errno::InvalidArgument);
+        }
         channels.push(object);
     }
     let mut rules = Vec::with_capacity(p.path_count as usize);
     for i in 0..p.path_count {
         let offset = i.checked_mul(core::mem::size_of::<PathRule>() as u64).ok_or(Errno::InvalidArgument)?;
         let rule: PathRule = get_user(p.paths.checked_add(offset).ok_or(Errno::Fault)?)?;
-        if rule.path_len == 0 || rule.path_len > osyx_abi::MAX_PATH as u64 || rule.access == 0 || rule.access & !(PATH_READ | PATH_WRITE | PATH_EXEC) != 0 {
+        if rule.path_len == 0
+            || rule.path_len > osyx_abi::MAX_PATH as u64
+            || rule.access == 0
+            || rule.access & !(PATH_READ | PATH_WRITE | PATH_EXEC) != 0
+        {
             return Err(Errno::InvalidArgument);
         }
         let mut bytes = alloc::vec![0u8; rule.path_len as usize];
         copy_from_user(&mut bytes, rule.path)?;
         let path = alloc::string::String::from_utf8(bytes).map_err(|_| Errno::InvalidArgument)?;
-        let access = Access { read: rule.access & PATH_READ != 0, write: rule.access & PATH_WRITE != 0, exec: rule.access & PATH_EXEC != 0 };
+        let access = Access {
+            read: rule.access & PATH_READ != 0,
+            write: rule.access & PATH_WRITE != 0,
+            exec: rule.access & PATH_EXEC != 0,
+        };
         rules.push((path, access));
     }
     let borrowed: Vec<_> = rules.iter().map(|(path, access)| (path.as_str(), *access)).collect();
@@ -146,7 +164,16 @@ pub fn spawn_restricted(args: u64, policy: u64) -> Result<u64, Errno> {
         copy_from_user(bytes, p.syscalls)?;
     }
     let req = ExecRequest::from_user(args)?;
-    process::spawn_restricted(sched::current_pid(), &req, paths, Arc::new(SyscallPolicy::new(&allowed)), broker, channels, p.flags & SPAWN_SUSPENDED != 0).map_err(|e| e.errno())
+    process::spawn_restricted(
+        sched::current_pid(),
+        &req,
+        paths,
+        Arc::new(SyscallPolicy::new(&allowed)),
+        broker,
+        channels,
+        p.flags & SPAWN_SUSPENDED != 0,
+    )
+    .map_err(|e| e.errno())
 }
 
 /// Reads standard input (handle 0) when it was redirected.
@@ -308,7 +335,12 @@ pub fn wait_handles_unlocked(items_ptr: u64, count: u64, timeout_ns: u64) -> Opt
     Some(finish_wait(items, items_ptr, &waitables, timeout_ns))
 }
 
-fn finish_wait(mut items: Vec<WaitItem>, items_ptr: u64, waitables: &[(object::Waitable, u32)], timeout_ns: u64) -> Result<u64, Errno> {
+fn finish_wait(
+    mut items: Vec<WaitItem>,
+    items_ptr: u64,
+    waitables: &[(object::Waitable, u32)],
+    timeout_ns: u64,
+) -> Result<u64, Errno> {
     let deadline = if timeout_ns == 0 { Some(0) } else { crate::waitq::deadline_after_ns(timeout_ns) };
     let revents = object::wait_any(waitables, deadline)?;
     let mut ready = 0;
@@ -360,7 +392,9 @@ pub fn channel_recv(handle: u64, msg: u64) -> Result<u64, Errno> {
     let received = c.recv(cap, max_objects)?;
     // A transferred file section can bypass the receiver's path policy.
     // Reject the whole message until a broker can validate such grants.
-    if process::current_path_restricted() && received.objects.iter().any(|o| matches!(o, Object::FileMap(_) | Object::File(_))) {
+    if process::current_path_restricted()
+        && received.objects.iter().any(|o| matches!(o, Object::FileMap(_) | Object::File(_)))
+    {
         return Err(Errno::PermissionDenied);
     }
     let len = received.data.len();
@@ -399,14 +433,18 @@ pub fn shm_size(handle: u64) -> Result<u64, Errno> {
 }
 
 pub fn filemap_create(file: u64, size: u64, writable: u64) -> Result<u64, Errno> {
-    if writable > 1 { return Err(Errno::InvalidArgument); }
+    if writable > 1 {
+        return Err(Errno::InvalidArgument);
+    }
     let Object::File(file) = process::get_object(file)? else { return Err(Errno::BadHandle) };
     let section = crate::filemap::create(file, size, writable != 0)?;
     process::add_object(Object::FileMap(section))
 }
 
 pub fn filemap_map(handle: u64, offset: u64, len: u64, writable: u64) -> Result<u64, Errno> {
-    if writable > 1 { return Err(Errno::InvalidArgument); }
+    if writable > 1 {
+        return Err(Errno::InvalidArgument);
+    }
     let Object::FileMap(section) = process::get_object(handle)? else { return Err(Errno::BadHandle) };
     crate::filemap::Section::map(&section, offset, len, writable != 0)
 }
@@ -523,7 +561,9 @@ pub fn display_flush_rects(rects: u64, count: u64) -> Result<u64, Errno> {
         .as_chunks::<4>()
         .0
         .iter()
-        .map(|r| [u32::from_le_bytes(r[0]), u32::from_le_bytes(r[1]), u32::from_le_bytes(r[2]), u32::from_le_bytes(r[3])])
+        .map(|r| {
+            [u32::from_le_bytes(r[0]), u32::from_le_bytes(r[1]), u32::from_le_bytes(r[2]), u32::from_le_bytes(r[3])]
+        })
         .collect();
     crate::display::flush_rects(sched::current_pid(), &list).map(|_| 0)
 }
@@ -595,7 +635,9 @@ pub fn device_list(buf: u64, len: u64) -> Result<u64, Errno> {
         let wifi = crate::wireless::pci_name(&d);
         let description = match &wifi {
             Some(name) => name.clone(),
-            None => alloc::format!("PCI {:04x}:{:04x} {}", d.vendor, d.device, crate::pci::class_name(d.class, d.subclass)),
+            None => {
+                alloc::format!("PCI {:04x}:{:04x} {}", d.vendor, d.device, crate::pci::class_name(d.class, d.subclass))
+            }
         };
         fill_field(&mut info.description, &description);
         fill_field(

@@ -136,7 +136,9 @@ fn is_root(s: &[u16]) -> bool {
     match s {
         [BS] => true,
         [_, COLON, BS] => true,
-        [BS, BS, rest @ ..] => !rest.is_empty() && rest.iter().filter(|&&c| c == BS).count() <= 1 && rest.last() != Some(&BS),
+        [BS, BS, rest @ ..] => {
+            !rest.is_empty() && rest.iter().filter(|&&c| c == BS).count() <= 1 && rest.last() != Some(&BS)
+        }
         _ => false,
     }
 }
@@ -146,7 +148,11 @@ fn is_root(s: &[u16]) -> bool {
 fn file_name(s: &[u16]) -> usize {
     let mut at = 0;
     for i in 0..s.len() {
-        if (s[i] == BS || s[i] == b'/' as u16 || s[i] == COLON) && i + 1 < s.len() && s[i + 1] != BS && s[i + 1] != b'/' as u16 {
+        if (s[i] == BS || s[i] == b'/' as u16 || s[i] == COLON)
+            && i + 1 < s.len()
+            && s[i + 1] != BS
+            && s[i + 1] != b'/' as u16
+        {
             at = i + 1;
         }
     }
@@ -209,7 +215,14 @@ extern "win64" fn PathIsRelativeW(p: *const u16) -> i32 {
 
 extern "win64" fn PathIsRootW(p: *const u16) -> i32 {
     // SAFETY: NULL or the caller's NUL-terminated path.
-    !p.is_null() as i32 & is_root(unsafe { if p.is_null() { &[] } else { text(p) } }) as i32
+    !p.is_null() as i32
+        & is_root(unsafe {
+            if p.is_null() {
+                &[]
+            } else {
+                text(p)
+            }
+        }) as i32
 }
 
 extern "win64" fn PathIsUNCW(p: *const u16) -> i32 {
@@ -239,7 +252,8 @@ extern "win64" fn PathIsURLW(p: *const u16) -> i32 {
     // SAFETY: the caller's NUL-terminated string.
     let s = unsafe { text(p) };
     let Some(colon) = s.iter().position(|&c| c == COLON) else { return 0 };
-    let scheme_char = |c: &u16| *c < 0x80 && ((*c as u8).is_ascii_alphanumeric() || matches!(*c as u8, b'+' | b'-' | b'.'));
+    let scheme_char =
+        |c: &u16| *c < 0x80 && ((*c as u8).is_ascii_alphanumeric() || matches!(*c as u8, b'+' | b'-' | b'.'));
     (colon >= 2 && s[..colon].iter().all(scheme_char) && (s[0] as u8).is_ascii_alphabetic() && s[0] < 0x80) as i32
 }
 
@@ -667,7 +681,10 @@ fn parse_int(s: &[u16], extended: bool, hex: bool) -> Option<i64> {
         i += 1;
     }
     let digit = |c: u16, radix: u32| char::from_u32(c as u32).and_then(|ch| ch.to_digit(radix));
-    let radix = if hex && s.get(i) == Some(&(b'0' as u16)) && s.get(i + 1).is_some_and(|&c| c == b'x' as u16 || c == b'X' as u16) {
+    let radix = if hex
+        && s.get(i) == Some(&(b'0' as u16))
+        && s.get(i + 1).is_some_and(|&c| c == b'x' as u16 || c == b'X' as u16)
+    {
         i += 2;
         16
     } else {
@@ -729,7 +746,13 @@ extern "win64" fn StrToInt64ExW(s: *const u16, flags: u32, out: *mut i64) -> i32
 /// A copy in a LocalAlloc block (the caller frees it with LocalFree).
 extern "win64" fn StrDupW(s: *const u16) -> *mut u16 {
     // SAFETY: NULL or the caller's NUL-terminated string.
-    let t = unsafe { if s.is_null() { &[] } else { text(s) } };
+    let t = unsafe {
+        if s.is_null() {
+            &[]
+        } else {
+            text(s)
+        }
+    };
     let Some(block) = kernel32::heap_alloc((t.len() + 1) * 2, false) else { return core::ptr::null_mut() };
     // SAFETY: a fresh block of len + 1 units.
     unsafe { put(block as *mut u16, t) };

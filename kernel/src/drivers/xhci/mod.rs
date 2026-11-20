@@ -23,6 +23,7 @@ pub mod dma;
 mod storage;
 
 use crate::arch::timer::{self, Deadline};
+use crate::drivers::usbhid::{HidFunction, HidKind};
 use crate::sync::IrqSpinLock;
 use crate::waitq::{block_on, WaitQueue};
 use crate::{input, interrupts, irq, kprintln, pci, sched};
@@ -35,14 +36,13 @@ use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use dma::{DmaError, DmaPage, DmaRing};
-use crate::drivers::usbhid::{HidFunction, HidKind};
-use storage::StorageState;
 use osyx_usb::descriptor::{self, Configuration, DescriptorError, DeviceDescriptor, Interface, SetupPacket};
 use osyx_usb::xhci::context::{self, ContextLayout, EndpointContext, EndpointType, SlotContext};
 use osyx_usb::xhci::regs::{self, ext, op, portsc, rt, usbcmd, usbsts, Capabilities, SupportedProtocol};
 use osyx_usb::xhci::ring::{erst_entry, EventRing, ProducerRing, RingError, TrbMemory};
 use osyx_usb::xhci::trb::{CompletionCode, Trb, TrbType};
 use osyx_usb::Speed;
+use storage::StorageState;
 
 const MAX_CONTROLLERS: usize = 4;
 const COMMAND_TIMEOUT_MS: u64 = 1000;
@@ -452,7 +452,9 @@ impl Xhci {
 
     fn start(index: usize, pci: pci::Device) -> Result<Xhci> {
         set_status(index, alloc::format!("xhci{index}: initialising"));
-        let Some(pci::Bar::Memory { base, size, .. }) = pci.bar(0) else { return Err(XhciError::Bar("BAR0 is not a memory BAR")) };
+        let Some(pci::Bar::Memory { base, size, .. }) = pci.bar(0) else {
+            return Err(XhciError::Bar("BAR0 is not a memory BAR"));
+        };
         if base == 0 || size < 0x1000 {
             return Err(XhciError::Bar("BAR0 unassigned or too small"));
         }
@@ -557,7 +559,9 @@ impl Xhci {
             }
         }
         m.w32(cmd, usbcmd::HCRST);
-        if !self.poll_until(RESET_TIMEOUT_MS, |h| h.mmio.r32(cmd) & usbcmd::HCRST == 0 && h.mmio.r32(sts) & usbsts::CNR == 0) {
+        if !self.poll_until(RESET_TIMEOUT_MS, |h| {
+            h.mmio.r32(cmd) & usbcmd::HCRST == 0 && h.mmio.r32(sts) & usbsts::CNR == 0
+        }) {
             return Err(XhciError::Timeout("controller reset did not complete"));
         }
         if m.r32(self.op(op::PAGESIZE)) & 1 == 0 {
@@ -735,7 +739,13 @@ impl Xhci {
             } else {
                 ep.errors += 1;
                 if ep.errors <= 3 || ep.errors == MAX_ENDPOINT_ERRORS {
-                    kprintln!("usb {}: interrupt endpoint {} transfer error {:?} ({} in a row)", dev.name, dci, code, ep.errors);
+                    kprintln!(
+                        "usb {}: interrupt endpoint {} transfer error {:?} ({} in a row)",
+                        dev.name,
+                        dci,
+                        code,
+                        ep.errors
+                    );
                 }
                 if code.halts_endpoint() {
                     let s = slot;
@@ -958,7 +968,10 @@ impl Xhci {
             }
         }
         let n = self.devices.len();
-        set_status(self.index, alloc::format!("xhci{}: running, {} interrupts, {} devices", self.index, self.irq_mode, n));
+        set_status(
+            self.index,
+            alloc::format!("xhci{}: running, {} interrupts, {} devices", self.index, self.irq_mode, n),
+        );
     }
 
     fn reset_port(&mut self, port: u8) -> Result<()> {
@@ -1091,7 +1104,9 @@ impl Xhci {
             return None;
         }
         let mut buf = [0u8; 255];
-        let n = self.control_in(slot, SetupPacket::get_descriptor(descriptor::DESC_STRING, index, lang, 255), &mut buf).ok()?;
+        let n = self
+            .control_in(slot, SetupPacket::get_descriptor(descriptor::DESC_STRING, index, lang, 255), &mut buf)
+            .ok()?;
         descriptor::parse_string(&buf[..n]).ok().map(|s| String::from(s.trim()))
     }
 
@@ -1106,7 +1121,11 @@ impl Xhci {
             self.set_ep0_max_packet(slot, mps)?;
         }
         let mut dd = [0u8; DeviceDescriptor::LEN];
-        let n = self.control_in(slot, SetupPacket::get_descriptor(descriptor::DESC_DEVICE, 0, 0, DeviceDescriptor::LEN as u16), &mut dd)?;
+        let n = self.control_in(
+            slot,
+            SetupPacket::get_descriptor(descriptor::DESC_DEVICE, 0, 0, DeviceDescriptor::LEN as u16),
+            &mut dd,
+        )?;
         let desc = DeviceDescriptor::parse(&dd[..n])?;
         let mut c9 = [0u8; 9];
         let n = self.control_in(slot, SetupPacket::get_descriptor(descriptor::DESC_CONFIGURATION, 0, 0, 9), &mut c9)?;
@@ -1115,7 +1134,11 @@ impl Xhci {
             return Err(XhciError::Unsupported("configuration descriptor larger than 4 KiB"));
         }
         let mut raw_cfg = vec![0u8; total];
-        let n = self.control_in(slot, SetupPacket::get_descriptor(descriptor::DESC_CONFIGURATION, 0, 0, total as u16), &mut raw_cfg)?;
+        let n = self.control_in(
+            slot,
+            SetupPacket::get_descriptor(descriptor::DESC_CONFIGURATION, 0, 0, total as u16),
+            &mut raw_cfg,
+        )?;
         let cfg = Configuration::parse(&raw_cfg[..n])?;
         let mut langs = [0u8; 4];
         let lang = self
@@ -1126,7 +1149,11 @@ impl Xhci {
         let manufacturer = self.string(slot, desc.manufacturer_index, lang).unwrap_or_default();
         let product = self.string(slot, desc.product_index, lang).unwrap_or_default();
         let port = self.devices[&slot].port;
-        let name = if product.is_empty() { alloc::format!("{:04x}:{:04x}", desc.vendor, desc.product) } else { product.clone() };
+        let name = if product.is_empty() {
+            alloc::format!("{:04x}:{:04x}", desc.vendor, desc.product)
+        } else {
+            product.clone()
+        };
         kprintln!(
             "usb: port {}: {:04x}:{:04x} \"{}\" \"{}\", USB {:x}.{:02x}, class {:02x}, {} configuration(s), {} interface(s), EP0 max packet {}",
             port,
@@ -1168,7 +1195,9 @@ impl Xhci {
             })
             .cloned();
         // Bluetooth controllers (interface 0 of class E0/01/01).
-        if let Some(iface) = cfg.default_interfaces().find(|i| (i.class, i.subclass, i.protocol) == bt::CLASS && i.number == 0).cloned() {
+        if let Some(iface) =
+            cfg.default_interfaces().find(|i| (i.class, i.subclass, i.protocol) == bt::CLASS && i.number == 0).cloned()
+        {
             let devname = self.devices[&slot].name.clone();
             crate::wireless::usb_device(desc.vendor, desc.product, bt::CLASS, &devname);
             return self.setup_bt(slot, cfg.value, &iface, desc.vendor, desc.product);
@@ -1215,7 +1244,12 @@ impl Xhci {
 
     /// Configure Endpoint for every HID interrupt IN endpoint and for the
     /// mass-storage bulk endpoints, then starts the interrupt transfers.
-    fn configure_endpoints(&mut self, slot: u8, functions: Vec<(Interface, HidFunction)>, storage: Option<&Interface>) -> Result<()> {
+    fn configure_endpoints(
+        &mut self,
+        slot: u8,
+        functions: Vec<(Interface, HidFunction)>,
+        storage: Option<&Interface>,
+    ) -> Result<()> {
         let l = self.layout;
         let ac64 = self.caps.ac64;
         let dev = self.devices.get_mut(&slot).ok_or(XhciError::BadSlot)?;
@@ -1342,7 +1376,11 @@ impl Xhci {
 
     /// Releases a device and, for a hub, every device behind it first.
     fn release_device(&mut self, slot: u8) {
-        let children: Vec<u8> = self.devices.get(&slot).and_then(|d| d.hub.as_ref()).map_or(Vec::new(), |h| h.children.values().copied().collect());
+        let children: Vec<u8> = self
+            .devices
+            .get(&slot)
+            .and_then(|d| d.hub.as_ref())
+            .map_or(Vec::new(), |h| h.children.values().copied().collect());
         for child in children {
             if let Some(name) = self.devices.get(&child).map(|d| d.name.clone()) {
                 kprintln!("usb {}: gone with its hub", name);
@@ -1453,7 +1491,8 @@ impl Xhci {
         if change & hubreq::CHANGE_CONNECTION != 0 {
             let _ = self.control_out(hub_slot, hubreq::clear_port(port, hubreq::C_PORT_CONNECTION), &[]);
         }
-        let existing = self.devices.get(&hub_slot).and_then(|d| d.hub.as_ref()).and_then(|h| h.children.get(&port).copied());
+        let existing =
+            self.devices.get(&hub_slot).and_then(|d| d.hub.as_ref()).and_then(|h| h.children.get(&port).copied());
         if let Some(child) = existing {
             if let Some(name) = self.devices.get(&child).map(|d| d.name.clone()) {
                 kprintln!("usb {}: disconnected from its hub", name);
@@ -1515,7 +1554,11 @@ impl Xhci {
         let hub = &self.devices[&hub_slot];
         let (root, route, depth) = (hub.port, hub.route | ((port as u32 & 0xF) << (4 * hub.depth)), hub.depth + 1);
         // The nearest high-speed hub translates for low/full-speed devices.
-        let tt = if hub.speed == Speed::High && matches!(speed, Speed::Low | Speed::Full) { (hub_slot, port) } else { hub.tt };
+        let tt = if hub.speed == Speed::High && matches!(speed, Speed::Low | Speed::Full) {
+            (hub_slot, port)
+        } else {
+            hub.tt
+        };
         let hub_name = hub.name.clone();
         kprintln!("usb {}: port {}: {} device connected", hub_name, port, speed.name());
         let ev = self.command(Trb::enable_slot(0))?;
@@ -1544,7 +1587,8 @@ impl Xhci {
 
     /// Looks for connects and disconnects on every hub's ports.
     fn scan_hubs(&mut self) {
-        let hubs: Vec<(u8, u8)> = self.devices.iter().filter_map(|(s, d)| d.hub.as_ref().map(|h| (*s, h.ports))).collect();
+        let hubs: Vec<(u8, u8)> =
+            self.devices.iter().filter_map(|(s, d)| d.hub.as_ref().map(|h| (*s, h.ports))).collect();
         for (slot, ports) in hubs {
             for p in 1..=ports {
                 if self.devices.contains_key(&slot) {

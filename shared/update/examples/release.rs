@@ -74,7 +74,9 @@ fn tar_files(data: &[u8]) -> Result<Vec<(String, u32, Vec<u8>)>, String> {
         } else if kind != b'5' && kind != b'2' {
             return Err(format!("{name}: unsupported archive entry type {:?} (use --format=ustar)", kind as char));
         }
-        at = body.checked_add(size.div_ceil(512).checked_mul(512).ok_or("archive size overflow")?).ok_or("archive size overflow")?;
+        at = body
+            .checked_add(size.div_ceil(512).checked_mul(512).ok_or("archive size overflow")?)
+            .ok_or("archive size overflow")?;
         if at > data.len() {
             return Err(format!("{name}: archive padding truncated"));
         }
@@ -99,9 +101,14 @@ fn keygen(secret_path: &str, public_path: &str) -> Result<(), String> {
     if let Some(dir) = Path::new(secret_path).parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(secret_path).map_err(|e| format!("{secret_path}: {e}"))?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(secret_path)
+        .map_err(|e| format!("{secret_path}: {e}"))?;
     f.write_all(format!("{}\n", hex(&secret)).as_bytes()).map_err(|e| format!("{secret_path}: {e}"))?;
-    std::fs::write(public_path, format!("{}\n", hex(&public_from_secret(&secret)))).map_err(|e| format!("{public_path}: {e}"))?;
+    std::fs::write(public_path, format!("{}\n", hex(&public_from_secret(&secret))))
+        .map_err(|e| format!("{public_path}: {e}"))?;
     println!("secret key: {secret_path} (keep it private, back it up)");
     println!("public key: {public_path}");
     Ok(())
@@ -111,7 +118,9 @@ fn build(tar: &str, version: &str, secret_path: &str, out_dir: &str) -> Result<(
     let secret = read_secret(secret_path)?;
     let built_in = public_key().ok_or("shared/update/release.pub is not a public key")?;
     if public_from_secret(&secret) != built_in {
-        return Err(format!("{secret_path} does not match shared/update/release.pub: systems would reject this release"));
+        return Err(format!(
+            "{secret_path} does not match shared/update/release.pub: systems would reject this release"
+        ));
     }
     let data = std::fs::read(tar).map_err(|e| format!("{tar}: {e}"))?;
     let mut files: Vec<(String, u32, Vec<u8>)> = Vec::new();
@@ -136,7 +145,12 @@ fn build(tar: &str, version: &str, secret_path: &str, out_dir: &str) -> Result<(
     let mut payload = Vec::new();
     let mut entries = Vec::new();
     for (path, mode, body) in &files {
-        entries.push(Entry { path: path.clone(), size: body.len() as u64, mode: *mode, sha256: Sha256::digest(body).into() });
+        entries.push(Entry {
+            path: path.clone(),
+            size: body.len() as u64,
+            mode: *mode,
+            sha256: Sha256::digest(body).into(),
+        });
         payload.extend_from_slice(body);
     }
     let manifest = Manifest {
@@ -232,8 +246,14 @@ mod tests {
         let name = format!("osyx-ustar-test-{}", std::process::id());
         let path = dir.join(&name);
         std::fs::write(&path, b"test data").unwrap();
-        let executable = if Path::new("C:/msys64/usr/bin/tar.exe").exists() { "C:/msys64/usr/bin/tar.exe" } else { "tar" };
-        let result = std::process::Command::new(executable).arg("--format=ustar").args(["-cf", "-", "-C"]).arg(&dir).arg(&name).output();
+        let executable =
+            if Path::new("C:/msys64/usr/bin/tar.exe").exists() { "C:/msys64/usr/bin/tar.exe" } else { "tar" };
+        let result = std::process::Command::new(executable)
+            .arg("--format=ustar")
+            .args(["-cf", "-", "-C"])
+            .arg(&dir)
+            .arg(&name)
+            .output();
         std::fs::remove_file(&path).unwrap();
         let output = result.expect("tar must be available for archive interoperability testing");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

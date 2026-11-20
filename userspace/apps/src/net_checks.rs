@@ -119,9 +119,10 @@ pub fn run(t: &mut Tests, tcp_port: u16, udp_port: u16) {
         let after = net::stats().map(|s| s.counters[22]).unwrap_or(u64::MAX);
         r && before == after
     });
-    t.check("net: a name that does not exist is HostNotFound", || {
-        matches!(net::lookup_host("osyx-does-not-exist.invalid"), Err(e) if e.kind() == ErrorKind::HostNotFound)
-    });
+    t.check(
+        "net: a name that does not exist is HostNotFound",
+        || matches!(net::lookup_host("osyx-does-not-exist.invalid"), Err(e) if e.kind() == ErrorKind::HostNotFound),
+    );
     t.check("net: /bin/dns lookup example.com exits 0", || run_tool(&["/bin/dns", "lookup", "example.com"]));
     t.check("net: UDP echo with the host (5 datagrams)", || {
         let Ok(s) = UdpSocket::bind("0.0.0.0:0") else { return false };
@@ -148,7 +149,12 @@ pub fn run(t: &mut Tests, tcp_port: u16, udp_port: u16) {
         match echo_round_trip(SocketAddr::new(GATEWAY, tcp_port), &data) {
             Ok(got) => {
                 let ms = t0.elapsed().as_millis().max(1);
-                println!("net: TCP echo of {} bytes took {} ms ({} KiB/s each way)", data.len(), ms, (data.len() as u128 * 1000 / ms) / 1024);
+                println!(
+                    "net: TCP echo of {} bytes took {} ms ({} KiB/s each way)",
+                    data.len(),
+                    ms,
+                    (data.len() as u128 * 1000 / ms) / 1024
+                );
                 got == data
             }
             Err(e) => {
@@ -174,10 +180,17 @@ pub fn run(t: &mut Tests, tcp_port: u16, udp_port: u16) {
     {
         let t0 = Instant::now();
         let r = TcpStream::connect_timeout(&SocketAddr::new(GATEWAY, tcp_port + 50), Some(Duration::from_secs(3)));
-        println!("net: (info) connect to a closed host port: {:?} after {} ms", r.map(|_| ()).map_err(|e| e.kind()), t0.elapsed().as_millis());
+        println!(
+            "net: (info) connect to a closed host port: {:?} after {} ms",
+            r.map(|_| ()).map_err(|e| e.kind()),
+            t0.elapsed().as_millis()
+        );
     }
     t.check("net: TCP connect to a closed local port is refused (RST)", || {
-        let own = net::interfaces().ok().and_then(|i| i.into_iter().find(|i| net::field(&i.name) == "eth0")).map(|i| Ipv4Addr(i.addr));
+        let own = net::interfaces()
+            .ok()
+            .and_then(|i| i.into_iter().find(|i| net::field(&i.name) == "eth0"))
+            .map(|i| Ipv4Addr(i.addr));
         let Some(own) = own else { return false };
         [Ipv4Addr::LOCALHOST, own].iter().all(|&a| {
             matches!(TcpStream::connect(&SocketAddr::new(a, 9)), Err(e) if e.kind() == ErrorKind::ConnectionRefused)

@@ -11,7 +11,9 @@ pub struct RefaultGuard {
 impl RefaultGuard {
     /// Times use caller-supplied monotonic ticks. Parameters use the same unit.
     pub fn restored(&mut self, evicted: u64, now: u64, window: u64, threshold: u32, cooldown: u64) -> bool {
-        if now.saturating_sub(evicted) > window || threshold == 0 { return false; }
+        if now.saturating_sub(evicted) > window || threshold == 0 {
+            return false;
+        }
         if now.saturating_sub(self.window_start) > window {
             self.window_start = now;
             self.quick = 0;

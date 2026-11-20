@@ -86,7 +86,11 @@ impl<D: BlockDevice> FileSystem<D> {
             let a = self.bitmap[bit / 8] >> (bit % 8) & 1 != 0;
             let b = seen[bit / 8] >> (bit % 8) & 1 != 0;
             if a != b {
-                return Err(FsError::Corrupt(if a { "allocated cluster nobody uses" } else { "used cluster not allocated" }));
+                return Err(FsError::Corrupt(if a {
+                    "allocated cluster nobody uses"
+                } else {
+                    "used cluster not allocated"
+                }));
             }
             used += a as u32;
         }

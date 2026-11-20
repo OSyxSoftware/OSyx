@@ -82,7 +82,9 @@ pub fn run(t: &mut Tests) {
     t.check("PRIO 2: dynamic boost: +1 futex/IPC, +2 input, HIGH ceiling, decay per slice", || boost(cpus - 1));
     println!("prio: test 2 took {} ms", ms(started.elapsed()));
     let started = Instant::now();
-    t.check("PRIO 3: SMP inheritance: contended locks on every CPU, no lost update, no deadlock", || smp_inheritance(cpus));
+    t.check("PRIO 3: SMP inheritance: contended locks on every CPU, no lost update, no deadlock", || {
+        smp_inheritance(cpus)
+    });
     println!("prio: test 3 took {} ms", ms(started.elapsed()));
     let _ = system::thread_affinity(0, all);
 }
@@ -174,7 +176,8 @@ fn inversion(cpu: u32) -> bool {
     );
     let Some((_, high_info)) = high else { return false };
     let before_ok = before_wait.is_some_and(|i| i.base == p::LOW && i.inherited == 0);
-    let during_ok = lent.is_some() && during.is_some_and(|i| i.inherited == p::HIGH && i.effective == p::HIGH && i.base == p::LOW);
+    let during_ok =
+        lent.is_some() && during.is_some_and(|i| i.inherited == p::HIGH && i.effective == p::HIGH && i.base == p::LOW);
     // Inheriting, LOW outruns MEDIUM; without it, LOW only runs when aging
     // lifts it to MEDIUM's level.
     let ran_ahead = boosted > starved.saturating_mul(4);
@@ -275,7 +278,9 @@ fn boost(cpu: u32) -> bool {
         futex, pipe, input, input_above, futex_high, futex_realtime
     );
     let woke = |w: Woken, base: u64, boost: u64, effective: u64| {
-        w.is_some_and(|(now, _)| now.base == base && now.boost == boost && now.effective == effective && now.inherited == 0)
+        w.is_some_and(|(now, _)| {
+            now.base == base && now.boost == boost && now.effective == effective && now.inherited == 0
+        })
     };
     let decayed = |w: Woken, base: u64| w.is_some_and(|(_, later)| later.boost == 0 && later.effective == base);
     let ipc = woke(futex, p::NORMAL, 1, p::NORMAL + 1) && woke(pipe, p::NORMAL, 1, p::NORMAL + 1);
@@ -318,7 +323,8 @@ fn smp_inheritance(cpus: u32) -> bool {
     let mut workers = Vec::new();
     for cpu in 0..cpus {
         for (k, level) in [p::LOW, p::HIGH].into_iter().enumerate() {
-            let (locks, finished, release, low_tids) = (locks.clone(), finished.clone(), release.clone(), low_tids.clone());
+            let (locks, finished, release, low_tids) =
+                (locks.clone(), finished.clone(), release.clone(), low_tids.clone());
             workers.push(thread::spawn(move || {
                 if !set_priority(level) || !pin(cpu) {
                     return None;
@@ -386,7 +392,8 @@ fn smp_inheritance(cpus: u32) -> bool {
     }
     let complete = results.iter().all(Option::is_some);
     let counts: Vec<u64> = locks.iter().map(|m| *m.lock().unwrap()).collect();
-    let consistent = counts.iter().zip(expected.iter()).all(|(a, b)| a == b) && counts.iter().sum::<u64>() == ROUNDS * workers_total as u64;
+    let consistent = counts.iter().zip(expected.iter()).all(|(a, b)| a == b)
+        && counts.iter().sum::<u64>() == ROUNDS * workers_total as u64;
     println!(
         "prio3: {} CPUs, {} workers x {} rounds in {} ms (finished: {}); counts {:?} expected {:?}; \
          inheritance seen {} samples, max {}, over HIGH {}; final views clean {}",
@@ -402,5 +409,12 @@ fn smp_inheritance(cpus: u32) -> bool {
         over,
         clean
     );
-    done.is_some() && complete && consistent && lent_seen > 0 && max_seen <= p::HIGH && over == 0 && clean && spinners_ok
+    done.is_some()
+        && complete
+        && consistent
+        && lent_seen > 0
+        && max_seen <= p::HIGH
+        && over == 0
+        && clean
+        && spinners_ok
 }

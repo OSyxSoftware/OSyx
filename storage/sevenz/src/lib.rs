@@ -489,7 +489,9 @@ struct Folder {
 impl Folder {
     /// The out stream no bond consumes: the folder's result.
     fn main_out(&self) -> Result<usize> {
-        (0..self.unpack.len()).find(|o| !self.bonds.iter().any(|b| b.1 == *o)).ok_or(Error::Corrupt("folder has no main output"))
+        (0..self.unpack.len())
+            .find(|o| !self.bonds.iter().any(|b| b.1 == *o))
+            .ok_or(Error::Corrupt("folder has no main output"))
     }
     fn size(&self) -> Result<u64> {
         Ok(self.unpack[self.main_out()?])
@@ -561,7 +563,9 @@ fn read_streams(r: &mut Reader<'_>) -> Result<Streams> {
                     }
                     let np = total_in.checked_sub(f.bonds.len()).ok_or(Error::Corrupt("bonds"))?;
                     if np == 1 {
-                        let free = (0..total_in).find(|i| !f.bonds.iter().any(|b| b.0 == *i)).ok_or(Error::Corrupt("bonds"))?;
+                        let free = (0..total_in)
+                            .find(|i| !f.bonds.iter().any(|b| b.0 == *i))
+                            .ok_or(Error::Corrupt("bonds"))?;
                         f.packed.push(free);
                     } else {
                         for _ in 0..np {
@@ -670,7 +674,13 @@ fn folder_stream(src: &Shared, base: u64, s: &Streams, folder: usize, first_pack
         off += size;
         let _ = i;
     }
-    fn build_out(src: &Shared, f: &Folder, packs: &[(u64, u64)], first_pack: usize, out: usize) -> Result<Box<dyn Stream>> {
+    fn build_out(
+        src: &Shared,
+        f: &Folder,
+        packs: &[(u64, u64)],
+        first_pack: usize,
+        out: usize,
+    ) -> Result<Box<dyn Stream>> {
         let (mut in_base, mut out_base) = (0, 0);
         for c in &f.coders {
             if out < out_base + c.outs {
@@ -684,7 +694,9 @@ fn folder_stream(src: &Shared, base: u64, s: &Streams, folder: usize, first_pack
                 let size = f.unpack[out];
                 let stream: Box<dyn Stream> = match c.id.as_slice() {
                     [0x00] => inputs.pop().ok_or(Error::Corrupt("copy input"))?,
-                    [0x03, 0x01, 0x01] => Box::new(Lzma::new(&c.props, inputs.pop().ok_or(Error::Corrupt("LZMA input"))?, size)?),
+                    [0x03, 0x01, 0x01] => {
+                        Box::new(Lzma::new(&c.props, inputs.pop().ok_or(Error::Corrupt("LZMA input"))?, size)?)
+                    }
                     [0x03, 0x03, 0x01, 0x03] => Box::new(Bcj::new(inputs.pop().ok_or(Error::Corrupt("BCJ input"))?)),
                     [0x03, 0x03, 0x01, 0x1B] => Box::new(Bcj2::new(inputs, size)?),
                     [0x21] => return Err(Error::Unsupported("LZMA2")),
@@ -698,7 +710,13 @@ fn folder_stream(src: &Shared, base: u64, s: &Streams, folder: usize, first_pack
         }
         Err(Error::Corrupt("out stream index"))
     }
-    fn build_in(src: &Shared, f: &Folder, packs: &[(u64, u64)], first_pack: usize, i: usize) -> Result<Box<dyn Stream>> {
+    fn build_in(
+        src: &Shared,
+        f: &Folder,
+        packs: &[(u64, u64)],
+        first_pack: usize,
+        i: usize,
+    ) -> Result<Box<dyn Stream>> {
         if let Some(b) = f.bonds.iter().find(|b| b.0 == i) {
             return build_out(src, f, packs, first_pack, b.1);
         }
@@ -869,7 +887,11 @@ fn open(src: &Shared, base: u64) -> Result<Archive> {
         let mut sub = 0;
         for (i, name) in names.into_iter().enumerate() {
             let path = name.replace('\\', "/");
-            if path.is_empty() || path.starts_with('/') || path.split('/').any(|c| c == ".." || c.is_empty()) || path.contains(':') {
+            if path.is_empty()
+                || path.starts_with('/')
+                || path.split('/').any(|c| c == ".." || c.is_empty())
+                || path.contains(':')
+            {
                 return Err(Error::Corrupt("unsafe path in the archive"));
             }
             if empty_stream[i] {

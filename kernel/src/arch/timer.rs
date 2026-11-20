@@ -44,9 +44,18 @@ static TSC_KHZ: AtomicU64 = AtomicU64::new(0);
 static HEALTHY: AtomicBool = AtomicBool::new(false);
 static SECONDARY_COUNT: AtomicU32 = AtomicU32::new(0);
 
-pub fn secondary_available()->bool { SECONDARY_COUNT.load(Ordering::Relaxed)!=0 }
-pub fn start_secondary() { apic::timer_start_periodic(APIC_TIMER_VECTOR,SECONDARY_COUNT.load(Ordering::Relaxed)); }
-pub fn spin_ms(ms:u64) { let end=tsc().saturating_add(tsc_khz().saturating_mul(ms));while tsc()<end {core::hint::spin_loop();} }
+pub fn secondary_available() -> bool {
+    SECONDARY_COUNT.load(Ordering::Relaxed) != 0
+}
+pub fn start_secondary() {
+    apic::timer_start_periodic(APIC_TIMER_VECTOR, SECONDARY_COUNT.load(Ordering::Relaxed));
+}
+pub fn spin_ms(ms: u64) {
+    let end = tsc().saturating_add(tsc_khz().saturating_mul(ms));
+    while tsc() < end {
+        core::hint::spin_loop();
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Reference {
@@ -240,7 +249,7 @@ pub fn init(force: Option<&str>, calib: Option<&str>) {
     if use_apic && force != Some("pit") && (1..=u32::MAX as u64).contains(&apic_per_tick) {
         pic::disable_timer_irq();
         apic::timer_start_periodic(APIC_TIMER_VECTOR, apic_per_tick as u32);
-        SECONDARY_COUNT.store(apic_per_tick as u32,Ordering::Relaxed);
+        SECONDARY_COUNT.store(apic_per_tick as u32, Ordering::Relaxed);
         SOURCE.store(SOURCE_APIC, Ordering::Relaxed);
     } else {
         start_pit();
@@ -248,7 +257,7 @@ pub fn init(force: Option<&str>, calib: Option<&str>) {
 }
 
 fn start_pit() {
-    SECONDARY_COUNT.store(0,Ordering::Relaxed);
+    SECONDARY_COUNT.store(0, Ordering::Relaxed);
     apic::timer_stop();
     pic::enable_timer_irq();
     SOURCE.store(SOURCE_PIT, Ordering::Relaxed);
@@ -281,7 +290,12 @@ pub fn verify() -> bool {
     }
     HEALTHY.store(ok, Ordering::Relaxed);
     if ok {
-        kprintln!("timer: tick source: {} at {} Hz, {} mode, interrupts enabled", source_name(), TIMER_HZ, apic::mode_name());
+        kprintln!(
+            "timer: tick source: {} at {} Hz, {} mode, interrupts enabled",
+            source_name(),
+            TIMER_HZ,
+            apic::mode_name()
+        );
     } else {
         kprintln!(
             "timer: WARNING: no tick source interrupts ({} tried, {} mode); sleeping and preemption will not work",

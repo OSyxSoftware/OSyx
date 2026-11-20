@@ -62,10 +62,12 @@ pub fn unpack() -> Result<usize, &'static str> {
         })?;
         out
     } else {
-        miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&data[HEADER_LEN..], declared as usize).map_err(|e| {
-            kprintln!("live: inflate failed: {:?}", e.status);
-            "rootfs.z does not decompress"
-        })?
+        miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&data[HEADER_LEN..], declared as usize).map_err(
+            |e| {
+                kprintln!("live: inflate failed: {:?}", e.status);
+                "rootfs.z does not decompress"
+            },
+        )?
     };
     kprintln!("live: decompressed in {} ms", crate::interrupts::uptime_ms().saturating_sub(started));
     if raw.len() as u64 != declared {

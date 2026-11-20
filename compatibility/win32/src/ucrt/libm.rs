@@ -12,9 +12,9 @@
 //! are computed in double and rounded to float.
 
 use super::math::{
-    add, consts, copysign_soft, dd, div, error, exp_dd, fabs_soft, fmod_soft, is_int, ln_dd,
-    mul, neg, quick_two_sum, round_half_even, scalbn as scalb, scale, sqrt_soft, sub, trunc_f, two_prod, two_sum, Dd,
-    DOMAIN, IND, OVERFLOW, SING, UNDERFLOW,
+    add, consts, copysign_soft, dd, div, error, exp_dd, fabs_soft, fmod_soft, is_int, ln_dd, mul, neg, quick_two_sum,
+    round_half_even, scalbn as scalb, scale, sqrt_soft, sub, trunc_f, two_prod, two_sum, Dd, DOMAIN, IND, OVERFLOW,
+    SING, UNDERFLOW,
 };
 use super::*;
 
@@ -42,8 +42,28 @@ fn note_libm(i: usize) {
     let c = LIBM_CALLS[i].fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
     if c.is_multiple_of(20_000) && libm_trace() {
         const NAMES: [&str; 22] = [
-            "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "expm1",
-            "log1p", "log2", "exp2", "cbrt", "atan2", "hypot", "fma", "remainder", "nextafter",
+            "sin",
+            "cos",
+            "tan",
+            "asin",
+            "acos",
+            "atan",
+            "sinh",
+            "cosh",
+            "tanh",
+            "asinh",
+            "acosh",
+            "atanh",
+            "expm1",
+            "log1p",
+            "log2",
+            "exp2",
+            "cbrt",
+            "atan2",
+            "hypot",
+            "fma",
+            "remainder",
+            "nextafter",
         ];
         // The stack above this frame holds return addresses; anything in the
         // browser's own image range identifies the caller.

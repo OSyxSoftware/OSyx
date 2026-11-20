@@ -1,4 +1,4 @@
-﻿//! Network overload and recovery check run by `init netstress,<tcp>,<udp>`
+//! Network overload and recovery check run by `init netstress,<tcp>,<udp>`
 //! (driven by `scripts/net-stress.ps1`) against the helper of
 //! `scripts/net-bench-host.py`.
 //!
@@ -38,7 +38,11 @@ fn health(tcp: SocketAddr, udp: SocketAddr, round: usize) -> Result<(), String> 
     // Every part is tried, so a failure names all that is broken.
     let parts = [health_udp(udp, round), health_dns(round), health_tcp(tcp, round), health_ping(round)];
     let errors: Vec<String> = parts.into_iter().filter_map(Result::err).collect();
-    if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 fn health_udp(udp: SocketAddr, round: usize) -> Result<(), String> {
@@ -69,7 +73,8 @@ fn health_dns(round: usize) -> Result<(), String> {
 }
 
 fn health_tcp(tcp: SocketAddr, round: usize) -> Result<(), String> {
-    let mut s = TcpStream::connect_timeout(&tcp, Some(Duration::from_secs(3))).map_err(|e| format!("TCP connect: {e}"))?;
+    let mut s =
+        TcpStream::connect_timeout(&tcp, Some(Duration::from_secs(3))).map_err(|e| format!("TCP connect: {e}"))?;
     let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
     command(&mut s, b'E', 0).map_err(|e| format!("TCP send: {e}"))?;
     let data: Vec<u8> = (0..16384).map(|i| (i * 7 + round) as u8).collect();
@@ -171,7 +176,10 @@ pub fn run(tcp_port: u16, udp_port: u16) -> i32 {
             }
         }
     }
-    println!("netstress: (info) {opened} connections closed while their peer holds them{refused}; sockets: {}", socket_states());
+    println!(
+        "netstress: (info) {opened} connections closed while their peer holds them{refused}; sockets: {}",
+        socket_states()
+    );
 
     // 2. Full buffers both ways, closed with data unread (a reset), while
     //    readers sit blocked on idle sockets; 3. UDP floods out and in.
@@ -224,7 +232,11 @@ pub fn run(tcp_port: u16, udp_port: u16) -> i32 {
     for b in blockers {
         let _ = b.join();
     }
-    println!("netstress: (info) load done: {} KiB pushed into full buffers; sockets: {}", filled / 1024, socket_states());
+    println!(
+        "netstress: (info) load done: {} KiB pushed into full buffers; sockets: {}",
+        filled / 1024,
+        socket_states()
+    );
     drop(sink);
 
     // 4. The load is over: the network has to come back by itself.
@@ -234,7 +246,10 @@ pub fn run(tcp_port: u16, udp_port: u16) -> i32 {
 
     // 5. Reconnect the way Settings does (DHCP again), twice: once while
     //    the interface is up, once after taking it down.
-    for (step, down_first) in [("reconnect (DHCP again) brings the network back", false), ("down, then reconnect, brings the network back", true)] {
+    for (step, down_first) in [
+        ("reconnect (DHCP again) brings the network back", false),
+        ("down, then reconnect, brings the network back", true),
+    ] {
         let r = (|| {
             let i = eth0().ok_or(String::from("no eth0"))?;
             let c = NetConfig { iface: i.index as u32, method: net::CONFIG_DHCP as u32, ..Default::default() };

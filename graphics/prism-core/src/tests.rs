@@ -22,7 +22,8 @@ fn sync_ack_follows_geometry_events_on_its_connection() {
     h.send(c, Request::SetGeometry { window: 1, x: 20, y: 30, width: 360, height: 260 });
     h.send(c, Request::Sync { cookie: 42 });
     let events = h.events_for(c);
-    let resized = events.iter().position(|event| matches!(event, Event::Configure { width: 360, height: 260, .. })).unwrap();
+    let resized =
+        events.iter().position(|event| matches!(event, Event::Configure { width: 360, height: 260, .. })).unwrap();
     let ack = events.iter().position(|event| matches!(event, Event::SyncDone { cookie: 42 })).unwrap();
     assert!(resized < ack);
 }
@@ -43,16 +44,18 @@ fn cursor_overlay_moves_without_recomposing_and_matches_composed_pixels() {
     let mut regular = Harness::new();
     let mut overlay = Harness::new();
     overlay.c.set_cursor_overlay(true);
-    regular.render(); overlay.render();
+    regular.render();
+    overlay.render();
     let clean = overlay.fb.clone();
-    regular.move_to(123,234); overlay.move_to(123,234);
+    regular.move_to(123, 234);
+    overlay.move_to(123, 234);
     assert!(regular.c.has_damage());
     assert!(!overlay.c.has_damage(), "pointer-only motion must not schedule an application frame");
     regular.render();
     let mut frame = overlay.fb.clone();
-    overlay.c.draw_cursor_overlay(&mut Surface::new(&mut frame,W,H,W).unwrap());
-    assert_eq!(frame,regular.fb);
-    assert_eq!(overlay.fb,clean,"overlay must leave the clean back buffer intact");
+    overlay.c.draw_cursor_overlay(&mut Surface::new(&mut frame, W, H, W).unwrap());
+    assert_eq!(frame, regular.fb);
+    assert_eq!(overlay.fb, clean, "overlay must leave the clean back buffer intact");
     assert!(overlay.c.cursor_area().w * overlay.c.cursor_area().h < 1024);
 }
 
@@ -74,7 +77,10 @@ fn changing_the_palette_redraws_decorations_in_the_new_colours() {
     assert!(h.fb.iter().any(|px| px & 0x00ff_ffff == light.title_active & 0x00ff_ffff), "no light title bar");
     assert_ne!(h.fb, dark);
     // The client's own pixels are not recoloured.
-    assert_eq!(h.fb.iter().filter(|px| **px & 0x00ff_ffff == 0x0010_2030).count(), dark.iter().filter(|px| **px & 0x00ff_ffff == 0x0010_2030).count());
+    assert_eq!(
+        h.fb.iter().filter(|px| **px & 0x00ff_ffff == 0x0010_2030).count(),
+        dark.iter().filter(|px| **px & 0x00ff_ffff == 0x0010_2030).count()
+    );
     h.c.set_palette(theme::Palette::DARK);
     h.render();
     assert_eq!(h.fb, dark);
@@ -125,14 +131,20 @@ fn print_screen_asks_for_the_screen_the_window_or_a_dragged_area() {
     // The release itself is not the window's either, but the window
     // under the pointer hears where the pointer is now.
     let after = h.events_for(c);
-    assert!(after.iter().all(|e| !matches!(e, Event::Pointer { kind, .. } if *kind == proto::pointer::BUTTON)), "the window got the release");
+    assert!(
+        after.iter().all(|e| !matches!(e, Event::Pointer { kind, .. } if *kind == proto::pointer::BUTTON)),
+        "the window got the release"
+    );
     // A drag in a window is not turned into a selection half way.
     h.move_to(rect.x + 50, rect.y + 50);
     h.input(kind::BUTTON, 1, 1, 0, 0);
     key_event(&mut h, key::PRINT_SCREEN, true, modifier::LEFT_SHIFT);
     assert!(!h.c.selecting());
     h.input(kind::BUTTON, 1, 0, 0, 0);
-    assert!(h.events_for(c).iter().any(|e| matches!(e, Event::Pointer { kind, .. } if *kind == proto::pointer::BUTTON)), "the window lost its release");
+    assert!(
+        h.events_for(c).iter().any(|e| matches!(e, Event::Pointer { kind, .. } if *kind == proto::pointer::BUTTON)),
+        "the window lost its release"
+    );
     // The outline is gone from the frame the picture is taken from.
     h.render();
     assert_eq!(h.px(rect.x + 20, rect.y + 29) & 0x00ff_ffff, 0x0010_2030);
@@ -209,7 +221,15 @@ impl Harness {
         let buf: Box<dyn PixelSource> = Box::new(vec![color; (w * h) as usize]);
         self.try_send(
             client,
-            Request::AttachBuffer { surface: local, buffer: local, width: w, height: h, stride: w * 4, format: proto::format::XRGB8888, offset: 0 },
+            Request::AttachBuffer {
+                surface: local,
+                buffer: local,
+                width: w,
+                height: h,
+                stride: w * 4,
+                format: proto::format::XRGB8888,
+                offset: 0,
+            },
             Some(buf),
         )
         .unwrap();
@@ -224,7 +244,11 @@ impl Harness {
     }
 
     fn events(&mut self) -> Vec<(ClientId, Event)> {
-        self.c.take_messages().into_iter().map(|(c, m)| (c, Event::decode(&m).expect("compositor emits valid events"))).collect()
+        self.c
+            .take_messages()
+            .into_iter()
+            .map(|(c, m)| (c, Event::decode(&m).expect("compositor emits valid events")))
+            .collect()
     }
 
     fn events_for(&mut self, client: ClientId) -> Vec<Event> {
@@ -330,10 +354,12 @@ fn committed_content_reaches_the_screen_with_decorations() {
     assert!(below != theme::DESKTOP_FALLBACK && below & 0xFF < theme::DESKTOP_FALLBACK & 0xFF);
     assert_eq!(h.px(5, 5), theme::DESKTOP_FALLBACK);
     // Frame callback after the content was composed.
-    assert!(h.events_for(app).contains(&Event::FrameDone { surface: 1, time_ms: h.now - 1 }) || {
-        // (the first render already sent it)
-        true
-    });
+    assert!(
+        h.events_for(app).contains(&Event::FrameDone { surface: 1, time_ms: h.now - 1 }) || {
+            // (the first render already sent it)
+            true
+        }
+    );
 }
 
 #[test]
@@ -347,13 +373,19 @@ fn taskbar_excludes_unmapped_and_auxiliary_windows_but_keeps_minimized_apps() {
     assert!(events.iter().any(|e| matches!(e, Event::WindowList { windows } if windows.is_empty())));
     h.paint(app, 1, 200, 100, 0);
     let events = h.events_for(shell);
-    let id = events.iter().find_map(|e| match e {
-        Event::WindowList { windows } if windows.len() == 1 => Some(windows[0].id), _ => None,
-    }).expect("first buffer publishes the application task");
+    let id = events
+        .iter()
+        .find_map(|e| match e {
+            Event::WindowList { windows } if windows.len() == 1 => Some(windows[0].id),
+            _ => None,
+        })
+        .expect("first buffer publishes the application task");
     h.create(app, 2, Role::Normal, window_flags::SKIP_TASKBAR, (30, 50, 100, 80));
     h.paint(app, 2, 100, 80, 0);
     let events = h.events_for(shell);
-    assert!(events.iter().any(|e| matches!(e, Event::WindowList { windows } if windows.len() == 1 && windows[0].id == id)));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::WindowList { windows } if windows.len() == 1 && windows[0].id == id)));
     h.send(app, Request::WindowAction { target: 1, action: Action::Minimize, global: false });
     let events = h.events_for(shell);
     assert!(events.iter().any(|e| matches!(e, Event::WindowList { windows } if windows.len() == 1 && windows[0].flags & proto::state::MINIMIZED != 0)));
@@ -367,11 +399,23 @@ fn owned_helper_focus_highlights_its_parent_task() {
     let parent = h.window(app, 1, 200, 100, 0);
     h.events();
     h.send(app, Request::CreateSurface { surface: 2 });
-    h.send(app, Request::CreateWindow {
-        window: 2, surface: 2, parent: 1, role: Role::Normal,
-        flags: window_flags::SKIP_TASKBAR, x: 30, y: 50,
-        width: 100, height: 80, min_width: 0, min_height: 0, title: "helper".to_string(),
-    });
+    h.send(
+        app,
+        Request::CreateWindow {
+            window: 2,
+            surface: 2,
+            parent: 1,
+            role: Role::Normal,
+            flags: window_flags::SKIP_TASKBAR,
+            x: 30,
+            y: 50,
+            width: 100,
+            height: 80,
+            min_width: 0,
+            min_height: 0,
+            title: "helper".to_string(),
+        },
+    );
     h.paint(app, 2, 100, 80, 0);
     let events = h.events_for(shell);
     assert!(events.iter().any(|e| matches!(e, Event::WindowList { windows } if windows.len() == 1 && windows[0].id == parent && windows[0].flags & proto::state::ACTIVATED != 0)));
@@ -416,8 +460,12 @@ fn damage_after_mapping_is_limited_to_the_committed_area() {
         }
     }
     let buf: Box<dyn PixelSource> = Box::new(data);
-    h.try_send(app, Request::AttachBuffer { surface: 1, buffer: 1, width: 300, height: 200, stride: 1200, format: 1, offset: 0 }, Some(buf))
-        .unwrap();
+    h.try_send(
+        app,
+        Request::AttachBuffer { surface: 1, buffer: 1, width: 300, height: 200, stride: 1200, format: 1, offset: 0 },
+        Some(buf),
+    )
+    .unwrap();
     h.send(app, Request::Damage { surface: 1, rect: proto::Rect { x: 40, y: 20, w: 10, h: 10 } });
     h.send(app, Request::Commit { surface: 1 });
     let mut s = Surface::new(&mut h.fb, W, H, W).unwrap();
@@ -552,8 +600,26 @@ fn keyboard_goes_to_the_focused_window_with_layout_text() {
     h.input(kind::KEY, key::A, 0, 0, modifier::RIGHT_ALT);
     let ev = h.events();
     assert!(ev.iter().all(|(c, _)| *c == b), "only the focused client hears keys");
-    assert_eq!(ev[0].1, Event::Key { window: 1, usage: key::A, state: proto::key_state::DOWN, modifiers: modifier::RIGHT_ALT, text: Some('ą') });
-    assert_eq!(ev[1].1, Event::Key { window: 1, usage: key::A, state: proto::key_state::UP, modifiers: modifier::RIGHT_ALT, text: None });
+    assert_eq!(
+        ev[0].1,
+        Event::Key {
+            window: 1,
+            usage: key::A,
+            state: proto::key_state::DOWN,
+            modifiers: modifier::RIGHT_ALT,
+            text: Some('ą')
+        }
+    );
+    assert_eq!(
+        ev[1].1,
+        Event::Key {
+            window: 1,
+            usage: key::A,
+            state: proto::key_state::UP,
+            modifiers: modifier::RIGHT_ALT,
+            text: None
+        }
+    );
     h.input(kind::KEY, key::ENTER, 1, 0, 0);
     assert_eq!(h.events_for(b), [Event::Key { window: 1, usage: key::ENTER, state: 1, modifiers: 0, text: None }]);
 }
@@ -573,13 +639,22 @@ fn pointer_events_use_local_coordinates_and_capture_while_dragging() {
     h.input(kind::BUTTON, 1, 1, 0, 0);
     h.move_to(r.right() as i32 + 100, r.y - 30);
     let ev = h.events_for(a);
-    assert!(ev.iter().any(|e| matches!(e, Event::Pointer { kind: proto::pointer::BUTTON, button: 1, pressed: true, .. })));
+    assert!(ev
+        .iter()
+        .any(|e| matches!(e, Event::Pointer { kind: proto::pointer::BUTTON, button: 1, pressed: true, .. })));
     let expect_x = r.w as i32 + 100;
-    assert!(ev.iter().any(|e| matches!(e, Event::Pointer { kind: proto::pointer::MOTION, x, y: -30, .. } if *x == expect_x)), "{ev:?}");
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Pointer { kind: proto::pointer::MOTION, x, y: -30, .. } if *x == expect_x)),
+        "{ev:?}"
+    );
     h.input(kind::BUTTON, 1, 0, 0, 0);
     let ev = h.events_for(a);
     assert!(ev.iter().any(|e| matches!(e, Event::Pointer { kind: proto::pointer::BUTTON, pressed: false, .. })));
-    assert!(ev.iter().any(|e| matches!(e, Event::Pointer { kind: proto::pointer::LEAVE, .. })), "leave after the grab ends outside");
+    assert!(
+        ev.iter().any(|e| matches!(e, Event::Pointer { kind: proto::pointer::LEAVE, .. })),
+        "leave after the grab ends outside"
+    );
     // Wheel goes to the window under the pointer, carrying both coordinate
     // spaces: Win32 wheel messages report the screen position.
     h.move_to(r.x + 5, r.y + 5);
@@ -714,7 +789,12 @@ fn decoration_buttons_close_maximize_minimize() {
     let r = h.rect_of(w);
     let f_top = r.y - theme::TITLE_HEIGHT as i32;
     let right = r.right() as i32 - theme::BUTTON_MARGIN as i32;
-    let center = |i: i32| (right - (i + 1) * theme::BUTTON as i32 - i * theme::BUTTON_GAP as i32 + 12, f_top + theme::TITLE_HEIGHT as i32 / 2);
+    let center = |i: i32| {
+        (
+            right - (i + 1) * theme::BUTTON as i32 - i * theme::BUTTON_GAP as i32 + 12,
+            f_top + theme::TITLE_HEIGHT as i32 / 2,
+        )
+    };
     h.events();
     // Close: a request to the client, the window stays until it agrees.
     let (x, y) = center(0);
@@ -846,7 +926,11 @@ fn malformed_and_invalid_requests_disconnect_only_the_offender() {
     let liar = h.client(4);
     h.send(liar, Request::CreateSurface { surface: 1 });
     let small: Box<dyn PixelSource> = Box::new(vec![0u32; 10]);
-    let r = h.try_send(liar, Request::AttachBuffer { surface: 1, buffer: 1, width: 100, height: 100, stride: 400, format: 1, offset: 0 }, Some(small));
+    let r = h.try_send(
+        liar,
+        Request::AttachBuffer { surface: 1, buffer: 1, width: 100, height: 100, stride: 400, format: 1, offset: 0 },
+        Some(small),
+    );
     assert_eq!(r, Err(proto::error::BAD_BUFFER));
     h.c.disconnect(liar);
     // Unknown ids, commit without a buffer, duplicates.
@@ -864,7 +948,10 @@ fn malformed_and_invalid_requests_disconnect_only_the_offender() {
     assert_eq!(h.try_send(c, Request::CreateSurface { surface: 1 }, Some(stray)), Err(proto::error::MALFORMED));
     // Global actions need the shell role.
     let c = h.client(9);
-    assert_eq!(h.try_send(c, Request::WindowAction { target: gw, action: Action::Close, global: true }, None), Err(proto::error::NOT_ALLOWED));
+    assert_eq!(
+        h.try_send(c, Request::WindowAction { target: gw, action: Action::Close, global: true }, None),
+        Err(proto::error::NOT_ALLOWED)
+    );
     // The well-behaved client is unaffected.
     h.render();
     let r = h.rect_of(gw);
@@ -878,11 +965,21 @@ fn a_redefined_buffer_is_revalidated_at_commit() {
     let c = h.client(2);
     h.create(c, 1, Role::Normal, window_flags::DECORATED, (-1, -1, 50, 50));
     let big: Box<dyn PixelSource> = Box::new(vec![0u32; 50 * 50]);
-    h.try_send(c, Request::AttachBuffer { surface: 1, buffer: 1, width: 50, height: 50, stride: 200, format: 1, offset: 0 }, Some(big)).unwrap();
+    h.try_send(
+        c,
+        Request::AttachBuffer { surface: 1, buffer: 1, width: 50, height: 50, stride: 200, format: 1, offset: 0 },
+        Some(big),
+    )
+    .unwrap();
     // Redefine buffer 1 as a tiny one through another surface's attach.
     h.send(c, Request::CreateSurface { surface: 2 });
     let tiny: Box<dyn PixelSource> = Box::new(vec![0u32; 4]);
-    h.try_send(c, Request::AttachBuffer { surface: 2, buffer: 1, width: 2, height: 2, stride: 8, format: 1, offset: 0 }, Some(tiny)).unwrap();
+    h.try_send(
+        c,
+        Request::AttachBuffer { surface: 2, buffer: 1, width: 2, height: 2, stride: 8, format: 1, offset: 0 },
+        Some(tiny),
+    )
+    .unwrap();
     assert_eq!(h.try_send(c, Request::Commit { surface: 1 }, None), Err(proto::error::BAD_BUFFER));
 }
 
@@ -932,8 +1029,14 @@ fn per_client_limits_are_enforced() {
     c2.handle(id, &hello(0), None, 0).unwrap();
     c2.handle(id, &Request::CreateSurface { surface: 1 }.encode(0), None, 0).unwrap();
     let big: Box<dyn PixelSource> = Box::new(vec![0u32; 200 * 200]);
-    c2.handle(id, &Request::AttachBuffer { surface: 1, buffer: 1, width: 200, height: 200, stride: 800, format: 1, offset: 0 }.encode(0), Some(big), 0)
-        .unwrap();
+    c2.handle(
+        id,
+        &Request::AttachBuffer { surface: 1, buffer: 1, width: 200, height: 200, stride: 800, format: 1, offset: 0 }
+            .encode(0),
+        Some(big),
+        0,
+    )
+    .unwrap();
     let r = c2.handle(id, &Request::Commit { surface: 1 }.encode(0), None, 0);
     assert_eq!(r.map_err(|e| e.code), Err(proto::error::LIMIT));
 }
@@ -946,7 +1049,10 @@ fn notifications_go_to_the_shell_only() {
     h.events();
     h.send(a, Request::Notify { title: "Done".to_string(), body: "42 files".to_string() });
     let ev = h.events();
-    assert_eq!(ev, [(shell, Event::Notification { from_pid: 2, title: "Done".to_string(), body: "42 files".to_string() })]);
+    assert_eq!(
+        ev,
+        [(shell, Event::Notification { from_pid: 2, title: "Done".to_string(), body: "42 files".to_string() })]
+    );
     // A client claiming the shell role without being the designated process does not get it.
     let impostor = h.c.connect(99);
     h.c.handle(impostor, &hello(proto::hello::SHELL), None, 0).unwrap();
@@ -983,7 +1089,6 @@ fn render_damage_is_bounded_and_idle_when_nothing_changes() {
     assert!(px > 0 && px < 40 * 40, "{rects:?}");
 }
 
-
 #[test]
 fn the_clipboard_is_shared_by_every_client() {
     let mut h = Harness::new();
@@ -1002,7 +1107,10 @@ fn the_clipboard_is_shared_by_every_client() {
     }
     // A client that connects later is told the contents with its hello.
     let late = h.client(4);
-    assert!(h.events_for(late).contains(&Event::ClipboardChanged { seq: 1, entries }), "a new client starts with the clipboard it missed");
+    assert!(
+        h.events_for(late).contains(&Event::ClipboardChanged { seq: 1, entries }),
+        "a new client starts with the clipboard it missed"
+    );
     // Contents over the protocol's caps do not decode, disconnecting the
     // offender like every other malformed request.
     let big = vec![proto::ClipEntry { format: 13, name: None, data: vec![0; proto::MAX_CLIPBOARD_BYTES + 1] }];
@@ -1018,10 +1126,13 @@ fn unicode_clipboard_text_is_shared_between_clients() {
     h.events();
     h.send(native, Request::ClipboardSet { entries: vec![proto::clipboard_text_entry("Zażółć 🌍")] });
     let received = h.events_for(windows);
-    let entries = received.iter().find_map(|e| match e {
-        Event::ClipboardChanged { entries, .. } => Some(entries),
-        _ => None,
-    }).expect("Windows client receives clipboard change");
+    let entries = received
+        .iter()
+        .find_map(|e| match e {
+            Event::ClipboardChanged { entries, .. } => Some(entries),
+            _ => None,
+        })
+        .expect("Windows client receives clipboard change");
     assert_eq!(proto::clipboard_text(entries).as_deref(), Some("Zażółć 🌍"));
 }
 
@@ -1035,10 +1146,13 @@ fn file_clipboard_is_shared_between_clients() {
     let entry = proto::clipboard_files_entry(&paths, true).unwrap();
     h.send(source, Request::ClipboardSet { entries: vec![entry] });
     let events = h.events_for(target);
-    let entries = events.iter().find_map(|e| match e {
-        Event::ClipboardChanged { entries, .. } => Some(entries),
-        _ => None,
-    }).expect("target receives file clipboard");
+    let entries = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ClipboardChanged { entries, .. } => Some(entries),
+            _ => None,
+        })
+        .expect("target receives file clipboard");
     assert_eq!(proto::clipboard_files(entries), Some((paths, true)));
 }
 
@@ -1057,7 +1171,12 @@ fn file_drag_delivers_only_to_the_window_at_release() {
     h.move_to(380, 100);
     h.input(kind::BUTTON, 1, 0, 0, 0);
     let events = h.events_for(target);
-    assert!(events.iter().any(|e| matches!(e, Event::FileDrop { window: 1, x: 30, y: 40, path } if path == "/home/user/picture.png")), "{events:?}");
+    assert!(
+        events.iter().any(
+            |e| matches!(e, Event::FileDrop { window: 1, x: 30, y: 40, path } if path == "/home/user/picture.png")
+        ),
+        "{events:?}"
+    );
     // Without a pressed source window, an unsolicited request cannot drop.
     h.send(source, Request::FileDrag { window: 1, path: "/other".to_string() });
     h.click(380, 100);

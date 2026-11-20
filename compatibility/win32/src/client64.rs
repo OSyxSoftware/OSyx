@@ -102,7 +102,11 @@ fn module_rows() -> Vec<ModuleRow> {
     crate::loader::summary()
         .into_iter()
         .filter_map(|(name, base, builtin, _, _)| {
-            let size = if builtin { crate::mem::PAGE as u32 } else { crate::loader::image_containing(base).map_or(0, |(_, s)| s as u32) };
+            let size = if builtin {
+                crate::mem::PAGE as u32
+            } else {
+                crate::loader::image_containing(base).map_or(0, |(_, s)| s as u32)
+            };
             let path = kernel32::module_name(base).unwrap_or_else(|| alloc::format!("C:\\Windows\\System32\\{name}"));
             Some((base, size, name, path))
         })
@@ -115,7 +119,15 @@ fn module_rows() -> Vec<ModuleRow> {
 /// and heap lists are empty: OSyx does not list other processes' threads
 /// or this runtime's heaps.
 extern "win64" fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> u64 {
-    if flags & !(TH32CS_SNAPHEAPLIST | TH32CS_SNAPPROCESS | TH32CS_SNAPTHREAD | TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32 | TH32CS_INHERIT) != 0 {
+    if flags
+        & !(TH32CS_SNAPHEAPLIST
+            | TH32CS_SNAPPROCESS
+            | TH32CS_SNAPTHREAD
+            | TH32CS_SNAPMODULE
+            | TH32CS_SNAPMODULE32
+            | TH32CS_INHERIT)
+        != 0
+    {
         return fail(ERROR_INVALID_PARAMETER, u64::MAX);
     }
     let me = kernel32::pid() as u32;
@@ -156,7 +168,8 @@ fn put_process(entry: *mut u8, row: &ProcessRow, wide: bool) -> Result<(), u32> 
         return Err(ERROR_BAD_LENGTH);
     }
     let p = entry as u64;
-    let (heap, module, threads, parent, pri, flags) = if n { (12, 16, 20, 24, 28, 32) } else { (16, 24, 28, 32, 36, 40) };
+    let (heap, module, threads, parent, pri, flags) =
+        if n { (12, 16, 20, 24, 28, 32) } else { (16, 24, 28, 32, 36, 40) };
     // SAFETY: an entry of at least `size` bytes.
     unsafe {
         teb::put(p, 4, 0u32);
@@ -171,7 +184,11 @@ fn put_process(entry: *mut u8, row: &ProcessRow, wide: bool) -> Result<(), u32> 
         teb::put(p, parent, row.1);
         teb::put(p, pri, 8i32); // NORMAL_PRIORITY_CLASS base priority
         teb::put(p, flags, 0u32);
-        if wide { put_wide(p + name_at, 260, &row.3) } else { put_ansi(p + name_at, 260, &row.3) }
+        if wide {
+            put_wide(p + name_at, 260, &row.3)
+        } else {
+            put_ansi(p + name_at, 260, &row.3)
+        }
     }
     Ok(())
 }
@@ -182,7 +199,8 @@ fn put_process(entry: *mut u8, row: &ProcessRow, wide: bool) -> Result<(), u32> 
 fn put_module(entry: *mut u8, row: &ModuleRow, pid: u32, wide: bool) -> Result<(), u32> {
     let n = narrow();
     let unit = if wide { 2 } else { 1 };
-    let (base_at, size_at, handle_at, name_at): (u64, u64, u64, u64) = if n { (20, 24, 28, 32) } else { (24, 32, 40, 48) };
+    let (base_at, size_at, handle_at, name_at): (u64, u64, u64, u64) =
+        if n { (20, 24, 28, 32) } else { (24, 32, 40, 48) };
     let path_at = name_at + 256 * unit;
     let size = (path_at + 260 * unit) as u32;
     // SAFETY: the caller's entry starts with dwSize.
@@ -381,7 +399,12 @@ extern "win64" fn FindVolumeClose(h: u64) -> Bool {
 
 /// GetVolumePathNamesForVolumeNameW: the drive letter and folder paths a
 /// volume is mounted at, as a double-NUL-terminated list.
-extern "win64" fn GetVolumePathNamesForVolumeNameW(volume: *const u16, out: *mut u16, len: u32, needed: *mut u32) -> Bool {
+extern "win64" fn GetVolumePathNamesForVolumeNameW(
+    volume: *const u16,
+    out: *mut u16,
+    len: u32,
+    needed: *mut u32,
+) -> Bool {
     // SAFETY: a NUL-terminated name.
     let Some(name) = (unsafe { path::wide_to_string(volume) }) else { return fail(ERROR_INVALID_PARAMETER, FALSE) };
     let mut paths: Vec<String> = Vec::new();
@@ -474,7 +497,8 @@ const FILE_ACTION_RENAMED_NEW_NAME: u32 = 5;
 /// The changes from `old` to `new` the filter asks for. A name that went
 /// away and one that appeared with the same size and time is a rename.
 fn changes(old: &Listing, new: &Listing, filter: u32) -> Vec<(u32, String)> {
-    let wanted = |is_dir: bool| filter & if is_dir { FILE_NOTIFY_CHANGE_DIR_NAME } else { FILE_NOTIFY_CHANGE_FILE_NAME } != 0;
+    let wanted =
+        |is_dir: bool| filter & if is_dir { FILE_NOTIFY_CHANGE_DIR_NAME } else { FILE_NOTIFY_CHANGE_FILE_NAME } != 0;
     let removed: Vec<(&String, &(bool, u64, i64, u32))> = old.iter().filter(|(k, _)| !new.contains_key(*k)).collect();
     let mut added: Vec<(&String, &(bool, u64, i64, u32))> = new.iter().filter(|(k, _)| !old.contains_key(*k)).collect();
     let mut out = Vec::new();
@@ -610,7 +634,16 @@ extern "win64" fn dir_read_thread(arg: u64) -> u32 {
 /// ERROR_IO_PENDING and completes it (Internal, InternalHigh, the event).
 /// Completion routines would need an alertable wait: ERROR_NOT_SUPPORTED.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn ReadDirectoryChangesW(handle: u64, buf: *mut u8, len: u32, subtree: Bool, filter: u32, returned: *mut u32, ov: *mut u8, routine: u64) -> Bool {
+extern "win64" fn ReadDirectoryChangesW(
+    handle: u64,
+    buf: *mut u8,
+    len: u32,
+    subtree: Bool,
+    filter: u32,
+    returned: *mut u32,
+    ov: *mut u8,
+    routine: u64,
+) -> Bool {
     let Some(Object::File(f)) = objects::get(handle) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
     if !f.is_dir {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
@@ -641,7 +674,15 @@ extern "win64" fn ReadDirectoryChangesW(handle: u64, buf: *mut u8, len: u32, sub
                 kernel32::reset_event(event);
             }
         }
-        let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(DirRead { handle, dir, subtree, filter, buf: buf as u64, len, ov: ov as u64 }));
+        let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(DirRead {
+            handle,
+            dir,
+            subtree,
+            filter,
+            buf: buf as u64,
+            len,
+            ov: ov as u64,
+        }));
         let t = kernel32::CreateThread(0, 0, dir_read_thread as *const () as u64, arg as u64, 0, core::ptr::null_mut());
         if t == 0 {
             // SAFETY: not handed to a thread.
@@ -687,7 +728,14 @@ fn tcp_state(name: &str) -> u32 {
 /// listeners, connections or both. dwOwningPid is the process that made the
 /// socket (Steam checks which process is on the other end of its local
 /// connections); the module information is empty.
-extern "win64" fn GetExtendedTcpTable(table: *mut u8, size: *mut u32, sorted: Bool, family: u32, class: u32, reserved: u32) -> u32 {
+extern "win64" fn GetExtendedTcpTable(
+    table: *mut u8,
+    size: *mut u32,
+    sorted: Bool,
+    family: u32,
+    class: u32,
+    reserved: u32,
+) -> u32 {
     const AF_INET: u32 = 2;
     const AF_INET6: u32 = 23;
     if size.is_null() || reserved != 0 || class > 8 || !matches!(family, AF_INET | AF_INET6) {
@@ -697,7 +745,16 @@ extern "win64" fn GetExtendedTcpTable(table: *mut u8, size: *mut u32, sorted: Bo
     let mut rows: Vec<(u32, [u8; 4], u16, [u8; 4], u16, u32)> = sockets
         .iter()
         .filter(|s| osyx_abi::ipc::field_str(&s.kind) == "tcp" && s.internal == 0)
-        .map(|s| (tcp_state(osyx_abi::ipc::field_str(&s.state)), s.local.addr, s.local.port, s.remote.addr, s.remote.port, s.pid))
+        .map(|s| {
+            (
+                tcp_state(osyx_abi::ipc::field_str(&s.state)),
+                s.local.addr,
+                s.local.port,
+                s.remote.addr,
+                s.remote.port,
+                s.pid,
+            )
+        })
         .filter(|r| match class % 3 {
             0 => r.0 == 2,
             1 => r.0 != 2,
@@ -750,7 +807,16 @@ const IID_ICLIENT_SECURITY: [u8; 16] = [0x3D, 0x01, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0
 /// in this process are not proxies and have no IClientSecurity:
 /// E_NOINTERFACE, as on Windows.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn CoSetProxyBlanket(proxy: u64, authn: u32, authz: u32, principal: u64, level: u32, imp: u32, info: u64, caps: u32) -> u32 {
+extern "win64" fn CoSetProxyBlanket(
+    proxy: u64,
+    authn: u32,
+    authz: u32,
+    principal: u64,
+    level: u32,
+    imp: u32,
+    info: u64,
+    caps: u32,
+) -> u32 {
     const E_INVALIDARG: u32 = 0x8007_0057;
     if proxy == 0 {
         return E_INVALIDARG;
@@ -761,18 +827,27 @@ extern "win64" fn CoSetProxyBlanket(proxy: u64, authn: u32, authz: u32, principa
     // is slot 0, Release slot 2, IClientSecurity::SetBlanket slot 4.
     let slot = |obj: u64, n: u64| unsafe {
         let vtbl = if width == 4 { *(obj as *const u32) as u64 } else { *(obj as *const u64) };
-        if width == 4 { *((vtbl + 4 * n) as *const u32) as u64 } else { *((vtbl + 8 * n) as *const u64) }
+        if width == 4 {
+            *((vtbl + 4 * n) as *const u32) as u64
+        } else {
+            *((vtbl + 8 * n) as *const u64)
+        }
     };
-    let hr = crate::wow64::callback(slot(proxy, 0), &[proxy, IID_ICLIENT_SECURITY.as_ptr() as u64, &mut security as *mut u64 as u64]) as u32;
+    let hr = crate::wow64::callback(
+        slot(proxy, 0),
+        &[proxy, IID_ICLIENT_SECURITY.as_ptr() as u64, &mut security as *mut u64 as u64],
+    ) as u32;
     if hr != 0 || security == 0 {
         return hr;
     }
     let security = if width == 4 { security & 0xFFFF_FFFF } else { security };
-    let hr = crate::wow64::callback(slot(security, 4), &[security, proxy, authn as u64, authz as u64, principal, level as u64, imp as u64, info, caps as u64]) as u32;
+    let hr = crate::wow64::callback(
+        slot(security, 4),
+        &[security, proxy, authn as u64, authz as u64, principal, level as u64, imp as u64, info, caps as u64],
+    ) as u32;
     crate::wow64::callback(slot(security, 2), &[security]);
     hr
 }
-
 
 extern "win64" fn malloc_query(this: u64, iid: *const u8, out: *mut u64) -> u32 {
     // IID_IUnknown {00000000-...-46} and IID_IMalloc {00000002-...-46}.
@@ -805,10 +880,18 @@ extern "win64" fn malloc_free(_this: u64, p: u64) {
     crate::ole32::CoTaskMemFree(p)
 }
 extern "win64" fn malloc_size(_this: u64, p: u64) -> usize {
-    if p == 0 { usize::MAX } else { kernel32::heap_size(p) }
+    if p == 0 {
+        usize::MAX
+    } else {
+        kernel32::heap_size(p)
+    }
 }
 extern "win64" fn malloc_did_alloc(_this: u64, p: u64) -> i32 {
-    if p == 0 { -1 } else { (kernel32::heap_size(p) != 0) as i32 }
+    if p == 0 {
+        -1
+    } else {
+        (kernel32::heap_size(p) != 0) as i32
+    }
 }
 extern "win64" fn malloc_minimize(_this: u64) {}
 
@@ -940,7 +1023,8 @@ extern "win64" fn ExtractIconExA(file: *const u8, index: i32, large: *mut u64, s
 // ---- hid.dll --------------------------------------------------------------------
 
 /// The HID device interface class {4D1E55B2-F16F-11CF-88CB-001111000030}.
-const HID_GUID: [u8; 16] = [0xB2, 0x55, 0x1E, 0x4D, 0x6F, 0xF1, 0xCF, 0x11, 0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30];
+const HID_GUID: [u8; 16] =
+    [0xB2, 0x55, 0x1E, 0x4D, 0x6F, 0xF1, 0xCF, 0x11, 0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30];
 
 extern "win64" fn HidD_GetHidGuid(out: *mut u8) {
     if !out.is_null() {
@@ -1017,7 +1101,14 @@ extern "win64" fn HidP_MaxDataListLength(_kind: u32, _data: u64) -> u32 {
     0
 }
 
-extern "win64" fn HidP_GetData(_kind: u32, _list: *mut u8, _len: *mut u32, _data: u64, _report: *mut u8, _report_len: u32) -> u32 {
+extern "win64" fn HidP_GetData(
+    _kind: u32,
+    _list: *mut u8,
+    _len: *mut u32,
+    _data: u64,
+    _report: *mut u8,
+    _report_len: u32,
+) -> u32 {
     HIDP_STATUS_INVALID_PREPARSED_DATA
 }
 

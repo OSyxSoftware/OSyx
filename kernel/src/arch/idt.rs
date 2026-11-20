@@ -88,7 +88,7 @@ extern "C" {
 
 /// Register state saved on interrupt entry (lowest address first).
 #[repr(C)]
-#[derive(Debug,Clone,Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct TrapFrame {
     pub r15: u64,
     pub r14: u64,
@@ -156,7 +156,7 @@ pub unsafe fn init() {
             ist,
             // INT3/INTO are user debugging/overflow traps; other software
             // interrupt gates remain privileged. Both clear IF on entry.
-            attributes: if v==3||v==4 {0xEE} else {0x8E},
+            attributes: if v == 3 || v == 4 { 0xEE } else { 0x8E },
             offset_mid: (handler >> 16) as u16,
             offset_high: (handler >> 32) as u32,
             _zero: 0,

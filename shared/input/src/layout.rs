@@ -231,8 +231,18 @@ fn french_key(usage: u16) -> Option<Key> {
 
 /// Non-letter keys of the US layout: (unshifted, shifted).
 fn us_symbol(usage: u16) -> Option<(char, char)> {
-    const DIGITS: [(char, char); 10] =
-        [('1', '!'), ('2', '@'), ('3', '#'), ('4', '$'), ('5', '%'), ('6', '^'), ('7', '&'), ('8', '*'), ('9', '('), ('0', ')')];
+    const DIGITS: [(char, char); 10] = [
+        ('1', '!'),
+        ('2', '@'),
+        ('3', '#'),
+        ('4', '$'),
+        ('5', '%'),
+        ('6', '^'),
+        ('7', '&'),
+        ('8', '*'),
+        ('9', '('),
+        ('0', ')'),
+    ];
     Some(match usage {
         DIGIT1..=DIGIT0 => DIGITS[(usage - DIGIT1) as usize],
         SPACE => (' ', ' '),
@@ -360,15 +370,39 @@ mod tests {
         let (shift, altgr, caps) = (modifier::LEFT_SHIFT, modifier::RIGHT_ALT, modifier::CAPS_LOCK);
         assert_eq!((de.translate(Y, 0), de.translate(Z, 0)), (Some('z'), Some('y')));
         assert_eq!(de.translate(Y, shift), Some('Z'));
-        assert_eq!((de.translate(SEMICOLON, 0), de.translate(APOSTROPHE, shift), de.translate(LEFT_BRACKET, caps)), (Some('ö'), Some('Ä'), Some('Ü')));
-        assert_eq!((de.translate(MINUS, 0), de.translate(MINUS, shift), de.translate(MINUS, altgr)), (Some('ß'), Some('?'), Some('\\')));
+        assert_eq!(
+            (de.translate(SEMICOLON, 0), de.translate(APOSTROPHE, shift), de.translate(LEFT_BRACKET, caps)),
+            (Some('ö'), Some('Ä'), Some('Ü'))
+        );
+        assert_eq!(
+            (de.translate(MINUS, 0), de.translate(MINUS, shift), de.translate(MINUS, altgr)),
+            (Some('ß'), Some('?'), Some('\\'))
+        );
         assert_eq!(de.translate(MINUS, caps), Some('ß'), "ß has no capital on this key");
         assert_eq!((de.translate(Q, altgr), de.translate(E, altgr)), (Some('@'), Some('€')));
         assert_eq!(de.translate(Q, altgr | shift), Some('@'), "symbols have no upper case");
-        assert_eq!((de.translate(0x24, altgr), de.translate(0x25, altgr), de.translate(0x26, altgr), de.translate(DIGIT0, altgr)), (Some('{'), Some('['), Some(']'), Some('}')));
-        assert_eq!((de.translate(0x1F, shift), de.translate(0x20, shift), de.translate(0x24, shift)), (Some('"'), Some('§'), Some('/')));
+        assert_eq!(
+            (
+                de.translate(0x24, altgr),
+                de.translate(0x25, altgr),
+                de.translate(0x26, altgr),
+                de.translate(DIGIT0, altgr)
+            ),
+            (Some('{'), Some('['), Some(']'), Some('}'))
+        );
+        assert_eq!(
+            (de.translate(0x1F, shift), de.translate(0x20, shift), de.translate(0x24, shift)),
+            (Some('"'), Some('§'), Some('/'))
+        );
         assert_eq!((de.translate(SLASH, 0), de.translate(SLASH, shift)), (Some('-'), Some('_')));
-        assert_eq!((de.translate(NON_US_BACKSLASH, 0), de.translate(NON_US_BACKSLASH, shift), de.translate(NON_US_BACKSLASH, altgr)), (Some('<'), Some('>'), Some('|')));
+        assert_eq!(
+            (
+                de.translate(NON_US_BACKSLASH, 0),
+                de.translate(NON_US_BACKSLASH, shift),
+                de.translate(NON_US_BACKSLASH, altgr)
+            ),
+            (Some('<'), Some('>'), Some('|'))
+        );
         assert_eq!(de.translate(DIGIT1, caps), Some('1'), "Caps Lock is for letters");
         assert_eq!(de.translate(B, altgr), None);
         assert_eq!(de.translate(A, modifier::LEFT_CTRL), None);
@@ -384,20 +418,52 @@ mod tests {
         assert_eq!((gb.translate(NON_US_BACKSLASH, 0), gb.translate(NON_US_BACKSLASH, shift)), (Some('\\'), Some('|')));
         assert_eq!((gb.translate(GRAVE, shift), gb.translate(GRAVE, altgr)), (Some('¬'), Some('¦')));
         assert_eq!((gb.translate(E, altgr), gb.translate(E, altgr | shift)), (Some('é'), Some('É')));
-        assert_eq!((gb.translate(Q, 0), gb.translate(DIGIT1, shift), gb.translate(SLASH, shift)), (Some('q'), Some('!'), Some('?')));
+        assert_eq!(
+            (gb.translate(Q, 0), gb.translate(DIGIT1, shift), gb.translate(SLASH, shift)),
+            (Some('q'), Some('!'), Some('?'))
+        );
     }
 
     #[test]
     fn french_layout() {
         let fr = Layout::French;
         let (shift, altgr, caps) = (modifier::LEFT_SHIFT, modifier::RIGHT_ALT, modifier::CAPS_LOCK);
-        assert_eq!((fr.translate(Q, 0), fr.translate(A, 0), fr.translate(W, 0), fr.translate(Z, 0)), (Some('a'), Some('q'), Some('z'), Some('w')));
-        assert_eq!((fr.translate(SEMICOLON, 0), fr.translate(SEMICOLON, shift), fr.translate(M, 0), fr.translate(M, shift)), (Some('m'), Some('M'), Some(','), Some('?')));
-        assert_eq!((fr.translate(DIGIT1, 0), fr.translate(DIGIT1, shift), fr.translate(0x1F, 0), fr.translate(DIGIT0, 0)), (Some('&'), Some('1'), Some('é'), Some('à')));
+        assert_eq!(
+            (fr.translate(Q, 0), fr.translate(A, 0), fr.translate(W, 0), fr.translate(Z, 0)),
+            (Some('a'), Some('q'), Some('z'), Some('w'))
+        );
+        assert_eq!(
+            (fr.translate(SEMICOLON, 0), fr.translate(SEMICOLON, shift), fr.translate(M, 0), fr.translate(M, shift)),
+            (Some('m'), Some('M'), Some(','), Some('?'))
+        );
+        assert_eq!(
+            (fr.translate(DIGIT1, 0), fr.translate(DIGIT1, shift), fr.translate(0x1F, 0), fr.translate(DIGIT0, 0)),
+            (Some('&'), Some('1'), Some('é'), Some('à'))
+        );
         assert_eq!(fr.translate(0x1F, caps), Some('é'), "Caps Lock does not turn é into 2");
-        assert_eq!((fr.translate(0x20, altgr), fr.translate(0x21, altgr), fr.translate(0x22, altgr), fr.translate(DIGIT0, altgr)), (Some('#'), Some('{'), Some('['), Some('@')));
-        assert_eq!((fr.translate(MINUS, altgr), fr.translate(EQUAL, altgr), fr.translate(E, altgr)), (Some(']'), Some('}'), Some('€')));
-        assert_eq!((fr.translate(COMMA, 0), fr.translate(COMMA, shift), fr.translate(PERIOD, 0), fr.translate(PERIOD, shift), fr.translate(SLASH, 0)), (Some(';'), Some('.'), Some(':'), Some('/'), Some('!')));
+        assert_eq!(
+            (
+                fr.translate(0x20, altgr),
+                fr.translate(0x21, altgr),
+                fr.translate(0x22, altgr),
+                fr.translate(DIGIT0, altgr)
+            ),
+            (Some('#'), Some('{'), Some('['), Some('@'))
+        );
+        assert_eq!(
+            (fr.translate(MINUS, altgr), fr.translate(EQUAL, altgr), fr.translate(E, altgr)),
+            (Some(']'), Some('}'), Some('€'))
+        );
+        assert_eq!(
+            (
+                fr.translate(COMMA, 0),
+                fr.translate(COMMA, shift),
+                fr.translate(PERIOD, 0),
+                fr.translate(PERIOD, shift),
+                fr.translate(SLASH, 0)
+            ),
+            (Some(';'), Some('.'), Some(':'), Some('/'), Some('!'))
+        );
         assert_eq!((fr.translate(APOSTROPHE, 0), fr.translate(APOSTROPHE, shift)), (Some('ù'), Some('%')));
     }
 
@@ -412,7 +478,8 @@ mod tests {
             }
             assert_eq!(seen, (1 << 26) - 1, "{}: every letter a-z", l.name());
             for d in '0'..='9' {
-                let typed = (DIGIT1..=DIGIT0).any(|u| l.translate(u, 0) == Some(d) || l.translate(u, modifier::LEFT_SHIFT) == Some(d));
+                let typed = (DIGIT1..=DIGIT0)
+                    .any(|u| l.translate(u, 0) == Some(d) || l.translate(u, modifier::LEFT_SHIFT) == Some(d));
                 assert!(typed, "{}: digit {d}", l.name());
             }
             assert_eq!(l.translate(SPACE, 0), Some(' '));

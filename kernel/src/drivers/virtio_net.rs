@@ -167,7 +167,9 @@ impl VirtioNet {
         // Post every receive slot.
         for _ in 0..rx.size() {
             let f = alloc_frame().ok_or(VirtioError::OutOfMemory)?;
-            let head = rx.add(&[Buffer { phys: f, len: PAGE_SIZE as u32, device_writes: true }]).ok_or(VirtioError::NoQueue)?;
+            let head = rx
+                .add(&[Buffer { phys: f, len: PAGE_SIZE as u32, device_writes: true }])
+                .ok_or(VirtioError::NoQueue)?;
             rx_frames[head as usize] = f;
         }
         rx.kick();
@@ -210,7 +212,11 @@ impl VirtioNet {
                 // and `HDR_LEN + n <= PAGE_SIZE`; the copy initialises all
                 // `n` bytes of the vector's capacity.
                 unsafe {
-                    core::ptr::copy_nonoverlapping((phys_to_virt(frame) + HDR_LEN as u64) as *const u8, v.as_mut_ptr(), n);
+                    core::ptr::copy_nonoverlapping(
+                        (phys_to_virt(frame) + HDR_LEN as u64) as *const u8,
+                        v.as_mut_ptr(),
+                        n,
+                    );
                     v.set_len(n);
                 }
                 c.rx_frames += 1;
@@ -286,7 +292,8 @@ impl VirtioNet {
                 core::ptr::write_bytes(p, 0, HDR_LEN);
                 core::ptr::copy_nonoverlapping(f.as_ptr(), p.add(HDR_LEN), f.len());
             }
-            let Some(head) = q.tx.add(&[Buffer { phys: frame, len: (HDR_LEN + f.len()) as u32, device_writes: false }]) else {
+            let Some(head) = q.tx.add(&[Buffer { phys: frame, len: (HDR_LEN + f.len()) as u32, device_writes: false }])
+            else {
                 break;
             };
             // Keep frame <-> token association: swap so tx_frames[head] is the frame in flight.
@@ -309,7 +316,11 @@ impl VirtioNet {
         if !self.transport.needs_reset() {
             return false;
         }
-        crate::kprintln!("virtio-net {}: device needs reset (status {:#x}), reinitialising", self.name, self.transport.status());
+        crate::kprintln!(
+            "virtio-net {}: device needs reset (status {:#x}), reinitialising",
+            self.name,
+            self.transport.status()
+        );
         self.reinit()
     }
 

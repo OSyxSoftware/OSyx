@@ -113,7 +113,14 @@ extern "win64" fn CreateWindowStationW(name: *const u16, flags: u32, _access: u3
     h
 }
 
-extern "win64" fn CreateDesktopW(name: *const u16, device: *const u16, mode: u64, flags: u32, _access: u32, sa: u64) -> u64 {
+extern "win64" fn CreateDesktopW(
+    name: *const u16,
+    device: *const u16,
+    mode: u64,
+    flags: u32,
+    _access: u32,
+    sa: u64,
+) -> u64 {
     if !device.is_null() || mode != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0); // reserved; must be NULL
     }
@@ -168,7 +175,8 @@ extern "win64" fn SetProcessWindowStation(h: u64) -> i32 {
 
 /// Whether `tid` is a thread of this process.
 fn own_thread(tid: u64) -> bool {
-    tid == os_sys::gettid() || objects::any(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) as u64 == tid))
+    tid == os_sys::gettid()
+        || objects::any(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) as u64 == tid))
 }
 
 extern "win64" fn GetThreadDesktop(tid: u32) -> u64 {
@@ -177,7 +185,14 @@ extern "win64" fn GetThreadDesktop(tid: u32) -> u64 {
     }
     let mut d = THREAD_DESKTOP.lock().unwrap();
     if *d == 0 {
-        let desktop = interactive().desktops.lock().unwrap().iter().find(|d| d.interactive).cloned().expect("the default desktop");
+        let desktop = interactive()
+            .desktops
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|d| d.interactive)
+            .cloned()
+            .expect("the default desktop");
         *d = objects::insert(Object::Desktop(desktop));
     }
     *d
@@ -204,7 +219,8 @@ extern "win64" fn OpenInputDesktop(flags: u32, _inherit: i32, _access: u32) -> u
     if flags & !1 != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let desktop = interactive().desktops.lock().unwrap().iter().find(|d| d.interactive).cloned().expect("the default desktop");
+    let desktop =
+        interactive().desktops.lock().unwrap().iter().find(|d| d.interactive).cloned().expect("the default desktop");
     objects::insert(Object::Desktop(desktop))
 }
 
@@ -287,7 +303,9 @@ fn wide(s: &str) -> Vec<u8> {
 
 extern "win64" fn GetUserObjectInformationW(h: u64, index: u32, out: *mut u8, size: u32, needed: *mut u32) -> i32 {
     let (name, kind, flags, io, desktop) = match objects::get(h) {
-        Some(Object::WindowStation(w)) => (w.name.clone(), "WindowStation", if w.interactive { WSF_VISIBLE } else { 0 }, w.interactive, false),
+        Some(Object::WindowStation(w)) => {
+            (w.name.clone(), "WindowStation", if w.interactive { WSF_VISIBLE } else { 0 }, w.interactive, false)
+        }
         Some(Object::Desktop(d)) => (d.name.clone(), "Desktop", d.flags, d.interactive && d.station.interactive, true),
         _ => return fail(ERROR_INVALID_HANDLE, 0),
     };

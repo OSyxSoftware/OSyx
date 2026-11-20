@@ -38,14 +38,14 @@ const WSA_OPERATION_ABORTED: u32 = 995;
 
 /// Winsock errors and the NTSTATUS an OVERLAPPED carries for them.
 const STATUSES: [(u32, u64); 8] = [
-    (WSA_OPERATION_ABORTED, 0xC000_0120),  // STATUS_CANCELLED
-    (10054, 0xC000_020D),                  // WSAECONNRESET: STATUS_CONNECTION_RESET
-    (10053, 0xC000_0241),                  // WSAECONNABORTED: STATUS_CONNECTION_ABORTED
-    (10060, 0xC000_00B5),                  // WSAETIMEDOUT: STATUS_IO_TIMEOUT
-    (10061, 0xC000_0236),                  // WSAECONNREFUSED: STATUS_CONNECTION_REFUSED
-    (10057, 0xC000_0184),                  // WSAENOTCONN: STATUS_INVALID_DEVICE_STATE
-    (10040, 0x8000_0005),                  // WSAEMSGSIZE: STATUS_BUFFER_OVERFLOW
-    (10051, 0xC000_023C),                  // WSAENETUNREACH: STATUS_NETWORK_UNREACHABLE
+    (WSA_OPERATION_ABORTED, 0xC000_0120), // STATUS_CANCELLED
+    (10054, 0xC000_020D),                 // WSAECONNRESET: STATUS_CONNECTION_RESET
+    (10053, 0xC000_0241),                 // WSAECONNABORTED: STATUS_CONNECTION_ABORTED
+    (10060, 0xC000_00B5),                 // WSAETIMEDOUT: STATUS_IO_TIMEOUT
+    (10061, 0xC000_0236),                 // WSAECONNREFUSED: STATUS_CONNECTION_REFUSED
+    (10057, 0xC000_0184),                 // WSAENOTCONN: STATUS_INVALID_DEVICE_STATE
+    (10040, 0x8000_0005),                 // WSAEMSGSIZE: STATUS_BUFFER_OVERFLOW
+    (10051, 0xC000_023C),                 // WSAENETUNREACH: STATUS_NETWORK_UNREACHABLE
 ];
 
 fn status_of(e: u32) -> u64 {
@@ -122,7 +122,10 @@ fn finish_to(port: Option<(u64, u64)>, o: u64, bytes: usize, error: u32) {
     // a program's socket traffic.
     static TRACED: AtomicU32 = AtomicU32::new(0);
     if traced() && TRACED.fetch_add(1, Ordering::Relaxed) < 400 {
-        os_std::eprintln!("winrun: overlapped socket I/O {o:#x} done: {bytes} byte(s), error {error}, port {}", port.is_some());
+        os_std::eprintln!(
+            "winrun: overlapped socket I/O {o:#x} done: {bytes} byte(s), error {error}, port {}",
+            port.is_some()
+        );
     }
     let status = if error == 0 { 0 } else { status_of(error) };
     // SAFETY: the caller's OVERLAPPED, which stays valid until it completes.
@@ -158,7 +161,8 @@ where
     let port = PORTS.lock().unwrap().get(&s).copied();
     super::service::hold_fd(hold);
     let started = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
-        let stop = move || PENDING.lock().unwrap().get(&o).is_none_or(|p| p.2) || !SOCKETS.lock().unwrap().contains_key(&s);
+        let stop =
+            move || PENDING.lock().unwrap().get(&o).is_none_or(|p| p.2) || !SOCKETS.lock().unwrap().contains_key(&s);
         let r = op(&stop);
         PENDING.lock().unwrap().remove(&o);
         if super::service::release_fd(hold) {
@@ -187,7 +191,15 @@ pub(super) fn wait_ready(fd: u64, events: u32) {
 /// An overlapped receive: the WSABUFs are copied now (their memory stays
 /// the caller's until completion); the data is received on a helper
 /// thread, waiting for it on a non-blocking socket.
-pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, from: *mut u8, fromlen: *mut i32) -> i32 {
+pub(super) fn receive(
+    s: u64,
+    bufs: *const u8,
+    count: u32,
+    fl: u64,
+    o: *mut u8,
+    from: *mut u8,
+    fromlen: *mut i32,
+) -> i32 {
     let (fd, stream) = match fd(s) {
         Ok(v) => v,
         Err(e) => return err(e, SOCKET_ERROR),
@@ -216,11 +228,14 @@ pub(super) fn receive(s: u64, bufs: *const u8, count: u32, fl: u64, o: *mut u8, 
             // seen between the bounded waits below.
             match os_sys::sock_recv(fd, &mut data, fl | net::MSG_DONTWAIT) {
                 Err(Errno::WouldBlock) => {
-                    let mut item = [os_sys::ipc::WaitItem { handle: fd, events: osyx_abi::ipc::WAIT_READABLE, revents: 0 }];
+                    let mut item =
+                        [os_sys::ipc::WaitItem { handle: fd, events: osyx_abi::ipc::WAIT_READABLE, revents: 0 }];
                     // A bounded wait, so a socket closed meanwhile is noticed.
                     let _ = os_sys::wait_handles(&mut item, 200_000_000);
                 }
-                Err(e) => break (0, if SOCKETS.lock().unwrap().contains_key(&s) { wsa(e) } else { WSA_OPERATION_ABORTED }),
+                Err(e) => {
+                    break (0, if SOCKETS.lock().unwrap().contains_key(&s) { wsa(e) } else { WSA_OPERATION_ABORTED })
+                }
                 Ok((n, peer)) => {
                     trace_data("WSARecv (overlapped)", s, &data[..n]);
                     let truncated = datagram_truncated(fd, stream, n).unwrap_or(false);
@@ -295,7 +310,8 @@ pub(super) fn send(s: u64, fd: u64, data: Vec<u8>, to: Option<SockAddr>, o: *mut
             match os_sys::sock_send(fd, &data[done..], to.as_ref(), net::MSG_DONTWAIT) {
                 Ok(n) => done += n,
                 Err(Errno::WouldBlock) => {
-                    let mut item = [os_sys::ipc::WaitItem { handle: fd, events: osyx_abi::ipc::WAIT_WRITABLE, revents: 0 }];
+                    let mut item =
+                        [os_sys::ipc::WaitItem { handle: fd, events: osyx_abi::ipc::WAIT_WRITABLE, revents: 0 }];
                     let _ = os_sys::wait_handles(&mut item, 200_000_000);
                 }
                 Err(e) => break wsa(e),

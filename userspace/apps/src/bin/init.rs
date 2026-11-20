@@ -30,11 +30,11 @@
 #![no_main]
 
 use os_std::error::ErrorKind;
+use os_std::mpsc;
 use os_std::os::raw::{self, Errno, PROT_EXEC, PROT_READ, PROT_WRITE};
 use os_std::prelude::*;
 use os_std::process::{Child, Command};
 use os_std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use os_std::mpsc;
 use os_std::sync::{Once, OnceLock, RwLock};
 use os_std::time::{Duration, Instant};
 use os_std::{env, fs, os, process, thread};
@@ -51,20 +51,20 @@ mod fs_checks;
 mod ipc_checks;
 #[path = "../media_checks.rs"]
 mod media_checks;
-#[path = "../net_checks.rs"]
-mod net_checks;
-#[path = "../net_bench.rs"]
-mod net_bench;
-#[path = "../net_stress.rs"]
-mod net_stress;
-#[path = "../win_checks.rs"]
-mod win_checks;
-#[path = "../smp_checks.rs"]
-mod smp_checks;
-#[path = "../prio_checks.rs"]
-mod prio_checks;
 #[path = "../memory_lock_checks.rs"]
 mod memory_lock_checks;
+#[path = "../net_bench.rs"]
+mod net_bench;
+#[path = "../net_checks.rs"]
+mod net_checks;
+#[path = "../net_stress.rs"]
+mod net_stress;
+#[path = "../prio_checks.rs"]
+mod prio_checks;
+#[path = "../smp_checks.rs"]
+mod smp_checks;
+#[path = "../win_checks.rs"]
+mod win_checks;
 
 os_std::entry!(main);
 
@@ -177,11 +177,29 @@ fn main() -> i32 {
         Some("swap-stress") => return swap_stress(),
         Some("zen-probe") => {
             let mode = args.get(3).map(String::as_str).unwrap_or("");
-            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", false, mode == "prof", mode == "sandbox" || mode == "sandboxfat");
+            return zen_probe(
+                args.get(2).map(String::as_str),
+                mode == "trace",
+                mode == "mozlog",
+                mode == "events",
+                mode == "count",
+                false,
+                mode == "prof",
+                mode == "sandbox" || mode == "sandboxfat",
+            );
         }
         Some("zen-installed") => {
             let mode = args.get(3).map(String::as_str).unwrap_or("");
-            return zen_probe(args.get(2).map(String::as_str), mode == "trace", mode == "mozlog", mode == "events", mode == "count", true, mode == "prof", mode == "sandbox");
+            return zen_probe(
+                args.get(2).map(String::as_str),
+                mode == "trace",
+                mode == "mozlog",
+                mode == "events",
+                mode == "count",
+                true,
+                mode == "prof",
+                mode == "sandbox",
+            );
         }
         // `init tests winapp <program> [args...]`: PRISM and then one Windows
         // GUI program (an installer, for instance) with winrun's verbose log.
@@ -292,7 +310,7 @@ fn main() -> i32 {
             let mut t = Tests::default();
             smp_checks::run(&mut t);
             prio_checks::run(&mut t);
-            println!("smp checks: {} passed, {} failed",t.passed,t.failed);
+            println!("smp checks: {} passed, {} failed", t.passed, t.failed);
             return t.failed as i32;
         }
         Some("memory-locks") => return memory_lock_checks::run(),
@@ -523,7 +541,9 @@ fn swap_stress() -> i32 {
         }
     }
     // SAFETY: no references into the region remain.
-    if unsafe { raw::unmap(p, bytes) }.is_err() { return 1; }
+    if unsafe { raw::unmap(p, bytes) }.is_err() {
+        return 1;
+    }
     println!("swap-stress: verified {} pages", bytes / PAGE);
     0
 }
@@ -533,22 +553,42 @@ fn swap_stress() -> i32 {
 /// it cannot be brought up, init exits and the kernel's status screen
 /// stays as the diagnostic fallback.
 #[allow(clippy::too_many_arguments)]
-fn zen_probe(url: Option<&str>, network_trace: bool, mozlog: bool, events: bool, count: bool, installed: bool, prof: bool, sandbox: bool) -> i32 {
+fn zen_probe(
+    url: Option<&str>,
+    network_trace: bool,
+    mozlog: bool,
+    events: bool,
+    count: bool,
+    installed: bool,
+    prof: bool,
+    sandbox: bool,
+) -> i32 {
     println!("zen-probe: official /opt/zen/zen.exe via /bin/winrun; no substitute browser");
     let sandbox_fat = os_std::env::args().any(|a| a == "sandboxfat");
     if sandbox_fat {
-        let setup = fs::create_dir_all("/opt/zen").and_then(|_| fs::create_dir_all("/home"))
+        let setup = fs::create_dir_all("/opt/zen")
+            .and_then(|_| fs::create_dir_all("/home"))
             .and_then(|_| os_std::os::unmount("/mnt/vdb"))
             .and_then(|_| os_std::os::mount("/dev/disks/vdb", "/opt/zen", "fat32", true, 0));
-        if let Err(e) = setup { println!("ZEN_PROBE_RESULT infrastructure=zen_mount_failed: {e}"); return 1; }
+        if let Err(e) = setup {
+            println!("ZEN_PROBE_RESULT infrastructure=zen_mount_failed: {e}");
+            return 1;
+        }
     }
     let mut prism_cmd = Command::new(if sandbox_fat { "/bin/prism" } else { "/system/bin/prism" });
     // Trace only on request: serial output is slow and the compositor's
     // per-frame logging costs more than a full frame at 1080p.
-    if network_trace { prism_cmd.env("OSYX_PRISM_TRACE", "1"); }
-    if events { prism_cmd.env("OSYX_PRISM_EVENTS", "1"); }
+    if network_trace {
+        prism_cmd.env("OSYX_PRISM_TRACE", "1");
+    }
+    if events {
+        prism_cmd.env("OSYX_PRISM_EVENTS", "1");
+    }
     let prism = prism_cmd.spawn();
-    if let Err(e) = &prism { println!("ZEN_PROBE_RESULT infrastructure=prism_start_failed: {e}"); return 1; }
+    if let Err(e) = &prism {
+        println!("ZEN_PROBE_RESULT infrastructure=prism_start_failed: {e}");
+        return 1;
+    }
     // Prism clients retry service lookup and wait for the HELLO response, so
     // launching Zen immediately cannot race compositor startup.
     // OSyx has no Direct3D driver. Use Gecko's software WebRender path
@@ -649,9 +689,14 @@ user_pref("network.connectivity-service.enabled", false);
         let hex = |s: &str| -> String { s.as_bytes().iter().map(|b| format!("{b:02x}")).collect() };
         let registry = format!("K\t{}\nV\t{}\t{}\t11\t0000000000000000\n", hex(key), hex(key), hex(name));
         let registry_dir = format!("{profile}/.osyx-registry");
-        if let Err(e) = fs::create_dir_all(&registry_dir).and_then(|_| fs::write(format!("{registry_dir}/user.reg"), registry)) {
+        if let Err(e) =
+            fs::create_dir_all(&registry_dir).and_then(|_| fs::write(format!("{registry_dir}/user.reg"), registry))
+        {
             println!("ZEN_PROBE_RESULT infrastructure=diagnostic_registry_failed: {e}");
-            if let Ok(p) = prism { let _ = os_std::system::kill(p.id()); let _ = p.wait(); }
+            if let Ok(p) = prism {
+                let _ = os_std::system::kill(p.id());
+                let _ = p.wait();
+            }
             return 1;
         }
         zen.env("HOME", &profile).env("OSYX_EXPERIMENTAL_CONTENT_SANDBOX", "1");
@@ -660,7 +705,9 @@ user_pref("network.connectivity-service.enabled", false);
     // with a de-elevated token, which OSyx cannot run: keep its own. The
     // probe has its own temporary profile with software-rendering prefs.
     if !installed {
-        if network_trace || sandbox { zen.arg("-v"); }
+        if network_trace || sandbox {
+            zen.arg("-v");
+        }
         zen.args(["/opt/zen/zen.exe", "--no-remote", "-profile"]);
     }
     let url = url.unwrap_or("file:///C:/tmp/zen-probe-page.html");
@@ -694,13 +741,16 @@ user_pref("network.connectivity-service.enabled", false);
             );
         });
     }
-    if !installed { zen.arg(&format!("C:{}", profile.replace('/', "\\"))); }
+    if !installed {
+        zen.arg(&format!("C:{}", profile.replace('/', "\\")));
+    }
     zen.arg(url);
     // This bootstrap flag also reaches Gecko's command-line handler, which
     // still sees it as unknown and skips the following argument. Keep it
     // last so that the requested URL is not silently discarded.
-    if !installed { zen.arg("-no-deelevate"); }
-    else if network_trace {
+    if !installed {
+        zen.arg("-no-deelevate");
+    } else if network_trace {
         zen.env("OSYX_ZEN_TRACE", "1");
     }
     // Gecko's Windows sandbox broker starts its children suspended and
@@ -710,17 +760,24 @@ user_pref("network.connectivity-service.enabled", false);
         if network_trace {
             // Every failing Windows API call goes to the serial log (bring-up).
             zen.env("OSYX_WINRUN_TRACE", "1");
-        }        let log_modules = if network_trace {
+        }
+        let log_modules = if network_trace {
             "timestamp,sync,nsDocShell:5,DocLoader:5,nsStreamPump:5,nsSocketTransport:2,nsHostResolver:3,pipnss:4,nsHttp:5,nsChannelClassifier:5"
         } else {
             "timestamp,sync,nsDocShell:5,DocLoader:5,nsHttp:5,PresShell:4,RefreshDriver:5,Vsync:5,Compositor:5"
         };
         zen.env("MOZ_LOG", log_modules);
     }
-    if events || mozlog { zen.env("OSYX_WINRUN_EVENTS", "1"); }
-    if count { zen.env("OSYX_WINRUN_COUNT", "1"); }
+    if events || mozlog {
+        zen.env("OSYX_WINRUN_EVENTS", "1");
+    }
+    if count {
+        zen.env("OSYX_WINRUN_COUNT", "1");
+    }
     // Module bases for the kernel profiler's user-mode samples.
-    if prof { zen.env("OSYX_WINRUN_MODULES", "1"); }
+    if prof {
+        zen.env("OSYX_WINRUN_MODULES", "1");
+    }
     for kind in ["CONTENT", "GPU", "RDD", "SOCKET_PROCESS", "GMP", "UTILITY", "VR"] {
         zen.env(&format!("MOZ_DISABLE_{kind}_SANDBOX"), "1");
     }
@@ -755,7 +812,10 @@ user_pref("network.connectivity-service.enabled", false);
     }
     let result = zen.status();
     println!("ZEN_PROBE_RESULT exit={:?}", result.as_ref().ok().and_then(|s| s.code()));
-    if let Ok(p) = prism { let _ = os_std::system::kill(p.id()); let _ = p.wait(); }
+    if let Ok(p) = prism {
+        let _ = os_std::system::kill(p.id());
+        let _ = p.wait();
+    }
     // Boot completion is separate from browser success; the host reads
     // the actual winrun exit above and never treats this as a browser pass.
     0
@@ -1121,9 +1181,7 @@ fn thread_checks(t: &mut Tests) {
             .collect();
         let values: Vec<u64> = hs.into_iter().filter_map(|h| h.join().ok()).collect();
         let expected = cell.get().copied();
-        runs.load(Ordering::Relaxed) == 1
-            && values.len() == 4
-            && values.iter().all(|v| Some(*v) == expected)
+        runs.load(Ordering::Relaxed) == 1 && values.len() == 4 && values.iter().all(|v| Some(*v) == expected)
     });
     t.check("mpsc: 4 senders, bounded try_send, timeout", || {
         let (tx, rx) = mpsc::channel::<u64>();

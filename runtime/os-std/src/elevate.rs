@@ -39,7 +39,11 @@ pub fn run(program: &str, cwd: &str, args: &[String], verbose: bool, mut started
         request.push('\n');
         request.push_str(arg);
     }
-    if program.contains('\n') || cwd.contains('\n') || args.iter().any(|a| a.contains('\n')) || request.len() >= MAX_MESSAGE {
+    if program.contains('\n')
+        || cwd.contains('\n')
+        || args.iter().any(|a| a.contains('\n'))
+        || request.len() >= MAX_MESSAGE
+    {
         return Outcome::Failed(String::from("the command line cannot be passed to the elevation service"));
     }
     let channel = match Channel::connect(SERVICE) {

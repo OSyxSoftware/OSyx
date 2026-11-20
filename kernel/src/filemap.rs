@@ -335,13 +335,13 @@ fn writeback_worker(_: u64, _: u64) {
     loop {
         sched::sleep_ticks(crate::arch::timer::ms_to_ticks(1000));
         if crate::has_boot_option("stats") {
-        // TEMP I/O diagnostics.
-        let (wc, wb) = osyx_ext4::write_stats();
-        let (tc, tb) = osyx_ext4::commit_stats();
-        let (rb, _) = crate::block::io_bytes();
-        let (_, waits, spin, max_spin) = crate::smp::lock_stats();
-        let (holds, hold_cycles, hold_max, slow) = crate::smp::hold_stats();
-        crate::kprintln!(
+            // TEMP I/O diagnostics.
+            let (wc, wb) = osyx_ext4::write_stats();
+            let (tc, tb) = osyx_ext4::commit_stats();
+            let (rb, _) = crate::block::io_bytes();
+            let (_, waits, spin, max_spin) = crate::smp::lock_stats();
+            let (holds, hold_cycles, hold_max, slow) = crate::smp::hold_stats();
+            crate::kprintln!(
             "iostat: wcalls={wc} wKiB={} rKiB={} commits={tc} cblocks={tb} lock_waits={} spin_ms={} max_spin_us={} holds={} hold_ms={} hold_max_ms={} slow={}",
             wb / 1024,
             (rb - last_read) / 1024,
@@ -353,239 +353,243 @@ fn writeback_worker(_: u64, _: u64) {
             hold_max / khz,
             slow - last_slow
         );
-        // TEMP device request counts, latency, queue wait and size, per second.
-        let dev = crate::drivers::virtio_blk::request_stats();
-        let mut s = alloc::string::String::new();
-        for (i, name) in ["rd", "wr", "fl"].iter().enumerate() {
-            let (c, cyc, mx, bytes, wait) = dev[i];
-            let (lc, lcyc, _, lbytes, lwait) = last_dev[i];
-            last_dev[i] = (c, cyc, mx, bytes, wait);
-            let dc = c - lc;
-            let (avg, wavg, kib) = match ((cyc - lcyc).checked_div(dc), (wait - lwait).checked_div(dc)) {
-                (Some(a), Some(w)) => (a * 1000 / khz, w * 1000 / khz, (bytes - lbytes) / 1024),
-                _ => (0, 0, 0),
-            };
-            core::fmt::Write::write_fmt(&mut s, format_args!(" {name}={dc}/{kib}K/{avg}us/w{wavg}us/m{}us", mx * 1000 / khz)).ok();
-        }
-        crate::kprintln!("devio:{s}");
-        // TEMP prefault cost per second.
-        let pf = crate::process::prefault_stats();
-        if pf[0] != last_pf[0] {
-            crate::kprintln!(
-                "prefault: pages={} chunks={} skipped={} ms={}",
-                pf[0] - last_pf[0],
-                pf[1] - last_pf[1],
-                pf[2] - last_pf[2],
-                (pf[3] - last_pf[3]) / khz
-            );
-        }
-        last_pf = pf;
-        // TEMP write volume by file kind (and fsync count) per second.
-        let wc = crate::vfs::write_cat_bytes();
-        let mut line = alloc::string::String::new();
-        for (i, name) in ["idb", "places", "session", "cache2", "journal", "other"].iter().enumerate() {
-            let d = wc[i].saturating_sub(last_wc[i]);
-            last_wc[i] = wc[i];
-            if d != 0 {
-                core::fmt::Write::write_fmt(&mut line, format_args!(" {name}={}K", d / 1024)).ok();
+            // TEMP device request counts, latency, queue wait and size, per second.
+            let dev = crate::drivers::virtio_blk::request_stats();
+            let mut s = alloc::string::String::new();
+            for (i, name) in ["rd", "wr", "fl"].iter().enumerate() {
+                let (c, cyc, mx, bytes, wait) = dev[i];
+                let (lc, lcyc, _, lbytes, lwait) = last_dev[i];
+                last_dev[i] = (c, cyc, mx, bytes, wait);
+                let dc = c - lc;
+                let (avg, wavg, kib) = match ((cyc - lcyc).checked_div(dc), (wait - lwait).checked_div(dc)) {
+                    (Some(a), Some(w)) => (a * 1000 / khz, w * 1000 / khz, (bytes - lbytes) / 1024),
+                    _ => (0, 0, 0),
+                };
+                core::fmt::Write::write_fmt(
+                    &mut s,
+                    format_args!(" {name}={dc}/{kib}K/{avg}us/w{wavg}us/m{}us", mx * 1000 / khz),
+                )
+                .ok();
             }
-        }
-        let syncs = wc[6].saturating_sub(last_wc[6]);
-        last_wc[6] = wc[6];
-        crate::kprintln!("writecat:{line} syncs={syncs}");
-        // TEMP cache hit rates and the last IndexedDB writer.
-        let (fh, fm, rh) = crate::filecache::hit_stats();
-        let dh = fh.saturating_sub(last_fh);
-        let dm = fm.saturating_sub(last_fm);
-        let dr = rh.saturating_sub(last_rh);
-        last_fh = fh;
-        last_fm = fm;
-        last_rh = rh;
-        let (wtid, woff, wlen) = crate::vfs::last_idb_write();
-        crate::kprintln!("fcache: hit={dh} miss={dm} recent={dr} idbw=tid{wtid}@{woff}+{wlen}");
-        // TEMP TCP flow-control snapshot (connections with traffic).
-        for line in crate::net::debug_lines() {
-            crate::kprintln!("tcpdbg: {line}");
-        }
-        // TEMP syscall histogram (top six by count in the last second).
-        let counts = crate::smp::nr_counts();
-        let mut top: [(usize, u64); 6] = [(0, 0); 6];
-        for (i, &c) in counts.iter().enumerate() {
-            let d = c - last_nr[i];
-            last_nr[i] = c;
-            if d > top[5].1 {
-                top[5] = (i, d);
-                top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+            crate::kprintln!("devio:{s}");
+            // TEMP prefault cost per second.
+            let pf = crate::process::prefault_stats();
+            if pf[0] != last_pf[0] {
+                crate::kprintln!(
+                    "prefault: pages={} chunks={} skipped={} ms={}",
+                    pf[0] - last_pf[0],
+                    pf[1] - last_pf[1],
+                    pf[2] - last_pf[2],
+                    (pf[3] - last_pf[3]) / khz
+                );
             }
-        }
-        let mut line = alloc::string::String::new();
-        for (i, d) in top {
-            if d != 0 {
-                core::fmt::Write::write_fmt(&mut line, format_args!(" {:#x}={d}", i)).ok();
+            last_pf = pf;
+            // TEMP write volume by file kind (and fsync count) per second.
+            let wc = crate::vfs::write_cat_bytes();
+            let mut line = alloc::string::String::new();
+            for (i, name) in ["idb", "places", "session", "cache2", "journal", "other"].iter().enumerate() {
+                let d = wc[i].saturating_sub(last_wc[i]);
+                last_wc[i] = wc[i];
+                if d != 0 {
+                    core::fmt::Write::write_fmt(&mut line, format_args!(" {name}={}K", d / 1024)).ok();
+                }
             }
-        }
-        crate::kprintln!("syscalls:{line}");
-        // TEMP lock time by syscall (top six, milliseconds in the last second).
-        let holds_by_nr = crate::smp::nr_hold_cycles();
-        let mut top: [(usize, u64); 6] = [(0, 0); 6];
-        for (i, &c) in holds_by_nr.iter().enumerate() {
-            let d = (c - last_nr_hold[i]) / khz;
-            last_nr_hold[i] = c;
-            if d > top[5].1 {
-                top[5] = (i, d);
-                top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+            let syncs = wc[6].saturating_sub(last_wc[6]);
+            last_wc[6] = wc[6];
+            crate::kprintln!("writecat:{line} syncs={syncs}");
+            // TEMP cache hit rates and the last IndexedDB writer.
+            let (fh, fm, rh) = crate::filecache::hit_stats();
+            let dh = fh.saturating_sub(last_fh);
+            let dm = fm.saturating_sub(last_fm);
+            let dr = rh.saturating_sub(last_rh);
+            last_fh = fh;
+            last_fm = fm;
+            last_rh = rh;
+            let (wtid, woff, wlen) = crate::vfs::last_idb_write();
+            crate::kprintln!("fcache: hit={dh} miss={dm} recent={dr} idbw=tid{wtid}@{woff}+{wlen}");
+            // TEMP TCP flow-control snapshot (connections with traffic).
+            for line in crate::net::debug_lines() {
+                crate::kprintln!("tcpdbg: {line}");
             }
-        }
-        let mut line = alloc::string::String::new();
-        for (i, d) in top {
-            if d != 0 {
-                core::fmt::Write::write_fmt(&mut line, format_args!(" {:#x}={d}ms", i)).ok();
+            // TEMP syscall histogram (top six by count in the last second).
+            let counts = crate::smp::nr_counts();
+            let mut top: [(usize, u64); 6] = [(0, 0); 6];
+            for (i, &c) in counts.iter().enumerate() {
+                let d = c - last_nr[i];
+                last_nr[i] = c;
+                if d > top[5].1 {
+                    top[5] = (i, d);
+                    top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+                }
             }
-        }
-        crate::kprintln!("holdtime:{line} lockfree={}", crate::smp::lock_free_calls());
-        // TEMP per-process attribution of CLOCK / CHANNEL_RECV pollers.
-        let pids = crate::smp::pid_counters();
-        let mut line = alloc::string::String::new();
-        for (i, &(pid, recv, clock, stat)) in pids.iter().enumerate() {
-            let (_, lr, lc, ls) = last_pid[i];
-            let dr = recv.saturating_sub(lr);
-            let dc = clock.saturating_sub(lc);
-            let ds = stat.saturating_sub(ls);
-            last_pid[i] = (pid, recv, clock, stat);
-            if pid != 0 && (dr != 0 || dc != 0 || ds != 0) {
-                core::fmt::Write::write_fmt(&mut line, format_args!(" pid{pid}:recv={dr} clock={dc} stat={ds}"))
-                    .ok();
+            let mut line = alloc::string::String::new();
+            for (i, d) in top {
+                if d != 0 {
+                    core::fmt::Write::write_fmt(&mut line, format_args!(" {:#x}={d}", i)).ok();
+                }
             }
-        }
-        if !line.is_empty() {
-            crate::kprintln!("pidstat:{line}");
-        }
-        // TEMP per-thread attribution.
-        let tids = crate::smp::tid_counters();
-        let mut line = alloc::string::String::new();
-        for (i, &(tid, recv, clock, stat)) in tids.iter().enumerate() {
-            let (_, lr, lc, ls) = last_tid[i];
-            let dr = recv.saturating_sub(lr);
-            let dc = clock.saturating_sub(lc);
-            let ds = stat.saturating_sub(ls);
-            last_tid[i] = (tid, recv, clock, stat);
-            if tid != 0 && (dr != 0 || dc != 0 || ds != 0) {
-                core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}:recv={dr} clock={dc} stat={ds}"))
-                    .ok();
+            crate::kprintln!("syscalls:{line}");
+            // TEMP lock time by syscall (top six, milliseconds in the last second).
+            let holds_by_nr = crate::smp::nr_hold_cycles();
+            let mut top: [(usize, u64); 6] = [(0, 0); 6];
+            for (i, &c) in holds_by_nr.iter().enumerate() {
+                let d = (c - last_nr_hold[i]) / khz;
+                last_nr_hold[i] = c;
+                if d > top[5].1 {
+                    top[5] = (i, d);
+                    top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+                }
             }
-        }
-        if !line.is_empty() {
-            crate::kprintln!("tidstat:{line}");
-        }
-        // TEMP per-thread futex/yield attribution.
-        let futs = crate::smp::tid_futex_counters();
-        let mut line = alloc::string::String::new();
-        for (i, &(tid, wait, wake, yield_)) in futs.iter().enumerate() {
-            let (_, lw, lk, ly) = last_futex[i];
-            let dw = wait.saturating_sub(lw);
-            let dk = wake.saturating_sub(lk);
-            let dy = yield_.saturating_sub(ly);
-            last_futex[i] = (tid, wait, wake, yield_);
-            if tid != 0 && (dw != 0 || dk != 0 || dy != 0) {
-                core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}:wait={dw} wake={dk} yield={dy}"))
-                    .ok();
+            let mut line = alloc::string::String::new();
+            for (i, d) in top {
+                if d != 0 {
+                    core::fmt::Write::write_fmt(&mut line, format_args!(" {:#x}={d}ms", i)).ok();
+                }
             }
-        }
-        if !line.is_empty() {
-            crate::kprintln!("futexstat:{line}");
-        }
-        crate::futex::dump_waiters();
-        sched::dump();
-        // TEMP per-thread CPU ticks (top six by delta) for the browser's process.
-        let tcpu = sched::thread_cpu();
-        let mut top: [(u64, u64, u64); 6] = [(0, 0, 0); 6];
-        for (tid, pid, ticks) in tcpu {
-            let before = last_thrcpu.get(&tid).copied().unwrap_or(ticks);
-            last_thrcpu.insert(tid, ticks);
-            let d = ticks.saturating_sub(before);
-            if d > top[5].2 {
-                top[5] = (tid, pid, d);
-                top.sort_unstable_by_key(|a| core::cmp::Reverse(a.2));
+            crate::kprintln!("holdtime:{line} lockfree={}", crate::smp::lock_free_calls());
+            // TEMP per-process attribution of CLOCK / CHANNEL_RECV pollers.
+            let pids = crate::smp::pid_counters();
+            let mut line = alloc::string::String::new();
+            for (i, &(pid, recv, clock, stat)) in pids.iter().enumerate() {
+                let (_, lr, lc, ls) = last_pid[i];
+                let dr = recv.saturating_sub(lr);
+                let dc = clock.saturating_sub(lc);
+                let ds = stat.saturating_sub(ls);
+                last_pid[i] = (pid, recv, clock, stat);
+                if pid != 0 && (dr != 0 || dc != 0 || ds != 0) {
+                    core::fmt::Write::write_fmt(&mut line, format_args!(" pid{pid}:recv={dr} clock={dc} stat={ds}"))
+                        .ok();
+                }
             }
-        }
-        let mut line = alloc::string::String::new();
-        for (tid, pid, d) in top {
-            if d != 0 {
-                core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}/p{pid}={d}")).ok();
+            if !line.is_empty() {
+                crate::kprintln!("pidstat:{line}");
             }
-        }
-        if !line.is_empty() {
-            crate::kprintln!("thrcpu:{line}");
-        }
-        // TEMP user-RIP samples from the timer (top six by delta).
-        let samples = crate::smp::rip_samples();
-        let mut top: [(usize, u64); 6] = [(0, 0); 6];
-        for (i, &(_, _, count)) in samples.iter().enumerate() {
-            let d = count.saturating_sub(last_samples[i]);
-            last_samples[i] = count;
-            if d > top[5].1 {
-                top[5] = (i, d);
-                top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+            // TEMP per-thread attribution.
+            let tids = crate::smp::tid_counters();
+            let mut line = alloc::string::String::new();
+            for (i, &(tid, recv, clock, stat)) in tids.iter().enumerate() {
+                let (_, lr, lc, ls) = last_tid[i];
+                let dr = recv.saturating_sub(lr);
+                let dc = clock.saturating_sub(lc);
+                let ds = stat.saturating_sub(ls);
+                last_tid[i] = (tid, recv, clock, stat);
+                if tid != 0 && (dr != 0 || dc != 0 || ds != 0) {
+                    core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}:recv={dr} clock={dc} stat={ds}"))
+                        .ok();
+                }
             }
-        }
-        let mut line = alloc::string::String::new();
-        for (i, d) in top {
-            if d != 0 {
-                let (tid, rip, _) = samples[i];
-                core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}@{rip:#x}={d}")).ok();
+            if !line.is_empty() {
+                crate::kprintln!("tidstat:{line}");
             }
-        }
-        if !line.is_empty() {
-            crate::kprintln!("rips:{line}");
-        }
-        // TEMP stack attribution at user samples (top six by delta).
-        let stk = crate::smp::stack_samples();
-        let mut top: [(usize, u64); 6] = [(0, 0); 6];
-        for (i, &(_, _, count)) in stk.iter().enumerate() {
-            let d = count.saturating_sub(last_stk[i]);
-            last_stk[i] = count;
-            if d > top[5].1 {
-                top[5] = (i, d);
-                top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+            // TEMP per-thread futex/yield attribution.
+            let futs = crate::smp::tid_futex_counters();
+            let mut line = alloc::string::String::new();
+            for (i, &(tid, wait, wake, yield_)) in futs.iter().enumerate() {
+                let (_, lw, lk, ly) = last_futex[i];
+                let dw = wait.saturating_sub(lw);
+                let dk = wake.saturating_sub(lk);
+                let dy = yield_.saturating_sub(ly);
+                last_futex[i] = (tid, wait, wake, yield_);
+                if tid != 0 && (dw != 0 || dk != 0 || dy != 0) {
+                    core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}:wait={dw} wake={dk} yield={dy}"))
+                        .ok();
+                }
             }
-        }
-        let mut line = alloc::string::String::new();
-        for (i, d) in top {
-            if d != 0 {
-                let (tid, rip, _) = stk[i];
-                core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}@{rip:#x}={d}")).ok();
+            if !line.is_empty() {
+                crate::kprintln!("futexstat:{line}");
             }
-        }
-        if !line.is_empty() {
-            crate::kprintln!("stk:{line}");
-        }
-        // TEMP syscall call sites (top eight by delta).
-        let sites = crate::smp::call_sites();
-        let mut top: [(usize, u64); 8] = [(0, 0); 8];
-        for (i, &(_, _, _, count)) in sites.iter().enumerate() {
-            let d = count.saturating_sub(last_calls[i]);
-            last_calls[i] = count;
-            if d > top[7].1 {
-                top[7] = (i, d);
-                top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+            crate::futex::dump_waiters();
+            sched::dump();
+            // TEMP per-thread CPU ticks (top six by delta) for the browser's process.
+            let tcpu = sched::thread_cpu();
+            let mut top: [(u64, u64, u64); 6] = [(0, 0, 0); 6];
+            for (tid, pid, ticks) in tcpu {
+                let before = last_thrcpu.get(&tid).copied().unwrap_or(ticks);
+                last_thrcpu.insert(tid, ticks);
+                let d = ticks.saturating_sub(before);
+                if d > top[5].2 {
+                    top[5] = (tid, pid, d);
+                    top.sort_unstable_by_key(|a| core::cmp::Reverse(a.2));
+                }
             }
-        }
-        let mut line = alloc::string::String::new();
-        for (i, d) in top {
-            if d != 0 {
-                let (tid, rip, nr, _) = sites[i];
-                core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}#{nr}@{rip:#x}={d}")).ok();
+            let mut line = alloc::string::String::new();
+            for (tid, pid, d) in top {
+                if d != 0 {
+                    core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}/p{pid}={d}")).ok();
+                }
             }
-        }
-        if !line.is_empty() {
-            crate::kprintln!("calls:{line}");
-        }
-        last_spin = spin;
-        last_waits = waits;
-        last_holds = holds;
-        last_hold_cycles = hold_cycles;
-        last_slow = slow;
-        last_read = rb;
+            if !line.is_empty() {
+                crate::kprintln!("thrcpu:{line}");
+            }
+            // TEMP user-RIP samples from the timer (top six by delta).
+            let samples = crate::smp::rip_samples();
+            let mut top: [(usize, u64); 6] = [(0, 0); 6];
+            for (i, &(_, _, count)) in samples.iter().enumerate() {
+                let d = count.saturating_sub(last_samples[i]);
+                last_samples[i] = count;
+                if d > top[5].1 {
+                    top[5] = (i, d);
+                    top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+                }
+            }
+            let mut line = alloc::string::String::new();
+            for (i, d) in top {
+                if d != 0 {
+                    let (tid, rip, _) = samples[i];
+                    core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}@{rip:#x}={d}")).ok();
+                }
+            }
+            if !line.is_empty() {
+                crate::kprintln!("rips:{line}");
+            }
+            // TEMP stack attribution at user samples (top six by delta).
+            let stk = crate::smp::stack_samples();
+            let mut top: [(usize, u64); 6] = [(0, 0); 6];
+            for (i, &(_, _, count)) in stk.iter().enumerate() {
+                let d = count.saturating_sub(last_stk[i]);
+                last_stk[i] = count;
+                if d > top[5].1 {
+                    top[5] = (i, d);
+                    top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+                }
+            }
+            let mut line = alloc::string::String::new();
+            for (i, d) in top {
+                if d != 0 {
+                    let (tid, rip, _) = stk[i];
+                    core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}@{rip:#x}={d}")).ok();
+                }
+            }
+            if !line.is_empty() {
+                crate::kprintln!("stk:{line}");
+            }
+            // TEMP syscall call sites (top eight by delta).
+            let sites = crate::smp::call_sites();
+            let mut top: [(usize, u64); 8] = [(0, 0); 8];
+            for (i, &(_, _, _, count)) in sites.iter().enumerate() {
+                let d = count.saturating_sub(last_calls[i]);
+                last_calls[i] = count;
+                if d > top[7].1 {
+                    top[7] = (i, d);
+                    top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
+                }
+            }
+            let mut line = alloc::string::String::new();
+            for (i, d) in top {
+                if d != 0 {
+                    let (tid, rip, nr, _) = sites[i];
+                    core::fmt::Write::write_fmt(&mut line, format_args!(" tid{tid}#{nr}@{rip:#x}={d}")).ok();
+                }
+            }
+            if !line.is_empty() {
+                crate::kprintln!("calls:{line}");
+            }
+            last_spin = spin;
+            last_waits = waits;
+            last_holds = holds;
+            last_hold_cycles = hold_cycles;
+            last_slow = slow;
+            last_read = rb;
         }
         // Only the cache holds an unused backing. The flush itself runs without
         // the global lock: it holds the backing's state lock, so a concurrent

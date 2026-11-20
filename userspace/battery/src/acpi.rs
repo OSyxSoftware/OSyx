@@ -4,15 +4,15 @@
 
 use crate::hw::{EcCell, EcPorts, Firmware, Hardware, Stats};
 use crate::model::{field, Poll, Sample};
-use alloc::collections::BTreeSet;
-use aml::value::Args;
-use aml::{AmlContext, AmlName, AmlValue, DebugVerbosity, LevelType};
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use aml::value::Args;
+use aml::{AmlContext, AmlName, AmlValue, DebugVerbosity, LevelType};
 
 /// `_BIF`/`_BIX` change rarely (the last full capacity creeps down over
 /// months) and each call costs many EC reads: ask again after this many polls.
@@ -201,7 +201,12 @@ impl Acpi {
     /// is asked, and the legacy ports (0x62/0x66) are the last resort. The
     /// ports are fixed before `initialize_objects`, whose `_INI` methods may
     /// already read the EC.
-    pub fn load<H: Hardware + 'static>(hw: H, ec: Option<EcPorts>, tables: &[Vec<u8>], log: &mut dyn FnMut(&str)) -> Acpi {
+    pub fn load<H: Hardware + 'static>(
+        hw: H,
+        ec: Option<EcPorts>,
+        tables: &[Vec<u8>],
+        log: &mut dyn FnMut(&str),
+    ) -> Acpi {
         let stats = Arc::new(Stats::default());
         let firmware = Firmware::new(hw, ec, stats.clone());
         let ec_cell = firmware.ec_cell();
@@ -397,7 +402,8 @@ impl Acpi {
         // cycle count 8, model 16, serial 17, type 18, OEM 19.
         // `_BIF`: unit 0, design capacity 1, last full 2, design voltage 4,
         // model 9, serial 10, type 11, OEM 12.
-        let bix = if has(&self.ctx, dev, "_BIX") { package(self.run(dev, "_BIX")).filter(|p| p.len() > 5) } else { None };
+        let bix =
+            if has(&self.ctx, dev, "_BIX") { package(self.run(dev, "_BIX")).filter(|p| p.len() > 5) } else { None };
         let (p, base, text, cycles) = match bix {
             Some(p) => (p, 1, 16, true),
             None => (package(self.run(dev, "_BIF"))?, 0, 9, false),

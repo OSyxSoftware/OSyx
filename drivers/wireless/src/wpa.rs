@@ -188,11 +188,28 @@ pub mod suite {
 /// the AP's group cipher (`suite::CCMP` or `suite::TKIP`).
 pub fn rsn_ie_psk(group_cipher: u8) -> Vec<u8> {
     alloc::vec![
-        0x30, 0x14, 0x01, 0x00, // element id, length, version 1
-        0x00, 0x0f, 0xac, group_cipher, // group cipher
-        0x01, 0x00, 0x00, 0x0f, 0xac, suite::CCMP, // one pairwise cipher
-        0x01, 0x00, 0x00, 0x0f, 0xac, suite::AKM_PSK, // one AKM
-        0x00, 0x00, // capabilities
+        0x30,
+        0x14,
+        0x01,
+        0x00, // element id, length, version 1
+        0x00,
+        0x0f,
+        0xac,
+        group_cipher, // group cipher
+        0x01,
+        0x00,
+        0x00,
+        0x0f,
+        0xac,
+        suite::CCMP, // one pairwise cipher
+        0x01,
+        0x00,
+        0x00,
+        0x0f,
+        0xac,
+        suite::AKM_PSK, // one AKM
+        0x00,
+        0x00, // capabilities
     ]
 }
 
@@ -347,7 +364,14 @@ impl Supplicant {
                 self.anonce = Some(k.nonce);
                 self.ptk = Some(ptk);
                 self.state = State::WaitMsg3;
-                let msg2 = build(info::VERSION_AES | info::PAIRWISE | info::MIC, 0, k.replay, &self.snonce, &self.rsn_ie, Some(&ptk.kck));
+                let msg2 = build(
+                    info::VERSION_AES | info::PAIRWISE | info::MIC,
+                    0,
+                    k.replay,
+                    &self.snonce,
+                    &self.rsn_ie,
+                    Some(&ptk.kck),
+                );
                 Ok(alloc::vec![Action::Send(msg2)])
             }
             // Message 3.
@@ -367,7 +391,14 @@ impl Supplicant {
                 };
                 let gtk = find_gtk(&data).ok_or(WpaError::NoGroupKey)?;
                 self.replay = Some(k.replay);
-                let msg4 = build(info::VERSION_AES | info::PAIRWISE | info::MIC | info::SECURE, 0, k.replay, &[0; 32], &[], Some(&ptk.kck));
+                let msg4 = build(
+                    info::VERSION_AES | info::PAIRWISE | info::MIC | info::SECURE,
+                    0,
+                    k.replay,
+                    &[0; 32],
+                    &[],
+                    Some(&ptk.kck),
+                );
                 self.state = State::Done;
                 Ok(alloc::vec![Action::Send(msg4), Action::InstallPairwise(ptk.tk), Action::InstallGroup(gtk)])
             }
@@ -381,7 +412,8 @@ impl Supplicant {
                 let data = aes_unwrap(&ptk.kek, k.data).ok_or(WpaError::BadKeyData)?;
                 let gtk = find_gtk(&data).ok_or(WpaError::NoGroupKey)?;
                 self.replay = Some(k.replay);
-                let reply = build(info::VERSION_AES | info::MIC | info::SECURE, 0, k.replay, &[0; 32], &[], Some(&ptk.kck));
+                let reply =
+                    build(info::VERSION_AES | info::MIC | info::SECURE, 0, k.replay, &[0; 32], &[], Some(&ptk.kck));
                 Ok(alloc::vec![Action::Send(reply), Action::InstallGroup(gtk)])
             }
             (false, false) => Err(WpaError::UnexpectedMessage),

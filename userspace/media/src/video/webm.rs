@@ -231,7 +231,9 @@ mod tests {
     use crate::vp8::Decoder;
 
     fn picture(w: usize, h: usize, t: usize) -> Vec<u32> {
-        (0..w * h).map(|i| (((i % w) * 255 / w) as u32) << 16 | (((i / w + t * 9) % h * 255 / h) as u32) << 8 | 0x40).collect()
+        (0..w * h)
+            .map(|i| (((i % w) * 255 / w) as u32) << 16 | (((i / w + t * 9) % h * 255 / h) as u32) << 8 | 0x40)
+            .collect()
     }
 
     /// Records `n` frames at 100 ms; returns the file as written and as

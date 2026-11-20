@@ -108,7 +108,8 @@ pub fn insert(section: &Arc<ImageSection>) {
 /// The base of a live section of the same file and user as `key` (its
 /// `base` and `pages` are ignored), so a loader can place it there too.
 pub fn base_of(key: &Key) -> Option<u64> {
-    let same = |k: &Key| (k.dev, k.ino, k.size, k.mtime_ns, k.uid) == (key.dev, key.ino, key.size, key.mtime_ns, key.uid);
+    let same =
+        |k: &Key| (k.dev, k.ino, k.size, k.mtime_ns, k.uid) == (key.dev, key.ino, key.size, key.mtime_ns, key.uid);
     CACHE.lock().iter().find(|(k, w)| same(k) && w.strong_count() != 0).map(|(k, _)| k.base)
 }
 
@@ -122,4 +123,3 @@ pub fn stats() -> (u64, u64, u64, u64) {
     let live = CACHE.lock().values().filter(|w| w.strong_count() != 0).count() as u64;
     (live, FRAMES.load(Ordering::Relaxed), HITS.load(Ordering::Relaxed), PUBLISHED.load(Ordering::Relaxed))
 }
-

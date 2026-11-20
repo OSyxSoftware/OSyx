@@ -73,7 +73,11 @@ fn main() {
         if values.len() > 1 {
             alternates.push((name.clone(), values.clone()));
         }
-        if samples.len() < 12 && (name.starts_with("api-ms-win-core-file") || name.starts_with("api-ms-win-crt-runtime") || name.starts_with("api-ms-win-core-processthreads")) {
+        if samples.len() < 12
+            && (name.starts_with("api-ms-win-core-file")
+                || name.starts_with("api-ms-win-crt-runtime")
+                || name.starts_with("api-ms-win-core-processthreads"))
+        {
             samples.push((name.clone(), eflags, hashed_len / 2, values.clone()));
         }
     }

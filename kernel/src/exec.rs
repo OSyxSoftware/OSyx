@@ -34,8 +34,7 @@ struct PageCache {
     pages: usize,
     generation: u64,
 }
-static SHARED_PAGES: KMutex<PageCache> =
-    KMutex::new(PageCache { images: BTreeMap::new(), pages: 0, generation: 0 });
+static SHARED_PAGES: KMutex<PageCache> = KMutex::new(PageCache { images: BTreeMap::new(), pages: 0, generation: 0 });
 struct ImageCache {
     images: BTreeMap<(u64, u64), Arc<Vec<u8>>>,
     generation: u64,

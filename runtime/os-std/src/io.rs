@@ -51,7 +51,8 @@ pub trait Read {
     fn read_to_string(&mut self, buf: &mut String) -> Result<usize> {
         let mut bytes = Vec::new();
         let n = self.read_to_end(&mut bytes)?;
-        let s = core::str::from_utf8(&bytes).map_err(|_| Error::new(ErrorKind::InvalidData, "stream did not contain valid UTF-8"))?;
+        let s = core::str::from_utf8(&bytes)
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "stream did not contain valid UTF-8"))?;
         buf.push_str(s);
         Ok(n)
     }
@@ -100,7 +101,8 @@ pub trait BufRead: Read {
     fn read_line(&mut self, line: &mut String) -> Result<usize> {
         let mut bytes = Vec::new();
         let n = self.read_until(b'\n', &mut bytes)?;
-        let text = core::str::from_utf8(&bytes).map_err(|_| Error::new(ErrorKind::InvalidData, "stream did not contain valid UTF-8"))?;
+        let text = core::str::from_utf8(&bytes)
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "stream did not contain valid UTF-8"))?;
         line.push_str(text);
         Ok(n)
     }

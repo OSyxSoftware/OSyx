@@ -127,7 +127,10 @@ fn describe(w: &Wait) -> String {
                     let set = if by == 0 {
                         String::from("never set here")
                     } else {
-                        format!("last set by thread {by} {} ms ago", now_ns().saturating_sub(e.last_set_at.load(Ordering::Relaxed)) / 1_000_000)
+                        format!(
+                            "last set by thread {by} {} ms ago",
+                            now_ns().saturating_sub(e.last_set_at.load(Ordering::Relaxed)) / 1_000_000
+                        )
                     };
                     format!(
                         " {}{}, {}, {set}",
@@ -150,7 +153,11 @@ fn watchdog() {
     // when nothing stalls (every thread's system call and stack), for a
     // process that is idle in untracked waits.
     // An interval too long to count in nanoseconds is ignored.
-    let every_ns = os_std::env::var("OSYX_WINRUN_REPORT_EVERY").ok().and_then(|v| v.parse::<u64>().ok()).filter(|&s| s > 0).and_then(|s| s.checked_mul(1_000_000_000));
+    let every_ns = os_std::env::var("OSYX_WINRUN_REPORT_EVERY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .and_then(|s| s.checked_mul(1_000_000_000));
     let mut last_report = now_ns();
     loop {
         // Until the next scan, or the next periodic report if that comes
@@ -167,7 +174,8 @@ fn watchdog() {
         // Copied out, so the report below runs without the lock.
         let snapshot: Vec<(u64, &'static str, String, u64, bool)> = {
             let mut waits = WAITS.lock().unwrap();
-            let stalled = waits.values().flatten().any(|w| !w.reported && now.saturating_sub(w.since) > REPORT_AFTER_NS);
+            let stalled =
+                waits.values().flatten().any(|w| !w.reported && now.saturating_sub(w.since) > REPORT_AFTER_NS);
             if !stalled && !periodic {
                 continue;
             }
@@ -208,8 +216,14 @@ fn watchdog() {
         let describe = |tid: u64, words: &mut Vec<u64>| -> Option<u64> {
             let n = os_sys::thread_state(tid, words).ok()?;
             let state = ["ready", "running", "blocked", "dead"].get(words[0] as usize).copied().unwrap_or("?");
-            os_std::eprintln!("winrun:     {state}, {} (from {:#x})", syscall_text(words[1], words[4], words[5]), words[2]);
-            if let Some(chain) = images.as_ref().and_then(|i| crate::exceptions::chain_of(&words[STATE_WORDS.min(n)..n], i)) {
+            os_std::eprintln!(
+                "winrun:     {state}, {} (from {:#x})",
+                syscall_text(words[1], words[4], words[5]),
+                words[2]
+            );
+            if let Some(chain) =
+                images.as_ref().and_then(|i| crate::exceptions::chain_of(&words[STATE_WORDS.min(n)..n], i))
+            {
                 os_std::eprintln!("winrun:     stack: {chain}");
             }
             let (lo, hi) = own_code();
@@ -233,11 +247,16 @@ fn watchdog() {
             let busy = after[i].saturating_sub(before[i]);
             let waiting = snapshot.iter().any(|w| w.0 == tid as u64);
             let tail = match last.get(&(tid as u64)) {
-                Some((api, what, at)) => format!("last {api} on {what:#x} {} ms ago", now.saturating_sub(*at) / 1_000_000),
+                Some((api, what, at)) => {
+                    format!("last {api} on {what:#x} {} ms ago", now.saturating_sub(*at) / 1_000_000)
+                }
                 None => String::from("no tracked wait yet"),
             };
             let name = crate::kernel32::thread_description(tid as u32).map(|n| format!(" \"{n}\"")).unwrap_or_default();
-            os_std::eprintln!("winrun:   thread {tid}{name}: {busy} ticks{} — {tail}", if waiting { ", waiting" } else { "" });
+            os_std::eprintln!(
+                "winrun:   thread {tid}{name}: {busy} ticks{} — {tail}",
+                if waiting { ", waiting" } else { "" }
+            );
             if let Some(owner) = describe(tid as u64, &mut words) {
                 if !owners.contains(&owner) {
                     owners.push(owner);
@@ -257,7 +276,10 @@ fn watchdog() {
         }
         os_std::eprintln!("winrun: stalled waits ({} thread waits under way):", snapshot.len());
         for (tid, api, what, secs, fresh) in snapshot {
-            os_std::eprintln!("winrun:   thread {tid}{} {api} for {secs} s on {what}", if fresh { " STALLED" } else { "" });
+            os_std::eprintln!(
+                "winrun:   thread {tid}{} {api} for {secs} s on {what}",
+                if fresh { " STALLED" } else { "" }
+            );
         }
     }
 }

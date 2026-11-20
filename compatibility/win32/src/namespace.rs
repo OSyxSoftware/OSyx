@@ -133,7 +133,10 @@ pub fn register(name: &str, kind: Kind, h: u64) {
     {
         let mut anchors = ANCHORS.lock().unwrap();
         // One anchor per object and name is enough.
-        if anchors.iter().any(|(a, ah)| a == n && objects::get(*ah).is_some_and(|o| objects::same_kernel_object(&o, &object))) {
+        if anchors
+            .iter()
+            .any(|(a, ah)| a == n && objects::get(*ah).is_some_and(|o| objects::same_kernel_object(&o, &object)))
+        {
             return;
         }
         let anchor = objects::insert(object.clone());
@@ -162,7 +165,11 @@ pub fn released(o: &objects::Object) {
         return;
     }
     let mut anchors = ANCHORS.lock().unwrap();
-    let Some(i) = anchors.iter().position(|(_, ah)| objects::get(*ah).is_some_and(|x| objects::same_kernel_object(&x, o))) else { return };
+    let Some(i) =
+        anchors.iter().position(|(_, ah)| objects::get(*ah).is_some_and(|x| objects::same_kernel_object(&x, o)))
+    else {
+        return;
+    };
     if objects::handle_count(o) > 1 {
         return;
     }

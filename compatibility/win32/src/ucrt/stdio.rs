@@ -108,7 +108,11 @@ fn std_streams() {
 
 pub(super) extern "win64" fn __acrt_iob_func(i: u32) -> *mut File {
     std_streams();
-    if i < 3 { STD[i as usize].load(Ordering::SeqCst) as *mut File } else { core::ptr::null_mut() }
+    if i < 3 {
+        STD[i as usize].load(Ordering::SeqCst) as *mut File
+    } else {
+        core::ptr::null_mut()
+    }
 }
 
 fn is_std(f: *mut File) -> bool {
@@ -678,11 +682,19 @@ fn fsopen(path: Option<Vec<u16>>, mode: Option<Vec<u16>>, shflag: i32) -> Result
 }
 
 fn narrow_arg(p: *const u8) -> Option<Vec<u16>> {
-    if p.is_null() { None } else { Some(super::fs::widen_path(p)) }
+    if p.is_null() {
+        None
+    } else {
+        Some(super::fs::widen_path(p))
+    }
 }
 
 fn wide_arg(p: *const u16) -> Option<Vec<u16>> {
-    if p.is_null() { None } else { Some(super::fs::wide_path(p)) }
+    if p.is_null() {
+        None
+    } else {
+        Some(super::fs::wide_path(p))
+    }
 }
 
 extern "win64" fn fopen(path: *const u8, mode: *const u8) -> *mut File {
@@ -867,7 +879,11 @@ extern "win64" fn puts(s: *const u8) -> i32 {
     // SAFETY: a NUL-terminated string.
     let b = unsafe { cstr(s) };
     with(__acrt_iob_func(1), EOF, |st| {
-        if write_nolock(b, st) == b.len() && putc_nolock(b'\n' as i32, st) != EOF { 0 } else { EOF }
+        if write_nolock(b, st) == b.len() && putc_nolock(b'\n' as i32, st) != EOF {
+            0
+        } else {
+            EOF
+        }
     })
 }
 

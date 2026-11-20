@@ -23,7 +23,10 @@ fn join(dir: &str, name: &str) -> String {
 }
 
 fn secs(m: &fs::Metadata) -> u64 {
-    m.modified().ok().and_then(|t| t.duration_since(os_std::time::SystemTime::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
+    m.modified()
+        .ok()
+        .and_then(|t| t.duration_since(os_std::time::SystemTime::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Copies a file or folder (symbolic links are skipped). Returns the
@@ -56,7 +59,8 @@ fn pack_entry(out: &mut fs::File, path: &str, rel: &str, count: &mut usize) -> R
     if m.is_dir() {
         out.write_all(&tar::header(rel, EntryKind::Dir, 0, mode, secs(&m))?).map_err(|e| format!("write: {e}"))?;
         *count += 1;
-        let mut names: Vec<String> = fs::read_dir(path).map_err(|e| format!("{path}: {e}"))?.map(|e| String::from(e.file_name())).collect();
+        let mut names: Vec<String> =
+            fs::read_dir(path).map_err(|e| format!("{path}: {e}"))?.map(|e| String::from(e.file_name())).collect();
         names.sort();
         for n in names {
             pack_entry(out, &join(path, &n), &format!("{rel}/{n}"), count)?;
@@ -203,7 +207,9 @@ pub fn extract(path: &str, dest: &str) -> Result<usize, String> {
                         return Err(format!("{}: unsafe path in the archive", e.path));
                     }
                     match e.kind {
-                        EntryKind::Dir => fs::create_dir_all(join(dest, &e.path)).map_err(|er| format!("{}: {er}", e.path))?,
+                        EntryKind::Dir => {
+                            fs::create_dir_all(join(dest, &e.path)).map_err(|er| format!("{}: {er}", e.path))?
+                        }
                         EntryKind::File => {
                             write_file(dest, &e.path, &data[e.data.clone()], e.mode)?;
                             n += 1;

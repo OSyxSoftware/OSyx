@@ -72,7 +72,11 @@ extern "win64" fn AtlThunk_InitData(thunk: u64, proc: u64, first: u64) {
 
 /// AtlThunk_DataToCode: the thunk's code, to call as a window procedure.
 extern "win64" fn AtlThunk_DataToCode(thunk: u64) -> u64 {
-    if thunk == 0 { 0 } else { thunk - PAGE }
+    if thunk == 0 {
+        0
+    } else {
+        thunk - PAGE
+    }
 }
 
 /// AtlThunk_FreeData: the thunk can be handed out again.

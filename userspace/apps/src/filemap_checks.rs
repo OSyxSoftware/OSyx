@@ -87,9 +87,7 @@ fn checks(path: &str) -> Result<(), Errno> {
     if rights && shared && persisted && zero && lazy_ok {
         Ok(())
     } else {
-        println!(
-            "filemap: rights={rights} shared={shared} persisted={persisted} fresh={zero} lazy={lazy_ok}"
-        );
+        println!("filemap: rights={rights} shared={shared} persisted={persisted} fresh={zero} lazy={lazy_ok}");
         Err(Errno::Io)
     }
 }

@@ -16,7 +16,11 @@ static NEXT: AtomicU64 = AtomicU64::new(0x4000_0000);
 /// SP_DEVINFO_DATA / SP_DEVICE_INTERFACE_DATA end with a ULONG_PTR: 28
 /// bytes for a 32-bit (WoW64) caller, 32 for a 64-bit one.
 fn data_size() -> u32 {
-    if crate::wow64::is_active() { 28 } else { 32 }
+    if crate::wow64::is_active() {
+        28
+    } else {
+        32
+    }
 }
 
 /// SP_DEVINFO_DATA.Reserved (at 24): the device's index in its set.
@@ -25,7 +29,13 @@ fn data_size() -> u32 {
 /// `data` must be the caller's SP_DEVINFO_DATA.
 unsafe fn reserved(data: u64) -> u64 {
     // SAFETY: as documented.
-    unsafe { if crate::wow64::is_active() { teb::get::<u32>(data, 24) as u64 } else { teb::get::<u64>(data, 24) } }
+    unsafe {
+        if crate::wow64::is_active() {
+            teb::get::<u32>(data, 24) as u64
+        } else {
+            teb::get::<u64>(data, 24)
+        }
+    }
 }
 
 /// # Safety
@@ -179,7 +189,14 @@ extern "win64" fn SetupDiGetDeviceInterfaceDetailW(
 
 /// SetupDiGetDeviceInterfaceDetailA: as the Unicode form (no interface is
 /// ever enumerated, see SetupDiEnumDeviceInterfaces).
-extern "win64" fn SetupDiGetDeviceInterfaceDetailA(set: u64, iface_data: u64, detail: u64, detail_size: u32, required: *mut u32, dev_data: u64) -> i32 {
+extern "win64" fn SetupDiGetDeviceInterfaceDetailA(
+    set: u64,
+    iface_data: u64,
+    detail: u64,
+    detail_size: u32,
+    required: *mut u32,
+    dev_data: u64,
+) -> i32 {
     SetupDiGetDeviceInterfaceDetailW(set, iface_data, detail, detail_size, required, dev_data)
 }
 
@@ -194,7 +211,8 @@ extern "win64" fn SetupDiGetDevicePropertyW(
     _required: *mut u32,
     flags: u32,
 ) -> i32 {
-    if data == 0 || unsafe { teb::get::<u32>(data, 0) } != data_size() || key == 0 || prop_type.is_null() || flags != 0 {
+    if data == 0 || unsafe { teb::get::<u32>(data, 0) } != data_size() || key == 0 || prop_type.is_null() || flags != 0
+    {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let sets = SETS.lock().unwrap();
@@ -286,7 +304,13 @@ fn instance_id(set: u64, data: u64) -> Result<alloc::string::String, u32> {
     Ok(alloc::format!("{}\\{}", system::field_str(&d.hardware_id).to_uppercase(), index + 1))
 }
 
-extern "win64" fn SetupDiGetDeviceInstanceIdW(set: u64, data: u64, out: *mut u16, size: u32, required: *mut u32) -> i32 {
+extern "win64" fn SetupDiGetDeviceInstanceIdW(
+    set: u64,
+    data: u64,
+    out: *mut u16,
+    size: u32,
+    required: *mut u32,
+) -> i32 {
     let id = match instance_id(set, data) {
         Ok(s) => s,
         Err(e) => return fail(e, 0),

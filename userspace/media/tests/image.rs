@@ -167,7 +167,14 @@ fn tiff_formats_are_described_and_unsupported_ones_named() {
 
 #[test]
 fn damaged_tiff_files_do_not_panic() {
-    for name in ["rgb8-lzw.tif", "mono-g4.tif", "rgb8-be-tiles.tif", "rgb8-planar-pred.tif", "rgb16-le-pred.tif", "pal4-lzw.tif"] {
+    for name in [
+        "rgb8-lzw.tif",
+        "mono-g4.tif",
+        "rgb8-be-tiles.tif",
+        "rgb8-planar-pred.tif",
+        "rgb16-le-pred.tif",
+        "pal4-lzw.tif",
+    ] {
         let good = data(name);
         // Every prefix, and every byte of the header and directory changed.
         for cut in (0..good.len()).step_by(7) {

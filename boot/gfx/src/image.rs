@@ -105,14 +105,7 @@ impl<'a> Image<'a> {
     /// Fully opaque image and no extra alpha: every texel contributes its
     /// colour with weight 65536 in total, so a shift replaces the divisions
     /// and the destination pixel is simply overwritten.
-    fn draw_scaled_opaque(
-        &self,
-        s: &mut Surface,
-        dst: Rect,
-        area: Rect,
-        step_x: u64,
-        step_y: u64,
-    ) -> Rect {
+    fn draw_scaled_opaque(&self, s: &mut Surface, dst: Rect, area: Rect, step_x: u64, step_y: u64) -> Rect {
         let sw = self.width as i32;
         let sh = self.height as i32;
         let stride = self.width as usize * 4;
@@ -141,15 +134,15 @@ impl<'a> Image<'a> {
                 let w10 = fx * wy0;
                 let w01 = (256 - fx) * wy1;
                 let w11 = fx * wy1;
-                let r = (row0[c0] as u32 * w00 + row0[c1] as u32 * w10
-                    + row1[c0] as u32 * w01
-                    + row1[c1] as u32 * w11)
+                let r = (row0[c0] as u32 * w00 + row0[c1] as u32 * w10 + row1[c0] as u32 * w01 + row1[c1] as u32 * w11)
                     >> 16;
-                let g = (row0[c0 + 1] as u32 * w00 + row0[c1 + 1] as u32 * w10
+                let g = (row0[c0 + 1] as u32 * w00
+                    + row0[c1 + 1] as u32 * w10
                     + row1[c0 + 1] as u32 * w01
                     + row1[c1 + 1] as u32 * w11)
                     >> 16;
-                let b = (row0[c0 + 2] as u32 * w00 + row0[c1 + 2] as u32 * w10
+                let b = (row0[c0 + 2] as u32 * w00
+                    + row0[c1 + 2] as u32 * w10
                     + row1[c0 + 2] as u32 * w01
                     + row1[c1 + 2] as u32 * w11)
                     >> 16;

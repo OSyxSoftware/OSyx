@@ -139,7 +139,15 @@ impl ExfatVolume {
         paths.insert(ROOT, String::from("/"));
         let mut by_path = BTreeMap::new();
         by_path.insert(String::from("/"), ROOT);
-        let state = State { fs, paths, by_path, next: ROOT + 1, open: BTreeMap::new(), files: BTreeMap::new(), dirty_since: None };
+        let state = State {
+            fs,
+            paths,
+            by_path,
+            next: ROOT + 1,
+            open: BTreeMap::new(),
+            files: BTreeMap::new(),
+            dirty_since: None,
+        };
         Ok(ExfatVolume { state: KMutex::new(state), label, device, read_only, owner: owner.unwrap_or((0, 0)) })
     }
 
@@ -279,7 +287,9 @@ impl Filesystem for ExfatVolume {
             let p = join(&s.path(dir)?, name);
             match what {
                 NewNode::File => {
-                    let f = s.fs.open(&p, OpenOptions { create_new: true, create: true, truncate: false }).map_err(fs_errno)?;
+                    let f =
+                        s.fs.open(&p, OpenOptions { create_new: true, create: true, truncate: false })
+                            .map_err(fs_errno)?;
                     let ino = s.ino_for(&p);
                     s.files.insert(ino, f);
                     Ok(ino)
@@ -410,7 +420,12 @@ impl Filesystem for ExfatVolume {
 
     fn fsck(&self) -> Option<core::result::Result<String, String>> {
         Some(match self.check() {
-            Ok(r) => Ok(alloc::format!("{} files, {} directories, {} clusters used", r.files, r.directories, r.used_clusters)),
+            Ok(r) => Ok(alloc::format!(
+                "{} files, {} directories, {} clusters used",
+                r.files,
+                r.directories,
+                r.used_clusters
+            )),
             Err(e) => Err(alloc::format!("{e}")),
         })
     }

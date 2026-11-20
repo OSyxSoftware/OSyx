@@ -470,7 +470,9 @@ pub(crate) fn timeout_ms(t: *const i64) -> Result<u32, NtStatus> {
     let units = if v > 0 {
         let ns = os_sys::clock(osyx_abi::CLOCK_REALTIME).map_err(errno_to_status)? as i64;
         (v as u64).saturating_sub(kernel32::filetime(ns))
-    } else { v.unsigned_abs() };
+    } else {
+        v.unsigned_abs()
+    };
     Ok(units.div_ceil(10_000).min(objects::INFINITE as u64 - 1) as u32)
 }
 
@@ -481,8 +483,10 @@ extern "win64" fn NtWaitForSingleObject(h: u64, alertable: u8, timeout: *const i
     };
     let r = if alertable != 0 {
         // STATUS_USER_APC has WAIT_IO_COMPLETION's value.
-        Ok(crate::apc::alertable_wait(ms, objects::WAIT_TIMEOUT, |slice| objects::wait(&[h], false, slice).unwrap_or(objects::WAIT_FAILED)))
-            .and_then(|r| if r == objects::WAIT_FAILED { Err(()) } else { Ok(r) })
+        Ok(crate::apc::alertable_wait(ms, objects::WAIT_TIMEOUT, |slice| {
+            objects::wait(&[h], false, slice).unwrap_or(objects::WAIT_FAILED)
+        }))
+        .and_then(|r| if r == objects::WAIT_FAILED { Err(()) } else { Ok(r) })
     } else {
         objects::wait(&[h], false, ms).map_err(|_| ())
     };
@@ -620,7 +624,11 @@ extern "win64" fn LdrRegisterDllNotification(flags: u32, callback: u64, context:
 }
 
 extern "win64" fn LdrUnregisterDllNotification(cookie: u64) -> NtStatus {
-    if crate::loader::unregister_dll_notification(cookie) { STATUS_SUCCESS } else { STATUS_DLL_NOT_FOUND }
+    if crate::loader::unregister_dll_notification(cookie) {
+        STATUS_SUCCESS
+    } else {
+        STATUS_DLL_NOT_FOUND
+    }
 }
 
 extern "win64" fn LdrUnlockLoaderLock(flags: u32, cookie: u64) -> NtStatus {
@@ -678,7 +686,11 @@ extern "win64" fn RtlNtStatusToDosError(s: NtStatus) -> u32 {
 extern "win64" fn RtlGetLastNtStatus() -> NtStatus {
     let t = teb::current();
     // SAFETY: as above.
-    if t == 0 { STATUS_SUCCESS } else { unsafe { teb::get(t, LAST_STATUS) } }
+    if t == 0 {
+        STATUS_SUCCESS
+    } else {
+        unsafe { teb::get(t, LAST_STATUS) }
+    }
 }
 
 extern "win64" fn RtlGetLastWin32Error() -> u32 {
@@ -708,7 +720,6 @@ extern "win64" fn RtlGetVersion(info: *mut u8) -> NtStatus {
     STATUS_SUCCESS
 }
 
-
 const STATUS_NOT_FOUND: NtStatus = 0xC000_0225;
 const STATUS_INVALID_DEVICE_REQUEST: NtStatus = 0xC000_0010;
 
@@ -722,7 +733,18 @@ extern "win64" fn NtCancelIoFileEx(h: u64, _io: u64, _status: u64) -> NtStatus {
 
 /// No device controls are implemented for OSyx's files and devices.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn NtDeviceIoControlFile(h: u64, _e: u64, _apc: u64, _ctx: u64, _io: u64, _code: u32, _i: u64, _il: u32, _o: u64, _ol: u32) -> NtStatus {
+extern "win64" fn NtDeviceIoControlFile(
+    h: u64,
+    _e: u64,
+    _apc: u64,
+    _ctx: u64,
+    _io: u64,
+    _code: u32,
+    _i: u64,
+    _il: u32,
+    _o: u64,
+    _ol: u32,
+) -> NtStatus {
     if objects::get(h).is_none() {
         return STATUS_INVALID_HANDLE;
     }
@@ -754,7 +776,9 @@ extern "win64" fn NtOpenDirectoryObject(handle: *mut u64, _access: u32, oa: u64)
         return STATUS_INVALID_PARAMETER;
     }
     // SAFETY: an OBJECT_ATTRIBUTES: RootDirectory at 8, ObjectName at 16.
-    let (root, name_ptr) = unsafe { (core::ptr::read_unaligned((oa + 8) as *const u64), core::ptr::read_unaligned((oa + 16) as *const u64)) };
+    let (root, name_ptr) = unsafe {
+        (core::ptr::read_unaligned((oa + 8) as *const u64), core::ptr::read_unaligned((oa + 16) as *const u64))
+    };
     if name_ptr == 0 {
         return STATUS_INVALID_PARAMETER;
     }
@@ -762,7 +786,11 @@ extern "win64" fn NtOpenDirectoryObject(handle: *mut u64, _access: u32, oa: u64)
     let name = unsafe {
         let len = core::ptr::read_unaligned(name_ptr as *const u16) as usize / 2;
         let buf = core::ptr::read_unaligned((name_ptr + 8) as *const u64) as *const u16;
-        if buf.is_null() { String::new() } else { String::from_utf16_lossy(core::slice::from_raw_parts(buf, len)) }
+        if buf.is_null() {
+            String::new()
+        } else {
+            String::from_utf16_lossy(core::slice::from_raw_parts(buf, len))
+        }
     };
     let full = if root != 0 {
         let Some(Object::Directory(d)) = objects::get(root) else { return STATUS_INVALID_HANDLE };
@@ -775,7 +803,11 @@ extern "win64" fn NtOpenDirectoryObject(handle: *mut u64, _access: u32, oa: u64)
     };
     let Some(path) = directory_path(&full) else { return STATUS_OBJECT_NAME_NOT_FOUND };
     // SAFETY: the caller's out pointer.
-    unsafe { *handle = objects::insert(Object::Directory(alloc::sync::Arc::new(objects::DirectoryObj { path: String::from(path) }))) };
+    unsafe {
+        *handle = objects::insert(Object::Directory(alloc::sync::Arc::new(objects::DirectoryObj {
+            path: String::from(path),
+        })))
+    };
     0
 }
 
@@ -796,7 +828,15 @@ fn directory_entries(path: &str) -> Vec<(String, &'static str)> {
 /// left, STATUS_BUFFER_TOO_SMALL that not even one fits (`ret` has the size
 /// that one needs).
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn NtQueryDirectoryObject(h: u64, buf: u64, len: u32, single: u8, restart: u8, ctx: *mut u32, ret: *mut u32) -> NtStatus {
+extern "win64" fn NtQueryDirectoryObject(
+    h: u64,
+    buf: u64,
+    len: u32,
+    single: u8,
+    restart: u8,
+    ctx: *mut u32,
+    ret: *mut u32,
+) -> NtStatus {
     let Some(Object::Directory(dir)) = objects::get(h) else { return STATUS_INVALID_HANDLE };
     if ctx.is_null() {
         return STATUS_ACCESS_VIOLATION;
@@ -811,7 +851,8 @@ extern "win64" fn NtQueryDirectoryObject(h: u64, buf: u64, len: u32, single: u8,
     }
     // Bytes of one entry's strings, with their NULs, and the fixed part: the
     // entries so far plus the terminating zero entry.
-    let strings = |e: &(String, &'static str)| (e.0.encode_utf16().count() + 1) * 2 + (e.1.encode_utf16().count() + 1) * 2;
+    let strings =
+        |e: &(String, &'static str)| (e.0.encode_utf16().count() + 1) * 2 + (e.1.encode_utf16().count() + 1) * 2;
     let want = if single != 0 { 1 } else { entries.len() - start };
     let mut fit = 0usize;
     let mut need = 32usize;
@@ -855,7 +896,11 @@ extern "win64" fn NtQueryDirectoryObject(h: u64, buf: u64, len: u32, single: u8,
             *ret = need as u32;
         }
     }
-    if start + fit < entries.len() && single == 0 { STATUS_MORE_ENTRIES } else { 0 }
+    if start + fit < entries.len() && single == 0 {
+        STATUS_MORE_ENTRIES
+    } else {
+        0
+    }
 }
 
 /// SystemBasicInformation (0) and SystemProcessorPerformanceInformation
@@ -866,7 +911,13 @@ extern "win64" fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, r
     // SYSTEM_BASIC_INFORMATION is 64 bytes for 64-bit callers and 44 for PE32 ones.
     let narrow = crate::wow64::is_active();
     let need: u32 = match class {
-        0 => if narrow { 44 } else { 64 },
+        0 => {
+            if narrow {
+                44
+            } else {
+                64
+            }
+        }
         8 => 48,
         _ => return STATUS_INVALID_INFO_CLASS,
     };
@@ -916,7 +967,12 @@ extern "win64" fn NtQuerySystemInformation(class: u32, buf: *mut u8, len: u32, r
 
 /// DOS path → "\??\C:\..." NT path in a process-heap UNICODE_STRING
 /// (RtlFreeUnicodeString frees it), with the file part pointed to.
-extern "win64" fn RtlDosPathNameToNtPathName_U_WithStatus(dos: *const u16, nt: *mut u8, file_part: *mut u64, relative: *mut u8) -> NtStatus {
+extern "win64" fn RtlDosPathNameToNtPathName_U_WithStatus(
+    dos: *const u16,
+    nt: *mut u8,
+    file_part: *mut u64,
+    relative: *mut u8,
+) -> NtStatus {
     if nt.is_null() {
         return STATUS_INVALID_PARAMETER;
     }
@@ -949,7 +1005,7 @@ extern "win64" fn RtlDosPathNameToNtPathName_U_WithStatus(dos: *const u16, nt: *
 const BACKSLASH: char = '\\';
 
 pub fn exports() -> Vec<(&'static str, u64)> {
-    let mut exports=export_table![
+    let mut exports = export_table![
         NtCreateFile,
         NtOpenFile,
         NtReadFile,

@@ -385,7 +385,13 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
             record.code,
             n.rip,
             n.gpr[fault::RSP],
-            if record.info[0] == 1 { "writing" } else if record.info[0] == 8 { "executing" } else { "reading" },
+            if record.info[0] == 1 {
+                "writing"
+            } else if record.info[0] == 8 {
+                "executing"
+            } else {
+                "reading"
+            },
             record.info[1],
             crate::loader::loading(),
         );
@@ -424,16 +430,33 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         }
     }
     static REPORTS: Mutex<Vec<alloc::string::String>> = Mutex::new(Vec::new());
-    let delay = delay_load_failure(&record); let verbose = crate::VERBOSE.load(Ordering::Relaxed); if delay.is_some() || verbose {
+    let delay = delay_load_failure(&record);
+    let verbose = crate::VERBOSE.load(Ordering::Relaxed);
+    if delay.is_some() || verbose {
         let _ = &delay;
         let key = delay.clone().unwrap_or_else(|| alloc::format!("{:x}:{:x}", record.code, record.address));
         let report = {
             let mut seen = REPORTS.lock().unwrap();
-            if seen.len() >= 32 || seen.contains(&key) { false } else { seen.push(key); true }
+            if seen.len() >= 32 || seen.contains(&key) {
+                false
+            } else {
+                seen.push(key);
+                true
+            }
         };
         if report {
-            if verbose { os_std::eprintln!("winrun: dispatching Windows exception {:#x} at {} in thread {}, info {:x?}", record.code, where_text(record.address), os_sys::gettid(), &record.info[..record.count.min(15) as usize]); }
-            if let Some(what) = delay { os_std::eprintln!("winrun: delay-load exception: {what}"); }
+            if verbose {
+                os_std::eprintln!(
+                    "winrun: dispatching Windows exception {:#x} at {} in thread {}, info {:x?}",
+                    record.code,
+                    where_text(record.address),
+                    os_sys::gettid(),
+                    &record.info[..record.count.min(15) as usize]
+                );
+            }
+            if let Some(what) = delay {
+                os_std::eprintln!("winrun: delay-load exception: {what}");
+            }
         }
     }
     // Unwinding during this dispatch (RtlUnwindEx) starts at this context
@@ -508,7 +531,9 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         let r8 = context.regs[8];
         if let Some(text) = text_at(r8, 1) {
             os_std::eprintln!("winrun: ... reason in r8: {text}");
-        } else if let Some(text) = readable(r8, 8).filter(|b| b.len() == 8).and_then(|b| text_at(u64::from_le_bytes(b.try_into().unwrap()), 8)) {
+        } else if let Some(text) =
+            readable(r8, 8).filter(|b| b.len() == 8).and_then(|b| text_at(u64::from_le_bytes(b.try_into().unwrap()), 8))
+        {
             os_std::eprintln!("winrun: ... reason at [r8]: {text}");
         } else if let Some(text) = (0..64u64).map(|i| context.regs[4] + 8 * i).find_map(|a| text_at(a, 24)) {
             // A message formatted into a stack buffer just before the trap.
@@ -525,7 +550,9 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
         };
         let t = crate::teb::current();
         // SAFETY: this thread's TEB.
-        let (base, limit): (u64, u64) = unsafe { (crate::teb::get(t, crate::teb::TEB_STACK_BASE), crate::teb::get(t, crate::teb::TEB_STACK_LIMIT)) };
+        let (base, limit): (u64, u64) = unsafe {
+            (crate::teb::get(t, crate::teb::TEB_STACK_BASE), crate::teb::get(t, crate::teb::TEB_STACK_LIMIT))
+        };
         os_std::eprintln!("winrun: ... {kind} {:#x} (stack {limit:#x}..{base:#x})", record.info[1]);
         // The memory the access hit, as VirtualQuery sees it.
         match crate::mem::virtual_query_for_report(record.info[1]) {
@@ -562,7 +589,8 @@ extern "C" fn entry(native: *mut NativeContext) -> ! {
 /// if there are at least `min` characters of it.
 fn text_at(addr: u64, min: usize) -> Option<alloc::string::String> {
     let text = readable(addr, 256)?.split(|&b| b == 0).next().unwrap_or(&[]);
-    (text.len() >= min && text.iter().all(|&b| (0x20..0x7f).contains(&b))).then(|| alloc::string::String::from(core::str::from_utf8(text).unwrap_or("")))
+    (text.len() >= min && text.iter().all(|&b| (0x20..0x7f).contains(&b)))
+        .then(|| alloc::string::String::from(core::str::from_utf8(text).unwrap_or("")))
 }
 
 /// `module+offset` for a code address, for crash reports.
@@ -579,10 +607,19 @@ fn where_text(addr: u64) -> alloc::string::String {
 /// would be better, but this says which module failed without it.
 pub(crate) fn trace_current() {
     let teb = crate::teb::current();
-    if teb == 0 { return; }
-    let (limit, base) = unsafe { (crate::teb::get::<u64>(teb, crate::teb::TEB_STACK_LIMIT), crate::teb::get::<u64>(teb, crate::teb::TEB_STACK_BASE)) };
+    if teb == 0 {
+        return;
+    }
+    let (limit, base) = unsafe {
+        (
+            crate::teb::get::<u64>(teb, crate::teb::TEB_STACK_LIMIT),
+            crate::teb::get::<u64>(teb, crate::teb::TEB_STACK_BASE),
+        )
+    };
     let rsp: u64;
-    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+    }
     trace(limit, base, rsp);
 }
 
@@ -690,7 +727,9 @@ fn delay_load_failure(r: &Record) -> Option<alloc::string::String> {
         return None;
     }
     // SAFETY (both closures): every address is probed readable first.
-    let read = |a: u64| (a != 0 && !crate::sysext::is_bad_read(a, 8)).then(|| unsafe { core::ptr::read_unaligned(a as *const u64) });
+    let read = |a: u64| {
+        (a != 0 && !crate::sysext::is_bad_read(a, 8)).then(|| unsafe { core::ptr::read_unaligned(a as *const u64) })
+    };
     let text = |p: u64| -> Option<alloc::string::String> {
         let mut s = alloc::string::String::new();
         for i in 0..260 {

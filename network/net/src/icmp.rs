@@ -17,12 +17,29 @@ pub const UNREACH_FRAG_NEEDED: u8 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message<'a> {
-    EchoRequest { ident: u16, seq: u16, data: &'a [u8] },
-    EchoReply { ident: u16, seq: u16, data: &'a [u8] },
+    EchoRequest {
+        ident: u16,
+        seq: u16,
+        data: &'a [u8],
+    },
+    EchoReply {
+        ident: u16,
+        seq: u16,
+        data: &'a [u8],
+    },
     /// `original` is the IP header + first bytes of the offending datagram.
-    Unreachable { code: u8, original: &'a [u8] },
-    TimeExceeded { code: u8, original: &'a [u8] },
-    Other { kind: u8, code: u8 },
+    Unreachable {
+        code: u8,
+        original: &'a [u8],
+    },
+    TimeExceeded {
+        code: u8,
+        original: &'a [u8],
+    },
+    Other {
+        kind: u8,
+        code: u8,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

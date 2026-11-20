@@ -109,7 +109,9 @@ impl<'a> Schema<'a> {
         if count > MAX_ENTRIES {
             return Err(ApiSetError::OutOfBounds("entry count"));
         }
-        let fits = |off: u32, n: u32, size: usize| (off as usize).checked_add(n as usize * size).is_some_and(|end| end <= ns.len());
+        let fits = |off: u32, n: u32, size: usize| {
+            (off as usize).checked_add(n as usize * size).is_some_and(|end| end <= ns.len())
+        };
         if !fits(entry_off, count, ENTRY) {
             return Err(ApiSetError::OutOfBounds("entry table"));
         }
@@ -169,7 +171,13 @@ impl<'a> Schema<'a> {
     }
 
     fn eq_ascii_ci(utf16: &[u8], s: &str) -> bool {
-        utf16.len() == s.len() * 2 && utf16.as_chunks::<2>().0.iter().zip(s.bytes()).all(|(c, b)| ascii_lower(u16::from_le_bytes(*c)) == ascii_lower(b as u16))
+        utf16.len() == s.len() * 2
+            && utf16
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(s.bytes())
+                .all(|(c, b)| ascii_lower(u16::from_le_bytes(*c)) == ascii_lower(b as u16))
     }
 
     /// Name of entry `i` (for listings).
@@ -280,7 +288,7 @@ impl SchemaBuilder {
         let strings_off = hash_off + count * HASH;
         let mut out = alloc::vec![0u8; strings_off];
         let mut strings: Vec<u8> = Vec::new();
-        let add_str =|s: &str, strings: &mut Vec<u8>| -> (u32, u32) {
+        let add_str = |s: &str, strings: &mut Vec<u8>| -> (u32, u32) {
             if s.is_empty() {
                 return (0, 0);
             }
@@ -321,7 +329,9 @@ impl SchemaBuilder {
         }
         out.extend_from_slice(&strings);
         let size = out.len() as u32;
-        for (k, v) in [VERSION, size, 0, count as u32, entry_off as u32, hash_off as u32, HASH_FACTOR].into_iter().enumerate() {
+        for (k, v) in
+            [VERSION, size, 0, count as u32, entry_off as u32, hash_off as u32, HASH_FACTOR].into_iter().enumerate()
+        {
             put(&mut out, k * 4, v);
         }
         out

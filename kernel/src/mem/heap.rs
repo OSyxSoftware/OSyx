@@ -38,9 +38,7 @@ struct Ev {
 struct EventLog(core::cell::UnsafeCell<[Ev; LOG_SLOTS]>);
 // SAFETY: only touched under the heap state lock (or in the panic it causes).
 unsafe impl Sync for EventLog {}
-static EVENTS: EventLog = EventLog(core::cell::UnsafeCell::new(
-    [Ev { addr: 0, size: 0, seq: 0, op: 0 }; LOG_SLOTS],
-));
+static EVENTS: EventLog = EventLog(core::cell::UnsafeCell::new([Ev { addr: 0, size: 0, seq: 0, op: 0 }; LOG_SLOTS]));
 static EVENT_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 fn note_event(addr: u64, size: u64, op: u64) {

@@ -518,12 +518,7 @@ mod tests {
         assert_eq!((sub.width(), sub.height()), (2, 2));
         sub.fill(7);
         sub.put(2, 0, 9);
-        assert_eq!(px, [
-            0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 7, 7,
-            0, 0, 0, 0, 7, 7,
-        ]);
+        assert_eq!(px, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 0, 0, 0, 0, 7, 7,]);
         let s = Surface::new(&mut px, 6, 4, 6).unwrap();
         assert!(s.into_sub(Rect::new(6, 0, 3, 3)).is_none());
     }

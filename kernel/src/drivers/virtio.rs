@@ -6,9 +6,9 @@
 //! at a time, serialised by its owner. Legacy (pre-1.0) devices are not
 //! supported; QEMU's transitional devices expose the modern interface too.
 
+use crate::arch::timer::Deadline;
 use crate::mem::{self, alloc_frame, phys_to_virt};
 use crate::pci::{self, Bar};
-use crate::arch::timer::Deadline;
 use crate::sched;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
@@ -472,7 +472,9 @@ unsafe impl Send for AsyncQueue {}
 
 impl AsyncQueue {
     /// Whether the device accepted this queue's MSI-X entry.
-    pub fn has_interrupts(&self) -> bool { self.interrupts }
+    pub fn has_interrupts(&self) -> bool {
+        self.interrupts
+    }
     pub fn size(&self) -> u16 {
         self.size
     }

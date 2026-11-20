@@ -49,11 +49,16 @@ pub fn run(t: &mut Tests) {
         let table: Vec<(&str, String)> =
             ["/", "/boot", "/tmp", "/run", "/dev"].iter().map(|p| (*p, fstype(p))).collect();
         println!("mounts: {table:?}");
-        table[0].1 == "ext4" && table[1].1 == "fat32" && table[2].1 == "tmpfs" && table[3].1 == "tmpfs" && table[4].1 == "devfs"
+        table[0].1 == "ext4"
+            && table[1].1 == "fat32"
+            && table[2].1 == "tmpfs"
+            && table[3].1 == "tmpfs"
+            && table[4].1 == "devfs"
     });
     t.check("fs: ext4 root: files from mke2fs, owners, links, sparse", || {
         let pattern: Vec<u8> = (0..300_000usize).map(|i| ((i * 11 + 3) % 253) as u8).collect();
-        let hello = fs::read_to_string("/osyx-seed/hello.txt").as_deref() == Ok("Hello from the OSyx root file system!\n");
+        let hello =
+            fs::read_to_string("/osyx-seed/hello.txt").as_deref() == Ok("Hello from the OSyx root file system!\n");
         let bin = fs::read("/osyx-seed/pattern.bin").is_ok_and(|b| b == pattern);
         let link = fs::read_link("/osyx-seed/link").is_ok_and(|p| p == "hello.txt")
             && fs::read_to_string("/osyx-seed/link").is_ok_and(|s| s.starts_with("Hello"));
@@ -79,9 +84,8 @@ pub fn run(t: &mut Tests) {
             return false;
         }
         let data: Vec<u8> = (0..OUT_BIN_LEN).map(out_byte).collect();
-        let bin = File::create("/osyx-out/pattern.bin").is_ok_and(|mut f| {
-            data.chunks(7_000).all(|c| f.write_all(c).is_ok()) && f.sync_all().is_ok()
-        });
+        let bin = File::create("/osyx-out/pattern.bin")
+            .is_ok_and(|mut f| data.chunks(7_000).all(|c| f.write_all(c).is_ok()) && f.sync_all().is_ok());
         let tree = fs::create_dir_all("/osyx-out/a/b/c").is_ok()
             && fs::write("/osyx-out/a/b/c/deep.txt", "deep\n").is_ok()
             && fs::rename("/osyx-out/a/b", "/osyx-out/moved").is_ok()
@@ -104,9 +108,8 @@ pub fn run(t: &mut Tests) {
     });
     t.check("fs: 200 KB file, seek and partial reads (tmpfs)", || {
         let data: Vec<u8> = (0..OUT_BIN_LEN).map(out_byte).collect();
-        let written = File::create("/tmp/pattern.bin").is_ok_and(|mut f| {
-            data.chunks(7_000).all(|c| f.write_all(c).is_ok()) && f.sync_all().is_ok()
-        });
+        let written = File::create("/tmp/pattern.bin")
+            .is_ok_and(|mut f| data.chunks(7_000).all(|c| f.write_all(c).is_ok()) && f.sync_all().is_ok());
         let Ok(mut f) = File::open("/tmp/pattern.bin") else { return false };
         let mut mid = [0u8; 1000];
         let seeked = f.seek(SeekFrom::Start(123_457)).ok() == Some(123_457)
@@ -174,9 +177,7 @@ pub fn run(t: &mut Tests) {
         let target = fs::read_link("/tmp/links/rel").is_ok_and(|p| p == "target.txt");
         let dev = fs::metadata("/tmp/links/zero").is_ok_and(|m| m.file_type().is_char_device());
         let looped = kind_of(fs::metadata("/tmp/links/loop")) == Some(ErrorKind::FilesystemLoop);
-        let listed = fs::read_dir("/tmp/links").is_ok_and(|d| {
-            d.filter(|e| e.file_type().is_symlink()).count() == 3
-        });
+        let listed = fs::read_dir("/tmp/links").is_ok_and(|d| d.filter(|e| e.file_type().is_symlink()).count() == 3);
         let m = fs::metadata("/tmp/links/target.txt");
         let times = m.is_ok_and(|m| {
             m.modified()
@@ -247,7 +248,8 @@ pub fn run(t: &mut Tests) {
     });
     t.check("fs: handles left open at exit are closed by the kernel", || {
         let ok = matches!(worker(&["fs-leak", "/tmp/leaked.txt"]).status(), Ok(s) if s.success());
-        ok && fs::read_to_string("/tmp/leaked.txt").as_deref() == Ok("still here\n") && fs::remove_file("/tmp/leaked.txt").is_ok()
+        ok && fs::read_to_string("/tmp/leaked.txt").as_deref() == Ok("still here\n")
+            && fs::remove_file("/tmp/leaked.txt").is_ok()
     });
     t.check("fs: /dev devices from user space", || {
         let null = File::options().read(true).write(true).open("/dev/null").is_ok_and(|mut f| {
@@ -268,18 +270,27 @@ pub fn run(t: &mut Tests) {
                 false
             }
         };
-        let console = File::options().write(true).open("/dev/console").is_ok_and(|mut f| f.write_all(b"init writes to /dev/console\n").is_ok());
+        let console = File::options()
+            .write(true)
+            .open("/dev/console")
+            .is_ok_and(|mut f| f.write_all(b"init writes to /dev/console\n").is_ok());
         let disks = fs::read_dir("/dev/disks").is_ok_and(|d| {
             let v: Vec<_> = d.collect();
             !v.is_empty() && v.iter().all(|e| e.file_type().is_block_device())
         });
         // The input core's seat stream; per-device nodes only for attached devices.
         let input = fs::metadata("/dev/input/seat0").is_ok_and(|m| m.file_type().is_char_device())
-            && fs::read_dir("/dev/input").is_ok_and(|mut d| d.all(|e| e.file_name() == "seat0" || e.file_name().starts_with("event")));
+            && fs::read_dir("/dev/input")
+                .is_ok_and(|mut d| d.all(|e| e.file_name() == "seat0" || e.file_name().starts_with("event")));
         null && zero && random && console && disks && input
     });
     t.check("fs: an unprivileged process is confined", || {
-        let secret = File::options().write(true).create_new(true).mode(0o600).open("/tmp/root-only").is_ok_and(|mut f| f.write_all(b"secret").is_ok());
+        let secret = File::options()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open("/tmp/root-only")
+            .is_ok_and(|mut f| f.write_all(b"secret").is_ok());
         let ok = matches!(worker(&["as-user", "1000"]).status(), Ok(s) if s.success());
         secret && ok && fs::remove_file("/tmp/root-only").is_ok() && fs::remove_file("/tmp/user-file").is_ok()
     });
@@ -319,14 +330,14 @@ pub fn run(t: &mut Tests) {
             return false;
         }
         let data: Vec<u8> = (0..OUT_BIN_LEN).map(out_byte).collect();
-        let bin = File::create("/boot/osyx-out/pattern.bin").is_ok_and(|mut f| {
-            data.chunks(7_000).all(|c| f.write_all(c).is_ok()) && f.sync_all().is_ok()
-        });
+        let bin = File::create("/boot/osyx-out/pattern.bin")
+            .is_ok_and(|mut f| data.chunks(7_000).all(|c| f.write_all(c).is_ok()) && f.sync_all().is_ok());
         let back = fs::read("/boot/OSYX-OUT/PATTERN.BIN").is_ok_and(|b| b == data);
         let child = matches!(worker(&["fs-write", "/boot/osyx-out/from-worker.txt"]).status(), Ok(s) if s.success());
         let text = File::create("/boot/osyx-out/hello-from-osyx.txt")
             .is_ok_and(|mut f| f.write_all(OUT_TEXT.as_bytes()).is_ok() && f.sync_all().is_ok());
-        let fat_meta = fs::metadata("/boot/osyx-out/pattern.bin").is_ok_and(|m| m.uid() == 0 && m.attributes() & 0x20 != 0);
+        let fat_meta =
+            fs::metadata("/boot/osyx-out/pattern.bin").is_ok_and(|m| m.uid() == 0 && m.attributes() & 0x20 != 0);
         let no_links = kind_of(fs::symlink("x", "/boot/osyx-out/link")) == Some(ErrorKind::Unsupported);
         bin && back && child && text && fat_meta && no_links
     });

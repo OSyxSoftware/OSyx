@@ -33,7 +33,8 @@ struct Cache {
     cap: usize,
 }
 
-static CACHE: KMutex<Cache> = KMutex::new(Cache { entries: BTreeMap::new(), bytes: 0, clock: 0, generation: 0, cap: 0 });
+static CACHE: KMutex<Cache> =
+    KMutex::new(Cache { entries: BTreeMap::new(), bytes: 0, clock: 0, generation: 0, cap: 0 });
 
 // TEMP: page cache and recent-write overlay hit counters.
 static FC_HITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -216,7 +217,13 @@ pub fn note_write(key: Key, offset: u64, data: &[u8]) {
 /// own read. `source`, when given, lets a background thread extend the
 /// read-ahead window past what this call reads. Any cache failure falls back
 /// to reading directly.
-pub fn read(key: Key, offset: u64, out: &mut [u8], fill: impl Fn(u64, &mut [u8]) -> Result<usize, Errno>, source: Option<&Source>) -> Result<usize, Errno> {
+pub fn read(
+    key: Key,
+    offset: u64,
+    out: &mut [u8],
+    fill: impl Fn(u64, &mut [u8]) -> Result<usize, Errno>,
+    source: Option<&Source>,
+) -> Result<usize, Errno> {
     if recent_read(key, offset, out) {
         RECENT_HITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return Ok(out.len());
@@ -246,9 +253,8 @@ pub fn read(key: Key, offset: u64, out: &mut [u8], fill: impl Fn(u64, &mut [u8])
         let n = (len - within).min(out.len() - done);
         // SAFETY: the SharedMemory keeps this RAM page mapped and alive
         // while the reference counted page is held here.
-        let src = unsafe {
-            core::slice::from_raw_parts((mem::phys_to_virt(page.frames()[0]) as *const u8).add(within), n)
-        };
+        let src =
+            unsafe { core::slice::from_raw_parts((mem::phys_to_virt(page.frames()[0]) as *const u8).add(within), n) };
         out[done..done + n].copy_from_slice(src);
         done += n;
     }
@@ -376,7 +382,11 @@ fn readahead_thread(_: u64, _: u64) {
     loop {
         let job = {
             let mut q = JOBS.lock();
-            if q.is_empty() { None } else { Some(q.remove(0)) }
+            if q.is_empty() {
+                None
+            } else {
+                Some(q.remove(0))
+            }
         };
         match job {
             Some(job) => readahead(job),
@@ -437,7 +447,13 @@ fn insert(key: Key, index: u64, generation: u64, fresh: &[(u64, Arc<SharedMemory
     c.clock += 1;
     let clock = c.clock;
     let added = {
-        let e = c.entries.entry(key).or_insert_with(|| Entry { pages: BTreeMap::new(), used: clock, bytes: 0, next: index, window: READAHEAD_START });
+        let e = c.entries.entry(key).or_insert_with(|| Entry {
+            pages: BTreeMap::new(),
+            used: clock,
+            bytes: 0,
+            next: index,
+            window: READAHEAD_START,
+        });
         e.used = clock;
         let mut added = 0;
         for (i, shm, n) in fresh {
@@ -463,7 +479,12 @@ fn insert(key: Key, index: u64, generation: u64, fresh: &[(u64, Arc<SharedMemory
     c.entries.get(&key).and_then(|e| e.pages.get(&index)).cloned()
 }
 
-pub(crate) fn page(key: Key, index: u64, fill: &impl Fn(u64, &mut [u8]) -> Result<usize, Errno>, source: Option<&Source>) -> Result<Option<Page>, Errno> {
+pub(crate) fn page(
+    key: Key,
+    index: u64,
+    fill: &impl Fn(u64, &mut [u8]) -> Result<usize, Errno>,
+    source: Option<&Source>,
+) -> Result<Option<Page>, Errno> {
     let (generation, want) = {
         let mut c = CACHE.lock();
         c.clock += 1;

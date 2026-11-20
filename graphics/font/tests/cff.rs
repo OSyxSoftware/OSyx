@@ -1,10 +1,10 @@
 //! Exercises the Windows DirectWrite parser and rasterizer on a real CFF font.
 extern crate alloc;
 
-#[path = "../../../compatibility/win32/src/dwrite/ttf.rs"]
-mod ttf;
 #[path = "../../../compatibility/win32/src/dwrite/raster.rs"]
 mod raster;
+#[path = "../../../compatibility/win32/src/dwrite/ttf.rs"]
+mod ttf;
 
 use alloc::sync::Arc;
 

@@ -86,7 +86,13 @@ impl Filesystem for DevFs {
     }
 
     fn stat(&self, ino: u64) -> Result<FileStat> {
-        let base = FileStat { ino, atime_ns: self.created, mtime_ns: self.created, ctime_ns: self.created, ..Default::default() };
+        let base = FileStat {
+            ino,
+            atime_ns: self.created,
+            mtime_ns: self.created,
+            ctime_ns: self.created,
+            ..Default::default()
+        };
         if let Some(path) = self.dir_path(ino) {
             // A directory whose last node was removed no longer exists.
             if !path.is_empty() && !devices::list().iter().any(|n| n.path.starts_with(&alloc::format!("{path}/"))) {
@@ -133,7 +139,14 @@ impl Filesystem for DevFs {
         self.node(ino).map(DeviceFile)
     }
 
-    fn create(&self, _dir: u64, _name: &str, _what: osyx_vfs::NewNode<'_>, _mode: u32, _cred: &osyx_vfs::Cred) -> Result<u64> {
+    fn create(
+        &self,
+        _dir: u64,
+        _name: &str,
+        _what: osyx_vfs::NewNode<'_>,
+        _mode: u32,
+        _cred: &osyx_vfs::Cred,
+    ) -> Result<u64> {
         Err(Errno::PermissionDenied)
     }
 

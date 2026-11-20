@@ -30,12 +30,8 @@ pub const USER_FS32: u16 = 0x40 | 3;
 
 /// The 32-bit selectors sit above the TSS (0x28, two slots) and leave the
 /// SYSRET pair (0x18, 0x20) untouched.
-const _: () = assert!(
-    USER_DS + 8 == USER_CS
-        && USER_CS32 & !3 == 0x38
-        && USER_FS32 & !3 == 0x40
-        && USER_CS32 & !3 >= 0x28 + 16
-);
+const _: () =
+    assert!(USER_DS + 8 == USER_CS && USER_CS32 & !3 == 0x38 && USER_FS32 & !3 == 0x40 && USER_CS32 & !3 >= 0x28 + 16);
 
 /// RFLAGS of a 32-bit entry: IF set; TF, DF, IOPL, NT and VM stay clear.
 pub const ENTRY_RFLAGS: u64 = 0x202;

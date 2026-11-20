@@ -113,7 +113,8 @@ fn parse_to_unicode(data: &[u8]) -> BTreeMap<u32, String> {
             match s[i] {
                 b'<' => {
                     let end = s[i..].iter().position(|&c| c == b'>').map_or(s.len(), |e| i + e);
-                    let digits: Vec<u8> = s[i + 1..end].iter().filter_map(|c| (*c as char).to_digit(16).map(|d| d as u8)).collect();
+                    let digits: Vec<u8> =
+                        s[i + 1..end].iter().filter_map(|c| (*c as char).to_digit(16).map(|d| d as u8)).collect();
                     out.push(Tok::Hex(digits.chunks(2).map(|c| c[0] << 4 | c.get(1).copied().unwrap_or(0)).collect()));
                     i = end;
                 }
@@ -137,7 +138,9 @@ fn parse_to_unicode(data: &[u8]) -> BTreeMap<u32, String> {
     // as many as the largest real fonts need, and no more.
     let mut budget = TO_UNICODE_MAX;
     let find = |from: usize, word: &[u8]| data[from..].windows(word.len()).position(|w| w == word).map(|p| from + p);
-    for (begin, end, ranges) in [(&b"beginbfchar"[..], &b"endbfchar"[..], false), (&b"beginbfrange"[..], &b"endbfrange"[..], true)] {
+    for (begin, end, ranges) in
+        [(&b"beginbfchar"[..], &b"endbfchar"[..], false), (&b"beginbfrange"[..], &b"endbfrange"[..], true)]
+    {
         let mut at = 0;
         while let Some(start) = find(at, begin) {
             let stop = find(start, end).unwrap_or(data.len());

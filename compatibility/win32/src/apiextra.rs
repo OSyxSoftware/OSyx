@@ -92,15 +92,36 @@ extern "win64" fn LCMapStringW(_lcid: u32, flags: u32, src: *const u16, n: i32, 
     crate::locale::LCMapStringEx(core::ptr::null(), flags, src, n, dst, cap, 0, 0, 0)
 }
 
-pub(crate) extern "win64" fn CompareStringW(_lcid: u32, flags: u32, s1: *const u16, n1: i32, s2: *const u16, n2: i32) -> i32 {
+pub(crate) extern "win64" fn CompareStringW(
+    _lcid: u32,
+    flags: u32,
+    s1: *const u16,
+    n1: i32,
+    s2: *const u16,
+    n2: i32,
+) -> i32 {
     crate::locale::CompareStringEx(core::ptr::null(), flags, s1, n1, s2, n2, 0, 0, 0)
 }
 
-extern "win64" fn GetDateFormatW(_lcid: u32, flags: u32, st: *const [u16; 8], fmt: *const u16, buf: *mut u16, size: i32) -> i32 {
+extern "win64" fn GetDateFormatW(
+    _lcid: u32,
+    flags: u32,
+    st: *const [u16; 8],
+    fmt: *const u16,
+    buf: *mut u16,
+    size: i32,
+) -> i32 {
     crate::nls::GetDateFormatEx(core::ptr::null(), flags, st, fmt, buf, size, core::ptr::null())
 }
 
-extern "win64" fn GetTimeFormatW(_lcid: u32, flags: u32, st: *const [u16; 8], fmt: *const u16, buf: *mut u16, size: i32) -> i32 {
+extern "win64" fn GetTimeFormatW(
+    _lcid: u32,
+    flags: u32,
+    st: *const [u16; 8],
+    fmt: *const u16,
+    buf: *mut u16,
+    size: i32,
+) -> i32 {
     crate::nls::GetTimeFormatEx(core::ptr::null(), flags, st, fmt, buf, size)
 }
 
@@ -206,7 +227,13 @@ fn resource_id(name: u64, wide: bool) -> Option<u64> {
         return (name != 0).then_some(name);
     }
     // SAFETY: the caller's NUL-terminated name.
-    let s = unsafe { if wide { path::wide_to_string(name as *const u16) } else { path::ansi_to_string(name as *const u8) } }?;
+    let s = unsafe {
+        if wide {
+            path::wide_to_string(name as *const u16)
+        } else {
+            path::ansi_to_string(name as *const u8)
+        }
+    }?;
     s.strip_prefix('#')?.parse().ok()
 }
 
@@ -287,33 +314,72 @@ extern "win64" fn RegOpenKeyA(hkey: u64, sub: *const u8, out: *mut u64) -> u32 {
 
 #[allow(clippy::too_many_arguments)] // the Win32 signature
 extern "win64" fn RegCreateKeyExA(
-    hkey: u64, sub: *const u8, reserved: u32, class: *const u8, options: u32, sam: u32, attributes: u64, out: *mut u64,
+    hkey: u64,
+    sub: *const u8,
+    reserved: u32,
+    class: *const u8,
+    options: u32,
+    sam: u32,
+    attributes: u64,
+    out: *mut u64,
     disposition: *mut u32,
 ) -> u32 {
     let (w, c) = (ansi_arg(sub), ansi_arg(class));
-    crate::registry::RegCreateKeyExW(hkey, ptr_or_null(&w), reserved, ptr_or_null(&c), options, sam, attributes, out, disposition)
+    crate::registry::RegCreateKeyExW(
+        hkey,
+        ptr_or_null(&w),
+        reserved,
+        ptr_or_null(&c),
+        options,
+        sam,
+        attributes,
+        out,
+        disposition,
+    )
 }
 
 /// RegSetValueExA: string data (REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ) is
 /// stored as UTF-16, as Windows does.
-extern "win64" fn RegSetValueExA(hkey: u64, name: *const u8, reserved: u32, kind: u32, data: *const u8, size: u32) -> u32 {
+extern "win64" fn RegSetValueExA(
+    hkey: u64,
+    name: *const u8,
+    reserved: u32,
+    kind: u32,
+    data: *const u8,
+    size: u32,
+) -> u32 {
     let n = ansi_arg(name);
     if matches!(kind, REG_SZ | REG_EXPAND_SZ | REG_MULTI_SZ) && !data.is_null() {
         // SAFETY: the caller's `size` bytes.
         let bytes = unsafe { core::slice::from_raw_parts(data, size as usize) };
         let units: Vec<u16> = String::from_utf8_lossy(bytes).encode_utf16().collect();
-        return crate::registry::RegSetValueExW(hkey, ptr_or_null(&n), reserved, kind, units.as_ptr() as *const u8, units.len() as u32 * 2);
+        return crate::registry::RegSetValueExW(
+            hkey,
+            ptr_or_null(&n),
+            reserved,
+            kind,
+            units.as_ptr() as *const u8,
+            units.len() as u32 * 2,
+        );
     }
     crate::registry::RegSetValueExW(hkey, ptr_or_null(&n), reserved, kind, data, size)
 }
 
 /// RegQueryValueExA: string data comes back as ANSI (UTF-8); sizes are in
 /// bytes of the converted data.
-extern "win64" fn RegQueryValueExA(hkey: u64, name: *const u8, reserved: *const u32, kind: *mut u32, buf: *mut u8, size: *mut u32) -> u32 {
+extern "win64" fn RegQueryValueExA(
+    hkey: u64,
+    name: *const u8,
+    reserved: *const u32,
+    kind: *mut u32,
+    buf: *mut u8,
+    size: *mut u32,
+) -> u32 {
     let n = ansi_arg(name);
     let mut t = 0u32;
     let mut need = 0u32;
-    let r = crate::registry::RegQueryValueExW(hkey, ptr_or_null(&n), reserved, &mut t, core::ptr::null_mut(), &mut need);
+    let r =
+        crate::registry::RegQueryValueExW(hkey, ptr_or_null(&n), reserved, &mut t, core::ptr::null_mut(), &mut need);
     if r != 0 {
         return r;
     }
@@ -323,7 +389,14 @@ extern "win64" fn RegQueryValueExA(hkey: u64, name: *const u8, reserved: *const 
     }
     let mut data = alloc::vec![0u8; need as usize];
     let mut got = need;
-    let r = crate::registry::RegQueryValueExW(hkey, ptr_or_null(&n), reserved, core::ptr::null_mut(), data.as_mut_ptr(), &mut got);
+    let r = crate::registry::RegQueryValueExW(
+        hkey,
+        ptr_or_null(&n),
+        reserved,
+        core::ptr::null_mut(),
+        data.as_mut_ptr(),
+        &mut got,
+    );
     if r != 0 {
         return r;
     }
@@ -412,7 +485,8 @@ extern "win64" fn GetProcessMemoryInfo(process: u64, out: *mut u8, cb: u32) -> B
     if crate::procinfo::K32GetProcessMemoryInfo(process, wide.as_mut_ptr(), 80) == FALSE {
         return FALSE;
     }
-    let field = |i: usize| u64::from_le_bytes(wide[8 + 8 * i..16 + 8 * i].try_into().unwrap()).min(u32::MAX as u64) as u32;
+    let field =
+        |i: usize| u64::from_le_bytes(wide[8 + 8 * i..16 + 8 * i].try_into().unwrap()).min(u32::MAX as u64) as u32;
     let size = if cb >= 44 { 44u32 } else { 40 };
     // SAFETY: the caller's structure of `cb` bytes.
     unsafe {

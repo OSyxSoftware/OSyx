@@ -92,7 +92,9 @@ impl BsdNic {
             MacAddr(mac)
         }
         #[cfg(not(osyx_bsd))]
-        { self.mac }
+        {
+            self.mac
+        }
     }
 
     pub fn link_up(&self) -> bool {
@@ -207,7 +209,8 @@ pub fn probe(devices: &[pci::Device]) -> Vec<Arc<BsdNic>> {
 pub fn after_mount() {
     #[cfg(osyx_bsd)]
     {
-        let wifi: Vec<Arc<BsdNic>> = NICS.lock().iter().filter(|n| n.wireless.load(Ordering::Relaxed)).cloned().collect();
+        let wifi: Vec<Arc<BsdNic>> =
+            NICS.lock().iter().filter(|n| n.wireless.load(Ordering::Relaxed)).cloned().collect();
         let _g = BIG_LOCK.lock();
         kprintln!("bsd: deferred attach steps (Wi-Fi firmware)");
         crate::serial::sync_log_file();
@@ -409,7 +412,13 @@ fn wifi_join(nic: &BsdNic, ssid: &str, pass: &str, watch: &mut JoinWatch, memory
 /// network in range when nothing is connected, and refreshes
 /// `/run/wifi.status`; changes of the association state go to the log.
 #[cfg(osyx_bsd)]
-fn wifi_housekeeping(last_conf: &mut Option<(i64, u64)>, last_reconnect: &mut Option<(i64, u64)>, last_state: &mut String, watch: &mut JoinWatch, memory: &mut WifiMemory) {
+fn wifi_housekeeping(
+    last_conf: &mut Option<(i64, u64)>,
+    last_reconnect: &mut Option<(i64, u64)>,
+    last_state: &mut String,
+    watch: &mut JoinWatch,
+    memory: &mut WifiMemory,
+) {
     let Some(nic) = NICS.lock().iter().find(|n| n.wireless.load(Ordering::Relaxed)).cloned() else { return };
     if !WIFI_READY.load(Ordering::Acquire) {
         return;
@@ -460,8 +469,12 @@ fn wifi_housekeeping(last_conf: &mut Option<(i64, u64)>, last_reconnect: &mut Op
     buf.truncate(n);
     // The association lines come before the scan results ("net\t...").
     let text = String::from_utf8_lossy(&buf);
-    let state: String =
-        text.lines().take_while(|l| !l.starts_with("net\t")).filter(|l| !l.starts_with("rssi ")).collect::<Vec<_>>().join(", ");
+    let state: String = text
+        .lines()
+        .take_while(|l| !l.starts_with("net\t"))
+        .filter(|l| !l.starts_with("rssi "))
+        .collect::<Vec<_>>()
+        .join(", ");
     if state != *last_state {
         kprintln!("bsd: {}: {}", nic.name, state);
         *last_state = state;
@@ -473,7 +486,12 @@ fn wifi_housekeeping(last_conf: &mut Option<(i64, u64)>, last_reconnect: &mut Op
         Some("yes") => watch.keyless_since = None,
         Some(_) => match watch.keyless_since {
             None => watch.keyless_since = Some(now),
-            Some(since) if !watch.trusted && !memory.saved && !watch.wrong_password && now.saturating_sub(since) >= crate::arch::timer::ms_to_ticks(HANDSHAKE_LIMIT_MS) => {
+            Some(since)
+                if !watch.trusted
+                    && !memory.saved
+                    && !watch.wrong_password
+                    && now.saturating_sub(since) >= crate::arch::timer::ms_to_ticks(HANDSHAKE_LIMIT_MS) =>
+            {
                 kprintln!("bsd: {}: the WPA handshake does not finish: wrong password", nic.name);
                 watch.wrong_password = true;
                 watch.last_error = Some(String::from("WPA handshake failed; check password"));
@@ -517,7 +535,8 @@ fn wifi_housekeeping(last_conf: &mut Option<(i64, u64)>, last_reconnect: &mut Op
     }
     // Nothing connected for a while: the strongest saved network in range
     // that was not tried yet (all tried: start over).
-    let idle = memory.last_join == 0 || now.saturating_sub(memory.last_join) >= crate::arch::timer::ms_to_ticks(AUTO_JOIN_AFTER_MS);
+    let idle = memory.last_join == 0
+        || now.saturating_sub(memory.last_join) >= crate::arch::timer::ms_to_ticks(AUTO_JOIN_AFTER_MS);
     if !connected && idle {
         let best = |memory: &WifiMemory, tried: &[String]| {
             seen.iter()
@@ -531,7 +550,11 @@ fn wifi_housekeeping(last_conf: &mut Option<(i64, u64)>, last_reconnect: &mut Op
             pick = best(memory, &[]);
         }
         if pick.is_none() {
-            pick = memory.target.as_ref().filter(|(s, _)| memory.passphrase(s).is_some() && !memory.rejected.contains(s)).map(|(s, _)| s.clone());
+            pick = memory
+                .target
+                .as_ref()
+                .filter(|(s, _)| memory.passphrase(s).is_some() && !memory.rejected.contains(s))
+                .map(|(s, _)| s.clone());
         }
         if let Some(ssid) = pick {
             let pass = String::from(memory.passphrase(&ssid).unwrap_or(""));
@@ -605,7 +628,9 @@ extern "C" fn osyx_bsd_file_size(path: *const u8) -> i64 {
 #[no_mangle]
 extern "C" fn osyx_bsd_file_read(path: *const u8, buf: *mut u8, len: usize) -> i64 {
     // SAFETY: C passes a NUL-terminated path and `len` writable bytes.
-    let (p, out) = unsafe { (core::ffi::CStr::from_ptr(path as *const core::ffi::c_char), core::slice::from_raw_parts_mut(buf, len)) };
+    let (p, out) = unsafe {
+        (core::ffi::CStr::from_ptr(path as *const core::ffi::c_char), core::slice::from_raw_parts_mut(buf, len))
+    };
     let Some(data) = p.to_str().ok().and_then(read_file) else { return -1 };
     let n = data.len().min(len);
     out[..n].copy_from_slice(&data[..n]);
@@ -616,7 +641,9 @@ extern "C" fn osyx_bsd_file_read(path: *const u8, buf: *mut u8, len: usize) -> i
 
 #[no_mangle]
 extern "C" fn osyx_bsd_alloc(size: usize, align: usize) -> *mut c_void {
-    let Ok(layout) = core::alloc::Layout::from_size_align(size.max(1), align.max(8)) else { return core::ptr::null_mut() };
+    let Ok(layout) = core::alloc::Layout::from_size_align(size.max(1), align.max(8)) else {
+        return core::ptr::null_mut();
+    };
     // SAFETY: non-zero size.
     unsafe { alloc::alloc::alloc(layout) as *mut c_void }
 }
@@ -626,7 +653,8 @@ extern "C" fn osyx_bsd_free(p: *mut c_void, size: usize, align: usize) {
     if p.is_null() {
         return;
     }
-    let layout = core::alloc::Layout::from_size_align(size.max(1), align.max(8)).expect("layout used for the allocation");
+    let layout =
+        core::alloc::Layout::from_size_align(size.max(1), align.max(8)).expect("layout used for the allocation");
     // SAFETY: allocated by `osyx_bsd_alloc` with the same layout.
     unsafe { alloc::alloc::dealloc(p as *mut u8, layout) }
 }

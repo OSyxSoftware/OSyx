@@ -63,8 +63,9 @@ struct Table {
 // also takes the off-CPU samples), and read by the dump after sampling stopped.
 unsafe impl Sync for Table {}
 
-static TABLES: [Table; MAX_CPUS] =
-    [const { Table { entries: UnsafeCell::new(core::ptr::null_mut()), dropped: AtomicU64::new(0), samples: AtomicU64::new(0) } }; MAX_CPUS];
+static TABLES: [Table; MAX_CPUS] = [const {
+    Table { entries: UnsafeCell::new(core::ptr::null_mut()), dropped: AtomicU64::new(0), samples: AtomicU64::new(0) }
+}; MAX_CPUS];
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static SYSCALL: [AtomicU64; SYS_SLOTS] = [const { AtomicU64::new(0) }; SYS_SLOTS];
 
@@ -112,7 +113,14 @@ fn record(cpu: usize, pid: u32, tid: u32, kind: u32, sys: u32, frames: &[u64], w
             e.frames[..frames.len()].copy_from_slice(frames);
             return;
         }
-        if e.hash == h && e.pid == pid && e.tid == tid && e.kind == kind && e.sys == sys && e.depth as usize == frames.len() && e.frames[..frames.len()] == *frames {
+        if e.hash == h
+            && e.pid == pid
+            && e.tid == tid
+            && e.kind == kind
+            && e.sys == sys
+            && e.depth as usize == frames.len()
+            && e.frames[..frames.len()] == *frames
+        {
             e.count += weight;
             return;
         }
@@ -126,7 +134,9 @@ fn walk(mut rbp: u64, lo: u64, hi: u64, out: &mut [u64; DEPTH], mut n: usize) ->
         if rbp < lo || rbp.saturating_add(16) > hi || rbp & 7 != 0 {
             break;
         }
-        let (Ok(next), Ok(ret)) = (crate::fixup::probe_read_u64(rbp), crate::fixup::probe_read_u64(rbp + 8)) else { break };
+        let (Ok(next), Ok(ret)) = (crate::fixup::probe_read_u64(rbp), crate::fixup::probe_read_u64(rbp + 8)) else {
+            break;
+        };
         if ret < 0xffff_ffff_8000_0000 {
             break;
         }
@@ -143,7 +153,9 @@ fn walk(mut rbp: u64, lo: u64, hi: u64, out: &mut [u64; DEPTH], mut n: usize) ->
 /// Frames of a thread that is switched out: `rsp` is its saved stack pointer
 /// (see `osyx_switch`: flags, r15..rbx, rbp, return address).
 pub fn switched_out_frames(rsp: u64, hi: u64, out: &mut [u64; DEPTH]) -> usize {
-    let (Ok(rbp), Ok(ret)) = (crate::fixup::probe_read_u64(rsp + 48), crate::fixup::probe_read_u64(rsp + 56)) else { return 0 };
+    let (Ok(rbp), Ok(ret)) = (crate::fixup::probe_read_u64(rsp + 48), crate::fixup::probe_read_u64(rsp + 56)) else {
+        return 0;
+    };
     out[0] = ret;
     walk(rbp, rsp, hi, out, 1)
 }
@@ -253,13 +265,26 @@ fn dump_worker(secs: u64, _: u64) {
     let mut merged: Vec<Entry> = Vec::with_capacity(all.len());
     for e in all {
         match merged.last_mut() {
-            Some(l) if l.hash == e.hash && l.pid == e.pid && l.tid == e.tid && l.kind == e.kind && l.sys == e.sys && l.frames[..l.depth as usize] == e.frames[..e.depth as usize] => l.count += e.count,
+            Some(l)
+                if l.hash == e.hash
+                    && l.pid == e.pid
+                    && l.tid == e.tid
+                    && l.kind == e.kind
+                    && l.sys == e.sys
+                    && l.frames[..l.depth as usize] == e.frames[..e.depth as usize] =>
+            {
+                l.count += e.count
+            }
             _ => merged.push(e),
         }
     }
     merged.sort_unstable_by(|a, b| b.count.cmp(&a.count));
     let (ticks, idle) = sched::cpu_stats();
-    crate::kprintln!("prof: begin cpus={} samples={samples} dropped={dropped} stacks={} ticks={ticks} idle_ticks={idle}", crate::smp::online(), merged.len());
+    crate::kprintln!(
+        "prof: begin cpus={} samples={samples} dropped={dropped} stacks={} ticks={ticks} idle_ticks={idle}",
+        crate::smp::online(),
+        merged.len()
+    );
     let mut rest = 0u64;
     for (n, e) in merged.iter().enumerate() {
         if n >= MAX_LINES {

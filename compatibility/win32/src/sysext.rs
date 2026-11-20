@@ -89,7 +89,15 @@ pub(crate) extern "win64" fn SystemTimeToFileTime(st: *const [u16; 8], out: *mut
     let [y, m, _, d, h, min, s, ms] = unsafe { *st };
     let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
     let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    if !(1601..=30827).contains(&y) || !(1..=12).contains(&m) || d == 0 || d > month_days[m as usize - 1] || h > 23 || min > 59 || s > 59 || ms > 999 {
+    if !(1601..=30827).contains(&y)
+        || !(1..=12).contains(&m)
+        || d == 0
+        || d > month_days[m as usize - 1]
+        || h > 23
+        || min > 59
+        || s > 59
+        || ms > 999
+    {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let days = days_from_civil(y as i64, m as u32, d as u32) + 134_774;
@@ -124,7 +132,13 @@ extern "win64" fn QueryUnbiasedInterruptTimePrecise(out: *mut u64) {
 /// kernel's process record (all of it user time: the scheduler samples
 /// without telling the modes apart). Only this process's start is known;
 /// another's creation time is reported as 0.
-extern "win64" fn GetProcessTimes(process: u64, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32 {
+extern "win64" fn GetProcessTimes(
+    process: u64,
+    creation: *mut u64,
+    exit: *mut u64,
+    kernel: *mut u64,
+    user: *mut u64,
+) -> i32 {
     let Some(pid) = crate::process::handle_pid(process) else { return fail(ERROR_INVALID_HANDLE, 0) };
     if creation.is_null() || exit.is_null() || kernel.is_null() || user.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -136,7 +150,10 @@ extern "win64" fn GetProcessTimes(process: u64, creation: *mut u64, exit: *mut u
     };
     // SAFETY: the caller's FILETIMEs.
     unsafe {
-        core::ptr::write_unaligned(creation, if own { kernel32::filetime(START_NS.load(Ordering::Relaxed) as i64) } else { 0 });
+        core::ptr::write_unaligned(
+            creation,
+            if own { kernel32::filetime(START_NS.load(Ordering::Relaxed) as i64) } else { 0 },
+        );
         core::ptr::write_unaligned(exit, 0);
         core::ptr::write_unaligned(kernel, 0);
         core::ptr::write_unaligned(user, info.cpu_ticks * 10_000);
@@ -167,14 +184,32 @@ pub(crate) fn windows_version() -> (u32, u32, u32) {
 
 /// Bit index of a VER_* type → its slot in the condition mask.
 fn slot(type_bit: u32) -> Option<usize> {
-    [VER_MINORVERSION, VER_MAJORVERSION, VER_BUILDNUMBER, VER_PLATFORMID, VER_SERVICEPACKMINOR, VER_SERVICEPACKMAJOR, VER_SUITENAME, VER_PRODUCT_TYPE]
-        .iter()
-        .position(|&b| b == type_bit)
+    [
+        VER_MINORVERSION,
+        VER_MAJORVERSION,
+        VER_BUILDNUMBER,
+        VER_PLATFORMID,
+        VER_SERVICEPACKMINOR,
+        VER_SERVICEPACKMAJOR,
+        VER_SUITENAME,
+        VER_PRODUCT_TYPE,
+    ]
+    .iter()
+    .position(|&b| b == type_bit)
 }
 
 extern "win64" fn VerSetConditionMask(mask: u64, type_mask: u32, condition: u8) -> u64 {
     // Like Windows, one type per call: the highest-priority bit given.
-    let order = [VER_PRODUCT_TYPE, VER_SUITENAME, VER_SERVICEPACKMAJOR, VER_SERVICEPACKMINOR, VER_PLATFORMID, VER_BUILDNUMBER, VER_MAJORVERSION, VER_MINORVERSION];
+    let order = [
+        VER_PRODUCT_TYPE,
+        VER_SUITENAME,
+        VER_SERVICEPACKMAJOR,
+        VER_SERVICEPACKMINOR,
+        VER_PLATFORMID,
+        VER_BUILDNUMBER,
+        VER_MAJORVERSION,
+        VER_MINORVERSION,
+    ];
     match order.iter().find(|&&b| type_mask & b != 0).and_then(|&b| slot(b)) {
         // Windows also sets bit 63 in every mask it builds.
         Some(i) => mask | 1 << 63 | ((condition as u64 & 7) << (i * 3)),
@@ -233,7 +268,8 @@ extern "win64" fn VerifyVersionInfoW(info: *const u8, type_mask: u32, mask: u64)
     };
     let cond = |i: usize| (mask >> (i * 3)) & 7;
     // Major, minor and service pack compare as one version tuple.
-    let tuple = [(1usize, VER_MAJORVERSION), (0, VER_MINORVERSION), (5, VER_SERVICEPACKMAJOR), (4, VER_SERVICEPACKMINOR)];
+    let tuple =
+        [(1usize, VER_MAJORVERSION), (0, VER_MINORVERSION), (5, VER_SERVICEPACKMAJOR), (4, VER_SERVICEPACKMINOR)];
     let mut ok = true;
     let mut decided = false;
     for &(i, bit) in &tuple {
@@ -264,7 +300,11 @@ extern "win64" fn VerifyVersionInfoW(info: *const u8, type_mask: u32, mask: u64)
             _ => return fail(ERROR_INVALID_PARAMETER, 0),
         };
     }
-    if ok { 1 } else { fail(ERROR_OLD_WIN_VERSION, 0) }
+    if ok {
+        1
+    } else {
+        fail(ERROR_OLD_WIN_VERSION, 0)
+    }
 }
 
 // ---- pointer probes ---------------------------------------------------------------
@@ -360,9 +400,17 @@ fn exists(win: &str) -> Option<String> {
     }
 }
 
-extern "win64" fn SearchPathW(dirs: *const u16, file: *const u16, ext: *const u16, size: u32, buf: *mut u16, part: *mut *mut u16) -> u32 {
+extern "win64" fn SearchPathW(
+    dirs: *const u16,
+    file: *const u16,
+    ext: *const u16,
+    size: u32,
+    buf: *mut u16,
+    part: *mut *mut u16,
+) -> u32 {
     // SAFETY: NULL or NUL-terminated strings from the caller.
-    let (dirs, file, ext) = unsafe { (path::wide_to_string(dirs), path::wide_to_string(file), path::wide_to_string(ext)) };
+    let (dirs, file, ext) =
+        unsafe { (path::wide_to_string(dirs), path::wide_to_string(file), path::wide_to_string(ext)) };
     let Some(mut file) = file.filter(|f| !f.is_empty()) else { return fail(ERROR_INVALID_PARAMETER, 0) };
     let leaf = file.rsplit(['\\', '/']).next().unwrap_or(&file);
     if let Some(e) = ext {
@@ -547,7 +595,12 @@ fn expand(text: &str, flags: u32, args: *const u64, wide: bool) -> Result<String
 fn format_arg(v: u64, spec: &str, wide: bool) -> Result<String, u32> {
     let conv = spec.chars().last().ok_or(ERROR_INVALID_PARAMETER)?;
     let body = &spec[..spec.len() - 1];
-    let pad: usize = body.trim_start_matches(['-', '0']).trim_end_matches(['l', 'h', 'w']).trim_end_matches("I64").parse().unwrap_or(0);
+    let pad: usize = body
+        .trim_start_matches(['-', '0'])
+        .trim_end_matches(['l', 'h', 'w'])
+        .trim_end_matches("I64")
+        .parse()
+        .unwrap_or(0);
     let left = body.starts_with('-');
     let zero = body.starts_with('0');
     let long64 = body.contains("I64") || body.contains("ll");
@@ -556,14 +609,42 @@ fn format_arg(v: u64, spec: &str, wide: bool) -> Result<String, u32> {
             let wide_str = (conv == 's') == wide || body.contains(['l', 'w']);
             // SAFETY: the argument is a NUL-terminated string of that width.
             unsafe {
-                if wide_str { path::wide_to_string(v as *const u16) } else { path::ansi_to_string(v as *const u8) }
+                if wide_str {
+                    path::wide_to_string(v as *const u16)
+                } else {
+                    path::ansi_to_string(v as *const u8)
+                }
             }
             .unwrap_or_else(|| String::from("(null)"))
         }
-        'd' | 'i' => if long64 { (v as i64).to_string() } else { (v as i32).to_string() },
-        'u' => if long64 { v.to_string() } else { (v as u32).to_string() },
-        'x' => if long64 { alloc::format!("{v:x}") } else { alloc::format!("{:x}", v as u32) },
-        'X' => if long64 { alloc::format!("{v:X}") } else { alloc::format!("{:X}", v as u32) },
+        'd' | 'i' => {
+            if long64 {
+                (v as i64).to_string()
+            } else {
+                (v as i32).to_string()
+            }
+        }
+        'u' => {
+            if long64 {
+                v.to_string()
+            } else {
+                (v as u32).to_string()
+            }
+        }
+        'x' => {
+            if long64 {
+                alloc::format!("{v:x}")
+            } else {
+                alloc::format!("{:x}", v as u32)
+            }
+        }
+        'X' => {
+            if long64 {
+                alloc::format!("{v:X}")
+            } else {
+                alloc::format!("{:X}", v as u32)
+            }
+        }
         'c' | 'C' => char::from_u32(v as u32).map(String::from).unwrap_or_default(),
         'p' => alloc::format!("{v:016X}"),
         _ => return Err(ERROR_INVALID_PARAMETER),
@@ -580,7 +661,13 @@ fn format_arg(v: u64, spec: &str, wide: bool) -> Result<String, u32> {
 fn source_text(flags: u32, source: u64, id: u32, wide: bool) -> Result<String, u32> {
     if flags & FROM_STRING != 0 {
         // SAFETY: the caller's NUL-terminated format string.
-        let s = unsafe { if wide { path::wide_to_string(source as *const u16) } else { path::ansi_to_string(source as *const u8) } };
+        let s = unsafe {
+            if wide {
+                path::wide_to_string(source as *const u16)
+            } else {
+                path::ansi_to_string(source as *const u8)
+            }
+        };
         return s.ok_or(ERROR_INVALID_PARAMETER);
     }
     if flags & FROM_HMODULE != 0 && source != 0 {
@@ -708,13 +795,13 @@ extern "win64" fn FormatMessageW(flags: u32, source: u64, id: u32, lang: u32, bu
 // OSyx reports online logical CPUs and supports native thread affinity.
 
 extern "win64" fn GetCurrentProcessorNumber() -> u32 {
-    os_sys::cpu_info().map_or(0, |(_,cpu)|cpu)
+    os_sys::cpu_info().map_or(0, |(_, cpu)| cpu)
 }
 
 /// With one CPU, a fence orders this thread's stores before any other
 /// thread runs; there are no other processors' write buffers.
 extern "win64" fn FlushProcessWriteBuffers() {
-    let _=os_sys::process_write_barrier();
+    let _ = os_sys::process_write_barrier();
 }
 
 /// CPUID leaf 4 (deterministic cache parameters): (level, type, ways,
@@ -765,8 +852,8 @@ extern "win64" fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, 
     };
     // GROUP_AFFINITY: mask 1 in group 0.
     let mut affinity = [0u8; 16];
-    let count = os_sys::cpu_info().map_or(1, |(count,_)|count);
-    let mask = (1u64<<count)-1;
+    let count = os_sys::cpu_info().map_or(1, |(count, _)| count);
+    let mask = (1u64 << count) - 1;
     affinity[..8].copy_from_slice(&mask.to_le_bytes());
     let processor = |b: &mut Vec<u8>| {
         b.extend_from_slice(&[0u8; 22]); // Flags, EfficiencyClass, Reserved
@@ -777,7 +864,7 @@ extern "win64" fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, 
         for cpu in 0..count {
             let mut b = Vec::new();
             processor(&mut b);
-            b[24..32].copy_from_slice(&(1u64<<cpu).to_le_bytes());
+            b[24..32].copy_from_slice(&(1u64 << cpu).to_le_bytes());
             record(0, &b);
         }
     }
@@ -841,12 +928,14 @@ extern "win64" fn GetNumaHighestNodeNumber(out: *mut u32) -> i32 {
 }
 
 pub(crate) extern "win64" fn SetThreadAffinityMask(thread: u64, mask: u64) -> u64 {
-    if mask==0 {return fail(ERROR_INVALID_PARAMETER,0);}
+    if mask == 0 {
+        return fail(ERROR_INVALID_PARAMETER, 0);
+    }
     if !(thread == objects::CURRENT_THREAD || matches!(objects::get(thread), Some(objects::Object::Thread(_)))) {
         return fail(ERROR_INVALID_HANDLE, 0);
     }
-    let tid=crate::kernel32::GetThreadId(thread);
-    os_sys::thread_affinity(tid as u64,mask).unwrap_or_else(|e| fail(crate::error::errno_to_win32(e),0))
+    let tid = crate::kernel32::GetThreadId(thread);
+    os_sys::thread_affinity(tid as u64, mask).unwrap_or_else(|e| fail(crate::error::errno_to_win32(e), 0))
 }
 
 // ---- process information ------------------------------------------------------------
@@ -904,7 +993,11 @@ extern "win64" fn GetProcessHeaps(n: u32, out: *mut u64) -> u32 {
             // SAFETY: the caller's array of `n` handles (4 bytes each for a
             // 32-bit caller).
             unsafe {
-                if crate::wow64::is_active() { *(out as *mut u32).add(i) = *h as u32 } else { *out.add(i) = *h }
+                if crate::wow64::is_active() {
+                    *(out as *mut u32).add(i) = *h as u32
+                } else {
+                    *out.add(i) = *h
+                }
             }
         }
     }
@@ -993,9 +1086,11 @@ struct ThreadInfo {
     throttle_state: u32,
 }
 
-const THREAD_INFO_DEFAULT: ThreadInfo = ThreadInfo { memory: MEMORY_PRIORITY_NORMAL, absolute: 0, dynamic_code: 0, throttle_control: 0, throttle_state: 0 };
+const THREAD_INFO_DEFAULT: ThreadInfo =
+    ThreadInfo { memory: MEMORY_PRIORITY_NORMAL, absolute: 0, dynamic_code: 0, throttle_control: 0, throttle_state: 0 };
 
-static THREAD_INFO: Mutex<alloc::collections::BTreeMap<u32, ThreadInfo>> = Mutex::new(alloc::collections::BTreeMap::new());
+static THREAD_INFO: Mutex<alloc::collections::BTreeMap<u32, ThreadInfo>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
 
 fn thread_tid(h: u64) -> Option<u32> {
     if h == objects::CURRENT_THREAD || matches!(objects::get(h), Some(objects::Object::Thread(_))) {
@@ -1263,7 +1358,11 @@ pub(crate) extern "win64" fn ExpandEnvironmentStringsW(src: *const u16, dst: *mu
     let expanded = crate::registry::expand_env(&s);
     // Returns the size including the terminator, whether or not it fits.
     let r = kernel32::out_w(&expanded, dst, size);
-    if r >= size { r } else { r + 1 }
+    if r >= size {
+        r
+    } else {
+        r + 1
+    }
 }
 
 extern "win64" fn DebugBreak() {
@@ -1336,7 +1435,14 @@ extern "win64" fn SetDllDirectoryW(dir: *const u16) -> i32 {
     1
 }
 
-extern "win64" fn CreateSemaphoreExW(sa: u64, initial: i32, max: i32, name: *const u16, flags: u32, _access: u32) -> u64 {
+extern "win64" fn CreateSemaphoreExW(
+    sa: u64,
+    initial: i32,
+    max: i32,
+    name: *const u16,
+    flags: u32,
+    _access: u32,
+) -> u64 {
     if flags != 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -1368,7 +1474,10 @@ extern "win64" fn NtQueryObject(h: u64, class: u32, buf: *mut u8, len: u32, ret:
         }
         2 => {
             let name = match o {
-                objects::Object::File(_) | objects::Object::Console(_) | objects::Object::Null | objects::Object::Pipe(_) => "File",
+                objects::Object::File(_)
+                | objects::Object::Console(_)
+                | objects::Object::Null
+                | objects::Object::Pipe(_) => "File",
                 objects::Object::Directory(_) => "Directory",
                 objects::Object::Transaction(_) => "Transaction",
                 objects::Object::Snapshot(_) => "Section",

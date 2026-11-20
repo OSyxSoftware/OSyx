@@ -177,7 +177,11 @@ fn trace_data(what: &str, s: u64, data: &[u8]) {
 fn err<T>(code: u32, v: T) -> T {
     static ERRORS: AtomicU32 = AtomicU32::new(0);
     if code != WSAEWOULDBLOCK && traced() && ERRORS.fetch_add(1, Ordering::Relaxed) < 128 {
-        os_std::eprintln!("winrun: Winsock error {code} in thread {} at {}", os_sys::gettid(), core::panic::Location::caller());
+        os_std::eprintln!(
+            "winrun: Winsock error {code} in thread {} at {}",
+            os_sys::gettid(),
+            core::panic::Location::caller()
+        );
     }
     teb::set_last_error(code);
     v
@@ -292,7 +296,11 @@ fn v4_to_v6(a: [u8; 4]) -> [u8; 16] {
 
 /// The sockaddr size of socket `s`'s family.
 fn addr_size(s: u64) -> i32 {
-    if socket_state(s).is_ok_and(|k| k.v6) { 28 } else { 16 }
+    if socket_state(s).is_ok_and(|k| k.v6) {
+        28
+    } else {
+        16
+    }
 }
 
 /// The address the caller gives socket `s`: a sockaddr_in (family, port
@@ -423,22 +431,25 @@ extern "win64" fn socket(af: i32, kind: i32, proto: i32) -> u64 {
             let mut n = NEXT.lock().unwrap();
             let s = *n;
             *n += 4;
-            SOCKETS.lock().unwrap().insert(s, Sock {
-                fd,
-                stream,
-                nonblocking: false,
-                linger: 0,
-                recv_timeout: 0,
-                send_timeout: 0,
-                reuseaddr: false,
-                keepalive: false,
-                rcvbuf: None,
-                sndbuf: None,
-                read_shutdown: false,
-                write_shutdown: false,
-                v6: af == AF_INET6,
-                v6only: true,
-            });
+            SOCKETS.lock().unwrap().insert(
+                s,
+                Sock {
+                    fd,
+                    stream,
+                    nonblocking: false,
+                    linger: 0,
+                    recv_timeout: 0,
+                    send_timeout: 0,
+                    reuseaddr: false,
+                    keepalive: false,
+                    rcvbuf: None,
+                    sndbuf: None,
+                    read_shutdown: false,
+                    write_shutdown: false,
+                    v6: af == AF_INET6,
+                    v6only: true,
+                },
+            );
             s
         }
         Err(e) => err(wsa(e), INVALID_SOCKET),
@@ -501,7 +512,9 @@ extern "win64" fn connect(s: u64, addr: *const u8, len: i32) -> i32 {
         let nonblocking = socket_state(s).is_ok_and(|k| k.nonblocking);
         let r = match r {
             Ok(()) if nonblocking => Err(WSAEWOULDBLOCK),
-            Err(WSAETIMEDOUT | WSAECONNREFUSED | WSAEHOSTUNREACH | WSAENETUNREACH | WSAECONNRESET) if nonblocking => Err(WSAEWOULDBLOCK),
+            Err(WSAETIMEDOUT | WSAECONNREFUSED | WSAEHOSTUNREACH | WSAENETUNREACH | WSAECONNRESET) if nonblocking => {
+                Err(WSAEWOULDBLOCK)
+            }
             r => r,
         };
         if traced() {
@@ -557,23 +570,26 @@ extern "win64" fn accept(s: u64, addr: *mut u8, len: *mut i32) -> u64 {
         let mut n = NEXT.lock().unwrap();
         let ns = *n;
         *n += 4;
-        SOCKETS.lock().unwrap().insert(ns, Sock {
-            fd: nfd,
-            stream: true,
-            nonblocking: listener.nonblocking,
-            linger: 0,
-            recv_timeout: 0,
-            send_timeout: 0,
-            reuseaddr: false,
-            keepalive: false,
-            // An accepted socket inherits the listener's buffer sizes.
-            rcvbuf: listener.rcvbuf,
-            sndbuf: listener.sndbuf,
-            read_shutdown: false,
-            write_shutdown: false,
-            v6: listener.v6,
-            v6only: listener.v6only,
-        });
+        SOCKETS.lock().unwrap().insert(
+            ns,
+            Sock {
+                fd: nfd,
+                stream: true,
+                nonblocking: listener.nonblocking,
+                linger: 0,
+                recv_timeout: 0,
+                send_timeout: 0,
+                reuseaddr: false,
+                keepalive: false,
+                // An accepted socket inherits the listener's buffer sizes.
+                rcvbuf: listener.rcvbuf,
+                sndbuf: listener.sndbuf,
+                read_shutdown: false,
+                write_shutdown: false,
+                v6: listener.v6,
+                v6only: listener.v6only,
+            },
+        );
         Ok(ns)
     })();
     r.unwrap_or_else(|e| err(e, INVALID_SOCKET))
@@ -670,9 +686,9 @@ extern "win64" fn shutdown(s: u64, how: i32) -> i32 {
     result((|| {
         let (fd, _) = fd(s)?;
         let (read, write) = match how {
-            0 => (true, false),       // SD_RECEIVE
-            1 => (false, true),       // SD_SEND
-            2 => (true, true),        // SD_BOTH
+            0 => (true, false), // SD_RECEIVE
+            1 => (false, true), // SD_SEND
+            2 => (true, true),  // SD_BOTH
             _ => return Err(WSAEINVAL),
         };
         if write {
@@ -757,7 +773,9 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
             // with every call.
             (SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT) => {
                 let mut peer = SockAddr::default();
-                os_sys::sock_ctl(fd, net::ctl::PEER_ADDR, &mut peer as *mut SockAddr as u64).map(|_| ()).map_err(|_| WSAENOTCONN)
+                os_sys::sock_ctl(fd, net::ctl::PEER_ADDR, &mut peer as *mut SockAddr as u64)
+                    .map(|_| ())
+                    .map_err(|_| WSAENOTCONN)
             }
             (IPPROTO_IPV6, IPV6_V6ONLY) => {
                 let on = int()? != 0;
@@ -773,7 +791,11 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
                 let size = int()?;
                 let mut sockets = SOCKETS.lock().unwrap();
                 let sock = sockets.get_mut(&s).ok_or(WSAENOTSOCK)?;
-                if name == SO_RCVBUF { sock.rcvbuf = Some(size) } else { sock.sndbuf = Some(size) }
+                if name == SO_RCVBUF {
+                    sock.rcvbuf = Some(size)
+                } else {
+                    sock.sndbuf = Some(size)
+                }
                 Ok(())
             }
             // Linger 0 closes abortively, which the kernel can do; a positive
@@ -784,7 +806,10 @@ extern "win64" fn setsockopt(s: u64, level: i32, name: i32, val: *const u8, len:
                 }
                 // SAFETY: the caller's struct linger { u16 l_onoff, l_linger }.
                 let (onoff, linger) = unsafe {
-                    (core::ptr::read_unaligned(val as *const u16), core::ptr::read_unaligned((val as *const u16).add(1)))
+                    (
+                        core::ptr::read_unaligned(val as *const u16),
+                        core::ptr::read_unaligned((val as *const u16).add(1)),
+                    )
                 };
                 let abortive = onoff != 0 && linger == 0;
                 os_sys::sock_ctl(fd, net::ctl::RESET_ON_CLOSE, abortive as u64).map_err(wsa)?;
@@ -1162,13 +1187,15 @@ pub(crate) extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hi
         proto = if socktype == SOCK_DGRAM { IPPROTO_UDP } else { IPPROTO_TCP };
     }
     // A numeric IPv6 address, for AF_INET6 or no family.
-    let numeric6 = n.as_deref().and_then(|s| s.parse::<core::net::Ipv6Addr>().ok()).filter(|_| family != AF_INET as i32);
+    let numeric6 =
+        n.as_deref().and_then(|s| s.parse::<core::net::Ipv6Addr>().ok()).filter(|_| family != AF_INET as i32);
     // Addresses: IPv4, or IPv6 (16 bytes) for AF_INET6 and numeric IPv6.
     let mut addrs: Vec<([u8; 4], Option<[u8; 16]>)> = Vec::new();
     if let Some(a) = numeric6 {
         addrs.push(([0; 4], Some(a.octets())));
     } else if family == AF_INET6 {
-        let local = n.as_deref().is_none_or(|s| s.eq_ignore_ascii_case("localhost") || s.eq_ignore_ascii_case(&host_name()));
+        let local =
+            n.as_deref().is_none_or(|s| s.eq_ignore_ascii_case("localhost") || s.eq_ignore_ascii_case(&host_name()));
         if local && flags & AI_NUMERICHOST == 0 {
             // This host's IPv6 addresses: loopback, or the wildcard a
             // server binds (AI_PASSIVE with no name).
@@ -1176,7 +1203,9 @@ pub(crate) extern "win64" fn getaddrinfo(node: *const u8, service: *const u8, hi
             addrs.push(([0; 4], Some(v4_to_v6(a))));
         } else if flags & AI_V4MAPPED != 0 {
             let v4 = match n.as_deref() {
-                Some(s) if flags & AI_NUMERICHOST != 0 => parse_ipv4(s).map(|a| alloc::vec![a]).ok_or(WSAHOST_NOT_FOUND),
+                Some(s) if flags & AI_NUMERICHOST != 0 => {
+                    parse_ipv4(s).map(|a| alloc::vec![a]).ok_or(WSAHOST_NOT_FOUND)
+                }
                 Some(s) => resolve(s),
                 None => Ok(alloc::vec![[127, 0, 0, 1]]),
             };
@@ -1258,7 +1287,9 @@ fn name_info(sa: *const u8, salen: i32, flags: i32) -> Result<(String, String), 
         return Err(WSAEFAULT);
     }
     // SAFETY: the caller's sockaddr of at least 16 bytes.
-    let (family, port) = unsafe { (core::ptr::read_unaligned(sa as *const u16), u16::from_be(core::ptr::read_unaligned(sa.add(2) as *const u16))) };
+    let (family, port) = unsafe {
+        (core::ptr::read_unaligned(sa as *const u16), u16::from_be(core::ptr::read_unaligned(sa.add(2) as *const u16)))
+    };
     let (numeric, loopback) = if family == AF_INET6 as u16 {
         if salen < 28 {
             return Err(WSAEFAULT);
@@ -1366,7 +1397,14 @@ pub(crate) extern "win64" fn freeaddrinfo(mut p: u64) {
 /// WSASocketW: a plain socket. Overlapped I/O is not offered (calls block
 /// or fail with WSAEWOULDBLOCK), so WSA_FLAG_OVERLAPPED changes nothing;
 /// a specific provider (WSAPROTOCOL_INFOW) is not supported.
-pub(crate) extern "win64" fn WSASocketW(af: i32, kind: i32, proto: i32, info: *const u8, group: u32, _flags: u32) -> u64 {
+pub(crate) extern "win64" fn WSASocketW(
+    af: i32,
+    kind: i32,
+    proto: i32,
+    info: *const u8,
+    group: u32,
+    _flags: u32,
+) -> u64 {
     if traced() {
         os_std::eprintln!("winrun: WSASocket family {af}, kind {kind}, protocol {proto}, provider {}, group {group}, flags {_flags:#x}", !info.is_null());
     }
@@ -1480,7 +1518,8 @@ extern "win64" fn WSAIoctl(
                     return Err(WSAEOPNOTSUPP);
                 }
                 let mut peer = SockAddr::default();
-                os_sys::sock_ctl(fd, net::ctl::PEER_ADDR, &mut peer as *mut SockAddr as u64).map_err(|_| WSAENOTCONN)?;
+                os_sys::sock_ctl(fd, net::ctl::PEER_ADDR, &mut peer as *mut SockAddr as u64)
+                    .map_err(|_| WSAENOTCONN)?;
                 // SAFETY: the caller's 4-byte output buffer.
                 unsafe { core::ptr::write_unaligned(output as *mut u32, SEND_BACKLOG) };
                 4
@@ -1577,7 +1616,15 @@ fn send_result(s: u64, r: Result<usize, u32>, sent: *mut u32, ov: *mut u8) -> i3
 /// WSASend: gathers the WSABUFs into one stream write or datagram.
 /// Completion routines are not supported; an OVERLAPPED completes in the
 /// call (see overlapped.rs).
-pub(crate) extern "win64" fn WSASend(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, ov: *mut u8, completion: u64) -> i32 {
+pub(crate) extern "win64" fn WSASend(
+    s: u64,
+    bufs: *const u8,
+    count: u32,
+    sent: *mut u32,
+    f: u32,
+    ov: *mut u8,
+    completion: u64,
+) -> i32 {
     let r = (|| {
         let (fd, _) = fd(s)?;
         check_shutdown(s, false)?;
@@ -1687,7 +1734,9 @@ pub(crate) extern "win64" fn WSARecv(
         Ok(Ok((n, f, truncated)))
     })();
     match r {
-        Ok(Err(fl)) => overlapped::receive(s, bufs, count, fl, overlapped, core::ptr::null_mut(), core::ptr::null_mut()),
+        Ok(Err(fl)) => {
+            overlapped::receive(s, bufs, count, fl, overlapped, core::ptr::null_mut(), core::ptr::null_mut())
+        }
         Ok(Ok(v)) => recv_result(Ok(v), received),
         Err(e) => recv_result(Err(e), received),
     }
@@ -1735,7 +1784,14 @@ pub(crate) extern "win64" fn WSARecvFrom(
 /// WSASendMsg: WSAMSG { name, namelen, lpBuffers, dwBufferCount, Control,
 /// dwFlags } with the buffers gathered into one datagram or stream write.
 /// Control data (ancillary messages) is not supported.
-extern "win64" fn WSASendMsg(s: u64, msg: *const u8, f: u32, sent: *mut u32, overlapped: *mut u8, completion: u64) -> i32 {
+extern "win64" fn WSASendMsg(
+    s: u64,
+    msg: *const u8,
+    f: u32,
+    sent: *mut u32,
+    overlapped: *mut u8,
+    completion: u64,
+) -> i32 {
     let r = (|| {
         let (fd, _) = fd(s)?;
         check_shutdown(s, false)?;
@@ -1908,7 +1964,14 @@ fn our_provider(id: *const u8) -> bool {
 /// WSCGetProviderInfo: LSP categories are recorded only for layered
 /// providers (WSCSetProviderInfo); for a base provider Windows reports
 /// WSAEINVALIDPROVIDER, and so does OSyx, which has only base providers.
-extern "win64" fn WSCGetProviderInfo(id: *const u8, _kind: i32, _info: *mut u8, _size: *mut usize, _flags: u32, errno: *mut i32) -> i32 {
+extern "win64" fn WSCGetProviderInfo(
+    id: *const u8,
+    _kind: i32,
+    _info: *mut u8,
+    _size: *mut usize,
+    _flags: u32,
+    errno: *mut i32,
+) -> i32 {
     if !errno.is_null() {
         // SAFETY: the caller's error out-parameter.
         unsafe { *errno = if our_provider(id) { WSAEINVALIDPROVIDER } else { WSAEINVAL } as i32 };

@@ -261,7 +261,8 @@ impl E1000 {
                 break;
             }
             // SAFETY: as above.
-            let (len, errors) = unsafe { (read_volatile((d + 8) as *const u16) as usize, read_volatile((d + 13) as *const u8)) };
+            let (len, errors) =
+                unsafe { (read_volatile((d + 8) as *const u16) as usize, read_volatile((d + 13) as *const u8)) };
             if status & RX_EOP != 0 && errors == 0 && len > 0 && len <= RX_BUF {
                 // Filled by the copy below, so not zeroed first.
                 let mut f = Vec::with_capacity(len);

@@ -16,8 +16,8 @@ extern crate alloc;
 pub mod compositor;
 pub mod damage;
 pub mod draw;
-pub mod theme;
 pub mod taskbar;
+pub mod theme;
 
 #[cfg(test)]
 mod tests;

@@ -96,8 +96,8 @@ impl Heap {
         // A double free or an out-of-range dealloc overlaps a free block. It
         // would hand the same bytes to two owners, so stop here instead of
         // corrupting live objects silently.
-        let clash = (!cur.is_null() && addr + size > cur as usize)
-            || (!prev.is_null() && prev as usize + (*prev).size > addr);
+        let clash =
+            (!cur.is_null() && addr + size > cur as usize) || (!prev.is_null() && prev as usize + (*prev).size > addr);
         if clash || size == 0 {
             panic!("heap: overlapping free addr={addr:#x} size={size:#x} prev={prev:p} cur={cur:p}");
         }
@@ -228,18 +228,22 @@ impl Heap {
     }
 
     pub fn stats(&self) -> HeapStats {
-        let mut n = self.bins.iter().map(|&b| {
-            let mut k = 0;
-            let mut cur = b;
-            // SAFETY: walking our own bins.
-            unsafe {
-                while !cur.is_null() {
-                    k += 1;
-                    cur = (*cur).next;
+        let mut n = self
+            .bins
+            .iter()
+            .map(|&b| {
+                let mut k = 0;
+                let mut cur = b;
+                // SAFETY: walking our own bins.
+                unsafe {
+                    while !cur.is_null() {
+                        k += 1;
+                        cur = (*cur).next;
+                    }
                 }
-            }
-            k
-        }).sum::<usize>();
+                k
+            })
+            .sum::<usize>();
         let mut cur = self.head;
         // SAFETY: walking our own list.
         unsafe {

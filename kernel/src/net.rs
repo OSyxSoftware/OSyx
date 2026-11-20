@@ -13,9 +13,9 @@
 //! and releases sockets whose handles were closed (closing only queues the
 //! id, so dropping a handle never takes the stack lock).
 
-use crate::drivers::virtio_net::{self, VirtioNet};
 use crate::drivers::e1000::{self, E1000};
 use crate::drivers::rtl8168::{self, Rtl8168};
+use crate::drivers::virtio_net::{self, VirtioNet};
 use crate::fixup::{copy_from_user, copy_to_user, copy_vec_from_user, user_range_ok};
 use crate::object::Object;
 use crate::sync::{IrqSpinLock, KMutex};
@@ -32,7 +32,9 @@ use osyx_net::wire::{Endpoint, Ipv4Addr};
 
 static STACK: KMutex<Option<Stack>> = KMutex::new(None);
 trait NetDevice: Send + Sync {
-    fn is_wireless(&self) -> bool { false }
+    fn is_wireless(&self) -> bool {
+        false
+    }
     fn link_up(&self) -> bool;
     fn has_interrupts(&self) -> bool;
     fn counters(&self) -> virtio_net::Counters;
@@ -42,48 +44,100 @@ trait NetDevice: Send + Sync {
     fn description(&self) -> String;
     /// Called before the network thread sleeps; true if received frames
     /// are already waiting (see `VirtioNet::arm`).
-    fn arm(&self) -> bool { false }
+    fn arm(&self) -> bool {
+        false
+    }
     /// Brings a wedged device back (a reconnect, or a transmit queue that
     /// stopped moving). Drivers without a full reset restart what their
     /// `recover` restarts.
-    fn reset(&self) -> bool { self.recover() }
+    fn reset(&self) -> bool {
+        self.recover()
+    }
 }
 
 macro_rules! impl_net_device {
     ($ty:ty, $kind:literal) => {
         impl NetDevice for $ty {
-            fn link_up(&self) -> bool { self.link_up() }
-            fn has_interrupts(&self) -> bool { self.has_interrupts() }
-            fn counters(&self) -> virtio_net::Counters { self.counters() }
-            fn receive(&self, frames: &mut Vec<Vec<u8>>) { self.receive(frames) }
-            fn transmit(&self, frames: &[Vec<u8>]) -> usize { self.transmit(frames) }
-            fn recover(&self) -> bool { self.recover() }
-            fn description(&self) -> String { alloc::format!("{} ({} at {})", self.name, $kind, self.location) }
+            fn link_up(&self) -> bool {
+                self.link_up()
+            }
+            fn has_interrupts(&self) -> bool {
+                self.has_interrupts()
+            }
+            fn counters(&self) -> virtio_net::Counters {
+                self.counters()
+            }
+            fn receive(&self, frames: &mut Vec<Vec<u8>>) {
+                self.receive(frames)
+            }
+            fn transmit(&self, frames: &[Vec<u8>]) -> usize {
+                self.transmit(frames)
+            }
+            fn recover(&self) -> bool {
+                self.recover()
+            }
+            fn description(&self) -> String {
+                alloc::format!("{} ({} at {})", self.name, $kind, self.location)
+            }
         }
     };
 }
 impl NetDevice for VirtioNet {
-    fn link_up(&self) -> bool { self.link_up() }
-    fn has_interrupts(&self) -> bool { self.has_interrupts() }
-    fn counters(&self) -> virtio_net::Counters { self.counters() }
-    fn receive(&self, frames: &mut Vec<Vec<u8>>) { self.receive(frames) }
-    fn transmit(&self, frames: &[Vec<u8>]) -> usize { self.transmit(frames) }
-    fn recover(&self) -> bool { self.recover() }
-    fn description(&self) -> String { alloc::format!("{} (virtio-net at {})", self.name, self.location) }
-    fn arm(&self) -> bool { self.arm() }
-    fn reset(&self) -> bool { self.reset() }
+    fn link_up(&self) -> bool {
+        self.link_up()
+    }
+    fn has_interrupts(&self) -> bool {
+        self.has_interrupts()
+    }
+    fn counters(&self) -> virtio_net::Counters {
+        self.counters()
+    }
+    fn receive(&self, frames: &mut Vec<Vec<u8>>) {
+        self.receive(frames)
+    }
+    fn transmit(&self, frames: &[Vec<u8>]) -> usize {
+        self.transmit(frames)
+    }
+    fn recover(&self) -> bool {
+        self.recover()
+    }
+    fn description(&self) -> String {
+        alloc::format!("{} (virtio-net at {})", self.name, self.location)
+    }
+    fn arm(&self) -> bool {
+        self.arm()
+    }
+    fn reset(&self) -> bool {
+        self.reset()
+    }
 }
 impl_net_device!(E1000, "e1000");
 impl_net_device!(Rtl8168, "rtl8168");
 impl NetDevice for crate::bsd::BsdNic {
-    fn is_wireless(&self) -> bool { self.is_wireless() }
-    fn link_up(&self) -> bool { self.link_up() }
-    fn has_interrupts(&self) -> bool { self.has_interrupts() }
-    fn counters(&self) -> virtio_net::Counters { self.counters() }
-    fn receive(&self, frames: &mut Vec<Vec<u8>>) { self.receive(frames) }
-    fn transmit(&self, frames: &[Vec<u8>]) -> usize { self.transmit(frames) }
-    fn recover(&self) -> bool { self.recover() }
-    fn description(&self) -> String { alloc::format!("{} (openbsd at {})", self.name, self.location) }
+    fn is_wireless(&self) -> bool {
+        self.is_wireless()
+    }
+    fn link_up(&self) -> bool {
+        self.link_up()
+    }
+    fn has_interrupts(&self) -> bool {
+        self.has_interrupts()
+    }
+    fn counters(&self) -> virtio_net::Counters {
+        self.counters()
+    }
+    fn receive(&self, frames: &mut Vec<Vec<u8>>) {
+        self.receive(frames)
+    }
+    fn transmit(&self, frames: &[Vec<u8>]) -> usize {
+        self.transmit(frames)
+    }
+    fn recover(&self) -> bool {
+        self.recover()
+    }
+    fn description(&self) -> String {
+        alloc::format!("{} (openbsd at {})", self.name, self.location)
+    }
 }
 type Devices = Vec<(usize, Arc<dyn NetDevice>)>;
 static DEVICES: IrqSpinLock<Devices> = IrqSpinLock::new(Vec::new());
@@ -194,7 +248,10 @@ pub fn init(devices: &[pci::Device], boot: &crate::BootData) -> usize {
     let _ = crate::random::fill(&mut seed);
     let mut stack = Stack::new(u64::from_le_bytes(seed) ^ interrupts::ticks());
     let mut found = 0;
-    for d in devices.iter().filter(|d| d.vendor == crate::drivers::virtio::VENDOR && virtio_net::DEVICE_IDS.contains(&d.device)) {
+    for d in devices
+        .iter()
+        .filter(|d| d.vendor == crate::drivers::virtio::VENDOR && virtio_net::DEVICE_IDS.contains(&d.device))
+    {
         let name = alloc::format!("eth{}", found);
         match VirtioNet::probe(d, &name) {
             Ok(dev) => {
@@ -337,7 +394,11 @@ fn net_thread(_: u64, _: u64) {
                 let c = dev.counters();
                 let (sent, full) = tx_seen[n];
                 if c.tx_full > full && c.tx_frames == sent {
-                    kprintln!("net: {}: transmit queue stalled ({} frames refused, none sent), resetting", dev.description(), c.tx_full - full);
+                    kprintln!(
+                        "net: {}: transmit queue stalled ({} frames refused, none sent), resetting",
+                        dev.description(),
+                        c.tx_full - full
+                    );
                     dev.reset();
                 }
                 tx_seen[n] = (c.tx_frames, c.tx_full);
@@ -350,7 +411,8 @@ fn net_thread(_: u64, _: u64) {
             last_health = now_ms();
         }
         let closing = core::mem::take(&mut *CLOSING.lock());
-        let links: Vec<(usize, bool)> = if check_health { devs.iter().map(|(i, d)| (*i, d.link_up())).collect() } else { Vec::new() };
+        let links: Vec<(usize, bool)> =
+            if check_health { devs.iter().map(|(i, d)| (*i, d.link_up())).collect() } else { Vec::new() };
         with_stack(|s| {
             for (id, reset) in closing {
                 s.close(id, reset);
@@ -476,7 +538,12 @@ fn stack_call<R>(f: impl FnOnce(&mut Stack) -> Result<R, NetError>) -> Result<R,
 
 /// Retries `op` until it stops saying `WouldBlock`, sleeping until the
 /// socket shows one of `want` (or hangs up) in between.
-fn blocking<R>(s: &SocketObj, want: u32, timeout_ns: u64, mut op: impl FnMut(&mut Stack) -> Result<R, NetError>) -> Result<R, Errno> {
+fn blocking<R>(
+    s: &SocketObj,
+    want: u32,
+    timeout_ns: u64,
+    mut op: impl FnMut(&mut Stack) -> Result<R, NetError>,
+) -> Result<R, Errno> {
     let deadline = if timeout_ns == 0 { None } else { deadline_after_ns(timeout_ns) };
     loop {
         match stack_call(&mut op) {
@@ -485,7 +552,9 @@ fn blocking<R>(s: &SocketObj, want: u32, timeout_ns: u64, mut op: impl FnMut(&mu
             // lack `want`: a change elsewhere in the stack is no reason to
             // retry (and take the stack lock) again.
             Err(Errno::WouldBlock) if !s.nonblock.load(Ordering::Relaxed) => {
-                block_on(&[&CHANGED], deadline, || (s.ready.load(Ordering::Acquire) & (want | HANGUP) != 0).then_some(()))?;
+                block_on(&[&CHANGED], deadline, || {
+                    (s.ready.load(Ordering::Acquire) & (want | HANGUP) != 0).then_some(())
+                })?;
             }
             r => return r,
         }
@@ -799,9 +868,7 @@ pub fn sys_recv(h: u64, buf: u64, len: u64, from: u64, flags: u64) -> Result<u64
     // Data is copied straight from the stack's queues to the caller (under
     // the stack lock; a fault stops the copy and leaves the rest queued),
     // except for peeks and ICMP, which go through `k`.
-    let to_user = |at: u64| {
-        move |part: &[u8]| copy_to_user(at, part).is_ok()
-    };
+    let to_user = |at: u64| move |part: &[u8]| copy_to_user(at, part).is_ok();
     let mut direct = true;
     let (n, addr) = match s.kind {
         abi::SOCK_DGRAM => {
@@ -933,11 +1000,17 @@ pub fn sys_ctl(h: u64, op: u64, arg: u64) -> Result<u64, Errno> {
                 }
                 (abi::SOCK_STREAM, Some(id)) => {
                     if let Some(local) = bound {
-                        if peer { return Err(Errno::NotConnected); }
+                        if peer {
+                            return Err(Errno::NotConnected);
+                        }
                         local
                     } else {
                         let (l, r) = stack_call(|st| st.tcp_endpoints(id))?;
-                        if peer { r } else { l }
+                        if peer {
+                            r
+                        } else {
+                            l
+                        }
                     }
                 }
                 (abi::SOCK_DGRAM, Some(id)) if !peer => stack_call(|st| st.udp_local(id))?,
@@ -1001,7 +1074,9 @@ pub fn sys_resolve(name: u64, len: u64, out: u64, max: u64) -> Result<u64, Errno
                 if let Some(r) = with_stack(|s| s.resolve_result(q)).flatten() {
                     break r.map_err(errno)?;
                 }
-                if let Err(e) = block_on(&[&CHANGED], deadline, || (GENERATION.load(Ordering::Acquire) != seen).then_some(())) {
+                if let Err(e) =
+                    block_on(&[&CHANGED], deadline, || (GENERATION.load(Ordering::Acquire) != seen).then_some(()))
+                {
                     with_stack(|s| s.resolve_cancel(q));
                     return Err(e);
                 }
@@ -1024,7 +1099,9 @@ fn put_records<T: Copy>(buf: u64, len: u64, items: &[T]) -> Result<u64, Errno> {
 }
 
 pub fn sys_query(kind: u64, buf: u64, len: u64) -> Result<u64, Errno> {
-    let interrupts = virtio_net::INTERRUPTS.load(Ordering::Relaxed) + e1000::INTERRUPTS.load(Ordering::Relaxed) + rtl8168::INTERRUPTS.load(Ordering::Relaxed);
+    let interrupts = virtio_net::INTERRUPTS.load(Ordering::Relaxed)
+        + e1000::INTERRUPTS.load(Ordering::Relaxed)
+        + rtl8168::INTERRUPTS.load(Ordering::Relaxed);
     let irq_devs: Vec<usize> = DEVICES.lock().iter().filter(|(_, d)| d.has_interrupts()).map(|(i, _)| *i).collect();
     let wireless_devs: Vec<usize> = DEVICES.lock().iter().filter(|(_, d)| d.is_wireless()).map(|(i, _)| *i).collect();
     let r = with_stack(|s| -> Result<u64, Errno> {
@@ -1037,7 +1114,8 @@ pub fn sys_query(kind: u64, buf: u64, len: u64) -> Result<u64, Errno> {
                     .iter()
                     .enumerate()
                     .map(|(i, f)| {
-                        let mut r = abi::NetIface { index: i as u8, mtu: f.mtu as u32, mac: f.mac.0, ..Default::default() };
+                        let mut r =
+                            abi::NetIface { index: i as u8, mtu: f.mtu as u32, mac: f.mac.0, ..Default::default() };
                         osyx_abi::ipc::fill_field(&mut r.name, &f.name);
                         r.flags = abi::IFF_UP
                             | if f.link_up { abi::IFF_LINK } else { 0 }
@@ -1048,7 +1126,13 @@ pub fn sys_query(kind: u64, buf: u64, len: u64) -> Result<u64, Errno> {
                             r.addr = a.0;
                             r.prefix = p;
                         }
-                        r.gateway = s.routes().iter().find(|rt| rt.iface == i && rt.prefix == 0).and_then(|rt| rt.gateway).unwrap_or_default().0;
+                        r.gateway = s
+                            .routes()
+                            .iter()
+                            .find(|rt| rt.iface == i && rt.prefix == 0)
+                            .and_then(|rt| rt.gateway)
+                            .unwrap_or_default()
+                            .0;
                         if i > 0 {
                             r.dns = dns.0;
                         }
@@ -1294,7 +1378,9 @@ pub fn log_summary() {
             c.rx_errors,
             c.tx_full,
             c.resets,
-            virtio_net::INTERRUPTS.load(Ordering::Relaxed) + e1000::INTERRUPTS.load(Ordering::Relaxed) + rtl8168::INTERRUPTS.load(Ordering::Relaxed)
+            virtio_net::INTERRUPTS.load(Ordering::Relaxed)
+                + e1000::INTERRUPTS.load(Ordering::Relaxed)
+                + rtl8168::INTERRUPTS.load(Ordering::Relaxed)
         );
     }
 }

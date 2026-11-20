@@ -87,7 +87,8 @@ pub fn alertable_wait(ms: u32, timeout: u32, mut wait: impl FnMut(u32) -> u32) -
     if let Some(r) = before_wait(true) {
         return r;
     }
-    let deadline = (ms != objects::INFINITE).then(|| os_std::time::Instant::now() + core::time::Duration::from_millis(ms as u64));
+    let deadline =
+        (ms != objects::INFINITE).then(|| os_std::time::Instant::now() + core::time::Duration::from_millis(ms as u64));
     loop {
         let left = match deadline {
             None => SLICE_MS,
@@ -151,7 +152,8 @@ fn file_ex(op: impl FnOnce() -> i32, ov: u64, routine: u64) -> i32 {
         // Finished at once (a disk file): the routine still runs only in
         // an alertable wait. A pipe that completed here queued it already.
         // SAFETY: the caller's OVERLAPPED.
-        let (status, bytes) = unsafe { (crate::kernel32::overlapped::status(ov), crate::kernel32::overlapped::bytes(ov)) };
+        let (status, bytes) =
+            unsafe { (crate::kernel32::overlapped::status(ov), crate::kernel32::overlapped::bytes(ov)) };
         completed(ov, if status == 0 { 0 } else { crate::pipes::error_of(status) }, bytes as u32);
         return 1;
     }

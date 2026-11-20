@@ -115,7 +115,8 @@ impl Recorder {
     /// Starts recording `width` x `height` frames; the finished film
     /// becomes the desktop user's file `dir/name`.
     pub fn start(dir: String, name: String, width: u32, height: u32, now: u64) -> Result<Recorder, String> {
-        let encoder = Encoder::new(width as usize, height as usize, QUALITY).ok_or("the screen is too large to record")?;
+        let encoder =
+            Encoder::new(width as usize, height as usize, QUALITY).ok_or("the screen is too large to record")?;
         let (writer, head) = webm::Writer::start(width, height);
         let io = |e: Error| format!("{SPOOL}: {e}");
         fs::create_dir_all(SPOOL).map_err(io)?;

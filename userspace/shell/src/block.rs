@@ -14,8 +14,16 @@ use alloc::vec::Vec;
 pub enum Stmt {
     /// A complete line the shell runs as a command.
     Command(String),
-    If { cond: String, then: Vec<Stmt>, alt: Vec<Stmt> },
-    For { name: String, words: String, body: Vec<Stmt> },
+    If {
+        cond: String,
+        then: Vec<Stmt>,
+        alt: Vec<Stmt>,
+    },
+    For {
+        name: String,
+        words: String,
+        body: Vec<Stmt>,
+    },
 }
 
 /// How many block levels a chunk of lines opens (`{` minus `}`, outside

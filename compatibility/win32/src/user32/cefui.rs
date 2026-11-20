@@ -211,8 +211,15 @@ extern "win64" fn InsertMenuItemW(menu: u64, item: u32, by_pos: Bool, info: *con
     let b = info as u64;
     // SAFETY: a MENUITEMINFOW of the size just checked.
     let (mask, kind, state, id, sub, data, text) = unsafe {
-        (teb::get::<u32>(b, 4), teb::get::<u32>(b, 8), teb::get::<u32>(b, 12), teb::get::<u32>(b, 16),
-         client::get_ptr(b, sub_at), client::get_ptr(b, data_at), client::get_ptr(b, text_at))
+        (
+            teb::get::<u32>(b, 4),
+            teb::get::<u32>(b, 8),
+            teb::get::<u32>(b, 12),
+            teb::get::<u32>(b, 16),
+            client::get_ptr(b, sub_at),
+            client::get_ptr(b, data_at),
+            client::get_ptr(b, text_at),
+        )
     };
     let separator = mask & (MIIM_TYPE | MIIM_FTYPE) != 0 && kind & MF_SEPARATOR != 0;
     let mut flags = if separator { MF_SEPARATOR } else { 0 };
@@ -224,7 +231,11 @@ extern "win64" fn InsertMenuItemW(menu: u64, item: u32, by_pos: Bool, info: *con
         flags |= MF_POPUP;
         command = sub;
     }
-    let label = if !separator && (mask & MIIM_STRING != 0 || mask & MIIM_TYPE != 0) { text as *const u16 } else { core::ptr::null() };
+    let label = if !separator && (mask & MIIM_STRING != 0 || mask & MIIM_TYPE != 0) {
+        text as *const u16
+    } else {
+        core::ptr::null()
+    };
     let position_flag = if by_pos != 0 { 0x400 } else { 0 };
     if client::InsertMenuW(menu, item, flags | position_flag, command, label) == FALSE {
         return FALSE;
@@ -274,7 +285,11 @@ const MIM_APPLYTOSUBMENUS: u32 = 0x8000_0000;
 /// MENUINFO: cbSize, fMask, dwStyle, cyMax, hbrBack, dwContextHelpID,
 /// dwMenuData; 40 bytes (28 for 32-bit callers).
 fn menuinfo_layout() -> (u32, u64, u64, u64) {
-    if crate::wow64::is_active() { (28, 16, 20, 24) } else { (40, 16, 24, 32) }
+    if crate::wow64::is_active() {
+        (28, 16, 20, 24)
+    } else {
+        (40, 16, 24, 32)
+    }
 }
 
 extern "win64" fn GetMenuInfo(menu: u64, info: *mut u8) -> Bool {
@@ -317,7 +332,14 @@ extern "win64" fn SetMenuInfo(menu: u64, info: *const u8) -> Bool {
     let p = info as u64;
     // SAFETY: a MENUINFO of the size just checked.
     let (mask, style, max_height, background, help, data) = unsafe {
-        (teb::get::<u32>(p, 4), teb::get::<u32>(p, 8), teb::get::<u32>(p, 12), client::get_ptr(p, back_at), teb::get::<u32>(p, help_at as usize), client::get_ptr(p, data_at))
+        (
+            teb::get::<u32>(p, 4),
+            teb::get::<u32>(p, 8),
+            teb::get::<u32>(p, 12),
+            client::get_ptr(p, back_at),
+            teb::get::<u32>(p, help_at as usize),
+            client::get_ptr(p, data_at),
+        )
     };
     // The menu and, with MIM_APPLYTOSUBMENUS, the submenus it opens.
     let menus = with(|g| {
@@ -396,10 +418,17 @@ extern "win64" fn DrawEdge(dc: u64, rect: *mut u8, edge: u32, flags: u32) -> Boo
     // (top-left colour, bottom-right colour) of each ring present.
     let ring = |raised: bool, sunken: bool, outer: bool| -> Option<(u32, u32)> {
         if flags & BF_MONO != 0 {
-            return (raised || sunken).then_some((if outer { COLOR_WINDOWFRAME } else { COLOR_WINDOW }, if outer { COLOR_WINDOWFRAME } else { COLOR_WINDOW }));
+            return (raised || sunken).then_some((
+                if outer { COLOR_WINDOWFRAME } else { COLOR_WINDOW },
+                if outer { COLOR_WINDOWFRAME } else { COLOR_WINDOW },
+            ));
         }
         if flags & BF_FLAT != 0 {
-            return (raised || sunken).then_some(if outer { (COLOR_BTNSHADOW, COLOR_BTNSHADOW) } else { (COLOR_BTNFACE, COLOR_BTNFACE) });
+            return (raised || sunken).then_some(if outer {
+                (COLOR_BTNSHADOW, COLOR_BTNSHADOW)
+            } else {
+                (COLOR_BTNFACE, COLOR_BTNFACE)
+            });
         }
         match (raised, sunken, outer) {
             (true, _, true) => Some((COLOR_3DLIGHT, COLOR_3DDKSHADOW)),
@@ -514,7 +543,10 @@ extern "win64" fn GetGuiResources(process: u64, flags: u32) -> u32 {
         return fail(ERROR_ACCESS_DENIED, 0);
     }
     let (gdi, user) = with(|g| {
-        let gdi = g.gdi.keys().filter(|&&h| h < STOCK_BASE || h >= STOCK_BASE + 0x100).count() + g.dcs.len() + g.bitmaps.len() + g.regions.len();
+        let gdi = g.gdi.keys().filter(|&&h| h < STOCK_BASE || h >= STOCK_BASE + 0x100).count()
+            + g.dcs.len()
+            + g.bitmaps.len()
+            + g.regions.len();
         (gdi as u64, (g.windows.len() + g.menus.len() + g.icons.len()) as u64)
     });
     let gdi_peak = PEAK[0].fetch_max(gdi, Ordering::Relaxed).max(gdi);
@@ -532,7 +564,11 @@ extern "win64" fn GetGuiResources(process: u64, flags: u32) -> u32 {
 /// header size is that of RAWINPUTHEADER, -1 otherwise.
 extern "win64" fn DefRawInputProc(_input: u64, _count: i32, header_size: u32) -> i64 {
     let expected = if crate::wow64::is_active() { 16 } else { 24 };
-    if header_size == expected { 0 } else { -1 }
+    if header_size == expected {
+        0
+    } else {
+        -1
+    }
 }
 
 // ---- gdi32 --------------------------------------------------------------------------------
@@ -619,7 +655,9 @@ extern "win64" fn GetCharWidthW(dc: u64, first: u32, last: u32, widths: *mut i32
     if widths.is_null() || first > last || last > 0x10_FFFF {
         return fail(ERROR_INVALID_PARAMETER, FALSE);
     }
-    let Some(k) = with(|g| g.dcs.get(&dc).map(|d| font_of(&g.gdi, d.font))) else { return fail(ERROR_INVALID_HANDLE, FALSE) };
+    let Some(k) = with(|g| g.dcs.get(&dc).map(|d| font_of(&g.gdi, d.font))) else {
+        return fail(ERROR_INVALID_HANDLE, FALSE);
+    };
     for (i, c) in (first..=last).enumerate() {
         let ch = char::from_u32(c).unwrap_or('?');
         let mut buf = [0; 4];

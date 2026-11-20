@@ -109,7 +109,8 @@ pub(super) enum Kind {
 
 /// Window classes of the rich edit control: riched20.dll (2.0/3.0),
 /// riched32.dll (1.0) and msftedit.dll (4.1+).
-pub(super) const RICH_EDIT_CLASSES: [&str; 5] = ["RichEdit20W", "RichEdit20A", "RICHEDIT50W", "RICHEDIT60W", "RichEdit"];
+pub(super) const RICH_EDIT_CLASSES: [&str; 5] =
+    ["RichEdit20W", "RichEdit20A", "RICHEDIT50W", "RICHEDIT60W", "RichEdit"];
 
 pub(super) fn kind_of(class: &str) -> Option<Kind> {
     if class.eq_ignore_ascii_case("msctls_progress32") {
@@ -408,8 +409,10 @@ pub(super) fn paint(dc: u64, kind: Kind, hwnd: u64, width: i32, height: i32) {
             let rows = (height / ROW_HEIGHT).max(1) as usize;
             for (line, row) in data.rows.iter().skip(data.top).take(rows).enumerate() {
                 let mut rect = [2, line as i32 * ROW_HEIGHT, width - 2, (line as i32 + 1) * ROW_HEIGHT];
-                let text: Vec<u16> = row.first().map_or("", String::as_str).encode_utf16().chain(core::iter::once(0)).collect();
-                DrawTextW(dc, text.as_ptr(), -1, rect.as_mut_ptr(), 0x20 | 0x800); // DT_SINGLELINE | DT_NOPREFIX
+                let text: Vec<u16> =
+                    row.first().map_or("", String::as_str).encode_utf16().chain(core::iter::once(0)).collect();
+                DrawTextW(dc, text.as_ptr(), -1, rect.as_mut_ptr(), 0x20 | 0x800);
+                // DT_SINGLELINE | DT_NOPREFIX
             }
             let border = CreateSolidBrush(0x00BC_BCBC);
             FrameRect(dc, whole.as_ptr(), border);
@@ -518,10 +521,10 @@ fn rich_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
         }
         WM_KEYDOWN => {
             let lines = match w as u32 {
-                0x26 => -1,          // VK_UP
-                0x28 => 1,           // VK_DOWN
-                0x21 => -page,       // VK_PRIOR
-                0x22 => page,        // VK_NEXT
+                0x26 => -1,           // VK_UP
+                0x28 => 1,            // VK_DOWN
+                0x21 => -page,        // VK_PRIOR
+                0x22 => page,         // VK_NEXT
                 0x24 => i32::MIN / 2, // VK_HOME
                 0x23 => i32::MAX / 2, // VK_END
                 _ => return None,
@@ -532,8 +535,8 @@ fn rich_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
         WM_GETDLGCODE => Some(0x1 | 0x80), // DLGC_WANTARROWS | DLGC_HASSETSEL
         // Accepted without effect: formatting, limits, URL detection, options
         // and selection of a read-only display.
-        0x00B1 | 0x00C5 | 0x00CF | 0x00D3 | 0x0435 | 0x0437 | 0x043F | 0x0444 | 0x0447 | 0x0448 | 0x044D | 0x0459 | 0x045B
-        | 0x0478 | 0x04CC => Some(if msg == 0x00CF || msg == 0x0448 { 1 } else { 0 }),
+        0x00B1 | 0x00C5 | 0x00CF | 0x00D3 | 0x0435 | 0x0437 | 0x043F | 0x0444 | 0x0447 | 0x0448 | 0x044D | 0x0459
+        | 0x045B | 0x0478 | 0x04CC => Some(if msg == 0x00CF || msg == 0x0448 { 1 } else { 0 }),
         _ => None,
     }
 }
@@ -571,10 +574,14 @@ fn stream_in(hwnd: u64, format: u32, es: i64) -> i64 {
         *got = 0;
         let got_ptr: *mut i32 = &mut *got;
         let r = if wow {
-            crate::wow64::call32(callback as u32, &[cookie as u32, chunk.as_mut_ptr() as u32, chunk.len() as u32, got_ptr as u32])
+            crate::wow64::call32(
+                callback as u32,
+                &[cookie as u32, chunk.as_mut_ptr() as u32, chunk.len() as u32, got_ptr as u32],
+            )
         } else {
             // SAFETY: a caller-supplied EDITSTREAMCALLBACK of the Windows x64 ABI.
-            let f: extern "win64" fn(u64, *mut u8, i32, *mut i32) -> u32 = unsafe { core::mem::transmute(callback as usize) };
+            let f: extern "win64" fn(u64, *mut u8, i32, *mut i32) -> u32 =
+                unsafe { core::mem::transmute(callback as usize) };
             f(cookie, chunk.as_mut_ptr(), chunk.len() as i32, got_ptr)
         };
         if r != 0 {
@@ -592,7 +599,9 @@ fn stream_in(hwnd: u64, format: u32, es: i64) -> i64 {
     let text = if format & SF_RTF != 0 {
         rtf_to_text(&bytes)
     } else if format & SF_UNICODE != 0 {
-        char::decode_utf16(bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c))).map(|c| c.unwrap_or('\u{FFFD}')).collect()
+        char::decode_utf16(bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)))
+            .map(|c| c.unwrap_or('\u{FFFD}'))
+            .collect()
     } else {
         ansi_text(&bytes)
     };
@@ -613,10 +622,14 @@ fn ansi_text(bytes: &[u8]) -> String {
 /// One Windows-1252 byte (the 0x80..0x9F block differs from Latin-1).
 fn cp1252(b: u8) -> char {
     const HIGH: [char; 32] = [
-        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž', '\u{8F}',
-        '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž', '\u{8F}', '\u{90}', '‘',
+        '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
     ];
-    if (0x80..0xA0).contains(&b) { HIGH[(b - 0x80) as usize] } else { b as char }
+    if (0x80..0xA0).contains(&b) {
+        HIGH[(b - 0x80) as usize]
+    } else {
+        b as char
+    }
 }
 
 /// The text of an RTF document. Groups and control words are read;
@@ -667,7 +680,10 @@ pub(super) fn rtf_to_text(rtf: &[u8]) -> String {
                     while rtf.get(i).is_some_and(|c| c.is_ascii_digit()) {
                         i += 1;
                     }
-                    let param = core::str::from_utf8(&rtf[digits..i]).ok().and_then(|t| t.parse::<i32>().ok()).map(|v| if negative { -v } else { v });
+                    let param = core::str::from_utf8(&rtf[digits..i])
+                        .ok()
+                        .and_then(|t| t.parse::<i32>().ok())
+                        .map(|v| if negative { -v } else { v });
                     if rtf.get(i) == Some(&b' ') {
                         i += 1;
                     }
@@ -699,17 +715,40 @@ pub(super) fn rtf_to_text(rtf: &[u8]) -> String {
                             }
                         }
                         b"uc" => uc = param.unwrap_or(1).max(0) as usize,
-                        b"fonttbl" | b"colortbl" | b"stylesheet" | b"info" | b"pict" | b"object" | b"header" | b"footer"
-                        | b"headerl" | b"headerr" | b"footerl" | b"footerr" | b"listtable" | b"listoverridetable" | b"rsidtbl"
-                        | b"generator" | b"xmlnstbl" | b"themedata" | b"colorschememapping" | b"datastore" | b"latentstyles"
-                        | b"fldinst" | b"filetbl" | b"revtbl" => skip = true,
+                        b"fonttbl"
+                        | b"colortbl"
+                        | b"stylesheet"
+                        | b"info"
+                        | b"pict"
+                        | b"object"
+                        | b"header"
+                        | b"footer"
+                        | b"headerl"
+                        | b"headerr"
+                        | b"footerl"
+                        | b"footerr"
+                        | b"listtable"
+                        | b"listoverridetable"
+                        | b"rsidtbl"
+                        | b"generator"
+                        | b"xmlnstbl"
+                        | b"themedata"
+                        | b"colorschememapping"
+                        | b"datastore"
+                        | b"latentstyles"
+                        | b"fldinst"
+                        | b"filetbl"
+                        | b"revtbl" => skip = true,
                         _ => {}
                     }
                 } else {
                     i += 1;
                     match d {
                         b'\'' => {
-                            let byte = rtf.get(i..i + 2).and_then(|h| core::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+                            let byte = rtf
+                                .get(i..i + 2)
+                                .and_then(|h| core::str::from_utf8(h).ok())
+                                .and_then(|h| u8::from_str_radix(h, 16).ok());
                             i += 2;
                             if let Some(b) = byte {
                                 emit(&mut out, skip, &mut fallback, cp1252(b));
@@ -807,7 +846,11 @@ fn paint_rich(dc: u64, hwnd: u64, data: ControlData, width: i32, height: i32) {
 
 /// The pointer size of the program's structures: 4 for a 32-bit program.
 fn ptr_size() -> usize {
-    if crate::wow64::is_active() { 4 } else { 8 }
+    if crate::wow64::is_active() {
+        4
+    } else {
+        8
+    }
 }
 
 /// A pointer-sized field of a caller structure; a 32-bit value is
@@ -857,7 +900,8 @@ fn copy_text(text: &str, buf: u64, max: i64, wide: bool) -> i64 {
         }
         units.len() as i64
     } else {
-        let bytes: Vec<u8> = text.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).take(max as usize - 1).collect();
+        let bytes: Vec<u8> =
+            text.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).take(max as usize - 1).collect();
         // SAFETY: the caller's buffer of `max` bytes.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len());
@@ -929,18 +973,21 @@ fn combo_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
         }
     };
     let result = match msg {
-        0x0143 => data_of(hwnd, |d| { // CB_ADDSTRING
+        0x0143 => data_of(hwnd, |d| {
+            // CB_ADDSTRING
             d.rows.push(alloc::vec![wide_text(l as u64)]);
             d.item_data.push(0);
             d.rows.len() as i64 - 1
         }),
-        0x014A => data_of(hwnd, |d| { // CB_INSERTSTRING
+        0x014A => data_of(hwnd, |d| {
+            // CB_INSERTSTRING
             let at = if (w as i64) < 0 { d.rows.len() } else { (w as usize).min(d.rows.len()) };
             d.rows.insert(at, alloc::vec![wide_text(l as u64)]);
             d.item_data.insert(at, 0);
             at as i64
         }),
-        0x0144 => data_of(hwnd, |d| { // CB_DELETESTRING
+        0x0144 => data_of(hwnd, |d| {
+            // CB_DELETESTRING
             let i = w as usize;
             if i >= d.rows.len() {
                 return CB_ERR;
@@ -952,7 +999,8 @@ fn combo_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
             }
             d.rows.len() as i64
         }),
-        0x014B => data_of(hwnd, |d| { // CB_RESETCONTENT
+        0x014B => data_of(hwnd, |d| {
+            // CB_RESETCONTENT
             d.rows.clear();
             d.item_data.clear();
             d.sel = None;
@@ -960,7 +1008,8 @@ fn combo_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
         }),
         0x0146 => data_of(hwnd, |d| d.rows.len() as i64), // CB_GETCOUNT
         0x0147 => data_of(hwnd, |d| d.sel.map_or(CB_ERR, |s| s as i64)), // CB_GETCURSEL
-        0x014E => data_of(hwnd, |d| { // CB_SETCURSEL
+        0x014E => data_of(hwnd, |d| {
+            // CB_SETCURSEL
             let i = w as i64;
             if i < 0 || i as usize >= d.rows.len() {
                 d.sel = None;
@@ -970,15 +1019,19 @@ fn combo_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
                 i
             }
         }),
-        0x0148 => { // CB_GETLBTEXT
+        0x0148 => {
+            // CB_GETLBTEXT
             let text = data_of(hwnd, |d| d.rows.get(w as usize).and_then(|r| r.first().cloned())).flatten();
             match text {
                 Some(t) => Some(copy_text(&t, l as u64, i32::MAX as i64, true)),
                 None => Some(CB_ERR),
             }
         }
-        0x0149 => data_of(hwnd, |d| d.rows.get(w as usize).and_then(|r| r.first()).map_or(CB_ERR, |t| t.encode_utf16().count() as i64)),
-        0x014C | 0x0158 | 0x014D => { // CB_FINDSTRING, CB_FINDSTRINGEXACT, CB_SELECTSTRING
+        0x0149 => data_of(hwnd, |d| {
+            d.rows.get(w as usize).and_then(|r| r.first()).map_or(CB_ERR, |t| t.encode_utf16().count() as i64)
+        }),
+        0x014C | 0x0158 | 0x014D => {
+            // CB_FINDSTRING, CB_FINDSTRINGEXACT, CB_SELECTSTRING
             let want = wide_text(l as u64).to_lowercase();
             let exact = msg == 0x0158;
             let found = data_of(hwnd, |d| {
@@ -986,7 +1039,11 @@ fn combo_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
                 let start = if (w as i64) < 0 { 0 } else { (w as usize + 1) % n.max(1) };
                 (0..n).map(|k| (start + k) % n).find(|&i| {
                     let t = d.rows[i].first().map(|t| t.to_lowercase()).unwrap_or_default();
-                    if exact { t == want } else { t.starts_with(&want) }
+                    if exact {
+                        t == want
+                    } else {
+                        t.starts_with(&want)
+                    }
                 })
             })
             .flatten();
@@ -1001,7 +1058,8 @@ fn combo_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
             }
         }
         0x0150 => data_of(hwnd, |d| d.item_data.get(w as usize).map_or(CB_ERR, |&v| v as i64)), // CB_GETITEMDATA
-        0x0151 => data_of(hwnd, |d| match d.item_data.get_mut(w as usize) { // CB_SETITEMDATA
+        0x0151 => data_of(hwnd, |d| match d.item_data.get_mut(w as usize) {
+            // CB_SETITEMDATA
             Some(v) => {
                 *v = l as u64;
                 1
@@ -1012,7 +1070,8 @@ fn combo_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
         // CB_LIMITTEXT, CB_SHOWDROPDOWN, CB_SETITEMHEIGHT, CB_SETEXTENDEDUI,
         // CB_GETDROPPEDSTATE, CB_SETDROPPEDWIDTH, CB_INITSTORAGE.
         0x0141 | 0x014F | 0x0153 | 0x0155 | 0x0157 | 0x0160 | 0x0161 => Some(if msg == 0x0141 { 1 } else { 0 }),
-        0x0201 | 0x0203 => { // WM_LBUTTONDOWN, WM_LBUTTONDBLCLK
+        0x0201 | 0x0203 => {
+            // WM_LBUTTONDOWN, WM_LBUTTONDBLCLK
             select(1);
             return Some(0);
         }
@@ -1047,7 +1106,7 @@ fn paint_combo(dc: u64, _hwnd: u64, data: &ControlData, width: i32, height: i32)
     let wide: Vec<u16> = text.encode_utf16().chain(core::iter::once(0)).collect();
     let mut rect = [4, 0, (width - 20).max(4), height];
     DrawTextW(dc, wide.as_ptr(), -1, rect.as_mut_ptr(), 0x20 | 0x4 | 0x800); // SINGLELINE | VCENTER | NOPREFIX
-    // The drop-down arrow: a small triangle of shrinking rows.
+                                                                             // The drop-down arrow: a small triangle of shrinking rows.
     let arrow = CreateSolidBrush(0x0040_4040);
     let (cx, cy) = (width - 10, height / 2 - 2);
     for row in 0..4 {
@@ -1187,7 +1246,8 @@ fn tree_hit(hwnd: u64, x: i32, y: i32) -> (u64, u32) {
 fn tree_set_fields(node: &mut TreeNode, item: u64, wide: bool) {
     let p = ptr_size();
     // SAFETY: the caller's TVITEM.
-    let (mask, state, state_mask) = unsafe { (teb::get::<u32>(item, 0), teb::get::<u32>(item, 2 * p), teb::get::<u32>(item, 2 * p + 4)) };
+    let (mask, state, state_mask) =
+        unsafe { (teb::get::<u32>(item, 0), teb::get::<u32>(item, 2 * p), teb::get::<u32>(item, 2 * p + 4)) };
     let text_at = 2 * p + 8;
     let after_text = text_at + p + 4;
     if mask & 0x1 != 0 {
@@ -1224,7 +1284,11 @@ fn tree_set_fields(node: &mut TreeNode, item: u64, wide: bool) {
 
 /// The offset of TVITEM.lParam: 36 in a 32-bit program, 48 on x64.
 fn lparam_offset() -> usize {
-    if ptr_size() == 4 { 36 } else { 48 }
+    if ptr_size() == 4 {
+        36
+    } else {
+        48
+    }
 }
 
 /// Fills the caller's TVITEM at `item` from `node` for the fields its mask asks.
@@ -1442,25 +1506,32 @@ fn tree_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
         TVM_GETINDENT => Some(TREE_INDENT as i64),
         TVM_SETINDENT | TVM_SETITEMHEIGHT => Some(0),
         TVM_GETITEMHEIGHT => Some(TREE_ROW as i64),
-        TVM_GETVISIBLECOUNT => Some(with(|g| g.windows.get(&hwnd).map_or(1, |w| (w.size.1 as i32 - 4) / TREE_ROW)) as i64),
+        TVM_GETVISIBLECOUNT => {
+            Some(with(|g| g.windows.get(&hwnd).map_or(1, |w| (w.size.1 as i32 - 4) / TREE_ROW)) as i64)
+        }
         TVM_GETIMAGELIST => data_of(hwnd, |d| if w == 2 { d.state_images as i64 } else { 0 }),
-        TVM_SETIMAGELIST => data_of(hwnd, |d| if w == 2 { core::mem::replace(&mut d.state_images, l as u64) as i64 } else { 0 }),
+        TVM_SETIMAGELIST => {
+            data_of(hwnd, |d| if w == 2 { core::mem::replace(&mut d.state_images, l as u64) as i64 } else { 0 })
+        }
         TVM_GETNEXTITEM => data_of(hwnd, |d| {
             let item = l as u64;
             let index = node_index(d, item);
             let rows = visible_rows(d);
             let found = match w as u32 {
                 0 => d.nodes.first().map(|n| n.handle), // TVGN_ROOT
-                1 => index.and_then(|i| { // TVGN_NEXT: next sibling
+                1 => index.and_then(|i| {
+                    // TVGN_NEXT: next sibling
                     let parent = d.nodes[i].parent;
                     d.nodes.get(subtree_end(d, i)).filter(|n| n.parent == parent).map(|n| n.handle)
                 }),
-                2 => index.and_then(|i| { // TVGN_PREVIOUS
+                2 => index.and_then(|i| {
+                    // TVGN_PREVIOUS
                     let parent = d.nodes[i].parent;
                     d.nodes[..i].iter().rev().find(|n| n.parent == parent).map(|n| n.handle)
                 }),
                 3 => index.map(|i| d.nodes[i].parent).filter(|&h| h != 0), // TVGN_PARENT
-                4 => { // TVGN_CHILD
+                4 => {
+                    // TVGN_CHILD
                     let parent = if item == 0 || item == TVI_ROOT { 0 } else { item };
                     match parent {
                         0 => d.nodes.first().map(|n| n.handle),
@@ -1468,8 +1539,14 @@ fn tree_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
                     }
                 }
                 5 => rows.get(d.top).map(|&i| d.nodes[i].handle), // TVGN_FIRSTVISIBLE
-                6 => index.and_then(|i| rows.iter().position(|&r| r == i)).and_then(|r| rows.get(r + 1)).map(|&i| d.nodes[i].handle),
-                7 => index.and_then(|i| rows.iter().position(|&r| r == i)).filter(|&r| r > 0).map(|r| d.nodes[rows[r - 1]].handle),
+                6 => index
+                    .and_then(|i| rows.iter().position(|&r| r == i))
+                    .and_then(|r| rows.get(r + 1))
+                    .map(|&i| d.nodes[i].handle),
+                7 => index
+                    .and_then(|i| rows.iter().position(|&r| r == i))
+                    .filter(|&r| r > 0)
+                    .map(|r| d.nodes[rows[r - 1]].handle),
                 9 => (d.selected != 0).then_some(d.selected), // TVGN_CARET
                 0xA => rows.last().map(|&i| d.nodes[i].handle), // TVGN_LASTVISIBLE
                 _ => None,
@@ -1498,7 +1575,8 @@ fn tree_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
                 return Some(0);
             }
             let handle = read_ptr(item, 4.max(p));
-            let node = data_of(hwnd, |d| node_index(d, handle).map(|i| (d.nodes[i].clone(), has_children(d, i)))).flatten();
+            let node =
+                data_of(hwnd, |d| node_index(d, handle).map(|i| (d.nodes[i].clone(), has_children(d, i)))).flatten();
             match node {
                 Some((n, kids)) => {
                     tree_get_fields(&n, kids, item, msg == TVM_GETITEMW);
@@ -1560,7 +1638,8 @@ fn tree_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
             d.text_colour = (l as i32 != -1).then_some(colour_ref(l as u32));
             old
         }),
-        0x0201 | 0x0203 => { // WM_LBUTTONDOWN, WM_LBUTTONDBLCLK
+        0x0201 | 0x0203 => {
+            // WM_LBUTTONDOWN, WM_LBUTTONDBLCLK
             let (x, y) = ((l & 0xFFFF) as i16 as i32, ((l >> 16) & 0xFFFF) as i16 as i32);
             let (item, flags) = tree_hit(hwnd, x, y);
             if item != 0 {
@@ -1620,7 +1699,21 @@ fn tree_message(hwnd: u64, msg: u32, w: u64, l: i64) -> Option<i64> {
         0x112C | 0x1121 | 0x2005 | 0x2007 => Some(0),
         _ => None,
     };
-    if result.is_some() && !matches!(msg, TVM_GETCOUNT | TVM_GETNEXTITEM | TVM_GETITEMA | TVM_GETITEMW | TVM_GETITEMSTATE | TVM_GETITEMRECT | TVM_GETINDENT | TVM_GETITEMHEIGHT | TVM_GETVISIBLECOUNT | TVM_GETIMAGELIST) {
+    if result.is_some()
+        && !matches!(
+            msg,
+            TVM_GETCOUNT
+                | TVM_GETNEXTITEM
+                | TVM_GETITEMA
+                | TVM_GETITEMW
+                | TVM_GETITEMSTATE
+                | TVM_GETITEMRECT
+                | TVM_GETINDENT
+                | TVM_GETITEMHEIGHT
+                | TVM_GETVISIBLECOUNT
+                | TVM_GETIMAGELIST
+        )
+    {
         redraw(hwnd);
     }
     result
@@ -1681,7 +1774,11 @@ fn paint_tree(dc: u64, hwnd: u64, data: &ControlData, width: i32, height: i32) {
         if node.handle == data.selected {
             let mut measure_rect = rect;
             DrawTextW(dc, text.as_ptr(), -1, measure_rect.as_mut_ptr(), 0x20 | 0x800 | 0x400); // DT_CALCRECT
-            FillRect(dc, [label - 2, y + 1, (measure_rect[2] + 2).min(width - 2), y + TREE_ROW - 1].as_ptr(), highlight);
+            FillRect(
+                dc,
+                [label - 2, y + 1, (measure_rect[2] + 2).min(width - 2), y + TREE_ROW - 1].as_ptr(),
+                highlight,
+            );
             SetTextColor(dc, 0x00FF_FFFF);
         } else {
             SetTextColor(dc, data.text_colour.unwrap_or(0));

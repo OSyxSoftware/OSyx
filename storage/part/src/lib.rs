@@ -261,7 +261,8 @@ fn read_header<R: SectorReader>(r: &mut R, lba: u64) -> Result<Table, GptError> 
         if fl < first || ll > last || fl > ll {
             return Err(GptError::Corrupt("partition outside the usable range"));
         }
-        let units: Vec<u16> = (0..36).map(|k| u16::from_le_bytes([e[56 + 2 * k], e[57 + 2 * k]])).take_while(|&u| u != 0).collect();
+        let units: Vec<u16> =
+            (0..36).map(|k| u16::from_le_bytes([e[56 + 2 * k], e[57 + 2 * k]])).take_while(|&u| u != 0).collect();
         partitions.push(Partition {
             number: i as u32 + 1,
             type_guid,
@@ -331,7 +332,11 @@ pub fn build(disk_sectors: u64, disk_guid: Guid, parts: &[NewPartition<'_>]) -> 
         if p.type_guid.is_zero() {
             return Err(GptError::Corrupt("partition type is zero"));
         }
-        let end = p.sectors.checked_sub(1).and_then(|n| p.first_lba.checked_add(n)).ok_or(GptError::Corrupt("partition outside the usable range"))?;
+        let end = p
+            .sectors
+            .checked_sub(1)
+            .and_then(|n| p.first_lba.checked_add(n))
+            .ok_or(GptError::Corrupt("partition outside the usable range"))?;
         if p.first_lba < first || end > last {
             return Err(GptError::Corrupt("partition outside the usable range"));
         }

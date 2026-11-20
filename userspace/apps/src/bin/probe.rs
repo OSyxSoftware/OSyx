@@ -14,11 +14,11 @@
 #![no_std]
 #![no_main]
 
+use os_std::env;
 use os_std::fs;
 use os_std::os::{self, auxv, raw};
 use os_std::prelude::*;
 use os_std::process::{self, Command};
-use os_std::env;
 
 os_std::entry!(main);
 
@@ -42,7 +42,8 @@ fn headers_ok() -> (&'static str, &'static str) {
         // SAFETY: the kernel maps the program headers it reports in AT_PHDR.
         let h = unsafe { core::slice::from_raw_parts((phdr + i * 56) as *const u8, 56) };
         let word = |o: usize| u64::from_le_bytes(h[o..o + 8].try_into().unwrap());
-        let (p_type, flags) = (u32::from_le_bytes(h[0..4].try_into().unwrap()), u32::from_le_bytes(h[4..8].try_into().unwrap()));
+        let (p_type, flags) =
+            (u32::from_le_bytes(h[0..4].try_into().unwrap()), u32::from_le_bytes(h[4..8].try_into().unwrap()));
         p_type == 1 && flags & 1 != 0 && word(16) <= e && e < word(16) + word(40)
     });
     (if covers { "ok" } else { "bad" }, if entry_ok { "ok" } else { "bad" })

@@ -43,7 +43,8 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u32, Vec<u8>)>) -> Resul
             walk(root, &path, out)?;
         } else if meta.is_file() {
             let rel = path.strip_prefix(root).map_err(|e| e.to_string())?;
-            let rel = rel.to_str().ok_or_else(|| format!("{}: the name is not UTF-8", path.display()))?.replace('\\', "/");
+            let rel =
+                rel.to_str().ok_or_else(|| format!("{}: the name is not UTF-8", path.display()))?.replace('\\', "/");
             #[cfg(unix)]
             let executable = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
             #[cfg(not(unix))]
@@ -57,7 +58,14 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u32, Vec<u8>)>) -> Resul
     Ok(())
 }
 
-fn build(name: &str, version: &str, description: &str, tree: &str, secret_path: &str, out_dir: &str) -> Result<(), String> {
+fn build(
+    name: &str,
+    version: &str,
+    description: &str,
+    tree: &str,
+    secret_path: &str,
+    out_dir: &str,
+) -> Result<(), String> {
     let secret = read_secret(secret_path)?;
     let mut found = Vec::new();
     walk(Path::new(tree), Path::new(tree), &mut found)?;
@@ -80,19 +88,29 @@ fn build(name: &str, version: &str, description: &str, tree: &str, secret_path: 
     Package::parse(&text)?;
     let [manifest, signature, bin] = package::file_names(name);
     std::fs::create_dir_all(out_dir).map_err(|e| format!("{out_dir}: {e}"))?;
-    let write = |file: &str, data: &[u8]| std::fs::write(Path::new(out_dir).join(file), data).map_err(|e| format!("{out_dir}/{file}: {e}"));
+    let write = |file: &str, data: &[u8]| {
+        std::fs::write(Path::new(out_dir).join(file), data).map_err(|e| format!("{out_dir}/{file}: {e}"))
+    };
     write(&manifest, text.as_bytes())?;
     write(&signature, &sign(text.as_bytes(), &secret))?;
     write(&bin, &payload)?;
-    println!("{name} {version}: {} files, {} bytes, signed with {}", p.files.len(), payload.len(), hex(&public_from_secret(&secret)));
+    println!(
+        "{name} {version}: {} files, {} bytes, signed with {}",
+        p.files.len(),
+        payload.len(),
+        hex(&public_from_secret(&secret))
+    );
     Ok(())
 }
 
 fn index(secret_path: &str, dir: &str) -> Result<(), String> {
     let secret = read_secret(secret_path)?;
-    let entries = std::fs::read_dir(dir).and_then(|d| d.collect::<Result<Vec<_>, _>>()).map_err(|e| format!("{dir}: {e}"))?;
-    let mut names: Vec<String> =
-        entries.iter().filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".pkg.txt")).map(String::from)).collect();
+    let entries =
+        std::fs::read_dir(dir).and_then(|d| d.collect::<Result<Vec<_>, _>>()).map_err(|e| format!("{dir}: {e}"))?;
+    let mut names: Vec<String> = entries
+        .iter()
+        .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".pkg.txt")).map(String::from))
+        .collect();
     let public = public_from_secret(&secret);
     names.sort();
     let mut list = Index::default();
@@ -128,7 +146,8 @@ fn index(secret_path: &str, dir: &str) -> Result<(), String> {
     let text = list.to_text();
     Index::parse(&text)?;
     std::fs::write(Path::new(dir).join(package::INDEX), &text).map_err(|e| format!("{dir}: {e}"))?;
-    std::fs::write(Path::new(dir).join(package::INDEX_SIGNATURE), sign(text.as_bytes(), &secret)).map_err(|e| format!("{dir}: {e}"))?;
+    std::fs::write(Path::new(dir).join(package::INDEX_SIGNATURE), sign(text.as_bytes(), &secret))
+        .map_err(|e| format!("{dir}: {e}"))?;
     println!("{} packages listed, signed with {}", list.packages.len(), hex(&public_from_secret(&secret)));
     Ok(())
 }

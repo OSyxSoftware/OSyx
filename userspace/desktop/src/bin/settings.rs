@@ -39,16 +39,16 @@ use common::{human_size, installed_programs, run_app, App, Ctx, InstalledProgram
 use os_std::prelude::*;
 use os_std::process::Command;
 use os_std::{fs, os, system};
-use osyx_gfx::{Color, Rect};
 use osyx_abi::battery::{Info as BatteryInfo, State as BatteryState, Status as Battery};
+use osyx_gfx::{Color, Rect};
 use osyx_input::layout::Layout;
 use osyx_ui::options::{ClockOptions, PowerOptions};
-use osyx_ui::time::ZONES;
 use osyx_ui::theme::SchemeChoice;
+use osyx_ui::time::ZONES;
 use osyx_ui::widget::{Button, ButtonStyle, TextField};
 use osyx_ui::{icon, Align, Event as Ui, FontKind, Icon, Painter, Response};
-use prism_core::PointerSettings;
 use prism_client::WindowSpec;
+use prism_core::PointerSettings;
 
 os_std::entry!(main);
 
@@ -64,7 +64,8 @@ const UPDATE_REQUEST: &str = "/etc/osyx/update.request";
 /// State of the system update service: (state, version, detail).
 fn update_state() -> (String, String, String) {
     let text = fs::read_to_string(UPDATE_STATUS).unwrap_or_default();
-    let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(k).map(|v| String::from(v.trim()))).unwrap_or_default();
+    let field =
+        |k: &str| text.lines().find_map(|l| l.strip_prefix(k).map(|v| String::from(v.trim()))).unwrap_or_default();
     (field("state "), field("version "), field("detail "))
 }
 
@@ -315,7 +316,7 @@ fn write(path: &str, value: &str) -> String {
         Ok(()) => {
             println!("settings: saved {path}={value}");
             format!("Saved {path}")
-        },
+        }
         Err(e) => format!("Cannot write {path}: {e}"),
     }
 }
@@ -474,7 +475,10 @@ impl Settings {
         Some(match self.section {
             Section::Keyboard => {
                 let current = Layout::from_name(&read("/etc/osyx/keyboard")).unwrap_or(Layout::Us);
-                let layouts = Layout::ALL.iter().map(|l| Row::Radio(Act::Layout(*l), String::from(l.label()), *l == current)).collect();
+                let layouts = Layout::ALL
+                    .iter()
+                    .map(|l| Row::Radio(Act::Layout(*l), String::from(l.label()), *l == current))
+                    .collect();
                 vec![
                     Group::new("Input source", layouts),
                     Group::new(
@@ -501,15 +505,25 @@ impl Settings {
                                 PointerSettings::MAX_SPEED,
                                 format!("{} %", s.speed),
                             ),
-                            Row::Toggle(Act::LeftHanded, String::from("Left-handed: swap the primary and secondary button"), s.left_handed),
+                            Row::Toggle(
+                                Act::LeftHanded,
+                                String::from("Left-handed: swap the primary and secondary button"),
+                                s.left_handed,
+                            ),
                         ],
                     ),
                     Group::new(
                         "Scrolling",
                         vec![
-                            Row::Toggle(Act::NaturalScroll, String::from("Natural scrolling: content follows the fingers"), s.natural_scroll),
+                            Row::Toggle(
+                                Act::NaturalScroll,
+                                String::from("Natural scrolling: content follows the fingers"),
+                                s.natural_scroll,
+                            ),
                             Row::Note(String::from("These options apply within a few seconds, to mice and touchpads.")),
-                            Row::Note(String::from("Tablets and touch screens report positions: the speed does not change them.")),
+                            Row::Note(String::from(
+                                "Tablets and touch screens report positions: the speed does not change them.",
+                            )),
                         ],
                     ),
                 ]
@@ -562,7 +576,11 @@ impl Settings {
                     ),
                     Group::new(
                         "Time zone",
-                        ZONES.iter().enumerate().map(|(i, (z, name))| Row::Radio(Act::Zone(i), String::from(*name), *z == zone)).collect(),
+                        ZONES
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (z, name))| Row::Radio(Act::Zone(i), String::from(*name), *z == zone))
+                            .collect(),
                     ),
                 ]
             }
@@ -608,13 +626,19 @@ impl Settings {
                     Row::Info(String::from("Status"), status),
                 ];
                 if let Some(mw) = b.rate_mw.filter(|&r| r > 0) {
-                    rows.push(Row::Info(String::from(if b.charging() { "Charging power" } else { "Power draw" }), milli(mw, "W")));
+                    rows.push(Row::Info(
+                        String::from(if b.charging() { "Charging power" } else { "Power draw" }),
+                        milli(mw, "W"),
+                    ));
                 }
                 if let (Some(e), Some(c)) = (b.energy_mwh, b.capacity_mwh) {
                     rows.push(Row::Info(String::from("Energy"), format!("{} of {}", milli(e, "Wh"), milli(c, "Wh"))));
                 }
                 if let (Some(h), Some(d)) = (b.health_percent(), b.design_mwh) {
-                    rows.push(Row::Info(String::from("Health"), format!("{h} % of the design capacity ({})", milli(d, "Wh"))));
+                    rows.push(Row::Info(
+                        String::from("Health"),
+                        format!("{h} % of the design capacity ({})", milli(d, "Wh")),
+                    ));
                 }
                 if let Some(mv) = b.voltage_mv {
                     rows.push(Row::Info(String::from("Voltage"), format!("{}.{:02} V", mv / 1000, mv % 1000 / 10)));
@@ -623,7 +647,9 @@ impl Settings {
                     rows.push(Row::Info(String::from("Batteries"), format!("{}", b.batteries)));
                 }
                 if b.stale {
-                    rows.push(Row::Note(String::from("The firmware stopped answering: these are the last values it gave.")));
+                    rows.push(Row::Note(String::from(
+                        "The firmware stopped answering: these are the last values it gave.",
+                    )));
                 }
                 if unknown {
                     rows.push(Row::Note(String::from(
@@ -633,9 +659,12 @@ impl Settings {
                 groups.push(Group::new("Battery", rows));
                 for info in BatteryInfo::parse(&read_raw(osyx_abi::BATTERY_INFO_PATH)) {
                     let mut rows = Vec::new();
-                    for (label, value) in
-                        [("Model", &info.model), ("Manufacturer", &info.vendor), ("Chemistry", &info.technology), ("Serial number", &info.serial)]
-                    {
+                    for (label, value) in [
+                        ("Model", &info.model),
+                        ("Manufacturer", &info.vendor),
+                        ("Chemistry", &info.technology),
+                        ("Serial number", &info.serial),
+                    ] {
                         if !value.is_empty() {
                             rows.push(Row::Info(String::from(label), value.clone()));
                         }
@@ -649,7 +678,11 @@ impl Settings {
                 }
                 groups.push(Group::new(
                     "Task bar",
-                    vec![Row::Toggle(Act::ShowPercent, String::from("Show the percentage beside the battery"), options.show_percent)],
+                    vec![Row::Toggle(
+                        Act::ShowPercent,
+                        String::from("Show the percentage beside the battery"),
+                        options.show_percent,
+                    )],
                 ));
                 groups.push(Group::new(
                     "Low battery warning",
@@ -673,7 +706,10 @@ impl Settings {
         }
         let mut machine = Vec::new();
         if let Some(b) = battery.filter(Battery::present) {
-            machine.push(Row::Info(String::from("Power adapter"), String::from(if b.ac { "Connected" } else { "Not connected" })));
+            machine.push(Row::Info(
+                String::from("Power adapter"),
+                String::from(if b.ac { "Connected" } else { "Not connected" }),
+            ));
         }
         match read(osyx_abi::LID_STATUS_PATH).as_str() {
             "open" => machine.push(Row::Info(String::from("Lid"), String::from("Open"))),
@@ -699,9 +735,13 @@ impl Settings {
         let (placed, total) = place(view, self.scroll, groups);
         let max_scroll = (total as i32 - view.h as i32).max(0);
         let slide_at = |x: i32, y: i32, any_row: bool| {
-            placed.iter().zip(groups).flat_map(|((_, rects), g)| rects.iter().zip(&g.rows)).find_map(|(r, row)| match row {
-                Row::Slider(slide, _, _, min, max, _) if any_row || inside(*r, x, y) => Some((*slide, *r, *min, *max)),
-                _ => None,
+            placed.iter().zip(groups).flat_map(|((_, rects), g)| rects.iter().zip(&g.rows)).find_map(|(r, row)| {
+                match row {
+                    Row::Slider(slide, _, _, min, max, _) if any_row || inside(*r, x, y) => {
+                        Some((*slide, *r, *min, *max))
+                    }
+                    _ => None,
+                }
             })
         };
         match *ev {
@@ -716,10 +756,12 @@ impl Settings {
                     self.slide(slide, slider_value(row, x, min, max));
                     return Some(true);
                 }
-                let hit = placed.iter().zip(groups).flat_map(|((_, rects), g)| rects.iter().zip(&g.rows)).find_map(|(r, row)| match row {
-                    Row::Toggle(act, ..) | Row::Radio(act, ..) if inside(*r, x, y) => Some(*act),
-                    _ => None,
-                });
+                let hit = placed.iter().zip(groups).flat_map(|((_, rects), g)| rects.iter().zip(&g.rows)).find_map(
+                    |(r, row)| match row {
+                        Row::Toggle(act, ..) | Row::Radio(act, ..) if inside(*r, x, y) => Some(*act),
+                        _ => None,
+                    },
+                );
                 hit.map(|act| {
                     self.apply(act);
                     true
@@ -728,14 +770,13 @@ impl Settings {
             Ui::PointerMove { x, .. } => {
                 let slide = self.drag?;
                 // The dragged slider follows the pointer wherever it is.
-                let (_, row, min, max) = placed
-                    .iter()
-                    .zip(groups)
-                    .flat_map(|((_, rects), g)| rects.iter().zip(&g.rows))
-                    .find_map(|(r, row)| match row {
-                        Row::Slider(s, _, _, min, max, _) if *s == slide => Some((*s, *r, *min, *max)),
-                        _ => None,
-                    })?;
+                let (_, row, min, max) =
+                    placed.iter().zip(groups).flat_map(|((_, rects), g)| rects.iter().zip(&g.rows)).find_map(
+                        |(r, row)| match row {
+                            Row::Slider(s, _, _, min, max, _) if *s == slide => Some((*s, *r, *min, *max)),
+                            _ => None,
+                        },
+                    )?;
                 self.slide(slide, slider_value(row, x, min, max));
                 Some(true)
             }
@@ -756,7 +797,8 @@ impl Settings {
             Slide::PointerSpeed => {
                 let mut s = PointerSettings::parse(&read_raw("/etc/osyx/pointer"));
                 // Steps of 25 %: the difference between 137 % and 138 % is not felt.
-                let speed = ((value + SPEED_STEP / 2) / SPEED_STEP * SPEED_STEP).clamp(PointerSettings::MIN_SPEED, PointerSettings::MAX_SPEED);
+                let speed = ((value + SPEED_STEP / 2) / SPEED_STEP * SPEED_STEP)
+                    .clamp(PointerSettings::MIN_SPEED, PointerSettings::MAX_SPEED);
                 if speed != s.speed {
                     s.speed = speed;
                     self.status = save("/etc/osyx/pointer", &s.to_text(), &format!("Pointer speed {speed} %"));
@@ -783,7 +825,11 @@ impl Settings {
             save(PowerOptions::PATH, &o.to_text(), done)
         };
         self.status = match act {
-            Act::Layout(l) => save("/etc/osyx/keyboard", &format!("{}\n", l.name()), &format!("{}: applies within seconds", l.label())),
+            Act::Layout(l) => save(
+                "/etc/osyx/keyboard",
+                &format!("{}\n", l.name()),
+                &format!("{}: applies within seconds", l.label()),
+            ),
             Act::Zone(i) => save("/etc/TZ", &format!("{}\n", ZONES[i].0), &format!("Time zone: {}", ZONES[i].1)),
             Act::TwelveHour(on) => clock(&|o| o.twelve_hour = on),
             Act::ClockSeconds => clock(&|o| o.seconds = !o.seconds),
@@ -802,7 +848,11 @@ impl Settings {
             Act::ShowPercent => power(&|o| o.show_percent = !o.show_percent, "The task bar follows within seconds"),
             Act::LowAt(low) => power(
                 &|o| o.low = low,
-                &if low == 0 { String::from("No low battery warning") } else { format!("Warning when the battery reaches {low} %") },
+                &if low == 0 {
+                    String::from("No low battery warning")
+                } else {
+                    format!("Warning when the battery reaches {low} %")
+                },
             ),
         };
     }
@@ -854,7 +904,8 @@ impl Settings {
                         p.text(FontKind::Ui, r.x + 10, r.y + 16, label, t.text);
                         let track = slider_track(*r);
                         p.rounded(track, 4, t.field, 255);
-                        let filled = (track.w as u64 * (*value).saturating_sub(*min) as u64 / (*max - *min).max(1) as u64) as u32;
+                        let filled = (track.w as u64 * (*value).saturating_sub(*min) as u64
+                            / (*max - *min).max(1) as u64) as u32;
                         if filled > 0 {
                             p.rounded(Rect::new(track.x, track.y, filled.max(8), 8), 4, t.accent, 255);
                         }
@@ -873,7 +924,13 @@ impl Settings {
                         }
                     }
                     Row::Note(text) => {
-                        p.text_in(FontKind::Ui, Rect::new(r.x + 10, r.y + 8, r.w.saturating_sub(20), 20), text, t.text_faint, Align::Left);
+                        p.text_in(
+                            FontKind::Ui,
+                            Rect::new(r.x + 10, r.y + 8, r.w.saturating_sub(20), 20),
+                            text,
+                            t.text_faint,
+                            Align::Left,
+                        );
                     }
                 }
             }
@@ -960,8 +1017,7 @@ impl App for Settings {
                         let r = Rect::new(c.x + 20 + i as i32 * 52, c.y + 80, 40, 40);
                         if inside(r, x, y) {
                             self.accent = i;
-                            self.status =
-                                write("/etc/osyx/accent", accent.0);
+                            self.status = write("/etc/osyx/accent", accent.0);
                             return true;
                         }
                     }
@@ -981,7 +1037,9 @@ impl App for Settings {
                     }
                 }
                 Section::Apps => {
-                    for (i, r) in option_rows(c, self.programs.len().min(PROGRAM_ROWS), c.y + 74).into_iter().enumerate() {
+                    for (i, r) in
+                        option_rows(c, self.programs.len().min(PROGRAM_ROWS), c.y + 74).into_iter().enumerate()
+                    {
                         if inside(r, x, y) {
                             self.selected_program = Some(self.programs_top + i);
                             return true;
@@ -994,7 +1052,12 @@ impl App for Settings {
         let mut redraw = false;
         match self.section {
             Section::General => {
-                let typed = self.hostname.event_with_clipboard(&ev, cx.focused && self.focus == 0, &cx.fonts, &mut cx.clipboard);
+                let typed = self.hostname.event_with_clipboard(
+                    &ev,
+                    cx.focused && self.focus == 0,
+                    &cx.fonts,
+                    &mut cx.clipboard,
+                );
                 redraw |= typed.needs_redraw();
                 let activated = matches!(self.save_host.event(&ev, cx.focused), Response::Activated(_));
                 if activated || typed == Response::Submitted {
@@ -1042,8 +1105,14 @@ impl App for Settings {
                 }
             }
             Section::Network => {
-                redraw |= self.addr.event_with_clipboard(&ev, cx.focused && self.focus == 1, &cx.fonts, &mut cx.clipboard).needs_redraw();
-                redraw |= self.gateway.event_with_clipboard(&ev, cx.focused && self.focus == 2, &cx.fonts, &mut cx.clipboard).needs_redraw();
+                redraw |= self
+                    .addr
+                    .event_with_clipboard(&ev, cx.focused && self.focus == 1, &cx.fonts, &mut cx.clipboard)
+                    .needs_redraw();
+                redraw |= self
+                    .gateway
+                    .event_with_clipboard(&ev, cx.focused && self.focus == 2, &cx.fonts, &mut cx.clipboard)
+                    .needs_redraw();
                 if matches!(self.dhcp.event(&ev, cx.focused), Response::Activated(_)) {
                     self.status = match self.configure_network(true) {
                         Ok(()) => String::from("DHCP requested"),
@@ -1087,7 +1156,13 @@ impl App for Settings {
         // Live state: also the battery, the mixer and the clock.
         matches!(
             self.section,
-            Section::Network | Section::Storage | Section::Display | Section::About | Section::Power | Section::Sound | Section::DateTime
+            Section::Network
+                | Section::Storage
+                | Section::Display
+                | Section::About
+                | Section::Power
+                | Section::Sound
+                | Section::DateTime
         ) && self.drag.is_none()
     }
 
@@ -1291,13 +1366,24 @@ impl App for Settings {
             Section::Apps => {
                 let rows = self.programs.len().min(PROGRAM_ROWS);
                 let title = if self.programs.len() > rows {
-                    format!("Installed programs ({}-{} of {}, scroll for more)", self.programs_top + 1, self.programs_top + rows, self.programs.len())
+                    format!(
+                        "Installed programs ({}-{} of {}, scroll for more)",
+                        self.programs_top + 1,
+                        self.programs_top + rows,
+                        self.programs.len()
+                    )
                 } else {
                     String::from("Installed programs")
                 };
                 let g = Self::group(p, Rect::new(c.x, c.y + 40, c.w, 34 + (rows.max(1) * 40) as u32 + 8), &title);
                 if self.programs.is_empty() {
-                    p.text(FontKind::Ui, g.x + 16, g.y + 12, "No program with an uninstaller is installed in Program Files.", t.text_dim);
+                    p.text(
+                        FontKind::Ui,
+                        g.x + 16,
+                        g.y + 12,
+                        "No program with an uninstaller is installed in Program Files.",
+                        t.text_dim,
+                    );
                 }
                 for (i, r) in option_rows(c, rows, c.y + 74).into_iter().enumerate() {
                     let program = &self.programs[self.programs_top + i];
@@ -1306,7 +1392,13 @@ impl App for Settings {
                     }
                     icon::draw(p, program.icon, Rect::new(r.x + 8, r.y + 4, 28, 28), t.text);
                     p.text(FontKind::Ui, r.x + 46, r.y + 9, &program.name, t.text);
-                    p.text_in(FontKind::Ui, Rect::new(r.x, r.y + 9, r.w.saturating_sub(12), 20), &program.folder, t.text_dim, Align::Right);
+                    p.text_in(
+                        FontKind::Ui,
+                        Rect::new(r.x, r.y + 9, r.w.saturating_sub(12), 20),
+                        &program.folder,
+                        t.text_dim,
+                        Align::Right,
+                    );
                 }
                 if self.selected_program.is_some() {
                     self.uninstall.draw(p, cx.focused);

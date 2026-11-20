@@ -27,10 +27,10 @@ use crate::sync::IrqSpinLock;
 use crate::{interrupts, syscall};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
-use core::cmp::Reverse;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::arch::global_asm;
+use core::cmp::Reverse;
 
 pub type Tid = u64;
 
@@ -219,7 +219,9 @@ extern "C" fn osyx_thread_start(entry: u64, a: u64, b: u64) -> ! {
     exit_current()
 }
 
-fn idle_loop(_: u64, _: u64) { secondary_idle(); }
+fn idle_loop(_: u64, _: u64) {
+    secondary_idle();
+}
 
 pub fn secondary_idle() -> ! {
     loop {
@@ -356,11 +358,19 @@ pub fn init() {
         threads,
         ready: core::array::from_fn(|_| VecDeque::with_capacity(64)),
         sleepers: BinaryHeap::new(),
-        current: { let mut a=[0;crate::smp::MAX_CPUS]; a[0]=1; a },
-        idle: { let mut a=[0;crate::smp::MAX_CPUS]; a[0]=2; a },
+        current: {
+            let mut a = [0; crate::smp::MAX_CPUS];
+            a[0] = 1;
+            a
+        },
+        idle: {
+            let mut a = [0; crate::smp::MAX_CPUS];
+            a[0] = 2;
+            a
+        },
         next_tid: 3,
-        reap: [None;crate::smp::MAX_CPUS],
-        publish: [None;crate::smp::MAX_CPUS],
+        reap: [None; crate::smp::MAX_CPUS],
+        publish: [None; crate::smp::MAX_CPUS],
         switches: 0,
         ticks: 0,
         idle_ticks: 0,
@@ -371,19 +381,52 @@ pub fn init() {
 
 /// Adopts an AP's bootstrap stack as that CPU's permanent idle thread.
 pub fn init_secondary(top: u64) {
-    let index=crate::smp::index();
-    let mut guard=SCHED.lock();
-    let s=guard.as_mut().expect("scheduler initialized");
-    let tid=s.next_tid; s.next_tid+=1;
-    let t=Box::new(Thread {
-        tid,name:alloc::format!("idle/{index}"),pid:0,state:State::Running,rsp:0,
-        root:paging::kernel_root(),_kstack:Vec::new(),kstack_top:top,
-        fpu:FpuState::initial(),wake_at:None,joiners:Vec::new(),slice:TIME_SLICE_TICKS,
-        fs_base:0,gs_base:0,fs32_base:0,kill_pending:false,kill_code:0,wake_pending:false,leaving:false,bkl:false,cpu_ticks:0,affinity:u64::MAX,last_cpu:index,priority:NORMAL,boost:0,inherited:0,queued_at:0,low_rsp:top,stack_warned:false,suspend:0,parked:false,
+    let index = crate::smp::index();
+    let mut guard = SCHED.lock();
+    let s = guard.as_mut().expect("scheduler initialized");
+    let tid = s.next_tid;
+    s.next_tid += 1;
+    let t = Box::new(Thread {
+        tid,
+        name: alloc::format!("idle/{index}"),
+        pid: 0,
+        state: State::Running,
+        rsp: 0,
+        root: paging::kernel_root(),
+        _kstack: Vec::new(),
+        kstack_top: top,
+        fpu: FpuState::initial(),
+        wake_at: None,
+        joiners: Vec::new(),
+        slice: TIME_SLICE_TICKS,
+        fs_base: 0,
+        gs_base: 0,
+        fs32_base: 0,
+        kill_pending: false,
+        kill_code: 0,
+        wake_pending: false,
+        leaving: false,
+        bkl: false,
+        cpu_ticks: 0,
+        affinity: u64::MAX,
+        last_cpu: index,
+        priority: NORMAL,
+        boost: 0,
+        inherited: 0,
+        queued_at: 0,
+        low_rsp: top,
+        stack_warned: false,
+        suspend: 0,
+        parked: false,
     });
-    s.threads.insert(tid,t);s.current[index]=tid;s.idle[index]=tid;
+    s.threads.insert(tid, t);
+    s.current[index] = tid;
+    s.idle[index] = tid;
     crate::smp::set_current(tid, 0);
-    unsafe { gdt::set_kernel_stack(top);syscall::set_kernel_stack(top); }
+    unsafe {
+        gdt::set_kernel_stack(top);
+        syscall::set_kernel_stack(top);
+    }
 }
 
 /// Creates a ready thread running `entry(a, b)` with page table `root` and
@@ -402,14 +445,18 @@ pub fn spawn_initial(name: &str, pid: u64, root: u64, entry: Entry, a: u64, b: u
     let tid = s.next_tid;
     s.next_tid += 1;
     let mut t = new_thread(tid, name, pid, root, entry, a, b, fs_base);
-    if held { t.state = State::Blocked; }
+    if held {
+        t.state = State::Blocked;
+    }
     if let Some(parent) = s.threads.get(&s.current[crate::smp::index()]) {
         if parent.pid == pid && pid != 0 {
             t.priority = parent.priority;
         }
     }
     s.threads.insert(tid, t);
-    if !held { s.enqueue(tid); }
+    if !held {
+        s.enqueue(tid);
+    }
     tid
 }
 
@@ -773,7 +820,9 @@ pub fn tick(now: u64) {
             // before they outnumber the threads by far.
             if s.sleepers.len() > 4 * s.threads.len() + 1024 {
                 let Scheduler { threads, sleepers, .. } = s;
-                sleepers.retain(|&Reverse((at, tid))| threads.get(&tid).is_some_and(|t| t.state == State::Blocked && t.wake_at == Some(at)));
+                sleepers.retain(|&Reverse((at, tid))| {
+                    threads.get(&tid).is_some_and(|t| t.state == State::Blocked && t.wake_at == Some(at))
+                });
             }
         }
         let ci = crate::smp::index();
@@ -798,7 +847,13 @@ pub fn tick(now: u64) {
                 unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
                 crate::kprintln!(
                     "stack canary: tid {} ({}) base={:#x} top={:#x} rsp={:#x} low={:#x} canary={:#x}",
-                    cur.tid, cur.name, base, cur.kstack_top, rsp, cur.low_rsp, bottom
+                    cur.tid,
+                    cur.name,
+                    base,
+                    cur.kstack_top,
+                    rsp,
+                    cur.low_rsp,
+                    bottom
                 );
                 for i in 0..12u64 {
                     let w = unsafe { core::ptr::read_volatile((base + i * 8) as *const u64) };
@@ -853,7 +908,10 @@ pub fn thread_cpu() -> alloc::vec::Vec<(Tid, u64, u64)> {
 /// handler made another thread ready (instead of halting until the next
 /// timer tick).
 pub fn preempt_if_idle() {
-    let resched = SCHED.lock().as_ref().is_some_and(|s| s.current[crate::smp::index()] == s.idle[crate::smp::index()] && s.any_ready());
+    let resched = SCHED
+        .lock()
+        .as_ref()
+        .is_some_and(|s| s.current[crate::smp::index()] == s.idle[crate::smp::index()] && s.any_ready());
     if resched {
         schedule();
     }
@@ -958,16 +1016,27 @@ pub fn current_kill_pending() -> bool {
     if KILLS_PENDING.load(core::sync::atomic::Ordering::SeqCst) == 0 {
         return false;
     }
-    SCHED.lock().as_ref().is_some_and(|s| s.threads.get(&s.current[crate::smp::index()]).is_some_and(|t| t.kill_pending))
+    SCHED
+        .lock()
+        .as_ref()
+        .is_some_and(|s| s.threads.get(&s.current[crate::smp::index()]).is_some_and(|t| t.kill_pending))
 }
 
 /// Status the current thread's pending kill ends it with (0 when it is not
 /// being killed). Only meaningful right after [`current_kill_pending`].
 pub fn current_kill_code() -> i32 {
-    SCHED.lock().as_ref().and_then(|s| {
-        let t = s.threads.get(&s.current[crate::smp::index()])?;
-        if t.kill_pending { Some(t.kill_code) } else { None }
-    }).unwrap_or(0)
+    SCHED
+        .lock()
+        .as_ref()
+        .and_then(|s| {
+            let t = s.threads.get(&s.current[crate::smp::index()])?;
+            if t.kill_pending {
+                Some(t.kill_code)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
 }
 
 /// Threads with a non-zero suspend count. Every return to user mode asks
@@ -1059,7 +1128,11 @@ pub fn thread_suspend(tid: Tid, op: u64) -> Result<u64, osyx_abi::Errno> {
     if op == suspend::SUSPEND && previous == 0 && tid != me {
         // Wait (a few ticks at most) until the thread is off user code.
         for _ in 0..20 {
-            let settled = SCHED.lock().as_ref().and_then(|s| s.threads.get(&tid)).is_none_or(|t| t.parked || t.state == State::Blocked || t.state == State::Dead);
+            let settled = SCHED
+                .lock()
+                .as_ref()
+                .and_then(|s| s.threads.get(&tid))
+                .is_none_or(|t| t.parked || t.state == State::Blocked || t.state == State::Dead);
             if settled {
                 break;
             }
@@ -1316,23 +1389,31 @@ pub fn current_tid() -> Tid {
     SCHED.lock().as_ref().map_or(1, |s| s.current[crate::smp::index()])
 }
 
-pub fn set_affinity(tid:Tid,mask:u64)->Result<u64,osyx_abi::Errno> {
-    let available=(1u64<<crate::smp::online())-1;
-    if mask & !available !=0 { return Err(osyx_abi::Errno::InvalidArgument); }
-    let me=current_tid();
-    let tid=if tid==0 {me}else{tid};
-    let pid=current_pid();
-    let old={
-        let mut guard=SCHED.lock();
-        let s=guard.as_mut().ok_or(osyx_abi::Errno::NotSupported)?;
-        let thread=s.threads.get_mut(&tid).ok_or(osyx_abi::Errno::NotFound)?;
-        if thread.pid!=pid {return Err(osyx_abi::Errno::PermissionDenied);}
-        let old=thread.affinity&available;
-        if mask==0 { return Ok(old); }
-        thread.affinity=mask;
+pub fn set_affinity(tid: Tid, mask: u64) -> Result<u64, osyx_abi::Errno> {
+    let available = (1u64 << crate::smp::online()) - 1;
+    if mask & !available != 0 {
+        return Err(osyx_abi::Errno::InvalidArgument);
+    }
+    let me = current_tid();
+    let tid = if tid == 0 { me } else { tid };
+    let pid = current_pid();
+    let old = {
+        let mut guard = SCHED.lock();
+        let s = guard.as_mut().ok_or(osyx_abi::Errno::NotSupported)?;
+        let thread = s.threads.get_mut(&tid).ok_or(osyx_abi::Errno::NotFound)?;
+        if thread.pid != pid {
+            return Err(osyx_abi::Errno::PermissionDenied);
+        }
+        let old = thread.affinity & available;
+        if mask == 0 {
+            return Ok(old);
+        }
+        thread.affinity = mask;
         old
     };
-    if tid==me && mask & (1<<crate::smp::index())==0 { schedule(); }
+    if tid == me && mask & (1 << crate::smp::index()) == 0 {
+        schedule();
+    }
     Ok(old)
 }
 

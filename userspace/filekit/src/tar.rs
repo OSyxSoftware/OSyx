@@ -82,7 +82,9 @@ fn parse_octal(field: &[u8]) -> Option<u64> {
     if text.is_empty() {
         return Some(0);
     }
-    text.iter().try_fold(0u64, |acc, &b| (b'0'..=b'7').contains(&b).then(|| acc.checked_mul(8)?.checked_add((b - b'0') as u64)).flatten())
+    text.iter().try_fold(0u64, |acc, &b| {
+        (b'0'..=b'7').contains(&b).then(|| acc.checked_mul(8)?.checked_add((b - b'0') as u64)).flatten()
+    })
 }
 
 /// All entries of a plain tar archive. Links, devices and other types are
@@ -96,7 +98,8 @@ pub fn parse(data: &[u8]) -> Result<Vec<Entry>, String> {
             break;
         }
         let stored = parse_octal(&h[148..156]).ok_or("bad tar checksum field")?;
-        let sum: u32 = h.iter().enumerate().map(|(i, &b)| if (148..156).contains(&i) { b' ' as u32 } else { b as u32 }).sum();
+        let sum: u32 =
+            h.iter().enumerate().map(|(i, &b)| if (148..156).contains(&i) { b' ' as u32 } else { b as u32 }).sum();
         if stored != sum as u64 {
             return Err(String::from("tar header checksum mismatch: not a tar archive or damaged"));
         }
@@ -109,7 +112,8 @@ pub fn parse(data: &[u8]) -> Result<Vec<Entry>, String> {
         let path = if prefix.is_empty() { name } else { alloc::format!("{prefix}/{name}") };
         let size = parse_octal(&h[124..136]).ok_or("bad tar size")? as usize;
         let start = pos + BLOCK;
-        let end = start.checked_add(size).filter(|&e| e <= data.len()).ok_or("tar entry runs past the end of the archive")?;
+        let end =
+            start.checked_add(size).filter(|&e| e <= data.len()).ok_or("tar entry runs past the end of the archive")?;
         let kind = match h[156] {
             b'0' | 0 => Some(EntryKind::File),
             b'5' => Some(EntryKind::Dir),
@@ -154,7 +158,11 @@ mod tests {
     #[test]
     fn round_trip() {
         let long = alloc::format!("{}/{}", "d".repeat(120), "f".repeat(60));
-        let tar = pack(&[("dir", EntryKind::Dir, b""), ("dir/a.txt", EntryKind::File, b"hello"), (&long, EntryKind::File, &[7u8; 1000])]);
+        let tar = pack(&[
+            ("dir", EntryKind::Dir, b""),
+            ("dir/a.txt", EntryKind::File, b"hello"),
+            (&long, EntryKind::File, &[7u8; 1000]),
+        ]);
         assert_eq!(tar.len() % 512, 0);
         let e = parse(&tar).unwrap();
         assert_eq!(e.len(), 3);

@@ -306,7 +306,8 @@ fn gone_thread(arg: u64, _: u64) {
 
 /// Mounts the removable disks that were already attached at boot.
 pub fn attach_boot_media() {
-    let disks: Vec<Arc<dyn BlockDev>> = block::devices().into_iter().filter(|d| d.removable() && d.parent_name().is_none()).collect();
+    let disks: Vec<Arc<dyn BlockDev>> =
+        block::devices().into_iter().filter(|d| d.removable() && d.parent_name().is_none()).collect();
     for disk in disks {
         disk_ready(&disk);
     }

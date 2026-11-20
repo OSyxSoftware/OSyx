@@ -180,13 +180,31 @@ const CHARSETS: &[(u8, &str, u32)] = &[
 
 fn faces() -> Vec<Face> {
     let mut v = alloc::vec![
-        Face { family: String::from("Cantarell"), kind: FontKind::Sans, styles: &[("Regular", 400), ("Bold", 700)], charsets: &[0, 238, 204, 161, 162, 186], fixed: false },
-        Face { family: String::from("Source Code Pro"), kind: FontKind::Mono, styles: &[("Regular", 400)], charsets: &[0, 238, 204, 161, 162], fixed: true },
+        Face {
+            family: String::from("Cantarell"),
+            kind: FontKind::Sans,
+            styles: &[("Regular", 400), ("Bold", 700)],
+            charsets: &[0, 238, 204, 161, 162, 186],
+            fixed: false
+        },
+        Face {
+            family: String::from("Source Code Pro"),
+            kind: FontKind::Mono,
+            styles: &[("Regular", 400)],
+            charsets: &[0, 238, 204, 161, 162],
+            fixed: true
+        },
     ];
     for f in FONT_FILES.lock().unwrap().iter().filter(|f| f.enumerable) {
         for family in &f.families {
             if !v.iter().any(|x| x.family.eq_ignore_ascii_case(family)) {
-                v.push(Face { family: family.clone(), kind: FontKind::Sans, styles: &[("Regular", 400)], charsets: &[0], fixed: false });
+                v.push(Face {
+                    family: family.clone(),
+                    kind: FontKind::Sans,
+                    styles: &[("Regular", 400)],
+                    charsets: &[0],
+                    fixed: false,
+                });
             }
         }
     }
@@ -257,7 +275,8 @@ fn enum_records(f: &Face, style: (&str, i32), charset: u8, wide: bool) -> (Vec<u
     ntm[at + 4..at + 8].copy_from_slice(&1000u32.to_le_bytes()); // units per em
     ntm[at + 8..at + 12].copy_from_slice(&((h as u32) * 1000 / (h as u32 * 4 / 5).max(1)).to_le_bytes());
     ntm[at + 12..at + 16].copy_from_slice(&((avg as u32) * 1000 / (h as u32 * 4 / 5).max(1)).to_le_bytes());
-    let csb: u32 = f.charsets.iter().filter_map(|c| CHARSETS.iter().find(|x| x.0 == *c)).map(|x| x.2).fold(0, |a, b| a | b);
+    let csb: u32 =
+        f.charsets.iter().filter_map(|c| CHARSETS.iter().find(|x| x.0 == *c)).map(|x| x.2).fold(0, |a, b| a | b);
     ntm[at + 16..at + 20].copy_from_slice(&0x0000_0003u32.to_le_bytes()); // Latin-1, Latin Extended-A
     ntm[at + 32..at + 36].copy_from_slice(&csb.to_le_bytes());
     (elf, ntm)
@@ -269,7 +288,11 @@ fn call_enum(proc_: u64, elf: &[u8], ntm: &[u8], lparam: u64) -> i32 {
     if crate::wow64::is_active() {
         // LOGFONT and TEXTMETRIC hold no pointers: x86 shares the layout.
         // The records go to the program's heap, which 32-bit code reaches.
-        let (Some(e), Some(n)) = (crate::kernel32::heap_alloc(elf.len(), false), crate::kernel32::heap_alloc(ntm.len(), false)) else { return 0 };
+        let (Some(e), Some(n)) =
+            (crate::kernel32::heap_alloc(elf.len(), false), crate::kernel32::heap_alloc(ntm.len(), false))
+        else {
+            return 0;
+        };
         // SAFETY: fresh blocks of the records' sizes.
         unsafe {
             core::ptr::copy_nonoverlapping(elf.as_ptr(), e as *mut u8, elf.len());
@@ -296,7 +319,10 @@ fn enum_font_families(dc: u64, lf: *const u8, proc_: u64, lparam: u64, wide: boo
     }
     // SAFETY: the caller's LOGFONT: lfCharSet @23, lfFaceName @28.
     let (charset, face) = unsafe {
-        (*lf.add(23), if wide { path::wide_to_string(lf.add(28) as *const u16) } else { path::ansi_to_string(lf.add(28)) })
+        (
+            *lf.add(23),
+            if wide { path::wide_to_string(lf.add(28) as *const u16) } else { path::ansi_to_string(lf.add(28)) },
+        )
     };
     let face = face.unwrap_or_default();
     let mut last = 1;
@@ -304,7 +330,11 @@ fn enum_font_families(dc: u64, lf: *const u8, proc_: u64, lparam: u64, wide: boo
         if !face.is_empty() && !f.family.eq_ignore_ascii_case(&face) {
             continue;
         }
-        let sets: Vec<u8> = if charset == 1 { f.charsets.to_vec() } else { f.charsets.iter().copied().filter(|&c| c == charset).collect() };
+        let sets: Vec<u8> = if charset == 1 {
+            f.charsets.to_vec()
+        } else {
+            f.charsets.iter().copied().filter(|&c| c == charset).collect()
+        };
         for set in sets {
             let styles: &[(&str, i32)] = if face.is_empty() { &f.styles[..1] } else { f.styles };
             for &style in styles {
@@ -332,7 +362,16 @@ extern "win64" fn EnumFontFamiliesExA(dc: u64, lf: *const u8, proc_: u64, lparam
 /// ExtTextOutA: the text in the ANSI code page (UTF-8); a byte-wise dx
 /// array is summed per character.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn ExtTextOutA(dc: u64, x: i32, y: i32, flags: u32, rect: *const u8, text: *const u8, n: u32, dx: *const i32) -> Bool {
+extern "win64" fn ExtTextOutA(
+    dc: u64,
+    x: i32,
+    y: i32,
+    flags: u32,
+    rect: *const u8,
+    text: *const u8,
+    n: u32,
+    dx: *const i32,
+) -> Bool {
     if n > 8192 || (n > 0 && text.is_null()) {
         return FALSE;
     }
@@ -376,7 +415,16 @@ extern "win64" fn ExtTextOutA(dc: u64, x: i32, y: i32, flags: u32, rect: *const 
         }
         out
     });
-    ExtTextOutW(dc, x, y, flags, rect, units.as_ptr(), units.len() as u32, advances.as_ref().map_or(core::ptr::null(), |a| a.as_ptr()))
+    ExtTextOutW(
+        dc,
+        x,
+        y,
+        flags,
+        rect,
+        units.as_ptr(),
+        units.len() as u32,
+        advances.as_ref().map_or(core::ptr::null(), |a| a.as_ptr()),
+    )
 }
 
 fn dc_font(dc: u64) -> Option<FontKind> {
@@ -520,7 +568,15 @@ extern "win64" fn SetDIBitsToDevice(
     };
     // A header for just the lines given, followed by the caller's masks
     // and colour table unchanged.
-    let colors = if bpp <= 8 { if used > 0 { used.min(256) } else { 1 << bpp } } else { used.min(256) } as usize;
+    let colors = if bpp <= 8 {
+        if used > 0 {
+            used.min(256)
+        } else {
+            1 << bpp
+        }
+    } else {
+        used.min(256)
+    } as usize;
     let masks = if compression == 3 && size == 40 { 12 } else { 0 };
     let total = size + masks + 4 * colors;
     // SAFETY: the header and what may follow it in the caller's block.
@@ -534,8 +590,13 @@ extern "win64" fn SetDIBitsToDevice(
     // bottom-up DIB gives ySrc as the rectangle's lower-left corner, in
     // scan lines from the bottom of the whole DIB.
     let top = if height < 0 { sy - start as i32 } else { start as i32 + rows - sy - h as i32 };
-    let copied = StretchDIBits(dc, x, y, w as i32, h as i32, sx, top, w as i32, h as i32, bits, copy.as_ptr(), usage, 0xcc0020);
-    if copied == 0 { 0 } else { rows }
+    let copied =
+        StretchDIBits(dc, x, y, w as i32, h as i32, sx, top, w as i32, h as i32, bits, copy.as_ptr(), usage, 0xcc0020);
+    if copied == 0 {
+        0
+    } else {
+        rows
+    }
 }
 
 extern "win64" fn SetRectRgn(rgn: u64, l: i32, t: i32, r: i32, b: i32) -> Bool {

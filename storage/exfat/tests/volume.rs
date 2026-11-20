@@ -57,7 +57,10 @@ fn format_and_mount() {
     assert_eq!((r.files, r.directories), (0, 1));
     assert!(fs.free_bytes() > 60 * MIB as u64);
     assert!(matches!(format(&mut vec![0u8; MIB], "X", 1), Err(FsError::Unsupported(_))), "too small");
-    assert!(matches!(format(&mut vec![0u8; 8 * MIB], "TWELVE-CHARS", 1), Err(FsError::InvalidInput(_))), "label too long");
+    assert!(
+        matches!(format(&mut vec![0u8; 8 * MIB], "TWELVE-CHARS", 1), Err(FsError::InvalidInput(_))),
+        "label too long"
+    );
 }
 
 #[test]
@@ -116,7 +119,11 @@ fn names_case_and_unicode() {
     write_file(&mut fs, &format!("/{long}"), b"long");
     assert_eq!(read_file(&mut fs, &format!("/{long}")), b"long");
     for bad in ["/a?b", "/a:b", "/a\\b", "/a|b", "/a\"b", "/a<b", "/a*b", &format!("/{}", "n".repeat(256))] {
-        assert_eq!(fs.open(bad, OpenOptions { create: true, ..Default::default() }).err(), Some(FsError::InvalidName), "{bad}");
+        assert_eq!(
+            fs.open(bad, OpenOptions { create: true, ..Default::default() }).err(),
+            Some(FsError::InvalidName),
+            "{bad}"
+        );
     }
     assert!(fs.open("/a/../b", OpenOptions::default()).is_err());
     check(&mut fs);
@@ -183,7 +190,11 @@ fn directory_grows_and_shrinks_in_use() {
     let mut fs = fresh(32 * MIB);
     fs.create_dir("/many").unwrap();
     for i in 0..600 {
-        write_file(&mut fs, &format!("/many/file-{i:04}-with-a-long-name-to-need-several-entries.txt"), format!("{i}").as_bytes());
+        write_file(
+            &mut fs,
+            &format!("/many/file-{i:04}-with-a-long-name-to-need-several-entries.txt"),
+            format!("{i}").as_bytes(),
+        );
     }
     assert_eq!(fs.read_dir("/many").unwrap().len(), 600);
     assert_eq!(read_file(&mut fs, "/many/file-0599-with-a-long-name-to-need-several-entries.txt"), b"599");
@@ -339,10 +350,18 @@ fn unplugged_device_reports_io_errors() {
             self.inner.sector_count()
         }
         fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> osyx_exfat::Result<()> {
-            if self.alive { self.inner.read_sectors(lba, buf) } else { Err(FsError::Io) }
+            if self.alive {
+                self.inner.read_sectors(lba, buf)
+            } else {
+                Err(FsError::Io)
+            }
         }
         fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> osyx_exfat::Result<()> {
-            if self.alive { self.inner.write_sectors(lba, buf) } else { Err(FsError::Io) }
+            if self.alive {
+                self.inner.write_sectors(lba, buf)
+            } else {
+                Err(FsError::Io)
+            }
         }
     }
     let mut img = vec![0u8; 16 * MIB];

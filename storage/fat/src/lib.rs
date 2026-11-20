@@ -233,8 +233,15 @@ pub(crate) fn dos_to_unix(date: u16, time: u16) -> u32 {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return 0;
     }
-    let secs = days_from_civil(y, m, d) * 86_400 + (time >> 11) as i64 * 3600 + ((time >> 5) & 0x3F) as i64 * 60 + (time & 0x1F) as i64 * 2;
-    if secs < DOS_EPOCH_SECS { 0 } else { secs as u32 }
+    let secs = days_from_civil(y, m, d) * 86_400
+        + (time >> 11) as i64 * 3600
+        + ((time >> 5) & 0x3F) as i64 * 60
+        + (time & 0x1F) as i64 * 2;
+    if secs < DOS_EPOCH_SECS {
+        0
+    } else {
+        secs as u32
+    }
 }
 
 impl<D: BlockDevice> FileSystem<D> {
@@ -246,7 +253,11 @@ impl<D: BlockDevice> FileSystem<D> {
 
     /// (date, time) written to entries touched now.
     pub(crate) fn timestamp(&self) -> (u16, u16) {
-        if self.now == 0 { (1 << 5 | 1, 0) } else { dos_date_time(self.now) }
+        if self.now == 0 {
+            (1 << 5 | 1, 0)
+        } else {
+            dos_date_time(self.now)
+        }
     }
 
     /// Mounts the FAT32 volume on `dev` (no partition table: the volume
@@ -255,7 +266,16 @@ impl<D: BlockDevice> FileSystem<D> {
         let mut bs = [0u8; SECTOR_SIZE];
         dev.read_sectors(0, &mut bs)?;
         let geo = parse_bpb(&bs, dev.sector_count())?;
-        let mut fs = FileSystem { dev, geo, fat_cache: Vec::new(), free_count: 0, next_free: 2, fsinfo_dirty: false, fat_generation: 0, now: 0 };
+        let mut fs = FileSystem {
+            dev,
+            geo,
+            fat_cache: Vec::new(),
+            free_count: 0,
+            next_free: 2,
+            fsinfo_dirty: false,
+            fat_generation: 0,
+            now: 0,
+        };
         let mut have_info = false;
         if geo.fsinfo_sector != 0 && geo.fsinfo_sector != 0xFFFF && geo.fsinfo_sector < geo.reserved_sectors {
             let mut info = [0u8; SECTOR_SIZE];

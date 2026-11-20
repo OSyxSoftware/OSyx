@@ -129,7 +129,8 @@ pub fn bounds(lines: &Lines) -> Option<(i32, i32, i32, i32)> {
         });
     }
     let (l, t, r, bt) = b?;
-    let (l, t, r, bt) = (l.div_euclid(ONE), t.div_euclid(ONE), (r + ONE - 1).div_euclid(ONE), (bt + ONE - 1).div_euclid(ONE));
+    let (l, t, r, bt) =
+        (l.div_euclid(ONE), t.div_euclid(ONE), (r + ONE - 1).div_euclid(ONE), (bt + ONE - 1).div_euclid(ONE));
     (r > l && bt > t).then_some((l, t, r, bt))
 }
 

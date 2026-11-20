@@ -748,8 +748,16 @@ struct ThreadStart {
 /// stack, TEB32 and 64-bit gate stack, then calls `start(param)`; its
 /// return value is the thread's exit code.
 #[allow(non_snake_case)] // the Win32 name
-extern "win64" fn CreateThread32(attributes: u64, stack: usize, start: u64, param: u64, flags: u32, tid: *mut u32) -> u64 {
-    let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ThreadStart { start: start as u32, param: param as u32 }));
+extern "win64" fn CreateThread32(
+    attributes: u64,
+    stack: usize,
+    start: u64,
+    param: u64,
+    flags: u32,
+    tid: *mut u32,
+) -> u64 {
+    let arg =
+        alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ThreadStart { start: start as u32, param: param as u32 }));
     let h = crate::kernel32::CreateThread(attributes, stack, thread32_main as *const () as u64, arg as u64, flags, tid);
     if h == 0 {
         // SAFETY: not handed to any thread.
@@ -761,9 +769,28 @@ extern "win64" fn CreateThread32(attributes: u64, stack: usize, start: u64, para
 /// CreateRemoteThreadEx for 32-bit callers (this process only, as the host
 /// call): the start routine is 32-bit code, run as CreateThread32 runs it.
 #[allow(non_snake_case, clippy::too_many_arguments)] // the Win32 name
-extern "win64" fn CreateRemoteThreadEx32(process: u64, attributes: u64, stack: usize, start: u64, param: u64, flags: u32, list: u64, tid: *mut u32) -> u64 {
-    let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ThreadStart { start: start as u32, param: param as u32 }));
-    let h = crate::process::CreateRemoteThreadEx(process, attributes, stack, thread32_main as *const () as u64, arg as u64, flags, list, tid);
+extern "win64" fn CreateRemoteThreadEx32(
+    process: u64,
+    attributes: u64,
+    stack: usize,
+    start: u64,
+    param: u64,
+    flags: u32,
+    list: u64,
+    tid: *mut u32,
+) -> u64 {
+    let arg =
+        alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ThreadStart { start: start as u32, param: param as u32 }));
+    let h = crate::process::CreateRemoteThreadEx(
+        process,
+        attributes,
+        stack,
+        thread32_main as *const () as u64,
+        arg as u64,
+        flags,
+        list,
+        tid,
+    );
     if h == 0 {
         // SAFETY: not handed to any thread.
         drop(unsafe { alloc::boxed::Box::from_raw(arg) });
@@ -932,13 +959,21 @@ extern "win64" fn CreateProcessW32(
 ) -> i32 {
     const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
     if startup.is_null() || info.is_null() || flags & EXTENDED_STARTUPINFO_PRESENT != 0 {
-        return crate::kernel32::fail(if flags & EXTENDED_STARTUPINFO_PRESENT != 0 { crate::error::ERROR_NOT_SUPPORTED } else { crate::error::ERROR_INVALID_PARAMETER }, 0);
+        return crate::kernel32::fail(
+            if flags & EXTENDED_STARTUPINFO_PRESENT != 0 {
+                crate::error::ERROR_NOT_SUPPORTED
+            } else {
+                crate::error::ERROR_INVALID_PARAMETER
+            },
+            0,
+        );
     }
     let Some(si) = startupinfo_to64(startup) else {
         return crate::kernel32::fail(crate::error::ERROR_INVALID_PARAMETER, 0);
     };
     let mut pi = [0u64; 3];
-    let r = crate::process::CreateProcessW(app, cmdline, psa, tsa, inherit, flags, env, cwd, si.as_ptr(), pi.as_mut_ptr());
+    let r =
+        crate::process::CreateProcessW(app, cmdline, psa, tsa, inherit, flags, env, cwd, si.as_ptr(), pi.as_mut_ptr());
     if r != 0 {
         // Handles are small table indices; a value that does not fit would
         // be silently truncated, so refuse it instead.
@@ -977,9 +1012,8 @@ extern "win64" fn CreateProcessA32(
     info: *mut u32,
 ) -> i32 {
     // SAFETY: NULL or the caller's NUL-terminated strings.
-    let (app, mut cmd, cwd) = unsafe {
-        (crate::path::ansi_to_wide(app), crate::path::ansi_to_wide(cmdline), crate::path::ansi_to_wide(cwd))
-    };
+    let (app, mut cmd, cwd) =
+        unsafe { (crate::path::ansi_to_wide(app), crate::path::ansi_to_wide(cmdline), crate::path::ansi_to_wide(cwd)) };
     // A command line that does not convert (longer than a path may be) is
     // an error, not a missing command line.
     if !cmdline.is_null() && cmd.is_none() {
@@ -1008,13 +1042,32 @@ extern "win64" fn CreateProcessAsUserW32(
 ) -> i32 {
     const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
     if startup.is_null() || info.is_null() || flags & EXTENDED_STARTUPINFO_PRESENT != 0 {
-        return crate::kernel32::fail(if flags & EXTENDED_STARTUPINFO_PRESENT != 0 { crate::error::ERROR_NOT_SUPPORTED } else { crate::error::ERROR_INVALID_PARAMETER }, 0);
+        return crate::kernel32::fail(
+            if flags & EXTENDED_STARTUPINFO_PRESENT != 0 {
+                crate::error::ERROR_NOT_SUPPORTED
+            } else {
+                crate::error::ERROR_INVALID_PARAMETER
+            },
+            0,
+        );
     }
     let Some(si) = startupinfo_to64(startup) else {
         return crate::kernel32::fail(crate::error::ERROR_INVALID_PARAMETER, 0);
     };
     let mut pi = [0u64; 3];
-    let r = crate::tokens::CreateProcessAsUserW(token, app, cmdline, psa, tsa, inherit, flags, env, cwd, si.as_ptr(), pi.as_mut_ptr());
+    let r = crate::tokens::CreateProcessAsUserW(
+        token,
+        app,
+        cmdline,
+        psa,
+        tsa,
+        inherit,
+        flags,
+        env,
+        cwd,
+        si.as_ptr(),
+        pi.as_mut_ptr(),
+    );
     if r != 0 {
         process_information32(&pi, info);
     }
@@ -1211,7 +1264,9 @@ fn dispatch(bridge: &Bridge, index: u32, args: *const u32) -> (u64, u32, u32) {
 /// Resolve an additional gate after entry without making code writable.
 pub(crate) fn import_active(symbol: &str, host: u64) -> Option<u32> {
     let bridge = ACTIVE.load(Ordering::Acquire);
-    if bridge.is_null() { return None; }
+    if bridge.is_null() {
+        return None;
+    }
     // SAFETY: the active bridge lives until process exit.
     unsafe { &*bridge }.import(symbol, host)
 }

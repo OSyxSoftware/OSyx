@@ -86,7 +86,11 @@ fn read(src: *const u8) -> Result<Value, u32> {
             VT_BOOL => Value::Bool(core::ptr::read_unaligned(at as *const i16) != 0),
             VT_ERROR => Value::Error(core::ptr::read_unaligned(at as *const u32)),
             VT_BSTR => {
-                let p = if crate::wow64::is_active() { core::ptr::read_unaligned(at as *const u32) as u64 } else { core::ptr::read_unaligned(at as *const u64) };
+                let p = if crate::wow64::is_active() {
+                    core::ptr::read_unaligned(at as *const u32) as u64
+                } else {
+                    core::ptr::read_unaligned(at as *const u64)
+                };
                 let n = if p == 0 { 0 } else { SysStringLen(p) as usize };
                 let units = if p == 0 { &[][..] } else { core::slice::from_raw_parts(p as *const u16, n) };
                 Value::Text(String::from_utf16_lossy(units))
@@ -104,14 +108,22 @@ fn floor(f: f64) -> f64 {
         return f;
     }
     let t = f as i64 as f64;
-    if t > f { t - 1.0 } else { t }
+    if t > f {
+        t - 1.0
+    } else {
+        t
+    }
 }
 
 /// Round half to even, as the VarXxxFromR8 functions do.
 pub(super) fn round_even(f: f64) -> f64 {
     let low = floor(f);
     let diff = f - low;
-    if diff > 0.5 || (diff == 0.5 && (low as i64) % 2 != 0) { low + 1.0 } else { low }
+    if diff > 0.5 || (diff == 0.5 && (low as i64) % 2 != 0) {
+        low + 1.0
+    } else {
+        low
+    }
 }
 
 /// Parses number text as VarR8FromStr does for en-US: blanks around it,
@@ -140,7 +152,13 @@ fn to_f64(v: &Value) -> Result<f64, u32> {
         Value::Int(i) => *i as f64,
         Value::Float(f, _) | Value::Date(f) => *f,
         Value::Cy(c) => *c as f64 / 10000.0,
-        Value::Bool(b) => if *b { -1.0 } else { 0.0 },
+        Value::Bool(b) => {
+            if *b {
+                -1.0
+            } else {
+                0.0
+            }
+        }
         Value::Text(s) => {
             if s.eq_ignore_ascii_case("true") {
                 -1.0
@@ -174,14 +192,24 @@ fn float_text(f: f64, digits: usize) -> String {
         return String::from("0");
     }
     if !f.is_finite() {
-        return String::from(if f.is_nan() { "NaN" } else if f > 0.0 { "1.#INF" } else { "-1.#INF" });
+        return String::from(if f.is_nan() {
+            "NaN"
+        } else if f > 0.0 {
+            "1.#INF"
+        } else {
+            "-1.#INF"
+        });
     }
     // Round to `digits` significant digits first; that may move the exponent.
     let scaled = alloc::format!("{:.*e}", digits - 1, f);
     let (mantissa, e) = scaled.split_once('e').unwrap_or((&scaled, "0"));
     let e: i32 = e.parse().unwrap_or(0);
     let trim = |s: &str| -> String {
-        if s.contains('.') { String::from(s.trim_end_matches('0').trim_end_matches('.')) } else { String::from(s) }
+        if s.contains('.') {
+            String::from(s.trim_end_matches('0').trim_end_matches('.'))
+        } else {
+            String::from(s)
+        }
     };
     if e < -5 || e >= digits as i32 {
         let sign = if e < 0 { '-' } else { '+' };
@@ -223,7 +251,13 @@ fn date_text(d: f64) -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + (month <= 2) as i64;
     let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    let time = alloc::format!("{}:{:02}:{:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, m, s, if h < 12 { "AM" } else { "PM" });
+    let time = alloc::format!(
+        "{}:{:02}:{:02} {}",
+        if h % 12 == 0 { 12 } else { h % 12 },
+        m,
+        s,
+        if h < 12 { "AM" } else { "PM" }
+    );
     match (days != 0, secs != 0) {
         (true, false) => alloc::format!("{month}/{day}/{year}"),
         (false, true) => time,
@@ -267,9 +301,13 @@ fn store(dst: *mut u8, vt: u16, v: &Value, flags: u16) -> Result<(), u32> {
         VT_UI1 => bytes[..1].copy_from_slice(&(range(to_int(v)?, 0, 255)? as u8).to_le_bytes()),
         VT_I2 => bytes[..2].copy_from_slice(&(range(to_int(v)?, -32768, 32767)? as i16).to_le_bytes()),
         VT_UI2 => bytes[..2].copy_from_slice(&(range(to_int(v)?, 0, 65535)? as u16).to_le_bytes()),
-        VT_I4 | VT_INT => bytes[..4].copy_from_slice(&(range(to_int(v)?, i32::MIN as i128, i32::MAX as i128)? as i32).to_le_bytes()),
+        VT_I4 | VT_INT => {
+            bytes[..4].copy_from_slice(&(range(to_int(v)?, i32::MIN as i128, i32::MAX as i128)? as i32).to_le_bytes())
+        }
         // VarUI4FromI4 keeps the bits of a negative 32-bit value.
-        VT_UI4 | VT_UINT => bytes[..4].copy_from_slice(&(range(to_int(v)?, i32::MIN as i128, u32::MAX as i128)? as u32).to_le_bytes()),
+        VT_UI4 | VT_UINT => {
+            bytes[..4].copy_from_slice(&(range(to_int(v)?, i32::MIN as i128, u32::MAX as i128)? as u32).to_le_bytes())
+        }
         VT_I8 => bytes.copy_from_slice(&(range(to_int(v)?, i64::MIN as i128, i64::MAX as i128)? as i64).to_le_bytes()),
         VT_UI8 => bytes.copy_from_slice(&(range(to_int(v)?, 0, u64::MAX as i128)? as u64).to_le_bytes()),
         VT_R4 => {
@@ -357,7 +395,9 @@ pub(super) extern "win64" fn VariantChangeTypeEx(dst: *mut u8, src: *const u8, _
         // The source BSTR is freed once the copy is made.
         let mut tmp = [0u8; 24];
         // SAFETY: a 16 or 24-byte VARIANT.
-        unsafe { core::ptr::copy_nonoverlapping(src, tmp.as_mut_ptr(), if crate::wow64::is_active() { 16 } else { 24 }) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, tmp.as_mut_ptr(), if crate::wow64::is_active() { 16 } else { 24 })
+        };
         let r = store(dst, vt, &value, flags);
         if r.is_ok() {
             VariantClear(tmp.as_mut_ptr());

@@ -21,7 +21,11 @@ const HRESULT_FILE_NOT_FOUND: u32 = 0x8007_0002;
 const HRESULT_NOT_SUPPORTED: u32 = 0x8007_0032;
 
 const fn hresult(win32: u32) -> u32 {
-    if win32 == 0 { S_OK } else { 0x8007_0000 | (win32 & 0xffff) }
+    if win32 == 0 {
+        S_OK
+    } else {
+        0x8007_0000 | (win32 & 0xffff)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -36,34 +40,110 @@ enum Base {
 type Folder = ((u32, u16, u16, [u8; 8]), u32, Base);
 
 const FOLDERS: &[Folder] = &[
-    ((0xA77F5D77, 0x2E2B, 0x44C3, [0xA6, 0xA2, 0xAB, 0xA6, 0x01, 0x05, 0x4A, 0x51]), 0x02, Base::Profile("AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs")),
-    ((0x625B53C3, 0xAB48, 0x4EC1, [0xBA, 0x1F, 0xA1, 0xEF, 0x41, 0x46, 0xFC, 0x19]), 0x0B, Base::Profile("AppData\\Roaming\\Microsoft\\Windows\\Start Menu")),
-    ((0xB97D20BB, 0xF46A, 0x4C97, [0xBA, 0x10, 0x5E, 0x36, 0x08, 0x43, 0x08, 0x54]), 0x07, Base::Profile("AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup")),
-    ((0x0139D44E, 0x6AFE, 0x49F2, [0x86, 0x90, 0x3D, 0xAF, 0xCA, 0xE6, 0xFF, 0xB8]), 0x17, Base::Machine("C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs")),
-    ((0xA4115719, 0xD62E, 0x491D, [0xAA, 0x7C, 0xE7, 0x4B, 0x8B, 0xE3, 0xB0, 0x67]), 0x16, Base::Machine("C:\\ProgramData\\Microsoft\\Windows\\Start Menu")),
+    (
+        (0xA77F5D77, 0x2E2B, 0x44C3, [0xA6, 0xA2, 0xAB, 0xA6, 0x01, 0x05, 0x4A, 0x51]),
+        0x02,
+        Base::Profile("AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs"),
+    ),
+    (
+        (0x625B53C3, 0xAB48, 0x4EC1, [0xBA, 0x1F, 0xA1, 0xEF, 0x41, 0x46, 0xFC, 0x19]),
+        0x0B,
+        Base::Profile("AppData\\Roaming\\Microsoft\\Windows\\Start Menu"),
+    ),
+    (
+        (0xB97D20BB, 0xF46A, 0x4C97, [0xBA, 0x10, 0x5E, 0x36, 0x08, 0x43, 0x08, 0x54]),
+        0x07,
+        Base::Profile("AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"),
+    ),
+    (
+        (0x0139D44E, 0x6AFE, 0x49F2, [0x86, 0x90, 0x3D, 0xAF, 0xCA, 0xE6, 0xFF, 0xB8]),
+        0x17,
+        Base::Machine("C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs"),
+    ),
+    (
+        (0xA4115719, 0xD62E, 0x491D, [0xAA, 0x7C, 0xE7, 0x4B, 0x8B, 0xE3, 0xB0, 0x67]),
+        0x16,
+        Base::Machine("C:\\ProgramData\\Microsoft\\Windows\\Start Menu"),
+    ),
     // A one-user system: the shared desktop is the user's desktop.
     ((0xC4AA340D, 0xF20F, 0x4863, [0xAF, 0xEF, 0xF8, 0x7E, 0xF2, 0xE6, 0xBA, 0x25]), 0x19, Base::Profile("Desktop")),
-    ((0xAE50C081, 0xEBD2, 0x438A, [0x86, 0x55, 0x8A, 0x09, 0x2E, 0x34, 0x98, 0x7A]), 0x08, Base::Profile("AppData\\Roaming\\Microsoft\\Windows\\Recent")),
+    (
+        (0xAE50C081, 0xEBD2, 0x438A, [0x86, 0x55, 0x8A, 0x09, 0x2E, 0x34, 0x98, 0x7A]),
+        0x08,
+        Base::Profile("AppData\\Roaming\\Microsoft\\Windows\\Recent"),
+    ),
     ((0x5E6C858F, 0x0E22, 0x4760, [0x9A, 0xFE, 0xEA, 0x33, 0x17, 0xB6, 0x71, 0x73]), 0x28, Base::Profile("")),
-    ((0x3EB685DB, 0x65F9, 0x4CF6, [0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D]), 0x1A, Base::Profile("AppData\\Roaming")),
-    ((0xF1B32785, 0x6FBA, 0x4FCF, [0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91]), 0x1C, Base::Profile("AppData\\Local")),
-    ((0x352481E8, 0x33BE, 0x4251, [0xBA, 0x85, 0x60, 0x07, 0xCA, 0xED, 0xCF, 0x9D]), 0x20, Base::Profile("AppData\\Local\\Microsoft\\Windows\\INetCache")),
-    ((0x2B0F765D, 0xC0E9, 0x4171, [0x90, 0x8E, 0x08, 0xA6, 0x11, 0xB6, 0xFC, 0x84]), 0x21, Base::Profile("AppData\\Local\\Microsoft\\Windows\\INetCookies")),
-    ((0xD9DC8A3B, 0xB784, 0x432E, [0xA7, 0x81, 0x5A, 0x11, 0x30, 0xA7, 0x59, 0x63]), 0x22, Base::Profile("AppData\\Local\\Microsoft\\Windows\\History")),
-    ((0xA520A1A4, 0x1780, 0x4FF6, [0xBD, 0x18, 0x16, 0x73, 0x43, 0xC5, 0xAF, 0x16]), 0, Base::Profile("AppData\\LocalLow")),
+    (
+        (0x3EB685DB, 0x65F9, 0x4CF6, [0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D]),
+        0x1A,
+        Base::Profile("AppData\\Roaming"),
+    ),
+    (
+        (0xF1B32785, 0x6FBA, 0x4FCF, [0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91]),
+        0x1C,
+        Base::Profile("AppData\\Local"),
+    ),
+    (
+        (0x352481E8, 0x33BE, 0x4251, [0xBA, 0x85, 0x60, 0x07, 0xCA, 0xED, 0xCF, 0x9D]),
+        0x20,
+        Base::Profile("AppData\\Local\\Microsoft\\Windows\\INetCache"),
+    ),
+    (
+        (0x2B0F765D, 0xC0E9, 0x4171, [0x90, 0x8E, 0x08, 0xA6, 0x11, 0xB6, 0xFC, 0x84]),
+        0x21,
+        Base::Profile("AppData\\Local\\Microsoft\\Windows\\INetCookies"),
+    ),
+    (
+        (0xD9DC8A3B, 0xB784, 0x432E, [0xA7, 0x81, 0x5A, 0x11, 0x30, 0xA7, 0x59, 0x63]),
+        0x22,
+        Base::Profile("AppData\\Local\\Microsoft\\Windows\\History"),
+    ),
+    (
+        (0xA520A1A4, 0x1780, 0x4FF6, [0xBD, 0x18, 0x16, 0x73, 0x43, 0xC5, 0xAF, 0x16]),
+        0,
+        Base::Profile("AppData\\LocalLow"),
+    ),
     ((0xB4BFCC3A, 0xDB2C, 0x424C, [0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41]), 0x10, Base::Profile("Desktop")),
     ((0xFDD39AD0, 0x238F, 0x46AF, [0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7]), 0x05, Base::Profile("Documents")),
     ((0x374DE290, 0x123F, 0x4565, [0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B]), 0, Base::Profile("Downloads")),
     ((0x33E28130, 0x4E1E, 0x4676, [0x83, 0x5A, 0x98, 0x39, 0x5C, 0x3B, 0xC3, 0xBB]), 0x27, Base::Profile("Pictures")),
     ((0x4BD8D571, 0x6D19, 0x48D3, [0xBE, 0x97, 0x42, 0x22, 0x20, 0x08, 0x0E, 0x43]), 0x0D, Base::Profile("Music")),
     ((0x18989B1D, 0x99B5, 0x455B, [0x84, 0x1C, 0xAB, 0x7C, 0x74, 0xE4, 0xDD, 0xFC]), 0x0E, Base::Profile("Videos")),
-    ((0x5CD7AEE2, 0x2219, 0x4A67, [0xB8, 0x5D, 0x6C, 0x9C, 0xE1, 0x56, 0x60, 0xCB]), 0, Base::Profile("AppData\\Local\\Programs")),
-    ((0x62AB5D82, 0xFDC1, 0x4DC3, [0xA9, 0xDD, 0x07, 0x0D, 0x1D, 0x49, 0x5D, 0x97]), 0x23, Base::Machine("C:\\ProgramData")),
-    ((0xF38BF404, 0x1D43, 0x42F2, [0x93, 0x05, 0x67, 0xDE, 0x0B, 0x28, 0xFC, 0x23]), 0x24, Base::Machine("C:\\Windows")),
-    ((0x1AC14E77, 0x02E7, 0x4E5D, [0xB7, 0x44, 0x2E, 0xB1, 0xAE, 0x51, 0x98, 0xB7]), 0x25, Base::Machine("C:\\Windows\\System32")),
-    ((0xFD228CB7, 0xAE11, 0x4AE3, [0x86, 0x4C, 0x16, 0xF3, 0x91, 0x0A, 0xB8, 0xFE]), 0x14, Base::Machine("C:\\Windows\\Fonts")),
-    ((0x905E63B6, 0xC1BF, 0x494E, [0xB2, 0x9C, 0x65, 0xB7, 0x32, 0xD3, 0xD2, 0x1A]), 0x26, Base::Machine("C:\\Program Files")),
-    ((0x6D809377, 0x6AF0, 0x444B, [0x89, 0x57, 0xA3, 0x77, 0x3F, 0x02, 0x20, 0x0E]), 0, Base::Machine("C:\\Program Files")),
+    (
+        (0x5CD7AEE2, 0x2219, 0x4A67, [0xB8, 0x5D, 0x6C, 0x9C, 0xE1, 0x56, 0x60, 0xCB]),
+        0,
+        Base::Profile("AppData\\Local\\Programs"),
+    ),
+    (
+        (0x62AB5D82, 0xFDC1, 0x4DC3, [0xA9, 0xDD, 0x07, 0x0D, 0x1D, 0x49, 0x5D, 0x97]),
+        0x23,
+        Base::Machine("C:\\ProgramData"),
+    ),
+    (
+        (0xF38BF404, 0x1D43, 0x42F2, [0x93, 0x05, 0x67, 0xDE, 0x0B, 0x28, 0xFC, 0x23]),
+        0x24,
+        Base::Machine("C:\\Windows"),
+    ),
+    (
+        (0x1AC14E77, 0x02E7, 0x4E5D, [0xB7, 0x44, 0x2E, 0xB1, 0xAE, 0x51, 0x98, 0xB7]),
+        0x25,
+        Base::Machine("C:\\Windows\\System32"),
+    ),
+    (
+        (0xFD228CB7, 0xAE11, 0x4AE3, [0x86, 0x4C, 0x16, 0xF3, 0x91, 0x0A, 0xB8, 0xFE]),
+        0x14,
+        Base::Machine("C:\\Windows\\Fonts"),
+    ),
+    (
+        (0x905E63B6, 0xC1BF, 0x494E, [0xB2, 0x9C, 0x65, 0xB7, 0x32, 0xD3, 0xD2, 0x1A]),
+        0x26,
+        Base::Machine("C:\\Program Files"),
+    ),
+    (
+        (0x6D809377, 0x6AF0, 0x444B, [0x89, 0x57, 0xA3, 0x77, 0x3F, 0x02, 0x20, 0x0E]),
+        0,
+        Base::Machine("C:\\Program Files"),
+    ),
 ];
 
 /// The profile directory as a Windows path.
@@ -418,14 +498,48 @@ fn file_kind(is_dir: bool, name: &str) -> &'static str {
         e if e.eq_ignore_ascii_case("exe") || e.eq_ignore_ascii_case("com") => "Application",
         e if e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd") => "Windows Command Script",
         e if e.eq_ignore_ascii_case("msi") => "Windows Installer Package",
-        e if e.eq_ignore_ascii_case("txt") || e.eq_ignore_ascii_case("log") || e.eq_ignore_ascii_case("ini") || e.eq_ignore_ascii_case("md") => "Text Document",
+        e if e.eq_ignore_ascii_case("txt")
+            || e.eq_ignore_ascii_case("log")
+            || e.eq_ignore_ascii_case("ini")
+            || e.eq_ignore_ascii_case("md") =>
+        {
+            "Text Document"
+        }
         e if e.eq_ignore_ascii_case("pdf") => "PDF Document",
         e if e.eq_ignore_ascii_case("zip") => "Compressed (zipped) Folder",
-        e if e.eq_ignore_ascii_case("7z") || e.eq_ignore_ascii_case("rar") || e.eq_ignore_ascii_case("gz") || e.eq_ignore_ascii_case("xz") => "Compressed Archive",
+        e if e.eq_ignore_ascii_case("7z")
+            || e.eq_ignore_ascii_case("rar")
+            || e.eq_ignore_ascii_case("gz")
+            || e.eq_ignore_ascii_case("xz") =>
+        {
+            "Compressed Archive"
+        }
         e if e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm") => "HTML Document",
-        e if e.eq_ignore_ascii_case("png") || e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg") || e.eq_ignore_ascii_case("gif") || e.eq_ignore_ascii_case("webp") || e.eq_ignore_ascii_case("bmp") || e.eq_ignore_ascii_case("ico") => "Image",
-        e if e.eq_ignore_ascii_case("mp3") || e.eq_ignore_ascii_case("wav") || e.eq_ignore_ascii_case("flac") || e.eq_ignore_ascii_case("ogg") || e.eq_ignore_ascii_case("m4a") => "Audio",
-        e if e.eq_ignore_ascii_case("mp4") || e.eq_ignore_ascii_case("mkv") || e.eq_ignore_ascii_case("webm") || e.eq_ignore_ascii_case("avi") => "Video",
+        e if e.eq_ignore_ascii_case("png")
+            || e.eq_ignore_ascii_case("jpg")
+            || e.eq_ignore_ascii_case("jpeg")
+            || e.eq_ignore_ascii_case("gif")
+            || e.eq_ignore_ascii_case("webp")
+            || e.eq_ignore_ascii_case("bmp")
+            || e.eq_ignore_ascii_case("ico") =>
+        {
+            "Image"
+        }
+        e if e.eq_ignore_ascii_case("mp3")
+            || e.eq_ignore_ascii_case("wav")
+            || e.eq_ignore_ascii_case("flac")
+            || e.eq_ignore_ascii_case("ogg")
+            || e.eq_ignore_ascii_case("m4a") =>
+        {
+            "Audio"
+        }
+        e if e.eq_ignore_ascii_case("mp4")
+            || e.eq_ignore_ascii_case("mkv")
+            || e.eq_ignore_ascii_case("webm")
+            || e.eq_ignore_ascii_case("avi") =>
+        {
+            "Video"
+        }
         _ => "File",
     }
 }
@@ -448,7 +562,8 @@ fn exetype(name: &str) -> u64 {
 /// renders a fallback for a NULL icon). PIDLs belong to the shell namespace,
 /// which exists only for the file dialogs' own PIDLs; return 0 for those.
 fn sh_get_file_info(path: *const u16, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
-    if flags & SHGFI_PIDL != 0 || path.is_null() || (flags != SHGFI_EXETYPE && (info.is_null() || cb < SHFILEINFO_SIZE)) {
+    if flags & SHGFI_PIDL != 0 || path.is_null() || (flags != SHGFI_EXETYPE && (info.is_null() || cb < SHFILEINFO_SIZE))
+    {
         return 0;
     }
     if !info.is_null() && cb >= SHFILEINFO_SIZE {
@@ -501,7 +616,9 @@ fn sh_get_file_info(path: *const u16, input: u32, info: *mut u8, cb: u32, flags:
 
 pub(crate) extern "win64" fn SHGetFileInfoW(p: *const u16, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
     if crate::wow64::is_active() {
-        if flags != SHGFI_EXETYPE && (info.is_null() || cb < 692) { return 0; }
+        if flags != SHGFI_EXETYPE && (info.is_null() || cb < 692) {
+            return 0;
+        }
         let mut host = [0u64; 87];
         let result = sh_get_file_info(p, input, host.as_mut_ptr().cast(), SHFILEINFO_SIZE, flags);
         if !info.is_null() && cb >= 692 {
@@ -522,14 +639,22 @@ fn fileop_error(e: os_std::error::Error) -> u32 {
 
 /// Reads a double-NUL-terminated list with bounded length and entry count.
 unsafe fn fileop_paths(ptr: *const u16) -> Result<Vec<String>, u32> {
-    if ptr.is_null() { return Err(87); }
+    if ptr.is_null() {
+        return Err(87);
+    }
     let mut paths = Vec::new();
     let mut start = 0usize;
     for at in 0..65536usize {
         let c = unsafe { core::ptr::read_unaligned(ptr.add(at)) };
-        if c != 0 { continue; }
-        if at == start { return Ok(paths); }
-        if at - start > path::MAX_PATH_CHARS || paths.len() >= 1024 { return Err(206); }
+        if c != 0 {
+            continue;
+        }
+        if at == start {
+            return Ok(paths);
+        }
+        if at - start > path::MAX_PATH_CHARS || paths.len() >= 1024 {
+            return Err(206);
+        }
         let units = unsafe { core::slice::from_raw_parts(ptr.add(start), at - start) };
         let name = String::from_utf16(units).map_err(|_| 123u32)?;
         paths.push(name);
@@ -540,10 +665,17 @@ unsafe fn fileop_paths(ptr: *const u16) -> Result<Vec<String>, u32> {
 
 fn copy_tree(src: &str, dst: &str, depth: u32) -> Result<(), u32> {
     use os_std::fs;
-    if depth > 128 { return Err(206); }
+    if depth > 128 {
+        return Err(206);
+    }
     let meta = fs::symlink_metadata(src).map_err(fileop_error)?;
-    if meta.is_symlink() { return Err(50); }
-    if !meta.is_dir() { fs::copy(src, dst).map_err(fileop_error)?; return Ok(()); }
+    if meta.is_symlink() {
+        return Err(50);
+    }
+    if !meta.is_dir() {
+        fs::copy(src, dst).map_err(fileop_error)?;
+        return Ok(());
+    }
     fs::create_dir_all(dst).map_err(fileop_error)?;
     for item in fs::read_dir(src).map_err(fileop_error)? {
         let name = item.file_name();
@@ -554,37 +686,64 @@ fn copy_tree(src: &str, dst: &str, depth: u32) -> Result<(), u32> {
 
 extern "win64" fn SHFileOperationW(op: *mut u8) -> i32 {
     use os_std::fs;
-    if op.is_null() { return 87; }
+    if op.is_null() {
+        return 87;
+    }
     let is32 = crate::wow64::is_active();
     let base = op as u64;
     // SAFETY: the caller supplies a SHFILEOPSTRUCTW for its ABI.
     let (function, from, to, flags) = unsafe {
         if is32 {
-            (crate::teb::get::<u32>(base, 4), crate::teb::get::<u32>(base, 8) as u64,
-             crate::teb::get::<u32>(base, 12) as u64, crate::teb::get::<u16>(base, 16))
+            (
+                crate::teb::get::<u32>(base, 4),
+                crate::teb::get::<u32>(base, 8) as u64,
+                crate::teb::get::<u32>(base, 12) as u64,
+                crate::teb::get::<u16>(base, 16),
+            )
         } else {
-            (crate::teb::get::<u32>(base, 8), crate::teb::get::<u64>(base, 16),
-             crate::teb::get::<u64>(base, 24), crate::teb::get::<u16>(base, 32))
+            (
+                crate::teb::get::<u32>(base, 8),
+                crate::teb::get::<u64>(base, 16),
+                crate::teb::get::<u64>(base, 24),
+                crate::teb::get::<u16>(base, 32),
+            )
         }
     };
     let aborted = if is32 { 20 } else { 36 };
     unsafe { crate::teb::put(base, aborted, 0u32) };
     let result = (|| -> Result<(), u32> {
-        if !matches!(function, 1..=4) { return Err(87); }
+        if !matches!(function, 1..=4) {
+            return Err(87);
+        }
         // Recycle bin, wildcard expansion and rename-on-collision are not
         // implemented; never silently perform a different operation.
-        if flags & (0x0040 | 0x0008 | 0x0080) != 0 { return Err(50); }
+        if flags & (0x0040 | 0x0008 | 0x0080) != 0 {
+            return Err(50);
+        }
         let sources = unsafe { fileop_paths(from as *const u16) }?;
-        if sources.is_empty() { return Err(87); }
+        if sources.is_empty() {
+            return Err(87);
+        }
         let destinations = if function == 3 { Vec::new() } else { unsafe { fileop_paths(to as *const u16) }? };
-        if function != 3 && (destinations.is_empty() || flags & 1 != 0 && destinations.len() != sources.len()) { return Err(87); }
+        if function != 3 && (destinations.is_empty() || flags & 1 != 0 && destinations.len() != sources.len()) {
+            return Err(87);
+        }
         for (index, source) in sources.iter().enumerate() {
             let (src, exists) = kernel32::locate(source)?;
-            if !exists { return Err(2); }
-            if src == "/" { return Err(5); }
+            if !exists {
+                return Err(2);
+            }
+            if src == "/" {
+                return Err(5);
+            }
             let metadata = fs::symlink_metadata(&src).map_err(fileop_error)?;
             if function == 3 {
-                if metadata.is_dir() && !metadata.is_symlink() { fs::remove_dir_all(&src) } else { fs::remove_file(&src) }.map_err(fileop_error)?;
+                if metadata.is_dir() && !metadata.is_symlink() {
+                    fs::remove_dir_all(&src)
+                } else {
+                    fs::remove_file(&src)
+                }
+                .map_err(fileop_error)?;
                 continue;
             }
             let dst_win = if flags & 1 != 0 { &destinations[index] } else { &destinations[0] };
@@ -593,17 +752,32 @@ extern "win64" fn SHFileOperationW(op: *mut u8) -> i32 {
                 let name = src.rsplit('/').next().ok_or(87u32)?;
                 dst = format!("{}/{name}", dst.trim_end_matches('/'));
             }
-            if dst == src || metadata.is_dir() && dst.starts_with(&format!("{src}/")) { return Err(87); }
-            if let Ok(target) = fs::symlink_metadata(&dst) {
-                if target.is_symlink() { return Err(50); }
-                if target.dev() == metadata.dev() && target.ino() == metadata.ino() { return Err(87); }
+            if dst == src || metadata.is_dir() && dst.starts_with(&format!("{src}/")) {
+                return Err(87);
             }
-            if function == 2 { copy_tree(&src, &dst, 0)?; }
-            else { fs::rename(&src, &dst).map_err(fileop_error)?; }
+            if let Ok(target) = fs::symlink_metadata(&dst) {
+                if target.is_symlink() {
+                    return Err(50);
+                }
+                if target.dev() == metadata.dev() && target.ino() == metadata.ino() {
+                    return Err(87);
+                }
+            }
+            if function == 2 {
+                copy_tree(&src, &dst, 0)?;
+            } else {
+                fs::rename(&src, &dst).map_err(fileop_error)?;
+            }
         }
         Ok(())
     })();
-    match result { Ok(()) => 0, Err(e) => { unsafe { crate::teb::put(base, aborted, 1u32) }; e as i32 } }
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { crate::teb::put(base, aborted, 1u32) };
+            e as i32
+        }
+    }
 }
 
 extern "win64" fn SHGetFileInfoA(p: *const u8, input: u32, info: *mut u8, cb: u32, flags: u32) -> u64 {
@@ -692,7 +866,11 @@ extern "win64" fn SHGetSpecialFolderLocation(_hwnd: u64, csidl: u32, pidl: *mut 
 extern "win64" fn SHCloneSpecialIDList(_hwnd: u64, csidl: i32, create: i32) -> u64 {
     let flags = csidl as u32 | if create != 0 { CSIDL_FLAG_CREATE } else { 0 };
     let mut id = 0u64;
-    if SHGetSpecialFolderLocation(0, flags, &mut id) == S_OK { id } else { 0 }
+    if SHGetSpecialFolderLocation(0, flags, &mut id) == S_OK {
+        id
+    } else {
+        0
+    }
 }
 
 // ---- stock icons ------------------------------------------------------------------------------
@@ -704,36 +882,186 @@ extern "win64" fn SHCloneSpecialIDList(_hwnd: u64, csidl: i32, create: i32) -> u
 // (folder, document, drive or a generic one) at the size asked for.
 
 const STOCK_ICONS: [(i16, u8, i16); 181] = [
-    (-2, 0, 0), (-90, 0, 1), (-15, 0, 2), (-3, 0, 3), (-4, 0, 4), (-29, 0, 5),
-    (-28, 0, 6), (-35, 0, 7), (-32, 0, 8), (-33, 0, 9), (-31, 0, 10), (-30, 0, 11),
-    (-34, 0, 12), (-152, 0, 13), (-15, 1, 14), (-109, 0, 15), (-51, 0, 16), (-25, 0, 17),
-    (-19, 1, 18), (-20, 1, 19), (-21, 1, 20), (-27, 0, 21), (-177, 0, 22), (-99, 0, 23),
-    (-100, 0, 24), (-101, 0, 25), (-27, 1, 26), (-28, 1, 27), (-164, 0, 28), (-163, 0, 29),
-    (-97, 0, 30), (-55, 0, 31), (-54, 0, 32), (-34, 1, 33), (-110, 0, 34), (-137, 1, 35),
-    (-37, 1, 36), (-26, 0, 37), (-77, 0, 38), (-80, 0, 39), (-85, 0, 40), (-42, 1, 41),
-    (-43, 1, 42), (-44, 1, 43), (-45, 1, 44), (-46, 1, 45), (-47, 1, 46), (-48, 1, 47),
-    (-49, 1, 48), (-8, 0, 50), (-53, 0, 51), (-143, 0, 52), (-76, 0, 53), (-199, 1, 54),
-    (-52, 0, 55), (-148, 0, 56), (-142, 0, 57), (-162, 0, 58), (-75, 0, 59), (-37, 0, 60),
-    (-56, 0, 61), (-39, 0, 62), (-41, 0, 63), (-38, 0, 64), (-40, 0, 65), (-180, 0, 66),
-    (-64, 0, 67), (-62, 0, 68), (-155, 0, 69), (-61, 0, 70), (-63, 0, 71), (-131, 0, 72),
-    (-132, 0, 73), (-133, 0, 74), (-134, 0, 75), (-5, 0, 76), (-6, 0, 77), (-78, 0, 78),
-    (-84, 0, 79), (-81, 0, 80), (-98, 0, 81), (-82, 0, 82), (-161, 0, 83), (-94, 0, 84),
-    (-89, 0, 85), (-135, 0, 86), (-136, 0, 87), (-137, 0, 88), (-138, 0, 89), (-139, 0, 90),
-    (-140, 0, 91), (-141, 0, 92), (-172, 0, 93), (-173, 0, 94), (-109, 0, 15), (-119, 0, 95),
-    (-88, 0, 96), (-60, 0, 97), (-65, 0, 98), (-47, 0, 99), (-57, 0, 100), (-46, 0, 101),
-    (-66, 0, 102), (-171, 0, 103), (-120, 0, 104), (-174, 0, 105), (-121, 0, 106), (-36, 0, 107),
-    (-87, 0, 108), (-108, 0, 109), (-101, 3, 110), (-238, 1, 111), (-18, 0, 112), (-139, 1, 113),
-    (-171, 1, 114), (-17, 0, 115), (-103, 0, 116), (-50, 0, 117), (-48, 0, 118), (-198, 1, 119),
-    (-49, 0, 120), (-197, 1, 121), (-19, 0, 122), (-20, 0, 123), (-21, 0, 124), (-22, 0, 125),
-    (-23, 0, 126), (-79, 0, 127), (-104, 0, 128), (-105, 0, 129), (-106, 0, 130), (-107, 0, 131),
-    (-200, 2, 132), (-201, 2, 133), (-202, 2, 134), (-203, 2, 135), (-204, 2, 136), (-205, 2, 137),
-    (-206, 2, 138), (-207, 2, 139), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140),
-    (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140),
-    (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140),
-    (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-208, 2, 140), (-1015, 0, 141), (-1017, 0, 142),
-    (-1018, 0, 143), (-1026, 0, 144), (-1030, 0, 145), (-1031, 0, 146), (-1032, 0, 147), (-1033, 0, 148),
-    (-1034, 0, 149), (-1035, 0, 150), (-1036, 0, 151), (-1037, 0, 152), (-1001, 0, 153), (-157, 0, 49),
-    (-5201, 0, 154), (-5, 0, 76), (-3, 0, 3), (-162, 0, 58), (-1304, 0, 155), (-1305, 0, 156),
+    (-2, 0, 0),
+    (-90, 0, 1),
+    (-15, 0, 2),
+    (-3, 0, 3),
+    (-4, 0, 4),
+    (-29, 0, 5),
+    (-28, 0, 6),
+    (-35, 0, 7),
+    (-32, 0, 8),
+    (-33, 0, 9),
+    (-31, 0, 10),
+    (-30, 0, 11),
+    (-34, 0, 12),
+    (-152, 0, 13),
+    (-15, 1, 14),
+    (-109, 0, 15),
+    (-51, 0, 16),
+    (-25, 0, 17),
+    (-19, 1, 18),
+    (-20, 1, 19),
+    (-21, 1, 20),
+    (-27, 0, 21),
+    (-177, 0, 22),
+    (-99, 0, 23),
+    (-100, 0, 24),
+    (-101, 0, 25),
+    (-27, 1, 26),
+    (-28, 1, 27),
+    (-164, 0, 28),
+    (-163, 0, 29),
+    (-97, 0, 30),
+    (-55, 0, 31),
+    (-54, 0, 32),
+    (-34, 1, 33),
+    (-110, 0, 34),
+    (-137, 1, 35),
+    (-37, 1, 36),
+    (-26, 0, 37),
+    (-77, 0, 38),
+    (-80, 0, 39),
+    (-85, 0, 40),
+    (-42, 1, 41),
+    (-43, 1, 42),
+    (-44, 1, 43),
+    (-45, 1, 44),
+    (-46, 1, 45),
+    (-47, 1, 46),
+    (-48, 1, 47),
+    (-49, 1, 48),
+    (-8, 0, 50),
+    (-53, 0, 51),
+    (-143, 0, 52),
+    (-76, 0, 53),
+    (-199, 1, 54),
+    (-52, 0, 55),
+    (-148, 0, 56),
+    (-142, 0, 57),
+    (-162, 0, 58),
+    (-75, 0, 59),
+    (-37, 0, 60),
+    (-56, 0, 61),
+    (-39, 0, 62),
+    (-41, 0, 63),
+    (-38, 0, 64),
+    (-40, 0, 65),
+    (-180, 0, 66),
+    (-64, 0, 67),
+    (-62, 0, 68),
+    (-155, 0, 69),
+    (-61, 0, 70),
+    (-63, 0, 71),
+    (-131, 0, 72),
+    (-132, 0, 73),
+    (-133, 0, 74),
+    (-134, 0, 75),
+    (-5, 0, 76),
+    (-6, 0, 77),
+    (-78, 0, 78),
+    (-84, 0, 79),
+    (-81, 0, 80),
+    (-98, 0, 81),
+    (-82, 0, 82),
+    (-161, 0, 83),
+    (-94, 0, 84),
+    (-89, 0, 85),
+    (-135, 0, 86),
+    (-136, 0, 87),
+    (-137, 0, 88),
+    (-138, 0, 89),
+    (-139, 0, 90),
+    (-140, 0, 91),
+    (-141, 0, 92),
+    (-172, 0, 93),
+    (-173, 0, 94),
+    (-109, 0, 15),
+    (-119, 0, 95),
+    (-88, 0, 96),
+    (-60, 0, 97),
+    (-65, 0, 98),
+    (-47, 0, 99),
+    (-57, 0, 100),
+    (-46, 0, 101),
+    (-66, 0, 102),
+    (-171, 0, 103),
+    (-120, 0, 104),
+    (-174, 0, 105),
+    (-121, 0, 106),
+    (-36, 0, 107),
+    (-87, 0, 108),
+    (-108, 0, 109),
+    (-101, 3, 110),
+    (-238, 1, 111),
+    (-18, 0, 112),
+    (-139, 1, 113),
+    (-171, 1, 114),
+    (-17, 0, 115),
+    (-103, 0, 116),
+    (-50, 0, 117),
+    (-48, 0, 118),
+    (-198, 1, 119),
+    (-49, 0, 120),
+    (-197, 1, 121),
+    (-19, 0, 122),
+    (-20, 0, 123),
+    (-21, 0, 124),
+    (-22, 0, 125),
+    (-23, 0, 126),
+    (-79, 0, 127),
+    (-104, 0, 128),
+    (-105, 0, 129),
+    (-106, 0, 130),
+    (-107, 0, 131),
+    (-200, 2, 132),
+    (-201, 2, 133),
+    (-202, 2, 134),
+    (-203, 2, 135),
+    (-204, 2, 136),
+    (-205, 2, 137),
+    (-206, 2, 138),
+    (-207, 2, 139),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-208, 2, 140),
+    (-1015, 0, 141),
+    (-1017, 0, 142),
+    (-1018, 0, 143),
+    (-1026, 0, 144),
+    (-1030, 0, 145),
+    (-1031, 0, 146),
+    (-1032, 0, 147),
+    (-1033, 0, 148),
+    (-1034, 0, 149),
+    (-1035, 0, 150),
+    (-1036, 0, 151),
+    (-1037, 0, 152),
+    (-1001, 0, 153),
+    (-157, 0, 49),
+    (-5201, 0, 154),
+    (-5, 0, 76),
+    (-3, 0, 3),
+    (-162, 0, 58),
+    (-1304, 0, 155),
+    (-1305, 0, 156),
     (-1306, 0, 157),
 ];
 const STOCK_DLLS: [&str; 4] = ["imageres.dll", "shell32.dll", "imagesp1.dll", "mydocs.dll"];
@@ -744,7 +1072,8 @@ const SHGSI_LINKOVERLAY: u32 = 0x8000;
 const SHGSI_SELECTED: u32 = 0x1_0000;
 const SHGSI_SMALLICON: u32 = 0x1;
 const SHGSI_SHELLICONSIZE: u32 = 0x4;
-const SHGSI_VALID: u32 = SHGSI_ICON | SHGSI_SYSICONINDEX | SHGSI_LINKOVERLAY | SHGSI_SELECTED | SHGSI_SMALLICON | SHGSI_SHELLICONSIZE;
+const SHGSI_VALID: u32 =
+    SHGSI_ICON | SHGSI_SYSICONINDEX | SHGSI_LINKOVERLAY | SHGSI_SELECTED | SHGSI_SMALLICON | SHGSI_SHELLICONSIZE;
 
 /// SHGetStockIconInfo(id, flags, &SHSTOCKICONINFO): the struct is cbSize,
 /// hIcon @8, iSysImageIndex @16, iIcon @20 and szPath[260] @24. E_INVALIDARG
@@ -764,7 +1093,10 @@ extern "win64" fn SHGetStockIconInfo(id: i32, flags: u32, info: *mut u8) -> u32 
     let path = alloc::format!("C:\\Windows\\System32\\{}", STOCK_DLLS[dll as usize]);
     // SAFETY: as above; the path fits szPath (260 UTF-16 units).
     unsafe {
-        core::ptr::write_unaligned(info.add(16) as *mut i32, if flags & SHGSI_SYSICONINDEX != 0 { system as i32 } else { -1 });
+        core::ptr::write_unaligned(
+            info.add(16) as *mut i32,
+            if flags & SHGSI_SYSICONINDEX != 0 { system as i32 } else { -1 },
+        );
         core::ptr::write_unaligned(info.add(20) as *mut i32, index as i32);
         for (i, c) in path.encode_utf16().take(259).enumerate() {
             core::ptr::write_unaligned(info.add(24 + 2 * i) as *mut u16, c);
@@ -772,9 +1104,9 @@ extern "win64" fn SHGetStockIconInfo(id: i32, flags: u32, info: *mut u8) -> u32 
         if flags & SHGSI_ICON != 0 {
             let size = if flags & SHGSI_SMALLICON != 0 { 16 } else { 32 };
             let kind = match id {
-                3 | 4 | 175 | 176 => 1,        // folders
-                0..=2 => 2,                     // documents
-                5..=12 => 3,                    // drives
+                3 | 4 | 175 | 176 => 1, // folders
+                0..=2 => 2,             // documents
+                5..=12 => 3,            // drives
                 _ => 0,
             };
             core::ptr::write_unaligned(info.add(8) as *mut u64, crate::user32::stock_icon(kind, size));
@@ -813,7 +1145,9 @@ fn shell_link(target: &str, directory: bool) -> Vec<u8> {
     let info_size = 0x1C + volume_id.len() + path.len() + 1;
     let mut l = Vec::new();
     l.extend_from_slice(&0x4Cu32.to_le_bytes());
-    l.extend_from_slice(&[0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46]);
+    l.extend_from_slice(&[
+        0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+    ]);
     l.extend_from_slice(&(0x2u32 | 0x80 | 0x10_0000).to_le_bytes()); // HasLinkInfo, IsUnicode, ForceNoLinkTrack
     l.extend_from_slice(&(if directory { 0x10u32 } else { 0x20 }).to_le_bytes());
     l.extend_from_slice(&[0u8; 24]); // creation, access and write times
@@ -859,7 +1193,9 @@ extern "win64" fn SHAddToRecentDocs(flags: u32, item: u64) {
         }
     };
     let Some(target) = target.filter(|t| !t.is_empty()) else { return };
-    let directory = kernel32::locate(&target).ok().is_some_and(|(p, exists)| exists && os_sys::stat(&p).is_ok_and(|s| s.kind == osyx_abi::KIND_DIR));
+    let directory = kernel32::locate(&target)
+        .ok()
+        .is_some_and(|(p, exists)| exists && os_sys::stat(&p).is_ok_and(|s| s.kind == osyx_abi::KIND_DIR));
     let name = target.trim_end_matches('\\').rsplit('\\').next().unwrap_or("");
     if name.is_empty() || os_std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -902,7 +1238,13 @@ extern "win64" fn SHCreateItemFromParsingName(_name: *const u16, _bind: u64, _ri
     E_NOTIMPL
 }
 
-extern "win64" fn SHGetKnownFolderItem(_id: *const u8, _flags: u32, _token: u64, _riid: *const u8, out: *mut u64) -> u32 {
+extern "win64" fn SHGetKnownFolderItem(
+    _id: *const u8,
+    _flags: u32,
+    _token: u64,
+    _riid: *const u8,
+    out: *mut u64,
+) -> u32 {
     if !out.is_null() {
         // SAFETY: the caller's out pointer.
         unsafe { *out = 0 };
@@ -1026,7 +1368,8 @@ fn run_as(line: &str, dir: Option<&str>) -> Result<u64, (u64, u32)> {
     let n = CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let service = format!("user.{}.winrun.elevate.{}.{n}", os_std::os::getuid().0, kernel32::pid());
     let listener = Listener::listen(&service).map_err(|_| (SE_ERR_ACCESSDENIED, ERROR_ELEVATION_REQUIRED))?;
-    let proxy = spawn_line_env(line, dir, &[("OSYX_ELEVATE", "1"), (crate::elevation::NOTIFY_ENV, &service)]).map_err(|e| (se_error(e), e))?;
+    let proxy = spawn_line_env(line, dir, &[("OSYX_ELEVATE", "1"), (crate::elevation::NOTIFY_ENV, &service)])
+        .map_err(|e| (se_error(e), e))?;
     let mut channels = Vec::new();
     let mut buf = alloc::vec![0u8; MAX_MESSAGE];
     loop {
@@ -1085,8 +1428,7 @@ fn shell_launch(verb: &str, file: &str, params: Option<&str>, dir: Option<&str>)
         return Err((SE_ERR_FNF, ERROR_FILE_NOT_FOUND));
     }
     if ["http://", "https://", "file://", "about:"].iter().any(|p| file.starts_with(p)) {
-        return spawn_line(&format!("/bin/open {}", quote_win_arg(file)), None)
-            .map_err(|e| (se_error(e), e));
+        return spawn_line(&format!("/bin/open {}", quote_win_arg(file)), None).map_err(|e| (se_error(e), e));
     }
     // SAFETY: a NUL-terminated path from the caller.
     let Ok((osyx, true)) = kernel32::locate(file) else {
@@ -1130,7 +1472,14 @@ fn shell_launch(verb: &str, file: &str, params: Option<&str>, dir: Option<&str>)
     Err((SE_ERR_NOASSOC, ERROR_NO_ASSOCIATION))
 }
 
-extern "win64" fn ShellExecuteW(_hwnd: u64, op: *const u16, file: *const u16, params: *const u16, dir: *const u16, _show: i32) -> u64 {
+extern "win64" fn ShellExecuteW(
+    _hwnd: u64,
+    op: *const u16,
+    file: *const u16,
+    params: *const u16,
+    dir: *const u16,
+    _show: i32,
+) -> u64 {
     // SAFETY: NULL or NUL-terminated strings from the caller.
     let (verb, file, params, dir) = unsafe {
         (path::wide_to_string(op), path::wide_to_string(file), path::wide_to_string(params), path::wide_to_string(dir))
@@ -1176,7 +1525,12 @@ pub(crate) extern "win64" fn ShellExecuteExW(info: *mut u8) -> i32 {
     // or NUL-terminated.
     let (verb, file, params, dir) = unsafe {
         let field = |at: usize| core::ptr::read_unaligned(info.add(at) as *const u64) as *const u16;
-        (path::wide_to_string(field(16)), path::wide_to_string(field(24)), path::wide_to_string(field(32)), path::wide_to_string(field(40)))
+        (
+            path::wide_to_string(field(16)),
+            path::wide_to_string(field(24)),
+            path::wide_to_string(field(32)),
+            path::wide_to_string(field(40)),
+        )
     };
     // SAFETY: inside the validated struct.
     let (hinst, hprocess) = unsafe {
@@ -1206,7 +1560,6 @@ pub(crate) extern "win64" fn ShellExecuteExW(info: *mut u8) -> i32 {
         }
     }
 }
-
 
 /// ShellExecuteExW for a 32-bit caller: the same work, with the 60-byte
 /// SHELLEXECUTEINFOW layout and four-byte handles.
@@ -1277,9 +1630,18 @@ extern "win64" fn Shell_NotifyIconA(message: u32, data: u64) -> i32 {
 }
 
 /// ShellExecuteA: the strings in UTF-16, as ShellExecuteW.
-extern "win64" fn ShellExecuteA(hwnd: u64, op: *const u8, file: *const u8, params: *const u8, dir: *const u8, show: i32) -> u64 {
+extern "win64" fn ShellExecuteA(
+    hwnd: u64,
+    op: *const u8,
+    file: *const u8,
+    params: *const u8,
+    dir: *const u8,
+    show: i32,
+) -> u64 {
     // SAFETY: NULL or NUL-terminated strings.
-    let (o, f, p, d) = unsafe { (path::ansi_to_wide(op), path::ansi_to_wide(file), path::ansi_to_wide(params), path::ansi_to_wide(dir)) };
+    let (o, f, p, d) = unsafe {
+        (path::ansi_to_wide(op), path::ansi_to_wide(file), path::ansi_to_wide(params), path::ansi_to_wide(dir))
+    };
     let ptr = |v: &Option<Vec<u16>>| v.as_ref().map_or(core::ptr::null(), |w| w.as_ptr());
     ShellExecuteW(hwnd, ptr(&o), ptr(&f), ptr(&p), ptr(&d), show)
 }
@@ -1289,13 +1651,19 @@ extern "win64" fn ShellExecuteA(hwnd: u64, op: *const u8, file: *const u8, param
 /// lpParameters and lpDirectory follow cbSize, fMask and hwnd.
 extern "win64" fn ShellExecuteExA(info: *mut u8) -> i32 {
     let narrow = crate::wow64::is_active();
-    let (size, strings, hinst_at, hprocess_at, width) = if narrow { (60u32, 12usize, 32usize, 56usize, 4usize) } else { (SHELLEXECUTEINFO_SIZE, 16, SHELLEXECUTEINFO_HINSTAPP, SHELLEXECUTEINFO_HPROCESS, 8) };
+    let (size, strings, hinst_at, hprocess_at, width) = if narrow {
+        (60u32, 12usize, 32usize, 56usize, 4usize)
+    } else {
+        (SHELLEXECUTEINFO_SIZE, 16, SHELLEXECUTEINFO_HINSTAPP, SHELLEXECUTEINFO_HPROCESS, 8)
+    };
     if info.is_null() {
         crate::teb::set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
     }
     // SAFETY: cbSize and fMask begin the caller's structure.
-    let (cb, mask) = unsafe { (core::ptr::read_unaligned(info as *const u32), core::ptr::read_unaligned((info as *const u32).add(1))) };
+    let (cb, mask) = unsafe {
+        (core::ptr::read_unaligned(info as *const u32), core::ptr::read_unaligned((info as *const u32).add(1)))
+    };
     if cb < size {
         crate::teb::set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
@@ -1304,9 +1672,18 @@ extern "win64" fn ShellExecuteExA(info: *mut u8) -> i32 {
     let (verb, file, params, dir) = unsafe {
         let field = |i: usize| {
             let at = info.add(strings + width * i);
-            (if narrow { core::ptr::read_unaligned(at as *const u32) as u64 } else { core::ptr::read_unaligned(at as *const u64) }) as *const u8
+            (if narrow {
+                core::ptr::read_unaligned(at as *const u32) as u64
+            } else {
+                core::ptr::read_unaligned(at as *const u64)
+            }) as *const u8
         };
-        (path::ansi_to_string(field(0)), path::ansi_to_string(field(1)), path::ansi_to_string(field(2)), path::ansi_to_string(field(3)))
+        (
+            path::ansi_to_string(field(0)),
+            path::ansi_to_string(field(1)),
+            path::ansi_to_string(field(2)),
+            path::ansi_to_string(field(3)),
+        )
     };
     // SAFETY: inside the validated structure (pointer-sized fields).
     let put = |at: usize, v: u64| unsafe {
@@ -1349,30 +1726,44 @@ extern "win64" fn DragFinish(drop: u64) {
 }
 
 extern "win64" fn DragQueryFileW(drop: u64, index: u32, buf: *mut u16, count: u32) -> u32 {
-    if drop == 0 { return 0; }
+    if drop == 0 {
+        return 0;
+    }
     // SAFETY: HDROP is an HGLOBAL returned by the data object.
     let len = kernel32::heap_size(drop);
-    if len < 20 { return 0; }
+    if len < 20 {
+        return 0;
+    }
     let data = unsafe { core::slice::from_raw_parts(drop as *const u8, len) };
     let offset = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
     let wide = u32::from_le_bytes([data[16], data[17], data[18], data[19]]) != 0;
     let Some(bytes) = data.get(offset..) else { return 0 };
-    let units: Vec<u16> = if wide { bytes.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect() }
-        else { bytes.iter().map(|&b| b as u16).collect() };
+    let units: Vec<u16> = if wide {
+        bytes.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect()
+    } else {
+        bytes.iter().map(|&b| b as u16).collect()
+    };
     let mut files = Vec::new();
     let mut start = 0;
     while start < units.len() {
         let Some(end) = units[start..].iter().position(|&u| u == 0).map(|n| start + n) else { return 0 };
-        if end == start { break; }
+        if end == start {
+            break;
+        }
         files.push(&units[start..end]);
         start = end + 1;
     }
-    if index == u32::MAX { return files.len() as u32; }
+    if index == u32::MAX {
+        return files.len() as u32;
+    }
     let Some(file) = files.get(index as usize) else { return 0 };
     if !buf.is_null() && count > 0 {
         let n = file.len().min(count as usize - 1);
         // SAFETY: the caller supplies a writable buffer of `count` WCHARs.
-        unsafe { core::ptr::copy_nonoverlapping(file.as_ptr(), buf, n); *buf.add(n) = 0; }
+        unsafe {
+            core::ptr::copy_nonoverlapping(file.as_ptr(), buf, n);
+            *buf.add(n) = 0;
+        }
         return n as u32;
     }
     file.len() as u32
@@ -1473,7 +1864,8 @@ extern "win64" fn SHAppBarMessage(message: u32, data: *mut u8) -> u64 {
     let (wnd, cb, edge, rc, lparam) = unsafe {
         let rd = |o: u64| core::ptr::read_unaligned((p + o) as *const i32);
         let wnd = if narrow { rd(wnd_at) as u32 as u64 } else { core::ptr::read_unaligned((p + wnd_at) as *const u64) };
-        let lparam = if narrow { rd(lp_at) as u32 as u64 } else { core::ptr::read_unaligned((p + lp_at) as *const u64) };
+        let lparam =
+            if narrow { rd(lp_at) as u32 as u64 } else { core::ptr::read_unaligned((p + lp_at) as *const u64) };
         (wnd, rd(msg_at) as u32, rd(edge_at) as u32, [rd(rc_at), rd(rc_at + 4), rd(rc_at + 8), rd(rc_at + 12)], lparam)
     };
     let write_rc = |r: [i32; 4]| {

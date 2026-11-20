@@ -45,7 +45,10 @@ pub fn normalize(name: &str) -> Option<String> {
         return None;
     }
     for label in n.split('.') {
-        if label.is_empty() || label.len() > 63 || !label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+        if label.is_empty()
+            || label.len() > 63
+            || !label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        {
             return None;
         }
     }

@@ -214,7 +214,15 @@ pub(super) extern "win64" fn CommandLineToArgvW32(cmdline: *const u16, count: *m
 /// ReportEventW: the string array holds 4-byte pointers.
 #[allow(clippy::too_many_arguments)] // the Win32 signature
 pub(super) extern "win64" fn ReportEventW32(
-    h: u64, kind: u16, category: u16, id: u32, user: *const u8, count: u16, size: u32, strings: *const u32, data: *const u8,
+    h: u64,
+    kind: u16,
+    category: u16,
+    id: u32,
+    user: *const u8,
+    count: u16,
+    size: u32,
+    strings: *const u32,
+    data: *const u8,
 ) -> i32 {
     let wide: Vec<u64> = if strings.is_null() {
         Vec::new()
@@ -231,7 +239,12 @@ pub(super) extern "win64" fn ReportEventW32(
 /// getaddrinfo: the result list is rebuilt with the 32-byte x86 ADDRINFOA
 /// (flags, family, socktype, protocol, addrlen, canonname, addr, next),
 /// each node followed by its address. freeaddrinfo32 frees it.
-pub(super) extern "win64" fn getaddrinfo32(node: *const u8, service: *const u8, hints: *const u8, res: *mut u32) -> i32 {
+pub(super) extern "win64" fn getaddrinfo32(
+    node: *const u8,
+    service: *const u8,
+    hints: *const u8,
+    res: *mut u32,
+) -> i32 {
     if res.is_null() {
         return 10014; // WSAEFAULT
     }
@@ -304,19 +317,43 @@ fn wsabufs(bufs: *const u8, count: u32) -> Vec<u64> {
     out
 }
 
-pub(super) extern "win64" fn WSARecv32(s: u64, bufs: *const u8, count: u32, got: *mut u32, f: *mut u32, ov: *mut u8, cr: u64) -> i32 {
+pub(super) extern "win64" fn WSARecv32(
+    s: u64,
+    bufs: *const u8,
+    count: u32,
+    got: *mut u32,
+    f: *mut u32,
+    ov: *mut u8,
+    cr: u64,
+) -> i32 {
     let b = wsabufs(bufs, count);
     crate::ws2_32::WSARecv(s, b.as_ptr() as *const u8, count, got, f, ov, cr)
 }
 
-pub(super) extern "win64" fn WSASend32(s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, ov: *mut u8, cr: u64) -> i32 {
+pub(super) extern "win64" fn WSASend32(
+    s: u64,
+    bufs: *const u8,
+    count: u32,
+    sent: *mut u32,
+    f: u32,
+    ov: *mut u8,
+    cr: u64,
+) -> i32 {
     let b = wsabufs(bufs, count);
     crate::ws2_32::WSASend(s, b.as_ptr() as *const u8, count, sent, f, ov, cr)
 }
 
 #[allow(clippy::too_many_arguments)] // the Win32 signature
 pub(super) extern "win64" fn WSARecvFrom32(
-    s: u64, bufs: *const u8, count: u32, got: *mut u32, f: *mut u32, from: *mut u8, fromlen: *mut i32, ov: *mut u8, cr: u64,
+    s: u64,
+    bufs: *const u8,
+    count: u32,
+    got: *mut u32,
+    f: *mut u32,
+    from: *mut u8,
+    fromlen: *mut i32,
+    ov: *mut u8,
+    cr: u64,
 ) -> i32 {
     let b = wsabufs(bufs, count);
     crate::ws2_32::WSARecvFrom(s, b.as_ptr() as *const u8, count, got, f, from, fromlen, ov, cr)
@@ -324,7 +361,15 @@ pub(super) extern "win64" fn WSARecvFrom32(
 
 #[allow(clippy::too_many_arguments)] // the Win32 signature
 pub(super) extern "win64" fn WSASendTo32(
-    s: u64, bufs: *const u8, count: u32, sent: *mut u32, f: u32, to: *const u8, tolen: i32, ov: *mut u8, cr: u64,
+    s: u64,
+    bufs: *const u8,
+    count: u32,
+    sent: *mut u32,
+    f: u32,
+    to: *const u8,
+    tolen: i32,
+    ov: *mut u8,
+    cr: u64,
 ) -> i32 {
     let b = wsabufs(bufs, count);
     crate::ws2_32::WSASendTo(s, b.as_ptr() as *const u8, count, sent, f, to, tolen, ov, cr)

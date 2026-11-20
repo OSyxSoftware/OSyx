@@ -83,9 +83,13 @@ struct InterruptState {
 }
 impl InterruptState {
     const fn new() -> Self {
-        Self { base: AtomicU64::new(0), pending: [const { AtomicU32::new(0) }; 32],
+        Self {
+            base: AtomicU64::new(0),
+            pending: [const { AtomicU32::new(0) }; 32],
             waiters: [const { crate::waitq::WaitQueue::new() }; 32],
-            interrupts: AtomicUsize::new(0), slept: AtomicUsize::new(0) }
+            interrupts: AtomicUsize::new(0),
+            slept: AtomicUsize::new(0),
+        }
     }
 }
 static IRQ_STATE: [InterruptState; MAX_IRQ_CONTROLLERS] = [const { InterruptState::new() }; MAX_IRQ_CONTROLLERS];
@@ -93,12 +97,16 @@ static IRQ_STATE: [InterruptState; MAX_IRQ_CONTROLLERS] = [const { InterruptStat
 fn completion_interrupt(index: u64) {
     let Some(state) = IRQ_STATE.get(index as usize) else { return };
     let base = state.base.load(Ordering::Acquire);
-    if base == 0 { return; }
+    if base == 0 {
+        return;
+    }
     let m = Mmio(base);
     let ports = m.r32(HBA_IS);
     state.interrupts.fetch_add(1, Ordering::Relaxed);
     for port in 0..32 {
-        if ports & (1 << port) == 0 { continue; }
+        if ports & (1 << port) == 0 {
+            continue;
+        }
         let p = PORT_BASE + port as u64 * PORT_STRIDE;
         let status = m.r32(p + PX_IS);
         state.pending[port].fetch_or(status, Ordering::Release);
@@ -112,25 +120,39 @@ fn setup_interrupts(dev: &pci::Device, m: Mmio, implemented: u32) -> Option<usiz
     let index = CONTROLLERS.fetch_add(1, Ordering::Relaxed);
     let state = IRQ_STATE.get(index)?;
     for port in 0..32 {
-        if implemented & (1 << port) != 0 { m.w32(PORT_BASE + port * PORT_STRIDE + PX_IE, 0); }
+        if implemented & (1 << port) != 0 {
+            m.w32(PORT_BASE + port * PORT_STRIDE + PX_IE, 0);
+        }
     }
     state.base.store(m.0, Ordering::Release);
     let vector = crate::irq::allocate(completion_interrupt, index as u64)?;
     let (address, data) = crate::arch::apic::msi_message(vector);
-    let mode = if dev.enable_msix(address, data).is_ok() { Some("MSI-X") }
-        else if dev.enable_msi(address, data).is_ok() { Some("MSI") } else { None };
+    let mode = if dev.enable_msix(address, data).is_ok() {
+        Some("MSI-X")
+    } else if dev.enable_msi(address, data).is_ok() {
+        Some("MSI")
+    } else {
+        None
+    };
     if let Some(mode) = mode {
         m.w32(HBA_IS, u32::MAX);
         m.w32(HBA_GHC, m.r32(HBA_GHC) | GHC_IE);
         crate::kprintln!("ahci{index}: completion interrupts via {mode} on vector {vector:#x}");
         Some(index)
-    } else { crate::irq::free(vector); None }
+    } else {
+        crate::irq::free(vector);
+        None
+    }
 }
 
 pub fn log_stats() {
     for index in 0..CONTROLLERS.load(Ordering::Relaxed).min(MAX_IRQ_CONTROLLERS) {
         let s = &IRQ_STATE[index];
-        crate::kprintln!("ahci{index}: {} completion interrupts, {} completions after sleeping", s.interrupts.load(Ordering::Relaxed), s.slept.load(Ordering::Relaxed));
+        crate::kprintln!(
+            "ahci{index}: {} completion interrupts, {} completions after sleeping",
+            s.interrupts.load(Ordering::Relaxed),
+            s.slept.load(Ordering::Relaxed)
+        );
     }
 }
 
@@ -272,7 +294,13 @@ fn start(dev: &pci::Device) -> Result<Vec<Arc<dyn BlockDev>>, &'static str> {
         let name = if index < 26 { format!("sd{}", (b'a' + index as u8) as char) } else { format!("sd{index}") };
         match start_port(m, port, wide, name, interrupt_index) {
             Ok(disk) => {
-                crate::kprintln!("ahci: {}: {} MiB on port {} ({})", disk.name, disk.sectors >> 11, port, if disk.lba48 { "LBA48" } else { "LBA28" });
+                crate::kprintln!(
+                    "ahci: {}: {} MiB on port {} ({})",
+                    disk.name,
+                    disk.sectors >> 11,
+                    port,
+                    if disk.lba48 { "LBA48" } else { "LBA28" }
+                );
                 disks.push(Arc::new(disk) as Arc<dyn BlockDev>);
             }
             Err(e) => crate::kprintln!("ahci: port {}: disk not usable: {}", port, e),
@@ -281,7 +309,13 @@ fn start(dev: &pci::Device) -> Result<Vec<Arc<dyn BlockDev>>, &'static str> {
     Ok(disks)
 }
 
-fn start_port(m: Mmio, port: u32, wide: bool, name: String, interrupt_index: Option<usize>) -> Result<AhciDisk, &'static str> {
+fn start_port(
+    m: Mmio,
+    port: u32,
+    wide: bool,
+    name: String,
+    interrupt_index: Option<usize>,
+) -> Result<AhciDisk, &'static str> {
     let cmd_list = dma_frame(wide)?;
     let fis = dma_frame(wide)?;
     let table = dma_frame(wide)?;
@@ -306,7 +340,9 @@ fn start_port(m: Mmio, port: u32, wide: bool, name: String, interrupt_index: Opt
     m.w32(p + PX_FBU, (fis >> 32) as u32);
     m.w32(p + PX_IS, 0xFFFF_FFFF);
     m.w32(p + PX_SERR, 0xFFFF_FFFF);
-    if interrupt_index.is_some() { m.w32(p + PX_IE, 1 | IS_ERRORS); }
+    if interrupt_index.is_some() {
+        m.w32(p + PX_IE, 1 | IS_ERRORS);
+    }
     m.w32(p + PX_CMD, CMD_ST | CMD_FRE);
     let deadline = Deadline::after_ms(500);
     while m.r32(p + PX_CMD) & CMD_CR == 0 {
@@ -388,14 +424,26 @@ impl AhciDisk {
             for (i, chunk) in buf.chunks_mut(PAGE).enumerate() {
                 // SAFETY: as above; the device has finished with the frame.
                 unsafe {
-                    core::ptr::copy_nonoverlapping(phys_to_virt(g.data[i]) as *const u8, chunk.as_mut_ptr(), chunk.len());
+                    core::ptr::copy_nonoverlapping(
+                        phys_to_virt(g.data[i]) as *const u8,
+                        chunk.as_mut_ptr(),
+                        chunk.len(),
+                    );
                 }
             }
         }
         Ok(())
     }
 
-    fn run(&self, g: &mut Inner, command: u8, lba: u64, sectors: u16, len: usize, write: bool) -> Result<(), BlockError> {
+    fn run(
+        &self,
+        g: &mut Inner,
+        command: u8,
+        lba: u64,
+        sectors: u16,
+        len: usize,
+        write: bool,
+    ) -> Result<(), BlockError> {
         let m = self.mmio;
         let p = self.port_base();
         if g.failed {
@@ -408,7 +456,9 @@ impl AhciDisk {
         }
         m.w32(p + PX_IS, 0xFFFF_FFFF);
         m.w32(p + PX_SERR, 0xFFFF_FFFF);
-        if let Some(index) = self.interrupt_index { IRQ_STATE[index].pending[self.port as usize].store(0, Ordering::Release); }
+        if let Some(index) = self.interrupt_index {
+            IRQ_STATE[index].pending[self.port as usize].store(0, Ordering::Release);
+        }
 
         // Host-to-device register FIS (20 bytes).
         let mut f = [0u8; 20];
@@ -478,17 +528,27 @@ impl AhciDisk {
             }
             if deadline.expired() {
                 g.failed = true;
-                crate::kprintln!("ahci {}: command {:#04x} timed out (CI {:#x}, TFD {:#x}); disk disabled", self.name, command, ci, tfd);
+                crate::kprintln!(
+                    "ahci {}: command {:#04x} timed out (CI {:#x}, TFD {:#x}); disk disabled",
+                    self.name,
+                    command,
+                    ci,
+                    tfd
+                );
                 return Err(BlockError::Io);
             }
-            if let Some(index) = self.interrupt_index.filter(|_| timer::healthy() && crate::sched::current_tid() != 0 && crate::arch::cpu::interrupts_enabled()) {
+            if let Some(index) = self.interrupt_index.filter(|_| {
+                timer::healthy() && crate::sched::current_tid() != 0 && crate::arch::cpu::interrupts_enabled()
+            }) {
                 let state = &IRQ_STATE[index];
                 let mut checks = 0;
-                let result = crate::waitq::block_on(&[&state.waiters[self.port as usize]], Some(deadline.tick()), || {
-                    checks += 1;
-                    let done = m.r32(p + PX_CI) & 1 == 0 && m.r32(p + PX_TFD) & TFD_BSY == 0;
-                    (done || state.pending[self.port as usize].load(Ordering::Acquire) & IS_ERRORS != 0).then_some(())
-                });
+                let result =
+                    crate::waitq::block_on(&[&state.waiters[self.port as usize]], Some(deadline.tick()), || {
+                        checks += 1;
+                        let done = m.r32(p + PX_CI) & 1 == 0 && m.r32(p + PX_TFD) & TFD_BSY == 0;
+                        (done || state.pending[self.port as usize].load(Ordering::Acquire) & IS_ERRORS != 0)
+                            .then_some(())
+                    });
                 // A thread being killed, or a slice that ended, still has a
                 // command the controller owns: it waits on (the deadline
                 // above bounds it) instead of disabling the disk.
@@ -497,18 +557,28 @@ impl AhciDisk {
                     Err(osyx_abi::Errno::Interrupted) => crate::sched::yield_now(),
                     Err(_) => continue,
                 }
-                if checks > 2 { state.slept.fetch_add(1, Ordering::Relaxed); }
-                if state.pending[self.port as usize].load(Ordering::Acquire) & IS_ERRORS != 0 { break; }
-            } else { timer::pause_tick(); }
+                if checks > 2 {
+                    state.slept.fetch_add(1, Ordering::Relaxed);
+                }
+                if state.pending[self.port as usize].load(Ordering::Acquire) & IS_ERRORS != 0 {
+                    break;
+                }
+            } else {
+                timer::pause_tick();
+            }
         }
         let mut is = m.r32(p + PX_IS);
-        if let Some(index) = self.interrupt_index { is |= IRQ_STATE[index].pending[self.port as usize].swap(0, Ordering::AcqRel); }
+        if let Some(index) = self.interrupt_index {
+            is |= IRQ_STATE[index].pending[self.port as usize].swap(0, Ordering::AcqRel);
+        }
         let tfd = m.r32(p + PX_TFD);
         m.w32(p + PX_IS, is);
         if tfd & TFD_ERR != 0 || is & IS_ERRORS != 0 {
             // An error interrupt can arrive before slot 0 is retired. Do not
             // overwrite DMA buffers while the controller may still use them.
-            if m.r32(p + PX_CI) & 1 != 0 { g.failed = true; }
+            if m.r32(p + PX_CI) & 1 != 0 {
+                g.failed = true;
+            }
             crate::kprintln!("ahci {}: command {:#04x} failed (TFD {:#x}, IS {:#x})", self.name, command, tfd, is);
             return Err(BlockError::Io);
         }
@@ -522,7 +592,12 @@ impl BlockDev for AhciDisk {
     }
 
     fn describe(&self) -> String {
-        format!("SATA disk on AHCI port {} ({}{} MiB)", self.port, self.sectors >> 11, if self.lba48 { ", LBA48" } else { "" })
+        format!(
+            "SATA disk on AHCI port {} ({}{} MiB)",
+            self.port,
+            self.sectors >> 11,
+            if self.lba48 { ", LBA48" } else { "" }
+        )
     }
 
     fn sector_count(&self) -> u64 {

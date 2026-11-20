@@ -5,8 +5,8 @@
 //! at the first frame outside a PE image. Frame-based exception dispatch
 //! (`RtlUnwindEx`) is not implemented here yet.
 #![allow(non_snake_case)]
-use crate::{kernel32::fail, loader, objects};
 use crate::error::*;
+use crate::{kernel32::fail, loader, objects};
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use os_std::sync::Mutex;
@@ -124,7 +124,9 @@ pub fn lookup(pc: u64) -> Option<(u64, u64)> {
         return Some((e, base));
     }
     let d = DYNAMIC.lock().unwrap();
-    d.iter().filter(|t| pc >= t.low && pc < t.high).find_map(|t| search(t.table, t.count, t.base, pc).map(|e| (e, t.base)))
+    d.iter()
+        .filter(|t| pc >= t.low && pc < t.high)
+        .find_map(|t| search(t.table, t.count, t.base, pc).map(|e| (e, t.base)))
 }
 
 extern "win64" fn RtlLookupFunctionEntry(pc: u64, base: *mut u64, _history: u64) -> u64 {
@@ -165,7 +167,14 @@ const STATUS_INVALID_PARAMETER: u32 = 0xC000_000D;
 /// A growable table (JIT code): its range is given up front and entries
 /// are appended in place, so lookups read the current count. The handle
 /// is the table's address.
-extern "win64" fn RtlAddGrowableFunctionTable(handle: *mut u64, table: u64, count: u32, max: u32, low: u64, high: u64) -> u32 {
+extern "win64" fn RtlAddGrowableFunctionTable(
+    handle: *mut u64,
+    table: u64,
+    count: u32,
+    max: u32,
+    low: u64,
+    high: u64,
+) -> u32 {
     if handle.is_null() || table == 0 || count > max || low >= high {
         return STATUS_INVALID_PARAMETER;
     }
@@ -320,7 +329,13 @@ fn run_epilog(ctx: u64, ptrs: u64) {
 /// Size in slots of the unwind code at `i`.
 fn code_slots(op: u8, info: u8) -> usize {
     match op {
-        UWOP_ALLOC_LARGE => if info == 0 { 2 } else { 3 },
+        UWOP_ALLOC_LARGE => {
+            if info == 0 {
+                2
+            } else {
+                3
+            }
+        }
         UWOP_SAVE_NONVOL | UWOP_SAVE_XMM128 | UWOP_EPILOG => 2,
         UWOP_SAVE_NONVOL_FAR | UWOP_SAVE_XMM128_FAR => 3,
         _ => 1,
@@ -330,7 +345,16 @@ fn code_slots(op: u8, info: u8) -> usize {
 /// Unwinds one frame of `ctx`. Returns the language handler (0 if none
 /// applies) and sets the handler data and establisher frame.
 #[allow(clippy::too_many_arguments)]
-pub fn virtual_unwind(kind: u32, base: u64, pc: u64, function: u64, ctx: u64, data: *mut u64, frame_out: *mut u64, ptrs: u64) -> u64 {
+pub fn virtual_unwind(
+    kind: u32,
+    base: u64,
+    pc: u64,
+    function: u64,
+    ctx: u64,
+    data: *mut u64,
+    frame_out: *mut u64,
+    ptrs: u64,
+) -> u64 {
     let mut f: Function = rd(function);
     let mut info = base + f.unwind as u64;
     let mut offset = pc.wrapping_sub(base + f.begin as u64);

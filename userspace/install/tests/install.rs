@@ -53,8 +53,30 @@ struct MemSource {
 
 impl MemSource {
     fn new() -> MemSource {
-        let mut s = MemSource { entries: BTreeMap::new(), data: BTreeMap::new(), fail_at: None, boot_calls: 0, empty_boot: None, oversize_at: None, extra_boot: None, lower_cmdline: false, fail_list: false, long_cmdline: false };
-        for (d, mode, uid) in [("/bin", 0o755, 0), ("/etc", 0o755, 0), ("/etc/osyx", 0o755, 0), ("/dev", 0o755, 0), ("/tmp", 0o1777, 0), ("/home", 0o755, 0), ("/home/user", 0o755, 1000), ("/system", 0o755, 0), ("/system/share", 0o755, 0), ("/system/share/osyx-setup", 0o755, 0)] {
+        let mut s = MemSource {
+            entries: BTreeMap::new(),
+            data: BTreeMap::new(),
+            fail_at: None,
+            boot_calls: 0,
+            empty_boot: None,
+            oversize_at: None,
+            extra_boot: None,
+            lower_cmdline: false,
+            fail_list: false,
+            long_cmdline: false,
+        };
+        for (d, mode, uid) in [
+            ("/bin", 0o755, 0),
+            ("/etc", 0o755, 0),
+            ("/etc/osyx", 0o755, 0),
+            ("/dev", 0o755, 0),
+            ("/tmp", 0o1777, 0),
+            ("/home", 0o755, 0),
+            ("/home/user", 0o755, 1000),
+            ("/system", 0o755, 0),
+            ("/system/share", 0o755, 0),
+            ("/system/share/osyx-setup", 0o755, 0),
+        ] {
             s.dir(d, mode, uid);
         }
         s.file("/bin/init", &pattern(700_000, 1), 0o755);
@@ -64,7 +86,10 @@ impl MemSource {
         s.file("/home/user/notes.txt", b"hello", 0o644);
         s.file("/dev/should-not-copy", b"x", 0o644);
         s.file("/system/share/osyx-setup/KERNEL.ELF", &pattern(2_000_000, 3), 0o644);
-        s.entries.insert("/bin/sh".into(), SourceEntry { name: "sh".into(), kind: Kind::Symlink("axis".into()), mode: 0o777, uid: 0, gid: 0, size: 4 });
+        s.entries.insert(
+            "/bin/sh".into(),
+            SourceEntry { name: "sh".into(), kind: Kind::Symlink("axis".into()), mode: 0o777, uid: 0, gid: 0, size: 4 },
+        );
         s
     }
     fn dir(&mut self, p: &str, mode: u16, uid: u32) {
@@ -73,14 +98,17 @@ impl MemSource {
     }
     fn file(&mut self, p: &str, data: &[u8], mode: u16) {
         let name = p.rsplit('/').next().unwrap().to_string();
-        self.entries.insert(p.into(), SourceEntry { name, kind: Kind::File, mode, uid: 0, gid: 0, size: data.len() as u64 });
+        self.entries
+            .insert(p.into(), SourceEntry { name, kind: Kind::File, mode, uid: 0, gid: 0, size: data.len() as u64 });
         self.data.insert(p.into(), data.to_vec());
     }
 }
 
 impl Source for MemSource {
     fn list(&mut self, path: &str) -> std::result::Result<Vec<SourceEntry>, String> {
-        if self.fail_list { return Err("simulated directory read error".into()); }
+        if self.fail_list {
+            return Err("simulated directory read error".into());
+        }
         let prefix = if path == "/" { "/".to_string() } else { format!("{path}/") };
         Ok(self
             .entries
@@ -104,7 +132,9 @@ impl Source for MemSource {
     }
     fn boot_files(&mut self) -> std::result::Result<Vec<(String, Vec<u8>)>, String> {
         self.boot_calls += 1;
-        if self.boot_calls > 1 { return Err("boot files requested twice".into()); }
+        if self.boot_calls > 1 {
+            return Err("boot files requested twice".into());
+        }
         let mut files = vec![
             ("EFI/BOOT/BOOTX64.EFI".into(), pattern(150_000, 7)),
             ("EFI/OSYX/KERNEL.ELF".into(), self.data["/system/share/osyx-setup/KERNEL.ELF"].clone()),
@@ -112,12 +142,20 @@ impl Source for MemSource {
         ];
         if let Some(path) = &self.empty_boot {
             for (name, data) in &mut files {
-                if name == path { data.clear(); }
+                if name == path {
+                    data.clear();
+                }
             }
         }
-        if let Some(path) = &self.extra_boot { files.push((path.clone(), vec![1])); }
-        if self.lower_cmdline { files[2].0 = "efi/osyx/cmdline.txt".into(); }
-        if self.long_cmdline { files[2].1 = vec![b'x'; 4097]; }
+        if let Some(path) = &self.extra_boot {
+            files.push((path.clone(), vec![1]));
+        }
+        if self.lower_cmdline {
+            files[2].0 = "efi/osyx/cmdline.txt".into();
+        }
+        if self.long_cmdline {
+            files[2].1 = vec![b'x'; 4097];
+        }
         Ok(files)
     }
 }
@@ -162,12 +200,23 @@ fn config() -> Config {
 
 #[test]
 fn invalid_plan_never_writes_disk() {
-    struct GuardDisk { writes: usize }
+    struct GuardDisk {
+        writes: usize,
+    }
     impl Disk for GuardDisk {
-        fn sectors(&self) -> u64 { 2_000_000 }
-        fn read(&mut self, _: u64, _: &mut [u8]) -> std::result::Result<(), String> { Err("unexpected read".into()) }
-        fn write(&mut self, _: u64, _: &[u8]) -> std::result::Result<(), String> { self.writes += 1; Err("unexpected write".into()) }
-        fn flush(&mut self) -> std::result::Result<(), String> { Err("unexpected flush".into()) }
+        fn sectors(&self) -> u64 {
+            2_000_000
+        }
+        fn read(&mut self, _: u64, _: &mut [u8]) -> std::result::Result<(), String> {
+            Err("unexpected read".into())
+        }
+        fn write(&mut self, _: u64, _: &[u8]) -> std::result::Result<(), String> {
+            self.writes += 1;
+            Err("unexpected write".into())
+        }
+        fn flush(&mut self) -> std::result::Result<(), String> {
+            Err("unexpected flush".into())
+        }
     }
     let good = plan(2_000_000, Layout::Automatic).unwrap();
     let cases = [
@@ -178,21 +227,30 @@ fn invalid_plan_never_writes_disk() {
     ];
     for p in cases {
         let mut disk = GuardDisk { writes: 0 };
-        assert!(matches!(install(&mut disk, &p, &mut MemSource::new(), &config(), &mut Log::default()), Err(Error::Invalid(_))));
+        assert!(matches!(
+            install(&mut disk, &p, &mut MemSource::new(), &config(), &mut Log::default()),
+            Err(Error::Invalid(_))
+        ));
         assert_eq!(disk.writes, 0);
     }
     for path in ["EFI/BOOT/BOOTX64.EFI", "EFI/OSYX/KERNEL.ELF"] {
         let mut disk = GuardDisk { writes: 0 };
         let mut source = MemSource::new();
         source.empty_boot = Some(path.into());
-        assert!(matches!(install(&mut disk, &good, &mut source, &config(), &mut Log::default()), Err(Error::Source(_))));
+        assert!(matches!(
+            install(&mut disk, &good, &mut source, &config(), &mut Log::default()),
+            Err(Error::Source(_))
+        ));
         assert_eq!(disk.writes, 0);
     }
     for path in ["EFI/BOOT/../BOOT/BOOTX64.EFI", "efi/osyx/kernel.elf", "/EFI/extra", "EFI\\extra", "EFI//extra"] {
         let mut disk = GuardDisk { writes: 0 };
         let mut source = MemSource::new();
         source.extra_boot = Some(path.into());
-        assert!(matches!(install(&mut disk, &good, &mut source, &config(), &mut Log::default()), Err(Error::Source(_))));
+        assert!(matches!(
+            install(&mut disk, &good, &mut source, &config(), &mut Log::default()),
+            Err(Error::Source(_))
+        ));
         assert_eq!(disk.writes, 0);
     }
     for overflow in [false, true] {
@@ -203,7 +261,10 @@ fn invalid_plan_never_writes_disk() {
         } else {
             source.fail_list = true;
         }
-        assert!(matches!(install(&mut disk, &good, &mut source, &config(), &mut Log::default()), Err(Error::Source(_))));
+        assert!(matches!(
+            install(&mut disk, &good, &mut source, &config(), &mut Log::default()),
+            Err(Error::Source(_))
+        ));
         assert_eq!(disk.writes, 0);
     }
     let mut disk = GuardDisk { writes: 0 };
@@ -245,7 +306,11 @@ fn installs_a_bootable_system_on_a_whole_disk() {
     keep("installed.img", &disk);
 
     let p = plan;
-    let mut fs = Ext4::mount(Window::new(&mut disk, p.root_first, p.root_sectors), MountOptions { read_only: true, clock: None }).unwrap();
+    let mut fs = Ext4::mount(
+        Window::new(&mut disk, p.root_first, p.root_sectors),
+        MountOptions { read_only: true, clock: None },
+    )
+    .unwrap();
     assert_eq!(read_file(&mut fs, "/bin/init"), pattern(700_000, 1));
     assert_eq!(read_file(&mut fs, "/etc/hostname"), b"workstation\n");
     let sh = fs.resolve("/bin/sh").unwrap();
@@ -339,7 +404,10 @@ fn an_interrupted_installation_is_not_bootable() {
     drop(esp);
     let mut bad_source = MemSource::new();
     bad_source.oversize_at = Some("/etc/hostname".into());
-    assert!(matches!(install(&mut disk, &plan, &mut bad_source, &config(), &mut Log::default()), Err(Error::Source(_))));
+    assert!(matches!(
+        install(&mut disk, &plan, &mut bad_source, &config(), &mut Log::default()),
+        Err(Error::Source(_))
+    ));
     let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
     assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err());
     drop(esp);
@@ -349,10 +417,18 @@ fn an_interrupted_installation_is_not_bootable() {
     let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
     assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err());
     drop(esp);
-    struct FailLoader<'a> { disk: &'a mut Vec<u8>, fail: bool, corrupt: bool }
+    struct FailLoader<'a> {
+        disk: &'a mut Vec<u8>,
+        fail: bool,
+        corrupt: bool,
+    }
     impl Disk for FailLoader<'_> {
-        fn sectors(&self) -> u64 { self.disk.sectors() }
-        fn read(&mut self, lba: u64, buf: &mut [u8]) -> std::result::Result<(), String> { Disk::read(self.disk, lba, buf) }
+        fn sectors(&self) -> u64 {
+            self.disk.sectors()
+        }
+        fn read(&mut self, lba: u64, buf: &mut [u8]) -> std::result::Result<(), String> {
+            Disk::read(self.disk, lba, buf)
+        }
         fn write(&mut self, lba: u64, buf: &[u8]) -> std::result::Result<(), String> {
             if self.fail && buf.len() == 512 && buf == pattern(512, 7) {
                 self.fail = false;
@@ -365,7 +441,9 @@ fn an_interrupted_installation_is_not_bootable() {
             }
             Disk::write(self.disk, lba, buf)
         }
-        fn flush(&mut self) -> std::result::Result<(), String> { Ok(()) }
+        fn flush(&mut self) -> std::result::Result<(), String> {
+            Ok(())
+        }
     }
     let mut failing = FailLoader { disk: &mut disk, fail: true, corrupt: false };
     assert!(install(&mut failing, &plan, &mut MemSource::new(), &config(), &mut Log::default()).is_err());
@@ -374,7 +452,10 @@ fn an_interrupted_installation_is_not_bootable() {
     assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err());
     drop(esp);
     let mut corrupting = FailLoader { disk: &mut disk, fail: true, corrupt: true };
-    assert!(matches!(install(&mut corrupting, &plan, &mut MemSource::new(), &config(), &mut Log::default()), Err(Error::Verify(_))));
+    assert!(matches!(
+        install(&mut corrupting, &plan, &mut MemSource::new(), &config(), &mut Log::default()),
+        Err(Error::Verify(_))
+    ));
     assert!(!corrupting.fail, "the loader write must have been corrupted");
     let mut esp = osyx_fat::FileSystem::mount(Window::new(&mut disk, plan.esp_first, plan.esp_sectors)).unwrap();
     assert!(esp.metadata("/EFI/BOOT/BOOTX64.EFI").is_err());

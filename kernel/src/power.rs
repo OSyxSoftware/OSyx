@@ -78,7 +78,12 @@ pub fn request(reboot: bool) -> Result<u64, Errno> {
     // (PM1a, PM1b, SLP_TYPa, SLP_TYPb) from the tables, else the chipset.
     let acpi = crate::acpi::power();
     let target = match &acpi {
-        Some(p) => Some((p.pm1a_cnt, p.pm1b_cnt, p.s5.map_or(SLP_TYP_S5, |s| s.0 as u16), p.s5.map_or(SLP_TYP_S5, |s| s.1 as u16))),
+        Some(p) => Some((
+            p.pm1a_cnt,
+            p.pm1b_cnt,
+            p.s5.map_or(SLP_TYP_S5, |s| s.0 as u16),
+            p.s5.map_or(SLP_TYP_S5, |s| s.1 as u16),
+        )),
         None => pm1a_control().map(|port| (port, None, SLP_TYP_S5, SLP_TYP_S5)),
     };
     shutdown_volumes("power off");

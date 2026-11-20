@@ -58,9 +58,9 @@ extern "win64" fn GetProcessAffinityMask(h: u64, process: *mut u64, system: *mut
     }
     // SAFETY: the caller supplies two writable DWORD_PTR outputs.
     unsafe {
-        let count=os_sys::cpu_info().map_or(1, |(count,_)|count);
-        *process = (1u64<<count)-1;
-        *system = (1u64<<count)-1;
+        let count = os_sys::cpu_info().map_or(1, |(count, _)| count);
+        *process = (1u64 << count) - 1;
+        *system = (1u64 << count) - 1;
     }
     1
 }
@@ -96,9 +96,11 @@ fn thread_of(h: u64) -> Option<(u32, Option<alloc::sync::Arc<objects::ThreadObj>
         _ if h == objects::CURRENT_THREAD => {
             let tid = kernel32::GetThreadId(h);
             let obj = kernel32::thread_object(tid).or_else(|| {
-                objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)).and_then(|o| match o {
-                    Object::Thread(t) => Some(t),
-                    _ => None,
+                objects::find(|o| matches!(o, Object::Thread(t) if t.tid.load(Ordering::SeqCst) == tid)).and_then(|o| {
+                    match o {
+                        Object::Thread(t) => Some(t),
+                        _ => None,
+                    }
                 })
             });
             Some((tid, obj))
@@ -230,7 +232,8 @@ pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
         let Ok(prev) = suspend(osyx_abi::suspend::SUSPEND) else { break };
         // Stopped for certain (the kernel's suspend waits a few ticks at
         // most), holding no lock and with the allocator free.
-        let stopped = os_sys::thread_state(tid as u64, &mut state).is_ok_and(|_| state[0] == osyx_abi::thread_state::BLOCKED);
+        let stopped =
+            os_sys::thread_state(tid as u64, &mut state).is_ok_and(|_| state[0] == osyx_abi::thread_state::BLOCKED);
         let held = os_std::sync::locks_held_by(tid as u64);
         let busy = os_std::sync::allocator_busy();
         if stopped && held == 0 && !busy {
@@ -275,7 +278,10 @@ pub(crate) extern "win64" fn TerminateThread(h: u64, code: u32) -> i32 {
         run_on(prev, &mut dropped);
         os_std::thread::sleep(core::time::Duration::from_millis(1));
     }
-    os_std::eprintln!("winrun: TerminateThread: thread {tid} {}", if ended { "ended itself on waking" } else { "killed" });
+    os_std::eprintln!(
+        "winrun: TerminateThread: thread {tid} {}",
+        if ended { "ended itself on waking" } else { "killed" }
+    );
     if !ended {
         match os_sys::thread_kill(tid as u64, code as i32) {
             Ok(_) => {}
@@ -335,8 +341,8 @@ extern "win64" fn GetThreadGroupAffinity(h: u64, out: *mut u8) -> i32 {
     // SAFETY: the caller's 16-byte GROUP_AFFINITY.
     unsafe {
         core::ptr::write_bytes(out, 0, 16);
-        let tid=kernel32::GetThreadId(h);
-        let mask=os_sys::thread_affinity(tid as u64,0).unwrap_or(1);
+        let tid = kernel32::GetThreadId(h);
+        let mask = os_sys::thread_affinity(tid as u64, 0).unwrap_or(1);
         teb::put(out as u64, 0, mask);
     }
     1
@@ -412,7 +418,11 @@ extern "win64" fn GetPriorityClass(h: u64) -> u32 {
         return fail(ERROR_INVALID_HANDLE, 0);
     }
     // Another process's class lives in its own winrun.
-    if crate::process::handle_pid(h) == Some(kernel32::pid()) { PRIORITY_CLASS.load(Ordering::Relaxed) } else { 0x20 }
+    if crate::process::handle_pid(h) == Some(kernel32::pid()) {
+        PRIORITY_CLASS.load(Ordering::Relaxed)
+    } else {
+        0x20
+    }
 }
 
 /// SetProcessInformation settings OSyx's memory manager and scheduler have
@@ -446,7 +456,8 @@ extern "win64" fn SetProcessInformation(h: u64, class: u32, info: *const u8, siz
         }
         PROCESS_POWER_THROTTLING if size == 12 => {
             // SAFETY: the caller's 12-byte structure.
-            let (version, control, state): (u32, u32, u32) = unsafe { (teb::get(p, 0), teb::get(p, 4), teb::get(p, 8)) };
+            let (version, control, state): (u32, u32, u32) =
+                unsafe { (teb::get(p, 0), teb::get(p, 4), teb::get(p, 8)) };
             // EXECUTION_SPEED 1, IGNORE_TIMER_RESOLUTION 4.
             if version != 1 || control & !5 != 0 || state & !control != 0 {
                 return fail(ERROR_INVALID_PARAMETER, 0);
@@ -461,7 +472,9 @@ extern "win64" fn SetProcessInformation(h: u64, class: u32, info: *const u8, siz
             }
             LEAP_SECONDS.store(flags, Ordering::Relaxed);
         }
-        PROCESS_MEMORY_PRIORITY | PROCESS_POWER_THROTTLING | PROCESS_LEAP_SECOND_INFO => return fail(ERROR_BAD_LENGTH_P, 0),
+        PROCESS_MEMORY_PRIORITY | PROCESS_POWER_THROTTLING | PROCESS_LEAP_SECOND_INFO => {
+            return fail(ERROR_BAD_LENGTH_P, 0)
+        }
         _ => return fail(ERROR_INVALID_PARAMETER, 0),
     }
     1
@@ -487,7 +500,9 @@ extern "win64" fn GetProcessInformation(h: u64, class: u32, info: *mut u8, size:
             }
         }
         PROCESS_LEAP_SECOND_INFO if size == 8 => unsafe { teb::put(p, 0, [LEAP_SECONDS.load(Ordering::Relaxed), 0]) },
-        PROCESS_MEMORY_PRIORITY | PROCESS_POWER_THROTTLING | PROCESS_LEAP_SECOND_INFO => return fail(ERROR_BAD_LENGTH_P, 0),
+        PROCESS_MEMORY_PRIORITY | PROCESS_POWER_THROTTLING | PROCESS_LEAP_SECOND_INFO => {
+            return fail(ERROR_BAD_LENGTH_P, 0)
+        }
         _ => return fail(ERROR_INVALID_PARAMETER, 0),
     }
     1
@@ -545,9 +560,12 @@ extern "win64" fn GetLogicalProcessorInformation(buf: *mut u8, len: *mut u32) ->
     if len.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let count=os_sys::cpu_info().map_or(1, |(count,_)|count);
-    let mut entries=alloc::vec![(RELATION_PROCESSOR_PACKAGE,(1u64<<count)-1),(RELATION_NUMA_NODE,(1u64<<count)-1)];
-    for cpu in 0..count {entries.push((RELATION_PROCESSOR_CORE,1u64<<cpu));}
+    let count = os_sys::cpu_info().map_or(1, |(count, _)| count);
+    let mut entries =
+        alloc::vec![(RELATION_PROCESSOR_PACKAGE, (1u64 << count) - 1), (RELATION_NUMA_NODE, (1u64 << count) - 1)];
+    for cpu in 0..count {
+        entries.push((RELATION_PROCESSOR_CORE, 1u64 << cpu));
+    }
     let need = (entries.len() * 32) as u32;
     // SAFETY: the caller's in/out length and buffer.
     unsafe {
@@ -556,7 +574,7 @@ extern "win64" fn GetLogicalProcessorInformation(buf: *mut u8, len: *mut u32) ->
             return fail(ERROR_INSUFFICIENT_BUFFER, 0);
         }
         core::ptr::write_bytes(buf, 0, need as usize);
-        for (i, (r,mask)) in entries.iter().enumerate() {
+        for (i, (r, mask)) in entries.iter().enumerate() {
             let e = buf as u64 + i as u64 * 32;
             teb::put(e, 0, *mask);
             teb::put(e, 8, *r);
@@ -567,24 +585,30 @@ extern "win64" fn GetLogicalProcessorInformation(buf: *mut u8, len: *mut u32) ->
 }
 
 /// SYSTEM_CPU_SET_INFORMATION (32 bytes): the one CPU set, id 0x100.
-extern "win64" fn GetSystemCpuSetInformation(buf: *mut u8, len: u32, returned: *mut u32, process: u64, flags: u32) -> i32 {
+extern "win64" fn GetSystemCpuSetInformation(
+    buf: *mut u8,
+    len: u32,
+    returned: *mut u32,
+    process: u64,
+    flags: u32,
+) -> i32 {
     if returned.is_null() || flags != 0 || (process != 0 && !is_process(process)) {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     // SAFETY: the caller's out pointer and buffer of `len` bytes.
     unsafe {
-        let count=os_sys::cpu_info().map_or(1, |(count,_)|count);
-        *returned = 32*count;
-        if buf.is_null() || len < 32*count {
+        let count = os_sys::cpu_info().map_or(1, |(count, _)| count);
+        *returned = 32 * count;
+        if buf.is_null() || len < 32 * count {
             return fail(ERROR_INSUFFICIENT_BUFFER, 0);
         }
-        core::ptr::write_bytes(buf, 0, (32*count) as usize);
+        core::ptr::write_bytes(buf, 0, (32 * count) as usize);
         for cpu in 0..count {
-            let p=buf as u64+cpu as u64*32;
+            let p = buf as u64 + cpu as u64 * 32;
             teb::put(p, 0, 32u32);
-            teb::put(p, 8, 0x100u32+cpu);
-            teb::put(p,14,cpu as u8);
-            teb::put(p,15,cpu as u8);
+            teb::put(p, 8, 0x100u32 + cpu);
+            teb::put(p, 14, cpu as u8);
+            teb::put(p, 15, cpu as u8);
         }
     }
     1
@@ -942,7 +966,13 @@ extern "win64" fn K32GetPerformanceInfo(out: *mut u8, cb: u32) -> i32 {
 /// times (1), whether it is the process's last thread (12), whether it has
 /// I/O pending (16, never: I/O completes in the call or in its own thread)
 /// and whether it has ended (20).
-extern "win64" fn NtQueryInformationThread(h: u64, class: u32, buf: *mut u8, len: u32, ret: *mut u32) -> crate::error::NtStatus {
+extern "win64" fn NtQueryInformationThread(
+    h: u64,
+    class: u32,
+    buf: *mut u8,
+    len: u32,
+    ret: *mut u32,
+) -> crate::error::NtStatus {
     let Some((tid, obj)) = thread_of(h) else { return STATUS_INVALID_HANDLE };
     let need: u32 = match class {
         0 => 48,

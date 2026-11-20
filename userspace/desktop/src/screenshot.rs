@@ -33,7 +33,11 @@ pub fn encode_png(pixels: &[u32], width: u32, height: u32) -> Vec<u8> {
         let mut prev = [0u8; 3];
         for &p in row {
             let rgb = [(p >> 16) as u8, (p >> 8) as u8, p as u8];
-            raw.extend_from_slice(&[rgb[0].wrapping_sub(prev[0]), rgb[1].wrapping_sub(prev[1]), rgb[2].wrapping_sub(prev[2])]);
+            raw.extend_from_slice(&[
+                rgb[0].wrapping_sub(prev[0]),
+                rgb[1].wrapping_sub(prev[1]),
+                rgb[2].wrapping_sub(prev[2]),
+            ]);
             prev = rgb;
         }
     }

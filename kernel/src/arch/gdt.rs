@@ -72,21 +72,30 @@ impl CpuTables {
     const fn new() -> Self {
         Self {
             stacks: [const { Stack([0; IST_STACK_SIZE]) }; 3],
-            tss: Tss { _reserved0: 0, rsp: [0;3], _reserved1: 0, ist: [0;7], _reserved2: 0, _reserved3: 0, iomap_base: size_of::<Tss>() as u16 },
+            tss: Tss {
+                _reserved0: 0,
+                rsp: [0; 3],
+                _reserved1: 0,
+                ist: [0; 7],
+                _reserved2: 0,
+                _reserved3: 0,
+                iomap_base: size_of::<Tss>() as u16,
+            },
             gdt: [
-                0,                              // 0x00 null
-                0x00AF_9A00_0000_FFFF,          // 0x08 KERNEL_CS
-                0x00CF_9200_0000_FFFF,          // 0x10 KERNEL_DS
-                0x00CF_F200_0000_FFFF,          // 0x18 USER_DS
-                0x00AF_FA00_0000_FFFF,          // 0x20 USER_CS (L=1)
-                0, 0,                           // 0x28 TSS (low, high), filled in init_cpu
-                wow64::code32_descriptor(),     // 0x38 USER_CS32 (D=1, L=0)
-                wow64::data32_descriptor(0),    // 0x40 USER_FS32, base per thread
+                0,                     // 0x00 null
+                0x00AF_9A00_0000_FFFF, // 0x08 KERNEL_CS
+                0x00CF_9200_0000_FFFF, // 0x10 KERNEL_DS
+                0x00CF_F200_0000_FFFF, // 0x18 USER_DS
+                0x00AF_FA00_0000_FFFF, // 0x20 USER_CS (L=1)
+                0,
+                0,                           // 0x28 TSS (low, high), filled in init_cpu
+                wow64::code32_descriptor(),  // 0x38 USER_CS32 (D=1, L=0)
+                wow64::data32_descriptor(0), // 0x40 USER_FS32, base per thread
             ],
         }
     }
 }
-static mut TABLES: [CpuTables;crate::smp::MAX_CPUS] = [const { CpuTables::new() };crate::smp::MAX_CPUS];
+static mut TABLES: [CpuTables; crate::smp::MAX_CPUS] = [const { CpuTables::new() }; crate::smp::MAX_CPUS];
 
 /// Sets the stack the CPU switches to when an interrupt or exception arrives
 /// while running in ring 3 (TSS.RSP0).
@@ -110,7 +119,9 @@ struct Pointer {
 ///
 /// # Safety
 /// Must be called once, on the boot CPU, before interrupts are enabled.
-pub unsafe fn init() { init_cpu(0); }
+pub unsafe fn init() {
+    init_cpu(0);
+}
 
 /// # Safety
 /// Each logical CPU calls this once with a distinct slot, interrupts off.

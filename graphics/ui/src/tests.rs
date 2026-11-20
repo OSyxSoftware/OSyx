@@ -189,7 +189,10 @@ fn list_selection_activation_and_keyboard() {
     assert_eq!(l.event(&d, true), Response::Changed);
     l.event(&u, true);
     assert_eq!(l.selected(), Some(1));
-    assert_eq!(l.event(&Event::PointerDown { x: 50, y: 28 + 45, button: button::LEFT, clicks: 2 }, true), Response::Activated(1));
+    assert_eq!(
+        l.event(&Event::PointerDown { x: 50, y: 28 + 45, button: button::LEFT, clicks: 2 }, true),
+        Response::Activated(1)
+    );
     assert_eq!(l.event(&key_down(key::DOWN, None, 0), true), Response::Changed);
     assert_eq!(l.selected(), Some(2));
     l.event(&key_down(key::END, None, 0), true);
@@ -204,7 +207,10 @@ fn list_selection_activation_and_keyboard() {
     // A click below the last row clears the selection.
     let mut short = list_with(2);
     short.select(Some(1));
-    assert_eq!(short.event(&Event::PointerDown { x: 50, y: 28 + 140, button: button::LEFT, clicks: 1 }, true), Response::Changed);
+    assert_eq!(
+        short.event(&Event::PointerDown { x: 50, y: 28 + 140, button: button::LEFT, clicks: 1 }, true),
+        Response::Changed
+    );
     assert_eq!(short.selected(), None);
 }
 
@@ -246,7 +252,11 @@ fn scroll_thumb_drag_maps_to_offset() {
 #[test]
 fn menu_keyboard_and_pointer() {
     let fonts = Fonts::load();
-    let mut items = vec![MenuItem::new("Open Terminal", Some(Icon::Terminal)), MenuItem::new("Disabled", None), MenuItem::new("Files", None)];
+    let mut items = vec![
+        MenuItem::new("Open Terminal", Some(Icon::Terminal)),
+        MenuItem::new("Disabled", None),
+        MenuItem::new("Files", None),
+    ];
     items[1].enabled = false;
     let mut m = Menu::new(items);
     let (w, h) = m.size(&fonts);
@@ -270,8 +280,13 @@ fn menu_keyboard_and_pointer() {
 #[test]
 fn dialog_input_and_buttons() {
     let fonts = Fonts::load();
-    let mut d = Dialog::new(1, "New folder", "Name of the new folder:", &[("Cancel", ButtonStyle::Secondary), ("Create", ButtonStyle::Primary)])
-        .with_input("Untitled", "Folder name");
+    let mut d = Dialog::new(
+        1,
+        "New folder",
+        "Name of the new folder:",
+        &[("Cancel", ButtonStyle::Secondary), ("Create", ButtonStyle::Primary)],
+    )
+    .with_input("Untitled", "Folder name");
     d.layout(Rect::new(0, 0, 640, 480), &fonts);
     assert!(contains(&Rect::new(0, 0, 640, 480), d.rect.x, d.rect.y));
     // The initial text is selected: typing replaces it.
@@ -286,7 +301,10 @@ fn dialog_input_and_buttons() {
     d.event(&down, &fonts);
     assert_eq!(d.event(&up, &fonts), Response::Activated(0));
     // Clicks elsewhere in the window are swallowed (modal).
-    assert_eq!(d.event(&Event::PointerDown { x: 2, y: 2, button: button::LEFT, clicks: 1 }, &fonts), Response::Consumed);
+    assert_eq!(
+        d.event(&Event::PointerDown { x: 2, y: 2, button: button::LEFT, clicks: 1 }, &fonts),
+        Response::Consumed
+    );
     // Without an input the default button has the focus.
     let mut q = Dialog::new(2, "Delete?", "x", &[("Cancel", ButtonStyle::Secondary), ("Delete", ButtonStyle::Danger)]);
     q.layout(Rect::new(0, 0, 640, 480), &fonts);
@@ -541,7 +559,8 @@ fn dib_icon_rejects_what_it_cannot_read() {
 #[test]
 fn bitmap_icons_register_and_draw_scaled() {
     assert!(icon::register_bitmap(icon::Bitmap { width: 2, height: 2, pixels: vec![0; 3] }).is_none());
-    let red = icon::register_bitmap(icon::Bitmap { width: 2, height: 2, pixels: vec![0xFFFF_0000; 4] }).expect("registered");
+    let red =
+        icon::register_bitmap(icon::Bitmap { width: 2, height: 2, pixels: vec![0xFFFF_0000; 4] }).expect("registered");
     let mut px = vec![0x0000_00FFu32; 8 * 8];
     let mut s = Surface::new(&mut px, 8, 8, 8).unwrap();
     let fonts = Fonts::load();
@@ -967,7 +986,10 @@ fn text_area_read_only_and_drawing() {
     a.draw(&mut p, true);
     let (cw, lh) = (fonts.mono.cell_width() as usize, fonts.line_height(FontKind::Mono) as usize);
     let cell = |px: &[u32], col: usize, line: usize| -> Vec<u32> {
-        (0..lh).flat_map(|y| (0..cw).map(move |x| (x, y))).map(|(x, y)| px[(line * lh + y) * 600 + 6 + col * cw + x]).collect()
+        (0..lh)
+            .flat_map(|y| (0..cw).map(move |x| (x, y)))
+            .map(|(x, y)| px[(line * lh + y) * 600 + 6 + col * cw + x])
+            .collect()
     };
     let keyword = Style::Keyword.color(&MIDNIGHT);
     let plain = Style::Plain.color(&MIDNIGHT);

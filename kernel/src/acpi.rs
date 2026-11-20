@@ -60,7 +60,15 @@ pub fn dsdt() -> Option<(u64, usize)> {
 /// The table bytes of the `n`-th table with signature `sig` (`DSDT` for the
 /// DSDT), for the firmware interface of `crate::firmware`.
 pub fn table_bytes(sig: &[u8; 4], n: usize) -> Option<&'static [u8]> {
-    let (pa, len) = if sig == b"DSDT" { if n == 0 { dsdt()? } else { return None } } else { find_nth(sig, n)? };
+    let (pa, len) = if sig == b"DSDT" {
+        if n == 0 {
+            dsdt()?
+        } else {
+            return None;
+        }
+    } else {
+        find_nth(sig, n)?
+    };
     // SAFETY: checked tables lie in firmware memory inside the HHDM.
     Some(unsafe { core::slice::from_raw_parts(mem::phys_to_virt(pa) as *const u8, len) })
 }
@@ -73,7 +81,8 @@ pub fn find_nth(sig: &[u8; 4], n: usize) -> Option<(u64, usize)> {
     if &rsdp[..8] != b"RSD PTR " {
         return None;
     }
-    let (root, entry_size) = if rsdp[15] >= 2 && u64_at(&rsdp, 24) != 0 { (u64_at(&rsdp, 24), 8) } else { (u32_at(&rsdp, 16) as u64, 4) };
+    let (root, entry_size) =
+        if rsdp[15] >= 2 && u64_at(&rsdp, 24) != 0 { (u64_at(&rsdp, 24), 8) } else { (u32_at(&rsdp, 16) as u64, 4) };
     let (root, len) = checked_table(root)?;
     for i in 0..(len - 36) / entry_size {
         let at = root + 36 + (i * entry_size) as u64;
@@ -229,9 +238,10 @@ pub fn power() -> Option<Power> {
     let src = unsafe { core::slice::from_raw_parts(mem::phys_to_virt(pa) as *const u8, len.min(276)) };
     f[..src.len()].copy_from_slice(src);
     let x = |off: usize| len >= off + 12;
-    let pm1a = if x(172) { io_port(f[172], u64_at(&f, 176)) } else { None }
-        .or_else(|| io_port(1, u32_at(&f, 64) as u64))?;
-    let pm1b = if x(184) { io_port(f[184], u64_at(&f, 188)) } else { None }.or_else(|| io_port(1, u32_at(&f, 68) as u64));
+    let pm1a =
+        if x(172) { io_port(f[172], u64_at(&f, 176)) } else { None }.or_else(|| io_port(1, u32_at(&f, 64) as u64))?;
+    let pm1b =
+        if x(184) { io_port(f[184], u64_at(&f, 188)) } else { None }.or_else(|| io_port(1, u32_at(&f, 68) as u64));
     let dsdt = if len >= 148 && u64_at(&f, 140) != 0 { u64_at(&f, 140) } else { u32_at(&f, 40) as u64 };
     let reset = if len >= 129 && u32_at(&f, 112) & (1 << 10) != 0 {
         let addr = u64_at(&f, 120);

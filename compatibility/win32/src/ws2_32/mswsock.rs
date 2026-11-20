@@ -34,7 +34,8 @@ fn complete(s: u64, r: Result<u32, u32>, done: *mut u32, overlapped: *mut u8) ->
             }
             Err(e) => {
                 if !overlapped.is_null() {
-                    crate::kernel32::overlapped::set_status(overlapped as u64, 0xC000_0001); // STATUS_UNSUCCESSFUL
+                    crate::kernel32::overlapped::set_status(overlapped as u64, 0xC000_0001);
+                    // STATUS_UNSUCCESSFUL
                 }
                 err(e, 0)
             }
@@ -74,7 +75,9 @@ impl Accept {
                 }
                 match os_sys::sock_recv(nfd, data, net::MSG_DONTWAIT) {
                     Ok((n, _)) => break n,
-                    Err(osyx_abi::Errno::WouldBlock) => super::overlapped::wait_ready(nfd, osyx_abi::ipc::WAIT_READABLE),
+                    Err(osyx_abi::Errno::WouldBlock) => {
+                        super::overlapped::wait_ready(nfd, osyx_abi::ipc::WAIT_READABLE)
+                    }
                     Err(e) => return fail(wsa(e)),
                 }
             };
@@ -156,7 +159,8 @@ pub(crate) extern "win64" fn AcceptEx(
     let job = Accept { accept_s, out: out as u64, recv_len, local_len };
     let never = || false;
     if overlapped.is_null() {
-        let r = blocking(listen_s, |fd| os_sys::sock_accept(fd).map_err(wsa)).and_then(|(nfd, peer)| job.finish(nfd, peer, &never));
+        let r = blocking(listen_s, |fd| os_sys::sock_accept(fd).map_err(wsa))
+            .and_then(|(nfd, peer)| job.finish(nfd, peer, &never));
         return complete(listen_s, r, received, overlapped);
     }
     // A connection already waiting, with no data to wait for, completes now.

@@ -63,13 +63,25 @@ impl SetupPacket {
 
     /// GET_DESCRIPTOR (device recipient).
     pub fn get_descriptor(kind: u8, index: u8, language: u16, length: u16) -> SetupPacket {
-        SetupPacket { request_type: 0x80, request: REQ_GET_DESCRIPTOR, value: (kind as u16) << 8 | index as u16, index: language, length }
+        SetupPacket {
+            request_type: 0x80,
+            request: REQ_GET_DESCRIPTOR,
+            value: (kind as u16) << 8 | index as u16,
+            index: language,
+            length,
+        }
     }
 
     /// GET_DESCRIPTOR of a class descriptor addressed to an interface (the
     /// HID report descriptor).
     pub fn get_interface_descriptor(kind: u8, interface: u8, length: u16) -> SetupPacket {
-        SetupPacket { request_type: 0x81, request: REQ_GET_DESCRIPTOR, value: (kind as u16) << 8, index: interface as u16, length }
+        SetupPacket {
+            request_type: 0x81,
+            request: REQ_GET_DESCRIPTOR,
+            value: (kind as u16) << 8,
+            index: interface as u16,
+            length,
+        }
     }
 
     pub fn set_configuration(value: u8) -> SetupPacket {
@@ -78,7 +90,13 @@ impl SetupPacket {
 
     /// HID SET_PROTOCOL: 0 = boot protocol, 1 = report protocol.
     pub fn hid_set_protocol(interface: u8, report_protocol: bool) -> SetupPacket {
-        SetupPacket { request_type: 0x21, request: HID_SET_PROTOCOL, value: u16::from(report_protocol), index: interface as u16, length: 0 }
+        SetupPacket {
+            request_type: 0x21,
+            request: HID_SET_PROTOCOL,
+            value: u16::from(report_protocol),
+            index: interface as u16,
+            length: 0,
+        }
     }
 
     /// HID GET_PROTOCOL: one byte, 0 = boot protocol, 1 = report protocol.
@@ -88,12 +106,24 @@ impl SetupPacket {
 
     /// HID SET_IDLE: `duration` in 4 ms units, 0 = report only on change.
     pub fn hid_set_idle(interface: u8, duration: u8) -> SetupPacket {
-        SetupPacket { request_type: 0x21, request: HID_SET_IDLE, value: (duration as u16) << 8, index: interface as u16, length: 0 }
+        SetupPacket {
+            request_type: 0x21,
+            request: HID_SET_IDLE,
+            value: (duration as u16) << 8,
+            index: interface as u16,
+            length: 0,
+        }
     }
 
     /// HID SET_REPORT of an output report (keyboard LEDs).
     pub fn hid_set_output_report(interface: u8, report_id: u8, length: u16) -> SetupPacket {
-        SetupPacket { request_type: 0x21, request: HID_SET_REPORT, value: 0x0200 | report_id as u16, index: interface as u16, length }
+        SetupPacket {
+            request_type: 0x21,
+            request: HID_SET_REPORT,
+            value: 0x0200 | report_id as u16,
+            index: interface as u16,
+            length,
+        }
     }
 }
 

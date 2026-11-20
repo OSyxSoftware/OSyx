@@ -420,7 +420,13 @@ fn fat_err(what: &str, e: osyx_fat::FsError) -> Error {
 
 /// Installs OSyx on the whole of `disk` following `plan`. Everything on the
 /// disk is lost. The caller must have the user's explicit confirmation.
-pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, source: &mut S, config: &Config, progress: &mut P) -> Result<Report> {
+pub fn install<D: Disk, S: Source, P: Progress>(
+    disk: &mut D,
+    plan: &Plan,
+    source: &mut S,
+    config: &Config,
+    progress: &mut P,
+) -> Result<Report> {
     validate(config).map_err(Error::Invalid)?;
     if plan.disk_sectors != disk.sectors() {
         return Err(Error::Invalid("the plan was made for a different disk size".into()));
@@ -429,21 +435,38 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     let esp_end = plan.esp_first.checked_add(plan.esp_sectors).ok_or_else(invalid_plan)?;
     let root_end = plan.root_first.checked_add(plan.root_sectors).ok_or_else(invalid_plan)?;
     let usable_end = disk.sectors().checked_sub(33).ok_or_else(invalid_plan)?;
-    if plan.esp_first < ALIGN || plan.esp_sectors < MIN_ESP_MIB * ALIGN
-        || plan.root_sectors < MIN_ROOT_MIB * ALIGN || plan.root_first < esp_end || root_end > usable_end
+    if plan.esp_first < ALIGN
+        || plan.esp_sectors < MIN_ESP_MIB * ALIGN
+        || plan.root_sectors < MIN_ROOT_MIB * ALIGN
+        || plan.root_first < esp_end
+        || root_end > usable_end
     {
         return Err(invalid_plan());
     }
     let parts = [
-        NewPartition { type_guid: osyx_part::TYPE_ESP, unique_guid: guid(&config.seed, 1), first_lba: plan.esp_first, sectors: plan.esp_sectors, name: "EFI system partition" },
-        NewPartition { type_guid: osyx_part::TYPE_ROOT_X86_64, unique_guid: guid(&config.seed, 2), first_lba: plan.root_first, sectors: plan.root_sectors, name: "OSyx" },
+        NewPartition {
+            type_guid: osyx_part::TYPE_ESP,
+            unique_guid: guid(&config.seed, 1),
+            first_lba: plan.esp_first,
+            sectors: plan.esp_sectors,
+            name: "EFI system partition",
+        },
+        NewPartition {
+            type_guid: osyx_part::TYPE_ROOT_X86_64,
+            unique_guid: guid(&config.seed, 2),
+            first_lba: plan.root_first,
+            sectors: plan.root_sectors,
+            name: "OSyx",
+        },
     ];
-    let table = osyx_part::build(disk.sectors(), guid(&config.seed, 0), &parts).map_err(|e| Error::Invalid(format!("partition table: {e:?}")))?;
+    let table = osyx_part::build(disk.sectors(), guid(&config.seed, 0), &parts)
+        .map_err(|e| Error::Invalid(format!("partition table: {e:?}")))?;
     CLOCK.store(config.time, Ordering::Relaxed);
     // Fail before touching the disk if the boot files are missing.
     let boot = source.boot_files().map_err(Error::Source)?;
     for (index, (path, _)) in boot.iter().enumerate() {
-        if path.contains('\\') || path.chars().any(char::is_control)
+        if path.contains('\\')
+            || path.chars().any(char::is_control)
             || path.split('/').any(|part| part.is_empty() || part == "." || part == "..")
         {
             return Err(Error::Source(format!("invalid boot file path: {path}")));
@@ -453,7 +476,9 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
         }
     }
     if boot.iter().filter(|(p, _)| p.eq_ignore_ascii_case(LOADER)).count() != 1
-        || boot.iter().any(|(p, _)| p.eq_ignore_ascii_case(LOADER_TEMP) || (p.eq_ignore_ascii_case(LOADER) && p != LOADER))
+        || boot
+            .iter()
+            .any(|(p, _)| p.eq_ignore_ascii_case(LOADER_TEMP) || (p.eq_ignore_ascii_case(LOADER) && p != LOADER))
     {
         return Err(Error::Source("boot files contain a reserved loader path".into()));
     }
@@ -462,7 +487,9 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
             return Err(Error::Source(format!("{need} is missing or empty")));
         }
     }
-    if config.cmdline.is_empty() && boot.iter().any(|(path, data)| path.eq_ignore_ascii_case("EFI/OSYX/CMDLINE.TXT") && data.len() > CMDLINE_MAX) {
+    if config.cmdline.is_empty()
+        && boot.iter().any(|(path, data)| path.eq_ignore_ascii_case("EFI/OSYX/CMDLINE.TXT") && data.len() > CMDLINE_MAX)
+    {
         return Err(Error::Source("the boot command line exceeds 4096 bytes".into()));
     }
     let total = estimate(source, "/", config).map_err(Error::Source)?.max(1);
@@ -496,19 +523,27 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     let mut uuid = [0u8; 16];
     uuid.copy_from_slice(&guid(&config.seed, 3).0);
     let opts = osyx_ext4::FormatOptions { label: "OSyx", uuid, time: config.time as u32 };
-    let f = osyx_ext4::format(&mut Window::new(disk, plan.root_first, plan.root_sectors), &opts).map_err(|e| ext4_err("formatting the root", e))?;
-    progress.log(&format!("root formatted as ext4: {} blocks, {} groups, {} inodes, journal {} blocks", f.blocks, f.groups, f.inodes, f.journal_blocks));
+    let f = osyx_ext4::format(&mut Window::new(disk, plan.root_first, plan.root_sectors), &opts)
+        .map_err(|e| ext4_err("formatting the root", e))?;
+    progress.log(&format!(
+        "root formatted as ext4: {} blocks, {} groups, {} inodes, journal {} blocks",
+        f.blocks, f.groups, f.inodes, f.journal_blocks
+    ));
 
     let mut report = Report { plan: *plan, files: 0, dirs: 0, links: 0, bytes: 0 };
     {
-        let mut fs = Ext4::mount(Window::new(disk, plan.root_first, plan.root_sectors), MountOptions { read_only: false, clock: Some(clock) })
-            .map_err(|e| ext4_err("mounting the new root", e))?;
+        let mut fs = Ext4::mount(
+            Window::new(disk, plan.root_first, plan.root_sectors),
+            MountOptions { read_only: false, clock: Some(clock) },
+        )
+        .map_err(|e| ext4_err("mounting the new root", e))?;
         if let Some(why) = fs.write_refusal() {
             return Err(Error::Io(format!("the new root is not writable: {why}")));
         }
         progress.stage(Stage::Copying, 0.06);
         progress.log(&format!("copying {} MiB of system files", total / MIB));
-        let mut copy = Copy { fs: &mut fs, source, config, report: &mut report, total, progress, buf: vec![0u8; CHUNK] };
+        let mut copy =
+            Copy { fs: &mut fs, source, config, report: &mut report, total, progress, buf: vec![0u8; CHUNK] };
         copy.dir("/", ROOT_INO)?;
         progress.stage(Stage::Configuring, 0.90);
         configure(&mut fs, config)?;
@@ -527,7 +562,8 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     let mut expected_boot = Vec::new();
     let mut boot_hashes = Vec::new();
     {
-        let mut esp = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("mounting the ESP", e))?;
+        let mut esp = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors))
+            .map_err(|e| fat_err("mounting the ESP", e))?;
         let mut files = boot;
         if !config.cmdline.is_empty() {
             files.retain(|(p, _)| !p.eq_ignore_ascii_case("EFI/OSYX/CMDLINE.TXT"));
@@ -551,7 +587,8 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
     progress.stage(Stage::Verifying, 0.97);
     verify(disk, plan, config, &expected_boot)?;
     {
-        let mut esp = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("ESP", e))?;
+        let mut esp = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors))
+            .map_err(|e| fat_err("ESP", e))?;
         verify_boot_contents(&mut esp, &boot_hashes)?;
         esp.rename(LOADER_TEMP, LOADER).map_err(|e| fat_err("publishing the boot loader", e))?;
         esp.unmount().map_err(|e| fat_err("unmounting the ESP", e))?;
@@ -563,7 +600,11 @@ pub fn install<D: Disk, S: Source, P: Progress>(disk: &mut D, plan: &Plan, sourc
 }
 
 fn join(dir: &str, name: &str) -> String {
-    if dir == "/" { format!("/{name}") } else { format!("{dir}/{name}") }
+    if dir == "/" {
+        format!("/{name}")
+    } else {
+        format!("{dir}/{name}")
+    }
 }
 
 fn skipped(path: &str, config: &Config) -> bool {
@@ -609,21 +650,30 @@ impl<D: osyx_ext4::BlockDevice, S: Source, P: Progress> Copy<'_, D, S, P> {
             }
             match &e.kind {
                 Kind::Dir => {
-                    let child = self.fs.create(ino, &e.name, NewKind::Dir, e.mode, e.uid, e.gid).map_err(|x| ext4_err(&p, x))?;
+                    let child = self
+                        .fs
+                        .create(ino, &e.name, NewKind::Dir, e.mode, e.uid, e.gid)
+                        .map_err(|x| ext4_err(&p, x))?;
                     self.report.dirs += 1;
                     if !EMPTY_DIRS.contains(&p.as_str()) {
                         self.dir(&p, child)?;
                     }
                 }
                 Kind::Symlink(target) => {
-                    self.fs.create(ino, &e.name, NewKind::Symlink(target), 0o777, e.uid, e.gid).map_err(|x| ext4_err(&p, x))?;
+                    self.fs
+                        .create(ino, &e.name, NewKind::Symlink(target), 0o777, e.uid, e.gid)
+                        .map_err(|x| ext4_err(&p, x))?;
                     self.report.links += 1;
                 }
                 Kind::File => {
-                    let f = self.fs.create(ino, &e.name, NewKind::File, e.mode, e.uid, e.gid).map_err(|x| ext4_err(&p, x))?;
+                    let f = self
+                        .fs
+                        .create(ino, &e.name, NewKind::File, e.mode, e.uid, e.gid)
+                        .map_err(|x| ext4_err(&p, x))?;
                     let mut at = 0u64;
                     loop {
-                        let n = self.source.read(&p, at, &mut self.buf).map_err(|x| Error::Source(format!("{p}: {x}")))?;
+                        let n =
+                            self.source.read(&p, at, &mut self.buf).map_err(|x| Error::Source(format!("{p}: {x}")))?;
                         if n > self.buf.len() {
                             return Err(Error::Source(format!("{p}: read returned more bytes than the buffer")));
                         }
@@ -632,7 +682,8 @@ impl<D: osyx_ext4::BlockDevice, S: Source, P: Progress> Copy<'_, D, S, P> {
                         }
                         let mut done = 0;
                         while done < n {
-                            let w = self.fs.write(f, at + done as u64, &self.buf[done..n]).map_err(|x| ext4_err(&p, x))?;
+                            let w =
+                                self.fs.write(f, at + done as u64, &self.buf[done..n]).map_err(|x| ext4_err(&p, x))?;
                             if w == 0 {
                                 return Err(Error::Io(format!("{p}: short write")));
                             }
@@ -664,7 +715,9 @@ fn ensure_dir<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, path: &str, mode: u16
     for part in path.split('/').filter(|p| !p.is_empty()) {
         ino = match fs.lookup(ino, part) {
             Ok(i) => i,
-            Err(osyx_ext4::Error::NotFound) => fs.create(ino, part, NewKind::Dir, mode, uid, gid).map_err(|e| ext4_err(path, e))?,
+            Err(osyx_ext4::Error::NotFound) => {
+                fs.create(ino, part, NewKind::Dir, mode, uid, gid).map_err(|e| ext4_err(path, e))?
+            }
             Err(e) => return Err(ext4_err(path, e)),
         };
     }
@@ -672,7 +725,14 @@ fn ensure_dir<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, path: &str, mode: u16
 }
 
 /// Writes (or replaces) a whole file.
-fn put_file<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, path: &str, data: &[u8], mode: u16, uid: u32, gid: u32) -> Result<()> {
+fn put_file<D: osyx_ext4::BlockDevice>(
+    fs: &mut Ext4<D>,
+    path: &str,
+    data: &[u8],
+    mode: u16,
+    uid: u32,
+    gid: u32,
+) -> Result<()> {
     let (dir, name) = path.rsplit_once('/').ok_or_else(|| Error::Invalid(format!("{path}: not absolute")))?;
     let d = ensure_dir(fs, dir, 0o755, 0, 0)?;
     if fs.lookup(d, name).is_ok() {
@@ -691,7 +751,10 @@ fn put_file<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, path: &str, data: &[u8]
 fn configure<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, c: &Config) -> Result<()> {
     put_file(fs, "/etc/hostname", format!("{}\n", c.hostname).as_bytes(), 0o664, 0, ADMIN_GID)?;
     let gecos = if c.full_name.is_empty() { c.user_name.clone() } else { c.full_name.clone() };
-    let passwd = format!("root:x:0:0:Administrator:/root:/bin/axis\n{}:x:{USER_ID}:{ADMIN_GID}:{gecos}:{USER_HOME}:/bin/axis\n", c.user_name);
+    let passwd = format!(
+        "root:x:0:0:Administrator:/root:/bin/axis\n{}:x:{USER_ID}:{ADMIN_GID}:{gecos}:{USER_HOME}:/bin/axis\n",
+        c.user_name
+    );
     put_file(fs, "/etc/passwd", passwd.as_bytes(), 0o644, 0, 0)?;
     put_file(fs, "/etc/group", format!("root:x:0:\nsudo:x:{ADMIN_GID}:{}\n", c.user_name).as_bytes(), 0o644, 0, 0)?;
     let secret = match &c.password {
@@ -710,7 +773,8 @@ fn configure<D: osyx_ext4::BlockDevice>(fs: &mut Ext4<D>, c: &Config) -> Result<
     put_file(
         fs,
         "/etc/osyx/firstboot.conf",
-        format!("# Tasks for the first start of the installed system.\nzen={}\n", if c.install_zen { 1 } else { 0 }).as_bytes(),
+        format!("# Tasks for the first start of the installed system.\nzen={}\n", if c.install_zen { 1 } else { 0 })
+            .as_bytes(),
         0o644,
         0,
         0,
@@ -752,16 +816,22 @@ fn fat_write<D: osyx_fat::BlockDevice>(fs: &mut osyx_fat::FileSystem<D>, path: &
     Ok(())
 }
 
-fn verify_boot_contents<D: osyx_fat::BlockDevice>(fs: &mut osyx_fat::FileSystem<D>, expected: &[(String, [u8; 32])]) -> Result<()> {
+fn verify_boot_contents<D: osyx_fat::BlockDevice>(
+    fs: &mut osyx_fat::FileSystem<D>,
+    expected: &[(String, [u8; 32])],
+) -> Result<()> {
     let mut buf = vec![0u8; 64 * 1024];
     for (path, digest) in expected {
-        let mut file = fs.open(&format!("/{path}"), osyx_fat::OpenOptions::default())
+        let mut file = fs
+            .open(&format!("/{path}"), osyx_fat::OpenOptions::default())
             .map_err(|e| Error::Verify(format!("ESP {path}: {e:?}")))?;
         let mut hash = osyx_crypto::Sha256::new();
         let mut offset = 0u64;
         loop {
             let n = fs.read(&mut file, offset, &mut buf).map_err(|e| Error::Verify(format!("ESP {path}: {e:?}")))?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hash.update(&buf[..n]);
             offset += n as u64;
         }
@@ -785,13 +855,24 @@ pub fn verify<D: Disk>(disk: &mut D, plan: &Plan, config: &Config, boot: &[(Stri
         }
     }
     let table = osyx_part::parse(&mut Reader(disk)).map_err(|e| Error::Verify(format!("partition table: {e:?}")))?;
-    let esp = table.partitions.iter().find(|p| p.type_guid == osyx_part::TYPE_ESP).ok_or_else(|| Error::Verify("no ESP".into()))?;
-    let root = table.partitions.iter().find(|p| p.type_guid == osyx_part::TYPE_ROOT_X86_64).ok_or_else(|| Error::Verify("no root partition".into()))?;
-    if (esp.first_lba, esp.sectors(), root.first_lba, root.sectors()) != (plan.esp_first, plan.esp_sectors, plan.root_first, plan.root_sectors) {
+    let esp = table
+        .partitions
+        .iter()
+        .find(|p| p.type_guid == osyx_part::TYPE_ESP)
+        .ok_or_else(|| Error::Verify("no ESP".into()))?;
+    let root = table
+        .partitions
+        .iter()
+        .find(|p| p.type_guid == osyx_part::TYPE_ROOT_X86_64)
+        .ok_or_else(|| Error::Verify("no root partition".into()))?;
+    if (esp.first_lba, esp.sectors(), root.first_lba, root.sectors())
+        != (plan.esp_first, plan.esp_sectors, plan.root_first, plan.root_sectors)
+    {
         return Err(Error::Verify("partitions differ from the plan".into()));
     }
     {
-        let mut fs = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors)).map_err(|e| fat_err("ESP", e))?;
+        let mut fs = osyx_fat::FileSystem::mount(Window::new(disk, plan.esp_first, plan.esp_sectors))
+            .map_err(|e| fat_err("ESP", e))?;
         for (path, size) in boot {
             let m = fs.metadata(&format!("/{path}")).map_err(|e| Error::Verify(format!("ESP {path}: {e:?}")))?;
             if m.size as u64 != *size {
@@ -799,8 +880,11 @@ pub fn verify<D: Disk>(disk: &mut D, plan: &Plan, config: &Config, boot: &[(Stri
             }
         }
     }
-    let mut fs = Ext4::mount(Window::new(disk, plan.root_first, plan.root_sectors), MountOptions { read_only: true, clock: None })
-        .map_err(|e| ext4_err("root", e))?;
+    let mut fs = Ext4::mount(
+        Window::new(disk, plan.root_first, plan.root_sectors),
+        MountOptions { read_only: true, clock: None },
+    )
+    .map_err(|e| ext4_err("root", e))?;
     fs.check().map_err(|e| Error::Verify(format!("root consistency: {e}")))?;
     for path in ["/etc/hostname", "/etc/passwd", "/etc/osyx/firstboot.conf", "/etc/osyx/installed"] {
         fs.resolve(path).map_err(|e| Error::Verify(format!("{path}: {e}")))?;

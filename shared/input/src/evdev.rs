@@ -31,14 +31,94 @@ pub const BTN_TOUCH: u16 = 0x14A;
 pub fn key_usage(code: u16) -> Option<u16> {
     /// Codes 1 to 88 in order: the main block, function keys and keypad.
     const MAIN: [u16; 88] = [
-        key::ESCAPE, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, key::MINUS, key::EQUAL, key::BACKSPACE, key::TAB,
-        key::Q, key::W, key::E, key::R, key::T, key::Y, key::U, key::I, key::O, key::P, key::LEFT_BRACKET, key::RIGHT_BRACKET,
-        key::ENTER, key::LEFT_CTRL, key::A, key::S, key::D, key::F, key::G, key::H, key::J, key::K, key::L, key::SEMICOLON,
-        key::APOSTROPHE, key::GRAVE, key::LEFT_SHIFT, key::BACKSLASH, key::Z, key::X, key::C, key::V, key::B, key::N, key::M,
-        key::COMMA, key::PERIOD, key::SLASH, 0xE5, key::KP_MULTIPLY, key::LEFT_ALT, key::SPACE, key::CAPS_LOCK,
-        0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, key::NUM_LOCK, key::SCROLL_LOCK,
-        0x5F, 0x60, 0x61, key::KP_MINUS, 0x5C, 0x5D, 0x5E, key::KP_PLUS, 0x59, 0x5A, 0x5B, key::KP_0, key::KP_PERIOD,
-        0, 0, key::NON_US_BACKSLASH, 0x44, key::F12,
+        key::ESCAPE,
+        0x1E,
+        0x1F,
+        0x20,
+        0x21,
+        0x22,
+        0x23,
+        0x24,
+        0x25,
+        0x26,
+        0x27,
+        key::MINUS,
+        key::EQUAL,
+        key::BACKSPACE,
+        key::TAB,
+        key::Q,
+        key::W,
+        key::E,
+        key::R,
+        key::T,
+        key::Y,
+        key::U,
+        key::I,
+        key::O,
+        key::P,
+        key::LEFT_BRACKET,
+        key::RIGHT_BRACKET,
+        key::ENTER,
+        key::LEFT_CTRL,
+        key::A,
+        key::S,
+        key::D,
+        key::F,
+        key::G,
+        key::H,
+        key::J,
+        key::K,
+        key::L,
+        key::SEMICOLON,
+        key::APOSTROPHE,
+        key::GRAVE,
+        key::LEFT_SHIFT,
+        key::BACKSLASH,
+        key::Z,
+        key::X,
+        key::C,
+        key::V,
+        key::B,
+        key::N,
+        key::M,
+        key::COMMA,
+        key::PERIOD,
+        key::SLASH,
+        0xE5,
+        key::KP_MULTIPLY,
+        key::LEFT_ALT,
+        key::SPACE,
+        key::CAPS_LOCK,
+        0x3A,
+        0x3B,
+        0x3C,
+        0x3D,
+        0x3E,
+        0x3F,
+        0x40,
+        0x41,
+        0x42,
+        0x43,
+        key::NUM_LOCK,
+        key::SCROLL_LOCK,
+        0x5F,
+        0x60,
+        0x61,
+        key::KP_MINUS,
+        0x5C,
+        0x5D,
+        0x5E,
+        key::KP_PLUS,
+        0x59,
+        0x5A,
+        0x5B,
+        key::KP_0,
+        key::KP_PERIOD,
+        0,
+        0,
+        key::NON_US_BACKSLASH,
+        0x44,
+        key::F12,
     ];
     let usage = match code {
         1..=88 => MAIN[code as usize - 1],
@@ -82,12 +162,27 @@ pub fn button_number(code: u16) -> Option<u16> {
 /// What a decoded event asks of the input core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
-    Key { usage: u16, down: bool },
-    Button { number: u16, down: bool },
-    Motion { dx: i32, dy: i32 },
+    Key {
+        usage: u16,
+        down: bool,
+    },
+    Button {
+        number: u16,
+        down: bool,
+    },
+    Motion {
+        dx: i32,
+        dy: i32,
+    },
     /// Each coordinate from 0 to [`crate::ABSOLUTE_MAX`].
-    Absolute { x: i32, y: i32 },
-    Wheel { vertical: i32, horizontal: i32 },
+    Absolute {
+        x: i32,
+        y: i32,
+    },
+    Wheel {
+        vertical: i32,
+        horizontal: i32,
+    },
 }
 
 /// Collects the events of one device between synchronisation events.
@@ -146,7 +241,10 @@ impl Decoder {
     fn flush(&mut self, emit: &mut dyn FnMut(Action)) {
         if self.moved && self.abs_max.0 > 0 && self.abs_max.1 > 0 {
             let scale = |v: u32, max: u32| (v.min(max) as u64 * crate::ABSOLUTE_MAX as u64 / max as u64) as i32;
-            emit(Action::Absolute { x: scale(self.position.0, self.abs_max.0), y: scale(self.position.1, self.abs_max.1) });
+            emit(Action::Absolute {
+                x: scale(self.position.0, self.abs_max.0),
+                y: scale(self.position.1, self.abs_max.1),
+            });
         }
         self.moved = false;
         if self.motion != (0, 0) {
@@ -192,9 +290,18 @@ mod tests {
         assert_eq!((key_usage(29), key_usage(97)), (Some(key::LEFT_CTRL), Some(0xE4)));
         assert_eq!((key_usage(42), key_usage(54)), (Some(key::LEFT_SHIFT), Some(0xE5)));
         assert_eq!((key_usage(56), key_usage(100)), (Some(key::LEFT_ALT), Some(0xE6)));
-        assert_eq!((key_usage(103), key_usage(108), key_usage(105), key_usage(106)), (Some(key::UP), Some(key::DOWN), Some(key::LEFT), Some(key::RIGHT)));
-        assert_eq!((key_usage(111), key_usage(110), key_usage(125)), (Some(key::DELETE), Some(key::INSERT), Some(key::LEFT_GUI)));
-        assert_eq!((key_usage(0), key_usage(84), key_usage(85), key_usage(BTN_LEFT), key_usage(600)), (None, None, None, None, None));
+        assert_eq!(
+            (key_usage(103), key_usage(108), key_usage(105), key_usage(106)),
+            (Some(key::UP), Some(key::DOWN), Some(key::LEFT), Some(key::RIGHT))
+        );
+        assert_eq!(
+            (key_usage(111), key_usage(110), key_usage(125)),
+            (Some(key::DELETE), Some(key::INSERT), Some(key::LEFT_GUI))
+        );
+        assert_eq!(
+            (key_usage(0), key_usage(84), key_usage(85), key_usage(BTN_LEFT), key_usage(600)),
+            (None, None, None, None, None)
+        );
         // Every letter and digit has exactly one code.
         let mut letters = 0u32;
         for code in 1..=127 {
@@ -211,22 +318,48 @@ mod tests {
     #[test]
     fn keyboard_events() {
         let mut d = Decoder::new((0, 0));
-        let a = run(&mut d, &[(EV_KEY, KEY_A, 1), (EV_SYN, 0, 0), (EV_KEY, KEY_A, 2), (EV_SYN, 0, 0), (EV_KEY, KEY_A, 0), (EV_SYN, 0, 0), (EV_KEY, 240, 1)]);
+        let a = run(
+            &mut d,
+            &[
+                (EV_KEY, KEY_A, 1),
+                (EV_SYN, 0, 0),
+                (EV_KEY, KEY_A, 2),
+                (EV_SYN, 0, 0),
+                (EV_KEY, KEY_A, 0),
+                (EV_SYN, 0, 0),
+                (EV_KEY, 240, 1),
+            ],
+        );
         assert_eq!(a, [Action::Key { usage: key::A, down: true }, Action::Key { usage: key::A, down: false }]);
     }
 
     #[test]
     fn relative_motion_is_gathered_until_the_synchronisation() {
         let mut d = Decoder::new((0, 0));
-        let a = run(&mut d, &[(EV_REL, REL_X, 3), (EV_REL, REL_Y, -2), (EV_REL, REL_X, 1), (EV_SYN, 0, 0), (EV_SYN, 0, 0)]);
+        let a =
+            run(&mut d, &[(EV_REL, REL_X, 3), (EV_REL, REL_Y, -2), (EV_REL, REL_X, 1), (EV_SYN, 0, 0), (EV_SYN, 0, 0)]);
         assert_eq!(a, [Action::Motion { dx: 4, dy: -2 }]);
         let a = run(&mut d, &[(EV_REL, REL_WHEEL, -1), (EV_REL, REL_HWHEEL, 2), (EV_SYN, 0, 0)]);
         assert_eq!(a, [Action::Wheel { vertical: -1, horizontal: 2 }]);
         // A press between motion and synchronisation lands after the motion.
-        let a = run(&mut d, &[(EV_REL, REL_X, 5), (EV_KEY, BTN_LEFT, 1), (EV_SYN, 0, 0), (EV_KEY, BTN_LEFT + 1, 1), (EV_KEY, BTN_LEFT + 2, 0)]);
+        let a = run(
+            &mut d,
+            &[
+                (EV_REL, REL_X, 5),
+                (EV_KEY, BTN_LEFT, 1),
+                (EV_SYN, 0, 0),
+                (EV_KEY, BTN_LEFT + 1, 1),
+                (EV_KEY, BTN_LEFT + 2, 0),
+            ],
+        );
         assert_eq!(
             a,
-            [Action::Motion { dx: 5, dy: 0 }, Action::Button { number: 1, down: true }, Action::Button { number: 2, down: true }, Action::Button { number: 3, down: false }]
+            [
+                Action::Motion { dx: 5, dy: 0 },
+                Action::Button { number: 1, down: true },
+                Action::Button { number: 2, down: true },
+                Action::Button { number: 3, down: false }
+            ]
         );
     }
 

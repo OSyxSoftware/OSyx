@@ -2,8 +2,8 @@
 //! the first 256 bytes of each function) and bus enumeration.
 
 use crate::arch::cpu;
-use crate::sync::IrqSpinLock;
 use crate::kprintln;
+use crate::sync::IrqSpinLock;
 use alloc::vec::Vec;
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
@@ -365,10 +365,8 @@ pub fn first_fit(start: u64, end: u64, size: u64, align: u64, used: &[(u64, u64)
 /// bridge above it. A root port whose window the firmware left closed gets
 /// one, in the first free gap between the windows of the other root ports.
 fn place_bar(devs: &[Device], d: &Device, size: u64, avoid: &[(u64, u64)]) -> Result<(u64, Device), &'static str> {
-    let bridge = *devs
-        .iter()
-        .find(|b| b.is_bridge() && b.addr.read8(0x19) == d.addr.bus)
-        .ok_or("no bridge above it")?;
+    let bridge =
+        *devs.iter().find(|b| b.is_bridge() && b.addr.read8(0x19) == d.addr.bus).ok_or("no bridge above it")?;
     kprintln!(
         "pci {}: bridge above {}: memory window {:x?}, prefetchable {:x?}, command {:#x}",
         bridge.addr,
@@ -473,7 +471,11 @@ pub fn assign_bars(devs: &[Device], avoid: &[(u64, u64)]) {
                             bridge.addr.write16(0x04, bridge.command() | CMD_MEMORY | CMD_BUS_MASTER);
                             kprintln!(
                                 "pci {}: BAR{} was unassigned; assigned {:#x}-{:#x} behind bridge {}",
-                                d.addr, index, at, at + size - 1, bridge.addr
+                                d.addr,
+                                index,
+                                at,
+                                at + size - 1,
+                                bridge.addr
                             );
                         }
                         Err(e) => kprintln!("pci {}: BAR{} unassigned (size {:#x}): {}", d.addr, index, size, e),

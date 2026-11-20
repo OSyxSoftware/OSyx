@@ -74,8 +74,10 @@ const PACKAGE_NEGOTIATE: u32 = 0;
 const PACKAGE_KERBEROS: u32 = 2;
 const PACKAGE_MSV1_0: u32 = 11;
 
-static LSA_HANDLES: os_std::sync::Mutex<alloc::collections::BTreeMap<u64, bool>> = os_std::sync::Mutex::new(alloc::collections::BTreeMap::new());
-static LSA_BUFFERS: os_std::sync::Mutex<alloc::collections::BTreeSet<u64>> = os_std::sync::Mutex::new(alloc::collections::BTreeSet::new());
+static LSA_HANDLES: os_std::sync::Mutex<alloc::collections::BTreeMap<u64, bool>> =
+    os_std::sync::Mutex::new(alloc::collections::BTreeMap::new());
+static LSA_BUFFERS: os_std::sync::Mutex<alloc::collections::BTreeSet<u64>> =
+    os_std::sync::Mutex::new(alloc::collections::BTreeSet::new());
 static NEXT_LSA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x1a50);
 static NEXT_LUID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x3e8f0);
 
@@ -114,7 +116,11 @@ extern "win64" fn LsaRegisterLogonProcess(name: *const u8, handle: *mut u64, mod
 /// Closes a connection; an unknown or already closed handle is an invalid
 /// RPC binding.
 extern "win64" fn LsaDeregisterLogonProcess(handle: u64) -> u32 {
-    if LSA_HANDLES.lock().unwrap().remove(&handle).is_some() { 0 } else { STATUS_RPC_INVALID_BINDING }
+    if LSA_HANDLES.lock().unwrap().remove(&handle).is_some() {
+        0
+    } else {
+        STATUS_RPC_INVALID_BINDING
+    }
 }
 
 /// Reads an LSA_STRING (Length, MaximumLength, 4 bytes of padding, Buffer).
@@ -208,7 +214,18 @@ extern "win64" fn LsaLogonUser(
     if !matches!(package, PACKAGE_NEGOTIATE | PACKAGE_KERBEROS | PACKAGE_MSV1_0) {
         return STATUS_NOT_SUPPORTED;
     }
-    if !trusted || origin.is_null() || source.is_null() || info.is_null() || info_len < MSV1_0_INTERACTIVE_LOGON_SIZE || profile.is_null() || profile_len.is_null() || luid.is_null() || token.is_null() || quotas.is_null() || substatus.is_null() {
+    if !trusted
+        || origin.is_null()
+        || source.is_null()
+        || info.is_null()
+        || info_len < MSV1_0_INTERACTIVE_LOGON_SIZE
+        || profile.is_null()
+        || profile_len.is_null()
+        || luid.is_null()
+        || token.is_null()
+        || quotas.is_null()
+        || substatus.is_null()
+    {
         return STATUS_INVALID_PARAMETER;
     }
     if package != PACKAGE_MSV1_0 || !matches!(kind, 2 | 3 | 4 | 5 | 7 | 8 | 9) {
@@ -216,17 +233,32 @@ extern "win64" fn LsaLogonUser(
     }
     // SAFETY: an MSV1_0_INTERACTIVE_LOGON of at least 56 bytes: MessageType,
     // then the LogonDomainName, UserName and Password UNICODE_STRINGs.
-    let (message, domain, user, password) = unsafe { (core::ptr::read_unaligned(info as *const u32), unicode_string(info.add(8)), unicode_string(info.add(24)), unicode_string(info.add(40))) };
+    let (message, domain, user, password) = unsafe {
+        (
+            core::ptr::read_unaligned(info as *const u32),
+            unicode_string(info.add(8)),
+            unicode_string(info.add(24)),
+            unicode_string(info.add(40)),
+        )
+    };
     if message != MSV1_0_INTERACTIVE_LOGON {
         return STATUS_INVALID_PARAMETER;
     }
-    let verdict = if crate::accounts::domain_is_local(&domain) { crate::accounts::logon(&user, &password) } else { Err(crate::accounts::LogonFailure::NoSuchUser) };
+    let verdict = if crate::accounts::domain_is_local(&domain) {
+        crate::accounts::logon(&user, &password)
+    } else {
+        Err(crate::accounts::LogonFailure::NoSuchUser)
+    };
     let (uid, gid) = match verdict {
         Ok(ids) => ids,
         Err(why) => {
             // SAFETY: the caller's out pointer.
             unsafe {
-                *substatus = if why == crate::accounts::LogonFailure::NoSuchUser { STATUS_NO_SUCH_USER } else { STATUS_WRONG_PASSWORD };
+                *substatus = if why == crate::accounts::LogonFailure::NoSuchUser {
+                    STATUS_NO_SUCH_USER
+                } else {
+                    STATUS_WRONG_PASSWORD
+                };
             }
             return STATUS_LOGON_FAILURE;
         }
@@ -237,7 +269,10 @@ extern "win64" fn LsaLogonUser(
     // SAFETY: the caller's out pointers; `block` holds the profile.
     unsafe {
         core::ptr::write_unaligned(block as *mut u32, MSV1_0_INTERACTIVE_PROFILE);
-        core::ptr::write_unaligned((block + 8) as *mut i64, crate::kernel32::filetime(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0) as i64) as i64);
+        core::ptr::write_unaligned(
+            (block + 8) as *mut i64,
+            crate::kernel32::filetime(os_sys::clock(osyx_abi::CLOCK_REALTIME).unwrap_or(0) as i64) as i64,
+        );
         *profile = block;
         *profile_len = MSV1_0_INTERACTIVE_PROFILE_SIZE as u32;
         *luid = session;
@@ -315,7 +350,15 @@ extern "win64" fn ClosePrinter(_handle: u64) -> i32 {
 
 /// The list of printers is empty: success with zero bytes needed and zero
 /// entries, for the levels Windows defines (1, 2, 4, 5).
-extern "win64" fn EnumPrintersW(_flags: u32, _name: *const u16, level: u32, _buf: *mut u8, _size: u32, needed: *mut u32, returned: *mut u32) -> i32 {
+extern "win64" fn EnumPrintersW(
+    _flags: u32,
+    _name: *const u16,
+    level: u32,
+    _buf: *mut u8,
+    _size: u32,
+    needed: *mut u32,
+    returned: *mut u32,
+) -> i32 {
     if needed.is_null() || returned.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -331,11 +374,24 @@ extern "win64" fn EnumPrintersW(_flags: u32, _name: *const u16, level: u32, _buf
 }
 
 /// There is no printer to ask: -1 with ERROR_INVALID_PRINTER_NAME.
-extern "win64" fn DeviceCapabilitiesW(_device: *const u16, _port: *const u16, _capability: u16, _out: *mut u16, _mode: u64) -> i32 {
+extern "win64" fn DeviceCapabilitiesW(
+    _device: *const u16,
+    _port: *const u16,
+    _capability: u16,
+    _out: *mut u16,
+    _mode: u64,
+) -> i32 {
     fail(ERROR_INVALID_PRINTER_NAME, -1)
 }
 
-extern "win64" fn DocumentPropertiesW(_hwnd: u64, _printer: u64, _device: *const u16, _out: u64, _input: u64, _mode: u32) -> i32 {
+extern "win64" fn DocumentPropertiesW(
+    _hwnd: u64,
+    _printer: u64,
+    _device: *const u16,
+    _out: u64,
+    _input: u64,
+    _mode: u32,
+) -> i32 {
     fail(ERROR_INVALID_PRINTER_NAME, -1)
 }
 
@@ -351,7 +407,14 @@ extern "win64" fn GetPrinterW(_handle: u64, level: u32, _buf: *mut u8, _size: u3
     fail(ERROR_INVALID_HANDLE, 0)
 }
 
-extern "win64" fn GetPrinterDriverW(_handle: u64, _env: *const u16, level: u32, _buf: *mut u8, _size: u32, needed: *mut u32) -> i32 {
+extern "win64" fn GetPrinterDriverW(
+    _handle: u64,
+    _env: *const u16,
+    level: u32,
+    _buf: *mut u8,
+    _size: u32,
+    needed: *mut u32,
+) -> i32 {
     if !matches!(level, 1..=8 | 101) {
         return fail(ERROR_INVALID_LEVEL, 0);
     }
@@ -376,7 +439,16 @@ extern "win64" fn GetDefaultPrinterW(_buf: *mut u16, size: *mut u32) -> i32 {
 }
 
 pub fn winspool_exports() -> Vec<(&'static str, u64)> {
-    export_table![OpenPrinterW, ClosePrinter, EnumPrintersW, DeviceCapabilitiesW, DocumentPropertiesW, GetDefaultPrinterW, GetPrinterW, GetPrinterDriverW]
+    export_table![
+        OpenPrinterW,
+        ClosePrinter,
+        EnumPrintersW,
+        DeviceCapabilitiesW,
+        DocumentPropertiesW,
+        GetDefaultPrinterW,
+        GetPrinterW,
+        GetPrinterDriverW
+    ]
 }
 
 /// Windows exports GetDefaultPrinterW only by ordinal.
@@ -427,7 +499,8 @@ extern "win64" fn singleton_ref(_this: u64) -> u32 {
     1 // the objects are static: their count never changes
 }
 
-static SINGLETON_VTABLE: VTable = VTable([singleton_query as *const (), singleton_ref as *const (), singleton_ref as *const ()]);
+static SINGLETON_VTABLE: VTable =
+    VTable([singleton_query as *const (), singleton_ref as *const (), singleton_ref as *const ()]);
 static NOT_SUPPORTED_VALUE: Singleton = Singleton { vtable: &SINGLETON_VTABLE };
 static MIXED_VALUE: Singleton = Singleton { vtable: &SINGLETON_VTABLE };
 
@@ -474,11 +547,22 @@ extern "win64" fn UiaRaiseAutomationPropertyChangedEvent(_provider: u64, _proper
     S_OK
 }
 
-extern "win64" fn UiaRaiseNotificationEvent(_provider: u64, _kind: i32, _processing: i32, _text: u64, _activity: u64) -> u32 {
+extern "win64" fn UiaRaiseNotificationEvent(
+    _provider: u64,
+    _kind: i32,
+    _processing: i32,
+    _text: u64,
+    _activity: u64,
+) -> u32 {
     S_OK
 }
 
-extern "win64" fn UiaRaiseStructureChangedEvent(_provider: u64, _change: i32, _runtime_id: *const i32, _len: i32) -> u32 {
+extern "win64" fn UiaRaiseStructureChangedEvent(
+    _provider: u64,
+    _change: i32,
+    _runtime_id: *const i32,
+    _len: i32,
+) -> u32 {
     S_OK
 }
 

@@ -64,7 +64,8 @@ fn initialize(h: u64, search: Option<String>, invade: i32) -> i32 {
     if s.contains_key(&h) {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let modules = if invade != 0 { loader::modules().into_iter().map(|m| (m.name, m.base)).collect() } else { Vec::new() };
+    let modules =
+        if invade != 0 { loader::modules().into_iter().map(|m| (m.name, m.base)).collect() } else { Vec::new() };
     s.insert(h, modules);
     SEARCH_PATHS.lock().unwrap().insert(h, initial_search(search));
     1
@@ -141,7 +142,9 @@ const CONTEXT_SIZE: usize = 0x4D0;
 
 /// Whether 8 bytes at `addr` can be read.
 fn readable(addr: u64) -> bool {
-    addr != 0 && crate::mem::virtual_query(addr).is_some_and(|i| i.state == crate::mem::MEM_COMMIT && i.protect & 0x101 == 0 && addr + 8 <= i.base + i.size)
+    addr != 0
+        && crate::mem::virtual_query(addr)
+            .is_some_and(|i| i.state == crate::mem::MEM_COMMIT && i.protect & 0x101 == 0 && addr + 8 <= i.base + i.size)
 }
 
 /// Unwinds `ctx` one frame: through the function's unwind data, or, for
@@ -186,7 +189,17 @@ const ADDR_MODE_FLAT: u32 = 3;
 /// function-table, module-base and address-translation routines are not
 /// needed.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn StackWalk64(machine: u32, process: u64, _thread: u64, frame: u64, ctx: u64, _read: u64, _table: u64, _base: u64, _translate: u64) -> i32 {
+extern "win64" fn StackWalk64(
+    machine: u32,
+    process: u64,
+    _thread: u64,
+    frame: u64,
+    ctx: u64,
+    _read: u64,
+    _table: u64,
+    _base: u64,
+    _translate: u64,
+) -> i32 {
     if machine != IMAGE_FILE_MACHINE_AMD64 || frame == 0 || ctx == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
@@ -216,8 +229,14 @@ extern "win64" fn StackWalk64(machine: u32, process: u64, _thread: u64, frame: u
         struct Context([u8; CONTEXT_SIZE]);
         let mut above = Context([0u8; CONTEXT_SIZE]);
         core::ptr::copy_nonoverlapping(ctx as *const u8, above.0.as_mut_ptr(), CONTEXT_SIZE);
-        let ret = if unwind_frame(above.0.as_mut_ptr() as u64) { get::<u64>(above.0.as_ptr() as u64, CTX_RIP) } else { 0 };
-        for (at, v) in [(SF_PC, rip), (SF_RETURN, ret), (SF_FRAME, if started == 0 && get::<u64>(frame, SF_FRAME) != 0 { get(frame, SF_FRAME) } else { rsp }), (SF_STACK, rsp)] {
+        let ret =
+            if unwind_frame(above.0.as_mut_ptr() as u64) { get::<u64>(above.0.as_ptr() as u64, CTX_RIP) } else { 0 };
+        for (at, v) in [
+            (SF_PC, rip),
+            (SF_RETURN, ret),
+            (SF_FRAME, if started == 0 && get::<u64>(frame, SF_FRAME) != 0 { get(frame, SF_FRAME) } else { rsp }),
+            (SF_STACK, rsp),
+        ] {
             put(frame, at, v);
             put(frame, at + 8, 0u16);
             put(frame, at + 12, ADDR_MODE_FLAT);
@@ -252,17 +271,29 @@ fn module_at(h: u64, addr: u64) -> Result<ModuleInfo, u32> {
     drop(s);
     loader::modules()
         .into_iter()
-        .find(|m| list.iter().any(|(n, b)| *n == m.name && *b == m.base) && (addr >= m.base && addr < m.base + m.size || m.symbols.iter().any(|s| s.0 == addr)))
+        .find(|m| {
+            list.iter().any(|(n, b)| *n == m.name && *b == m.base)
+                && (addr >= m.base && addr < m.base + m.size || m.symbols.iter().any(|s| s.0 == addr))
+        })
         .ok_or(ERROR_MOD_NOT_FOUND)
 }
 
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn SymLoadModule64(h: u64, _file: u64, image: *const u8, module: *const u8, base: u64, _size: u32) -> u64 {
+extern "win64" fn SymLoadModule64(
+    h: u64,
+    _file: u64,
+    image: *const u8,
+    module: *const u8,
+    base: u64,
+    _size: u32,
+) -> u64 {
     // SAFETY: NULL or NUL-terminated names.
     let (image, module) = unsafe { (path::ansi_to_string(image), path::ansi_to_string(module)) };
-    let wanted = module.or(image).map(|n| String::from(n.rsplit(['\\', '/']).next().unwrap_or(&n)).to_ascii_lowercase());
+    let wanted =
+        module.or(image).map(|n| String::from(n.rsplit(['\\', '/']).next().unwrap_or(&n)).to_ascii_lowercase());
     let found = loader::modules().into_iter().find(|m| {
-        (base != 0 && m.base == base) || (base == 0 && wanted.as_deref().is_some_and(|w| m.name == w || m.name.strip_suffix(".dll") == Some(w)))
+        (base != 0 && m.base == base)
+            || (base == 0 && wanted.as_deref().is_some_and(|w| m.name == w || m.name.strip_suffix(".dll") == Some(w)))
     });
     let Some(m) = found else { return fail(ERROR_MOD_NOT_FOUND, 0) };
     let mut s = SESSIONS.lock().unwrap();

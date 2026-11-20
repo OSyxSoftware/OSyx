@@ -96,7 +96,13 @@ impl Ext4Volume {
             );
         }
         let label = fs.label();
-        Ok(Ext4Volume { fs: KMutex::new(fs), device, label, read_only, dirty_since: core::sync::atomic::AtomicU64::new(0) })
+        Ok(Ext4Volume {
+            fs: KMutex::new(fs),
+            device,
+            label,
+            read_only,
+            dirty_since: core::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     fn ino(n: u64) -> Result<u32> {
@@ -124,7 +130,11 @@ impl Filesystem for Ext4Volume {
     fn stat(&self, ino: u64) -> Result<FileStat> {
         let s = self.fs.lock().stat(Self::ino(ino)?).map_err(errno)?;
         Ok(FileStat {
-            size: if s.mode & S_IFMT == S_IFDIR || s.mode & S_IFMT == S_IFREG || s.mode & S_IFMT == S_IFLNK { s.size } else { 0 },
+            size: if s.mode & S_IFMT == S_IFDIR || s.mode & S_IFMT == S_IFREG || s.mode & S_IFMT == S_IFLNK {
+                s.size
+            } else {
+                0
+            },
             ino,
             blocks: s.blocks_512,
             atime_ns: s.atime_ns,
@@ -184,7 +194,11 @@ impl Filesystem for Ext4Volume {
             NewNode::Dir => NewKind::Dir,
             NewNode::Symlink(t) => NewKind::Symlink(t),
         };
-        self.fs.lock().create(Self::ino(dir)?, name, kind, mode as u16, cred.uid, cred.gid).map(|i| i as u64).map_err(errno)
+        self.fs
+            .lock()
+            .create(Self::ino(dir)?, name, kind, mode as u16, cred.uid, cred.gid)
+            .map(|i| i as u64)
+            .map_err(errno)
     }
 
     fn unlink(&self, dir: u64, name: &str) -> Result<()> {

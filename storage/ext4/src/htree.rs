@@ -323,7 +323,10 @@ impl<D: BlockDevice> Ext4<D> {
                     return Ok(None);
                 }
                 let (_, nb) = self.dir_block(dir, blk as u64)?;
-                if le32(&nb, 0) != 0 || le16(&nb, 4) as usize != bs || nb[6] != 0 || !self.dx_csum_ok(dir, &nb, NODE_COUNT)
+                if le32(&nb, 0) != 0
+                    || le16(&nb, 4) as usize != bs
+                    || nb[6] != 0
+                    || !self.dx_csum_ok(dir, &nb, NODE_COUNT)
                 {
                     return Ok(None);
                 }

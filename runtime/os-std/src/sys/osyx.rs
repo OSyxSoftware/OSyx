@@ -476,7 +476,8 @@ unsafe impl GlobalAlloc for UserHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if is_large(layout) {
             // Page aligned and zeroed by the kernel.
-            return os_sys::map(layout.size().next_multiple_of(4096), PROT_READ | PROT_WRITE).unwrap_or(core::ptr::null_mut());
+            return os_sys::map(layout.size().next_multiple_of(4096), PROT_READ | PROT_WRITE)
+                .unwrap_or(core::ptr::null_mut());
         }
         self.with(|h| {
             if let Some(p) = h.alloc(layout) {

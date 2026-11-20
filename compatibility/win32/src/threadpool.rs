@@ -110,7 +110,10 @@ fn wake() {
 
 /// Makes sure a worker will pick up new work (or watch the timers).
 fn ensure_worker(p: &mut Pool) {
-    if p.idle == 0 && p.workers < MAX_WORKERS && kernel32::spawn_thread(worker as *const () as u64, 0, kernel32::stack_reserve(0, false), false).is_ok() {
+    if p.idle == 0
+        && p.workers < MAX_WORKERS
+        && kernel32::spawn_thread(worker as *const () as u64, 0, kernel32::stack_reserve(0, false), false).is_ok()
+    {
         p.workers += 1;
     }
 }
@@ -138,11 +141,19 @@ fn run(job: Job) {
     // SAFETY: callbacks registered with the matching Create* call.
     unsafe {
         match &job {
-            Job::Work(w) => core::mem::transmute::<usize, Simple>(w.callback as usize)(inst, w.context, Arc::as_ptr(w) as u64),
+            Job::Work(w) => {
+                core::mem::transmute::<usize, Simple>(w.callback as usize)(inst, w.context, Arc::as_ptr(w) as u64)
+            }
             Job::Timer(t) if t.legacy => core::mem::transmute::<usize, Legacy>(t.callback as usize)(t.context, 1),
-            Job::Timer(t) => core::mem::transmute::<usize, Simple>(t.callback as usize)(inst, t.context, Arc::as_ptr(t) as u64),
-            Job::Wait(w, r) => core::mem::transmute::<usize, WaitCb>(w.callback as usize)(inst, w.context, Arc::as_ptr(w) as u64, *r),
-            Job::Registered(r, timed_out) => core::mem::transmute::<usize, Legacy>(r.callback as usize)(r.context, u8::from(*timed_out)),
+            Job::Timer(t) => {
+                core::mem::transmute::<usize, Simple>(t.callback as usize)(inst, t.context, Arc::as_ptr(t) as u64)
+            }
+            Job::Wait(w, r) => {
+                core::mem::transmute::<usize, WaitCb>(w.callback as usize)(inst, w.context, Arc::as_ptr(w) as u64, *r)
+            }
+            Job::Registered(r, timed_out) => {
+                core::mem::transmute::<usize, Legacy>(r.callback as usize)(r.context, u8::from(*timed_out))
+            }
         }
     }
     if instance.free_library != 0 {
@@ -264,7 +275,13 @@ extern "win64" fn CreateThreadpoolTimer(callback: u64, context: u64, env: u64) -
     if !environment_ok(env) {
         return fail(ERROR_NOT_SUPPORTED, 0);
     }
-    Arc::into_raw(Arc::new(Timer { callback, context, due: Mutex::new(None), pending: Pending::default(), legacy: false })) as u64
+    Arc::into_raw(Arc::new(Timer {
+        callback,
+        context,
+        due: Mutex::new(None),
+        pending: Pending::default(),
+        legacy: false,
+    })) as u64
 }
 
 /// FILETIME due time: negative relative, positive absolute (100 ns).
@@ -360,7 +377,8 @@ extern "win64" fn CreateTimerQueue() -> u64 {
 /// Arms timer `t` to fire `due_ms` from now and then every `period_ms`
 /// (0: once).
 fn arm(t: &Arc<Timer>, due_ms: u32, period_ms: u32) {
-    *t.due.lock().unwrap() = Some((Instant::now() + Duration::from_millis(due_ms as u64), Duration::from_millis(period_ms as u64)));
+    *t.due.lock().unwrap() =
+        Some((Instant::now() + Duration::from_millis(due_ms as u64), Duration::from_millis(period_ms as u64)));
     let mut p = POOL.lock().unwrap();
     if !p.timers.iter().any(|x| Arc::ptr_eq(x, t)) {
         p.timers.push(t.clone());
@@ -375,12 +393,21 @@ fn arm(t: &Arc<Timer>, due_ms: u32, period_ms: u32) {
 /// period). The other WT_ flags choose threads Windows has: every pool
 /// thread here can wait, run long and use I/O.
 #[allow(clippy::too_many_arguments)]
-extern "win64" fn CreateTimerQueueTimer(out: *mut u64, queue: u64, callback: u64, param: u64, due: u32, period: u32, flags: u32) -> i32 {
+extern "win64" fn CreateTimerQueueTimer(
+    out: *mut u64,
+    queue: u64,
+    callback: u64,
+    param: u64,
+    due: u32,
+    period: u32,
+    flags: u32,
+) -> i32 {
     if out.is_null() || callback == 0 {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
     let period = if flags & WT_EXECUTEONLYONCE != 0 { 0 } else { period };
-    let t = Arc::new(Timer { callback, context: param, due: Mutex::new(None), pending: Pending::default(), legacy: true });
+    let t =
+        Arc::new(Timer { callback, context: param, due: Mutex::new(None), pending: Pending::default(), legacy: true });
     if let Err(e) = with_queue(queue, |timers| timers.push(t.clone())) {
         return fail(e, 0);
     }
@@ -500,8 +527,13 @@ extern "win64" fn CreateThreadpoolWait(callback: u64, context: u64, env: u64) ->
     if !environment_ok(env) {
         return fail(ERROR_NOT_SUPPORTED, 0);
     }
-    Arc::into_raw(Arc::new(Wait { callback, context, cancel: AtomicU64::new(0), generation: AtomicU64::new(0), pending: Pending::default() }))
-        as u64
+    Arc::into_raw(Arc::new(Wait {
+        callback,
+        context,
+        cancel: AtomicU64::new(0),
+        generation: AtomicU64::new(0),
+        pending: Pending::default(),
+    })) as u64
 }
 
 fn stop_wait(w: &Wait) {
@@ -516,7 +548,9 @@ extern "win64" fn SetThreadpoolWait(wait: u64, handle: u64, timeout: *const i64)
     static ARMS: AtomicU64 = AtomicU64::new(0);
     if crate::COUNT.load(Ordering::Relaxed) {
         let count = ARMS.fetch_add(1, Ordering::Relaxed) + 1;
-        if count.is_multiple_of(1024) { os_std::eprintln!("winrun: threadpool wait arms={count}"); }
+        if count.is_multiple_of(1024) {
+            os_std::eprintln!("winrun: threadpool wait arms={count}");
+        }
     }
     // SAFETY: a PTP_WAIT from CreateThreadpoolWait.
     let w = unsafe { borrow::<Wait>(wait) };
@@ -582,11 +616,24 @@ extern "win64" fn FreeLibraryWhenCallbackReturns(instance: u64, module: u64) {
 
 const WT_EXECUTEONLYONCE: u32 = 0x8;
 
-extern "win64" fn RegisterWaitForSingleObject(out: *mut u64, handle: u64, callback: u64, context: u64, ms: u32, flags: u32) -> i32 {
+extern "win64" fn RegisterWaitForSingleObject(
+    out: *mut u64,
+    handle: u64,
+    callback: u64,
+    context: u64,
+    ms: u32,
+    flags: u32,
+) -> i32 {
     if out.is_null() || callback == 0 || objects::get(handle).is_none() {
         return fail(ERROR_INVALID_PARAMETER, 0);
     }
-    let r = Arc::new(Registered { callback, context, cancel: new_cancel_event(), stopped: AtomicBool::new(false), pending: Pending::default() });
+    let r = Arc::new(Registered {
+        callback,
+        context,
+        cancel: new_cancel_event(),
+        stopped: AtomicBool::new(false),
+        pending: Pending::default(),
+    });
     let me = r.clone();
     let once = flags & WT_EXECUTEONLYONCE != 0;
     let spawned = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || loop {
@@ -644,7 +691,11 @@ extern "win64" fn UnregisterWaitEx(wait: u64, completion: u64) -> i32 {
                 r.pending.wait_idle();
                 objects::close(cancel);
             });
-            if busy { fail(ERROR_IO_PENDING, 0) } else { 1 }
+            if busy {
+                fail(ERROR_IO_PENDING, 0)
+            } else {
+                1
+            }
         }
         event => {
             let _ = os_std::thread::Builder::new().stack_size(64 << 10).spawn(move || {
@@ -730,7 +781,13 @@ extern "win64" fn PostQueuedCompletionStatus(port: u64, bytes: u32, key: u64, ov
     1
 }
 
-extern "win64" fn GetQueuedCompletionStatus(port: u64, bytes: *mut u32, key: *mut u64, overlapped: *mut u64, ms: u32) -> i32 {
+extern "win64" fn GetQueuedCompletionStatus(
+    port: u64,
+    bytes: *mut u32,
+    key: *mut u64,
+    overlapped: *mut u64,
+    ms: u32,
+) -> i32 {
     let Some(Object::Port(p)) = objects::get(port) else { return fail(ERROR_INVALID_HANDLE, 0) };
     if bytes.is_null() || key.is_null() || overlapped.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);
@@ -768,7 +825,14 @@ extern "win64" fn GetQueuedCompletionStatus(port: u64, bytes: *mut u32, key: *mu
 /// OVERLAPPED_ENTRY { lpCompletionKey, lpOverlapped, Internal,
 /// dwNumberOfBytesTransferred }: waits for the first packet, then takes
 /// what else is queued, up to `count`.
-extern "win64" fn GetQueuedCompletionStatusEx(port: u64, entries: *mut u8, count: u32, removed: *mut u32, ms: u32, _alertable: i32) -> i32 {
+extern "win64" fn GetQueuedCompletionStatusEx(
+    port: u64,
+    entries: *mut u8,
+    count: u32,
+    removed: *mut u32,
+    ms: u32,
+    _alertable: i32,
+) -> i32 {
     let Some(Object::Port(p)) = objects::get(port) else { return fail(ERROR_INVALID_HANDLE, 0) };
     if entries.is_null() || count == 0 || removed.is_null() {
         return fail(ERROR_INVALID_PARAMETER, 0);

@@ -96,7 +96,11 @@ extern "win64" fn RtlInitAnsiString(dst: *mut Counted<u8>, src: *const u8) {
 }
 
 /// Converts with the process ANSI code page (UTF-8 on OSyx, see path.rs).
-extern "win64" fn RtlAnsiStringToUnicodeString(dst: *mut Counted<u16>, src: *const Counted<u8>, allocate: u8) -> NtStatus {
+extern "win64" fn RtlAnsiStringToUnicodeString(
+    dst: *mut Counted<u16>,
+    src: *const Counted<u8>,
+    allocate: u8,
+) -> NtStatus {
     if dst.is_null() || src.is_null() {
         return STATUS_INVALID_PARAMETER;
     }
@@ -269,7 +273,11 @@ extern "win64" fn FlushInstructionCache(process: u64, _addr: u64, _len: usize) -
 }
 
 extern "win64" fn NtFlushInstructionCache(process: u64, _addr: u64, _len: usize) -> NtStatus {
-    if process != objects::CURRENT_PROCESS { STATUS_INVALID_HANDLE } else { STATUS_SUCCESS }
+    if process != objects::CURRENT_PROCESS {
+        STATUS_INVALID_HANDLE
+    } else {
+        STATUS_SUCCESS
+    }
 }
 
 // ---- NT names of kernel32 synchronisation ---------------------------------------
@@ -290,7 +298,11 @@ extern "win64" fn RtlRunOnceInitialize(once: u64) {
     synch::InitOnceInitialize(once)
 }
 extern "win64" fn RtlRunOnceExecuteOnce(once: u64, callback: u64, parameter: u64, context: *mut u64) -> NtStatus {
-    if synch::InitOnceExecuteOnce(once, callback, parameter, context) != 0 { STATUS_SUCCESS } else { STATUS_UNSUCCESSFUL }
+    if synch::InitOnceExecuteOnce(once, callback, parameter, context) != 0 {
+        STATUS_SUCCESS
+    } else {
+        STATUS_UNSUCCESSFUL
+    }
 }
 extern "win64" fn RtlWakeAllConditionVariable(cv: u64) {
     synch::WakeAllConditionVariable(cv)

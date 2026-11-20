@@ -58,8 +58,16 @@ fn find_clang() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("OSYX_CLANG") {
         return Some(PathBuf::from(p));
     }
-    let candidates = ["clang", "C:\\msys64\\ucrt64\\bin\\clang.exe", "C:\\msys64\\clang64\\bin\\clang.exe", "C:\\Program Files\\LLVM\\bin\\clang.exe"];
-    candidates.iter().map(PathBuf::from).find(|c| Command::new(c).arg("--version").output().is_ok_and(|o| o.status.success()))
+    let candidates = [
+        "clang",
+        "C:\\msys64\\ucrt64\\bin\\clang.exe",
+        "C:\\msys64\\clang64\\bin\\clang.exe",
+        "C:\\Program Files\\LLVM\\bin\\clang.exe",
+    ];
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|c| Command::new(c).arg("--version").output().is_ok_and(|o| o.status.success()))
 }
 
 fn build_bsd(dir: &Path) {

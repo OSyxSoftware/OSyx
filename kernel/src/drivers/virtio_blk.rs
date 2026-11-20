@@ -20,7 +20,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 const MAX_IRQ_DISKS: usize = 16;
 static DISKS: AtomicUsize = AtomicUsize::new(0);
-static COMPLETIONS: [crate::waitq::WaitQueue; MAX_IRQ_DISKS] = [const { crate::waitq::WaitQueue::new() }; MAX_IRQ_DISKS];
+static COMPLETIONS: [crate::waitq::WaitQueue; MAX_IRQ_DISKS] =
+    [const { crate::waitq::WaitQueue::new() }; MAX_IRQ_DISKS];
 static IRQ_COUNTS: [AtomicUsize; MAX_IRQ_DISKS] = [const { AtomicUsize::new(0) }; MAX_IRQ_DISKS];
 static SLEPT: [AtomicUsize; MAX_IRQ_DISKS] = [const { AtomicUsize::new(0) }; MAX_IRQ_DISKS];
 
@@ -33,7 +34,11 @@ fn completion_interrupt(index: u64) {
 
 pub fn log_stats() {
     for index in 0..DISKS.load(Ordering::Relaxed).min(MAX_IRQ_DISKS) {
-        crate::kprintln!("virtio-blk{index}: {} completion interrupts, {} completions after sleeping", IRQ_COUNTS[index].load(Ordering::Relaxed), SLEPT[index].load(Ordering::Relaxed));
+        crate::kprintln!(
+            "virtio-blk{index}: {} completion interrupts, {} completions after sleeping",
+            IRQ_COUNTS[index].load(Ordering::Relaxed),
+            SLEPT[index].load(Ordering::Relaxed)
+        );
     }
 }
 
@@ -125,16 +130,24 @@ impl VirtioBlk {
         let vector = if index < MAX_IRQ_DISKS {
             crate::irq::allocate(completion_interrupt, index as u64).and_then(|vector| {
                 let (address, data) = crate::arch::apic::msi_message(vector);
-                if dev.enable_msix(address, data).is_ok() { Some(vector) }
-                else { crate::irq::free(vector); None }
+                if dev.enable_msix(address, data).is_ok() {
+                    Some(vector)
+                } else {
+                    crate::irq::free(vector);
+                    None
+                }
             })
-        } else { None };
+        } else {
+            None
+        };
         let queue = t.setup_async_queue(0, vector.map(|_| 0))?;
         let interrupt_index = vector.filter(|_| queue.has_interrupts()).map(|_| index);
         if let Some(vector) = vector {
             if interrupt_index.is_some() {
                 crate::kprintln!("virtio-blk{index}: completion interrupts via MSI-X on vector {vector:#x}");
-            } else { crate::irq::free(vector); }
+            } else {
+                crate::irq::free(vector);
+            }
         }
         // Each slot owns a chain and a status byte; keep one chain's worth of
         // descriptors for every slot.
@@ -175,21 +188,21 @@ impl VirtioBlk {
             read_only: features & F_RO != 0,
             can_flush: features & F_FLUSH != 0,
             data_pages: pages,
-            inner: KMutex::new(Inner {
-                queue,
-                headers,
-                data,
-                chains,
-                pages_per_slot,
-                failed: false,
-            }),
+            inner: KMutex::new(Inner { queue, headers, data, chains, pages_per_slot, failed: false }),
             _transport: t,
             interrupt_index,
         })
     }
 
     /// Runs one request. `len` bytes of data are staged in the DMA pages.
-    fn request(&self, dir: Dir, lba: u64, len: usize, stage: impl FnOnce(&[u64]), fetch: impl FnOnce(&[u64])) -> Result<(), BlockError> {
+    fn request(
+        &self,
+        dir: Dir,
+        lba: u64,
+        len: usize,
+        stage: impl FnOnce(&[u64]),
+        fetch: impl FnOnce(&[u64]),
+    ) -> Result<(), BlockError> {
         let t0 = crate::arch::timer::tsc();
         let mut g = self.inner.lock();
         let t1 = crate::arch::timer::tsc();
@@ -268,7 +281,11 @@ impl VirtioBlk {
             if polls < SPIN_POLLS {
                 polls += 1;
                 core::hint::spin_loop();
-            } else if let Some(index) = self.interrupt_index.filter(|_| crate::arch::timer::healthy() && crate::sched::current_tid() != 0 && crate::arch::cpu::interrupts_enabled()) {
+            } else if let Some(index) = self.interrupt_index.filter(|_| {
+                crate::arch::timer::healthy()
+                    && crate::sched::current_tid() != 0
+                    && crate::arch::cpu::interrupts_enabled()
+            }) {
                 let mut checks = 0;
                 let result = crate::waitq::block_on(&[&COMPLETIONS[index]], Some(deadline.tick()), || {
                     checks += 1;
@@ -277,7 +294,9 @@ impl VirtioBlk {
                 match result {
                     Ok(item) => {
                         completed = Some(item);
-                        if checks > 2 { SLEPT[index].fetch_add(1, Ordering::Relaxed); }
+                        if checks > 2 {
+                            SLEPT[index].fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     // A thread being killed (its process exiting) or a slice
                     // that ended still has a request the device owns: it
@@ -287,7 +306,10 @@ impl VirtioBlk {
                     Err(osyx_abi::Errno::Interrupted) => crate::sched::yield_now(),
                     Err(osyx_abi::Errno::TimedOut) => {}
                     Err(e) => {
-                        crate::kprintln!("virtio-blk {}: waiting for a completion failed ({e:?}); disk disabled", self.name);
+                        crate::kprintln!(
+                            "virtio-blk {}: waiting for a completion failed ({e:?}); disk disabled",
+                            self.name
+                        );
                         inner.failed = true;
                         return Err(BlockError::Io);
                     }

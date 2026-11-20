@@ -33,8 +33,26 @@ const PAD: u32 = 10;
 const BG: Color = rgb(9, 12, 18);
 const FG: Color = rgb(214, 221, 234);
 const CURSOR: Color = rgb(76, 141, 255);
-const ANSI: [Color; 8] = [rgb(70, 78, 96), rgb(240, 98, 110), rgb(110, 214, 150), rgb(236, 190, 100), rgb(96, 150, 255), rgb(196, 136, 236), rgb(96, 206, 220), rgb(220, 226, 236)];
-const ANSI_BRIGHT: [Color; 8] = [rgb(110, 118, 138), rgb(255, 130, 140), rgb(140, 236, 176), rgb(250, 214, 130), rgb(130, 176, 255), rgb(220, 166, 250), rgb(130, 226, 236), rgb(250, 252, 255)];
+const ANSI: [Color; 8] = [
+    rgb(70, 78, 96),
+    rgb(240, 98, 110),
+    rgb(110, 214, 150),
+    rgb(236, 190, 100),
+    rgb(96, 150, 255),
+    rgb(196, 136, 236),
+    rgb(96, 206, 220),
+    rgb(220, 226, 236),
+];
+const ANSI_BRIGHT: [Color; 8] = [
+    rgb(110, 118, 138),
+    rgb(255, 130, 140),
+    rgb(140, 236, 176),
+    rgb(250, 214, 130),
+    rgb(130, 176, 255),
+    rgb(220, 166, 250),
+    rgb(130, 226, 236),
+    rgb(250, 252, 255),
+];
 
 #[derive(Clone, Copy)]
 struct Cell {
@@ -148,7 +166,8 @@ impl Terminal {
     }
 
     fn sgr(&mut self) {
-        let params: Vec<u32> = if self.csi.is_empty() { vec![0] } else { self.csi.split(';').map(|p| p.parse().unwrap_or(0)).collect() };
+        let params: Vec<u32> =
+            if self.csi.is_empty() { vec![0] } else { self.csi.split(';').map(|p| p.parse().unwrap_or(0)).collect() };
         for p in params {
             self.fg = match p {
                 0 | 39 => FG,
@@ -297,7 +316,10 @@ impl Terminal {
                 }
             }
             key::LEFT => self.cursor = self.input[..self.cursor].char_indices().next_back().map_or(0, |(i, _)| i),
-            key::RIGHT => self.cursor = self.input[self.cursor..].chars().next().map_or(self.cursor, |c| self.cursor + c.len_utf8()),
+            key::RIGHT => {
+                self.cursor =
+                    self.input[self.cursor..].chars().next().map_or(self.cursor, |c| self.cursor + c.len_utf8())
+            }
             key::HOME => self.cursor = 0,
             key::END => self.cursor = self.input.len(),
             key::UP | key::DOWN => {
@@ -430,7 +452,10 @@ impl App for Terminal {
                 cx.quit = true;
             }
             Some(s) => {
-                self.output(format!("\x1b[93m[AXIS ended with status {:#x}; press Enter for a new shell]\x1b[0m\n", s.raw()).as_bytes());
+                self.output(
+                    format!("\x1b[93m[AXIS ended with status {:#x}; press Enter for a new shell]\x1b[0m\n", s.raw())
+                        .as_bytes(),
+                );
                 self.ended = true;
             }
             None => self.ended = true,
